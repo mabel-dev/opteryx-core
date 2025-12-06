@@ -213,3 +213,4 @@ tmp/**
 opteryx/compiled/**/*.c*
 opteryx/compiled/**/*.h*
 Cargo.lock
+tests/integration/sql_battery/tmp/iceberg/**
