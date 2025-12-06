@@ -1,0 +1,9 @@
+# Components in this file are not installed, they are embedded into
+# the Opteryx codebase. This file exists for two reasons:
+#    1) To give credit to the authors of these libraries
+#    2) For dependabot to alert to new versions
+
+fuzzy==1.2.2
+travers==0.1.11
+sqloxide
+pysimdjson

@@ -1,0 +1,271 @@
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# See the License at http://www.apache.org/licenses/LICENSE-2.0
+# Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
+
+import datetime
+import typing
+from os import environ
+from pathlib import Path
+from typing import Optional
+from typing import Union
+
+_config_values: dict = {}
+
+# we need a preliminary version of this variable
+_OPTERYX_DEBUG = environ.get("OPTERYX_DEBUG") is not None
+
+
+def memory_allocation_calculation(allocation: Union[float, int]) -> int:
+    """
+    Configure the memory allocation for the database based on the input.
+    If the allocation is between 0 and 1, it's treated as a percentage of the total system memory.
+    If the allocation is greater than 1, it's treated as an absolute value in megabytes.
+
+    Parameters:
+        allocation (float|int): Memory allocation value which could be a percentage or an absolute value.
+
+    Returns:
+        int: Memory size in bytes to be allocated.
+    """
+
+    # Import psutil lazily to avoid paying the import cost at module import time.
+    # Use a small helper so tests or callers that need the value will trigger the
+    # import only when this function is called.
+    def _get_total_memory_bytes() -> int:
+        import psutil
+
+        return psutil.virtual_memory().total
+
+    total_memory = _get_total_memory_bytes()
+    if 0 < allocation < 1:  # Treat as a percentage
+        return int(total_memory * allocation)
+    elif allocation >= 1:  # Treat as an absolute value in MB
+        return int(allocation * 1024 * 1024)
+    else:
+        raise ValueError("Invalid memory allocation value. Must be a positive number.")
+
+
+def system_gigabytes() -> int:
+    """
+    Get the total system memory in gigabytes.
+
+    This imports psutil lazily to avoid paying the cost at module import time.
+
+    Returns:
+        int: Total system memory in gigabytes.
+    """
+    import psutil
+
+    return psutil.virtual_memory().total // (1024 * 1024 * 1024)
+
+
+def parse_yaml(yaml_str: str) -> dict:
+    """
+    Parse a simple YAML string into a dictionary.
+
+    Parameters:
+        yaml_str (str): YAML string to parse.
+
+    Returns:
+        dict: Parsed YAML content as a dictionary.
+    """
+
+    def line_value(value: str) -> typing.Any:
+        value = value.strip()
+        if value.isdigit():
+            return int(value)
+        if value.replace(".", "", 1).isdigit():
+            return float(value)
+        if value.lower() == "true":
+            return True
+        if value.lower() == "false":
+            return False
+        if value.lower() == "none":
+            return None
+        if value.startswith("["):
+            return [val.strip() for val in value[1:-1].split(",")]
+        if value.startswith("-"):
+            return [val.strip() for val in value.split("-") if val.strip()]
+        return value
+
+    result: dict = {}
+    lines = yaml_str.strip().split("\n")
+    key = ""
+    value: typing.Any = ""
+    in_list = False
+    list_key = ""
+    for line in lines:
+        ## remove comments
+        line = line.split("#")[0]
+        line = line.strip()
+        if not line:
+            continue
+        if in_list:
+            if line.startswith("- "):
+                result[list_key].append(line[2:].strip())
+            elif line.count(":") == 1:
+                key, value = line.split(":", 1)
+                if not value.strip():
+                    in_list = False
+                else:
+                    if not isinstance(result[list_key], dict):
+                        result[list_key] = {}
+                    result[list_key][key.strip()] = line_value(value.strip())
+        if not in_list:
+            key, value = line.split(":", 1)
+            if not value.split():
+                in_list = True
+                list_key = key.strip()
+                result[list_key] = []
+            else:
+                result[key.strip()] = line_value(value)
+    return result
+
+
+try:  # pragma: no cover
+    _config_path = Path(".") / "opteryx.yaml"
+    if _config_path.exists():
+        with open(_config_path, "r", encoding="utf-8") as _config_file:
+            _config_values = parse_yaml(_config_file.read())
+        if _OPTERYX_DEBUG:
+            print(f"{datetime.datetime.now()} [LOADER] Loading config from {_config_path}")
+except OSError as exception:  # pragma: no cover # it doesn't matter why - just use the defaults
+    if _OPTERYX_DEBUG:
+        print(
+            f"{datetime.datetime.now()} [LOADER] Config file {_config_path} not used - {exception}"
+        )
+
+
+def get(key: str, default: Optional[typing.Any] = None) -> Optional[typing.Any]:
+    """
+    Retrieve a configuration value.
+
+    Parameters:
+        key (str): The key to look up.
+        default (Optional[Any]): The default value if the key is not found.
+
+    Returns:
+        Optional[Any]: The configuration value.
+    """
+    value = environ.get(key)
+    if value is None:
+        value = _config_values.get(key, default)
+    return value
+
+
+# fmt:off
+
+# These are 'protected' properties which cannot be overridden by a single query
+
+DISABLE_OPTIMIZER: bool = bool(get("DISABLE_OPTIMIZER", False))
+"""**DANGEROUS** This will cause most queries to fail."""
+
+OPTERYX_DEBUG: bool = bool(get("OPTERYX_DEBUG", False))
+"""**DANGEROUS** Diagnostic and debug mode - generates a lot of log entries."""
+
+MAX_CACHE_EVICTIONS_PER_QUERY: int = int(get("MAX_CACHE_EVICTIONS_PER_QUERY", 64))
+"""Maximum number of buffer pool evictions by a single query."""
+
+MAX_CACHEABLE_ITEM_SIZE: int = int(get("MAX_CACHEABLE_ITEM_SIZE", 2 * 1024 * 1024))
+"""Maximum size for items saved to the remote buffer."""
+
+MAX_CONSECUTIVE_CACHE_FAILURES: int = int(get("MAX_CONSECUTIVE_CACHE_FAILURES", 10))
+"""Maximum number of consecutive cache failures before disabling cache usage."""
+
+# These values are computed lazily via __getattr__ to avoid importing
+# psutil (and making expensive system calls) during module import.
+# Annotate the names so type checkers know about them, but do not assign
+# values here — __getattr__ will compute and cache them on first access.
+MAX_LOCAL_BUFFER_CAPACITY: int
+"""Local buffer pool size in either bytes or fraction of system memory (lazy)."""
+
+MAX_READ_BUFFER_CAPACITY: int
+"""Read buffer pool size in either bytes or fraction of system memory (lazy)."""
+
+MAX_STATISTICS_CACHE_ITEMS: int = get("MAX_STATISTICS_CACHE_ITEMS", 10_000)
+"""The number of .parquet files we cache the statistics for."""
+
+_LAZY_VALUES: dict = {}
+
+
+# Lazily computed configuration values. We compute certain values on first
+# access because they depend on expensive system calls (psutil) or other
+# runtime properties. Access these as attributes on the module; __getattr__
+# will compute and cache them.
+
+CONCURRENT_WORKERS_DEFAULT = int(get("CONCURRENT_WORKERS", 2))
+
+
+def _compute_MAX_LOCAL_BUFFER_CAPACITY():
+    return memory_allocation_calculation(float(get("MAX_LOCAL_BUFFER_CAPACITY", 0.2)))
+
+
+def _compute_MAX_READ_BUFFER_CAPACITY():
+    return memory_allocation_calculation(float(get("MAX_READ_BUFFER_CAPACITY", 0.1)))
+
+
+def _compute_CONCURRENT_READS():
+    # default to max(system_gigabytes(), 2)
+    return int(get("CONCURRENT_READS", max(system_gigabytes(), 2)))
+
+
+def __getattr__(name: str):
+    """Lazy attribute access for computed config values."""
+    if name == "MAX_LOCAL_BUFFER_CAPACITY":
+        val = _LAZY_VALUES.get(name)
+        if val is None:
+            val = _compute_MAX_LOCAL_BUFFER_CAPACITY()
+            _LAZY_VALUES[name] = val
+        return val
+    if name == "MAX_READ_BUFFER_CAPACITY":
+        val = _LAZY_VALUES.get(name)
+        if val is None:
+            val = _compute_MAX_READ_BUFFER_CAPACITY()
+            _LAZY_VALUES[name] = val
+        return val
+    if name == "CONCURRENT_READS":
+        val = _LAZY_VALUES.get(name)
+        if val is None:
+            val = _compute_CONCURRENT_READS()
+            _LAZY_VALUES[name] = val
+        return val
+    if name == "CONCURRENT_WORKERS":
+        # simple default, no expensive computation
+        return CONCURRENT_WORKERS_DEFAULT
+    raise AttributeError(name)
+
+
+DISABLE_ZERO_COPY_BUFFER_READS = bool(get("DISABLE_ZERO_COPY_BUFFER_READS", False))
+"""Disable zero-copy reads from the buffer pool."""
+
+RESOURCES_PATH: Path = Path(get("RESOURCES_PATH", Path.cwd()))
+
+
+# GCP project ID - for Google Cloud Data
+GCP_PROJECT_ID: str = get("GCP_PROJECT_ID") 
+# don't try to raise the priority of the server process
+DISABLE_HIGH_PRIORITY: bool = bool(get("DISABLE_HIGH_PRIORITY", False))
+# don't output resource (memory) utilization information
+ENABLE_RESOURCE_LOGGING: bool = bool(get("ENABLE_RESOURCE_LOGGING", False))
+# size of morsels to push between steps
+# MORSEL_SIZE remains a plain constant
+MORSEL_SIZE: int = int(get("MORSEL_SIZE", 64 * 1024 * 1024))
+# not GA
+PROFILE_LOCATION:str = get("PROFILE_LOCATION")
+
+# fmt:on
+
+
+# FEATURE FLAGS
+class Features:
+    # Feature flags are used to enable or disable experimental features.
+    enable_native_aggregator = bool(get("FEATURE_ENABLE_NATIVE_AGGREGATOR", False))
+    disable_nested_loop_join = bool(get("FEATURE_DISABLE_NESTED_LOOP_JOIN", False))
+    force_nested_loop_join = bool(get("FEATURE_FORCE_NESTED_LOOP_JOIN", False))
+    disable_sql_statistics_gathering = bool(get("FEATURE_DISABLE_SQL_STATISTICS_GATHERING", False))
+    enable_free_threading = bool(get("FEATURE_ENABLE_FREE_THREADING", False))
+    use_draken_ops_kernels = bool(get("FEATURE_USE_DRAKEN_OPS_KERNELS", False))
+
+
+features = Features()
