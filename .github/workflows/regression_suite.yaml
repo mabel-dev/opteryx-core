@@ -48,7 +48,7 @@ jobs:
           python -m uv pip install --upgrade numpy cython
           python -m uv pip install --upgrade -r $GITHUB_WORKSPACE/tests/requirements.txt
           python -m uv pip install --upgrade -r $GITHUB_WORKSPACE/pyproject.toml
-          python setup.py build_ext --inplace -j 4
+          python setup.py build_ext --inplace -j 1
 
       - name: Print 'parquet' shared object dependencies
         if: matrix.os == 'ubuntu-latest'
