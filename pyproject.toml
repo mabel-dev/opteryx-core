@@ -108,4 +108,15 @@ output = "coverage.xml"  # XML output (useful for CI)
 # Exclude scratch directory - contains debugging scripts, not actual tests
 # These files run queries at module import time, slowing collection by 2+ minutes!
 testpaths = ["tests"]
-norecursedirs = ["scratch", ".*", "build", "dist", "tmp", "third_party"]
+# Don't recurse into these directories when collecting tests. Exclude the
+# `rugo` folder (example/debug scripts) because several files there run
+# at import time and are not intended as pytest tests.
+norecursedirs = ["scratch", ".*", "build", "dist", "tmp", "third_party", "rugo"]
+
+[project.optional-dependencies]
+# Optional groups for development and testing. CI can install these with
+# `pip install .[testing]` or similar. Add test-only packages here so they
+# don't become runtime dependencies.
+testing = [
+    "freezegun",
+]
