@@ -1,0 +1,12 @@
+# support hyphens in identifier names
+SELECT * FROM testdata.hyphened-name
+
+SELECT 10_000_000
+SELECT 1_2_3_4
+SELECT * FROM $satellites WHERE id > 1_00
+SELECT * FROM $satellites
+
+# Support EXCEPT
+SELECT * EXCEPT(id) FROM $planets
+
+# SELECT postgrad && undergrad FROM $astronauts

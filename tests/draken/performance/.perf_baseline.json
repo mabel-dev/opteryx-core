@@ -1,0 +1,11 @@
+{
+  "N": 2000000,
+  "avg_len": 16,
+  "total_mb": 28.083542823791504,
+  "append_time": 0.08740558300632983,
+  "append_view_time": 0.32694587495643646,
+  "py_iter_time": 0.09721704199910164,
+  "offsets_time": 0.0006161669734865427,
+  "append_throughput": 22881833.53064714,
+  "py_iter_throughput": 20572524.72275881
+}
