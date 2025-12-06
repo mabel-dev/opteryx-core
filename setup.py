@@ -21,7 +21,24 @@ class build_ext(build_ext_orig):
     def build_extensions(self):
         if self.compiler and ".S" not in self.compiler.src_extensions:
             self.compiler.src_extensions.append(".S")
+        # Best-effort: if `self.parallel` exists and is > 1, keep it to allow parallel builds
+        # but the per-extension build_temp in build_extension prevents object file collisions.
         super().build_extensions()
+
+    def build_extension(self, ext):
+        # Create a unique build_temp per extension to avoid collisions when the
+        # same source file is used by multiple extensions in a parallel build.
+        orig_build_temp = getattr(self, 'build_temp', None) or self.get_finalized_command('build').build_temp
+        safe_name = ext.name.replace('.', '_')
+        per_ext_build_temp = os.path.join(orig_build_temp, safe_name)
+        os.makedirs(per_ext_build_temp, exist_ok=True)
+        # Temporarily override build_temp used by underlying compiler invocations
+        self.build_temp = per_ext_build_temp
+        try:
+            super().build_extension(ext)
+        finally:
+            # Restore original build_temp after building this extension
+            self.build_temp = orig_build_temp
 
 # Platform detection
 def is_mac(): return platform.system() == "Darwin"
