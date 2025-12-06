@@ -1,0 +1,232 @@
+
+# SHOW FUNCTIONS;
+# SHOW FUNCTIONS LIKE '%date';
+# SHOW FUNCTIONS LIKE '%date%';
+# SHOW FUNCTIONS LIKE '%zz';
+
+SELECT planetId, LEAST(ARRAY_AGG(magnitude)) FROM $satellites group by planetId;
+
+SELECT TIMESTAMP('2022-01-01');
+SELECT INTEGER('22');
+SELECT DOUBLE('22.0');
+SELECT DECIMAL('22.0');
+SELECT BOOLEAN('true');
+SELECT DATE('2022-01-01');
+
+SELECT TIMESTAMP '2022-01-01';
+SELECT INTEGER '22';
+SELECT DOUBLE '22.0';
+SELECT DECIMAL '22.0';
+SELECT BOOLEAN 'true';
+SELECT DATE '2022-01-01';
+
+SELECT CAST('2022-01-01' AS TIMESTAMP);
+SELECT CAST('22' AS INTEGER);
+SELECT CAST('22.0' AS DOUBLE);
+SELECT CAST('22.0' AS DECIMAL);
+SELECT CAST('true' AS BOOLEAN);
+SELECT CAST('2022-01-01' AS DATE);
+
+SELECT TRY_CAST('2022-01-01' AS TIMESTAMP);
+SELECT TRY_CAST('22' AS INTEGER);
+SELECT TRY_CAST('22.0' AS DOUBLE);
+SELECT TRY_CAST('22.0' AS DECIMAL);
+SELECT TRY_CAST('true' AS BOOLEAN);
+SELECT TRY_CAST('2022-01-01' AS DATE);
+
+SELECT CAST('Hello, World!' AS VARCHAR);
+SELECT CAST('12345' AS VARCHAR);
+SELECT CAST('22.5' AS VARCHAR);
+SELECT CAST(NULL AS VARCHAR);
+SELECT CAST(TRUE AS VARCHAR);
+SELECT CAST(FALSE AS VARCHAR);
+SELECT CAST('48656c6c6f' AS BLOB); -- "Hello" in hexadecimal
+
+SELECT CAST('48656c6c6f' AS BLOB);
+SELECT CAST(NULL AS BLOB);
+
+SELECT TRY_CAST('Hello, World!' AS VARCHAR);
+SELECT TRY_CAST('12345' AS VARCHAR);
+SELECT TRY_CAST('22.5' AS VARCHAR);
+SELECT TRY_CAST(NULL AS VARCHAR);
+SELECT TRY_CAST(TRUE AS VARCHAR);
+SELECT TRY_CAST(FALSE AS VARCHAR);
+SELECT TRY_CAST('48656c6c6f' AS BLOB);
+SELECT TRY_CAST(NULL AS BLOB);
+SELECT TRY_CAST('Not a number' AS INTEGER);
+SELECT TRY_CAST('Not a number' AS DOUBLE);
+SELECT TRY_CAST('2022-01-01' AS INTEGER);  -- Invalid cast
+SELECT TRY_CAST('3.14159' AS INTEGER);  -- Should return NULL
+SELECT TRY_CAST('' AS BOOLEAN);  -- Invalid cast
+SELECT TRY_CAST('42' AS BOOLEAN);  -- Invalid cast
+
+SELECT SAFE_CAST('Hello, World!' AS VARCHAR);
+SELECT SAFE_CAST('12345' AS VARCHAR);
+SELECT SAFE_CAST('22.5' AS VARCHAR);
+SELECT SAFE_CAST(NULL AS VARCHAR);
+SELECT SAFE_CAST(TRUE AS VARCHAR);
+SELECT SAFE_CAST(FALSE AS VARCHAR);
+SELECT SAFE_CAST('48656c6c6f' AS BLOB);
+SELECT SAFE_CAST(NULL AS BLOB);
+SELECT SAFE_CAST('Not a number' AS INTEGER);
+SELECT SAFE_CAST('Not a number' AS DOUBLE);
+SELECT SAFE_CAST('2022-01-01' AS INTEGER);  -- Invalid cast
+SELECT SAFE_CAST('3.14159' AS INTEGER);  -- Should return NULL
+SELECT SAFE_CAST('' AS BOOLEAN);  -- Invalid cast
+SELECT SAFE_CAST('42' AS BOOLEAN);  -- Invalid cast
+
+SELECT CAST(NULL AS INTEGER);
+SELECT CAST(NULL AS DOUBLE);
+SELECT TRY_CAST(NULL AS INTEGER);
+SELECT TRY_CAST(NULL AS DOUBLE);
+SELECT CAST(NULL AS BOOLEAN);
+SELECT TRY_CAST(NULL AS BOOLEAN);
+SELECT CAST(NULL AS TIMESTAMP);
+SELECT TRY_CAST(NULL AS TIMESTAMP);
+
+SELECT CAST('true' AS VARCHAR);
+SELECT CAST('false' AS VARCHAR);
+SELECT CAST('1' AS BOOLEAN);  -- Often interpreted as true
+SELECT CAST('0' AS BOOLEAN);  -- Often interpreted as false
+SELECT TRY_CAST('true' AS VARCHAR);
+SELECT TRY_CAST('false' AS VARCHAR);
+SELECT TRY_CAST('1' AS BOOLEAN);
+SELECT TRY_CAST('0' AS BOOLEAN);
+
+SELECT CEIL(1.5);
+SELECT FLOOR(2.5);
+SELECT CEIL(1.5, 1);
+SELECT FLOOR(2.5, 1);
+SELECT CEIL(1.5, -1);
+SELECT FLOOR(2.5, -1);
+
+# SHOW DATABASES;
+
+SELECT POSITION('e' IN 'barge');
+SELECT POSITION('x' IN 'barge');
+SELECT POSITION('a' IN name) FROM $planets;
+SELECT POSITION(' ' IN name) FROM $astronauts;
+SELECT LEFT('', 1);
+SELECT LEFT('a', 1);
+SELECT LEFT('ab', 1);
+
+SELECT CASE id WHEN 3 THEN 'Earth' WHEN 1 THEN 'Mercury' ELSE 'Elsewhere' END FROM $planets;
+SELECT CASE id WHEN 3 THEN 'Earth' WHEN 1 THEN 'Mercury' END FROM $planets;
+SELECT CASE WHEN id = 3 THEN 'Earth' WHEN id = 1 THEN 'Mercury' ELSE 'Elsewhere' END FROM $planets;
+SELECT CASE WHEN id = 3 THEN 'Earth' WHEN id = 1 THEN 'Mercury' END FROM $planets;
+
+SELECT * FROM $astronauts WHERE death_date > current_timestamp - interval '50' YEAR;
+SELECT * FROM $astronauts WHERE birth_date < current_timestamp + interval '50' YEAR;
+
+SELECT LTRIM('   ABC');
+SELECT TRIM(LEADING '_' FROM '___ABC');
+SELECT TRIM('_' FROM '__init__');
+SELECT TRIM(BOTH '_' FROM '____dunder_');
+SELECT TRIM(TRAILING '__' FROM '_dunder_');
+SELECT RTRIM('   dunder    ');
+SELECT TRIM('    ABC   ');
+SELECT TRIM(name) FROM $planets;
+SELECT TRIM(LEADING ' ' FROM name) FROM $planets;
+
+SELECT HASH(name || varchar(id)) FROM $planets GROUP BY name, id;
+
+# ANALYZE TABLE $planets;
+# ANALYZE TABLE $astronauts;
+
+SELECT LEVENSHTEIN(name, 'zeus') FROM $planets;
+SELECT FROM_UNIXTIME(0);
+SELECT UNIXTIME();
+SELECT UNIXTIME(death_date), death_date from $astronauts;
+
+SELECT name FROM $planets ORDER BY mass, gravity;
+SELECT name FROM $planets ORDER BY mass DESC;
+SELECT name FROM $planets ORDER BY mass DESC, gravity ASC;
+SELECT * FROM $planets ORDER BY mass;
+SELECT name FROM $planets ORDER BY mass LIMIT 2;
+
+# ANALYZE TABLE $astronauts;
+# ANALYZE TABLE $planets;
+# ANALYZE TABLE 'testdata/flat/formats/parquet/tweets.parquet';
+
+# USE opteryx;
+
+-- SELECT SPLIT('a,bc,def');
+-- SELECT SPLIT('a,bc,def', ',');
+-- SELECT SPLIT('a');
+-- SELECT SPLIT('a', 'a');
+SELECT SPLIT(name, ' ') FROM $astronauts;
+
+SELECT '{"test":true}';
+SELECT ST['prod'] FROM (SELECT '{"prod": 73}' AS ST FROM $planets) AS SB;
+
+# Function calls which are actually resolved by the binder
+
+SELECT VERSION();
+SELECT NOW();
+SELECT CURRENT_TIME;
+SELECT CURRENT_TIMESTAMP;
+SELECT UTC_TIMESTAMP()
+SELECT CURRENT_DATE;
+SELECT TODAY();
+SELECT YESTERDAY();
+SELECT CONNECTION_ID();
+SELECT E();
+SELECT PI();
+SELECT PHI();
+SELECT USER();
+SELECT DATABASE();
+SELECT NOW() - birth_date, NOW(), birth_date FROM $astronauts;
+SELECT E() * PI() * PHI();
+
+SELECT ['a', 'b', 'c'] @> ['g', 'h', 'a']
+SELECT ['a', 'b', 'c'] @> ['a', 'a', 'a']
+SELECT ['a', 'b', 'c'] @> ('a', 'a', 'a')
+SELECT ('a', 'b', 'c') @> ('a', 'a', 'a')
+SELECT ['a', 'b', 'c'] @> ['a', 'x'];
+SELECT ['apple', 'banana', 'cherry'] @> ['dragonfruit'];
+SELECT ['alpha', 'beta', 'gamma'] @> ['gamma', 'beta'];
+SELECT ['a', 'b', 'c'] @> [];
+SELECT [] @> ['x'];
+SELECT ('a', 'b', 'c') @> ['b'];
+SELECT ('a', 'b', 'c') @> ('b', 'a');
+SELECT ['one'] @> ['one'];
+SELECT [1, 2, 3] @> [2];
+SELECT (1.1, 2.2, 3.3) @> [3.3];
+SELECT ['z', 'z', 'z'] @> ['z'];
+SELECT ['a'] @> ['a', 'b'];
+SELECT ['a', 'b', 'c'] @> ['a', 'a', 'b'];
+SELECT ['a', 'b', 'c'] @> ('a', 'a');
+SELECT missions @> ('STS-1 (Columbia)', 'STS-9 (Columbia)') FROM $astronauts;
+SELECT missions @> ['STS-77'] FROM $astronauts;
+SELECT missions @> ('Gemini 3', 'STS-1 (Columbia)') FROM $astronauts;
+SELECT missions @> [] FROM $astronauts;
+
+SELECT HUMANIZE('{"a":100}'->'a')
+SELECT HUMANIZE(SUM('{"a":100}'->'a'))
+SELECT HUMANIZE(1000000)
+SELECT HUMANIZE(0)
+SELECT HUMANIZE(NULL)
+SELECT HUMANIZE(10000.00)
+SELECT HUMANIZE(SUM(gravity)) FROM $planets
+SELECT HUMANIZE(-1)
+
+WITH large_planets AS (SELECT id, name, mass, diameter FROM $planets WHERE mass > 1.0) SELECT lp.name AS large_planet FROM large_planets lp;
+WITH cold_planets AS (SELECT id, name, meanTemperature FROM $planets WHERE meanTemperature < 0) SELECT name FROM cold_planets;
+WITH long_days AS (SELECT id, name, lengthOfDay FROM $planets WHERE lengthOfDay > 1000) SELECT name, lengthOfDay FROM long_days;
+WITH dense_planets AS (SELECT id, name, density FROM $planets WHERE density > 5) SELECT COUNT(*) FROM dense_planets;
+WITH far_planets AS (SELECT id, name, distanceFromSun FROM $planets WHERE distanceFromSun > 1000) SELECT name FROM far_planets ORDER BY distanceFromSun DESC;
+WITH fast_planets AS (SELECT id, name, orbitalVelocity FROM $planets WHERE orbitalVelocity > 30) SELECT name FROM fast_planets ORDER BY orbitalVelocity DESC;
+WITH inclined_planets AS (SELECT id, name, orbitalInclination FROM $planets WHERE orbitalInclination > 3) SELECT COUNT(*) FROM inclined_planets;
+WITH eccentric_planets AS (SELECT id, name, orbitalEccentricity FROM $planets WHERE orbitalEccentricity > 0.05) SELECT name, orbitalEccentricity FROM eccentric_planets;
+WITH high_gravity AS (SELECT id, name, gravity FROM $planets WHERE gravity > 10) SELECT name FROM high_gravity;
+WITH escaping_planets AS (SELECT id, name, escapeVelocity FROM $planets WHERE escapeVelocity > 50) SELECT name FROM escaping_planets;
+WITH slow_rotators AS (SELECT id, name, rotationPeriod FROM $planets WHERE rotationPeriod > 500) SELECT COUNT(*) FROM slow_rotators;
+WITH big_diameter AS (SELECT id, name, diameter FROM $planets WHERE diameter > 100000) SELECT name FROM big_diameter;
+WITH temperate_planets AS (SELECT id, name, meanTemperature FROM $planets WHERE meanTemperature BETWEEN -50 AND 50) SELECT name FROM temperate_planets ORDER BY meanTemperature;
+WITH atmospheric_planets AS (SELECT id, name, surfacePressure FROM $planets WHERE surfacePressure IS NOT NULL) SELECT COUNT(*) FROM atmospheric_planets;
+WITH moonful_planets AS (SELECT id, name, numberOfMoons FROM $planets WHERE numberOfMoons > 0) SELECT name, numberOfMoons FROM moonful_planets;
+WITH matching_names AS (SELECT id, name FROM $planets WHERE name LIKE 'M%') SELECT COUNT(*) FROM matching_names;
+WITH short_names AS (SELECT id, name FROM $planets WHERE LENGTH(name) < 5) SELECT name FROM short_names;
+WITH exact_gravity AS (SELECT id, name FROM $planets WHERE gravity = 9.8) SELECT name FROM exact_gravity;
+WITH retrograde AS (SELECT id, name, obliquityToOrbit FROM $planets WHERE obliquityToOrbit > 90) SELECT name FROM retrograde;
+WITH flattened_names AS (SELECT id, LOWER(name) AS name FROM $planets) SELECT name FROM flattened_names ORDER BY name;
