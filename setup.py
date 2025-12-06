@@ -570,7 +570,7 @@ setup(
     description="Python SQL Query Engine",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    packages=find_packages(include=[LIBRARY, f"{LIBRARY}.*"]),
+    packages=find_packages(include=[LIBRARY, f"{LIBRARY}.*", "opteryx_core", "opteryx_core.*"]),
     python_requires=">=3.11",
     url="https://github.com/mabel-dev/opteryx/",
     ext_modules=cythonize(extensions, compiler_directives={
