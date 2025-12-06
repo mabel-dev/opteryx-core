@@ -24,8 +24,8 @@ class VersionStatus(Enum):
     RELEASE = "release"
 
 __major_version__ = 0
-__minor_version__ = 26
-__revision_version__ = 2
+__minor_version__ = 1
+__revision_version__ = 0
 __author__ = "@joocer"
 __status__ = VersionStatus.BETA
 
