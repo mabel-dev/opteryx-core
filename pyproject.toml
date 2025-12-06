@@ -1,0 +1,100 @@
+[project]
+name = "opteryx-core"
+version = "0.26.2-beta.1974"
+description = "Query your data, where it lives"
+requires-python = '>=3.11'
+readme = {file = "README.md", content-type = "text/markdown"}
+authors = [{name='Justin Joyce', email='justin.joyce@joocer.com'}]
+maintainers = [{name='Justin Joyce', email='justin.joyce@joocer.com'}]
+dependencies = ['aiohttp', 'numpy>=2.0.0', 'orjson', 'orso>=0.0.204', 'psutil', 'pyarrow>=20.0.0', 'requests']
+
+[project.urls]
+Homepage = "https://opteryx.dev/"
+Documentation = "https://opteryx.dev/"
+Repository = "https://github.com/mabel-dev/opteryx.git"
+
+[tool.black]
+line-length = 100
+target-version = ['py312']
+fast = true
+
+[tool.isort]
+profile = "black"
+extend_skip_glob = ["tests/**", "*.pyx", "*.pxd", "testdata/**", "**/operators/__init__.py"]
+skip_gitignore = true
+line_length = 100
+multi_line_output = 9
+force_single_line = true
+float_to_top = true
+ensure_newline_before_comments = true
+
+[tool.pylint.messages_control]
+disable = "C0103,C0415"
+
+[tool.mypy]
+exclude = ["bench", "#"]
+
+[tool.bandit]
+exclude_dirs = ["**/test_*.py",]
+skips = ["B101", "B105", "B324", "B608"]
+# B101 - Use of ASSERT
+# B105 - Hardcoded passwords
+# B324 - Use of weak crypto
+# B608 - Hardcoded SQL
+
+[build-system]
+requires = ["setuptools>=42", "wheel", "cython", "numpy", "setuptools_rust"]
+build-backend = "setuptools.build_meta"
+
+[tool.ruff]
+line-length = 100
+indent-width = 4
+target-version = 'py311'
+
+[tool.ruff.format]
+docstring-code-format = true
+docstring-code-line-length = 100
+
+[tool.cython-lint]
+max-line-length = 120
+ignore = ['E265', 'E501']
+exclude = '**/containers.pxd'
+
+[tool.ruff.lint]
+select = ["SIM", "NPY201"]
+ignore = ["SIM105"]
+
+[tool.ruff.lint.per-file-ignores]
+"**/optimizer/**" = ["SIM102"]
+"opteryx/managers/expression/ops.py" = ["SIM118"]
+"**/third_party/**" = ["SIM115", "SIM110", "SIM109", "SIM108", "SIM105", "SIM103", "SIM102"]
+
+[tool.setuptools.package-data]
+"opteryx.virtual_datasets" = ["*.zst"]
+
+[tool.coverage.run]
+branch = true
+source = ["opteryx", "opteryx/**"]
+omit = ["**/third_party/**"]
+
+[tool.coverage.report]
+show_missing = true  # Show missing lines in the report
+fail_under = 80  # Fail if coverage is below 90%
+skip_covered = true  # Hide files that are fully covered
+exclude_lines = [
+    "if __name__ == .__main__.:",  # Ignore standard script entry point
+    "pragma: no cover",  # Ignore manually marked lines
+    "except"
+]
+
+[tool.coverage.html]
+directory = "coverage_html_report"  # Output directory for HTML reports
+
+[tool.coverage.xml]
+output = "coverage.xml"  # XML output (useful for CI)
+
+[tool.pytest.ini_options]
+# Exclude scratch directory - contains debugging scripts, not actual tests
+# These files run queries at module import time, slowing collection by 2+ minutes!
+testpaths = ["tests"]
+norecursedirs = ["scratch", ".*", "build", "dist", "tmp", "third_party"]

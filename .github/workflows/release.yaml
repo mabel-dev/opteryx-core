@@ -1,0 +1,66 @@
+name: Release to PyPI
+
+on:
+  release:
+    types: [published]
+    branches:
+      - 'main'
+
+jobs:
+  build-manylinux:
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix:
+        python-version: ["3.13"]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4.1.7
+        with:
+          path: io
+
+      - name: Set permissions for build-wheels.sh
+        run: chmod +x io/dev/build-wheels.sh
+
+      - name: Build Wheels
+        run: >
+          docker run --rm
+          -e PLAT=manylinux2014_x86_64
+          -e PACKAGE_NAME=opteryx
+          -e PYTHON_VERSION=${{ matrix.python-version }}
+          -v `pwd`:/io
+          --workdir /io
+          quay.io/pypa/manylinux2014_x86_64
+          io/dev/build-wheels.sh
+
+      - name: Archive Wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-linux-${{ matrix.python-version }}
+          path: io/dist/*manylinux2014_x86_64*.whl
+
+  upload:
+    needs: [build-manylinux]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4.1.7
+
+      - name: Install Python package dependencies
+        run: python -m pip install --upgrade cython wheel numpy setuptools_rust draken
+
+      - name: Create source dist
+        run: python setup.py sdist
+
+      - name: Stage linux 3.13
+        uses: actions/download-artifact@v4.1.7
+        with:
+          name: dist-linux-3.13
+          path: dist-linux-3.13
+      - run: mv -v dist-linux-3.13/* dist/
+
+      - name: Publish distribution 📦 to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}

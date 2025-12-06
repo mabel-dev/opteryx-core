@@ -1,0 +1,117 @@
+# This is the main regression test script which tests the entire application.
+# Other GitHub Actions test subsets primarily to ensure compatibility for different OSes.
+
+# This script is run on Ubuntu, the most common OS for CI/CD pipelines.
+# The script is run on Python 3.10, 3.11, and 3.12.
+# The script is run at 4:00 AM UTC every day and on every push to the repository.
+
+name: Regression Suite
+
+on:
+  push:
+    branches-ignore:
+      - main  # Exclude the main branch
+      - 'refs/tags/*'  # Exclude tags (releases)
+  schedule:
+    - cron: "0 4 * * *"
+
+jobs:
+  regression_matrix:
+    strategy:
+      max-parallel: 4
+      fail-fast: false
+      matrix:
+        python-version: ["3.13"]
+        os: [ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+  
+      - name: Set up Python ${{ matrix.python-version }} x64
+        if: matrix.os == 'ubuntu-latest'
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          architecture: x64
+      - name: Install system packages (Ubuntu)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          # We only need libssl-dev/pkg-config for libcrypto and build tooling
+          sudo apt-get install -y libssl-dev pkg-config
+        
+      - name: Install Requirements
+        run: |
+          python -m pip install --upgrade pip uv
+          python -m uv pip install --upgrade numpy cython
+          python -m uv pip install --upgrade -r $GITHUB_WORKSPACE/tests/requirements.txt
+          python -m uv pip install --upgrade -r $GITHUB_WORKSPACE/pyproject.toml
+          python setup.py build_ext --inplace -j 4
+
+      - name: Print 'parquet' shared object dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          set -eux
+          SO_FILE=$(ls -1 opteryx/rugo/parquet*.so | head -n1)
+          echo "Located: $SO_FILE"
+          echo "File type: $(file $SO_FILE)"
+          echo "ldd output:"
+          ldd $SO_FILE || true
+          if ! ldd $SO_FILE | grep -q libcrypto; then
+            echo "ERROR: libcrypto not linked into $SO_FILE"
+            exit 1
+          fi
+
+      - name: "Start Memcached Instance"
+        run: |
+            docker run -d --name my-memcached \
+                       -p 11211:11211 \
+                       memcached \
+                       -m 16
+
+      - name: "Authenticate to Google Cloud"
+        uses: google-github-actions/auth@v1
+        with:
+          credentials_json: '${{ secrets.GCP_KEY }}'
+
+      - name: Decode Astra (DataStax/Cassandra) Secure Connect Bundle
+        run: |
+          echo "${{ secrets.ASTRA_SECURE_BUNDLE_BASE64 }}" | base64 -d > secure-connect.zip
+
+      - name: Run Regression Tests
+        run: python -m coverage run -m pytest --color=yes
+        env:
+          AZURE_STORAGE_CONNECTION_STRING: "DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://127.0.0.1:10000/devstoreaccount1;QueueEndpoint=http://127.0.0.1:10001/devstoreaccount1;"
+          MINIO_END_POINT: "s3.eu-west-2.amazonaws.com"
+          GCP_PROJECT_ID: mabeldev
+          MYSQL_USER: '${{ secrets.MYSQL_USER }}'
+          MYSQL_PASSWORD: '${{ secrets.MYSQL_PASSWORD }}'
+          POSTGRES_USER: '${{ secrets.POSTGRES_USER }}'
+          POSTGRES_PASSWORD: '${{ secrets.POSTGRES_PASSWORD }}'
+          POSTGRES_HOST: '${{ secrets.POSTGRES_HOST }}'
+          MONGODB_CONNECTION: '${{ secrets.MONGODB_CONNECTION }}'
+          MONGODB_DATABASE: opteryx
+          COCKROACH_USER: '${{ secrets.COCKROACH_USER }}'
+          COCKROACH_PASSWORD: '${{ secrets.COCKROACH_PASSWORD }}'
+          REDIS_CONNECTION: '${{ secrets.REDIS_CONNECTION }}'
+          MEMCACHED_SERVER: 'localhost:11211'
+          DATASTAX_CLIENT_ID: '${{ secrets.DATASTAX_CLIENT_ID }}'
+          DATASTAX_CLIENT_SECRET: '${{ secrets.DATASTAX_CLIENT_SECRET }}'
+          OPTERYX_DEBUG: 1
+          MAX_LOCAL_BUFFER_CAPACITY: 100
+          MAX_CACHE_EVICTIONS_PER_QUERY: 4
+          DATA_CATALOG_CONNECTION: '${{ secrets.DATA_CATALOG_CONNECTION }}'
+          DATA_CATALOG_STORAGE: '${{ secrets.DATA_CATALOG_STORAGE }}'
+          VALKEY_CONNECTION: '${{ secrets.VALKEY_CONNECTION }}'
+          RESOURCES_PATH: 'testdata'
+
+      - name: Check Coverage
+        run: python -m coverage report -m
+
+      - name: "Upload coverage to Codecov"
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.11'
+        uses: codecov/codecov-action@v1
+        with:
+          fail_ci_if_error: false
