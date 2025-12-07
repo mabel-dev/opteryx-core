@@ -26,7 +26,6 @@ from opteryx.connectors.capabilities import PredicatePushable
 from opteryx.exceptions import UnsupportedFileTypeError
 from opteryx.managers.expression import NodeType
 from opteryx.managers.expression import get_all_nodes_of_type
-from opteryx.models import RelationStatistics
 from opteryx.rugo.converters.orso import rugo_to_orso_schema
 from opteryx.utils.arrow import post_read_projector
 
@@ -128,10 +127,8 @@ def parquet_decoder(
     projection: Optional[list] = None,
     selection: Optional[list] = None,
     just_schema: bool = False,
-    just_statistics: bool = False,
     force_read: bool = False,
     use_threads: bool = True,
-    statistics: Optional[RelationStatistics] = None,
 ) -> Tuple[int, int, pyarrow.Table]:
     """
     Read parquet formatted files.
@@ -186,40 +183,6 @@ def parquet_decoder(
                 memoryview(buffer), schema_only=True, max_row_groups=1, include_statistics=False
             )
         return rugo_to_orso_schema(metadata, "parquet")
-
-    # Gather statistics if that's all that's needed
-    # We can use rugo's metadata reader which is faster than pyarrow's
-    if just_statistics:
-        if statistics is None:
-            statistics = RelationStatistics()
-
-        if isinstance(buffer, memoryview):
-            metadata = parquet_meta.read_metadata_from_memoryview(buffer, include_statistics=True)
-        else:
-            metadata = parquet_meta.read_metadata_from_memoryview(
-                memoryview(buffer), include_statistics=True
-            )
-
-        num_rows = metadata["num_rows"]
-        statistics.record_count += num_rows
-
-        for row_group in metadata["row_groups"]:
-            for column in row_group["columns"]:
-                column_name = column["name"]
-
-                min_value = column.get("min")
-                if min_value is not None:
-                    statistics.update_lower(column_name, min_value)
-
-                max_value = column.get("max")
-                if max_value is not None:
-                    statistics.update_upper(column_name, max_value)
-
-                null_count = column.get("null_count")
-                if null_count:
-                    statistics.add_null(column_name, null_count)
-
-        return statistics
 
     # Use rugo's lightweight metadata reader first (faster than pyarrow)
     if isinstance(buffer, memoryview):
@@ -318,7 +281,6 @@ def vortex_decoder(
     projection: Optional[list] = None,
     selection: Optional[list] = None,
     just_schema: bool = False,
-    just_statistics: bool = False,
     **kwargs,
 ) -> Tuple[int, int, pyarrow.Table]:
     try:
@@ -330,9 +292,6 @@ def vortex_decoder(
 
     import os
     import tempfile
-
-    if just_statistics:
-        return None
 
     # Current version of vortex appears to not be able to read streams
     # this is painfully slow, don't do this.
@@ -360,7 +319,7 @@ def vortex_decoder(
 
     # If it's COUNT(*), we don't need to create a full dataset
     # We have a handler later to sum up the $COUNT(*) column
-    if projection == [] and selection == [] and not just_schema and not just_statistics:
+    if projection == [] and selection == [] and not just_schema:
         num_rows = len(table)
         table = pyarrow.Table.from_arrays([[num_rows]], names=["$COUNT(*)"])
         return (num_rows, 0, 0, table)
@@ -393,7 +352,6 @@ def jsonl_decoder(
     projection: Optional[list] = None,
     selection: Optional[list] = None,
     just_schema: bool = False,
-    just_statistics: bool = False,
     **kwargs,
 ) -> Tuple[int, int, pyarrow.Table]:
     # rugo is our own library for fast jsonl reading
@@ -403,9 +361,6 @@ def jsonl_decoder(
     from opteryx.rugo.converters.orso import jsonl_to_orso_schema
     from opteryx.utils import count_instances
 
-    if just_statistics:
-        return None
-
     if not isinstance(buffer, memoryview):
         buffer = memoryview(buffer)
 
@@ -414,7 +369,7 @@ def jsonl_decoder(
 
     # If it's COUNT(*), we don't need to create a full dataset
     # We have a handler later to sum up the $COUNT(*) column
-    if projection == [] and selection == [] and not just_schema and not just_statistics:
+    if projection == [] and selection == [] and not just_schema:
         # Try to use the SIMD-optimized counter from the cython module if available
         table = pyarrow.Table.from_arrays([[num_rows]], names=["$COUNT(*)"])
         return (num_rows, 0, len(buffer), table)

@@ -17,7 +17,6 @@ from opteryx.connectors.base.base_connector import BaseConnector
 from opteryx.connectors.capabilities import Asynchronous
 from opteryx.connectors.capabilities import Diachronic
 from opteryx.connectors.capabilities import PredicatePushable
-from opteryx.connectors.capabilities import Statistics
 from opteryx.exceptions import DatasetNotFoundError
 from opteryx.exceptions import DatasetReadError
 from opteryx.exceptions import MissingDependencyError
@@ -53,9 +52,7 @@ def get_storage_credentials():
     return _storage_client._credentials
 
 
-class GcpCloudStorageConnector(
-    BaseConnector, Diachronic, PredicatePushable, Asynchronous, Statistics
-):
+class GcpCloudStorageConnector(BaseConnector, Diachronic, PredicatePushable, Asynchronous):
     __mode__ = "Blob"
     __type__ = "GCS"
 
@@ -91,7 +88,6 @@ class GcpCloudStorageConnector(
         Diachronic.__init__(self, **kwargs)
         PredicatePushable.__init__(self, **kwargs)
         Asynchronous.__init__(self, **kwargs)
-        Statistics.__init__(self, **kwargs)
 
         # Only convert dots to path separators if the dataset doesn't already contain slashes
         # Dataset references like "my.dataset.table" use dots as separators
@@ -272,15 +268,6 @@ class GcpCloudStorageConnector(
                         selection=predicates,
                         just_schema=just_schema,
                     )
-                    stats = self.read_blob_statistics(
-                        blob_name=blob_name, blob_bytes=blob_bytes, decoder=decoder
-                    )
-                    # Aggregate statistics from all blobs
-                    if stats is not None:
-                        if self.relation_statistics is None:
-                            self.relation_statistics = stats
-                        else:
-                            self.relation_statistics.merge(stats)
                 except Exception as err:
                     raise DatasetReadError(f"Unable to read file {blob_name} ({err})") from err
 

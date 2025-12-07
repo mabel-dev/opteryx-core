@@ -1,20 +1,17 @@
-"""
-Expose compiled list_ops functions at package level.
+"""Package init for compiled list ops
 
-When the consolidated C/C++ extension `function_definitions` is built it provides
-the implementations (e.g. `list_contains_all`). Import them here so code can do:
-
-        from opteryx.compiled.list_ops import list_contains_all
-
-If the compiled extension is not available (during development before running
-`make c`) the import will be ignored so tooling and static analysis can still
-import this package without raising an ImportError.
+This module provides the compiled (Cython/C++) function implementations as
+convenience re-exports at the package level. The build process creates a
+compiled extension named `function_definitions`, so we import all public
+symbols from it into the package namespace for compatibility with code that
+imports directly from `opteryx.compiled.list_ops`.
 """
 
 try:
-    # Consolidated compiled module name created by setup.py
+    # Re-export compiled functions from the compiled extension
     from .function_definitions import *  # noqa: F401,F403
-except (ImportError, ModuleNotFoundError):
-    # If the extension isn't built, silently continue; callers should only use
-    # these functions after building the extensions (e.g. via `make c`).
+except ImportError:
+    # If the extension isn't available (e.g., pre-build environment), don't
+    # prevent the package from importing. Callers can import the extension
+    # directly or build the extension using `make c`.
     pass

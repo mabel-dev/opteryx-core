@@ -102,14 +102,6 @@ class AsyncReaderNode(ReaderNode):
             prefix=reader.dataset,
         )
 
-        if self.predicates and hasattr(reader, "prune_blobs"):
-            # if we're capturing statistics, we can prefilter the blobs
-            start = time.monotonic_ns()
-            blob_names = reader.prune_blobs(
-                blob_names=blob_names, query_statistics=self.statistics, selection=self.predicates
-            )
-            self.statistics.time_pruning_blobs += time.monotonic_ns() - start
-
         if len(blob_names) == 0:
             # if we don't have any matching blobs, create an empty dataset
             from orso import DataFrame

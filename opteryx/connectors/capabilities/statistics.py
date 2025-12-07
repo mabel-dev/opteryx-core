@@ -14,7 +14,7 @@ from orso.types import OrsoTypes
 from opteryx.compiled.structures.relation_statistics import to_int
 from opteryx.managers.expression import NodeType
 from opteryx.models import RelationStatistics
-from opteryx.shared.stats_cache import StatsCache
+#from opteryx.shared.stats_cache import StatsCache
 from opteryx.third_party.cyan4973.xxhash import hash_bytes
 
 handlers = {
@@ -29,7 +29,7 @@ handlers = {
 
 class Statistics:
     def __init__(self, statistics: dict, **kwargs):
-        self.stats_cache = StatsCache()
+        #self.stats_cache = StatsCache()
         self.relation_statistics = RelationStatistics()
 
     def read_blob_statistics(

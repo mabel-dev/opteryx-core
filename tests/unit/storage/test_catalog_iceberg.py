@@ -43,61 +43,6 @@ def test_iceberg_get_schema():
     table = catalog.load_table("opteryx.tweets")
     table.schema().as_arrow()
 
-
-@skip_if(is_arm() or is_windows() or is_mac())
-def test_iceberg_get_statistics_manual():
-
-    from opteryx.models import RelationStatistics
-
-    catalog = set_up_iceberg()
-    opteryx.register_store(
-        "iceberg",
-        IcebergConnector,
-        catalog=catalog,
-        remove_prefix=True,
-    )
-
-    table = catalog.load_table("opteryx.tweets")
-    table.schema().as_arrow()
-
-    stats = RelationStatistics()
-
-    column_names = {col.field_id:col.name for col in table.schema().columns}
-    column_types = {col.field_id:col.field_type for col in table.schema().columns}
-
-    files = table.inspect.files()
-    stats.record_count = pyarrow.compute.sum(files.column("record_count")).as_py()
-
-    if "distinct_counts" in files.columns:
-        for file in files.column("distinct_counts"):
-            for k, v in file:
-                stats.set_cardinality_estimate[column_names[k]] += v
-
-    if "value_counts" in files.columns:
-        for file in files.column("value_counts"):
-            for k, v in file:
-                stats.add_count(column_names[k], v)
-
-    for file in files.column("lower_bounds"):
-        for k, v in file:
-            stats.update_lower(column_names[k], IcebergConnector.decode_iceberg_value(v, column_types[k]))
-
-    for file in files.column("upper_bounds"):
-        for k, v in file:
-            stats.update_upper(column_names[k], IcebergConnector.decode_iceberg_value(v, column_types[k]))
-
-    assert stats.record_count == 100000
-    assert stats.lower_bounds[b"followers"] == 0
-    assert stats.upper_bounds[b"followers"] == 8266250
-    assert stats.lower_bounds[b"user_name"] == to_int("")
-    assert stats.upper_bounds[b"user_name"] == to_int("🫖🔫")
-    assert stats.lower_bounds[b"tweet_id"] == to_int(1346604539013705728)
-    assert stats.upper_bounds[b"tweet_id"] == to_int(1346615999009755142)
-    assert stats.lower_bounds[b"text"] == to_int("!! PLEASE STOP A")
-    assert stats.upper_bounds[b"text"] == to_int("🪶Cultural approq")
-    assert stats.lower_bounds[b"timestamp"] == to_int("2021-01-05T23:48")
-    assert stats.upper_bounds[b"timestamp"] == to_int("2021-01-06T00:35")
-
 @skip_if(is_arm() or is_windows() or is_mac())
 def test_iceberg_connector():
 
