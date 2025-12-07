@@ -145,4 +145,4 @@ class DatasetReader:
         """
         Close the reader and release any resources.
         """
-        pass
+        return None

@@ -10,7 +10,6 @@ given as a folder on local disk
 
 import os
 import threading
-import time
 from concurrent.futures import FIRST_COMPLETED
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import wait
@@ -26,7 +25,6 @@ from opteryx.connectors.base.base_connector import BaseConnector
 from opteryx.connectors.capabilities import Diachronic
 from opteryx.connectors.capabilities import LimitPushable
 from opteryx.connectors.capabilities import PredicatePushable
-from opteryx.connectors.capabilities import Statistics
 from opteryx.exceptions import DataError
 from opteryx.exceptions import DatasetNotFoundError
 from opteryx.exceptions import EmptyDatasetError
@@ -37,7 +35,7 @@ from opteryx.utils.file_decoders import get_decoder
 OS_SEP = os.sep
 
 
-class DiskConnector(BaseConnector, Diachronic, PredicatePushable, LimitPushable, Statistics):
+class DiskConnector(BaseConnector, Diachronic, PredicatePushable, LimitPushable):
     """
     Connector for reading datasets from files on local storage.
     """
@@ -78,7 +76,6 @@ class DiskConnector(BaseConnector, Diachronic, PredicatePushable, LimitPushable,
         Diachronic.__init__(self, **kwargs)
         PredicatePushable.__init__(self, **kwargs)
         LimitPushable.__init__(self, **kwargs)
-        Statistics.__init__(self, **kwargs)
 
         self.dataset = self.dataset.replace(".", OS_SEP)
         self.cached_first_blob = None  # Cache for the first blob in the dataset
@@ -153,17 +150,6 @@ class DiskConnector(BaseConnector, Diachronic, PredicatePushable, LimitPushable,
             with self._stats_lock:
                 self.statistics.bytes_read += len(mv)
 
-            if not just_schema:
-                stats = self.read_blob_statistics(
-                    blob_name=blob_name, blob_bytes=mv, decoder=decoder
-                )
-                if stats is not None:
-                    with self._stats_lock:
-                        if self.relation_statistics is None:
-                            self.relation_statistics = stats
-                        else:
-                            self.relation_statistics.merge(stats)
-
             return result
         finally:
             # CRITICAL: Clean up the memory mapping
@@ -214,13 +200,6 @@ class DiskConnector(BaseConnector, Diachronic, PredicatePushable, LimitPushable,
         blob_names = self.get_list_of_blob_names(
             prefix=self.dataset,
         )
-
-        if predicates is not None:
-            start = time.monotonic_ns()
-            blob_names = self.prune_blobs(
-                blob_names=blob_names, query_statistics=self.statistics, selection=predicates
-            )
-            self.statistics.time_pruning_blobs += time.monotonic_ns() - start
 
         if just_schema:
             for blob_name in blob_names:

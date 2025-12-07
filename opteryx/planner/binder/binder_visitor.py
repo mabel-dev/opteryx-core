@@ -945,9 +945,7 @@ class BinderVisitor:
 
     def visit_scan(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
         from opteryx.connectors import connector_factory
-        from opteryx.connectors.capabilities import Asynchronous
         from opteryx.connectors.capabilities import Diachronic
-        from opteryx.connectors.capabilities import Statistics
         from opteryx.exceptions import DatabaseError
         from opteryx.managers.permissions import can_read_table
 
@@ -972,11 +970,10 @@ class BinderVisitor:
             node.schema = node.connector.get_dataset_schema()
             node.schema.aliases.append(node.alias)
 
-            if Statistics in connector_capabilities:
+            if hasattr(node.connector, "relation_statistics"):
                 node.schema = node.connector.map_statistics(
                     node.connector.relation_statistics, node.schema
                 )
-
             context.schemas[node.alias] = node.schema
             for column in node.schema.columns:
                 column.origin = [node.alias]

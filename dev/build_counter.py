@@ -25,7 +25,7 @@ class VersionStatus(Enum):
 
 __major_version__ = 0
 __minor_version__ = 1
-__revision_version__ = 1
+__revision_version__ = 2
 __author__ = "@joocer"
 __status__ = VersionStatus.BETA
 
@@ -46,6 +46,7 @@ if __build__:
 __build__ = {__build__}
 __author__ = "{__author__}"
 __version__ = "{__version__}"
+__lib__ = "opteryx-core"
 
 # Store the version here so:
 # 1) we don't load dependencies by storing it in __init__.py

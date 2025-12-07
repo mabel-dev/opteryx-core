@@ -176,9 +176,6 @@ MAX_LOCAL_BUFFER_CAPACITY: int
 MAX_READ_BUFFER_CAPACITY: int
 """Read buffer pool size in either bytes or fraction of system memory (lazy)."""
 
-MAX_STATISTICS_CACHE_ITEMS: int = get("MAX_STATISTICS_CACHE_ITEMS", 10_000)
-"""The number of .parquet files we cache the statistics for."""
-
 _LAZY_VALUES: dict = {}
 
 
@@ -256,7 +253,6 @@ class Features:
     enable_native_aggregator = bool(get("FEATURE_ENABLE_NATIVE_AGGREGATOR", False))
     disable_nested_loop_join = bool(get("FEATURE_DISABLE_NESTED_LOOP_JOIN", False))
     force_nested_loop_join = bool(get("FEATURE_FORCE_NESTED_LOOP_JOIN", False))
-    disable_sql_statistics_gathering = bool(get("FEATURE_DISABLE_SQL_STATISTICS_GATHERING", False))
     enable_free_threading = bool(get("FEATURE_ENABLE_FREE_THREADING", False))
     use_draken_ops_kernels = bool(get("FEATURE_USE_DRAKEN_OPS_KERNELS", False))
 
