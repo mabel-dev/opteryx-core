@@ -1,10 +1,3 @@
-# This is the main regression test script which tests the entire application.
-# Other GitHub Actions test subsets primarily to ensure compatibility for different OSes.
-
-# This script is run on Ubuntu, the most common OS for CI/CD pipelines.
-# The script is run on Python 3.10, 3.11, and 3.12.
-# The script is run at 4:00 AM UTC every day and on every push to the repository.
-
 name: Regression Suite
 
 on:
@@ -69,10 +62,6 @@ jobs:
         with:
           credentials_json: '${{ secrets.GCP_KEY }}'
 
-      - name: Decode Astra (DataStax/Cassandra) Secure Connect Bundle
-        run: |
-          echo "${{ secrets.ASTRA_SECURE_BUNDLE_BASE64 }}" | base64 -d > secure-connect.zip
-
       - name: Run Regression Tests
         run: python -m coverage run -m pytest --color=yes
         env:
@@ -88,9 +77,3 @@ jobs:
 
       - name: Check Coverage
         run: python -m coverage report -m
-
-      - name: "Upload coverage to Codecov"
-        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.11'
-        uses: codecov/codecov-action@v1
-        with:
-          fail_ci_if_error: false
