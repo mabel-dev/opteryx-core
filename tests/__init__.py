@@ -385,7 +385,6 @@ def set_up_iceberg():
     from pyiceberg.catalog.sql import SqlCatalog
     from pyiceberg.exceptions import NamespaceAlreadyExistsError, NoSuchTableError
     from opteryx.connectors.iceberg_connector import IcebergConnector
-    from freezegun import freeze_time
 
     worker_id = os.environ.get('PYTEST_XDIST_WORKER', 'gw0')
     ICEBERG_BASE_PATH: str = f"tmp/iceberg/{worker_id}"
@@ -445,7 +444,6 @@ def set_up_iceberg():
         # initialized by a prior run. These are used in battery tests.
         from pyiceberg.exceptions import NoSuchTableError as _NoSuchTableError
         import pyarrow as _pa
-        from freezegun import freeze_time as _freeze_time
 
         def _ensure_table_empty(identifier):
             try:
@@ -461,9 +459,7 @@ def set_up_iceberg():
                 schema = _pa.schema([_pa.field("id", _pa.int64()), _pa.field("name", _pa.string())])
                 table = catalog.create_table(identifier, schema=schema)
                 data = _pa.Table.from_arrays([_pa.array([1, 2, 3]), _pa.array(["a", "b", "c"])], schema=schema)
-                commit_time = datetime.datetime(2023, 1, 1, 12, 0, 0)
-                with _freeze_time(commit_time):
-                    table.append(data)
+                table.append(data)
 
         def _ensure_two_snapshots(identifier):
             try:
@@ -472,13 +468,9 @@ def set_up_iceberg():
                 schema = _pa.schema([_pa.field("id", _pa.int64()), _pa.field("name", _pa.string())])
                 table = catalog.create_table(identifier, schema=schema)
                 data1 = _pa.Table.from_arrays([_pa.array([1, 2]), _pa.array(["a", "b"])], schema=schema)
-                commit_time1 = datetime.datetime(2021, 1, 1, 12, 0, 0)
-                with _freeze_time(commit_time1):
-                    table.append(data1)
+                table.append(data1)
                 data2 = _pa.Table.from_arrays([_pa.array([1, 2, 3]), _pa.array(["a", "b", "c"])], schema=schema)
-                commit_time2 = datetime.datetime(2022, 1, 1, 12, 0, 0)
-                with _freeze_time(commit_time2):
-                    table.overwrite(data2)
+                table.overwrite(data2)
 
         _ensure_table_empty("opteryx.empty_battery")
         _ensure_single_snapshot("opteryx.single_snap_battery")
@@ -538,18 +530,15 @@ def set_up_iceberg():
             if cutoff is None:
                 table.append(snapshot_data, snapshot_properties=snapshot_props(snapshot_label, cutoff))
             else:
-                with freeze_time(cutoff):
-                    table.append(snapshot_data, snapshot_properties=snapshot_props(snapshot_label, cutoff))
+                table.append(snapshot_data, snapshot_properties=snapshot_props(snapshot_label, cutoff))
 
             latest_snapshot = snapshot_data
             for snapshot_label, cutoff in snapshots[1:]:
                 snapshot_data = load_planet_snapshot(cutoff if cutoff is not modern_timestamp else None)
                 if cutoff is None or cutoff is modern_timestamp:
-                    with freeze_time(modern_timestamp):
-                        table.overwrite(snapshot_data, snapshot_properties=snapshot_props(snapshot_label, None))
+                    table.overwrite(snapshot_data, snapshot_properties=snapshot_props(snapshot_label, None))
                 else:
-                    with freeze_time(cutoff):
-                        table.overwrite(snapshot_data, snapshot_properties=snapshot_props(snapshot_label, cutoff))
+                    table.overwrite(snapshot_data, snapshot_properties=snapshot_props(snapshot_label, cutoff))
                 latest_snapshot = snapshot_data
 
             expected_rows = latest_snapshot.num_rows
@@ -579,7 +568,6 @@ def set_up_iceberg():
     # Create additional tables that tests rely on (empty and single snapshot)
     from pyiceberg.exceptions import NoSuchTableError as _NoSuchTableError
     import pyarrow as _pa
-    from freezegun import freeze_time as _freeze_time
 
     def _ensure_table_empty(identifier):
         try:
@@ -595,9 +583,7 @@ def set_up_iceberg():
             schema = _pa.schema([_pa.field("id", _pa.int64()), _pa.field("name", _pa.string())])
             table = catalog.create_table(identifier, schema=schema)
             data = _pa.Table.from_arrays([_pa.array([1, 2, 3]), _pa.array(["a", "b", "c"])], schema=schema)
-            commit_time = datetime.datetime(2023, 1, 1, 12, 0, 0)
-            with _freeze_time(commit_time):
-                table.append(data)
+            table.append(data)
 
     def _ensure_two_snapshots(identifier):
         try:
@@ -606,13 +592,9 @@ def set_up_iceberg():
             schema = _pa.schema([_pa.field("id", _pa.int64()), _pa.field("name", _pa.string())])
             table = catalog.create_table(identifier, schema=schema)
             data1 = _pa.Table.from_arrays([_pa.array([1, 2]), _pa.array(["a", "b"])], schema=schema)
-            commit_time1 = datetime.datetime(2021, 1, 1, 12, 0, 0)
-            with _freeze_time(commit_time1):
-                table.append(data1)
+            table.append(data1)
             data2 = _pa.Table.from_arrays([_pa.array([1, 2, 3]), _pa.array(["a", "b", "c"])], schema=schema)
-            commit_time2 = datetime.datetime(2022, 1, 1, 12, 0, 0)
-            with _freeze_time(commit_time2):
-                table.overwrite(data2)
+            table.overwrite(data2)
 
     _ensure_table_empty("opteryx.empty_battery")
     _ensure_single_snapshot("opteryx.single_snap_battery")
