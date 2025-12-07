@@ -21,7 +21,6 @@ from opteryx.connectors.base.base_connector import BaseConnector
 from opteryx.connectors.capabilities import Asynchronous
 from opteryx.connectors.capabilities import Diachronic
 from opteryx.connectors.capabilities import PredicatePushable
-from opteryx.connectors.capabilities import Statistics
 from opteryx.exceptions import DataError
 from opteryx.exceptions import DatasetNotFoundError
 from opteryx.exceptions import MissingDependencyError
@@ -34,7 +33,7 @@ from opteryx.utils.file_decoders import get_decoder
 OS_SEP = os.sep
 
 
-class AwsS3Connector(BaseConnector, Diachronic, PredicatePushable, Asynchronous, Statistics):
+class AwsS3Connector(BaseConnector, Diachronic, PredicatePushable, Asynchronous):
     __mode__ = "Blob"
     __type__ = "S3"
 
@@ -67,7 +66,6 @@ class AwsS3Connector(BaseConnector, Diachronic, PredicatePushable, Asynchronous,
         Diachronic.__init__(self, **kwargs)
         PredicatePushable.__init__(self, **kwargs)
         Asynchronous.__init__(self, **kwargs)
-        Statistics.__init__(self, **kwargs)
 
         # fmt:off
         end_point = kwargs.get("S3_END_POINT", os.environ.get("MINIO_END_POINT"))
@@ -151,17 +149,6 @@ class AwsS3Connector(BaseConnector, Diachronic, PredicatePushable, Asynchronous,
                 blob_bytes = self.read_blob(blob_name=blob_name, statistics=self.statistics)
                 try:
                     decoded = decoder(blob_bytes, projection=columns, just_schema=just_schema)
-
-                    stats = self.read_blob_statistics(
-                        blob_name=blob_name, blob_bytes=blob_bytes, decoder=decoder
-                    )
-                    # Aggregate statistics from all blobs
-                    if stats is not None:
-                        if self.relation_statistics is None:
-                            self.relation_statistics = stats
-                        else:
-                            self.relation_statistics.merge(stats)
-
                 except Exception as err:
                     raise DataError(f"Unable to read file {blob_name} ({err})") from err
                 if not just_schema:

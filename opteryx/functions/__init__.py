@@ -92,7 +92,7 @@ def array_encode_utf8(arr):
     try:
         # array_encode_utf8 is fast but brittle
         return to_blob(arr)
-    except:
+    except Exception:
         return [None if s is None else str(s).encode() for s in arr]
 
 
