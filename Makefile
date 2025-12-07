@@ -3,7 +3,17 @@
 SHELL := /bin/bash
 
 # Variables
-PYTHON := PYTHON_GIL=0 python
+# By default we don't force Python to run with the GIL disabled. Some Python
+# builds don't support disabling the GIL and will abort at startup when the
+# environment requests it (fatal error: config_read_gil). To enable running
+# without the GIL you can override this like:
+#
+#   make PYTHON_GIL='PYTHON_GIL=0' <target>
+#
+PYTHON_GIL ?=
+# Prefer python3.13 by default for consistent ABI and compiled artifacts.
+# Users may override by passing PYTHON='python3.x' on the make commandline.
+PYTHON ?= $(PYTHON_GIL) python3.13
 UV := $(PYTHON) -m uv
 PIP := $(UV) pip
 PYTEST := $(PYTHON) -m pytest
@@ -36,10 +46,20 @@ define print_red
 	@echo -e "\033[0;31m$(1)\033[0m"
 endef
 
-.PHONY: help lint format check test test-quick test-battery coverage mypy compile clean install update dev-install all
+.PHONY: help lint format check test test-quick test-battery coverage mypy compile clean install update dev-install all check-python
 
 # Default target
 .DEFAULT_GOAL := help
+
+# Enforce Python 3.13 for CI and developer tools. This will abort early if the configured
+# python interpreter is not 3.13; set PYTHON to override or install 3.13 via your environment.
+check-python:
+	@ver=`$(PYTHON) -c "import sys; print(f'{sys.version_info[0]}.{sys.version_info[1]}')" 2>/dev/null`; \
+	if [ "$$ver" != "3.13" ]; then \
+		echo "\nERROR: Python 3.13 is required for builds in this repository; found $$ver\n" >&2; \
+		echo "Set your local Python to 3.13 (pyenv local 3.13.5) or override with: make PYTHON=python3.13 <target>" >&2; \
+		exit 1; \
+	fi
 
 help: ## Show this help message
 	$(call print_green,"Opteryx Development Makefile")
@@ -48,7 +68,7 @@ help: ## Show this help message
 
 # === LINTING AND FORMATTING ===
 
-lint: ## Run all linting tools
+lint: check-python ## Run all linting tools
 	$(call print_blue,"Installing linting tools...")
 	@$(PIP) install --quiet --upgrade pycln isort ruff yamllint cython-lint
 	$(call print_blue,"Removing whitespace in pyx files...")
@@ -94,17 +114,17 @@ update: ## Update all dependencies
 
 # === TESTING ===
 
-test: dev-install ## Run full test suite
+test: check-python dev-install ## Run full test suite
 	$(call print_blue,"Running full test suite...")
 	@$(PIP) install --upgrade pytest pytest-xdist
 	@clear
 	@MANUAL_TEST=1 $(PYTEST) -n auto --color=yes
 
-test-quick: ## Run quick test (alias: t)
+test-quick: check-python ## Run quick test (alias: t)
 	@clear
 	@$(PYTHON) tests/integration/sql_battery/run_shapes_battery.py
 
-b:
+ b: check-python
 	@clear
 	@$(PYTHON) scratch/brace.py
 
@@ -130,18 +150,18 @@ mypy: ## Run type checking
 	$(call print_blue,"Running type checking...")
 	@$(PIP) install --upgrade mypy
 	@clear
-	@$(MYPY) --ignore-missing-imports --python-version 3.11 --no-strict-optional --check-untyped-defs $(SRC_DIR)
+	@$(MYPY) --ignore-missing-imports --python-version 3.13 --no-strict-optional --check-untyped-defs $(SRC_DIR)
 
 # === COMPILATION ===
 
-compile: clean ## Compile Cython extensions
+compile: check-python clean ## Compile Cython extensions
 	$(call print_blue,"Compiling Cython extensions...")
 	@$(PIP) install --upgrade pip uv numpy cython setuptools setuptools_rust
 	@$(PYTHON) setup.py clean
 	@$(PYTHON) setup.py build_ext --inplace -j $(JOBS)
 	$(call print_green,"Compilation complete!")
 
-compile-quick: ## Quick compilation (alias: c)
+compile-quick: check-python ## Quick compilation (alias: c)
 	@$(PYTHON) setup.py build_ext --inplace
 
 # Alias for backward compatibility

@@ -84,6 +84,7 @@ from opteryx.connectors import register_store
 from opteryx.__version__ import __author__
 from opteryx.__version__ import __build__
 from opteryx.__version__ import __version__
+from opteryx.__version__ import __lib__
 
 
 __all__ = [
@@ -95,6 +96,7 @@ __all__ = [
     "__author__",
     "__build__",
     "__version__",
+    "__lib__",
     "OPTERYX_DEBUG",
 ]
 
