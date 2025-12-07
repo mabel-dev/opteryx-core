@@ -1,5 +1,5 @@
 [project]
-name = "opteryx-core"
+name = "opteryx_core"
 version = "0.26.2-beta.11"
 description = "Query your data, where it lives"
 requires-python = '==3.13'

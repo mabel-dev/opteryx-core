@@ -62,7 +62,7 @@ STATEMENTS = [
         ("SELECT * FROM $planets", 9, 20, None),
         ("SELECT * FROM $astronauts", 357, 19, None),
         ("SELECT * FROM $no_table", 1, 1, None),
-        ("SELECT * FROM $variables", 43, 5, None),
+        ("SELECT * FROM $variables", 41, 5, None),
         ("SELECT * FROM $missions", 4630, 8, None),
         ("SELECT * FROM $statistics", 17, 2, None),
         ("SELECT * FROM $stop_words", 305, 1, None),

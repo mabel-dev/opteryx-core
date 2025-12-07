@@ -12,7 +12,6 @@ isort
 pycln
 jellyfish
 
-redis
 valkey
 requests
 rich
