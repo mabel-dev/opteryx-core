@@ -64,13 +64,6 @@ jobs:
             exit 1
           fi
 
-      - name: "Start Memcached Instance"
-        run: |
-            docker run -d --name my-memcached \
-                       -p 11211:11211 \
-                       memcached \
-                       -m 16
-
       - name: "Authenticate to Google Cloud"
         uses: google-github-actions/auth@v1
         with:
@@ -86,22 +79,8 @@ jobs:
           AZURE_STORAGE_CONNECTION_STRING: "DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://127.0.0.1:10000/devstoreaccount1;QueueEndpoint=http://127.0.0.1:10001/devstoreaccount1;"
           MINIO_END_POINT: "s3.eu-west-2.amazonaws.com"
           GCP_PROJECT_ID: mabeldev
-          MYSQL_USER: '${{ secrets.MYSQL_USER }}'
-          MYSQL_PASSWORD: '${{ secrets.MYSQL_PASSWORD }}'
-          POSTGRES_USER: '${{ secrets.POSTGRES_USER }}'
-          POSTGRES_PASSWORD: '${{ secrets.POSTGRES_PASSWORD }}'
-          POSTGRES_HOST: '${{ secrets.POSTGRES_HOST }}'
-          MONGODB_CONNECTION: '${{ secrets.MONGODB_CONNECTION }}'
-          MONGODB_DATABASE: opteryx
-          COCKROACH_USER: '${{ secrets.COCKROACH_USER }}'
-          COCKROACH_PASSWORD: '${{ secrets.COCKROACH_PASSWORD }}'
-          REDIS_CONNECTION: '${{ secrets.REDIS_CONNECTION }}'
-          MEMCACHED_SERVER: 'localhost:11211'
-          DATASTAX_CLIENT_ID: '${{ secrets.DATASTAX_CLIENT_ID }}'
-          DATASTAX_CLIENT_SECRET: '${{ secrets.DATASTAX_CLIENT_SECRET }}'
           OPTERYX_DEBUG: 1
           MAX_LOCAL_BUFFER_CAPACITY: 100
-          MAX_CACHE_EVICTIONS_PER_QUERY: 4
           DATA_CATALOG_CONNECTION: '${{ secrets.DATA_CATALOG_CONNECTION }}'
           DATA_CATALOG_STORAGE: '${{ secrets.DATA_CATALOG_STORAGE }}'
           VALKEY_CONNECTION: '${{ secrets.VALKEY_CONNECTION }}'

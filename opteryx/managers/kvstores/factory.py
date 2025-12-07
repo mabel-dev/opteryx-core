@@ -11,7 +11,6 @@ from opteryx.managers.kvstores.base_kv_store import BaseKeyValueStore
 from opteryx.managers.kvstores.file_kv_store import FileKeyValueStore
 from opteryx.managers.kvstores.gcs_kv_store import GCSKeyValueStore
 from opteryx.managers.kvstores.null_cache import NullCache
-from opteryx.managers.kvstores.redis import RedisCache
 from opteryx.managers.kvstores.s3_kv_store import S3KeyValueStore
 from opteryx.managers.kvstores.valkey import ValkeyCache
 
@@ -23,7 +22,6 @@ def create_kv_store(location: str | None, **kwargs: Any) -> BaseKeyValueStore | 
     - file:///path or /path
     - s3://bucket[/prefix]
     - gs://bucket[/prefix]
-    - redis://host:port
     - memcached://host:port
     - valkey://connection
     - null://anything
@@ -40,9 +38,6 @@ def create_kv_store(location: str | None, **kwargs: Any) -> BaseKeyValueStore | 
         return S3KeyValueStore(location, **kwargs)
     if scheme in ("gs", "gcs"):
         return GCSKeyValueStore(location, **kwargs)
-    if scheme == "redis":
-        # pass through server URL to redis.from_url handled in implementation
-        return RedisCache(server=location, **kwargs)
     if scheme == "valkey":
         server = parsed.netloc or location
         return ValkeyCache(server=server, **kwargs)

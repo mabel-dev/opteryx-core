@@ -588,14 +588,13 @@ setup(
     long_description=long_description,
     long_description_content_type="text/markdown",
     packages=find_packages(include=[LIBRARY, f"{LIBRARY}.*", "opteryx_core", "opteryx_core.*"]),
-    python_requires=">=3.11",
+    python_requires="==3.13",
     url="https://github.com/mabel-dev/opteryx/",
     ext_modules=cythonize(extensions, compiler_directives={
         "language_level": "3", 
         "linetrace": "a" in __version__ or "b" in __version__,
     }),
     rust_extensions=[RustExtension("opteryx.compute", "Cargo.toml", debug=False)],  # Add Rust here
-    entry_points={"console_scripts": ["opteryx=opteryx.command:main"]},
     package_data={"": ["*.pyx", "*.pxd", "*.h"]},
     cmdclass={"build_ext": build_ext},
     zip_safe=False,

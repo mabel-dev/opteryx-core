@@ -84,8 +84,6 @@ SYSTEM_VARIABLES_DEFAULTS: Dict[str, VariableSchema] = {
     "default_tmp_storage_engine": (OrsoTypes.VARCHAR, "opteryx", VariableOwner.SERVER, Visibility.UNRESTRICTED),
 
     # These are Opteryx specific variables
-    "max_cache_evictions_per_query": (OrsoTypes.INTEGER, config.MAX_CACHE_EVICTIONS_PER_QUERY, VariableOwner.USER, Visibility.RESTRICTED),
-    "max_cacheable_item_size": (OrsoTypes.INTEGER, config.MAX_CACHEABLE_ITEM_SIZE, VariableOwner.SERVER, Visibility.RESTRICTED),
     "max_local_buffer_capacity": (OrsoTypes.INTEGER, config.MAX_LOCAL_BUFFER_CAPACITY, VariableOwner.SERVER, Visibility.RESTRICTED),
     "max_read_buffer_capacity": (OrsoTypes.INTEGER, config.MAX_READ_BUFFER_CAPACITY, VariableOwner.SERVER, Visibility.RESTRICTED),
     "disable_optimizer": (OrsoTypes.BOOLEAN, config.DISABLE_OPTIMIZER, VariableOwner.USER, Visibility.RESTRICTED),
