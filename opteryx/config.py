@@ -163,13 +163,6 @@ DISABLE_OPTIMIZER: bool = bool(get("DISABLE_OPTIMIZER", False))
 
 OPTERYX_DEBUG: bool = bool(get("OPTERYX_DEBUG", False))
 """**DANGEROUS** Diagnostic and debug mode - generates a lot of log entries."""
-
-MAX_CACHE_EVICTIONS_PER_QUERY: int = int(get("MAX_CACHE_EVICTIONS_PER_QUERY", 64))
-"""Maximum number of buffer pool evictions by a single query."""
-
-MAX_CACHEABLE_ITEM_SIZE: int = int(get("MAX_CACHEABLE_ITEM_SIZE", 2 * 1024 * 1024))
-"""Maximum size for items saved to the remote buffer."""
-
 MAX_CONSECUTIVE_CACHE_FAILURES: int = int(get("MAX_CONSECUTIVE_CACHE_FAILURES", 10))
 """Maximum number of consecutive cache failures before disabling cache usage."""
 

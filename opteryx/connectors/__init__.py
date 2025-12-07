@@ -80,7 +80,6 @@ on demand, significantly reducing initial import time while maintaining
 full functionality.
 """
 
-import os
 
 # Lazy imports - connectors are only loaded when actually needed
 # This significantly improves module import time from ~500ms to ~130ms
@@ -164,55 +163,6 @@ def register_store(prefix, connector, *, remove_prefix: bool = False, **kwargs):
     }
 
 
-def register_df(name, frame):
-    """register a orso, pandas or Polars dataframe"""
-    # Lazy import ArrowConnector
-    import pyarrow
-
-    from opteryx.connectors.arrow_connector import ArrowConnector
-
-    # polars (maybe others) - the polars to arrow API is a mess
-    if hasattr(frame, "_df"):  # pragma: no cover
-        frame = frame._df
-    if "PyDataFrame" in str(type(frame)):  # pragma: no cover
-        arrow = frame.to_arrow(compat_level=1)
-        if not isinstance(arrow, pyarrow.Table):
-            from opteryx.exceptions import NotSupportedError
-
-            raise NotSupportedError(
-                "Polars not supported whilst changes are being made to the Polars to Arrow APIs"
-            )
-        register_arrow(name, arrow)
-        return
-    if hasattr(frame, "to_arrow"):  # pragma: no cover
-        arrow = frame.to_arrow()
-        if not isinstance(arrow, pyarrow.Table):
-            arrow = pyarrow.Table.from_batches(arrow)
-        register_arrow(name, arrow)
-        return
-    # orso
-    if hasattr(frame, "arrow"):  # pragma: no cover
-        arrow = frame.arrow()
-        register_arrow(name, arrow)
-        return
-    # pandas
-    frame_type = str(type(frame))
-    if "pandas" in frame_type:  # pragma: no cover
-        register_arrow(name, pyarrow.Table.from_pandas(frame))
-        return
-    raise ValueError("Unable to register unknown frame type.")
-
-
-def register_arrow(name, table):
-    """register an arrow table"""
-    from opteryx.connectors.arrow_connector import ArrowConnector
-    from opteryx.shared import MaterializedDatasets
-
-    materialized_datasets = MaterializedDatasets()
-    materialized_datasets[name] = table
-    register_store(name, ArrowConnector)
-
-
 def known_prefix(prefix) -> bool:
     return prefix in _storage_prefixes
 
@@ -243,12 +193,6 @@ def connector_factory(dataset, statistics, **config):
                 connector = _lazy_import_connector(connector)
             break
     else:
-        # Check if dataset is a file or contains wildcards
-        has_wildcards = any(char in dataset for char in ["*", "?", "["])
-        if os.path.isfile(dataset) or has_wildcards:
-            from opteryx.connectors import file_connector
-
-            return file_connector.FileConnector(dataset=dataset, statistics=statistics)
         # fall back to the default connector (local disk if not set)
         connector_entry = _storage_prefixes.get("_default", {})
         connector = connector_entry.pop("connector", "DiskConnector")

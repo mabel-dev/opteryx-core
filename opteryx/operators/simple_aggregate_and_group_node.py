@@ -179,11 +179,8 @@ class SimpleAggregateAndGroupNode(BasePlanNode):
                 # If we receive a Draken Morsel, convert to Arrow for further ops
                 if isinstance(groups, Morsel):
                     groups = groups.to_arrow()
-                try:
-                    # Rename first len(internal_names) columns to alias names
-                    groups = groups.rename_columns(list(column_names))
-                except Exception:
-                    pass
+                # Rename first len(internal_names) columns to alias names
+                groups = groups.rename_columns(list(column_names))
             except Exception:
                 # Fall back to pyarrow implementation if anything goes wrong
                 groups = morsel.group_by(self.group_by_columns)

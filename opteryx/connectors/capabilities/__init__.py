@@ -4,7 +4,6 @@
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
 from opteryx.connectors.capabilities.asynchronous import Asynchronous
-from opteryx.connectors.capabilities.cacheable import Cacheable
 from opteryx.connectors.capabilities.diachronic import Diachronic
 from opteryx.connectors.capabilities.limit_pushable import LimitPushable
 from opteryx.connectors.capabilities.predicate_pushable import PredicatePushable
@@ -12,7 +11,6 @@ from opteryx.connectors.capabilities.statistics import Statistics
 
 __all__ = (
     "Asynchronous",
-    "Cacheable",
     "LimitPushable",
     "Diachronic",
     "PredicatePushable",

@@ -946,11 +946,8 @@ class BinderVisitor:
     def visit_scan(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
         from opteryx.connectors import connector_factory
         from opteryx.connectors.capabilities import Asynchronous
-        from opteryx.connectors.capabilities import Cacheable
         from opteryx.connectors.capabilities import Diachronic
         from opteryx.connectors.capabilities import Statistics
-        from opteryx.connectors.capabilities.cacheable import async_read_thru_cache
-        from opteryx.connectors.capabilities.cacheable import read_thru_cache
         from opteryx.exceptions import DatabaseError
         from opteryx.managers.permissions import can_read_table
 
@@ -971,16 +968,6 @@ class BinderVisitor:
         if Diachronic in connector_capabilities:
             node.connector.start_date = node.start_date
             node.connector.end_date = node.end_date
-        if Cacheable in connector_capabilities and "NO_CACHE" not in (node.hints or []):
-            # We add the caching mechanism here if the connector is Cacheable and
-            # we've not disable caching
-            original_read_blob = node.connector.read_blob
-            node.connector.read_blob = read_thru_cache(original_read_blob)
-
-            if Asynchronous in connector_capabilities:
-                original_async_read_blob = node.connector.async_read_blob
-                node.connector.async_read_blob = async_read_thru_cache(original_async_read_blob)
-
         try:
             node.schema = node.connector.get_dataset_schema()
             node.schema.aliases.append(node.alias)

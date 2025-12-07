@@ -19,7 +19,6 @@ from orso.types import OrsoTypes
 
 from opteryx.connectors.base.base_connector import BaseConnector
 from opteryx.connectors.capabilities import Asynchronous
-from opteryx.connectors.capabilities import Cacheable
 from opteryx.connectors.capabilities import Diachronic
 from opteryx.connectors.capabilities import PredicatePushable
 from opteryx.connectors.capabilities import Statistics
@@ -35,9 +34,7 @@ from opteryx.utils.file_decoders import get_decoder
 OS_SEP = os.sep
 
 
-class AwsS3Connector(
-    BaseConnector, Cacheable, Diachronic, PredicatePushable, Asynchronous, Statistics
-):
+class AwsS3Connector(BaseConnector, Diachronic, PredicatePushable, Asynchronous, Statistics):
     __mode__ = "Blob"
     __type__ = "S3"
 
@@ -68,7 +65,6 @@ class AwsS3Connector(
 
         BaseConnector.__init__(self, **kwargs)
         Diachronic.__init__(self, **kwargs)
-        Cacheable.__init__(self, **kwargs)
         PredicatePushable.__init__(self, **kwargs)
         Asynchronous.__init__(self, **kwargs)
         Statistics.__init__(self, **kwargs)

@@ -13,8 +13,6 @@ from opteryx.connectors import IcebergConnector
 from opteryx.compiled.structures.relation_statistics import to_int
 from opteryx.exceptions import DatasetReadError, UnsupportedSyntaxError
 from opteryx.models import QueryStatistics
-import datetime
-from freezegun import freeze_time
 
 @skip_if(is_arm() or is_windows() or is_mac())
 def test_iceberg_basic():
@@ -353,12 +351,8 @@ def test_iceberg_single_snapshot_where_clause():
         pass
     table = catalog.create_table(table_name, schema=schema)
     snapshot_data = pa.Table.from_arrays([pa.array([1, 2, 3]), pa.array(["a", "b", "c"])], schema=schema)
-    commit_time = datetime.datetime(2022, 1, 1, 12, 0, 0)
-    from freezegun import freeze_time
-    from opteryx.exceptions import DatasetReadError
-
-    with freeze_time(commit_time):
-        table.append(snapshot_data)
+    
+    table.append(snapshot_data)
 
     res = opteryx.query_to_arrow("SELECT * FROM iceberg.opteryx.single_snapshot WHERE id = 1")
     assert res.shape[0] == 1

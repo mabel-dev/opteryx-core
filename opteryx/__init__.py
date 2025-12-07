@@ -78,19 +78,7 @@ if OPTERYX_DEBUG:  # pragma: no cover
     from opteryx.debugging import OpteryxOrsoImportFinder
 
 from opteryx import config
-from opteryx.managers.cache.cache_manager import CacheManager  # isort:skip
 
-_cache_manager = CacheManager(cache_backend=None)
-
-
-def get_cache_manager() -> CacheManager:
-    """Function to get the current cache manager."""
-    return _cache_manager
-
-
-# Lazy import registration functions - these are lightweight
-from opteryx.connectors import register_arrow
-from opteryx.connectors import register_df
 from opteryx.connectors import register_store
 
 from opteryx.__version__ import __author__
@@ -99,27 +87,16 @@ from opteryx.__version__ import __version__
 
 
 __all__ = [
-    "apilevel",
     "connect",
     "Connection",
-    "paramstyle",
     "query",
     "query_to_arrow",
-    "register_arrow",
-    "register_df",
     "register_store",
-    "threadsafety",
     "__author__",
     "__build__",
     "__version__",
     "OPTERYX_DEBUG",
 ]
-
-# PEP-249 specifies these attributes for a Python Database API 2.0 compliant interface
-# For more details, see: https://www.python.org/dev/peps/pep-0249/
-apilevel: str = "1.0"  # Compliance level with DB API 2.0
-threadsafety: int = 0  # Thread safety level, 0 means not thread-safe
-paramstyle: str = "named"  # Parameter placeholder style, named means :name for placeholders
 
 
 def connect(*args, **kwargs) -> "Connection":
@@ -132,17 +109,6 @@ def connect(*args, **kwargs) -> "Connection":
     # Lazy import Connection
     from opteryx.connection import Connection
 
-    # Check for deprecated 'cache' parameter
-    if "cache" in kwargs:  # pragma: no cover
-        # Import the warnings module here to minimize dependencies
-        import warnings
-
-        # Emit a deprecation warning
-        warnings.warn(
-            "'cache' is no longer set via a parameter on connect, use opteryx.cache_manager instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
     # Create and return a Connection object
     return Connection(*args, **kwargs)
 
@@ -277,42 +243,6 @@ if not config.DISABLE_HIGH_PRIORITY and hasattr(os, "nice"):  # pragma: no cover
             print(
                 f"{datetime.datetime.now()} [LOADER] Cannot update process priority. Currently set to {display_nice}."
             )
-
-
-def set_cache_manager(new_cache_manager):
-    """Function to set a new cache manager and trigger custom functionality."""
-    global _cache_manager
-    _cache_manager = new_cache_manager
-
-    # if we change the cache config, reset the BufferPool
-    # Lazy import BufferPool
-    from opteryx.shared import BufferPool
-
-    BufferPool.reset()
-
-
-cache_manager = get_cache_manager()
-
-
-# if we're running in a notebook, register a magick
-try:  # pragma: no cover
-    from IPython import get_ipython
-    from IPython.core.magic import Magics, magics_class, cell_magic
-
-    @magics_class
-    class OpteryxMagics(Magics):
-        @cell_magic
-        def opteryx(self, line, cell):
-            self.shell.run_cell(
-                'import opteryx\nopteryx.query("' + cell.replace("\n", " ") + '")',
-                store_history=True,
-            )
-
-    ipython = get_ipython()
-    if ipython:
-        ipython.register_magics(OpteryxMagics)
-except (ImportError, ValueError, TypeError) as err:  # pragma: no cover
-    pass
 
 # Enable all warnings, including DeprecationWarning
 warnings.simplefilter("once", DeprecationWarning)
