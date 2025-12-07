@@ -46,6 +46,7 @@ if __build__:
 __build__ = {__build__}
 __author__ = "{__author__}"
 __version__ = "{__version__}"
+__lib__ = "opteryx-core"
 
 # Store the version here so:
 # 1) we don't load dependencies by storing it in __init__.py
