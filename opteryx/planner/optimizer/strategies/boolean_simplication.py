@@ -12,7 +12,7 @@ Goal: Preposition for following actions
 
 from opteryx.managers.expression import NodeType
 from opteryx.models import Node
-from opteryx.models import QueryStatistics
+from opteryx.models import QueryTelemetry
 from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner import LogicalPlanNode
 from opteryx.planner.logical_planner import LogicalPlanStepType
@@ -89,7 +89,7 @@ class BooleanSimplificationStrategy(OptimizationStrategy):  # pragma: no cover
 
         if node.node_type == LogicalPlanStepType.Filter:
             # do the work
-            node.condition = update_expression_tree(node.condition, self.statistics)
+            node.condition = update_expression_tree(node.condition, self.telemetry)
             context.optimized_plan[context.node_id] = node
 
         return context
@@ -122,7 +122,7 @@ def _is_literal_false(node: LogicalPlanNode) -> bool:
     return False
 
 
-def _flatten_and_chain(node: LogicalPlanNode, statistics: QueryStatistics) -> list:
+def _flatten_and_chain(node: LogicalPlanNode, telemetry: QueryTelemetry) -> list:
     """
     Flatten nested AND chains into a list of conditions.
     e.g., ((A AND B) AND C) becomes [A, B, C]
@@ -132,8 +132,8 @@ def _flatten_and_chain(node: LogicalPlanNode, statistics: QueryStatistics) -> li
     if node.node_type != NodeType.AND:
         return [node]
 
-    left_conditions = _flatten_and_chain(node.left, statistics)
-    right_conditions = _flatten_and_chain(node.right, statistics)
+    left_conditions = _flatten_and_chain(node.left, telemetry)
+    right_conditions = _flatten_and_chain(node.right, telemetry)
     return left_conditions + right_conditions
 
 
@@ -184,10 +184,10 @@ def _rebuild_or_chain(conditions: list) -> LogicalPlanNode:
     return result
 
 
-def update_expression_tree(node: LogicalPlanNode, statistics: QueryStatistics):
+def update_expression_tree(node: LogicalPlanNode, telemetry: QueryTelemetry):
     # break out of nests
     if node.node_type == NodeType.NESTED:
-        return update_expression_tree(node.centre, statistics)
+        return update_expression_tree(node.centre, telemetry)
 
     # handle rules relating to NOTs
     if node.node_type == NodeType.NOT:
@@ -217,17 +217,17 @@ def update_expression_tree(node: LogicalPlanNode, statistics: QueryStatistics):
 
                 # Track statistic based on chain length
                 if len(or_conditions) > 2:
-                    statistics.optimization_boolean_rewrite_demorgan_nary += 1
+                    telemetry.optimization_boolean_rewrite_demorgan_nary += 1
                 else:
-                    statistics.optimization_boolean_rewrite_demorgan += 1
+                    telemetry.optimization_boolean_rewrite_demorgan += 1
 
-                return update_expression_tree(result, statistics)
+                return update_expression_tree(result, telemetry)
 
         # NOT(A = B) => A != B
         if centre_node.value in INVERSIONS:
             centre_node.value = INVERSIONS[centre_node.value]
-            statistics.optimization_boolean_rewrite_inversion += 1
-            return update_expression_tree(centre_node, statistics)
+            telemetry.optimization_boolean_rewrite_inversion += 1
+            return update_expression_tree(centre_node, telemetry)
 
         # De Morgan's for NOT IN: NOT(col IN (a,b,c)) => col != a AND col != b AND col != c
         # This expands a single predicate into multiple AND-ed conditions for better pushdown
@@ -254,23 +254,23 @@ def update_expression_tree(node: LogicalPlanNode, statistics: QueryStatistics):
                 for pred in ne_predicates[1:]:
                     result = Node(NodeType.AND, left=result, right=pred)
 
-                statistics.optimization_boolean_rewrite_demorgan_in_expansion += 1
-                return update_expression_tree(result, statistics)
+                telemetry.optimization_boolean_rewrite_demorgan_in_expansion += 1
+                return update_expression_tree(result, telemetry)
 
         # NOT(NOT(A)) => A
         if centre_node.node_type == NodeType.NOT:
-            statistics.optimization_boolean_rewrite_double_not += 1
-            return update_expression_tree(centre_node.centre, statistics)
+            telemetry.optimization_boolean_rewrite_double_not += 1
+            return update_expression_tree(centre_node.centre, telemetry)
 
     # traverse the expression tree
-    node.left = None if node.left is None else update_expression_tree(node.left, statistics)
-    node.centre = None if node.centre is None else update_expression_tree(node.centre, statistics)
-    node.right = None if node.right is None else update_expression_tree(node.right, statistics)
+    node.left = None if node.left is None else update_expression_tree(node.left, telemetry)
+    node.centre = None if node.centre is None else update_expression_tree(node.centre, telemetry)
+    node.right = None if node.right is None else update_expression_tree(node.right, telemetry)
     if node.parameters:
         node.parameters = [
             parameter
             if not isinstance(parameter, Node)
-            else update_expression_tree(parameter, statistics)
+            else update_expression_tree(parameter, telemetry)
             for parameter in node.parameters
         ]
 
@@ -278,24 +278,24 @@ def update_expression_tree(node: LogicalPlanNode, statistics: QueryStatistics):
     if node.node_type == NodeType.AND:
         # A AND TRUE => A
         if _is_literal_true(node.right):
-            statistics.optimization_boolean_rewrite_and_true += 1
+            telemetry.optimization_boolean_rewrite_and_true += 1
             return node.left
         if _is_literal_true(node.left):
-            statistics.optimization_boolean_rewrite_and_true += 1
+            telemetry.optimization_boolean_rewrite_and_true += 1
             return node.right
 
         # A AND FALSE => FALSE
         if _is_literal_false(node.right):
-            statistics.optimization_boolean_rewrite_and_false += 1
+            telemetry.optimization_boolean_rewrite_and_false += 1
             return node.right
         if _is_literal_false(node.left):
-            statistics.optimization_boolean_rewrite_and_false += 1
+            telemetry.optimization_boolean_rewrite_and_false += 1
             return node.left
 
         # Flatten nested AND chains to prepare for predicate pushdown
         # Only flatten chains with more than 2 conditions to enable better pushdown
         # ((A AND B) AND C) => (A AND (B AND C))
-        conditions = _flatten_and_chain(node, statistics)
+        conditions = _flatten_and_chain(node, telemetry)
 
         # Only proceed with flattening if we have more than 2 conditions
         if len(conditions) > 2:
@@ -311,7 +311,7 @@ def update_expression_tree(node: LogicalPlanNode, statistics: QueryStatistics):
                         and hasattr(existing, "uuid")
                         and condition.uuid == existing.uuid
                     ):
-                        statistics.optimization_boolean_rewrite_and_redundant += 1
+                        telemetry.optimization_boolean_rewrite_and_redundant += 1
                         is_duplicate = True
                         break
                 if not is_duplicate:
@@ -320,7 +320,7 @@ def update_expression_tree(node: LogicalPlanNode, statistics: QueryStatistics):
             # Rebuild the chain for better pushdown
             # This creates a left-associative chain that's easier to traverse
             if len(unique_conditions) < len(conditions) or len(unique_conditions) > 2:
-                statistics.optimization_boolean_rewrite_and_flatten += 1
+                telemetry.optimization_boolean_rewrite_and_flatten += 1
                 return _rebuild_and_chain(unique_conditions)
 
     return node

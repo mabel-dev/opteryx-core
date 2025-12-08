@@ -15,7 +15,7 @@ from typing import Optional
 import pyarrow
 from orso.schema import RelationSchema
 
-from opteryx.models import QueryStatistics
+from opteryx.models import QueryTelemetry
 
 MIN_CHUNK_SIZE: int = 500
 INITIAL_CHUNK_SIZE: int = 500
@@ -36,7 +36,7 @@ class BaseConnector:
         *,
         dataset: str = None,
         config: Dict[str, Any] = None,
-        statistics: QueryStatistics,
+        telemetry: QueryTelemetry,
         **kwargs,
     ) -> None:
         """
@@ -53,7 +53,7 @@ class BaseConnector:
         self.dataset = dataset
         self.chunk_size = INITIAL_CHUNK_SIZE
         self.schema: RelationSchema = None
-        self.statistics = statistics
+        self.telemetry = telemetry
         self.pushed_predicates: list = []
 
     def get_dataset_schema(self) -> RelationSchema:  # pragma: no cover

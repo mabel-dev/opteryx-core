@@ -26,7 +26,7 @@ def test_binder_sets_diachronic_dates():
     from types import SimpleNamespace
 
     context = BindingContext(
-        schemas={}, qid="qid", connection=SimpleNamespace(memberships=["opteryx"]), relations={}, statistics=None
+        schemas={}, qid="qid", connection=SimpleNamespace(memberships=["opteryx"]), relations={}, telemetry=None
     )
 
     # Monkeypatch the connector_factory so our fake connector is used
@@ -34,7 +34,7 @@ def test_binder_sets_diachronic_dates():
 
     original_factory = connectors_module.connector_factory
 
-    def fake_factory(_dataset, statistics, **config):
+    def fake_factory(_dataset, telemetry, **config):
         return FakeConnector(**config)
 
     connectors_module.connector_factory = fake_factory

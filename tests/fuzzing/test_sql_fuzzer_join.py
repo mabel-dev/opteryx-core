@@ -21,7 +21,7 @@ import opteryx
 from opteryx.utils.formatter import format_sql
 
 from opteryx.connectors import IcebergConnector
-from opteryx.models import QueryStatistics
+from opteryx.models import QueryTelemetry
 from tests import set_up_iceberg
 
 
@@ -138,19 +138,19 @@ def get_iceberg_tables():
     _tables_cache = [
         {
             "name": "iceberg.opteryx.planets",
-            "fields": IcebergConnector(dataset="opteryx.planets", statistics=QueryStatistics(), catalog=_catalog).get_dataset_schema().columns,
+            "fields": IcebergConnector(dataset="opteryx.planets", telemetry=QueryTelemetry(), catalog=_catalog).get_dataset_schema().columns,
         },
         {
             "name": "iceberg.opteryx.satellites",
-            "fields": IcebergConnector(dataset="opteryx.satellites", statistics=QueryStatistics(), catalog=_catalog).get_dataset_schema().columns,
+            "fields": IcebergConnector(dataset="opteryx.satellites", telemetry=QueryTelemetry(), catalog=_catalog).get_dataset_schema().columns,
         },
         {
             "name": "iceberg.opteryx.astronauts",
-            "fields": IcebergConnector(dataset="opteryx.astronauts", statistics=QueryStatistics(), catalog=_catalog).get_dataset_schema().columns,
+            "fields": IcebergConnector(dataset="opteryx.astronauts", telemetry=QueryTelemetry(), catalog=_catalog).get_dataset_schema().columns,
         },
         {
             "name": "iceberg.opteryx.missions",
-            "fields": IcebergConnector(dataset="opteryx.missions", statistics=QueryStatistics(), catalog=_catalog).get_dataset_schema().columns,
+            "fields": IcebergConnector(dataset="opteryx.missions", telemetry=QueryTelemetry(), catalog=_catalog).get_dataset_schema().columns,
         },
         {
             "name": virtual_datasets.planets.schema().name,

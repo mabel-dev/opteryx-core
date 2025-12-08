@@ -33,7 +33,7 @@ WELL_KNOWN_DATASETS = {
     "$variables": ("opteryx.virtual_datasets.variables_data", True),
     "$derived": ("opteryx.virtual_datasets.derived_data", False),
     "$no_table": ("opteryx.virtual_datasets.no_table_data", False),
-    "$statistics": ("opteryx.virtual_datasets.statistics", True),
+    "$telemetry": ("opteryx.virtual_datasets.telemetry", True),
     "$stop_words": ("opteryx.virtual_datasets.stop_words", True),
     "$user": ("opteryx.virtual_datasets.user", True),
 }
@@ -69,6 +69,7 @@ def suggest(dataset):
 class SampleDataConnector(BaseConnector, Diachronic, Statistics):
     __mode__ = "Internal"
     __type__ = "SAMPLE"
+    __synchronousity__ = "synchronous"
 
     def __init__(self, *args, **kwargs):
         BaseConnector.__init__(self, **kwargs)

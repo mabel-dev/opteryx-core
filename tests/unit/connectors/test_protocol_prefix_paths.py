@@ -12,8 +12,8 @@ import pytest
 from opteryx.connectors import connector_factory
 
 
-class MockStatistics:
-    """Mock statistics object for testing"""
+class Mocktelemetry:
+    """Mock telemetry object for testing"""
     def __init__(self):
         self.bytes_read = 0
         self.rows_seen = 0
@@ -23,14 +23,14 @@ class MockStatistics:
 
 def test_prefix_removal():
     """Test that protocol prefixes are correctly removed from dataset paths"""
-    stats = MockStatistics()
+    stats = Mocktelemetry()
     
     # Note: These tests verify the connector_factory logic, not actual cloud access
     # We're testing that the right connector is selected and prefix is removed correctly
     
     # Test GCS prefix
     try:
-        connector = connector_factory("gs://bucket/path", statistics=stats)
+        connector = connector_factory("gs://bucket/path", telemetry=stats)
         # Should use GcpCloudStorageConnector
         assert connector.__type__ == "GCS"
         # Dataset should have prefix removed (gs:// -> "")
@@ -45,7 +45,7 @@ def test_prefix_removal():
     
     # Test S3 prefix
     try:
-        connector = connector_factory("s3://bucket/path", statistics=stats)
+        connector = connector_factory("s3://bucket/path", telemetry=stats)
         assert connector.__type__ == "S3"
         assert connector.dataset == "bucket/path"
     except Exception as e:
@@ -55,11 +55,11 @@ def test_prefix_removal():
 
 def test_wildcard_detection_in_cloud_paths():
     """Test that wildcards are detected in cloud storage paths"""
-    stats = MockStatistics()
+    stats = Mocktelemetry()
     
     # Test GCS with wildcards
     try:
-        connector = connector_factory("gs://bucket/path/*.parquet", statistics=stats)
+        connector = connector_factory("gs://bucket/path/*.parquet", telemetry=stats)
         assert hasattr(connector, 'has_wildcards')
         assert connector.has_wildcards is True
         assert connector.wildcard_pattern == "bucket/path/*.parquet"
@@ -69,7 +69,7 @@ def test_wildcard_detection_in_cloud_paths():
     
     # Test S3 with wildcards
     try:
-        connector = connector_factory("s3://bucket/path/*.parquet", statistics=stats)
+        connector = connector_factory("s3://bucket/path/*.parquet", telemetry=stats)
         assert hasattr(connector, 'has_wildcards')
         assert connector.has_wildcards is True
         assert connector.wildcard_pattern == "bucket/path/*.parquet"
@@ -80,7 +80,7 @@ def test_wildcard_detection_in_cloud_paths():
 
 def test_protocol_prefix_matching():
     """Test that protocol prefixes are correctly matched"""
-    stats = MockStatistics()
+    stats = Mocktelemetry()
     
     # These should match cloud connectors
     cloud_paths = [
@@ -94,7 +94,7 @@ def test_protocol_prefix_matching():
     
     for path, expected_type in cloud_paths:
         try:
-            connector = connector_factory(path, statistics=stats)
+            connector = connector_factory(path, telemetry=stats)
             assert connector.__type__ == expected_type, f"Path {path} should use {expected_type} connector"
         except Exception:
             # Expected if credentials not configured

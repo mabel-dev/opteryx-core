@@ -23,7 +23,7 @@ def _distinct_size(func, column):
 
 def test_count_distinct_parquet():
     cur = opteryx.query("SELECT COUNT(DISTINCT user_name) FROM testdata.flat.formats.parquet;")
-    stats = cur.stats
+    stats = cur.telemetry
     assert stats["columns_read"] == 1, stats["columns_read"]
     assert stats["rows_read"] == 100000, stats["rows_read"]
     assert stats["rows_seen"] == 100000, stats["rows_seen"]
@@ -35,7 +35,7 @@ def test_count_distinct_identifier_group_by():
     cur = opteryx.query(
         "SELECT COUNT(DISTINCT user_name) AS un FROM testdata.flat.formats.parquet GROUP BY following ORDER BY un DESC;"
     )
-    stats = cur.stats
+    stats = cur.telemetry
     assert stats["columns_read"] == 2, stats["columns_read"]
     assert stats["rows_read"] == 100000, stats["rows_read"]
     assert stats["rows_seen"] == 100000, stats["rows_seen"]

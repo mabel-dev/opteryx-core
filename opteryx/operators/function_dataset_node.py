@@ -116,7 +116,7 @@ class FunctionDatasetNode(ReaderNode):
         try:
             start_time = time.time_ns()
             data = DATASET_FUNCTIONS[self.function](**self.parameters)  # type:ignore
-            self.statistics.time_evaluate_dataset += time.time_ns() - start_time
+            self.telemetry.time_evaluate_dataset += time.time_ns() - start_time
         except TypeError as err:  # pragma: no cover
             if str(err).startswith("_unnest() takes 2"):
                 raise SqlError(
@@ -131,8 +131,8 @@ class FunctionDatasetNode(ReaderNode):
         else:
             table = data
 
-        self.statistics.columns_read += len(table.column_names)
-        self.statistics.rows_read += table.num_rows
-        self.statistics.bytes_processed += table.nbytes
+        self.telemetry.columns_read += len(table.column_names)
+        self.telemetry.rows_read += table.num_rows
+        self.telemetry.bytes_processed += table.nbytes
 
         yield table

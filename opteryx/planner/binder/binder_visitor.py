@@ -953,7 +953,7 @@ class BinderVisitor:
             raise AmbiguousDatasetError(dataset=node.alias)
 
         # work out which connector will be serving this request
-        node.connector = connector_factory(node.relation, statistics=context.statistics)
+        node.connector = connector_factory(node.relation, telemetry=context.telemetry)
 
         # ensure this user can read the table
         if not can_read_table(context.connection.memberships, node.relation):

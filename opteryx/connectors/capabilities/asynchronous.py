@@ -8,5 +8,5 @@ class Asynchronous:
     def __init__(self, **kwargs):
         pass
 
-    async def async_read_blob(self, *, blob_name, pool, statistics, **kwargs):
+    async def async_read_blob(self, *, blob_name, pool, telemetry, **kwargs):
         pass

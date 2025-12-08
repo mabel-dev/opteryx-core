@@ -1,5 +1,5 @@
 import time
-import statistics
+import telemetry
 
 
 def benchmark_schema_padding_strategies(n_rows=100_000, n_keys=20):
@@ -41,8 +41,8 @@ def benchmark_schema_padding_strategies(n_rows=100_000, n_keys=20):
         t1 = time.perf_counter()
         times_optimized.append(t1 - t0)
     
-    current_mean = statistics.mean(times_current)
-    optimized_mean = statistics.mean(times_optimized)
+    current_mean = telemetry.mean(times_current)
+    optimized_mean = telemetry.mean(times_optimized)
     improvement = (current_mean - optimized_mean) / current_mean * 100
     
     print(f"n_rows={n_rows:,}, n_keys={n_keys}")
@@ -70,5 +70,5 @@ if __name__ == "__main__":
         improvements.append(imp)
     
     print("="*70)
-    print(f"Average improvement: {statistics.mean(improvements):.2f}%")
+    print(f"Average improvement: {telemetry.mean(improvements):.2f}%")
     print(f"Min: {min(improvements):.2f}%, Max: {max(improvements):.2f}%")

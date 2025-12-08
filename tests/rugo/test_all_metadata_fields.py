@@ -47,7 +47,7 @@ def test_all_metadata_fields_exposed():
             'index_page_offset',
             'dictionary_page_offset',
             
-            # Statistics
+            # telemetry
             'min',
             'max',
             'null_count',

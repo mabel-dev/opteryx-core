@@ -8,11 +8,11 @@ from opteryx.planner import views
 
 
 def _plan_text(result):
-    return result.stats.get("executed_plan", "") or ""
+    return result.telemetry.get("executed_plan", "") or ""
 
 
 def _inline_stat(result):
-    return result.stats.get("optimization_predicate_pushdown_inline_project", 0)
+    return result.telemetry.get("optimization_predicate_pushdown_inline_project", 0)
 
 
 def test_inline_alias_within_subquery():

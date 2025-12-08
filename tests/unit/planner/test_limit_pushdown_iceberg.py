@@ -46,7 +46,7 @@ def test_iceberg_limit_pushdown(query, expected_rows):
 
     cur = opteryx.query(query)
     cur.materialize()
-    assert cur.stats["rows_read"] == expected_rows, cur.stats
+    assert cur.telemetry["rows_read"] == expected_rows, cur.telemetry
 
 if __name__ == "__main__":  # pragma: no cover
     import shutil

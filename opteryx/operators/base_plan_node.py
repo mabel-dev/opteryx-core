@@ -28,14 +28,14 @@ class BasePlanNode:
         """
         This is the base class for nodes in the execution plan.
 
-        The initializer accepts a QueryStatistics node which is populated by different nodes
+        The initializer accepts a QueryTelemetry node which is populated by different nodes
         differently to record what happened during the query execution.
         """
         from opteryx.models import QueryProperties
-        from opteryx.models import QueryStatistics
+        from opteryx.models import QueryTelemetry
 
         self.properties: QueryProperties = properties
-        self.statistics: QueryStatistics = QueryStatistics(properties.qid)
+        self.telemetry: QueryTelemetry = QueryTelemetry(properties.qid)
         self.parameters = parameters
         self.execution_time = 0
         self.identity = random_string()
@@ -99,7 +99,7 @@ class BasePlanNode:
         if morsel is EOS:
             return EOS
         if isinstance(morsel, Morsel):
-            self.statistics.morsel_to_table_conversion += 1
+            self.telemetry.morsel_to_table_conversion += 1
             return morsel.to_arrow()
         return morsel
 
@@ -111,7 +111,7 @@ class BasePlanNode:
         if table is EOS:
             return EOS
         if isinstance(table, Table):
-            self.statistics.table_to_morsel_conversion += 1
+            self.telemetry.table_to_morsel_conversion += 1
             # Use iter_from_arrow to avoid expensive combine_chunks
             # Yields morsels aligned with Arrow chunk boundaries
             return Morsel.iter_from_arrow(table)
@@ -119,7 +119,7 @@ class BasePlanNode:
 
     def __call__(self, morsel: pyarrow.Table, join_leg: str) -> Optional[pyarrow.Table]:
         # Cache frequently accessed attributes
-        statistics = self.statistics
+        telemetry = self.telemetry
         time_stat_key = self._time_stat_key
         is_scan = self.is_scan
 
@@ -143,7 +143,7 @@ class BasePlanNode:
                 execution_time = time.monotonic_ns() - start_time
 
                 self.execution_time += execution_time
-                statistics.increase(time_stat_key, execution_time)
+                telemetry.increase(time_stat_key, execution_time)
 
                 if result == END:
                     if not at_least_one and empty_morsel is not None:
@@ -168,7 +168,7 @@ class BasePlanNode:
                         yield result
                         continue
                     else:
-                        statistics.dead_ended_empty_morsels += 1
+                        telemetry.dead_ended_empty_morsels += 1
                 except AttributeError:
                     # Not a table-like object
                     pass

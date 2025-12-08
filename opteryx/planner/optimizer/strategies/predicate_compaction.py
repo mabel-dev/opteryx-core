@@ -246,8 +246,8 @@ class PredicateCompactionStrategy(OptimizationStrategy):  # pragma: no cover
 
             if status == "contradiction":
                 filters_to_false.update(occ.filter_nid for occ in occurrences)
-                self.statistics.optimization_predicate_compaction += 1
-                self.statistics.optimization_predicate_compaction_range_simplified += 1
+                self.telemetry.optimization_predicate_compaction += 1
+                self.telemetry.optimization_predicate_compaction_range_simplified += 1
                 continue
 
             if status != "compacted" or not analysis.required:
@@ -261,8 +261,8 @@ class PredicateCompactionStrategy(OptimizationStrategy):  # pragma: no cover
 
             if len(analysis.required) < len(occurrences):
                 removed = len(occurrences) - len(analysis.required)
-                self.statistics.optimization_predicate_compaction += removed
-                self.statistics.optimization_predicate_compaction_range_simplified += 1
+                self.telemetry.optimization_predicate_compaction += removed
+                self.telemetry.optimization_predicate_compaction_range_simplified += 1
 
         for filter_nid, filter_info in filters_state.items():
             if filter_nid not in optimized_plan:

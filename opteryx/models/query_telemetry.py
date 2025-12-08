@@ -7,12 +7,12 @@
 from collections import defaultdict
 
 
-class _QueryStatistics:
+class _QueryTelemetry:
     def __init__(self):
-        # predefine "messages" and "executed_plan" so all new statistics default to 0
-        self._stats: dict = defaultdict(int)
-        self._stats["messages"] = []
-        self._stats["executed_plan"] = None
+        # predefine "messages" and "executed_plan" so all new telemetry default to 0
+        self._reading: dict = defaultdict(int)
+        self._reading["messages"] = []
+        self._reading["executed_plan"] = None
 
     def _ns_to_s(self, nano_seconds: int) -> float:
         """convert elapsed ns to s"""
@@ -22,53 +22,53 @@ class _QueryStatistics:
 
     def __getattr__(self, attr):
         """allow access using stats.statistic_name"""
-        return self._stats[attr]
+        return self._reading[attr]
 
     def __setattr__(self, attr, value):
         """allow access using stats.statistic_name"""
-        if attr == "_stats":
+        if attr == "_reading":
             super().__setattr__(attr, value)
         else:
-            self._stats[attr] = value
+            self._reading[attr] = value
 
     def increase(self, attr: str, amount: float = 1.0):
-        self._stats[attr] += amount
+        self._reading[attr] += amount
 
     def add_message(self, message: str):
         """collect warnings"""
-        self._stats["messages"].append(message)
+        self._reading["messages"].append(message)
 
     def as_dict(self):
         """
-        Return statistics as a dictionary
+        Return telemetry as a dictionary
         """
         import opteryx
 
-        stats_dict = dict(self._stats)
-        for k, v in stats_dict.items():
+        readings_dict = dict(self._reading)
+        for k, v in readings_dict.items():
             # times are recorded in ns but reported in seconds
             if k.startswith("time_"):
-                stats_dict[k] = self._ns_to_s(v)
-        stats_dict["time_total"] = self._ns_to_s(
-            stats_dict.pop("end_time", 0) - stats_dict.pop("start_time", 0)
+                readings_dict[k] = self._ns_to_s(v)
+        readings_dict["time_total"] = self._ns_to_s(
+            readings_dict.pop("end_time", 0) - readings_dict.pop("start_time", 0)
         )
         # sort the keys in the dictionary
-        stats_dict = {key: stats_dict[key] for key in sorted(stats_dict)}
+        readings_dict = {key: readings_dict[key] for key in sorted(readings_dict)}
         # put messages and executed_plan at the end
-        stats_dict["version"] = opteryx.__version__
-        stats_dict["messages"] = stats_dict.pop("messages", [])
-        stats_dict["executed_plan"] = stats_dict.pop("executed_plan", None)
-        return stats_dict
+        readings_dict["version"] = opteryx.__version__
+        readings_dict["messages"] = readings_dict.pop("messages", [])
+        readings_dict["executed_plan"] = readings_dict.pop("executed_plan", None)
+        return readings_dict
 
 
-class QueryStatistics(_QueryStatistics):
+class QueryTelemetry(_QueryTelemetry):
     slots = "_instances"
 
-    _instances: dict[str, _QueryStatistics] = {}
+    _instances: dict[str, _QueryTelemetry] = {}
 
     def __new__(cls, qid=""):
         if cls._instances.get(qid) is None:
-            cls._instances[qid] = _QueryStatistics()
+            cls._instances[qid] = _QueryTelemetry()
             if len(cls._instances.keys()) > 16:
                 # find the first key that is not "system"
                 key_to_remove = next((key for key in cls._instances if key != "system"), None)

@@ -19,7 +19,7 @@ sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
 import time
 import random
-import statistics
+import telemetry
 import argparse
 import importlib
 
@@ -73,7 +73,7 @@ def timeit(func, *fargs, repeat=5):
         func(*fargs)
         t1 = time.perf_counter()
         times.append(t1 - t0)
-    return min(times), statistics.mean(times), (statistics.stdev(times) if len(times) > 1 else 0.0)
+    return min(times), telemetry.mean(times), (telemetry.stdev(times) if len(times) > 1 else 0.0)
 
 
 def bench_set_only(cache_cls, n_inserts, key_size=16, value_size=64):

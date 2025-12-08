@@ -65,7 +65,7 @@ class RedundantOperationsStrategy(OptimizationStrategy):
                         context.optimized_plan.add_node(provider_nid, provider_node)
                         # remove the node
                         context.optimized_plan.remove_node(context.node_id, heal=True)
-                        self.statistics.optimization_remove_redundant_operators_project += 1
+                        self.telemetry.optimization_remove_redundant_operators_project += 1
 
         # Subqueries are useful for planning but not needed for execution
         # We need to ensure the alias of the subquery is pushed
@@ -84,7 +84,7 @@ class RedundantOperationsStrategy(OptimizationStrategy):
                 updated_node.all_relations = {alias}
             context.optimized_plan.add_node(nid, updated_node)
             context.optimized_plan.remove_node(context.node_id, heal=True)
-            self.statistics.optimization_remove_redundant_operators_subquery += 1
+            self.telemetry.optimization_remove_redundant_operators_subquery += 1
 
         return context
 

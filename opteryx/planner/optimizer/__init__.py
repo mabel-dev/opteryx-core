@@ -59,7 +59,7 @@ This module aims to enhance query performance through systematic and incremental
 """
 
 from opteryx.config import DISABLE_OPTIMIZER
-from opteryx.models import QueryStatistics
+from opteryx.models import QueryTelemetry
 from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.optimizer.strategies import BooleanSimplificationStrategy
 from opteryx.planner.optimizer.strategies import ConstantFoldingStrategy
@@ -83,29 +83,29 @@ __all__ = ["do_optimizer"]
 
 
 class OptimizerVisitor:
-    def __init__(self, statistics: QueryStatistics):
+    def __init__(self, telemetry: QueryTelemetry):
         """
         Initialize the OptimizerVisitor with a list of optimization strategies.
         Each strategy encapsulates a specific optimization rule.
         """
         self.strategies = [
-            ConstantFoldingStrategy(statistics),
-            BooleanSimplificationStrategy(statistics),
-            SplitConjunctivePredicatesStrategy(statistics),
-            CorrelatedFiltersStrategy(statistics),
-            PredicateRewriteStrategy(statistics),
-            PredicateCompactionStrategy(statistics),
-            PredicatePushdownStrategy(statistics),
-            ProjectionPushdownStrategy(statistics),
-            JoinRewriteStrategy(statistics),
-            JoinOrderingStrategy(statistics),
-            DistinctPushdownStrategy(statistics),
-            OperatorFusionStrategy(statistics),
-            LimitPushdownStrategy(statistics),
-            #            EmptyTableStrategy(statistics),
-            PredicateOrderingStrategy(statistics),
-            RedundantOperationsStrategy(statistics),
-            ConstantFoldingStrategy(statistics),
+            ConstantFoldingStrategy(telemetry),
+            BooleanSimplificationStrategy(telemetry),
+            SplitConjunctivePredicatesStrategy(telemetry),
+            CorrelatedFiltersStrategy(telemetry),
+            PredicateRewriteStrategy(telemetry),
+            PredicateCompactionStrategy(telemetry),
+            PredicatePushdownStrategy(telemetry),
+            ProjectionPushdownStrategy(telemetry),
+            JoinRewriteStrategy(telemetry),
+            JoinOrderingStrategy(telemetry),
+            DistinctPushdownStrategy(telemetry),
+            OperatorFusionStrategy(telemetry),
+            LimitPushdownStrategy(telemetry),
+            #            EmptyTableStrategy(telemetry),
+            PredicateOrderingStrategy(telemetry),
+            RedundantOperationsStrategy(telemetry),
+            ConstantFoldingStrategy(telemetry),
         ]
 
     def traverse(self, plan: LogicalPlan, strategy) -> LogicalPlan:
@@ -158,13 +158,13 @@ class OptimizerVisitor:
         return current_plan
 
 
-def do_optimizer(plan: LogicalPlan, statistics: QueryStatistics) -> LogicalPlan:
+def do_optimizer(plan: LogicalPlan, telemetry: QueryTelemetry) -> LogicalPlan:
     """
     Perform optimization on the given logical plan.
 
     Parameters:
         plan (LogicalPlan): The logical plan to optimize.
-        statistics (QueryStatistics)
+        telemetry (QueryTelemetry)
 
     Returns:
         LogicalPlan: The optimized logical plan.
@@ -172,7 +172,7 @@ def do_optimizer(plan: LogicalPlan, statistics: QueryStatistics) -> LogicalPlan:
     if DISABLE_OPTIMIZER:  # pragma: no cover
         message = "[OPTERYX] The optimizer has been disabled, 'DISABLE_OPTIMIZER' variable is TRUE."
         print(message)
-        statistics.add_message(message)
+        telemetry.add_message(message)
         return plan
-    optimizer = OptimizerVisitor(statistics)
+    optimizer = OptimizerVisitor(telemetry)
     return optimizer.optimize(plan)

@@ -25,7 +25,7 @@ from opteryx.managers.expression import NodeType
 from opteryx.managers.expression import evaluate
 from opteryx.managers.expression import get_all_nodes_of_type
 from opteryx.models import Node
-from opteryx.models import QueryStatistics
+from opteryx.models import QueryTelemetry
 from opteryx.planner import build_literal_node
 from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner import LogicalPlanNode
@@ -45,7 +45,7 @@ def _build_if_not_null_node(root, value, value_if_not_null) -> Node:
     return node
 
 
-def _build_passthru_node(root, value, statistics) -> Node:
+def _build_passthru_node(root, value, telemetry) -> Node:
     # We sometimes need to wrap a value in a function to make sure
     # the expression tree is valid.
     if root.node_type == NodeType.COMPARISON_OPERATOR:
@@ -61,10 +61,10 @@ def _build_passthru_node(root, value, statistics) -> Node:
     node.schema_column = root.schema_column
     node.query_column = root.query_column
     # See if we can fold this further
-    return fold_constants(node, statistics)
+    return fold_constants(node, telemetry)
 
 
-def fold_constants(root: Node, statistics: QueryStatistics) -> Node:
+def fold_constants(root: Node, telemetry: QueryTelemetry) -> Node:
     if root.node_type == NodeType.LITERAL:
         # if we're already a literal (constant), we can't fold
         return root
@@ -75,13 +75,13 @@ def fold_constants(root: Node, statistics: QueryStatistics) -> Node:
 
     if root.node_type == NodeType.DNF:
         # if we have a DNF, we can fold each part
-        root.parameters = [fold_constants(p, statistics) for p in root.parameters]
+        root.parameters = [fold_constants(p, telemetry) for p in root.parameters]
         return root
 
     if root.node_type in {NodeType.COMPARISON_OPERATOR, NodeType.BINARY_OPERATOR}:
         # if we have a binary expression, try to fold each side
-        root.left = fold_constants(root.left, statistics)
-        root.right = fold_constants(root.right, statistics)
+        root.left = fold_constants(root.left, telemetry)
+        root.right = fold_constants(root.right, telemetry)
 
         # some expressions we can simplify to x or 0.
         if root.node_type == NodeType.BINARY_OPERATOR:
@@ -93,7 +93,7 @@ def fold_constants(root: Node, statistics: QueryStatistics) -> Node:
             ):
                 # 0 * anything = 0 (except NULL)
                 node = _build_if_not_null_node(root, root.right, build_literal_node(0))
-                statistics.optimization_constant_fold_reduce += 1
+                telemetry.optimization_constant_fold_reduce += 1
                 return node
             if (
                 root.value == "Multiply"
@@ -103,7 +103,7 @@ def fold_constants(root: Node, statistics: QueryStatistics) -> Node:
             ):
                 # anything * 0 = 0 (except NULL)
                 node = _build_if_not_null_node(root, root.left, build_literal_node(0))
-                statistics.optimization_constant_fold_reduce += 1
+                telemetry.optimization_constant_fold_reduce += 1
                 return node
             if (
                 root.value == "Multiply"
@@ -112,8 +112,8 @@ def fold_constants(root: Node, statistics: QueryStatistics) -> Node:
                 and root.left.value == 1
             ):
                 # 1 * anything = anything (except NULL)
-                node = _build_passthru_node(root, root.right, statistics)
-                statistics.optimization_constant_fold_reduce += 1
+                node = _build_passthru_node(root, root.right, telemetry)
+                telemetry.optimization_constant_fold_reduce += 1
                 return node
             if (
                 root.value == "Multiply"
@@ -122,8 +122,8 @@ def fold_constants(root: Node, statistics: QueryStatistics) -> Node:
                 and root.right.value == 1
             ):
                 # anything * 1 = anything (except NULL)
-                node = _build_passthru_node(root, root.left, statistics)
-                statistics.optimization_constant_fold_reduce += 1
+                node = _build_passthru_node(root, root.left, telemetry)
+                telemetry.optimization_constant_fold_reduce += 1
                 return node
             if (
                 root.value in "Plus"
@@ -132,8 +132,8 @@ def fold_constants(root: Node, statistics: QueryStatistics) -> Node:
                 and root.left.value == 0
             ):
                 # 0 + anything = anything (except NULL)
-                node = _build_passthru_node(root, root.right, statistics)
-                statistics.optimization_constant_fold_reduce += 1
+                node = _build_passthru_node(root, root.right, telemetry)
+                telemetry.optimization_constant_fold_reduce += 1
                 return node
             if (
                 root.value in ("Plus", "Minus")
@@ -142,8 +142,8 @@ def fold_constants(root: Node, statistics: QueryStatistics) -> Node:
                 and root.right.value == 0
             ):
                 # anything +/- 0 = anything (except NULL)
-                node = _build_passthru_node(root, root.left, statistics)
-                statistics.optimization_constant_fold_reduce += 1
+                node = _build_passthru_node(root, root.left, telemetry)
+                telemetry.optimization_constant_fold_reduce += 1
                 return node
             if (
                 root.value == "Divide"
@@ -152,8 +152,8 @@ def fold_constants(root: Node, statistics: QueryStatistics) -> Node:
                 and root.right.value == 1
             ):
                 # anything / 1 = anything (except NULL)
-                node = _build_passthru_node(root, root.left, statistics)
-                statistics.optimization_constant_fold_reduce += 1
+                node = _build_passthru_node(root, root.left, telemetry)
+                telemetry.optimization_constant_fold_reduce += 1
                 return node
 
         if root.node_type == NodeType.COMPARISON_OPERATOR:
@@ -172,15 +172,15 @@ def fold_constants(root: Node, statistics: QueryStatistics) -> Node:
                 node.centre = root.left
                 node.query_column = root.query_column
                 node.alias = root.alias
-                statistics.optimization_constant_fold_reduce += 1
+                telemetry.optimization_constant_fold_reduce += 1
                 return node
 
     if root.node_type in {NodeType.AND, NodeType.OR, NodeType.XOR}:
         # try to fold each side of logical operators
         if root.left is not None:
-            root.left = fold_constants(root.left, statistics)
+            root.left = fold_constants(root.left, telemetry)
         if root.right is not None:
-            root.right = fold_constants(root.right, statistics)
+            root.right = fold_constants(root.right, telemetry)
 
         # If we have a logical expression and one side is a constant,
         # we can simplify further
@@ -191,8 +191,8 @@ def fold_constants(root: Node, statistics: QueryStatistics) -> Node:
                 and root.left.value
             ):
                 # True OR anything is True (including NULL)
-                node = _build_passthru_node(root, root.left, statistics)
-                statistics.optimization_constant_fold_boolean_reduce += 1
+                node = _build_passthru_node(root, root.left, telemetry)
+                telemetry.optimization_constant_fold_boolean_reduce += 1
                 return node
             if (
                 root.right.node_type == NodeType.LITERAL
@@ -200,8 +200,8 @@ def fold_constants(root: Node, statistics: QueryStatistics) -> Node:
                 and root.right.value
             ):
                 # anything OR True is True (including NULL)
-                node = _build_passthru_node(root, root.right, statistics)
-                statistics.optimization_constant_fold_boolean_reduce += 1
+                node = _build_passthru_node(root, root.right, telemetry)
+                telemetry.optimization_constant_fold_boolean_reduce += 1
                 return node
             if (
                 root.left.node_type == NodeType.LITERAL
@@ -209,8 +209,8 @@ def fold_constants(root: Node, statistics: QueryStatistics) -> Node:
                 and not root.left.value
             ):
                 # False OR anything is anything (except NULL)
-                node = _build_passthru_node(root, root.right, statistics)
-                statistics.optimization_constant_fold_boolean_reduce += 1
+                node = _build_passthru_node(root, root.right, telemetry)
+                telemetry.optimization_constant_fold_boolean_reduce += 1
                 return node
             if (
                 root.right.node_type == NodeType.LITERAL
@@ -218,8 +218,8 @@ def fold_constants(root: Node, statistics: QueryStatistics) -> Node:
                 and not root.right.value
             ):
                 # anything OR False is anything (except NULL)
-                node = _build_passthru_node(root, root.left, statistics)
-                statistics.optimization_constant_fold_boolean_reduce += 1
+                node = _build_passthru_node(root, root.left, telemetry)
+                telemetry.optimization_constant_fold_boolean_reduce += 1
                 return node
 
         elif root.node_type == NodeType.AND:
@@ -229,8 +229,8 @@ def fold_constants(root: Node, statistics: QueryStatistics) -> Node:
                 and not root.left.value
             ):
                 # False AND anything is False (including NULL)
-                node = _build_passthru_node(root, root.left, statistics)
-                statistics.optimization_constant_fold_boolean_reduce += 1
+                node = _build_passthru_node(root, root.left, telemetry)
+                telemetry.optimization_constant_fold_boolean_reduce += 1
                 return node
             if (
                 root.right.node_type == NodeType.LITERAL
@@ -238,8 +238,8 @@ def fold_constants(root: Node, statistics: QueryStatistics) -> Node:
                 and not root.right.value
             ):
                 # anything AND False is False (including NULL)
-                node = _build_passthru_node(root, root.right, statistics)
-                statistics.optimization_constant_fold_boolean_reduce += 1
+                node = _build_passthru_node(root, root.right, telemetry)
+                telemetry.optimization_constant_fold_boolean_reduce += 1
                 return node
             if (
                 root.left.node_type == NodeType.LITERAL
@@ -247,8 +247,8 @@ def fold_constants(root: Node, statistics: QueryStatistics) -> Node:
                 and root.left.value
             ):
                 # True AND anything is anything (except NULL)
-                node = _build_passthru_node(root, root.right, statistics)
-                statistics.optimization_constant_fold_boolean_reduce += 1
+                node = _build_passthru_node(root, root.right, telemetry)
+                telemetry.optimization_constant_fold_boolean_reduce += 1
                 return node
             if (
                 root.right.node_type == NodeType.LITERAL
@@ -256,9 +256,9 @@ def fold_constants(root: Node, statistics: QueryStatistics) -> Node:
                 and root.right.value
             ):
                 # anything AND True is anything (except NULL)
-                node = _build_passthru_node(root, root.left, statistics)
+                node = _build_passthru_node(root, root.left, telemetry)
                 node.type = OrsoTypes.BOOLEAN
-                statistics.optimization_constant_fold_boolean_reduce += 1
+                telemetry.optimization_constant_fold_boolean_reduce += 1
                 return node
 
         return root
@@ -276,7 +276,7 @@ def fold_constants(root: Node, statistics: QueryStatistics) -> Node:
         if isinstance(root.parameters, tuple):
             root.parameters = list(root.parameters)
         for i, param in enumerate(root.parameters):
-            root.parameters[i] = fold_constants(param, statistics)
+            root.parameters[i] = fold_constants(param, telemetry)
 
     if (
         len(identifiers) == 0
@@ -286,7 +286,7 @@ def fold_constants(root: Node, statistics: QueryStatistics) -> Node:
         table = no_table_data.read()
         try:
             result = evaluate(root, table)[0]
-            statistics.optimization_constant_fold_expression += 1
+            telemetry.optimization_constant_fold_expression += 1
             return build_literal_node(result, root, root.schema_column.type)
         except (ValueError, TypeError, KeyError) as err:  # nosec
             if not err:
@@ -308,14 +308,14 @@ class ConstantFoldingStrategy(OptimizationStrategy):
 
         # fold constants when referenced in filter clauses (WHERE/HAVING)
         if node.node_type == LogicalPlanStepType.Filter:
-            node.condition = fold_constants(node.condition, self.statistics)
+            node.condition = fold_constants(node.condition, self.telemetry)
             if node.condition.node_type == NodeType.LITERAL and node.condition.value:
                 context.optimized_plan.remove_node(context.node_id, heal=True)
             else:
                 context.optimized_plan[context.node_id] = node
         # fold constants when referenced in the SELECT clause
         if node.node_type == LogicalPlanStepType.Project:
-            node.columns = [fold_constants(c, self.statistics) for c in node.columns]
+            node.columns = [fold_constants(c, self.telemetry) for c in node.columns]
             context.optimized_plan[context.node_id] = node
 
         # remove nesting in order by and group by clauses
@@ -330,7 +330,7 @@ class ConstantFoldingStrategy(OptimizationStrategy):
 
         if node.node_type == LogicalPlanStepType.AggregateAndGroup:
             node.groups = [g.centre if g.node_type == NodeType.NESTED else g for g in node.groups]
-            node.groups = [fold_constants(g, self.statistics) for g in node.groups]
+            node.groups = [fold_constants(g, self.telemetry) for g in node.groups]
             context.optimized_plan[context.node_id] = node
 
         return context

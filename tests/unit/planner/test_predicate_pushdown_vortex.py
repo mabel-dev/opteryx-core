@@ -23,7 +23,7 @@ def test_predicate_pushdowns_blobs_vortex():
     )
     # when pushdown is enabled, we only read the matching rows from the source
     assert cur.rowcount == 711, cur.rowcount
-    assert cur.stats.get("rows_read", 0) == 711, cur.stats
+    assert cur.telemetry.get("rows_read", 0) == 711, cur.telemetry
 
     cur = conn.cursor()
     cur.execute(
@@ -31,7 +31,7 @@ def test_predicate_pushdowns_blobs_vortex():
     )
     # test with a more complex filter
     assert cur.rowcount == 266, cur.rowcount
-    assert cur.stats.get("rows_read", 0) == 266, cur.stats
+    assert cur.telemetry.get("rows_read", 0) == 266, cur.telemetry
 
     cur = conn.cursor()
     cur.execute(
@@ -39,21 +39,21 @@ def test_predicate_pushdowns_blobs_vortex():
     )
     # we don't push all predicates down,
     assert cur.rowcount == 86, cur.rowcount
-    assert cur.stats.get("rows_read", 0) == 711, cur.stats
+    assert cur.telemetry.get("rows_read", 0) == 711, cur.telemetry
 
     cur = conn.cursor()
     cur.execute(
         "SELECT * FROM testdata.flat.formats.vortex WHERE user_verified = TRUE and user_name LIKE '%b%';"
     )
     assert cur.rowcount == 86, cur.rowcount
-    assert cur.stats.get("rows_read", 0) == 711, cur.stats
+    assert cur.telemetry.get("rows_read", 0) == 711, cur.telemetry
 
     cur = conn.cursor()
     cur.execute(
         "SELECT text FROM testdata.flat.formats.vortex WHERE user_verified = TRUE and user_name LIKE '%b%';"
     )
     assert cur.rowcount == 86, cur.rowcount
-    assert cur.stats.get("rows_read", 0) == 711, cur.stats
+    assert cur.telemetry.get("rows_read", 0) == 711, cur.telemetry
 
     conn.close()
 

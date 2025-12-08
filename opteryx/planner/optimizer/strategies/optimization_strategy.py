@@ -59,8 +59,8 @@ class OptimizerContext:
 
 
 class OptimizationStrategy:
-    def __init__(self, statistics):
-        self.statistics = statistics
+    def __init__(self, telemetry):
+        self.telemetry = telemetry
 
     def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:
         """

@@ -9,7 +9,7 @@ from typing import Any
 from typing import Dict
 
 from opteryx.models import ConnectionContext
-from opteryx.models import QueryStatistics
+from opteryx.models import QueryTelemetry
 from opteryx.virtual_datasets import derived
 
 
@@ -33,7 +33,7 @@ class BindingContext:
     qid: str
     connection: ConnectionContext
     relations: Dict[str, str]
-    statistics: QueryStatistics
+    telemetry: QueryTelemetry
 
     @classmethod
     def initialize(cls, qid: str, connection=None) -> "BindingContext":
@@ -54,7 +54,7 @@ class BindingContext:
             qid=qid,
             connection=connection,
             relations={},
-            statistics=QueryStatistics(qid),
+            telemetry=QueryTelemetry(qid),
         )
 
     def copy(self) -> "BindingContext":
@@ -69,5 +69,5 @@ class BindingContext:
             qid=self.qid,
             connection=self.connection,
             relations={k: v for k, v in self.relations.items()},
-            statistics=self.statistics,
+            telemetry=self.telemetry,
         )

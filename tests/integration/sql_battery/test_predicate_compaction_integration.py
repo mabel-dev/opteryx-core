@@ -8,7 +8,7 @@ import opteryx
 
 
 def _plan_text(result):
-    return result.stats.get("executed_plan", "") or ""
+    return result.telemetry.get("executed_plan", "") or ""
 
 
 def test_predicate_compaction_compacts_before_join_scan():
@@ -23,7 +23,7 @@ def test_predicate_compaction_compacts_before_join_scan():
 
     assert "FILTER (id > 4)" in plan
     assert "id > 1" not in plan.replace("id > 4", "")
-    assert result.stats.get("optimization_predicate_compaction", 0) >= 1
+    assert result.telemetry.get("optimization_predicate_compaction", 0) >= 1
 
     baseline = opteryx.query(
         "SELECT p.name FROM $planets AS p INNER JOIN testdata.satellites AS s ON p.id = s.planetId WHERE p.id > 4"
@@ -44,5 +44,5 @@ def test_predicate_compaction_in_nested_subquery():
 
     assert "FILTER (id > 4)" in plan
     assert "id > 1" not in plan.replace("id > 4", "")
-    assert result.stats.get("optimization_predicate_compaction", 0) >= 1
+    assert result.telemetry.get("optimization_predicate_compaction", 0) >= 1
     assert result.fetchall() == [(5,)]

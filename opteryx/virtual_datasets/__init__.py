@@ -18,7 +18,7 @@ _MODULES = {
     "satellites": "opteryx.virtual_datasets.satellite_data",
     "variables": "opteryx.virtual_datasets.variables_data",
     "missions": "opteryx.virtual_datasets.missions",
-    "statistics": "opteryx.virtual_datasets.statistics",
+    "telemetry": "opteryx.virtual_datasets.telemetry",
     "stop_words": "opteryx.virtual_datasets.stop_words",
     "user": "opteryx.virtual_datasets.user",
 }

@@ -45,7 +45,7 @@ class JoinOrderingStrategy(OptimizationStrategy):
                 node.left_readers, node.right_readers = node.right_readers, node.left_readers
                 node.left_relation_names, node.right_relation_names = node.right_relation_names, node.left_relation_names
                 # fmt:on
-                self.statistics.optimization_inner_join_smallest_table_left += 1
+                self.telemetry.optimization_inner_join_smallest_table_left += 1
                 context.optimized_plan[context.node_id] = node
 
             # if any of the comparisons are other than "equal", we cannot use a hash join

@@ -29,8 +29,9 @@ handlers = {
 
 
 class Statistics:
-    def __init__(self, statistics: dict, **kwargs):
+    def __init__(self, **kwargs):
         # self.stats_cache = StatsCache()
+        self.stats_cache = {}
         self.relation_statistics = RelationStatistics()
 
     def read_blob_statistics(
@@ -42,12 +43,12 @@ class Statistics:
             # If statistics are cached, return them
             return cached_stats
 
-        cached_stats = decoder(blob_bytes, just_statistics=True)
+        cached_stats = decoder(blob_bytes)
         if cached_stats is not None:
             self.stats_cache.set(key, cached_stats)
         return cached_stats
 
-    def prune_blobs(self, blob_names: list[str], query_statistics, selection) -> list[str]:
+    def prune_blobs(self, blob_names: list[str], query_telemetry, selection) -> list[str]:
         new_blob_names = []
 
         for blob_name in blob_names:
@@ -96,7 +97,7 @@ class Statistics:
                     if max_value is not None and min_value is not None:
                         prune = handlers.get(condition.value)
                         if prune and prune(literal_value, min_value, max_value):
-                            query_statistics.blobs_pruned += 1
+                            query_telemetry.blobs_pruned += 1
                             skip_blob = True
                             break
 
@@ -125,7 +126,7 @@ class Statistics:
                         op_name = condition.value[5:]
                         prune = handlers.get(op_name)
                         if prune and prune(literal_value, min_value, max_value):
-                            query_statistics.blobs_pruned += 1
+                            query_telemetry.blobs_pruned += 1
                             skip_blob = True
                             break
 

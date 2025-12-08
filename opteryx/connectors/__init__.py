@@ -158,7 +158,7 @@ def known_prefix(prefix) -> bool:
     return prefix in _storage_prefixes
 
 
-def connector_factory(dataset, statistics, **config):
+def connector_factory(dataset, telemetry, **config):
     """
     Work out which connector will service the access to this dataset.
     """
@@ -167,7 +167,7 @@ def connector_factory(dataset, statistics, **config):
     if dataset[0] == "$":
         from opteryx.connectors import virtual_data
 
-        return virtual_data.SampleDataConnector(dataset=dataset, statistics=statistics)
+        return virtual_data.SampleDataConnector(dataset=dataset, telemetry=telemetry)
 
     # Look up the prefix from the registered prefixes
     connector_entry: dict = config
@@ -203,7 +203,7 @@ def connector_factory(dataset, statistics, **config):
 
     # DEBUG: print(prefix, dataset, connector, _storage_prefixes)
 
-    return connector_class(dataset=dataset, statistics=statistics, **connector_entry)
+    return connector_class(dataset=dataset, telemetry=telemetry, **connector_entry)
 
 
 def __getattr__(name):

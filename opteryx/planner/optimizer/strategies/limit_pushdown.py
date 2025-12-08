@@ -131,7 +131,7 @@ class LimitPushdownStrategy(OptimizationStrategy):
             if limit_node.nid in context.optimized_plan:
                 context.optimized_plan.remove_node(limit_node.nid, heal=True)
             context.optimized_plan[context.node_id] = scan_node
-            self.statistics.optimization_limit_pushdown += 1
+            self.telemetry.optimization_limit_pushdown += 1
             return True
 
         return False
@@ -187,4 +187,4 @@ class LimitPushdownStrategy(OptimizationStrategy):
         context.optimized_plan.insert_node_after(limit_node.nid, limit_node, context.node_id)
         limit_node.columns = []
         limit_node.pushdown_targets = set(limit_node.all_relations or [])
-        self.statistics.optimization_limit_pushdown += 1
+        self.telemetry.optimization_limit_pushdown += 1

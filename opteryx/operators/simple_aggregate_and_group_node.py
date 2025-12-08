@@ -129,7 +129,7 @@ class SimpleAggregateAndGroupNode(BasePlanNode):
             groups = groups.select(internal_names)
             groups = groups.rename_columns(column_names)
 
-            self.statistics.time_groupby_finalize += time.monotonic_ns() - start
+            self.telemetry.time_groupby_finalize += time.monotonic_ns() - start
 
             num_rows = groups.num_rows
             for start in range(0, num_rows, CHUNK_SIZE):
@@ -192,7 +192,7 @@ class SimpleAggregateAndGroupNode(BasePlanNode):
             groups = groups.aggregate(self.aggregate_functions)
             groups = groups.select(internal_names)
             groups = groups.rename_columns(column_names)
-        self.statistics.time_pregrouping += time.monotonic_ns() - st
+        self.telemetry.time_pregrouping += time.monotonic_ns() - st
 
         self.buffer.append(groups)
 

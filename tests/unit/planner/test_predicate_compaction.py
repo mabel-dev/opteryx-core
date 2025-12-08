@@ -7,7 +7,7 @@ import opteryx
 
 
 def _plan_text(result):
-    return result.stats.get("executed_plan", "") or ""
+    return result.telemetry.get("executed_plan", "") or ""
 
 
 def test_predicate_compaction_prefers_strongest_lower_bound():
@@ -17,8 +17,8 @@ def test_predicate_compaction_prefers_strongest_lower_bound():
 
     assert ") (id > 4)" in plan or "id > 4" in plan
     assert "id > 1" not in plan.replace("id > 4", "")
-    assert result.stats.get("optimization_predicate_compaction", 0) >= 1
-    assert result.stats.get("optimization_predicate_compaction_range_simplified", 0) >= 1
+    assert result.telemetry.get("optimization_predicate_compaction", 0) >= 1
+    assert result.telemetry.get("optimization_predicate_compaction_range_simplified", 0) >= 1
     assert result.rowcount == 5
 
 
@@ -32,7 +32,7 @@ def test_predicate_compaction_collapse_to_equality():
     assert "id = 3" in plan
     assert ">" not in plan
     assert "<" not in plan
-    assert result.stats.get("optimization_predicate_compaction_range_simplified", 0) >= 1
+    assert result.telemetry.get("optimization_predicate_compaction_range_simplified", 0) >= 1
     assert result.rowcount == 1
 
 
@@ -46,7 +46,7 @@ def test_predicate_compaction_contradiction_preserves_schema():
     assert "False" in plan
     assert result.rowcount == 0
     assert len(result.column_names) == 20
-    assert result.stats.get("optimization_predicate_compaction_range_simplified", 0) >= 1
+    assert result.telemetry.get("optimization_predicate_compaction_range_simplified", 0) >= 1
 
 
 def test_predicate_compaction_prefers_strongest_upper_bound():
@@ -85,7 +85,7 @@ def test_predicate_compaction_respects_other_column_filters():
     assert "id > 4" in plan
     assert "mass >" in plan
     assert "id > 1" not in plan.replace("id > 4", "")
-    assert result.stats.get("optimization_predicate_compaction", 0) >= 1
+    assert result.telemetry.get("optimization_predicate_compaction", 0) >= 1
     assert result.rowcount == 5
 
 
@@ -98,7 +98,7 @@ def test_predicate_compaction_across_subquery_boundary():
 
     assert "id > 4" in plan
     assert "id > 1" not in plan.replace("id > 4", "")
-    assert result.stats.get("optimization_predicate_compaction", 0) >= 1
+    assert result.telemetry.get("optimization_predicate_compaction", 0) >= 1
     assert result.rowcount == 5
 
 
@@ -111,7 +111,7 @@ def test_predicate_compaction_inherited_from_outer_query():
 
     assert "id > 4" in plan
     assert "id > 1" not in plan.replace("id > 4", "")
-    assert result.stats.get("optimization_predicate_compaction", 0) >= 1
+    assert result.telemetry.get("optimization_predicate_compaction", 0) >= 1
     assert result.rowcount == 5
 
 
@@ -138,7 +138,7 @@ def test_predicate_compaction_handles_different_columns_and_bounds():
     assert "id > 4" in plan
     assert "diameter" in plan
     assert "id > 1" not in plan.replace("id > 4", "")
-    assert result.stats.get("optimization_predicate_compaction", 0) >= 1
+    assert result.telemetry.get("optimization_predicate_compaction", 0) >= 1
     assert result.rowcount == 4
 
 

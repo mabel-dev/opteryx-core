@@ -36,6 +36,7 @@ OS_SEP = os.sep
 class AwsS3Connector(BaseConnector, Diachronic, PredicatePushable, Asynchronous):
     __mode__ = "Blob"
     __type__ = "S3"
+    __synchronousity__ = "asynchronous"
 
     PUSHABLE_OPS: Dict[str, bool] = {
         "Eq": True,
@@ -146,15 +147,15 @@ class AwsS3Connector(BaseConnector, Diachronic, PredicatePushable, Asynchronous)
         for blob_name in blob_names:
             try:
                 decoder = get_decoder(blob_name)
-                blob_bytes = self.read_blob(blob_name=blob_name, statistics=self.statistics)
+                blob_bytes = self.read_blob(blob_name=blob_name, telemetry=self.telemetry)
                 try:
                     decoded = decoder(blob_bytes, projection=columns, just_schema=just_schema)
                 except Exception as err:
                     raise DataError(f"Unable to read file {blob_name} ({err})") from err
                 if not just_schema:
                     num_rows, num_columns, raw_bytes, decoded = decoded
-                    self.statistics.rows_seen += num_rows
-                    self.statistics.bytes_raw += raw_bytes
+                    self.telemetry.rows_seen += num_rows
+                    self.telemetry.bytes_raw += raw_bytes
                 yield decoded
             except UnsupportedFileTypeError:
                 pass
@@ -171,8 +172,8 @@ class AwsS3Connector(BaseConnector, Diachronic, PredicatePushable, Asynchronous)
 
         return self.schema
 
-    async def async_read_blob(self, *, blob_name, pool, statistics, **kwargs):
-        from opteryx import system_statistics
+    async def async_read_blob(self, *, blob_name, pool, telemetry, **kwargs):
+        from opteryx import system_telemetry
 
         try:
             bucket, object_path, name, extension = paths.get_parts(blob_name)
@@ -186,11 +187,11 @@ class AwsS3Connector(BaseConnector, Diachronic, PredicatePushable, Asynchronous)
             ref = await pool.commit(data)
             # treat both None and -1 as commit failure and retry
             while ref is None or ref == -1:
-                statistics.stalls_io_waiting_on_engine += 1
+                telemetry.stalls_io_waiting_on_engine += 1
                 await asyncio.sleep(0.1)
-                system_statistics.cpu_wait_seconds += 0.1
+                system_telemetry.cpu_wait_seconds += 0.1
                 ref = await pool.commit(data)
-            statistics.bytes_read += len(data)
+            telemetry.bytes_read += len(data)
             return ref
         finally:
             if stream:
@@ -204,7 +205,7 @@ class AwsS3Connector(BaseConnector, Diachronic, PredicatePushable, Asynchronous)
                 bucket_name=bucket, object_name=object_path + "/" + name + extension
             )
             content = stream.read()
-            self.statistics.bytes_read += len(content)
+            self.telemetry.bytes_read += len(content)
             return content
         finally:
             if stream:

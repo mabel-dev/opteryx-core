@@ -106,7 +106,7 @@ class EmptyTableStrategy(OptimizationStrategy):  # pragma: no cover
             # Replace the filter node with the empty node (node must still exist in graph)
             optimized_plan[filter_nid] = empty_node
 
-            self.statistics.optimization_empty_table += 1
+            self.telemetry.optimization_empty_table += 1
 
         return optimized_plan
 

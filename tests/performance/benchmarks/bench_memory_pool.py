@@ -20,7 +20,7 @@ repo (setup.py / build ext) so that the Cython `MemoryPool` is used.
 import time
 import threading
 import random
-import statistics
+import telemetry
 import argparse
 import math
 
@@ -151,7 +151,7 @@ def timeit(func, *fargs, repeat=5):
         func(*fargs)
         end_time = time.perf_counter()
         times.append(end_time - start_time)
-    return min(times), statistics.mean(times), (statistics.stdev(times) if len(times) > 1 else 0.0)
+    return min(times), telemetry.mean(times), (telemetry.stdev(times) if len(times) > 1 else 0.0)
 
 def bench_commit_immediate_release(memory_pool, size, payload_size, iterations):
     """Commit and immediately release on each iteration so the pool is reused."""
@@ -315,11 +315,11 @@ if __name__ == "__main__":
         lat_stats = {}
         if samples:
             samples_sorted = sorted(samples)
-            lat_stats['p50'] = statistics.median(samples_sorted)
+            lat_stats['p50'] = telemetry.median(samples_sorted)
             lat_stats['p95'] = samples_sorted[min(len(samples_sorted)-1, math.floor(len(samples_sorted)*0.95))]
             lat_stats['p99'] = samples_sorted[min(len(samples_sorted)-1, math.floor(len(samples_sorted)*0.99))]
-            lat_stats['mean'] = statistics.mean(samples_sorted)
-            lat_stats['stddev'] = statistics.stdev(samples_sorted) if len(samples_sorted) > 1 else 0.0
+            lat_stats['mean'] = telemetry.mean(samples_sorted)
+            lat_stats['stddev'] = telemetry.stdev(samples_sorted) if len(samples_sorted) > 1 else 0.0
 
         return {
             'total_ops': total_ops,

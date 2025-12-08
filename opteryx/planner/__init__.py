@@ -126,7 +126,7 @@ def query_planner(
     visibility_filters: Optional[Dict[str, Any]],
     connection,
     qid: str,
-    statistics,
+    telemetry,
 ) -> Generator[PhysicalPlan, Any, Any]:
     from opteryx.exceptions import SqlError
     from opteryx.models import QueryProperties
@@ -141,7 +141,7 @@ def query_planner(
     # SQL Rewriter
     start = time.monotonic_ns()
     clean_sql = do_sql_rewrite(operation)
-    statistics.time_planning_sql_rewriter += time.monotonic_ns() - start
+    telemetry.time_planning_sql_rewriter += time.monotonic_ns() - start
 
     params: Union[list, dict, None] = None
     if parameters is None:
@@ -163,7 +163,7 @@ def query_planner(
         parameters=params,
         connection=connection,
     )[0]
-    statistics.time_planning_ast_rewriter += time.monotonic_ns() - start
+    telemetry.time_planning_ast_rewriter += time.monotonic_ns() - start
 
     # Logical Planner converts ASTs to logical plans
 
@@ -183,20 +183,20 @@ def query_planner(
         qid=qid,
         common_table_expressions=ctes,
         visibility_filters=visibility_filters,
-        statistics=statistics,
+        telemetry=telemetry,
     )
-    statistics.time_planning_binder += time.monotonic_ns() - start
+    telemetry.time_planning_binder += time.monotonic_ns() - start
 
     start = time.monotonic_ns()
-    optimized_plan = do_optimizer(bound_plan, statistics)
-    statistics.time_planning_optimizer += time.monotonic_ns() - start
+    optimized_plan = do_optimizer(bound_plan, telemetry)
+    telemetry.time_planning_optimizer += time.monotonic_ns() - start
 
-    statistics.executed_plan = optimized_plan.draw(ascii_safe=True)
+    telemetry.executed_plan = optimized_plan.draw(ascii_safe=True)
 
     # before we write the new optimizer and execution engine, convert to a V1 plan
     start = time.monotonic_ns()
     query_properties = QueryProperties(qid=qid, variables=connection.context.variables)
     physical_plan = create_physical_plan(optimized_plan, query_properties)
-    statistics.time_planning_physical_planner += time.monotonic_ns() - start
+    telemetry.time_planning_physical_planner += time.monotonic_ns() - start
 
     return physical_plan

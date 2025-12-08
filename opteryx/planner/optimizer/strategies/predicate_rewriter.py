@@ -53,7 +53,7 @@ from opteryx.managers.expression import ExpressionColumn
 from opteryx.managers.expression import NodeType
 from opteryx.managers.expression import format_expression
 from opteryx.models import Node
-from opteryx.models import QueryStatistics
+from opteryx.models import QueryTelemetry
 from opteryx.planner.binder.operator_map import determine_type
 from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner import LogicalPlanNode
@@ -124,7 +124,7 @@ def reorder_interval_calc(predicate):
         return predicate
 
 
-def rewrite_ored_like_to_regex(predicate, statistics):
+def rewrite_ored_like_to_regex(predicate, telemetry):
     """
     Rewrite multiple OR'ed LIKE conditions on the same column to a single regex pattern.
 
@@ -173,7 +173,7 @@ def rewrite_ored_like_to_regex(predicate, statistics):
 
     for col_id, like_data in like_conditions.items():
         if len(like_data["patterns"]) > 1:
-            statistics.optimization_predicate_rewriter_like_to_regex += 1
+            telemetry.optimization_predicate_rewriter_like_to_regex += 1
             # Create a new regex pattern
             regex_pattern = "|".join(pattern for pattern in like_data["patterns"])
             new_node = like_data["nodes"][0]
@@ -187,7 +187,7 @@ def rewrite_ored_like_to_regex(predicate, statistics):
     return predicate
 
 
-def rewrite_ored_any_eq_to_contains(predicate, statistics):
+def rewrite_ored_any_eq_to_contains(predicate, telemetry):
     """
     Rewrite multiple OR'ed ANYOPEQ conditions on the same column to a single @> condition.
 
@@ -222,7 +222,7 @@ def rewrite_ored_any_eq_to_contains(predicate, statistics):
 
     for data in anyeq_conditions.values():
         if len(data["values"]) > 1:
-            statistics.optimization_predicate_rewriter_anyeq_to_contains += 1
+            telemetry.optimization_predicate_rewriter_anyeq_to_contains += 1
 
             # Build new comparison node: ('a', 'b', 'c') @> z
             new_node = data["nodes"][0]
@@ -252,7 +252,7 @@ def rewrite_ored_any_eq_to_contains(predicate, statistics):
     return predicate
 
 
-def rewrite_ored_eq_to_inlist(predicate, statistics):
+def rewrite_ored_eq_to_inlist(predicate, telemetry):
     """
     Rewrite multiple OR'ed Equals conditions on the same column to a single regex pattern.
 
@@ -294,7 +294,7 @@ def rewrite_ored_eq_to_inlist(predicate, statistics):
 
     for col_id, eq_data in eq_conditions.items():
         if len(eq_data["values"]) > 1:
-            statistics.optimization_predicate_rewriter_eqs_to_list += 1
+            telemetry.optimization_predicate_rewriter_eqs_to_list += 1
             # Create a new regex pattern
             new_node = eq_data["nodes"][0]
             new_node.value = "InList"
@@ -323,25 +323,25 @@ dispatcher: Dict[str, Callable] = {
 
 
 # Dispatcher conditions
-def _rewrite_predicate(predicate, statistics: QueryStatistics):
+def _rewrite_predicate(predicate, telemetry: QueryTelemetry):
     if predicate.node_type == NodeType.FUNCTION:
-        return _rewrite_function(predicate, statistics)
+        return _rewrite_function(predicate, telemetry)
 
     # Add our new rewrite for ORed LIKE conditions
     if predicate.node_type == NodeType.OR:
-        rewritten = rewrite_ored_like_to_regex(predicate, statistics)
-        rewritten = rewrite_ored_eq_to_inlist(rewritten, statistics)
-        rewritten = rewrite_ored_any_eq_to_contains(rewritten, statistics)
+        rewritten = rewrite_ored_like_to_regex(predicate, telemetry)
+        rewritten = rewrite_ored_eq_to_inlist(rewritten, telemetry)
+        rewritten = rewrite_ored_any_eq_to_contains(rewritten, telemetry)
         if rewritten != predicate:
             return rewritten
 
     # if predicate.node_type in {NodeType.AND, NodeType.OR, NodeType.XOR}:
     if predicate.left:
-        predicate.left = _rewrite_predicate(predicate.left, statistics)
+        predicate.left = _rewrite_predicate(predicate.left, telemetry)
     if predicate.right:
-        predicate.right = _rewrite_predicate(predicate.right, statistics)
+        predicate.right = _rewrite_predicate(predicate.right, telemetry)
     if predicate.centre:
-        predicate.centre = _rewrite_predicate(predicate.centre, statistics)
+        predicate.centre = _rewrite_predicate(predicate.centre, telemetry)
 
     if predicate.node_type not in {NodeType.BINARY_OPERATOR, NodeType.COMPARISON_OPERATOR}:
         # after rewrites, some filters aren't actually predicates
@@ -350,12 +350,12 @@ def _rewrite_predicate(predicate, statistics: QueryStatistics):
     if predicate.right.type == OrsoTypes.VARCHAR:
         if predicate.value in {"Like", "ILike", "NotLike", "NotILike"}:
             if "%%" in predicate.right.value:
-                statistics.optimization_predicate_rewriter_remove_adjacent_wildcards += 1
+                telemetry.optimization_predicate_rewriter_remove_adjacent_wildcards += 1
                 predicate.right.value = re.sub(r"%+", "%", predicate.right.value)
 
         if predicate.value in LIKE_REWRITES:
             if "%" not in predicate.right.value and "_" not in predicate.right.value:
-                statistics.optimization_predicate_rewriter_remove_redundant_like += 1
+                telemetry.optimization_predicate_rewriter_remove_redundant_like += 1
                 predicate.value = LIKE_REWRITES[predicate.value]
 
         if predicate.value in INSTR_REWRITES:
@@ -365,19 +365,19 @@ def _rewrite_predicate(predicate, statistics: QueryStatistics):
                 and predicate.right.value.startswith("%")
                 and "%" not in predicate.right.value[1:-1]
             ):
-                statistics.optimization_predicate_rewriter_replace_like_with_in_string += 1
+                telemetry.optimization_predicate_rewriter_replace_like_with_in_string += 1
                 predicate.right.value = predicate.right.value[1:-1]
                 predicate.value = INSTR_REWRITES[predicate.value]
 
     if predicate.right.type == OrsoTypes.BLOB:
         if predicate.value in {"Like", "ILike", "NotLike", "NotILike"}:
             if b"%%" in predicate.right.value:
-                statistics.optimization_predicate_rewriter_remove_adjacent_wildcards += 1
+                telemetry.optimization_predicate_rewriter_remove_adjacent_wildcards += 1
                 predicate.right.value = re.sub(b"%+", b"%", predicate.right.value)
 
         if predicate.value in LIKE_REWRITES:
             if b"%" not in predicate.right.value and b"_" not in predicate.right.value:
-                statistics.optimization_predicate_rewriter_remove_redundant_like += 1
+                telemetry.optimization_predicate_rewriter_remove_redundant_like += 1
                 predicate.value = LIKE_REWRITES[predicate.value]
 
         if predicate.value in INSTR_REWRITES:
@@ -386,23 +386,23 @@ def _rewrite_predicate(predicate, statistics: QueryStatistics):
                 and predicate.right.value.endswith(b"%")
                 and predicate.right.value.startswith(b"%")
             ):
-                statistics.optimization_predicate_rewriter_replace_like_with_in_string += 1
+                telemetry.optimization_predicate_rewriter_replace_like_with_in_string += 1
                 predicate.right.value = predicate.right.value[1:-1]
                 predicate.value = INSTR_REWRITES[predicate.value]
 
     if predicate.value == "AnyOpEq":
         if predicate.right.node_type == NodeType.LITERAL:
-            statistics.optimization_predicate_rewriter_any_to_inlist += 1
+            telemetry.optimization_predicate_rewriter_any_to_inlist += 1
             predicate.value = "InList"
 
     if predicate.value == "AnyOpNotEq":
         if predicate.right.node_type == NodeType.LITERAL:
-            statistics.optimization_predicate_rewriter_any_to_inlist += 1
+            telemetry.optimization_predicate_rewriter_any_to_inlist += 1
             predicate.value = "NotInList"
 
     if predicate.value in IN_REWRITES:
         if predicate.right.node_type == NodeType.LITERAL and len(predicate.right.value) == 1:
-            statistics.optimization_predicate_rewriter_in_to_equals += 1
+            telemetry.optimization_predicate_rewriter_in_to_equals += 1
             return dispatcher["rewrite_in_to_eq"](predicate)
 
     if (
@@ -413,13 +413,13 @@ def _rewrite_predicate(predicate, statistics: QueryStatistics):
             determine_type(predicate.left) == OrsoTypes.INTERVAL
             and determine_type(predicate.right) == OrsoTypes.INTERVAL
         ):
-            statistics.optimization_predicate_rewriter_date_ += 1
+            telemetry.optimization_predicate_rewriter_date_ += 1
             predicate = dispatcher["reorder_interval_calc"](predicate)
 
     return predicate
 
 
-def _rewrite_function(function, statistics: QueryStatistics):
+def _rewrite_function(function, telemetry: QueryTelemetry):
     if function.value == "CASE":
         # CASE WHEN x IS NULL THEN y ELSE x END → IFNULL(x, y)
         if len(function.parameters) == 2 and function.parameters[0].parameters[0].value == "IsNull":
@@ -428,7 +428,7 @@ def _rewrite_function(function, statistics: QueryStatistics):
             value_if_null = function.parameters[1].parameters[0]
 
             if compare_column.schema_column.identity == target_column.schema_column.identity:
-                statistics.optimization_predicate_rewriter_case_to_ifnull += 1
+                telemetry.optimization_predicate_rewriter_case_to_ifnull += 1
                 function.value = "IFNULL"
                 function.parameters = [compare_column, value_if_null]
                 return function
@@ -439,7 +439,7 @@ def _rewrite_function(function, statistics: QueryStatistics):
             and function.parameters[0].parameters[1].value is True
             and len(function.parameters[1].parameters) == 2
         ):
-            statistics.optimization_predicate_rewriter_case_to_iif += 1
+            telemetry.optimization_predicate_rewriter_case_to_iif += 1
 
             compare_column = function.parameters[0].parameters[0]
             value_if_true = function.parameters[1].parameters[0]
@@ -451,18 +451,18 @@ def _rewrite_function(function, statistics: QueryStatistics):
     # COALESCE(x, y) → IFNULL(x, y)
     if function.value == "COALESCE":
         if len(function.parameters) == 2:
-            statistics.optimization_predicate_rewriter_coalesce_to_ifnull += 1
+            telemetry.optimization_predicate_rewriter_coalesce_to_ifnull += 1
             function.value = "IFNULL"
             return function
     # SUBSTRING(x, 1, n) → LEFT(x, n)
     if function.value == "SUBSTRING" and function.parameters[1].value == 1:
-        statistics.optimization_predicate_rewriter_substring_to_left += 1
+        telemetry.optimization_predicate_rewriter_substring_to_left += 1
         function.value = "LEFT"
         function.parameters = [function.parameters[0], function.parameters[2]]
         return function
     # CONCAT(x, y, z) → x || y || z
     if function.value == "CONCAT" and len(function.parameters) > 1:
-        statistics.optimization_predicate_rewriter_concat_to_double_pipe += 1
+        telemetry.optimization_predicate_rewriter_concat_to_double_pipe += 1
         left_node = function.parameters[0]
         for param in function.parameters[1:]:
             this_node = Node(
@@ -478,7 +478,7 @@ def _rewrite_function(function, statistics: QueryStatistics):
         function = this_node
     # CONCAT_WS(x, y, z) → y || x || z
     if function.value == "CONCAT_WS" and len(function.parameters) > 2:
-        statistics.optimization_predicate_rewriter_concatws_to_double_pipe += 1
+        telemetry.optimization_predicate_rewriter_concatws_to_double_pipe += 1
         separator = function.parameters[0]
         left_node = function.parameters[1]
         for param in function.parameters[2:]:
@@ -503,7 +503,7 @@ def _rewrite_function(function, statistics: QueryStatistics):
 
     # STARTS_WITH → x LIKE 'pattern%'
     if function.value == "STARTS_WITH":
-        statistics.optimization_predicate_rewriter_starts_with_to_like += 1
+        telemetry.optimization_predicate_rewriter_starts_with_to_like += 1
         left_node = function.parameters[0]
         function.parameters[1].value = function.parameters[1].value + "%"
         this_node = Node(
@@ -519,7 +519,7 @@ def _rewrite_function(function, statistics: QueryStatistics):
 
     # ENDS_WITH → x LIKE '%pattern'
     if function.value == "ENDS_WITH":
-        statistics.optimization_predicate_rewriter_ends_with_to_like += 1
+        telemetry.optimization_predicate_rewriter_ends_with_to_like += 1
         left_node = function.parameters[0]
         function.parameters[1].value = "%" + function.parameters[1].value
         this_node = Node(
@@ -542,13 +542,13 @@ class PredicateRewriteStrategy(OptimizationStrategy):
             context.optimized_plan = context.pre_optimized_tree.copy()  # type: ignore
 
         if node.node_type == LogicalPlanStepType.Filter:
-            node.condition = _rewrite_predicate(node.condition, self.statistics)
+            node.condition = _rewrite_predicate(node.condition, self.telemetry)
             context.optimized_plan[context.node_id] = node
 
         if node.node_type == LogicalPlanStepType.Project:
             new_columns = []
             for column in node.columns:
-                new_column = _rewrite_predicate(column, self.statistics)
+                new_column = _rewrite_predicate(column, self.telemetry)
                 new_columns.append(new_column)
             node.columns = new_columns
             context.optimized_plan[context.node_id] = node

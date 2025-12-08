@@ -46,7 +46,7 @@ def test_predicate_pushdowns_blobs_parquet(query, expected_rowcount, expected_ro
     cur.materialize()
     
     assert cur.rowcount == expected_rowcount, f"Expected rowcount: {expected_rowcount}, got: {cur.rowcount}"
-    assert cur.stats.get("rows_read", 0) == expected_rows_read, f"Expected rows_read: {expected_rows_read}, got: {cur.stats.get('rows_read', 0)}"
+    assert cur.telemetry.get("rows_read", 0) == expected_rows_read, f"Expected rows_read: {expected_rows_read}, got: {cur.telemetry.get('rows_read', 0)}"
     
     conn.close()
 

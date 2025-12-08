@@ -42,6 +42,7 @@ class DiskConnector(BaseConnector, Diachronic, PredicatePushable, LimitPushable)
 
     __mode__ = "Blob"
     __type__ = "LOCAL"
+    __synchronousity__ = "synchronous"
 
     PUSHABLE_OPS: Dict[str, bool] = {
         "Eq": True,
@@ -148,7 +149,7 @@ class DiskConnector(BaseConnector, Diachronic, PredicatePushable, LimitPushable)
             )
 
             with self._stats_lock:
-                self.statistics.bytes_read += len(mv)
+                self.telemetry.bytes_read += len(mv)
 
             return result
         finally:
@@ -214,13 +215,13 @@ class DiskConnector(BaseConnector, Diachronic, PredicatePushable, LimitPushable)
                     if schema.row_count_metric and blob_count > 1:
                         schema.row_count_estimate = schema.row_count_metric * blob_count
                         schema.row_count_metric = None
-                        self.statistics.estimated_row_count += schema.row_count_estimate
+                        self.telemetry.estimated_row_count += schema.row_count_estimate
                     yield schema
                 except UnsupportedFileTypeError:
                     continue
                 except pyarrow.ArrowInvalid:
                     with self._stats_lock:
-                        self.statistics.unreadable_data_blobs += 1
+                        self.telemetry.unreadable_data_blobs += 1
                 except Exception as err:
                     raise DataError(f"Unable to read file {blob_name} ({err})") from err
             return
@@ -233,10 +234,10 @@ class DiskConnector(BaseConnector, Diachronic, PredicatePushable, LimitPushable)
                 decoded = decoded.slice(0, remaining_rows)
             remaining_rows -= decoded.num_rows
 
-            self.statistics.rows_seen += num_rows
+            self.telemetry.rows_seen += num_rows
             self.rows_seen += num_rows
             self.blobs_seen += 1
-            self.statistics.bytes_raw += raw_size
+            self.telemetry.bytes_raw += raw_size
             return decoded
 
         max_workers = min(self._max_workers, len(blob_names)) or 1
@@ -253,7 +254,7 @@ class DiskConnector(BaseConnector, Diachronic, PredicatePushable, LimitPushable)
                     continue
                 except pyarrow.ArrowInvalid:
                     with self._stats_lock:
-                        self.statistics.unreadable_data_blobs += 1
+                        self.telemetry.unreadable_data_blobs += 1
                     continue
                 except Exception as err:
                     raise DataError(f"Unable to read file {blob_name} ({err})") from err
@@ -294,7 +295,7 @@ class DiskConnector(BaseConnector, Diachronic, PredicatePushable, LimitPushable)
                             pass
                         except pyarrow.ArrowInvalid:
                             with self._stats_lock:
-                                self.statistics.unreadable_data_blobs += 1
+                                self.telemetry.unreadable_data_blobs += 1
                         except Exception as err:
                             for remaining_future in list(pending):
                                 remaining_future.cancel()
