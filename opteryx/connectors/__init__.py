@@ -176,15 +176,14 @@ def connector_factory(dataset, statistics, **config):
     for prefix, storage_details in _storage_prefixes.items():
         if dataset == prefix or dataset.startswith(prefix + "."):
             connector_entry.update(storage_details.copy())  # type: ignore
-            connector = connector_entry.pop("connector")
-            # If connector is a string, lazy load it
+            connector = connector_entry.get("connector")
             break
 
     if connector is None:
         # fall back to the default connector (local disk if not set)
         connector_entry = _storage_prefixes.get("_default", {})
-        connector = connector_entry.pop("connector", "DiskConnector")
-        remove_prefix = connector_entry.pop("remove_prefix", False)
+        connector = connector_entry.get("connector", "DiskConnector")
+        remove_prefix = connector_entry.get("remove_prefix", False)
         if remove_prefix and "." in dataset:
             dataset = dataset.split(".", 1)[1]
 
@@ -194,8 +193,8 @@ def connector_factory(dataset, statistics, **config):
         connector_class = connector
         connector = connector.__name__
 
-    prefix = connector_entry.pop("prefix", "")
-    remove_prefix = connector_entry.pop("remove_prefix", False)
+    prefix = connector_entry.get("prefix", "")
+    remove_prefix = connector_entry.get("remove_prefix", False)
     if prefix and remove_prefix and dataset.startswith(prefix):
         # Remove the prefix. If there's a separator (. or //) after the prefix, skip it too
         dataset = dataset[len(prefix) :]

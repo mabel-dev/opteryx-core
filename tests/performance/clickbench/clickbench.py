@@ -2,8 +2,6 @@ import os
 import pytest
 import sys
 
-import opteryx
-
 os.environ.pop("OPTERYX_DEBUG", None)
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../../../orso"))

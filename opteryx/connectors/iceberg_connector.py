@@ -163,7 +163,7 @@ class IcebergConnector(BaseConnector, Diachronic, LimitPushable, Statistics, Pre
                     firestore_project=kwargs.get("firestore_project"),
                     firestore_database=kwargs.get("firestore_database"),
                     gcs_bucket=kwargs.get("gcs_bucket"),
-            )
+                )
             print(self.dataset)
             self.table = metastore.load_table(self.dataset)
 
@@ -325,10 +325,15 @@ class IcebergConnector(BaseConnector, Diachronic, LimitPushable, Statistics, Pre
 
         batch = None
         for batch in reader:
-            # Check for decimal columns in the batch schema
-            for field in batch.schema:
+            # Cast decimal columns to floats until native decimal support is added
+            for idx, field in enumerate(batch.schema):
                 if pyarrow.types.is_decimal(field.type):
-                    raise NotSupportedError("Decimal columns are not supported in Iceberg tables.")
+                    cast_col = pyarrow.compute.cast(
+                        batch.column(idx), pyarrow.float64(), safe=False
+                    )
+                    batch = batch.set_column(
+                        idx, pyarrow.field(field.name, pyarrow.float64()), cast_col
+                    )
 
             table = pyarrow.Table.from_batches([batch])
 
