@@ -178,7 +178,6 @@ def connector_factory(dataset, statistics, **config):
             connector_entry.update(storage_details.copy())  # type: ignore
             connector = connector_entry.pop("connector")
             # If connector is a string, lazy load it
-            connector_class = _lazy_import_connector(connector)
             break
 
     if connector is None:
@@ -189,7 +188,11 @@ def connector_factory(dataset, statistics, **config):
         if remove_prefix and "." in dataset:
             dataset = dataset.split(".", 1)[1]
 
+    if isinstance(connector, str):
         connector_class = _lazy_import_connector(connector)
+    else:
+        connector_class = connector
+        connector = connector.__name__
 
     prefix = connector_entry.pop("prefix", "")
     remove_prefix = connector_entry.pop("remove_prefix", False)

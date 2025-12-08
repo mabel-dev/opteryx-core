@@ -153,13 +153,18 @@ class IcebergConnector(BaseConnector, Diachronic, LimitPushable, Statistics, Pre
 
         try:
             # DEBUG: print(self.dataset, args, kwargs)
-            catalog_name, self.dataset = self.dataset.split(".", 1)
-            metastore = catalog(
-                catalog_name=catalog_name,
-                firestore_project=kwargs.get("firestore_project"),
-                firestore_database=kwargs.get("firestore_database"),
-                gcs_bucket=kwargs.get("gcs_bucket"),
+            if isinstance(catalog, pyiceberg.catalog.Catalog):
+                metastore = catalog
+                catalog_name = metastore.name
+            else:
+                catalog_name, self.dataset = self.dataset.split(".", 1)
+                metastore = catalog(
+                    catalog_name=catalog_name,
+                    firestore_project=kwargs.get("firestore_project"),
+                    firestore_database=kwargs.get("firestore_database"),
+                    gcs_bucket=kwargs.get("gcs_bucket"),
             )
+            print(self.dataset)
             self.table = metastore.load_table(self.dataset)
 
             self.snapshot = self.table.current_snapshot()
