@@ -9,7 +9,7 @@ maintainers = [{name='Justin Joyce', email='justin.joyce@joocer.com'}]
 dependencies = [
     'aiohttp==3.13.2',
     'numpy==2.3.5',
-    'orjson==3.11.4',
+    'orjson==3.11.5',
     'orso==0.0.226',
     'psutil==7.1.3',
     'pyarrow==22.0.0',
