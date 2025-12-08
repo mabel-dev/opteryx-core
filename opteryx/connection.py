@@ -71,16 +71,6 @@ class Connection:
         self._closed = True
         self._close_all_cursors()
 
-    def commit(self) -> None:
-        """Exists for interface compatibility only."""
-        if self._closed:  # pragma: no cover
-            raise ProgrammingError("Cannot commit using a closed connection.")
-
-    def rollback(self):
-        """Exists for interface compatibility only. Raises AttributeError."""
-        # return AttributeError as per https://peps.python.org/pep-0249/#id48
-        raise AttributeError("Opteryx does not support transactions.")
-
     def __enter__(self):
         """Support context manager usage."""
         return self

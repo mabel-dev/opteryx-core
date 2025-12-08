@@ -149,11 +149,6 @@ def register_store(prefix, connector, *, remove_prefix: bool = False, **kwargs):
         # uninstantiated classes aren't a type
         raise ValueError("connectors registered with `register_store` must be uninstantiated.")
 
-    if connector.__name__ == "IcebergConnector" and not remove_prefix:
-        raise ValueError(
-            "IcebergConnector requires remove_prefix=True so catalog prefixes don't leak into table names."
-        )
-
     # Store connector class directly (not as a string)
     _storage_prefixes[prefix] = {
         "connector": connector,  # type: ignore
@@ -196,6 +191,9 @@ def connector_factory(dataset, statistics, **config):
         # fall back to the default connector (local disk if not set)
         connector_entry = _storage_prefixes.get("_default", {})
         connector = connector_entry.pop("connector", "DiskConnector")
+        remove_prefix = connector_entry.pop("remove_prefix", False)
+        if remove_prefix and "." in dataset:
+            dataset = dataset.split(".", 1)[1]
         # If connector is a string, lazy load it
         if isinstance(connector, str):
             connector = _lazy_import_connector(connector)

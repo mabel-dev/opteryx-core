@@ -138,7 +138,7 @@ def query_planner(
     from opteryx.planner.sql_rewriter import do_sql_rewrite
     from opteryx.third_party import sqloxide
 
-    # SQL Rewriter extracts temporal filters
+    # SQL Rewriter
     start = time.monotonic_ns()
     clean_sql = do_sql_rewrite(operation)
     statistics.time_planning_sql_rewriter += time.monotonic_ns() - start

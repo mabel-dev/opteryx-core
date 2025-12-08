@@ -556,16 +556,7 @@ class Cursor(DataFrame):
 
         In notebooks we should return a table
         """
-        in_a_notebook = False
-        try:
-            from IPython import get_ipython
-
-            in_a_notebook = get_ipython() is not None
-            if not in_a_notebook:
-                return f"<opteryx.Cursor {self._state}>"
-        except Exception:  # nosec
-            pass
-        return str(self)
+        return f"<opteryx.Cursor {self._state}>"
 
     def __bool__(self):
         """
