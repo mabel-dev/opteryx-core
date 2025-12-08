@@ -166,6 +166,7 @@ def render_order(node: LogicalPlanNode) -> str:
 @register_render(LogicalPlanStepType.Scan)
 def render_scan(node: LogicalPlanNode) -> str:
     io_async = "ASYNC " if hasattr(node.connector, "async_read_blob") else ""
+    connector = " " if not hasattr(node.connector, "__type__") else f" [{node.connector.__type__}] "
     date_range = ""
     if node.start_date == node.end_date and node.start_date is not None:
         date_range = f" FOR '{node.start_date}'"
@@ -180,7 +181,7 @@ def render_scan(node: LogicalPlanNode) -> str:
     )
     hints = f" WITH({','.join(node.hints)})" if node.hints else ""
     limit = f" LIMIT {node.limit}" if node.limit else ""
-    return f"{io_async}READ ({node.relation}{alias}{date_range}{hints}){columns}{predicates}{limit}"
+    return f"{io_async}READ{connector}({node.relation}{alias}{date_range}{hints}){columns}{predicates}{limit}"
 
 
 @register_render(LogicalPlanStepType.Set)

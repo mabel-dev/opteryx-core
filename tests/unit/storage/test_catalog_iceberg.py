@@ -3,6 +3,7 @@ import os
 import sys
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
+os.environ["OPTERYX_DEBUG"] = "1"
 
 from tests import is_arm, is_mac, is_windows, skip_if
 from tests import set_up_iceberg
@@ -10,6 +11,8 @@ import opteryx
 from opteryx.connectors import IcebergConnector
 from opteryx.compiled.structures.relation_statistics import to_int
 from opteryx.models import QueryStatistics
+
+print(f"Running Iceberg tests on Python {sys.version.split(' ')[0]}, Opteryx {opteryx.__version__}")
 
 @skip_if(is_arm() or is_windows() or is_mac())
 def test_iceberg_basic():
@@ -343,7 +346,7 @@ def __test_firestore_gcs_connector_registration():
         gcs_bucket=BUCKET_NAME,
     )
 
-    res = opteryx.query("SELECT count(*) FROM opteryx.clickbench.hits;")
+    res = opteryx.query("SELECT * FROM public.space.planets;")
     print(res)
 
 
