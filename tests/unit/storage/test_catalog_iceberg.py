@@ -10,7 +10,7 @@ from tests import set_up_iceberg
 import opteryx
 from opteryx.connectors import IcebergConnector
 from opteryx.compiled.structures.relation_statistics import to_int
-from opteryx.models import QueryStatistics
+from opteryx.models import QueryTelemetry
 
 print(f"Running Iceberg tests on Python {sys.version.split(' ')[0]}, Opteryx {opteryx.__version__}")
 
@@ -71,9 +71,9 @@ def test_iceberg_get_stats_tweets():
         remove_prefix=True,
     )
 
-    connector = connector_factory("iceberg.opteryx.tweets", QueryStatistics())
+    connector = connector_factory("iceberg.opteryx.tweets", QueryTelemetry())
     connector.get_dataset_schema()
-    stats = connector.relation_statistics
+    stats = connector.relation_telemetry
 
     assert stats.record_count == 100000
     assert stats.lower_bounds[b"followers"] == 0
@@ -100,9 +100,9 @@ def test_iceberg_get_stats_missions():
         catalog=catalog,
         remove_prefix=True,
     )
-    connector = connector_factory("iceberg.opteryx.tweets", QueryStatistics())
+    connector = connector_factory("iceberg.opteryx.tweets", QueryTelemetry())
     connector.get_dataset_schema()
-    stats = connector.relation_statistics
+    stats = connector.relation_telemetry
 
     assert stats.record_count == 100000
     assert stats.lower_bounds[b"followers"] == 0
@@ -140,9 +140,9 @@ def test_iceberg_get_stats_remote():
         catalog=catalog,
         remove_prefix=True,
     )
-    connector = connector_factory("iceberg.iceberg.planets", QueryStatistics())
+    connector = connector_factory("iceberg.iceberg.planets", QueryTelemetry())
     connector.get_dataset_schema()
-    stats = connector.relation_statistics
+    stats = connector.relation_telemetry
 
     assert stats.record_count == 9
     assert stats.lower_bounds[b"id"] == 1, stats.lower_bounds[b"id"]

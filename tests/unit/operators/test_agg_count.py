@@ -16,7 +16,7 @@ import opteryx
 def test_count_star_parquet():
     """ if is just SELECT COUNT(*) for parquet files, we don't read the rows"""
     cur = opteryx.query("SELECT count(*) FROM testdata.flat.formats.parquet")
-    stats = cur.stats
+    stats = cur.telemetry
     assert stats["columns_read"] <= 1, stats["columns_read"]
     assert stats["rows_read"] == 1, stats["rows_read"]
     assert stats["rows_seen"] == 100000, stats["rows_seen"]
@@ -26,7 +26,7 @@ def test_count_star_parquet():
 def test_count_star_non_parquet():
     """ if is just SELECT COUNT(*) for non-parquet files, we read the rows"""
     cur = opteryx.query("SELECT COUNT(*) FROM testdata.flat.ten_files;")
-    stats = cur.stats
+    stats = cur.telemetry
     assert stats["columns_read"] <= 1, stats["columns_read"]
     assert stats["rows_read"] == 10, stats["rows_read"]
     assert stats["rows_seen"] == 250, stats["rows_seen"]
@@ -35,7 +35,7 @@ def test_count_star_non_parquet():
 def test_count_identifier_parquest_read_the_rows():
     """ we're counting an identifier, so we need to read the rows """
     cur = opteryx.query("SELECT COUNT(user_name) FROM testdata.flat.formats.parquet;")
-    stats = cur.stats
+    stats = cur.telemetry
     assert stats["columns_read"] <= 1, stats["columns_read"]
     assert stats["rows_read"] == 100000, stats["rows_read"]
     assert stats["rows_seen"] == 100000, stats["rows_seen"]
@@ -47,7 +47,7 @@ def test_count_star_group_by():
     cur = opteryx.query(
         "SELECT COUNT(*) FROM testdata.flat.formats.parquet GROUP BY tweet_id;"
     )
-    stats = cur.stats
+    stats = cur.telemetry
     assert stats["columns_read"] <= 1, stats["columns_read"]
     assert stats["rows_read"] == 100000, stats["rows_read"]
     assert stats["rows_seen"] == 100000, stats["rows_seen"]
@@ -61,7 +61,7 @@ def test_incorrect_pushdown():
     cur = opteryx.query(
         "SELECT COUNT(*) FROM (SELECT DISTINCT name FROM $planets) AS S"
     )
-    stats = cur.stats
+    stats = cur.telemetry
     assert stats["columns_read"] == 1, stats["columns_read"]
     assert stats["rows_read"] == 9, stats["rows_read"]
     first = cur.fetchone()[0]

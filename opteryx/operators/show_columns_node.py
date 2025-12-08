@@ -83,7 +83,7 @@ class ShowColumnsNode(BasePlanNode):
         if self._full or self._extended:
             # we're going to read the full table, so we can count stuff
 
-            self.statistics.add_message("SHOW FULL/SHOW EXTENDED not implemented")
+            self.telemetry.add_message("SHOW FULL/SHOW EXTENDED not implemented")
 
             self.seen = True
             yield _simple_collector(self._schema)

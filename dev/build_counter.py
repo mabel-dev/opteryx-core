@@ -7,6 +7,7 @@ updates the version file, and stages the changes for commit.
 We also update the version in pyproject.toml to keep them in sync.
 """
 
+import datetime
 import re
 import subprocess
 from pathlib import Path
@@ -24,8 +25,8 @@ class VersionStatus(Enum):
     RELEASE = "release"
 
 __major_version__ = 0
-__minor_version__ = 1
-__revision_version__ = 4
+__minor_version__ = 2
+__revision_version__ = 0
 __author__ = "@joocer"
 __status__ = VersionStatus.BETA
 
@@ -47,6 +48,7 @@ __build__ = {__build__}
 __author__ = "{__author__}"
 __version__ = "{__version__}"
 __lib__ = "opteryx-core"
+__build_date__ = "{datetime.datetime.now(datetime.UTC).isoformat()}Z"
 
 # Store the version here so:
 # 1) we don't load dependencies by storing it in __init__.py

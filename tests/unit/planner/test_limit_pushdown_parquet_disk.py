@@ -32,7 +32,7 @@ def test_parquet_disk_limit_pushdown(query, expected_rows):
 
     cur = opteryx.query(query)
     cur.materialize()
-    assert cur.stats["rows_read"] == expected_rows, cur.stats
+    assert cur.telemetry["rows_read"] == expected_rows, cur.telemetry
 
 
 @skip_if(is_arm() or is_windows() or is_mac())
@@ -40,10 +40,10 @@ def test_limit_pushdown_projection_plan():
     query = "SELECT name FROM (SELECT name FROM testdata.planets) AS s LIMIT 3;"
     cur = opteryx.query(query)
     cur.materialize()
-    plan_lines = cur.stats["executed_plan"].splitlines()
+    plan_lines = cur.telemetry["executed_plan"].splitlines()
     scan_line = next(line for line in plan_lines if "READ (testdata.planets)" in line)
-    assert "LIMIT 3" in scan_line, cur.stats["executed_plan"]
-    assert cur.stats["rows_read"] == 3, cur.stats
+    assert "LIMIT 3" in scan_line, cur.telemetry["executed_plan"]
+    assert cur.telemetry["rows_read"] == 3, cur.telemetry
 
 
 @skip_if(is_arm() or is_windows() or is_mac())
@@ -51,12 +51,12 @@ def test_limit_not_pushed_past_heap_sort():
     query = "SELECT name FROM testdata.planets ORDER BY name LIMIT 3;"
     cur = opteryx.query(query)
     cur.materialize()
-    plan_lines = cur.stats["executed_plan"].splitlines()
+    plan_lines = cur.telemetry["executed_plan"].splitlines()
     heap_sort_line = next(line for line in plan_lines if "HEAP SORT" in line)
     scan_line = next(line for line in plan_lines if "READ (testdata.planets)" in line)
     assert "LIMIT" in heap_sort_line  # fused limit stays with heap sort
-    assert "LIMIT" not in scan_line, cur.stats["executed_plan"]
-    assert cur.stats["rows_read"] == 9, cur.stats
+    assert "LIMIT" not in scan_line, cur.telemetry["executed_plan"]
+    assert cur.telemetry["rows_read"] == 9, cur.telemetry
 
 if __name__ == "__main__":  # pragma: no cover
     import shutil

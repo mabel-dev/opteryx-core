@@ -66,8 +66,8 @@ class NestedLoopJoinNode(JoinNode):
                 # build a bloom filter for the left relation if it's small enough
                 start = time.monotonic_ns()
                 self.left_filter = create_bloom_filter(self.left_relation, self.left_columns)
-                self.statistics.time_build_bloom_filter += time.monotonic_ns() - start
-                self.statistics.feature_bloom_filter += 1
+                self.telemetry.time_build_bloom_filter += time.monotonic_ns() - start
+                self.telemetry.feature_bloom_filter += 1
 
             else:
                 self.left_buffer.append(morsel)
@@ -90,11 +90,11 @@ class NestedLoopJoinNode(JoinNode):
                     maybe_in_left = self.left_filter.possibly_contains_many(
                         morsel, self.right_columns
                     )
-                    self.statistics.time_bloom_filtering += time.monotonic_ns() - start
+                    self.telemetry.time_bloom_filtering += time.monotonic_ns() - start
 
                     morsel = morsel.filter(maybe_in_left)
                     eliminated_rows = len(maybe_in_left) - morsel.num_rows
-                    self.statistics.rows_eliminated_by_bloom_filter += eliminated_rows
+                    self.telemetry.rows_eliminated_by_bloom_filter += eliminated_rows
 
                 left_indexes, right_indexes = nested_loop_join(
                     self.left_relation, morsel, self.left_columns, self.right_columns

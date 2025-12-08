@@ -173,10 +173,10 @@ class ReaderNode(BasePlanNode):
         self.limit = parameters.get("limit")
 
         if len(self.hints) != 0:
-            self.statistics.add_message("All HINTS are currently ignored")
+            self.telemetry.add_message("All HINTS are currently ignored")
 
-        self.statistics.rows_read += 0
-        self.statistics.columns_read += 0
+        self.telemetry.rows_read += 0
+        self.telemetry.columns_read += 0
 
     def to_mermaid(self, stats, nid):
         """
@@ -272,13 +272,13 @@ class ReaderNode(BasePlanNode):
             if arrow_schema.names:
                 morsel = morsel.cast(arrow_schema)
 
-            self.statistics.time_reading_blobs += time.monotonic_ns() - start_clock
-            self.statistics.blobs_read += 1
-            self.statistics.rows_read += morsel.num_rows
-            self.statistics.bytes_processed += morsel.nbytes
+            self.telemetry.time_reading_blobs += time.monotonic_ns() - start_clock
+            self.telemetry.blobs_read += 1
+            self.telemetry.rows_read += morsel.num_rows
+            self.telemetry.bytes_processed += morsel.nbytes
             yield morsel
             start_clock = time.monotonic_ns()
         if morsel:
-            self.statistics.columns_read += morsel.num_columns
+            self.telemetry.columns_read += morsel.num_columns
         else:
-            self.statistics.columns_read += len(orso_schema.columns)
+            self.telemetry.columns_read += len(orso_schema.columns)

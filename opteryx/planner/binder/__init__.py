@@ -191,7 +191,7 @@ def do_bind_phase(
     qid: str = None,
     common_table_expressions: dict = None,
     visibility_filters: dict = None,
-    statistics=None,
+    telemetry=None,
 ) -> LogicalPlan:
     """
     Execute the bind phase of the query engine.
@@ -214,7 +214,7 @@ def do_bind_phase(
     plan = bind_logical_relations(plan, common_table_expressions)
 
     if visibility_filters:
-        plan = apply_visibility_filters(plan, visibility_filters, statistics)
+        plan = apply_visibility_filters(plan, visibility_filters, telemetry)
 
     binder_visitor = BinderVisitor()
     root_node = plan.get_exit_points()

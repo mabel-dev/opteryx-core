@@ -34,7 +34,7 @@ class SimpleAggregateCollector:
         *,
         count_nulls=False,
         duplicate_treatment="IGNORE",
-        statistics=None,
+        telemetry=None,
     ):
         self.aggregate_type = aggregate_type
         self.current_value = None
@@ -44,7 +44,7 @@ class SimpleAggregateCollector:
         self.schema_column = schema_column
         self.column_type = schema_column.type
         self.always_count = aggregate_type in ("COUNT", "AVG")
-        self.statistics = statistics
+        self.telemetry = telemetry
 
     def collect(self, values):
         if self.always_count and self.count_nulls:
@@ -147,7 +147,7 @@ class SimpleAggregateNode(BasePlanNode):
                 aggregate_type,
                 aggregate.parameters[0].schema_column,
                 duplicate_treatment=aggregate.duplicate_treatment,
-                statistics=self.statistics,
+                telemetry=self.telemetry,
             )
 
     @property

@@ -44,7 +44,7 @@ def test_direct_as_arrow_no_limit():
     assert "name" in table.column_names, table.column_names
     assert table.num_rows == 9
     assert len(table.column_names) == 20
-    assert cur.stats["rows_read"] == 9, cur.stats
+    assert cur.telemetry["rows_read"] == 9, cur.telemetry
 
 
 if __name__ == "__main__":  # pragma: no cover

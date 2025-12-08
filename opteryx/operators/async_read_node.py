@@ -40,7 +40,7 @@ DISABLE_ZERO_COPY_BUFFER_READS = config.DISABLE_ZERO_COPY_BUFFER_READS
 ENABLE_ZERO_COPY = not DISABLE_ZERO_COPY_BUFFER_READS
 
 
-async def fetch_data(blob_names, pool, reader, reply_queue, statistics):
+async def fetch_data(blob_names, pool, reader, reply_queue, telemetry):
     import aiohttp
 
     semaphore = asyncio.Semaphore(CONCURRENT_READS)
@@ -52,10 +52,10 @@ async def fetch_data(blob_names, pool, reader, reply_queue, statistics):
         async with semaphore:
             start_per_blob = time.monotonic_ns()
             reference = await reader(
-                blob_name=blob_name, pool=pool, session=session, statistics=statistics
+                blob_name=blob_name, pool=pool, session=session, telemetry=telemetry
             )
             reply_queue.put((blob_name, reference))  # Put data onto the queue
-            statistics.time_reading_blobs += time.monotonic_ns() - start_per_blob
+            telemetry.time_reading_blobs += time.monotonic_ns() - start_per_blob
 
     tasks = (fetch_and_process(blob) for blob in blob_names)
 
@@ -84,7 +84,7 @@ class AsyncReaderNode(ReaderNode):
             yield None
             return
 
-        from opteryx import system_statistics
+        from opteryx import system_telemetry
 
         # Perform this step, time how long is spent doing work
         orso_schema = self.parameters["schema"]
@@ -96,7 +96,7 @@ class AsyncReaderNode(ReaderNode):
                 orso_schema_cols.append(col)
         orso_schema.columns = orso_schema_cols
 
-        self.statistics.columns_read += len(orso_schema.columns)
+        self.telemetry.columns_read += len(orso_schema.columns)
 
         blob_names = reader.get_list_of_blob_names(
             prefix=reader.dataset,
@@ -121,7 +121,7 @@ class AsyncReaderNode(ReaderNode):
                     AsyncMemoryPool(self.pool),
                     reader.async_read_blob,
                     data_queue,
-                    self.statistics,
+                    self.telemetry,
                 )
             ),
             daemon=True,
@@ -137,8 +137,8 @@ class AsyncReaderNode(ReaderNode):
                 item = data_queue.get(timeout=0.1)
             except queue.Empty:
                 # Increment stall count if the queue is empty (engine waiting on data).
-                self.statistics.stalls_engine_waiting_on_data += 1
-                system_statistics.io_wait_seconds += 0.1
+                self.telemetry.stalls_engine_waiting_on_data += 1
+                system_telemetry.io_wait_seconds += 0.1
                 continue  # Skip the rest of the loop and try to get an item again.
 
             if item is None:
@@ -158,15 +158,15 @@ class AsyncReaderNode(ReaderNode):
                     blob_memory_view = self.pool.read(
                         reference, zero_copy=ENABLE_ZERO_COPY, latch=ENABLE_ZERO_COPY
                     )
-                    self.statistics.bytes_read += len(blob_memory_view)
+                    self.telemetry.bytes_read += len(blob_memory_view)
                     decoded = decoder(
                         blob_memory_view, projection=self.columns, selection=self.predicates
                     )
 
                     # We read the statisics from the blob, we can use this for
                     # prefiltering the files next time we read them.
-                    if hasattr(reader, "read_blob_statistics"):
-                        reader.read_blob_statistics(
+                    if hasattr(reader, "read_blob_telemetry"):
+                        reader.read_blob_telemetry(
                             blob_name=blob_name, blob_bytes=blob_memory_view, decoder=decoder
                         )
 
@@ -183,29 +183,27 @@ class AsyncReaderNode(ReaderNode):
                             f"Unable to read blob {blob_name} - this error is likely caused by a blob having an significantly different schema to previously handled blobs, or the data catalog."
                         )
                     raise DataError(f"Unable to read blob {blob_name} - error {err}") from err
-                self.statistics.time_reading_blobs += time.monotonic_ns() - start
+                self.telemetry.time_reading_blobs += time.monotonic_ns() - start
                 num_rows, _, raw_bytes, morsel = decoded
-                self.statistics.rows_seen += num_rows
+                self.telemetry.rows_seen += num_rows
 
                 morsel = struct_to_jsonb(morsel)
                 morsel = normalize_morsel(orso_schema, morsel)
                 if morsel.column_names != ["*"]:
                     morsel = morsel.cast(arrow_schema)
 
-                self.statistics.blobs_read += 1
-                self.statistics.rows_read += morsel.num_rows
-                self.statistics.bytes_processed += morsel.nbytes
-                self.statistics.bytes_raw += raw_bytes
+                self.telemetry.blobs_read += 1
+                self.telemetry.rows_read += morsel.num_rows
+                self.telemetry.bytes_processed += morsel.nbytes
+                self.telemetry.bytes_raw += raw_bytes
 
                 self.rows_seen += morsel.num_rows
                 self.blobs_seen += 1
 
                 yield morsel
             except Exception as err:
-                self.statistics.add_message(
-                    f"failed to read {blob_name} ({err.__class__.__name__})"
-                )
-                self.statistics.failed_reads += 1
+                self.telemetry.add_message(f"failed to read {blob_name} ({err.__class__.__name__})")
+                self.telemetry.failed_reads += 1
                 import warnings
 
                 warnings.warn(f"failed to read {blob_name} - {err}")
@@ -214,7 +212,7 @@ class AsyncReaderNode(ReaderNode):
         read_thread.join()
 
         if morsel is None:
-            self.statistics.empty_datasets += 1
+            self.telemetry.empty_datasets += 1
             arrow_schema = convert_orso_schema_to_arrow_schema(orso_schema, use_identities=True)
             yield pyarrow.Table.from_arrays(
                 [pyarrow.array([]) for _ in arrow_schema], schema=arrow_schema

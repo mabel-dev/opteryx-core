@@ -21,7 +21,7 @@ from opteryx import EOS
 from opteryx.constants import ResultType
 from opteryx.exceptions import InvalidInternalStateError
 from opteryx.models import PhysicalPlan
-from opteryx.models import QueryStatistics
+from opteryx.models import QueryTelemetry
 from opteryx.utils.threading import is_free_threading_available
 
 from .serial_engine import explain
@@ -120,7 +120,7 @@ class ExecutionContext:
 
 
 def execute(
-    plan: PhysicalPlan, head_node: str = None, statistics: QueryStatistics = None
+    plan: PhysicalPlan, head_node: str = None, telemetry: QueryTelemetry = None
 ) -> Tuple[Generator[pyarrow.Table, Any, Any], ResultType]:
     """Main execution entry point."""
     from opteryx.operators import ExplainNode

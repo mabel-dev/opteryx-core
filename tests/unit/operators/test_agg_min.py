@@ -7,7 +7,7 @@ import opteryx
 
 def test_min_parquet():
     cur = opteryx.query("SELECT MIN(followers) FROM testdata.flat.formats.parquet")
-    stats = cur.stats
+    stats = cur.telemetry
     assert stats["columns_read"] == 1, stats["columns_read"]
     assert stats["rows_read"] == 100000, stats["rows_read"]
     assert stats["rows_seen"] == 100000, stats["rows_seen"]
@@ -16,7 +16,7 @@ def test_min_parquet():
 
 def test_min_non_parquet():
     cur = opteryx.query("SELECT MIN(followers) FROM testdata.flat.ten_files;")
-    stats = cur.stats
+    stats = cur.telemetry
     assert stats["columns_read"] == 1, stats["columns_read"]
     assert stats["rows_read"] == 250, stats["rows_read"]
     assert stats["rows_seen"] == 250, stats["rows_seen"]
@@ -28,7 +28,7 @@ def test_min_group_by():
     cur = opteryx.query(
         "SELECT MIN(followers) FROM testdata.flat.formats.parquet GROUP BY tweet_id ORDER BY tweet_id;"
     )
-    stats = cur.stats
+    stats = cur.telemetry
     assert stats["columns_read"] == 2, stats["columns_read"]
     assert stats["rows_read"] == 100000, stats["rows_read"]
     assert stats["rows_seen"] == 100000, stats["rows_seen"]

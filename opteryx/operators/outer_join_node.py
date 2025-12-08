@@ -201,15 +201,15 @@ class OuterJoinNode(JoinNode):
                 if self.join_type == "left outer":
                     start = time.monotonic_ns()
                     self.left_hash = build_side_hash_map(self.left_relation, self.left_columns)
-                    self.statistics.time_build_hash_map += time.monotonic_ns() - start
+                    self.telemetry.time_build_hash_map += time.monotonic_ns() - start
 
                     if self.left_relation.num_rows < 16_000_001:
                         start = time.monotonic_ns()
                         self.filter_index = create_bloom_filter(
                             self.left_relation, self.left_columns
                         )
-                        self.statistics.time_build_bloom_filter += time.monotonic_ns() - start
-                        self.statistics.feature_bloom_filter += 1
+                        self.telemetry.time_build_bloom_filter += time.monotonic_ns() - start
+                        self.telemetry.feature_bloom_filter += 1
             else:
                 if self.left_buffer_columns is None:
                     self.left_buffer_columns = morsel.schema.names

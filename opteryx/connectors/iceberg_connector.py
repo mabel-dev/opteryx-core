@@ -122,6 +122,7 @@ def to_iceberg_filter(root):
 class IcebergConnector(BaseConnector, Diachronic, LimitPushable, Statistics, PredicatePushable):
     __mode__ = "Blob"
     __type__ = "ICEBERG"
+    __synchronousity__ = "synchronous"
 
     PUSHABLE_OPS: Dict[str, bool] = {
         "Eq": True,
@@ -200,13 +201,13 @@ class IcebergConnector(BaseConnector, Diachronic, LimitPushable, Statistics, Pre
             elif self.start_date > last_committed:
                 # Point-in-time read after the latest snapshot — return current data
                 selected = snapshot_rows[-1]
-                # ensure we store the commit time for statistics/context
-                self.statistics.dataset_committed_at = selected["committed_at"].isoformat()
+                # ensure we store the commit time for telemetry/context
+                self.telemetry.dataset_committed_at = selected["committed_at"].isoformat()
             else:
                 selected = snapshot_rows[0]
                 for candidate in snapshot_rows:
                     if candidate["committed_at"] <= self.start_date:
-                        self.statistics.dataset_committed_at = candidate["committed_at"].isoformat()
+                        self.telemetry.dataset_committed_at = candidate["committed_at"].isoformat()
                         selected = candidate
                     else:
                         break
@@ -220,7 +221,7 @@ class IcebergConnector(BaseConnector, Diachronic, LimitPushable, Statistics, Pre
             iceberg_schema = self.table.schema()
         else:
             iceberg_schema = self.table.schemas()[self.snapshot.schema_id]
-            self.statistics.dataset_committed_at = datetime.datetime.fromtimestamp(
+            self.telemetry.dataset_committed_at = datetime.datetime.fromtimestamp(
                 self.snapshot.timestamp_ms / 1000.0
             ).isoformat()
         arrow_schema = iceberg_schema.as_arrow()
@@ -340,7 +341,7 @@ class IcebergConnector(BaseConnector, Diachronic, LimitPushable, Statistics, Pre
             if unsupported:
                 table = filter_records(unsupported, table)
             yield table
-            rows_read += batch.num_rows
+            rows_read += table.num_rows
 
         if batch is None:
             from orso.schema import RelationSchema

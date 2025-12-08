@@ -19,12 +19,12 @@ def test_limit_pushdown_left_outer_join():
         "LEFT JOIN testdata.planets AS p ON s.planetId = p.id LIMIT 5;"
     )
     cursor = _materialize(query)
-    plan_lines = cursor.stats["executed_plan"].splitlines()
+    plan_lines = cursor.telemetry["executed_plan"].splitlines()
     scan_line = next(
         line for line in plan_lines if "READ (testdata.satellites AS s)" in line
     )
-    assert "LIMIT 5" in scan_line, cursor.stats["executed_plan"]
-    assert cursor.stats["rows_read"] <= 14, cursor.stats
+    assert "LIMIT 5" in scan_line, cursor.telemetry["executed_plan"]
+    assert cursor.telemetry["rows_read"] <= 14, cursor.telemetry
 
 
 def test_limit_pushdown_cross_join_prefers_smaller_side():
@@ -32,12 +32,12 @@ def test_limit_pushdown_cross_join_prefers_smaller_side():
         "SELECT * FROM testdata.planets AS p CROSS JOIN testdata.satellites AS s LIMIT 5;"
     )
     cursor = _materialize(query)
-    plan_lines = cursor.stats["executed_plan"].splitlines()
+    plan_lines = cursor.telemetry["executed_plan"].splitlines()
     scan_line = next(
         line for line in plan_lines if "READ (testdata.planets AS p)" in line
     )
-    assert "LIMIT 5" in scan_line, cursor.stats["executed_plan"]
-    assert cursor.stats["rows_read"] <= 182, cursor.stats
+    assert "LIMIT 5" in scan_line, cursor.telemetry["executed_plan"]
+    assert cursor.telemetry["rows_read"] <= 182, cursor.telemetry
 
 if __name__ == "__main__":  # pragma: no cover
     pytest.main([__file__])

@@ -1043,7 +1043,7 @@ QUERY_BUILDERS = {
 
 
 def apply_visibility_filters(
-    logical_plan: LogicalPlan, visibility_filters: dict, statistics
+    logical_plan: LogicalPlan, visibility_filters: dict, telemetry
 ) -> LogicalPlan:
     for nid, node in list(logical_plan.nodes(True)):
         if node.node_type == LogicalPlanStepType.Scan:
@@ -1065,13 +1065,13 @@ def apply_visibility_filters(
                     all_relations={node.relation, node.alias},
                 )
                 logical_plan.insert_node_after(random_string(), filter_node, nid)
-                statistics.visibility_filters_blank_condition_added += 1
+                telemetry.visibility_filters_blank_condition_added += 1
             if filter_dnf:
                 # Do some basic simplification early, less binding etc to do if we can
                 # eliminate some elements from the tree now
                 start = time.monotonic_ns()
                 filter_dnf = dnf.simplify_dnf(filter_dnf)
-                statistics.time_rewriting_visibility_filters += time.monotonic_ns() - start
+                telemetry.time_rewriting_visibility_filters += time.monotonic_ns() - start
                 # Apply the transformation from DNF to an expression tree
                 expression_tree = build_expression_tree(node.alias, filter_dnf)
 
@@ -1082,7 +1082,7 @@ def apply_visibility_filters(
                 )
 
                 logical_plan.insert_node_after(random_string(), filter_node, nid)
-                statistics.visibility_filters_condition_added += 1
+                telemetry.visibility_filters_condition_added += 1
     return logical_plan
 
 

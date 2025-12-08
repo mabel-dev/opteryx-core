@@ -76,7 +76,7 @@ class InnerJoinNode(JoinNode):
 
                     start = time.monotonic_ns()
                     self.left_hash = build_side_hash_map(self.left_relation, self.left_columns)
-                    self.statistics.increase(
+                    self.telemetry.increase(
                         "time_inner_join_build_side_hash_map",
                         time.monotonic_ns() - start,
                     )
@@ -88,10 +88,10 @@ class InnerJoinNode(JoinNode):
                         self.left_filter = create_bloom_filter(
                             self.left_relation, self.left_columns
                         )
-                        self.statistics.increase(
+                        self.telemetry.increase(
                             "time_build_bloom_filter", time.monotonic_ns() - start
                         )
-                        self.statistics.increase("feature_bloom_filter", 1)
+                        self.telemetry.increase("feature_bloom_filter", 1)
 
                     # Project the left relation down to only the columns we need in the
                     # resulting morsel. This reduces the amount of data we keep in memory
@@ -101,7 +101,7 @@ class InnerJoinNode(JoinNode):
                         left_keep = [c for c in candidates if c in self.left_relation.schema.names]
                         if len(left_keep) < len(self.left_relation.schema.names):
                             self.left_relation = self.left_relation.select(left_keep)
-                            self.statistics.feature_eliminate_left_join_columns = 1
+                            self.telemetry.feature_eliminate_left_join_columns = 1
                 else:
                     if self.left_buffer_columns is None:
                         self.left_buffer_columns = morsel.schema.names
@@ -123,7 +123,7 @@ class InnerJoinNode(JoinNode):
                     maybe_in_left = self.left_filter.possibly_contains_many(
                         morsel, self.right_columns
                     )
-                    self.statistics.increase("time_bloom_filtering", time.monotonic_ns() - start)
+                    self.telemetry.increase("time_bloom_filtering", time.monotonic_ns() - start)
                     morsel = morsel.filter(maybe_in_left)
 
                     # If the bloom filter is not effective, disable it.
@@ -132,9 +132,9 @@ class InnerJoinNode(JoinNode):
                     eliminated_rows = len(maybe_in_left) - morsel.num_rows
                     if eliminated_rows < 0.05 * len(maybe_in_left):
                         self.left_filter = None
-                        self.statistics.increase("feature_dynamically_disabled_bloom_filter", 1)
+                        self.telemetry.increase("feature_dynamically_disabled_bloom_filter", 1)
 
-                    self.statistics.increase("rows_eliminated_by_bloom_filter", eliminated_rows)
+                    self.telemetry.increase("rows_eliminated_by_bloom_filter", eliminated_rows)
 
                 # do the join
                 left_indicies, right_indicies = inner_join(
@@ -150,12 +150,12 @@ class InnerJoinNode(JoinNode):
                     matched_rows,
                     materialize_time,
                 ) = get_last_inner_join_metrics()
-                self.statistics.increase("time_inner_join_hash", hash_time)
-                self.statistics.increase("time_inner_join_probe", probe_time)
-                self.statistics.increase("rows_inner_join_hashed", rows_hashed)
-                self.statistics.increase("rows_inner_join_candidates", candidate_rows)
-                self.statistics.increase("time_inner_join_indices", materialize_time)
-                self.statistics.increase("rows_inner_join_matched", matched_rows)
+                self.telemetry.increase("time_inner_join_hash", hash_time)
+                self.telemetry.increase("time_inner_join_probe", probe_time)
+                self.telemetry.increase("rows_inner_join_hashed", rows_hashed)
+                self.telemetry.increase("rows_inner_join_candidates", candidate_rows)
+                self.telemetry.increase("time_inner_join_indices", materialize_time)
+                self.telemetry.increase("rows_inner_join_matched", matched_rows)
                 start = time.monotonic_ns()
 
                 # Project the right relation down to only the columns we need in the
@@ -166,9 +166,9 @@ class InnerJoinNode(JoinNode):
                     right_keep = [c for c in candidates if c in morsel.schema.names]
                     if len(right_keep) < len(morsel.schema.names):
                         morsel = morsel.select(right_keep)
-                        self.statistics.feature_eliminate_right_join_columns = 1
+                        self.telemetry.feature_eliminate_right_join_columns = 1
 
                 aligned = align_tables(morsel, self.left_relation, right_indicies, left_indicies)
-                self.statistics.increase("time_inner_join_align", time.monotonic_ns() - start)
+                self.telemetry.increase("time_inner_join_align", time.monotonic_ns() - start)
 
                 yield aligned

@@ -69,7 +69,7 @@ def test_logical_plan_visitor():
             return node, context
 
     context = BindingContext(
-        schemas={}, qid="12345", connection=None, relations={}, statistics=None
+        schemas={}, qid="12345", connection=None, relations={}, telemetry=None
     )
 
     visitor = TestBinderVisitor()

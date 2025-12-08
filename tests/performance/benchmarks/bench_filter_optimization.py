@@ -1,5 +1,5 @@
 import time
-import statistics
+import telemetry
 import numpy as np
 import pyarrow as pa
 from typing import Tuple
@@ -63,8 +63,8 @@ def run_benchmark(n_rows: int, selectivity: float = 0.5, iterations: int = 10):
         elapsed, _ = optimized_filter_approach(table, mask)
         times_optimized.append(elapsed)
     
-    current_mean = statistics.mean(times_current)
-    optimized_mean = statistics.mean(times_optimized)
+    current_mean = telemetry.mean(times_current)
+    optimized_mean = telemetry.mean(times_optimized)
     improvement = (current_mean - optimized_mean) / current_mean * 100
     
     print(f"    Current:   {current_mean*1000:7.3f} ms")
@@ -92,5 +92,5 @@ if __name__ == "__main__":
     print("\n" + "="*70)
     print("SUMMARY")
     print("="*70)
-    print(f"Average improvement: {statistics.mean(improvements):.2f}%")
+    print(f"Average improvement: {telemetry.mean(improvements):.2f}%")
     print(f"Min: {min(improvements):.2f}%, Max: {max(improvements):.2f}%")

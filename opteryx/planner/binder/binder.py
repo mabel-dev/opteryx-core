@@ -291,7 +291,7 @@ def inner_binder(node: Node, context: BindingContext) -> Tuple[Node, Any]:
                     message = f"Function '{node.value}' is deprecated and will be removed in a future version. Use '{DEPRECATED_FUNCTIONS[node.value]}' instead."
                 else:
                     message = f"Function '{node.value}' is deprecated and will be removed in a future version."
-                context.statistics.add_message(message)
+                context.telemetry.add_message(message)
                 warnings.warn(message, category=DeprecationWarning, stacklevel=2)
 
             # we need to add this new column to the schema

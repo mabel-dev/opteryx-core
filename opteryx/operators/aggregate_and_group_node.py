@@ -239,7 +239,7 @@ class AggregateAndGroupNode(BasePlanNode):
         if self.evaluatable_nodes:
             morsel = evaluate_and_append(self.evaluatable_nodes, morsel)
         morsel = evaluate_and_append(self.groups, morsel)
-        self.statistics.time_group_by_evaluations += time.monotonic_ns() - eval_start
+        self.telemetry.time_group_by_evaluations += time.monotonic_ns() - eval_start
 
         self.buffer.append(morsel)
 
@@ -248,7 +248,7 @@ class AggregateAndGroupNode(BasePlanNode):
             group_start = time.monotonic_ns()
             morsel = morsel.group_by(self.group_by_columns)
             morsel = morsel.aggregate(self.aggregate_functions)
-            self.statistics.time_pregrouping += time.monotonic_ns() - group_start
+            self.telemetry.time_pregrouping += time.monotonic_ns() - group_start
             self.buffer[-1] = morsel
 
         # If buffer is full, do partial aggregation

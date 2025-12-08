@@ -13,9 +13,9 @@ from orso.types import OrsoTypes
 import opteryx
 import opteryx.virtual_datasets
 from opteryx.managers.expression import NodeType, evaluate
-from opteryx.models import Node, QueryStatistics
+from opteryx.models import Node, QueryTelemetry
 
-stats = QueryStatistics()
+stats = QueryTelemetry()
 
 
 # fmt:off

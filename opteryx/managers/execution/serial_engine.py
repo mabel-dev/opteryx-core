@@ -18,11 +18,11 @@ from opteryx import EOS
 from opteryx.constants import ResultType
 from opteryx.exceptions import InvalidInternalStateError
 from opteryx.models import PhysicalPlan
-from opteryx.models import QueryStatistics
+from opteryx.models import QueryTelemetry
 
 
 def execute(
-    plan: PhysicalPlan, head_node: str = None, statistics: QueryStatistics = None
+    plan: PhysicalPlan, head_node: str = None, telemetry: QueryTelemetry = None
 ) -> Tuple[Generator[pyarrow.Table, Any, Any], ResultType]:
     from opteryx.operators import ExplainNode
     from opteryx.operators import SetVariableNode
@@ -99,7 +99,7 @@ def explain(
     if len(head) != 1:  # pragma: no cover
         raise InvalidInternalStateError(f"Problem with the plan - it has {len(head)} heads.")
 
-    # for EXPLAIN ANALYZE, we execute the query and report statistics
+    # for EXPLAIN ANALYZE, we execute the query and report telemetry
     if analyze:
         # we don't want the results, just the details from the plan
         temp = None

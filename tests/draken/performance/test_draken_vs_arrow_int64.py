@@ -31,7 +31,7 @@ def performance_int64_comparison():
     local benchmarking and should not be treated as a regression test.
     """
     import time
-    import statistics
+    import telemetry
 
     # Gather Arrow array and Draken vector once
     arr = opteryx.query_to_arrow("SELECT id FROM $satellites")["id"]
@@ -65,8 +65,8 @@ def performance_int64_comparison():
             arrow_times.append((time.perf_counter_ns() - start) / 1e6)
 
         # Use median to reduce noise
-        draken_ms = statistics.median(draken_times)
-        arrow_ms = statistics.median(arrow_times)
+        draken_ms = telemetry.median(draken_times)
+        arrow_ms = telemetry.median(arrow_times)
         ratio = draken_ms / arrow_ms if arrow_ms else float("inf")
 
         results.append((name, draken_ms, arrow_ms, ratio))

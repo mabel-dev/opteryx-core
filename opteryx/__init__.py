@@ -249,28 +249,28 @@ if not config.DISABLE_HIGH_PRIORITY and hasattr(os, "nice"):  # pragma: no cover
 # Enable all warnings, including DeprecationWarning
 warnings.simplefilter("once", DeprecationWarning)
 
-# Lazy initialization of system_statistics
-_system_statistics = None
+# Lazy initialization of system_telemetry
+_system_telemetry = None
 
 
-def _get_system_statistics():
+def _get_system_telemetry():
     """
-    Lazy getter for system statistics.
+    Lazy getter for system telemetry.
 
-    System statistics are only created when first accessed, which avoids
-    importing the QueryStatistics model (and its dependencies) during the
+    System telemetry are only created when first accessed, which avoids
+    importing the QueryTelemetry model (and its dependencies) during the
     initial import of the opteryx module.
 
     Returns:
-        QueryStatistics: The global system statistics object
+        QueryTelemetry: The global system telemetry object
     """
-    global _system_statistics
-    if _system_statistics is None:
-        from opteryx.models import QueryStatistics
+    global _system_telemetry
+    if _system_telemetry is None:
+        from opteryx.models import QueryTelemetry
 
-        _system_statistics = QueryStatistics("system")
-        _system_statistics.start_time = time.time_ns()
-    return _system_statistics
+        _system_telemetry = QueryTelemetry("system")
+        _system_telemetry.start_time = time.time_ns()
+    return _system_telemetry
 
 
 # Provide access via module attribute
@@ -280,11 +280,11 @@ def __getattr__(name):
 
     This function intercepts attribute access on the opteryx module to
     implement lazy loading of heavy components like Connection and
-    system_statistics. This reduces initial import time from ~500ms to ~130ms.
+    system_telemetry. This reduces initial import time from ~500ms to ~130ms.
 
     Supported lazy attributes:
     - Connection: The main connection class
-    - system_statistics: Global query statistics object
+    - system_telemetry: Global query telemetry object
 
     Args:
         name: The attribute name being accessed
@@ -299,6 +299,6 @@ def __getattr__(name):
         from opteryx.connection import Connection
 
         return Connection
-    elif name == "system_statistics":
-        return _get_system_statistics()
+    elif name == "system_telemetry":
+        return _get_system_telemetry()
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

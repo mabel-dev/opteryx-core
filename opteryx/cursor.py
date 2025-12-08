@@ -30,7 +30,7 @@ from opteryx.exceptions import InvalidCursorStateError
 from opteryx.exceptions import MissingSqlStatement
 from opteryx.exceptions import SqlError
 from opteryx.exceptions import UnsupportedSyntaxError
-from opteryx.models import QueryStatistics
+from opteryx.models import QueryTelemetry
 from opteryx.utils import sql
 
 PROFILE_LOCATION = config.PROFILE_LOCATION
@@ -55,7 +55,7 @@ class Cursor(DataFrame):
         self._collected_stats = None
         self._plan = None
         self._qid = str(uuid4())
-        self._statistics = QueryStatistics(self._qid)
+        self._telemetry = QueryTelemetry(self._qid)
         self._query_status = QueryStatus._UNDEFINED
         self._result_type = ResultType._UNDEFINED
         self._rowcount = None
@@ -91,7 +91,7 @@ class Cursor(DataFrame):
         Returns:
             Results of the query execution.
         """
-        from opteryx import system_statistics
+        from opteryx import system_telemetry
         from opteryx.managers.execution import execute
         from opteryx.planner import query_planner
 
@@ -110,15 +110,15 @@ class Cursor(DataFrame):
                 visibility_filters=visibility_filters,
                 connection=self._connection,
                 qid=self.id,
-                statistics=self._statistics,
+                telemetry=self._telemetry,
             )
         except RuntimeError as err:  # pragma: no cover
             raise SqlError(f"Error Executing SQL Statement ({err})") from err
         finally:
-            self._statistics.time_planning += time.time_ns() - start
+            self._telemetry.time_planning += time.time_ns() - start
 
-        results = execute(plan, statistics=self._statistics)
-        system_statistics.queries_executed += 1
+        results = execute(plan, telemetry=self._telemetry)
+        system_telemetry.queries_executed += 1
 
         if results is not None:
             # we can't update tuples directly
@@ -145,7 +145,7 @@ class Cursor(DataFrame):
         Returns:
             Results of the query execution, if any.
         """
-        self._statistics.start_time = time.time_ns()
+        self._telemetry.start_time = time.time_ns()
 
         if hasattr(operation, "decode"):
             operation = operation.decode()
@@ -320,16 +320,16 @@ class Cursor(DataFrame):
             raise DataError(f"Unable to build result dataset ({err})") from err
 
     @property
-    def stats(self) -> Dict[str, Any]:
+    def telemetry(self) -> Dict[str, Any]:
         """
-        Gets the execution statistics.
+        Gets the execution telemetry.
 
         Returns:
-            Dictionary containing query execution statistics.
+            Dictionary containing query execution telemetry.
         """
-        if self._statistics.end_time == 0:  # pragma: no cover
-            self._statistics.end_time = time.time_ns()
-        return self._statistics.as_dict()
+        if self._telemetry.end_time == 0:  # pragma: no cover
+            self._telemetry.end_time = time.time_ns()
+        return self._telemetry.as_dict()
 
     def execute_to_arrow_batches(
         self,
@@ -516,7 +516,7 @@ class Cursor(DataFrame):
         Returns:
             List of warnings generated during query execution.
         """
-        return self._statistics.messages
+        return self._telemetry.messages
 
     def close(self):
         """

@@ -55,6 +55,7 @@ def get_storage_credentials():
 class GcpCloudStorageConnector(BaseConnector, Diachronic, PredicatePushable, Asynchronous):
     __mode__ = "Blob"
     __type__ = "GCS"
+    __synchronousity__ = "asynchronous"
 
     PUSHABLE_OPS: Dict[str, bool] = {
         "Eq": True,
@@ -147,11 +148,11 @@ class GcpCloudStorageConnector(BaseConnector, Diachronic, PredicatePushable, Asy
             raise DatasetReadError(f"Unable to read '{blob_name}' - {response.status_code}")
 
         content = response.content
-        self.statistics.bytes_read += len(content)
+        self.telemetry.bytes_read += len(content)
         return content
 
-    async def async_read_blob(self, *, blob_name, pool, session, statistics, **kwargs):
-        from opteryx import system_statistics
+    async def async_read_blob(self, *, blob_name, pool, session, telemetry, **kwargs):
+        from opteryx import system_telemetry
 
         bucket, _, _, _ = paths.get_parts(blob_name)
         # DEBUG: print("READ   ", blob_name)
@@ -178,8 +179,8 @@ class GcpCloudStorageConnector(BaseConnector, Diachronic, PredicatePushable, Asy
         attempts = 0
         while (ref is None or ref == -1) and attempts < max_retries:
             attempts += 1
-            statistics.stalls_io_waiting_on_engine += 1
-            system_statistics.cpu_wait_seconds += 0.1
+            telemetry.stalls_io_waiting_on_engine += 1
+            system_telemetry.cpu_wait_seconds += 0.1
             await asyncio.sleep(0.1)
             try:
                 ref = await pool.commit(data)
@@ -189,7 +190,7 @@ class GcpCloudStorageConnector(BaseConnector, Diachronic, PredicatePushable, Asy
         if ref is None or ref == -1:
             # Give up and raise so caller can handle the failure instead of hanging
             raise DatasetReadError(f"Unable to commit data to MemoryPool after {attempts} attempts")
-        statistics.bytes_read += len(data)
+        telemetry.bytes_read += len(data)
         return ref
 
     def get_list_of_blob_names(self, *, prefix: str) -> List[str]:
@@ -259,7 +260,7 @@ class GcpCloudStorageConnector(BaseConnector, Diachronic, PredicatePushable, Asy
         for blob_name in blob_names:
             try:
                 decoder = get_decoder(blob_name)
-                blob_bytes = self.read_blob(blob_name=blob_name, statistics=self.statistics)
+                blob_bytes = self.read_blob(blob_name=blob_name, telemetry=self.telemetry)
 
                 try:
                     decoded = decoder(
@@ -275,8 +276,8 @@ class GcpCloudStorageConnector(BaseConnector, Diachronic, PredicatePushable, Asy
                     num_rows, num_columns, raw_bytes, decoded = decoded
                     self.blobs_seen += 1
                     self.rows_seen += num_rows
-                    self.statistics.rows_seen += num_rows
-                    self.statistics.bytes_raw += raw_bytes
+                    self.telemetry.rows_seen += num_rows
+                    self.telemetry.bytes_raw += raw_bytes
                 yield decoded
             except UnsupportedFileTypeError:  # pragma: no cover
                 pass
@@ -300,6 +301,6 @@ class GcpCloudStorageConnector(BaseConnector, Diachronic, PredicatePushable, Asy
         if self.schema.row_count_metric and number_of_blobs > 1:
             self.schema.row_count_estimate = self.schema.row_count_metric * number_of_blobs
             self.schema.row_count_metric = None
-            self.statistics.estimated_row_count += self.schema.row_count_estimate
+            self.telemetry.estimated_row_count += self.schema.row_count_estimate
 
         return self.schema

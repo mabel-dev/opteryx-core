@@ -1,7 +1,7 @@
 import asyncio
 
 from opteryx.connectors.gcp_cloudstorage_connector import GcpCloudStorageConnector
-from opteryx.models.query_statistics import QueryStatistics
+from opteryx.models.query_telemetry import QueryTelemetry
 
 
 class FakeResponse:
@@ -43,7 +43,7 @@ def test_async_read_blob_retry_on_commit_failure():
     data = b"hello world"
     session = FakeSession(data)
     pool = FlakyPool()
-    stats = QueryStatistics("test")
+    stats = QueryTelemetry("test")
 
     # Act
     result = asyncio.run(
@@ -52,7 +52,7 @@ def test_async_read_blob_retry_on_commit_failure():
             blob_name="bucket/path/file.txt",
             pool=pool,
             session=session,
-            statistics=stats,
+            telemetry=stats,
         )
     )
 

@@ -60,7 +60,7 @@ BASIC_COMPARISON_COSTS = {
 }
 
 
-def rewrite_anded_any_eq_to_contains_all(predicate, statistics):
+def rewrite_anded_any_eq_to_contains_all(predicate, telemetry):
     """
     Rewrite multiple AND'ed ANYOPEQ conditions on the same column into a single ArrayContainsAll (@>>) condition.
 
@@ -100,9 +100,7 @@ def rewrite_anded_any_eq_to_contains_all(predicate, statistics):
     for data in anyeq_by_col.values():
         # Only worth rewriting if we have 2+ literals against the same array column
         if len(data["values"]) > 1:
-            # optional: new counter; rename if you already have a metric for this
-            if hasattr(statistics, "optimization_predicate_rewriter_anyeq_to_contains_all"):
-                statistics.optimization_predicate_rewriter_anyeq_to_contains_all += 1
+            telemetry.optimization_predicate_rewriter_anyeq_to_contains_all += 1
 
             # Reuse the first matched node as the replacement site
             new_node = data["nodes"][0]
@@ -137,7 +135,7 @@ def rewrite_anded_any_eq_to_contains_all(predicate, statistics):
     return predicate
 
 
-def order_predicates(predicates: list, statistics) -> list:
+def order_predicates(predicates: list, telemetry) -> list:
     """
     This is a fairly naive cost-based predicate ordering routine.
 
@@ -159,7 +157,7 @@ def order_predicates(predicates: list, statistics) -> list:
     # Did this optimization change the ordering?
     for i, e in enumerate(cost_estimates):
         if i > 0 and cost_estimates[i - 1][1] > e[1]:
-            statistics.optimization_cost_based_predicate_ordering += 1
+            telemetry.optimization_cost_based_predicate_ordering += 1
             break
     return ordered_predicates
 
@@ -182,7 +180,7 @@ class PredicateOrderingStrategy(OptimizationStrategy):
             new_node = LogicalPlanNode(LogicalPlanStepType.Filter)
             new_node.condition = Node(node_type=NodeType.DNF)
             context.collected_predicates = order_predicates(
-                context.collected_predicates, self.statistics
+                context.collected_predicates, self.telemetry
             )
             new_node.condition.parameters = [c.condition for c in context.collected_predicates]
             new_node.columns = []
@@ -193,11 +191,11 @@ class PredicateOrderingStrategy(OptimizationStrategy):
                 new_node.columns.extend(predicate.columns)
                 new_node.relations.update(predicate.relations)
                 new_node.all_relations.update(predicate.all_relations)
-                self.statistics.optimization_flatten_filters += 1
+                self.telemetry.optimization_flatten_filters += 1
                 context.optimized_plan.remove_node(predicate.nid, heal=True)
 
             new_node.condition = rewrite_anded_any_eq_to_contains_all(
-                new_node.condition, self.statistics
+                new_node.condition, self.telemetry
             )
 
             context.optimized_plan.insert_node_after(random_string(), new_node, context.node_id)

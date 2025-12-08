@@ -57,7 +57,7 @@ def test_gcs_storage(test_case):
     cur = conn.cursor()
     cur.execute(test_case.query)
     # DEBUG: show stats observed during test run
-    print("DEBUG cur.stats:", cur.stats)
+    print("DEBUG cur.telemetry:", cur.telemetry)
 
     # Assertions for rowcount and columncount
     assert (
@@ -67,9 +67,9 @@ def test_gcs_storage(test_case):
         cur.columncount == test_case.expected_columncount
     ), f"Expected columncount {test_case.expected_columncount}, got {cur.columncount}"
 
-    # Assertions for statistics
+    # Assertions for telemetry
     for key, expected_value in test_case.stats.items():
-        actual_value = cur.stats.get(key, None)
+        actual_value = cur.telemetry.get(key, None)
         assert (
             actual_value == expected_value
         ), f"Stats check failed for {key}: expected {expected_value}, got {actual_value}"

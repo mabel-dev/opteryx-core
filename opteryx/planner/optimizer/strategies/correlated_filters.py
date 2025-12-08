@@ -168,7 +168,7 @@ class CorrelatedFiltersStrategy(OptimizationStrategy):
                     if new_node is None:
                         continue
                     context.optimized_plan.insert_node_after(new_nid, new_node, reader_nid)
-                    self.statistics.optimization_inner_join_correlated_filter += 1
+                    self.telemetry.optimization_inner_join_correlated_filter += 1
 
         return context
 

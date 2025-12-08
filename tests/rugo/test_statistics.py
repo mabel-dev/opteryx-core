@@ -49,7 +49,7 @@ def extract_pyarrow(path: str):
         rg = md.row_group(rg_idx)
         for col_idx in range(rg.num_columns):
             col = rg.column(col_idx)
-            stats = col.statistics
+            stats = col.telemetry
             # Map PyArrow type names to rugo type names
             physical_type = type_map.get(col.physical_type, col.physical_type.lower())
             out["columns"].append({
