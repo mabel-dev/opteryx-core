@@ -152,25 +152,22 @@ class IcebergConnector(BaseConnector, Diachronic, LimitPushable, Statistics, Pre
         import pyiceberg
 
         try:
-            if not isinstance(catalog, str):
-                catalog_name, self.dataset = self.dataset.split(".", 1)
-                metastore = catalog(
-                    catalog_name=catalog_name,
-                    firestore_project=kwargs.get("firestore_project"),
-                    firestore_database=kwargs.get("firestore_database"),
-                    gcs_bucket=kwargs.get("gcs_bucket"),
-                )
-            else:
-                metastore = pyiceberg.catalog.load_catalog(catalog)
+            # DEBUG: print(self.dataset, args, kwargs)
+            catalog_name, self.dataset = self.dataset.split(".", 1)
+            metastore = catalog(
+                catalog_name=catalog_name,
+                firestore_project=kwargs.get("firestore_project"),
+                firestore_database=kwargs.get("firestore_database"),
+                gcs_bucket=kwargs.get("gcs_bucket"),
+            )
             self.table = metastore.load_table(self.dataset)
+
             self.snapshot = self.table.current_snapshot()
-            # If the table exists but has no snapshots, we don't raise here —
-            # we allow non-time-travel reads to return an empty result set with
-            # a valid schema. For time-travel (start_date specified), we will
-            # still raise DatasetReadError in get_dataset_schema.
             self.snapshot_id = None if self.snapshot is None else self.snapshot.snapshot_id
         except pyiceberg.exceptions.NoSuchTableError:
-            raise DatasetNotFoundError(dataset=self.dataset, connector=self.__type__) from None
+            raise DatasetNotFoundError(
+                dataset=f"{catalog_name}.{self.dataset}", connector=self.__type__
+            )
 
     def get_dataset_schema(self) -> RelationSchema:
         if self.start_date != self.end_date:
