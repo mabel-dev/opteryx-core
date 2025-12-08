@@ -1,19 +1,14 @@
 
 import os
 import sys
-import pyarrow
-import pytest
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
-from opteryx.config import GCP_PROJECT_ID
-from scratch.brace import BUCKET_NAME
 from tests import is_arm, is_mac, is_windows, skip_if
 from tests import set_up_iceberg
 import opteryx
 from opteryx.connectors import IcebergConnector
 from opteryx.compiled.structures.relation_statistics import to_int
-from opteryx.exceptions import DatasetReadError, UnsupportedSyntaxError
 from opteryx.models import QueryStatistics
 
 @skip_if(is_arm() or is_windows() or is_mac())
@@ -348,11 +343,12 @@ def __test_firestore_gcs_connector_registration():
         gcs_bucket=BUCKET_NAME,
     )
 
-    res = opteryx.query("SELECT COUNT(*) FROM public.space.planets;")
+    res = opteryx.query("SELECT count(*) FROM opteryx.clickbench.hits;")
+    print(res)
 
 
 if __name__ == "__main__":  # pragma: no cover
     from tests import run_tests
 
-    run_tests()
+    #run_tests()
     __test_firestore_gcs_connector_registration()

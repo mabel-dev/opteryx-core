@@ -88,10 +88,6 @@ full functionality.
 # fmt:off
 _storage_prefixes = {
     "information_schema": "InformationSchema",
-    "gs:": {"connector": "GcpCloudStorageConnector", "prefix": "gs://", "remove_prefix": True},
-    "s3:": {"connector": "AwsS3Connector", "prefix": "s3://", "remove_prefix": True},
-    "minio:": {"connector": "AwsS3Connector", "prefix": "minio://", "remove_prefix": True},
-    "file:": {"connector": "DiskConnector", "prefix": "file://", "remove_prefix": True},
 }
 # fmt:on
 
@@ -175,28 +171,25 @@ def connector_factory(dataset, statistics, **config):
 
     # Look up the prefix from the registered prefixes
     connector_entry: dict = config
+    connector = None
+
     for prefix, storage_details in _storage_prefixes.items():
-        if (
-            dataset == prefix
-            or dataset.startswith(prefix + ".")
-            or dataset.startswith(prefix + "//")
-        ):
+        if dataset == prefix or dataset.startswith(prefix + "."):
             connector_entry.update(storage_details.copy())  # type: ignore
             connector = connector_entry.pop("connector")
             # If connector is a string, lazy load it
-            if isinstance(connector, str):
-                connector = _lazy_import_connector(connector)
+            connector_class = _lazy_import_connector(connector)
             break
-    else:
+
+    if connector is None:
         # fall back to the default connector (local disk if not set)
         connector_entry = _storage_prefixes.get("_default", {})
         connector = connector_entry.pop("connector", "DiskConnector")
         remove_prefix = connector_entry.pop("remove_prefix", False)
         if remove_prefix and "." in dataset:
             dataset = dataset.split(".", 1)[1]
-        # If connector is a string, lazy load it
-        if isinstance(connector, str):
-            connector = _lazy_import_connector(connector)
+
+        connector_class = _lazy_import_connector(connector)
 
     prefix = connector_entry.pop("prefix", "")
     remove_prefix = connector_entry.pop("remove_prefix", False)
@@ -205,11 +198,10 @@ def connector_factory(dataset, statistics, **config):
         dataset = dataset[len(prefix) :]
         if dataset.startswith(".") or dataset.startswith("//"):
             dataset = dataset[1:] if dataset.startswith(".") else dataset[2:]
-        if connector.__name__ == "IcebergConnector" and dataset and "." not in dataset:
-            # Default to a namespace matching the prefix when one isn't provided
-            dataset = f"{prefix}.{dataset}"
 
-    return connector(dataset=dataset, statistics=statistics, **connector_entry)
+    # DEBUG: print(prefix, dataset, connector, _storage_prefixes)
+
+    return connector_class(dataset=dataset, statistics=statistics, **connector_entry)
 
 
 def __getattr__(name):
