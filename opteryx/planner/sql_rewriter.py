@@ -36,34 +36,15 @@
 The SQL Rewriter does the following:
 - strips comments
 - normalizes whitespace
-- temporal extraction (this is non-standard and not part of the parser)
 
-This compensates for missing temporal table support in the SQL parser (sqlparser-rs).
-This is relatively complex for what it appears to be doing - it needs to account for
-a number of situations whilst being able to reconstruct the SQL query as the parser
-would expect it.
-
-For information on temporal tables see:
-https://blog.devgenius.io/a-query-in-time-introduction-to-sql-server-temporal-tables-145ddb1355d9
-
-This supports the following syntaxes:
-
-- FOR <timestamp>
-- FOR DATES BETWEEN <timestamp> AND <timestamp>
-- FOR DATES IN <range>
-- FOR DATES SINCE <timestamp>
-- FOR LAST <number> DAYS
 
 """
 
-import datetime
 import re
-from typing import List
 
 from opteryx.exceptions import UnsupportedSyntaxError
-from opteryx.utils import dates
 
-COLLECT_RELATION = {
+SQL_PARTS = {
     r"ANALYZE\sTABLE",
     r"ANTI\sJOIN",
     r"CREATE\sTABLE",
@@ -83,11 +64,6 @@ COLLECT_RELATION = {
     r"RIGHT\sOUTER\sJOIN",
     r"RIGHT\sSEMI\sJOIN",
     r"SEMI\sJOIN",
-}
-
-COLLECT_TEMPORAL = {r"FOR"}
-
-STOP_COLLECTING = {
     r"GROUP\sBY",
     r"HAVING",
     r"LIKE",
@@ -103,27 +79,9 @@ STOP_COLLECTING = {
     r";",
     r",",
     r"UNION",
+    r"AS",
 }
 
-COLLECT_ALIAS = {r"AS"}
-
-BOUNDARIES = {r"(", r")"}
-
-FOR_DATE_CLAUSES = {
-    r"DATES\sIN\s\w+",
-    r"DATES\sBETWEEN\s[^\r\n\t\f\v]AND\s[^\r\n\t\f\v]",
-    r"DATES\sSINCE\s\w+",
-    r"LAST\s\d+\sDAYS",
-}
-
-FUNCTIONS_WITH_FROM_SYNTAX = {"EXTRACT", "SUBSTRING", "TRIM"}
-
-SQL_PARTS = (
-    COLLECT_RELATION.union(COLLECT_TEMPORAL)
-    .union(STOP_COLLECTING)
-    .union(COLLECT_ALIAS)
-    .union(FOR_DATE_CLAUSES)
-)
 
 COMBINE_WHITESPACE_REGEX = re.compile(r"\r\n\t\f\v+")
 
@@ -139,30 +97,6 @@ _KEYWORDS_REGEX = re.compile(
 # We match b prefixes separately after the non-prefix versions
 _QUOTED_STRINGS_REGEX = re.compile(
     r'("[^"]*"|\'[^\']*\'|\b[bB]"[^"]*"|\b[bB]\'[^\']*\'|\b[rR]"[^"]*"|\b[rR]\'[^\']*\'|`[^`]*`)'
-)
-
-# states for the collection algorithm
-WAITING: int = 1
-RELATION: int = 2
-TEMPORAL: int = 4
-ALIAS: int = 8
-FUNCTION_RELATION: int = 16
-
-WEEKDAYS: List[str] = [
-    "MONDAY",
-    "TUESDAY",
-    "WEDNESDAY",
-    "THURSDAY",
-    "FRIDAY",
-    "SATURDAY",
-    "SUNDAY",
-]
-
-# Get current time in UTC but without timezone info
-NOW = (
-    datetime.datetime.now(tz=datetime.timezone.utc)
-    .replace(tzinfo=None)
-    .replace(hour=0, minute=0, second=0, microsecond=0)
 )
 
 
