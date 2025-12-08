@@ -240,3 +240,4 @@ third_party/mabel/draken/vectors/timestamp_vector.c*
 third_party/mabel/draken/vectors/vector.c*
 third_party/mabel/rugo/jsonl/jsonl_reader.c*
 third_party/mabel/rugo/parquet/parquet_reader.c*
+hits/**
