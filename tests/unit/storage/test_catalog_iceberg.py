@@ -6,6 +6,8 @@ import pytest
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
+from opteryx.config import GCP_PROJECT_ID
+from scratch.brace import BUCKET_NAME
 from tests import is_arm, is_mac, is_windows, skip_if
 from tests import set_up_iceberg
 import opteryx
@@ -324,8 +326,33 @@ def test_iceberg_two_snapshot_inspection_and_contents():
     second_scan = table.scan(snapshot_id=second_snapshot_id).to_arrow()
     assert second_scan.num_rows == 3
 
+def __test_firestore_gcs_connector_registration():
+    """
+    Test that the FirestoreGCSConnector can be registered without errors.
+    This test does not require actual GCS or Firestore access.
+    """
+    FIRESTORE_DATABASE = os.environ.get("FIRESTORE_DATABASE")
+    BUCKET_NAME = os.environ.get("GCS_BUCKET")
+    GCP_PROJECT_ID = os.environ.get("GCP_PROJECT_ID")
+
+    from pyiceberg_firestore_gcs import FirestoreCatalog
+    import opteryx
+    
+    opteryx.register_store(
+        prefix="_default",
+        connector=IcebergConnector,
+        remove_prefix=False,
+        catalog=FirestoreCatalog,
+        firestore_project=GCP_PROJECT_ID,
+        firestore_database=FIRESTORE_DATABASE,
+        gcs_bucket=BUCKET_NAME,
+    )
+
+    res = opteryx.query("SELECT COUNT(*) FROM public.space.planets;")
+
 
 if __name__ == "__main__":  # pragma: no cover
     from tests import run_tests
 
     run_tests()
+    __test_firestore_gcs_connector_registration()
