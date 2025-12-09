@@ -48,7 +48,8 @@ jobs:
         uses: actions/checkout@v4.1.7
 
       - name: Install Python package dependencies
-        run: python -m pip install --upgrade cython wheel numpy setuptools_rust
+        run: |
+          python -m pip install --upgrade pip setuptools packaging wheel build cython numpy setuptools_rust
 
       - name: Create source dist
         run: python setup.py sdist
