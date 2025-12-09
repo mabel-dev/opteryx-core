@@ -41,7 +41,7 @@ class Cursor(DataFrame):
     This class inherits from the orso DataFrame library to provide features such as fetch.
     """
 
-    def __init__(self, connection):
+    def __init__(self, connection, qid: Optional[str] = None):
         """
         Initializes the Cursor object, setting the initial state and binding the connection.
 
@@ -54,7 +54,7 @@ class Cursor(DataFrame):
         self._query_planner = None
         self._collected_stats = None
         self._plan = None
-        self._qid = str(uuid4())
+        self._qid = qid if qid is not None else str(uuid4())
         self._telemetry = QueryTelemetry(self._qid)
         self._query_status = QueryStatus._UNDEFINED
         self._result_type = ResultType._UNDEFINED
@@ -113,7 +113,7 @@ class Cursor(DataFrame):
                 telemetry=self._telemetry,
             )
         except RuntimeError as err:  # pragma: no cover
-            raise SqlError(f"Error Executing SQL Statement ({err})") from err
+            raise SqlError(f"Error Executing SQL Statement ({err}) (QID:{self.id})") from err
         finally:
             self._telemetry.time_planning += time.time_ns() - start
 
@@ -312,12 +312,12 @@ class Cursor(DataFrame):
             # DEBUG: print(err)
             if "struct" in str(err):
                 raise InconsistentSchemaError(
-                    "Unable to resolve different schemas, most likely related to a STRUCT column."
+                    f"Unable to resolve different schemas, most likely related to a STRUCT column. (QID:{self.id})"
                 ) from err
 
             from opteryx.exceptions import DataError
 
-            raise DataError(f"Unable to build result dataset ({err})") from err
+            raise DataError(f"Unable to build result dataset ({err}) (QID:{self.id})") from err
 
     @property
     def telemetry(self) -> Dict[str, Any]:
@@ -556,7 +556,7 @@ class Cursor(DataFrame):
 
         In notebooks we should return a table
         """
-        return f"<opteryx.Cursor {self._state}>"
+        return f"<opteryx.Cursor {self._state} (QID:{self.id})>"
 
     def __bool__(self):
         """

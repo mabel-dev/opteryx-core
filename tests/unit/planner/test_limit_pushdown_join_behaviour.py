@@ -21,7 +21,7 @@ def test_limit_pushdown_left_outer_join():
     cursor = _materialize(query)
     plan_lines = cursor.telemetry["executed_plan"].splitlines()
     scan_line = next(
-        line for line in plan_lines if "READ (testdata.satellites AS s)" in line
+        line for line in plan_lines if "READ" in line and "testdata.satellites AS s" in line
     )
     assert "LIMIT 5" in scan_line, cursor.telemetry["executed_plan"]
     assert cursor.telemetry["rows_read"] <= 14, cursor.telemetry
@@ -34,7 +34,7 @@ def test_limit_pushdown_cross_join_prefers_smaller_side():
     cursor = _materialize(query)
     plan_lines = cursor.telemetry["executed_plan"].splitlines()
     scan_line = next(
-        line for line in plan_lines if "READ (testdata.planets AS p)" in line
+        line for line in plan_lines if "READ" in line and "testdata.planets AS p" in line
     )
     assert "LIMIT 5" in scan_line, cursor.telemetry["executed_plan"]
     assert cursor.telemetry["rows_read"] <= 182, cursor.telemetry

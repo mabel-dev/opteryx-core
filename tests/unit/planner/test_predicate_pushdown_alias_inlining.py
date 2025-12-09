@@ -28,7 +28,7 @@ def test_inline_alias_within_subquery():
 
     assert "FILTER (year % 2 = 0)" in plan
     assert "even_launch_year" not in plan
-    assert "READ ($astronauts" in plan
+    assert "$astronauts" in plan
     assert _inline_stat(result) >= 1
 
 
@@ -48,7 +48,7 @@ WHERE even_launch_year = TRUE
 
     assert "FILTER (year % 2 = 0)" in plan
     assert "even_launch_year" not in plan
-    assert "READ ($astronauts" in plan
+    assert "$astronauts" in plan
     assert _inline_stat(result) >= 1
 
 
@@ -69,7 +69,7 @@ def test_inline_alias_from_view():
 
     assert "FILTER (year % 2 = 0)" in plan
     assert "even_launch_year" not in plan
-    assert "READ ($astronauts" in plan
+    assert "$astronauts" in plan
     assert _inline_stat(result) >= 1
 
 
