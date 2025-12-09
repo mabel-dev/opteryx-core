@@ -83,7 +83,7 @@ class AwsS3Connector(BaseConnector, Diachronic, PredicatePushable, Asynchronous)
         # Minio v7 uses keyword-only args for construction (endpoint=...).
         try:
             self.minio = Minio(
-                endpoint=end_point, access_key=access_key, secret_key=secret_key, secure=secure
+                end_point, access_key=access_key, secret_key=secret_key, secure=secure
             )
         except TypeError:
             # Fall back to positional args for older Minio versions.
