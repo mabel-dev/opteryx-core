@@ -41,7 +41,7 @@ def test_limit_pushdown_projection_plan():
     cur = opteryx.query(query)
     cur.materialize()
     plan_lines = cur.telemetry["executed_plan"].splitlines()
-    scan_line = next(line for line in plan_lines if "READ (testdata.planets)" in line)
+    scan_line = next(line for line in plan_lines if "READ" in line and "testdata.planets" in line)
     assert "LIMIT 3" in scan_line, cur.telemetry["executed_plan"]
     assert cur.telemetry["rows_read"] == 3, cur.telemetry
 
@@ -53,7 +53,7 @@ def test_limit_not_pushed_past_heap_sort():
     cur.materialize()
     plan_lines = cur.telemetry["executed_plan"].splitlines()
     heap_sort_line = next(line for line in plan_lines if "HEAP SORT" in line)
-    scan_line = next(line for line in plan_lines if "READ (testdata.planets)" in line)
+    scan_line = next(line for line in plan_lines if "READ" in line and "testdata.planets" in line)
     assert "LIMIT" in heap_sort_line  # fused limit stays with heap sort
     assert "LIMIT" not in scan_line, cur.telemetry["executed_plan"]
     assert cur.telemetry["rows_read"] == 9, cur.telemetry

@@ -21,11 +21,11 @@ class _QueryTelemetry:
         return nano_seconds / 1e9
 
     def __getattr__(self, attr):
-        """allow access using stats.statistic_name"""
+        """allow access using telemetry.reading_name"""
         return self._reading[attr]
 
     def __setattr__(self, attr, value):
-        """allow access using stats.statistic_name"""
+        """allow access using telemetry.reading_name"""
         if attr == "_reading":
             super().__setattr__(attr, value)
         else:

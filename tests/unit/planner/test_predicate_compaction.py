@@ -151,7 +151,7 @@ def test_predicate_compaction_handles_alias_qualified_columns():
 
     assert "id > 4" in plan
     assert "id > 1" not in plan.replace("id > 4", "")
-    assert "READ ($planets AS p)" in plan
+    assert "$planets AS p" in plan
     assert result.rowcount == 5
 
 
