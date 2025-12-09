@@ -1,6 +1,6 @@
 [project]
 name = "opteryx_core"
-version = "0.2.0-beta.32"
+version = "0.2.0-beta.33"
 description = "Opteryx Query Engine"
 readme = {file = "README.md", content-type = "text/markdown"}
 authors = [{name='Justin Joyce', email='justin.joyce@joocer.com'}]
