@@ -1,7 +1,8 @@
 [project]
 name = "opteryx_core"
-version = "0.2.0-beta.33"
+version = "0.2.0-beta.34"
 description = "Opteryx Query Engine"
+requires-python = '>=3.13'
 readme = {file = "README.md", content-type = "text/markdown"}
 authors = [{name='Justin Joyce', email='justin.joyce@joocer.com'}]
 maintainers = [{name='Justin Joyce', email='justin.joyce@joocer.com'}]
