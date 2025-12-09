@@ -1,10 +1,10 @@
 # Opteryx
 
-Opteryx is an open-source Python SQL query engine that lets you run federated SQL queries across files, object stores, and relational databases (e.g., Parquet, Iceberg, SQLite, Postgres, MongoDB). It's embeddable, integrates with common Python tooling, and focuses on enabling SQL-on-everything.
+Opteryx-Core is fork of [Opteryx](https://github.com/mabel-dev/opteryx) with a reduced API and configuration surface.
 
 Install:
 ```bash
-pip install opteryx
+pip install opteryx-core
 ```
 
-Docs: https://opteryx.dev/  •  Source: https://github.com/mabel-dev/opteryx  •  License: Apache-2.0
+Docs: https://opteryx.dev/  •  Source: https://github.com/mabel-dev/opteryx-core  •  License: Apache-2.0
