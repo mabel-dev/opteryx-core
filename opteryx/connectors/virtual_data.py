@@ -5,7 +5,7 @@
 
 """
 The 'sample' connector provides readers for the internal sample datasets,
-$planets, $astronauts, and $satellites.
+$planets.
 
 - $no_table is used in queries where there is no relation specified 'SELECT 1'
 - $derived is used as a schema to align virtual columns to
@@ -26,10 +26,7 @@ from opteryx.exceptions import DatasetNotFoundError
 from opteryx.utils import arrow
 
 WELL_KNOWN_DATASETS = {
-    "$astronauts": ("opteryx.virtual_datasets.astronaut_data", True),
     "$planets": ("opteryx.virtual_datasets.planet_data", True),
-    "$missions": ("opteryx.virtual_datasets.missions", True),
-    "$satellites": ("opteryx.virtual_datasets.satellite_data", True),
     "$variables": ("opteryx.virtual_datasets.variables_data", True),
     "$derived": ("opteryx.virtual_datasets.derived_data", False),
     "$no_table": ("opteryx.virtual_datasets.no_table_data", False),

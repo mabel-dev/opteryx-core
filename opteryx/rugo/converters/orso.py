@@ -60,6 +60,7 @@ def _map_parquet_type_to_orso(
             _type._precision = _precision
             _type._scale = _scale
             _type._element_type = _element_type
+            # print(f"DEBUG: mapped {logical_lower} to {_type} with element_type {_element_type}")
             return _type
 
     # Fall back to physical type mapping
@@ -165,7 +166,8 @@ def rugo_to_orso_schema(
         nullable = bool(entry.get("nullable", True))
 
         orso_type = _map_parquet_type_to_orso(physical_type, logical_type)
-        columns.append(FlatColumn(name=name, type=orso_type, nullable=nullable))
+        # print(f"DEBUG: creating FlatColumn for {name}, type={orso_type}, element_type={getattr(orso_type, '_element_type', 'MISSING')}")
+        columns.append(FlatColumn(name=name, type=orso_type, nullable=nullable, precision=orso_type._precision, scale=orso_type._scale, length=orso_type._length, element_type=orso_type._element_type))
 
     if not columns:
         raise ValueError("No columns could be derived from rugo metadata")

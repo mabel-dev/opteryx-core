@@ -49,7 +49,7 @@ test_cases = [
     ("SELECT * FROM table WHERE column = b'abc' AND function_call(b'xyz');", "SELECT * FROM table WHERE column = CAST('abc' AS VARBINARY) AND function_call(CAST('xyz' AS VARBINARY));"),
 
     # failed case
-    ("SELECT * FROM $satellites WHERE (((id = 5 OR (10<11)) AND ('a'='b')) OR (name = 'Europa' AND (TRUE AND (11=11))));", "SELECT * FROM $satellites WHERE (((id = 5 OR (10<11)) AND ('a'='b')) OR (name = 'Europa' AND (TRUE AND (11=11)))) ;"),
+    ("SELECT * FROM testdata.satellites WHERE (((id = 5 OR (10<11)) AND ('a'='b')) OR (name = 'Europa' AND (TRUE AND (11=11))));", "SELECT * FROM testdata.satellites WHERE (((id = 5 OR (10<11)) AND ('a'='b')) OR (name = 'Europa' AND (TRUE AND (11=11)))) ;"),
 
     # complex quotes
     ("SELECT * FROM table WHERE column = 'This is a ''test'' string';", "SELECT * FROM table WHERE column = 'This is a ''test'' string';"),

@@ -73,14 +73,14 @@ def test_right_outer_join_distinct_with_nulls():
     in the result of an outer join.
     """
     # First verify which planets have satellites
-    satellites_result = opteryx.query("SELECT DISTINCT planetId FROM $satellites ORDER BY planetId")
+    satellites_result = opteryx.query("SELECT DISTINCT planetId FROM testdata.satellites ORDER BY planetId")
     planets_with_satellites = satellites_result.arrow().to_pydict()
     
     # Right outer join should include all planets (even those without satellites)
     result = opteryx.query("""
         SELECT DISTINCT planetId 
-        FROM $satellites 
-        RIGHT OUTER JOIN $planets ON $satellites.planetId = $planets.id
+        FROM testdata.satellites 
+        RIGHT OUTER JOIN $planets ON testdata.satellites.planetId = $planets.id
         ORDER BY planetId
     """)
     

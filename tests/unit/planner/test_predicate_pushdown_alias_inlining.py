@@ -18,7 +18,7 @@ def _inline_stat(result):
 def test_inline_alias_within_subquery():
     sql = (
         "SELECT DISTINCT mission\n"
-        "FROM (SELECT missions, year % 2 == 0 AS even_launch_year FROM $astronauts) AS astro\n"
+        "FROM (SELECT missions, year % 2 == 0 AS even_launch_year FROM testdata.astronauts) AS astro\n"
         "CROSS JOIN UNNEST(missions) AS mission\n"
         "WHERE even_launch_year = TRUE"
     )
@@ -28,7 +28,7 @@ def test_inline_alias_within_subquery():
 
     assert "FILTER (year % 2 = 0)" in plan
     assert "even_launch_year" not in plan
-    assert "$astronauts" in plan
+    assert "testdata.astronauts" in plan
     assert _inline_stat(result) >= 1
 
 
@@ -36,7 +36,7 @@ def test_inline_alias_from_cte():
     sql = """
 WITH astro AS (
     SELECT missions, year % 2 == 0 AS even_launch_year
-    FROM $astronauts
+    FROM testdata.astronauts
 )
 SELECT DISTINCT mission
 FROM astro CROSS JOIN UNNEST(missions) AS mission
@@ -48,14 +48,14 @@ WHERE even_launch_year = TRUE
 
     assert "FILTER (year % 2 = 0)" in plan
     assert "even_launch_year" not in plan
-    assert "$astronauts" in plan
+    assert "testdata.astronauts" in plan
     assert _inline_stat(result) >= 1
 
 
 def test_inline_alias_from_view():
     view_name = "inline_alias_astronaut_view"
     views.VIEWS[view_name] = {
-        "statement": "SELECT missions, year % 2 == 0 AS even_launch_year FROM $astronauts"
+        "statement": "SELECT missions, year % 2 == 0 AS even_launch_year FROM testdata.astronauts"
     }
 
     try:
@@ -69,7 +69,7 @@ def test_inline_alias_from_view():
 
     assert "FILTER (year % 2 = 0)" in plan
     assert "even_launch_year" not in plan
-    assert "$astronauts" in plan
+    assert "testdata.astronauts" in plan
     assert _inline_stat(result) >= 1
 
 
@@ -103,7 +103,7 @@ def test_inline_alias_keeps_projected_column_two():
 def test_does_not_inline_when_alias_used_directly():
     sql = (
         "SELECT *\n"
-        "FROM (SELECT year % 2 == 0 AS even_launch_year FROM $astronauts) AS astro\n"
+        "FROM (SELECT year % 2 == 0 AS even_launch_year FROM testdata.astronauts) AS astro\n"
         "WHERE even_launch_year"
     )
 
@@ -117,7 +117,7 @@ def test_does_not_inline_when_alias_used_directly():
 def test_does_not_inline_aggregated_alias():
     sql = (
         "SELECT even_launch_year\n"
-        "FROM (SELECT COUNT(*) > 1 AS even_launch_year FROM $astronauts) AS counts\n"
+        "FROM (SELECT COUNT(*) > 1 AS even_launch_year FROM testdata.astronauts) AS counts\n"
         "WHERE even_launch_year = TRUE"
     )
 

@@ -24,7 +24,7 @@ test_cases = [
     ("SELECT * FROM $planets", {"$planets": [(True, "NotEq", True)]}, (0, 20)),
 
     # WHERE 'Apollo 11' = ANY(missions)
-    ("SELECT * FROM $astronauts", {"$astronauts": [("missions", "AnyOpEq", "Apollo 11")]}, (3, 19)),
+    ("SELECT * FROM testdata.astronauts", {"testdata.astronauts": [("missions", "AnyOpEq", "Apollo 11")]}, (3, 19)),
 
     ("SELECT * FROM $planets", {"testdata.planets": [("id", "Eq", 4)]}, (9, 20)),
     ("SELECT * FROM $planets", {"$planets": [("id", "Eq", 4)]}, (1, 20)),
@@ -38,16 +38,16 @@ test_cases = [
     ("SELECT * FROM $planets", {"$planets": [("gravity", "Lt", 10)]}, (7, 20)),
     ("SELECT * FROM $planets", {"$planets": [("name", "Eq", "Earth")]}, (1, 20)),
     ("SELECT * FROM $planets", {"$planets": [("name", "Like", "%a%")]}, (4, 20)),
-    ("SELECT * FROM $satellites", {"$planets": [("id", "Eq", 4)]}, (177, 8)),
-    ("SELECT * FROM $satellites", {"$planets": [("id", "NotEq", 4)]}, (177, 8)),
-    ("SELECT * FROM $satellites", {"$planets": [("id", "Gt", 4)]}, (177, 8)),
-    ("SELECT * FROM $satellites", {"$planets": [("id", "Lt", 4)]}, (177, 8)),
-    ("SELECT * FROM $satellites", {"$satellites": [("id", "Eq", 4)]}, (1, 8)),
-    ("SELECT * FROM $satellites", {"$satellites": [("id", "NotEq", 4)]}, (176, 8)),
-    ("SELECT * FROM $satellites", {"$satellites": [("id", "Gt", 4)]}, (173, 8)),
-    ("SELECT * FROM $satellites", {"$satellites": [("id", "Lt", 4)]}, (3, 8)),
-    ("SELECT * FROM $planets", {"$planets": [("id", "Eq", 4)], "$satellites": [("id", "Gt", 4)]}, (1, 20)),
-    ("SELECT * FROM $planets", {"$planets": [("id", "NotEq", 4)], "$satellites": [("id", "Gt", 4)]}, (8, 20)),
+    ("SELECT * FROM testdata.satellites", {"$planets": [("id", "Eq", 4)]}, (177, 8)),
+    ("SELECT * FROM testdata.satellites", {"$planets": [("id", "NotEq", 4)]}, (177, 8)),
+    ("SELECT * FROM testdata.satellites", {"$planets": [("id", "Gt", 4)]}, (177, 8)),
+    ("SELECT * FROM testdata.satellites", {"$planets": [("id", "Lt", 4)]}, (177, 8)),
+    ("SELECT * FROM testdata.satellites", {"testdata.satellites": [("id", "Eq", 4)]}, (1, 8)),
+    ("SELECT * FROM testdata.satellites", {"testdata.satellites": [("id", "NotEq", 4)]}, (176, 8)),
+    ("SELECT * FROM testdata.satellites", {"testdata.satellites": [("id", "Gt", 4)]}, (173, 8)),
+    ("SELECT * FROM testdata.satellites", {"testdata.satellites": [("id", "Lt", 4)]}, (3, 8)),
+    ("SELECT * FROM $planets", {"$planets": [("id", "Eq", 4)], "testdata.satellites": [("id", "Gt", 4)]}, (1, 20)),
+    ("SELECT * FROM $planets", {"$planets": [("id", "NotEq", 4)], "testdata.satellites": [("id", "Gt", 4)]}, (8, 20)),
 
     ("SELECT * FROM $planets AS planets", {"planets": [("id", "Eq", 4)]}, (9, 20)),
     ("SELECT * FROM $planets AS p", {"$planets": [("id", "Eq", 4)]}, (1, 20)),
@@ -56,10 +56,10 @@ test_cases = [
     ("SELECT * FROM $planets", {"$planets": [[("name", "Eq", "Earth"), ("id", "Eq", 4)], [("id", "Gt", 7)]]}, (2, 20)),
     ("SELECT * FROM $planets", {"$planets": [[("id", "Eq", 4)], [("name", "Like", "M%")]]}, (2, 20)),
 
-    ("SELECT * FROM $planets AS p INNER JOIN $satellites AS s ON p.id = s.planetId", {"$planets": [("id", "Eq", 3)]}, (1, 28)),
-    ("SELECT * FROM $planets p LEFT JOIN $satellites s ON p.id = s.planetId", {"$planets": [("id", "Gt", 3)], "$satellites": [("id", "Lt", 10)]}, (12, 28)),
-    ("SELECT * FROM $planets p LEFT JOIN $satellites s ON p.id = s.planetId",  {}, (179, 28)),
-    ("SELECT * FROM $planets p LEFT JOIN $satellites s ON p.id = s.planetId",  {"$satellites": [("id", "Lt", 4)]}, (10, 28)),
+    ("SELECT * FROM $planets AS p INNER JOIN testdata.satellites AS s ON p.id = s.planetId", {"$planets": [("id", "Eq", 3)]}, (1, 28)),
+    ("SELECT * FROM $planets p LEFT JOIN testdata.satellites s ON p.id = s.planetId", {"$planets": [("id", "Gt", 3)], "testdata.satellites": [("id", "Lt", 10)]}, (12, 28)),
+    ("SELECT * FROM $planets p LEFT JOIN testdata.satellites s ON p.id = s.planetId",  {}, (179, 28)),
+    ("SELECT * FROM $planets p LEFT JOIN testdata.satellites s ON p.id = s.planetId",  {"testdata.satellites": [("id", "Lt", 4)]}, (10, 28)),
 
     ("SELECT * FROM $planets p1 JOIN $planets p2 ON p1.id = p2.id", {"$planets": [("id", "Gt", 3)], "p2": [("name", "NotEq", "X")]}, (6, 40)),
 
@@ -85,7 +85,7 @@ test_cases = [
     ("SELECT * FROM $planets WHERE id IN (3,4)", {"$planets": [("id", "NotEq", 4)]}, (1, 20)),  # only id=3 remains
     ("SELECT * FROM $planets WHERE id = 4", {"$planets": [("id", "NotEq", 4)]}, (0, 20)),
     ("SELECT * FROM $planets WHERE id = 4", {"$planets": [[("id", "Eq", 4)], [("id", "Eq", 5)]]}, (1, 20)),  # SQL restricts
-    ("SELECT * FROM $planets p JOIN $satellites s ON p.id = s.planetId WHERE p.id = 4", {"$satellites": [("id", "Gt", 5)]}, (0, 28)),
+    ("SELECT * FROM $planets p JOIN testdata.satellites s ON p.id = s.planetId WHERE p.id = 4", {"testdata.satellites": [("id", "Gt", 5)]}, (0, 28)),
 
     # double list brackets
     ("SELECT * FROM $planets WHERE name LIKE 'M%'", {"$planets": [[("name", "Like", "M%")]]}, (2, 20)),
@@ -108,7 +108,7 @@ test_cases = [
     # the visibility filter isn't applied to the VIEW
     ("SELECT * FROM mission_reports", {"mission_reports": [("id", "Eq", 4)]}, (177, 1)),
     # the visibility filter is applied to the table underneath the view
-    ("SELECT * FROM mission_reports", {"$satellites": [(("id", "Eq", 4))]}, (1, 1)),
+    ("SELECT * FROM mission_reports", {"testdata.satellites": [(("id", "Eq", 4))]}, (1, 1)),
 
     # 1) Absorption: [A] absorbs [A ∧ B]  -> expect just Earth
     ("SELECT * FROM $planets", {"$planets": [[("name","Eq","Earth")], [("name","Eq","Earth"), ("id","Eq",3)]]}, (1, 20)),
@@ -128,9 +128,9 @@ test_cases = [
     # 8) Extreme nesting noise around a single clause -> still id=3
     ("SELECT * FROM $planets", {"$planets": [[[[[("id","Eq",3)]]]]]}, (1, 20)),
     # 9) ANY OR ANY: ('Apollo 11' ANY missions) OR ('Gemini 8' ANY missions) -> 4 astronauts
-    ("SELECT * FROM $astronauts", {"$astronauts": [[("missions","AnyOpEq","Apollo 11")], [("missions","AnyOpEq","Gemini 8")]]}, (4, 19)),
+    ("SELECT * FROM testdata.astronauts", {"testdata.astronauts": [[("missions","AnyOpEq","Apollo 11")], [("missions","AnyOpEq","Gemini 8")]]}, (4, 19)),
     # 10) ANY AND ANY: ('Apollo 11' ANY missions) AND ('Gemini 8' ANY missions) -> Armstrong only
-    ("SELECT * FROM $astronauts", {"$astronauts": [[("missions","AnyOpEq","Apollo 11"), ("missions","AnyOpEq","Gemini 8")]]}, (1, 19)),
+    ("SELECT * FROM testdata.astronauts", {"testdata.astronauts": [[("missions","AnyOpEq","Apollo 11"), ("missions","AnyOpEq","Gemini 8")]]}, (1, 19)),
 
 ]
 

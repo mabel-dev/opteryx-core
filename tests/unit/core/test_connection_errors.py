@@ -38,9 +38,9 @@ def test_connection_parameter_mismatch():
         opteryx.query("SELECT * FROM $planets WHERE id = ?", (1, 2))
 
     opteryx.query(
-        "SELECT * FROM $astronauts WHERE birth_date < ?", [datetime.datetime.today().date()]
+        "SELECT * FROM testdata.astronauts WHERE birth_date < ?", [datetime.datetime.today().date()]
     )
-    opteryx.query("SELECT * FROM $astronauts WHERE birth_date < ?", [None])
+    opteryx.query("SELECT * FROM testdata.astronauts WHERE birth_date < ?", [None])
 
 
 def test_fetching():

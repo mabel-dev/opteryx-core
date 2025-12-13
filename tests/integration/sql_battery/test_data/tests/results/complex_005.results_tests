@@ -18,7 +18,7 @@ JOIN
          AVG(density) AS avg_density,
          MAX(radius) AS max_radius
      FROM 
-         $satellites as s1
+         testdata.satellites as s1
      WHERE 
          gm > 1.0
      GROUP BY 
@@ -32,7 +32,7 @@ LEFT JOIN
          MIN(id) AS min_magnitude,
          AVG(magnitude) as avg_magnitude
      FROM 
-         $satellites as s2
+         testdata.satellites as s2
      GROUP BY 
          planetId
      HAVING 

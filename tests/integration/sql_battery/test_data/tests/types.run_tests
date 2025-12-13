@@ -180,26 +180,26 @@ SELECT 42::DECIMAL / 2 = 21; -- True
 -- SELECT 42::DECIMAL / 2.0 = 21.0; -- True
 SELECT 42::DECIMAL / 2::DECIMAL = 21; -- True
 
-SELECT * FROM $astronauts WHERE birth_date - current_timestamp > INTERVAL '1' DAY;
-SELECT * FROM $astronauts WHERE current_timestamp - birth_date > INTERVAL '1' DAY;
-SELECT * FROM $astronauts WHERE birth_date + INTERVAL '1' DAY < current_timestamp;
-SELECT * FROM $astronauts WHERE current_timestamp + INTERVAL '1' DAY > birth_date;
-SELECT * FROM $astronauts WHERE birth_date - INTERVAL '1' DAY < current_timestamp;
-SELECT * FROM $astronauts WHERE current_timestamp - INTERVAL '1' DAY > birth_date;
-SELECT * FROM $astronauts WHERE (birth_date + INTERVAL '1' DAY) - current_timestamp > INTERVAL '1' DAY;
-SELECT * FROM $astronauts WHERE (current_timestamp + INTERVAL '1' DAY) - birth_date > INTERVAL '1' DAY;
--- SELECT * FROM $astronauts WHERE (birth_date - current_timestamp) + INTERVAL '1' DAY > INTERVAL '1' DAY;
--- SELECT * FROM $astronauts WHERE (current_timestamp - birth_date) + INTERVAL '1' DAY > INTERVAL '1' DAY;
-SELECT * FROM $astronauts WHERE birth_date + INTERVAL '1' DAY > INTERVAL '1' DAY - current_timestamp;
-SELECT * FROM $astronauts WHERE (current_timestamp + INTERVAL '1' DAY) - birth_date > INTERVAL '1' DAY;
--- SELECT * FROM $astronauts WHERE (birth_date - current_timestamp) + INTERVAL '1' DAY > INTERVAL '1' DAY;
--- SELECT * FROM $astronauts WHERE (current_timestamp - birth_date) + INTERVAL '1' DAY > INTERVAL '1' DAY;
-SELECT * FROM $astronauts WHERE current_timestamp + INTERVAL '1' DAY = birth_date;
-SELECT * FROM $astronauts WHERE birth_date + INTERVAL '1' DAY = current_timestamp;
-SELECT * FROM $astronauts WHERE current_timestamp - INTERVAL '1' DAY = birth_date;
-SELECT * FROM $astronauts WHERE birth_date - INTERVAL '1' DAY = current_timestamp;
-SELECT * FROM $astronauts WHERE INTERVAL '1' DAY + current_timestamp = birth_date;
-SELECT * FROM $astronauts WHERE INTERVAL '1' DAY + birth_date = current_timestamp;
+SELECT * FROM testdata.astronauts WHERE birth_date - current_timestamp > INTERVAL '1' DAY;
+SELECT * FROM testdata.astronauts WHERE current_timestamp - birth_date > INTERVAL '1' DAY;
+SELECT * FROM testdata.astronauts WHERE birth_date + INTERVAL '1' DAY < current_timestamp;
+SELECT * FROM testdata.astronauts WHERE current_timestamp + INTERVAL '1' DAY > birth_date;
+SELECT * FROM testdata.astronauts WHERE birth_date - INTERVAL '1' DAY < current_timestamp;
+SELECT * FROM testdata.astronauts WHERE current_timestamp - INTERVAL '1' DAY > birth_date;
+SELECT * FROM testdata.astronauts WHERE (birth_date + INTERVAL '1' DAY) - current_timestamp > INTERVAL '1' DAY;
+SELECT * FROM testdata.astronauts WHERE (current_timestamp + INTERVAL '1' DAY) - birth_date > INTERVAL '1' DAY;
+-- SELECT * FROM testdata.astronauts WHERE (birth_date - current_timestamp) + INTERVAL '1' DAY > INTERVAL '1' DAY;
+-- SELECT * FROM testdata.astronauts WHERE (current_timestamp - birth_date) + INTERVAL '1' DAY > INTERVAL '1' DAY;
+SELECT * FROM testdata.astronauts WHERE birth_date + INTERVAL '1' DAY > INTERVAL '1' DAY - current_timestamp;
+SELECT * FROM testdata.astronauts WHERE (current_timestamp + INTERVAL '1' DAY) - birth_date > INTERVAL '1' DAY;
+-- SELECT * FROM testdata.astronauts WHERE (birth_date - current_timestamp) + INTERVAL '1' DAY > INTERVAL '1' DAY;
+-- SELECT * FROM testdata.astronauts WHERE (current_timestamp - birth_date) + INTERVAL '1' DAY > INTERVAL '1' DAY;
+SELECT * FROM testdata.astronauts WHERE current_timestamp + INTERVAL '1' DAY = birth_date;
+SELECT * FROM testdata.astronauts WHERE birth_date + INTERVAL '1' DAY = current_timestamp;
+SELECT * FROM testdata.astronauts WHERE current_timestamp - INTERVAL '1' DAY = birth_date;
+SELECT * FROM testdata.astronauts WHERE birth_date - INTERVAL '1' DAY = current_timestamp;
+SELECT * FROM testdata.astronauts WHERE INTERVAL '1' DAY + current_timestamp = birth_date;
+SELECT * FROM testdata.astronauts WHERE INTERVAL '1' DAY + birth_date = current_timestamp;
 
 -- NULL Handling
 SELECT BLOB('apple') = NULL;
@@ -250,10 +250,10 @@ SELECT 42.0 > 41.9999;
 SELECT -0 = 0;
 
 -- Comparisons with Interval Arithmetic
-SELECT * FROM $astronauts WHERE birth_date - current_timestamp > INTERVAL '1' DAY;
-SELECT * FROM $astronauts WHERE birth_date + INTERVAL '1' DAY < current_timestamp;
-SELECT * FROM $astronauts WHERE current_timestamp - INTERVAL '1' DAY = birth_date;
-SELECT * FROM $astronauts WHERE INTERVAL '1' DAY + current_timestamp = birth_date;
+SELECT * FROM testdata.astronauts WHERE birth_date - current_timestamp > INTERVAL '1' DAY;
+SELECT * FROM testdata.astronauts WHERE birth_date + INTERVAL '1' DAY < current_timestamp;
+SELECT * FROM testdata.astronauts WHERE current_timestamp - INTERVAL '1' DAY = birth_date;
+SELECT * FROM testdata.astronauts WHERE INTERVAL '1' DAY + current_timestamp = birth_date;
 
 -- Explicit Type Casting to Various Types
 SELECT CAST(BLOB('42') AS INTEGER) = 42;
@@ -320,21 +320,21 @@ SELECT CAST(BLOB('apple') AS VARCHAR) NOT LIKE '%apple%';
 SELECT CAST(BLOB('hello world') AS VARCHAR) RLIKE 'hello.*world';
 
 -- EXTRACT returns different typed values depending on the input
-SELECT birth_date FROM $astronauts WHERE EXTRACT(CENTURY FROM birth_date) <= 15;
-SELECT birth_date FROM $astronauts WHERE EXTRACT(DECADE FROM birth_date) <= 15;
-SELECT birth_date FROM $astronauts WHERE EXTRACT(isoyear FROM birth_date) < 1900;
-SELECT birth_date FROM $astronauts WHERE EXTRACT(YEAR FROM birth_date) < 1900;
-SELECT birth_date FROM $astronauts WHERE EXTRACT(DOY FROM birth_date) > 100;
-SELECT birth_date FROM $astronauts WHERE EXTRACT(dayofyear FROM birth_date) > 100;
-SELECT birth_date FROM $astronauts WHERE EXTRACT(QUARTER FROM birth_date) > 100;
-SELECT birth_date FROM $astronauts WHERE EXTRACT(MONTH FROM birth_date) = 1;
-SELECT birth_date FROM $astronauts WHERE EXTRACT(week FROM birth_date) = 1;
-SELECT birth_date FROM $astronauts WHERE EXTRACT(isoweek FROM birth_date) = 1;
-SELECT birth_date FROM $astronauts WHERE EXTRACT(DOW FROM birth_date) = 0;
-SELECT birth_date FROM $astronauts WHERE EXTRACT(dayofweek FROM birth_date) < 5;
-SELECT birth_date FROM $astronauts WHERE EXTRACT(HOUR FROM birth_date) <= 15;
-SELECT birth_date FROM $astronauts WHERE EXTRACT(MINUTE FROM birth_date) <= 15;
-SELECT birth_date FROM $astronauts WHERE EXTRACT(SECOND FROM birth_date) <= 15;
+SELECT birth_date FROM testdata.astronauts WHERE EXTRACT(CENTURY FROM birth_date) <= 15;
+SELECT birth_date FROM testdata.astronauts WHERE EXTRACT(DECADE FROM birth_date) <= 15;
+SELECT birth_date FROM testdata.astronauts WHERE EXTRACT(isoyear FROM birth_date) < 1900;
+SELECT birth_date FROM testdata.astronauts WHERE EXTRACT(YEAR FROM birth_date) < 1900;
+SELECT birth_date FROM testdata.astronauts WHERE EXTRACT(DOY FROM birth_date) > 100;
+SELECT birth_date FROM testdata.astronauts WHERE EXTRACT(dayofyear FROM birth_date) > 100;
+SELECT birth_date FROM testdata.astronauts WHERE EXTRACT(QUARTER FROM birth_date) > 100;
+SELECT birth_date FROM testdata.astronauts WHERE EXTRACT(MONTH FROM birth_date) = 1;
+SELECT birth_date FROM testdata.astronauts WHERE EXTRACT(week FROM birth_date) = 1;
+SELECT birth_date FROM testdata.astronauts WHERE EXTRACT(isoweek FROM birth_date) = 1;
+SELECT birth_date FROM testdata.astronauts WHERE EXTRACT(DOW FROM birth_date) = 0;
+SELECT birth_date FROM testdata.astronauts WHERE EXTRACT(dayofweek FROM birth_date) < 5;
+SELECT birth_date FROM testdata.astronauts WHERE EXTRACT(HOUR FROM birth_date) <= 15;
+SELECT birth_date FROM testdata.astronauts WHERE EXTRACT(MINUTE FROM birth_date) <= 15;
+SELECT birth_date FROM testdata.astronauts WHERE EXTRACT(SECOND FROM birth_date) <= 15;
 SELECT EXTRACT(MILLISECOND FROM NOW()) < 1000;
 SELECT EXTRACT(MILLISECONDS FROM NOW()) < 1000;
 SELECT EXTRACT(NANOSECOND FROM NOW()) < 1000000000;
@@ -376,9 +376,9 @@ SELECT COUNT(DISTINCT mass) FROM $planets; -- DOUBLE
 SELECT COUNT(DISTINCT name) FROM $planets; -- VARCHAR
 SELECT COUNT(DISTINCT id) FROM $planets; -- INTEGER
 SELECT COUNT(DISTINCT gravity) FROM $planets; -- DECIMAL
-SELECT COUNT(DISTINCT alma_mater) AS AM FROM $astronauts; -- LIST<VARCHAR>
-SELECT COUNT(DISTINCT birth_place) FROM $astronauts; -- JSONB/STRUCT
-SELECT COUNT(DISTINCT death_date) AS AM FROM $astronauts; -- TIMESTAMP
+SELECT COUNT(DISTINCT alma_mater) AS AM FROM testdata.astronauts; -- LIST<VARCHAR>
+SELECT COUNT(DISTINCT birth_place) FROM testdata.astronauts; -- JSONB/STRUCT
+SELECT COUNT(DISTINCT death_date) AS AM FROM testdata.astronauts; -- TIMESTAMP
 SELECT COUNT(DISTINCT id > 1) AS AM FROM $planets; -- BOOLEAN
 SELECT COUNT(DISTINCT surfacePressure > 1) AS AM FROM $planets; -- BOOLEAN (with nulls)
 
@@ -399,83 +399,83 @@ SELECT alma_mater::ARRAY<BOOLEAN> FROM testdata.astronauts
 SELECT CAST(CAST(alma_mater AS ARRAY<BOOLEAN>) AS ARRAY<VARCHAR>) FROM testdata.astronauts
 SELECT CAST(CAST(alma_mater AS ARRAY<BLOB>) AS ARRAY<VARCHAR>) FROM testdata.astronauts
 
-SELECT * FROM $astronauts WHERE birth_place->>'town' ILIKE b'C%e%r'
-SELECT * FROM $astronauts WHERE birth_place->>'town' ILIKE 'C%e%r'
-SELECT * FROM $astronauts WHERE birth_place->>'town' LIKE b'C%e%r'
-SELECT * FROM $astronauts WHERE birth_place->>'town' LIKE 'C%e%r'
-SELECT * FROM $astronauts WHERE birth_place->'town' ILIKE b'C%e%r'
-SELECT * FROM $astronauts WHERE birth_place->'town' ILIKE 'C%e%r'
-SELECT * FROM $astronauts WHERE birth_place->'town' LIKE b'C%e%r'
-SELECT * FROM $astronauts WHERE birth_place->'town' LIKE 'C%e%r'
-SELECT * FROM $astronauts WHERE BLOB(birth_place->'town') ILIKE b'C%e%r'
-SELECT * FROM $astronauts WHERE BLOB(birth_place->'town') ILIKE 'C%e%r'
-SELECT * FROM $astronauts WHERE BLOB(birth_place->'town') LIKE b'C%e%r'
-SELECT * FROM $astronauts WHERE BLOB(birth_place->'town') LIKE 'C%e%r'
-SELECT * FROM $astronauts WHERE VARCHAR(birth_place->'town') ILIKE b'C%e%r'
-SELECT * FROM $astronauts WHERE VARCHAR(birth_place->'town') ILIKE 'C%e%r'
-SELECT * FROM $astronauts WHERE VARCHAR(birth_place->'town') LIKE b'C%e%r'
-SELECT * FROM $astronauts WHERE VARCHAR(birth_place->'town') LIKE 'C%e%r'
+SELECT * FROM testdata.astronauts WHERE birth_place->>'town' ILIKE b'C%e%r'
+SELECT * FROM testdata.astronauts WHERE birth_place->>'town' ILIKE 'C%e%r'
+SELECT * FROM testdata.astronauts WHERE birth_place->>'town' LIKE b'C%e%r'
+SELECT * FROM testdata.astronauts WHERE birth_place->>'town' LIKE 'C%e%r'
+SELECT * FROM testdata.astronauts WHERE birth_place->'town' ILIKE b'C%e%r'
+SELECT * FROM testdata.astronauts WHERE birth_place->'town' ILIKE 'C%e%r'
+SELECT * FROM testdata.astronauts WHERE birth_place->'town' LIKE b'C%e%r'
+SELECT * FROM testdata.astronauts WHERE birth_place->'town' LIKE 'C%e%r'
+SELECT * FROM testdata.astronauts WHERE BLOB(birth_place->'town') ILIKE b'C%e%r'
+SELECT * FROM testdata.astronauts WHERE BLOB(birth_place->'town') ILIKE 'C%e%r'
+SELECT * FROM testdata.astronauts WHERE BLOB(birth_place->'town') LIKE b'C%e%r'
+SELECT * FROM testdata.astronauts WHERE BLOB(birth_place->'town') LIKE 'C%e%r'
+SELECT * FROM testdata.astronauts WHERE VARCHAR(birth_place->'town') ILIKE b'C%e%r'
+SELECT * FROM testdata.astronauts WHERE VARCHAR(birth_place->'town') ILIKE 'C%e%r'
+SELECT * FROM testdata.astronauts WHERE VARCHAR(birth_place->'town') LIKE b'C%e%r'
+SELECT * FROM testdata.astronauts WHERE VARCHAR(birth_place->'town') LIKE 'C%e%r'
 
-SELECT * FROM $astronauts WHERE 'MIT' = ANY(alma_mater);
+SELECT * FROM testdata.astronauts WHERE 'MIT' = ANY(alma_mater);
 SELECT 1 = ANY(i) FROM (SELECT ARRAY_AGG(id) AS i FROM $planets GROUP BY gravity) AS A;
 SELECT 1 = ANY(i) FROM (SELECT ARRAY_AGG(mass) AS i FROM $planets GROUP BY gravity) AS A;
 SELECT 1 = ANY(i) FROM (SELECT ARRAY_AGG(gravity) AS i FROM $planets GROUP BY gravity) AS A;
-SELECT '1936-03-07' = ANY(i), i FROM (SELECT ARRAY_AGG(birth_date) AS i FROM $astronauts GROUP BY status) AS A;
-SELECT CAST('1936-03-07' AS DATE) = ANY(i), i FROM (SELECT ARRAY_AGG(birth_date) AS i FROM $astronauts GROUP BY status) AS A
+SELECT '1936-03-07' = ANY(i), i FROM (SELECT ARRAY_AGG(birth_date) AS i FROM testdata.astronauts GROUP BY status) AS A;
+SELECT CAST('1936-03-07' AS DATE) = ANY(i), i FROM (SELECT ARRAY_AGG(birth_date) AS i FROM testdata.astronauts GROUP BY status) AS A
 SELECT True = ANY(i) FROM (SELECT ARRAY_AGG(id > 5) AS i FROM $planets GROUP BY gravity) AS A;
 
-SELECT * FROM $astronauts WHERE 'MIT' != ANY(alma_mater);
+SELECT * FROM testdata.astronauts WHERE 'MIT' != ANY(alma_mater);
 SELECT 1 != ANY(i) FROM (SELECT ARRAY_AGG(id) AS i FROM $planets GROUP BY gravity) AS A;
 SELECT 1 != ANY(i) FROM (SELECT ARRAY_AGG(mass) AS i FROM $planets GROUP BY gravity) AS A;
 SELECT 1 != ANY(i) FROM (SELECT ARRAY_AGG(gravity) AS i FROM $planets GROUP BY gravity) AS A;
-SELECT '1936-03-07' != ANY(i), i FROM (SELECT ARRAY_AGG(birth_date) AS i FROM $astronauts GROUP BY status) AS A;
-SELECT CAST('1936-03-07' AS DATE) != ANY(i), i FROM (SELECT ARRAY_AGG(birth_date) AS i FROM $astronauts GROUP BY status) AS A
+SELECT '1936-03-07' != ANY(i), i FROM (SELECT ARRAY_AGG(birth_date) AS i FROM testdata.astronauts GROUP BY status) AS A;
+SELECT CAST('1936-03-07' AS DATE) != ANY(i), i FROM (SELECT ARRAY_AGG(birth_date) AS i FROM testdata.astronauts GROUP BY status) AS A
 SELECT True != ANY(i) FROM (SELECT ARRAY_AGG(id > 5) AS i FROM $planets GROUP BY gravity) AS A;
 
-SELECT * FROM $astronauts WHERE 'MIT' > ANY(alma_mater);
+SELECT * FROM testdata.astronauts WHERE 'MIT' > ANY(alma_mater);
 SELECT 1 > ANY(i) FROM (SELECT ARRAY_AGG(id) AS i FROM $planets GROUP BY gravity) AS A;
 SELECT 1 > ANY(i) FROM (SELECT ARRAY_AGG(mass) AS i FROM $planets GROUP BY gravity) AS A;
 SELECT 1 > ANY(i) FROM (SELECT ARRAY_AGG(gravity) AS i FROM $planets GROUP BY gravity) AS A;
-SELECT '1936-03-07' > ANY(i), i FROM (SELECT ARRAY_AGG(birth_date) AS i FROM $astronauts GROUP BY status) AS A;
-SELECT CAST('1936-03-07' AS DATE) > ANY(i), i FROM (SELECT ARRAY_AGG(birth_date) AS i FROM $astronauts GROUP BY status) AS A
+SELECT '1936-03-07' > ANY(i), i FROM (SELECT ARRAY_AGG(birth_date) AS i FROM testdata.astronauts GROUP BY status) AS A;
+SELECT CAST('1936-03-07' AS DATE) > ANY(i), i FROM (SELECT ARRAY_AGG(birth_date) AS i FROM testdata.astronauts GROUP BY status) AS A
 SELECT True > ANY(i) FROM (SELECT ARRAY_AGG(id > 5) AS i FROM $planets GROUP BY gravity) AS A;
 
-SELECT * FROM $astronauts WHERE 'MIT' >= ANY(alma_mater);
+SELECT * FROM testdata.astronauts WHERE 'MIT' >= ANY(alma_mater);
 SELECT 1 >= ANY(i) FROM (SELECT ARRAY_AGG(id) AS i FROM $planets GROUP BY gravity) AS A;
 SELECT 1 >= ANY(i) FROM (SELECT ARRAY_AGG(mass) AS i FROM $planets GROUP BY gravity) AS A;
 SELECT 1 >= ANY(i) FROM (SELECT ARRAY_AGG(gravity) AS i FROM $planets GROUP BY gravity) AS A;
-SELECT '1936-03-07' >= ANY(i), i FROM (SELECT ARRAY_AGG(birth_date) AS i FROM $astronauts GROUP BY status) AS A;
-SELECT CAST('1936-03-07' AS DATE) >= ANY(i), i FROM (SELECT ARRAY_AGG(birth_date) AS i FROM $astronauts GROUP BY status) AS A
+SELECT '1936-03-07' >= ANY(i), i FROM (SELECT ARRAY_AGG(birth_date) AS i FROM testdata.astronauts GROUP BY status) AS A;
+SELECT CAST('1936-03-07' AS DATE) >= ANY(i), i FROM (SELECT ARRAY_AGG(birth_date) AS i FROM testdata.astronauts GROUP BY status) AS A
 SELECT True >= ANY(i) FROM (SELECT ARRAY_AGG(id > 5) AS i FROM $planets GROUP BY gravity) AS A;
 
-SELECT * FROM $astronauts WHERE 'MIT' < ANY(alma_mater);
+SELECT * FROM testdata.astronauts WHERE 'MIT' < ANY(alma_mater);
 SELECT 1 < ANY(i) FROM (SELECT ARRAY_AGG(id) AS i FROM $planets GROUP BY gravity) AS A;
 SELECT 1 < ANY(i) FROM (SELECT ARRAY_AGG(mass) AS i FROM $planets GROUP BY gravity) AS A;
 SELECT 1 < ANY(i) FROM (SELECT ARRAY_AGG(gravity) AS i FROM $planets GROUP BY gravity) AS A;
-SELECT '1936-03-07' < ANY(i), i FROM (SELECT ARRAY_AGG(birth_date) AS i FROM $astronauts GROUP BY status) AS A;
-SELECT CAST('1936-03-07' AS DATE) < ANY(i), i FROM (SELECT ARRAY_AGG(birth_date) AS i FROM $astronauts GROUP BY status) AS A
+SELECT '1936-03-07' < ANY(i), i FROM (SELECT ARRAY_AGG(birth_date) AS i FROM testdata.astronauts GROUP BY status) AS A;
+SELECT CAST('1936-03-07' AS DATE) < ANY(i), i FROM (SELECT ARRAY_AGG(birth_date) AS i FROM testdata.astronauts GROUP BY status) AS A
 SELECT True < ANY(i) FROM (SELECT ARRAY_AGG(id > 5) AS i FROM $planets GROUP BY gravity) AS A;
 
-SELECT * FROM $astronauts WHERE 'MIT' <= ANY(alma_mater);
+SELECT * FROM testdata.astronauts WHERE 'MIT' <= ANY(alma_mater);
 SELECT 1 <= ANY(i) FROM (SELECT ARRAY_AGG(id) AS i FROM $planets GROUP BY gravity) AS A;
 SELECT 1 <= ANY(i) FROM (SELECT ARRAY_AGG(mass) AS i FROM $planets GROUP BY gravity) AS A;
 SELECT 1 <= ANY(i) FROM (SELECT ARRAY_AGG(gravity) AS i FROM $planets GROUP BY gravity) AS A;
-SELECT '1936-03-07' <= ANY(i), i FROM (SELECT ARRAY_AGG(birth_date) AS i FROM $astronauts GROUP BY status) AS A;
-SELECT CAST('1936-03-07' AS DATE) <= ANY(i), i FROM (SELECT ARRAY_AGG(birth_date) AS i FROM $astronauts GROUP BY status) AS A
+SELECT '1936-03-07' <= ANY(i), i FROM (SELECT ARRAY_AGG(birth_date) AS i FROM testdata.astronauts GROUP BY status) AS A;
+SELECT CAST('1936-03-07' AS DATE) <= ANY(i), i FROM (SELECT ARRAY_AGG(birth_date) AS i FROM testdata.astronauts GROUP BY status) AS A
 SELECT True <= ANY(i) FROM (SELECT ARRAY_AGG(id > 5) AS i FROM $planets GROUP BY gravity) AS A;
 
-SELECT * FROM $astronauts WHERE 'MIT' = ALL(alma_mater);
+SELECT * FROM testdata.astronauts WHERE 'MIT' = ALL(alma_mater);
 SELECT 1 = ALL(i) FROM (SELECT ARRAY_AGG(id) AS i FROM $planets GROUP BY gravity) AS A;
 SELECT 1 = ALL(i) FROM (SELECT ARRAY_AGG(mass) AS i FROM $planets GROUP BY gravity) AS A;
 SELECT 1 = ALL(i) FROM (SELECT ARRAY_AGG(gravity) AS i FROM $planets GROUP BY gravity) AS A;
-SELECT '1936-03-07' = ALL(i), i FROM (SELECT ARRAY_AGG(birth_date) AS i FROM $astronauts GROUP BY status) AS A;
-SELECT CAST('1936-03-07' AS DATE) = ALL(i), i FROM (SELECT ARRAY_AGG(birth_date) AS i FROM $astronauts GROUP BY status) AS A
+SELECT '1936-03-07' = ALL(i), i FROM (SELECT ARRAY_AGG(birth_date) AS i FROM testdata.astronauts GROUP BY status) AS A;
+SELECT CAST('1936-03-07' AS DATE) = ALL(i), i FROM (SELECT ARRAY_AGG(birth_date) AS i FROM testdata.astronauts GROUP BY status) AS A
 SELECT True = ALL(i) FROM (SELECT ARRAY_AGG(id > 5) AS i FROM $planets GROUP BY gravity) AS A;
 
-SELECT * FROM $astronauts WHERE 'MIT' != ALL(alma_mater);
+SELECT * FROM testdata.astronauts WHERE 'MIT' != ALL(alma_mater);
 SELECT 1 != ALL(i) FROM (SELECT ARRAY_AGG(id) AS i FROM $planets GROUP BY gravity) AS A;
 SELECT 1 != ALL(i) FROM (SELECT ARRAY_AGG(mass) AS i FROM $planets GROUP BY gravity) AS A;
 SELECT 1 != ALL(i) FROM (SELECT ARRAY_AGG(gravity) AS i FROM $planets GROUP BY gravity) AS A;
-SELECT '1936-03-07' != ALL(i), i FROM (SELECT ARRAY_AGG(birth_date) AS i FROM $astronauts GROUP BY status) AS A;
-SELECT CAST('1936-03-07' AS DATE) != ALL(i), i FROM (SELECT ARRAY_AGG(birth_date) AS i FROM $astronauts GROUP BY status) AS A
+SELECT '1936-03-07' != ALL(i), i FROM (SELECT ARRAY_AGG(birth_date) AS i FROM testdata.astronauts GROUP BY status) AS A;
+SELECT CAST('1936-03-07' AS DATE) != ALL(i), i FROM (SELECT ARRAY_AGG(birth_date) AS i FROM testdata.astronauts GROUP BY status) AS A
 SELECT True != ALL(i) FROM (SELECT ARRAY_AGG(id > 5) AS i FROM $planets GROUP BY gravity) AS A;

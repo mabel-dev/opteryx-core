@@ -1,6 +1,6 @@
 {
     "get_satellites_by_planet_name": {
-        "statement": "/* A test case FOR the EXECUTE query functionality */ SELECT s.name AS satellite_name FROM $satellites AS s INNER JOIN $planets AS p ON p.id = s.planetId WHERE p.name = :name",
+        "statement": "/* A test case FOR the EXECUTE query functionality */ SELECT s.name AS satellite_name FROM testdata.satellites AS s INNER JOIN $planets AS p ON p.id = s.planetId WHERE p.name = :name",
         "parameters": [
             {
                 "name": "name",

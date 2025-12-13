@@ -20,7 +20,7 @@ LEFT JOIN
          planetId, 
          COUNT(*) AS occurances 
      FROM 
-         $satellites s1 
+         testdata.satellites s1 
      FOR DATES BETWEEN '2022-01-01' AND TODAY 
      WHERE 
          gm > 10 
@@ -33,7 +33,7 @@ LEFT JOIN
          planetId, 
          COUNT(*) AS occurances 
      FROM 
-         $satellites s2 
+         testdata.satellites s2 
      FOR DATES IN LAST_MONTH 
      WHERE 
          gm < 10 

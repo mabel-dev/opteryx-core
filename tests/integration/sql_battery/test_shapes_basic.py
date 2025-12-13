@@ -58,15 +58,15 @@ from opteryx.connectors import IcebergConnector
 # fmt:off
 STATEMENTS = [
         # Are the datasets the shape we expect?
-        ("SELECT * FROM $satellites", 177, 8, None),
+        ("SELECT * FROM testdata.satellites", 177, 8, None),
         ("SELECT * FROM $planets", 9, 20, None),
-        ("SELECT * FROM $astronauts", 357, 19, None),
+        ("SELECT * FROM testdata.astronauts", 357, 19, None),
         ("SELECT * FROM $no_table", 1, 1, None),
         ("SELECT * FROM $variables", 41, 5, None),
-        ("SELECT * FROM $missions", 4630, 8, None),
+        ("SELECT * FROM testdata.missions", 4630, 8, None),
         ("SELECT * FROM $telemetry", 17, 2, None),
         ("SELECT * FROM $stop_words", 305, 1, None),
-        (b"SELECT * FROM $satellites", 177, 8, None),
+        (b"SELECT * FROM testdata.satellites", 177, 8, None),
         ("SELECT * FROM testdata.missions", 4630, 8, None),
         ("SELECT * FROM testdata.satellites", 177, 8, None),
         ("SELECT * FROM testdata.planets", 9, 20, None),
@@ -81,7 +81,7 @@ STATEMENTS = [
         # PAGING OF DATASETS AFTER A GROUP BY [#179]
         ("SELECT * FROM (SELECT COUNT(*), column_1 FROM FAKE(5000,2) AS FK GROUP BY column_1 ORDER BY COUNT(*)) AS SQ LIMIT 5", 5, 2, None),
         # FILTER CREATION FOR 3 OR MORE ANDED PREDICATES FAILS [#182]
-        ("SELECT * FROM $astronauts WHERE name LIKE '%o%' AND `year` > 1900 AND gender ILIKE '%ale%' AND group IN (1,2,3,4,5,6)", 41, 19, None),
+        ("SELECT * FROM testdata.astronauts WHERE name LIKE '%o%' AND `year` > 1900 AND gender ILIKE '%ale%' AND group IN (1,2,3,4,5,6)", 41, 19, None),
 
         # Additional basic query patterns - LIMIT and OFFSET
         ("SELECT * FROM $planets LIMIT 5", 5, 20, None),
@@ -113,9 +113,9 @@ STATEMENTS = [
         ("SELECT MAX(id) FROM $planets", 1, 1, None),
 
         # GROUP BY with aggregations
-        ("SELECT COUNT(*) FROM $satellites GROUP BY planetId", 7, 1, None),
-        ("SELECT planetId, COUNT(*) FROM $satellites GROUP BY planetId", 7, 2, None),
-        ("SELECT planetId, COUNT(*), MAX(id) FROM $satellites GROUP BY planetId", 7, 3, None),
+        ("SELECT COUNT(*) FROM testdata.satellites GROUP BY planetId", 7, 1, None),
+        ("SELECT planetId, COUNT(*) FROM testdata.satellites GROUP BY planetId", 7, 2, None),
+        ("SELECT planetId, COUNT(*), MAX(id) FROM testdata.satellites GROUP BY planetId", 7, 3, None),
 
         # WHERE clause variations
         ("SELECT * FROM $planets WHERE id = 1", 1, 20, None),

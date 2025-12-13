@@ -7,36 +7,36 @@ SELECT * FROM $planets WHERE TRUE OR FALSE;
 SELECT * FROM $planets WHERE FALSE OR TRUE;
 
 # [#561] HASH JOIN with an empty table
-SELECT * FROM $planets LEFT JOIN (SELECT planetId as id FROM $satellites WHERE id < 0) AS SQ USING (id);
+SELECT * FROM $planets LEFT JOIN (SELECT planetId as id FROM testdata.satellites WHERE id < 0) AS SQ USING (id);
 
 # Zero results queries
-SELECT name, COUNT(*) FROM $astronauts WHERE name = 'Jim' GROUP BY name;
+SELECT name, COUNT(*) FROM testdata.astronauts WHERE name = 'Jim' GROUP BY name;
 SELECT * FROM $planets WHERE id = -1 LIMIT 10;
 SELECT * FROM $planets WHERE id = -1 ORDER BY id;
 SELECT * FROM $planets WHERE id = -1;
-SELECT * FROM $satellites WHERE id = 5 AND magnitude = 1;
-SELECT * FROM $satellites WHERE name = '********';
+SELECT * FROM testdata.satellites WHERE id = 5 AND magnitude = 1;
+SELECT * FROM testdata.satellites WHERE name = '********';
 
 # Aggregate on literals
-SELECT COUNT(1) FROM $satellites;
+SELECT COUNT(1) FROM testdata.satellites;
 SELECT SUM(42) FROM $planets;
 
 # [#592] Date functions
-SELECT birth_date - TODAY() FROM $astronauts;
-SELECT birth_date - NOW() FROM $astronauts
-SELECT birth_date - current_timestamp FROM $astronauts;
-SELECT birth_date - current_date FROM $astronauts;
-# SELECT DATE(birth_date) - TODAY() FROM $astronauts;
-SELECT DATE(birth_date) - NOW() FROM $astronauts
-SELECT DATE(birth_date) - current_timestamp FROM $astronauts;
-# SELECT DATE(birth_date) - current_date FROM $astronauts;
-SELECT TIMESTAMP(birth_date) - TODAY() FROM $astronauts;
-SELECT TIMESTAMP("2022-02-01") - TODAY() FROM $astronauts;
-SELECT DATEDIFF('days', birth_date, TODAY()) FROM $astronauts;
-SELECT DATEDIFF('days', "2022-01-02", "2010-10-01") FROM $astronauts;
+SELECT birth_date - TODAY() FROM testdata.astronauts;
+SELECT birth_date - NOW() FROM testdata.astronauts
+SELECT birth_date - current_timestamp FROM testdata.astronauts;
+SELECT birth_date - current_date FROM testdata.astronauts;
+# SELECT DATE(birth_date) - TODAY() FROM testdata.astronauts;
+SELECT DATE(birth_date) - NOW() FROM testdata.astronauts
+SELECT DATE(birth_date) - current_timestamp FROM testdata.astronauts;
+# SELECT DATE(birth_date) - current_date FROM testdata.astronauts;
+SELECT TIMESTAMP(birth_date) - TODAY() FROM testdata.astronauts;
+SELECT TIMESTAMP("2022-02-01") - TODAY() FROM testdata.astronauts;
+SELECT DATEDIFF('days', birth_date, TODAY()) FROM testdata.astronauts;
+SELECT DATEDIFF('days', "2022-01-02", "2010-10-01") FROM testdata.astronauts;
 SELECT DATEDIFF('days', "2022-01-02", "2010-10-01");
 SELECT DATEDIFF('minutes', "2022-01-02", "2010-10-01");
-SELECT DATEDIFF('days', TIMESTAMP "2022-01-02", TIMESTAMP "2010-10-01") FROM $astronauts;
+SELECT DATEDIFF('days', TIMESTAMP "2022-01-02", TIMESTAMP "2010-10-01") FROM testdata.astronauts;
 SELECT DATEDIFF('days', TIMESTAMP("2022-01-02"), CAST("2010-10-01" AS TIMESTAMP));
 
 # testing NOTs
@@ -84,10 +84,10 @@ SELECT VARIANCE(id) FROM $planets GROUP BY TRUE;
 SHOW COLUMNS FROM $planets;
 
 # [670] nesting
-SELECT ARRAY_AGG(DISTINCT LEFT(LOWER(name), 1) LIMIT 2) from $satellites GROUP BY planetId;
-SELECT ARRAY_AGG(DISTINCT RIGHT(LOWER(name), 1) LIMIT 2) from $satellites GROUP BY planetId;
-SELECT ARRAY_AGG(DISTINCT LEFT(UPPER(name), 1) LIMIT 2) from $satellites GROUP BY planetId;
-SELECT ARRAY_AGG(DISTINCT RIGHT(UPPER(name), 1) LIMIT 2) from $satellites GROUP BY planetId
+SELECT ARRAY_AGG(DISTINCT LEFT(LOWER(name), 1) LIMIT 2) from testdata.satellites GROUP BY planetId;
+SELECT ARRAY_AGG(DISTINCT RIGHT(LOWER(name), 1) LIMIT 2) from testdata.satellites GROUP BY planetId;
+SELECT ARRAY_AGG(DISTINCT LEFT(UPPER(name), 1) LIMIT 2) from testdata.satellites GROUP BY planetId;
+SELECT ARRAY_AGG(DISTINCT RIGHT(UPPER(name), 1) LIMIT 2) from testdata.satellites GROUP BY planetId
 
 # [669]
 SELECT COUNT(*), COUNT_DISTINCT(id) FROM $planets;
@@ -106,98 +106,98 @@ SELECT DATE_TRUNC('year', current_date);
 SELECT DATE_TRUNC('month', current_date);
 
 # -> (Arrow) Tests
-SELECT * FROM $astronauts WHERE birth_place -> 'state' = 'CA';
-SELECT * FROM $astronauts WHERE birth_place -> 'state' != 'CA';
-SELECT * FROM $astronauts WHERE birth_place -> 'state' <= 'CA';
-SELECT * FROM $astronauts WHERE birth_place -> 'state' >= 'CA';
-SELECT * FROM $astronauts WHERE birth_place -> 'state' < 'CA';
-SELECT * FROM $astronauts WHERE birth_place -> 'state' > 'CA';
-SELECT * FROM $astronauts WHERE VARCHAR(birth_place) -> 'state' = 'CA';
-SELECT * FROM $astronauts WHERE VARCHAR(birth_place) -> 'state' != 'CA';
-SELECT * FROM $astronauts WHERE VARCHAR(birth_place) -> 'state' <= 'CA';
-SELECT * FROM $astronauts WHERE VARCHAR(birth_place) -> 'state' >= 'CA';
-SELECT * FROM $astronauts WHERE VARCHAR(birth_place) -> 'state' < 'CA';
-SELECT * FROM $astronauts WHERE VARCHAR(birth_place) -> 'state' > 'CA';
-SELECT * FROM $astronauts WHERE BLOB(birth_place) -> 'state' = 'CA';
-SELECT * FROM $astronauts WHERE BLOB(birth_place) -> 'state' != 'CA';
-SELECT * FROM $astronauts WHERE BLOB(birth_place) -> 'state' <= 'CA';
-SELECT * FROM $astronauts WHERE BLOB(birth_place) -> 'state' >= 'CA';
-SELECT * FROM $astronauts WHERE BLOB(birth_place) -> 'state' < 'CA';
-SELECT * FROM $astronauts WHERE BLOB(birth_place) -> 'state' > 'CA';
-SELECT * FROM $astronauts WHERE birth_place -> 'state' LIKE 'C%';
-SELECT * FROM $astronauts WHERE birth_place -> 'state' ILIKE 'c%';
-SELECT * FROM $astronauts WHERE birth_place -> 'state' RLIKE '^C.*$';
-SELECT * FROM $astronauts WHERE birth_place -> 'state' IS NULL;
-SELECT * FROM $astronauts WHERE birth_place -> 'state' IS NOT NULL;
-SELECT * FROM $astronauts WHERE birth_place -> 'state' = 'CA' AND name != 'Finn';
-SELECT * FROM $astronauts WHERE birth_place -> 'state' != 'CA' AND name != 'Finn';
-SELECT * FROM $astronauts WHERE birth_place -> 'state' <= 'CA' AND name != 'Finn';
-SELECT * FROM $astronauts WHERE birth_place -> 'state' >= 'CA' AND name != 'Finn';
-SELECT * FROM $astronauts WHERE birth_place -> 'state' < 'CA' AND name != 'Finn';
-SELECT * FROM $astronauts WHERE birth_place -> 'state' > 'CA' AND name != 'Finn';
-SELECT * FROM $astronauts WHERE birth_place -> 'state' LIKE 'C%' AND name != 'Finn';
-SELECT * FROM $astronauts WHERE birth_place -> 'state' ILIKE 'c%' AND name != 'Finn';
-SELECT * FROM $astronauts WHERE birth_place -> 'state' RLIKE '^C.*$' AND name != 'Finn';
-SELECT * FROM $astronauts WHERE birth_place -> 'state' IS NULL AND name != 'Finn';
-SELECT * FROM $astronauts WHERE birth_place -> 'state' IS NOT NULL AND name != 'Finn';
-SELECT * FROM $astronauts WHERE IFNULL(birth_place -> 'state', 'Jake') = 'CA' AND name != 'Finn';
-SELECT * FROM $astronauts WHERE IFNULL(birth_place -> 'state', 'Jake') != 'CA' AND name != 'Finn';
-SELECT * FROM $astronauts WHERE IFNULL(birth_place -> 'state', 'Jake') <= 'CA' AND name != 'Finn';
-SELECT * FROM $astronauts WHERE IFNULL(birth_place -> 'state', 'Jake') >= 'CA' AND name != 'Finn';
-SELECT * FROM $astronauts WHERE IFNULL(birth_place -> 'state', 'Jake') < 'CA' AND name != 'Finn';
-SELECT * FROM $astronauts WHERE IFNULL(birth_place -> 'state', 'Jake') > 'CA' AND name != 'Finn';
-SELECT * FROM $astronauts WHERE IFNULL(birth_place -> 'state', 'Jake') LIKE 'C%' AND name != 'Finn';
-SELECT * FROM $astronauts WHERE IFNULL(birth_place -> 'state', 'Jake') ILIKE 'c%' AND name != 'Finn';
-SELECT * FROM $astronauts WHERE IFNULL(birth_place -> 'state', 'Jake') RLIKE '^C.*$' AND name != 'Finn';
-SELECT * FROM $astronauts WHERE IFNULL(birth_place -> 'state', 'Jake') IS NULL AND name != 'Finn';
-SELECT * FROM $astronauts WHERE IFNULL(birth_place -> 'state', 'Jake') IS NOT NULL AND name != 'Finn';
+SELECT * FROM testdata.astronauts WHERE birth_place -> 'state' = 'CA';
+SELECT * FROM testdata.astronauts WHERE birth_place -> 'state' != 'CA';
+SELECT * FROM testdata.astronauts WHERE birth_place -> 'state' <= 'CA';
+SELECT * FROM testdata.astronauts WHERE birth_place -> 'state' >= 'CA';
+SELECT * FROM testdata.astronauts WHERE birth_place -> 'state' < 'CA';
+SELECT * FROM testdata.astronauts WHERE birth_place -> 'state' > 'CA';
+SELECT * FROM testdata.astronauts WHERE VARCHAR(birth_place) -> 'state' = 'CA';
+SELECT * FROM testdata.astronauts WHERE VARCHAR(birth_place) -> 'state' != 'CA';
+SELECT * FROM testdata.astronauts WHERE VARCHAR(birth_place) -> 'state' <= 'CA';
+SELECT * FROM testdata.astronauts WHERE VARCHAR(birth_place) -> 'state' >= 'CA';
+SELECT * FROM testdata.astronauts WHERE VARCHAR(birth_place) -> 'state' < 'CA';
+SELECT * FROM testdata.astronauts WHERE VARCHAR(birth_place) -> 'state' > 'CA';
+SELECT * FROM testdata.astronauts WHERE BLOB(birth_place) -> 'state' = 'CA';
+SELECT * FROM testdata.astronauts WHERE BLOB(birth_place) -> 'state' != 'CA';
+SELECT * FROM testdata.astronauts WHERE BLOB(birth_place) -> 'state' <= 'CA';
+SELECT * FROM testdata.astronauts WHERE BLOB(birth_place) -> 'state' >= 'CA';
+SELECT * FROM testdata.astronauts WHERE BLOB(birth_place) -> 'state' < 'CA';
+SELECT * FROM testdata.astronauts WHERE BLOB(birth_place) -> 'state' > 'CA';
+SELECT * FROM testdata.astronauts WHERE birth_place -> 'state' LIKE 'C%';
+SELECT * FROM testdata.astronauts WHERE birth_place -> 'state' ILIKE 'c%';
+SELECT * FROM testdata.astronauts WHERE birth_place -> 'state' RLIKE '^C.*$';
+SELECT * FROM testdata.astronauts WHERE birth_place -> 'state' IS NULL;
+SELECT * FROM testdata.astronauts WHERE birth_place -> 'state' IS NOT NULL;
+SELECT * FROM testdata.astronauts WHERE birth_place -> 'state' = 'CA' AND name != 'Finn';
+SELECT * FROM testdata.astronauts WHERE birth_place -> 'state' != 'CA' AND name != 'Finn';
+SELECT * FROM testdata.astronauts WHERE birth_place -> 'state' <= 'CA' AND name != 'Finn';
+SELECT * FROM testdata.astronauts WHERE birth_place -> 'state' >= 'CA' AND name != 'Finn';
+SELECT * FROM testdata.astronauts WHERE birth_place -> 'state' < 'CA' AND name != 'Finn';
+SELECT * FROM testdata.astronauts WHERE birth_place -> 'state' > 'CA' AND name != 'Finn';
+SELECT * FROM testdata.astronauts WHERE birth_place -> 'state' LIKE 'C%' AND name != 'Finn';
+SELECT * FROM testdata.astronauts WHERE birth_place -> 'state' ILIKE 'c%' AND name != 'Finn';
+SELECT * FROM testdata.astronauts WHERE birth_place -> 'state' RLIKE '^C.*$' AND name != 'Finn';
+SELECT * FROM testdata.astronauts WHERE birth_place -> 'state' IS NULL AND name != 'Finn';
+SELECT * FROM testdata.astronauts WHERE birth_place -> 'state' IS NOT NULL AND name != 'Finn';
+SELECT * FROM testdata.astronauts WHERE IFNULL(birth_place -> 'state', 'Jake') = 'CA' AND name != 'Finn';
+SELECT * FROM testdata.astronauts WHERE IFNULL(birth_place -> 'state', 'Jake') != 'CA' AND name != 'Finn';
+SELECT * FROM testdata.astronauts WHERE IFNULL(birth_place -> 'state', 'Jake') <= 'CA' AND name != 'Finn';
+SELECT * FROM testdata.astronauts WHERE IFNULL(birth_place -> 'state', 'Jake') >= 'CA' AND name != 'Finn';
+SELECT * FROM testdata.astronauts WHERE IFNULL(birth_place -> 'state', 'Jake') < 'CA' AND name != 'Finn';
+SELECT * FROM testdata.astronauts WHERE IFNULL(birth_place -> 'state', 'Jake') > 'CA' AND name != 'Finn';
+SELECT * FROM testdata.astronauts WHERE IFNULL(birth_place -> 'state', 'Jake') LIKE 'C%' AND name != 'Finn';
+SELECT * FROM testdata.astronauts WHERE IFNULL(birth_place -> 'state', 'Jake') ILIKE 'c%' AND name != 'Finn';
+SELECT * FROM testdata.astronauts WHERE IFNULL(birth_place -> 'state', 'Jake') RLIKE '^C.*$' AND name != 'Finn';
+SELECT * FROM testdata.astronauts WHERE IFNULL(birth_place -> 'state', 'Jake') IS NULL AND name != 'Finn';
+SELECT * FROM testdata.astronauts WHERE IFNULL(birth_place -> 'state', 'Jake') IS NOT NULL AND name != 'Finn';
 
 # ->> (Long Arrow) Tests
-SELECT * FROM $astronauts WHERE birth_place ->> 'state' = 'CA';
-SELECT * FROM $astronauts WHERE birth_place ->> 'state' != 'CA';
-SELECT * FROM $astronauts WHERE birth_place ->> 'state' <= 'CA';
-SELECT * FROM $astronauts WHERE birth_place ->> 'state' >= 'CA';
-SELECT * FROM $astronauts WHERE birth_place ->> 'state' < 'CA';
-SELECT * FROM $astronauts WHERE birth_place ->> 'state' > 'CA';
-SELECT * FROM $astronauts WHERE birth_place ->> 'state' LIKE 'C%';
-SELECT * FROM $astronauts WHERE birth_place ->> 'state' ILIKE 'c%';
-SELECT * FROM $astronauts WHERE birth_place ->> 'state' RLIKE '^C.*$';
-SELECT * FROM $astronauts WHERE birth_place ->> 'state' IS NULL;
-SELECT * FROM $astronauts WHERE birth_place ->> 'state' IS NOT NULL;
-SELECT * FROM $astronauts WHERE birth_place ->> 'state' = 'CA' AND name != 'Finn';
-SELECT * FROM $astronauts WHERE birth_place ->> 'state' != 'CA' AND name != 'Finn';
-SELECT * FROM $astronauts WHERE birth_place ->> 'state' <= 'CA' AND name != 'Finn';
-SELECT * FROM $astronauts WHERE birth_place ->> 'state' >= 'CA' AND name != 'Finn';
-SELECT * FROM $astronauts WHERE birth_place ->> 'state' < 'CA' AND name != 'Finn';
-SELECT * FROM $astronauts WHERE birth_place ->> 'state' > 'CA' AND name != 'Finn';
-SELECT * FROM $astronauts WHERE birth_place ->> 'state' LIKE 'C%' AND name != 'Finn';
-SELECT * FROM $astronauts WHERE birth_place ->> 'state' ILIKE 'c%' AND name != 'Finn';
-SELECT * FROM $astronauts WHERE birth_place ->> 'state' RLIKE '^C.*$' AND name != 'Finn';
-SELECT * FROM $astronauts WHERE birth_place ->> 'state' IS NULL AND name != 'Finn';
-SELECT * FROM $astronauts WHERE birth_place ->> 'state' IS NOT NULL AND name != 'Finn';
-SELECT * FROM $astronauts WHERE IFNULL(birth_place ->> 'state', 'Jake') = 'CA' AND name != 'Finn';
-SELECT * FROM $astronauts WHERE IFNULL(birth_place ->> 'state', 'Jake') != 'CA' AND name != 'Finn';
-SELECT * FROM $astronauts WHERE IFNULL(birth_place ->> 'state', 'Jake') <= 'CA' AND name != 'Finn';
-SELECT * FROM $astronauts WHERE IFNULL(birth_place ->> 'state', 'Jake') >= 'CA' AND name != 'Finn';
-SELECT * FROM $astronauts WHERE IFNULL(birth_place ->> 'state', 'Jake') < 'CA' AND name != 'Finn';
-SELECT * FROM $astronauts WHERE IFNULL(birth_place ->> 'state', 'Jake') > 'CA' AND name != 'Finn';
-SELECT * FROM $astronauts WHERE IFNULL(birth_place ->> 'state', 'Jake') LIKE 'C%' AND name != 'Finn';
-SELECT * FROM $astronauts WHERE IFNULL(birth_place ->> 'state', 'Jake') ILIKE 'c%' AND name != 'Finn';
-SELECT * FROM $astronauts WHERE IFNULL(birth_place ->> 'state', 'Jake') RLIKE '^C.*$' AND name != 'Finn';
-SELECT * FROM $astronauts WHERE IFNULL(birth_place ->> 'state', 'Jake') IS NULL AND name != 'Finn';
-SELECT * FROM $astronauts WHERE IFNULL(birth_place ->> 'state', 'Jake') IS NOT NULL AND name != 'Finn';
+SELECT * FROM testdata.astronauts WHERE birth_place ->> 'state' = 'CA';
+SELECT * FROM testdata.astronauts WHERE birth_place ->> 'state' != 'CA';
+SELECT * FROM testdata.astronauts WHERE birth_place ->> 'state' <= 'CA';
+SELECT * FROM testdata.astronauts WHERE birth_place ->> 'state' >= 'CA';
+SELECT * FROM testdata.astronauts WHERE birth_place ->> 'state' < 'CA';
+SELECT * FROM testdata.astronauts WHERE birth_place ->> 'state' > 'CA';
+SELECT * FROM testdata.astronauts WHERE birth_place ->> 'state' LIKE 'C%';
+SELECT * FROM testdata.astronauts WHERE birth_place ->> 'state' ILIKE 'c%';
+SELECT * FROM testdata.astronauts WHERE birth_place ->> 'state' RLIKE '^C.*$';
+SELECT * FROM testdata.astronauts WHERE birth_place ->> 'state' IS NULL;
+SELECT * FROM testdata.astronauts WHERE birth_place ->> 'state' IS NOT NULL;
+SELECT * FROM testdata.astronauts WHERE birth_place ->> 'state' = 'CA' AND name != 'Finn';
+SELECT * FROM testdata.astronauts WHERE birth_place ->> 'state' != 'CA' AND name != 'Finn';
+SELECT * FROM testdata.astronauts WHERE birth_place ->> 'state' <= 'CA' AND name != 'Finn';
+SELECT * FROM testdata.astronauts WHERE birth_place ->> 'state' >= 'CA' AND name != 'Finn';
+SELECT * FROM testdata.astronauts WHERE birth_place ->> 'state' < 'CA' AND name != 'Finn';
+SELECT * FROM testdata.astronauts WHERE birth_place ->> 'state' > 'CA' AND name != 'Finn';
+SELECT * FROM testdata.astronauts WHERE birth_place ->> 'state' LIKE 'C%' AND name != 'Finn';
+SELECT * FROM testdata.astronauts WHERE birth_place ->> 'state' ILIKE 'c%' AND name != 'Finn';
+SELECT * FROM testdata.astronauts WHERE birth_place ->> 'state' RLIKE '^C.*$' AND name != 'Finn';
+SELECT * FROM testdata.astronauts WHERE birth_place ->> 'state' IS NULL AND name != 'Finn';
+SELECT * FROM testdata.astronauts WHERE birth_place ->> 'state' IS NOT NULL AND name != 'Finn';
+SELECT * FROM testdata.astronauts WHERE IFNULL(birth_place ->> 'state', 'Jake') = 'CA' AND name != 'Finn';
+SELECT * FROM testdata.astronauts WHERE IFNULL(birth_place ->> 'state', 'Jake') != 'CA' AND name != 'Finn';
+SELECT * FROM testdata.astronauts WHERE IFNULL(birth_place ->> 'state', 'Jake') <= 'CA' AND name != 'Finn';
+SELECT * FROM testdata.astronauts WHERE IFNULL(birth_place ->> 'state', 'Jake') >= 'CA' AND name != 'Finn';
+SELECT * FROM testdata.astronauts WHERE IFNULL(birth_place ->> 'state', 'Jake') < 'CA' AND name != 'Finn';
+SELECT * FROM testdata.astronauts WHERE IFNULL(birth_place ->> 'state', 'Jake') > 'CA' AND name != 'Finn';
+SELECT * FROM testdata.astronauts WHERE IFNULL(birth_place ->> 'state', 'Jake') LIKE 'C%' AND name != 'Finn';
+SELECT * FROM testdata.astronauts WHERE IFNULL(birth_place ->> 'state', 'Jake') ILIKE 'c%' AND name != 'Finn';
+SELECT * FROM testdata.astronauts WHERE IFNULL(birth_place ->> 'state', 'Jake') RLIKE '^C.*$' AND name != 'Finn';
+SELECT * FROM testdata.astronauts WHERE IFNULL(birth_place ->> 'state', 'Jake') IS NULL AND name != 'Finn';
+SELECT * FROM testdata.astronauts WHERE IFNULL(birth_place ->> 'state', 'Jake') IS NOT NULL AND name != 'Finn';
 
 # @? Tests
-SELECT * FROM $astronauts WHERE birth_place @? 'state' IS NULL;
-SELECT * FROM $astronauts WHERE birth_place @? 'state' IS NOT NULL;
-SELECT * FROM $astronauts WHERE birth_place @? 'state' IS NULL AND name != 'Finn';
-SELECT * FROM $astronauts WHERE birth_place @? 'state' IS NOT NULL AND name != 'Finn';
-SELECT * FROM $astronauts WHERE birth_place @? 'state' IS TRUE AND name != 'Finn';
-SELECT * FROM $astronauts WHERE birth_place @? 'state' IS NOT TRUE AND name != 'Finn';
-SELECT * FROM $astronauts WHERE birth_place @? 'state' IS FALSE AND name != 'Finn';
-SELECT * FROM $astronauts WHERE birth_place @? 'state' IS NOT FALSE AND name != 'Finn';
-SELECT * FROM $astronauts WHERE IFNULL(birth_place @? 'state', 'Jake') IS NULL AND name != 'Finn';
-SELECT * FROM $astronauts WHERE IFNULL(birth_place @? 'state', 'Jake') IS NOT NULL AND name != 'Finn';
+SELECT * FROM testdata.astronauts WHERE birth_place @? 'state' IS NULL;
+SELECT * FROM testdata.astronauts WHERE birth_place @? 'state' IS NOT NULL;
+SELECT * FROM testdata.astronauts WHERE birth_place @? 'state' IS NULL AND name != 'Finn';
+SELECT * FROM testdata.astronauts WHERE birth_place @? 'state' IS NOT NULL AND name != 'Finn';
+SELECT * FROM testdata.astronauts WHERE birth_place @? 'state' IS TRUE AND name != 'Finn';
+SELECT * FROM testdata.astronauts WHERE birth_place @? 'state' IS NOT TRUE AND name != 'Finn';
+SELECT * FROM testdata.astronauts WHERE birth_place @? 'state' IS FALSE AND name != 'Finn';
+SELECT * FROM testdata.astronauts WHERE birth_place @? 'state' IS NOT FALSE AND name != 'Finn';
+SELECT * FROM testdata.astronauts WHERE IFNULL(birth_place @? 'state', 'Jake') IS NULL AND name != 'Finn';
+SELECT * FROM testdata.astronauts WHERE IFNULL(birth_place @? 'state', 'Jake') IS NOT NULL AND name != 'Finn';
 
 select * from testdata.tpch_tiny.lineitem, testdata.tpch_tiny.part where (p_partkey = l_partkey and p_brand = 'Brand#32' and p_container in ('SM CASE', 'SM BOX', 'SM PACK', 'SM PKG') and l_quantity >= 7 and l_quantity <= 7 + 10 and p_size between 1 and 5 and l_shipmode in ('AIR', 'AIR REG') and l_shipinstruct = 'DELIVER IN PERSON')
 select * from testdata.tpch_tiny.lineitem, testdata.tpch_tiny.part where (p_partkey = l_partkey and l_quantity >= 7 and l_quantity <= 7 + 10 and l_shipmode in ('AIR', 'AIR REG') and l_shipinstruct = 'DELIVER IN PERSON')

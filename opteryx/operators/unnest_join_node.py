@@ -179,6 +179,20 @@ def _cross_join_unnest_column(
 def _cross_join_unnest_literal(
     morsel: pyarrow.Table, source: Tuple, target_column: FlatColumn
 ) -> Generator[pyarrow.Table, None, None]:
+    
+    if morsel.column_names == ["$COUNT(*)"]:
+        count = morsel["$COUNT(*)"][0].as_py()
+        
+        # Create a table from 'source'
+        array_column = pyarrow.array(source)
+        # Ensure type matches target column if possible, or let implicit casting handle it
+        
+        table = pyarrow.Table.from_arrays([array_column], names=[target_column.identity])
+        
+        for _ in range(count):
+            yield table
+        return
+
     joined_list_size = len(source)
 
     # Break the morsel into batches to avoid memory issues
