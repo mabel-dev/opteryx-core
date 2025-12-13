@@ -193,7 +193,7 @@ class GcpCloudStorageConnector(BaseConnector, Diachronic, PredicatePushable, Asy
         telemetry.bytes_read += len(data)
         return ref
 
-    def get_list_of_blob_names(self, *, prefix: str) -> List[str]:
+    def get_list_of_blob_names(self, *, prefix: str, **kwargs) -> List[str]:
         # only fetch once per prefix (partition)
         if prefix in self.blob_list:
             return self.blob_list[prefix]
