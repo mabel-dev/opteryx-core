@@ -156,28 +156,20 @@ def get_iceberg_tables():
             "fields": virtual_datasets.planets.schema().columns,
         },
         {
-            "name": virtual_datasets.satellites.schema().name,
-            "fields": virtual_datasets.satellites.schema().columns,
-        },
-        {
-            "name": virtual_datasets.astronauts.schema().name,
-            "fields": virtual_datasets.astronauts.schema().columns,
-        },
-        {
-            "name": virtual_datasets.missions.schema().name,
-            "fields": virtual_datasets.missions.schema().columns,
-        },
-        {
             "name": "testdata.planets",
             "fields": virtual_datasets.planets.schema().columns,
         },
         {
             "name": "testdata.satellites",
-            "fields": virtual_datasets.satellites.schema().columns,
+            "fields": IcebergConnector(dataset="opteryx.satellites", telemetry=QueryTelemetry(), catalog=_catalog).get_dataset_schema().columns,
+        },
+        {
+            "name": "testdata.astronauts",
+            "fields": IcebergConnector(dataset="opteryx.astronauts", telemetry=QueryTelemetry(), catalog=_catalog).get_dataset_schema().columns,
         },
         {
             "name": "testdata.missions",
-            "fields": virtual_datasets.missions.schema().columns,
+            "fields": IcebergConnector(dataset="opteryx.missions", telemetry=QueryTelemetry(), catalog=_catalog).get_dataset_schema().columns,
         },
     ]
     return _tables_cache

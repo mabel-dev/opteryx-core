@@ -34,7 +34,7 @@ def performance_int64_comparison():
     import telemetry
 
     # Gather Arrow array and Draken vector once
-    arr = opteryx.query_to_arrow("SELECT id FROM $satellites")["id"]
+    arr = opteryx.query_to_arrow("SELECT id FROM testdata.satellites")["id"]
     vec = Vector.from_arrow(arr)
 
     # Define operations to compare. Each entry: (label, draken_callable, arrow_callable)

@@ -50,6 +50,25 @@ def _cross_join(left_morsel, right):
 
     from opteryx.utils.arrow import align_tables
 
+    # Optimization for COUNT(*) queries
+    if left_morsel.column_names == ["$COUNT(*)"] and right.column_names == ["$COUNT(*)"]:
+        left_count = left_morsel["$COUNT(*)"][0].as_py()
+        right_count = right["$COUNT(*)"][0].as_py()
+        yield pyarrow.Table.from_pydict({"$COUNT(*)": [left_count * right_count]})
+        return
+
+    if left_morsel.column_names == ["$COUNT(*)"]:
+        left_count = left_morsel["$COUNT(*)"][0].as_py()
+        for _ in range(left_count):
+            yield right
+        return
+
+    if right.column_names == ["$COUNT(*)"]:
+        right_count = right["$COUNT(*)"][0].as_py()
+        for _ in range(right_count):
+            yield left_morsel
+        return
+
     at_least_once = False
     left_schema = left_morsel.schema
     right_schema = right.schema

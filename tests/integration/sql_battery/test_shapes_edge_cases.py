@@ -58,10 +58,10 @@ from opteryx.connectors import IcebergConnector
 # fmt:off
 STATEMENTS = [
         # MONTH has a bug
-        ("SELECT DATEDIFF('months', birth_date, '2022-07-07') FROM $astronauts", None, None, FunctionExecutionError),
-        ("SELECT DATEDIFF('months', birth_date, '2022-07-07') FROM $astronauts", None, None, FunctionExecutionError),
-        ("SELECT DATEDIFF(MONTH, birth_date, '2022-07-07') FROM $astronauts", None, None, ColumnNotFoundError),
-        ("SELECT DATEDIFF(MONTHS, birth_date, '2022-07-07') FROM $astronauts", None, None, ColumnNotFoundError),
+        ("SELECT DATEDIFF('months', birth_date, '2022-07-07') FROM testdata.astronauts", None, None, FunctionExecutionError),
+        ("SELECT DATEDIFF('months', birth_date, '2022-07-07') FROM testdata.astronauts", None, None, FunctionExecutionError),
+        ("SELECT DATEDIFF(MONTH, birth_date, '2022-07-07') FROM testdata.astronauts", None, None, ColumnNotFoundError),
+        ("SELECT DATEDIFF(MONTHS, birth_date, '2022-07-07') FROM testdata.astronauts", None, None, ColumnNotFoundError),
 
         # can't cast to a list
         ("SELECT CAST('abc' AS LIST)", None, None, SqlError),
@@ -73,54 +73,54 @@ STATEMENTS = [
         ("SELECT (name, id) FROM $planets;", None, None, UnsupportedSyntaxError),
 
         # V2 Negative Tests
-        ("SELECT $planets.id, name FROM $planets INNER JOIN $satellites ON planetId = $planets.id", None, None, AmbiguousIdentifierError),
-        ("SELECT $planets.id FROM $satellites", None, None, UnexpectedDatasetReferenceError),
+        ("SELECT $planets.id, name FROM $planets INNER JOIN testdata.satellites ON planetId = $planets.id", None, None, AmbiguousIdentifierError),
+        ("SELECT $planets.id FROM testdata.satellites", None, None, UnexpectedDatasetReferenceError),
 
         # V2 New Syntax Checks
 #        ("SELECT * FROM $planets AS P1 UNION SELECT * FROM $planets AS P2;", 9, 20, UnsupportedSyntaxError),
-        ("SELECT * FROM $planets AS P LEFT ANTI JOIN $satellites AS S ON S.id = P.id;", 0, 20, None),
-        ("SELECT * FROM $planets AS P ANTI JOIN $satellites AS S ON S.id = P.id;", 0, 20, None),
-        ("SELECT * FROM $planets AS P RIGHT ANTI JOIN $satellites AS S ON S.id = P.id;", 168, 8, UnsupportedSyntaxError),
-        ("SELECT * FROM $planets AS P LEFT SEMI JOIN $satellites AS S ON S.id = P.id;", 9, 20, None),
-        ("SELECT * FROM $planets AS P SEMI JOIN $satellites AS S ON S.id = P.id;", 9, 20, None),
-        ("SELECT * FROM $planets AS P RIGHT SEMI JOIN $satellites AS S ON S.id = P.id;", 9, 8, UnsupportedSyntaxError),
-        ("SELECT * FROM $planets AS P LEFT ANTI JOIN $satellites AS S USING(id);", 0, 20, None),
-        ("SELECT * FROM $planets AS P RIGHT ANTI JOIN $satellites AS S USING(id);", 168, 8, UnsupportedSyntaxError),
-        ("SELECT * FROM $planets AS P LEFT SEMI JOIN $satellites AS S USING(id);", 9, 20, None),
-        ("SELECT * FROM $planets AS P RIGHT SEMI JOIN $satellites AS S USING(id);", 9, 8, UnsupportedSyntaxError),
-        ("SELECT * FROM $planets AS P LEFT ANTI JOIN $satellites AS S ON S.id = P.id WHERE P.id > 5;", 0, 20, None),
-        ("SELECT * FROM $planets AS P LEFT ANTI JOIN (SELECT id FROM $satellites WHERE name LIKE 'Moon%') AS S ON S.id = P.id;", 8, 20, None),
-        ("SELECT * FROM GENERATE_SERIES(1, 10) AS C LEFT ANTI JOIN $satellites AS S ON S.id = C;", 0, 1, None),
-        ("SELECT * FROM $planets AS P LEFT SEMI JOIN $satellites AS S ON S.id = P.id WHERE P.name LIKE 'E%';", 1, 20, None),
-        ("SELECT * FROM $planets AS P LEFT SEMI JOIN $satellites AS S ON S.id = P.id WHERE S.name LIKE 'E%';", 1, 20, UnexpectedDatasetReferenceError),
-        ("SELECT * FROM $planets AS P LEFT SEMI JOIN (SELECT id FROM $satellites WHERE name != 'Moon') AS S ON S.id = P.id;", 8, 20, None),
-        ("SELECT * FROM $planets AS P LEFT SEMI JOIN $satellites AS S ON S.id = P.id WHERE P.name != 'Earth';", 8, 20, None),
-        ("SELECT * FROM GENERATE_SERIES(1, 10) AS G LEFT SEMI JOIN $satellites AS S ON S.id = G;", 10, 1, None),
-        ("SELECT * FROM $planets AS P SEMI JOIN $satellites AS S ON P.id = S.id AND P.name = 'Earth';", 1, 20, None),
-        ("SELECT * FROM $planets AS P SEMI JOIN $satellites AS S ON P.name = S.name;", 0, 20, None),
-        ("SELECT * FROM $planets AS P SEMI JOIN $satellites AS S ON P.id = S.id WHERE P.name IS NOT NULL;", 9, 20, None),
-        ("SELECT * FROM $planets SEMI JOIN $satellites USING(id) WHERE id IS NULL;", 0, 20, None),
-        ("SELECT * FROM $planets AS P SEMI JOIN (SELECT DISTINCT id FROM $satellites) AS S ON P.id = S.id;", 9, 20, None),
-        ("SELECT * FROM $satellites AS S SEMI JOIN $planets AS P ON S.id = P.id;", 9, 8, None),
-        ("SELECT * FROM $planets AS P SEMI JOIN (SELECT id FROM $satellites WHERE FALSE) AS S ON P.id = S.id;", 0, 20, None),
-        ("SELECT * FROM $satellites AS P ANTI JOIN $planets AS S ON P.id = S.id;", 168, 8, None),
-        ("SELECT * FROM $planets AS P ANTI JOIN $satellites AS S ON P.name = S.name;", 9, 20, None),
-        ("SELECT * FROM $planets ANTI JOIN $satellites USING(id);", 0, 20, None),
-        ("SELECT * FROM $satellites ANTI JOIN $planets USING(id);", 168, 8, None),
-        ("SELECT * FROM $planets AS P ANTI JOIN (SELECT DISTINCT id FROM $satellites) AS S ON P.id = S.id;", 0, 20, None),
-        ("SELECT * FROM (SELECT 42 AS id) AS X SEMI JOIN $satellites AS S USING(id);", 1, 1, None),
+        ("SELECT * FROM $planets AS P LEFT ANTI JOIN testdata.satellites AS S ON S.id = P.id;", 0, 20, None),
+        ("SELECT * FROM $planets AS P ANTI JOIN testdata.satellites AS S ON S.id = P.id;", 0, 20, None),
+        ("SELECT * FROM $planets AS P RIGHT ANTI JOIN testdata.satellites AS S ON S.id = P.id;", 168, 8, UnsupportedSyntaxError),
+        ("SELECT * FROM $planets AS P LEFT SEMI JOIN testdata.satellites AS S ON S.id = P.id;", 9, 20, None),
+        ("SELECT * FROM $planets AS P SEMI JOIN testdata.satellites AS S ON S.id = P.id;", 9, 20, None),
+        ("SELECT * FROM $planets AS P RIGHT SEMI JOIN testdata.satellites AS S ON S.id = P.id;", 9, 8, UnsupportedSyntaxError),
+        ("SELECT * FROM $planets AS P LEFT ANTI JOIN testdata.satellites AS S USING(id);", 0, 20, None),
+        ("SELECT * FROM $planets AS P RIGHT ANTI JOIN testdata.satellites AS S USING(id);", 168, 8, UnsupportedSyntaxError),
+        ("SELECT * FROM $planets AS P LEFT SEMI JOIN testdata.satellites AS S USING(id);", 9, 20, None),
+        ("SELECT * FROM $planets AS P RIGHT SEMI JOIN testdata.satellites AS S USING(id);", 9, 8, UnsupportedSyntaxError),
+        ("SELECT * FROM $planets AS P LEFT ANTI JOIN testdata.satellites AS S ON S.id = P.id WHERE P.id > 5;", 0, 20, None),
+        ("SELECT * FROM $planets AS P LEFT ANTI JOIN (SELECT id FROM testdata.satellites WHERE name LIKE 'Moon%') AS S ON S.id = P.id;", 8, 20, None),
+        ("SELECT * FROM GENERATE_SERIES(1, 10) AS C LEFT ANTI JOIN testdata.satellites AS S ON S.id = C;", 0, 1, None),
+        ("SELECT * FROM $planets AS P LEFT SEMI JOIN testdata.satellites AS S ON S.id = P.id WHERE P.name LIKE 'E%';", 1, 20, None),
+        ("SELECT * FROM $planets AS P LEFT SEMI JOIN testdata.satellites AS S ON S.id = P.id WHERE S.name LIKE 'E%';", 1, 20, UnexpectedDatasetReferenceError),
+        ("SELECT * FROM $planets AS P LEFT SEMI JOIN (SELECT id FROM testdata.satellites WHERE name != 'Moon') AS S ON S.id = P.id;", 8, 20, None),
+        ("SELECT * FROM $planets AS P LEFT SEMI JOIN testdata.satellites AS S ON S.id = P.id WHERE P.name != 'Earth';", 8, 20, None),
+        ("SELECT * FROM GENERATE_SERIES(1, 10) AS G LEFT SEMI JOIN testdata.satellites AS S ON S.id = G;", 10, 1, None),
+        ("SELECT * FROM $planets AS P SEMI JOIN testdata.satellites AS S ON P.id = S.id AND P.name = 'Earth';", 1, 20, None),
+        ("SELECT * FROM $planets AS P SEMI JOIN testdata.satellites AS S ON P.name = S.name;", 0, 20, None),
+        ("SELECT * FROM $planets AS P SEMI JOIN testdata.satellites AS S ON P.id = S.id WHERE P.name IS NOT NULL;", 9, 20, None),
+        ("SELECT * FROM $planets SEMI JOIN testdata.satellites USING(id) WHERE id IS NULL;", 0, 20, None),
+        ("SELECT * FROM $planets AS P SEMI JOIN (SELECT DISTINCT id FROM testdata.satellites) AS S ON P.id = S.id;", 9, 20, None),
+        ("SELECT * FROM testdata.satellites AS S SEMI JOIN $planets AS P ON S.id = P.id;", 9, 8, None),
+        ("SELECT * FROM $planets AS P SEMI JOIN (SELECT id FROM testdata.satellites WHERE FALSE) AS S ON P.id = S.id;", 0, 20, None),
+        ("SELECT * FROM testdata.satellites AS P ANTI JOIN $planets AS S ON P.id = S.id;", 168, 8, None),
+        ("SELECT * FROM $planets AS P ANTI JOIN testdata.satellites AS S ON P.name = S.name;", 9, 20, None),
+        ("SELECT * FROM $planets ANTI JOIN testdata.satellites USING(id);", 0, 20, None),
+        ("SELECT * FROM testdata.satellites ANTI JOIN $planets USING(id);", 168, 8, None),
+        ("SELECT * FROM $planets AS P ANTI JOIN (SELECT DISTINCT id FROM testdata.satellites) AS S ON P.id = S.id;", 0, 20, None),
+        ("SELECT * FROM (SELECT 42 AS id) AS X SEMI JOIN testdata.satellites AS S USING(id);", 1, 1, None),
         ("SELECT * FROM (SELECT 42 AS id) AS X ANTI JOIN $planets AS S USING(id);", 1, 1, None),
-        ("SELECT * FROM (SELECT 42 AS id) AS X ANTI JOIN $satellites AS S USING(id);", 0, 1, None),
+        ("SELECT * FROM (SELECT 42 AS id) AS X ANTI JOIN testdata.satellites AS S USING(id);", 0, 1, None),
         ("SELECT * FROM (SELECT 42 AS id) AS X SEMI JOIN $planets AS S USING(id);", 0, 1, None),
-        ("SELECT * FROM $planets AS P ANTI JOIN (SELECT id FROM $satellites WHERE FALSE) AS S ON P.id = S.id;", 9, 20, None),
-        ("SELECT * FROM $planets ANTI JOIN $satellites USING(id) WHERE name IS NOT NULL;", 0, 20, None),
-        ("SELECT * FROM $planets AS P ANTI JOIN $satellites AS S ON P.id = S.id WHERE P.name != 'Earth';", 0, 20, None),
+        ("SELECT * FROM $planets AS P ANTI JOIN (SELECT id FROM testdata.satellites WHERE FALSE) AS S ON P.id = S.id;", 9, 20, None),
+        ("SELECT * FROM $planets ANTI JOIN testdata.satellites USING(id) WHERE name IS NOT NULL;", 0, 20, None),
+        ("SELECT * FROM $planets AS P ANTI JOIN testdata.satellites AS S ON P.id = S.id WHERE P.name != 'Earth';", 0, 20, None),
 
         ("EXPLAIN ANALYZE FORMAT TEXT SELECT * FROM $planets AS a INNER JOIN (SELECT id FROM $planets) AS b USING (id);", 3, 7, None),
         ("EXPLAIN ANALYZE FORMAT JSON SELECT * FROM $planets AS a INNER JOIN (SELECT id FROM $planets) AS b USING (id);", 3, 7, UnsupportedSyntaxError),
         ("EXPLAIN ANALYZE FORMAT GRAPHVIZ SELECT * FROM $planets AS a INNER JOIN (SELECT id FROM $planets) AS b USING (id);", 3, 7, UnsupportedSyntaxError),
         ("EXPLAIN ANALYZE FORMAT MERMAID SELECT * FROM $planets AS a INNER JOIN (SELECT id FROM $planets) AS b USING (id);", 1, 1, None),
-        ("SELECT DISTINCT ON (planetId) planetId, name FROM $satellites ", 7, 2, None),
+        ("SELECT DISTINCT ON (planetId) planetId, name FROM testdata.satellites ", 7, 2, None),
         ("SELECT 8 DIV 4", 1, 1, None),
 
         ("SELECT * FROM $planets WHERE id IN (1)", 1, 20, None),
@@ -144,7 +144,7 @@ STATEMENTS = [
         # Handling NULL Comparisons in WHERE Clause
         ("SELECT * FROM $planets WHERE id IS NOT NULL AND id < NULL", 0, 20, None),
         # Test for Zero-Length String Comparison
-        ("SELECT * FROM $satellites WHERE name = ''", 0, 8, None),
+        ("SELECT * FROM testdata.satellites WHERE name = ''", 0, 8, None),
         # Edge Case with LIKE and NULL Handling
         ("SELECT * FROM $planets WHERE name NOT LIKE '%a%' OR name IS NULL", 5, 20, None),
         # Ordering with NULLs First and Last
@@ -152,12 +152,12 @@ STATEMENTS = [
         # Edge Case Testing Subscripts on Arrays with NULL Values
         ("SELECT name[0] FROM $planets WHERE id IS NULL", 0, 1, None),
         # Edge Case with JSON-Like Filtering
-        ("SELECT * FROM $astronauts WHERE birth_place->>'city' = 'New York'", 0, 19, None),
+        ("SELECT * FROM testdata.astronauts WHERE birth_place->>'city' = 'New York'", 0, 19, None),
         # ZERO RECORD RESULT SETS
         ("SELECT * FROM $planets WHERE id = -1 ORDER BY id", 0, 20, None),
         ("SELECT * FROM $planets WHERE id = -1 LIMIT 10", 0, 20, None),
         # BYTE-ARRAY FAILS [#252]
-        (b"SELECT * FROM $satellites", 177, 8, None),
+        (b"SELECT * FROM testdata.satellites", 177, 8, None),
         # REGRESSION
         ("SELECT VERSION()", 1, 1, None),
         # COALESCE doesn't work with NaNs [#404]
@@ -176,7 +176,7 @@ STATEMENTS = [
         # Null columns can't be inverted
         ("SELECT NOT NULL", 1, 1, None),
         # Columns in CAST statements appear to not be bound correctly
-        ("SELECT SUM(CASE WHEN gm > 10 THEN 1 ELSE 0 END) AS gm_big_count FROM $satellites", 1, 1, None),
+        ("SELECT SUM(CASE WHEN gm > 10 THEN 1 ELSE 0 END) AS gm_big_count FROM testdata.satellites", 1, 1, None),
         # 1370, issues coercing DATE and TIMESTAMPS
         ("SELECT * FROM $planets WHERE TIMESTAMP '2023-01-01' = DATE '2023-01-01'", 9, 20, None),
         ("SELECT * FROM $planets WHERE 1 = 1.0", 9, 20, None),
@@ -193,81 +193,81 @@ STATEMENTS = [
         # 1320
         ("SELECT * FROM $planets WHERE LENGTH(name) BETWEEN 4 AND 6", 6, 20, None),
         # 1438
-        ("SELECT * FROM $planets, $satellites, $astronauts", None, None, UnsupportedSyntaxError),
+        ("SELECT * FROM $planets, testdata.satellites, testdata.astronauts", None, None, UnsupportedSyntaxError),
         # 1448
-        ("SELECT COUNT(*), planetId FROM $satellites", None, None, SqlError),
+        ("SELECT COUNT(*), planetId FROM testdata.satellites", None, None, SqlError),
         # 1474
         ("SELECT *, id FROM $planets;", None, None, SqlError),
         ("SELECT id, * FROM $planets;", None, None, SqlError),
         # 1487
-        ("SELECT * FROM $planets AS p INNER JOIN $satellites AS s ON p.id = s.planet_id WHERE p.name = 'Jupiter' AND s.radius = 1.0", 25, 28, None),
-        ("SELECT * FROM $planets AS p INNER JOIN $satellites AS s ON p.id = s.planet_id WHERE p.name = 'Jupiter'", 67, 28, None),
+        ("SELECT * FROM $planets AS p INNER JOIN testdata.satellites AS s ON p.id = s.planetId WHERE p.name = 'Jupiter' AND s.radius = 1.0", 25, 28, None),
+        ("SELECT * FROM $planets AS p INNER JOIN testdata.satellites AS s ON p.id = s.planetId WHERE p.name = 'Jupiter'", 67, 28, None),
         ("SELECT * FROM $planets AS p INNER JOIN $planets AS s ON p.id = s.id WHERE p.name = 'Jupiter' AND p.id = 1.0", 0, 40, None),
         # 1587
-        ("SELECT name, Mission_Status, Mission FROM $astronauts CROSS JOIN UNNEST (missions) AS mission_names INNER JOIN $missions ON Mission = mission_names WHERE mission_names = 'Apollo 11'", 3, 3, None),
-        ("SELECT name, Mission_Status, Mission FROM $astronauts CROSS JOIN UNNEST (missions) AS mission_names INNER JOIN $missions ON Mission = mission_names WHERE Mission = 'Apollo 11'", 3, 3, None),
+        ("SELECT name, Mission_Status, Mission FROM testdata.astronauts CROSS JOIN UNNEST (missions) AS mission_names INNER JOIN testdata.missions ON Mission = mission_names WHERE mission_names = 'Apollo 11'", 3, 3, None),
+        ("SELECT name, Mission_Status, Mission FROM testdata.astronauts CROSS JOIN UNNEST (missions) AS mission_names INNER JOIN testdata.missions ON Mission = mission_names WHERE Mission = 'Apollo 11'", 3, 3, None),
         # 1607
-        ("SELECT birth_place['town'], birth_place['state'] FROM $astronauts;", 357, 2, None),
-        ("SELECT birth_place->'town', birth_place->'state' FROM $astronauts;", 357, 2, None),
-        ("SELECT birth_place->>'town', birth_place->>'state' FROM $astronauts;", 357, 2, None),
+        ("SELECT birth_place['town'], birth_place['state'] FROM testdata.astronauts;", 357, 2, None),
+        ("SELECT birth_place->'town', birth_place->'state' FROM testdata.astronauts;", 357, 2, None),
+        ("SELECT birth_place->>'town', birth_place->>'state' FROM testdata.astronauts;", 357, 2, None),
         # 1622
-        ("SELECT * FROM (SELECT p.Price AS pri, s.escapeVelocity FROM $missions AS p INNER JOIN $planets AS s ON p.Price = s.escapeVelocity) AS SV WHERE IFNULL(null, pri) = pri", 5, 2, None),
+        ("SELECT * FROM (SELECT p.Price AS pri, s.escapeVelocity FROM testdata.missions AS p INNER JOIN $planets AS s ON p.Price = s.escapeVelocity) AS SV WHERE IFNULL(null, pri) = pri", 5, 2, None),
         # 1696
         ("SELECT name FROM (SELECT * FROM $planets LIMIT 5) AS S WHERE name != 'Mars'", 4, 1, None),
         # 1753
         ("SELECT TOP 5 * FROM $planets", None, None, UnsupportedSyntaxError),
         # 1801 CROSS JOIN UNNEST after WHERE
-        ("SELECT alma, birth_date FROM $astronauts CROSS JOIN UNNEST(alma_mater) as alma WHERE birth_date > '1950-05-22'", 415, 2, None),
-        ("SELECT alma, birth_date FROM $astronauts CROSS JOIN UNNEST(alma_mater) as alma", 681, 2, None),
+        ("SELECT alma, birth_date FROM testdata.astronauts CROSS JOIN UNNEST(alma_mater) as alma WHERE birth_date > '1950-05-22'", 415, 2, None),
+        ("SELECT alma, birth_date FROM testdata.astronauts CROSS JOIN UNNEST(alma_mater) as alma", 681, 2, None),
         # date pushdowns for parquet
         ("SELECT Location FROM testdata.missions WHERE Lauched_at BETWEEN '1950-01-01' AND '1975-01-01'", 1311, 1, None),
         # 1837
-        ("SELECT * FROM $astronauts CROSS JOIN UNNEST(missions)", None, None, UnnamedColumnError),
+        ("SELECT * FROM testdata.astronauts CROSS JOIN UNNEST(missions)", None, None, UnnamedColumnError),
         # 1841
-        ("SELECT * FROM $astronauts, jsonb_object_keys(birth_place) as keys", None, None, UnsupportedSyntaxError),
+        ("SELECT * FROM testdata.astronauts, jsonb_object_keys(birth_place) as keys", None, None, UnsupportedSyntaxError),
         # 1848
         ("SELECT name is null from (SELECT name from $planets where id = 90) as s", 0, 1, None),
         ("SELECT * from (SELECT name from $planets where id = 90) as s WHERE name is null", 0, 1, None),
         ("SELECT * from (SELECT * from $planets where id = 90) as s WHERE name is not true", 0, 20, IncorrectTypeError),
         # 1850
-        ("SELECT IFNULL(alma_mater, null) FROM $astronauts", 357, 1, None),
-        ("SELECT IFNULL(alma_mater, []) FROM $astronauts", 357, 1, None),
+        ("SELECT IFNULL(alma_mater, null) FROM testdata.astronauts", 357, 1, None),
+        ("SELECT IFNULL(alma_mater, []) FROM testdata.astronauts", 357, 1, None),
         # 1854
         ("SELECT s,e FROM generate_series('2024-01-01', '2025-01-01', '1mo') as s, generate_series('2024-01-01', '2025-01-01', '1mo') as e", 169, 2, None),
-        ("SELECT * from $planets, $satellites", 1593, 28, None),
+        ("SELECT * from $planets, testdata.satellites", 1593, 28, None),
         # 1865
         ("SELECT COUNT(*) FROM testdata.missions WHERE Lauched_at < '1970-01-01'", 1, 1, None),
         # 1875 - can't replicate error with test data, these are similar cases
-        ("SELECT * FROM $astronauts WHERE IFNULL(birth_place->'state', 'home') == 'CA'", 25, 19, None),
-        ("SELECT * FROM $astronauts WHERE IFNULL(GET(birth_place,'state'), 'home') == 'CA'", 25, 19, None),
+        ("SELECT * FROM testdata.astronauts WHERE IFNULL(birth_place->'state', 'home') == 'CA'", 25, 19, None),
+        ("SELECT * FROM testdata.astronauts WHERE IFNULL(GET(birth_place,'state'), 'home') == 'CA'", 25, 19, None),
         # 1880
-        ("SELECT name, mission FROM (SELECT name, missions FROM $astronauts) as nauts CROSS JOIN UNNEST (nauts.missions) AS mission WHERE mission != 'Apollo 11'", 843, 2, None),
-        ("SELECT name, mission FROM (SELECT name, missions FROM $astronauts) as nauts CROSS JOIN UNNEST (nauts.missions) AS mission WHERE mission > 'Apollo 11'", 837, 2, None),
-        ("SELECT name, mission FROM (SELECT name, missions FROM $astronauts) as nauts CROSS JOIN UNNEST (nauts.missions) AS mission WHERE mission >= 'Apollo 11'", 840, 2, None),
-        ("SELECT name, mission FROM (SELECT name, missions FROM $astronauts) as nauts CROSS JOIN UNNEST (nauts.missions) AS mission WHERE mission LIKE 'Apollo 11'", 3, 2, None),
-        ("SELECT name, mission FROM (SELECT name, missions FROM $astronauts) as nauts CROSS JOIN UNNEST (nauts.missions) AS mission WHERE mission = 'Apollo 11'", 3, 2, None),
-        ("SELECT name, mission FROM (SELECT name, missions FROM $astronauts) as nauts CROSS JOIN UNNEST (nauts.missions) AS mission WHERE mission LIKE 'Apollo%11'", 3, 2, None),
-        ("SELECT name, mission FROM (SELECT name, missions FROM $astronauts) as nauts CROSS JOIN UNNEST (nauts.missions) AS mission WHERE mission not in ('Apollo 11')", 843, 2, None),
-        ("SELECT name, mission FROM (SELECT name, missions FROM $astronauts) as nauts CROSS JOIN UNNEST (nauts.missions) AS mission WHERE NOT mission LIKE 'Apollo 11'", 843, 2, None),
-        ("SELECT name, mission FROM $astronauts CROSS JOIN UNNEST (missions) AS mission WHERE mission != 'Apollo 11'", 843, 2, None),
-        ("SELECT name, mission FROM $astronauts CROSS JOIN UNNEST (missions) AS mission WHERE mission > 'Apollo 11'", 837, 2, None),
-        ("SELECT name, mission FROM $astronauts CROSS JOIN UNNEST (missions) AS mission WHERE mission >= 'Apollo 11'", 840, 2, None),
-        ("SELECT name, mission FROM $astronauts CROSS JOIN UNNEST (missions) AS mission WHERE mission LIKE 'Apollo 11'", 3, 2, None),
-        ("SELECT name, mission FROM $astronauts CROSS JOIN UNNEST (missions) AS mission WHERE mission = 'Apollo 11'", 3, 2, None),
-        ("SELECT name, mission FROM $astronauts CROSS JOIN UNNEST (missions) AS mission WHERE mission LIKE 'Apollo%11'", 3, 2, None),
-        ("SELECT name, mission FROM $astronauts CROSS JOIN UNNEST (missions) AS mission WHERE mission not in ('Apollo 11')", 843, 2, None),
-        ("SELECT name, mission FROM $astronauts CROSS JOIN UNNEST (missions) AS mission WHERE NOT mission LIKE 'Apollo 11'", 843, 2, None),
+        ("SELECT name, mission FROM (SELECT name, missions FROM testdata.astronauts) as nauts CROSS JOIN UNNEST (nauts.missions) AS mission WHERE mission != 'Apollo 11'", 843, 2, None),
+        ("SELECT name, mission FROM (SELECT name, missions FROM testdata.astronauts) as nauts CROSS JOIN UNNEST (nauts.missions) AS mission WHERE mission > 'Apollo 11'", 837, 2, None),
+        ("SELECT name, mission FROM (SELECT name, missions FROM testdata.astronauts) as nauts CROSS JOIN UNNEST (nauts.missions) AS mission WHERE mission >= 'Apollo 11'", 840, 2, None),
+        ("SELECT name, mission FROM (SELECT name, missions FROM testdata.astronauts) as nauts CROSS JOIN UNNEST (nauts.missions) AS mission WHERE mission LIKE 'Apollo 11'", 3, 2, None),
+        ("SELECT name, mission FROM (SELECT name, missions FROM testdata.astronauts) as nauts CROSS JOIN UNNEST (nauts.missions) AS mission WHERE mission = 'Apollo 11'", 3, 2, None),
+        ("SELECT name, mission FROM (SELECT name, missions FROM testdata.astronauts) as nauts CROSS JOIN UNNEST (nauts.missions) AS mission WHERE mission LIKE 'Apollo%11'", 3, 2, None),
+        ("SELECT name, mission FROM (SELECT name, missions FROM testdata.astronauts) as nauts CROSS JOIN UNNEST (nauts.missions) AS mission WHERE mission not in ('Apollo 11')", 843, 2, None),
+        ("SELECT name, mission FROM (SELECT name, missions FROM testdata.astronauts) as nauts CROSS JOIN UNNEST (nauts.missions) AS mission WHERE NOT mission LIKE 'Apollo 11'", 843, 2, None),
+        ("SELECT name, mission FROM testdata.astronauts CROSS JOIN UNNEST (missions) AS mission WHERE mission != 'Apollo 11'", 843, 2, None),
+        ("SELECT name, mission FROM testdata.astronauts CROSS JOIN UNNEST (missions) AS mission WHERE mission > 'Apollo 11'", 837, 2, None),
+        ("SELECT name, mission FROM testdata.astronauts CROSS JOIN UNNEST (missions) AS mission WHERE mission >= 'Apollo 11'", 840, 2, None),
+        ("SELECT name, mission FROM testdata.astronauts CROSS JOIN UNNEST (missions) AS mission WHERE mission LIKE 'Apollo 11'", 3, 2, None),
+        ("SELECT name, mission FROM testdata.astronauts CROSS JOIN UNNEST (missions) AS mission WHERE mission = 'Apollo 11'", 3, 2, None),
+        ("SELECT name, mission FROM testdata.astronauts CROSS JOIN UNNEST (missions) AS mission WHERE mission LIKE 'Apollo%11'", 3, 2, None),
+        ("SELECT name, mission FROM testdata.astronauts CROSS JOIN UNNEST (missions) AS mission WHERE mission not in ('Apollo 11')", 843, 2, None),
+        ("SELECT name, mission FROM testdata.astronauts CROSS JOIN UNNEST (missions) AS mission WHERE NOT mission LIKE 'Apollo 11'", 843, 2, None),
         # 1881 - found when working on 1880 but different enough for a new bug
-#        ("SELECT name, mission FROM (SELECT name, missions FROM $astronauts) as nauts CROSS JOIN UNNEST (nauts.missions) AS mission WHERE VARCHAR(mission) = 'Apollo 11'", 3, 2, None),
-#        ("SELECT name, mission FROM $astronauts CROSS JOIN UNNEST (missions) AS mission WHERE LEFT(mission, 2) = 'Apollo 11'", 0, 0, None),
+#        ("SELECT name, mission FROM (SELECT name, missions FROM testdata.astronauts) as nauts CROSS JOIN UNNEST (nauts.missions) AS mission WHERE VARCHAR(mission) = 'Apollo 11'", 3, 2, None),
+#        ("SELECT name, mission FROM testdata.astronauts CROSS JOIN UNNEST (missions) AS mission WHERE LEFT(mission, 2) = 'Apollo 11'", 0, 0, None),
         # 1887
-        ("SELECT * FROM (SELECT * FROM $satellites LEFT JOIN (SELECT id AS pid, mass FROM $planets) AS p ON $satellites.planetId = p.pid) AS mapped WHERE mass > 1", 170, 10, None),
-        ("SELECT * FROM (SELECT planetId, mass FROM $satellites LEFT JOIN $planets AS p ON $satellites.planetId = p.id) AS mapped WHERE mass > 1", 170, 2, None),
-        ("SELECT * FROM $satellites LEFT JOIN $planets AS p ON $satellites.planetId = p.id WHERE mass > 1", 170, 28, None),
-        ("SELECT * FROM (SELECT p.id, mass FROM (SELECT * FROM $satellites) AS s LEFT JOIN $planets AS p ON s.planetId = p.id) AS mapped WHERE mass > 1", 170, 2, None),
-        ("SELECT * FROM (SELECT * FROM $satellites) AS s LEFT JOIN (SELECT id as pid, mass FROM $planets) AS p ON s.planetId = p.pid WHERE mass > 1", 170, 10, None),
-        ("SELECT * FROM $satellites LEFT JOIN (SELECT * FROM (SELECT * FROM $planets) AS p) AS planets ON $satellites.planetId = planets.id WHERE mass > 1", 170, 28, None),
-        ("SELECT * FROM (SELECT * FROM (SELECT p.id, mass FROM $satellites LEFT JOIN $planets AS p ON $satellites.planetId = p.id) AS joined) AS mapped WHERE mass > 1", 170, 2, None),
+        ("SELECT * FROM (SELECT * FROM testdata.satellites LEFT JOIN (SELECT id AS pid, mass FROM $planets) AS p ON testdata.satellites.planetId = p.pid) AS mapped WHERE mass > 1", 170, 10, None),
+        ("SELECT * FROM (SELECT planetId, mass FROM testdata.satellites LEFT JOIN $planets AS p ON testdata.satellites.planetId = p.id) AS mapped WHERE mass > 1", 170, 2, None),
+        ("SELECT * FROM testdata.satellites LEFT JOIN $planets AS p ON testdata.satellites.planetId = p.id WHERE mass > 1", 170, 28, None),
+        ("SELECT * FROM (SELECT p.id, mass FROM (SELECT * FROM testdata.satellites) AS s LEFT JOIN $planets AS p ON s.planetId = p.id) AS mapped WHERE mass > 1", 170, 2, None),
+        ("SELECT * FROM (SELECT * FROM testdata.satellites) AS s LEFT JOIN (SELECT id as pid, mass FROM $planets) AS p ON s.planetId = p.pid WHERE mass > 1", 170, 10, None),
+        ("SELECT * FROM testdata.satellites LEFT JOIN (SELECT * FROM (SELECT * FROM $planets) AS p) AS planets ON testdata.satellites.planetId = planets.id WHERE mass > 1", 170, 28, None),
+        ("SELECT * FROM (SELECT * FROM (SELECT p.id, mass FROM testdata.satellites LEFT JOIN $planets AS p ON testdata.satellites.planetId = p.id) AS joined) AS mapped WHERE mass > 1", 170, 2, None),
         # 1977
         ("SELECT s, e FROM GENERATE_SERIES('2024-01-01', '2025-01-01', '1mth') AS s CROSS JOIN GENERATE_SERIES('2024-01-01', '2025-01-01', '1mth') AS e WHERE s = e + INTERVAL '1' MONTH", 12, 2, None),
         ("SELECT s, e FROM GENERATE_SERIES('2024-01-01', '2025-01-01', '1mth') AS s CROSS JOIN GENERATE_SERIES('2024-01-01', '2025-01-01', '1mth') AS e WHERE s + INTERVAL '1' MONTH = e", 12, 2, None),
@@ -286,9 +286,9 @@ STATEMENTS = [
         ("SELECT DISTINCT id, gm, density, magnitude FROM testdata.satellites WHERE radius < 1286258.869 AND NOT id > 2730526.873 AND id IS NULL ORDER BY radius DESC", 0, 4, None),
         ("SELECT Company, Price, Mission FROM testdata.missions WHERE Price <= 4279346967 AND NOT Price BETWEEN 137294968 AND 2336093823 ORDER BY Company DESC LIMIT 9 ", 9, 3, None),
 
-        ("SELECT * FROM (SELECT * FROM (SELECT * FROM $satellites LEFT JOIN $planets AS p ON $satellites.planetId = p.id) AS joined) AS mapped WHERE mass > 1", 170, 28, AmbiguousIdentifierError),
-        ("SELECT * FROM (SELECT * FROM $satellites LEFT JOIN (SELECT * FROM $planets) AS p ON $satellites.planetId = p.id) AS mapped WHERE mass > 1", 170, 28, AmbiguousIdentifierError),
-        ("SELECT * FROM (SELECT * FROM $satellites LEFT JOIN $planets AS p ON $satellites.planetId = p.id) AS mapped WHERE mass > 1", 170, 28, AmbiguousIdentifierError),
+        ("SELECT * FROM (SELECT * FROM (SELECT * FROM testdata.satellites LEFT JOIN $planets AS p ON testdata.satellites.planetId = p.id) AS joined) AS mapped WHERE mass > 1", 170, 28, AmbiguousIdentifierError),
+        ("SELECT * FROM (SELECT * FROM testdata.satellites LEFT JOIN (SELECT * FROM $planets) AS p ON testdata.satellites.planetId = p.id) AS mapped WHERE mass > 1", 170, 28, AmbiguousIdentifierError),
+        ("SELECT * FROM (SELECT * FROM testdata.satellites LEFT JOIN $planets AS p ON testdata.satellites.planetId = p.id) AS mapped WHERE mass > 1", 170, 28, AmbiguousIdentifierError),
         # 2042
         ("SELECT DISTINCT Company FROM launches", 62, 1, None),
         ("SELECT Company FROM launches", 4630, 1, None),
@@ -302,20 +302,20 @@ STATEMENTS = [
         ("SELECT CASE WHEN surfacePressure = 0 THEN -1 WHEN surfacePressure IS NULL THEN 0 ELSE -2 END FROM $planets", 9, 1, None),
         ("SELECT CASE WHEN surfacePressure = 0 THEN -1 ELSE -2 END FROM $planets", 9, 1, None),
         # 2054
-        ("SELECT DISTINCT sides FROM (SELECT * FROM $planets AS plans LEFT JOIN (SELECT ARRAY_AGG(id) as sids, planetId FROM $satellites GROUP BY planetId) AS sats ON plans.id = planetId) AS plansats CROSS JOIN UNNEST (sids) as sides", 177, 1, None),
-        ("SELECT DISTINCT sides FROM (SELECT * FROM $planets AS plans LEFT JOIN (SELECT ARRAY_AGG(name) as sids, planetId FROM $satellites GROUP BY planetId) AS sats ON plans.id = planetId) AS plansats CROSS JOIN UNNEST (sids) as sides", 177, 1, None),
-        ("SELECT DISTINCT sides FROM (SELECT * FROM $planets AS plans LEFT JOIN (SELECT ARRAY_AGG(gm) as sids, planetId FROM $satellites GROUP BY planetId) AS sats ON plans.id = planetId) AS plansats CROSS JOIN UNNEST (sids) as sides", 102, 1, None),
-        ("SELECT DISTINCT sides FROM (SELECT * FROM $planets AS plans LEFT JOIN (SELECT ARRAY_AGG(birth_date)  as sids, group FROM $astronauts GROUP BY group) AS sats ON plans.id = group) AS plansats CROSS JOIN UNNEST (sids) as sides", 125, 1, None),
-        ("SELECT DISTINCT sides FROM (SELECT * FROM $planets AS plans LEFT JOIN (SELECT ARRAY_AGG(birth_place) as sids, group FROM $astronauts GROUP BY group) AS sats ON plans.id = group) AS plansats CROSS JOIN UNNEST (sids) as sides", 110, 1, None),
+        ("SELECT DISTINCT sides FROM (SELECT * FROM $planets AS plans LEFT JOIN (SELECT ARRAY_AGG(id) as sids, planetId FROM testdata.satellites GROUP BY planetId) AS sats ON plans.id = planetId) AS plansats CROSS JOIN UNNEST (sids) as sides", 177, 1, None),
+        ("SELECT DISTINCT sides FROM (SELECT * FROM $planets AS plans LEFT JOIN (SELECT ARRAY_AGG(name) as sids, planetId FROM testdata.satellites GROUP BY planetId) AS sats ON plans.id = planetId) AS plansats CROSS JOIN UNNEST (sids) as sides", 177, 1, None),
+        ("SELECT DISTINCT sides FROM (SELECT * FROM $planets AS plans LEFT JOIN (SELECT ARRAY_AGG(gm) as sids, planetId FROM testdata.satellites GROUP BY planetId) AS sats ON plans.id = planetId) AS plansats CROSS JOIN UNNEST (sids) as sides", 102, 1, None),
+        ("SELECT DISTINCT sides FROM (SELECT * FROM $planets AS plans LEFT JOIN (SELECT ARRAY_AGG(birth_date)  as sids, group FROM testdata.astronauts GROUP BY group) AS sats ON plans.id = group) AS plansats CROSS JOIN UNNEST (sids) as sides", 125, 1, None),
+        ("SELECT DISTINCT sides FROM (SELECT * FROM $planets AS plans LEFT JOIN (SELECT ARRAY_AGG(birth_place) as sids, group FROM testdata.astronauts GROUP BY group) AS sats ON plans.id = group) AS plansats CROSS JOIN UNNEST (sids) as sides", 110, 1, None),
         # 2059
         ("SELECT g FROM generate_series(10) as g CROSS JOIN UNNEST (g) as g1", 0, 0, IncorrectTypeError),
 #        ("SELECT DISTINCT l FROM (SELECT split('a b c d e f g h i j', ' ') as letters) as plet CROSS JOIN UNNEST (letters) as l", 10, 1, None),
         # 2112
         ("SELECT id FROM $planets WHERE surface_pressure / surface_pressure is null", 5, 1, None),
         # 2144
-        ("SELECT town, LENGTH(NULLIF(town, 'Inglewood')) FROM (SELECT birth_place->'town' AS town FROM $astronauts) AS T", 357, 2, None),
-        ("SELECT town, LENGTH(NULLIF(town, b'Inglewood')) FROM (SELECT birth_place->>'town' AS town FROM $astronauts) AS T", 357, 2, None),
-        ("SELECT town, LENGTH(NULLIF(town, 'Inglewood')) FROM (SELECT birth_place->>'town' AS town FROM $astronauts) AS T", 357, 2, None),
+        ("SELECT town, LENGTH(NULLIF(town, 'Inglewood')) FROM (SELECT birth_place->'town' AS town FROM testdata.astronauts) AS T", 357, 2, None),
+        ("SELECT town, LENGTH(NULLIF(town, b'Inglewood')) FROM (SELECT birth_place->>'town' AS town FROM testdata.astronauts) AS T", 357, 2, None),
+        ("SELECT town, LENGTH(NULLIF(town, 'Inglewood')) FROM (SELECT birth_place->>'town' AS town FROM testdata.astronauts) AS T", 357, 2, None),
         # 2159
         ("SELECT * FROM (SELECT 1 * surface_pressure as opt, surface_pressure FROM $planets) AS sub WHERE opt IS NULL", 4, 2, None),
         ("SELECT * FROM (SELECT surface_pressure * 1 as opt, surface_pressure FROM $planets) AS sub WHERE opt IS NULL", 4, 2, None),
@@ -360,9 +360,9 @@ STATEMENTS = [
         ("SELECT * FROM $planets ORDER BY (id) ASC, name", 9, 20, None),
         ("SELECT * FROM $planets ORDER BY (id) DESC, name", 9, 20, None),
         # 2340
-        ("SELECT * FROM $satellites WHERE magnitude != 573602.533 ORDER BY magnitude DESC", 171, 8, None),
+        ("SELECT * FROM testdata.satellites WHERE magnitude != 573602.533 ORDER BY magnitude DESC", 171, 8, None),
         ("SELECT * FROM iceberg.opteryx.satellites WHERE magnitude != 573602.533 ORDER BY magnitude DESC", 171, 8, None),
-        ("SELECT * FROM $satellites WHERE magnitude < 573602.533 ORDER BY magnitude DESC", 171, 8, None),
+        ("SELECT * FROM testdata.satellites WHERE magnitude < 573602.533 ORDER BY magnitude DESC", 171, 8, None),
         ("SELECT * FROM iceberg.opteryx.satellites WHERE magnitude < 573602.533 ORDER BY magnitude DESC", 171, 8, None),
         # 2489
         ("SELECT name FROM $planets where length(md5(name)) == 32", 9, 1, None),
@@ -384,18 +384,18 @@ STATEMENTS = [
         ("SELECT name FROM $planets WHERE IFNULL(surface_pressure, 0) == 0", 5, 1, None),
         ("SELECT name FROM $planets WHERE IFNULL(surface_pressure, 1) == 1", 5, 1, None),
         ("SELECT name FROM $planets WHERE IFNULL(surface_pressure, 2) == 2", 4, 1, None),
-        ("SELECT IFNULL(missions, []) FROM $astronauts", 357, 1, None),
-        ("SELECT IFNULL(missions, ['Training']) FROM $astronauts", 357, 1, None),
-        ("SELECT IFNULL(missions, []) FROM $astronauts WHERE missions IS NULL", 23, 1, None),
+        ("SELECT IFNULL(missions, []) FROM testdata.astronauts", 357, 1, None),
+        ("SELECT IFNULL(missions, ['Training']) FROM testdata.astronauts", 357, 1, None),
+        ("SELECT IFNULL(missions, []) FROM testdata.astronauts WHERE missions IS NULL", 23, 1, None),
         # 2649
         ("SELECT name FROM $planets WHERE UNIXTIME('2020-01-01T00:00:00') = 1577836800;", 9, 1, None),
         ("SELECT name FROM $planets WHERE UNIXTIME('2020-01-01T00:00:00'::TIMESTAMP) = 1577836800;", 9, 1, None),
         ("SELECT name FROM (SELECT name, UNIXTIME('1970-01-01'::DATE) AS ts FROM $planets) AS A WHERE ts = 0;", 9, 1, None),
-        ("SELECT name FROM $astronauts WHERE UNIXTIME(birth_date) = UNIXTIME('1961-11-05'::DATE);", 2, 1, None),
+        ("SELECT name FROM testdata.astronauts WHERE UNIXTIME(birth_date) = UNIXTIME('1961-11-05'::DATE);", 2, 1, None),
         ("SELECT name FROM $planets WHERE '2020-01-01T00:00:00'::TIMESTAMP = FROM_UNIXTIME(1577836800);", 9, 1, None),
         # 2754
-        ("SELECT name FROM $astronauts WHERE CONCAT(missions) ILIKE '%Apo%'", 34, 1, None),
-        ("SELECT name FROM $astronauts WHERE CONCAT(missions) LIKE '%Apo%'", 34, 1, None),
+        ("SELECT name FROM testdata.astronauts WHERE CONCAT(missions) ILIKE '%Apo%'", 34, 1, None),
+        ("SELECT name FROM testdata.astronauts WHERE CONCAT(missions) LIKE '%Apo%'", 34, 1, None),
         # 2781
         ("SELECT id, (COUNT(*) + COUNT(*)) AS c FROM $planets GROUP BY id", 9, 2, None),
         ("SELECT id, (COUNT(*) + COUNT(*) + COUNT(*)) AS c FROM $planets GROUP BY id", 9, 2, None),
@@ -418,21 +418,21 @@ STATEMENTS = [
         # Additional edge cases - UNION/EXCEPT/INTERSECT
         ("SELECT id FROM $planets WHERE id < 3 UNION SELECT id FROM $planets WHERE id > 7", 4, 1, AmbiguousDatasetError),
         ("SELECT id FROM $planets WHERE id < 5 UNION ALL SELECT id FROM $planets WHERE id < 3", 6, 1, AmbiguousDatasetError),
-        ("SELECT id FROM $planets EXCEPT SELECT id FROM $satellites WHERE id < 5", 5, 1, UnsupportedSyntaxError),
-        ("SELECT id FROM $planets INTERSECT SELECT id FROM $satellites", 9, 1, UnsupportedSyntaxError),
+        ("SELECT id FROM $planets EXCEPT SELECT id FROM testdata.satellites WHERE id < 5", 5, 1, UnsupportedSyntaxError),
+        ("SELECT id FROM $planets INTERSECT SELECT id FROM testdata.satellites", 9, 1, UnsupportedSyntaxError),
 
         # Complex nested subqueries
         ("SELECT * FROM (SELECT * FROM (SELECT * FROM $planets) AS s1) AS s2", 9, 20, None),
-        ("SELECT COUNT(*) FROM (SELECT id FROM $planets WHERE id IN (SELECT planetId FROM $satellites)) AS subq", 1, 1, UnsupportedSyntaxError),
+        ("SELECT COUNT(*) FROM (SELECT id FROM $planets WHERE id IN (SELECT planetId FROM testdata.satellites)) AS subq", 1, 1, UnsupportedSyntaxError),
 
         # CROSS JOIN edge cases
         ("SELECT COUNT(*) FROM $planets CROSS JOIN $no_table", 1, 1, None),
         ("SELECT p.id FROM $planets p CROSS JOIN (SELECT 1 AS one) AS t", 9, 1, None),
 
         # Edge cases with HAVING
-        ("SELECT planetId, COUNT(*) FROM $satellites GROUP BY planetId HAVING COUNT(*) > 1", 6, 2, None),
-        ("SELECT planetId FROM $satellites GROUP BY planetId HAVING COUNT(*) = 1", 1, 1, ColumnReferencedBeforeEvaluationError),
-        ("SELECT planetId FROM $satellites GROUP BY planetId HAVING MAX(id) > 100", 1, 1, ColumnNotFoundError),
+        ("SELECT planetId, COUNT(*) FROM testdata.satellites GROUP BY planetId HAVING COUNT(*) > 1", 6, 2, None),
+        ("SELECT planetId FROM testdata.satellites GROUP BY planetId HAVING COUNT(*) = 1", 1, 1, ColumnReferencedBeforeEvaluationError),
+        ("SELECT planetId FROM testdata.satellites GROUP BY planetId HAVING MAX(id) > 100", 1, 1, ColumnNotFoundError),
 
         # Window function edge cases (if supported)
         # ("SELECT id, ROW_NUMBER() OVER (ORDER BY id) FROM $planets", 9, 2, None),
@@ -453,9 +453,9 @@ STATEMENTS = [
         ("SELECT * FROM $planets WHERE LOWER(name) LIKE 'mars'", 1, 20, None),
 
         # Complex JOIN conditions
-        ("SELECT p.id FROM $planets p INNER JOIN $satellites s ON p.id = s.planetId AND p.id < 5", 3, 1, None),
-        ("SELECT COUNT(*) FROM $planets p LEFT JOIN $satellites s ON p.id = s.planetId WHERE s.id IS NULL", 1, 1, None),
-        ("SELECT COUNT(*) FROM $satellites s RIGHT JOIN $planets p ON s.planetId = p.id WHERE s.id IS NOT NULL", 1, 1, None),
+        ("SELECT p.id FROM $planets p INNER JOIN testdata.satellites s ON p.id = s.planetId AND p.id < 5", 3, 1, None),
+        ("SELECT COUNT(*) FROM $planets p LEFT JOIN testdata.satellites s ON p.id = s.planetId WHERE s.id IS NULL", 1, 1, None),
+        ("SELECT COUNT(*) FROM testdata.satellites s RIGHT JOIN $planets p ON s.planetId = p.id WHERE s.id IS NOT NULL", 1, 1, None),
 
         # Self-join edge cases
         ("SELECT p1.id FROM $planets p1 JOIN $planets p2 ON p1.id = p2.id", 9, 1, None),

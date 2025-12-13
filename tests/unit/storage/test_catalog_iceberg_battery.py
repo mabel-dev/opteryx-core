@@ -28,9 +28,9 @@ STATEMENTS = [
     ("SELECT name FROM iceberg.opteryx.satellites;", 177, 1, None),
     ("SELECT name FROM iceberg.opteryx.non_existent_table;", 0, 0, DatasetNotFoundError),
     
-    ("SELECT * FROM iceberg.opteryx.planets INNER JOIN $satellites ON iceberg.opteryx.planets.id = $satellites.planetId;", 177, 28, None),
-    ("SELECT * FROM iceberg.opteryx.planets, $satellites WHERE iceberg.opteryx.planets.id = $satellites.planetId;", 177, 28, None),
-    ("SELECT * FROM iceberg.opteryx.planets CROSS JOIN $satellites WHERE iceberg.opteryx.planets.id = $satellites.planetId;", 177, 28, None),
+    ("SELECT * FROM iceberg.opteryx.planets INNER JOIN testdata.satellites ON iceberg.opteryx.planets.id = testdata.satellites.planetId;", 177, 28, None),
+    ("SELECT * FROM iceberg.opteryx.planets, testdata.satellites WHERE iceberg.opteryx.planets.id = testdata.satellites.planetId;", 177, 28, None),
+    ("SELECT * FROM iceberg.opteryx.planets CROSS JOIN testdata.satellites WHERE iceberg.opteryx.planets.id = testdata.satellites.planetId;", 177, 28, None),
     ("SELECT * FROM iceberg.opteryx.planets INNER JOIN iceberg.opteryx.satellites ON iceberg.opteryx.planets.id = iceberg.opteryx.satellites.planetId;", 177, 28, None),
     ("SELECT name FROM iceberg.opteryx.planets WHERE name LIKE 'Earth';", 1, 1, None),
     ("SELECT * FROM iceberg.opteryx.planets WHERE id > gravity", 2, 20, None),

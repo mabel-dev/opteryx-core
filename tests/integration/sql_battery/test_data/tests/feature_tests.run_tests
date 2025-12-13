@@ -4,7 +4,7 @@
 # SHOW FUNCTIONS LIKE '%date%';
 # SHOW FUNCTIONS LIKE '%zz';
 
-SELECT planetId, LEAST(ARRAY_AGG(magnitude)) FROM $satellites group by planetId;
+SELECT planetId, LEAST(ARRAY_AGG(magnitude)) FROM testdata.satellites group by planetId;
 
 SELECT TIMESTAMP('2022-01-01');
 SELECT INTEGER('22');
@@ -105,7 +105,7 @@ SELECT FLOOR(2.5, -1);
 SELECT POSITION('e' IN 'barge');
 SELECT POSITION('x' IN 'barge');
 SELECT POSITION('a' IN name) FROM $planets;
-SELECT POSITION(' ' IN name) FROM $astronauts;
+SELECT POSITION(' ' IN name) FROM testdata.astronauts;
 SELECT LEFT('', 1);
 SELECT LEFT('a', 1);
 SELECT LEFT('ab', 1);
@@ -115,8 +115,8 @@ SELECT CASE id WHEN 3 THEN 'Earth' WHEN 1 THEN 'Mercury' END FROM $planets;
 SELECT CASE WHEN id = 3 THEN 'Earth' WHEN id = 1 THEN 'Mercury' ELSE 'Elsewhere' END FROM $planets;
 SELECT CASE WHEN id = 3 THEN 'Earth' WHEN id = 1 THEN 'Mercury' END FROM $planets;
 
-SELECT * FROM $astronauts WHERE death_date > current_timestamp - interval '50' YEAR;
-SELECT * FROM $astronauts WHERE birth_date < current_timestamp + interval '50' YEAR;
+SELECT * FROM testdata.astronauts WHERE death_date > current_timestamp - interval '50' YEAR;
+SELECT * FROM testdata.astronauts WHERE birth_date < current_timestamp + interval '50' YEAR;
 
 SELECT LTRIM('   ABC');
 SELECT TRIM(LEADING '_' FROM '___ABC');
@@ -131,12 +131,12 @@ SELECT TRIM(LEADING ' ' FROM name) FROM $planets;
 SELECT HASH(name || varchar(id)) FROM $planets GROUP BY name, id;
 
 # ANALYZE TABLE $planets;
-# ANALYZE TABLE $astronauts;
+# ANALYZE TABLE testdata.astronauts;
 
 SELECT LEVENSHTEIN(name, 'zeus') FROM $planets;
 SELECT FROM_UNIXTIME(0);
 SELECT UNIXTIME();
-SELECT UNIXTIME(death_date), death_date from $astronauts;
+SELECT UNIXTIME(death_date), death_date from testdata.astronauts;
 
 SELECT name FROM $planets ORDER BY mass, gravity;
 SELECT name FROM $planets ORDER BY mass DESC;
@@ -144,7 +144,7 @@ SELECT name FROM $planets ORDER BY mass DESC, gravity ASC;
 SELECT * FROM $planets ORDER BY mass;
 SELECT name FROM $planets ORDER BY mass LIMIT 2;
 
-# ANALYZE TABLE $astronauts;
+# ANALYZE TABLE testdata.astronauts;
 # ANALYZE TABLE $planets;
 # ANALYZE TABLE 'testdata/flat/formats/parquet/tweets.parquet';
 
@@ -154,7 +154,7 @@ SELECT name FROM $planets ORDER BY mass LIMIT 2;
 -- SELECT SPLIT('a,bc,def', ',');
 -- SELECT SPLIT('a');
 -- SELECT SPLIT('a', 'a');
-SELECT SPLIT(name, ' ') FROM $astronauts;
+SELECT SPLIT(name, ' ') FROM testdata.astronauts;
 
 SELECT '{"test":true}';
 SELECT ST['prod'] FROM (SELECT '{"prod": 73}' AS ST FROM $planets) AS SB;
@@ -175,7 +175,7 @@ SELECT PI();
 SELECT PHI();
 SELECT USER();
 SELECT DATABASE();
-SELECT NOW() - birth_date, NOW(), birth_date FROM $astronauts;
+SELECT NOW() - birth_date, NOW(), birth_date FROM testdata.astronauts;
 SELECT E() * PI() * PHI();
 
 SELECT ['a', 'b', 'c'] @> ['g', 'h', 'a']
@@ -196,10 +196,10 @@ SELECT ['z', 'z', 'z'] @> ['z'];
 SELECT ['a'] @> ['a', 'b'];
 SELECT ['a', 'b', 'c'] @> ['a', 'a', 'b'];
 SELECT ['a', 'b', 'c'] @> ('a', 'a');
-SELECT missions @> ('STS-1 (Columbia)', 'STS-9 (Columbia)') FROM $astronauts;
-SELECT missions @> ['STS-77'] FROM $astronauts;
-SELECT missions @> ('Gemini 3', 'STS-1 (Columbia)') FROM $astronauts;
-SELECT missions @> [] FROM $astronauts;
+SELECT missions @> ('STS-1 (Columbia)', 'STS-9 (Columbia)') FROM testdata.astronauts;
+SELECT missions @> ['STS-77'] FROM testdata.astronauts;
+SELECT missions @> ('Gemini 3', 'STS-1 (Columbia)') FROM testdata.astronauts;
+SELECT missions @> [] FROM testdata.astronauts;
 
 SELECT HUMANIZE('{"a":100}'->'a')
 SELECT HUMANIZE(SUM('{"a":100}'->'a'))

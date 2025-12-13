@@ -144,23 +144,23 @@ def test_membership_permissions():
     curr = conn.cursor()
 
     # the missions field is an ARRAY
-    curr.execute("SELECT * FROM $astronauts WHERE ARRAY_CONTAINS_ANY(missions, @@user_memberships)")
+    curr.execute("SELECT * FROM testdata.astronauts WHERE ARRAY_CONTAINS_ANY(missions, @@user_memberships)")
     assert curr.rowcount == 3
 
     res = opteryx.query(
-        "SELECT * FROM $astronauts WHERE ARRAY_CONTAINS_ANY(missions, @@user_memberships)",
+        "SELECT * FROM testdata.astronauts WHERE ARRAY_CONTAINS_ANY(missions, @@user_memberships)",
         memberships=["Apollo 11", "opteryx"],
     )
     assert res.rowcount == 3
 
     curr = conn.cursor()
     curr.execute(
-        "SELECT $missions.* FROM $missions INNER JOIN $user ON Mission = value WHERE attribute = 'membership'"
+        "SELECT testdata.missions.* FROM testdata.missions INNER JOIN $user ON Mission = value WHERE attribute = 'membership'"
     )
     assert curr.rowcount == 1
 
     res = opteryx.query(
-        "SELECT $missions.* FROM $missions INNER JOIN $user ON Mission = value WHERE attribute = 'membership'",
+        "SELECT testdata.missions.* FROM testdata.missions INNER JOIN $user ON Mission = value WHERE attribute = 'membership'",
         memberships=["Apollo 11", "opteryx"],
     )
     assert res.rowcount == 1

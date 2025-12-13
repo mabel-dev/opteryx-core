@@ -20,18 +20,18 @@ STATEMENTS = [
         ("SELECT * FROM $planets WHERE id = 4 + 4", "optimization_constant_fold_expression"),
         ("SELECT * FROM $planets WHERE id * 0 = 1", "optimization_constant_fold_reduce"),
         ("SELECT id ^ 1 = 1 FROM $planets LIMIT 10", "optimization_limit_pushdown"),
-        ("SELECT name FROM $astronauts WHERE name = 'Neil A. Armstrong'", "optimization_predicate_pushdown"),
+        ("SELECT name FROM testdata.astronauts WHERE name = 'Neil A. Armstrong'", "optimization_predicate_pushdown"),
         ("SELECT name FROM $planets WHERE name LIKE '%'", "optimization_constant_fold_reduce"), # rewritten to `name is not null`
         ("SELECT name FROM $planets WHERE name ILIKE '%'", "optimization_constant_fold_reduce"), # rewritten to `name is not null`
         ("SELECT name FROM $planets WHERE name ILIKE '%th%'", "optimization_predicate_rewriter_replace_like_with_in_string"),
         ("SELECT name FROM $planets WHERE NOT name NOT ILIKE '%th%'", "optimization_boolean_rewrite_inversion"),
         ("SELECT * FROM $planets WHERE NOT name != 'Earth'", "optimization_boolean_rewrite_inversion"),
         ("SELECT CASE WHEN surface_pressure IS NULL THEN -100.00 ELSE surface_pressure END FROM $planets", "optimization_predicate_rewriter_case_to_ifnull"),
-        ("SELECT * FROM $satellites INNER JOIN $planets ON planet_id = $planets.id", "optimization_inner_join_smallest_table_left"),
-        ("SELECT name FROM $astronauts WHERE 'MIT' = ANY(alma_mater) OR 'Stanford' = ANY(alma_mater) OR 'Harvard' = ANY(alma_mater)", "optimization_predicate_rewriter_anyeq_to_contains"),
+        ("SELECT * FROM testdata.satellites INNER JOIN $planets ON planetId = $planets.id", "optimization_inner_join_smallest_table_left"),
+        ("SELECT name FROM testdata.astronauts WHERE 'MIT' = ANY(alma_mater) OR 'Stanford' = ANY(alma_mater) OR 'Harvard' = ANY(alma_mater)", "optimization_predicate_rewriter_anyeq_to_contains"),
         ("SELECT COUNT(*) FROM $planets WHERE STARTS_WITH(name, 'M')", "optimization_predicate_rewriter_starts_with_to_like"),
         ("SELECT COUNT(*) FROM $planets WHERE ENDS_WITH(name, 's')", "optimization_predicate_rewriter_ends_with_to_like"),
-        ("SELECT name FROM $astronauts WHERE 'Apollo 13' = ANY(missions) AND 'Gemini 8' = ANY(missions)", "optimization_predicate_rewriter_anyeq_to_contains_all"),
+        ("SELECT name FROM testdata.astronauts WHERE 'Apollo 13' = ANY(missions) AND 'Gemini 8' = ANY(missions)", "optimization_predicate_rewriter_anyeq_to_contains_all"),
         # New boolean simplification tests
         ("SELECT * FROM $planets WHERE id > 5 AND name = 'Earth' AND id < 10", "optimization_boolean_rewrite_and_flatten"),  # AND chain flattening
         # De Morgan's n-ary tests (NOT of multiple OR conditions) - creates multiple AND predicates for pushdown
@@ -42,7 +42,7 @@ STATEMENTS = [
         ("SELECT * FROM $planets WHERE id < 8 AND id < 5", "optimization_predicate_compaction"),  # id < 8 AND id < 5 => id < 5
         ("SELECT * FROM $planets WHERE id > 1 AND id < 8 AND id > 3 AND id < 7", "optimization_predicate_compaction"),  # Multiple bounds compacted
         # Correlated filters test - filters created based on join telemetry
-        #("SELECT s.name FROM $satellites s INNER JOIN $planets p ON s.planetId = p.id", "optimization_inner_join_correlated_filter"),  # Correlated filter on join
+        #("SELECT s.name FROM testdata.satellites s INNER JOIN $planets p ON s.planetId = p.id", "optimization_inner_join_correlated_filter"),  # Correlated filter on join
     ]
 # fmt:on
 

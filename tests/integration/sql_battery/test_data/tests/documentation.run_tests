@@ -12,13 +12,13 @@ SELECT id, UPPER(name) AS uppercase_name FROM $planets WHERE id = 3;
 SELECT * FROM $planets WHERE lengthOfDay > 24 AND numberOfMoons < 10;
 SELECT name, numberOfMoons FROM $planets WHERE numberOfMoons = 0;
 SELECT name, numberOfMoons FROM $planets WHERE numberOfMoons = 0 ORDER BY name;
-SELECT DISTINCT planetId FROM $satellites;
-SELECT DISTINCT planetId FROM $satellites ORDER BY planetId;
-SELECT * FROM $satellites, $planets WHERE planetId = $planets.id;
-SELECT * FROM $satellites, $planets WHERE $satellites.planetId = $planets.id;
-SELECT * FROM $satellites INNER JOIN $planets ON $satellites.planetId = $planets.id;
-SELECT * FROM $satellites LEFT OUTER JOIN $planets ON $satellites.planetId = $planets.id;
-# SELECT name FROM $planets WHERE id NOT IN (SELECT DISTINCT planetId FROM $satellites);
+SELECT DISTINCT planetId FROM testdata.satellites;
+SELECT DISTINCT planetId FROM testdata.satellites ORDER BY planetId;
+SELECT * FROM testdata.satellites, $planets WHERE planetId = $planets.id;
+SELECT * FROM testdata.satellites, $planets WHERE testdata.satellites.planetId = $planets.id;
+SELECT * FROM testdata.satellites INNER JOIN $planets ON testdata.satellites.planetId = $planets.id;
+SELECT * FROM testdata.satellites LEFT OUTER JOIN $planets ON testdata.satellites.planetId = $planets.id;
+# SELECT name FROM $planets WHERE id NOT IN (SELECT DISTINCT planetId FROM testdata.satellites);
 
 # temporary tables
 SELECT * FROM (VALUES ('High', 3), ('Medium', 2),('Low', 1)) AS ratings (name, rating);
@@ -46,12 +46,12 @@ SELECT name FROM $planets WHERE name = null;
 SELECT name, CASE numberOfMoons WHEN 0 THEN 'none' WHEN 1 THEN 'one' ELSE 'lots' END as how_many_moons from $planets;
 SELECT name, CASE WHEN numberOfMoons = 0 THEN 'none' WHEN numberOfMoons = 1 THEN 'one' ELSE 'lots' END as how_many_moons from $planets;
 
-# SELECT name FROM $planets WHERE id NOT IN (SELECT DISTINCT planetId FROM $satellites);
+# SELECT name FROM $planets WHERE id NOT IN (SELECT DISTINCT planetId FROM testdata.satellites);
 
 # IP
 SELECT '192.168.0.1' | '192.168.0.0/24';
 
 # ADVANCED STRUCTS
-SELECT birth_place['town'] FROM $astronauts;
-SELECT birth_place['town'], COUNT(*) FROM $astronauts WHERE birth_place['state'] IS NOT NULL GROUP BY birth_place['town'];
-SELECT name, SEARCH(birth_place, 'Italy') FROM $astronauts;
+SELECT birth_place['town'] FROM testdata.astronauts;
+SELECT birth_place['town'], COUNT(*) FROM testdata.astronauts WHERE birth_place['state'] IS NOT NULL GROUP BY birth_place['town'];
+SELECT name, SEARCH(birth_place, 'Italy') FROM testdata.astronauts;

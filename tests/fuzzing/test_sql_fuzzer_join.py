@@ -156,18 +156,6 @@ def get_iceberg_tables():
             "name": virtual_datasets.planets.schema().name,
             "fields": virtual_datasets.planets.schema().columns,
         },
-        {
-            "name": virtual_datasets.satellites.schema().name,
-            "fields": virtual_datasets.satellites.schema().columns,
-        },
-        {
-            "name": virtual_datasets.astronauts.schema().name,
-            "fields": virtual_datasets.astronauts.schema().columns,
-        },
-        {
-            "name": virtual_datasets.missions.schema().name,
-            "fields": virtual_datasets.missions.schema().columns,
-        },
     ]
     return _tables_cache
 

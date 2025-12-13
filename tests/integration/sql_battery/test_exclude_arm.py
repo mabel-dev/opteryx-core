@@ -21,9 +21,9 @@ from tests import is_arm, skip_if
 # fmt:off
 STATEMENTS = [
         # Are the datasets the shape we expect?
-        ("SELECT * FROM $satellites", 177, 8, None),
+        ("SELECT * FROM testdata.satellites", 177, 8, None),
         ("SELECT * FROM $planets", 9, 20, None),
-        ("SELECT * FROM $astronauts", 357, 19, None),
+        ("SELECT * FROM testdata.astronauts", 357, 19, None),
 
         # Large results can't be added to pages [#453]
         ("SELECT SHA512(column_0) FROM FAKE(150000, 1) AS FK", 150000, 1, None),

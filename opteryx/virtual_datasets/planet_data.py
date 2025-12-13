@@ -20,8 +20,6 @@ from NASA, which is Public Domain.
 
 To access this dataset you can either run a query against dataset :planets: or you
 can instantiate a PlanetData() class and use it like a Relation.
-
-This has a companion dataset, $satellites, to help test joins.
 """
 
 import datetime
