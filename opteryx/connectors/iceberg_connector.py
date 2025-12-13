@@ -11,6 +11,7 @@ import datetime
 import struct
 from decimal import Decimal
 from typing import Dict
+from typing import List
 from typing import Union
 
 import numpy
@@ -20,7 +21,9 @@ from orso.schema import RelationSchema
 from orso.tools import single_item_cache
 from orso.types import OrsoTypes
 
+from opteryx.connectors import GcpCloudStorageConnector
 from opteryx.connectors.base.base_connector import BaseConnector
+from opteryx.connectors.capabilities import Asynchronous
 from opteryx.connectors.capabilities import Diachronic
 from opteryx.connectors.capabilities import LimitPushable
 from opteryx.connectors.capabilities import PredicatePushable
@@ -119,10 +122,10 @@ def to_iceberg_filter(root):
     return iceberg_filter if iceberg_filter else "True", unsupported
 
 
-class IcebergConnector(BaseConnector, Diachronic, LimitPushable, Statistics, PredicatePushable):
+class IcebergConnector(GcpCloudStorageConnector):
     __mode__ = "Blob"
     __type__ = "ICEBERG"
-    __synchronousity__ = "synchronous"
+    __synchronousity__ = "asynchronous"
 
     PUSHABLE_OPS: Dict[str, bool] = {
         "Eq": True,
@@ -144,16 +147,14 @@ class IcebergConnector(BaseConnector, Diachronic, LimitPushable, Statistics, Pre
     }
 
     def __init__(self, *args, catalog=None, **kwargs):
-        BaseConnector.__init__(self, **kwargs)
-        LimitPushable.__init__(self, **kwargs)
-        Diachronic.__init__(self, **kwargs)
-        Statistics.__init__(self, **kwargs)
-        PredicatePushable.__init__(self, **kwargs)
+        GcpCloudStorageConnector.__init__(self, **kwargs)
+
+        # The GCP connector changes . to / internally - we need to reverse that
+        self.dataset = self.dataset.lower().replace("/", ".")
 
         import pyiceberg
 
         try:
-            # DEBUG: print(self.dataset, args, kwargs)
             if isinstance(catalog, pyiceberg.catalog.Catalog):
                 metastore = catalog
                 catalog_name = metastore.name
@@ -165,7 +166,6 @@ class IcebergConnector(BaseConnector, Diachronic, LimitPushable, Statistics, Pre
                     firestore_database=kwargs.get("firestore_database"),
                     gcs_bucket=kwargs.get("gcs_bucket"),
                 )
-            print(self.dataset)
             self.table = metastore.load_table(self.dataset)
 
             self.snapshot = self.table.current_snapshot()
@@ -268,15 +268,32 @@ class IcebergConnector(BaseConnector, Diachronic, LimitPushable, Statistics, Pre
                     column_names[k], IcebergConnector.decode_iceberg_value(v, column_types[k])
                 )
 
-        self.relation_statistics = relation_statistics
+        #        self.relation_statistics = relation_statistics
 
         return self.schema
 
-    def read_dataset(
-        self, columns: list = None, predicates: list = None, limit: int = None, **kwargs
-    ) -> pyarrow.Table:
-        rows_read = 0
+    def get_list_of_blob_names(self, *, prefix: str = None, predicates: list = []) -> List[str]:
+        print(f"Getting blob names for prefix: {prefix} with predicates: {predicates}")
 
+        pushed_filters, _ = to_iceberg_filter(predicates)
+
+        # Get the list of data files to read
+        data_files = self.table.scan(
+            row_filter=pushed_filters,  # Iceberg expression
+            snapshot_id=self.snapshot_id,
+        ).plan_files()
+
+        def remove_protocol(text: str, prots: tuple) -> str:
+            for prot in prots:
+                if text.startswith(prot):
+                    return text[len(prot) :]
+            return text
+
+        all_blobs = [remove_protocol(task.file.file_path, ("gs://",)) for task in data_files]
+
+        return all_blobs
+
+    def _read_dataset(self):
         if columns is None:
             column_names = self.schema.column_names
         else:
@@ -293,19 +310,12 @@ class IcebergConnector(BaseConnector, Diachronic, LimitPushable, Statistics, Pre
         )
 
         # Short-cut COUNT(*) handling
-        if selected_columns == []:
+        if selected_columns == [] and not predicates:
             table = pyarrow.Table.from_arrays(
                 [[self.relation_statistics.record_count]], names=["$COUNT(*)"]
             )
             yield table
             return
-
-        reader = self.table.scan(
-            row_filter=pushed_filters,
-            selected_fields=selected_columns,
-            limit=limit,
-            snapshot_id=self.snapshot_id,
-        ).to_arrow_batch_reader()
 
         # If there are no snapshots (snapshot_id is None), return an empty morsel
         if self.snapshot_id is None:
@@ -324,6 +334,18 @@ class IcebergConnector(BaseConnector, Diachronic, LimitPushable, Statistics, Pre
             yield morsel
             return
 
+        # Get the list of data files to read
+        data_files = self.table.scan(
+            row_filter=pushed_filters,  # Iceberg expression
+            selected_fields=selected_columns,  # column *names*
+            limit=limit,
+            snapshot_id=self.snapshot_id,
+        ).plan_files()
+
+        all_blobs = [task.file.file_path for task in data_files]
+        self.number_of_blobs = len(all_blobs)
+
+    def _bench(self):
         batch = None
         for batch in reader:
             # Cast decimal columns to floats until native decimal support is added

@@ -201,8 +201,6 @@ def connector_factory(dataset, telemetry, **config):
         if dataset.startswith(".") or dataset.startswith("//"):
             dataset = dataset[1:] if dataset.startswith(".") else dataset[2:]
 
-    # DEBUG: print(prefix, dataset, connector, _storage_prefixes)
-
     return connector_class(dataset=dataset, telemetry=telemetry, **connector_entry)
 
 

@@ -56,11 +56,11 @@ class Connection:
         self._closed = False
         self._cursors: "WeakSet[Cursor]" = WeakSet()
 
-    def cursor(self) -> Cursor:
+    def cursor(self, qid: str = None) -> Cursor:
         """Return a cursor object."""
         if self._closed:
             raise ProgrammingError("Cannot create a cursor from a closed connection.")
-        cursor = Cursor(self)
+        cursor = Cursor(self, qid=qid)
         self._register_cursor(cursor)
         return cursor
 
