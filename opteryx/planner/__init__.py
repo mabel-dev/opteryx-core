@@ -191,8 +191,6 @@ def query_planner(
     optimized_plan = do_optimizer(bound_plan, telemetry)
     telemetry.time_planning_optimizer += time.monotonic_ns() - start
 
-    telemetry.executed_plan = optimized_plan.draw(ascii_safe=True)
-
     # before we write the new optimizer and execution engine, convert to a V1 plan
     start = time.monotonic_ns()
     query_properties = QueryProperties(qid=qid, variables=connection.context.variables)

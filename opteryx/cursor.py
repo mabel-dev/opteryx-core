@@ -104,7 +104,7 @@ class Cursor(DataFrame):
 
         start = time.time_ns()
         try:
-            plan = query_planner(
+            self._plan = query_planner(
                 operation=operation,
                 parameters=params,
                 visibility_filters=visibility_filters,
@@ -117,7 +117,7 @@ class Cursor(DataFrame):
         finally:
             self._telemetry.time_planning += time.time_ns() - start
 
-        results = execute(plan, telemetry=self._telemetry)
+        results = execute(self._plan, telemetry=self._telemetry)
         system_telemetry.queries_executed += 1
 
         if results is not None:
@@ -329,7 +329,19 @@ class Cursor(DataFrame):
         """
         if self._telemetry.end_time == 0:  # pragma: no cover
             self._telemetry.end_time = time.time_ns()
+        self._telemetry.plan = self.mermaid()
         return self._telemetry.as_dict()
+
+    def mermaid(self) -> str:
+        """
+        Generates a Mermaid diagram representation of the query plan.
+
+        Returns:
+            A string containing the Mermaid diagram.
+        """
+        from opteryx.utils import mermaid
+
+        return mermaid.plan_to_mermaid(self._plan)
 
     def execute_to_arrow_batches(
         self,
