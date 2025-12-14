@@ -169,6 +169,7 @@ def connector_factory(dataset, telemetry, **config):
 
     return connector_class(dataset=dataset, telemetry=telemetry, **connector_entry)
 
+
 def _lazy_import_connector(connector_name: str):
     """Lazy import a connector class by name."""
     if connector_name == "AwsS3Connector":
