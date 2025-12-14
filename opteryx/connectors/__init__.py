@@ -168,3 +168,24 @@ def connector_factory(dataset, telemetry, **config):
             dataset = dataset[1:] if dataset.startswith(".") else dataset[2:]
 
     return connector_class(dataset=dataset, telemetry=telemetry, **connector_entry)
+
+def _lazy_import_connector(connector_name: str):
+    """Lazy import a connector class by name."""
+    if connector_name == "AwsS3Connector":
+        from opteryx.connectors.aws_s3_connector import AwsS3Connector
+
+        return AwsS3Connector
+    elif connector_name == "DiskConnector":
+        from opteryx.connectors.disk_connector import DiskConnector
+
+        return DiskConnector
+    elif connector_name == "GcpCloudStorageConnector":
+        from opteryx.connectors.gcp_cloudstorage_connector import GcpCloudStorageConnector
+
+        return GcpCloudStorageConnector
+    elif connector_name == "IcebergConnector":
+        from opteryx.connectors.iceberg_connector import IcebergConnector
+
+        return IcebergConnector
+    else:
+        raise ValueError(f"Unknown connector: {connector_name}")
