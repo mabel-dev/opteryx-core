@@ -6,6 +6,7 @@
 """
 Iceberg Connector
 """
+
 import datetime
 import struct
 from decimal import Decimal
@@ -121,7 +122,7 @@ def to_iceberg_filter(root):
     return iceberg_filter if iceberg_filter else "True", unsupported
 
 
-class IcebergConnector(GcpCloudStorageConnector):
+class IcebergConnector(GcpCloudStorageConnector, Statistics):
     __mode__ = "Blob"
     __type__ = "ICEBERG"
     __synchronousity__ = "asynchronous"
@@ -147,6 +148,7 @@ class IcebergConnector(GcpCloudStorageConnector):
 
     def __init__(self, *args, catalog=None, **kwargs):
         GcpCloudStorageConnector.__init__(self, **kwargs)
+        Statistics.__init__(self, **kwargs)
 
         # The GCP connector changes . to / internally - we need to reverse that
         self.dataset = self.dataset.lower().replace("/", ".")
