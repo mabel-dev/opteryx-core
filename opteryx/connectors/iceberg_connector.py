@@ -6,7 +6,6 @@
 """
 Iceberg Connector
 """
-
 import datetime
 import struct
 from decimal import Decimal
@@ -268,13 +267,11 @@ class IcebergConnector(GcpCloudStorageConnector):
                     column_names[k], IcebergConnector.decode_iceberg_value(v, column_types[k])
                 )
 
-        #        self.relation_statistics = relation_statistics
+        self.relation_statistics = relation_statistics
 
         return self.schema
 
     def get_list_of_blob_names(self, *, prefix: str = None, predicates: list = []) -> List[str]:
-        print(f"Getting blob names for prefix: {prefix} with predicates: {predicates}")
-
         pushed_filters, _ = to_iceberg_filter(predicates)
 
         # Get the list of data files to read
