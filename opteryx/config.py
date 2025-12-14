@@ -187,10 +187,6 @@ _LAZY_VALUES: dict = {}
 CONCURRENT_WORKERS_DEFAULT = int(get("CONCURRENT_WORKERS", 2))
 
 
-def _compute_MAX_LOCAL_BUFFER_CAPACITY():
-    return memory_allocation_calculation(float(get("MAX_LOCAL_BUFFER_CAPACITY", 0.2)))
-
-
 def _compute_MAX_READ_BUFFER_CAPACITY():
     return memory_allocation_calculation(float(get("MAX_READ_BUFFER_CAPACITY", 0.1)))
 
@@ -202,12 +198,6 @@ def _compute_CONCURRENT_READS():
 
 def __getattr__(name: str):
     """Lazy attribute access for computed config values."""
-    if name == "MAX_LOCAL_BUFFER_CAPACITY":
-        val = _LAZY_VALUES.get(name)
-        if val is None:
-            val = _compute_MAX_LOCAL_BUFFER_CAPACITY()
-            _LAZY_VALUES[name] = val
-        return val
     if name == "MAX_READ_BUFFER_CAPACITY":
         val = _LAZY_VALUES.get(name)
         if val is None:

@@ -5,7 +5,6 @@
 
 from opteryx.compiled.structures.memory_pool import MemoryPool
 from opteryx.shared.async_memory_pool import AsyncMemoryPool
-from opteryx.shared.buffer_pool import BufferPool
 from opteryx.shared.materialized_datasets import MaterializedDatasets
 
-__all__ = ("AsyncMemoryPool", "BufferPool", "MaterializedDatasets", "MemoryPool")
+__all__ = ("AsyncMemoryPool", "MaterializedDatasets", "MemoryPool")

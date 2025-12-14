@@ -62,9 +62,9 @@ STATEMENTS = [
         ("SELECT * FROM $planets", 9, 20, None),
         ("SELECT * FROM testdata.astronauts", 357, 19, None),
         ("SELECT * FROM $no_table", 1, 1, None),
-        ("SELECT * FROM $variables", 41, 5, None),
+        ("SELECT * FROM $variables", 40, 5, None),
         ("SELECT * FROM testdata.missions", 4630, 8, None),
-        ("SELECT * FROM $telemetry", 17, 2, None),
+        ("SELECT * FROM $telemetry", 5, 2, None),
         ("SELECT * FROM $stop_words", 305, 1, None),
         (b"SELECT * FROM testdata.satellites", 177, 8, None),
         ("SELECT * FROM testdata.missions", 4630, 8, None),
@@ -166,13 +166,10 @@ def test_sql_battery(statement:str, rows:int, columns:int, exception: Optional[E
     """
     from tests import set_up_iceberg
     from opteryx.connectors import IcebergConnector
+    from opteryx.connectors import DiskConnector
     iceberg = set_up_iceberg()
-    opteryx.register_store(
-        "iceberg",
-        connector=IcebergConnector,
-        catalog=iceberg,
-        remove_prefix=True,
-    )
+    opteryx.register_store("iceberg", connector=IcebergConnector, catalog=iceberg, remove_prefix=True)
+    opteryx.register_store("testdata", DiskConnector, remove_prefix=False)
 
     try:
         # query to arrow is the fastest way to query
