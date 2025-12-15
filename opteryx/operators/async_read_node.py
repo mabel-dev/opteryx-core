@@ -100,6 +100,7 @@ class AsyncReaderNode(ReaderNode):
 
         blob_names = reader.get_list_of_blob_names(
             prefix=reader.dataset,
+            predicates=self.predicates or [],
         )
 
         if len(blob_names) == 0:
@@ -197,7 +198,7 @@ class AsyncReaderNode(ReaderNode):
                 self.telemetry.bytes_processed += morsel.nbytes
                 self.telemetry.bytes_raw += raw_bytes
 
-                self.rows_seen += morsel.num_rows
+                self.rows_seen += num_rows
                 self.blobs_seen += 1
 
                 yield morsel

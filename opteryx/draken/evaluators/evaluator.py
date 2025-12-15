@@ -182,9 +182,7 @@ def _compile_binary_boolean(operation: str, left: Expression, right: Expression)
                     return left_result.xor_vector(right_result)
         except Exception as err:
             logger.debug(
-                "Falling back to byte-wise combination for %s due to %s",
-                operation,
-                err,
+                f"Falling back to byte-wise combination for {operation} due to {err}"
             )
 
         # Normalize to raw byte buffers (int-like 0/1 per element)
@@ -199,7 +197,7 @@ def _compile_binary_boolean(operation: str, left: Expression, right: Expression)
                 mv = memoryview(res)
                 return bytearray(mv.tobytes())
             except (TypeError, ValueError, BufferError) as err:
-                logger.debug("memoryview conversion failed for %s: %s", type(res).__name__, err)
+                logger.debug(f"memoryview conversion failed for {type(res).__name__}: {err}")
             # Try sequence of ints/bools
             try:
                 return bytearray((1 if bool(x) else 0) for x in res)
@@ -303,15 +301,13 @@ def _compile_expression(expr: Expression) -> CompiledEvaluator:
                         return CompiledEvaluator(expr, mod.evaluate, optimized=True)
                     except Exception as err:
                         logger.debug(
-                            "Failed to synchronously compile evaluator %s: %s",
-                            key,
-                            err,
+                            f"Failed to synchronously compile evaluator {key}: {err}"
                         )
         except Exception as err:
             # Any error here shouldn't prevent fallback behavior
             logger.debug(
-                "Falling back to generic evaluator for %r due to %s",
-                expr,
+                f"Falling back to generic evaluator for {expr} due to {err}",
+            )
                 err,
             )
         # Try to compile as comparison
