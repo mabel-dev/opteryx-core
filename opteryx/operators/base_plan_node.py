@@ -85,7 +85,7 @@ class BasePlanNode:
                     mermaid += f"order<br />" + BAR
                 mermaid += f"calls: {reportable_stats.get('calls'):,}<br />"
                 mermaid += BAR
-                mermaid += f"({reportable_stats.get('time_ms', 0):,.2f}ms)"
+                mermaid += f"({self.execution_time / 1_000_000:,.2f}ms)"
         return mermaid + '"]'
 
     def __str__(self) -> str:

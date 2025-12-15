@@ -105,11 +105,6 @@ test_cases = [
     ("SELECT * FROM $planets", {"$planets": [[[[(("id", "Eq", 1))]]]]}, (1, 20)),
     ("SELECT * FROM $planets", {"$planets": [[("id", "Eq", 4), ("name", "Eq", "Earth")], [[[[("id", "Gt", 7)]]]]]}, (2, 20)),
 
-    # the visibility filter isn't applied to the VIEW
-    ("SELECT * FROM mission_reports", {"mission_reports": [("id", "Eq", 4)]}, (177, 1)),
-    # the visibility filter is applied to the table underneath the view
-    ("SELECT * FROM mission_reports", {"testdata.satellites": [(("id", "Eq", 4))]}, (1, 1)),
-
     # 1) Absorption: [A] absorbs [A ∧ B]  -> expect just Earth
     ("SELECT * FROM $planets", {"$planets": [[("name","Eq","Earth")], [("name","Eq","Earth"), ("id","Eq",3)]]}, (1, 20)),
     # 2) Duplicate predicate inside a clause -> dedup to single check

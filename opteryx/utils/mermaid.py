@@ -12,9 +12,9 @@ def plan_to_mermaid(plan: PhysicalPlan) -> str:
                 continue
             node_stat = {
                 "identity": node.identity,
-                "records_in": node.bytes_in,
+                "records_in": node.records_in,
                 "bytes_in": node.bytes_in,
-                "records_out": node.bytes_out,
+                "records_out": node.records_out,
                 "bytes_out": node.bytes_out,
                 "calls": node.calls,
             }

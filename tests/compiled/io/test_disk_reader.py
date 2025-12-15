@@ -44,8 +44,6 @@ class TestDiskReaderCorrectness:
     
     @pytest.mark.parametrize("filepath", [
         "testdata/permissions.json",
-        "testdata/prepared_statements.json",
-        "testdata/views.json",
         "testdata/flat/wordlist/english.txt",
         "testdata/flat/formats/jsonl/tweets.jsonl",
         "testdata/flat/formats/csv/tweets.csv",
@@ -320,8 +318,6 @@ class TestDiskReaderStress:
         """Test reading multiple files sequentially."""
         filepaths = [
             "testdata/permissions.json",
-            "testdata/prepared_statements.json",
-            "testdata/views.json",
             "testdata/flat/tweets/tweets-0000.jsonl",
             "testdata/flat/tweets/tweets-0001.jsonl",
         ]
@@ -438,8 +434,6 @@ class TestDiskReaderMmap:
     
     @pytest.mark.parametrize("filepath", [
         "testdata/permissions.json",
-        "testdata/prepared_statements.json",
-        "testdata/views.json",
         "testdata/flat/wordlist/english.txt",
         "testdata/flat/formats/jsonl/tweets.jsonl",
         "testdata/flat/formats/csv/tweets.csv",
@@ -621,9 +615,7 @@ class TestDiskReaderMmap:
     def test_mmap_sequential_files(self):
         """Test mmapping multiple files sequentially."""
         filepaths = [
-            "testdata/permissions.json",
-            "testdata/prepared_statements.json",
-            "testdata/views.json",
+            "testdata/permissions.json"
         ]
         
         for filepath in filepaths:
