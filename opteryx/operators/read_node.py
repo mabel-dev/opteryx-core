@@ -188,7 +188,7 @@ class ReaderNode(BasePlanNode):
             mermaid = f'NODE_{nid}[("**{self.node_type.upper()} (FUNCTION)**<br />'
             mermaid += f"{self.function}<br />"
         else:
-            mermaid = f'NODE_{nid}[("**{self.node_type.upper()} ({self.connector.__type__})**<br />'
+            mermaid = f'NODE_{nid}[("**READ**<br />'
             mermaid += f"{self.connector.dataset}<br />"
         mermaid += BAR
         if self.columns:
@@ -216,7 +216,7 @@ class ReaderNode(BasePlanNode):
                 mermaid += f"rows seen: {self.connector.rows_seen:,}<br />"
             mermaid += BAR
 
-        mermaid += f"({stats.get('time_ms', 0):,.2f}ms)"
+        mermaid += f"({self.execution_time / 1_000_000:,.2f}ms)"
         return mermaid + '")]'
 
     @property

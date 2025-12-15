@@ -126,20 +126,6 @@ STATEMENTS = [
         ("SELECT name FROM $planets WHERE 'Apollo 11' = ANY(@@user_memberships)", 9, 1, None),
         ("SELECT name FROM $planets WHERE REGEXP_REPLACE(name, '^E', 'G') == 'Garth'", 1, 1, None),
 
-        # TEST VIEWS
-        ("SELECT * FROM mission_reports", 177, 1, None),
-        ("SELECT * FROM mission_reports AS MR", 177, 1, None),
-        ("SELECT MR.* FROM mission_reports AS MR", 177, 1, None),
-        ("SELECT satellite_name FROM mission_reports", 177, 1, None),
-        ("SELECT MR.satellite_name FROM mission_reports AS MR", 177, 1, None),
-        ("SELECT satellite_name FROM mission_reports AS MR WHERE satellite_name ILIKE '%a%'", 90, 1, None),
-        ("SELECT satellite_name FROM mission_reports AS MR WHERE satellite_name ILIKE '%a%'", 90, 1, None),
-        ("SELECT * FROM mission_reports INNER JOIN testdata.satellites ON satellite_name = name", 177, 9, None),
-        ("SELECT * FROM my_mission_reports", 3, 19, None),
-        ("SELECT * FROM my_mission_reports WHERE year = 1963", 2, 19, None),
-        ("SELECT * FROM my_mission_reports ORDER BY name", 3, 19, None),
-        ("SELECT name, status FROM my_mission_reports", 3, 2, None),
-
         ("SELECT id, CASE WHEN id = 1 THEN 'Mercury' WHEN id = 3 THEN 'Earth' ELSE 'Elsewhere' END as place FROM $planets", 9, 2, None),
         ("SELECT id, CASE WHEN id = 1 THEN 'Mercury' WHEN id = 3 THEN 'Earth' ELSE NULL END as place FROM $planets", 9, 2, None),
         ("SELECT IFNULL(NULL, 'default') as result", 1, 1, None),

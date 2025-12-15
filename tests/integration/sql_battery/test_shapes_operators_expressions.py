@@ -606,10 +606,6 @@ STATEMENTS = [
         ("SELECT * FROM (SELECT LENGTH(ARRAY_AGG(DISTINCT planetId)) AS L FROM testdata.satellites GROUP BY planetId) AS I WHERE L == 1;", 7, 1, None),
         ("SELECT * FROM (SELECT ARRAY_AGG(id) AS sid FROM testdata.satellites GROUP BY planetId) AS A WHERE sid @> (1,2,3)", 2, 1, None),
 
-        ("SHOW CREATE VIEW mission_reports", 1, 1, None),
-        ("SHOW CREATE VIEW mission.reports", 1, 1, DatasetNotFoundError),
-        ("SHOW CREATE TABLE mission_reports", 1, 1, UnsupportedSyntaxError),
-
         ("SELECT name FROM (SELECT MD5(name) AS hash, name FROM $planets) AS S", 9, 1, None),
 
         ("SELECT jsonb_object_keys(birth_place) FROM testdata.astronauts", 357, 1, None),

@@ -3,19 +3,11 @@
 # See the License at http://www.apache.org/licenses/LICENSE-2.0
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
-import orjson
-
-from opteryx.config import RESOURCES_PATH
 from opteryx.exceptions import DatasetNotFoundError
 
 
 def _load_views():
-    try:
-        with open(RESOURCES_PATH / "views.json", "rb") as defs:
-            return orjson.loads(defs.read())
-    except Exception as err:  # nosec
-        # DEBUG: print(f"[OPTERYX] Unable to open views definition file. {err}")
-        return {}
+    return {}
 
 
 VIEWS = _load_views()
