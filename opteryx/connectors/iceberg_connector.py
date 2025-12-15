@@ -70,40 +70,48 @@ def to_iceberg_filter(root):
             return left
         if root.node_type != NodeType.COMPARISON_OPERATOR:
             raise NotSupportedError()
-        if root.left.node_type != NodeType.IDENTIFIER:
-            root.left, root.right = root.right, root.left
-        if root.right.schema_column.type == OrsoTypes.DATE:
-            date_val = root.right.value
+
+        left_node = root.left
+        right_node = root.right
+
+        if left_node.node_type != NodeType.IDENTIFIER:
+            left_node, right_node = right_node, left_node
+
+        right_value = right_node.value
+        right_type = right_node.schema_column.type
+        left_type = left_node.schema_column.type
+
+        if right_type == OrsoTypes.DATE:
+            date_val = right_value
             if hasattr(date_val, "item"):
                 date_val = date_val.item()
-            root.right.value = datetime.datetime.combine(date_val, datetime.time.min)
-            root.right.schema_column.type = OrsoTypes.TIMESTAMP
-        if root.left.schema_column.type == OrsoTypes.DATE:
-            root.left.schema_column.type = OrsoTypes.TIMESTAMP
-        if root.left.node_type != NodeType.IDENTIFIER:
+            right_value = datetime.datetime.combine(date_val, datetime.time.min)
+            right_type = OrsoTypes.TIMESTAMP
+        if left_type == OrsoTypes.DATE:
+            left_type = OrsoTypes.TIMESTAMP
+        if left_node.node_type != NodeType.IDENTIFIER:
             raise NotSupportedError()
-        if root.right.node_type != NodeType.LITERAL:
+        if right_node.node_type != NodeType.LITERAL:
             raise NotSupportedError()
-        if root.left.schema_column.type == OrsoTypes.VARCHAR:
-            root.left.schema_column.type = OrsoTypes.BLOB
-        if root.right.schema_column.type == OrsoTypes.VARCHAR:
-            root.right.schema_column.type = OrsoTypes.BLOB
-        if root.right.schema_column.type != root.left.schema_column.type:
-            raise NotSupportedError(
-                f"{root.right.schema_column.type} != {root.left.schema_column.type}"
-            )
-        if root.right.schema_column.type == OrsoTypes.DOUBLE:
+        if left_type == OrsoTypes.VARCHAR:
+            left_type = OrsoTypes.BLOB
+        if right_type == OrsoTypes.VARCHAR:
+            right_type = OrsoTypes.BLOB
+        if right_type != left_type:
+            raise NotSupportedError(f"{right_type} != {left_type}")
+        if right_type == OrsoTypes.DOUBLE:
             # iceberg needs doubles to be cast to floats
-            root.right.value = float(root.right.value)
-        if root.right.schema_column.type == OrsoTypes.INTEGER:
+            right_value = float(right_value)
+        if right_type == OrsoTypes.INTEGER:
             # iceberg doesn't like integers unless we convert to strings
-            root.right.value = str(root.right.value)
-        if root.right.schema_column.type == OrsoTypes.TIMESTAMP:
+            right_value = str(right_value)
+        if right_type == OrsoTypes.TIMESTAMP:
             # iceberg doesn't like timestamps unless we convert to strings
-            if isinstance(root.right.value, numpy.datetime64):
-                root.right.value = root.right.value.astype(datetime.datetime)
-            root.right.value = root.right.value.isoformat()
-        return ICEBERG_FILTERS[root.value](root.left.value, root.right.value)
+            if isinstance(right_value, numpy.datetime64):
+                right_value = right_value.astype(datetime.datetime)
+            # if hasattr(right_value, "isoformat"):
+            #    right_value = right_value.isoformat()
+        return ICEBERG_FILTERS[root.value](left_node.value, right_value)
 
     iceberg_filter = None
     unsupported = []
@@ -275,12 +283,16 @@ class IcebergConnector(GcpCloudStorageConnector, Statistics):
 
     def get_list_of_blob_names(self, *, prefix: str = None, predicates: list = []) -> List[str]:
         pushed_filters, _ = to_iceberg_filter(predicates)
+        print(f"DEBUG: Iceberg Pushdown - Predicates: {predicates}")
+        print(f"DEBUG: Iceberg Pushdown - Pushed Filters: {pushed_filters}")
 
         # Get the list of data files to read
         data_files = self.table.scan(
             row_filter=pushed_filters,  # Iceberg expression
             snapshot_id=self.snapshot_id,
         ).plan_files()
+
+        print(f"DEBUG: Iceberg Pushdown - Files Found: {len(data_files)}")
 
         def remove_protocol(text: str, prots: tuple) -> str:
             for prot in prots:

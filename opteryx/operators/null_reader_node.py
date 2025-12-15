@@ -65,7 +65,7 @@ class NullReaderNode(BasePlanNode):  # pragma: no cover
                 TypeError,
                 pyarrow.lib.ArrowInvalid,
             ) as err:  # pragma: no cover - defensive fallback
-                logger.debug("Unable to build schema-aware empty table: %s", err)
+                logger.debug(f"Unable to build schema-aware empty table: {err}")
 
         # Second try: use columns property if available
         if self.columns:
