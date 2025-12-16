@@ -14,7 +14,11 @@ without executing the query. This is useful for:
 - Query analysis
 """
 
-from typing import Dict, List, Set, Any, Optional
+from typing import Any
+from typing import Dict
+from typing import List
+from typing import Optional
+from typing import Set
 
 
 def _extract_tables_from_relation(relation: Dict[str, Any]) -> Set[str]:
@@ -37,7 +41,7 @@ def _extract_tables_from_relation(relation: Dict[str, Any]) -> Set[str]:
                 part.get("Identifier", {}).get("value", "") 
                 for part in table["name"]
             )
-            if table_name and table_name != "":
+            if table_name:
                 tables.add(table_name)
     
     if "Derived" in relation:
