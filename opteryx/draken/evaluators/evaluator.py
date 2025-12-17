@@ -181,9 +181,7 @@ def _compile_binary_boolean(operation: str, left: Expression, right: Expression)
                 elif operation == "xor":
                     return left_result.xor_vector(right_result)
         except Exception as err:
-            logger.debug(
-                f"Falling back to byte-wise combination for {operation} due to {err}"
-            )
+            logger.debug(f"Falling back to byte-wise combination for {operation} due to {err}")
 
         # Normalize to raw byte buffers (int-like 0/1 per element)
         def to_bytes_like(res):
@@ -300,16 +298,10 @@ def _compile_expression(expr: Expression) -> CompiledEvaluator:
                         mod_name, mod = ensure_compiled_evaluator(key, expr)
                         return CompiledEvaluator(expr, mod.evaluate, optimized=True)
                     except Exception as err:
-                        logger.debug(
-                            f"Failed to synchronously compile evaluator {key}: {err}"
-                        )
+                        logger.debug(f"Failed to synchronously compile evaluator {key}: {err}")
         except Exception as err:
             # Any error here shouldn't prevent fallback behavior
-            logger.debug(
-                f"Falling back to generic evaluator for {expr} due to {err}",
-            )
-                err,
-            )
+            logger.debug(f"Falling back to generic evaluator for {expr} due to {err}")
         # Try to compile as comparison
         comparison_ops = [
             "equals",

@@ -10,7 +10,7 @@ sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 
 def test_free_threading_detection():
     """Test that free-threading detection works correctly"""
-    from opteryx.utils.threading import is_free_threading_available
+    from opteryx.utils.free_threading import is_free_threading_available
     
     # Check detection works without errors
     result = is_free_threading_available()
@@ -41,7 +41,7 @@ def test_projection_node_is_stateless():
 
 def test_execution_engine_selection():
     """Test that the correct execution engine is selected based on free-threading availability"""
-    from opteryx.utils.threading import is_free_threading_available
+    from opteryx.utils.free_threading import is_free_threading_available
     
     # Import the execution module to verify it doesn't crash
     from opteryx.managers import execution

@@ -105,12 +105,9 @@ def to_iceberg_filter(root):
         if right_type == OrsoTypes.INTEGER:
             # iceberg doesn't like integers unless we convert to strings
             right_value = str(right_value)
-        if right_type == OrsoTypes.TIMESTAMP:
+        if right_type == OrsoTypes.TIMESTAMP and isinstance(right_value, numpy.datetime64):
             # iceberg doesn't like timestamps unless we convert to strings
-            if isinstance(right_value, numpy.datetime64):
-                right_value = right_value.astype(datetime.datetime)
-            # if hasattr(right_value, "isoformat"):
-            #    right_value = right_value.isoformat()
+            right_value = right_value.astype(datetime.datetime)
         return ICEBERG_FILTERS[root.value](left_node.value, right_value)
 
     iceberg_filter = None
@@ -230,9 +227,12 @@ class IcebergConnector(GcpCloudStorageConnector, Statistics):
             iceberg_schema = self.table.schema()
         else:
             iceberg_schema = self.table.schemas()[self.snapshot.schema_id]
-            self.telemetry.dataset_committed_at = datetime.datetime.fromtimestamp(
-                self.snapshot.timestamp_ms / 1000.0
-            ).isoformat()
+            try:
+                self.telemetry.dataset_committed_at = datetime.datetime.fromtimestamp(
+                    self.snapshot.timestamp_ms / 1000.0
+                ).isoformat()
+            except (ValueError, OSError, OverflowError):
+                pass
         arrow_schema = iceberg_schema.as_arrow()
 
         self.schema = RelationSchema(
@@ -265,17 +265,17 @@ class IcebergConnector(GcpCloudStorageConnector, Statistics):
                 for k, v in file:
                     relation_statistics.add_count(column_names[k], v)
 
-        for file in files.column("lower_bounds"):
-            for k, v in file:
-                relation_statistics.update_lower(
-                    column_names[k], IcebergConnector.decode_iceberg_value(v, column_types[k])
-                )
+        #        for file in files.column("lower_bounds"):
+        #            for k, v in file:
+        #                relation_statistics.update_lower(
+        #                    column_names[k], IcebergConnector.decode_iceberg_value(v, column_types[k])
+        #                )
 
-        for file in files.column("upper_bounds"):
-            for k, v in file:
-                relation_statistics.update_upper(
-                    column_names[k], IcebergConnector.decode_iceberg_value(v, column_types[k])
-                )
+        #        for file in files.column("upper_bounds"):
+        #            for k, v in file:
+        #                relation_statistics.update_upper(
+        #                    column_names[k], IcebergConnector.decode_iceberg_value(v, column_types[k])
+        #                )
 
         self.relation_statistics = relation_statistics
 
@@ -283,16 +283,12 @@ class IcebergConnector(GcpCloudStorageConnector, Statistics):
 
     def get_list_of_blob_names(self, *, prefix: str = None, predicates: list = []) -> List[str]:
         pushed_filters, _ = to_iceberg_filter(predicates)
-        print(f"DEBUG: Iceberg Pushdown - Predicates: {predicates}")
-        print(f"DEBUG: Iceberg Pushdown - Pushed Filters: {pushed_filters}")
 
         # Get the list of data files to read
         data_files = self.table.scan(
             row_filter=pushed_filters,  # Iceberg expression
             snapshot_id=self.snapshot_id,
         ).plan_files()
-
-        print(f"DEBUG: Iceberg Pushdown - Files Found: {len(data_files)}")
 
         def remove_protocol(text: str, prots: tuple) -> str:
             for prot in prots:
@@ -327,20 +323,20 @@ class IcebergConnector(GcpCloudStorageConnector, Statistics):
         data_type_class = data_type.__class__
 
         if data_type_class == pyiceberg.types.LongType:
-            return int.from_bytes(value, "little", signed=True)
+            return int.from_bytes(value, "big", signed=True)
         elif data_type_class == pyiceberg.types.DoubleType:
             # IEEE 754 encoded floats are typically decoded directly
-            return struct.unpack("<d", value)[0]  # 8-byte IEEE 754 double
+            return struct.unpack(">d", value)[0]  # 8-byte IEEE 754 double
         elif data_type_class in (pyiceberg.types.TimestampType, pyiceberg.types.TimestamptzType):
             # Iceberg stores timestamps as microseconds since epoch
-            interval = int.from_bytes(value, "little", signed=True)
+            interval = int.from_bytes(value, "big", signed=True)
             if interval < 0:
                 # Windows specifically doesn't like negative timestamps
                 return datetime.datetime(1970, 1, 1) + datetime.timedelta(microseconds=interval)
             return datetime.datetime.fromtimestamp(interval / 1_000_000)
         elif data_type == "date":
             # Iceberg stores dates as days since epoch (1970-01-01)
-            interval = int.from_bytes(value, "little", signed=True)
+            interval = int.from_bytes(value, "big", signed=True)
             return datetime.datetime(1970, 1, 1) + datetime.timedelta(days=interval)
         elif data_type_class == pyiceberg.types.StringType:
             # Assuming UTF-8 encoded bytes (or already decoded string)

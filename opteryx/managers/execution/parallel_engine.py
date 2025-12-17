@@ -22,7 +22,7 @@ from opteryx.constants import ResultType
 from opteryx.exceptions import InvalidInternalStateError
 from opteryx.models import PhysicalPlan
 from opteryx.models import QueryTelemetry
-from opteryx.utils.threading import is_free_threading_available
+from opteryx.utils.free_threading import is_free_threading_available
 
 from .serial_engine import explain
 

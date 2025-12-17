@@ -57,7 +57,7 @@ def all_op(branch, alias: Optional[List[str]] = None, key=None):
 
 def array(branch, alias: Optional[List[str]] = None, key=None):
     value_nodes = [build(elem) for elem in branch["elem"]]
-    value_list = {v.value for v in value_nodes}
+    value_list = [v.value for v in value_nodes]
     element_type = {v.type for v in value_nodes}
     if len(element_type) > 1:
         raise ArrayWithMixedTypesError("Literal ARRAY has values with mixed types.")
