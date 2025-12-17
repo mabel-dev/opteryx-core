@@ -1,6 +1,6 @@
 from opteryx.config import features
 from opteryx.exceptions import InvalidInternalStateError
-from opteryx.utils.threading import is_free_threading_available
+from opteryx.utils.free_threading import is_free_threading_available
 
 from .parallel_engine import execute as parallel_execute
 from .serial_engine import execute as serial_execute
