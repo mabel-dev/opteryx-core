@@ -93,6 +93,7 @@ __all__ = [
     "query",
     "query_to_arrow",
     "register_store",
+    "parse_query_info",
     "__author__",
     "__build__",
     "__version__",
@@ -230,6 +231,43 @@ def query_to_arrow_batches(
         limit=limit,
         visibility_filters=visibility_filters,
     )
+
+
+def parse_query_info(sql: str) -> Dict[str, Any]:
+    """
+    Parse a SQL query and extract metadata without executing it.
+    
+    This function analyzes the SQL query structure to extract information such as:
+    - Query type (SELECT, INSERT, UPDATE, DELETE, etc.)
+    - Tables being queried
+    - Other metadata available from the SQL syntax alone
+    
+    This is useful for:
+    - Pre-flight permission checks
+    - Query validation before queueing
+    - Resource planning
+    - Query analysis
+    
+    Parameters:
+        sql: SQL query string to parse
+        
+    Returns:
+        Dictionary containing:
+        - query_type: Type of query (e.g., "Query", "Insert", "Update")
+        - tables: List of table names referenced in the query
+        - is_select: True if this is a SELECT query
+        - is_mutation: True if this modifies data (INSERT, UPDATE, DELETE)
+        
+    Example:
+        >>> info = opteryx.parse_query_info("SELECT * FROM users WHERE id = 1")
+        >>> print(info['query_type'])
+        'Query'
+        >>> print(info['tables'])
+        ['users']
+    """
+    from opteryx.utils.query_parser import parse_query_info as _parse_query_info
+    
+    return _parse_query_info(sql)
 
 
 # Try to increase the priority of the application
