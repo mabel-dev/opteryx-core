@@ -263,7 +263,7 @@ def parse_query_info(sql: str) -> Dict[str, Any]:
     from opteryx.third_party import sqloxide
 
     # Clean the SQL using the same rewriter as the main query planner
-    clean_sql = do_sql_rewrite(sql)[0]
+    clean_sql = do_sql_rewrite(sql)
 
     # Parse the SQL to get the AST
     try:
@@ -293,10 +293,6 @@ def parse_query_info(sql: str) -> Dict[str, Any]:
     mutation_actions = ["Insert", "Update", "Delete"]
     ddl_actions = ["CreateTable", "CreateView", "AlterTable", "Drop"]
 
-    reader_permissions = query_type in reader_actions
-    writer_permissions = query_type in mutation_actions + reader_actions
-    owner_permissions = query_type in reader_actions + mutation_actions + ddl_actions
-
     return {
         "query_type": query_type,
         "tables": filtered_tables,
@@ -304,10 +300,10 @@ def parse_query_info(sql: str) -> Dict[str, Any]:
         "is_mutation": query_type in mutation_actions,
         "is_ddl": query_type in ddl_actions,
         "permission_required": "owner"
-        if owner_permissions
+        if query_type in ddl_actions
         else "writer"
-        if writer_permissions
+        if query_type in mutation_actions
         else "reader"
-        if reader_permissions
+        if query_type in reader_actions
         else "denied",
     }

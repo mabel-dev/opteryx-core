@@ -60,6 +60,10 @@ class LogicalPlanStepType(int, Enum):
     FunctionDataset = auto()  # Unnest, GenerateSeries, values + Fake
     MetadataWriter = auto()
 
+    CreateView = auto()
+    AlterView = auto()
+    DropView = auto()
+
 
 class LogicalPlan(Graph):
     pass
@@ -938,6 +942,126 @@ def plan_show_create_query(statement, **kwargs):
     return plan
 
 
+def plan_create_view(statement, **kwargs):
+    """
+    Create a logical plan for CREATE VIEW statement.
+
+    CREATE VIEW view_name AS query
+
+    Note: The query is stored as text, not planned. It will be planned
+    when the view is referenced in a query.
+    """
+    root_node = "CreateView"
+    plan = LogicalPlan()
+
+    create_view_node = LogicalPlanNode(node_type=LogicalPlanStepType.CreateView)
+
+    # Extract view name
+    view_name_parts = statement[root_node]["name"]
+    create_view_node.view_name = extract_variable(view_name_parts)
+    if isinstance(create_view_node.view_name, list):
+        create_view_node.view_name = ".".join(create_view_node.view_name)
+
+    # Extract OR REPLACE flag
+    create_view_node.or_replace = statement[root_node].get("or_replace", False)
+
+    # Extract MATERIALIZED flag (if supported)
+    create_view_node.materialized = statement[root_node].get("materialized", False)
+
+    # Extract columns (if specified)
+    columns = statement[root_node].get("columns")
+    if columns:
+        create_view_node.columns = [col["Identifier"]["value"] for col in columns]
+    else:
+        create_view_node.columns = None
+
+    # Store the query as the AST - we'll need it to reconstruct the SQL or re-parse later
+    create_view_node.query = statement[root_node]["query"]
+
+    # Add the CreateView node
+    plan.add_node(random_string(), create_view_node)
+
+    return plan
+
+
+def plan_alter_view(statement, **kwargs):
+    """
+    Create a logical plan for ALTER VIEW statement (UpdateView).
+
+    ALTER VIEW view_name AS query
+
+    Note: The query is stored as text, not planned. It will be planned
+    when the view is referenced in a query.
+    """
+    root_node = "AlterView"
+    plan = LogicalPlan()
+
+    alter_view_node = LogicalPlanNode(node_type=LogicalPlanStepType.AlterView)
+
+    # Extract view name
+    view_name_parts = statement[root_node]["name"]
+    alter_view_node.view_name = extract_variable(view_name_parts)
+    if isinstance(alter_view_node.view_name, list):
+        alter_view_node.view_name = ".".join(alter_view_node.view_name)
+
+    # Extract columns (if specified)
+    columns = statement[root_node].get("columns")
+    if columns:
+        alter_view_node.columns = [col["Identifier"]["value"] for col in columns]
+    else:
+        alter_view_node.columns = None
+
+    # Store the query as the AST - we'll need it to reconstruct the SQL or re-parse later
+    alter_view_node.query = statement[root_node]["query"]
+
+    # Add the AlterView node
+    plan.add_node(random_string(), alter_view_node)
+
+    return plan
+
+
+def plan_drop_view(statement, **kwargs):
+    """
+    Create a logical plan for DROP VIEW statement.
+
+    DROP VIEW [IF EXISTS] view_name
+    """
+    root_node = "Drop"
+    plan = LogicalPlan()
+
+    drop_statement = statement[root_node]
+
+    # Only handle DROP VIEW statements
+    if drop_statement.get("object_type") != "View":
+        from opteryx.exceptions import UnsupportedSyntaxError
+
+        raise UnsupportedSyntaxError(
+            f"DROP {drop_statement.get('object_type')} is not supported in this context"
+        )
+
+    drop_view_node = LogicalPlanNode(node_type=LogicalPlanStepType.DropView)
+
+    # Extract view names (can drop multiple views)
+    names = drop_statement["names"]
+    view_names = []
+    for name_parts in names:
+        view_name = extract_variable(name_parts)
+        if isinstance(view_name, list):
+            view_name = ".".join(view_name)
+        view_names.append(view_name)
+
+    drop_view_node.view_names = view_names
+
+    # Extract IF EXISTS flag
+    drop_view_node.if_exists = drop_statement.get("if_exists", False)
+
+    # Extract CASCADE/RESTRICT flag
+    drop_view_node.cascade = drop_statement.get("cascade", False)
+
+    plan.add_node(random_string(), drop_view_node)
+    return plan
+
+
 def build_expression_tree(relation, dnf_list):
     """
     Recursively build an expression tree from a DNF-like list structure.
@@ -1039,6 +1163,9 @@ QUERY_BUILDERS = {
     # "ShowVariable": plan_show_variable,  # generic SHOW handler
     # "ShowVariables": plan_show_variables,
     # "Use": plan_use
+    "CreateView": plan_create_view,
+    "AlterView": plan_alter_view,
+    "Drop": plan_drop_view,  # handles DROP VIEW (checks object_type internally)
 }
 
 

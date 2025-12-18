@@ -223,3 +223,25 @@ def render_metadata_writer(_: LogicalPlanNode) -> str:
 @register_render(LogicalPlanStepType.Exit)
 def render_exit(_: LogicalPlanNode) -> str:
     return "EXIT"
+
+
+@register_render(LogicalPlanStepType.CreateView)
+def render_create_view(node: LogicalPlanNode) -> str:
+    or_replace = "OR REPLACE " if node.or_replace else ""
+    materialized = "MATERIALIZED " if node.materialized else ""
+    columns = f" ({', '.join(node.columns)})" if node.columns else ""
+    return f"CREATE {or_replace}{materialized}VIEW ({node.view_name}{columns})"
+
+
+@register_render(LogicalPlanStepType.AlterView)
+def render_alter_view(node: LogicalPlanNode) -> str:
+    columns = f" ({', '.join(node.columns)})" if node.columns else ""
+    return f"ALTER VIEW ({node.view_name}{columns})"
+
+
+@register_render(LogicalPlanStepType.DropView)
+def render_drop_view(node: LogicalPlanNode) -> str:
+    if_exists = "IF EXISTS " if node.if_exists else ""
+    cascade = " CASCADE" if node.cascade else ""
+    view_list = ", ".join(node.view_names)
+    return f"DROP VIEW {if_exists}({view_list}){cascade}"
