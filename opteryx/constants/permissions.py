@@ -17,4 +17,8 @@ PERMISSIONS = {
     "ShowFunctions",  # SHOW FUNCTIONS
     "ShowTables",  # SHOW TABLES (metadata)
     "Set",  # Allow setting session variables only (no persistent side effects)
+    "Use",
+    "CreateView",
+    "AlterView",
+    "DropView",
 }

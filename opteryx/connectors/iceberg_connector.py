@@ -22,11 +22,7 @@ from orso.tools import single_item_cache
 from orso.types import OrsoTypes
 
 from opteryx.connectors import GcpCloudStorageConnector
-from opteryx.connectors.base.base_connector import BaseConnector
-from opteryx.connectors.capabilities import Asynchronous
-from opteryx.connectors.capabilities import Diachronic
-from opteryx.connectors.capabilities import LimitPushable
-from opteryx.connectors.capabilities import PredicatePushable
+from opteryx.connectors.capabilities import Eidetic
 from opteryx.connectors.capabilities import Statistics
 from opteryx.exceptions import DatasetNotFoundError
 from opteryx.exceptions import DatasetReadError
@@ -127,7 +123,7 @@ def to_iceberg_filter(root):
     return iceberg_filter if iceberg_filter else "True", unsupported
 
 
-class IcebergConnector(GcpCloudStorageConnector, Statistics):
+class IcebergConnector(GcpCloudStorageConnector, Statistics, Eidetic):
     __mode__ = "Blob"
     __type__ = "ICEBERG"
     __synchronousity__ = "asynchronous"
@@ -154,6 +150,7 @@ class IcebergConnector(GcpCloudStorageConnector, Statistics):
     def __init__(self, *args, catalog=None, **kwargs):
         GcpCloudStorageConnector.__init__(self, **kwargs)
         Statistics.__init__(self, **kwargs)
+        Eidetic.__init__(self, **kwargs)
 
         # The GCP connector changes . to / internally - we need to reverse that
         self.dataset = self.dataset.lower().replace("/", ".")
@@ -172,6 +169,10 @@ class IcebergConnector(GcpCloudStorageConnector, Statistics):
                     firestore_database=kwargs.get("firestore_database"),
                     gcs_bucket=kwargs.get("gcs_bucket"),
                 )
+            # Store catalog for view operations
+            self.catalog = metastore
+            self.catalog_name = catalog_name
+
             self.table = metastore.load_table(self.dataset)
 
             self.snapshot = self.table.current_snapshot()
@@ -351,3 +352,109 @@ class IcebergConnector(GcpCloudStorageConnector, Statistics):
             return bool(value)
 
         ValueError(f"Unsupported data type: {data_type}, {str(data_type)}")
+
+    # View operations (Eidetic capability)
+    def get_view(self, view_name: str):
+        """Retrieve the definition of the specified view.
+
+        Args:
+            view_name: Name of the view to retrieve (can be namespace.view_name or just view_name)
+
+        Returns:
+            ViewDefinition: The view definition with name, statement, owner, and last_row_count
+        """
+        from opteryx.connectors.capabilities.eidetic import ViewDefinition
+
+        # Parse view_name - it might include namespace
+        if "." in view_name:
+            namespace, name = view_name.rsplit(".", 1)
+        else:
+            # Use the same namespace as the table
+            namespace = self.dataset.rsplit(".", 1)[0] if "." in self.dataset else self.catalog_name
+            name = view_name
+
+        identifier = (namespace, name)
+        view = self.catalog.load_view(identifier)
+
+        return ViewDefinition(
+            name=view.name,
+            statement=view.metadata.sql_text,
+            owner=view.metadata.author,
+            last_row_count=view.metadata.last_row_count,
+        )
+
+    def list_views(self, prefix: str = None) -> list:
+        """List all available views in the specified catalog and schema.
+
+        Args:
+            prefix: Optional prefix to filter views (namespace prefix)
+
+        Returns:
+            list[ViewDefinition]: List of view definitions
+        """
+        from opteryx.connectors.capabilities.eidetic import ViewDefinition
+
+        # Determine namespace to list from
+        if prefix:
+            namespace = prefix
+        else:
+            # Use the same namespace as the table
+            namespace = self.dataset.rsplit(".", 1)[0] if "." in self.dataset else self.catalog_name
+
+        # Get view identifiers from catalog
+        view_identifiers = self.catalog.list_views(namespace)
+
+        # Load each view and convert to ViewDefinition
+        views = []
+        for identifier in view_identifiers:
+            try:
+                view = self.catalog.load_view(identifier)
+                views.append(
+                    ViewDefinition(
+                        name=view.name,
+                        statement=view.metadata.sql_text,
+                        owner=view.metadata.author,
+                        last_row_count=view.metadata.last_row_count,
+                    )
+                )
+            except (KeyError, AttributeError):
+                # Skip views that can't be loaded or have missing attributes
+                pass
+
+        return views
+
+    def create_view(self, view_name: str, statement: str, owner: str = None):
+        """Create a new view with the given name and definition.
+
+        Args:
+            view_name: Name of the view to create (can be namespace.view_name or just view_name)
+            statement: SQL statement that defines the view
+            owner: Optional owner/author of the view
+        """
+        # Parse view_name - it might include namespace
+        if "." in view_name:
+            namespace, name = view_name.rsplit(".", 1)
+        else:
+            # Use the same namespace as the table
+            namespace = self.dataset.rsplit(".", 1)[0] if "." in self.dataset else self.catalog_name
+            name = view_name
+
+        identifier = (namespace, name)
+        self.catalog.create_view(identifier=identifier, sql=statement, author=owner)
+
+    def drop_view(self, view_name: str):
+        """Drop the specified view.
+
+        Args:
+            view_name: Name of the view to drop (can be namespace.view_name or just view_name)
+        """
+        # Parse view_name - it might include namespace
+        if "." in view_name:
+            namespace, name = view_name.rsplit(".", 1)
+        else:
+            # Use the same namespace as the table
+            namespace = self.dataset.rsplit(".", 1)[0] if "." in self.dataset else self.catalog_name
+            name = view_name
+
+        identifier = (namespace, name)
+        self.catalog.drop_view(identifier)

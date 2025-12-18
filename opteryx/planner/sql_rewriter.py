@@ -47,7 +47,14 @@ from opteryx.exceptions import UnsupportedSyntaxError
 SQL_PARTS = {
     r"ANALYZE\sTABLE",
     r"ANTI\sJOIN",
+    r"ALTER\sVIEW",
     r"CREATE\sTABLE",
+    r"CREATE\sVIEW",
+    r"DROP\sVIEW",
+    r"EXPLAIN\sANALYZE",
+    r"FORMAT\sMERMAID",
+    r"FORMAT\sTEXT",
+    r"REPLACE",
     r"CROSS\sJOIN",
     r"FROM",
     r"FULL\sJOIN",
@@ -80,6 +87,9 @@ SQL_PARTS = {
     r",",
     r"UNION",
     r"AS",
+    r"AND",
+    r"OR",
+    r"NOT",
 }
 
 

@@ -1010,6 +1010,85 @@ class BinderVisitor:
             node.columns.append(column_reference)
         return node, context
 
+    def visit_create_view(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+        """
+        Bind the CREATE VIEW node to determine which connector should handle
+        storing the view definition.
+
+        This uses the same logic as visit_scan to determine the appropriate connector
+        based on the view name.
+        """
+        from opteryx.connectors import connector_factory
+        from opteryx.managers.permissions import can_read_table
+
+        # Work out which connector will be serving this request
+        # The view name determines where the view metadata will be stored
+        node.connector = connector_factory(node.view_name, telemetry=context.telemetry)
+
+        # Ensure this user can write to the view location
+        if not can_read_table(context.connection.memberships, node.view_name, action="WRITE"):
+            raise PermissionError(f"User does not have permission to create view {node.view_name}")
+
+        if hasattr(node.connector, "variables"):
+            node.connector.variables = context.connection.variables
+
+        node.columns = []
+        return node, context
+
+    def visit_alter_view(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+        """
+        Bind the ALTER VIEW node to determine which connector should handle
+        updating the view definition.
+
+        This uses the same logic as visit_scan to determine the appropriate connector
+        based on the view name.
+        """
+        from opteryx.connectors import connector_factory
+        from opteryx.managers.permissions import can_read_table
+
+        # Work out which connector will be serving this request
+        node.connector = connector_factory(node.view_name, telemetry=context.telemetry)
+
+        # Ensure this user can write to the view location
+        if not can_read_table(context.connection.memberships, node.view_name, action="WRITE"):
+            raise PermissionError(f"User does not have permission to alter view {node.view_name}")
+
+        if hasattr(node.connector, "variables"):
+            node.connector.variables = context.connection.variables
+
+        node.columns = []
+        return node, context
+
+    def visit_drop_view(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+        """
+        Bind the DROP VIEW node to determine which connector should handle
+        removing the view definition(s).
+
+        Since DROP VIEW can operate on multiple views, we need to check permissions
+        and determine connectors for each view.
+        """
+        from opteryx.connectors import connector_factory
+        from opteryx.managers.permissions import can_read_table
+
+        # Store connectors for each view to be dropped
+        node.connectors = {}
+
+        for view_name in node.view_names:
+            # Work out which connector handles this view
+            connector = connector_factory(view_name, telemetry=context.telemetry)
+
+            # Ensure this user can drop the view
+            if not can_read_table(context.connection.memberships, view_name, action="WRITE"):
+                raise PermissionError(f"User does not have permission to drop view {view_name}")
+
+            if hasattr(connector, "variables"):
+                connector.variables = context.connection.variables
+
+            node.connectors[view_name] = connector
+
+        node.columns = []
+        return node, context
+
     def visit_subquery(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
         node, context = self.visit_exit(node, context)
 
