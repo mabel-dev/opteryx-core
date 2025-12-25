@@ -175,7 +175,7 @@ class DatasetNotFoundError(SqlError):
     def __init__(self, connector: str, dataset: str = None, suggestion: Optional[str] = None):
         self.dataset = dataset
         self.connector = connector
-        message = f"The requested dataset, '{dataset}', could not be found by '{connector}'."
+        message = f"The requested dataset, '{dataset}', could not be found."
         if suggestion is not None:
             message += f" Did you mean '{suggestion}'?"
         super().__init__(message)

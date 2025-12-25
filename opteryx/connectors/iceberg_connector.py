@@ -177,6 +177,7 @@ class IcebergConnector(GcpCloudStorageConnector, Statistics, Eidetic):
 
             self.snapshot = self.table.current_snapshot()
             self.snapshot_id = None if self.snapshot is None else self.snapshot.snapshot_id
+            self.dataset_commited_at = None
         except pyiceberg.exceptions.NoSuchTableError:
             raise DatasetNotFoundError(
                 dataset=f"{catalog_name}.{self.dataset}", connector=self.__type__
@@ -210,11 +211,13 @@ class IcebergConnector(GcpCloudStorageConnector, Statistics, Eidetic):
                 selected = snapshot_rows[-1]
                 # ensure we store the commit time for telemetry/context
                 self.telemetry.dataset_committed_at = selected["committed_at"].isoformat()
+                self.dataset_commited_at = self.telemetry.dataset_committed_at
             else:
                 selected = snapshot_rows[0]
                 for candidate in snapshot_rows:
                     if candidate["committed_at"] <= self.start_date:
                         self.telemetry.dataset_committed_at = candidate["committed_at"].isoformat()
+                        self.dataset_commited_at = self.telemetry.dataset_committed_at
                         selected = candidate
                     else:
                         break
