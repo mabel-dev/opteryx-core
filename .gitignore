@@ -241,3 +241,6 @@ third_party/mabel/draken/vectors/vector.c*
 third_party/mabel/rugo/jsonl/jsonl_reader.c*
 third_party/mabel/rugo/parquet/parquet_reader.c*
 hits/**
+tools/test_gharchive.py
+tools/load_gharchive.py
+tools/load_gh_messages.py

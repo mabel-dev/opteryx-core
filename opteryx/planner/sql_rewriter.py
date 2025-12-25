@@ -167,6 +167,18 @@ def rewrite_explain(parts: list) -> list:
 
 
 def do_sql_rewrite(statement):
+    # If the SQL was passed with escaped sequences (e.g. "\\n"),
+    # interpret the common ones so the rewriter sees real newlines/tabs.
+    if isinstance(statement, str) and (
+        "\\n" in statement or "\\t" in statement or "\\r" in statement
+    ):
+        statement = (
+            statement.replace("\\r\\n", "\r\n")
+            .replace("\\n", "\n")
+            .replace("\\t", "\t")
+            .replace("\\r", "\r")
+        )
+
     parts = sql_parts(statement)
     parts = rewrite_explain(parts)
     return " ".join(parts)
