@@ -39,6 +39,7 @@ class ShowCreateNode(BasePlanNode):
             from opteryx.planner.views import view_as_sql
 
             if is_view(self.object_name):
+                print("SHOW CREATE VIEW", self.object_name)
                 view_sql = view_as_sql(self.object_name)
                 buffer = [{self.object_name: view_sql}]
                 table = pyarrow.Table.from_pylist(buffer)

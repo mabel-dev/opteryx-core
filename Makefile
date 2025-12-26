@@ -13,7 +13,7 @@ SHELL := /bin/bash
 PYTHON_GIL ?=
 # Prefer python3.13 by default for consistent ABI and compiled artifacts.
 # Users may override by passing PYTHON='python3.x' on the make commandline.
-PYTHON ?= $(PYTHON_GIL) python3.13
+PYTHON ?= $(PYTHON_GIL) python
 UV := $(PYTHON) -m uv
 PIP := $(UV) pip
 PYTEST := $(PYTHON) -m pytest

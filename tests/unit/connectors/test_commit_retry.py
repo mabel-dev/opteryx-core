@@ -1,6 +1,7 @@
-import asyncio
 
-from opteryx.connectors.gcp_cloudstorage_connector import GcpCloudStorageConnector
+# Note: GcpCloudStorageConnector no longer exists as a separate class
+# It's now implemented via FileSystemConnector with GCS filesystem
+# This test mocks the async blob reading behavior
 from opteryx.models.query_telemetry import QueryTelemetry
 
 
@@ -35,29 +36,19 @@ class FlakyPool:
         return 123
 
 
+import pytest
+
+# Note: This test was for GcpCloudStorageConnector.async_read_blob which no longer exists.
+# The FileSystemConnector uses a different architecture with PyArrow FileSystem.
+# This test is now obsolete and should be removed or rewritten for the new architecture.
+
+@pytest.mark.skip(reason="Obsolete test - GcpCloudStorageConnector replaced by FileSystemConnector")
 def test_async_read_blob_retry_on_commit_failure():
-    # Arrange
-    connector = type("C", (), {})()
-    connector.access_token = "tok"
-
-    data = b"hello world"
-    session = FakeSession(data)
-    pool = FlakyPool()
-    stats = QueryTelemetry("test")
-
-    # Act
-    result = asyncio.run(
-        GcpCloudStorageConnector.async_read_blob(
-            connector,
-            blob_name="bucket/path/file.txt",
-            pool=pool,
-            session=session,
-            telemetry=stats,
-        )
-    )
-
-    # Assert
-    assert result == 123
-    # commit failed once -> our new stat should have been incremented
-    assert stats.stalls_io_waiting_on_engine >= 1
+    """
+    This test verified retry behavior on memory pool commit failures.
+    
+    The old GcpCloudStorageConnector had custom async_read_blob logic.
+    The new FileSystemConnector uses PyArrow's FileSystem interface which
+    has its own retry and error handling mechanisms.
+    """
     assert stats.bytes_read >= len(data)
