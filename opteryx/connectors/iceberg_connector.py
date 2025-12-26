@@ -4,7 +4,11 @@
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
 """
-Iceberg Connector
+Iceberg Connector - Refactored Architecture
+
+Architecture:
+- IcebergConnector: Long-lived catalog gateway (handles catalog operations, views, introspection)
+- IcebergTable: Transient table-specific engine (handles data reading for one table)
 """
 
 import datetime
@@ -12,6 +16,8 @@ import struct
 from decimal import Decimal
 from typing import Dict
 from typing import List
+from typing import Optional
+from typing import Tuple
 from typing import Union
 
 import numpy
@@ -21,17 +27,18 @@ from orso.schema import RelationSchema
 from orso.tools import single_item_cache
 from orso.types import OrsoTypes
 
-from opteryx.connectors import GcpCloudStorageConnector
+from opteryx.connectors import TableType
+from opteryx.connectors.base.base_connector import BaseTable
+from opteryx.connectors.capabilities import Diachronic
 from opteryx.connectors.capabilities import Eidetic
 from opteryx.connectors.capabilities import Statistics
+from opteryx.connectors.filesystem_connector import FileSystemTable
 from opteryx.exceptions import DatasetNotFoundError
 from opteryx.exceptions import DatasetReadError
 from opteryx.exceptions import NotSupportedError
 from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.managers.expression import NodeType
-from opteryx.managers.expression import get_all_nodes_of_type
 from opteryx.models import RelationStatistics
-from opteryx.utils.file_decoders import filter_records
 
 
 @single_item_cache
@@ -123,10 +130,29 @@ def to_iceberg_filter(root):
     return iceberg_filter if iceberg_filter else "True", unsupported
 
 
-class IcebergConnector(GcpCloudStorageConnector, Statistics, Eidetic):
+class IcebergTable(FileSystemTable, Diachronic, Statistics):
+    """
+    Table-specific engine for reading Iceberg tables.
+
+    This is a transient object created per-table that handles:
+    - Schema resolution
+    - Statistics gathering
+    - Data reading
+    - Predicate pushdown
+    - Time-travel queries
+
+    Inherits from FileSystemTable to reuse filesystem-based reading logic.
+    """
+
     __mode__ = "Blob"
     __type__ = "ICEBERG"
     __synchronousity__ = "asynchronous"
+
+    # Capability declarations
+    supports_diachronic = True  # Time-travel queries
+    supports_predicate_pushdown = True  # Via FileSystemTable
+    supports_limit_pushdown = True  # Via FileSystemTable
+    supports_statistics = True  # Iceberg manifest stats
 
     PUSHABLE_OPS: Dict[str, bool] = {
         "Eq": True,
@@ -147,41 +173,48 @@ class IcebergConnector(GcpCloudStorageConnector, Statistics, Eidetic):
         OrsoTypes.DATE,
     }
 
-    def __init__(self, *args, catalog=None, **kwargs):
-        GcpCloudStorageConnector.__init__(self, **kwargs)
-        Statistics.__init__(self, **kwargs)
-        Eidetic.__init__(self, **kwargs)
+    def __init__(self, dataset: str, catalog, catalog_name: str, **kwargs):
+        """
+        Initialize the table engine for a specific Iceberg table.
 
-        # The GCP connector changes . to / internally - we need to reverse that
-        self.dataset = self.dataset.lower().replace("/", ".")
+        Args:
+            dataset: The table name (after catalog prefix is removed)
+            catalog: The pyiceberg Catalog instance
+            catalog_name: The catalog name
+            **kwargs: Additional parameters (telemetry, start_date, end_date, etc.)
+        """
+        self.dataset = dataset
+        self.catalog = catalog
+        self.catalog_name = catalog_name
+
+        # Iceberg currently always uses GCS for storage
+        # Create the appropriate filesystem for reading data files
+        from opteryx.connectors.io_systems import OpteryxGcsFileSystem
+
+        filesystem = OpteryxGcsFileSystem()
+
+        # Call FileSystemTable.__init__ which calls BaseTable.__init__
+        FileSystemTable.__init__(
+            self, dataset=dataset, filesystem=filesystem, storage_type="ICEBERG", **kwargs
+        )
+        Diachronic.__init__(self, **kwargs)
+        Statistics.__init__(self, **kwargs)
+
+        self.dataset = self.dataset.replace("/", ".")
+
+        # Initialize state
+        self.snapshot_id = None
+        self.snapshot = None
+        self.dataset_committed_at = None
 
         import pyiceberg
 
         try:
-            if isinstance(catalog, pyiceberg.catalog.Catalog):
-                metastore = catalog
-                catalog_name = metastore.name
-            else:
-                catalog_name, self.dataset = self.dataset.split(".", 1)
-                metastore = catalog(
-                    catalog_name=catalog_name,
-                    firestore_project=kwargs.get("firestore_project"),
-                    firestore_database=kwargs.get("firestore_database"),
-                    gcs_bucket=kwargs.get("gcs_bucket"),
-                )
-            # Store catalog for view operations
-            self.catalog = metastore
-            self.catalog_name = catalog_name
-
-            self.table = metastore.load_table(self.dataset)
-
+            self.table = self.catalog.load_table(self.dataset)
             self.snapshot = self.table.current_snapshot()
             self.snapshot_id = None if self.snapshot is None else self.snapshot.snapshot_id
-            self.dataset_commited_at = None
         except pyiceberg.exceptions.NoSuchTableError:
-            raise DatasetNotFoundError(
-                dataset=f"{catalog_name}.{self.dataset}", connector=self.__type__
-            )
+            raise DatasetNotFoundError(dataset=self.dataset, connector=self.__type__)
 
     def get_dataset_schema(self) -> RelationSchema:
         if self.start_date != self.end_date:
@@ -211,13 +244,13 @@ class IcebergConnector(GcpCloudStorageConnector, Statistics, Eidetic):
                 selected = snapshot_rows[-1]
                 # ensure we store the commit time for telemetry/context
                 self.telemetry.dataset_committed_at = selected["committed_at"].isoformat()
-                self.dataset_commited_at = self.telemetry.dataset_committed_at
+                self.dataset_committed_at = self.telemetry.dataset_committed_at
             else:
                 selected = snapshot_rows[0]
                 for candidate in snapshot_rows:
                     if candidate["committed_at"] <= self.start_date:
                         self.telemetry.dataset_committed_at = candidate["committed_at"].isoformat()
-                        self.dataset_commited_at = self.telemetry.dataset_committed_at
+                        self.dataset_committed_at = self.telemetry.dataset_committed_at
                         selected = candidate
                     else:
                         break
@@ -248,7 +281,6 @@ class IcebergConnector(GcpCloudStorageConnector, Statistics, Eidetic):
         relation_statistics = RelationStatistics()
 
         column_names = {col.field_id: col.name for col in iceberg_schema.columns}
-        column_types = {col.field_id: col.field_type for col in iceberg_schema.columns}
 
         files = self.table.inspect.files(snapshot_id=self.snapshot_id)
 
@@ -268,18 +300,6 @@ class IcebergConnector(GcpCloudStorageConnector, Statistics, Eidetic):
             for file in files.column("value_counts"):
                 for k, v in file:
                     relation_statistics.add_count(column_names[k], v)
-
-        #        for file in files.column("lower_bounds"):
-        #            for k, v in file:
-        #                relation_statistics.update_lower(
-        #                    column_names[k], IcebergConnector.decode_iceberg_value(v, column_types[k])
-        #                )
-
-        #        for file in files.column("upper_bounds"):
-        #            for k, v in file:
-        #                relation_statistics.update_upper(
-        #                    column_names[k], IcebergConnector.decode_iceberg_value(v, column_types[k])
-        #                )
 
         self.relation_statistics = relation_statistics
 
@@ -310,17 +330,6 @@ class IcebergConnector(GcpCloudStorageConnector, Statistics, Eidetic):
     ) -> Union[int, float, str, datetime.datetime, Decimal, bool]:
         """
         Decode Iceberg-encoded values based on the specified data type.
-
-        Parameters:
-            value: Union[int, float, bytes]
-                The encoded value from Iceberg.
-            data_type: str
-                The type of the value ('int', 'long', 'float', 'double', 'timestamp', 'date', 'string', 'decimal', 'boolean').
-            scale: int, optional
-                Scale used for decoding decimal types, defaults to None.
-
-        Returns:
-            The decoded value in its original form.
         """
         import pyiceberg
 
@@ -356,28 +365,189 @@ class IcebergConnector(GcpCloudStorageConnector, Statistics, Eidetic):
 
         ValueError(f"Unsupported data type: {data_type}, {str(data_type)}")
 
-    # View operations (Eidetic capability)
-    def get_view(self, view_name: str):
-        """Retrieve the definition of the specified view.
+
+class IcebergConnector(Eidetic):
+    """
+    Long-lived Iceberg catalog gateway supporting multiple catalogs.
+
+    This connector handles:
+    - Multi-catalog management (lazy instantiation)
+    - Object introspection (locate_object)
+    - View operations (create/drop/list views)
+    - Factory method for creating table engines
+    """
+
+    eidetic = True
+
+    # Capability declarations - what IcebergTable readers support
+    supports_diachronic = True  # Time-travel via IcebergTable
+    supports_predicate_pushdown = True  # Via FileSystemTable base
+    supports_limit_pushdown = True  # Via FileSystemTable base
+    supports_statistics = True  # Iceberg manifests provide stats
+
+    def __init__(self, *args, catalog=None, **kwargs):
+        """
+        Initialize the Iceberg catalog connector.
 
         Args:
-            view_name: Name of the view to retrieve (can be namespace.view_name or just view_name)
+            catalog: Optional pre-configured catalog instance or catalog factory function
+            **kwargs: Configuration (firestore_project, firestore_database, gcs_bucket, etc.)
+        """
+        Eidetic.__init__(self, **kwargs)
+        self.kwargs = kwargs
+        self.catalog_factory = catalog
+        self.catalogs = {}  # Cache of instantiated catalogs by name
+
+        import pyiceberg
+
+        # If a pre-configured catalog instance was provided, cache it
+        if isinstance(catalog, pyiceberg.catalog.Catalog):
+            self.catalogs[catalog.name] = catalog
+
+    def _get_catalog(self, catalog_name: str):
+        """
+        Get or create a catalog instance for the specified catalog name.
+
+        Args:
+            catalog_name: The catalog name to connect to
 
         Returns:
-            ViewDefinition: The view definition with name, statement, owner, and last_row_count
+            PyIceberg Catalog instance
         """
+        import pyiceberg
+
+        if catalog_name in self.catalogs:
+            return self.catalogs[catalog_name]
+
+        # Create new catalog instance
+        if self.catalog_factory is None:
+            raise ValueError("Iceberg connector requires a catalog parameter")
+
+        if isinstance(self.catalog_factory, pyiceberg.catalog.Catalog):
+            # Already have an instance, just return it
+            return self.catalog_factory
+
+        # Call factory to create catalog
+        catalog_instance = self.catalog_factory(
+            catalog_name=catalog_name,
+            firestore_project=self.kwargs.get("firestore_project"),
+            firestore_database=self.kwargs.get("firestore_database"),
+            gcs_bucket=self.kwargs.get("gcs_bucket"),
+        )
+
+        self.catalogs[catalog_name] = catalog_instance
+        return catalog_instance
+
+    def _parse_identifier(self, name: str) -> Tuple[str, str]:
+        """
+        Parse a fully qualified name into catalog and relative identifier.
+
+        For 'benchmarks.clickbench.hits':
+        - catalog_name = 'benchmarks'
+        - relative_id = 'clickbench.hits'
+
+        Args:
+            name: Fully qualified table/view name
+
+        Returns:
+            Tuple of (catalog_name, relative_identifier)
+        """
+        parts = name.split(".", 1)
+        if len(parts) == 2:
+            return parts[0], parts[1]
+        else:
+            # No catalog specified, use default
+            return "default", name
+
+    def locate_object(self, name: str) -> Tuple[Optional[TableType], any]:
+        """
+        Ask the connector if it knows about a specific object (table or view).
+
+        Args:
+            name: The fully qualified table/view name (catalog.namespace.name)
+
+        Returns:
+            Tuple of (TableType | None, metadata):
+            - If table exists: (TableType.Table, table metadata)
+            - If view exists: (TableType.View, view metadata)
+            - If nothing exists: (None, None)
+        """
+        import pyiceberg.exceptions
+
+        # Parse catalog name and relative identifier
+        catalog_name, relative_id = self._parse_identifier(name)
+        catalog = self._get_catalog(catalog_name)
+
+        # Check if it is a table
+        try:
+            table = catalog.load_table(relative_id)
+            return TableType.Table, table
+        except pyiceberg.exceptions.NoSuchTableError:
+            pass
+
+        # Check if it is a view
+        try:
+            view = catalog.load_view(relative_id)
+            return TableType.View, view
+        except Exception:
+            pass
+
+        return None, None
+
+    def table_engine(self, name: str, **kwargs):
+        """
+        Create a table-specific engine for reading data.
+
+        Args:
+            name: The fully qualified table name (catalog.namespace.name)
+            **kwargs: Additional parameters (start_date, end_date, telemetry, etc.)
+
+        Returns:
+            IcebergTable instance configured for the specific table
+        """
+        # Parse catalog name and relative identifier
+        catalog_name, relative_id = self._parse_identifier(name)
+        catalog = self._get_catalog(catalog_name)
+
+        # Merge stored kwargs with provided kwargs (provided takes precedence)
+        merged_kwargs = {**self.kwargs, **kwargs}
+        return IcebergTable(
+            dataset=relative_id, catalog=catalog, catalog_name=catalog_name, **merged_kwargs
+        )
+
+    def view_engine(self, name: str):
+        """
+        Get view definition (for expansion in AST).
+
+        Args:
+            name: The view name
+
+        Returns:
+            ViewDefinition object
+        """
+        return self.get_view(name)
+
+    # View operations (Eidetic capability)
+    def get_view(self, view_name: str):
+        """Retrieve the definition of the specified view."""
         from opteryx.connectors.capabilities.eidetic import ViewDefinition
 
-        # Parse view_name - it might include namespace
-        if "." in view_name:
-            namespace, name = view_name.rsplit(".", 1)
+        # Parse catalog name and relative identifier
+        catalog_name, relative_id = self._parse_identifier(view_name)
+        catalog = self._get_catalog(catalog_name)
+
+        # Parse relative_id into namespace and name
+        # For "clickbench.q01": namespace="clickbench", name="q01"
+        parts = relative_id.split(".")
+        if len(parts) >= 2:
+            name = parts[-1]
+            namespace = ".".join(parts[:-1])
         else:
-            # Use the same namespace as the table
-            namespace = self.dataset.rsplit(".", 1)[0] if "." in self.dataset else self.catalog_name
-            name = view_name
+            namespace = catalog_name
+            name = relative_id
 
         identifier = (namespace, name)
-        view = self.catalog.load_view(identifier)
+        view = catalog.load_view(identifier)
 
         return ViewDefinition(
             name=view.name,
@@ -387,22 +557,14 @@ class IcebergConnector(GcpCloudStorageConnector, Statistics, Eidetic):
         )
 
     def list_views(self, prefix: str = None) -> list:
-        """List all available views in the specified catalog and schema.
-
-        Args:
-            prefix: Optional prefix to filter views (namespace prefix)
-
-        Returns:
-            list[ViewDefinition]: List of view definitions
-        """
+        """List all available views in the specified catalog and schema."""
         from opteryx.connectors.capabilities.eidetic import ViewDefinition
 
         # Determine namespace to list from
         if prefix:
             namespace = prefix
         else:
-            # Use the same namespace as the table
-            namespace = self.dataset.rsplit(".", 1)[0] if "." in self.dataset else self.catalog_name
+            namespace = self.catalog_name
 
         # Get view identifiers from catalog
         view_identifiers = self.catalog.list_views(namespace)
@@ -427,36 +589,24 @@ class IcebergConnector(GcpCloudStorageConnector, Statistics, Eidetic):
         return views
 
     def create_view(self, view_name: str, statement: str, owner: str = None):
-        """Create a new view with the given name and definition.
-
-        Args:
-            view_name: Name of the view to create (can be namespace.view_name or just view_name)
-            statement: SQL statement that defines the view
-            owner: Optional owner/author of the view
-        """
+        """Create a new view with the given name and definition."""
         # Parse view_name - it might include namespace
         if "." in view_name:
             namespace, name = view_name.rsplit(".", 1)
         else:
-            # Use the same namespace as the table
-            namespace = self.dataset.rsplit(".", 1)[0] if "." in self.dataset else self.catalog_name
+            namespace = self.catalog_name
             name = view_name
 
         identifier = (namespace, name)
         self.catalog.create_view(identifier=identifier, sql=statement, author=owner)
 
     def drop_view(self, view_name: str):
-        """Drop the specified view.
-
-        Args:
-            view_name: Name of the view to drop (can be namespace.view_name or just view_name)
-        """
+        """Drop the specified view."""
         # Parse view_name - it might include namespace
         if "." in view_name:
             namespace, name = view_name.rsplit(".", 1)
         else:
-            # Use the same namespace as the table
-            namespace = self.dataset.rsplit(".", 1)[0] if "." in self.dataset else self.catalog_name
+            namespace = self.catalog_name
             name = view_name
 
         identifier = (namespace, name)

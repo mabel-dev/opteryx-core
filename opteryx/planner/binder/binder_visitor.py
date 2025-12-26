@@ -945,25 +945,45 @@ class BinderVisitor:
 
     def visit_scan(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
         from opteryx.connectors import connector_factory
-        from opteryx.connectors.capabilities import Diachronic
         from opteryx.exceptions import DatabaseError
         from opteryx.managers.permissions import can_read_table
 
         if node.alias in context.relations:
             raise AmbiguousDatasetError(dataset=node.alias)
 
-        # work out which connector will be serving this request
-        node.connector = connector_factory(node.relation, telemetry=context.telemetry)
+        # Get connector gateway (cached by prefix)
+        gateway = connector_factory(node.relation, telemetry=context.telemetry)
+
+        # Extract the dataset name (remove prefix if configured)
+        dataset_name = node.relation
+        if hasattr(gateway, "_matched_prefix") and hasattr(gateway, "_remove_prefix"):
+            if gateway._remove_prefix and gateway._matched_prefix:
+                prefix = gateway._matched_prefix
+                if node.relation.startswith(prefix):
+                    # Remove the prefix. If there's a separator (.) after the prefix, skip it too
+                    dataset_name = node.relation[len(prefix) :]
+                    if dataset_name.startswith("."):
+                        dataset_name = dataset_name[1:]
+
+        # Create table-specific engine
+        engine_kwargs = {}
+        if hasattr(gateway, "variables"):
+            engine_kwargs["variables"] = context.connection.variables
+        if gateway.supports_diachronic:
+            engine_kwargs["start_date"] = node.start_date
+            engine_kwargs["end_date"] = node.end_date
+
+        node.connector = gateway.table_engine(
+            dataset_name, telemetry=context.telemetry, **engine_kwargs
+        )
 
         # ensure this user can read the table
         if not can_read_table(context.connection.memberships, node.relation):
             raise PermissionError(f"User does not have permission to read {node.relation}")
 
-        connector_capabilities = node.connector.__class__.mro()
-
         if hasattr(node.connector, "variables"):
             node.connector.variables = context.connection.variables
-        if Diachronic in connector_capabilities:
+        if gateway.supports_diachronic:
             node.connector.start_date = node.start_date
             node.connector.end_date = node.end_date
         try:
@@ -1021,8 +1041,7 @@ class BinderVisitor:
         from opteryx.connectors import connector_factory
         from opteryx.managers.permissions import can_read_table
 
-        # Work out which connector will be serving this request
-        # The view name determines where the view metadata will be stored
+        # Get connector gateway (cached by prefix)
         node.connector = connector_factory(node.view_name, telemetry=context.telemetry)
 
         # Ensure this user can write to the view location
@@ -1046,7 +1065,7 @@ class BinderVisitor:
         from opteryx.connectors import connector_factory
         from opteryx.managers.permissions import can_read_table
 
-        # Work out which connector will be serving this request
+        # Get connector gateway (cached by prefix)
         node.connector = connector_factory(node.view_name, telemetry=context.telemetry)
 
         # Ensure this user can write to the view location
@@ -1074,7 +1093,7 @@ class BinderVisitor:
         node.connectors = {}
 
         for view_name in node.view_names:
-            # Work out which connector handles this view
+            # Get connector gateway (cached by prefix)
             connector = connector_factory(view_name, telemetry=context.telemetry)
 
             # Ensure this user can drop the view

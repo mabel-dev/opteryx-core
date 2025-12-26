@@ -4,13 +4,17 @@
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
 """
-The BaseConnector provides a common interface for all storage connectors.
+Base classes for connectors and table readers.
+
+BaseConnector: Gateway interface for long-lived connectors (IcebergConnector, FileSystemConnector)
+BaseTable: Table reader interface for transient readers (IcebergTable, FileSystemTable)
 """
 
 from typing import Any
 from typing import Dict
 from typing import Iterable
 from typing import Optional
+from typing import Tuple
 
 import pyarrow
 from orso.schema import RelationSchema
@@ -23,6 +27,24 @@ DEFAULT_MORSEL_SIZE: int = 16 * 1024 * 1024
 
 
 class BaseConnector:
+    """
+    Base class for gateway connectors.
+
+    Gateway connectors are long-lived, cached by storage configuration.
+    They create transient table reader instances via table_engine().
+
+    Examples: IcebergConnector, FileSystemConnector
+    """
+
+    eidetic = False
+
+    # Capability declarations - what the table readers created by this gateway support
+    supports_diachronic = False  # Time-travel/temporal queries
+    supports_predicate_pushdown = False  # Filter pushdown to storage
+    supports_limit_pushdown = False  # Limit pushdown to storage
+    supports_statistics = False  # Statistics gathering
+    supports_async = False  # Asynchronous reads
+
     @property
     def __mode__(self):  # pragma: no cover
         raise NotImplementedError("__mode__ not defined")
@@ -30,6 +52,67 @@ class BaseConnector:
     @property
     def interal_only(self):
         return False
+
+    def locate_object(self, name: str) -> Tuple[Optional[Any], Any]:
+        """
+        Determine if a name refers to a table, view, or doesn't exist.
+
+        This method allows the query planner to determine object type before
+        attempting to read it.
+
+        Args:
+            name: The fully qualified or relative name of the object
+
+        Returns:
+            Tuple of (TableType | None, metadata):
+            - If object exists: (TableType.Table or TableType.View, metadata object)
+            - If object doesn't exist: (None, None)
+
+        Note:
+            Default implementation returns None. Connectors that support views
+            or have catalog capabilities should override this method.
+        """
+        return None, None
+
+    def table_engine(self, name: str, **kwargs):  # pragma: no cover
+        """
+        Create a transient table reader for the specified dataset.
+
+        Args:
+            name: Dataset name/path
+            **kwargs: Additional parameters (telemetry, start_date, end_date, etc.)
+
+        Returns:
+            A table reader instance (e.g., IcebergTable, FileSystemTable)
+
+        Note:
+            Default implementation returns None. Gateway connectors must override
+            this method to return appropriate table reader instances.
+        """
+        return None
+
+
+class BaseTable:
+    """
+    Base class for transient table readers.
+
+    Table readers are created per-query to read specific datasets.
+    They have dataset, telemetry, and schema attributes, and implement
+    the actual data reading logic.
+
+    Examples: IcebergTable, FileSystemTable, legacy monolithic connectors
+    """
+
+    # Capability declarations - what this table reader supports
+    supports_diachronic = False  # Time-travel/temporal queries
+    supports_predicate_pushdown = False  # Filter pushdown to storage
+    supports_limit_pushdown = False  # Limit pushdown to storage
+    supports_statistics = False  # Statistics gathering
+    supports_async = False  # Asynchronous reads
+
+    @property
+    def __mode__(self):  # pragma: no cover
+        raise NotImplementedError("__mode__ not defined")
 
     def __init__(
         self,
@@ -40,11 +123,12 @@ class BaseConnector:
         **kwargs,
     ) -> None:
         """
-        Initialize the base connector with configuration.
+        Initialize the table reader with configuration.
 
         Args:
             dataset: The name of the dataset to read.
-            config: Configuration information specific to the connector.
+            config: Configuration information specific to the reader.
+            telemetry: Query telemetry object
         """
         if config is None:
             self.config = {}
