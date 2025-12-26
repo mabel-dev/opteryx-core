@@ -80,6 +80,7 @@ if OPTERYX_DEBUG:  # pragma: no cover
 from opteryx import config
 
 from opteryx.connectors import register_store
+from opteryx.connectors import set_default_connector
 
 from opteryx.__version__ import __author__
 from opteryx.__version__ import __build__
@@ -94,6 +95,7 @@ __all__ = [
     "query",
     "query_to_arrow",
     "register_store",
+    "set_default_connector",
     "__author__",
     "__build__",
     "__version__",

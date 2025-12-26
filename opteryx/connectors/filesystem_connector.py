@@ -1,28 +1,27 @@
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# See the License at http://www.apache.org/licenses/LICENSE-2.0
-# Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
-
 """
-The 'direct disk' connector provides the reader for when a dataset is
-given as a folder on local disk
+Generic filesystem connector using Arrow FileSystem interface.
+
+This provides a gateway connector (FileSystemConnector) and transient table reader
+(FileSystemTable) following the same pattern as IcebergConnector/IcebergTable.
 """
 
 import os
-import threading
 from concurrent.futures import FIRST_COMPLETED
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import wait
+from threading import Lock
 from typing import Dict
 from typing import List
+from typing import Optional
+from typing import Tuple
 
 import pyarrow
 from orso.schema import RelationSchema
-from orso.tools import single_item_cache
 from orso.types import OrsoTypes
 
+from opteryx.connectors import TableType
 from opteryx.connectors.base.base_connector import BaseConnector
-from opteryx.connectors.capabilities import Diachronic
+from opteryx.connectors.base.base_connector import BaseTable
 from opteryx.connectors.capabilities import LimitPushable
 from opteryx.connectors.capabilities import PredicatePushable
 from opteryx.exceptions import DataError
@@ -35,14 +34,20 @@ from opteryx.utils.file_decoders import get_decoder
 OS_SEP = os.sep
 
 
-class DiskConnector(BaseConnector, Diachronic, PredicatePushable, LimitPushable):
+class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
     """
-    Connector for reading datasets from files on local storage.
+    Transient table reader for filesystem-based datasets.
+
+    Created per query to read a specific dataset. Holds reference to parent
+    connector's filesystem for optimized I/O.
     """
 
     __mode__ = "Blob"
-    __type__ = "LOCAL"
     __synchronousity__ = "synchronous"
+
+    # Capability declarations
+    supports_predicate_pushdown = True
+    supports_limit_pushdown = True
 
     PUSHABLE_OPS: Dict[str, bool] = {
         "Eq": True,
@@ -64,125 +69,103 @@ class DiskConnector(BaseConnector, Diachronic, PredicatePushable, LimitPushable)
     }
 
     _executor = None  # Lazy initialization
+    _max_workers = 8
 
-    def __init__(self, **kwargs):
+    def __init__(self, dataset: str, filesystem, storage_type: str, **kwargs):
         """
-        Initialize the DiskConnector, which reads datasets directly from disk.
+        Initialize the table reader for a specific dataset.
 
-        Parameters:
-            kwargs: Dict
-                Arbitrary keyword arguments.
+        Args:
+            dataset: The dataset name/path
+            filesystem: Reference to the filesystem from parent connector
+            storage_type: Type identifier for telemetry (LOCAL, GCS, S3, etc.)
+            **kwargs: Additional parameters passed to BaseTable
         """
-        BaseConnector.__init__(self, **kwargs)
-        Diachronic.__init__(self, **kwargs)
+        BaseTable.__init__(self, dataset=dataset, **kwargs)
         PredicatePushable.__init__(self, **kwargs)
         LimitPushable.__init__(self, **kwargs)
 
-        self.dataset = self.dataset.replace(".", OS_SEP)
-        self.cached_first_blob = None  # Cache for the first blob in the dataset
-        self.blob_list = {}
+        self.filesystem = filesystem
+        self.__type__ = storage_type
+
+        # Initialize counters for telemetry
         self.rows_seen = 0
         self.blobs_seen = 0
-        self._stats_lock = threading.Lock()
-        cpu_count = os.cpu_count() or 1
-        self._max_workers = max(1, min(cpu_count * 2, 16))  # More aggressive scaling
+
+        # Normalize dataset path
+        if self.dataset and OS_SEP not in self.dataset and "/" not in self.dataset:
+            self.dataset = self.dataset.replace(".", OS_SEP)
+
+        self._stats_lock = Lock()
 
     def get_executor(self):
-        if self._executor is None:
-            self._executor = ThreadPoolExecutor(max_workers=self._max_workers)
-        return self._executor
+        """Get or create the thread pool executor."""
+        if FileSystemTable._executor is None:
+            FileSystemTable._executor = ThreadPoolExecutor(
+                max_workers=self._max_workers, thread_name_prefix="opteryx-io-"
+            )
+        return FileSystemTable._executor
 
     def __del__(self):
-        if self._executor is not None:
-            self._executor.shutdown(wait=False)
+        """Cleanup executor on deletion."""
+        if FileSystemTable._executor is not None:
+            FileSystemTable._executor.shutdown(wait=False)
+            FileSystemTable._executor = None
 
     def read_blob(
         self, *, blob_name: str, decoder, just_schema=False, projection=None, selection=None
     ):
         """
-        Read a blob (binary large object) from disk using memory-mapped file access.
+        Read a single blob using the filesystem.
 
-        This method uses low-level file reading with memory-mapped files to
-        improve performance. It reads the entire file into memory and then
-        decodes it using the provided decoder function.
-
-        Parameters:
-            blob_name (str):
-                The name of the blob file to read.
-            decoder (callable):
-                A function to decode the memory-mapped file content.
-            just_schema (bool, optional):
-                If True, only the schema of the data is returned. Defaults to False.
-            projection (list, optional):
-                A list of fields to project. Defaults to None.
-            selection (dict, optional):
-                A dictionary of selection criteria. Defaults to None.
-            **kwargs:
-                Additional keyword arguments.
+        Args:
+            blob_name: Path to the blob
+            decoder: Decoder function for the file format
+            just_schema: If True, only return schema
+            projection: Columns to project
+            selection: Predicates to push down
 
         Returns:
-            The decoded blob content.
-
-        Raises:
-            FileNotFoundError:
-                If the blob file does not exist.
-            OSError:
-                If an I/O error occurs while reading the file.
+            Decoded data or schema
         """
-        from opteryx.compiled.io.disk_reader import read_file_mmap
-        from opteryx.compiled.io.disk_reader import unmap_memory
+        # Open file through the filesystem
+        data = self.filesystem.open_input_file(blob_name)
+        self.telemetry.bytes_read += data.memoryview.nbytes
 
-        # from opteryx.compiled.io.disk_reader import unmap_memory
-        # Read using mmap for maximum speed
-        mmap_obj = read_file_mmap(blob_name)
+        # Decode the data
+        result = decoder(
+            data.memoryview,
+            projection=projection,
+            selection=selection,
+            just_schema=just_schema,
+        )
 
-        try:
-            # Create memoryview for the decoder
-            mv = memoryview(mmap_obj)
+        return result
 
-            result = decoder(
-                mv,
-                just_schema=just_schema,
-                projection=projection,
-                selection=selection,
-                use_threads=True,
-            )
-
-            with self._stats_lock:
-                self.telemetry.bytes_read += len(mv)
-
-            return result
-        finally:
-            # CRITICAL: Clean up the memory mapping
-            if mmap_obj is not None:
-                unmap_memory(mmap_obj)
-
-    @single_item_cache
     def get_list_of_blob_names(self, *, prefix: str) -> List[str]:
         """
-        List all blob files in the given directory path.
+        List all blobs matching the prefix.
 
-        Parameters:
-            prefix: str
-                The directory path.
+        Args:
+            prefix: Path prefix to search
 
         Returns:
-            A list of blob filenames.
+            List of blob paths
         """
-        # only fetch once per prefix (partition)
-        from opteryx.compiled.io.disk_reader import list_files
+        from pyarrow.fs import FileSelector
 
-        if prefix in self.blob_list:
-            return self.blob_list[prefix]
+        # Use filesystem's file listing
+        selector = FileSelector(prefix, recursive=True)
+        file_infos = self.filesystem.get_file_info(selector)
 
-        target = os.path.normpath(prefix)
-        try:
-            blobs = sorted(list_files(target, TUPLE_OF_VALID_EXTENSIONS))
-        except FileNotFoundError:
-            blobs = []
+        # Filter for valid file extensions
+        blob_names = [
+            info.path
+            for info in file_infos
+            if info.is_file and info.path.endswith(TUPLE_OF_VALID_EXTENSIONS)
+        ]
 
-        self.blob_list[prefix] = blobs
-        return blobs
+        return blob_names
 
     def read_dataset(
         self,
@@ -193,14 +176,18 @@ class DiskConnector(BaseConnector, Diachronic, PredicatePushable, LimitPushable)
         **kwargs,
     ) -> pyarrow.Table:
         """
-        Read the entire dataset from disk.
+        Read the entire dataset from the filesystem.
+
+        Args:
+            columns: Columns to project
+            predicates: Predicates to push down
+            just_schema: If True, only return schema
+            limit: Maximum number of rows to read
 
         Yields:
-            Each blob's content as a PyArrow Table.
+            PyArrow Tables or schemas
         """
-        blob_names = self.get_list_of_blob_names(
-            prefix=self.dataset,
-        )
+        blob_names = self.get_list_of_blob_names(prefix=self.dataset)
 
         if just_schema:
             for blob_name in blob_names:
@@ -223,7 +210,9 @@ class DiskConnector(BaseConnector, Diachronic, PredicatePushable, LimitPushable)
                     with self._stats_lock:
                         self.telemetry.unreadable_data_blobs += 1
                 except Exception as err:
-                    raise DataError(f"Unable to read file {blob_name} ({err})") from err
+                    raise DataError(
+                        f"Unable to read file {blob_name}: {type(err).__name__}"
+                    ) from err
             return
 
         remaining_rows = limit if limit is not None else float("inf")
@@ -243,6 +232,7 @@ class DiskConnector(BaseConnector, Diachronic, PredicatePushable, LimitPushable)
         max_workers = min(self._max_workers, len(blob_names)) or 1
 
         if max_workers <= 1:
+            # Single-threaded path
             for blob_name in blob_names:
                 try:
                     num_rows, _, raw_size, decoded = self._read_blob_task(
@@ -257,7 +247,9 @@ class DiskConnector(BaseConnector, Diachronic, PredicatePushable, LimitPushable)
                         self.telemetry.unreadable_data_blobs += 1
                     continue
                 except Exception as err:
-                    raise DataError(f"Unable to read file {blob_name} ({err})") from err
+                    raise DataError(
+                        f"Unable to read file {blob_name}: {type(err).__name__}"
+                    ) from err
 
                 if remaining_rows <= 0:
                     break
@@ -268,6 +260,7 @@ class DiskConnector(BaseConnector, Diachronic, PredicatePushable, LimitPushable)
                 if remaining_rows <= 0:
                     break
         else:
+            # Multi-threaded path
             blob_iter = iter(blob_names)
             pending = {}
 
@@ -299,7 +292,9 @@ class DiskConnector(BaseConnector, Diachronic, PredicatePushable, LimitPushable)
                         except Exception as err:
                             for remaining_future in list(pending):
                                 remaining_future.cancel()
-                            raise DataError(f"Unable to read file {blob_name} ({err})") from err
+                            raise DataError(
+                                f"Unable to read file {blob_name}: {type(err).__name__}"
+                            ) from err
                         else:
                             if remaining_rows > 0:
                                 decoded = process_result(num_rows, raw_size, decoded)
@@ -329,6 +324,7 @@ class DiskConnector(BaseConnector, Diachronic, PredicatePushable, LimitPushable)
                         break
 
     def _read_blob_task(self, blob_name: str, columns, predicates):
+        """Helper for reading a blob in a thread pool."""
         decoder = get_decoder(blob_name)
         return self.read_blob(
             blob_name=blob_name,
@@ -340,7 +336,7 @@ class DiskConnector(BaseConnector, Diachronic, PredicatePushable, LimitPushable)
 
     def get_dataset_schema(self) -> RelationSchema:
         """
-        Retrieve the schema of the dataset either from the metastore or infer it from the first blob.
+        Retrieve the schema of the dataset.
 
         Returns:
             The schema of the dataset.
@@ -358,3 +354,73 @@ class DiskConnector(BaseConnector, Diachronic, PredicatePushable, LimitPushable)
             raise DatasetNotFoundError(dataset=self.dataset, connector=self.__type__)
 
         return self.schema
+
+
+class FileSystemConnector(BaseConnector):
+    """
+    Gateway connector for filesystem-based datasets.
+
+    Long-lived connector cached by storage configuration. Creates transient
+    FileSystemTable instances for each dataset query.
+
+    Works with:
+    - OpteryxLocalFileSystem (local storage)
+    - OpteryxGcsFileSystem (Google Cloud Storage)
+    - OpteryxS3FileSystem (S3/MinIO)
+    - Any other pyarrow-compatible filesystem
+
+    Note: Filesystems only support tables, not views.
+    """
+
+    __mode__ = "Blob"
+
+    # Declare capabilities of FileSystemTable readers
+    supports_predicate_pushdown = True
+    supports_limit_pushdown = True
+
+    def __init__(self, filesystem, storage_type="FILESYSTEM", **kwargs):
+        """
+        Initialize the filesystem gateway connector.
+
+        Args:
+            filesystem: A filesystem instance (e.g., OpteryxLocalFileSystem)
+            storage_type: Type identifier for telemetry (LOCAL, GCS, S3, etc.)
+            **kwargs: Additional configuration parameters (ignored for gateway)
+        """
+        self.filesystem = filesystem
+        self.storage_type = storage_type
+        self.__type__ = storage_type
+
+    def locate_object(self, name: str) -> Tuple[Optional[TableType], any]:
+        """
+        Determine if a name refers to a table (always tables for filesystems).
+
+        Args:
+            name: Dataset name
+
+        Returns:
+            (TableType.Table, None) - filesystems only support tables
+        """
+        return (TableType.Table, None)
+
+    def table_engine(self, name: str, **kwargs):
+        """
+        Create a transient table reader for the specified dataset.
+
+        Args:
+            name: Dataset name/path
+            **kwargs: Additional parameters (telemetry, etc.)
+
+        Returns:
+            FileSystemTable instance configured to read the dataset
+        """
+        # Extract telemetry from kwargs, default to None if not provided
+        telemetry = kwargs.pop("telemetry", None)
+
+        return FileSystemTable(
+            dataset=name,
+            filesystem=self.filesystem,
+            storage_type=self.storage_type,
+            telemetry=telemetry,
+            **kwargs,
+        )

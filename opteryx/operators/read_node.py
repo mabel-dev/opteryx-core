@@ -191,8 +191,11 @@ class ReaderNode(BasePlanNode):
             mermaid = f'NODE_{nid}[("**READ**<br />'
             mermaid += f"{self.connector.dataset}<br />"
         mermaid += BAR
-        if hasattr(self, "dataset_commited_at"):
-            mermaid += f"committed at: {self.dataset_commited_at}<br />" + BAR
+        committed_at = None
+        if hasattr(self.connector, "dataset_committed_at"):
+            committed_at = self.connector.dataset_committed_at
+        if committed_at:
+            mermaid += f"committed at: {committed_at}<br />" + BAR
         if self.columns:
             mermaid += f"columns: {len(self.columns)}<br />" + BAR
         if self.predicates:

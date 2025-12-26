@@ -11,6 +11,7 @@
 #include <unistd.h>
 #include <string>
 #include <vector>
+#include <cstring>
 
 #ifndef PATH_MAX
 #define PATH_MAX 4096
@@ -143,18 +144,20 @@ static std::string join_paths(const std::string& base, const char* name) {
     return result;
 }
 
-static bool matches_extension(const char* name, const std::vector<std::string>& extensions) {
+static bool matches_extension(const char* name, const std::vector<std::string>& extensions)
+{
     if (extensions.empty()) {
         return true;
     }
 
-    const size_t name_len = strlen(name);
+    const char* dot = strrchr(name, '.');
+    if (!dot) {
+        return false;
+    }
+    
+    size_t ext_len = strlen(dot);
     for (const auto& ext : extensions) {
-        const size_t ext_len = ext.length();
-        if (ext_len == 0) {
-            continue;
-        }
-        if (name_len >= ext_len && strncmp(name + name_len - ext_len, ext.c_str(), ext_len) == 0) {
+        if (ext.length() == ext_len && memcmp(dot, ext.c_str(), ext_len) == 0) {
             return true;
         }
     }
@@ -301,4 +304,187 @@ void free_file_names(char** files, size_t count) {
         free(files[i]);
     }
     free(files);
+}
+
+// Recursive listing that returns file_info_t metadata with full paths in name
+int list_files_with_info(const char* base_path, const char** extensions, size_t ext_count,
+                         file_info_t** files, size_t* count) {
+    if (!base_path || !files || !count) {
+        return -EINVAL;
+    }
+
+    std::vector<std::string> extension_list;
+    extension_list.reserve(ext_count);
+    for (size_t i = 0; i < ext_count; ++i) {
+        if (extensions[i] != nullptr) {
+            // Store extensions with leading '.' for faster comparison
+            if (extensions[i][0] != '.') {
+                extension_list.emplace_back(std::string(".") + extensions[i]);
+            } else {
+                extension_list.emplace_back(extensions[i]);
+            }
+        }
+    }
+
+    std::vector<std::string> stack;
+    stack.emplace_back(base_path);
+
+    std::vector<file_info_t> out_list;
+    out_list.reserve(512);  // Larger initial capacity
+
+    bool processed_root = false;
+
+    // Pre-allocate buffer for directory entry size
+    long name_max = pathconf(base_path, _PC_NAME_MAX);
+    if (name_max == -1) name_max = 255;
+    size_t entry_size = offsetof(struct dirent, d_name) + name_max + 1;
+    
+    while (!stack.empty()) {
+        std::string current = std::move(stack.back());
+        stack.pop_back();
+
+        DIR* dir = opendir(current.c_str());
+        if (!dir) {
+            int err = errno;
+            if (current == base_path) {
+                return -err;
+            }
+            continue;
+        }
+
+        processed_root = true;
+
+        struct dirent* entry;
+        // Read directory entries and store them for batch processing
+        std::vector<std::pair<std::string, struct dirent*>> entries;
+        
+        // First pass: collect all entries
+        while ((entry = readdir(dir)) != nullptr) {
+            // Skip . and ..
+            if (entry->d_name[0] == '.') {
+                if ((entry->d_name[1] == '\0') || 
+                    (entry->d_name[1] == '.' && entry->d_name[2] == '\0')) {
+                    continue;
+                }
+            }
+            
+            // Quick filter: if we have extensions and filename is too short
+            if (!extension_list.empty()) {
+                size_t name_len = strlen(entry->d_name);
+                size_t min_ext_len = SIZE_MAX;
+                for (const auto& ext : extension_list) {
+                    if (ext.length() < min_ext_len) {
+                        min_ext_len = ext.length();
+                    }
+                }
+                if (name_len < min_ext_len) {
+                    continue;
+                }
+            }
+            
+            // Make a copy of the dirent entry
+            struct dirent* entry_copy = (struct dirent*)malloc(entry_size);
+            if (!entry_copy) {
+                continue;
+            }
+            memcpy(entry_copy, entry, entry_size);
+            entries.emplace_back(current, entry_copy);
+        }
+        
+        // Second pass: process collected entries
+        for (auto& entry_pair : entries) {
+            const std::string& current_dir = entry_pair.first;
+            struct dirent* entry_copy = entry_pair.second;
+            
+            // Build full path more efficiently
+            std::string full_path;
+            full_path.reserve(current_dir.length() + 1 + strlen(entry_copy->d_name));
+            full_path.append(current_dir);
+            if (current_dir.back() != '/') {
+                full_path.push_back('/');
+            }
+            full_path.append(entry_copy->d_name);
+            
+            bool is_directory = false;
+            bool is_file = false;
+            
+            // Try to use d_type first if available
+#ifdef _DIRENT_HAVE_D_TYPE
+            if (entry_copy->d_type != DT_UNKNOWN) {
+                if (entry_copy->d_type == DT_DIR) {
+                    is_directory = true;
+                } else if (entry_copy->d_type == DT_REG) {
+                    is_file = true;
+                }
+            }
+#endif
+            
+            // If d_type not available or is DT_UNKNOWN/DT_LNK, use stat
+            if (!is_directory && !is_file) {
+                struct stat st;
+                if (stat(full_path.c_str(), &st) != 0) {
+                    free(entry_copy);
+                    continue;
+                }
+                
+                if (S_ISDIR(st.st_mode)) {
+                    is_directory = true;
+                } else if (S_ISREG(st.st_mode)) {
+                    is_file = true;
+                }
+            }
+            
+            if (is_directory) {
+                stack.emplace_back(std::move(full_path));
+            } else if (is_file) {
+                // Check if file matches extensions
+                if (matches_extension(entry_copy->d_name, extension_list)) {
+                    // We need stat for size and mtime even if we knew it was a file from d_type
+                    struct stat st;
+                    if (stat(full_path.c_str(), &st) != 0) {
+                        free(entry_copy);
+                        continue;
+                    }
+                    
+                    file_info_t info;
+                    info.name = strdup(full_path.c_str());
+                    info.is_directory = 0;
+                    info.is_regular_file = 1;
+                    info.size = (int64_t)st.st_size;
+                    info.mtime = (int64_t)st.st_mtime;
+                    out_list.push_back(info);
+                }
+            }
+            
+            free(entry_copy);
+        }
+        
+        entries.clear();
+        closedir(dir);
+    }
+
+    if (!processed_root) {
+        return -ENOENT;
+    }
+
+    const size_t total = out_list.size();
+    if (total == 0) {
+        *files = nullptr;
+        *count = 0;
+        return 0;
+    }
+
+    file_info_t* out = (file_info_t*)malloc(total * sizeof(file_info_t));
+    if (!out) {
+        for (auto& info : out_list) {
+            free(info.name);
+        }
+        return -ENOMEM;
+    }
+
+    // Use memcpy for bulk copy
+    memcpy(out, out_list.data(), total * sizeof(file_info_t));
+    *files = out;
+    *count = total;
+    return 0;
 }

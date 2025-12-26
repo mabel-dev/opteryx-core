@@ -21,19 +21,19 @@ is responsible for:
 
 Connector Types:
 
-File System Connectors:
-- DiskConnector: Local file system access
-- AwsS3Connector: Amazon S3 storage
-- GcpCloudStorageConnector: Google Cloud Storage
-
-Format Connectors:
-- ArrowConnector: Apache Arrow tables and datasets
-- FileConnector: Generic file format handler
-- IcebergConnector: Apache Iceberg tables
+Core Connectors:
+- FileSystemConnector: Generic filesystem access (local, S3, GCS)
+- IcebergConnector: Apache Iceberg table format
 
 Special Connectors:
 - VirtualDataConnector: In-memory datasets and computed tables
 - InformationSchemaConnector: System metadata tables
+
+Legacy Compatibility:
+The following names are supported for backward compatibility and map to FileSystemConnector:
+- DiskConnector: Local file system access
+- AwsS3Connector: Amazon S3 storage
+- GcpCloudStorageConnector: Google Cloud Storage
 
 Lazy Loading:
 Connectors are only imported when actually needed, which significantly improves
@@ -84,34 +84,59 @@ full functionality.
 # Lazy imports - connectors are only loaded when actually needed
 # This significantly improves module import time from ~500ms to ~130ms
 
+from enum import Enum
+
 # load the base set of prefixes
 # fmt:off
-from opteryx.connectors.aws_s3_connector import AwsS3Connector
-from opteryx.connectors.disk_connector import DiskConnector
-from opteryx.connectors.gcp_cloudstorage_connector import GcpCloudStorageConnector
-from opteryx.connectors.iceberg_connector import IcebergConnector
+
+
+class TableType(str, Enum):
+    """Enum representing the type of object in a data catalog"""
+    Table = "Table"
+    View = "View"
+
+
 
 _storage_prefixes = {
     "information_schema": "InformationSchema",
 }
+
+# Cache for connector instances (keyed by prefix)
+_connector_cache = {}
+
+# Default connector configuration (separate from prefix registry)
+_default_connector = None
 # fmt:on
 
 
 __all__ = (
+    # Core connectors
+    "FileSystemConnector",
+    "IcebergConnector",
+    "IcebergTable",
+    # Factory functions for filesystem connectors
+    "create_local_connector",
+    "create_gcs_connector",
+    "create_s3_connector",
+    # Utilities
+    "set_default_connector",
+    "TableType",
+    # Legacy names (backward compatibility) - map to factories
     "AwsS3Connector",
     "DiskConnector",
     "GcpCloudStorageConnector",
-    "IcebergConnector",
 )
 
 
 def register_store(prefix, connector, *, remove_prefix: bool = False, **kwargs):
-    """add a prefix"""
-    if not isinstance(connector, type):  # type: ignore
-        # uninstantiated classes aren't a type
-        raise ValueError("connectors registered with `register_store` must be uninstantiated.")
+    """Register a connector for a specific prefix."""
+    # Accept both uninstantiated classes and factory functions
+    if not (isinstance(connector, type) or callable(connector)):
+        raise ValueError(
+            "connectors registered with `register_store` must be uninstantiated (a class or factory function)."
+        )
 
-    # Store connector class directly (not as a string)
+    # Store connector class/factory directly (not as a string)
     _storage_prefixes[prefix] = {
         "connector": connector,  # type: ignore
         "prefix": prefix,
@@ -120,73 +145,235 @@ def register_store(prefix, connector, *, remove_prefix: bool = False, **kwargs):
     }
 
 
+def set_default_connector(connector, **kwargs):
+    """
+    Set the default connector to use when no prefix matches.
+
+    Args:
+        connector: Connector class to use as default
+        **kwargs: Configuration parameters for the connector
+
+    Example:
+        set_default_connector(IcebergConnector,
+                            catalog=FirestoreCatalog,
+                            firestore_project="my-project",
+                            ...)
+    """
+    global _default_connector
+
+    if not isinstance(connector, type):
+        raise ValueError("Default connector must be an uninstantiated class.")
+
+    _default_connector = {
+        "connector": connector,
+        "remove_prefix": False,
+        **kwargs,
+    }
+
+
+def create_local_connector(**kwargs):
+    """
+    Create a FileSystemConnector for local storage.
+
+    Args:
+        **kwargs: Additional parameters passed to FileSystemConnector
+
+    Returns:
+        FileSystemConnector configured for local storage
+    """
+    from opteryx.connectors.filesystem_connector import FileSystemConnector
+    from opteryx.connectors.io_systems import OpteryxLocalFileSystem
+
+    filesystem = OpteryxLocalFileSystem()
+    return FileSystemConnector(filesystem=filesystem, storage_type="LOCAL", **kwargs)
+
+
+def create_gcs_connector(bucket=None, **kwargs):
+    """
+    Create a FileSystemConnector for Google Cloud Storage.
+
+    Args:
+        bucket: GCS bucket name (optional)
+        **kwargs: Additional parameters passed to FileSystemConnector
+
+    Returns:
+        FileSystemConnector configured for GCS
+    """
+    from opteryx.connectors.filesystem_connector import FileSystemConnector
+    from opteryx.connectors.io_systems import OpteryxGcsFileSystem
+
+    filesystem = OpteryxGcsFileSystem(bucket=bucket, **kwargs)
+    return FileSystemConnector(filesystem=filesystem, storage_type="GCS", **kwargs)
+
+
+def create_s3_connector(bucket=None, region=None, **kwargs):
+    """
+    Create a FileSystemConnector for S3/MinIO storage.
+
+    Args:
+        bucket: S3 bucket name (optional)
+        region: AWS region (optional)
+        **kwargs: Additional parameters passed to FileSystemConnector
+
+    Returns:
+        FileSystemConnector configured for S3
+    """
+    from opteryx.connectors.filesystem_connector import FileSystemConnector
+    from opteryx.connectors.io_systems import OpteryxS3FileSystem
+
+    filesystem = OpteryxS3FileSystem(bucket=bucket, region=region, **kwargs)
+    return FileSystemConnector(filesystem=filesystem, storage_type="S3", **kwargs)
+
+
 def known_prefix(prefix) -> bool:
     return prefix in _storage_prefixes
 
 
 def connector_factory(dataset, telemetry, **config):
     """
-    Work out which connector will service the access to this dataset.
+    Get or create a connector instance for the given dataset's prefix.
+
+    Connectors are now long-lived and cached by prefix/catalog, not by specific dataset.
+    The connector acts as a gateway to the catalog and can be queried about specific tables/views.
+
+    Args:
+        dataset: The dataset reference (e.g., "iceberg.catalog.schema.table")
+        telemetry: Query telemetry object
+        **config: Additional configuration
+
+    Returns:
+        A cached connector instance for the prefix
     """
 
     # if it starts with a $, it's a special internal dataset
     if dataset[0] == "$":
-        from opteryx.connectors import virtual_data
+        from opteryx.connectors.virtual_data_connector import VirtualDataConnector
 
-        return virtual_data.SampleDataConnector(dataset=dataset, telemetry=telemetry)
+        # Virtual data connector is a gateway - it doesn't need dataset/telemetry
+        # Those are passed when creating the table reader via table_engine()
+        return VirtualDataConnector()
 
     # Look up the prefix from the registered prefixes
-    connector_entry: dict = config
+    connector_entry: dict = config.copy()
     connector = None
+    matched_prefix = None
 
     for prefix, storage_details in _storage_prefixes.items():
         if dataset == prefix or dataset.startswith(prefix + "."):
-            connector_entry.update(storage_details.copy())  # type: ignore
-            connector = connector_entry.get("connector")
+            if isinstance(storage_details, dict):
+                connector_entry.update(storage_details.copy())
+                connector = connector_entry.get("connector")
+                matched_prefix = prefix
+            else:
+                # storage_details is a string (connector class name)
+                connector = storage_details
+                matched_prefix = prefix
+                connector_entry["prefix"] = prefix
             break
 
     if connector is None:
-        # fall back to the default connector (local disk if not set)
-        connector_entry = _storage_prefixes.get("_default", {})
-        connector = connector_entry.get("connector", "DiskConnector")
-        remove_prefix = connector_entry.get("remove_prefix", False)
-        if remove_prefix and "." in dataset:
-            dataset = dataset.split(".", 1)[1]
+        # Fall back to the default connector
+        if _default_connector is not None:
+            connector_entry = _default_connector.copy()
+            connector = connector_entry.get("connector")
+            matched_prefix = None  # No prefix matched, using default
+        else:
+            # No default set, use local disk with FileSystemConnector
+            from opteryx.connectors.filesystem_connector import FileSystemConnector
+            from opteryx.connectors.io_systems import OpteryxLocalFileSystem
 
+            filesystem = OpteryxLocalFileSystem()
+            connector_instance = FileSystemConnector(
+                filesystem=filesystem, storage_type="LOCAL", telemetry=telemetry, **connector_entry
+            )
+            connector_instance._matched_prefix = None
+            connector_instance._remove_prefix = False
+            _connector_cache[(None, ())] = connector_instance
+            return connector_instance
+
+    # Generate a cache key based on prefix and relevant config
+    cache_key = (
+        matched_prefix or "_default",
+        tuple(
+            sorted(
+                (k, v)
+                for k, v in connector_entry.items()
+                if k not in ("prefix", "remove_prefix", "connector")
+            )
+        ),
+    )
+
+    # Check if we have a cached connector instance
+    if cache_key in _connector_cache:
+        return _connector_cache[cache_key]
+
+    # Handle string-based connector names - map to appropriate factories
     if isinstance(connector, str):
-        connector_class = _lazy_import_connector(connector)
+        if connector == "DiskConnector":
+            from opteryx.connectors.filesystem_connector import FileSystemConnector
+            from opteryx.connectors.io_systems import OpteryxLocalFileSystem
+
+            filesystem = OpteryxLocalFileSystem()
+            connector_instance = FileSystemConnector(
+                filesystem=filesystem, storage_type="LOCAL", telemetry=telemetry, **connector_entry
+            )
+        elif connector == "GcpCloudStorageConnector":
+            from opteryx.connectors.filesystem_connector import FileSystemConnector
+            from opteryx.connectors.io_systems import OpteryxGcsFileSystem
+
+            filesystem = OpteryxGcsFileSystem(**connector_entry)
+            connector_instance = FileSystemConnector(
+                filesystem=filesystem, storage_type="GCS", telemetry=telemetry, **connector_entry
+            )
+        elif connector == "AwsS3Connector":
+            from opteryx.connectors.filesystem_connector import FileSystemConnector
+            from opteryx.connectors.io_systems import OpteryxS3FileSystem
+
+            filesystem = OpteryxS3FileSystem(**connector_entry)
+            connector_instance = FileSystemConnector(
+                filesystem=filesystem, storage_type="S3", telemetry=telemetry, **connector_entry
+            )
+        else:
+            # Unknown string connector - try __getattr__
+            connector_class = __getattr__(connector)
+            connector_instance = connector_class(telemetry=telemetry, **connector_entry)
+    elif isinstance(connector, type):
+        # Connector is a class, instantiate directly
+        connector_instance = connector(telemetry=telemetry, **connector_entry)
+    elif callable(connector):
+        # Connector is a factory function (like create_local_connector, create_s3_connector, etc.)
+        connector_instance = connector(telemetry=telemetry, **connector_entry)
     else:
-        connector_class = connector
-        connector = connector.__name__
+        raise ValueError(f"Invalid connector type: {type(connector)}")
 
-    prefix = connector_entry.get("prefix", "")
-    remove_prefix = connector_entry.get("remove_prefix", False)
-    if prefix and remove_prefix and dataset.startswith(prefix):
-        # Remove the prefix. If there's a separator (. or //) after the prefix, skip it too
-        dataset = dataset[len(prefix) :]
-        if dataset.startswith(".") or dataset.startswith("//"):
-            dataset = dataset[1:] if dataset.startswith(".") else dataset[2:]
+    # Store the matched prefix and config so binder can extract dataset names
+    connector_instance._matched_prefix = matched_prefix
+    connector_instance._remove_prefix = connector_entry.get("remove_prefix", False)
 
-    return connector_class(dataset=dataset, telemetry=telemetry, **connector_entry)
+    # Cache the instance
+    _connector_cache[cache_key] = connector_instance
+
+    return connector_instance
 
 
-def _lazy_import_connector(connector_name: str):
-    """Lazy import a connector class by name."""
-    if connector_name == "AwsS3Connector":
-        from opteryx.connectors.aws_s3_connector import AwsS3Connector
-
-        return AwsS3Connector
-    elif connector_name == "DiskConnector":
-        from opteryx.connectors.disk_connector import DiskConnector
-
-        return DiskConnector
-    elif connector_name == "GcpCloudStorageConnector":
-        from opteryx.connectors.gcp_cloudstorage_connector import GcpCloudStorageConnector
-
-        return GcpCloudStorageConnector
-    elif connector_name == "IcebergConnector":
+def __getattr__(connector_name: str):
+    """Lazy load connector classes on first access."""
+    if connector_name == "IcebergConnector":
         from opteryx.connectors.iceberg_connector import IcebergConnector
 
         return IcebergConnector
-    else:
-        raise ValueError(f"Unknown connector: {connector_name}")
+    if connector_name == "FileSystemConnector":
+        from opteryx.connectors.filesystem_connector import FileSystemConnector
+
+        return FileSystemConnector
+    if connector_name == "GcpCloudStorageConnector":
+        # Return FileSystemConnector with GCS filesystem
+        return create_gcs_connector
+    if connector_name == "AwsS3Connector":
+        # Return FileSystemConnector with S3 filesystem
+        return create_s3_connector
+    if connector_name == "DiskConnector":
+        # Return FileSystemConnector with local filesystem
+        return create_local_connector
+
+    raise AttributeError(f"module {__name__!r} has no attribute {connector_name!r}")
