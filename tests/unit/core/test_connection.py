@@ -32,10 +32,10 @@ def test_byte_strings():
 
 def test_register_errors():
     from opteryx import register_store
-    from opteryx.connectors import DiskConnector
+    from opteryx.connectors import create_local_connector
     
     with pytest.raises(ValueError):
-        register_store(prefix="prefix", connector=DiskConnector(dataset="", telemetry=None))
+        register_store(prefix="prefix", connector=create_local_connector(dataset="", telemetry=None))
 
 if __name__ == "__main__":  # pragma: no cover
     from tests import run_tests

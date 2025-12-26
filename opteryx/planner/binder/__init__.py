@@ -136,7 +136,7 @@ def join_leg_preprocess(plan: LogicalPlan):
     return plan
 
 
-def bind_logical_relations(plan: LogicalPlan, ctes: dict) -> LogicalPlan:
+def bind_logical_relations(plan: LogicalPlan, ctes: dict, telemetry) -> LogicalPlan:
     """
     Bind the logical relations in the logical plan.
 
@@ -152,8 +152,7 @@ def bind_logical_relations(plan: LogicalPlan, ctes: dict) -> LogicalPlan:
     from opteryx.managers.expression import NodeType
     from opteryx.models import Node
     from opteryx.planner.logical_planner import LogicalPlanStepType
-    from opteryx.planner.views import is_view
-    from opteryx.planner.views import view_as_plan
+    from opteryx.planner.views import get_view_plan
 
     if ctes is None:
         ctes = {}
@@ -164,10 +163,8 @@ def bind_logical_relations(plan: LogicalPlan, ctes: dict) -> LogicalPlan:
         if node.node_type == LogicalPlanStepType.Scan
     ]:
         relation = node.relation
-        sub_plan = None
-        if is_view(relation):
-            sub_plan = view_as_plan(relation)
-        elif relation in ctes:
+        sub_plan = get_view_plan(relation, telemetry)
+        if sub_plan is None and relation in ctes:
             sub_plan = ctes[relation]
         if sub_plan:
             sub_plan = rename_relations(sub_plan)
@@ -211,7 +208,7 @@ def do_bind_phase(
     if common_table_expressions is None:
         common_table_expressions = {}
 
-    plan = bind_logical_relations(plan, common_table_expressions)
+    plan = bind_logical_relations(plan, common_table_expressions, telemetry=telemetry)
 
     if visibility_filters:
         plan = apply_visibility_filters(plan, visibility_filters, telemetry)

@@ -38,6 +38,9 @@ cdef extern from "directories.h":
                                                     size_t ext_count, char*** files, size_t* count) nogil
     void free_file_names(char** files, size_t count)
 
+    int list_files_with_info_c "list_files_with_info"(const char* base_path, const char** extensions, size_t ext_count,
+                                                       file_info_t** files, size_t* count) nogil
+
 cdef class MappedMemory:
     cdef unsigned char* data
     cdef size_t size
@@ -175,6 +178,63 @@ def list_files(str path, extensions):
 
     return results
 
+
+def list_files_info(str path, extensions):
+    """Return a list of tuples (path, is_directory, is_regular_file, size, mtime) recursively."""
+
+    if extensions is None:
+        raise ValueError("extensions must be provided")
+
+    ext_seq = tuple(extensions)
+    ext_count = len(ext_seq)
+
+    cdef size_t c_ext_count = ext_count
+    cdef const char** ext_array = NULL
+    cdef file_info_t* files = NULL
+    cdef size_t file_count = 0
+
+    ext_bytes = [ext.encode("utf-8") if isinstance(ext, str) else ext for ext in ext_seq]
+
+    if c_ext_count > 0:
+        ext_array = <const char**>PyMem_Malloc(c_ext_count * sizeof(const char*))
+        if ext_array == NULL:
+            raise MemoryError("Unable to allocate extension array")
+        for idx in range(c_ext_count):
+            ext_array[idx] = <const char*>ext_bytes[idx]
+
+    path_b = path.encode("utf-8")
+    cdef const char* c_path = path_b
+
+    cdef int rc
+    with nogil:
+        rc = list_files_with_info_c(c_path, ext_array, c_ext_count, &files, &file_count)
+
+    if ext_array != NULL:
+        PyMem_Free(ext_array)
+
+    if rc != 0:
+        if files != NULL:
+            free_file_list(files, file_count)
+        err = -rc
+        if err == errno.ENOENT:
+            raise FileNotFoundError(path)
+        raise OSError(err, f"Failed to list files: {path}")
+
+    results = []
+    try:
+        for idx in range(file_count):
+            entry = files[idx]
+            if entry.name == NULL:
+                continue
+            py_path = PyUnicode_FromString(entry.name)
+            if py_path is None:
+                raise MemoryError("Unable to decode file path")
+            results.append((py_path, bool(entry.is_directory), bool(entry.is_regular_file), entry.size, entry.mtime))
+    finally:
+        if files != NULL:
+            free_file_list(files, file_count)
+
+    return results
 
 def read_file_mmap(str path):
     """

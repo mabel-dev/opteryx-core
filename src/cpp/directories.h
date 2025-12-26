@@ -25,6 +25,11 @@ typedef int (*file_callback_t)(const char* path, const struct stat* st, void* us
 int walk_directory(const char* base_path, file_callback_t callback, void* user_data, int max_depth);
 int list_matching_files(const char* base_path, const char** extensions, size_t ext_count,
                         char*** files, size_t* count);
+
+// Recursive listing that returns file metadata (full path in name)
+int list_files_with_info(const char* base_path, const char** extensions, size_t ext_count,
+                         file_info_t** files, size_t* count);
+
 void free_file_names(char** files, size_t count);
 
 #ifdef __cplusplus

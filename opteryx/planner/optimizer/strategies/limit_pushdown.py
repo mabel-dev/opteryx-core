@@ -15,7 +15,6 @@ We try to push the limit to the other side of PROJECTS
 from typing import Optional
 from typing import Set
 
-from opteryx.connectors.capabilities import LimitPushable
 from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner import LogicalPlanNode
 from opteryx.planner.logical_planner import LogicalPlanStepType
@@ -123,7 +122,7 @@ class LimitPushdownStrategy(OptimizationStrategy):
             return None
 
         connector = getattr(scan_node, "connector", None)
-        if connector and LimitPushable in connector.__class__.mro():
+        if connector and connector.supports_limit_pushdown:
             current_limit = getattr(scan_node, "limit", None)
             scan_node.limit = (
                 limit_node.limit if current_limit is None else min(current_limit, limit_node.limit)
