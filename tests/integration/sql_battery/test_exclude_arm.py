@@ -39,7 +39,7 @@ def test_sql_battery(statement, rows, columns, exception):
     Test an battery of statements
     """
 
-    opteryx.register_store("tests", DiskConnector)
+    opteryx.register_workspace("tests", DiskConnector)
 
     try:
         result = opteryx.query_to_arrow(statement)

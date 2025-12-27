@@ -31,11 +31,11 @@ def test_byte_strings():
     assert arrow.shape == (9, 20)
 
 def test_register_errors():
-    from opteryx import register_store
+    from opteryx import register_workspace
     from opteryx.connectors import create_local_connector
     
     with pytest.raises(ValueError):
-        register_store(prefix="prefix", connector=create_local_connector(dataset="", telemetry=None))
+        register_workspace(prefix="prefix", connector=create_local_connector(dataset="", telemetry=None))
 
 if __name__ == "__main__":  # pragma: no cover
     from tests import run_tests

@@ -16,7 +16,7 @@ from tests import is_arm, is_mac, is_windows, skip_if
 
 @skip_if(is_arm() or is_windows() or is_mac())  # reduce cost
 def test_minio_storage():
-    opteryx.register_store("opteryx_data", AwsS3Connector)
+    opteryx.register_workspace("opteryx_data", AwsS3Connector)
 
     conn = opteryx.connect()
 

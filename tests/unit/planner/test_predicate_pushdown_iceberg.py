@@ -82,7 +82,7 @@ test_cases = [
 @pytest.mark.parametrize("query, expected_rowcount, expected_rows_read", test_cases)
 def test_predicate_pushdowns_blobs_parquet(query, expected_rowcount, expected_rows_read):
     catalog = set_up_iceberg()
-    opteryx.register_store(
+    opteryx.register_workspace(
         "iceberg",
         IcebergConnector,
         catalog=catalog,

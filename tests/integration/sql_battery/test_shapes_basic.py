@@ -168,8 +168,8 @@ def test_sql_battery(statement:str, rows:int, columns:int, exception: Optional[E
     from opteryx.connectors import IcebergConnector
     from opteryx.connectors import DiskConnector
     iceberg = set_up_iceberg()
-    opteryx.register_store("iceberg", connector=IcebergConnector, catalog=iceberg, remove_prefix=True)
-    opteryx.register_store("testdata", DiskConnector, remove_prefix=False)
+    opteryx.register_workspace("iceberg", connector=IcebergConnector, catalog=iceberg, remove_prefix=True)
+    opteryx.register_workspace("testdata", DiskConnector, remove_prefix=False)
 
     try:
         # query to arrow is the fastest way to query
