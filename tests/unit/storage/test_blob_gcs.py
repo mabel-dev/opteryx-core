@@ -50,8 +50,8 @@ test_cases = [
 
 @pytest.mark.parametrize("test_case", test_cases)
 def test_gcs_storage(test_case):
-    opteryx.register_store("opteryx", GcpCloudStorageConnector)
-    opteryx.register_store("mabel_data", GcpCloudStorageConnector)
+    opteryx.register_workspace("opteryx", GcpCloudStorageConnector)
+    opteryx.register_workspace("mabel_data", GcpCloudStorageConnector)
 
     conn = opteryx.connect()
     cur = conn.cursor()

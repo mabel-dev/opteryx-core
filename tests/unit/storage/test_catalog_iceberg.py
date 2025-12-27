@@ -18,7 +18,7 @@ print(f"Running Iceberg tests on Python {sys.version.split(' ')[0]}, Opteryx {op
 def test_iceberg_basic():
 
     catalog = set_up_iceberg()
-    opteryx.register_store(
+    opteryx.register_workspace(
         "iceberg",
         IcebergConnector,
         catalog=catalog,
@@ -33,7 +33,7 @@ def test_iceberg_basic():
 def test_iceberg_get_schema():
 
     catalog = set_up_iceberg()
-    opteryx.register_store(
+    opteryx.register_workspace(
         "iceberg",
         IcebergConnector,
         catalog=catalog,
@@ -48,7 +48,7 @@ def test_iceberg_connector():
 
     catalog = set_up_iceberg()
 
-    opteryx.register_store(
+    opteryx.register_workspace(
         "iceberg",
         IcebergConnector,
         catalog=catalog,
@@ -64,7 +64,7 @@ def test_iceberg_get_stats_tweets():
 
     catalog = set_up_iceberg()
 
-    opteryx.register_store(
+    opteryx.register_workspace(
         "iceberg",
         IcebergConnector,
         catalog=catalog,
@@ -94,7 +94,7 @@ def test_iceberg_get_stats_missions():
 
     catalog = set_up_iceberg()
 
-    opteryx.register_store(
+    opteryx.register_workspace(
         "iceberg",
         IcebergConnector,
         catalog=catalog,
@@ -134,7 +134,7 @@ def test_iceberg_get_stats_remote():
         }
     )
 
-    opteryx.register_store(
+    opteryx.register_workspace(
         "iceberg",
         IcebergConnector,
         catalog=catalog,
@@ -175,7 +175,7 @@ def test_iceberg_remote():
         }
     )
 
-    opteryx.register_store(
+    opteryx.register_workspace(
         "iceberg",
         IcebergConnector,
         catalog=catalog,
@@ -195,7 +195,7 @@ def test_iceberg_empty_table_read():
     """
 
     catalog = set_up_iceberg()
-    opteryx.register_store(
+    opteryx.register_workspace(
         "iceberg",
         IcebergConnector,
         catalog=catalog,
@@ -225,7 +225,7 @@ def test_iceberg_empty_table_count_and_schema():
     """
 
     catalog = set_up_iceberg()
-    opteryx.register_store(
+    opteryx.register_workspace(
         "iceberg",
         IcebergConnector,
         catalog=catalog,
@@ -256,7 +256,7 @@ def test_iceberg_empty_table_count_and_schema():
 @skip_if(is_arm() or is_windows() or is_mac())
 def test_iceberg_empty_table_select_columns():
     catalog = set_up_iceberg()
-    opteryx.register_store(
+    opteryx.register_workspace(
         "iceberg",
         IcebergConnector,
         catalog=catalog,
@@ -280,7 +280,7 @@ def test_iceberg_empty_table_select_columns():
 @skip_if(is_arm() or is_windows() or is_mac())
 def test_iceberg_single_snapshot_where_clause():
     catalog = set_up_iceberg()
-    opteryx.register_store(
+    opteryx.register_workspace(
         "iceberg",
         IcebergConnector,
         catalog=catalog,
@@ -336,7 +336,7 @@ def __test_firestore_gcs_connector_registration():
     from pyiceberg_firestore_gcs import FirestoreCatalog
     import opteryx
     
-    opteryx.register_store(
+    opteryx.register_workspace(
         prefix="_default",
         connector=IcebergConnector,
         remove_prefix=False,

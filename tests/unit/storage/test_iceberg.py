@@ -374,7 +374,7 @@ def test_iceberg_battery(statement, rows, columns, exception):
     """
 
     catalog = set_up_iceberg()
-    opteryx.register_store(
+    opteryx.register_workspace(
         "iceberg",
         IcebergConnector,
         catalog=catalog,

@@ -37,7 +37,7 @@ STATEMENTS = [
 def test_iceberg_limit_pushdown(query, expected_rows):
 
     catalog = set_up_iceberg()
-    opteryx.register_store(
+    opteryx.register_workspace(
         "iceberg",
         IcebergConnector,
         catalog=catalog,

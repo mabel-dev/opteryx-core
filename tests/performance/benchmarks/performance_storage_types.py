@@ -82,7 +82,7 @@ FORMATS = (
 if __name__ == "__main__":
     CYCLES = 500
 
-    opteryx.register_store("tests", DiskConnector)
+    opteryx.register_workspace("tests", DiskConnector)
 
     conn = opteryx.connect()
 
