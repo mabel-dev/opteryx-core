@@ -60,7 +60,7 @@ FIRESTORE_DATABASE = os.environ.get("FIRESTORE_DATABASE")
 BUCKET_NAME = os.environ.get("GCS_BUCKET")
 GCP_PROJECT_ID = os.environ.get("GCP_PROJECT_ID")
 
-opteryx.register_store(
+opteryx.register_workspace(
     prefix="public",
     connector=IcebergConnector,
     remove_prefix=False,
@@ -279,7 +279,7 @@ def test_sql_battery(statement:str, rows:int, columns:int, exception: Optional[E
     Test a battery of statements
     """
     from opteryx.connectors import DiskConnector
-    opteryx.register_store("testdata", DiskConnector, remove_prefix=False)
+    opteryx.register_workspace("testdata", DiskConnector, remove_prefix=False)
 
     try:
         # query to arrow is the fastest way to query

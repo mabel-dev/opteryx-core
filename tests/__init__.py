@@ -495,7 +495,7 @@ def set_up_iceberg():
     table.append(data.slice(0, 50000))
     table.append(data.slice(50000, 50000))
 
-    opteryx.register_store(
+    opteryx.register_workspace(
         "iceberg", IcebergConnector, catalog=catalog, remove_prefix=True
     )
 

@@ -46,7 +46,7 @@ Usage Patterns:
    from opteryx.connectors import ArrowConnector
 
 2. Registration:
-   opteryx.register_store("my_prefix", my_connector_instance)
+   opteryx.register_workspace("my_prefix", my_connector_instance)
 
 3. Query Usage:
    opteryx.query("SELECT * FROM s3://bucket/file.parquet")
@@ -128,12 +128,12 @@ __all__ = (
 )
 
 
-def register_store(prefix, connector, *, remove_prefix: bool = False, **kwargs):
+def register_workspace(prefix, connector, *, remove_prefix: bool = False, **kwargs):
     """Register a connector for a specific prefix."""
     # Accept both uninstantiated classes and factory functions
     if not (isinstance(connector, type) or callable(connector)):
         raise ValueError(
-            "connectors registered with `register_store` must be uninstantiated (a class or factory function)."
+            "connectors registered with `register_workspace` must be uninstantiated (a class or factory function)."
         )
 
     # Store connector class/factory directly (not as a string)

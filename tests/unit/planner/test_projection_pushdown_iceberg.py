@@ -111,7 +111,7 @@ STATEMENTS = [
 def test_parquet_projection_pushdown(query, expected_columns):
 
     catalog = set_up_iceberg()
-    opteryx.register_store(
+    opteryx.register_workspace(
         "iceberg",
         IcebergConnector,
         catalog=catalog,
