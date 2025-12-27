@@ -23,6 +23,9 @@ from orso.schema import convert_orso_schema_to_arrow_schema
 
 from opteryx import EOS
 from opteryx import config
+from opteryx.connectors.io_systems import OpteryxGcsFileSystem
+from opteryx.connectors.io_systems import OpteryxLocalFileSystem
+from opteryx.connectors.io_systems import OpteryxS3FileSystem
 from opteryx.exceptions import DataError
 from opteryx.models import QueryProperties
 from opteryx.shared import AsyncMemoryPool
@@ -39,32 +42,69 @@ DISABLE_ZERO_COPY_BUFFER_READS = config.DISABLE_ZERO_COPY_BUFFER_READS
 
 ENABLE_ZERO_COPY = not DISABLE_ZERO_COPY_BUFFER_READS
 
+PROTOCOLS = {
+    "gs": OpteryxGcsFileSystem(),
+    "s3": OpteryxS3FileSystem(),
+    "file": OpteryxLocalFileSystem(),
+}
 
-async def fetch_data(blob_names, pool, reader, reply_queue, telemetry):
-    import aiohttp
+
+async def fetch_data(blob_names, pool, connector, reply_queue, telemetry):
+    """
+    Externalized async fetch loop.
+
+    IMPORTANT: this expects the connector to implement `async_read_blob(...)`
+    which is responsible for reading the blob and committing bytes into the
+    provided `AsyncMemoryPool` (returning a pool reference). Connectors that
+    don't implement `async_read_blob` will cause a read error for each blob.
+
+    The connector provided should implement `async_read_blob(blob_name, pool, telemetry, **kwargs)`.
+    """
 
     semaphore = asyncio.Semaphore(CONCURRENT_READS)
-    session = aiohttp.ClientSession(
-        headers={"Accept-Encoding": "gzip, br"},
-    )
+
+    # Cache protocol-specific readers if we need to instantiate filesystem-level
+    # readers based on the blob protocol. By default we use the provided connector
+    # which typically implements `async_read_blob`.
+    protocol_readers = {}
 
     async def fetch_and_process(blob_name):
         async with semaphore:
             start_per_blob = time.monotonic_ns()
-            reference = await reader(
-                blob_name=blob_name, pool=pool, session=session, telemetry=telemetry
-            )
-            reply_queue.put((blob_name, reference))  # Put data onto the queue
-            telemetry.time_reading_blobs += time.monotonic_ns() - start_per_blob
+            try:
+                # Default to the supplied connector which should implement
+                # async_read_blob(blob_name, pool, telemetry, **kwargs)
+                protocol = blob_name.split("://")[0]
 
-    tasks = (fetch_and_process(blob) for blob in blob_names)
+                reader = connector
 
-    await asyncio.gather(*tasks)
+                # Only fall back to a protocol-specific filesystem if the provided
+                # connector doesn't implement `async_read_blob`. This preserves the
+                # behaviour where the table/connector handles reading and committing
+                # to the memory pool (and returning an integer reference).
+                if not hasattr(connector, "async_read_blob") and protocol in PROTOCOLS:
+                    reader = protocol_readers[protocol]
+
+                # Call the async reader. We pass the commonly-used args; filesystem
+                # readers that require other parameters should handle defaults or
+                # raise a clear exception which we'll forward.
+                reference = await reader.async_read_blob(
+                    blob_name=blob_name, pool=pool, telemetry=telemetry
+                )
+
+                reply_queue.put((blob_name, reference))
+            except Exception as err:
+                # Pass the exception back so the reader loop can handle it
+                reply_queue.put((blob_name, err))
+            finally:
+                telemetry.time_reading_blobs += time.monotonic_ns() - start_per_blob
+
+    tasks = [fetch_and_process(blob) for blob in blob_names]
+    await asyncio.gather(*tasks, return_exceptions=True)
     reply_queue.put(None)
-    await session.close()
 
 
-class AsyncReaderNode(ReaderNode):
+class IcebergReaderNode(ReaderNode):
     def __init__(self, properties: QueryProperties, **parameters):
         ReaderNode.__init__(self, properties=properties, **parameters)
         self.pool = MemoryPool(MAX_READ_BUFFER_CAPACITY, f"ReadBuffer <{self.parameters['alias']}>")
@@ -120,7 +160,7 @@ class AsyncReaderNode(ReaderNode):
                 fetch_data(
                     blob_names,
                     AsyncMemoryPool(self.pool),
-                    reader.async_read_blob,
+                    reader,
                     data_queue,
                     self.telemetry,
                 )

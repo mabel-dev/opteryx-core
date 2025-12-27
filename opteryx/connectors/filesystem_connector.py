@@ -26,6 +26,7 @@ from opteryx.connectors.capabilities import LimitPushable
 from opteryx.connectors.capabilities import PredicatePushable
 from opteryx.exceptions import DataError
 from opteryx.exceptions import DatasetNotFoundError
+from opteryx.exceptions import DatasetReadError
 from opteryx.exceptions import EmptyDatasetError
 from opteryx.exceptions import UnsupportedFileTypeError
 from opteryx.utils.file_decoders import TUPLE_OF_VALID_EXTENSIONS
@@ -48,6 +49,7 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
     # Capability declarations
     supports_predicate_pushdown = True
     supports_limit_pushdown = True
+    supports_async = True
 
     PUSHABLE_OPS: Dict[str, bool] = {
         "Eq": True,
@@ -141,6 +143,53 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
         )
 
         return result
+
+    async def async_read_blob(self, *, blob_name: str, pool, telemetry, **kwargs):
+        """Asynchronous blob reader for filesystem-based tables.
+
+        This method reads the blob using the underlying filesystem (in an
+        executor to avoid blocking the event loop), commits the bytes into the
+        provided AsyncMemoryPool and returns the pool reference. It retries
+        commit failures a bounded number of times to avoid hanging.
+        """
+        import asyncio
+
+        from opteryx import system_telemetry as system_statistics
+
+        loop = asyncio.get_running_loop()
+
+        def blocking_read():
+            f = self.filesystem.open_input_stream(blob_name)
+            # Prefer getbuffer for BytesIO-like objects for speed
+            if hasattr(f, "getbuffer"):
+                return f.getbuffer().tobytes()
+            # Fallback to read
+            return f.read()
+
+        data = await loop.run_in_executor(None, blocking_read)
+
+        # Commit into the async pool
+        ref = await pool.commit(data)
+
+        # treat both None and -1 as commit failure and retry, but cap retries to avoid hanging
+        max_retries = 10
+        attempts = 0
+        while (ref is None or ref == -1) and attempts < max_retries:
+            attempts += 1
+            telemetry.stalls_io_waiting_on_engine += 1
+            system_statistics.cpu_wait_seconds += 0.1
+            await asyncio.sleep(0.1)
+            try:
+                ref = await pool.commit(data)
+            except Exception:
+                ref = None
+
+        if ref is None or ref == -1:
+            # Give up and raise so caller can handle the failure instead of hanging
+            raise DatasetReadError(f"Unable to commit data to MemoryPool after {attempts} attempts")
+
+        telemetry.bytes_read += len(data)
+        return ref
 
     def get_list_of_blob_names(self, *, prefix: str) -> List[str]:
         """

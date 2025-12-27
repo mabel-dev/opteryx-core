@@ -28,7 +28,6 @@ from orso.tools import single_item_cache
 from orso.types import OrsoTypes
 
 from opteryx.connectors import TableType
-from opteryx.connectors.base.base_connector import BaseTable
 from opteryx.connectors.capabilities import Diachronic
 from opteryx.connectors.capabilities import Eidetic
 from opteryx.connectors.capabilities import Statistics
@@ -314,15 +313,7 @@ class IcebergTable(FileSystemTable, Diachronic, Statistics):
             snapshot_id=self.snapshot_id,
         ).plan_files()
 
-        def remove_protocol(text: str, prots: tuple) -> str:
-            for prot in prots:
-                if text.startswith(prot):
-                    return text[len(prot) :]
-            return text
-
-        all_blobs = [remove_protocol(task.file.file_path, ("gs://",)) for task in data_files]
-
-        return all_blobs
+        return [data_file.file.file_path for data_file in data_files]
 
     @staticmethod
     def decode_iceberg_value(
