@@ -10,8 +10,6 @@ import os
 from typing import List
 from typing import Union
 
-import pyarrow as pa
-
 from opteryx.exceptions import MissingDependencyError
 from opteryx.exceptions import UnmetRequirementError
 

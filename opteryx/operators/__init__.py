@@ -16,7 +16,7 @@ Operator Categories:
 
 Data Sources:
 - ReaderNode: Reads data from connectors (files, databases, etc.)
-- AsyncReaderNode: Async version for improved I/O performance
+- IcebergReaderNode: Async version for improved I/O performance
 - NullReaderNode: Returns empty table with correct schema (for contradictory predicates)
 - FunctionDatasetNode: Generates data from function calls
 
@@ -86,7 +86,7 @@ from .base_plan_node import BasePlanNode, JoinNode  # isort: skip
 from .aggregate_and_group_node import AggregateAndGroupNode  # Group is always followed by aggregate
 from .aggregate_node import AGGREGATORS
 from .aggregate_node import AggregateNode  # aggregate data
-from .async_read_node import AsyncReaderNode
+from .iceberg_read_node import IcebergReaderNode
 from .null_reader_node import NullReaderNode  # empty table for contradictory predicates
 from .simple_aggregate_node import SimpleAggregateNode  # aggregate data
 from .simple_aggregate_and_group_node import SimpleAggregateAndGroupNode  # aggregate data
@@ -129,7 +129,7 @@ __all__ = [
     "AggregateAndGroupNode",
     "AGGREGATORS",
     "AggregateNode",
-    "AsyncReaderNode",
+    "IcebergReaderNode",
     "NullReaderNode",
     "SimpleAggregateNode",
     "SimpleAggregateAndGroupNode",

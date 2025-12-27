@@ -9,4 +9,12 @@ class Asynchronous:
         pass
 
     async def async_read_blob(self, *, blob_name, pool, telemetry, **kwargs):
-        pass
+        """Require connectors to implement their own async_read_blob.
+
+        Connectors should commit bytes into the provided AsyncMemoryPool and return
+        a pool reference. If a connector cannot support async reads it should not
+        advertise the Asynchronous capability.
+        """
+        raise NotImplementedError(
+            "Connector must implement async_read_blob(blob_name, pool, telemetry, **kwargs)"
+        )

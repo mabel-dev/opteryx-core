@@ -55,6 +55,11 @@ impl Dialect for OpteryxDialect {
         true
     }
 
+    // COMMENT ON TABLE table_name IS 'This is a comment';
+    fn supports_comment_on(&self) -> bool {
+        true
+    }
+
     // SELECT COUNT(*) FILTER (WHERE ID < 4)
     fn supports_filter_during_aggregation(&self) -> bool {
         true

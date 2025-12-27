@@ -79,8 +79,8 @@ def create_physical_plan(logical_plan, query_properties) -> PhysicalPlan:
                 # This is a Scan marked for empty result (contradictory predicates)
                 # Use NullReaderNode to return empty table with correct schema
                 node = operators.NullReaderNode(query_properties, **node_config)
-            elif connector and hasattr(connector, "async_read_blob"):
-                node = operators.AsyncReaderNode(query_properties, **node_config)
+            elif connector and connector.__type__ == "ICEBERG":
+                node = operators.IcebergReaderNode(query_properties, **node_config)
             else:
                 node = operators.ReaderNode(properties=query_properties, **node_config)
         elif node_type == LogicalPlanStepType.Set:
