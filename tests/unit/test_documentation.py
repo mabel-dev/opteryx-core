@@ -41,7 +41,7 @@ def test_readme_4():
 
     # Register the store, so we know queries for this store should be handled by
     # the GCS connector
-    opteryx.register_store("opteryx", GcpCloudStorageConnector)
+    opteryx.register_workspace("opteryx", GcpCloudStorageConnector)
     result = opteryx.query("SELECT * FROM opteryx.space_missions WITH(NO_PARTITION) LIMIT 5;")
     result.head()
 

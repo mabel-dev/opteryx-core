@@ -17,7 +17,7 @@ def test_iceberg_create_and_get_view():
     """Test creating and retrieving a view"""
     
     catalog = set_up_iceberg()
-    opteryx.register_store(
+    opteryx.register_workspace(
         "iceberg",
         IcebergConnector,
         catalog=catalog,
@@ -55,7 +55,7 @@ def test_iceberg_list_views():
     """Test listing views"""
     
     catalog = set_up_iceberg()
-    opteryx.register_store(
+    opteryx.register_workspace(
         "iceberg",
         IcebergConnector,
         catalog=catalog,
@@ -100,7 +100,7 @@ def test_iceberg_create_and_drop_view():
     """Test creating and dropping a view using connector methods"""
     
     catalog = set_up_iceberg()
-    opteryx.register_store(
+    opteryx.register_workspace(
         "iceberg",
         IcebergConnector,
         catalog=catalog,
@@ -135,7 +135,7 @@ def test_iceberg_view_with_namespace():
     """Test view operations with explicit namespace in view name"""
     
     catalog = set_up_iceberg()
-    opteryx.register_store(
+    opteryx.register_workspace(
         "iceberg",
         IcebergConnector,
         catalog=catalog,

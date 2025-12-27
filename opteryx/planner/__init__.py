@@ -127,7 +127,8 @@ def query_planner(
     connection,
     qid: str,
     telemetry,
-) -> Generator[PhysicalPlan, Any, Any]:
+    output_format: str = "physical",
+) -> Union[Generator[Any, Any, Any], Dict[str, Any]]:
     from opteryx.exceptions import SqlError
     from opteryx.models import QueryProperties
     from opteryx.planner.ast_rewriter import do_ast_rewriter
@@ -191,6 +192,19 @@ def query_planner(
     optimized_plan = do_optimizer(bound_plan, telemetry)
     telemetry.time_planning_optimizer += time.monotonic_ns() - start
 
+    # Choose output format
+    if output_format == "substrait":
+        # Build Substrait representation directly from optimized logical plan
+        from opteryx.planner.substrait_builder import build_substrait_plan
+
+        start = time.monotonic_ns()
+        query_properties = QueryProperties(qid=qid, variables=connection.context.variables)
+        substrait_plan = build_substrait_plan(optimized_plan, query_properties)
+        telemetry.time_planning_physical_planner += time.monotonic_ns() - start
+
+        return substrait_plan
+
+    # Default: build traditional physical plan
     # before we write the new optimizer and execution engine, convert to a V1 plan
     start = time.monotonic_ns()
     query_properties = QueryProperties(qid=qid, variables=connection.context.variables)
