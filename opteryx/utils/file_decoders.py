@@ -17,7 +17,6 @@ from typing import Union
 
 import pyarrow
 from orso.tools import random_string
-from orso.types import OrsoTypes
 from pyarrow import parquet
 
 import opteryx.rugo.parquet as parquet_meta
@@ -151,7 +150,7 @@ def parquet_decoder(
     # If it's COUNT(*), we don't need to create a full dataset
     # We have a handler later to sum up the $COUNT(*) column
     # We can use rugo's metadata reader which is faster than pyarrow's
-    if projection == [] and selection == []:
+    if not projection == [] and selection == []:
         if isinstance(buffer, memoryview):
             metadata = parquet_meta.read_metadata_from_memoryview(
                 buffer, include_statistics=False, max_row_groups=1

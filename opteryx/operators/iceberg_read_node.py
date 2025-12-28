@@ -23,9 +23,6 @@ from orso.schema import convert_orso_schema_to_arrow_schema
 
 from opteryx import EOS
 from opteryx import config
-from opteryx.connectors.io_systems import OpteryxGcsFileSystem
-from opteryx.connectors.io_systems import OpteryxLocalFileSystem
-from opteryx.connectors.io_systems import OpteryxS3FileSystem
 from opteryx.exceptions import DataError
 from opteryx.models import QueryProperties
 from opteryx.shared import AsyncMemoryPool
@@ -41,12 +38,6 @@ MAX_READ_BUFFER_CAPACITY = config.MAX_READ_BUFFER_CAPACITY
 DISABLE_ZERO_COPY_BUFFER_READS = config.DISABLE_ZERO_COPY_BUFFER_READS
 
 ENABLE_ZERO_COPY = not DISABLE_ZERO_COPY_BUFFER_READS
-
-PROTOCOLS = {
-    "gs": OpteryxGcsFileSystem(),
-    "s3": OpteryxS3FileSystem(),
-    "file": OpteryxLocalFileSystem(),
-}
 
 
 async def fetch_data(blob_names, pool, connector, reply_queue, telemetry):
@@ -66,32 +57,17 @@ async def fetch_data(blob_names, pool, connector, reply_queue, telemetry):
     # Cache protocol-specific readers if we need to instantiate filesystem-level
     # readers based on the blob protocol. By default we use the provided connector
     # which typically implements `async_read_blob`.
-    protocol_readers = {}
 
     async def fetch_and_process(blob_name):
         async with semaphore:
             start_per_blob = time.monotonic_ns()
             try:
-                # Default to the supplied connector which should implement
-                # async_read_blob(blob_name, pool, telemetry, **kwargs)
-                protocol = blob_name.split("://")[0]
-
-                reader = connector
-
-                # Only fall back to a protocol-specific filesystem if the provided
-                # connector doesn't implement `async_read_blob`. This preserves the
-                # behaviour where the table/connector handles reading and committing
-                # to the memory pool (and returning an integer reference).
-                if not hasattr(connector, "async_read_blob") and protocol in PROTOCOLS:
-                    reader = protocol_readers[protocol]
-
                 # Call the async reader. We pass the commonly-used args; filesystem
                 # readers that require other parameters should handle defaults or
                 # raise a clear exception which we'll forward.
-                reference = await reader.async_read_blob(
+                reference = await connector.async_read_blob(
                     blob_name=blob_name, pool=pool, telemetry=telemetry
                 )
-
                 reply_queue.put((blob_name, reference))
             except Exception as err:
                 # Pass the exception back so the reader loop can handle it
