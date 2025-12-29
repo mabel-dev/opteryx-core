@@ -36,7 +36,9 @@ for whl in dist/*.whl; do
         sleep 1
     done
     (
-        if ! auditwheel repair "$whl" -w dist/; then
+        base="$(basename "$whl")"
+        # Capture verbose auditwheel output for diagnostics
+        if ! auditwheel -v repair "$whl" -w dist/ 2>&1 | tee "dist/diagnostics/${base}.auditwheel.txt"; then
             echo "FAILED_REPAIR: $whl" >> dist/diagnostics/auditwheel_failures.txt
         fi
     ) &
@@ -56,14 +58,22 @@ for whl in dist/*.whl; do
         unzip -q "$whl" -d "$tmpdir"
         find "$tmpdir" -name '*.so' -print0 | while IFS= read -r -d '' so; do
             echo "=== $so ===" >> "$out"
+            # Look for specific blacklisted symbol names
             if command -v readelf >/dev/null 2>&1; then
-                readelf -Ws "$so" | egrep -i "$BLACKLIST_RE" >> "$out" || true
-            elif command -v objdump >/dev/null 2>&1; then
-                objdump -T "$so" | egrep -i "$BLACKLIST_RE" >> "$out" || true
-            elif command -v nm >/dev/null 2>&1; then
-                nm -D "$so" | egrep -i "$BLACKLIST_RE" >> "$out" || true
-            else
-                echo "No symbol tool available" >> "$out"
+                readelf -Ws "$so" | egrep -i "$BLACKLIST_RE|@@GLIBC_2.18|GLIBC_2.18" >> "$out" || true
+                readelf -V "$so" | egrep -i "GLIBC_2.18" >> "$out" || true
+            fi
+            # Check with objdump for versioned symbol names (e.g., symbol@@GLIBC_2.18)
+            if command -v objdump >/dev/null 2>&1; then
+                objdump -T "$so" | egrep -i "$BLACKLIST_RE|GLIBC_2.18|@@GLIBC_2.18" >> "$out" || true
+            fi
+            # Fallbacks
+            if command -v nm >/dev/null 2>&1; then
+                nm -D "$so" | egrep -i "$BLACKLIST_RE|GLIBC_2.18" >> "$out" || true
+            fi
+            # Last resort: search strings for the GLIBC version tag
+            if command -v strings >/dev/null 2>&1; then
+                strings "$so" | egrep -i "GLIBC_2.18|__cxa_thread_atexit_impl|__issignaling|pthread_getattr_default_np|pthread_setattr_default_np" >> "$out" || true
             fi
         done
         # keep a copy of the (original) wheel for debugging
