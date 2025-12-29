@@ -98,7 +98,11 @@ elif is_linux():
 # On Linux builds (manylinux) prefer static linking of libstdc++/libgcc to avoid
 # runtime dependency on host-provided newer libstdc++ which can require
 # GLIBCXX/GLIBC versions not available on older manylinux targets.
-LD_EXTRA = ["-static-libstdc++", "-static-libgcc"]
+# macOS/Clang does not support -static-libgcc
+if is_mac():
+    LD_EXTRA = ["-static-libstdc++"]
+else:
+    LD_EXTRA = ["-static-libstdc++", "-static-libgcc"]
 
 # SIMD-specific flags
 if arch == "x86_64":
