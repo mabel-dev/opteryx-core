@@ -35,10 +35,29 @@ jobs:
           io/dev/build-wheels.sh
 
       - name: Archive Wheels
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: dist-linux-${{ matrix.python-version }}
           path: io/dist/*manylinux2014_x86_64*.whl
+
+      - name: Upload wheel diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-linux-diagnostics-${{ matrix.python-version }}
+          path: io/dist/diagnostics/**
+
+      - name: Dump wheel diagnostics to log
+        if: always()
+        run: |
+          echo "== diagnostics files =="
+          ls -la io/dist/diagnostics || true
+          for f in io/dist/diagnostics/*.txt io/dist/diagnostics/*.*; do
+            [ -e "$f" ] || continue
+            echo "=== $f ==="
+            sed -n '1,400p' "$f" || true
+          done
 
   upload:
     needs: [build-manylinux]
