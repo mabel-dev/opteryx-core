@@ -132,6 +132,9 @@ cdef class IntervalVector(Vector):
     def length(self):
         return buf_length(self.ptr)
 
+    def __len__(self):
+        return buf_length(self.ptr)
+
     @property
     def itemsize(self):
         return buf_itemsize(self.ptr)

@@ -243,6 +243,10 @@ cdef class Morsel:
         """Return the number of rows."""
         return self.ptr.num_rows
 
+    def __len__(self) -> int:
+        """Return the number of rows (for len() compatibility)."""
+        return self.ptr.num_rows
+
     @property
     def num_columns(self) -> int:
         """Return the number of columns."""
