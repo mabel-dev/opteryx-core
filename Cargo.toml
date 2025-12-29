@@ -8,6 +8,11 @@ edition = "2021"
 name = "compute"
 crate-type = ["cdylib"]
 
+# Link statically against libgcc/libstdc++ to avoid GLIBC_2.18 symbols
+[profile.release]
+strip = true
+lto = true
+
 [dependencies]
 pythonize = "0.27"
 serde = "1.0.171"
