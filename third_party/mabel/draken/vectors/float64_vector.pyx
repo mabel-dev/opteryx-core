@@ -24,6 +24,7 @@ from libc.string cimport memset
 
 from libc.stdint cimport int32_t, int8_t, intptr_t, uint64_t, uint8_t
 from libc.stdlib cimport malloc
+from libc.math cimport isnan, llround
 
 from opteryx.draken.core.buffers cimport DrakenFixedBuffer
 from opteryx.draken.core.buffers cimport DRAKEN_FLOAT64
@@ -48,6 +49,9 @@ cdef class Float64Vector(Vector):
     # Python-friendly properties
     @property
     def length(self):
+        return buf_length(self.ptr)
+
+    def __len__(self):
         return buf_length(self.ptr)
 
     @property
@@ -378,6 +382,71 @@ cdef class Float64Vector(Vector):
         else:
             simd_mix_hash(dst, bits, <size_t>n)
             return
+
+    cdef void compress_into(self, int64_t[::1] out_buf, Py_ssize_t offset=0) except *:
+        """Fast compress for Float64Vector with NaN/Inf handling and clamping."""
+        cdef DrakenFixedBuffer* ptr = self.ptr
+        cdef double* data = <double*> ptr.data
+        cdef Py_ssize_t n = ptr.length
+        cdef int64_t* dst_base
+
+        if n == 0:
+            return
+        if offset < 0 or offset + n > out_buf.shape[0]:
+            raise ValueError("Float64Vector.compress: output buffer too small")
+
+        dst_base = &out_buf[0]
+        cdef int64_t* dst = dst_base + offset
+        cdef uint8_t* null_bitmap = ptr.null_bitmap
+        cdef bint has_nulls = null_bitmap != NULL
+        cdef Py_ssize_t i
+        cdef double v
+        cdef long long rv
+        cdef int64_t MIN_SIGNED = <int64_t> -9223372036854775807
+        cdef int64_t MAX_SIGNED = <int64_t> 9223372036854775807
+        cdef int64_t NULL_FLAG = <int64_t> -9223372036854775808
+
+        if has_nulls:
+            for i in range(n):
+                if ((null_bitmap[i >> 3] >> (i & 7)) & 1) == 0:
+                    dst[i] = NULL_FLAG
+                    continue
+                v = data[i]
+                if isnan(v):
+                    dst[i] = NULL_FLAG
+                    continue
+                if v == float("inf"):
+                    dst[i] = MAX_SIGNED
+                    continue
+                if v == float("-inf"):
+                    dst[i] = MIN_SIGNED
+                    continue
+                rv = llround(v)
+                if rv < MIN_SIGNED:
+                    dst[i] = MIN_SIGNED
+                elif rv > MAX_SIGNED:
+                    dst[i] = MAX_SIGNED
+                else:
+                    dst[i] = <int64_t> rv
+        else:
+            for i in range(n):
+                v = data[i]
+                if isnan(v):
+                    dst[i] = NULL_FLAG
+                    continue
+                if v == float("inf"):
+                    dst[i] = MAX_SIGNED
+                    continue
+                if v == float("-inf"):
+                    dst[i] = MIN_SIGNED
+                    continue
+                rv = llround(v)
+                if rv < MIN_SIGNED:
+                    dst[i] = MIN_SIGNED
+                elif rv > MAX_SIGNED:
+                    dst[i] = MAX_SIGNED
+                else:
+                    dst[i] = <int64_t> rv
 
     def __str__(self):
         cdef list vals = []

@@ -42,6 +42,7 @@ class JoinOrderingStrategy(OptimizationStrategy):
                 # fmt:off
                 node.left_size, node.right_size = node.right_size, node.left_size
                 node.left_columns, node.right_columns = node.right_columns, node.left_columns
+                node.left_column, node.right_column = node.right_column, node.left_column
                 node.left_readers, node.right_readers = node.right_readers, node.left_readers
                 node.left_relation_names, node.right_relation_names = node.right_relation_names, node.left_relation_names
                 # fmt:on

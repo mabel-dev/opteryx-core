@@ -20,7 +20,7 @@ Used for high-performance analytics and columnar data processing in Draken.
 
 from cpython.bytes cimport PyBytes_FromStringAndSize, PyBytes_AS_STRING
 from cpython.mem cimport PyMem_Malloc
-from libc.string cimport memset
+from libc.string cimport memset, memcpy
 
 from libc.stddef cimport size_t
 from libc.stdint cimport int32_t
@@ -71,6 +71,9 @@ cdef class Int64Vector(Vector):
     # Python-friendly properties (backed by C getters for kernels)
     @property
     def length(self):
+        return buf_length(self.ptr)
+
+    def __len__(self):
         return buf_length(self.ptr)
 
     @property
@@ -493,6 +496,40 @@ cdef class Int64Vector(Vector):
                 dst[i] = mix_hash(dst[i], value)
         else:
             simd_mix_hash(dst, as_uint64, <size_t>n)
+
+    cdef void compress_into(self, int64_t[::1] out_buf, Py_ssize_t offset=0) except *:
+        """Fast per-element compress for Int64Vector (no Python conversions).
+
+        Null values map to the NULL sentinel; non-null values are copied
+        directly into the output buffer.
+        """
+        cdef DrakenFixedBuffer* ptr = self.ptr
+        cdef int64_t* src = <int64_t*> ptr.data
+        cdef Py_ssize_t n = ptr.length
+        cdef int64_t* dst_base
+
+        if n == 0:
+            return
+
+        if offset < 0 or offset + n > out_buf.shape[0]:
+            raise ValueError("Int64Vector.compress: output buffer too small")
+
+        dst_base = &out_buf[0]
+        cdef int64_t* dst = dst_base + offset
+        cdef uint8_t* null_bitmap = ptr.null_bitmap
+        cdef bint has_nulls = null_bitmap != NULL
+        cdef Py_ssize_t i
+
+        if not has_nulls:
+            # Fast path: bulk copy
+            memcpy(<void*>dst, <const void*>src, <size_t>(n * sizeof(int64_t)))
+            return
+
+        for i in range(n):
+            if (null_bitmap[i >> 3] >> (i & 7)) & 1:
+                dst[i] = src[i]
+            else:
+                dst[i] = <int64_t> -9223372036854775808
 
     def __str__(self):
         cdef list vals = []

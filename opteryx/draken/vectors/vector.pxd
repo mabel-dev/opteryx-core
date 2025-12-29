@@ -7,7 +7,7 @@
 # cython: boundscheck=False
 
 from libc.stddef cimport size_t
-from libc.stdint cimport uint64_t
+from libc.stdint cimport uint64_t, int64_t
 
 from opteryx.draken.interop.arrow import vector_from_arrow
 
@@ -26,3 +26,12 @@ cdef class Vector:
     cdef bint here
     cpdef object null_bitmap(self)
     cdef void hash_into(self, uint64_t[::1] out_buf, Py_ssize_t offset=*) except *
+    cpdef uint64_t[::1] hash(self)
+
+    # Compress: convert each value to a signed 64-bit integer using the
+    # same semantics as `to_int` in relation_statistics. Implementations
+    # should write into an int64 buffer provided by the caller.
+    cdef void compress_into(self, int64_t[::1] out_buf, Py_ssize_t offset=*) except *
+    # Convenience Python-callable constructor that allocates the output
+    # buffer, calls `compress_into`, and returns it.
+    cpdef int64_t[::1] compress(self)

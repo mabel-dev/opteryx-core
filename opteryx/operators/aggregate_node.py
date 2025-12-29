@@ -60,12 +60,10 @@ def _is_count_star(aggregates):
 
 
 def _count_star(morsel_promise, column_name):
+    # Simplified: don't rely on a special $COUNT(*) column; just count rows.
     count = 0
     for morsel in morsel_promise:
-        if "$COUNT(*)" in morsel.column_names:
-            count += morsel["$COUNT(*)"].to_numpy()[0]
-        else:
-            count += morsel.num_rows
+        count += morsel.num_rows
     table = pyarrow.Table.from_pylist([{column_name: count}])
     return table
 
