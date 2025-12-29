@@ -35,6 +35,11 @@ class build_ext(build_ext_orig):
         # Temporarily override build_temp used by underlying compiler invocations
         self.build_temp = per_ext_build_temp
         try:
+            # If building a C++ extension on Linux, ensure we add the extra link
+            # args to statically link libstdc++ and libgcc to avoid requiring
+            # newer GLIBC/GLIBCXX on target systems.
+            if is_linux() and getattr(ext, 'language', '') == 'c++':
+                ext.extra_link_args = list(getattr(ext, 'extra_link_args', [])) + LD_EXTRA
             super().build_extension(ext)
         finally:
             # Restore original build_temp after building this extension
@@ -89,6 +94,11 @@ if is_win():
 elif is_linux():
     CPP_FLAGS.extend(["-march=native", "-fvisibility=default"])
     C_FLAGS.extend(["-march=native", "-fvisibility=default"])
+
+# On Linux builds (manylinux) prefer static linking of libstdc++/libgcc to avoid
+# runtime dependency on host-provided newer libstdc++ which can require
+# GLIBCXX/GLIBC versions not available on older manylinux targets.
+LD_EXTRA = ["-static-libstdc++", "-static-libgcc"]
 
 # SIMD-specific flags
 if arch == "x86_64":
@@ -158,6 +168,7 @@ def make_draken_extension(module_path, source_file, language="c++", depends=None
         sources=sources,
         include_dirs=include_dirs,
         extra_compile_args=CPP_FLAGS if language == "c++" else C_FLAGS,
+        extra_link_args=LD_EXTRA if language == "c++" else [],
         language=language,
         depends=depends,
     )
@@ -231,6 +242,7 @@ extensions = [
         include_dirs=include_dirs,
         language="c++",
         extra_compile_args=CPP_FLAGS,
+        extra_link_args=LD_EXTRA,
     ),
     Extension(
         "opteryx.third_party.alantsd.base64",
@@ -257,6 +269,7 @@ extensions = [
         include_dirs=include_dirs,
         language="c++",
         extra_compile_args=CPP_FLAGS,
+        extra_link_args=LD_EXTRA,
     ),
     Extension(
         "opteryx.third_party.tktech.csimdjson",
@@ -268,6 +281,7 @@ extensions = [
         include_dirs=include_dirs,
         language="c++",
         extra_compile_args=CPP_FLAGS,
+        extra_link_args=LD_EXTRA,
     ),
     Extension(
         "opteryx.third_party.facebook.zstd",
@@ -282,6 +296,7 @@ extensions = [
         define_macros=[("ZSTD_STATIC_LINKING_ONLY", "1")],
         language="c++",
         extra_compile_args=CPP_FLAGS,
+        extra_link_args=LD_EXTRA,
     ),
     Extension(
         "opteryx.third_party.ulfjack.ryu",
@@ -320,7 +335,7 @@ extensions = [
         define_macros=[("HAVE_SNAPPY", "1"), ("HAVE_ZSTD", "1"), ("ZSTD_STATIC_LINKING_ONLY", "1")],
         language="c++",
         extra_compile_args=CPP_FLAGS,
-        extra_link_args=parquet_link_args,
+        extra_link_args=parquet_link_args + LD_EXTRA,
     ),
     Extension(
         "opteryx.rugo.jsonl", 
