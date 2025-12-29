@@ -91,8 +91,23 @@ class PredicatePushable:
                 return left
             if root.node_type != NodeType.COMPARISON_OPERATOR:
                 raise NotSupportedError()
+
+            # If identifier is on the right, swap sides and invert operator
+            op = root.value
             if root.left.node_type != NodeType.IDENTIFIER:
                 root.left, root.right = root.right, root.left
+                INVERT_OP = {
+                    "Gt": "Lt",
+                    "GtEq": "LtEq",
+                    "Lt": "Gt",
+                    "LtEq": "GtEq",
+                    "Eq": "Eq",
+                    "NotEq": "NotEq",
+                    "InList": "InList",
+                    "NotInList": "NotInList",
+                }
+                op = INVERT_OP.get(op, op)
+
             if root.right.schema_column.type == OrsoTypes.DATE:
                 date_val = root.right.value
                 if hasattr(date_val, "item"):
@@ -111,7 +126,7 @@ class PredicatePushable:
                 raise NotSupportedError()
             return (
                 root.left.value,
-                PredicatePushable.OPS_XLAT[root.value],
+                PredicatePushable.OPS_XLAT[op],
                 root.right.value,
             )
 

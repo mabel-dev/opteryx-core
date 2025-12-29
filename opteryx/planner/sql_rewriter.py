@@ -93,7 +93,7 @@ SQL_PARTS = {
 }
 
 
-COMBINE_WHITESPACE_REGEX = re.compile(r"\r\n\t\f\v+")
+COMBINE_WHITESPACE_REGEX = re.compile(r"[\r\n\t\f\v]+")
 
 # Precompile regex patterns at module level for performance
 _KEYWORDS_REGEX = re.compile(
@@ -153,31 +153,73 @@ def sql_parts(string):
 
 def rewrite_explain(parts: list) -> list:
     """
-    The parser does not support MERMAID format.
+    Normalize EXPLAIN FORMAT handling.
 
-    We rewrite it to GRAPHVIZ, we don't support.
+    The parser's grammar accepts FORMAT GRAPHVIZ and FORMAT JSON but not
+    FORMAT MERMAID. Users may write any of these forms; we need to:
+      - Treat explicit FORMAT GRAPHVIZ or FORMAT JSON as unsupported and raise
+      - Allow FORMAT MERMAID by rewriting it to GRAPHVIZ so the parser will
+        accept it (the logical planner will convert GRAPHVIZ -> MERMAID)
+
+    The tokenizer (sql_parts) may split things in different ways, so we
+    check both the combined head token and separated tokens.
     """
-    if parts[0] == "EXPLAIN ANALYZE FORMAT GRAPHVIZ":
+    # Build a head string from the tokens up to the main body (e.g., SELECT)
+    select_idx = None
+    for i, token in enumerate(parts):
+        if token.upper().startswith("SELECT") or token.upper().startswith("WITH"):
+            select_idx = i
+            break
+    head_tokens = parts[:select_idx] if select_idx is not None else parts
+    head = " ".join(head_tokens).upper()
+
+    # If the head explicitly requests GRAPHVIZ or JSON, they are unsupported
+    if "FORMAT GRAPHVIZ" in head:
         raise UnsupportedSyntaxError("GRAPHVIZ format is not supported")
-    if parts[0] == "EXPLAIN ANALYZE FORMAT JSON":
+    if "FORMAT JSON" in head:
         raise UnsupportedSyntaxError("JSON format is not supported")
-    if parts[0].upper() == "EXPLAIN ANALYZE FORMAT MERMAID":
-        parts[0] = "EXPLAIN ANALYZE FORMAT GRAPHVIZ"
+
+    # If the head requests MERMAID, rewrite it to GRAPHVIZ so the parser accepts it
+    if "FORMAT MERMAID" in head:
+        # replace the first occurrence in the token list
+        for i, token in enumerate(parts):
+            if token.upper().startswith("FORMAT MERMAID"):
+                parts[i] = token.upper().replace("FORMAT MERMAID", "FORMAT GRAPHVIZ")
+                return parts
+
+    # Otherwise look for separate 'FORMAT' and value tokens (e.g., ['FORMAT', 'MERMAID'])
+    for i, token in enumerate(parts):
+        if token.upper() == "FORMAT":
+            # ensure there's a following token for the format value
+            if i + 1 < len(parts):
+                fmt = parts[i + 1].upper().rstrip(";")
+                if fmt == "GRAPHVIZ":
+                    raise UnsupportedSyntaxError("GRAPHVIZ format is not supported")
+                if fmt == "JSON":
+                    raise UnsupportedSyntaxError("JSON format is not supported")
+                if fmt == "MERMAID":
+                    # rewrite to GRAPHVIZ so parser accepts it
+                    parts[i + 1] = "GRAPHVIZ"
+            break
+
     return parts
 
 
 def do_sql_rewrite(statement):
     # If the SQL was passed with escaped sequences (e.g. "\\n"),
     # interpret the common ones so the rewriter sees real newlines/tabs.
-    if isinstance(statement, str) and (
-        "\\n" in statement or "\\t" in statement or "\\r" in statement
-    ):
-        statement = (
-            statement.replace("\\r\\n", "\r\n")
-            .replace("\\n", "\n")
-            .replace("\\t", "\t")
-            .replace("\\r", "\r")
-        )
+    if isinstance(statement, bytes):
+        statement = statement.decode("utf-8")
+
+    statement = (
+        statement.replace("\\r\\n", " ")
+        .replace("\\n", " ")
+        .replace("\\t", " ")
+        .replace("\\r", " ")
+        .replace("\n", " ")
+        .replace("\t", " ")
+        .replace("\r", " ")
+    )
 
     parts = sql_parts(statement)
     parts = rewrite_explain(parts)

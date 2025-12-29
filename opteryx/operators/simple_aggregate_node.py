@@ -184,14 +184,10 @@ class SimpleAggregateNode(BasePlanNode):
                         column_node.value, morsel.num_rows
                     )
                 elif column_node.node_type == NodeType.WILDCARD:
-                    if "$COUNT(*)" in morsel.column_names and morsel.num_rows > 0:
-                        self.accumulator[aggregate.schema_column.identity].collect_literal(
-                            1, morsel["$COUNT(*)"][0].as_py()
-                        )
-                    else:
-                        self.accumulator[aggregate.schema_column.identity].collect_literal(
-                            1, morsel.num_rows
-                        )
+                    # Always use the morsel row count; the $COUNT(*) shortcut is disabled
+                    self.accumulator[aggregate.schema_column.identity].collect_literal(
+                        1, morsel.num_rows
+                    )
                 else:
                     raw_column_values = morsel[column_node.schema_column.identity]
                     self.accumulator[aggregate.schema_column.identity].collect(raw_column_values)

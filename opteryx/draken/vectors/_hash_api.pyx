@@ -6,7 +6,7 @@
 # cython: wraparound=False
 # cython: boundscheck=False
 
-from libc.stdint cimport uint64_t
+from libc.stdint cimport uint64_t, int64_t
 
 from opteryx.draken.vectors.vector cimport Vector
 
@@ -23,3 +23,11 @@ cpdef void hash_into(
     method directly from Cython.
     """
     vector.hash_into(out_buf, offset)
+
+cpdef void compress_into(
+    Vector vector,
+    int64_t[::1] out_buf,
+    Py_ssize_t offset=0
+):
+    """Python-visible shim for invoking Vector.compress_into."""
+    vector.compress_into(out_buf, offset)
