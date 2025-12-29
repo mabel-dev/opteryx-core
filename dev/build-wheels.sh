@@ -7,43 +7,23 @@ set -ex
 # not be available on the base image and we compile vendor sources directly).
 yum install -y openssl-devel
 
-# Install Rust (required for building some Python packages with Rust extensions)
-curl https://sh.rustup.rs -sSf | sh -s -- --default-toolchain stable -y
+# Install Rust 1.83.0 (pinned version to avoid GLIBC_2.18 symbols from newer compilers)
+curl https://sh.rustup.rs -sSf | sh -s -- --default-toolchain 1.83.0 -y
 export PATH="$HOME/.cargo/bin:$PATH"
 
 cd $GITHUB_WORKSPACE/io
 cd io
 
-# Only build for the specified Python version
 PYBIN="/opt/python/cp${PYTHON_VERSION//.}-cp${PYTHON_VERSION//.}/bin"
 
-# Install necessary packages
-"${PYBIN}/python" -m pip install -U setuptools wheel setuptools-rust numpy cython auditwheel=="6.4.2"
+"${PYBIN}/python" -m pip install -U setuptools wheel setuptools-rust numpy cython auditwheel
 
-# Build the wheel (parallelize C/C++ extension compilation)
-# Detect number of CPUs available inside the container
 NPROC=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 1)
-echo "Using $NPROC parallel jobs for build_ext"
 "${PYBIN}/python" setup.py build_ext --parallel "$NPROC" bdist_wheel
 
-# Repair the wheel using auditwheel in parallel (capture failures and continue so we can collect diagnostics)
-mkdir -p dist/diagnostics
-BLACKLIST_RE='__cxa_thread_atexit_impl|__issignaling|pthread_getattr_default_np|pthread_setattr_default_np'
-max_jobs="$NPROC"
 for whl in dist/*.whl; do
-    # limit background jobs to number of CPUs
-    while [ "$(jobs -p | wc -l)" -ge "$max_jobs" ]; do
-        sleep 1
-    done
-    (
-        base="$(basename "$whl")"
-        # Capture verbose auditwheel output for diagnostics
-        if ! auditwheel -v repair "$whl" -w dist/ 2>&1 | tee "dist/diagnostics/${base}.auditwheel.txt"; then
-            echo "FAILED_REPAIR: $whl" >> dist/diagnostics/auditwheel_failures.txt
-        fi
-    ) &
+    auditwheel repair "$whl" -w dist/
 done
-wait
 
 # Generate symbol diagnostics for each wheel in parallel
 for whl in dist/*.whl; do
@@ -82,3 +62,11 @@ for whl in dist/*.whl; do
     ) &
 done
 wait
+
+# Show what wheels we have after repair attempts
+echo "=== Wheels after auditwheel repair ==="
+ls -lh dist/*.whl || echo "No wheels found in dist/"
+echo "=== Manylinux wheels ==="
+ls -lh dist/*manylinux*.whl || echo "No manylinux wheels found"
+echo "=== Auditwheel failures ==="
+cat dist/diagnostics/auditwheel_failures.txt 2>/dev/null || echo "No auditwheel_failures.txt found"
