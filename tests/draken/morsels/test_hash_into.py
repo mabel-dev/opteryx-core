@@ -328,6 +328,22 @@ def test_hash_into_consistency_with_hash():
     assert list(out_buf) == expected
 
 
+def test_vector_hash_method_matches_hash_into():
+    """Vector.hash() should create a buffer, use hash_into, and return it."""
+    table = pa.table({'a': pa.array([1, 2, 3, 4, 5], type=pa.int64())})
+    morsel = draken.Morsel.from_arrow(table)
+    vec = morsel.column(b'a')
+
+    # Compute expected via existing helper
+    expected = _vector_hash_to_list(vec)
+
+    # Call new method
+    buf = vec.hash()
+    view = memoryview(buf)
+    assert view.format == 'Q'
+    assert list(view) == expected
+
+
 def test_morsel_hash_uses_hash_into():
     """Morsel.hash() should use hash_into internally for all column types."""
     # Test with multiple column types

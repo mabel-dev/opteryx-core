@@ -147,28 +147,10 @@ def parquet_decoder(
         Tuple containing number of rows, number of columns, and the table or schema.
     """
 
-    # If it's COUNT(*), we don't need to create a full dataset
-    # We have a handler later to sum up the $COUNT(*) column
-    # We can use rugo's metadata reader which is faster than pyarrow's
-    if not projection == [] and selection == []:
-        if isinstance(buffer, memoryview):
-            metadata = parquet_meta.read_metadata_from_memoryview(
-                buffer, include_statistics=False, max_row_groups=1
-            )
-        else:
-            metadata = parquet_meta.read_metadata_from_memoryview(
-                memoryview(buffer), include_statistics=False, max_row_groups=1
-            )
-        num_rows = metadata["num_rows"]
-        num_columns = len(metadata["row_groups"][0]["columns"])
-        num_bytes = sum(x["total_byte_size"] for x in metadata["row_groups"])
-        table = pyarrow.Table.from_arrays([[num_rows]], names=["$COUNT(*)"])
-        return (
-            num_rows,
-            num_columns,
-            num_bytes,
-            table,
-        )
+    # COUNT(*) metadata fast-path disabled — prefer the normal read path.
+    # (Previously we returned a tiny table named "$COUNT(*)" and handled it
+    # specially in the aggregation operators; that code was fragile and has
+    # been removed.)
 
     # Return just the schema if that's all that's needed
     # We can use rugo's metadata reader which is faster than pyarrow's
@@ -316,12 +298,7 @@ def vortex_decoder(
         orso_schema = convert_arrow_schema_to_orso_schema(arrow_schema)
         return orso_schema
 
-    # If it's COUNT(*), we don't need to create a full dataset
-    # We have a handler later to sum up the $COUNT(*) column
-    if projection == [] and selection == [] and not just_schema:
-        num_rows = len(table)
-        table = pyarrow.Table.from_arrays([[num_rows]], names=["$COUNT(*)"])
-        return (num_rows, 0, 0, table)
+    # COUNT(*) fast-path disabled — fall through to a normal table read.
 
     # we currently aren't pushing filters into vortex so we need to read
     # the columns we're filtering by
@@ -366,12 +343,7 @@ def jsonl_decoder(
     # count newline occurrences in the provided buffer to get the number of rows
     num_rows = count_instances(buffer)
 
-    # If it's COUNT(*), we don't need to create a full dataset
-    # We have a handler later to sum up the $COUNT(*) column
-    if projection == [] and selection == [] and not just_schema:
-        # Try to use the SIMD-optimized counter from the cython module if available
-        table = pyarrow.Table.from_arrays([[num_rows]], names=["$COUNT(*)"])
-        return (num_rows, 0, len(buffer), table)
+    # COUNT(*) fast-path disabled — fall through to a normal table read.
 
     orso_schema = jsonl_to_orso_schema(rj.get_jsonl_schema(buffer))
 

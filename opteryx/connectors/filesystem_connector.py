@@ -108,12 +108,6 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
             )
         return FileSystemTable._executor
 
-    def __del__(self):
-        """Cleanup executor on deletion."""
-        if FileSystemTable._executor is not None:
-            FileSystemTable._executor.shutdown(wait=False)
-            FileSystemTable._executor = None
-
     def read_blob(
         self, *, blob_name: str, decoder, just_schema=False, projection=None, selection=None
     ):
@@ -313,64 +307,64 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
             blob_iter = iter(blob_names)
             pending = {}
 
-            with self.get_executor() as executor:
-                for _ in range(max_workers):
+            executor = self.get_executor()
+            for _ in range(max_workers):
+                try:
+                    blob_name = next(blob_iter)
+                except StopIteration:
+                    break
+                future = executor.submit(
+                    self._read_blob_task,
+                    blob_name,
+                    columns,
+                    predicates,
+                )
+                pending[future] = blob_name
+
+            while pending:
+                done, _ = wait(pending.keys(), return_when=FIRST_COMPLETED)
+                for future in done:
+                    blob_name = pending.pop(future)
                     try:
-                        blob_name = next(blob_iter)
-                    except StopIteration:
-                        break
-                    future = executor.submit(
-                        self._read_blob_task,
-                        blob_name,
-                        columns,
-                        predicates,
-                    )
-                    pending[future] = blob_name
-
-                while pending:
-                    done, _ = wait(pending.keys(), return_when=FIRST_COMPLETED)
-                    for future in done:
-                        blob_name = pending.pop(future)
-                        try:
-                            num_rows, _, raw_size, decoded = future.result()
-                        except UnsupportedFileTypeError:
-                            pass
-                        except pyarrow.ArrowInvalid:
-                            with self._stats_lock:
-                                self.telemetry.unreadable_data_blobs += 1
-                        except Exception as err:
-                            for remaining_future in list(pending):
-                                remaining_future.cancel()
-                            raise DataError(
-                                f"Unable to read file {blob_name}: {type(err).__name__}"
-                            ) from err
-                        else:
-                            if remaining_rows > 0:
-                                decoded = process_result(num_rows, raw_size, decoded)
-                                yield decoded
-                                if remaining_rows <= 0:
-                                    for remaining_future in list(pending):
-                                        remaining_future.cancel()
-                                    pending.clear()
-                                    break
-
-                        if remaining_rows <= 0:
-                            break
-
-                        try:
-                            next_blob = next(blob_iter)
-                        except StopIteration:
-                            continue
-                        future = executor.submit(
-                            self._read_blob_task,
-                            next_blob,
-                            columns,
-                            predicates,
-                        )
-                        pending[future] = next_blob
+                        num_rows, _, raw_size, decoded = future.result()
+                    except UnsupportedFileTypeError:
+                        pass
+                    except pyarrow.ArrowInvalid:
+                        with self._stats_lock:
+                            self.telemetry.unreadable_data_blobs += 1
+                    except Exception as err:
+                        for remaining_future in list(pending):
+                            remaining_future.cancel()
+                        raise DataError(
+                            f"Unable to read file {blob_name}: {type(err).__name__}"
+                        ) from err
+                    else:
+                        if remaining_rows > 0:
+                            decoded = process_result(num_rows, raw_size, decoded)
+                            yield decoded
+                            if remaining_rows <= 0:
+                                for remaining_future in list(pending):
+                                    remaining_future.cancel()
+                                pending.clear()
+                                break
 
                     if remaining_rows <= 0:
                         break
+
+                    try:
+                        next_blob = next(blob_iter)
+                    except StopIteration:
+                        continue
+                    future = executor.submit(
+                        self._read_blob_task,
+                        next_blob,
+                        columns,
+                        predicates,
+                    )
+                    pending[future] = next_blob
+
+                if remaining_rows <= 0:
+                    break
 
     def _read_blob_task(self, blob_name: str, columns, predicates):
         """Helper for reading a blob in a thread pool."""

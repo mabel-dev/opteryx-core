@@ -77,7 +77,18 @@ def to_iceberg_filter(root):
         right_node = root.right
 
         if left_node.node_type != NodeType.IDENTIFIER:
+            # swap sides so left is identifier; invert comparison to preserve semantics
             left_node, right_node = right_node, left_node
+            OP_INVERT = {
+                "Gt": "Lt",
+                "GtEq": "LtEq",
+                "Lt": "Gt",
+                "LtEq": "GtEq",
+                "Eq": "Eq",
+                "NotEq": "NotEq",
+            }
+            # mutate the root's value accordingly
+            root.value = OP_INVERT.get(root.value, root.value)
 
         right_value = right_node.value
         right_type = right_node.schema_column.type
@@ -104,12 +115,12 @@ def to_iceberg_filter(root):
         if right_type == OrsoTypes.DOUBLE:
             # iceberg needs doubles to be cast to floats
             right_value = float(right_value)
-#        if right_type == OrsoTypes.INTEGER:
-#            # iceberg doesn't like integers unless we convert to strings
-#            right_value = str(right_value)
-#        if right_type == OrsoTypes.TIMESTAMP and isinstance(right_value, numpy.datetime64):
-#            # iceberg doesn't like timestamps unless we convert to strings
-#            right_value = right_value.astype(datetime.datetime)
+        #        if right_type == OrsoTypes.INTEGER:
+        #            # iceberg doesn't like integers unless we convert to strings
+        #            right_value = str(right_value)
+        #        if right_type == OrsoTypes.TIMESTAMP and isinstance(right_value, numpy.datetime64):
+        #            # iceberg doesn't like timestamps unless we convert to strings
+        #            right_value = right_value.astype(datetime.datetime)
         return ICEBERG_FILTERS[root.value](left_node.value, right_value)
 
     iceberg_filter = None
@@ -283,42 +294,49 @@ class IcebergTable(FileSystemTable, Diachronic, Statistics):
 
         # Use Parquet manifest reader instead of PyIceberg inspect API to avoid Avro
         try:
-            from pyiceberg_firestore_gcs.parquet_manifest import read_parquet_manifest
             import pyarrow as pa
-            
+            from pyiceberg_firestore_gcs.parquet_manifest import read_parquet_manifest
+
             parquet_records = read_parquet_manifest(
                 self.table.metadata,
                 self.table.io,
                 self.table.metadata.location,
             )
-            
+
             if parquet_records:
                 # Convert to PyArrow table matching inspect.files() schema
                 file_paths = []
                 record_counts = []
-                
+
                 for record in parquet_records:
                     if record.get("active", True):
                         file_paths.append(record["file_path"])
                         record_counts.append(record["record_count"])
-                
-                files = pa.table({
-                    "file_path": file_paths,
-                    "record_count": record_counts,
-                })
+
+                files = pa.table(
+                    {
+                        "file_path": file_paths,
+                        "record_count": record_counts,
+                    }
+                )
             else:
                 # No Parquet manifest; return empty table
-                files = pa.table({
-                    "file_path": pa.array([], type=pa.string()),
-                    "record_count": pa.array([], type=pa.int64()),
-                })
+                files = pa.table(
+                    {
+                        "file_path": pa.array([], type=pa.string()),
+                        "record_count": pa.array([], type=pa.int64()),
+                    }
+                )
         except Exception as e:
             # Fallback to empty table if Parquet read fails
             import pyarrow as pa
-            files = pa.table({
-                "file_path": pa.array([], type=pa.string()),
-                "record_count": pa.array([], type=pa.int64()),
-            })
+
+            files = pa.table(
+                {
+                    "file_path": pa.array([], type=pa.string()),
+                    "record_count": pa.array([], type=pa.int64()),
+                }
+            )
 
         # No files = empty table, no stats
         if len(files.column("file_path")) == 0:

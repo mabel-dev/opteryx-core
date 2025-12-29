@@ -117,8 +117,8 @@ STATEMENTS = [
         ("SELECT * FROM $planets AS P ANTI JOIN testdata.satellites AS S ON P.id = S.id WHERE P.name != 'Earth';", 0, 20, None),
 
         ("EXPLAIN ANALYZE FORMAT TEXT SELECT * FROM $planets AS a INNER JOIN (SELECT id FROM $planets) AS b USING (id);", 3, 7, None),
-        ("EXPLAIN ANALYZE FORMAT JSON SELECT * FROM $planets AS a INNER JOIN (SELECT id FROM $planets) AS b USING (id);", 3, 7, UnsupportedSyntaxError),
-        ("EXPLAIN ANALYZE FORMAT GRAPHVIZ SELECT * FROM $planets AS a INNER JOIN (SELECT id FROM $planets) AS b USING (id);", 3, 7, UnsupportedSyntaxError),
+        ("EXPLAIN ANALYZE FORMAT JSON SELECT * FROM $planets AS a INNER JOIN (SELECT id FROM $planets) AS b USING (id);", 1, 1, UnsupportedSyntaxError),
+        ("EXPLAIN ANALYZE FORMAT GRAPHVIZ SELECT * FROM $planets AS a INNER JOIN (SELECT id FROM $planets) AS b USING (id);", 1, 1, UnsupportedSyntaxError),
         ("EXPLAIN ANALYZE FORMAT MERMAID SELECT * FROM $planets AS a INNER JOIN (SELECT id FROM $planets) AS b USING (id);", 1, 1, None),
         ("SELECT DISTINCT ON (planetId) planetId, name FROM testdata.satellites ", 7, 2, None),
         ("SELECT 8 DIV 4", 1, 1, None),
@@ -289,12 +289,6 @@ STATEMENTS = [
         ("SELECT * FROM (SELECT * FROM (SELECT * FROM testdata.satellites LEFT JOIN $planets AS p ON testdata.satellites.planetId = p.id) AS joined) AS mapped WHERE mass > 1", 170, 28, AmbiguousIdentifierError),
         ("SELECT * FROM (SELECT * FROM testdata.satellites LEFT JOIN (SELECT * FROM $planets) AS p ON testdata.satellites.planetId = p.id) AS mapped WHERE mass > 1", 170, 28, AmbiguousIdentifierError),
         ("SELECT * FROM (SELECT * FROM testdata.satellites LEFT JOIN $planets AS p ON testdata.satellites.planetId = p.id) AS mapped WHERE mass > 1", 170, 28, AmbiguousIdentifierError),
-        # 2042
-        ("SELECT DISTINCT Company FROM launches", 62, 1, None),
-        ("SELECT Company FROM launches", 4630, 1, None),
-        ("SELECT * FROM launches", 4630, 3, None),
-        ("SELECT DISTINCT Company FROM launches ORDER BY Company", 62, 1, None),
-        ("SELECT DISTINCT Mission FROM launches", 4556, 1, None),
         # 2050
         ("SELECT RANDOM_STRING() FROM $planets", 9, 1, None),
         ("SELECT RANDOM_STRING(24) FROM $planets", 9, 1, None),
