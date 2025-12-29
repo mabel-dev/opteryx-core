@@ -103,6 +103,14 @@ class NonEquiJoinNode(JoinNode):
                 right_indexes = numpy.array([], dtype=numpy.int32)
             else:
                 right_morsel = Morsel.from_arrow(morsel)
+
+                if self.left_column.encode("utf-8") in right_morsel.column_names:
+                    self.left_column, self.right_column = (self.right_column, self.left_column)
+
+                print(f"Non-Equi Join: {self.left_column} {self.comparison_op} {self.right_column}")
+                print(f"Left Morsel Columns: {self.left_morsel.column_names}")
+                print(f"Right Morsel Columns: {right_morsel.column_names}")
+
                 left_indexes, right_indexes = non_equi_nested_loop_join(
                     self.left_morsel,
                     right_morsel,

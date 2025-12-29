@@ -22,7 +22,7 @@ from cpython.mem cimport PyMem_Malloc, PyMem_Free
 from cpython.bytes cimport PyBytes_AS_STRING
 from cpython.bytes cimport PyBytes_FromStringAndSize
 from libc.stddef cimport size_t
-from libc.stdint cimport int32_t, intptr_t, uint8_t, uint64_t
+from libc.stdint cimport int32_t, intptr_t, uint8_t, uint64_t, int64_t
 from libc.string cimport memcpy, memset, memcmp
 from libc.stdlib cimport malloc, realloc, free
 
@@ -303,6 +303,41 @@ cdef class StringVector(Vector):
                 
                 simd_mix_hash(dst + i, scratch_ptr, <size_t> block)
                 i += block
+
+    cdef void compress_into(self, int64_t[::1] out_buf, Py_ssize_t offset=0) except *:
+        """Fast compress for StringVector: pack first 7 bytes into big-endian int64."""
+        cdef DrakenVarBuffer* ptr = self.ptr
+        cdef Py_ssize_t n = ptr.length
+        cdef char tmp[8]
+
+        if n == 0:
+            return
+        if offset < 0 or offset + n > out_buf.shape[0]:
+            raise ValueError("StringVector.compress: output buffer too small")
+
+        cdef int32_t start, end
+        cdef Py_ssize_t i, j
+        cdef char* base = <char*> ptr.data
+        cdef uint8_t* null_bitmap = ptr.null_bitmap
+        cdef bint has_nulls = null_bitmap != NULL
+        cdef uint64_t acc
+
+        for i in range(n):
+            if has_nulls and ((null_bitmap[i >> 3] >> (i & 7)) & 1) == 0:
+                out_buf[offset + i] = <int64_t> (-(1 << 63))
+                continue
+
+            start = ptr.offsets[i]
+            end = ptr.offsets[i + 1]
+            memset(tmp, 0, 8)
+            # copy up to 7 bytes into tmp[1:]
+            for j in range(min(7, end - start)):
+                tmp[1 + j] = base[start + j]
+
+            acc = 0
+            for j in range(8):
+                acc = (acc << 8) | (<uint8_t> tmp[j])
+            out_buf[offset + i] = <int64_t> acc
 
     cpdef StringVector take(self, int32_t[::1] indices):
         cdef DrakenVarBuffer* src_ptr = self.ptr

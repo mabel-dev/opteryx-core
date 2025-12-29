@@ -20,7 +20,7 @@ from cpython.bytes cimport PyBytes_FromStringAndSize, PyBytes_AS_STRING
 from cpython.mem cimport PyMem_Malloc, PyMem_Free
 from libc.string cimport memset
 
-from libc.stdint cimport int32_t, int8_t, intptr_t, uint64_t, uint8_t
+from libc.stdint cimport int32_t, int8_t, intptr_t, uint64_t, uint8_t, int64_t
 from libc.stdlib cimport malloc
 
 from opteryx.draken.core.buffers cimport DrakenFixedBuffer
@@ -61,6 +61,9 @@ cdef class BoolVector(Vector):
     # Properties
     @property
     def length(self):
+        return buf_length(self.ptr)
+
+    def __len__(self):
         return buf_length(self.ptr)
 
     @property
@@ -201,6 +204,24 @@ cdef class BoolVector(Vector):
             val = ((<uint8_t*>ptr.data)[i >> 3] >> (i & 7)) & 1
             buf[i] = 1 if val != target else 0
         return <int8_t[:n]> buf
+
+    cdef void compress_into(self, int64_t[::1] out_buf, Py_ssize_t offset=0) except *:
+        """Compress bools to int64_t where True=1, False=0, null=NULL_FLAG"""
+        cdef DrakenFixedBuffer* ptr = self.ptr
+        cdef Py_ssize_t n = ptr.length
+        if n == 0:
+            return
+        if offset < 0 or offset + n > out_buf.shape[0]:
+            raise ValueError("BoolVector.compress: output buffer too small")
+        cdef uint8_t* data = <uint8_t*> ptr.data
+        cdef uint8_t* null_bitmap = ptr.null_bitmap
+        cdef bint has_nulls = null_bitmap != NULL
+        cdef Py_ssize_t i
+        for i in range(n):
+            if has_nulls and ((null_bitmap[i >> 3] >> (i & 7)) & 1) == 0:
+                out_buf[offset + i] = <int64_t> (-(1 << 63))
+            else:
+                out_buf[offset + i] = 1 if ((data[i >> 3] >> (i & 7)) & 1) != 0 else 0
 
     cpdef int8_t any(self):
         cdef DrakenFixedBuffer* ptr = self.ptr

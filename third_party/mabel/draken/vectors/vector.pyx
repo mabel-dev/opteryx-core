@@ -19,7 +19,8 @@ The Vector class defines the common interface that all concrete vector
 types (Int64Vector, StringVector, etc.) implement.
 """
 
-from libc.stdint cimport uint64_t
+from libc.stdint cimport uint64_t, int64_t
+from cpython.mem cimport PyMem_Calloc
 
 from opteryx.draken.interop.arrow cimport vector_from_arrow
 
@@ -54,3 +55,77 @@ cdef class Vector:
             )
 
         py_hash(out_buf, offset=offset)
+
+    cpdef uint64_t[::1] hash(self):
+        """Create an output buffer, call `hash_into`, and return the buffer.
+
+        This is a Python-callable helper for convenience in tests and callers
+        that want a standalone hash for a single vector.
+        """
+        cdef Py_ssize_t n = len(self)
+        if n == 0:
+            # Return an empty Python array so `memoryview()` sees format 'Q'.
+            from array import array
+            return array("Q")
+
+        cdef uint64_t* out_buf = <uint64_t*> PyMem_Calloc(n, sizeof(uint64_t))
+        if out_buf == NULL:
+            raise MemoryError()
+
+        cdef uint64_t[::1] out_view = <uint64_t[:n]> out_buf
+        # Delegate to the low-level implementation
+        self.hash_into(out_view, 0)
+        return out_view
+
+    cdef void compress_into(self, int64_t[::1] out_buf, Py_ssize_t offset=0) except *:
+        """Default compress_into implementation.
+
+        If a concrete vector implements its own `compress_into`, that will be
+        invoked. Otherwise we fall back to a generic implementation that
+        iterates Python values and uses `to_int` from
+        `opteryx.compiled.structures.relation_statistics` to map each value
+        to an int64, writing into `out_buf` (starting at `offset`).
+        """
+        cdef object py_self = <object> self
+        # Check for Python override (or per-concrete-class override)
+        cdef object py_comp = getattr(py_self, "compress_into", None)
+        if py_comp is not None:
+            # A Python-level implementation exists on the instance/class
+            py_comp(out_buf, offset=offset)
+            return
+
+        # Generic fallback: iterate values and call to_int
+        from opteryx.compiled.structures.relation_statistics import to_int
+        cdef Py_ssize_t n = len(self)
+        # Validate buffer size
+        if out_buf.shape[0] - offset < n:
+            raise ValueError(f"output buffer too small")
+
+        cdef Py_ssize_t i
+        try:
+            vals = self.to_pylist()
+        except Exception:
+            # Fallback: try iterating
+            vals = [self[i] for i in range(n)]
+
+        for i in range(n):
+            out_buf[offset + i] = <int64_t> to_int(vals[i])
+
+    cpdef int64_t[::1] compress(self):
+        """Allocate an int64 buffer, call `compress`, and return the buffer.
+
+        Returns a memoryview compatible with `array('q')` (format 'q'). For
+        empty vectors returns an empty `array('q')`.
+        """
+        cdef Py_ssize_t n = len(self)
+        if n == 0:
+            from array import array
+            return array("q")
+
+        cdef int64_t* out_buf = <int64_t*> PyMem_Calloc(n, sizeof(int64_t))
+        if out_buf == NULL:
+            raise MemoryError()
+
+        cdef int64_t[::1] out_view = <int64_t[:n]> out_buf
+        self.compress_into(out_view, 0)
+        return out_view

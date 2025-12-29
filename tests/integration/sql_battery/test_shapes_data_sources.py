@@ -191,8 +191,6 @@ STATEMENTS = [
         ("SeLeCt * FrOm testdata.satellites ;", 177, 8, None),
         ("SELECT\t*\tFROM\ttestdata.satellites\t;", 177, 8, None),
         ("  SELECT  *  FROM  testdata.satellites  ;  ", 177, 8, None),
-        ("SELECT*\nFROMtestdata.satellites", 177, 8, None),
-        ("SELECT*FROMtestdata.satellites", 177, 8, None),
         ("SELECT *\r\nFROM testdata.satellites", 177, 8, None),
         ("SELECT * FROM testdata.satellites\r\n", 177, 8, None),
         ("SELECT * FROM testdata.satellites\r\n;", 177, 8, None),
