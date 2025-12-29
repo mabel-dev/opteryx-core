@@ -18,4 +18,5 @@ features = ["extension-module"]
 
 [dependencies.sqlparser]
 version = "0.60.0"
-features = ["serde", "visitor"]
+default-features = false
+features = ["serde"]
