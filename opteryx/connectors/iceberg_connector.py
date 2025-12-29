@@ -443,12 +443,7 @@ class IcebergConnector(Eidetic):
         self.kwargs = kwargs
         self.catalog_factory = catalog
         self.catalogs = {}  # Cache of instantiated catalogs by name
-
-        import pyiceberg
-
-        # If a pre-configured catalog instance was provided, cache it
-        if isinstance(catalog, pyiceberg.catalog.Catalog):
-            self.catalogs[catalog.name] = catalog
+        self.catalogs[catalog.name] = catalog
 
     def _get_catalog(self, catalog_name: str):
         """
@@ -460,7 +455,6 @@ class IcebergConnector(Eidetic):
         Returns:
             PyIceberg Catalog instance
         """
-        import pyiceberg
 
         if catalog_name in self.catalogs:
             return self.catalogs[catalog_name]
@@ -468,21 +462,7 @@ class IcebergConnector(Eidetic):
         # Create new catalog instance
         if self.catalog_factory is None:
             raise ValueError("Iceberg connector requires a catalog parameter")
-
-        if isinstance(self.catalog_factory, pyiceberg.catalog.Catalog):
-            # Already have an instance, just return it
-            return self.catalog_factory
-
-        # Call factory to create catalog
-        catalog_instance = self.catalog_factory(
-            catalog_name=catalog_name,
-            firestore_project=self.kwargs.get("firestore_project"),
-            firestore_database=self.kwargs.get("firestore_database"),
-            gcs_bucket=self.kwargs.get("gcs_bucket"),
-        )
-
-        self.catalogs[catalog_name] = catalog_instance
-        return catalog_instance
+        return self.catalog_factory
 
     def _parse_identifier(self, name: str) -> Tuple[str, str]:
         """
