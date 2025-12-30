@@ -54,7 +54,7 @@ from opteryx.exceptions import (
 
 from opteryx.utils.formatter import format_sql
 from opteryx.connectors import IcebergConnector
-from pyiceberg_firestore_gcs import FirestoreCatalog
+from opteryx_catalog.firestore_catalog import FirestoreCatalog
 
 FIRESTORE_DATABASE = os.environ.get("FIRESTORE_DATABASE")
 BUCKET_NAME = os.environ.get("GCS_BUCKET")

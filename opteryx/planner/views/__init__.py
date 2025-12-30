@@ -24,8 +24,6 @@ def get_view_plan(view_name: str, telemetry) -> dict:
 
 def _get_view_definition(view_name: str, telemetry) -> Optional[ViewDefinition]:
     """Return the view definition for a view, if it exists."""
-    import pyiceberg
-
     connector = connector_factory(view_name, telemetry)
     if not connector.eidetic:
         return None
@@ -34,7 +32,7 @@ def _get_view_definition(view_name: str, telemetry) -> Optional[ViewDefinition]:
         if view_definition is None:
             return None
         return view_definition
-    except pyiceberg.exceptions.NoSuchViewError:
+    except Exception:
         return None
 
 
