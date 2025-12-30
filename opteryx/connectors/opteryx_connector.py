@@ -12,13 +12,10 @@ Architecture:
 """
 
 import datetime
-import struct
-from decimal import Decimal
 from typing import Dict
 from typing import List
 from typing import Optional
 from typing import Tuple
-from typing import Union
 
 import numpy
 import pyarrow
@@ -38,106 +35,6 @@ from opteryx.exceptions import NotSupportedError
 from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.managers.expression import NodeType
 from opteryx.models import RelationStatistics
-
-
-@single_item_cache
-def to_iceberg_filter(root):
-    """
-    Convert a filter to Iceberg filter form.
-
-    This is specifically opinionated for the Iceberg reader.
-    """
-    import pyiceberg
-    import pyiceberg.expressions
-
-    ICEBERG_FILTERS = {
-        "GtEq": pyiceberg.expressions.GreaterThanOrEqual,
-        "Eq": pyiceberg.expressions.EqualTo,
-        "Gt": pyiceberg.expressions.GreaterThan,
-        "Lt": pyiceberg.expressions.LessThan,
-        "LtEq": pyiceberg.expressions.LessThanOrEqual,
-        "NotEq": pyiceberg.expressions.NotEqualTo,
-    }
-
-    def _predicate_to_iceberg_filter(root):
-        # Reduce look-ahead effort by using Exceptions to control flow
-        if root.node_type == NodeType.AND:  # pragma: no cover
-            left = _predicate_to_iceberg_filter(root.left)
-            right = _predicate_to_iceberg_filter(root.right)
-            if not isinstance(left, list):
-                left = [left]
-            if not isinstance(right, list):
-                right = [right]
-            left.extend(right)
-            return left
-        if root.node_type != NodeType.COMPARISON_OPERATOR:
-            raise NotSupportedError()
-
-        left_node = root.left
-        right_node = root.right
-
-        if left_node.node_type != NodeType.IDENTIFIER:
-            # swap sides so left is identifier; invert comparison to preserve semantics
-            left_node, right_node = right_node, left_node
-            OP_INVERT = {
-                "Gt": "Lt",
-                "GtEq": "LtEq",
-                "Lt": "Gt",
-                "LtEq": "GtEq",
-                "Eq": "Eq",
-                "NotEq": "NotEq",
-            }
-            # mutate the root's value accordingly
-            root.value = OP_INVERT.get(root.value, root.value)
-
-        right_value = right_node.value
-        right_type = right_node.schema_column.type
-        left_type = left_node.schema_column.type
-
-        if right_type == OrsoTypes.DATE:
-            date_val = right_value
-            if hasattr(date_val, "item"):
-                date_val = date_val.item()
-            right_value = datetime.datetime.combine(date_val, datetime.time.min)
-            right_type = OrsoTypes.TIMESTAMP
-        if left_type == OrsoTypes.DATE:
-            left_type = OrsoTypes.TIMESTAMP
-        if left_node.node_type != NodeType.IDENTIFIER:
-            raise NotSupportedError()
-        if right_node.node_type != NodeType.LITERAL:
-            raise NotSupportedError()
-        if left_type == OrsoTypes.VARCHAR:
-            left_type = OrsoTypes.BLOB
-        if right_type == OrsoTypes.VARCHAR:
-            right_type = OrsoTypes.BLOB
-        if right_type != left_type:
-            raise NotSupportedError(f"{right_type} != {left_type}")
-        if right_type == OrsoTypes.DOUBLE:
-            # iceberg needs doubles to be cast to floats
-            right_value = float(right_value)
-        #        if right_type == OrsoTypes.INTEGER:
-        #            # iceberg doesn't like integers unless we convert to strings
-        #            right_value = str(right_value)
-        #        if right_type == OrsoTypes.TIMESTAMP and isinstance(right_value, numpy.datetime64):
-        #            # iceberg doesn't like timestamps unless we convert to strings
-        #            right_value = right_value.astype(datetime.datetime)
-        return ICEBERG_FILTERS[root.value](left_node.value, right_value)
-
-    iceberg_filter = None
-    unsupported = []
-    if not isinstance(root, list):
-        root = [root]
-    for predicate in root:
-        try:
-            converted = _predicate_to_iceberg_filter(predicate)
-            if iceberg_filter is None:
-                iceberg_filter = converted
-            else:
-                iceberg_filter = pyiceberg.expressions.And(iceberg_filter, converted)
-        except NotSupportedError:
-            unsupported.append(predicate)
-
-    return iceberg_filter if iceberg_filter else "True", unsupported
 
 
 class OpteryxTable(FileSystemTable, Diachronic, Statistics):
@@ -165,12 +62,12 @@ class OpteryxTable(FileSystemTable, Diachronic, Statistics):
     supports_statistics = True  # Iceberg manifest stats
 
     PUSHABLE_OPS: Dict[str, bool] = {
-        "Eq": True,
-        "NotEq": True,  # nulls not handled correctly
-        "Gt": True,
-        "GtEq": True,
-        "Lt": True,
-        "LtEq": True,
+        #        "Eq": True,
+        #        "NotEq": True,
+        #        "Gt": True,
+        #        "GtEq": True,
+        #        "Lt": True,
+        #        "LtEq": True,
     }
 
     PUSHABLE_TYPES = {
@@ -189,7 +86,7 @@ class OpteryxTable(FileSystemTable, Diachronic, Statistics):
 
         Args:
             dataset: The table name (after catalog prefix is removed)
-            catalog: The pyiceberg Catalog instance
+            catalog: The Opteryx Catalog instance
             workspace: The workspace name
             **kwargs: Additional parameters (telemetry, start_date, end_date, etc.)
         """
@@ -280,10 +177,10 @@ class OpteryxTable(FileSystemTable, Diachronic, Statistics):
 
         column_names = self.schema.column_names
 
-        # Use Parquet manifest reader instead of PyIceberg inspect API to avoid Avro
+        # Use Parquet manifest reader instead of Opteryx inspect API to avoid Avro
         try:
             import pyarrow as pa
-            from pyiceberg_firestore_gcs.parquet_manifest import read_parquet_manifest
+            from opteryx_catalof.parquet_manifest import read_parquet_manifest
 
             parquet_records = read_parquet_manifest(
                 self.table.metadata,
@@ -357,47 +254,6 @@ class OpteryxTable(FileSystemTable, Diachronic, Statistics):
         )
         return [data_file.file_path for data_file in data_files]
 
-    @staticmethod
-    def decode_iceberg_value(
-        value: Union[int, float, bytes], data_type: str, scale: int = None
-    ) -> Union[int, float, str, datetime.datetime, Decimal, bool]:
-        """
-        Decode Iceberg-encoded values based on the specified data type.
-        """
-        import pyiceberg
-
-        data_type_class = data_type.__class__
-
-        if data_type_class == pyiceberg.types.LongType:
-            return int.from_bytes(value, "big", signed=True)
-        elif data_type_class == pyiceberg.types.DoubleType:
-            # IEEE 754 encoded floats are typically decoded directly
-            return struct.unpack(">d", value)[0]  # 8-byte IEEE 754 double
-        elif data_type_class in (pyiceberg.types.TimestampType, pyiceberg.types.TimestamptzType):
-            # Iceberg stores timestamps as microseconds since epoch
-            interval = int.from_bytes(value, "big", signed=True)
-            if interval < 0:
-                # Windows specifically doesn't like negative timestamps
-                return datetime.datetime(1970, 1, 1) + datetime.timedelta(microseconds=interval)
-            return datetime.datetime.fromtimestamp(interval / 1_000_000)
-        elif data_type == "date":
-            # Iceberg stores dates as days since epoch (1970-01-01)
-            interval = int.from_bytes(value, "big", signed=True)
-            return datetime.datetime(1970, 1, 1) + datetime.timedelta(days=interval)
-        elif data_type_class == pyiceberg.types.StringType:
-            # Assuming UTF-8 encoded bytes (or already decoded string)
-            return value.decode("utf-8") if isinstance(value, bytes) else str(value)
-        elif data_type_class == pyiceberg.types.BinaryType:
-            return value
-        elif str(data_type).startswith("decimal"):
-            # Iceberg stores decimals as unscaled integers
-            int_value = int.from_bytes(value, byteorder="big", signed=True)
-            return Decimal(int_value) / (10**data_type.scale)
-        elif data_type_class == pyiceberg.types.BooleanType:
-            return bool(value)
-
-        ValueError(f"Unsupported data type: {data_type}, {str(data_type)}")
-
 
 class OpteryxConnector(Eidetic):
     """
@@ -441,7 +297,7 @@ class OpteryxConnector(Eidetic):
             catalog_name: The catalog name to connect to
 
         Returns:
-            PyIceberg Catalog instance
+            Opteryx Catalog instance
         """
         # Require a catalog factory/class/instance to be configured
         if self.catalog_factory is None:
@@ -540,17 +396,15 @@ class OpteryxConnector(Eidetic):
             - If view exists: (TableType.View, view metadata)
             - If nothing exists: (None, None)
         """
-        import pyiceberg.exceptions
-
         # Parse catalog name and relative identifier
         catalog_name, relative_id = self._parse_identifier(name)
         catalog = self._get_catalog(catalog_name)
 
-        # Check if it is a table
+        # Check if it is a dataset
         try:
-            table = catalog.load_table(relative_id)
-            return TableType.Table, table
-        except pyiceberg.exceptions.NoSuchTableError:
+            dataset = catalog.load_dataset(relative_id)
+            return TableType.Table, dataset
+        except Exception:
             pass
 
         # Check if it is a view
