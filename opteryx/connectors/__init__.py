@@ -111,6 +111,8 @@ _default_connector = None
 
 __all__ = (
     # Core connectors
+    "OpteryxConnector",
+    "OpteryxTable",
     "FileSystemConnector",
     "IcebergConnector",
     "IcebergTable",
@@ -358,6 +360,10 @@ def connector_factory(dataset, telemetry, **config):
 
 def __getattr__(connector_name: str):
     """Lazy load connector classes on first access."""
+    if connector_name == "OpteryxConnector":
+        from opteryx.connectors.opteryx_connector import OpteryxConnector
+
+        return OpteryxConnector
     if connector_name == "IcebergConnector":
         from opteryx.connectors.iceberg_connector import IcebergConnector
 

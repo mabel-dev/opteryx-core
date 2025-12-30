@@ -140,9 +140,9 @@ def to_iceberg_filter(root):
     return iceberg_filter if iceberg_filter else "True", unsupported
 
 
-class IcebergTable(FileSystemTable, Diachronic, Statistics):
+class OpteryxTable(FileSystemTable, Diachronic, Statistics):
     """
-    Table-specific engine for reading Iceberg tables.
+    Table-specific engine for reading Opteryx tables.
 
     This is a transient object created per-table that handles:
     - Schema resolution
@@ -155,7 +155,7 @@ class IcebergTable(FileSystemTable, Diachronic, Statistics):
     """
 
     __mode__ = "Blob"
-    __type__ = "ICEBERG"
+    __type__ = "OPTERYX"
     __synchronousity__ = "asynchronous"
 
     # Capability declarations
@@ -183,22 +183,25 @@ class IcebergTable(FileSystemTable, Diachronic, Statistics):
         OrsoTypes.DATE,
     }
 
-    def __init__(self, dataset: str, catalog, catalog_name: str, **kwargs):
+    def __init__(self, dataset: str, catalog, workspace: str, **kwargs):
         """
-        Initialize the table engine for a specific Iceberg table.
+        Initialize the table engine for a specific Opteryx table.
 
         Args:
             dataset: The table name (after catalog prefix is removed)
             catalog: The pyiceberg Catalog instance
-            catalog_name: The catalog name
+            workspace: The workspace name
             **kwargs: Additional parameters (telemetry, start_date, end_date, etc.)
         """
         self.dataset = dataset
         self.catalog = catalog
-        self.catalog_name = catalog_name
+        self.workspace = workspace
+        self.at_date = None
 
         # Iceberg currently always uses GCS for storage
         # Create the appropriate filesystem for reading data files
+        from opteryx_catalog.exceptions import DatasetNotFound
+
         from opteryx.connectors.io_systems import OpteryxGcsFileSystem
 
         filesystem = OpteryxGcsFileSystem()
@@ -217,24 +220,15 @@ class IcebergTable(FileSystemTable, Diachronic, Statistics):
         self.snapshot = None
         self.dataset_committed_at = None
 
-        import pyiceberg
-
         try:
-            self.table = self.catalog.load_table(self.dataset)
-            self.snapshot = self.table.current_snapshot()
+            self.table = self.catalog.load_dataset(self.dataset)
+            self.snapshot = self.table.snapshot()
             self.snapshot_id = None if self.snapshot is None else self.snapshot.snapshot_id
-        except pyiceberg.exceptions.NoSuchTableError:
+        except DatasetNotFound:
             raise DatasetNotFoundError(dataset=self.dataset, connector=self.__type__)
 
     def get_dataset_schema(self) -> RelationSchema:
-        if self.start_date != self.end_date:
-            if self.start_date.date() != self.end_date.date():
-                raise UnsupportedSyntaxError("This table only supports point in time reads.")
-            raise UnsupportedSyntaxError(
-                "This table only supports point in time reads. Are you missing the time component from your FOR clause?"
-            )
-
-        if self.start_date is not None:
+        if self.at_date is not None:
             snapshots = self.table.inspect.snapshots().sort_by("committed_at")
             snapshot_rows = snapshots.to_pylist()
 
@@ -246,10 +240,10 @@ class IcebergTable(FileSystemTable, Diachronic, Statistics):
             first_committed = snapshot_rows[0]["committed_at"]
             last_committed = snapshot_rows[-1]["committed_at"]
 
-            if self.start_date < first_committed:
+            if self.at_date < first_committed:
                 # Point-in-time read is before our first snapshot — no data available then
                 raise DatasetReadError("No data available for the specified date.")
-            elif self.start_date > last_committed:
+            elif self.at_date > last_committed:
                 # Point-in-time read after the latest snapshot — return current data
                 selected = snapshot_rows[-1]
                 # ensure we store the commit time for telemetry/context
@@ -258,7 +252,7 @@ class IcebergTable(FileSystemTable, Diachronic, Statistics):
             else:
                 selected = snapshot_rows[0]
                 for candidate in snapshot_rows:
-                    if candidate["committed_at"] <= self.start_date:
+                    if candidate["committed_at"] <= self.at_date:
                         self.telemetry.dataset_committed_at = candidate["committed_at"].isoformat()
                         self.dataset_committed_at = self.telemetry.dataset_committed_at
                         selected = candidate
@@ -271,26 +265,20 @@ class IcebergTable(FileSystemTable, Diachronic, Statistics):
         # If the table has no snapshot and the read is not time-travel, use
         # the table's declared schema (from metadata) and return an empty result set.
         if self.snapshot is None:
-            iceberg_schema = self.table.schema()
+            self.schema = self.table.schema()
         else:
-            iceberg_schema = self.table.schemas()[self.snapshot.schema_id]
+            self.schema = self.table.schema(self.snapshot.schema_id)
             try:
                 self.telemetry.dataset_committed_at = datetime.datetime.fromtimestamp(
                     self.snapshot.timestamp_ms / 1000.0
                 ).isoformat()
             except (ValueError, OSError, OverflowError):
                 pass
-        arrow_schema = iceberg_schema.as_arrow()
-
-        self.schema = RelationSchema(
-            name=self.dataset,
-            columns=[FlatColumn.from_arrow(field) for field in arrow_schema],
-        )
 
         # Get statistics
         relation_statistics = RelationStatistics()
 
-        column_names = {col.field_id: col.name for col in iceberg_schema.columns}
+        column_names = self.schema.column_names
 
         # Use Parquet manifest reader instead of PyIceberg inspect API to avoid Avro
         try:
@@ -364,11 +352,10 @@ class IcebergTable(FileSystemTable, Diachronic, Statistics):
 
         # Get the list of data files to read
         data_files = self.table.scan(
-            row_filter=pushed_filters,  # Iceberg expression
+            row_filter=pushed_filters,
             snapshot_id=self.snapshot_id,
-        ).plan_files()
-
-        return [data_file.file.file_path for data_file in data_files]
+        )
+        return [data_file.file_path for data_file in data_files]
 
     @staticmethod
     def decode_iceberg_value(
@@ -412,7 +399,7 @@ class IcebergTable(FileSystemTable, Diachronic, Statistics):
         ValueError(f"Unsupported data type: {data_type}, {str(data_type)}")
 
 
-class IcebergConnector(Eidetic):
+class OpteryxConnector(Eidetic):
     """
     Long-lived Iceberg catalog gateway supporting multiple catalogs.
 
@@ -431,7 +418,7 @@ class IcebergConnector(Eidetic):
     supports_limit_pushdown = True  # Via FileSystemTable base
     supports_statistics = True  # Iceberg manifests provide stats
 
-    def __init__(self, *args, catalog=None, **kwargs):
+    def __init__(self, *args, catalog=None, telemetry=None, **kwargs):
         """
         Initialize the Iceberg catalog connector.
 
@@ -440,11 +427,11 @@ class IcebergConnector(Eidetic):
             **kwargs: Configuration (firestore_project, firestore_database, gcs_bucket, etc.)
         """
         Eidetic.__init__(self, **kwargs)
+        self.telemetry = telemetry
         self.kwargs = kwargs
+        self.kwargs.pop("connector", None)
+        self.kwargs.pop("remove_prefix", None)
         self.catalog_factory = catalog
-        self.catalogs = {}  # Cache of instantiated catalogs by name
-        print(catalog, dir(catalog))
-        self.catalogs[catalog.workspace] = catalog
 
     def _get_catalog(self, catalog_name: str):
         """
@@ -456,14 +443,68 @@ class IcebergConnector(Eidetic):
         Returns:
             PyIceberg Catalog instance
         """
-
-        if catalog_name in self.catalogs:
-            return self.catalogs[catalog_name]
-
-        # Create new catalog instance
+        # Require a catalog factory/class/instance to be configured
         if self.catalog_factory is None:
             raise ValueError("Iceberg connector requires a catalog parameter")
-        return self.catalog_factory
+
+        # Ensure we have a per-connector cache for instantiated catalogs
+        if not hasattr(self, "_catalog_cache"):
+            self._catalog_cache = {}
+
+        # Return cached instance when available
+        if catalog_name in self._catalog_cache:
+            return self._catalog_cache[catalog_name]
+
+        factory = self.catalog_factory
+
+        # If an instance (non-callable, non-class) was provided, cache and return it
+        if not isinstance(factory, type) and not callable(factory):
+            self._catalog_cache[catalog_name] = factory
+            return factory
+
+        instance = None
+        # If a class was provided, instantiate with workspace=catalog_name and allow exceptions to propagate
+        if isinstance(factory, type):
+            instance = factory(workspace=catalog_name, **self.kwargs)
+        else:
+            # Callable factory: call with workspace and let errors propagate
+            instance = factory(workspace=catalog_name, **self.kwargs)
+
+        # Cache and return instance
+        # Diagnostic logging: report workspace and whether tests_temp exists
+        try:
+            dbg_workspace = getattr(instance, "workspace", None)
+            print(
+                f"DEBUG [_get_catalog]: catalog_name={catalog_name} instance_type={type(instance)} workspace={dbg_workspace}"
+            )
+            try:
+                datasets = instance.list_datasets("tests_temp")
+                print(
+                    f"DEBUG [_get_catalog]: tests_temp datasets_count={len(datasets)} sample={datasets[:5]}"
+                )
+            except Exception as e:
+                print(f"DEBUG [_get_catalog]: list_datasets error: {e}")
+
+            # Additional diagnostics: Firestore client and GCS bucket
+            try:
+                fc = getattr(instance, "firestore_client", None)
+                fc_project = getattr(fc, "project", None) or getattr(fc, "_client_info", None)
+                fc_db = getattr(fc, "_database", None) or getattr(fc, "database", None)
+                print(
+                    f"DEBUG [_get_catalog]: firestore_client={fc} project={fc_project} database={fc_db}"
+                )
+            except Exception as e:
+                print(f"DEBUG [_get_catalog]: firestore_client inspect error: {e}")
+            try:
+                print(f"DEBUG [_get_catalog]: gcs_bucket={getattr(instance, 'gcs_bucket', None)}")
+            except Exception as e:
+                print(f"DEBUG [_get_catalog]: gcs_bucket inspect error: {e}")
+        except Exception:
+            # Never fail on diagnostics
+            pass
+
+        self._catalog_cache[catalog_name] = instance
+        return instance
 
     def _parse_identifier(self, name: str) -> Tuple[str, str]:
         """
@@ -533,13 +574,13 @@ class IcebergConnector(Eidetic):
             IcebergTable instance configured for the specific table
         """
         # Parse catalog name and relative identifier
-        catalog_name, relative_id = self._parse_identifier(name)
-        catalog = self._get_catalog(catalog_name)
+        workspace, relative_id = self._parse_identifier(name)
+        catalog = self._get_catalog(workspace)
 
         # Merge stored kwargs with provided kwargs (provided takes precedence)
         merged_kwargs = {**self.kwargs, **kwargs}
-        return IcebergTable(
-            dataset=relative_id, catalog=catalog, catalog_name=catalog_name, **merged_kwargs
+        return OpteryxTable(
+            dataset=relative_id, catalog=catalog, workspace=workspace, **merged_kwargs
         )
 
     def view_engine(self, name: str):
@@ -560,20 +601,17 @@ class IcebergConnector(Eidetic):
         from opteryx.connectors.capabilities.eidetic import ViewDefinition
 
         # Parse catalog name and relative identifier
-        catalog_name, relative_id = self._parse_identifier(view_name)
-        catalog = self._get_catalog(catalog_name)
+        workspace, relative_id = self._parse_identifier(view_name)
+        catalog = self._get_catalog(workspace)
 
-        # Parse relative_id into namespace and name
-        # For "clickbench.q01": namespace="clickbench", name="q01"
+        # Parse relative_id into collection and name
+        # For "clickbench.q01": collection="clickbench", name="q01"
         parts = relative_id.split(".")
         if len(parts) >= 2:
             name = parts[-1]
-            namespace = ".".join(parts[:-1])
-        else:
-            namespace = catalog_name
-            name = relative_id
+            collection = ".".join(parts[:-1])
 
-        identifier = (namespace, name)
+        identifier = (collection, name)
         view = catalog.load_view(identifier)
 
         return ViewDefinition(
@@ -591,7 +629,7 @@ class IcebergConnector(Eidetic):
         if prefix:
             namespace = prefix
         else:
-            namespace = self.catalog_name
+            namespace = self.workspace
 
         # Get view identifiers from catalog
         view_identifiers = self.catalog.list_views(namespace)
