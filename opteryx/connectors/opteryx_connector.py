@@ -245,11 +245,11 @@ class OpteryxTable(FileSystemTable, Diachronic, Statistics):
         return self.schema
 
     def get_list_of_blob_names(self, *, prefix: str = None, predicates: list = []) -> List[str]:
-        pushed_filters, _ = to_iceberg_filter(predicates)
+        #pushed_filters, _ = to_iceberg_filter(predicates)
 
         # Get the list of data files to read
         data_files = self.table.scan(
-            row_filter=pushed_filters,
+            #row_filter=pushed_filters,
             snapshot_id=self.snapshot_id,
         )
         return [data_file.file_path for data_file in data_files]
