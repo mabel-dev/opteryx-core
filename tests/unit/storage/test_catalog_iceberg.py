@@ -333,7 +333,7 @@ def __test_firestore_gcs_connector_registration():
     BUCKET_NAME = os.environ.get("GCS_BUCKET")
     GCP_PROJECT_ID = os.environ.get("GCP_PROJECT_ID")
 
-    from pyiceberg_firestore_gcs import FirestoreCatalog
+    from opteryx_catalog.firestore_catalog import FirestoreCatalog
     import opteryx
     
     opteryx.register_workspace(
