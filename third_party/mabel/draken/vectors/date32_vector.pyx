@@ -366,6 +366,37 @@ cdef class Date32Vector(Vector):
 
             dst[i] = mix_hash(dst[i], value)
 
+    cdef void compress_into(self, int64_t[::1] out_buf, Py_ssize_t offset=0) except *:
+        """Fast compress for Date32Vector: extend int32 days to int64."""
+        cdef DrakenFixedBuffer* ptr = self.ptr
+        cdef int32_t* data = <int32_t*> ptr.data
+        cdef Py_ssize_t n = ptr.length
+        cdef int64_t NULL_FLAG = <int64_t> -9223372036854775808
+
+        if n == 0:
+            return
+
+        if offset < 0 or offset + n > out_buf.shape[0]:
+            raise ValueError("Date32Vector.compress: output buffer too small")
+
+        cdef int64_t* dst = &out_buf[offset]
+        cdef uint8_t* null_bitmap = ptr.null_bitmap
+        cdef bint has_nulls = null_bitmap != NULL
+        cdef Py_ssize_t i
+        cdef uint8_t byte, bit
+
+        if has_nulls:
+            for i in range(n):
+                byte = null_bitmap[i >> 3]
+                bit = (byte >> (i & 7)) & 1
+                if bit:
+                    dst[i] = <int64_t> data[i]
+                else:
+                    dst[i] = NULL_FLAG
+        else:
+            for i in range(n):
+                dst[i] = <int64_t> data[i]
+
     def __str__(self):
         cdef list vals = []
         cdef Py_ssize_t i, k = min(<Py_ssize_t>buf_length(self.ptr), 10)

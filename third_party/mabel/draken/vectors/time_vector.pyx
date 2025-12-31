@@ -27,7 +27,7 @@ from libc.stdint cimport intptr_t
 from libc.stdint cimport uint64_t
 from libc.stdint cimport uint8_t
 from libc.stdlib cimport malloc
-from libc.string cimport memset
+from libc.string cimport memset, memcpy
 
 from opteryx.draken.core.buffers cimport DrakenFixedBuffer
 from opteryx.draken.core.buffers cimport DRAKEN_TIME32
@@ -298,6 +298,52 @@ cdef class TimeVector(Vector):
                     value = <uint64_t>(<int64_t> data32[i])
 
                 dst[i] = mix_hash(dst[i], value)
+
+    cdef void compress_into(self, int64_t[::1] out_buf, Py_ssize_t offset=0) except *:
+        """Fast compress for TimeVector: handle both time32 and time64."""
+        cdef DrakenFixedBuffer* ptr = self.ptr
+        cdef Py_ssize_t n = ptr.length
+        cdef int64_t NULL_FLAG = <int64_t> -9223372036854775808
+
+        if n == 0:
+            return
+
+        if offset < 0 or offset + n > out_buf.shape[0]:
+            raise ValueError("TimeVector.compress: output buffer too small")
+
+        cdef int64_t* dst = &out_buf[offset]
+        cdef uint8_t* null_bitmap = ptr.null_bitmap
+        cdef bint has_nulls = null_bitmap != NULL
+        cdef Py_ssize_t i
+        cdef uint8_t byte, bit
+        cdef int64_t* data64
+        cdef int32_t* data32
+
+        if self.is_time64:
+            data64 = <int64_t*> ptr.data
+            if not has_nulls:
+                memcpy(<void*>dst, <const void*>data64, <size_t>(n * sizeof(int64_t)))
+                return
+            for i in range(n):
+                byte = null_bitmap[i >> 3]
+                bit = (byte >> (i & 7)) & 1
+                if bit:
+                    dst[i] = data64[i]
+                else:
+                    dst[i] = NULL_FLAG
+        else:
+            data32 = <int32_t*> ptr.data
+            if has_nulls:
+                for i in range(n):
+                    byte = null_bitmap[i >> 3]
+                    bit = (byte >> (i & 7)) & 1
+                    if bit:
+                        dst[i] = <int64_t> data32[i]
+                    else:
+                        dst[i] = NULL_FLAG
+            else:
+                for i in range(n):
+                    dst[i] = <int64_t> data32[i]
 
     def __str__(self):
         cdef list vals = []

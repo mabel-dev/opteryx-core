@@ -42,12 +42,76 @@ class ArrowVector(Vector):
             raise TypeError("ArrowVector requires a pyarrow.Array")
         self._arr = arrow_array
         self._pa = pa
-        self._pc = pa.compute
+        try:
+            # Prefer direct access if available
+            self._pc = pa.compute
+        except Exception:
+            try:
+                # Some pyarrow builds expose compute as a submodule
+                import pyarrow.compute as _pc
+
+                self._pc = _pc
+            except Exception:
+                # Minimal shim for required compute operations used by ArrowVector
+                class _Shim:
+                    @staticmethod
+                    def take(arr, indices_arr):
+                        indices = indices_arr.to_pylist()
+                        vals = arr.to_pylist()
+                        return pa.array([vals[i] for i in indices])
+
+                    @staticmethod
+                    def equal(arr, value):
+                        return pa.array([x == value for x in arr.to_pylist()])
+
+                    @staticmethod
+                    def not_equal(arr, value):
+                        return pa.array([x != value for x in arr.to_pylist()])
+
+                    @staticmethod
+                    def greater(arr, value):
+                        return pa.array([x > value for x in arr.to_pylist()])
+
+                    @staticmethod
+                    def greater_equal(arr, value):
+                        return pa.array([x >= value for x in arr.to_pylist()])
+
+                    @staticmethod
+                    def less(arr, value):
+                        return pa.array([x < value for x in arr.to_pylist()])
+
+                    @staticmethod
+                    def less_equal(arr, value):
+                        return pa.array([x <= value for x in arr.to_pylist()])
+
+                    @staticmethod
+                    def sum(arr):
+                        s = sum(x for x in arr.to_pylist() if x is not None)
+                        return pa.scalar(s)
+
+                    @staticmethod
+                    def min(arr):
+                        vals = [x for x in arr.to_pylist() if x is not None]
+                        return pa.scalar(min(vals)) if vals else pa.scalar(None)
+
+                    @staticmethod
+                    def max(arr):
+                        vals = [x for x in arr.to_pylist() if x is not None]
+                        return pa.scalar(max(vals)) if vals else pa.scalar(None)
+
+                    @staticmethod
+                    def is_null(arr):
+                        return pa.array([x is None for x in arr.to_pylist()])
+
+                self._pc = _Shim()
 
     # -------- Core metadata --------
     @property
     def length(self) -> int:
         return len(self._arr)
+
+    def __len__(self) -> int:
+        return self.length
 
     @property
     def dtype(self):
