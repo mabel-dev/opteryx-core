@@ -328,6 +328,34 @@ cdef class IntervalVector(Vector):
                 value = mix_hash(partial, <uint64_t>data[i].microseconds)
             dst[i] = mix_hash(dst[i], value)
 
+    cdef void compress_into(self, int64_t[::1] out_buf, Py_ssize_t offset=0) except *:
+        """Fast compress for IntervalVector: use months component for ordering."""
+        cdef DrakenFixedBuffer* ptr = self.ptr
+        cdef Py_ssize_t n = ptr.length
+        cdef int64_t NULL_FLAG = <int64_t> -9223372036854775808
+
+        if n == 0:
+            return
+
+        if offset < 0 or offset + n > out_buf.shape[0]:
+            raise ValueError("IntervalVector.compress: output buffer too small")
+
+        cdef IntervalValue* data = <IntervalValue*> ptr.data
+        cdef int64_t* dst = &out_buf[offset]
+        cdef bint has_nulls = ptr.null_bitmap != NULL
+        cdef Py_ssize_t i
+
+        if has_nulls:
+            for i in range(n):
+                if _is_valid(ptr, i):
+                    # Use months as primary component for ordering
+                    dst[i] = data[i].months
+                else:
+                    dst[i] = NULL_FLAG
+        else:
+            for i in range(n):
+                dst[i] = data[i].months
+
     def __str__(self):
         cdef list preview = []
         cdef Py_ssize_t i, n = buf_length(self.ptr)

@@ -185,12 +185,13 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
         telemetry.bytes_read += len(data)
         return ref
 
-    def get_list_of_blob_names(self, *, prefix: str) -> List[str]:
+    def get_list_of_blob_names(self, *, prefix: str, predicates: list = []) -> List[str]:
         """
         List all blobs matching the prefix.
 
         Args:
             prefix: Path prefix to search
+            predicates: Optional predicates for filtering (subclasses may use this)
 
         Returns:
             List of blob paths
@@ -230,7 +231,7 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
         Yields:
             PyArrow Tables or schemas
         """
-        blob_names = self.get_list_of_blob_names(prefix=self.dataset)
+        blob_names = self.get_list_of_blob_names(prefix=self.dataset, predicates=predicates or [])
 
         if just_schema:
             for blob_name in blob_names:
