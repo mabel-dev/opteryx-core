@@ -102,7 +102,7 @@ def normalize_morsel(schema: RelationSchema, morsel: pyarrow.Table) -> pyarrow.T
 
     # Find which columns to drop and which columns we already have
     for i, column in enumerate(morsel.column_names):
-        column_name = schema.find_column(column)
+        column_name = schema.find_column(column, case_insensitive=True)
         if column_name is None:
             droppable_columns.add(i)
         else:

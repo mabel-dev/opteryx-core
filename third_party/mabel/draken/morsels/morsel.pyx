@@ -94,7 +94,7 @@ cdef class Morsel:
             PyMem_Free(self.ptr)
 
     cdef inline void _rebuild_name_to_index(self):
-        """Refresh the cached mapping from encoded column name -> index."""
+        """Refresh the cached mapping from encoded column name -> index (case-insensitive)."""
         cdef dict mapping = {}
         cdef Py_ssize_t i, n
         if self.ptr is NULL:
@@ -102,7 +102,8 @@ cdef class Morsel:
             return
         n = self.ptr.num_columns
         for i in range(n):
-            mapping[self._encoded_names[i]] = i
+            # Store lowercase version for case-insensitive lookups
+            mapping[self._encoded_names[i].decode("utf-8").lower().encode("utf-8")] = i
         self._name_to_index = mapping
 
     cdef inline dict _ensure_name_map(self):
@@ -111,7 +112,7 @@ cdef class Morsel:
         return self._name_to_index
 
     cdef inline Py_ssize_t _column_index_from_name(self, object column):
-        """Resolve column identifier (str/bytes/int) to a numeric index."""
+        """Resolve column identifier (str/bytes/int) to a numeric index (case-insensitive)."""
         if isinstance(column, int):
             if column < 0 or column >= self.ptr.num_columns:
                 raise IndexError(f"Column index {column} out of range")
@@ -119,9 +120,10 @@ cdef class Morsel:
 
         cdef bytes key
         if isinstance(column, str):
-            key = column.encode("utf-8")
+            key = column.lower().encode("utf-8")
         else:
-            key = column
+            # Convert bytes to lowercase for case-insensitive lookup
+            key = column.decode("utf-8").lower().encode("utf-8")
 
         cdef dict mapping = self._ensure_name_map()
         cdef object idx = mapping.get(key)
@@ -228,7 +230,9 @@ cdef class Morsel:
 
     cpdef Vector column(self, bytes name):
         cdef dict mapping = self._ensure_name_map()
-        cdef object idx = mapping.get(name)
+        # Lowercase for case-insensitive lookup
+        cdef bytes key = name.decode("utf-8").lower().encode("utf-8")
+        cdef object idx = mapping.get(key)
         if idx is None:
             raise KeyError(f"Column '{name}' not found")
         return <Vector>self.ptr.columns[<Py_ssize_t>idx]
