@@ -27,7 +27,7 @@ from libc.stdint cimport intptr_t
 from libc.stdint cimport uint64_t
 from libc.stdint cimport uint8_t
 from libc.stdlib cimport malloc
-from libc.string cimport memset
+from libc.string cimport memset, memcpy
 
 from opteryx.draken.core.buffers cimport DrakenFixedBuffer
 from opteryx.draken.core.buffers cimport DRAKEN_TIMESTAMP64
@@ -347,6 +347,37 @@ cdef class TimestampVector(Vector):
                 value = <uint64_t> data[i]
 
             dst[i] = mix_hash(dst[i], value)
+
+    cdef void compress_into(self, int64_t[::1] out_buf, Py_ssize_t offset=0) except *:
+        """Fast compress for TimestampVector: timestamps are already int64."""
+        cdef DrakenFixedBuffer* ptr = self.ptr
+        cdef int64_t* src = <int64_t*> ptr.data
+        cdef Py_ssize_t n = ptr.length
+        cdef int64_t* dst_base
+        cdef int64_t NULL_FLAG = <int64_t> -9223372036854775808
+
+        if n == 0:
+            return
+
+        if offset < 0 or offset + n > out_buf.shape[0]:
+            raise ValueError("TimestampVector.compress: output buffer too small")
+
+        dst_base = &out_buf[0]
+        cdef int64_t* dst = dst_base + offset
+        cdef uint8_t* null_bitmap = ptr.null_bitmap
+        cdef bint has_nulls = null_bitmap != NULL
+        cdef Py_ssize_t i
+
+        if not has_nulls:
+            # Fast path: bulk copy
+            memcpy(<void*>dst, <const void*>src, <size_t>(n * sizeof(int64_t)))
+            return
+
+        for i in range(n):
+            if _bitmap_is_valid(null_bitmap, i, self.null_bit_offset):
+                dst[i] = src[i]
+            else:
+                dst[i] = NULL_FLAG
 
     def __str__(self):
         cdef list vals = []
