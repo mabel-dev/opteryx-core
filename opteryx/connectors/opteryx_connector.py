@@ -4,11 +4,11 @@
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
 """
-Iceberg Connector - Refactored Architecture
+Opteryx Connector - Refactored Architecture
 
 Architecture:
-- IcebergConnector: Long-lived catalog gateway (handles catalog operations, views, introspection)
-- IcebergTable: Transient table-specific engine (handles data reading for one table)
+- OpteryxConnector: Long-lived catalog gateway (handles catalog operations, views, introspection)
+- OpteryxTable: Transient table-specific engine (handles data reading for one table)
 """
 
 import datetime
@@ -105,7 +105,7 @@ class OpteryxTable(FileSystemTable, Diachronic, Statistics):
 
         # Call FileSystemTable.__init__ which calls BaseTable.__init__
         FileSystemTable.__init__(
-            self, dataset=dataset, filesystem=filesystem, storage_type="ICEBERG", **kwargs
+            self, dataset=dataset, filesystem=filesystem, storage_type="OPTERYX", **kwargs
         )
         Diachronic.__init__(self, **kwargs)
         Statistics.__init__(self, **kwargs)
@@ -180,7 +180,7 @@ class OpteryxTable(FileSystemTable, Diachronic, Statistics):
         # Use Parquet manifest reader instead of Opteryx inspect API to avoid Avro
         try:
             import pyarrow as pa
-            from opteryx_catalof.parquet_manifest import read_parquet_manifest
+            from opteryx_catalog.parquet_manifest import read_parquet_manifest
 
             parquet_records = read_parquet_manifest(
                 self.table.metadata,
@@ -230,16 +230,6 @@ class OpteryxTable(FileSystemTable, Diachronic, Statistics):
 
         relation_statistics.record_count = pyarrow.compute.sum(files.column("record_count")).as_py()
 
-        if "distinct_counts" in files.columns:
-            for file in files.column("distinct_counts"):
-                for k, v in file:
-                    relation_statistics.set_cardinality_estimate(column_names[k], v)
-
-        if "value_counts" in files.columns:
-            for file in files.column("value_counts"):
-                for k, v in file:
-                    relation_statistics.add_count(column_names[k], v)
-
         self.relation_statistics = relation_statistics
 
         return self.schema
@@ -250,6 +240,7 @@ class OpteryxTable(FileSystemTable, Diachronic, Statistics):
         # Get the list of data files to read
         data_files = self.table.scan(
             #row_filter=pushed_filters,
+            row_limit=self.limit,
             snapshot_id=self.snapshot_id,
         )
         return [data_file.file_path for data_file in data_files]
@@ -461,9 +452,8 @@ class OpteryxConnector(Eidetic):
         # Parse relative_id into collection and name
         # For "clickbench.q01": collection="clickbench", name="q01"
         parts = relative_id.split(".")
-        if len(parts) >= 2:
-            name = parts[-1]
-            collection = ".".join(parts[:-1])
+        name = parts[-1]
+        collection = ".".join(parts[:-1])
 
         identifier = (collection, name)
         view = catalog.load_view(identifier)
