@@ -24,23 +24,28 @@ HistoryItem = Tuple[str, bool, datetime.datetime]
 
 
 @dataclass
-class ConnectionContext:
+class ExecutionContext:
     """
-    Manages the context for each database connection.
+    Manages the context for query execution.
+
+    Previously named ConnectionContext, renamed to reflect that this is about
+    query execution, not connection state.
 
     Attributes:
         connection_id: int
-            Unique identifier for the connection.
+            Unique identifier for the execution context.
         connected_at: datetime.datetime
-            Timestamp indicating when the connection was established.
+            Timestamp indicating when the context was established.
         user: str, optional
-            Username for the connection, defaults to None.
+            User identity for the execution, defaults to None.
         schema: str, optional
-            Schema to be used in the connection, defaults to None.
+            Schema to be used in the execution, defaults to None.
+        memberships: Iterable[str], optional
+            Groups/roles the user belongs to.
         variables: dict
-            System variables available during the connection.
+            System variables available during execution.
         history: List[HistoryItem]
-            A history of queries executed in this connection.
+            A history of queries executed in this context.
     """
 
     connection_id: int = field(default_factory=random_int, init=False)
