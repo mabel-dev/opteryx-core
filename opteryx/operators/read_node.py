@@ -13,6 +13,7 @@ normalizes the data into the format for internal processing.
 """
 
 import time
+from datetime import datetime
 from typing import Generator
 
 import orjson
@@ -182,7 +183,7 @@ class ReaderNode(BasePlanNode):
         """
         Generic method to convert a node to a mermaid entry
         """
-        BAR = "------------------------<br />"
+        BAR = "<hr />"
 
         if self.connector is None:
             mermaid = f'NODE_{nid}[("**{self.node_type.upper()} (FUNCTION)**<br />'
@@ -190,12 +191,58 @@ class ReaderNode(BasePlanNode):
         else:
             mermaid = f'NODE_{nid}[("**READ**<br />'
             mermaid += f"{self.connector.dataset}<br />"
-        mermaid += BAR
+        # Connector attribute name has historically been inconsistent; check common variants
         committed_at = None
         if hasattr(self.connector, "dataset_committed_at"):
             committed_at = self.connector.dataset_committed_at
+        elif hasattr(self.connector, "dataset_commited_at"):
+            committed_at = self.connector.dataset_commited_at
+        # Also allow value stored on telemetry as a fallback
+        if not committed_at and hasattr(self.telemetry, "dataset_committed_at"):
+            committed_at = getattr(self.telemetry, "dataset_committed_at")
+
+        # Format committed_at to 'YYYY-MM-DD HH:MM' when possible
+        formatted_committed = None
         if committed_at:
-            mermaid += f"committed at: {committed_at}<br />" + BAR
+            try:
+                if isinstance(committed_at, datetime):
+                    dt = committed_at
+                elif isinstance(committed_at, str):
+                    s = committed_at.strip()
+                    # Handle trailing Z (UTC) and timezone offsets
+                    if s.endswith("Z"):
+                        s = s[:-1]
+                    # Replace space with T for fromisoformat compat if necessary
+                    if " " in s and "T" not in s:
+                        s = s.replace(" ", "T")
+                    try:
+                        dt = datetime.fromisoformat(s)
+                    except Exception:
+                        # Fallback common patterns
+                        for fmt in (
+                            "%Y-%m-%dT%H:%M:%S.%f",
+                            "%Y-%m-%dT%H:%M:%S",
+                            "%Y-%m-%d %H:%M:%S",
+                        ):
+                            try:
+                                dt = datetime.strptime(s, fmt)
+                                break
+                            except Exception:
+                                dt = None
+                else:
+                    dt = None
+            except Exception:
+                dt = None
+
+            if dt:
+                formatted_committed = dt.strftime("%Y-%m-%d %H:%M")
+
+        if formatted_committed:
+            mermaid += f"committed: {formatted_committed}<br />" + BAR
+        elif committed_at:
+            # Fallback to raw value if parsing/formatting failed
+            mermaid += f"committed: {committed_at}<br />" + BAR
+        mermaid += BAR
         if self.columns:
             mermaid += f"columns: {len(self.columns)}<br />" + BAR
         if self.predicates:
@@ -207,14 +254,25 @@ class ReaderNode(BasePlanNode):
             mermaid += f"end date: {self.end_date}<br />"
             mermaid += BAR
 
-        if hasattr(self, "rows_seen") or hasattr(self, "blobs_seen"):
+        # Prefer telemetry values (updated during execution) for accurate counts
+        reads = getattr(self.telemetry, "blobs_read", None)
+        rows = getattr(self.telemetry, "rows_read", None)
+        bytes_processed = getattr(self.telemetry, "bytes_processed", None)
+
+        if reads or rows or bytes_processed:
+            if reads is not None:
+                mermaid += f"reads: {reads:,}<br />"
+            if rows is not None:
+                mermaid += f"rows seen: {rows:,}<br />"
+            if bytes_processed is not None:
+                mermaid += f"bytes: {bytes_processed:,}<br />"
+            mermaid += BAR
+        else:
+            # Fall back to legacy attributes on the node or connector
             if hasattr(self, "blobs_seen"):
                 mermaid += f"reads: {self.blobs_seen:,}<br />"
             if hasattr(self, "rows_seen"):
                 mermaid += f"rows seen: {self.rows_seen:,}<br />"
-            mermaid += BAR
-
-        elif hasattr(self.connector, "rows_seen") or hasattr(self.connector, "blobs_seen"):
             if hasattr(self.connector, "blobs_seen"):
                 mermaid += f"reads: {self.connector.blobs_seen:,}<br />"
             if hasattr(self.connector, "rows_seen"):

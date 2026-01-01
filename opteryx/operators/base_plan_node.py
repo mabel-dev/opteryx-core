@@ -68,7 +68,7 @@ class BasePlanNode:
         """
         Generic method to convert a node to a mermaid entry
         """
-        BAR = "------------------------<br />"
+        BAR = "<hr />"
 
         mermaid = f'NODE_{nid}["**{self.node_type.upper()}**<br />'
         if stats is None:
@@ -203,7 +203,7 @@ class JoinNode(BasePlanNode):
         """
         Generic method to convert a node to a mermaid entry
         """
-        BAR = "------------------------<br />"
+        BAR = "<hr />"
 
         mermaid = f'NODE_{nid}["**JOIN ({self.join_type.upper()})**<br />'
         if stats is None:
