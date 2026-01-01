@@ -18,7 +18,7 @@ from weakref import WeakSet
 from opteryx.cursor import Cursor
 from opteryx.exceptions import PermissionsError
 from opteryx.exceptions import ProgrammingError
-from opteryx.models import ConnectionContext
+from opteryx.models import ExecutionContext
 
 
 class Connection:
@@ -36,6 +36,12 @@ class Connection:
     ):
         """
         A virtual connection to the Opteryx query engine.
+
+        Parameters:
+            user: User identity (sub/client_id)
+            permissions: Granted permissions
+            memberships: Groups/roles the user belongs to
+            **kwargs: Additional connection parameters
         """
         self._kwargs = kwargs
 
@@ -48,7 +54,10 @@ class Connection:
         if memberships is None:
             memberships = ["opteryx"]
 
-        self.context = ConnectionContext(user=user, memberships=memberships)
+        self.context = ExecutionContext(
+            user=user,
+            memberships=memberships,
+        )
 
         # check the permissions we've been given are valid permissions
         self.permissions = self.validate_permissions(permissions)
