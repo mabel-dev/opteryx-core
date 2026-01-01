@@ -43,7 +43,6 @@ class ShowDatabasesNode(BasePlanNode):
             {
                 "Database": "<default>" if s == "_" else s,  # type: ignore
                 "Connector": str(c["connector"].__name__),  # type: ignore
-                "Remove_Prefix": c["remove_prefix"],  # type: ignore
                 "Type": str(c["connector"].mro()[1].__name__[4:-14]),  # type: ignore
             }
             for s, c in _storage_prefixes.items()
@@ -53,7 +52,6 @@ class ShowDatabasesNode(BasePlanNode):
             {
                 "Database": "opteryx",  # type: ignore
                 "Connector": "Internal",  # type: ignore
-                "Remove_Prefix": True,  # type: ignore
                 "Type": "Internal",  # type: ignore
             }
         )

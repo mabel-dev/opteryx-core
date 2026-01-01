@@ -54,10 +54,7 @@ class LocalFileCatalog(Catalog):
 
     def _resolve_path(self, identifier: Identifier) -> str:
         """Convert identifier to filesystem path."""
-        if isinstance(identifier, str):
-            parts = [identifier]
-        else:
-            parts = list(identifier)
+        parts = [identifier] if isinstance(identifier, str) else list(identifier)
         return os.path.join(self.root_path, *parts)
 
     def _is_table(self, path: str) -> bool:

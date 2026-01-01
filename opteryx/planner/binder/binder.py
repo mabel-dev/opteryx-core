@@ -78,7 +78,7 @@ def locate_identifier_in_loaded_schemas(
     column = None
 
     for schema in schemas.values():
-        found = schema.find_column(value)
+        found = schema.find_column(value, case_insensitive=True)
         if found:
             if column and found_source_relation:
                 # test for duplicates
@@ -245,7 +245,7 @@ def inner_binder(node: Node, context: BindingContext) -> Tuple[Node, Any]:
     # child columns, e.g. MAX(id), we may not have 'id' next time we see it, only MAX(id)
     column_name = node.query_column or format_expression(node, True)
     for schema in context.schemas.values():
-        found_column = schema.find_column(column_name)
+        found_column = schema.find_column(column_name, case_insensitive=True)
         # If the column exists in the schema, update node and context accordingly.
         if found_column:
             # found_identity = found_column.identity

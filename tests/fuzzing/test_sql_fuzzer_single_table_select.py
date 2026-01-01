@@ -198,7 +198,6 @@ def test_sql_fuzzing_single_table(i):
         "iceberg",
         connector=IcebergConnector,
         catalog=iceberg,
-        remove_prefix=True,
     )
 
     # Use test iteration number as seed for reproducibility

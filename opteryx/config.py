@@ -3,17 +3,10 @@
 # See the License at http://www.apache.org/licenses/LICENSE-2.0
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
-import datetime
 import typing
 from os import environ
-from pathlib import Path
 from typing import Optional
 from typing import Union
-
-_config_values: dict = {}
-
-# we need a preliminary version of this variable
-_OPTERYX_DEBUG = environ.get("OPTERYX_DEBUG") is not None
 
 
 def memory_allocation_calculation(allocation: Union[float, int]) -> int:
@@ -60,83 +53,6 @@ def system_gigabytes() -> int:
     return psutil.virtual_memory().total // (1024 * 1024 * 1024)
 
 
-def parse_yaml(yaml_str: str) -> dict:
-    """
-    Parse a simple YAML string into a dictionary.
-
-    Parameters:
-        yaml_str (str): YAML string to parse.
-
-    Returns:
-        dict: Parsed YAML content as a dictionary.
-    """
-
-    def line_value(value: str) -> typing.Any:
-        value = value.strip()
-        if value.isdigit():
-            return int(value)
-        if value.replace(".", "", 1).isdigit():
-            return float(value)
-        if value.lower() == "true":
-            return True
-        if value.lower() == "false":
-            return False
-        if value.lower() == "none":
-            return None
-        if value.startswith("["):
-            return [val.strip() for val in value[1:-1].split(",")]
-        if value.startswith("-"):
-            return [val.strip() for val in value.split("-") if val.strip()]
-        return value
-
-    result: dict = {}
-    lines = yaml_str.strip().split("\n")
-    key = ""
-    value: typing.Any = ""
-    in_list = False
-    list_key = ""
-    for line in lines:
-        ## remove comments
-        line = line.split("#")[0]
-        line = line.strip()
-        if not line:
-            continue
-        if in_list:
-            if line.startswith("- "):
-                result[list_key].append(line[2:].strip())
-            elif line.count(":") == 1:
-                key, value = line.split(":", 1)
-                if not value.strip():
-                    in_list = False
-                else:
-                    if not isinstance(result[list_key], dict):
-                        result[list_key] = {}
-                    result[list_key][key.strip()] = line_value(value.strip())
-        if not in_list:
-            key, value = line.split(":", 1)
-            if not value.split():
-                in_list = True
-                list_key = key.strip()
-                result[list_key] = []
-            else:
-                result[key.strip()] = line_value(value)
-    return result
-
-
-try:  # pragma: no cover
-    _config_path = Path(".") / "opteryx.yaml"
-    if _config_path.exists():
-        with open(_config_path, "r", encoding="utf-8") as _config_file:
-            _config_values = parse_yaml(_config_file.read())
-        if _OPTERYX_DEBUG:
-            print(f"{datetime.datetime.now()} [LOADER] Loading config from {_config_path}")
-except OSError as exception:  # pragma: no cover # it doesn't matter why - just use the defaults
-    if _OPTERYX_DEBUG:
-        print(
-            f"{datetime.datetime.now()} [LOADER] Config file {_config_path} not used - {exception}"
-        )
-
-
 def get(key: str, default: Optional[typing.Any] = None) -> Optional[typing.Any]:
     """
     Retrieve a configuration value.
@@ -148,10 +64,7 @@ def get(key: str, default: Optional[typing.Any] = None) -> Optional[typing.Any]:
     Returns:
         Optional[Any]: The configuration value.
     """
-    value = environ.get(key)
-    if value is None:
-        value = _config_values.get(key, default)
-    return value
+    return environ.get(key, default=default)
 
 
 # fmt:off
@@ -176,63 +89,27 @@ MAX_LOCAL_BUFFER_CAPACITY: int
 MAX_READ_BUFFER_CAPACITY: int
 """Read buffer pool size in either bytes or fraction of system memory (lazy)."""
 
-_LAZY_VALUES: dict = {}
+CONCURRENT_READS:int = int(get("CONCURRENT_READS", max(system_gigabytes(), 2)))
+READ_BUFFER_CAPACITY:int = memory_allocation_calculation(float(get("MAX_READ_BUFFER_CAPACITY", 0.1)))
+
+# Backwards compatibility alias: some modules expect MAX_READ_BUFFER_CAPACITY
+# to be present on the `config` module. Provide an alias to the computed
+# `READ_BUFFER_CAPACITY` value so older callers continue to work.
+MAX_READ_BUFFER_CAPACITY = READ_BUFFER_CAPACITY
 
 
-# Lazily computed configuration values. We compute certain values on first
-# access because they depend on expensive system calls (psutil) or other
-# runtime properties. Access these as attributes on the module; __getattr__
-# will compute and cache them.
-
-CONCURRENT_WORKERS_DEFAULT = int(get("CONCURRENT_WORKERS", 2))
-
-
-def _compute_MAX_READ_BUFFER_CAPACITY():
-    return memory_allocation_calculation(float(get("MAX_READ_BUFFER_CAPACITY", 0.1)))
-
-
-def _compute_CONCURRENT_READS():
-    # default to max(system_gigabytes(), 2)
-    return int(get("CONCURRENT_READS", max(system_gigabytes(), 2)))
-
-
-def __getattr__(name: str):
-    """Lazy attribute access for computed config values."""
-    if name == "MAX_READ_BUFFER_CAPACITY":
-        val = _LAZY_VALUES.get(name)
-        if val is None:
-            val = _compute_MAX_READ_BUFFER_CAPACITY()
-            _LAZY_VALUES[name] = val
-        return val
-    if name == "CONCURRENT_READS":
-        val = _LAZY_VALUES.get(name)
-        if val is None:
-            val = _compute_CONCURRENT_READS()
-            _LAZY_VALUES[name] = val
-        return val
-    if name == "CONCURRENT_WORKERS":
-        # simple default, no expensive computation
-        return CONCURRENT_WORKERS_DEFAULT
-    raise AttributeError(name)
-
-
-DISABLE_ZERO_COPY_BUFFER_READS = bool(get("DISABLE_ZERO_COPY_BUFFER_READS", False))
-"""Disable zero-copy reads from the buffer pool."""
-
-RESOURCES_PATH: Path = Path(get("RESOURCES_PATH", Path.cwd()))
 
 
 # GCP project ID - for Google Cloud Data
 GCP_PROJECT_ID: str = get("GCP_PROJECT_ID") 
-# don't try to raise the priority of the server process
-DISABLE_HIGH_PRIORITY: bool = bool(get("DISABLE_HIGH_PRIORITY", False))
-# don't output resource (memory) utilization information
-ENABLE_RESOURCE_LOGGING: bool = bool(get("ENABLE_RESOURCE_LOGGING", False))
 # size of morsels to push between steps
 # MORSEL_SIZE remains a plain constant
 MORSEL_SIZE: int = int(get("MORSEL_SIZE", 64 * 1024 * 1024))
-# not GA
-PROFILE_LOCATION:str = get("PROFILE_LOCATION")
+
+
+
+USE_PERMISSIONS_SERVICE: Optional[bool] = bool(get("USE_PERMISSIONS_SERVICE", False))
+"""If set, the URL of the external permissions service."""
 
 # fmt:on
 

@@ -99,10 +99,7 @@ elif is_linux():
 # runtime dependency on host-provided newer libstdc++ which can require
 # GLIBCXX/GLIBC versions not available on older manylinux targets.
 # macOS/Clang does not support -static-libgcc
-if is_mac():
-    LD_EXTRA = ["-static-libstdc++"]
-else:
-    LD_EXTRA = ["-static-libstdc++", "-static-libgcc"]
+LD_EXTRA = ["-static-libstdc++"] if is_mac() else ["-static-libstdc++", "-static-libgcc"]
 
 # SIMD-specific flags
 if arch == "x86_64":

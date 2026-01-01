@@ -19,7 +19,6 @@ from typing import Tuple
 from orso.tools import random_string
 from orso.types import OrsoTypes
 
-from opteryx.config import RESOURCES_PATH
 from opteryx.exceptions import UnnamedColumnError
 from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.managers.expression import NodeType
@@ -394,22 +393,35 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
                 proj_col.qualified_name for proj_col in _projection if proj_col.qualified_name
             }.union({f".{proj_col.alias}" for proj_col in _projection if proj_col.alias})
 
-            # Collect expression columns from projection
-            projection_expressions = {
-                format_expression(proj_col)
+            # Compare projection and ORDER BY identifiers case-insensitively
+            projection_qualified_names_lower = {n.lower() for n in projection_qualified_names}
+
+            # Collect expression columns from projection (lowercased)
+            projection_expressions_lower = {
+                format_expression(proj_col).lower()
                 for proj_col in _projection
                 if proj_col.node_type != NodeType.IDENTIFIER
+            }
+
+            # Collect source column names from projection (lowercased)
+            projection_source_columns_lower = {
+                f".{proj_col.source_column}".lower()
+                for proj_col in _projection
+                if getattr(proj_col, "source_column", None)
             }
 
             # Remove columns from ORDER BY that are directly in the projection, aliased, or have the same expression
             _order_by_columns_not_in_projection = [
                 ord_col
                 for ord_col in _order_by_columns
-                if ord_col.qualified_name not in projection_qualified_names
-                and f".{ord_col.source_column}" not in projection_qualified_names
-                and ord_col.qualified_name
-                not in [f".{proj_col.source_column}" for proj_col in _projection]
-                and format_expression(ord_col) not in projection_expressions
+                if (
+                    (ord_col.qualified_name or "").lower() not in projection_qualified_names_lower
+                    and f".{(ord_col.source_column or '')}".lower()
+                    not in projection_qualified_names_lower
+                    and f".{(ord_col.source_column or '')}".lower()
+                    not in projection_source_columns_lower
+                    and format_expression(ord_col).lower() not in projection_expressions_lower
+                )
             ]
 
             # Remove columns from ORDER BY that match the source of a wildcard in the projection
@@ -418,7 +430,7 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
                     _order_by_columns_not_in_projection = [
                         ord_col
                         for ord_col in _order_by_columns_not_in_projection
-                        if ord_col.source != proj_col.value[0]
+                        if (ord_col.source or "").lower() != (proj_col.value[0] or "").lower()
                     ]
 
         project_step = LogicalPlanNode(node_type=LogicalPlanStepType.Project)

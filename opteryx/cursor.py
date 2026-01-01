@@ -33,8 +33,6 @@ from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.models import QueryTelemetry
 from opteryx.utils import sql
 
-PROFILE_LOCATION = config.PROFILE_LOCATION
-
 
 class Cursor(DataFrame):
     """

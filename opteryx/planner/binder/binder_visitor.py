@@ -956,14 +956,6 @@ class BinderVisitor:
 
         # Extract the dataset name (remove prefix if configured)
         dataset_name = node.relation
-        if hasattr(gateway, "_matched_prefix") and hasattr(gateway, "_remove_prefix"):
-            if gateway._remove_prefix and gateway._matched_prefix:
-                prefix = gateway._matched_prefix
-                if node.relation.startswith(prefix):
-                    # Remove the prefix. If there's a separator (.) after the prefix, skip it too
-                    dataset_name = node.relation[len(prefix) :]
-                    if dataset_name.startswith("."):
-                        dataset_name = dataset_name[1:]
 
         # Create table-specific engine
         engine_kwargs = {}

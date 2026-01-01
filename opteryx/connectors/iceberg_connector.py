@@ -20,7 +20,6 @@ from typing import Optional
 from typing import Tuple
 from typing import Union
 
-import numpy
 import pyarrow
 from orso.schema import FlatColumn
 from orso.schema import RelationSchema
@@ -588,10 +587,7 @@ class IcebergConnector(Eidetic):
         from opteryx.connectors.capabilities.eidetic import ViewDefinition
 
         # Determine namespace to list from
-        if prefix:
-            namespace = prefix
-        else:
-            namespace = self.catalog_name
+        namespace = prefix or self.catalog_name
 
         # Get view identifiers from catalog
         view_identifiers = self.catalog.list_views(namespace)

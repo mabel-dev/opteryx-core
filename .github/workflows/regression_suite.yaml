@@ -73,7 +73,6 @@ jobs:
           DATA_CATALOG_CONNECTION: '${{ secrets.DATA_CATALOG_CONNECTION }}'
           DATA_CATALOG_STORAGE: '${{ secrets.DATA_CATALOG_STORAGE }}'
           VALKEY_CONNECTION: '${{ secrets.VALKEY_CONNECTION }}'
-          RESOURCES_PATH: 'testdata'
 
       - name: Check Coverage
         run: python -m coverage report -m

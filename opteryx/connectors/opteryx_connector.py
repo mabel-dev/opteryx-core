@@ -235,11 +235,11 @@ class OpteryxTable(FileSystemTable, Diachronic, Statistics):
         return self.schema
 
     def get_list_of_blob_names(self, *, prefix: str = None, predicates: list = []) -> List[str]:
-        #pushed_filters, _ = to_iceberg_filter(predicates)
+        # pushed_filters, _ = to_iceberg_filter(predicates)
 
         # Get the list of data files to read
         data_files = self.table.scan(
-            #row_filter=pushed_filters,
+            # row_filter=pushed_filters,
             row_limit=self.limit,
             snapshot_id=self.snapshot_id,
         )
@@ -277,7 +277,6 @@ class OpteryxConnector(Eidetic):
         self.telemetry = telemetry
         self.kwargs = kwargs
         self.kwargs.pop("connector", None)
-        self.kwargs.pop("remove_prefix", None)
         self.catalog_factory = catalog
 
     def _get_catalog(self, catalog_name: str):
@@ -470,10 +469,7 @@ class OpteryxConnector(Eidetic):
         from opteryx.connectors.capabilities.eidetic import ViewDefinition
 
         # Determine namespace to list from
-        if prefix:
-            namespace = prefix
-        else:
-            namespace = self.workspace
+        namespace = prefix or self.catalog_name
 
         # Get view identifiers from catalog
         view_identifiers = self.catalog.list_views(namespace)

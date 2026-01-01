@@ -335,8 +335,7 @@ def test_iceberg_battery(statement, rows, columns, exception):
     opteryx.register_workspace(
         "iceberg",
         IcebergConnector,
-        catalog=catalog,
-        remove_prefix=True,
+        catalog=catalog
     )
 
     try:

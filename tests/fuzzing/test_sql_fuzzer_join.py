@@ -186,7 +186,6 @@ def test_sql_fuzzing_join(i):
         "iceberg",
         connector=IcebergConnector,
         catalog=iceberg,
-        remove_prefix=True,
     )
 
     table1 = TABLES[random.choice(range(len(TABLES)))]

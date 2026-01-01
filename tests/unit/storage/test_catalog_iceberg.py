@@ -21,8 +21,7 @@ def test_iceberg_basic():
     opteryx.register_workspace(
         "iceberg",
         IcebergConnector,
-        catalog=catalog,
-        remove_prefix=True,
+        catalog=catalog
     )
 
     table = catalog.load_table("opteryx.tweets")
@@ -36,8 +35,7 @@ def test_iceberg_get_schema():
     opteryx.register_workspace(
         "iceberg",
         IcebergConnector,
-        catalog=catalog,
-        remove_prefix=True,
+        catalog=catalog
     )
 
     table = catalog.load_table("opteryx.tweets")
@@ -51,8 +49,7 @@ def test_iceberg_connector():
     opteryx.register_workspace(
         "iceberg",
         IcebergConnector,
-        catalog=catalog,
-        remove_prefix=True,
+        catalog=catalog
     )
     table = opteryx.query("SELECT * FROM iceberg.opteryx.tweets WHERE followers = 10")
     assert table.shape[0] == 353
@@ -67,8 +64,7 @@ def test_iceberg_get_stats_tweets():
     opteryx.register_workspace(
         "iceberg",
         IcebergConnector,
-        catalog=catalog,
-        remove_prefix=True,
+        catalog=catalog
     )
 
     connector = connector_factory("iceberg.opteryx.tweets", QueryTelemetry())
@@ -97,8 +93,7 @@ def test_iceberg_get_stats_missions():
     opteryx.register_workspace(
         "iceberg",
         IcebergConnector,
-        catalog=catalog,
-        remove_prefix=True,
+        catalog=catalog
     )
     connector = connector_factory("iceberg.opteryx.tweets", QueryTelemetry())
     connector.get_dataset_schema()
@@ -137,8 +132,7 @@ def test_iceberg_get_stats_remote():
     opteryx.register_workspace(
         "iceberg",
         IcebergConnector,
-        catalog=catalog,
-        remove_prefix=True,
+        catalog=catalog
     )
     connector = connector_factory("iceberg.iceberg.planets", QueryTelemetry())
     connector.get_dataset_schema()
@@ -178,8 +172,7 @@ def test_iceberg_remote():
     opteryx.register_workspace(
         "iceberg",
         IcebergConnector,
-        catalog=catalog,
-        remove_prefix=True,
+        catalog=catalog
     )
 
     table = opteryx.query("SELECT * FROM iceberg.iceberg.tweets WHERE followers = 10")
@@ -198,8 +191,7 @@ def test_iceberg_empty_table_read():
     opteryx.register_workspace(
         "iceberg",
         IcebergConnector,
-        catalog=catalog,
-        remove_prefix=True,
+        catalog=catalog
     )
 
     import pyarrow as pa
@@ -229,7 +221,6 @@ def test_iceberg_empty_table_count_and_schema():
         "iceberg",
         IcebergConnector,
         catalog=catalog,
-        remove_prefix=True,
     )
 
     import pyarrow as pa
@@ -260,7 +251,6 @@ def test_iceberg_empty_table_select_columns():
         "iceberg",
         IcebergConnector,
         catalog=catalog,
-        remove_prefix=True,
     )
 
     import pyarrow as pa
@@ -284,7 +274,6 @@ def test_iceberg_single_snapshot_where_clause():
         "iceberg",
         IcebergConnector,
         catalog=catalog,
-        remove_prefix=True,
     )
 
     import pyarrow as pa
@@ -339,7 +328,7 @@ def __test_firestore_gcs_connector_registration():
     opteryx.register_workspace(
         prefix="_default",
         connector=IcebergConnector,
-        remove_prefix=False,
+
         catalog=FirestoreCatalog,
         firestore_project=GCP_PROJECT_ID,
         firestore_database=FIRESTORE_DATABASE,

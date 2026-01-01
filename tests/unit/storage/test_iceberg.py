@@ -378,7 +378,6 @@ def test_iceberg_battery(statement, rows, columns, exception):
         "iceberg",
         IcebergConnector,
         catalog=catalog,
-        remove_prefix=True,
     )
 
     try:
