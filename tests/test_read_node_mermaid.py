@@ -98,7 +98,7 @@ def test_reader_mermaid_includes_committed_from_connector_single_t():
     node = read_node.ReaderNode(properties=qp, connector=connector, columns=[], predicates=[], limit=None)
 
     mermaid = node.to_mermaid(None, 1)
-    assert "committed at: 2025-12-24T12:00:00" in mermaid
+    assert "committed at: 2025-12-24 12:00" in mermaid
 
 
 def test_reader_mermaid_includes_committed_from_connector_double_t():
@@ -109,4 +109,4 @@ def test_reader_mermaid_includes_committed_from_connector_double_t():
     node = read_node.ReaderNode(properties=qp, connector=connector, columns=[], predicates=[], limit=None)
 
     mermaid = node.to_mermaid(None, 2)
-    assert "committed at: 2025-12-25T00:00:00" in mermaid
+    assert "committed at: 2025-12-25 00:00" in mermaid
