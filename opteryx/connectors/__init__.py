@@ -130,7 +130,7 @@ __all__ = (
 )
 
 
-def register_workspace(prefix, connector, *, remove_prefix: bool = False, **kwargs):
+def register_workspace(prefix, connector, **kwargs):
     """Register a connector for a specific prefix."""
     # Accept both uninstantiated classes and factory functions
     if not (isinstance(connector, type) or callable(connector)):
@@ -142,7 +142,6 @@ def register_workspace(prefix, connector, *, remove_prefix: bool = False, **kwar
     _storage_prefixes[prefix] = {
         "connector": connector,  # type: ignore
         "prefix": prefix,
-        "remove_prefix": remove_prefix,
         **kwargs,
     }
 
@@ -168,7 +167,6 @@ def set_default_connector(connector, **kwargs):
 
     _default_connector = {
         "connector": connector,
-        "remove_prefix": False,
         **kwargs,
     }
 
@@ -289,7 +287,6 @@ def connector_factory(dataset, telemetry, **config):
                 filesystem=filesystem, storage_type="LOCAL", telemetry=telemetry, **connector_entry
             )
             connector_instance._matched_prefix = None
-            connector_instance._remove_prefix = False
             _connector_cache[(None, ())] = connector_instance
             return connector_instance
 
@@ -297,11 +294,7 @@ def connector_factory(dataset, telemetry, **config):
     cache_key = (
         matched_prefix or "_default",
         tuple(
-            sorted(
-                (k, v)
-                for k, v in connector_entry.items()
-                if k not in ("prefix", "remove_prefix", "connector")
-            )
+            sorted((k, v) for k, v in connector_entry.items() if k not in ("prefix", "connector"))
         ),
     )
 
@@ -350,7 +343,6 @@ def connector_factory(dataset, telemetry, **config):
 
     # Store the matched prefix and config so binder can extract dataset names
     connector_instance._matched_prefix = matched_prefix
-    connector_instance._remove_prefix = connector_entry.get("remove_prefix", False)
 
     # Cache the instance
     _connector_cache[cache_key] = connector_instance
@@ -364,14 +356,14 @@ def __getattr__(connector_name: str):
         from opteryx.connectors.opteryx_connector import OpteryxConnector
 
         return OpteryxConnector
-    if connector_name == "IcebergConnector":
-        from opteryx.connectors.iceberg_connector import IcebergConnector
-
-        return IcebergConnector
     if connector_name == "FileSystemConnector":
         from opteryx.connectors.filesystem_connector import FileSystemConnector
 
         return FileSystemConnector
+    if connector_name == "IcebergConnector":
+        from opteryx.connectors.iceberg_connector import IcebergConnector
+
+        return IcebergConnector
     if connector_name == "GcpCloudStorageConnector":
         # Return FileSystemConnector with GCS filesystem
         return create_gcs_connector

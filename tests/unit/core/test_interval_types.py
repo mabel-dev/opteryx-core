@@ -1,7 +1,3 @@
-import os
-
-os.environ.setdefault("DISABLE_HIGH_PRIORITY", "1")
-
 import pyarrow
 import pytest
 from orso.types import OrsoTypes

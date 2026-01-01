@@ -52,7 +52,6 @@ from opteryx.exceptions import (
     VariableNotFoundError,
 )
 from opteryx.utils.formatter import format_sql
-from opteryx.connectors import IcebergConnector
 
 # fmt:off
 # fmt:off
@@ -62,7 +61,7 @@ STATEMENTS = [
         ("SELECT * FROM $planets", 9, 20, None),
         ("SELECT * FROM testdata.astronauts", 357, 19, None),
         ("SELECT * FROM $no_table", 1, 1, None),
-        ("SELECT * FROM $variables", 40, 5, None),
+        ("SELECT * FROM $variables", 39, 5, None),
         ("SELECT * FROM testdata.missions", 4630, 8, None),
         ("SELECT * FROM $telemetry", 5, 2, None),
         ("SELECT * FROM $stop_words", 305, 1, None),
@@ -155,9 +154,20 @@ STATEMENTS = [
         ("SELECT * FROM (SELECT id, name FROM $planets) AS subquery", 9, 2, None),
         ("SELECT COUNT(*) FROM (SELECT * FROM $planets WHERE id > 5) AS subquery", 1, 1, None),
 
+        # Mixed case identifiers
+        ("SELECT ID FROM $planets", 9, 1, None),
+        ("SELECT Id, NAME FROM $planets", 9, 2, None),
+        ("SELECT * FROM $planets WHERE ID = 1", 1, 20, None),
+        ("SELECT * FROM $planets ORDER BY NAME", 9, 20, None),
+        ("SELECT COUNT(ID) FROM $planets", 1, 1, None),
+        ("SELECT planetId, COUNT(*) FROM testdata.satellites GROUP BY PLANETID", 7, 2, None),
+        ("SELECT S.id, P.name FROM testdata.satellites AS S JOIN $planets AS P ON S.PLANETID = P.ID", 177, 2, None),
+        ("SELECT * FROM (SELECT ID, Name FROM $planets) AS subquery", 9, 2, None),
+        ("SELECT name FROM $planets WHERE id IN (1, 3, 5) ORDER BY NAME DESC", 3, 1, None),
+        ("SELECT ID, Name, id FROM $planets", 9, 3, AmbiguousIdentifierError),
 ]
-# fmt:on
 
+# fmt:on
 
 @pytest.mark.parametrize("statement, rows, columns, exception", STATEMENTS)
 def test_sql_battery(statement:str, rows:int, columns:int, exception: Optional[Exception]):
@@ -168,8 +178,8 @@ def test_sql_battery(statement:str, rows:int, columns:int, exception: Optional[E
     from opteryx.connectors import IcebergConnector
     from opteryx.connectors import DiskConnector
     iceberg = set_up_iceberg()
-    opteryx.register_workspace("iceberg", connector=IcebergConnector, catalog=iceberg, remove_prefix=True)
-    opteryx.register_workspace("testdata", DiskConnector, remove_prefix=False)
+    opteryx.register_workspace("iceberg", connector=IcebergConnector, catalog=iceberg)
+    opteryx.register_workspace("testdata", DiskConnector)
 
     try:
         # query to arrow is the fastest way to query

@@ -496,7 +496,7 @@ def set_up_iceberg():
     table.append(data.slice(50000, 50000))
 
     opteryx.register_workspace(
-        "iceberg", IcebergConnector, catalog=catalog, remove_prefix=True
+        "iceberg", IcebergConnector, catalog=catalog
     )
 
     modern_timestamp = datetime.datetime(2025, 11, 18, 21, 6, 21, 210000)

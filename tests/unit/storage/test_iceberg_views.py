@@ -21,7 +21,6 @@ def test_iceberg_create_and_get_view():
         "iceberg",
         IcebergConnector,
         catalog=catalog,
-        remove_prefix=True,
     )
     
     # Create a view directly using the catalog
@@ -59,7 +58,6 @@ def test_iceberg_list_views():
         "iceberg",
         IcebergConnector,
         catalog=catalog,
-        remove_prefix=True,
     )
     
     # Create multiple views
@@ -104,7 +102,6 @@ def test_iceberg_create_and_drop_view():
         "iceberg",
         IcebergConnector,
         catalog=catalog,
-        remove_prefix=True,
     )
     
     from opteryx.connectors import connector_factory
@@ -139,7 +136,6 @@ def test_iceberg_view_with_namespace():
         "iceberg",
         IcebergConnector,
         catalog=catalog,
-        remove_prefix=True,
     )
     
     from opteryx.connectors import connector_factory

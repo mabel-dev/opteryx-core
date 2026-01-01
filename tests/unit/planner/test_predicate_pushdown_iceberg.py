@@ -85,8 +85,7 @@ def test_predicate_pushdowns_blobs_parquet(query, expected_rowcount, expected_ro
     opteryx.register_workspace(
         "iceberg",
         IcebergConnector,
-        catalog=catalog,
-        remove_prefix=True,
+        catalog=catalog
     )
 
     cur = opteryx.query(query)

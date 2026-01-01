@@ -40,8 +40,7 @@ def test_iceberg_limit_pushdown(query, expected_rows):
     opteryx.register_workspace(
         "iceberg",
         IcebergConnector,
-        catalog=catalog,
-        remove_prefix=True,
+        catalog=catalog
     )
 
     cur = opteryx.query(query)

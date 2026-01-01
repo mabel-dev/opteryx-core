@@ -3,86 +3,45 @@
 # See the License at http://www.apache.org/licenses/LICENSE-2.0
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
-import fnmatch
-from typing import Dict
 from typing import Iterable
-from typing import List
 
-import orjson
+from opteryx import config
+from opteryx.exceptions import PermissionsError
 
-from opteryx.config import RESOURCES_PATH
-
-
-def load_permissions() -> List[Dict]:
-    """
-    Load permissions from a JSON file and return a list of permissions.
-
-    If the file is not found, or an error occurs, return a default set of permissions.
-
-    Returns:
-        List[Dict]: A list of dictionaries where each dictionary represents a permission.
-    """
-    try:
-        with open(RESOURCES_PATH / "permissions.json", "r", encoding="UTF8") as file:
-            # Load each line as a JSON object and append a default permission entry.
-            _permissions = [orjson.loads(line) for line in file] + [
-                {"role": "opteryx", "permission": "READ", "table": "*"}
-            ]
-        return _permissions
-    except FileNotFoundError:
-        # Return a default permission if the file does not exist.
-        return [{"role": "opteryx", "permission": "READ", "table": "*"}]
-    except Exception as err:
-        # Log the error and return a default permission in case of any other exceptions.
-        print(f"[OPTERYX] Failed to load permissions: {err}")
-        return [{"role": "opteryx", "permission": "READ", "table": "*"}]
-
-
-# Load permissions once and make them globally accessible.
-PERMISSIONS: List[Dict] = load_permissions()
+USE_PERMISSIONS_SERVICE = config.USE_PERMISSIONS_SERVICE
 
 
 def can_read_table(roles: Iterable[str], table: str, action: str = "READ") -> bool:
-    """
-    Check if any of the provided roles have READ access to the specified table.
+    """Check if any of the given roles can perform the action on the table.
 
-    When we call this function, we provide the current user's roles and the table name.
-    We then check if any of the permissions in the system match those roles and if those permissions
-    grant access to the table.
-
-    Tables can have wildcards in their names, so we use fnmatch to check the table name.
-
-    We have a default role 'opteryx' with READ access to all tables.
-
-    Parameters:
-        roles (List[str]): A list of roles to check against permissions.
-        table (str): The name of the table to check access for.
+    Args:
+        roles (Iterable[str]): The roles to check.
+        table (str): The table to check.
+        action (str): The action to check. Defaults to "READ".
 
     Returns:
-        bool: True if any role has READ access to the table, False otherwise.
+        bool: True if any role can perform the action on the table, False otherwise.
     """
+    if not USE_PERMISSIONS_SERVICE:
+        return True  # No permissions service configured, allow all
+    if table.count(".") == 0:
+        return True  # Local table, allow all
 
-    def escape_special_chars(pattern: str) -> str:
-        return pattern.replace(r"\*", "*").replace(r"\?", "?")
+    from opteryx.managers.permissions.check_permission import Action
+    from opteryx.managers.permissions.check_permission import check_permission
 
-    # If no permissions are loaded, default to allowing all reads.
-    if not PERMISSIONS:
-        return True
+    try:
+        response = check_permission(
+            roles=list(roles),
+            action=Action[action.upper()],
+            resources=[table],
+        )
+        return response.decision == "allow"
+    except Exception as exc:
+        # On any error, deny access
+        from orso.logging import get_logger
 
-    table = escape_special_chars(table)
-
-    for entry in PERMISSIONS:
-        # Check if the permission, the role is in the provided roles,
-        # and the table matches the pattern defined in the permission.
-        if (
-            entry["permission"] == action
-            and entry["role"] in roles
-            and fnmatch.fnmatch(table, entry["table"])
-        ):
-            # Additional check for leading dots
-            if table.startswith(".") and not entry["table"].startswith("."):
-                continue
-            return True
-
-    # If no matching permission is found, deny access.
-    return False
+        get_logger().error(
+            f"Permission check failed for roles {roles} on table {table} with action {action}: {exc}"
+        )
+        raise PermissionsError(f"Permission check failed for table {table} with action {action}")

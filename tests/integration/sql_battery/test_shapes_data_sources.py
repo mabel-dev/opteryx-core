@@ -23,7 +23,7 @@ from typing import Optional
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../../orso"))
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
-sys.path.insert(1, os.path.join(sys.path[0], "../pyiceberg_firestore_gcs"))
+sys.path.insert(1, os.path.join(sys.path[0], "../../../../pyiceberg-firestore-gcs"))
 
 import opteryx
 
@@ -55,7 +55,7 @@ from opteryx.exceptions import (
 
 from opteryx.utils.formatter import format_sql
 from opteryx.connectors import OpteryxConnector
-from opteryx_catalog import OpteryxConnector
+from opteryx_catalog import OpteryxCatalog
 
 FIRESTORE_DATABASE = os.environ.get("FIRESTORE_DATABASE")
 BUCKET_NAME = os.environ.get("GCS_BUCKET")
@@ -64,8 +64,7 @@ GCP_PROJECT_ID = os.environ.get("GCP_PROJECT_ID")
 opteryx.register_workspace(
     prefix="public",
     connector=OpteryxConnector,
-    remove_prefix=False,
-    catalog=OpteryxConnector,
+    catalog=OpteryxCatalog,
     firestore_project=GCP_PROJECT_ID,
     firestore_database=FIRESTORE_DATABASE,
     gcs_bucket=BUCKET_NAME,
@@ -278,7 +277,7 @@ def test_sql_battery(statement:str, rows:int, columns:int, exception: Optional[E
     Test a battery of statements
     """
     from opteryx.connectors import DiskConnector
-    opteryx.register_workspace("testdata", DiskConnector, remove_prefix=False)
+    opteryx.register_workspace("testdata", DiskConnector)
 
     try:
         # query to arrow is the fastest way to query

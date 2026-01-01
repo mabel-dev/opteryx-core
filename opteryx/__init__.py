@@ -272,20 +272,6 @@ def analyze_query(sql: str) -> Dict[str, Any]:
     return _parse_query_info(sql)
 
 
-# Try to increase the priority of the application
-if not config.DISABLE_HIGH_PRIORITY and hasattr(os, "nice"):  # pragma: no cover
-    nice_value = 0
-    try:
-        nice_value = os.nice(0)
-        if not is_mac():
-            os.nice(-20 + nice_value)
-    except PermissionError:
-        display_nice = f"{nice_value} (normal)" if nice_value == 0 else str(nice_value)
-        if OPTERYX_DEBUG:
-            print(
-                f"{datetime.datetime.now()} [LOADER] Cannot update process priority. Currently set to {display_nice}."
-            )
-
 # Enable all warnings, including DeprecationWarning
 warnings.simplefilter("once", DeprecationWarning)
 

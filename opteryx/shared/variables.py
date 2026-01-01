@@ -86,7 +86,6 @@ SYSTEM_VARIABLES_DEFAULTS: Dict[str, VariableSchema] = {
     # These are Opteryx specific variables
     "max_read_buffer_capacity": (OrsoTypes.INTEGER, config.MAX_READ_BUFFER_CAPACITY, VariableOwner.SERVER, Visibility.RESTRICTED),
     "disable_optimizer": (OrsoTypes.BOOLEAN, config.DISABLE_OPTIMIZER, VariableOwner.USER, Visibility.RESTRICTED),
-    "disable_high_priority": (OrsoTypes.BOOLEAN, config.DISABLE_HIGH_PRIORITY, VariableOwner.SERVER, Visibility.RESTRICTED),
     "concurrent_reads": (OrsoTypes.INTEGER, config.CONCURRENT_READS, VariableOwner.SERVER, Visibility.RESTRICTED),
     "user_memberships": (OrsoTypes.ARRAY, [[]], VariableOwner.INTERNAL, Visibility.UNRESTRICTED),
     "morsel_size": (OrsoTypes.INTEGER, config.MORSEL_SIZE, VariableOwner.SERVER, Visibility.RESTRICTED),

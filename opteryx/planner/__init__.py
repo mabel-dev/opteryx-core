@@ -54,8 +54,6 @@ from opteryx.managers.expression import NodeType
 from opteryx.models import Node
 from opteryx.models import PhysicalPlan
 
-PROFILE_LOCATION = config.PROFILE_LOCATION
-
 
 def build_literal_node(
     value: Any, root: Optional[Node] = None, suggested_type: Optional[OrsoTypes] = None

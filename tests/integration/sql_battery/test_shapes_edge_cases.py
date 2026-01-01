@@ -505,8 +505,7 @@ def test_sql_battery(statement:str, rows:int, columns:int, exception: Optional[E
     opteryx.register_workspace(
         "iceberg",
         connector=IcebergConnector,
-        catalog=iceberg,
-        remove_prefix=True,
+        catalog=iceberg
     )
 
     try:
