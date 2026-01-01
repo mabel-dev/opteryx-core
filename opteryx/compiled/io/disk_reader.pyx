@@ -39,7 +39,7 @@ cdef extern from "directories.h":
     void free_file_names(char** files, size_t count)
 
     int list_files_with_info_c "list_files_with_info"(const char* base_path, const char** extensions, size_t ext_count,
-                                                       file_info_t** files, size_t* count) nogil
+                                                    file_info_t** files, size_t* count) nogil
 
 cdef class MappedMemory:
     cdef unsigned char* data
@@ -235,6 +235,7 @@ def list_files_info(str path, extensions):
             free_file_list(files, file_count)
 
     return results
+
 
 def read_file_mmap(str path):
     """
