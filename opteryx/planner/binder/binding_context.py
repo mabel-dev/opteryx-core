@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import Any
 from typing import Dict
 
-from opteryx.models import ConnectionContext
+from opteryx.models import ExecutionContext
 from opteryx.models import QueryTelemetry
 from opteryx.virtual_datasets import derived
 
@@ -23,15 +23,15 @@ class BindingContext:
             Data schemas available during the binding phase.
         qid: str
             Query ID.
-        connection: Any
-            Database connection.
+        connection: ExecutionContext
+            Query execution context.
         relations: Set
             Relations involved in the current query.
     """
 
     schemas: Dict[str, Any]
     qid: str
-    connection: ConnectionContext
+    connection: ExecutionContext
     relations: Dict[str, str]
     telemetry: QueryTelemetry
 
