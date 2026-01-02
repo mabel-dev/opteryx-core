@@ -24,6 +24,7 @@ def get_view_plan(view_name: str, telemetry) -> dict:
 
 def _get_view_definition(view_name: str, telemetry) -> Optional[ViewDefinition]:
     """Return the view definition for a view, if it exists."""
+
     connector = connector_factory(view_name, telemetry)
     if not connector.eidetic:
         return None

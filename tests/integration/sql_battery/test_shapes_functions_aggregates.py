@@ -53,7 +53,6 @@ from opteryx.exceptions import (
 )
 
 from opteryx.utils.formatter import format_sql
-from opteryx.connectors import IcebergConnector
 
 # fmt:off
 # fmt:off
@@ -287,14 +286,6 @@ def test_sql_battery(statement:str, rows:int, columns:int, exception: Optional[E
     """
     Test a battery of statements
     """
-    from tests import set_up_iceberg
-    from opteryx.connectors import IcebergConnector
-    iceberg = set_up_iceberg()
-    opteryx.register_workspace(
-        "iceberg",
-        connector=IcebergConnector,
-        catalog=iceberg
-    )
 
     try:
         # query to arrow is the fastest way to query

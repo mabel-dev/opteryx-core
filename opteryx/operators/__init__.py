@@ -16,7 +16,7 @@ Operator Categories:
 
 Data Sources:
 - ReaderNode: Reads data from connectors (files, databases, etc.)
-- IcebergReaderNode: Async version for improved I/O performance
+- AsyncReadNode: Async version for connectors with async_read_blob() support
 - NullReaderNode: Returns empty table with correct schema (for contradictory predicates)
 - FunctionDatasetNode: Generates data from function calls
 
@@ -86,7 +86,7 @@ from .base_plan_node import BasePlanNode, JoinNode  # isort: skip
 from .aggregate_and_group_node import AggregateAndGroupNode  # Group is always followed by aggregate
 from .aggregate_node import AGGREGATORS
 from .aggregate_node import AggregateNode  # aggregate data
-from .iceberg_read_node import IcebergReaderNode
+from .async_read_node import AsyncReadNode
 from .null_reader_node import NullReaderNode  # empty table for contradictory predicates
 from .simple_aggregate_node import SimpleAggregateNode  # aggregate data
 from .simple_aggregate_and_group_node import SimpleAggregateAndGroupNode  # aggregate data
@@ -119,6 +119,7 @@ from .show_create_node import ShowCreateNode  # SHOW CREATE VIEW
 # from .show_databases_node import ShowDatabasesNode  # SHOW DATABASES
 # from .show_functions_node import ShowFunctionsNode  # supported functions
 from .show_value_node import ShowValueNode  # display node for SHOW
+from .view_management_node import ViewManagementNode  # CREATE/ALTER/DROP VIEW
 from .sort_node import SortNode  # order by selected columns
 from .union_node import UnionNode
 
@@ -129,7 +130,7 @@ __all__ = [
     "AggregateAndGroupNode",
     "AGGREGATORS",
     "AggregateNode",
-    "IcebergReaderNode",
+    "AsyncReadNode",
     "NullReaderNode",
     "SimpleAggregateNode",
     "SimpleAggregateAndGroupNode",
@@ -153,6 +154,7 @@ __all__ = [
     "ShowColumnsNode",
     "ShowCreateNode",
     "ShowValueNode",
+    "ViewManagementNode",
     "SortNode",
     "UnionNode",
     "is_aggregator",

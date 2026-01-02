@@ -4,9 +4,9 @@
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
 """
-S3 PyIceberg Catalog Shim
+S3 Catalog Shim
 
-Provides a PyIceberg-compatible catalog interface over S3/MinIO storage.
+Provides an OpteryxCatalog-compatible catalog interface over S3/MinIO storage.
 """
 
 from opteryx.connectors.catalogs.local_catalog import LocalFileCatalog
@@ -15,7 +15,7 @@ from opteryx.connectors.io_systems import OpteryxS3FileSystem
 
 class S3Catalog(LocalFileCatalog):
     """
-    Read-only PyIceberg catalog shim for S3/MinIO storage.
+    Read-only OpteryxCatalog-compatible shim for S3/MinIO storage.
 
     Uses OpteryxS3FileSystem for optimized S3 access.
     """

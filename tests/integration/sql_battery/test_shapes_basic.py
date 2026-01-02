@@ -174,11 +174,7 @@ def test_sql_battery(statement:str, rows:int, columns:int, exception: Optional[E
     """
     Test a battery of statements
     """
-    from tests import set_up_iceberg
-    from opteryx.connectors import IcebergConnector
     from opteryx.connectors import DiskConnector
-    iceberg = set_up_iceberg()
-    opteryx.register_workspace("iceberg", connector=IcebergConnector, catalog=iceberg)
     opteryx.register_workspace("testdata", DiskConnector)
 
     try:

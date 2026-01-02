@@ -4,16 +4,16 @@
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
 """
-PyIceberg Catalog Shims
+OpteryxCatalog Shims
 
-These shims implement the PyIceberg Catalog interface for non-Iceberg storage systems,
+These shims implement the OpteryxCatalog interface for non-Opteryx storage systems,
 allowing uniform catalog-based access patterns across all storage types.
 
 Key characteristics:
 - Read-only (no table/view creation)
 - No persistent metadata (schema inferred from files)
 - Filesystem-based table discovery
-- Compatible with PyIceberg table API
+- Compatible with OpteryxCatalog API
 """
 
 from opteryx.connectors.catalogs.gcs_catalog import GcsCatalog

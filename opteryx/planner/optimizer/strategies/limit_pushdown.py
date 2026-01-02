@@ -35,7 +35,6 @@ class LimitPushdownStrategy(OptimizationStrategy):
         LogicalPlanStepType.FunctionDataset,
         LogicalPlanStepType.HeapSort,
         LogicalPlanStepType.Limit,
-        LogicalPlanStepType.MetadataWriter,
         LogicalPlanStepType.Order,
         LogicalPlanStepType.Set,
         LogicalPlanStepType.Union,

@@ -2,7 +2,7 @@
 Generic filesystem connector using Arrow FileSystem interface.
 
 This provides a gateway connector (FileSystemConnector) and transient table reader
-(FileSystemTable) following the same pattern as IcebergConnector/IcebergTable.
+(FileSystemTable) following the same pattern as OpteryxConnector/OpteryxTable.
 """
 
 import os

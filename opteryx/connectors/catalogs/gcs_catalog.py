@@ -4,9 +4,9 @@
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
 """
-GCS PyIceberg Catalog Shim
+GCS Catalog Shim
 
-Provides a PyIceberg-compatible catalog interface over Google Cloud Storage.
+Provides an OpteryxCatalog-compatible catalog interface over Google Cloud Storage.
 """
 
 from opteryx.connectors.catalogs.local_catalog import LocalFileCatalog
@@ -15,7 +15,7 @@ from opteryx.connectors.io_systems import OpteryxGcsFileSystem
 
 class GcsCatalog(LocalFileCatalog):
     """
-    Read-only PyIceberg catalog shim for Google Cloud Storage.
+    Read-only OpteryxCatalog-compatible shim for Google Cloud Storage.
 
     Uses OpteryxGcsFileSystem for optimized GCS access.
     """
