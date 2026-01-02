@@ -21,7 +21,6 @@ protobuf
 # different storage providers
 google-cloud-storage
 minio
-pyiceberg[sql-sqlite,sql-postgres]
 openpyxl
 vortex-data==0.56.0
 

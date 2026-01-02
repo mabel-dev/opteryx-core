@@ -59,7 +59,7 @@ class OpteryxTable(FileSystemTable, Diachronic, Statistics):
     supports_diachronic = True  # Time-travel queries
     supports_predicate_pushdown = True  # Via FileSystemTable
     supports_limit_pushdown = True  # Via FileSystemTable
-    supports_statistics = True  # Iceberg manifest stats
+    supports_statistics = True  # Opteryx manifest stats
 
     PUSHABLE_OPS: Dict[str, bool] = {
         #        "Eq": True,
@@ -95,7 +95,7 @@ class OpteryxTable(FileSystemTable, Diachronic, Statistics):
         self.workspace = workspace
         self.at_date = None
 
-        # Iceberg currently always uses GCS for storage
+        # Opteryx currently always uses GCS for storage
         # Create the appropriate filesystem for reading data files
         from opteryx_catalog.exceptions import DatasetNotFound
 
@@ -235,7 +235,7 @@ class OpteryxTable(FileSystemTable, Diachronic, Statistics):
         return self.schema
 
     def get_list_of_blob_names(self, *, prefix: str = None, predicates: list = []) -> List[str]:
-        # pushed_filters, _ = to_iceberg_filter(predicates)
+        # pushed_filters, _ = to_opteryx_filter(predicates)
 
         # Get the list of data files to read
         data_files = self.table.scan(
@@ -248,7 +248,7 @@ class OpteryxTable(FileSystemTable, Diachronic, Statistics):
 
 class OpteryxConnector(Eidetic):
     """
-    Long-lived Iceberg catalog gateway supporting multiple catalogs.
+    Long-lived Opteryx catalog gateway supporting multiple catalogs.
 
     This connector handles:
     - Multi-catalog management (lazy instantiation)
@@ -259,15 +259,15 @@ class OpteryxConnector(Eidetic):
 
     eidetic = True
 
-    # Capability declarations - what IcebergTable readers support
-    supports_diachronic = True  # Time-travel via IcebergTable
+    # Capability declarations - what OpteryxTable readers support
+    supports_diachronic = True  # Time-travel via OpteryxTable
     supports_predicate_pushdown = True  # Via FileSystemTable base
     supports_limit_pushdown = True  # Via FileSystemTable base
-    supports_statistics = True  # Iceberg manifests provide stats
+    supports_statistics = True  # Opteryx manifests provide stats
 
     def __init__(self, *args, catalog=None, telemetry=None, **kwargs):
         """
-        Initialize the Iceberg catalog connector.
+        Initialize the Opteryx catalog connector.
 
         Args:
             catalog: Optional pre-configured catalog instance or catalog factory function
@@ -291,7 +291,7 @@ class OpteryxConnector(Eidetic):
         """
         # Require a catalog factory/class/instance to be configured
         if self.catalog_factory is None:
-            raise ValueError("Iceberg connector requires a catalog parameter")
+            raise ValueError("Opteryx connector requires a catalog parameter")
 
         # Ensure we have a per-connector cache for instantiated catalogs
         if not hasattr(self, "_catalog_cache"):
@@ -415,7 +415,7 @@ class OpteryxConnector(Eidetic):
             **kwargs: Additional parameters (start_date, end_date, telemetry, etc.)
 
         Returns:
-            IcebergTable instance configured for the specific table
+            OpteryxTable instance configured for the specific table
         """
         # Parse catalog name and relative identifier
         workspace, relative_id = self._parse_identifier(name)
@@ -469,16 +469,19 @@ class OpteryxConnector(Eidetic):
         from opteryx.connectors.capabilities.eidetic import ViewDefinition
 
         # Determine namespace to list from
-        namespace = prefix or self.catalog_name
+        namespace = prefix or "default"
+
+        # Resolve catalog for namespace
+        catalog = self._get_catalog(namespace)
 
         # Get view identifiers from catalog
-        view_identifiers = self.catalog.list_views(namespace)
+        view_identifiers = catalog.list_views(namespace)
 
         # Load each view and convert to ViewDefinition
         views = []
         for identifier in view_identifiers:
             try:
-                view = self.catalog.load_view(identifier)
+                view = catalog.load_view(identifier)
                 views.append(
                     ViewDefinition(
                         name=view.name,
@@ -493,26 +496,48 @@ class OpteryxConnector(Eidetic):
 
         return views
 
-    def create_view(self, view_name: str, statement: str, owner: str = None):
+    def create_view(
+        self, view_name: str, statement: str, update_if_exists: bool = False, owner: str = None
+    ):
         """Create a new view with the given name and definition."""
-        # Parse view_name - it might include namespace
-        if "." in view_name:
-            namespace, name = view_name.rsplit(".", 1)
-        else:
-            namespace = self.catalog_name
-            name = view_name
+        # Parse view_name into workspace and relative identifier
+        workspace, relative_id = self._parse_identifier(view_name)
+        catalog = self._get_catalog(workspace)
 
-        identifier = (namespace, name)
-        self.catalog.create_view(identifier=identifier, sql=statement, author=owner)
+        # Split relative identifier into collection and name for catalog
+        parts = relative_id.split(".")
+        name = parts[-1]
+        collection = ".".join(parts[:-1])
+
+        identifier = (collection, name)
+        catalog.create_view(
+            identifier=identifier, sql=statement, update_if_exists=update_if_exists, author=owner
+        )
 
     def drop_view(self, view_name: str):
         """Drop the specified view."""
-        # Parse view_name - it might include namespace
-        if "." in view_name:
-            namespace, name = view_name.rsplit(".", 1)
-        else:
-            namespace = self.catalog_name
-            name = view_name
+        # Parse view_name into workspace and relative identifier
+        workspace, relative_id = self._parse_identifier(view_name)
+        catalog = self._get_catalog(workspace)
 
-        identifier = (namespace, name)
-        self.catalog.drop_view(identifier)
+        # Split relative identifier into collection and name for catalog
+        parts = relative_id.split(".")
+        name = parts[-1]
+        collection = ".".join(parts[:-1])
+
+        identifier = (collection, name)
+        catalog.drop_view(identifier)
+
+    def view_exists(self, view_name: str) -> bool:
+        """Check if the specified view exists."""
+        # Parse view_name into workspace and relative identifier
+        workspace, relative_id = self._parse_identifier(view_name)
+        catalog = self._get_catalog(workspace)
+
+        # Split relative identifier into collection and name for catalog
+        parts = relative_id.split(".")
+        name = parts[-1]
+        collection = ".".join(parts[:-1])
+
+        identifier = (collection, name)
+        return catalog.view_exists(identifier)

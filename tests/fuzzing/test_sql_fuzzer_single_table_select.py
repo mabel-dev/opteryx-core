@@ -21,8 +21,6 @@ from orso.types import OrsoTypes
 
 import opteryx
 from opteryx.utils.formatter import format_sql
-from opteryx.connectors import IcebergConnector
-from opteryx.models import QueryTelemetry
 
 def random_value(t):
     if t == OrsoTypes.VARCHAR:
@@ -121,55 +119,32 @@ def generate_random_sql_select(columns, table):
     return select_clause
 
 from opteryx import virtual_datasets
-from tests import set_up_iceberg
 
-# Lazy-load the catalog to avoid expensive setup during test collection
-_catalog = None
+# Tables to use for fuzzing
 _tables_cache = None
 
-def get_iceberg_tables():
-    """Lazy initialization of Iceberg tables to avoid memory spike during test collection"""
-    global _catalog, _tables_cache
+def get_tables():
+    """Lazy initialization of tables to avoid expensive setup during test collection"""
+    global _tables_cache
     if _tables_cache is not None:
         return _tables_cache
     
-    _catalog = set_up_iceberg()
     _tables_cache = [
-        {
-            "name": "iceberg.opteryx.planets",
-            "fields": IcebergConnector(dataset="opteryx.planets", telemetry=QueryTelemetry(), catalog=_catalog).get_dataset_schema().columns,
-        },
-        {
-            "name": "iceberg.opteryx.satellites",
-            "fields": IcebergConnector(dataset="opteryx.satellites", telemetry=QueryTelemetry(), catalog=_catalog).get_dataset_schema().columns,
-        },
-        {
-            "name": "iceberg.opteryx.astronauts",
-            "fields": IcebergConnector(dataset="opteryx.astronauts", telemetry=QueryTelemetry(), catalog=_catalog).get_dataset_schema().columns,
-        },
-        {
-            "name": "iceberg.opteryx.missions",
-            "fields": IcebergConnector(dataset="opteryx.missions", telemetry=QueryTelemetry(), catalog=_catalog).get_dataset_schema().columns,
-        },
         {
             "name": virtual_datasets.planets.schema().name,
             "fields": virtual_datasets.planets.schema().columns,
         },
         {
-            "name": "testdata.planets",
-            "fields": virtual_datasets.planets.schema().columns,
+            "name": virtual_datasets.satellites.schema().name,
+            "fields": virtual_datasets.satellites.schema().columns,
         },
         {
-            "name": "testdata.satellites",
-            "fields": IcebergConnector(dataset="opteryx.satellites", telemetry=QueryTelemetry(), catalog=_catalog).get_dataset_schema().columns,
+            "name": virtual_datasets.astronauts.schema().name,
+            "fields": virtual_datasets.astronauts.schema().columns,
         },
         {
-            "name": "testdata.astronauts",
-            "fields": IcebergConnector(dataset="opteryx.astronauts", telemetry=QueryTelemetry(), catalog=_catalog).get_dataset_schema().columns,
-        },
-        {
-            "name": "testdata.missions",
-            "fields": IcebergConnector(dataset="opteryx.missions", telemetry=QueryTelemetry(), catalog=_catalog).get_dataset_schema().columns,
+            "name": virtual_datasets.missions.schema().name,
+            "fields": virtual_datasets.missions.schema().columns,
         },
     ]
     return _tables_cache
@@ -177,11 +152,11 @@ def get_iceberg_tables():
 # Keep old TABLES reference for compatibility but make it lazy
 class LazyTables:
     def __getitem__(self, key):
-        return get_iceberg_tables()[key]
+        return get_tables()[key]
     def __iter__(self):
-        return iter(get_iceberg_tables())
+        return iter(get_tables())
     def __len__(self):
-        return len(get_iceberg_tables())
+        return len(get_tables())
 
 TABLES = LazyTables()
 
@@ -190,15 +165,6 @@ TEST_CYCLES: int = 10
 
 @pytest.mark.parametrize("i", range(TEST_CYCLES))
 def test_sql_fuzzing_single_table(i):
-
-    from tests import set_up_iceberg
-    from opteryx.connectors import IcebergConnector
-    iceberg = set_up_iceberg()
-    opteryx.register_workspace(
-        "iceberg",
-        connector=IcebergConnector,
-        catalog=iceberg,
-    )
 
     # Use test iteration number as seed for reproducibility
     seed = i

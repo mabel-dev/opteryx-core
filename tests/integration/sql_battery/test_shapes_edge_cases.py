@@ -52,7 +52,6 @@ from opteryx.exceptions import (
     VariableNotFoundError,
 )
 from opteryx.utils.formatter import format_sql
-from opteryx.connectors import IcebergConnector
 
 # fmt:off
 # fmt:off
@@ -355,9 +354,7 @@ STATEMENTS = [
         ("SELECT * FROM $planets ORDER BY (id) DESC, name", 9, 20, None),
         # 2340
         ("SELECT * FROM testdata.satellites WHERE magnitude != 573602.533 ORDER BY magnitude DESC", 171, 8, None),
-        ("SELECT * FROM iceberg.opteryx.satellites WHERE magnitude != 573602.533 ORDER BY magnitude DESC", 171, 8, None),
         ("SELECT * FROM testdata.satellites WHERE magnitude < 573602.533 ORDER BY magnitude DESC", 171, 8, None),
-        ("SELECT * FROM iceberg.opteryx.satellites WHERE magnitude < 573602.533 ORDER BY magnitude DESC", 171, 8, None),
         # 2489
         ("SELECT name FROM $planets where length(md5(name)) == 32", 9, 1, None),
         ("SELECT name FROM $planets WHERE case when name is null then '' else name end == 'Earth'", 1, 1, None),
@@ -499,14 +496,6 @@ def test_sql_battery(statement:str, rows:int, columns:int, exception: Optional[E
     """
     Test a battery of statements
     """
-    from tests import set_up_iceberg
-    from opteryx.connectors import IcebergConnector
-    iceberg = set_up_iceberg()
-    opteryx.register_workspace(
-        "iceberg",
-        connector=IcebergConnector,
-        catalog=iceberg
-    )
 
     try:
         # query to arrow is the fastest way to query
