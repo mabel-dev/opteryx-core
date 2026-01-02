@@ -23,7 +23,7 @@ Connector Types:
 
 Core Connectors:
 - FileSystemConnector: Generic filesystem access (local, S3, GCS)
-- IcebergConnector: Apache Iceberg table format
+- OpteryxConnector: Opteryx table format
 
 Special Connectors:
 - VirtualDataConnector: In-memory datasets and computed tables
@@ -114,8 +114,6 @@ __all__ = (
     "OpteryxConnector",
     "OpteryxTable",
     "FileSystemConnector",
-    "IcebergConnector",
-    "IcebergTable",
     # Factory functions for filesystem connectors
     "create_local_connector",
     "create_gcs_connector",
@@ -155,7 +153,7 @@ def set_default_connector(connector, **kwargs):
         **kwargs: Configuration parameters for the connector
 
     Example:
-        set_default_connector(IcebergConnector,
+        set_default_connector(OpteryxConnector,
                             catalog=FirestoreCatalog,
                             firestore_project="my-project",
                             ...)
@@ -237,7 +235,7 @@ def connector_factory(dataset, telemetry, **config):
     The connector acts as a gateway to the catalog and can be queried about specific tables/views.
 
     Args:
-        dataset: The dataset reference (e.g., "iceberg.catalog.schema.table")
+        dataset: The dataset reference (e.g., "catalog.schema.table")
         telemetry: Query telemetry object
         **config: Additional configuration
 
@@ -360,10 +358,6 @@ def __getattr__(connector_name: str):
         from opteryx.connectors.filesystem_connector import FileSystemConnector
 
         return FileSystemConnector
-    if connector_name == "IcebergConnector":
-        from opteryx.connectors.iceberg_connector import IcebergConnector
-
-        return IcebergConnector
     if connector_name == "GcpCloudStorageConnector":
         # Return FileSystemConnector with GCS filesystem
         return create_gcs_connector

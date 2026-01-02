@@ -79,8 +79,9 @@ def create_physical_plan(logical_plan, query_properties) -> PhysicalPlan:
                 # This is a Scan marked for empty result (contradictory predicates)
                 # Use NullReaderNode to return empty table with correct schema
                 node = operators.NullReaderNode(query_properties, **node_config)
-            elif connector and connector.__type__ == "ICEBERG":
-                node = operators.IcebergReaderNode(query_properties, **node_config)
+            elif connector and getattr(connector, "__synchronousity__", None) == "asynchronous":
+                # Use async reader for connectors that support async_read_blob()
+                node = operators.AsyncReadNode(query_properties, **node_config)
             else:
                 node = operators.ReaderNode(properties=query_properties, **node_config)
         elif node_type == LogicalPlanStepType.Set:
@@ -92,6 +93,15 @@ def create_physical_plan(logical_plan, query_properties) -> PhysicalPlan:
                 node = operators.ShowCreateNode(query_properties, **node_config)
             else:
                 raise UnsupportedSyntaxError(f"Unsupported SHOW type '{node_config['object_type']}'")
+        elif node_type == LogicalPlanStepType.CreateView:
+            # Create view definition (view management)
+            node = operators.ViewManagementNode(query_properties, action="create_view", **node_config)
+        elif node_type == LogicalPlanStepType.AlterView:
+            # Alter view definition (view management)
+            node = operators.ViewManagementNode(query_properties, action="alter_view", **node_config)
+        elif node_type == LogicalPlanStepType.DropView:
+            # Drop view(s) (view management)
+            node = operators.ViewManagementNode(query_properties, action="drop_view", **node_config)
         elif node_type == LogicalPlanStepType.ShowColumns:
             node = operators.ShowColumnsNode(query_properties, **node_config)
         elif node_type == LogicalPlanStepType.Union:

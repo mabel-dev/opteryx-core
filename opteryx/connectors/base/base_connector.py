@@ -6,8 +6,8 @@
 """
 Base classes for connectors and table readers.
 
-BaseConnector: Gateway interface for long-lived connectors (IcebergConnector, FileSystemConnector)
-BaseTable: Table reader interface for transient readers (IcebergTable, FileSystemTable)
+BaseConnector: Gateway interface for long-lived connectors (OpteryxConnector, FileSystemConnector)
+BaseTable: Table reader interface for transient readers (OpteryxTable, FileSystemTable)
 """
 
 from typing import Any
@@ -33,7 +33,7 @@ class BaseConnector:
     Gateway connectors are long-lived, cached by storage configuration.
     They create transient table reader instances via table_engine().
 
-    Examples: IcebergConnector, FileSystemConnector
+    Examples: OpteryxConnector, FileSystemConnector
     """
 
     eidetic = False
@@ -83,7 +83,7 @@ class BaseConnector:
             **kwargs: Additional parameters (telemetry, start_date, end_date, etc.)
 
         Returns:
-            A table reader instance (e.g., IcebergTable, FileSystemTable)
+            A table reader instance (e.g., OpteryxTable, FileSystemTable)
 
         Note:
             Default implementation returns None. Gateway connectors must override
@@ -100,7 +100,7 @@ class BaseTable:
     They have dataset, telemetry, and schema attributes, and implement
     the actual data reading logic.
 
-    Examples: IcebergTable, FileSystemTable, legacy monolithic connectors
+    Examples: OpteryxTable, FileSystemTable, legacy monolithic connectors
     """
 
     # Capability declarations - what this table reader supports

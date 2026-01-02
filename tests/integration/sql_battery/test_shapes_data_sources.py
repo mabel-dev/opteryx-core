@@ -8,7 +8,7 @@ This is part of a suite of tests which are based on running many SQL statements.
     Results Checking
     Compare to DuckDB
 
-This file tests: Data source tests (Parquet, Iceberg, multiple sources)
+This file tests: Data source tests (Parquet, multiple sources)
 
 This tests that the shape of the response is as expected: the right number of columns,
 the right number of rows and, if appropriate, the right exception is thrown.
@@ -21,7 +21,6 @@ import sys
 
 from typing import Optional
 
-sys.path.insert(1, os.path.join(sys.path[0], "../../../orso"))
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 sys.path.insert(1, os.path.join(sys.path[0], "../../../../pyiceberg-firestore-gcs"))
 

@@ -13,7 +13,6 @@ normalizes the data into the format for internal processing.
 """
 
 import time
-from datetime import datetime
 from typing import Generator
 
 import orjson
@@ -163,8 +162,8 @@ class ReaderNode(BasePlanNode):
         BasePlanNode.__init__(self, properties=properties, **parameters)
 
         self.uuid = parameters.get("uuid")
-        self.start_date = parameters.get("start_date")
-        self.end_date = parameters.get("end_date")
+        self.at_date = parameters.get("at_date")
+        self.committed_at = parameters.get("committed_at")
         self.hints = parameters.get("hints", [])
         self.columns = parameters.get("columns", [])
         self.predicates = parameters.get("predicates", [])
@@ -191,57 +190,12 @@ class ReaderNode(BasePlanNode):
         else:
             mermaid = f'NODE_{nid}[("**READ**<br />'
             mermaid += f"{self.connector.dataset}<br />"
-        # Connector attribute name has historically been inconsistent; check common variants
-        committed_at = None
-        if hasattr(self.connector, "dataset_committed_at"):
-            committed_at = self.connector.dataset_committed_at
-        elif hasattr(self.connector, "dataset_commited_at"):
-            committed_at = self.connector.dataset_commited_at
-        # Also allow value stored on telemetry as a fallback
-        if not committed_at and hasattr(self.telemetry, "dataset_committed_at"):
-            committed_at = getattr(self.telemetry, "dataset_committed_at")
 
         # Format committed_at to 'YYYY-MM-DD HH:MM' when possible
-        formatted_committed = None
-        if committed_at:
-            try:
-                if isinstance(committed_at, datetime):
-                    dt = committed_at
-                elif isinstance(committed_at, str):
-                    s = committed_at.strip()
-                    # Handle trailing Z (UTC) and timezone offsets
-                    if s.endswith("Z"):
-                        s = s[:-1]
-                    # Replace space with T for fromisoformat compat if necessary
-                    if " " in s and "T" not in s:
-                        s = s.replace(" ", "T")
-                    try:
-                        dt = datetime.fromisoformat(s)
-                    except Exception:
-                        # Fallback common patterns
-                        for fmt in (
-                            "%Y-%m-%dT%H:%M:%S.%f",
-                            "%Y-%m-%dT%H:%M:%S",
-                            "%Y-%m-%d %H:%M:%S",
-                        ):
-                            try:
-                                dt = datetime.strptime(s, fmt)
-                                break
-                            except Exception:
-                                dt = None
-                else:
-                    dt = None
-            except Exception:
-                dt = None
-
-            if dt:
-                formatted_committed = dt.strftime("%Y-%m-%d %H:%M")
-
-        if formatted_committed:
+        if self.committed_at:
+            formatted_committed = self.committed_at.strftime("%Y-%m-%d %H:%M")
             mermaid += f"committed: {formatted_committed}<br />" + BAR
-        elif committed_at:
-            # Fallback to raw value if parsing/formatting failed
-            mermaid += f"committed: {committed_at}<br />" + BAR
+
         mermaid += BAR
         if self.columns:
             mermaid += f"columns: {len(self.columns)}<br />" + BAR
@@ -249,9 +203,8 @@ class ReaderNode(BasePlanNode):
             mermaid += "filters<br />" + BAR
         if self.limit:
             mermaid += f"limit: {self.limit:,}<br />" + BAR
-        if self.start_date:
-            mermaid += f"start date: {self.start_date}<br />"
-            mermaid += f"end date: {self.end_date}<br />"
+        if self.at_date:
+            mermaid += f"at date: {self.at_date}<br />"
             mermaid += BAR
 
         # Prefer telemetry values (updated during execution) for accurate counts

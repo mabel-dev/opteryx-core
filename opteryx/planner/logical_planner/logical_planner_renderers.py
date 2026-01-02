@@ -215,11 +215,6 @@ def render_cte(_: LogicalPlanNode) -> str:
     return "CTE"
 
 
-@register_render(LogicalPlanStepType.MetadataWriter)
-def render_metadata_writer(_: LogicalPlanNode) -> str:
-    return "WRITE METADATA"
-
-
 @register_render(LogicalPlanStepType.Exit)
 def render_exit(_: LogicalPlanNode) -> str:
     return "EXIT"

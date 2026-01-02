@@ -57,7 +57,6 @@ class LogicalPlanStepType(int, Enum):
     CTE = auto()
     Subquery = auto()
     FunctionDataset = auto()  # Unnest, GenerateSeries, values + Fake
-    MetadataWriter = auto()
 
     CreateView = auto()
     AlterView = auto()
@@ -983,7 +982,32 @@ def plan_create_view(statement, **kwargs):
     # Extract columns (if specified)
     columns = statement[root_node].get("columns")
     if columns:
-        create_view_node.columns = [col["Identifier"]["value"] for col in columns]
+        cols = []
+        for col in columns:
+            # Accept several AST shapes for an identifier
+            try:
+                if isinstance(col, dict) and "Identifier" in col:
+                    cols.append(col["Identifier"]["value"])
+                elif isinstance(col, dict) and "name" in col:
+                    name = col["name"]
+                    if isinstance(name, dict) and "Identifier" in name:
+                        cols.append(name["Identifier"]["value"])
+                    elif isinstance(name, str):
+                        cols.append(name)
+                    else:
+                        # fallback to the first string value in the dict
+                        for v in col.values():
+                            if isinstance(v, str):
+                                cols.append(v)
+                                break
+                elif isinstance(col, str):
+                    cols.append(col)
+                else:
+                    # generic fallback
+                    cols.append(str(col))
+            except Exception:
+                raise KeyError("Unexpected column AST format in CREATE VIEW")
+        create_view_node.columns = cols
     else:
         create_view_node.columns = None
 
@@ -1019,7 +1043,29 @@ def plan_alter_view(statement, **kwargs):
     # Extract columns (if specified)
     columns = statement[root_node].get("columns")
     if columns:
-        alter_view_node.columns = [col["Identifier"]["value"] for col in columns]
+        cols = []
+        for col in columns:
+            try:
+                if isinstance(col, dict) and "Identifier" in col:
+                    cols.append(col["Identifier"]["value"])
+                elif isinstance(col, dict) and "name" in col:
+                    name = col["name"]
+                    if isinstance(name, dict) and "Identifier" in name:
+                        cols.append(name["Identifier"]["value"])
+                    elif isinstance(name, str):
+                        cols.append(name)
+                    else:
+                        for v in col.values():
+                            if isinstance(v, str):
+                                cols.append(v)
+                                break
+                elif isinstance(col, str):
+                    cols.append(col)
+                else:
+                    cols.append(str(col))
+            except Exception:
+                raise KeyError("Unexpected column AST format in ALTER VIEW")
+        alter_view_node.columns = cols
     else:
         alter_view_node.columns = None
 
