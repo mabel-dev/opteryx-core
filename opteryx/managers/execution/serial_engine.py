@@ -28,6 +28,7 @@ def execute(
     from opteryx.operators import SetVariableNode
     from opteryx.operators import ShowCreateNode
     from opteryx.operators import ShowValueNode
+    from opteryx.operators import ViewManagementNode
 
     # Retrieve the tail of the query plan, which should ideally be a single head node
     head_nodes = list(set(plan.get_exit_points()))
@@ -49,6 +50,9 @@ def execute(
     # Special case handling
     if isinstance(head_node, SetVariableNode):
         # Set the variables and return a non-tabular result
+        return head_node(None), ResultType.NON_TABULAR
+    if isinstance(head_node, ViewManagementNode):
+        # Metadata DDL (CREATE/ALTER/DROP VIEW) - return non-tabular result
         return head_node(None), ResultType.NON_TABULAR
     if isinstance(head_node, (ShowValueNode, ShowCreateNode)):
         # There's no execution plan to execute, just return the result

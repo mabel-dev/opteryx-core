@@ -37,6 +37,7 @@ from .read_node import struct_to_jsonb
 
 CONCURRENT_READS = config.CONCURRENT_READS
 MAX_READ_BUFFER_CAPACITY = config.MAX_READ_BUFFER_CAPACITY
+ENABLE_ZERO_COPY = config.ENABLE_ZERO_COPY
 
 
 async def fetch_data(blob_names, pool, connector, reply_queue, telemetry):

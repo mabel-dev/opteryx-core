@@ -97,7 +97,7 @@ READ_BUFFER_CAPACITY:int = memory_allocation_calculation(float(get("MAX_READ_BUF
 # `READ_BUFFER_CAPACITY` value so older callers continue to work.
 MAX_READ_BUFFER_CAPACITY = READ_BUFFER_CAPACITY
 
-
+ENABLE_ZERO_COPY: bool = bool(get("ENABLE_ZERO_COPY", True))
 
 
 # GCP project ID - for Google Cloud Data

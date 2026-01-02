@@ -169,6 +169,15 @@ def query_planner(
     logical_plan, ast, ctes = do_logical_planning_phase(parsed_statement)  # type: ignore
     # check user has permission for this query type
     query_type = next(iter(ast))
+    # Special-case DROP VIEW -> treat as DropView permission
+    if query_type == "Drop":
+        try:
+            # ast["Drop"]["object_type"] is expected to be the object type (e.g., "View")
+            if ast["Drop"].get("object_type") == "View":
+                query_type = "DropView"
+        except Exception:
+            pass
+
     if query_type not in connection.permissions:
         from opteryx.exceptions import PermissionsError
 

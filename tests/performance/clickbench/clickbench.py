@@ -118,7 +118,7 @@ if __name__ == "__main__":  # pragma: no cover
         print("Warming up (cold start)...")
         start = time.monotonic_ns()
         try:
-            opteryx.query_to_arrow("SELECT COUNT(*) FROM hits;")
+            opteryx.query_to_arrow("SELECT COUNT(*) FROM scratch.hits;")
             cold_time_ms = (time.monotonic_ns() - start) / 1e6
             print(f"Cold start: {cold_time_ms:.2f}ms\n")
         except Exception as e:
