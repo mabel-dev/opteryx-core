@@ -13,6 +13,7 @@ from opteryx.connectors.capabilities.eidetic import ViewDefinition
 
 def get_view_plan(view_name: str, telemetry) -> dict:
     """Return the logical plan for a view, if it exists."""
+    # DEBUG: print(f"Fetching view plan for {view_name}")
     definition = _get_view_definition(view_name, telemetry)
     if definition is None:
         return None
@@ -33,7 +34,8 @@ def _get_view_definition(view_name: str, telemetry) -> Optional[ViewDefinition]:
         if view_definition is None:
             return None
         return view_definition
-    except Exception:
+    except Exception as exc:
+        print(f"error fetching view definition: {exc}")
         return None
 
 

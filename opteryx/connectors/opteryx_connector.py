@@ -459,9 +459,9 @@ class OpteryxConnector(Eidetic):
 
         return ViewDefinition(
             name=view.name,
-            statement=view.metadata.sql_text,
+            statement=view.definition,
             owner=view.metadata.author,
-            last_row_count=view.metadata.last_row_count,
+            last_row_count=view.metadata.last_execution_records,
         )
 
     def list_views(self, prefix: str = None) -> list:
