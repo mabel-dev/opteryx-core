@@ -16,17 +16,20 @@ from enum import Enum  # isort: skip
 
 LIBRARY_NAME = "opteryx"
 
+
 class VersionStatus(Enum):
     """
     Enumeration for version status.
     """
+
     ALPHA = "alpha"
     BETA = "beta"
     RELEASE = "release"
 
+
 __major_version__ = 0
 __minor_version__ = 5
-__revision_version__ = 6
+__revision_version__ = 7
 __author__ = "@joocer"
 __status__ = VersionStatus.RELEASE
 
@@ -69,7 +72,9 @@ print(__version__)
 pyproject_path = Path("pyproject.toml")
 pyproject_contents = pyproject_path.read_text(encoding="utf-8")
 pattern = re.compile(r'^(version\s*=\s*")[^"]*(")', re.MULTILINE)
-updated_contents, replacements = pattern.subn(f'version = "{__version__}"', pyproject_contents, count=1)
+updated_contents, replacements = pattern.subn(
+    f'version = "{__version__}"', pyproject_contents, count=1
+)
 
 if replacements == 0:
     msg = "Unable to locate version field in pyproject.toml"
