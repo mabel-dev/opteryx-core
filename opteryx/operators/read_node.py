@@ -178,59 +178,16 @@ class ReaderNode(BasePlanNode):
         self.telemetry.rows_read += 0
         self.telemetry.columns_read += 0
 
-    def to_mermaid(self, stats, nid):
+    def to_mermaid(self, nid):
         """
         Generic method to convert a node to a mermaid entry
         """
-        BAR = "<hr />"
-
         if self.connector is None:
             mermaid = f'NODE_{nid}[("**{self.node_type.upper()} (FUNCTION)**<br />'
             mermaid += f"{self.function}<br />"
         else:
             mermaid = f'NODE_{nid}[("**READ**<br />'
             mermaid += f"{self.connector.dataset}<br />"
-
-        # Format committed_at to 'YYYY-MM-DD HH:MM' when possible
-        if self.committed_at:
-            formatted_committed = self.committed_at.strftime("%Y-%m-%d %H:%M")
-            mermaid += f"committed: {formatted_committed}<br />" + BAR
-
-        mermaid += BAR
-        if self.columns:
-            mermaid += f"columns: {len(self.columns)}<br />" + BAR
-        if self.predicates:
-            mermaid += "filters<br />" + BAR
-        if self.limit:
-            mermaid += f"limit: {self.limit:,}<br />" + BAR
-        if self.at_date:
-            mermaid += f"at date: {self.at_date}<br />"
-            mermaid += BAR
-
-        # Prefer telemetry values (updated during execution) for accurate counts
-        reads = getattr(self.telemetry, "blobs_read", None)
-        rows = getattr(self.telemetry, "rows_read", None)
-        bytes_processed = getattr(self.telemetry, "bytes_processed", None)
-
-        if reads or rows or bytes_processed:
-            if reads is not None:
-                mermaid += f"reads: {reads:,}<br />"
-            if rows is not None:
-                mermaid += f"rows seen: {rows:,}<br />"
-            if bytes_processed is not None:
-                mermaid += f"bytes: {bytes_processed:,}<br />"
-            mermaid += BAR
-        else:
-            # Fall back to legacy attributes on the node or connector
-            if hasattr(self, "blobs_seen"):
-                mermaid += f"reads: {self.blobs_seen:,}<br />"
-            if hasattr(self, "rows_seen"):
-                mermaid += f"rows seen: {self.rows_seen:,}<br />"
-            if hasattr(self.connector, "blobs_seen"):
-                mermaid += f"reads: {self.connector.blobs_seen:,}<br />"
-            if hasattr(self.connector, "rows_seen"):
-                mermaid += f"rows seen: {self.connector.rows_seen:,}<br />"
-            mermaid += BAR
 
         mermaid += f"({self.execution_time / 1_000_000:,.2f}ms)"
         return mermaid + '")]'

@@ -9,10 +9,10 @@ from collections import defaultdict
 
 class _QueryTelemetry:
     def __init__(self):
-        # predefine "messages" and "executed_plan" so all new telemetry default to 0
+        # predefine "messages" and "operations" so all new telemetry default to 0
         self._reading: dict = defaultdict(int)
         self._reading["messages"] = []
-        self._reading["executed_plan"] = None
+        self._reading["operations"] = {}
 
     def _ns_to_s(self, nano_seconds: int) -> float:
         """convert elapsed ns to s"""
