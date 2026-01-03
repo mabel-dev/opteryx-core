@@ -21,6 +21,31 @@ def plan_to_mermaid(plan: PhysicalPlan, stats: list = None) -> str:
                 "bytes_out": node.bytes_out,
                 "calls": node.calls,
             }
+            # Add sensor readings from the node
+            sensors = node.sensors()
+            node_stat.update(sensors)
+
+            # Add telemetry-specific readings for reader nodes
+            if node.is_scan:
+                node_stat["rows_read"] = getattr(node.telemetry, "rows_read", 0)
+                node_stat["blobs_read"] = getattr(node.telemetry, "blobs_read", 0)
+                node_stat["bytes_processed"] = getattr(node.telemetry, "bytes_processed", 0)
+                node_stat["columns_read"] = getattr(node.telemetry, "columns_read", 0)
+
+            # Add node-specific attributes
+            if hasattr(node, "columns") and node.columns:
+                node_stat["columns"] = len(node.columns)
+            if hasattr(node, "limit") and node.limit is not None:
+                node_stat["limit"] = node.limit
+            if hasattr(node, "predicates") and node.predicates:
+                node_stat["has_filters"] = True
+            if hasattr(node, "left_filter") and node.left_filter is not None:
+                node_stat["bloom_filter"] = True
+            if hasattr(node, "at_date") and node.at_date:
+                node_stat["at_date"] = str(node.at_date)
+            if hasattr(node, "committed_at") and node.committed_at:
+                node_stat["committed_at"] = node.committed_at.strftime("%Y-%m-%d %H:%M")
+
             stats.append(node_stat)
         return stats
 
@@ -29,11 +54,18 @@ def plan_to_mermaid(plan: PhysicalPlan, stats: list = None) -> str:
         for stat in stats:
             node_stats[stat["identity"]] = stat
 
+    # Store detailed stats in telemetry operations
+    for nid, node in plan.nodes(True):
+        if not node.is_not_explained:
+            stat = node_stats.get(node.identity)
+            if stat:
+                node.telemetry.operations[nid] = stat
+
     for nid, node in plan.nodes(True):
         if node.is_not_explained:
             excluded_nodes.append(nid)
             continue
-        builder += f"  {node.to_mermaid(node_stats.get(node.identity), nid)}\n"
+        builder += f"  {node.to_mermaid(nid)}\n"
         node_stats[nid] = node_stats.pop(node.identity, None)
     builder += "\n"
     for s, t, r in plan.edges():

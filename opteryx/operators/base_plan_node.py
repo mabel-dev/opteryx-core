@@ -64,28 +64,12 @@ class BasePlanNode:
     def node_type(self) -> str:
         return self.name
 
-    def to_mermaid(self, stats, nid):
+    def to_mermaid(self, nid):
         """
         Generic method to convert a node to a mermaid entry
         """
-        BAR = "<hr />"
-
         mermaid = f'NODE_{nid}["**{self.node_type.upper()}**<br />'
-        if stats is None:
-            reportable_stats = {}
-        else:
-            reportable_stats = {k: v for k, v in stats.items() if k in ["calls", "time_ms"]}
-            if reportable_stats:
-                mermaid += BAR
-                if self.columns:
-                    mermaid += f"columns: {len(self.columns)}<br />" + BAR
-                if hasattr(self, "limit") and self.limit is not None:
-                    mermaid += f"limit: {self.limit:,}<br />" + BAR
-                if hasattr(self, "order") and self.limit is not None:
-                    mermaid += f"order<br />" + BAR
-                mermaid += f"calls: {reportable_stats.get('calls'):,}<br />"
-                mermaid += BAR
-                mermaid += f"({self.execution_time / 1_000_000:,.2f}ms)"
+        mermaid += f"({self.execution_time / 1_000_000:,.2f}ms)"
         return mermaid + '"]'
 
     def __str__(self) -> str:
@@ -199,22 +183,10 @@ class JoinNode(BasePlanNode):
         self.left_readers = parameters.get("left_readers")
         self.right_readers = parameters.get("right_readers")
 
-    def to_mermaid(self, stats, nid):
+    def to_mermaid(self, nid):
         """
         Generic method to convert a node to a mermaid entry
         """
-        BAR = "<hr />"
-
         mermaid = f'NODE_{nid}["**JOIN ({self.join_type.upper()})**<br />'
-        if stats is None:
-            reportable_stats = {}
-        else:
-            reportable_stats = {k: v for k, v in stats.items() if k in ["calls", "time_ms"]}
-            if reportable_stats:
-                mermaid += BAR
-                if hasattr(self, "left_filter") and self.left_filter is not None:
-                    mermaid += f"bloom filter<br />" + BAR
-                mermaid += f"calls: {reportable_stats.get('calls'):,}<br />"
-                mermaid += BAR
-                mermaid += f"({reportable_stats.get('time_ms', 0):,.2f}ms)"
+        mermaid += f"({self.execution_time / 1_000_000:,.2f}ms)"
         return mermaid + '"]'
