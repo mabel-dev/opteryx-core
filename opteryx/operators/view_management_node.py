@@ -20,7 +20,7 @@ from . import BasePlanNode
 class ViewManagementNode(BasePlanNode):
     def __init__(self, properties: QueryProperties, **parameters):
         BasePlanNode.__init__(self, properties=properties, **parameters)
-        
+
         # Action should be one of: 'create_view', 'alter_view', 'drop_view'
         self.action: str = parameters.get("action")
 
@@ -95,4 +95,3 @@ class ViewManagementNode(BasePlanNode):
 
         else:
             raise NotImplementedError(f"Unsupported view action: {self.action}")
-

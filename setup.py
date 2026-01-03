@@ -83,7 +83,7 @@ def detect_architecture():
         return "x86_64"
     return machine
 
-# Compiler flags with SIMD support
+
 arch = detect_architecture()
 CPP_FLAGS = ["-O3", "-std=c++17"]
 C_FLAGS = ["-O3"]
@@ -92,8 +92,8 @@ if is_win():
     CPP_FLAGS = ["/O2", "/std:c++17"]
     C_FLAGS = ["/O2"]
 elif is_linux():
-    CPP_FLAGS.extend(["-march=native", "-fvisibility=default"])
-    C_FLAGS.extend(["-march=native", "-fvisibility=default"])
+    CPP_FLAGS.append("-fvisibility=default")
+    C_FLAGS.append("-fvisibility=default")
 
 # On Linux builds (manylinux) prefer static linking of libstdc++/libgcc to avoid
 # runtime dependency on host-provided newer libstdc++ which can require
@@ -101,11 +101,12 @@ elif is_linux():
 # macOS/Clang does not support -static-libgcc
 LD_EXTRA = ["-static-libstdc++"] if is_mac() else ["-static-libstdc++", "-static-libgcc"]
 
-# SIMD-specific flags
+# SIMD-specific flags (deterministic baseline to avoid host-specific AVX512/etc.)
 if arch == "x86_64":
-    # Add SIMD support
-    CPP_FLAGS.extend(["-msse4.2", "-mavx2"])
+    CPP_FLAGS.extend(["-msse4.2", "-mavx2", "-march=haswell"])
+    C_FLAGS.extend(["-msse4.2", "-mavx2", "-march=haswell"])
 elif arch == "arm" and not is_mac():
+    # 32-bit ARM needs explicit NEON; AArch64 already guarantees it.
     CPP_FLAGS.append("-mfpu=neon")
 
 # Common warning suppressions
