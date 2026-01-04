@@ -68,6 +68,7 @@ from opteryx.planner.optimizer.strategies import DistinctPushdownStrategy
 from opteryx.planner.optimizer.strategies import JoinOrderingStrategy
 from opteryx.planner.optimizer.strategies import JoinRewriteStrategy
 from opteryx.planner.optimizer.strategies import LimitPushdownStrategy
+from opteryx.planner.optimizer.strategies import ManifestPruningStrategy
 from opteryx.planner.optimizer.strategies import OperatorFusionStrategy
 from opteryx.planner.optimizer.strategies import PredicateCompactionStrategy
 from opteryx.planner.optimizer.strategies import PredicateOrderingStrategy
@@ -96,6 +97,7 @@ class OptimizerVisitor:
             PredicateRewriteStrategy(telemetry),
             PredicateCompactionStrategy(telemetry),
             PredicatePushdownStrategy(telemetry),
+            ManifestPruningStrategy(telemetry),  # Apply after predicate pushdown
             ProjectionPushdownStrategy(telemetry),
             JoinRewriteStrategy(telemetry),
             JoinOrderingStrategy(telemetry),

@@ -12,77 +12,46 @@ Architecture:
 """
 
 import datetime
-from typing import Dict
-from typing import List
 from typing import Optional
 from typing import Tuple
 
-import numpy
-import pyarrow
-from orso.schema import FlatColumn
 from orso.schema import RelationSchema
-from orso.tools import single_item_cache
 from orso.types import OrsoTypes
 
 from opteryx.connectors import TableType
 from opteryx.connectors.capabilities import Diachronic
 from opteryx.connectors.capabilities import Eidetic
-from opteryx.connectors.capabilities import Statistics
-from opteryx.connectors.filesystem_connector import FileSystemTable
 from opteryx.exceptions import DatasetNotFoundError
 from opteryx.exceptions import DatasetReadError
-from opteryx.exceptions import NotSupportedError
-from opteryx.exceptions import UnsupportedSyntaxError
-from opteryx.managers.expression import NodeType
+from opteryx.models import FileEntry
+from opteryx.models import Manifest
 from opteryx.models import RelationStatistics
 
 
-class OpteryxTable(FileSystemTable, Diachronic, Statistics):
+class OpteryxTable(Diachronic):
     """
-    Table-specific engine for reading Opteryx tables.
+    Plan-time table metadata provider for Opteryx tables.
 
-    This is a transient object created per-table that handles:
+    This is a transient object created per-table during planning that handles:
     - Schema resolution
-    - Statistics gathering
-    - Data reading
-    - Predicate pushdown
-    - Time-travel queries
+    - Manifest building (file list + statistics)
+    - Time-travel query resolution
 
-    Inherits from FileSystemTable to reuse filesystem-based reading logic.
+    This class is PLAN-TIME ONLY - it does not perform any data reading.
+    Execution uses generic filesystem readers based on file paths from the manifest.
     """
 
     __mode__ = "Blob"
     __type__ = "OPTERYX"
-    __synchronousity__ = "asynchronous"
+    __synchronousity__ = "asynchronous"  # Used by physical planner to select operator
 
-    # Capability declarations
+    # Capability declarations (for plan-time)
     supports_diachronic = True  # Time-travel queries
-    supports_predicate_pushdown = True  # Via FileSystemTable
-    supports_limit_pushdown = True  # Via FileSystemTable
-    supports_statistics = True  # Opteryx manifest stats
-
-    PUSHABLE_OPS: Dict[str, bool] = {
-        #        "Eq": True,
-        #        "NotEq": True,
-        #        "Gt": True,
-        #        "GtEq": True,
-        #        "Lt": True,
-        #        "LtEq": True,
-    }
-
-    PUSHABLE_TYPES = {
-        OrsoTypes.BLOB,
-        OrsoTypes.BOOLEAN,
-        OrsoTypes.DOUBLE,
-        OrsoTypes.INTEGER,
-        OrsoTypes.VARCHAR,
-        OrsoTypes.TIMESTAMP,
-        OrsoTypes.DATE,
-    }
+    supports_statistics = True  # Manifest provides stats
 
     def __init__(self, dataset: str, catalog, workspace: str, **kwargs):
         """
-        Initialize the table engine for a specific Opteryx table.
+        Initialize the plan-time table metadata provider.
 
         Args:
             dataset: The table name (after catalog prefix is removed)
@@ -90,41 +59,42 @@ class OpteryxTable(FileSystemTable, Diachronic, Statistics):
             workspace: The workspace name
             **kwargs: Additional parameters (telemetry, start_date, end_date, etc.)
         """
-        self.dataset = dataset
+        Diachronic.__init__(self, **kwargs)
+
+        self.dataset = dataset.replace("/", ".")
         self.catalog = catalog
         self.workspace = workspace
         self.at_date = None
-
-        # Opteryx currently always uses GCS for storage
-        # Create the appropriate filesystem for reading data files
-        from opteryx_catalog.exceptions import DatasetNotFound
-
-        from opteryx.connectors.io_systems import OpteryxGcsFileSystem
-
-        filesystem = OpteryxGcsFileSystem()
-
-        # Call FileSystemTable.__init__ which calls BaseTable.__init__
-        FileSystemTable.__init__(
-            self, dataset=dataset, filesystem=filesystem, storage_type="OPTERYX", **kwargs
-        )
-        Diachronic.__init__(self, **kwargs)
-        Statistics.__init__(self, **kwargs)
-
-        self.dataset = self.dataset.replace("/", ".")
+        self.telemetry = kwargs.get("telemetry")
 
         # Initialize state
         self.snapshot_id = None
         self.snapshot = None
         self.dataset_committed_at = None
+        self.schema = None
+        self.manifest = None
+        self.relation_statistics = None
+
+        # Load table from catalog
+        from opteryx_catalog.exceptions import DatasetNotFound
 
         try:
             self.table = self.catalog.load_dataset(self.dataset)
             self.snapshot = self.table.snapshot()
             self.snapshot_id = None if self.snapshot is None else self.snapshot.snapshot_id
-        except DatasetNotFound:
-            raise DatasetNotFoundError(dataset=self.dataset, connector=self.__type__)
+        except DatasetNotFound as exc:
+            raise DatasetNotFoundError(dataset=self.dataset, connector=self.__type__) from exc
 
-    def get_dataset_schema(self) -> RelationSchema:
+    def get_dataset_metadata(self) -> Tuple[RelationSchema, Manifest]:
+        """
+        Get dataset schema and build manifest from catalog.
+
+        Returns both schema and manifest to make the dual purpose explicit.
+        Manifest contains file-level statistics from table.scan().
+
+        Returns:
+            Tuple of (RelationSchema, Manifest)
+        """
         if self.at_date is not None:
             snapshots = self.table.inspect.snapshots().sort_by("committed_at")
             snapshot_rows = snapshots.to_pylist()
@@ -172,78 +142,71 @@ class OpteryxTable(FileSystemTable, Diachronic, Statistics):
             except (ValueError, OSError, OverflowError):
                 pass
 
-        # Get statistics
-        relation_statistics = RelationStatistics()
-
-        column_names = self.schema.column_names
-
-        # Use Parquet manifest reader instead of Opteryx inspect API to avoid Avro
+        # Build Manifest from catalog table.scan()
+        # scan() returns an iterable of DataFile objects
         try:
-            import pyarrow as pa
-            from opteryx_catalog.parquet_manifest import read_parquet_manifest
+            # Get file list from catalog via table.scan()
+            scan = self.table.scan(snapshot_id=self.snapshot_id)
 
-            parquet_records = read_parquet_manifest(
-                self.table.metadata,
-                self.table.io,
-                self.table.metadata.location,
-            )
+            # Build FileEntry for each file
+            file_entries = []
+            protocols = set()
 
-            if parquet_records:
-                # Convert to PyArrow table matching inspect.files() schema
-                file_paths = []
-                record_counts = []
+            for data_file in scan:
+                file_entry = FileEntry.from_datafile(data_file)
+                file_entries.append(file_entry)
 
-                for record in parquet_records:
-                    if record.get("active", True):
-                        file_paths.append(record["file_path"])
-                        record_counts.append(record["record_count"])
+                # Extract protocol for validation (gs://, s3://, file://)
+                if "://" in file_entry.file_path:
+                    protocol = file_entry.file_path.split("://")[0]
+                    protocols.add(protocol)
 
-                files = pa.table(
-                    {
-                        "file_path": file_paths,
-                        "record_count": record_counts,
-                    }
+            # Validate all files use same protocol
+            if len(protocols) > 1:
+                raise DatasetReadError(
+                    f"Mixed protocols in manifest: {protocols}. All files must use the same protocol."
                 )
-            else:
-                # No Parquet manifest; return empty table
-                files = pa.table(
-                    {
-                        "file_path": pa.array([], type=pa.string()),
-                        "record_count": pa.array([], type=pa.int64()),
-                    }
-                )
+
+            # Create Manifest with files and schema
+            self.manifest = Manifest(files=file_entries, schema=self.schema)
+
         except Exception as e:
-            # Fallback to empty table if Parquet read fails
-            import pyarrow as pa
+            # Fallback: create empty Manifest if scan fails
+            self.manifest = Manifest(files=[], schema=self.schema)
 
-            files = pa.table(
-                {
-                    "file_path": pa.array([], type=pa.string()),
-                    "record_count": pa.array([], type=pa.int64()),
-                }
-            )
-
-        # No files = empty table, no stats
-        if len(files.column("file_path")) == 0:
-            self.relation_statistics = relation_statistics
-            return self.schema
-
-        relation_statistics.record_count = pyarrow.compute.sum(files.column("record_count")).as_py()
-
+        # For backward compatibility: populate relation_statistics
+        # Eventually this can be removed
+        relation_statistics = RelationStatistics()
+        relation_statistics.record_count = self.manifest.get_record_count()
         self.relation_statistics = relation_statistics
 
-        return self.schema
+        return self.schema, self.manifest
 
-    def get_list_of_blob_names(self, *, prefix: str = None, predicates: list = []) -> List[str]:
-        # pushed_filters, _ = to_opteryx_filter(predicates)
+    def map_statistics(
+        self, statistics: RelationStatistics, schema: RelationSchema
+    ) -> RelationSchema:
+        """
+        Map statistics to schema columns.
 
-        # Get the list of data files to read
-        data_files = self.table.scan(
-            # row_filter=pushed_filters,
-            row_limit=self.limit,
-            snapshot_id=self.snapshot_id,
-        )
-        return [data_file.file_path for data_file in data_files]
+        For backward compatibility with the binder.
+        This will be removed once all connectors use manifests.
+        """
+        if statistics is None:
+            return schema
+
+        schema.row_count_metric = statistics.record_count
+
+        # Map bounds from statistics to schema columns
+        for column in schema.columns:
+            column_key = column.name.encode() if isinstance(column.name, str) else column.name
+            if hasattr(statistics, "upper_bounds"):
+                column.highest_value = statistics.upper_bounds.get(column_key, None)
+            if hasattr(statistics, "lower_bounds"):
+                column.lowest_value = statistics.lower_bounds.get(column_key, None)
+            if hasattr(statistics, "null_count"):
+                column.null_count = statistics.null_count.get(column_key, None)
+
+        return schema
 
 
 class OpteryxConnector(Eidetic):

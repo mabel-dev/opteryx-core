@@ -1,0 +1,349 @@
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# See the License at http://www.apache.org/licenses/LICENSE-2.0
+# Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
+
+"""
+Manifest - encapsulates table manifest data and statistics operations.
+
+The Manifest is attached to each READ/Scan node during binding and provides:
+- File pruning (called by optimizer)
+- Cardinality/selectivity estimation (for cost-based optimization)
+- Column statistics (for schema annotation)
+
+One Manifest per READ node. Optimizer uses it to make decisions,
+execution follows those decisions deterministically.
+"""
+
+from typing import Any
+from typing import Dict
+from typing import List
+from typing import Optional
+from typing import Tuple
+
+from orso.schema import RelationSchema
+
+from opteryx.models.file_entry import FileEntry
+
+
+class Manifest:
+    """
+    Encapsulates manifest data and statistics operations for a table.
+
+    Created during binding phase from catalog's table.scan() results.
+    Provides methods for optimizer to make pruning and costing decisions.
+    """
+
+    def __init__(self, files: List[FileEntry], schema: RelationSchema):
+        """
+        Initialize Manifest with file entries and schema.
+
+        Args:
+            files: List of FileEntry objects from catalog scan
+            schema: Table schema (RelationSchema)
+        """
+        self.files = files
+        self.schema = schema
+
+        # Lazy-computed mappings
+        self._field_id_to_name: Optional[Dict[int, str]] = None
+        self._name_to_field_id: Optional[Dict[str, int]] = None
+        self._column_bounds_cache: Dict[str, Tuple[Any, Any]] = {}
+
+    # ================================================================
+    # Basic Aggregates
+    # ================================================================
+
+    def get_record_count(self) -> int:
+        """Total record count across all files."""
+        return sum(f.record_count for f in self.files)
+
+    def get_file_count(self) -> int:
+        """Number of files in manifest."""
+        return len(self.files)
+
+    def get_total_size(self) -> int:
+        """Total size in bytes across all files."""
+        return sum(f.file_size_in_bytes for f in self.files)
+
+    # ================================================================
+    # File Pruning (called by optimizer)
+    # ================================================================
+
+    def prune_files(self, predicates: List) -> List[FileEntry]:
+        """
+        Filter files based on predicates using min/max bounds.
+
+        Called by optimizer to determine which files to read.
+        Returns list of files that might contain matching rows.
+
+        This is NOT called at execution time - the optimizer makes
+        this decision and execution just follows it.
+
+        Args:
+            predicates: List of predicate Node objects to evaluate
+
+        Returns:
+            Filtered list of FileEntry objects
+        """
+        import numpy
+        from orso.types import OrsoTypes
+
+        from opteryx.compiled.structures.relation_statistics import to_int
+        from opteryx.managers.expression import NodeType
+
+        # Define handlers for each comparison operator
+        # Returns True if file can be pruned (skipped)
+        handlers = {
+            "Eq": lambda v, min_, max_: v < min_ or v > max_,
+            "NotEq": lambda v, min_, max_: min_ == max_ == v,
+            "Gt": lambda v, min_, max_: max_ <= v,
+            "GtEq": lambda v, min_, max_: max_ < v,
+            "Lt": lambda v, min_, max_: min_ >= v,
+            "LtEq": lambda v, min_, max_: min_ > v,
+        }
+
+        if not predicates:
+            # No predicates = no pruning
+            return self.files
+
+        pruned_files = []
+
+        for file_entry in self.files:
+            print("Evaluating file:", file_entry.file_path)
+            skip_file = False
+
+            # Check each predicate
+            for predicate in predicates:
+                print("  Predicate:", predicate.left.value, predicate.value, predicate.right.value)
+                # Handle simple comparisons: column op literal
+                if (
+                    predicate.node_type == NodeType.COMPARISON_OPERATOR
+                    and predicate.value in handlers
+                    and predicate.left.node_type == NodeType.IDENTIFIER
+                    and predicate.right.node_type == NodeType.LITERAL
+                ):
+                    # Get column name and literal value
+                    column_name = predicate.left.source_column
+                    literal_value = predicate.right.value
+
+                    # Normalize literal value
+                    if hasattr(literal_value, "item"):
+                        literal_value = literal_value.item()
+                    literal_value = to_int(literal_value)
+
+                    # Get field_id for this column from schema
+                    # Bounds are indexed by field_id (int)
+                    field_id = None
+                    for col in self.schema.columns:
+                        if col.name == column_name:
+                            # Try to get field_id from column metadata
+                            # This assumes schema columns have field_id info
+                            # For now, we'll skip if we can't map column to field_id
+                            # TODO: Proper column name -> field_id mapping
+                            break
+
+                    # For now, skip this file if we can't map column to bounds
+                    # In a full implementation, we'd need proper field_id mapping
+                    # from the schema
+                    if field_id is None:
+                        continue
+
+                    # Get bounds for this field
+                    min_value = file_entry.lower_bounds.get(field_id)
+                    max_value = file_entry.upper_bounds.get(field_id)
+
+                    if min_value is not None and max_value is not None:
+                        # Check if file can be pruned
+                        prune_func = handlers.get(predicate.value)
+                        if prune_func and prune_func(literal_value, min_value, max_value):
+                            skip_file = True
+                            break
+
+            if not skip_file:
+                pruned_files.append(file_entry)
+
+        return pruned_files
+
+    # ================================================================
+    # Estimation Methods (for cost-based optimization)
+    # ================================================================
+
+    def estimate_selectivity(self, predicate) -> float:
+        """
+        Estimate fraction of rows matching predicate.
+
+        Uses histograms if available, otherwise falls back to bounds
+        or simple heuristics.
+
+        Args:
+            predicate: Predicate expression to evaluate
+
+        Returns:
+            Estimated selectivity (0.0 to 1.0)
+
+        Note:
+            Placeholder - will be implemented with actual estimation logic.
+        """
+        # TODO: Implement selectivity estimation
+        # Default: assume 50% selectivity (conservative)
+        return 0.5
+
+    def estimate_cardinality(self, column: str) -> Optional[int]:
+        """
+        Estimate distinct values in column.
+
+        Uses k-hashes if available, otherwise returns None.
+
+        Args:
+            column: Column name
+
+        Returns:
+            Estimated distinct count, or None if not available
+
+        Note:
+            Placeholder - will be implemented with k-hash analysis.
+        """
+        # TODO: Implement cardinality estimation using k-hashes
+        return None
+
+    def estimate_null_fraction(self, column: str) -> Optional[float]:
+        """
+        Estimate fraction of nulls in column.
+
+        Uses null_value_counts if available.
+
+        Args:
+            column: Column name
+
+        Returns:
+            Estimated null fraction (0.0 to 1.0), or None if not available
+        """
+        field_id = self._get_field_id(column)
+        if field_id is None:
+            return None
+
+        total_rows = self.get_record_count()
+        if total_rows == 0:
+            return None
+
+        null_count = 0
+        for file in self.files:
+            if file.null_value_counts and field_id in file.null_value_counts:
+                null_count += file.null_value_counts[field_id]
+
+        return null_count / total_rows if total_rows > 0 else 0.0
+
+    # ================================================================
+    # Column Statistics
+    # ================================================================
+
+    def get_column_bounds(self, column: str) -> Optional[Tuple[bytes, bytes]]:
+        """
+        Get aggregated min/max bounds for column across all files.
+
+        Returns raw serialized bytes as stored in manifest.
+
+        Args:
+            column: Column name
+
+        Returns:
+            Tuple of (min_bytes, max_bytes), or None if not available
+        """
+        if column in self._column_bounds_cache:
+            return self._column_bounds_cache[column]
+
+        field_id = self._get_field_id(column)
+        if field_id is None:
+            return None
+
+        min_val = None
+        max_val = None
+
+        for file in self.files:
+            if file.lower_bounds and field_id in file.lower_bounds:
+                file_min = file.lower_bounds[field_id]
+                if min_val is None or file_min < min_val:
+                    min_val = file_min
+
+            if file.upper_bounds and field_id in file.upper_bounds:
+                file_max = file.upper_bounds[field_id]
+                if max_val is None or file_max > max_val:
+                    max_val = file_max
+
+        result = (min_val, max_val) if min_val is not None and max_val is not None else None
+        self._column_bounds_cache[column] = result
+        return result
+
+    def get_column_stats(self, column: str) -> Dict[str, Any]:
+        """
+        Get comprehensive statistics for a column.
+
+        Args:
+            column: Column name
+
+        Returns:
+            Dictionary with available statistics:
+                - bounds: (min, max) tuple
+                - null_fraction: fraction of nulls
+                - estimated_cardinality: distinct count estimate
+        """
+        return {
+            "bounds": self.get_column_bounds(column),
+            "null_fraction": self.estimate_null_fraction(column),
+            "estimated_cardinality": self.estimate_cardinality(column),
+        }
+
+    # ================================================================
+    # Schema Mapping Helpers
+    # ================================================================
+
+    def _build_field_mappings(self):
+        """Build field_id <-> column_name mappings from schema."""
+        if self._field_id_to_name is not None:
+            return
+
+        self._field_id_to_name = {}
+        self._name_to_field_id = {}
+
+        # Build mapping from schema
+        # Note: This assumes schema has field_id information
+        # May need adjustment based on actual schema structure
+        for column in self.schema.columns:
+            if hasattr(column, "field_id"):
+                field_id = column.field_id
+                self._field_id_to_name[field_id] = column.name
+                self._name_to_field_id[column.name] = field_id
+
+    def _get_field_id(self, column_name: str) -> Optional[int]:
+        """Get field_id for column name."""
+        self._build_field_mappings()
+        return self._name_to_field_id.get(column_name)
+
+    def _get_column_name(self, field_id: int) -> Optional[str]:
+        """Get column name for field_id."""
+        self._build_field_mappings()
+        return self._field_id_to_name.get(field_id)
+
+    # ================================================================
+    # Debug/Inspection
+    # ================================================================
+
+    def summary(self) -> Dict[str, Any]:
+        """Get summary information for debugging."""
+        return {
+            "file_count": self.get_file_count(),
+            "record_count": self.get_record_count(),
+            "total_size_bytes": self.get_total_size(),
+            "avg_file_size": self.get_total_size() / self.get_file_count()
+            if self.get_file_count() > 0
+            else 0,
+            "files_with_bounds": sum(1 for f in self.files if f.lower_bounds or f.upper_bounds),
+            "files_with_k_hashes": sum(1 for f in self.files if f.min_k_hashes),
+            "files_with_histograms": sum(1 for f in self.files if f.histogram_counts),
+        }
+
+
+# Backward compatibility alias
+# Can be removed in future version after migration
+RelationStatistics = Manifest
