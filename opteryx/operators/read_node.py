@@ -197,6 +197,11 @@ class ReaderNode(BasePlanNode):
         """friendly name for this step"""
         return "Read"
 
+    def sensors(self):
+        base = super().sensors()
+        base["commited_at"] = self.committed_at
+        return base
+
     @property
     def config(self):
         """Additional details for this step"""
@@ -215,6 +220,89 @@ class ReaderNode(BasePlanNode):
             f"{date_range}"
             f"{' WITH(' + ','.join(self.parameters.get('hints')) + ')' if self.parameters.get('hints') else ''})"
         )
+
+    def plan_config(self) -> dict:
+        """
+        Structured configuration for planning/telemetry purposes.
+
+        Returns a dict containing:
+          - files: list of {file_path, rows, bytes}
+          - selection_pushdown: predicates (simple repr)
+          - projection_pushdown: list of projected column identities/names
+          - connector: connector type
+          - relation: dataset name
+        """
+        config = {
+            "connector": getattr(self.connector, "__type__", None),
+            "relation": self.parameters.get("relation"),
+            "files": [],
+            "selection_pushdown": [],
+            "projection_pushdown": [],
+        }
+
+        # If a manifest is attached, prefer its file entries
+        manifest = getattr(self, "manifest", None) or self.parameters.get("manifest")
+        pruned = getattr(self, "pruned_files", None) or self.parameters.get("pruned_files")
+        if manifest is not None:
+            # manifest.files contains FileEntry objects
+            for f in manifest.files:
+                config["files"].append(
+                    {"path": f.file_path, "rows": f.record_count, "bytes": f.uncompressed_size}
+                )
+            # If pruning reduced files, filter to pruned list
+            if pruned:
+                pruned_set = set(pruned)
+                config["files"] = [ff for ff in config["files"] if ff.get("path") in pruned_set]
+        elif pruned:
+            # We only have file paths
+            for p in pruned:
+                config["files"].append({"path": p, "rows": None, "bytes": None})
+
+        # Selection pushdown: represent predicates simply
+        try:
+            config["selection_pushdown"] = [str(p) for p in (self.predicates or [])]
+        except Exception:
+            config["selection_pushdown"] = []
+
+        # Projection pushdown: provide schema index and column name for each projected column
+        proj = []
+
+        schema_columns = getattr(self.schema, "columns", []) or []
+        for c in self.columns or []:
+            # use the column identity (internal identity) as the column_name
+            identity = c.schema_column.identity
+            schema_index = None
+            for idx, sc in enumerate(schema_columns):
+                if sc.identity == identity:
+                    schema_index = idx
+                    break
+            proj.append({"schema_index": schema_index, "identity": identity})
+
+        config["projection_pushdown"] = proj
+
+        # Summary: aggregate totals for files/rows/bytes when available
+        total_files = len(config["files"])
+        # If any file lacks rows/bytes info, mark totals as None
+        total_rows = None
+        total_bytes = None
+        if total_files == 0:
+            total_rows = 0
+            total_bytes = 0
+        else:
+            rows_known = all((f.get("rows") is not None for f in config["files"]))
+            bytes_known = all((f.get("bytes") is not None for f in config["files"]))
+            if rows_known:
+                total_rows = sum((f.get("rows", 0) for f in config["files"]))
+            if bytes_known:
+                total_bytes = sum((f.get("bytes", 0) for f in config["files"]))
+
+        config["summary"] = {
+            "total-files": total_files,
+            "total-rows": total_rows,
+            "total-bytes": total_bytes,
+        }
+
+        return config
 
     def execute(self, morsel, **kwargs) -> Generator:
         """Perform this step, time how long is spent doing work"""
