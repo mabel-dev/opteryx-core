@@ -100,10 +100,37 @@ class AsyncReadNode(ReaderNode):
             return
 
         from opteryx import system_telemetry
+        from opteryx.connectors.io_systems import create_filesystem
 
         # Perform this step, time how long is spent doing work
         orso_schema = self.parameters["schema"]
-        reader = self.parameters["connector"]
+
+        # Get file paths (pruned by optimizer)
+        blob_names = getattr(self, "pruned_files", [])
+
+        print(
+            f"DEBUG [AsyncReadNode]: pruned_files attr exists={hasattr(self, 'pruned_files')}, blob_names count={len(blob_names)}"
+        )
+        if blob_names:
+            print(f"DEBUG [AsyncReadNode]: first blob_name={blob_names[0]}")
+
+        # If no pruned_files, try to get from connector (backward compat)
+        if not blob_names:
+            reader = self.parameters.get("connector")
+            if reader and hasattr(reader, "get_list_of_blob_names"):
+                blob_names = reader.get_list_of_blob_names(
+                    prefix=reader.dataset,
+                    predicates=self.predicates or [],
+                )
+
+        # Instantiate filesystem from protocol
+        if blob_names:
+            protocol = blob_names[0].split("://")[0] if "://" in blob_names[0] else "file"
+            reader = create_filesystem(protocol)
+            print(f"DEBUG [AsyncReadNode]: protocol={protocol}, reader={reader}")
+        else:
+            # Fallback to connector if no file paths
+            reader = self.parameters.get("connector")
 
         orso_schema_cols = []
         for col in orso_schema.columns:
@@ -112,11 +139,6 @@ class AsyncReadNode(ReaderNode):
         orso_schema.columns = orso_schema_cols
 
         self.telemetry.columns_read += len(orso_schema.columns)
-
-        blob_names = reader.get_list_of_blob_names(
-            prefix=reader.dataset,
-            predicates=self.predicates or [],
-        )
 
         if len(blob_names) == 0:
             # if we don't have any matching blobs, create an empty dataset

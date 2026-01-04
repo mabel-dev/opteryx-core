@@ -51,33 +51,43 @@ async def fetch_data(blob_names, pool, connector, reply_queue, telemetry):
 
     The connector provided should implement `async_read_blob(blob_name, pool, telemetry, **kwargs)`.
     """
+    import aiohttp
 
     semaphore = asyncio.Semaphore(CONCURRENT_READS)
 
-    # Cache protocol-specific readers if we need to instantiate filesystem-level
-    # readers based on the blob protocol. By default we use the provided connector
-    # which typically implements `async_read_blob`.
+    # Create aiohttp session for filesystem readers that need it
+    async with aiohttp.ClientSession() as http_session:
 
-    async def fetch_and_process(blob_name):
-        async with semaphore:
-            start_per_blob = time.monotonic_ns()
-            try:
-                # Call the async reader. We pass the commonly-used args; filesystem
-                # readers that require other parameters should handle defaults or
-                # raise a clear exception which we'll forward.
-                reference = await connector.async_read_blob(
-                    blob_name=blob_name, pool=pool, telemetry=telemetry
-                )
-                reply_queue.put((blob_name, reference))
-            except Exception as err:
-                # Pass the exception back so the reader loop can handle it
-                reply_queue.put((blob_name, err))
-            finally:
-                telemetry.time_reading_blobs += time.monotonic_ns() - start_per_blob
+        async def fetch_and_process(blob_name):
+            async with semaphore:
+                start_per_blob = time.monotonic_ns()
+                try:
+                    # Call the async reader. We pass the commonly-used args; filesystem
+                    # readers that require other parameters should handle defaults or
+                    # raise a clear exception which we'll forward.
+                    # Try with session and statistics for filesystem readers
+                    reference = await connector.async_read_blob(
+                        blob_name=blob_name, pool=pool, session=http_session, statistics=telemetry
+                    )
+                    reply_queue.put((blob_name, reference))
+                except TypeError:
+                    # Fallback for connectors that don't accept session/statistics
+                    try:
+                        reference = await connector.async_read_blob(
+                            blob_name=blob_name, pool=pool, telemetry=telemetry
+                        )
+                        reply_queue.put((blob_name, reference))
+                    except Exception as err:
+                        reply_queue.put((blob_name, err))
+                except Exception as err:
+                    # Pass the exception back so the reader loop can handle it
+                    reply_queue.put((blob_name, err))
+                finally:
+                    telemetry.time_reading_blobs += time.monotonic_ns() - start_per_blob
 
-    tasks = [fetch_and_process(blob) for blob in blob_names]
-    await asyncio.gather(*tasks, return_exceptions=True)
-    reply_queue.put(None)
+        tasks = [fetch_and_process(blob) for blob in blob_names]
+        await asyncio.gather(*tasks, return_exceptions=True)
+        reply_queue.put(None)
 
 
 class AsyncReadNode(ReaderNode):
@@ -101,10 +111,30 @@ class AsyncReadNode(ReaderNode):
             return
 
         from opteryx import system_telemetry
+        from opteryx.connectors.io_systems import create_filesystem
 
         # Perform this step, time how long is spent doing work
         orso_schema = self.parameters["schema"]
-        reader = self.parameters["connector"]
+
+        # Get file paths (pruned by optimizer)
+        blob_names = getattr(self, "pruned_files", [])
+
+        # If no pruned_files, try to get from connector (backward compat)
+        if not blob_names:
+            reader = self.parameters.get("connector")
+            if reader and hasattr(reader, "get_list_of_blob_names"):
+                blob_names = reader.get_list_of_blob_names(
+                    prefix=reader.dataset,
+                    predicates=self.predicates or [],
+                )
+
+        # Instantiate filesystem from protocol
+        if blob_names:
+            protocol = blob_names[0].split("://")[0] if "://" in blob_names[0] else "file"
+            reader = create_filesystem(protocol)
+        else:
+            # Fallback to connector if no file paths
+            reader = self.parameters.get("connector")
 
         orso_schema_cols = []
         for col in orso_schema.columns:
@@ -113,11 +143,6 @@ class AsyncReadNode(ReaderNode):
         orso_schema.columns = orso_schema_cols
 
         self.telemetry.columns_read += len(orso_schema.columns)
-
-        blob_names = reader.get_list_of_blob_names(
-            prefix=reader.dataset,
-            predicates=self.predicates or [],
-        )
 
         if len(blob_names) == 0:
             # if we don't have any matching blobs, create an empty dataset

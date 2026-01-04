@@ -148,10 +148,8 @@ class OpteryxGcsFileSystem:
     async def async_read_blob(self, *, blob_name, pool, session, statistics, **kwargs):
         import asyncio
 
-        from opteryx import system_statistics
+        from opteryx import system_telemetry as system_statistics
         from opteryx.utils import paths
-
-        print("async read blob:", blob_name)
 
         # strip gs:// prefix
         if blob_name.startswith("gs://"):
