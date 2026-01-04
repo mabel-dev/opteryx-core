@@ -35,7 +35,7 @@ def _get_view_definition(view_name: str, telemetry) -> Optional[ViewDefinition]:
             return None
         return view_definition
     except Exception as exc:
-        print(f"error fetching view definition: {exc}")
+        # Missing views or catalog errors are non-fatal for planning
         return None
 
 
