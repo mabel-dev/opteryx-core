@@ -38,6 +38,11 @@ class FileEntry:
     min_k_hashes: Optional[List[List[int]]] = None
     histogram_counts: Optional[List[List[int]]] = None
     histogram_bins: Optional[int] = None
+    # raw min/max lists (for direct access if needed)
+    min_values: Optional[List] = None
+    max_values: Optional[List] = None
+    # Per-column uncompressed sizes (aligned with schema field order)
+    column_uncompressed_sizes_in_bytes: Optional[List[int]] = None
 
     @classmethod
     def from_datafile(cls, datafile, file_format: str = "PARQUET"):
@@ -67,6 +72,8 @@ class FileEntry:
             lower_bounds = None
             upper_bounds = None
 
+            column_uncompressed_sizes = entry.get("column_uncompressed_sizes_in_bytes")
+
             if min_values and isinstance(min_values, list):
                 # Build dict indexed by position (0-based field_id)
                 lower_bounds = {i: val for i, val in enumerate(min_values) if val is not None}
@@ -88,6 +95,13 @@ class FileEntry:
             lower_bounds = getattr(datafile, "lower_bounds", None)
             upper_bounds = getattr(datafile, "upper_bounds", None)
 
+            # Try raw min/max lists and column sizes
+            min_values = getattr(datafile, "min_values", None)
+            max_values = getattr(datafile, "max_values", None)
+            column_uncompressed_sizes = getattr(
+                datafile, "column_uncompressed_sizes_in_bytes", None
+            )
+
             # Convert to dict if needed
             if lower_bounds and not isinstance(lower_bounds, dict):
                 lower_bounds = dict(lower_bounds) if hasattr(lower_bounds, "__iter__") else None
@@ -97,6 +111,15 @@ class FileEntry:
             min_k_hashes = getattr(datafile, "min_k_hashes", None)
             histogram_counts = getattr(datafile, "histogram_counts", None)
             histogram_bins = getattr(datafile, "histogram_bins", None)
+
+            # If we have raw min_values/max_values but no lower_bounds/upper_bounds,
+            # convert them to bounds mapping for backward compatibility
+            if (lower_bounds is None or upper_bounds is None) and isinstance(min_values, list):
+                lb = {i: val for i, val in enumerate(min_values) if val is not None}
+                lower_bounds = lower_bounds or lb
+            if (upper_bounds is None) and isinstance(max_values, list):
+                ub = {i: val for i, val in enumerate(max_values) if val is not None}
+                upper_bounds = upper_bounds or ub
 
         return cls(
             file_path=file_path,
@@ -110,6 +133,9 @@ class FileEntry:
             min_k_hashes=min_k_hashes,
             histogram_counts=histogram_counts,
             histogram_bins=histogram_bins,
+            column_uncompressed_sizes_in_bytes=column_uncompressed_sizes,
+            min_values=min_values,
+            max_values=max_values,
         )
 
     def to_dict(self) -> dict:
@@ -120,6 +146,9 @@ class FileEntry:
             "record_count": self.record_count,
             "file_size_in_bytes": self.file_size_in_bytes,
             "uncompressed_size_in_bytes": self.uncompressed_size_in_bytes,
+            "column_uncompressed_sizes_in_bytes": self.column_uncompressed_sizes_in_bytes,
+            "min_values": self.min_values,
+            "max_values": self.max_values,
             "has_bounds": self.lower_bounds is not None or self.upper_bounds is not None,
             "has_null_counts": self.null_value_counts is not None,
             "has_k_hashes": self.min_k_hashes is not None,
