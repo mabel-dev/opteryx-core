@@ -82,9 +82,7 @@ def create_physical_plan(logical_plan, query_properties) -> PhysicalPlan:
             elif connector and getattr(connector, "__synchronousity__", None) == "asynchronous":
                 # Use async reader for connectors that support async_read_blob()
                 node = operators.AsyncReadNode(query_properties, **node_config)
-                # Copy pruned_files from logical node (set by optimizer)
-                if hasattr(logical_node, 'pruned_files'):
-                    node.pruned_files = logical_node.pruned_files
+                # Use async reader for connectors that support async_read_blob()
             else:
                 node = operators.ReaderNode(properties=query_properties, **node_config)
         elif node_type == LogicalPlanStepType.Set:
@@ -116,6 +114,18 @@ def create_physical_plan(logical_plan, query_properties) -> PhysicalPlan:
                 f"Unexpected logical node encountered during physical planning: {node_type.name}"
             )
         # fmt: on
+
+        # Copy optimizer/binder attached metadata from logical node to physical node
+        if hasattr(logical_node, "pruned_files"):
+            try:
+                node.pruned_files = logical_node.pruned_files
+            except Exception:
+                pass
+        if hasattr(logical_node, "manifest"):
+            try:
+                node.manifest = logical_node.manifest
+            except Exception:
+                pass
 
         plan.add_node(nid, node)
 

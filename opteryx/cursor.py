@@ -250,19 +250,85 @@ class Cursor(DataFrame):
         self._telemetry.time_planning += time.time_ns() - start
 
         # build a JSON representation
+        def _humanize_physical_type(class_name: str) -> str:
+            # Remove common suffix
+            if class_name.endswith("Node"):
+                class_name = class_name[: -len("Node")]
+            # Split CamelCase into words
+            import re
+
+            parts = re.findall(r"[A-Z][a-z]*|[0-9]+", class_name)
+            # Normalize last token 'Read' -> 'reader'
+            if parts and parts[-1].lower() == "read":
+                parts[-1] = "reader"
+            return " ".join(p.lower() for p in parts)
+
         nodes = []
         for nid, node in physical_plan.nodes(data=True):
+            # friendly/logical type: prefer Substrait-like names for common kinds
+            def _logical_rel_name(node):
+                try:
+                    if getattr(node, "is_scan", False):
+                        return "ReadRel"
+                    if getattr(node, "is_join", False):
+                        return "JoinRel"
+                    # fall back to name-based heuristics
+                    candidate = getattr(node, "name", None) or getattr(node, "node_type", None)
+                    if candidate is None:
+                        return None
+                    s = str(candidate).lower()
+                    if "aggregate" in s or "group" in s or "distinct" in s:
+                        return "AggregateRel"
+                    if "project" in s or "projection" in s:
+                        return "ProjectRel"
+                    if "filter" in s or "where" in s:
+                        return "FilterRel"
+                    if "limit" in s:
+                        return "LimitRel"
+                    if "sort" in s or "order" in s:
+                        return "SortRel"
+                    if "union" in s:
+                        return "UnionRel"
+                    if "exit" in s:
+                        return "ExitRel"
+                    # default: title-case the candidate and append Rel
+                    token = str(candidate)
+                    token = token.replace(" ", "_").replace("-", "_")
+                    token = token[0].upper() + token[1:] if token else token
+                    return f"{token}Rel"
+                except Exception:
+                    return None
+
+            logical_type = _logical_rel_name(node)
+
+            # physical implementation type (class name -> human readable)
             try:
-                node_entry = {
-                    "nid": nid,
-                    "identity": getattr(node, "identity", None),
-                    "type": getattr(node, "node_type", getattr(node, "name", None)),
-                    "config": node.plan_config()
-                    if hasattr(node, "plan_config")
-                    else getattr(node, "config", None),
-                }
+                class_name = node.__class__.__name__
+                physical_type = _humanize_physical_type(class_name)
             except Exception:
-                node_entry = {"nid": nid, "type": str(type(node))}
+                physical_type = str(getattr(node, "__class__", type(node)))
+
+            # config / plan_config
+            try:
+                config_val = (
+                    node.plan_config()
+                    if hasattr(node, "plan_config")
+                    else getattr(node, "config", None)
+                )
+            except Exception as err:
+                # Don't silently drop errors from plan_config — include them in the output
+                try:
+                    cfg_str = getattr(node, "config", None)
+                except Exception:
+                    cfg_str = None
+                config_val = {"_plan_error": str(err), "config": cfg_str}
+
+            node_entry = {
+                "rel_id": nid,
+                "type": logical_type,
+                "physical_type": physical_type,
+                "config": config_val,
+            }
             nodes.append(node_entry)
 
         edges = [{"source": s, "target": t, "relation": r} for s, t, r in physical_plan.edges()]
