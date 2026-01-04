@@ -11,7 +11,6 @@ from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import wait
 from threading import Lock
 from typing import Dict
-from typing import List
 from typing import Optional
 from typing import Tuple
 
@@ -108,6 +107,26 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
             )
         return FileSystemTable._executor
 
+    def get_list_of_blob_names(self, prefix: str, predicates=None):
+        """
+        Get list of blob names (file paths) matching the prefix.
+
+        Args:
+            prefix: Directory/path prefix to list files from
+            predicates: Optional predicates (not used for file listing)
+
+        Returns:
+            List of file paths
+        """
+        from pyarrow.fs import FileSelector
+
+        # Create file selector to list files recursively
+        selector = FileSelector(prefix, recursive=True)
+        file_infos = self.filesystem.get_file_info(selector)
+
+        # Extract paths from FileInfo objects
+        return [info.path for info in file_infos]
+
     def read_blob(
         self, *, blob_name: str, decoder, just_schema=False, projection=None, selection=None
     ):
@@ -184,32 +203,6 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
 
         telemetry.bytes_read += len(data)
         return ref
-
-    def get_list_of_blob_names(self, *, prefix: str, predicates: list = []) -> List[str]:
-        """
-        List all blobs matching the prefix.
-
-        Args:
-            prefix: Path prefix to search
-            predicates: Optional predicates for filtering (subclasses may use this)
-
-        Returns:
-            List of blob paths
-        """
-        from pyarrow.fs import FileSelector
-
-        # Use filesystem's file listing
-        selector = FileSelector(prefix, recursive=True)
-        file_infos = self.filesystem.get_file_info(selector)
-
-        # Filter for valid file extensions
-        blob_names = [
-            info.path
-            for info in file_infos
-            if info.is_file and info.path.endswith(TUPLE_OF_VALID_EXTENSIONS)
-        ]
-
-        return blob_names
 
     def read_dataset(
         self,

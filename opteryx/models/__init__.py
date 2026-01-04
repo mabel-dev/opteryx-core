@@ -6,7 +6,9 @@
 from opteryx.compiled.structures.node import Node
 from opteryx.compiled.structures.relation_statistics import RelationStatistics
 from opteryx.models.connection_context import ExecutionContext
+from opteryx.models.file_entry import FileEntry
 from opteryx.models.logical_column import LogicalColumn
+from opteryx.models.manifest import Manifest
 from opteryx.models.non_tabular_result import NonTabularResult
 from opteryx.models.physical_plan import PhysicalPlan
 from opteryx.models.query_properties import QueryProperties
@@ -14,7 +16,9 @@ from opteryx.models.query_telemetry import QueryTelemetry
 
 __all__ = (
     "ExecutionContext",
+    "FileEntry",
     "LogicalColumn",
+    "Manifest",
     "Node",
     "NonTabularResult",
     "PhysicalPlan",

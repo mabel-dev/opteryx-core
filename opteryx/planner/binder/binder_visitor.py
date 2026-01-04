@@ -979,9 +979,14 @@ class BinderVisitor:
             node.connector.start_date = node.start_date
             node.connector.end_date = node.end_date
         try:
-            node.schema = node.connector.get_dataset_schema()
-            node.schema.aliases.append(node.alias)
-
+            # Get dataset schema and build manifest (if supported by connector)
+            # For Opteryx catalog connectors, this creates a Manifest with file-level stats
+            if hasattr(node.connector, "get_dataset_metadata"):
+                node.schema, node.manifest = node.connector.get_dataset_metadata()
+            else:
+                # Fallback for connectors that don't have manifest support yet
+                node.schema = node.connector.get_dataset_schema()
+                node.manifest = None
             if hasattr(node.connector, "relation_statistics"):
                 node.schema = node.connector.map_statistics(
                     node.connector.relation_statistics, node.schema
