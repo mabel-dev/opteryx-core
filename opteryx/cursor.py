@@ -215,6 +215,66 @@ class Cursor(DataFrame):
             self._description = None
         self._executed = True
 
+    def plan(
+        self,
+        operation: str,
+        params: Optional[Iterable] = None,
+        visibility_filters: Optional[Dict[str, Any]] = None,
+    ) -> dict:
+        """
+        Produce a planner-only representation of the given SQL without executing it.
+
+        Parameters:
+            operation: SQL query string
+            params: optional parameters for parameterized queries
+            visibility_filters: optional visibility filters passed to the binder
+            output: 'json' (default) or 'mermaid' to return a mermaid string
+
+        Returns:
+            A JSON serialized string describing the physical plan, or a mermaid string
+            if `output == 'mermaid'`.
+        """
+        self._ensure_open()
+
+        from opteryx.planner import query_planner
+
+        start = time.time_ns()
+        physical_plan = query_planner(
+            operation=operation,
+            parameters=params,
+            visibility_filters=visibility_filters,
+            connection=self._connection,
+            qid=self.id,
+            telemetry=self._telemetry,
+        )
+        self._telemetry.time_planning += time.time_ns() - start
+
+        # build a JSON representation
+        nodes = []
+        for nid, node in physical_plan.nodes(data=True):
+            try:
+                node_entry = {
+                    "nid": nid,
+                    "identity": getattr(node, "identity", None),
+                    "type": getattr(node, "node_type", getattr(node, "name", None)),
+                    "config": node.plan_config()
+                    if hasattr(node, "plan_config")
+                    else getattr(node, "config", None),
+                }
+            except Exception:
+                node_entry = {"nid": nid, "type": str(type(node))}
+            nodes.append(node_entry)
+
+        edges = [{"source": s, "target": t, "relation": r} for s, t, r in physical_plan.edges()]
+
+        plan_dict = {
+            "nodes": nodes,
+            "edges": edges,
+            "exit_points": list(physical_plan.get_exit_points()),
+        }
+
+        return plan_dict
+
     @property
     def result_type(self) -> ResultType:
         return self._result_type
