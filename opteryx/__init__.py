@@ -94,6 +94,7 @@ __all__ = [
     "Connection",
     "query",
     "query_to_arrow",
+    "plan",
     "register_workspace",
     "set_default_connector",
     "__author__",
@@ -270,6 +271,29 @@ def analyze_query(sql: str) -> Dict[str, Any]:
     from opteryx.utils.query_parser import parse_query_info as _parse_query_info
 
     return _parse_query_info(sql)
+
+
+def plan(
+    operation: str,
+    params: Optional[Iterable] = None,
+    visibility_filters: Optional[Dict[str, Any]] = None,
+    **kwargs,
+) -> dict:
+    """
+    Produce a planner-only representation of the given SQL without executing it.
+
+    This convenience wrapper creates a temporary `Connection` and `Cursor`, calls
+    `Cursor.plan(...)`, then closes the cursor and connection.
+    """
+    from opteryx.connection import Connection
+
+    conn = Connection(**kwargs)
+    cur = conn.cursor()
+    cur._owns_connection = True
+    try:
+        return cur.plan(operation=operation, params=params, visibility_filters=visibility_filters)
+    finally:
+        cur.close()
 
 
 # Enable all warnings, including DeprecationWarning

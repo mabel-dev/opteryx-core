@@ -110,12 +110,10 @@ class Manifest:
         pruned_files = []
 
         for file_entry in self.files:
-            print("Evaluating file:", file_entry.file_path)
             skip_file = False
 
             # Check each predicate
             for predicate in predicates:
-                print("  Predicate:", predicate.left.value, predicate.value, predicate.right.value)
                 # Handle simple comparisons: column op literal
                 if (
                     predicate.node_type == NodeType.COMPARISON_OPERATOR
