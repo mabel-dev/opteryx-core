@@ -246,17 +246,22 @@ class ReaderNode(BasePlanNode):
         if manifest is not None:
             # manifest.files contains FileEntry objects
             for f in manifest.files:
-                config["files"].append(
-                    {"path": f.file_path, "rows": f.record_count, "bytes": f.uncompressed_size}
-                )
+                file_entry = {"path": f.file_path}
+                # only include rows if known
+                if getattr(f, "record_count", None) is not None:
+                    file_entry["rows"] = f.record_count
+                # include uncompressed bytes only when present (do not fall back)
+                if getattr(f, "uncompressed_size_in_bytes", None) is not None:
+                    file_entry["bytes"] = f.uncompressed_size_in_bytes
+                config["files"].append(file_entry)
             # If pruning reduced files, filter to pruned list
             if pruned:
                 pruned_set = set(pruned)
                 config["files"] = [ff for ff in config["files"] if ff.get("path") in pruned_set]
         elif pruned:
-            # We only have file paths
+            # We only have file paths; include only the path (no rows/bytes)
             for p in pruned:
-                config["files"].append({"path": p, "rows": None, "bytes": None})
+                config["files"].append({"path": p})
 
         # Selection pushdown: represent predicates simply
         try:
@@ -270,13 +275,13 @@ class ReaderNode(BasePlanNode):
         schema_columns = getattr(self.schema, "columns", []) or []
         for c in self.columns or []:
             # use the column identity (internal identity) as the column_name
-            identity = c.schema_column.identity
+            identity = getattr(c, "identity", None) or getattr(c, "name", None) or str(c)
             schema_index = None
             for idx, sc in enumerate(schema_columns):
-                if sc.identity == identity:
+                if getattr(sc, "identity", None) == identity:
                     schema_index = idx
                     break
-            proj.append({"schema_index": schema_index, "identity": identity})
+            proj.append({"schema_index": schema_index, "column_name": identity})
 
         config["projection_pushdown"] = proj
 
@@ -289,12 +294,13 @@ class ReaderNode(BasePlanNode):
             total_rows = 0
             total_bytes = 0
         else:
-            rows_known = all((f.get("rows") is not None for f in config["files"]))
-            bytes_known = all((f.get("bytes") is not None for f in config["files"]))
+            # all files must have the key and a non-None value to be considered known
+            rows_known = all(("rows" in f and f["rows"] is not None for f in config["files"]))
+            bytes_known = all(("bytes" in f and f["bytes"] is not None for f in config["files"]))
             if rows_known:
-                total_rows = sum((f.get("rows", 0) for f in config["files"]))
+                total_rows = sum((f["rows"] for f in config["files"]))
             if bytes_known:
-                total_bytes = sum((f.get("bytes", 0) for f in config["files"]))
+                total_bytes = sum((f["bytes"] for f in config["files"]))
 
         config["summary"] = {
             "total-files": total_files,
