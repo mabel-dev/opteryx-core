@@ -1,5 +1,5 @@
 - restore filter pushdowns
-- support "create view"/"drop view"/"update view" (https://github.com/mabel-dev/opteryx-core/issues/17)
+- "DROP VIEW" doesn't work (https://github.com/mabel-dev/opteryx-core/issues/17)
 - support "comment" (https://github.com/mabel-dev/opteryx-core/issues/31)
 - support redoing the statistics `ANALYZE TABLE opteryx.test.astronauts` (https://github.com/mabel-dev/opteryx-core/issues/57)
 - 'MAKE T' test to test using the opteryx.tests datasets
