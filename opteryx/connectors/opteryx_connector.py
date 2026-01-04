@@ -48,6 +48,7 @@ class OpteryxTable(Diachronic):
     # Capability declarations (for plan-time)
     supports_diachronic = True  # Time-travel queries
     supports_statistics = True  # Manifest provides stats
+    supports_limit_pushdown = True  # Allow optimizer to push LIMIT to OpteryxTable
 
     def __init__(self, dataset: str, catalog, workspace: str, **kwargs):
         """
