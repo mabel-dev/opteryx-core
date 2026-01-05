@@ -487,12 +487,15 @@ class OpteryxConnector(Eidetic):
         object_name_type, _ = self.locate_object(object_name)
         if object_name_type == TableType.Table:
             # Update table comment
-            catalog.update_dataset_description(identifier=identifier, description=comment, describer=describer)
+            catalog.update_dataset_description(
+                identifier=identifier, description=comment, describer=describer
+            )
             return
         if object_name_type == TableType.View:
             # Update view comment
-            catalog.update_view_description(identifier=identifier, description=comment, describer=describer)
+            catalog.update_view_description(
+                identifier=identifier, description=comment, describer=describer
+            )
             return
-        
-        raise DatasetNotFoundError(connector=self, dataset=object_name)
 
+        raise DatasetNotFoundError(connector=self, dataset=object_name)

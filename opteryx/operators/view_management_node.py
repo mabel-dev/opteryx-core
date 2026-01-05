@@ -119,9 +119,7 @@ class ViewManagementNode(BasePlanNode):
             # Try to locate the object to verify it exists (unless IF EXISTS is specified)
             object_type, _ = self.connector.locate_object(self.object_name)
             if object_type not in (TableType.View, TableType.Table):
-                raise DatasetNotFoundError(
-                    connector=self.connector, dataset=self.object_name
-                )
+                raise DatasetNotFoundError(connector=self.connector, dataset=self.object_name)
 
             # Store the comment via the connector's generic comment API
             # Ensure the connector implements the API before calling.

@@ -1117,9 +1117,7 @@ class BinderVisitor:
 
         # Ensure this user can write to the object location
         if not can_read_table(context.connection.memberships, node.object_name, action="WRITE"):
-            raise PermissionError(
-                f"User does not have permission to comment on {node.object_name}"
-            )
+            raise PermissionError(f"User does not have permission to comment on {node.object_name}")
 
         if hasattr(node.connector, "variables"):
             node.connector.variables = context.connection.variables

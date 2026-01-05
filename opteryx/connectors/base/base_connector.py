@@ -19,9 +19,9 @@ from typing import Tuple
 import pyarrow
 from orso.schema import RelationSchema
 
-from opteryx.models import QueryTelemetry
 from opteryx.connectors import TableType
 from opteryx.exceptions import DatasetNotFoundError
+from opteryx.models import QueryTelemetry
 
 MIN_CHUNK_SIZE: int = 500
 INITIAL_CHUNK_SIZE: int = 500
