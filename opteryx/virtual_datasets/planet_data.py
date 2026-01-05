@@ -31,8 +31,6 @@ from orso.schema import RelationSchema
 from orso.tools import single_item_cache
 from orso.types import OrsoTypes
 
-from opteryx.models import RelationStatistics
-
 __all__ = ("read", "schema")
 
 
@@ -87,102 +85,28 @@ def read(end_date=None, *args) -> pyarrow.Table:
 def schema():
     # fmt:off
     return RelationSchema(
-            name="$planets",
-            columns=[
-                FlatColumn(name="id", type=OrsoTypes.INTEGER),
-                FlatColumn(name="name", type=OrsoTypes.VARCHAR),
-                FlatColumn(name="mass", type=OrsoTypes.DOUBLE),
-                FlatColumn(name="diameter", type=OrsoTypes.INTEGER),
-                FlatColumn(name="density", type=OrsoTypes.INTEGER),
-                FlatColumn(name="gravity", type=OrsoTypes.DECIMAL, precision=3, scale=1),
-                FlatColumn(name="escape_velocity", type=OrsoTypes.DOUBLE, aliases=["escapeVelocity"]),
-                FlatColumn(name="rotation_period", type=OrsoTypes.DOUBLE, aliases=["rotationPeriod"]),
-                FlatColumn(name="length_of_day", type=OrsoTypes.DOUBLE, aliases=["lengthOfDay"]),
-                FlatColumn(name="distance_from_sun", type=OrsoTypes.DOUBLE, aliases=["distanceFromSun"]),
-                FlatColumn(name="perihelion", type=OrsoTypes.DOUBLE),
-                FlatColumn(name="aphelion", type=OrsoTypes.DOUBLE),
-                FlatColumn(name="orbital_period", type=OrsoTypes.DOUBLE, aliases=["orbitalPeriod"]),
-                FlatColumn(name="orbital_velocity", type=OrsoTypes.DOUBLE, aliases=["orbitalVelocity"]),
-                FlatColumn(name="orbital_inclination", type=OrsoTypes.DOUBLE, aliases=["orbitalInclination"]),
-                FlatColumn(name="orbital_eccentricity", type=OrsoTypes.DOUBLE, aliases=["orbitalEccentricity"]),
-                FlatColumn(name="obliquity_to_orbit", type=OrsoTypes.DOUBLE, aliases=["obliquityToOrbit"]),
-                FlatColumn(name="mean_temperature", type=OrsoTypes.INTEGER, aliases=["meanTemperature"]),
-                FlatColumn(name="surface_pressure", type=OrsoTypes.DOUBLE, aliases=["surfacePressure"]),
-                FlatColumn(name="number_of_moons", type=OrsoTypes.INTEGER, aliases=["numberOfMoons"]),
-            ],
-        )
+        name="$planets",
+        columns=[
+            FlatColumn(name="id", type=OrsoTypes.INTEGER),
+            FlatColumn(name="name", type=OrsoTypes.VARCHAR),
+            FlatColumn(name="mass", type=OrsoTypes.DOUBLE),
+            FlatColumn(name="diameter", type=OrsoTypes.INTEGER),
+            FlatColumn(name="density", type=OrsoTypes.INTEGER),
+            FlatColumn(name="gravity", type=OrsoTypes.DECIMAL, precision=3, scale=1),
+            FlatColumn(name="escape_velocity", type=OrsoTypes.DOUBLE, aliases=["escapeVelocity"]),
+            FlatColumn(name="rotation_period", type=OrsoTypes.DOUBLE, aliases=["rotationPeriod"]),
+            FlatColumn(name="length_of_day", type=OrsoTypes.DOUBLE, aliases=["lengthOfDay"]),
+            FlatColumn(name="distance_from_sun", type=OrsoTypes.DOUBLE, aliases=["distanceFromSun"]),
+            FlatColumn(name="perihelion", type=OrsoTypes.DOUBLE),
+            FlatColumn(name="aphelion", type=OrsoTypes.DOUBLE),
+            FlatColumn(name="orbital_period", type=OrsoTypes.DOUBLE, aliases=["orbitalPeriod"]),
+            FlatColumn(name="orbital_velocity", type=OrsoTypes.DOUBLE, aliases=["orbitalVelocity"]),
+            FlatColumn(name="orbital_inclination", type=OrsoTypes.DOUBLE, aliases=["orbitalInclination"]),
+            FlatColumn(name="orbital_eccentricity", type=OrsoTypes.DOUBLE, aliases=["orbitalEccentricity"]),
+            FlatColumn(name="obliquity_to_orbit", type=OrsoTypes.DOUBLE, aliases=["obliquityToOrbit"]),
+            FlatColumn(name="mean_temperature", type=OrsoTypes.INTEGER, aliases=["meanTemperature"]),
+            FlatColumn(name="surface_pressure", type=OrsoTypes.DOUBLE, aliases=["surfacePressure"]),
+            FlatColumn(name="number_of_moons", type=OrsoTypes.INTEGER, aliases=["numberOfMoons"]),
+        ],
+    )
     # fmt:on
-
-
-def statistics() -> RelationStatistics:
-    stats = RelationStatistics()
-
-    stats.record_count = 9
-    stats.lower_bounds = {
-        b"id": 1,
-        b"obliquityToOrbit": 0,
-        b"distanceFromSun": 58,
-        b"density": 687,
-        b"meanTemperature": -225,
-        b"name": 4999402905644564480,
-        b"mass": 0,
-        b"surfacePressure": 0,
-        b"escapeVelocity": 1,
-        b"rotationPeriod": -5832,
-        b"diameter": 2370,
-        b"lengthOfDay": 10,
-        b"gravity": 1,
-        b"orbitalPeriod": 88,
-        b"numberOfMoons": 0,
-        b"perihelion": 46,
-        b"orbitalInclination": 0,
-        b"aphelion": 70,
-        b"orbitalVelocity": 5,
-        b"orbitalEccentricity": 0,
-    }
-    stats.upper_bounds = {
-        b"id": 9,
-        b"obliquityToOrbit": 177,
-        b"distanceFromSun": 5906,
-        b"density": 5514,
-        b"meanTemperature": 464,
-        b"name": 6225503510629187584,
-        b"mass": 1898,
-        b"surfacePressure": 92,
-        b"escapeVelocity": 60,
-        b"rotationPeriod": 1408,
-        b"diameter": 142984,
-        b"lengthOfDay": 4223,
-        b"gravity": 23,
-        b"orbitalPeriod": 90560,
-        b"numberOfMoons": 82,
-        b"perihelion": 4444,
-        b"orbitalInclination": 17,
-        b"aphelion": 7376,
-        b"orbitalVelocity": 47,
-        b"orbitalEccentricity": 0,
-    }
-    stats.null_count = {
-        b"id": 0,
-        b"name": 0,
-        b"mass": 0,
-        b"diameter": 0,
-        b"density": 0,
-        b"gravity": 0,
-        b"escapeVelocity": 0,
-        b"rotationPeriod": 0,
-        b"lengthOfDay": 0,
-        b"distanceFromSun": 0,
-        b"perihelion": 0,
-        b"aphelion": 0,
-        b"orbitalPeriod": 0,
-        b"orbitalVelocity": 0,
-        b"orbitalInclination": 0,
-        b"orbitalEccentricity": 0,
-        b"obliquityToOrbit": 0,
-        b"meanTemperature": 0,
-        b"surfacePressure": 4,
-        b"numberOfMoons": 0,
-    }
-
-    return stats

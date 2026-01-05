@@ -18,14 +18,15 @@ from orso.schema import RelationSchema
 from orso.tools import single_item_cache
 from orso.types import OrsoTypes
 
-from opteryx.models import RelationStatistics
-
 __all__ = ("read", "schema")
 
 
 @single_item_cache
-def read(*args) -> pyarrow.Table:
+def read(end_date=None, variables=None) -> pyarrow.Table:
     # Create a PyArrow table with one column and one row
+    _ = end_date
+    _ = variables
+
     arrow_schema = pyarrow.schema([pyarrow.field("$column", pyarrow.int64())])
     return pyarrow.Table.from_arrays(
         [pyarrow.array([0], type=pyarrow.int64())], schema=arrow_schema
@@ -36,7 +37,3 @@ def schema():
     # fmt:off
     return RelationSchema(name="$no_table", columns=[FlatColumn(name="$column", type=OrsoTypes.INTEGER)])
     # fmt:on
-
-
-def statistics() -> RelationStatistics:
-    return RelationStatistics()

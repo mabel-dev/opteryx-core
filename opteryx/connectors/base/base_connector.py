@@ -19,6 +19,8 @@ from typing import Tuple
 import pyarrow
 from orso.schema import RelationSchema
 
+from opteryx.connectors import TableType
+from opteryx.exceptions import DatasetNotFoundError
 from opteryx.models import QueryTelemetry
 
 MIN_CHUNK_SIZE: int = 500
@@ -73,6 +75,26 @@ class BaseConnector:
             or have catalog capabilities should override this method.
         """
         return None, None
+
+    def update_comment(self, object_name: str, comment: str, describer: str = "system"):
+        """
+        Update the comment/description for an object (table or view).
+
+        Default implementation will locate the object and attempt to delegate
+        to connector-specific comment/set methods if available.
+        """
+        # Determine object type first
+        object_type, _ = self.locate_object(object_name)
+
+        if object_type not in (TableType.View, TableType.Table):
+            # Let callers decide how to handle missing objects
+            raise DatasetNotFoundError(connector=self, dataset=object_name)
+
+        # Prefer a generic `set_comment` if connector implements it
+        if hasattr(self, "set_comment"):
+            return self.set_comment(object_name, comment, describer=describer)
+
+        raise NotImplementedError("Connector does not support updating comments for this object")
 
     def table_engine(self, name: str, **kwargs):  # pragma: no cover
         """

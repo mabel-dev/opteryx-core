@@ -13,13 +13,17 @@ from orso.schema import FlatColumn
 from orso.schema import RelationSchema
 from orso.types import OrsoTypes
 
-from opteryx.models import RelationStatistics
-
 __all__ = ("read", "schema")
 
 
-def read(end_date=None, variables={}):
+def read(end_date=None, variables=None):
     import pyarrow
+
+    _ = end_date
+    if not variables:
+        return pyarrow.Table.from_pylist([])
+
+    variables = variables or {}
 
     buffer = []
     for variable in variables:
@@ -52,7 +56,3 @@ def schema():
         ],
     )
     # fmt:on
-
-
-def statistics() -> RelationStatistics:
-    return RelationStatistics()

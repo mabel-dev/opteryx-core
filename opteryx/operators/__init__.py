@@ -55,6 +55,8 @@ Control and Meta:
 - ShowCreateNode: SHOW CREATE VIEW implementation
 - ShowValueNode: SHOW variable value display
 - SetVariableNode: SET variable operations
+- ViewManagementNode: CREATE/ALTER/DROP VIEW operations
+- TableManagementNode: ANALYZE TABLE operations
 
 Base Classes:
 - BasePlanNode: Base class for all operators
@@ -115,6 +117,7 @@ from .read_node import ReaderNode
 from .set_variable_node import SetVariableNode
 from .show_columns_node import ShowColumnsNode  # column details
 from .show_create_node import ShowCreateNode  # SHOW CREATE VIEW
+from .table_management_node import TableManagementNode  # ANALYZE TABLE
 
 # from .show_databases_node import ShowDatabasesNode  # SHOW DATABASES
 # from .show_functions_node import ShowFunctionsNode  # supported functions

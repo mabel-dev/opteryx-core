@@ -61,6 +61,8 @@ class LogicalPlanStepType(int, Enum):
     CreateView = auto()
     AlterView = auto()
     DropView = auto()
+    Analyze = auto()
+    Comment = auto()  # COMMENT ON VIEW/TABLE
 
 
 class LogicalPlan(Graph):
@@ -1120,6 +1122,24 @@ def plan_drop_view(statement, **kwargs):
     return plan
 
 
+def plan_analyze_query(statement, **kwargs) -> LogicalPlan:
+    root = "Analyze"
+
+    if not statement[root]["has_table_keyword"]:
+        raise UnsupportedSyntaxError("ANALYZE without TABLE keyword is not supported")
+
+    plan = LogicalPlan()
+    analyze_node = LogicalPlanNode(node_type=LogicalPlanStepType.Analyze)
+    analyze_node.table_name = ".".join(
+        part["Identifier"]["value"] for part in statement[root]["table_name"]
+    )
+
+    analyze_id = random_string()
+    plan.add_node(analyze_id, analyze_node)
+
+    return plan
+
+
 def build_expression_tree(relation, dnf_list):
     """
     Recursively build an expression tree from a DNF-like list structure.
@@ -1210,8 +1230,45 @@ def build_expression_tree(relation, dnf_list):
     raise ValueError(f"Unsupported DNF structure: {dnf_list}")
 
 
+def plan_comment(statement, **kwargs):
+    """
+    Create a logical plan for COMMENT ON VIEW/TABLE/EXTENSION statement.
+
+    COMMENT [ IF EXISTS ] ON EXTENSION object_name IS 'comment_text'
+
+    Note: The SQL rewriter converts TABLE and VIEW to EXTENSION so the parser
+    can accept them.
+    """
+    root_node = "Comment"
+    plan = LogicalPlan()
+
+    comment_node = LogicalPlanNode(node_type=LogicalPlanStepType.Comment)
+
+    # Extract object name (e.g., workspace.collection.view)
+    object_name_parts = statement[root_node]["object_name"]
+    object_name = extract_variable(object_name_parts)
+    if isinstance(object_name, list):
+        object_name = ".".join(object_name)
+    comment_node.object_name = object_name
+
+    # Extract object type (should be Extension after rewrite)
+    comment_node.object_type = statement[root_node].get("object_type", "Extension")
+
+    # Extract the comment text
+    comment_node.comment = statement[root_node].get("comment", "")
+
+    # Extract IF EXISTS flag
+    comment_node.if_exists = statement[root_node].get("if_exists", False)
+
+    # Add the Comment node
+    plan.add_node(random_string(), comment_node)
+
+    return plan
+
+
 QUERY_BUILDERS = {
-    # "Analyze": analyze_query,
+    "Analyze": plan_analyze_query,
+    "Comment": plan_comment,
     "Explain": plan_explain,
     "Query": plan_query,
     "Set": plan_set_variable,

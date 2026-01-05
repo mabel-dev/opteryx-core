@@ -447,13 +447,6 @@ extensions = [
         extra_compile_args=C_FLAGS,
     ),
     Extension(
-        "opteryx.compiled.structures.relation_statistics",
-        sources=["opteryx/compiled/structures/relation_statistics.pyx"],
-        include_dirs=include_dirs,
-        language="c++",
-        extra_compile_args=CPP_FLAGS,
-    ),
-    Extension(
         "opteryx.compiled.structures.bloom_filter",
         sources=["opteryx/compiled/structures/bloom_filter.pyx"],
         include_dirs=include_dirs,
