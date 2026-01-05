@@ -13,17 +13,33 @@ from orso.schema import FlatColumn
 from orso.schema import RelationSchema
 from orso.types import OrsoTypes
 
-from opteryx.models import RelationStatistics
+from opteryx.exceptions import VariableNotFoundError
 
 __all__ = ("read", "schema")
 
 
-def read(end_date=None, variables={}):
+def read(end_date=None, variables=None):
     import pyarrow
+
+    _ = end_date
+    variables = variables or {}
+
+    if isinstance(variables, dict):
+        memberships = variables.get("user_memberships", [])
+    elif hasattr(variables, "__getitem__"):
+        try:
+            memberships = variables["user_memberships"]
+        except (KeyError, VariableNotFoundError, TypeError):
+            memberships = []
+    else:
+        memberships = []
+
+    if hasattr(memberships, "to_pylist"):
+        memberships = memberships.to_pylist()
 
     buffer = []
 
-    for value in variables["user_memberships"]:
+    for value in memberships:
         buffer.append({"attribute": "membership", "value": str(value), "type": "VARCHAR"})
 
     return pyarrow.Table.from_pylist(buffer)
@@ -40,7 +56,3 @@ def schema():
         ],
     )
     # fmt:on
-
-
-def statistics() -> RelationStatistics:
-    return RelationStatistics()

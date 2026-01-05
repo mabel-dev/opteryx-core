@@ -109,6 +109,11 @@ def create_physical_plan(logical_plan, query_properties) -> PhysicalPlan:
             node = operators.UnionNode(query_properties, **node_config)
         elif node_type == LogicalPlanStepType.Unnest:
             node = operators.UnnestJoinNode(query_properties, **node_config)
+        elif node_type == LogicalPlanStepType.Analyze:
+            node = operators.TableManagementNode(query_properties, action="analyze_table", **node_config)
+        elif node_type == LogicalPlanStepType.Comment:
+            # COMMENT ON VIEW/TABLE/EXTENSION - use ViewManagementNode with 'comment' action
+            node = operators.ViewManagementNode(query_properties, action="comment", **node_config)
         else:  # pragma: no cover
             raise InvalidInternalStateError(
                 f"Unexpected logical node encountered during physical planning: {node_type.name}"

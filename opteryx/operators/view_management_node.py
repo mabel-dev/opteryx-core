@@ -10,7 +10,9 @@ Handles CREATE/ALTER/DROP VIEW operations at execution time.
 
 from typing import Optional
 
+from opteryx.connectors import TableType
 from opteryx.constants import QueryStatus
+from opteryx.exceptions import DatasetNotFoundError
 from opteryx.models import NonTabularResult
 from opteryx.models import QueryProperties
 
@@ -21,7 +23,7 @@ class ViewManagementNode(BasePlanNode):
     def __init__(self, properties: QueryProperties, **parameters):
         BasePlanNode.__init__(self, properties=properties, **parameters)
 
-        # Action should be one of: 'create_view', 'alter_view', 'drop_view'
+        # Action should be one of: 'create_view', 'alter_view', 'drop_view', 'comment'
         self.action: str = parameters.get("action")
 
         # CREATE / ALTER
@@ -35,7 +37,12 @@ class ViewManagementNode(BasePlanNode):
         # Binder supplies a mapping of view_name -> connector for drops
         self.connectors = parameters.get("connectors")
 
-        # Single connector (create/alter)
+        # COMMENT
+        self.object_name: Optional[str] = parameters.get("object_name")
+        self.comment: Optional[str] = parameters.get("comment")
+        self.if_exists: bool = parameters.get("if_exists", False)
+
+        # Single connector (create/alter/comment)
         self.connector = parameters.get("connector")
 
     @property
@@ -46,6 +53,8 @@ class ViewManagementNode(BasePlanNode):
     def config(self):  # pragma: no cover - simple string
         if self.action == "drop_view":
             return f"drop {', '.join(self.view_names or [])}"
+        elif self.action == "comment":
+            return f"comment on {self.object_name}"
         return f"{self.action} {self.view_name}"
 
     def __call__(self, morsel=None, **kwargs) -> NonTabularResult:
@@ -88,10 +97,38 @@ class ViewManagementNode(BasePlanNode):
 
                     connector = connector_factory(vn, telemetry=self.telemetry)
 
+                if connector.locate_object(vn)[0] != TableType.View:
+                    raise DatasetNotFoundError(connector=connector, dataset=vn)
+
                 connector.drop_view(vn)
                 dropped += 1
 
             return NonTabularResult(record_count=dropped, status=QueryStatus.SQL_SUCCESS)
+
+        elif self.action == "comment":
+            # COMMENT ON VIEW/TABLE/EXTENSION
+            if not self.object_name:
+                raise ValueError("No object name supplied for COMMENT")
+
+            if not self.connector:
+                # Defensive: if connector is missing, derive via connector_factory lazily
+                from opteryx.connectors import connector_factory
+
+                self.connector = connector_factory(self.object_name, telemetry=self.telemetry)
+
+            # Try to locate the object to verify it exists (unless IF EXISTS is specified)
+            object_type, _ = self.connector.locate_object(self.object_name)
+            if object_type not in (TableType.View, TableType.Table):
+                raise DatasetNotFoundError(connector=self.connector, dataset=self.object_name)
+
+            # Store the comment via the connector's generic comment API
+            # Ensure the connector implements the API before calling.
+            if not hasattr(self.connector, "set_comment"):
+                raise NotImplementedError("Connector does not support updating comments")
+
+            self.connector.set_comment(self.object_name, self.comment, describer="system")
+
+            return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
 
         else:
             raise NotImplementedError(f"Unsupported view action: {self.action}")

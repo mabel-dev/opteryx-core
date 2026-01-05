@@ -8,6 +8,8 @@ class ViewDefinition:
     statement: str
     owner: Optional[str] = None
     last_row_count: Optional[int] = None
+    description: Optional[str] = None
+    describer: Optional[str] = None
 
 
 class Eidetic:

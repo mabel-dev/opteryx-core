@@ -4,6 +4,7 @@ This module provides a small sanitizer that coerces common numeric
 and array types (notably NumPy) to native Python types that the
 Firestore client accepts.
 """
+
 from typing import Any
 
 

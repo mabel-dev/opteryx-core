@@ -8,6 +8,8 @@ All of the query types supported by sqlparser-rs
 """
 
 PERMISSIONS = {
+    "Analyze",  # ANALYZE TABLE
+    "Comment",  # COMMENT ON VIEW/TABLE
     "Query",  # SELECT
     "Explain",  # EXPLAIN
     "ShowColumns",  # SHOW COLUMNS
@@ -17,7 +19,7 @@ PERMISSIONS = {
     "ShowFunctions",  # SHOW FUNCTIONS
     "ShowTables",  # SHOW TABLES (metadata)
     "Set",  # Allow setting session variables only (no persistent side effects)
-    "Use",
+    "Use",  # USE database
     "CreateView",
     "AlterView",
     "DropView",

@@ -163,10 +163,6 @@ class LocalOpteryxCatalog:
         metadata = SimpleNamespace(location=path)
         return OpteryxShimTable(identifier, schema, metadata)
 
-    def load_table(self, identifier: Any) -> OpteryxShimTable:
-        """Backward-compatible alias that returns an OpteryxShimTable."""
-        return self.load_dataset(identifier)
-
     def list_tables(self, namespace: str) -> List[Tuple[str, str]]:
         """List all tables in a namespace."""
         namespace_path = self._resolve_path(namespace)
@@ -222,7 +218,3 @@ class LocalOpteryxCatalog:
         if not os.path.exists(namespace_path):
             raise FileNotFoundError(f"Namespace not found: {namespace}")
         return {}
-
-
-# Backwards compatibility: previous API exported LocalFileCatalog
-LocalFileCatalog = LocalOpteryxCatalog
