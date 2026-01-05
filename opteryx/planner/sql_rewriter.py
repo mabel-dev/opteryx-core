@@ -209,11 +209,11 @@ def rewrite_explain(parts: list) -> list:
 def rewrite_comment(parts: list) -> list:
     """
     Rewrite COMMENT ON TABLE to COMMENT ON EXTENSION.
-    
+
     The parser supports COMMENT ON EXTENSION but not COMMENT ON TABLE.
     This transformation allows users to write COMMENT ON TABLE and have it
     work seamlessly.
-    
+
     Example:
         COMMENT ON TABLE workspace.collection.table IS 'description'
         -> COMMENT ON EXTENSION workspace.collection.table IS 'description'
@@ -222,11 +222,11 @@ def rewrite_comment(parts: list) -> list:
     # ['COMMENT ON', 'TABLE workspace...'] or
     # ['COMMENT IF EXISTS', 'ON', 'TABLE workspace...'] or
     # ['COMMENT ON', 'TABLE', '"schema"', ...]
-    
+
     for i in range(len(parts)):
         part = parts[i]
         part_upper = part.upper()
-        
+
         # Check if this token starts with TABLE or VIEW (with a space after)
         if part_upper.startswith("TABLE "):
             parts[i] = "EXTENSION " + part[6:]  # Replace "TABLE " with "EXTENSION "
@@ -238,7 +238,7 @@ def rewrite_comment(parts: list) -> list:
         elif part_upper == "TABLE" or part_upper == "VIEW":
             parts[i] = "EXTENSION"
             break
-    
+
     return parts
 
 
