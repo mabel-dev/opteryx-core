@@ -240,3 +240,8 @@ def render_drop_view(node: LogicalPlanNode) -> str:
     cascade = " CASCADE" if node.cascade else ""
     view_list = ", ".join(node.view_names)
     return f"DROP VIEW {if_exists}({view_list}){cascade}"
+
+
+@register_render(LogicalPlanStepType.Analyze)
+def render_analyze(node: LogicalPlanNode) -> str:
+    return f"ANALYZE TABLE ({node.table_name})"

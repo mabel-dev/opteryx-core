@@ -13,15 +13,16 @@ from orso.schema import FlatColumn
 from orso.schema import RelationSchema
 from orso.types import OrsoTypes
 
-from opteryx.models import RelationStatistics
-
 __all__ = ("read", "schema")
 
 
-def read(end_date=None, variables={}):
+def read(end_date=None, variables=None):
     import pyarrow
 
-    from opteryx import system_telemetry
+    _ = end_date
+    variables = variables or {}
+
+    from opteryx import system_telemetry  # type: ignore[attr-defined]
 
     # fmt:off
     buffer = [
@@ -46,7 +47,3 @@ def schema():
         ],
     )
     # fmt:on
-
-
-def statistics() -> RelationStatistics:
-    return RelationStatistics()

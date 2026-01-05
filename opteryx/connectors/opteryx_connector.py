@@ -16,7 +16,6 @@ from typing import Optional
 from typing import Tuple
 
 from orso.schema import RelationSchema
-from orso.types import OrsoTypes
 
 from opteryx.connectors import TableType
 from opteryx.connectors.capabilities import Diachronic
@@ -25,7 +24,6 @@ from opteryx.exceptions import DatasetNotFoundError
 from opteryx.exceptions import DatasetReadError
 from opteryx.models import FileEntry
 from opteryx.models import Manifest
-from opteryx.models import RelationStatistics
 
 
 class OpteryxTable(Diachronic):
@@ -74,7 +72,6 @@ class OpteryxTable(Diachronic):
         self.dataset_committed_at = None
         self.schema = None
         self.manifest = None
-        self.relation_statistics = None
 
         # Load table from catalog
         from opteryx_catalog.exceptions import DatasetNotFound
@@ -175,39 +172,7 @@ class OpteryxTable(Diachronic):
             # Fallback: create empty Manifest if scan fails
             self.manifest = Manifest(files=[], schema=self.schema)
 
-        # For backward compatibility: populate relation_statistics
-        # Eventually this can be removed
-        relation_statistics = RelationStatistics()
-        relation_statistics.record_count = self.manifest.get_record_count()
-        self.relation_statistics = relation_statistics
-
         return self.schema, self.manifest
-
-    def map_statistics(
-        self, statistics: RelationStatistics, schema: RelationSchema
-    ) -> RelationSchema:
-        """
-        Map statistics to schema columns.
-
-        For backward compatibility with the binder.
-        This will be removed once all connectors use manifests.
-        """
-        if statistics is None:
-            return schema
-
-        schema.row_count_metric = statistics.record_count
-
-        # Map bounds from statistics to schema columns
-        for column in schema.columns:
-            column_key = column.name.encode() if isinstance(column.name, str) else column.name
-            if hasattr(statistics, "upper_bounds"):
-                column.highest_value = statistics.upper_bounds.get(column_key, None)
-            if hasattr(statistics, "lower_bounds"):
-                column.lowest_value = statistics.lower_bounds.get(column_key, None)
-            if hasattr(statistics, "null_count"):
-                column.null_count = statistics.null_count.get(column_key, None)
-
-        return schema
 
 
 class OpteryxConnector(Eidetic):
@@ -505,3 +470,29 @@ class OpteryxConnector(Eidetic):
 
         identifier = (collection, name)
         return catalog.view_exists(identifier)
+
+    def set_comment(self, object_name: str, comment: str, describer: str = "system"):
+        """Set a comment on a view or table."""
+        # Parse object_name into workspace and relative identifier
+        workspace, relative_id = self._parse_identifier(object_name)
+        catalog = self._get_catalog(workspace)
+
+        # Split relative identifier into collection and name for catalog
+        parts = relative_id.split(".")
+        name = parts[-1]
+        collection = ".".join(parts[:-1])
+
+        identifier = (collection, name)
+
+        object_name_type, _ = self.locate_object(object_name)
+        if object_name_type == TableType.Table:
+            # Update table comment
+            catalog.update_dataset_description(identifier=identifier, description=comment, describer=describer)
+            return
+        if object_name_type == TableType.View:
+            # Update view comment
+            catalog.update_view_description(identifier=identifier, description=comment, describer=describer)
+            return
+        
+        raise DatasetNotFoundError(connector=self, dataset=object_name)
+

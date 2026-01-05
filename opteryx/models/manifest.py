@@ -86,9 +86,6 @@ class Manifest:
         Returns:
             Filtered list of FileEntry objects
         """
-        import numpy
-        from orso.types import OrsoTypes
-
         from opteryx.compiled.structures.relation_statistics import to_int
         from opteryx.managers.expression import NodeType
 
@@ -189,35 +186,42 @@ class Manifest:
 
     def estimate_cardinality(self, column: str) -> Optional[int]:
         """
-        Estimate distinct values in column.
+        Estimate distinct values in column using K-Minimum Values (KMV).
 
-        Uses k-hashes if available, otherwise returns None.
-
-        Args:
-            column: Column name
-
-        Returns:
-            Estimated distinct count, or None if not available
-
-        Note:
-            Placeholder - will be implemented with k-hash analysis.
+        Uses min-k hashes from file entries if available, otherwise returns None.
+        Merges min-k hashes across all files and applies KMV estimator formula.
         """
-        # TODO: Implement cardinality estimation using k-hashes
-        return None
+        K = 32
+        HASH_RANGE = 2**64
+
+        field_id = self._resolve_field_id(column)
+        if field_id is None:
+            return None
+
+        # Merge min-k hashes from all files
+        min_k_hashes = []
+
+        for file_entry in self.files:
+            if file_entry.min_k_hashes and field_id < len(file_entry.min_k_hashes):
+                file_hashes = file_entry.min_k_hashes[field_id]
+                if file_hashes:
+                    # Merge keeping k smallest distinct hashes
+                    min_k_hashes = sorted(set(min_k_hashes + file_hashes))[:K]
+
+        if not min_k_hashes:
+            return None
+
+        # Apply KMV estimator formula
+        if len(min_k_hashes) < K:
+            # Exact count when we have fewer than K distinct values
+            return len(min_k_hashes)
+
+        # Estimate: (k-1) * hash_range / kth_smallest_hash
+        return int((K - 1) * HASH_RANGE / min_k_hashes[K - 1])
 
     def estimate_null_fraction(self, column: str) -> Optional[float]:
-        """
-        Estimate fraction of nulls in column.
-
-        Uses null_value_counts if available.
-
-        Args:
-            column: Column name
-
-        Returns:
-            Estimated null fraction (0.0 to 1.0), or None if not available
-        """
-        field_id = self._get_field_id(column)
+        """Estimate fraction of nulls in column using catalog null counts if present."""
+        field_id = self._resolve_field_id(column)
         if field_id is None:
             return None
 
@@ -313,6 +317,21 @@ class Manifest:
                 self._field_id_to_name[field_id] = column.name
                 self._name_to_field_id[column.name] = field_id
 
+    def _resolve_field_id(self, column_name: str) -> Optional[int]:
+        """Resolve column to field_id; fall back to schema index when field_id is absent."""
+        self._build_field_mappings()
+
+        # Prefer explicit field_id mapping when present
+        if self._name_to_field_id and column_name in self._name_to_field_id:
+            return self._name_to_field_id[column_name]
+
+        # Fallback: positional index in schema
+        for idx, col in enumerate(self.schema.columns):
+            if col.name == column_name:
+                return idx
+
+        return None
+
     def _get_field_id(self, column_name: str) -> Optional[int]:
         """Get field_id for column name."""
         self._build_field_mappings()
@@ -340,8 +359,3 @@ class Manifest:
             "files_with_k_hashes": sum(1 for f in self.files if f.min_k_hashes),
             "files_with_histograms": sum(1 for f in self.files if f.histogram_counts),
         }
-
-
-# Backward compatibility alias
-# Can be removed in future version after migration
-RelationStatistics = Manifest

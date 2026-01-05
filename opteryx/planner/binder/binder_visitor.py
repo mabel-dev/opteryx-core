@@ -987,10 +987,6 @@ class BinderVisitor:
                 # Fallback for connectors that don't have manifest support yet
                 node.schema = node.connector.get_dataset_schema()
                 node.manifest = None
-            if hasattr(node.connector, "relation_statistics"):
-                node.schema = node.connector.map_statistics(
-                    node.connector.relation_statistics, node.schema
-                )
             context.schemas[node.alias] = node.schema
             for column in node.schema.columns:
                 column.origin = [node.alias]
@@ -1102,6 +1098,33 @@ class BinderVisitor:
 
             node.connectors[view_name] = connector
 
+        node.columns = []
+        return node, context
+
+    def visit_comment(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+        """
+        Bind the COMMENT node to determine which connector should handle
+        storing the comment on the view/table.
+
+        This is a pass-through binder - COMMENT nodes don't need schema resolution,
+        but we do need to determine the connector for storage.
+        """
+        from opteryx.connectors import connector_factory
+        from opteryx.managers.permissions import can_read_table
+
+        # Get connector gateway (cached by prefix)
+        node.connector = connector_factory(node.object_name, telemetry=context.telemetry)
+
+        # Ensure this user can write to the object location
+        if not can_read_table(context.connection.memberships, node.object_name, action="WRITE"):
+            raise PermissionError(
+                f"User does not have permission to comment on {node.object_name}"
+            )
+
+        if hasattr(node.connector, "variables"):
+            node.connector.variables = context.connection.variables
+
+        # COMMENT nodes don't have columns (non-tabular result)
         node.columns = []
         return node, context
 

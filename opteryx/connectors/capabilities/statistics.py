@@ -13,7 +13,6 @@ from orso.types import OrsoTypes
 
 from opteryx.compiled.structures.relation_statistics import to_int
 from opteryx.managers.expression import NodeType
-from opteryx.models import RelationStatistics
 
 # from opteryx.shared.stats_cache import StatsCache
 from opteryx.third_party.cyan4973.xxhash import hash_bytes
@@ -32,7 +31,6 @@ class Statistics:
     def __init__(self, **kwargs):
         # self.stats_cache = StatsCache()
         self.stats_cache = {}
-        self.relation_statistics = RelationStatistics()
 
     def read_blob_statistics(
         self, blob_name: str, blob_bytes: bytes = None, decoder=None
@@ -134,21 +132,3 @@ class Statistics:
                 new_blob_names.append(blob_name)
 
         return new_blob_names
-
-    def map_statistics(
-        self, statistics: Optional[RelationStatistics], schema: RelationSchema
-    ) -> RelationSchema:
-        if statistics is None:
-            return schema
-
-        schema.row_count_metric = statistics.record_count
-
-        for column in schema.columns:
-            # Statistics dictionaries use bytes keys, so we need to encode the column name
-            column_key = column.name.encode() if isinstance(column.name, str) else column.name
-            column.highest_value = statistics.upper_bounds.get(column_key, None)
-            column.lowest_value = statistics.lower_bounds.get(column_key, None)
-            if statistics.null_count:
-                column.null_count = statistics.null_count.get(column_key, None)
-
-        return schema
