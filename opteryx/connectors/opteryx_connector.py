@@ -11,7 +11,6 @@ Architecture:
 - OpteryxTable: Transient table-specific engine (handles data reading for one table)
 """
 
-import datetime
 from typing import Optional
 from typing import Tuple
 
@@ -130,15 +129,11 @@ class OpteryxTable(Diachronic):
         # If the table has no snapshot and the read is not time-travel, use
         # the table's declared schema (from metadata) and return an empty result set.
         if self.snapshot is None:
-            self.schema = self.table.schema()
-        else:
-            self.schema = self.table.schema(self.snapshot.schema_id)
-            try:
-                self.telemetry.dataset_committed_at = datetime.datetime.fromtimestamp(
-                    self.snapshot.timestamp_ms / 1000.0
-                ).isoformat()
-            except (ValueError, OSError, OverflowError):
-                pass
+            self.snapshot = self.table.snapshot()
+            self.snapshot_id = self.snapshot.snapshot_id
+
+        self.schema = self.table.schema(self.snapshot.schema_id)
+        self.dataset_committed_at = self.snapshot.timestamp_ms
 
         # Build Manifest from catalog table.scan()
         # scan() returns an iterable of DataFile objects
@@ -245,62 +240,32 @@ class OpteryxConnector(Eidetic):
             # Callable factory: call with workspace and let errors propagate
             instance = factory(workspace=catalog_name, **self.kwargs)
 
-        # Cache and return instance
-        # Diagnostic logging: report workspace and whether tests_temp exists
-        try:
-            dbg_workspace = getattr(instance, "workspace", None)
-            print(
-                f"DEBUG [_get_catalog]: catalog_name={catalog_name} instance_type={type(instance)} workspace={dbg_workspace}"
-            )
-            try:
-                datasets = instance.list_datasets("tests_temp")
-                print(
-                    f"DEBUG [_get_catalog]: tests_temp datasets_count={len(datasets)} sample={datasets[:5]}"
-                )
-            except Exception as e:
-                print(f"DEBUG [_get_catalog]: list_datasets error: {e}")
-
-            # Additional diagnostics: Firestore client and GCS bucket
-            try:
-                fc = getattr(instance, "firestore_client", None)
-                fc_project = getattr(fc, "project", None) or getattr(fc, "_client_info", None)
-                fc_db = getattr(fc, "_database", None) or getattr(fc, "database", None)
-                print(
-                    f"DEBUG [_get_catalog]: firestore_client={fc} project={fc_project} database={fc_db}"
-                )
-            except Exception as e:
-                print(f"DEBUG [_get_catalog]: firestore_client inspect error: {e}")
-            try:
-                print(f"DEBUG [_get_catalog]: gcs_bucket={getattr(instance, 'gcs_bucket', None)}")
-            except Exception as e:
-                print(f"DEBUG [_get_catalog]: gcs_bucket inspect error: {e}")
-        except Exception:
-            # Never fail on diagnostics
-            pass
-
         self._catalog_cache[catalog_name] = instance
         return instance
 
-    def _parse_identifier(self, name: str) -> Tuple[str, str]:
+    def _parse_identifier(self, name) -> Tuple[str, str]:
         """
         Parse a fully qualified name into catalog and relative identifier.
 
-        For 'benchmarks.clickbench.hits':
-        - catalog_name = 'benchmarks'
-        - relative_id = 'clickbench.hits'
+        Accepts either a string (e.g. 'benchmarks.clickbench.hits') or an
+        identifier tuple/list returned by some catalog APIs (e.g. ('clickbench', 'hits')).
 
-        Args:
-            name: Fully qualified table/view name
-
-        Returns:
-            Tuple of (catalog_name, relative_identifier)
+        Returns a tuple of (catalog_name, relative_identifier).
         """
-        parts = name.split(".", 1)
+        # If caller passed an identifier tuple/list (catalog APIs often use these),
+        # treat it as a relative identifier and use the default catalog.
+        if isinstance(name, (tuple, list)):
+            if len(name) == 0:
+                return "default", ""
+            # Join tuple parts into a dot-separated relative id
+            return "default", ".".join(map(str, name))
+
+        # Otherwise expect a string
+        parts = str(name).split(".", 1)
         if len(parts) == 2:
             return parts[0], parts[1]
         else:
-            # No catalog specified, use default
-            return "default", name
+            return "default", str(name)
 
     def locate_object(self, name: str) -> Tuple[Optional[TableType], any]:
         """
