@@ -5,6 +5,7 @@
 
 
 import time
+from collections import defaultdict
 from typing import Optional
 from typing import Union
 
@@ -49,6 +50,8 @@ class BasePlanNode:
         self._time_stat_key = f"time_{self.name.lower().replace(' ', '_')}"
         self._empty_morsel_cache = None
 
+        self.readings = defaultdict(int)
+
     @property
     def config(self) -> str:
         return ""
@@ -83,7 +86,7 @@ class BasePlanNode:
         if morsel is EOS:
             return EOS
         if isinstance(morsel, Morsel):
-            self.telemetry.morsel_to_table_conversion += 1
+            self.readings["morsel_to_table_conversion"] += 1
             return morsel.to_arrow()
         return morsel
 
@@ -95,7 +98,7 @@ class BasePlanNode:
         if table is EOS:
             return EOS
         if isinstance(table, Table):
-            self.telemetry.table_to_morsel_conversion += 1
+            self.readings["table_to_morsel_conversion"] += 1
             # Use iter_from_arrow to avoid expensive combine_chunks
             # Yields morsels aligned with Arrow chunk boundaries
             return Morsel.iter_from_arrow(table)
@@ -164,7 +167,7 @@ class BasePlanNode:
                 raise err
 
     def sensors(self):
-        return {
+        base = {
             "calls": self.calls,
             "execution_time": self.execution_time,
             "records_in": self.records_in,
@@ -172,6 +175,8 @@ class BasePlanNode:
             "bytes_in": self.bytes_in,
             "bytes_out": self.bytes_out,
         }
+        base.update(self.readings)
+        return base
 
 
 class JoinNode(BasePlanNode):

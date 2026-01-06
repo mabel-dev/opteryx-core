@@ -44,7 +44,7 @@ def plan_to_mermaid(plan: PhysicalPlan, stats: list = None) -> str:
             if hasattr(node, "at_date") and node.at_date:
                 node_stat["at_date"] = str(node.at_date)
             if hasattr(node, "committed_at") and node.committed_at:
-                node_stat["committed_at"] = node.committed_at.strftime("%Y-%m-%d %H:%M")
+                node_stat["committed_at"] = node.committed_at
 
             stats.append(node_stat)
         return stats
@@ -72,16 +72,28 @@ def plan_to_mermaid(plan: PhysicalPlan, stats: list = None) -> str:
         if t in excluded_nodes:
             continue
         stats = node_stats.get(s) or {}
-        # Prefer telemetry values from the node when available (more accurate for reads)
+        # Prefer node-specific stats (records_out/bytes_out). Only fall back to
+        # the node's telemetry for reader/scan nodes or when the stats are
+        # missing/zero. This avoids propagating reader telemetry across
+        # non-scan nodes which can produce misleading arrow labels.
         source_node = node_map.get(s)
         records = stats.get("records_out")
         bytes_ = stats.get("bytes_out")
         if source_node is not None:
+            # Use telemetry only for scan nodes or when summary stats are absent/zero
             telemetry_rows = getattr(source_node.telemetry, "rows_read", None)
             telemetry_bytes = getattr(source_node.telemetry, "bytes_processed", None)
-            if telemetry_rows not in (None, 0):
+            if (
+                (records is None or records == 0)
+                and getattr(source_node, "is_scan", False)
+                and telemetry_rows not in (None, 0)
+            ):
                 records = telemetry_rows
-            if telemetry_bytes not in (None, 0):
+            if (
+                (bytes_ is None or bytes_ == 0)
+                and getattr(source_node, "is_scan", False)
+                and telemetry_bytes not in (None, 0)
+            ):
                 bytes_ = telemetry_bytes
 
         records = 0 if records is None else records
