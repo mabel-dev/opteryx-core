@@ -142,7 +142,7 @@ class AsyncReadNode(ReaderNode):
                 orso_schema_cols.append(col)
         orso_schema.columns = orso_schema_cols
 
-        self.telemetry.columns_read += len(orso_schema.columns)
+        self.readings["columns_read"] += len(orso_schema.columns)
 
         if len(blob_names) == 0:
             # if we don't have any matching blobs, create an empty dataset
@@ -180,6 +180,7 @@ class AsyncReadNode(ReaderNode):
             except queue.Empty:
                 # Increment stall count if the queue is empty (engine waiting on data).
                 self.telemetry.stalls_engine_waiting_on_data += 1
+                self.readings["stalls_engine_waiting_on_data"] += 1
                 system_telemetry.io_wait_seconds += 0.1
                 continue  # Skip the rest of the loop and try to get an item again.
 
@@ -201,51 +202,41 @@ class AsyncReadNode(ReaderNode):
                         reference, zero_copy=ENABLE_ZERO_COPY, latch=ENABLE_ZERO_COPY
                     )
                     self.telemetry.bytes_read += len(blob_memory_view)
+                    self.readings["bytes_read"] += len(blob_memory_view)
                     decoded = decoder(
                         blob_memory_view, projection=self.columns, selection=self.predicates
                     )
 
-                    # We read the statisics from the blob, we can use this for
-                    # prefiltering the files next time we read them.
-                    if hasattr(reader, "read_blob_telemetry"):
-                        reader.read_blob_telemetry(
-                            blob_name=blob_name, blob_bytes=blob_memory_view, decoder=decoder
-                        )
-
                     self.pool.release(reference)  # release also unlatches the segment
                 except Exception as err:
                     from pyarrow import ArrowInvalid
-
-                    # purge the blob from the cache if it is invalid - we may end up fetching and discarding it
-                    if hasattr(reader, "purge_blob"):
-                        reader.purge_blob(blob_name)
 
                     if isinstance(err, ArrowInvalid) and "No match for" in str(err):
                         raise DataError(
                             f"Unable to read blob {blob_name} - this error is likely caused by a blob having an significantly different schema to previously handled blobs, or the data catalog."
                         )
                     raise DataError(f"Unable to read blob {blob_name} - error {err}") from err
-                self.telemetry.time_reading_blobs += time.monotonic_ns() - start
+                self.readings["time_reading_blobs"] += time.monotonic_ns() - start
                 num_rows, _, raw_bytes, morsel = decoded
-                self.telemetry.rows_seen += num_rows
+                self.readings["rows_seen"] += num_rows
 
                 morsel = struct_to_jsonb(morsel)
                 morsel = normalize_morsel(orso_schema, morsel)
                 if morsel.column_names != ["*"]:
                     morsel = morsel.cast(arrow_schema)
 
-                self.telemetry.blobs_read += 1
-                self.telemetry.rows_read += morsel.num_rows
-                self.telemetry.bytes_processed += morsel.nbytes
-                self.telemetry.bytes_raw += raw_bytes
+                self.readings["blobs_read"] += 1
+                self.readings["rows_read"] += morsel.num_rows
+                self.readings["bytes_processed"] += morsel.nbytes
+                self.readings["bytes_raw"] += raw_bytes
 
-                self.rows_seen += num_rows
-                self.blobs_seen += 1
+                self.readings["rows_seen"] += num_rows
+                self.readings["blobs_seen"] += 1
 
                 yield morsel
             except Exception as err:
                 self.telemetry.add_message(f"failed to read {blob_name} ({err.__class__.__name__})")
-                self.telemetry.failed_reads += 1
+                self.readings["failed_reads"] += 1
                 import warnings
 
                 warnings.warn(f"failed to read {blob_name} - {err}")
@@ -254,7 +245,7 @@ class AsyncReadNode(ReaderNode):
         read_thread.join()
 
         if morsel is None:
-            self.telemetry.empty_datasets += 1
+            self.readings["empty_datasets"] += 1
             arrow_schema = convert_orso_schema_to_arrow_schema(orso_schema, use_identities=True)
             yield pyarrow.Table.from_arrays(
                 [pyarrow.array([]) for _ in arrow_schema], schema=arrow_schema

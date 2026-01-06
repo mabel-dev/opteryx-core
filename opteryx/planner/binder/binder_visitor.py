@@ -983,6 +983,15 @@ class BinderVisitor:
             # For Opteryx catalog connectors, this creates a Manifest with file-level stats
             if hasattr(node.connector, "get_dataset_metadata"):
                 node.schema, node.manifest = node.connector.get_dataset_metadata()
+                # Propagate dataset commit timestamp from the connector to the
+                # logical node so it becomes available to physical nodes
+                # (and ultimately shown as `committed_at` in telemetry).
+                try:
+                    dc = getattr(node.connector, "dataset_committed_at", None)
+                    if dc is not None:
+                        node.dataset_committed_at = dc
+                except (AttributeError, TypeError):
+                    pass
             else:
                 # Fallback for connectors that don't have manifest support yet
                 node.schema = node.connector.get_dataset_schema()
