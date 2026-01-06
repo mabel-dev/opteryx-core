@@ -163,7 +163,7 @@ class ReaderNode(BasePlanNode):
 
         self.uuid = parameters.get("uuid")
         self.at_date = parameters.get("at_date")
-        self.committed_at = parameters.get("committed_at")
+        self.dataset_committed_at = parameters.get("dataset_committed_at")
         self.hints = parameters.get("hints", [])
         self.columns = parameters.get("columns", [])
         self.predicates = parameters.get("predicates", [])
@@ -199,20 +199,18 @@ class ReaderNode(BasePlanNode):
 
     def sensors(self):
         base = super().sensors()
-        base["commited_at"] = self.committed_at
+        base["committed_at"] = self.dataset_committed_at
+        base["at_date"] = self.at_date
+        base["limit"] = self.limit
+        base["predicates"] = len(self.predicates) if self.predicates else 0
         return base
 
     @property
     def config(self):
         """Additional details for this step"""
         date_range = ""
-        if self.parameters.get("start_date") == self.parameters.get("end_date"):
-            if self.parameters.get("start_date") is not None:
-                date_range = f" FOR '{self.parameters.get('start_date')}'"
-        else:
-            date_range = (
-                f" FOR '{self.parameters.get('start_date')}' TO '{self.parameters.get('end_date')}'"
-            )
+        if self.parameters.get("at_date"):
+            date_range = f" AT('{self.parameters.get('at_date')}')"
         return (
             f"{self.connector.__type__} "
             f"({self.parameters.get('relation')}"
@@ -240,6 +238,44 @@ class ReaderNode(BasePlanNode):
             "projection_pushdown": [],
         }
 
+        # Projection pushdown: provide schema index and column name for each projected column
+        proj = []
+
+        schema_columns = getattr(self.schema, "columns", []) or []
+        columns_to_read = []
+        for c in self.columns or []:
+            # use the column identity (internal identity) as the column_name
+            identity = c.schema_column.identity
+            schema_index = None
+            for idx, sc in enumerate(schema_columns):
+                if getattr(sc, "identity", None) == identity:
+                    columns_to_read.append(idx)
+                    schema_index = idx
+                    break
+            proj.append({"schema_index": schema_index, "column_name": identity})
+
+        # Initialize column bytes accumulator (uncompressed) for projected columns
+        # Projection pushdown: provide schema index and column name for each projected column
+        proj = []
+
+        schema_columns = getattr(self.schema, "columns", []) or []
+        columns_to_read = []
+        for c in self.columns or []:
+            # use the column identity (internal identity) as the column_name
+            identity = c.schema_column.identity
+            schema_index = None
+            for idx, sc in enumerate(schema_columns):
+                if getattr(sc, "identity", None) == identity:
+                    columns_to_read.append(idx)
+                    schema_index = idx
+                    break
+            proj.append({"schema_index": schema_index, "column_name": identity})
+
+        # Initialize column bytes accumulator (uncompressed) and completeness flags
+        column_bytes_totals = {p["column_name"]: 0 for p in proj}
+        column_bytes_complete = {p["column_name"]: True for p in proj}
+        config["projection_pushdown"] = proj
+
         # If a manifest is attached, prefer its file entries
         manifest = getattr(self, "manifest", None) or self.parameters.get("manifest")
         pruned = getattr(self, "pruned_files", None) or self.parameters.get("pruned_files")
@@ -253,7 +289,44 @@ class ReaderNode(BasePlanNode):
                 # include uncompressed bytes only when present (do not fall back)
                 if getattr(f, "uncompressed_size_in_bytes", None) is not None:
                     file_entry["bytes"] = f.uncompressed_size_in_bytes
+
+                # Per-file column statistics for projected columns (when available)
+                if proj and getattr(f, "column_uncompressed_sizes_in_bytes", None):
+                    col_stats = {}
+                    for p in proj:
+                        si = p.get("schema_index")
+                        if si is None:
+                            continue
+                        col_name = p.get("column_name")
+                        stats = {}
+                        col_sizes = getattr(f, "column_uncompressed_sizes_in_bytes", None)
+                        if (
+                            col_sizes
+                            and isinstance(col_sizes, (list, tuple))
+                            and si < len(col_sizes)
+                            and col_sizes[si] is not None
+                        ):
+                            ub_bytes = col_sizes[si]
+                            stats["uncompressed_bytes"] = ub_bytes
+                            # Accumulate total uncompressed bytes for this projected column
+                            column_bytes_totals[col_name] = column_bytes_totals.get(
+                                col_name, 0
+                            ) + int(ub_bytes)
+                        else:
+                            # Missing column size for this file/column -> mark incomplete
+                            column_bytes_complete[col_name] = False
+                        if stats:
+                            col_stats[col_name] = stats
+
                 config["files"].append(file_entry)
+
+            # After processing files, attach accumulated uncompressed bytes to projection entries
+            for p in proj:
+                cname = p.get("column_name")
+                if column_bytes_complete.get(cname, False):
+                    p["uncompressed_bytes"] = column_bytes_totals.get(cname, 0)
+                else:
+                    p["uncompressed_bytes"] = None
             # If pruning reduced files, filter to pruned list
             if pruned:
                 pruned_set = set(pruned)
@@ -268,22 +341,6 @@ class ReaderNode(BasePlanNode):
             config["selection_pushdown"] = [str(p) for p in (self.predicates or [])]
         except Exception:
             config["selection_pushdown"] = []
-
-        # Projection pushdown: provide schema index and column name for each projected column
-        proj = []
-
-        schema_columns = getattr(self.schema, "columns", []) or []
-        for c in self.columns or []:
-            # use the column identity (internal identity) as the column_name
-            identity = getattr(c, "identity", None) or getattr(c, "name", None) or str(c)
-            schema_index = None
-            for idx, sc in enumerate(schema_columns):
-                if getattr(sc, "identity", None) == identity:
-                    schema_index = idx
-                    break
-            proj.append({"schema_index": schema_index, "column_name": identity})
-
-        config["projection_pushdown"] = proj
 
         # Summary: aggregate totals for files/rows/bytes when available
         total_files = len(config["files"])
@@ -302,10 +359,16 @@ class ReaderNode(BasePlanNode):
             if bytes_known:
                 total_bytes = sum((f["bytes"] for f in config["files"]))
 
+        # Determine total-column-bytes only when all projected columns were complete
+        total_column_bytes = None
+        if proj and all(column_bytes_complete.values()):
+            total_column_bytes = sum(column_bytes_totals.values())
+
         config["summary"] = {
             "total-files": total_files,
             "total-rows": total_rows,
-            "total-bytes": total_bytes,
+            "total-files-bytes": total_bytes,
+            "total-column-bytes": total_column_bytes,
         }
 
         return config
