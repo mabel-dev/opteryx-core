@@ -12,6 +12,7 @@ It wraps different internal readers (e.g. GCP Blob reader, SQL Reader),
 normalizes the data into the format for internal processing.
 """
 
+import datetime
 import time
 from typing import Generator
 
@@ -199,8 +200,12 @@ class ReaderNode(BasePlanNode):
 
     def sensors(self):
         base = super().sensors()
-        base["committed_at"] = self.dataset_committed_at
-        base["at_date"] = self.at_date
+        base["committed_at"] = (
+            str(datetime.datetime.fromtimestamp(self.dataset_committed_at / 1000))
+            if self.dataset_committed_at
+            else None
+        )
+        base["at_date"] = str(self.at_date) if self.at_date else None
         base["limit"] = self.limit
         base["predicates"] = len(self.predicates) if self.predicates else 0
         return base
@@ -209,8 +214,8 @@ class ReaderNode(BasePlanNode):
     def config(self):
         """Additional details for this step"""
         date_range = ""
-        if self.parameters.get("at_date"):
-            date_range = f" AT('{self.parameters.get('at_date')}')"
+        if self.at_date:
+            date_range = f" AT ('{self.at_date}')"
         return (
             f"{self.connector.__type__} "
             f"({self.parameters.get('relation')}"

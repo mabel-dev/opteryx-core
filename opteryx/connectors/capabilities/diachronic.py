@@ -7,13 +7,11 @@
 class Diachronic:
     """Capability for connectors that support diachronic (time-travel) reads.
 
-    Historically this capability was named `Partitionable`; it stores a partition
-    scheme and optional start/end date attributes used by connectors to support
-    date-range reads and time-travel queries.
+    This capability enables connectors to support time-travel queries via the AT syntax,
+    allowing queries to read data as it existed at a specific point in time.
     """
 
     partitioned = True
 
     def __init__(self, **kwargs):
-        self.start_date = None
-        self.end_date = None
+        self.at_date = kwargs.get("at_date")

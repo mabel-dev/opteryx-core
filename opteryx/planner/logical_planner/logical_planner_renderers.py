@@ -168,10 +168,8 @@ def render_scan(node: LogicalPlanNode) -> str:
     io_async = "ASYNC " if hasattr(node.connector, "async_read_blob") else ""
     connector = " " if not hasattr(node.connector, "__type__") else f" [{node.connector.__type__}] "
     date_range = ""
-    if node.start_date == node.end_date and node.start_date is not None:
-        date_range = f" FOR '{node.start_date}'"
-    elif node.start_date is not None:
-        date_range = f" FOR '{node.start_date}' TO '{node.end_date}'"
+    if node.at_date is not None:
+        date_range = f" AT ('{node.at_date.isoformat()}')"
     alias = f" AS {node.alias}" if node.relation != node.alias else ""
     columns = " [" + ", ".join(c.source_column for c in node.columns) + "]" if node.columns else ""
     predicates = (

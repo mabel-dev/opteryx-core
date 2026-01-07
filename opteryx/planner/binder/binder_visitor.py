@@ -865,24 +865,29 @@ class BinderVisitor:
 
             else:
                 # Handle qualified wildcards
+                # Ensure column.value is a list/tuple for qualified references
+                table_name = (
+                    column.value[0] if isinstance(column.value, (list, tuple)) else column.value
+                )
+
                 for name, schema in list(context.schemas.items()):
                     if (
-                        name == column.value[0]
+                        name == table_name
                         or name.startswith("$shared")
-                        and f"^{column.value[0]}#" in schema.name
+                        and f"^{table_name}#" in schema.name
                     ):
                         for schema_column in schema.columns:
                             column_reference = LogicalColumn(
                                 node_type=NodeType.IDENTIFIER,  # column type
                                 source_column=schema_column.name,  # the source column
-                                source=column.value[0],  # the source relation
+                                source=table_name,  # the source relation
                                 schema_column=schema_column,
                             )
                             columns.append(column_reference)
-                    if name.startswith("$shared") and f"^{column.value[0]}#" in schema.name:
+                    if name.startswith("$shared") and f"^{table_name}#" in schema.name:
                         context.schemas.pop(name)
 
-                    context.schemas[column.value[0]] = RelationSchema(
+                    context.schemas[table_name] = RelationSchema(
                         name=name, columns=[col.schema_column for col in columns]
                     )
 
@@ -962,8 +967,7 @@ class BinderVisitor:
         if hasattr(gateway, "variables"):
             engine_kwargs["variables"] = context.connection.variables
         if gateway.supports_diachronic:
-            engine_kwargs["start_date"] = node.start_date
-            engine_kwargs["end_date"] = node.end_date
+            engine_kwargs["at_date"] = node.at_date
 
         node.connector = gateway.table_engine(
             dataset_name, telemetry=context.telemetry, **engine_kwargs

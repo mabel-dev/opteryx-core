@@ -35,7 +35,7 @@ __all__ = ("read", "schema")
 
 
 @single_item_cache
-def read(end_date=None, *args) -> pyarrow.Table:
+def read(at_date=None, variables=None) -> pyarrow.Table:
     # fmt:off
     # Define the data
     data = [
@@ -65,17 +65,17 @@ def read(end_date=None, *args) -> pyarrow.Table:
     # fmt: on
     full_set = pyarrow.Table.from_arrays(data, column_names)
 
-    if end_date is None:
+    if at_date is None:
         return full_set
 
     # Make the planet data act like it supports temporality
-    if end_date < datetime.datetime(1781, 4, 26):
+    if at_date < datetime.datetime(1781, 4, 26):
         # April 26, 1781 - Uranus discovered by Sir William Herschel
         return full_set.take([0, 1, 2, 3, 4, 5])
-    if end_date < datetime.datetime(1846, 11, 13):
+    if at_date < datetime.datetime(1846, 11, 13):
         # November 13, 1846 - Neptune discovered, so only planets through Uranus exist
         return full_set.take([0, 1, 2, 3, 4, 5, 6])
-    if end_date < datetime.datetime(1930, 3, 13):
+    if at_date < datetime.datetime(1930, 3, 13):
         # March 13, 1930 - Pluto discovered by Clyde William Tombaugh
         return full_set.take([0, 1, 2, 3, 4, 5, 6, 7])
 

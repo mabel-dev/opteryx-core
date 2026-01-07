@@ -160,35 +160,6 @@ def parameter_dict_binder(
     return node
 
 
-def temporal_range_binder(ast, filters):
-    if isinstance(ast, (list)):
-        return [temporal_range_binder(node, filters) for node in ast]
-    if isinstance(ast, (dict)):
-        node_name = next(iter(ast))
-        if node_name == "Table":
-            temporal_range = filters.pop(0)
-            ast["Table"]["start_date"] = temporal_range[1]
-            ast["Table"]["end_date"] = temporal_range[2]
-            return ast
-        if "table_name" in ast:
-            temporal_range = filters.pop(0)
-            ast["table_name"][0]["start_date"] = temporal_range[1]
-            ast["table_name"][0]["end_date"] = temporal_range[2]
-            return ast
-        if "parent_name" in ast:
-            temporal_range = filters.pop(0)
-            ast["parent_name"][0]["start_date"] = temporal_range[1]
-            ast["parent_name"][0]["end_date"] = temporal_range[2]
-            return ast
-        if "ShowCreate" in ast and filters:
-            temporal_range = filters.pop(0)
-            ast["ShowCreate"]["start_date"] = temporal_range[1]
-            ast["ShowCreate"]["end_date"] = temporal_range[2]
-            return ast
-        return {k: temporal_range_binder(v, filters) for k, v in ast.items()}
-    return ast
-
-
 def rewrite_json_accessors(node: Dict[str, Any]) -> Dict[str, Any]:
     """
     Traverse the AST represented as a dictionary and rewrite accessors.
