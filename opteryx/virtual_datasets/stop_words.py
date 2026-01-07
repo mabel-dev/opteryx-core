@@ -324,10 +324,9 @@ STOP_WORDS: Set[bytes] = {
 }
 
 
-def read(end_date=None, variables=None):
+def read(at_date=None, variables=None):
     import pyarrow
 
-    _ = end_date
     _ = variables
 
     # Define the data

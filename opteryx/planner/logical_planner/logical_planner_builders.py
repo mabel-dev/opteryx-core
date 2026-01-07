@@ -37,6 +37,82 @@ from opteryx.utils import dates
 from opteryx.utils import suggest_alternative
 
 
+def extract_at_timestamp(version_clause) -> Optional[object]:
+    """
+    Extract and validate AT timestamp from the table version clause.
+
+    Supports only: AT ( TIMESTAMP => 'YYYY-MM-DD HH:MM:SS' )
+
+    Args:
+        version_clause: The version field from the table AST
+
+    Returns:
+        Parsed datetime object or None if no AT clause
+
+    Raises:
+        UnsupportedSyntaxError: If syntax is not the supported AT format
+    """
+    if version_clause is None:
+        return None
+
+    # Extract the Function structure
+    if "Function" not in version_clause:
+        raise UnsupportedSyntaxError("Unsupported table version syntax.")
+
+    func = version_clause["Function"]["Function"]
+
+    # Validate it's the AT function
+    func_name = func["name"][0]["Identifier"]["value"]
+    if func_name.upper() != "AT":
+        raise UnsupportedSyntaxError(
+            f"Unsupported time-travel function '{func_name}'. Only AT is supported."
+        )
+
+    # Validate we have exactly one argument
+    args = func.get("args", {}).get("List", {}).get("args", [])
+    if len(args) != 1:
+        raise UnsupportedSyntaxError(f"AT function expects 1 argument, got {len(args)}.")
+
+    # Extract the argument
+    arg = args[0]
+    if "Unnamed" not in arg:
+        raise UnsupportedSyntaxError("AT argument must be a timestamp expression.")
+
+    expr = arg["Unnamed"]["Expr"]
+
+    # Validate it's a TypedString with Timestamp type
+    if "TypedString" not in expr:
+        raise UnsupportedSyntaxError("AT argument must be a timestamp value.")
+
+    typed_string = expr["TypedString"]
+    data_type = typed_string.get("data_type")
+
+    # Validate data type is Timestamp
+    if not isinstance(data_type, dict) or "Timestamp" not in data_type:
+        raise UnsupportedSyntaxError("AT argument must be a TIMESTAMP value.")
+
+    # Extract the timestamp string value
+    value_expr = typed_string.get("value", {}).get("value", {})
+    timestamp_str = None
+
+    if "SingleQuotedString" in value_expr:
+        timestamp_str = value_expr["SingleQuotedString"]
+    elif "DoubleQuotedString" in value_expr:
+        timestamp_str = value_expr["DoubleQuotedString"]
+
+    if not timestamp_str:
+        raise UnsupportedSyntaxError("AT timestamp must be a quoted string.")
+
+    # Parse the timestamp string
+    parsed_timestamp = dates.parse_iso(timestamp_str)
+    if parsed_timestamp is None:
+        raise UnsupportedSyntaxError(
+            f"Invalid timestamp format: '{timestamp_str}'. Expected format: YYYY-MM-DD or YYYY-MM-DD HH:MM:SS"
+        )
+
+    return parsed_timestamp
+
+
 def any_op(branch, alias: Optional[List[str]] = None, key=None):
     return Node(
         NodeType.COMPARISON_OPERATOR,

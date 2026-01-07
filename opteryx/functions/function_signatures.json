@@ -1,0 +1,1553 @@
+{
+    "DATE_TRUNC": [
+        {
+            "label": "DATE_TRUNC(unit, timestamp)",
+            "documentation": "Truncate `timestamp` to the precision specified by `unit` (e.g. 'hour', 'day').",
+            "parameters": [
+                {
+                    "label": "unit",
+                    "type": "string",
+                    "documentation": "Text or identifier specifying the unit (YEAR, MONTH, DAY, HOUR, MINUTE, SECOND, etc.)"
+                },
+                {
+                    "label": "timestamp",
+                    "type": "timestamp",
+                    "documentation": "The timestamp or datetime expression to truncate"
+                }
+            ]
+        }
+    ],
+    "ROUND": [
+        {
+            "label": "ROUND(value, [scale])",
+            "documentation": "Round `value` to `scale` decimal places. `scale` is optional and defaults to 0.",
+            "parameters": [
+                {
+                    "label": "value",
+                    "type": "number",
+                    "documentation": "Numeric expression to round"
+                },
+                {
+                    "label": "scale",
+                    "type": "number",
+                    "documentation": "Number of decimal places (optional)"
+                }
+            ]
+        }
+    ],
+    "FLOOR": [
+        {
+            "label": "FLOOR(value)",
+            "documentation": "Return the largest integer value not greater than `value`.",
+            "parameters": [
+                {
+                    "label": "value",
+                    "type": "number",
+                    "documentation": "Numeric expression to floor"
+                }
+            ]
+        }
+    ],
+    "CEIL": [
+        {
+            "label": "CEIL(value)",
+            "documentation": "Return the smallest integer value not less than `value`.",
+            "parameters": [
+                {
+                    "label": "value",
+                    "type": "number",
+                    "documentation": "Numeric expression to ceil"
+                }
+            ]
+        }
+    ],
+    "ABS": [
+        {
+            "label": "ABS(value)",
+            "documentation": "Return the absolute value of `value`.",
+            "parameters": [
+                {
+                    "label": "value",
+                    "type": "number",
+                    "documentation": "Numeric expression"
+                }
+            ]
+        }
+    ],
+    "SIGN": [
+        {
+            "label": "SIGN(value)",
+            "documentation": "Return the sign of `value` (-1, 0, or 1).",
+            "parameters": [
+                {
+                    "label": "value",
+                    "type": "number",
+                    "documentation": "Numeric expression"
+                }
+            ]
+        }
+    ],
+    "SQRT": [
+        {
+            "label": "SQRT(value)",
+            "documentation": "Return the square root of `value`.",
+            "parameters": [
+                {
+                    "label": "value",
+                    "type": "number",
+                    "documentation": "Numeric expression (non-negative)"
+                }
+            ]
+        }
+    ],
+    "TRUNC": [
+        {
+            "label": "TRUNC(value)",
+            "documentation": "Truncate `value` to an integer (remove decimal part).",
+            "parameters": [
+                {
+                    "label": "value",
+                    "type": "number",
+                    "documentation": "Numeric expression to truncate"
+                }
+            ]
+        }
+    ],
+    "POWER": [
+        {
+            "label": "POWER(base, exponent)",
+            "documentation": "Return `base` raised to the power of `exponent`.",
+            "parameters": [
+                {
+                    "label": "base",
+                    "type": "number",
+                    "documentation": "The base value"
+                },
+                {
+                    "label": "exponent",
+                    "type": "number",
+                    "documentation": "The exponent value"
+                }
+            ]
+        }
+    ],
+    "LN": [
+        {
+            "label": "LN(value)",
+            "documentation": "Return the natural logarithm of `value`.",
+            "parameters": [
+                {
+                    "label": "value",
+                    "type": "number",
+                    "documentation": "Numeric expression (must be positive)"
+                }
+            ]
+        }
+    ],
+    "LOG10": [
+        {
+            "label": "LOG10(value)",
+            "documentation": "Return the base-10 logarithm of `value`.",
+            "parameters": [
+                {
+                    "label": "value",
+                    "type": "number",
+                    "documentation": "Numeric expression (must be positive)"
+                }
+            ]
+        }
+    ],
+    "LOG2": [
+        {
+            "label": "LOG2(value)",
+            "documentation": "Return the base-2 logarithm of `value`.",
+            "parameters": [
+                {
+                    "label": "value",
+                    "type": "number",
+                    "documentation": "Numeric expression (must be positive)"
+                }
+            ]
+        }
+    ],
+    "LOG": [
+        {
+            "label": "LOG(value, base)",
+            "documentation": "Return the logarithm of `value` to the specified `base`.",
+            "parameters": [
+                {
+                    "label": "value",
+                    "type": "number",
+                    "documentation": "Numeric expression (must be positive)"
+                },
+                {
+                    "label": "base",
+                    "type": "number",
+                    "documentation": "The logarithm base"
+                }
+            ]
+        }
+    ],
+    "LENGTH": [
+        {
+            "label": "LENGTH(string)",
+            "documentation": "Return the length of the string in characters.",
+            "parameters": [
+                {
+                    "label": "string",
+                    "type": "varchar",
+                    "documentation": "String expression"
+                }
+            ]
+        }
+    ],
+    "UPPER": [
+        {
+            "label": "UPPER(string)",
+            "documentation": "Convert string to uppercase.",
+            "parameters": [
+                {
+                    "label": "string",
+                    "type": "varchar",
+                    "documentation": "String expression to convert"
+                }
+            ]
+        }
+    ],
+    "LOWER": [
+        {
+            "label": "LOWER(string)",
+            "documentation": "Convert string to lowercase.",
+            "parameters": [
+                {
+                    "label": "string",
+                    "type": "varchar",
+                    "documentation": "String expression to convert"
+                }
+            ]
+        }
+    ],
+    "LEFT": [
+        {
+            "label": "LEFT(string, length)",
+            "documentation": "Return the leftmost `length` characters from `string`.",
+            "parameters": [
+                {
+                    "label": "string",
+                    "type": "varchar",
+                    "documentation": "String expression"
+                },
+                {
+                    "label": "length",
+                    "type": "integer",
+                    "documentation": "Number of characters to extract"
+                }
+            ]
+        }
+    ],
+    "RIGHT": [
+        {
+            "label": "RIGHT(string, length)",
+            "documentation": "Return the rightmost `length` characters from `string`.",
+            "parameters": [
+                {
+                    "label": "string",
+                    "type": "varchar",
+                    "documentation": "String expression"
+                },
+                {
+                    "label": "length",
+                    "type": "integer",
+                    "documentation": "Number of characters to extract"
+                }
+            ]
+        }
+    ],
+    "REVERSE": [
+        {
+            "label": "REVERSE(string)",
+            "documentation": "Reverse the characters in `string`.",
+            "parameters": [
+                {
+                    "label": "string",
+                    "type": "varchar",
+                    "documentation": "String expression to reverse"
+                }
+            ]
+        }
+    ],
+    "SOUNDEX": [
+        {
+            "label": "SOUNDEX(string)",
+            "documentation": "Return the Soundex code of `string` for phonetic comparison.",
+            "parameters": [
+                {
+                    "label": "string",
+                    "type": "varchar",
+                    "documentation": "String expression"
+                }
+            ]
+        }
+    ],
+    "TITLE": [
+        {
+            "label": "TITLE(string)",
+            "documentation": "Convert string to title case (first letter of each word capitalized).",
+            "parameters": [
+                {
+                    "label": "string",
+                    "type": "varchar",
+                    "documentation": "String expression to convert"
+                }
+            ]
+        }
+    ],
+    "INITCAP": [
+        {
+            "label": "INITCAP(string)",
+            "documentation": "Convert string to initial capital (first letter capitalized, rest lowercase).",
+            "parameters": [
+                {
+                    "label": "string",
+                    "type": "varchar",
+                    "documentation": "String expression to convert"
+                }
+            ]
+        }
+    ],
+    "CONCAT": [
+        {
+            "label": "CONCAT(string1, string2, ...)",
+            "documentation": "Concatenate multiple strings together.",
+            "parameters": [
+                {
+                    "label": "string1",
+                    "type": "varchar",
+                    "documentation": "First string expression"
+                },
+                {
+                    "label": "string2, ...",
+                    "type": "varchar",
+                    "documentation": "Additional string expressions to concatenate"
+                }
+            ]
+        }
+    ],
+    "CONCAT_WS": [
+        {
+            "label": "CONCAT_WS(separator, string1, string2, ...)",
+            "documentation": "Concatenate multiple strings with a separator between them.",
+            "parameters": [
+                {
+                    "label": "separator",
+                    "type": "varchar",
+                    "documentation": "Separator to use between strings"
+                },
+                {
+                    "label": "string1, string2, ...",
+                    "type": "varchar",
+                    "documentation": "String expressions to concatenate"
+                }
+            ]
+        }
+    ],
+    "SUBSTRING": [
+        {
+            "label": "SUBSTRING(string, start, [length])",
+            "documentation": "Extract a substring from `string` starting at `start` position for `length` characters.",
+            "parameters": [
+                {
+                    "label": "string",
+                    "type": "varchar",
+                    "documentation": "String expression"
+                },
+                {
+                    "label": "start",
+                    "type": "integer",
+                    "documentation": "Starting position (1-based)"
+                },
+                {
+                    "label": "length",
+                    "type": "integer",
+                    "documentation": "Number of characters to extract (optional)"
+                }
+            ]
+        }
+    ],
+    "POSITION": [
+        {
+            "label": "POSITION(substring IN string)",
+            "documentation": "Return the position of `substring` in `string` (1-based, 0 if not found).",
+            "parameters": [
+                {
+                    "label": "substring",
+                    "type": "varchar",
+                    "documentation": "Substring to search for"
+                },
+                {
+                    "label": "string",
+                    "type": "varchar",
+                    "documentation": "String to search in"
+                }
+            ]
+        }
+    ],
+    "TRIM": [
+        {
+            "label": "TRIM(string)",
+            "documentation": "Remove leading and trailing whitespace from `string`.",
+            "parameters": [
+                {
+                    "label": "string",
+                    "type": "varchar",
+                    "documentation": "String expression to trim"
+                }
+            ]
+        }
+    ],
+    "LTRIM": [
+        {
+            "label": "LTRIM(string)",
+            "documentation": "Remove leading whitespace from `string`.",
+            "parameters": [
+                {
+                    "label": "string",
+                    "type": "varchar",
+                    "documentation": "String expression to trim"
+                }
+            ]
+        }
+    ],
+    "RTRIM": [
+        {
+            "label": "RTRIM(string)",
+            "documentation": "Remove trailing whitespace from `string`.",
+            "parameters": [
+                {
+                    "label": "string",
+                    "type": "varchar",
+                    "documentation": "String expression to trim"
+                }
+            ]
+        }
+    ],
+    "LPAD": [
+        {
+            "label": "LPAD(string, length, [pad_string])",
+            "documentation": "Pad the left side of `string` to `length` using `pad_string` (default space).",
+            "parameters": [
+                {
+                    "label": "string",
+                    "type": "varchar",
+                    "documentation": "String to pad"
+                },
+                {
+                    "label": "length",
+                    "type": "integer",
+                    "documentation": "Target length"
+                },
+                {
+                    "label": "pad_string",
+                    "type": "varchar",
+                    "documentation": "String to use for padding (optional, default space)"
+                }
+            ]
+        }
+    ],
+    "RPAD": [
+        {
+            "label": "RPAD(string, length, [pad_string])",
+            "documentation": "Pad the right side of `string` to `length` using `pad_string` (default space).",
+            "parameters": [
+                {
+                    "label": "string",
+                    "type": "varchar",
+                    "documentation": "String to pad"
+                },
+                {
+                    "label": "length",
+                    "type": "integer",
+                    "documentation": "Target length"
+                },
+                {
+                    "label": "pad_string",
+                    "type": "varchar",
+                    "documentation": "String to use for padding (optional, default space)"
+                }
+            ]
+        }
+    ],
+    "LEVENSHTEIN": [
+        {
+            "label": "LEVENSHTEIN(string1, string2)",
+            "documentation": "Return the Levenshtein distance (edit distance) between two strings.",
+            "parameters": [
+                {
+                    "label": "string1",
+                    "type": "varchar",
+                    "documentation": "First string"
+                },
+                {
+                    "label": "string2",
+                    "type": "varchar",
+                    "documentation": "Second string"
+                }
+            ]
+        }
+    ],
+    "SPLIT": [
+        {
+            "label": "SPLIT(string, delimiter)",
+            "documentation": "Split `string` by `delimiter` and return an array of substrings.",
+            "parameters": [
+                {
+                    "label": "string",
+                    "type": "varchar",
+                    "documentation": "String to split"
+                },
+                {
+                    "label": "delimiter",
+                    "type": "varchar",
+                    "documentation": "Delimiter to split by"
+                }
+            ]
+        }
+    ],
+    "REPLACE": [
+        {
+            "label": "REPLACE(string, search, replacement)",
+            "documentation": "Replace all occurrences of `search` with `replacement` in `string`.",
+            "parameters": [
+                {
+                    "label": "string",
+                    "type": "varchar",
+                    "documentation": "String to search in"
+                },
+                {
+                    "label": "search",
+                    "type": "varchar",
+                    "documentation": "Substring to search for"
+                },
+                {
+                    "label": "replacement",
+                    "type": "varchar",
+                    "documentation": "Replacement string"
+                }
+            ]
+        }
+    ],
+    "REGEXP_REPLACE": [
+        {
+            "label": "REGEXP_REPLACE(string, pattern, replacement)",
+            "documentation": "Replace matches of regex `pattern` with `replacement` in `string`.",
+            "parameters": [
+                {
+                    "label": "string",
+                    "type": "varchar",
+                    "documentation": "String to search in"
+                },
+                {
+                    "label": "pattern",
+                    "type": "varchar",
+                    "documentation": "Regular expression pattern"
+                },
+                {
+                    "label": "replacement",
+                    "type": "varchar",
+                    "documentation": "Replacement string"
+                }
+            ]
+        }
+    ],
+    "MATCH_AGAINST": [
+        {
+            "label": "MATCH_AGAINST(string, pattern)",
+            "documentation": "Check if `string` matches the pattern (boolean result).",
+            "parameters": [
+                {
+                    "label": "string",
+                    "type": "varchar",
+                    "documentation": "String to match"
+                },
+                {
+                    "label": "pattern",
+                    "type": "varchar",
+                    "documentation": "Pattern to match against"
+                }
+            ]
+        }
+    ],
+    "CHAR": [
+        {
+            "label": "CHAR(value)",
+            "documentation": "Return the character with the specified ASCII/Unicode code.",
+            "parameters": [
+                {
+                    "label": "value",
+                    "type": "integer",
+                    "documentation": "Character code"
+                }
+            ]
+        }
+    ],
+    "ASCII": [
+        {
+            "label": "ASCII(string)",
+            "documentation": "Return the ASCII code of the first character in `string`.",
+            "parameters": [
+                {
+                    "label": "string",
+                    "type": "varchar",
+                    "documentation": "String expression"
+                }
+            ]
+        }
+    ],
+    "MD5": [
+        {
+            "label": "MD5(value)",
+            "documentation": "Return the MD5 hash of `value`.",
+            "parameters": [
+                {
+                    "label": "value",
+                    "type": "variant",
+                    "documentation": "Value to hash"
+                }
+            ]
+        }
+    ],
+    "SHA1": [
+        {
+            "label": "SHA1(value)",
+            "documentation": "Return the SHA1 hash of `value`.",
+            "parameters": [
+                {
+                    "label": "value",
+                    "type": "variant",
+                    "documentation": "Value to hash"
+                }
+            ]
+        }
+    ],
+    "SHA256": [
+        {
+            "label": "SHA256(value)",
+            "documentation": "Return the SHA256 hash of `value`.",
+            "parameters": [
+                {
+                    "label": "value",
+                    "type": "variant",
+                    "documentation": "Value to hash"
+                }
+            ]
+        }
+    ],
+    "SHA512": [
+        {
+            "label": "SHA512(value)",
+            "documentation": "Return the SHA512 hash of `value`.",
+            "parameters": [
+                {
+                    "label": "value",
+                    "type": "variant",
+                    "documentation": "Value to hash"
+                }
+            ]
+        }
+    ],
+    "HASH": [
+        {
+            "label": "HASH(value)",
+            "documentation": "Return a hash of `value`.",
+            "parameters": [
+                {
+                    "label": "value",
+                    "type": "variant",
+                    "documentation": "Value to hash"
+                }
+            ]
+        }
+    ],
+    "BASE64_ENCODE": [
+        {
+            "label": "BASE64_ENCODE(value)",
+            "documentation": "Encode `value` as Base64.",
+            "parameters": [
+                {
+                    "label": "value",
+                    "type": "variant",
+                    "documentation": "Value to encode"
+                }
+            ]
+        }
+    ],
+    "BASE64_DECODE": [
+        {
+            "label": "BASE64_DECODE(value)",
+            "documentation": "Decode `value` from Base64.",
+            "parameters": [
+                {
+                    "label": "value",
+                    "type": "blob",
+                    "documentation": "Base64 encoded value"
+                }
+            ]
+        }
+    ],
+    "HEX_ENCODE": [
+        {
+            "label": "HEX_ENCODE(value)",
+            "documentation": "Encode `value` as hexadecimal.",
+            "parameters": [
+                {
+                    "label": "value",
+                    "type": "variant",
+                    "documentation": "Value to encode"
+                }
+            ]
+        }
+    ],
+    "HEX_DECODE": [
+        {
+            "label": "HEX_DECODE(value)",
+            "documentation": "Decode `value` from hexadecimal.",
+            "parameters": [
+                {
+                    "label": "value",
+                    "type": "blob",
+                    "documentation": "Hexadecimal encoded value"
+                }
+            ]
+        }
+    ],
+    "RANDOM": [
+        {
+            "label": "RANDOM()",
+            "documentation": "Generate a random double between 0 and 1.",
+            "parameters": []
+        }
+    ],
+    "RAND": [
+        {
+            "label": "RAND()",
+            "documentation": "Generate a random double between 0 and 1 (alias for RANDOM).",
+            "parameters": []
+        }
+    ],
+    "NORMAL": [
+        {
+            "label": "NORMAL()",
+            "documentation": "Generate a random value from a normal distribution.",
+            "parameters": []
+        }
+    ],
+    "RANDOM_STRING": [
+        {
+            "label": "RANDOM_STRING(length)",
+            "documentation": "Generate a random string of specified length.",
+            "parameters": [
+                {
+                    "label": "length",
+                    "type": "integer",
+                    "documentation": "Length of random string to generate"
+                }
+            ]
+        }
+    ],
+    "YEAR": [
+        {
+            "label": "YEAR(date)",
+            "documentation": "Extract the year from a date or timestamp.",
+            "parameters": [
+                {
+                    "label": "date",
+                    "type": "timestamp",
+                    "documentation": "Date or timestamp expression"
+                }
+            ]
+        }
+    ],
+    "MONTH": [
+        {
+            "label": "MONTH(date)",
+            "documentation": "Extract the month (1-12) from a date or timestamp.",
+            "parameters": [
+                {
+                    "label": "date",
+                    "type": "timestamp",
+                    "documentation": "Date or timestamp expression"
+                }
+            ]
+        }
+    ],
+    "DAY": [
+        {
+            "label": "DAY(date)",
+            "documentation": "Extract the day of month (1-31) from a date or timestamp.",
+            "parameters": [
+                {
+                    "label": "date",
+                    "type": "timestamp",
+                    "documentation": "Date or timestamp expression"
+                }
+            ]
+        }
+    ],
+    "WEEK": [
+        {
+            "label": "WEEK(date)",
+            "documentation": "Extract the ISO week number (1-53) from a date or timestamp.",
+            "parameters": [
+                {
+                    "label": "date",
+                    "type": "timestamp",
+                    "documentation": "Date or timestamp expression"
+                }
+            ]
+        }
+    ],
+    "HOUR": [
+        {
+            "label": "HOUR(timestamp)",
+            "documentation": "Extract the hour (0-23) from a timestamp.",
+            "parameters": [
+                {
+                    "label": "timestamp",
+                    "type": "timestamp",
+                    "documentation": "Timestamp expression"
+                }
+            ]
+        }
+    ],
+    "MINUTE": [
+        {
+            "label": "MINUTE(timestamp)",
+            "documentation": "Extract the minute (0-59) from a timestamp.",
+            "parameters": [
+                {
+                    "label": "timestamp",
+                    "type": "timestamp",
+                    "documentation": "Timestamp expression"
+                }
+            ]
+        }
+    ],
+    "SECOND": [
+        {
+            "label": "SECOND(timestamp)",
+            "documentation": "Extract the second (0-59) from a timestamp.",
+            "parameters": [
+                {
+                    "label": "timestamp",
+                    "type": "timestamp",
+                    "documentation": "Timestamp expression"
+                }
+            ]
+        }
+    ],
+    "QUARTER": [
+        {
+            "label": "QUARTER(date)",
+            "documentation": "Extract the quarter (1-4) from a date or timestamp.",
+            "parameters": [
+                {
+                    "label": "date",
+                    "type": "timestamp",
+                    "documentation": "Date or timestamp expression"
+                }
+            ]
+        }
+    ],
+    "DATEDIFF": [
+        {
+            "label": "DATEDIFF(unit, start_date, end_date)",
+            "documentation": "Calculate the difference between two dates in specified units.",
+            "parameters": [
+                {
+                    "label": "unit",
+                    "type": "varchar",
+                    "documentation": "Unit of difference (YEAR, MONTH, DAY, HOUR, MINUTE, SECOND)"
+                },
+                {
+                    "label": "start_date",
+                    "type": "timestamp",
+                    "documentation": "Start date or timestamp"
+                },
+                {
+                    "label": "end_date",
+                    "type": "timestamp",
+                    "documentation": "End date or timestamp"
+                }
+            ]
+        }
+    ],
+    "TIMEDIFF": [
+        {
+            "label": "TIMEDIFF(start_time, end_time)",
+            "documentation": "Calculate the time difference between two timestamps.",
+            "parameters": [
+                {
+                    "label": "start_time",
+                    "type": "timestamp",
+                    "documentation": "Start timestamp"
+                },
+                {
+                    "label": "end_time",
+                    "type": "timestamp",
+                    "documentation": "End timestamp"
+                }
+            ]
+        }
+    ],
+    "DATEPART": [
+        {
+            "label": "DATEPART(part, date)",
+            "documentation": "Extract a part of a date (YEAR, MONTH, DAY, HOUR, MINUTE, SECOND, WEEK, QUARTER).",
+            "parameters": [
+                {
+                    "label": "part",
+                    "type": "varchar",
+                    "documentation": "Date part to extract"
+                },
+                {
+                    "label": "date",
+                    "type": "timestamp",
+                    "documentation": "Date or timestamp expression"
+                }
+            ]
+        }
+    ],
+    "DATE_FORMAT": [
+        {
+            "label": "DATE_FORMAT(date, format)",
+            "documentation": "Format a date or timestamp according to a format string.",
+            "parameters": [
+                {
+                    "label": "date",
+                    "type": "timestamp",
+                    "documentation": "Date or timestamp to format"
+                },
+                {
+                    "label": "format",
+                    "type": "varchar",
+                    "documentation": "Format string (e.g., 'YYYY-MM-DD HH:MM:SS')"
+                }
+            ]
+        }
+    ],
+    "FROM_UNIXTIME": [
+        {
+            "label": "FROM_UNIXTIME(unix_timestamp)",
+            "documentation": "Convert Unix timestamp to a datetime.",
+            "parameters": [
+                {
+                    "label": "unix_timestamp",
+                    "type": "integer",
+                    "documentation": "Unix timestamp (seconds since epoch)"
+                }
+            ]
+        }
+    ],
+    "UNIXTIME": [
+        {
+            "label": "UNIXTIME([timestamp])",
+            "documentation": "Convert a timestamp to Unix timestamp, or return current Unix timestamp if no argument.",
+            "parameters": [
+                {
+                    "label": "timestamp",
+                    "type": "timestamp",
+                    "documentation": "Timestamp to convert (optional, defaults to current time)"
+                }
+            ]
+        }
+    ],
+    "COALESCE": [
+        {
+            "label": "COALESCE(value1, value2, ...)",
+            "documentation": "Return the first non-null value from the list.",
+            "parameters": [
+                {
+                    "label": "value1, value2, ...",
+                    "type": "variant",
+                    "documentation": "Values to evaluate"
+                }
+            ]
+        }
+    ],
+    "IFNULL": [
+        {
+            "label": "IFNULL(value, replacement)",
+            "documentation": "Return `value` if not null, otherwise return `replacement`.",
+            "parameters": [
+                {
+                    "label": "value",
+                    "type": "variant",
+                    "documentation": "Value to check"
+                },
+                {
+                    "label": "replacement",
+                    "type": "variant",
+                    "documentation": "Replacement if value is null"
+                }
+            ]
+        }
+    ],
+    "IFNOTNULL": [
+        {
+            "label": "IFNOTNULL(value, result)",
+            "documentation": "Return `result` if `value` is not null, otherwise null.",
+            "parameters": [
+                {
+                    "label": "value",
+                    "type": "variant",
+                    "documentation": "Value to check"
+                },
+                {
+                    "label": "result",
+                    "type": "variant",
+                    "documentation": "Result if value is not null"
+                }
+            ]
+        }
+    ],
+    "NULLIF": [
+        {
+            "label": "NULLIF(value1, value2)",
+            "documentation": "Return null if `value1` equals `value2`, otherwise return `value1`.",
+            "parameters": [
+                {
+                    "label": "value1",
+                    "type": "variant",
+                    "documentation": "First value"
+                },
+                {
+                    "label": "value2",
+                    "type": "variant",
+                    "documentation": "Second value to compare"
+                }
+            ]
+        }
+    ],
+    "IIF": [
+        {
+            "label": "IIF(condition, true_value, false_value)",
+            "documentation": "Return `true_value` if `condition` is true, otherwise return `false_value`.",
+            "parameters": [
+                {
+                    "label": "condition",
+                    "type": "boolean",
+                    "documentation": "Condition to evaluate"
+                },
+                {
+                    "label": "true_value",
+                    "type": "variant",
+                    "documentation": "Value if condition is true"
+                },
+                {
+                    "label": "false_value",
+                    "type": "variant",
+                    "documentation": "Value if condition is false"
+                }
+            ]
+        }
+    ],
+    "GREATEST": [
+        {
+            "label": "GREATEST(value1, value2, ...)",
+            "documentation": "Return the greatest (maximum) value from the list.",
+            "parameters": [
+                {
+                    "label": "value1, value2, ...",
+                    "type": "variant",
+                    "documentation": "Values to compare"
+                }
+            ]
+        }
+    ],
+    "LEAST": [
+        {
+            "label": "LEAST(value1, value2, ...)",
+            "documentation": "Return the least (minimum) value from the list.",
+            "parameters": [
+                {
+                    "label": "value1, value2, ...",
+                    "type": "variant",
+                    "documentation": "Values to compare"
+                }
+            ]
+        }
+    ],
+    "SORT": [
+        {
+            "label": "SORT(array)",
+            "documentation": "Sort the elements in an array.",
+            "parameters": [
+                {
+                    "label": "array",
+                    "type": "array",
+                    "documentation": "Array to sort"
+                }
+            ]
+        }
+    ],
+    "ARRAY_CONTAINS": [
+        {
+            "label": "ARRAY_CONTAINS(array, value)",
+            "documentation": "Check if `array` contains `value` (returns boolean).",
+            "parameters": [
+                {
+                    "label": "array",
+                    "type": "array",
+                    "documentation": "Array to search"
+                },
+                {
+                    "label": "value",
+                    "type": "variant",
+                    "documentation": "Value to search for"
+                }
+            ]
+        }
+    ],
+    "ARRAY_CONTAINS_ANY": [
+        {
+            "label": "ARRAY_CONTAINS_ANY(array, values)",
+            "documentation": "Check if `array` contains any value from the `values` array.",
+            "parameters": [
+                {
+                    "label": "array",
+                    "type": "array",
+                    "documentation": "Array to search"
+                },
+                {
+                    "label": "values",
+                    "type": "array",
+                    "documentation": "Array of values to search for"
+                }
+            ]
+        }
+    ],
+    "ARRAY_CONTAINS_ALL": [
+        {
+            "label": "ARRAY_CONTAINS_ALL(array, values)",
+            "documentation": "Check if `array` contains all values from the `values` array.",
+            "parameters": [
+                {
+                    "label": "array",
+                    "type": "array",
+                    "documentation": "Array to search"
+                },
+                {
+                    "label": "values",
+                    "type": "array",
+                    "documentation": "Array of values to search for"
+                }
+            ]
+        }
+    ],
+    "GET": [
+        {
+            "label": "GET(json_or_array, key)",
+            "documentation": "Get value from JSON object or array by key/index.",
+            "parameters": [
+                {
+                    "label": "json_or_array",
+                    "type": "variant",
+                    "documentation": "JSON object or array"
+                },
+                {
+                    "label": "key",
+                    "type": "variant",
+                    "documentation": "Key (string for objects) or index (integer for arrays)"
+                }
+            ]
+        }
+    ],
+    "JSONB_OBJECT_KEYS": [
+        {
+            "label": "JSONB_OBJECT_KEYS(json_object)",
+            "documentation": "Return an array of all keys in a JSON object.",
+            "parameters": [
+                {
+                    "label": "json_object",
+                    "type": "blob",
+                    "documentation": "JSON object"
+                }
+            ]
+        }
+    ],
+    "HUMANIZE": [
+        {
+            "label": "HUMANIZE(number)",
+            "documentation": "Convert number to a human-readable format.",
+            "parameters": [
+                {
+                    "label": "number",
+                    "type": "number",
+                    "documentation": "Number to humanize"
+                }
+            ]
+        }
+    ],
+    "COSINE_SIMILARITY": [
+        {
+            "label": "COSINE_SIMILARITY(vector1, vector2)",
+            "documentation": "Calculate the cosine similarity between two vectors.",
+            "parameters": [
+                {
+                    "label": "vector1",
+                    "type": "array",
+                    "documentation": "First vector"
+                },
+                {
+                    "label": "vector2",
+                    "type": "array",
+                    "documentation": "Second vector"
+                }
+            ]
+        }
+    ],
+    "SEARCH": [
+        {
+            "label": "SEARCH(text, pattern)",
+            "documentation": "Search for a pattern in text (boolean result).",
+            "parameters": [
+                {
+                    "label": "text",
+                    "type": "varchar",
+                    "documentation": "Text to search"
+                },
+                {
+                    "label": "pattern",
+                    "type": "varchar",
+                    "documentation": "Pattern to search for"
+                }
+            ]
+        }
+    ],
+    "NOW": [
+        {
+            "label": "NOW()",
+            "documentation": "Return the current timestamp.",
+            "parameters": []
+        }
+    ],
+    "UTC_TIMESTAMP": [
+        {
+            "label": "UTC_TIMESTAMP()",
+            "documentation": "Return the current UTC timestamp.",
+            "parameters": []
+        }
+    ],
+    "CURRENT_TIMESTAMP": [
+        {
+            "label": "CURRENT_TIMESTAMP()",
+            "documentation": "Return the current timestamp (alias for NOW).",
+            "parameters": []
+        }
+    ],
+    "CURRENT_DATE": [
+        {
+            "label": "CURRENT_DATE()",
+            "documentation": "Return the current date.",
+            "parameters": []
+        }
+    ],
+    "CURRENT_TIME": [
+        {
+            "label": "CURRENT_TIME()",
+            "documentation": "Return the current time.",
+            "parameters": []
+        }
+    ],
+    "TODAY": [
+        {
+            "label": "TODAY()",
+            "documentation": "Return the current date (alias for CURRENT_DATE).",
+            "parameters": []
+        }
+    ],
+    "YESTERDAY": [
+        {
+            "label": "YESTERDAY()",
+            "documentation": "Return yesterday's date.",
+            "parameters": []
+        }
+    ],
+    "VERSION": [
+        {
+            "label": "VERSION()",
+            "documentation": "Return the version of Opteryx.",
+            "parameters": []
+        }
+    ],
+    "CONNECTION_ID": [
+        {
+            "label": "CONNECTION_ID()",
+            "documentation": "Return the connection ID.",
+            "parameters": []
+        }
+    ],
+    "DATABASE": [
+        {
+            "label": "DATABASE()",
+            "documentation": "Return the current database/schema.",
+            "parameters": []
+        }
+    ],
+    "USER": [
+        {
+            "label": "USER()",
+            "documentation": "Return the current user.",
+            "parameters": []
+        }
+    ],
+    "PI": [
+        {
+            "label": "PI()",
+            "documentation": "Return the value of pi.",
+            "parameters": []
+        }
+    ],
+    "PHI": [
+        {
+            "label": "PHI()",
+            "documentation": "Return the golden ratio (phi).",
+            "parameters": []
+        }
+    ],
+    "E": [
+        {
+            "label": "E()",
+            "documentation": "Return Euler's number (e).",
+            "parameters": []
+        }
+    ],
+    "TIME_BUCKET": [
+        {
+            "label": "TIME_BUCKET(interval, timestamp)",
+            "documentation": "Bucket a timestamp into time intervals.",
+            "parameters": [
+                {
+                    "label": "interval",
+                    "type": "varchar",
+                    "documentation": "Time interval (e.g., '1 hour', '1 day')"
+                },
+                {
+                    "label": "timestamp",
+                    "type": "timestamp",
+                    "documentation": "Timestamp to bucket"
+                }
+            ]
+        }
+    ],
+    "COUNT": [
+        {
+            "label": "COUNT([DISTINCT] expr)",
+            "documentation": "Count the number of non-null values. Use COUNT(DISTINCT expr) for distinct values.",
+            "parameters": [
+                {
+                    "label": "expr",
+                    "type": "variant",
+                    "documentation": "Expression to count"
+                }
+            ],
+            "category": "Aggregate"
+        }
+    ],
+    "COUNT_DISTINCT": [
+        {
+            "label": "COUNT(DISTINCT expr)",
+            "documentation": "Count the number of distinct values.",
+            "parameters": [
+                {
+                    "label": "expr",
+                    "type": "variant",
+                    "documentation": "Expression to count distinct values"
+                }
+            ],
+            "category": "Aggregate"
+        }
+    ],
+    "SUM": [
+        {
+            "label": "SUM([DISTINCT] number)",
+            "documentation": "Calculate the sum of values. Use SUM(DISTINCT number) for distinct values.",
+            "parameters": [
+                {
+                    "label": "number",
+                    "type": "number",
+                    "documentation": "Numeric expression to sum"
+                }
+            ],
+            "category": "Aggregate"
+        }
+    ],
+    "AVG": [
+        {
+            "label": "AVG([DISTINCT] number)",
+            "documentation": "Calculate the average of values. Use AVG(DISTINCT number) for distinct values.",
+            "parameters": [
+                {
+                    "label": "number",
+                    "type": "number",
+                    "documentation": "Numeric expression to average"
+                }
+            ],
+            "category": "Aggregate"
+        }
+    ],
+    "MIN": [
+        {
+            "label": "MIN(expr)",
+            "documentation": "Return the minimum value.",
+            "parameters": [
+                {
+                    "label": "expr",
+                    "type": "variant",
+                    "documentation": "Expression to find minimum"
+                }
+            ],
+            "category": "Aggregate"
+        }
+    ],
+    "MAX": [
+        {
+            "label": "MAX(expr)",
+            "documentation": "Return the maximum value.",
+            "parameters": [
+                {
+                    "label": "expr",
+                    "type": "variant",
+                    "documentation": "Expression to find maximum"
+                }
+            ],
+            "category": "Aggregate"
+        }
+    ],
+    "STDDEV": [
+        {
+            "label": "STDDEV(number)",
+            "documentation": "Calculate the standard deviation of values.",
+            "parameters": [
+                {
+                    "label": "number",
+                    "type": "number",
+                    "documentation": "Numeric expression"
+                }
+            ],
+            "category": "Aggregate"
+        }
+    ],
+    "VARIANCE": [
+        {
+            "label": "VARIANCE(number)",
+            "documentation": "Calculate the variance of values.",
+            "parameters": [
+                {
+                    "label": "number",
+                    "type": "number",
+                    "documentation": "Numeric expression"
+                }
+            ],
+            "category": "Aggregate"
+        }
+    ],
+    "ARRAY_AGG": [
+        {
+            "label": "ARRAY_AGG([DISTINCT] expr)",
+            "documentation": "Aggregate values into an array.",
+            "parameters": [
+                {
+                    "label": "expr",
+                    "type": "variant",
+                    "documentation": "Expression to aggregate"
+                }
+            ],
+            "category": "Aggregate"
+        }
+    ],
+    "ANY_VALUE": [
+        {
+            "label": "ANY_VALUE(expr)",
+            "documentation": "Return any non-null value from the group.",
+            "parameters": [
+                {
+                    "label": "expr",
+                    "type": "variant",
+                    "documentation": "Expression to select from"
+                }
+            ],
+            "category": "Aggregate"
+        }
+    ],
+    "ALL": [
+        {
+            "label": "ALL(boolean_expr)",
+            "documentation": "Check if all values in the group are true.",
+            "parameters": [
+                {
+                    "label": "boolean_expr",
+                    "type": "boolean",
+                    "documentation": "Boolean expression"
+                }
+            ],
+            "category": "Aggregate"
+        }
+    ],
+    "ANY": [
+        {
+            "label": "ANY(boolean_expr)",
+            "documentation": "Check if any value in the group is true.",
+            "parameters": [
+                {
+                    "label": "boolean_expr",
+                    "type": "boolean",
+                    "documentation": "Boolean expression"
+                }
+            ],
+            "category": "Aggregate"
+        }
+    ],
+    "APPROXIMATE_MEDIAN": [
+        {
+            "label": "APPROXIMATE_MEDIAN(number)",
+            "documentation": "Calculate an approximate median of values.",
+            "parameters": [
+                {
+                    "label": "number",
+                    "type": "number",
+                    "documentation": "Numeric expression"
+                }
+            ],
+            "category": "Aggregate"
+        }
+    ],
+    "HISTOGRAM": [
+        {
+            "label": "HISTOGRAM(number)",
+            "documentation": "Generate a histogram distribution from values.",
+            "parameters": [
+                {
+                    "label": "number",
+                    "type": "number",
+                    "documentation": "Numeric expression"
+                }
+            ],
+            "category": "Aggregate"
+        }
+    ],
+    "PRODUCT": [
+        {
+            "label": "PRODUCT(number)",
+            "documentation": "Calculate the product of values.",
+            "parameters": [
+                {
+                    "label": "number",
+                    "type": "number",
+                    "documentation": "Numeric expression"
+                }
+            ],
+            "category": "Aggregate"
+        }
+    ]
+}

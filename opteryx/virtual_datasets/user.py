@@ -18,10 +18,9 @@ from opteryx.exceptions import VariableNotFoundError
 __all__ = ("read", "schema")
 
 
-def read(end_date=None, variables=None):
+def read(at_date=None, variables=None):
     import pyarrow
 
-    _ = end_date
     variables = variables or {}
 
     if isinstance(variables, dict):
