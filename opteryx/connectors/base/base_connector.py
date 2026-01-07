@@ -102,7 +102,7 @@ class BaseConnector:
 
         Args:
             name: Dataset name/path
-            **kwargs: Additional parameters (telemetry, start_date, end_date, etc.)
+            **kwargs: Additional parameters (telemetry, etc.)
 
         Returns:
             A table reader instance (e.g., OpteryxTable, FileSystemTable)

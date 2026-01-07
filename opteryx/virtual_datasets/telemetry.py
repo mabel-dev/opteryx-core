@@ -16,10 +16,9 @@ from orso.types import OrsoTypes
 __all__ = ("read", "schema")
 
 
-def read(end_date=None, variables=None):
+def read(at_date=None, variables=None):
     import pyarrow
 
-    _ = end_date
     variables = variables or {}
 
     from opteryx import system_telemetry  # type: ignore[attr-defined]

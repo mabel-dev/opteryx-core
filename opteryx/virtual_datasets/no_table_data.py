@@ -22,9 +22,8 @@ __all__ = ("read", "schema")
 
 
 @single_item_cache
-def read(end_date=None, variables=None) -> pyarrow.Table:
+def read(at_date=None, variables=None) -> pyarrow.Table:
     # Create a PyArrow table with one column and one row
-    _ = end_date
     _ = variables
 
     arrow_schema = pyarrow.schema([pyarrow.field("$column", pyarrow.int64())])
