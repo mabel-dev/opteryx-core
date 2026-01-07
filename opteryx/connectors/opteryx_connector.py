@@ -55,14 +55,13 @@ class OpteryxTable(Diachronic):
             dataset: The table name (after catalog prefix is removed)
             catalog: The Opteryx Catalog instance
             workspace: The workspace name
-            **kwargs: Additional parameters (telemetry, start_date, end_date, etc.)
+            **kwargs: Additional parameters (telemetry, etc.)
         """
         Diachronic.__init__(self, **kwargs)
 
         self.dataset = dataset.replace("/", ".")
         self.catalog = catalog
         self.workspace = workspace
-        self.at_date = None
         self.telemetry = kwargs.get("telemetry")
 
         # Initialize state
@@ -93,38 +92,45 @@ class OpteryxTable(Diachronic):
             Tuple of (RelationSchema, Manifest)
         """
         if self.at_date is not None:
-            snapshots = self.table.inspect.snapshots().sort_by("committed_at")
-            snapshot_rows = snapshots.to_pylist()
+            # reload the dataset with history enabled
+            self.table = self.catalog.load_dataset(self.dataset, load_history=True)
+            snapshots = self.table.snapshots()
 
-            if not snapshot_rows:
+            if not snapshots:
+                print(snapshots)
+                quit()
                 raise DatasetReadError("No data available for the specified date.")
+
+            snapshots = sorted(snapshots, key=lambda s: s.timestamp_ms, reverse=False)
 
             # Honor dates before the first snapshot by rejecting them, but treat
             # dates after the latest snapshot as selecting the latest snapshot
-            first_committed = snapshot_rows[0]["committed_at"]
-            last_committed = snapshot_rows[-1]["committed_at"]
+            first_committed = snapshots[0].timestamp_ms
+            last_committed = snapshots[-1].timestamp_ms
 
-            if self.at_date < first_committed:
+            at_ms = int(self.at_date.timestamp() * 1000)
+
+            if at_ms < first_committed:
                 # Point-in-time read is before our first snapshot — no data available then
-                raise DatasetReadError("No data available for the specified date.")
-            elif self.at_date > last_committed:
+                import datetime
+
+                first_timestamp = datetime.datetime.fromtimestamp(first_committed / 1000)
+                raise DatasetReadError(
+                    f"No data available for the specified date - first available snapshot is {first_timestamp}."
+                )
+            elif at_ms > last_committed:
                 # Point-in-time read after the latest snapshot — return current data
-                selected = snapshot_rows[-1]
-                # ensure we store the commit time for telemetry/context
-                self.telemetry.dataset_committed_at = selected["committed_at"].isoformat()
-                self.dataset_committed_at = self.telemetry.dataset_committed_at
+                selected = snapshots[-1]
             else:
-                selected = snapshot_rows[0]
-                for candidate in snapshot_rows:
-                    if candidate["committed_at"] <= self.at_date:
-                        self.telemetry.dataset_committed_at = candidate["committed_at"].isoformat()
-                        self.dataset_committed_at = self.telemetry.dataset_committed_at
+                selected = snapshots[0]
+                for candidate in snapshots:
+                    if candidate.timestamp_ms <= at_ms:
                         selected = candidate
                     else:
                         break
 
-            self.snapshot_id = selected["snapshot_id"]
-            self.snapshot = self.table.snapshot_by_id(self.snapshot_id)
+            self.snapshot_id = selected.snapshot_id
+            self.snapshot = self.table.snapshot(self.snapshot_id)
 
         # If the table has no snapshot and the read is not time-travel, use
         # the table's declared schema (from metadata) and return an empty result set.
@@ -306,7 +312,7 @@ class OpteryxConnector(Eidetic):
 
         Args:
             name: The fully qualified table name (catalog.namespace.name)
-            **kwargs: Additional parameters (start_date, end_date, telemetry, etc.)
+            **kwargs: Additional parameters (telemetry, etc.)
 
         Returns:
             OpteryxTable instance configured for the specific table

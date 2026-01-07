@@ -725,8 +725,12 @@ def create_node_relation(relation: dict):
             from_step.relation if table["alias"] is None else table["alias"]["name"]["value"]
         )
         from_step.hints = [hint["Identifier"]["value"] for hint in table["with_hints"]]
-        from_step.start_date = table.get("start_date")
-        from_step.end_date = table.get("end_date")
+
+        # Extract and validate AT clause if present
+        version_clause = table.get("version")
+        if version_clause is not None:
+            from_step.at_date = logical_planner_builders.extract_at_timestamp(version_clause)
+
         step_id = random_string()
         sub_plan.add_node(step_id, from_step)
 
@@ -917,8 +921,6 @@ def plan_show_columns(statement, **kwargs):
     table = statement[root_node]["show_options"]["show_in"]["parent_name"]
     from_step.relation = ".".join(part["Identifier"]["value"] for part in table)
     from_step.alias = from_step.relation
-    from_step.start_date = table[0].get("start_date")
-    from_step.end_date = table[0].get("end_date")
     step_id = random_string()
     plan.add_node(step_id, from_step)
 

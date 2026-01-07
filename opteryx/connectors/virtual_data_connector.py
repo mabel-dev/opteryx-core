@@ -136,7 +136,7 @@ class VirtualDataTable(BaseTable):
             raise DatasetNotFoundError(
                 suggestion=suggestion, dataset=self.dataset, connector=self.__type__
             )
-        table = data_provider.read(None, self.variables)
+        table = data_provider.read(at_date=kwargs.get("at_date"), variables=self.variables)
         yield arrow.post_read_projector(table, columns)
 
 
