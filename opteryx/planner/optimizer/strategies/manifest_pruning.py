@@ -76,30 +76,14 @@ class ManifestPruningStrategy(OptimizationStrategy):
 
         elif node.node_type == LogicalPlanStepType.Scan:
             # Try to prune files using manifest
-            if hasattr(node, "manifest") and node.manifest is not None:
-                try:
-                    # Apply manifest-based pruning
-                    # Even if there are no predicates, we still need to extract file paths
-                    pruned_files = node.manifest.prune_files(self.collected_predicates)
+            if node.manifest is not None and self.collected_predicates:
+                # Apply manifest-based pruning
+                original_count = node.manifest.get_file_count()
 
-                    # Store pruned file list in node for execution
-                    node.pruned_files = [f.file_path for f in pruned_files]
+                node.manifest.prune_files(self.collected_predicates)
 
-                    # Track statistics
-                    original_count = len(node.manifest.files)
-                    pruned_count = len(pruned_files)
-                    self.telemetry.files_pruned = getattr(self.telemetry, "files_pruned", 0) + (
-                        original_count - pruned_count
-                    )
-                    self.telemetry.files_scanned = (
-                        getattr(self.telemetry, "files_scanned", 0) + pruned_count
-                    )
-
-                except Exception as e:
-                    # If pruning fails, fall back to all files in manifest (safe fallback)
-                    # This handles cases where manifest data is incomplete
-                    if hasattr(node, "manifest") and node.manifest:
-                        node.pruned_files = [f.file_path for f in node.manifest.files]
+                pruned_count = node.manifest.get_file_count()
+                self.telemetry.files_pruned += original_count - pruned_count
 
             # Clear collected predicates after processing scan
             self.collected_predicates = []
@@ -157,7 +141,6 @@ class ManifestPruningStrategy(OptimizationStrategy):
         """
         for nid in plan.nodes():
             node = plan[nid]
-            if node.node_type == LogicalPlanStepType.Scan:
-                if hasattr(node, "manifest") and node.manifest is not None:
-                    return True
+            if node.node_type == LogicalPlanStepType.Scan and node.manifest is not None:
+                return True
         return False
