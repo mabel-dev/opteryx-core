@@ -67,6 +67,7 @@ from opteryx.planner.optimizer.strategies import CorrelatedFiltersStrategy
 from opteryx.planner.optimizer.strategies import DistinctPushdownStrategy
 from opteryx.planner.optimizer.strategies import JoinOrderingStrategy
 from opteryx.planner.optimizer.strategies import JoinRewriteStrategy
+from opteryx.planner.optimizer.strategies import LimitFilesPruningStrategy
 from opteryx.planner.optimizer.strategies import LimitPushdownStrategy
 from opteryx.planner.optimizer.strategies import ManifestPruningStrategy
 from opteryx.planner.optimizer.strategies import OperatorFusionStrategy
@@ -104,6 +105,7 @@ class OptimizerVisitor:
             DistinctPushdownStrategy(telemetry),
             OperatorFusionStrategy(telemetry),
             LimitPushdownStrategy(telemetry),
+            LimitFilesPruningStrategy(telemetry),  # Prune files for LIMIT queries (after pushdown)
             #            EmptyTableStrategy(telemetry),
             PredicateOrderingStrategy(telemetry),
             RedundantOperationsStrategy(telemetry),

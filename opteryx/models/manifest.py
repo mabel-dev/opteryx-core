@@ -70,7 +70,7 @@ class Manifest:
     # File Pruning (called by optimizer)
     # ================================================================
 
-    def prune_files(self, predicates: List) -> List[FileEntry]:
+    def prune_files(self, predicates: List) -> None:
         """
         Filter files based on predicates using min/max bounds.
 
@@ -86,7 +86,6 @@ class Manifest:
         Returns:
             Filtered list of FileEntry objects
         """
-        from opteryx.compiled.structures.relation_statistics import to_int
         from opteryx.managers.expression import NodeType
 
         # Define handlers for each comparison operator
@@ -104,7 +103,7 @@ class Manifest:
             # No predicates = no pruning
             return self.files
 
-        pruned_files = []
+        kept_files = []
 
         for file_entry in self.files:
             skip_file = False
@@ -125,17 +124,14 @@ class Manifest:
                     # Normalize literal value
                     if hasattr(literal_value, "item"):
                         literal_value = literal_value.item()
-                    literal_value = to_int(literal_value)
+                    literal_value = str(literal_value).encode("utf-8")
 
                     # Get field_id for this column from schema
                     # Bounds are indexed by field_id (int)
                     field_id = None
-                    for col in self.schema.columns:
+                    for i, col in enumerate(self.schema.columns):
                         if col.name == column_name:
-                            # Try to get field_id from column metadata
-                            # This assumes schema columns have field_id info
-                            # For now, we'll skip if we can't map column to field_id
-                            # TODO: Proper column name -> field_id mapping
+                            field_id = i
                             break
 
                     # For now, skip this file if we can't map column to bounds
@@ -150,15 +146,28 @@ class Manifest:
 
                     if min_value is not None and max_value is not None:
                         # Check if file can be pruned
+                        if not isinstance(min_value, bytes):
+                            min_value = str(min_value).encode("utf-8")
+                        if not isinstance(max_value, bytes):
+                            max_value = str(max_value).encode("utf-8")
+
                         prune_func = handlers.get(predicate.value)
                         if prune_func and prune_func(literal_value, min_value, max_value):
                             skip_file = True
                             break
 
             if not skip_file:
-                pruned_files.append(file_entry)
+                kept_files.append(file_entry)
 
-        return pruned_files
+        self.files = kept_files
+
+    # ================================================================
+    # File Accessors
+    # ================================================================
+
+    def get_file_paths(self) -> List[str]:
+        """Get file paths from the manifest."""
+        return [file.file_path for file in self.files]
 
     # ================================================================
     # Estimation Methods (for cost-based optimization)
