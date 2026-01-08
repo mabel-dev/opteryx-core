@@ -40,7 +40,7 @@ MAX_READ_BUFFER_CAPACITY = config.MAX_READ_BUFFER_CAPACITY
 ENABLE_ZERO_COPY = config.ENABLE_ZERO_COPY
 
 
-async def fetch_data(blob_names, pool, connector, reply_queue, telemetry):
+async def fetch_data(manifest, pool, connector, reply_queue, telemetry):
     """
     Externalized async fetch loop.
 
@@ -85,7 +85,7 @@ async def fetch_data(blob_names, pool, connector, reply_queue, telemetry):
                 finally:
                     telemetry.time_reading_blobs += time.monotonic_ns() - start_per_blob
 
-        tasks = [fetch_and_process(blob) for blob in blob_names]
+        tasks = [fetch_and_process(blob) for blob in manifest.get_file_paths()]
         await asyncio.gather(*tasks, return_exceptions=True)
         reply_queue.put(None)
 
@@ -116,25 +116,13 @@ class AsyncReadNode(ReaderNode):
         # Perform this step, time how long is spent doing work
         orso_schema = self.parameters["schema"]
 
-        # Get file paths (pruned by optimizer)
-        blob_names = getattr(self, "pruned_files", [])
-
-        # If no pruned_files, try to get from connector (backward compat)
-        if not blob_names:
-            reader = self.parameters.get("connector")
-            if reader and hasattr(reader, "get_list_of_blob_names"):
-                blob_names = reader.get_list_of_blob_names(
-                    prefix=reader.dataset,
-                    predicates=self.predicates or [],
-                )
-
         # Instantiate filesystem from protocol
-        if blob_names:
-            protocol = blob_names[0].split("://")[0] if "://" in blob_names[0] else "file"
+        if self.manifest and self.manifest.get_file_count() > 0:
+            file_zero = self.manifest.files[0].file_path
+            protocol = file_zero.split("://")[0] if "://" in file_zero else "file"
             reader = create_filesystem(protocol)
         else:
-            # Fallback to connector if no file paths
-            reader = self.parameters.get("connector")
+            reader = create_filesystem("file")
 
         orso_schema_cols = []
         for col in orso_schema.columns:
@@ -144,7 +132,7 @@ class AsyncReadNode(ReaderNode):
 
         self.readings["columns_read"] += len(orso_schema.columns)
 
-        if len(blob_names) == 0:
+        if self.manifest.get_file_count() == 0:
             # if we don't have any matching blobs, create an empty dataset
             from orso import DataFrame
 
@@ -159,7 +147,7 @@ class AsyncReadNode(ReaderNode):
         read_thread = threading.Thread(
             target=lambda: loop.run_until_complete(
                 fetch_data(
-                    blob_names,
+                    self.manifest,
                     AsyncMemoryPool(self.pool),
                     reader,
                     data_queue,
@@ -172,6 +160,7 @@ class AsyncReadNode(ReaderNode):
 
         morsel = None
         arrow_schema = convert_orso_schema_to_arrow_schema(orso_schema, use_identities=True)
+        records_to_read = self.limit if self.limit is not None else float("inf")
 
         while True:
             try:
@@ -220,6 +209,12 @@ class AsyncReadNode(ReaderNode):
                 num_rows, _, raw_bytes, morsel = decoded
                 self.readings["rows_seen"] += num_rows
 
+                if records_to_read < morsel.num_rows:
+                    morsel = morsel.slice(0, records_to_read)
+                    records_to_read = 0
+                else:
+                    records_to_read -= morsel.num_rows
+
                 morsel = struct_to_jsonb(morsel)
                 morsel = normalize_morsel(orso_schema, morsel)
                 if morsel.column_names != ["*"]:
@@ -234,6 +229,9 @@ class AsyncReadNode(ReaderNode):
                 self.readings["blobs_seen"] += 1
 
                 yield morsel
+
+                if records_to_read <= 0:
+                    break
             except Exception as err:
                 self.telemetry.add_message(f"failed to read {blob_name} ({err.__class__.__name__})")
                 self.readings["failed_reads"] += 1

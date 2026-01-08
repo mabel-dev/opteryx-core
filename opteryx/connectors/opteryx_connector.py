@@ -97,8 +97,6 @@ class OpteryxTable(Diachronic):
             snapshots = self.table.snapshots()
 
             if not snapshots:
-                print(snapshots)
-                quit()
                 raise DatasetReadError("No data available for the specified date.")
 
             snapshots = sorted(snapshots, key=lambda s: s.timestamp_ms, reverse=False)
