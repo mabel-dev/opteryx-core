@@ -209,7 +209,6 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
         columns: list = None,
         predicates: list = None,
         just_schema: bool = False,
-        limit: int = None,
         **kwargs,
     ) -> pyarrow.Table:
         """
@@ -219,7 +218,6 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
             columns: Columns to project
             predicates: Predicates to push down
             just_schema: If True, only return schema
-            limit: Maximum number of rows to read
 
         Yields:
             PyArrow Tables or schemas
@@ -252,14 +250,7 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
                     ) from err
             return
 
-        remaining_rows = limit if limit is not None else float("inf")
-
         def process_result(num_rows, raw_size, decoded):
-            nonlocal remaining_rows
-            if decoded.num_rows > remaining_rows:
-                decoded = decoded.slice(0, remaining_rows)
-            remaining_rows -= decoded.num_rows
-
             self.telemetry.rows_seen += num_rows
             self.rows_seen += num_rows
             self.blobs_seen += 1
@@ -288,14 +279,8 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
                         f"Unable to read file {blob_name}: {type(err).__name__}"
                     ) from err
 
-                if remaining_rows <= 0:
-                    break
-
                 decoded = process_result(num_rows, raw_size, decoded)
                 yield decoded
-
-                if remaining_rows <= 0:
-                    break
         else:
             # Multi-threaded path
             blob_iter = iter(blob_names)
@@ -333,17 +318,8 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
                             f"Unable to read file {blob_name}: {type(err).__name__}"
                         ) from err
                     else:
-                        if remaining_rows > 0:
-                            decoded = process_result(num_rows, raw_size, decoded)
-                            yield decoded
-                            if remaining_rows <= 0:
-                                for remaining_future in list(pending):
-                                    remaining_future.cancel()
-                                pending.clear()
-                                break
-
-                    if remaining_rows <= 0:
-                        break
+                        decoded = process_result(num_rows, raw_size, decoded)
+                        yield decoded
 
                     try:
                         next_blob = next(blob_iter)
@@ -356,9 +332,6 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
                         predicates,
                     )
                     pending[future] = next_blob
-
-                if remaining_rows <= 0:
-                    break
 
     def _read_blob_task(self, blob_name: str, columns, predicates):
         """Helper for reading a blob in a thread pool."""
@@ -391,6 +364,80 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
             raise DatasetNotFoundError(dataset=self.dataset, connector=self.__type__)
 
         return self.schema
+
+    def get_dataset_metadata(self) -> Tuple[RelationSchema, "Manifest"]:
+        """
+        Get dataset schema and build manifest from file metadata.
+
+        Returns both schema and manifest to enable statistics-based optimizations.
+        Manifest contains file-level statistics (record counts, bounds, etc.)
+        extracted from file metadata without reading data.
+
+        Returns:
+            Tuple of (RelationSchema, Manifest)
+        """
+        from opteryx.models.file_entry import FileEntry
+        from opteryx.models.manifest import Manifest
+
+        # Get the schema first
+        schema = self.get_dataset_schema()
+
+        # Get list of files in the dataset
+        blob_names = self.get_list_of_blob_names(self.dataset)
+
+        # Build FileEntry objects from file metadata
+        file_entries = []
+        for blob_name in blob_names:
+            # Skip non-data files
+            if not any(blob_name.endswith(ext) for ext in TUPLE_OF_VALID_EXTENSIONS):
+                continue
+
+            try:
+                # Get decoder for this file format
+                _ = get_decoder(blob_name)
+
+                # Open the file and read just the metadata
+                file_stream = self.filesystem.open_input_file(blob_name)
+
+                # Determine file format
+                file_format = "PARQUET" if blob_name.endswith(".parquet") else "CSV"
+
+                # Extract record count from file metadata
+                # For Parquet, we can read metadata without reading row data
+                record_count = 0
+                file_size = file_stream.size() if hasattr(file_stream, "size") else 0
+
+                if blob_name.endswith(".parquet"):
+                    try:
+                        import pyarrow.parquet as pq
+
+                        parquet_file = pq.ParquetFile(file_stream)
+                        record_count = parquet_file.metadata.num_rows
+                    except (OSError, ValueError, RuntimeError) as ex:
+                        # Fallback: set to 0 if we can't read metadata
+                        _ = ex
+                        record_count = 0
+                else:
+                    # For non-parquet files, we can't easily get the count without reading
+                    # For now, set to 0 (executor will read the actual count)
+                    record_count = 0
+
+                # Create FileEntry
+                entry = FileEntry(
+                    file_path=blob_name,
+                    file_format=file_format,
+                    record_count=record_count,
+                    file_size_in_bytes=file_size,
+                )
+                file_entries.append(entry)
+
+            except (OSError, ValueError, RuntimeError):
+                # Skip files we can't read metadata from
+                continue
+
+        # Create and return manifest
+        manifest = Manifest(file_entries, schema)
+        return schema, manifest
 
 
 class FileSystemConnector(BaseConnector):

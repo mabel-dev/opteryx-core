@@ -168,6 +168,7 @@ class ReaderNode(BasePlanNode):
         self.hints = parameters.get("hints", [])
         self.columns = parameters.get("columns", [])
         self.predicates = parameters.get("predicates", [])
+        self.manifest = parameters.get("manifest", [])
 
         self.connector = parameters.get("connector")
         self.schema = parameters.get("schema")
@@ -396,10 +397,19 @@ class ReaderNode(BasePlanNode):
         reader = self.connector.read_dataset(
             columns=self.columns,
             predicates=self.predicates,
-            limit=self.limit,
         )
+
+        records_to_read = self.limit if self.limit is not None else float("inf")
+
         for morsel in reader:
             # try to make each morsel have the same schema
+
+            if records_to_read < morsel.num_rows:
+                morsel = morsel.slice(0, records_to_read)
+                records_to_read = 0
+            else:
+                records_to_read -= morsel.num_rows
+
             morsel = struct_to_jsonb(morsel)
             morsel = normalize_morsel(orso_schema, morsel)
             if arrow_schema is None:
@@ -413,6 +423,10 @@ class ReaderNode(BasePlanNode):
             self.telemetry.bytes_processed += morsel.nbytes
             yield morsel
             start_clock = time.monotonic_ns()
+
+            if records_to_read <= 0:
+                break
+
         if morsel:
             self.telemetry.columns_read += morsel.num_columns
         else:

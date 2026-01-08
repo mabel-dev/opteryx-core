@@ -195,6 +195,18 @@ def query_planner(
     )
     telemetry.time_planning_binder += time.monotonic_ns() - start
 
+    # NEW: Try statistics-only response strategy
+    from opteryx.planner.optimizer.strategies.statistics_only_response import (
+        try_statistics_only_response,
+    )
+
+    stats_result = try_statistics_only_response(bound_plan)
+    has_statistics_only = stats_result is not None
+    if has_statistics_only:
+        # Successfully answered from statistics!
+        # Store result on the plan to be picked up by executor
+        setattr(bound_plan, "_statistics_only_result", stats_result)
+
     start = time.monotonic_ns()
     optimized_plan = do_optimizer(bound_plan, telemetry)
     telemetry.time_planning_optimizer += time.monotonic_ns() - start
@@ -202,14 +214,22 @@ def query_planner(
     # Choose output format
     if output_format == "substrait":
         # Build Substrait representation directly from optimized logical plan
-        from opteryx.planner.substrait_builder import build_substrait_plan
+        try:
+            from opteryx.planner.substrait_builder import build_substrait_plan
 
-        start = time.monotonic_ns()
-        query_properties = QueryProperties(qid=qid, variables=connection.context.variables)
-        substrait_plan = build_substrait_plan(optimized_plan, query_properties)
-        telemetry.time_planning_physical_planner += time.monotonic_ns() - start
+            start = time.monotonic_ns()
+            query_properties = QueryProperties(qid=qid, variables=connection.context.variables)
+            substrait_plan = build_substrait_plan(optimized_plan, query_properties)
+            telemetry.time_planning_physical_planner += time.monotonic_ns() - start
 
-        return substrait_plan
+            # Transfer statistics-only result to physical plan if present
+            if has_statistics_only:
+                setattr(substrait_plan, "_statistics_only_result", stats_result)
+
+            return substrait_plan
+        except ImportError:
+            # Fallback to physical planner if substrait builder not available
+            pass
 
     # Default: build traditional physical plan
     # before we write the new optimizer and execution engine, convert to a V1 plan
@@ -217,5 +237,9 @@ def query_planner(
     query_properties = QueryProperties(qid=qid, variables=connection.context.variables)
     physical_plan = create_physical_plan(optimized_plan, query_properties)
     telemetry.time_planning_physical_planner += time.monotonic_ns() - start
+
+    # Transfer statistics-only result to physical plan if present
+    if has_statistics_only:
+        setattr(physical_plan, "_statistics_only_result", stats_result)
 
     return physical_plan
