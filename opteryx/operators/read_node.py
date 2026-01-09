@@ -14,6 +14,7 @@ normalizes the data into the format for internal processing.
 
 import datetime
 import time
+from collections import defaultdict
 from typing import Generator
 
 import orjson
@@ -240,8 +241,6 @@ class ReaderNode(BasePlanNode):
             "connector": getattr(self.connector, "__type__", None),
             "relation": self.parameters.get("relation"),
             "files": [],
-            "selection_pushdown": [],
-            "projection_pushdown": [],
         }
 
         # Projection pushdown: provide schema index and column name for each projected column
@@ -258,33 +257,48 @@ class ReaderNode(BasePlanNode):
                     columns_to_read.append(idx)
                     schema_index = idx
                     break
-            proj.append({"schema_index": schema_index, "column_name": identity})
+            proj.append({"schema-index": schema_index, "column-name": identity})
 
         # Initialize column bytes accumulator (uncompressed) for projected columns
         # Projection pushdown: provide schema index and column name for each projected column
         proj = []
 
         schema_columns = getattr(self.schema, "columns", []) or []
-        columns_to_read = []
-        for c in self.columns or []:
-            # use the column identity (internal identity) as the column_name
-            identity = c.schema_column.identity
-            schema_index = None
-            for idx, sc in enumerate(schema_columns):
-                if getattr(sc, "identity", None) == identity:
-                    columns_to_read.append(idx)
-                    schema_index = idx
-                    break
-            proj.append({"schema_index": schema_index, "column_name": identity})
+        if len(self.columns) == 0:
+            for idx, c in enumerate(self.columns or []):
+                # use the column identity (internal identity) as the column_name
+                identity = c.schema_column.identity
+                column_name = c.schema_column.name
+                proj.append(
+                    {"schema-index": idx, "column-identity": identity, "column-name": column_name}
+                )
+        else:
+            columns_to_read = []
+            for c in self.columns or []:
+                # use the column identity (internal identity) as the column_name
+                identity = c.schema_column.identity
+                column_name = c.schema_column.name
+                schema_index = None
+                for idx, sc in enumerate(schema_columns):
+                    if sc.identity == identity:
+                        columns_to_read.append(idx)
+                        schema_index = idx
+                        break
+                proj.append(
+                    {
+                        "schema-index": schema_index,
+                        "column-identity": identity,
+                        "column-name": column_name,
+                    }
+                )
 
         # Initialize column bytes accumulator (uncompressed) and completeness flags
-        column_bytes_totals = {p["column_name"]: 0 for p in proj}
-        column_bytes_complete = {p["column_name"]: True for p in proj}
-        config["projection_pushdown"] = proj
+        column_bytes_totals = defaultdict(int)
+        column_bytes_complete = defaultdict(lambda: True)
+        config["projection"] = proj
 
         # If a manifest is attached, prefer its file entries
-        manifest = getattr(self, "manifest", None) or self.parameters.get("manifest")
-        pruned = getattr(self, "pruned_files", None) or self.parameters.get("pruned_files")
+        manifest = self.manifest
         if manifest is not None:
             # manifest.files contains FileEntry objects
             for f in manifest.files:
@@ -296,57 +310,40 @@ class ReaderNode(BasePlanNode):
                 if getattr(f, "uncompressed_size_in_bytes", None) is not None:
                     file_entry["bytes"] = f.uncompressed_size_in_bytes
 
+                col_sizes = getattr(f, "column_uncompressed_sizes_in_bytes", None)
+
                 # Per-file column statistics for projected columns (when available)
-                if proj and getattr(f, "column_uncompressed_sizes_in_bytes", None):
-                    col_stats = {}
+                if proj and col_sizes:
                     for p in proj:
-                        si = p.get("schema_index")
+                        si = p.get("schema-index")
                         if si is None:
                             continue
-                        col_name = p.get("column_name")
-                        stats = {}
-                        col_sizes = getattr(f, "column_uncompressed_sizes_in_bytes", None)
+
                         if (
                             col_sizes
                             and isinstance(col_sizes, (list, tuple))
                             and si < len(col_sizes)
                             and col_sizes[si] is not None
                         ):
-                            ub_bytes = col_sizes[si]
-                            stats["uncompressed_bytes"] = ub_bytes
                             # Accumulate total uncompressed bytes for this projected column
-                            column_bytes_totals[col_name] = column_bytes_totals.get(
-                                col_name, 0
-                            ) + int(ub_bytes)
+                            column_bytes_totals[si] += col_sizes[si]
                         else:
                             # Missing column size for this file/column -> mark incomplete
-                            column_bytes_complete[col_name] = False
-                        if stats:
-                            col_stats[col_name] = stats
+                            column_bytes_complete[si] = False
 
                 config["files"].append(file_entry)
 
             # After processing files, attach accumulated uncompressed bytes to projection entries
             for p in proj:
-                cname = p.get("column_name")
-                if column_bytes_complete.get(cname, False):
-                    p["uncompressed_bytes"] = column_bytes_totals.get(cname, 0)
-                else:
-                    p["uncompressed_bytes"] = None
-            # If pruning reduced files, filter to pruned list
-            if pruned:
-                pruned_set = set(pruned)
-                config["files"] = [ff for ff in config["files"] if ff.get("path") in pruned_set]
-        elif pruned:
-            # We only have file paths; include only the path (no rows/bytes)
-            for p in pruned:
-                config["files"].append({"path": p})
+                schema_index = p.get("schema-index")
+                if column_bytes_complete[schema_index]:
+                    p["total-bytes"] = column_bytes_totals.get(schema_index, 0)
 
         # Selection pushdown: represent predicates simply
         try:
-            config["selection_pushdown"] = [str(p) for p in (self.predicates or [])]
+            config["predicates"] = [str(p) for p in (self.predicates or [])]
         except Exception:
-            config["selection_pushdown"] = []
+            config["predicates"] = []
 
         # Summary: aggregate totals for files/rows/bytes when available
         total_files = len(config["files"])
