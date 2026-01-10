@@ -342,7 +342,7 @@ def merge(h1: Distogram, h2: Distogram) -> Distogram:  # pragma: no cover
     return h
 
 
-def count_at(h: Distogram, value: float):  # pragma: no cover
+def count_up_to(h: Distogram, value: float):  # pragma: no cover
     """Counts the number of elements present in the distribution up to value.
 
     Args:
@@ -481,7 +481,7 @@ def histogram(
         return None
 
     bin_bounds = _linspace(h.min, h.max, num=bin_count)
-    counts = [count_at(h, e) for e in bin_bounds]
+    counts = [count_up_to(h, e) for e in bin_bounds]
     counts = [new - last for new, last in zip(counts[1:], counts[:-1])]
 
     result = {f"{bin_bounds[i]} - {bin_bounds[i + 1]}": c for i, c in enumerate(counts)}

@@ -24,6 +24,8 @@ from typing import Tuple
 from orso.schema import RelationSchema
 
 from opteryx.models.file_entry import FileEntry
+from opteryx.third_party.maki_nage.distogram import Distogram
+from opteryx.third_party.maki_nage.distogram import load
 
 
 class Manifest:
@@ -49,6 +51,7 @@ class Manifest:
         self._field_id_to_name: Optional[Dict[int, str]] = None
         self._name_to_field_id: Optional[Dict[str, int]] = None
         self._column_bounds_cache: Dict[str, Tuple[Any, Any]] = {}
+        self._distogram_cache: Dict[str, Distogram] = {}
 
     # ================================================================
     # Basic Aggregates
@@ -173,7 +176,7 @@ class Manifest:
     # Estimation Methods (for cost-based optimization)
     # ================================================================
 
-    def estimate_selectivity(self, predicate) -> float:
+    def estimate_selectivity(self, _predicate) -> float:
         """
         Estimate fraction of rows matching predicate.
 
@@ -189,9 +192,74 @@ class Manifest:
         Note:
             Placeholder - will be implemented with actual estimation logic.
         """
-        # TODO: Implement selectivity estimation
-        # Default: assume 50% selectivity (conservative)
         return 0.5
+
+    # ================================================================
+    # Histograms / Distograms
+    # ================================================================
+
+    def get_distogram(self, column: str) -> Optional[Distogram]:
+        """Build or retrieve a combined distogram for the column from per-file histograms."""
+
+        if column in self._distogram_cache:
+            return self._distogram_cache[column]
+
+        field_id = self._resolve_field_id(column)
+        if field_id is None:
+            return None
+
+        combined: Optional[Distogram] = None
+
+        for file_entry in self.files:
+            # Ensure histograms and min/max are present and aligned
+            if not file_entry.histogram_counts:
+                continue
+            if file_entry.min_values is None or file_entry.max_values is None:
+                continue
+            if field_id >= len(file_entry.histogram_counts):
+                continue
+            if field_id >= len(file_entry.min_values) or field_id >= len(file_entry.max_values):
+                continue
+
+            col_hist = file_entry.histogram_counts[field_id]
+            col_min = file_entry.min_values[field_id]
+            col_max = file_entry.max_values[field_id]
+
+            if col_hist is None or col_min is None or col_max is None:
+                continue
+
+            if not hasattr(col_hist, "__iter__"):
+                continue
+            counts = list(col_hist)
+
+            if not counts:
+                continue
+
+            col_min_f = float(col_min)
+            col_max_f = float(col_max)
+
+            bins: List[Tuple[float, int]] = []
+            if col_min_f == col_max_f:
+                bins = [(col_min_f, sum(counts))]
+            else:
+                num_bins = len(counts)
+                span = col_max_f - col_min_f
+                for bin_idx, count in enumerate(counts):
+                    if count == 0:
+                        continue
+                    center = col_min_f + (bin_idx + 0.5) * span / num_bins
+                    bins.append((center, int(count)))
+
+            if not bins:
+                continue
+
+            dgram = load(bins, col_min_f, col_max_f)
+            combined = dgram if combined is None else combined + dgram
+
+        if combined is not None:
+            self._distogram_cache[column] = combined
+
+        return combined
 
     def estimate_cardinality(self, column: str) -> Optional[int]:
         """

@@ -122,6 +122,9 @@ class Features:
     force_nested_loop_join = bool(get("FEATURE_FORCE_NESTED_LOOP_JOIN", False))
     enable_free_threading = bool(get("FEATURE_ENABLE_FREE_THREADING", False))
     use_draken_ops_kernels = bool(get("FEATURE_USE_DRAKEN_OPS_KERNELS", False))
+    disable_predicate_ordering = bool(get("FEATURE_DISABLE_PREDICATE_ORDERING", False))
+    disable_predicate_pushdown = bool(get("FEATURE_DISABLE_PREDICATE_PUSHDOWN", False))
+    disable_manifest_pruning = bool(get("FEATURE_DISABLE_MANIFEST_PRUNING", False))
 
 
 features = Features()

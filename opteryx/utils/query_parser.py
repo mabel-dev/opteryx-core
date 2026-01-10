@@ -165,6 +165,10 @@ def _extract_tables_from_ast(ast: Dict[str, Any]) -> Set[str]:
                 if "relation" in relation:
                     tables.update(_extract_tables_from_relation(relation["relation"]))
 
+    FUNCTIONS_NOT_TABLES = ("UNNEST", "GENERATE_SERIES", "VALUES")
+    tables = [
+        table for table in tables if table and table.upper() not in FUNCTIONS_NOT_TABLES
+    ]  # Remove empty names and functions
     return tables
 
 

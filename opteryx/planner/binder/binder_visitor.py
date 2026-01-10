@@ -953,6 +953,8 @@ class BinderVisitor:
         from opteryx.exceptions import DatabaseError
         from opteryx.managers.permissions import can_read_table
 
+        node.relation = node.relation.lower()
+
         if node.alias in context.relations:
             raise AmbiguousDatasetError(dataset=node.alias)
 
