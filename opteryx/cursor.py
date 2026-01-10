@@ -186,6 +186,7 @@ class Cursor(DataFrame):
                 Parameters for the SQL operation, defaults to None.
         """
         self._ensure_open()
+        start = time.time_ns()
         results = self._execute_statements(operation, params, visibility_filters)
         if results is not None:
             result_data, self._result_type = results
@@ -213,6 +214,7 @@ class Cursor(DataFrame):
             self._description = self._schema_to_description(self._schema)
         else:
             self._description = None
+        self._telemetry.time_executing += time.time_ns() - start
         self._executed = True
 
     def plan(
@@ -488,8 +490,10 @@ class Cursor(DataFrame):
             limit: Optional limit on the number of rows to return.
         """
         self._ensure_open()
+        start = time.time_ns()
         results = self._execute_statements(operation, params, visibility_filters)
         if results is None:
+            self._telemetry.time_executing += time.time_ns() - start
             return
         result_data, self._result_type = results
 
@@ -512,6 +516,7 @@ class Cursor(DataFrame):
             self._query_status = QueryStatus.SQL_SUCCESS
             for batch in table.to_batches(max_chunksize=batch_size):
                 yield batch
+            self._telemetry.time_executing += time.time_ns() - start
             return
 
         # If we have a single pyarrow.Table, iterate over its batches
@@ -531,6 +536,7 @@ class Cursor(DataFrame):
             self._query_status = QueryStatus.SQL_SUCCESS
             for batch in table.to_batches(max_chunksize=batch_size):
                 yield batch
+            self._telemetry.time_executing += time.time_ns() - start
             return
 
         # For a generator/iterator of pyarrow.Tables, optionally apply a limit and then
@@ -643,6 +649,8 @@ class Cursor(DataFrame):
         # Mark executed if we emitted at least one morsel or had a last morsel
         if last_morsel is not None:
             self._executed = True
+        
+        self._telemetry.time_executing += time.time_ns() - start
 
     @property
     def messages(self) -> List[str]:
