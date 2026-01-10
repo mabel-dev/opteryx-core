@@ -11,6 +11,7 @@ Architecture:
 - OpteryxTable: Transient table-specific engine (handles data reading for one table)
 """
 
+from typing import Dict
 from typing import Optional
 from typing import Tuple
 
@@ -19,13 +20,14 @@ from orso.schema import RelationSchema
 from opteryx.connectors import TableType
 from opteryx.connectors.capabilities import Diachronic
 from opteryx.connectors.capabilities import Eidetic
+from opteryx.connectors.capabilities import PredicatePushable
 from opteryx.exceptions import DatasetNotFoundError
 from opteryx.exceptions import DatasetReadError
 from opteryx.models import FileEntry
 from opteryx.models import Manifest
 
 
-class OpteryxTable(Diachronic):
+class OpteryxTable(Diachronic, PredicatePushable):
     """
     Plan-time table metadata provider for Opteryx tables.
 
@@ -45,7 +47,19 @@ class OpteryxTable(Diachronic):
     # Capability declarations (for plan-time)
     supports_diachronic = True  # Time-travel queries
     supports_statistics = True  # Manifest provides stats
+    supports_predicate_pushdown = True  # Allow optimizer to push predicates to reader
     supports_limit_pushdown = True  # Allow optimizer to push LIMIT to OpteryxTable
+
+    PUSHABLE_OPS: Dict[str, bool] = {
+        "Eq": True,
+        "NotEq": True,
+        "Gt": True,
+        "GtEq": True,
+        "Lt": True,
+        "LtEq": True,
+        "Like": False,
+        "NotLike": False,
+    }
 
     def __init__(self, dataset: str, catalog, workspace: str, **kwargs):
         """
@@ -58,6 +72,7 @@ class OpteryxTable(Diachronic):
             **kwargs: Additional parameters (telemetry, etc.)
         """
         Diachronic.__init__(self, **kwargs)
+        PredicatePushable.__init__(self, **kwargs)
 
         self.dataset = dataset.replace("/", ".")
         self.catalog = catalog
@@ -174,7 +189,7 @@ class OpteryxTable(Diachronic):
         return self.schema, self.manifest
 
 
-class OpteryxConnector(Eidetic):
+class OpteryxConnector(Eidetic, PredicatePushable):
     """
     Long-lived Opteryx catalog gateway supporting multiple catalogs.
 
@@ -193,6 +208,17 @@ class OpteryxConnector(Eidetic):
     supports_limit_pushdown = True  # Via FileSystemTable base
     supports_statistics = True  # Opteryx manifests provide stats
 
+    PUSHABLE_OPS: Dict[str, bool] = {
+        "Eq": True,
+        "NotEq": True,
+        "Gt": True,
+        "GtEq": True,
+        "Lt": True,
+        "LtEq": True,
+        "Like": False,
+        "NotLike": False,
+    }
+
     def __init__(self, *args, catalog=None, telemetry=None, **kwargs):
         """
         Initialize the Opteryx catalog connector.
@@ -202,6 +228,8 @@ class OpteryxConnector(Eidetic):
             **kwargs: Configuration (firestore_project, firestore_database, gcs_bucket, etc.)
         """
         Eidetic.__init__(self, **kwargs)
+        PredicatePushable.__init__(self, **kwargs)
+
         self.telemetry = telemetry
         self.kwargs = kwargs
         self.kwargs.pop("connector", None)
