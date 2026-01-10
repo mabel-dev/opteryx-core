@@ -83,11 +83,20 @@ class PredicatePushdownStrategy(OptimizationStrategy):
         elif node.node_type == LogicalPlanStepType.Filter:
             self._inline_project_alias_predicates(node, context)
             # collect predicates we can probably push
-            if (
-                len(node.relations) > 0
-                and not get_all_nodes_of_type(node.condition, (NodeType.AGGREGATOR,))
-                and len(get_all_nodes_of_type(node.condition, (NodeType.IDENTIFIER,))) == 1
-            ):
+            # A predicate is pushable if:
+            # - It references at least one relation
+            # - It has no aggregations
+            # - It's a simple comparison (not a complex nested expression)
+            has_agg = get_all_nodes_of_type(node.condition, (NodeType.AGGREGATOR,))
+            identifiers = get_all_nodes_of_type(node.condition, (NodeType.IDENTIFIER,))
+
+            # Allow pushdown if: references relations AND no aggregators AND (has identifiers OR is a simple literal comparison)
+            is_simple_comparison = (
+                node.condition.node_type == NodeType.COMPARISON_OPERATOR
+                and len(identifiers) >= 1  # At least one column reference
+            )
+
+            if len(node.relations) > 0 and not has_agg and is_simple_comparison:
                 # record where the node was, so we can put it back
                 node.nid = context.node_id
                 node.plan_path = context.optimized_plan.trace_to_root(context.node_id)
@@ -292,13 +301,12 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                 (node.relation, node.alias)
             ):
                 if node.connector:
-                    connector_capabilities = node.connector.__class__.mro()
                     types = set()
                     if predicate.condition.left and predicate.condition.left.schema_column:
                         types.add(predicate.condition.left.schema_column.type)
                     if predicate.condition.right and predicate.condition.right.schema_column:
                         types.add(predicate.condition.right.schema_column.type)
-                    if PredicatePushable in connector_capabilities and node.connector.can_push(
+                    if node.connector.supports_predicate_pushdown and node.connector.can_push(
                         predicate, types
                     ):
                         if not node.predicates:
