@@ -12,6 +12,9 @@ from opteryx.models import Node
 
 OPERATORS = [
     "Eq",
+]
+
+NOT_OPERATORS = [
     "NotEq",
     "Gt",
     "GtEq",

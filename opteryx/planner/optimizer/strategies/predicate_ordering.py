@@ -21,6 +21,8 @@ been run if this strategy didn't run.
 - How to handle complex sub conditions or ORed conditions
 """
 
+from itertools import permutations
+
 from orso.schema import ConstantColumn
 from orso.tools import random_string
 
@@ -37,27 +39,105 @@ from .optimization_strategy import OptimizationStrategy
 from .optimization_strategy import OptimizerContext
 from .optimization_strategy import get_nodes_of_type_from_logical_plan
 
-# Approximate of the time in seconds (3dp) to compare 1 million records
-# None indicates no comparison is possible
+# Approximate of the time in seconds (3sf) to compare 1 million records
 # These are the core comparisons, Eq, NotEq, Gt, GtEq, Lt, LtEq
 BASIC_COMPARISON_COSTS = {
     OrsoTypes.ARRAY: 10.00,  # expensive
-    OrsoTypes.BLOB: 0.06,  # varies based on length, this is 50 bytes
+    OrsoTypes.BLOB: 0.058,  # varies based on length, this is 50 bytes
     OrsoTypes.JSONB: 10.00,  # JSONB (treat as expensive)
     OrsoTypes.BOOLEAN: 0.004,
     OrsoTypes.DATE: 0.01,
-    OrsoTypes.DECIMAL: 2.35,
+    OrsoTypes.DECIMAL: 2.871,
     OrsoTypes.DOUBLE: 0.003,
     OrsoTypes.INTEGER: 0.002,
     OrsoTypes.INTERVAL: 10.00,  # expensive
     OrsoTypes.STRUCT: 10.00,  # expensive
     OrsoTypes.TIMESTAMP: 0.009,
     OrsoTypes.TIME: 10.00,  # expensive
-    OrsoTypes.VARCHAR: 0.3,  # varies based on length, this is 50 chars
+    OrsoTypes.VARCHAR: 0.375,  # varies based on length, this is 50 chars
     OrsoTypes.NULL: 10.00,  # for completeness
-    OrsoTypes._MISSING_TYPE: 10.00,  # for completeness
+    getattr(OrsoTypes, "_MISSING_TYPE", 0): 10.00,  # for completeness
     0: 10.00,  # for completeness
 }
+
+# If we have no data, we assume these default selectivities
+DEFAULT_SELECTIVITY = {
+    "Eq": 0.1,
+    "NotEq": 0.9,
+    "Gt": 0.5,
+    "GtEq": 0.5,
+    "Lt": 0.5,
+    "LtEq": 0.5,
+}
+
+
+def _contains_function(node):
+    """Return True if the comparison involves any function call on either side."""
+
+    def is_fn(n):
+        return getattr(n, "node_type", None) == NodeType.FUNCTION
+
+    return is_fn(node) or is_fn(getattr(node, "left", None)) or is_fn(getattr(node, "right", None))
+
+
+def _estimate_selectivity(condition):
+    """Conservative selectivity using defaults when no distribution is available."""
+
+    op = getattr(condition, "value", None)
+    return DEFAULT_SELECTIVITY.get(op, 0.5)
+
+
+def _base_cost(condition):
+    col = getattr(condition, "left", None)
+    col_type = getattr(col, "schema_column", None)
+    if col_type is None:
+        return 10.0
+    return BASIC_COMPARISON_COSTS.get(col_type.type, 10.0)
+
+
+def _order_simple_predicates(predicates, telemetry):
+    """Order simple (non-function) predicates by brute-force cost if small, else by cost heuristic."""
+
+    if len(predicates) <= 1:
+        return predicates
+
+    selectivities = [_estimate_selectivity(p.condition) for p in predicates]
+    execution = [_base_cost(p.condition) for p in predicates]
+
+    if len(predicates) <= 6:
+        best_order = _brute_force_order(selectivities, execution)
+        ordered = [predicates[i] for i in best_order]
+    else:
+        # Greedy: lowest execution cost first
+        order = sorted(range(len(predicates)), key=lambda i: execution[i])
+        ordered = [predicates[i] for i in order]
+
+    # Telemetry if order changed
+    if any(predicates[i] is not ordered[i] for i in range(len(ordered)) if i < len(predicates)):
+        telemetry.optimization_cost_based_predicate_ordering += 1
+
+    return ordered
+
+
+def _brute_force_order(predicate_selectivity, predicate_execution_time):
+    """Return the permutation with the lowest estimated cost using simple selectivity/cost model."""
+
+    best_order = tuple(range(len(predicate_selectivity)))
+    best_cost = float("inf")
+
+    for arrangement in permutations(range(len(predicate_selectivity))):
+        cumulative_size = 1.0
+        execution_cost = 0.0
+
+        for idx in arrangement:
+            execution_cost += predicate_execution_time[idx] * cumulative_size
+            cumulative_size *= predicate_selectivity[idx]
+
+        if execution_cost < best_cost:
+            best_cost = execution_cost
+            best_order = arrangement
+
+    return best_order
 
 
 def rewrite_anded_any_eq_to_contains_all(predicate, telemetry):
@@ -137,29 +217,32 @@ def rewrite_anded_any_eq_to_contains_all(predicate, telemetry):
 
 def order_predicates(predicates: list, telemetry) -> list:
     """
-    This is a fairly naive cost-based predicate ordering routine.
+    Order predicates using simple selectivity/cost heuristics.
 
-    We have the time it takes for each comparison based on the datatype
-    of the values - we order the 'cheapest' (fastest) comparisons first
+    - Simple column-vs-literal comparisons are ordered first using brute-force
+      (up to small N) with conservative selectivities.
+    - Predicates involving functions (or non-comparison forms) are appended
+      after the ordered simple predicates, preserving their original order.
     """
-    cost_estimates = [
-        (
-            10.00
-            if c.condition.left is None
-            else BASIC_COMPARISON_COSTS[c.condition.left.schema_column.type],
-            i,
-        )
-        for i, c in enumerate(predicates)
-    ]
-    # Lowest execution times to the front
-    cost_estimates.sort(key=lambda x: x[0], reverse=False)
-    ordered_predicates = [predicates[c[1]] for c in cost_estimates]
-    # Did this optimization change the ordering?
-    for i, e in enumerate(cost_estimates):
-        if i > 0 and cost_estimates[i - 1][1] > e[1]:
-            telemetry.optimization_cost_based_predicate_ordering += 1
-            break
-    return ordered_predicates
+    simple = []
+    complex_preds = []
+
+    for pred in predicates:
+        cond = getattr(pred, "condition", None)
+        if cond is None or cond.node_type != NodeType.COMPARISON_OPERATOR:
+            complex_preds.append(pred)
+            continue
+
+        if _contains_function(cond):
+            complex_preds.append(pred)
+            continue
+
+        simple.append(pred)
+
+    ordered_simple = _order_simple_predicates(simple, telemetry)
+
+    # Maintain original order for complex/function predicates appended after simples
+    return ordered_simple + complex_preds
 
 
 class PredicateOrderingStrategy(OptimizationStrategy):
@@ -208,6 +291,12 @@ class PredicateOrderingStrategy(OptimizationStrategy):
         return plan
 
     def should_i_run(self, plan):
-        # only run if there are LIMIT clauses in the plan
+        # Check if predicate ordering is disabled via feature flag
+        from opteryx import config
+
+        if config.features.disable_predicate_ordering:
+            return False
+
+        # only run if there are Filter nodes in the plan
         candidates = get_nodes_of_type_from_logical_plan(plan, (LogicalPlanStepType.Filter,))
         return len(candidates) > 0

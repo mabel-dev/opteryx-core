@@ -51,6 +51,11 @@ def _add_condition(existing_condition, new_condition):
 
 
 class PredicatePushdownStrategy(OptimizationStrategy):
+    def should_i_run(self, plan):
+        from opteryx import config
+
+        return not config.features.disable_predicate_pushdown
+
     def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:
         if not context.optimized_plan:
             context.optimized_plan = context.pre_optimized_tree.copy()  # type: ignore

@@ -139,6 +139,11 @@ class ManifestPruningStrategy(OptimizationStrategy):
 
         Only run if there's at least one SCAN node with a manifest.
         """
+        from opteryx import config
+
+        if config.features.disable_manifest_pruning:
+            return False
+
         for nid in plan.nodes():
             node = plan[nid]
             if node.node_type == LogicalPlanStepType.Scan and node.manifest is not None:
