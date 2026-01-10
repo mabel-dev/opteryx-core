@@ -149,6 +149,8 @@ class OpteryxTable(Diachronic, PredicatePushable):
         # the table's declared schema (from metadata) and return an empty result set.
         if self.snapshot is None:
             self.snapshot = self.table.snapshot()
+            if self.snapshot is None:
+                raise DatasetReadError("The dataset exists, but it no data has been committed.")
             self.snapshot_id = self.snapshot.snapshot_id
 
         self.schema = self.table.schema(self.snapshot.schema_id)
