@@ -214,7 +214,9 @@ class Cursor(DataFrame):
             self._description = self._schema_to_description(self._schema)
         else:
             self._description = None
-        self._telemetry.time_executing += time.time_ns() - start
+        # time_executing includes planning time, so subtract it to get just execution time
+        elapsed = time.time_ns() - start
+        self._telemetry.time_executing += elapsed - self._telemetry.time_planning
         self._executed = True
 
     def plan(
@@ -251,95 +253,11 @@ class Cursor(DataFrame):
         )
         self._telemetry.time_planning += time.time_ns() - start
 
-        # build a JSON representation
-        def _humanize_physical_type(class_name: str) -> str:
-            # Remove common suffix
-            if class_name.endswith("Node"):
-                class_name = class_name[: -len("Node")]
-            # Split CamelCase into words
-            import re
-
-            parts = re.findall(r"[A-Z][a-z]*|[0-9]+", class_name)
-            # Normalize last token 'Read' -> 'reader'
-            if parts and parts[-1].lower() == "read":
-                parts[-1] = "reader"
-            return " ".join(p.lower() for p in parts)
-
-        nodes = []
-        for nid, node in physical_plan.nodes(data=True):
-            # friendly/logical type: prefer Substrait-like names for common kinds
-            def _logical_rel_name(node):
-                try:
-                    if getattr(node, "is_scan", False):
-                        return "ReadRel"
-                    if getattr(node, "is_join", False):
-                        return "JoinRel"
-                    # fall back to name-based heuristics
-                    candidate = getattr(node, "name", None) or getattr(node, "node_type", None)
-                    if candidate is None:
-                        return None
-                    s = str(candidate).lower()
-                    if "aggregate" in s or "group" in s or "distinct" in s:
-                        return "AggregateRel"
-                    if "project" in s or "projection" in s:
-                        return "ProjectRel"
-                    if "filter" in s or "where" in s:
-                        return "FilterRel"
-                    if "limit" in s:
-                        return "LimitRel"
-                    if "sort" in s or "order" in s:
-                        return "SortRel"
-                    if "union" in s:
-                        return "UnionRel"
-                    if "exit" in s:
-                        return "ExitRel"
-                    # default: title-case the candidate and append Rel
-                    token = str(candidate)
-                    token = token.replace(" ", "_").replace("-", "_")
-                    token = token[0].upper() + token[1:] if token else token
-                    return f"{token}Rel"
-                except Exception:
-                    return None
-
-            logical_type = _logical_rel_name(node)
-
-            # physical implementation type (class name -> human readable)
-            try:
-                class_name = node.__class__.__name__
-                physical_type = _humanize_physical_type(class_name)
-            except Exception:
-                physical_type = str(getattr(node, "__class__", type(node)))
-
-            # config / plan_config
-            try:
-                config_val = (
-                    node.plan_config()
-                    if hasattr(node, "plan_config")
-                    else getattr(node, "config", None)
-                )
-            except Exception as err:
-                # Don't silently drop errors from plan_config — include them in the output
-                try:
-                    cfg_str = getattr(node, "config", None)
-                except Exception:
-                    cfg_str = None
-                config_val = {"_plan_error": str(err), "config": cfg_str}
-
-            node_entry = {
-                "rel_id": nid,
-                "type": logical_type,
-                "physical_type": physical_type,
-                "config": config_val,
-            }
-            nodes.append(node_entry)
-
-        edges = [{"source": s, "target": t, "relation": r} for s, t, r in physical_plan.edges()]
-
-        plan_dict = {
-            "nodes": nodes,
-            "edges": edges,
-            "exit_points": list(physical_plan.get_exit_points()),
-        }
+        # Temporarily set the plan so we can use _get_plan_dict
+        old_plan = self._plan
+        self._plan = physical_plan
+        plan_dict = self._get_plan_dict()
+        self._plan = old_plan
 
         return plan_dict
 
@@ -445,6 +363,106 @@ class Cursor(DataFrame):
 
             raise DataError(f"Unable to build result dataset ({err}) (QID:{self.id})") from err
 
+    def _get_plan_dict(self) -> Optional[dict]:
+        """
+        Generate the plan dictionary representation.
+
+        Returns:
+            A dictionary with nodes and edges representing the query plan, or None if no plan exists.
+        """
+        if self._plan is None:
+            return None
+
+        # build a JSON representation
+        def _humanize_physical_type(class_name: str) -> str:
+            # Remove common suffix
+            if class_name.endswith("Node"):
+                class_name = class_name[: -len("Node")]
+            # Split CamelCase into words
+            import re
+
+            parts = re.findall(r"[A-Z][a-z]*|[0-9]+", class_name)
+            # Normalize last token 'Read' -> 'reader'
+            if parts and parts[-1].lower() == "read":
+                parts[-1] = "reader"
+            return " ".join(p.lower() for p in parts)
+
+        nodes = []
+        for nid, node in self._plan.nodes(data=True):
+            # friendly/logical type: prefer Substrait-like names for common kinds
+            def _logical_rel_name(node):
+                try:
+                    if getattr(node, "is_scan", False):
+                        return "ReadRel"
+                    if getattr(node, "is_join", False):
+                        return "JoinRel"
+                    # fall back to name-based heuristics
+                    candidate = getattr(node, "name", None) or getattr(node, "node_type", None)
+                    if candidate is None:
+                        return None
+                    s = str(candidate).lower()
+                    if "aggregate" in s or "group" in s or "distinct" in s:
+                        return "AggregateRel"
+                    if "project" in s or "projection" in s:
+                        return "ProjectRel"
+                    if "filter" in s or "where" in s:
+                        return "FilterRel"
+                    if "limit" in s:
+                        return "LimitRel"
+                    if "sort" in s or "order" in s:
+                        return "SortRel"
+                    if "union" in s:
+                        return "UnionRel"
+                    if "exit" in s:
+                        return "ExitRel"
+                    # default: title-case the candidate and append Rel
+                    token = str(candidate)
+                    token = token.replace(" ", "_").replace("-", "_")
+                    token = token[0].upper() + token[1:] if token else token
+                    return f"{token}Rel"
+                except Exception:
+                    return None
+
+            logical_type = _logical_rel_name(node)
+
+            # physical implementation type (class name -> human readable)
+            try:
+                class_name = node.__class__.__name__
+                physical_type = _humanize_physical_type(class_name)
+            except Exception:
+                physical_type = str(getattr(node, "__class__", type(node)))
+
+            # config / plan_config
+            try:
+                config_val = (
+                    node.plan_config()
+                    if hasattr(node, "plan_config")
+                    else getattr(node, "config", None)
+                )
+            except Exception as err:
+                # Don't silently drop errors from plan_config — include them in the output
+                try:
+                    cfg_str = getattr(node, "config", None)
+                except Exception:
+                    cfg_str = None
+                config_val = {"_plan_error": str(err), "config": cfg_str}
+
+            node_entry = {
+                "rel_id": nid,
+                "type": logical_type,
+                "physical_type": physical_type,
+                "config": config_val,
+            }
+            nodes.append(node_entry)
+
+        edges = [{"source": s, "target": t, "relation": r} for s, t, r in self._plan.edges()]
+
+        return {
+            "nodes": nodes,
+            "edges": edges,
+            "exit_points": list(self._plan.get_exit_points()),
+        }
+
     @property
     def telemetry(self) -> Dict[str, Any]:
         """
@@ -455,7 +473,11 @@ class Cursor(DataFrame):
         """
         if self._telemetry.end_time == 0:  # pragma: no cover
             self._telemetry.end_time = time.time_ns()
-        self._telemetry.plan = self.mermaid()
+
+        # Include mermaid diagram of the plan
+        if self._plan is not None:
+            self._telemetry.plan = self.mermaid()
+
         return self._telemetry.as_dict()
 
     def mermaid(self) -> str:
@@ -516,7 +538,9 @@ class Cursor(DataFrame):
             self._query_status = QueryStatus.SQL_SUCCESS
             for batch in table.to_batches(max_chunksize=batch_size):
                 yield batch
-            self._telemetry.time_executing += time.time_ns() - start
+            # time_executing includes planning time, so subtract it to get just execution time
+            elapsed = time.time_ns() - start
+            self._telemetry.time_executing += elapsed - self._telemetry.time_planning
             return
 
         # If we have a single pyarrow.Table, iterate over its batches
@@ -536,7 +560,9 @@ class Cursor(DataFrame):
             self._query_status = QueryStatus.SQL_SUCCESS
             for batch in table.to_batches(max_chunksize=batch_size):
                 yield batch
-            self._telemetry.time_executing += time.time_ns() - start
+            # time_executing includes planning time, so subtract it to get just execution time
+            elapsed = time.time_ns() - start
+            self._telemetry.time_executing += elapsed - self._telemetry.time_planning
             return
 
         # For a generator/iterator of pyarrow.Tables, optionally apply a limit and then
@@ -649,8 +675,10 @@ class Cursor(DataFrame):
         # Mark executed if we emitted at least one morsel or had a last morsel
         if last_morsel is not None:
             self._executed = True
-        
-        self._telemetry.time_executing += time.time_ns() - start
+
+        # time_executing includes planning time, so subtract it to get just execution time
+        elapsed = time.time_ns() - start
+        self._telemetry.time_executing += elapsed - self._telemetry.time_planning
 
     @property
     def messages(self) -> List[str]:

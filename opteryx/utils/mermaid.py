@@ -54,11 +54,52 @@ def plan_to_mermaid(plan: PhysicalPlan, stats: list = None) -> str:
         for stat in stats:
             node_stats[stat["identity"]] = stat
 
-    # Store detailed stats in telemetry operations
+    # Helper function to get logical node type (same as in cursor._get_plan_dict)
+    def _get_logical_node_type(node):
+        try:
+            if getattr(node, "is_scan", False):
+                return "ReadRel"
+            if getattr(node, "is_join", False):
+                return "JoinRel"
+            # fall back to name-based heuristics
+            candidate = getattr(node, "name", None) or getattr(node, "node_type", None)
+            if candidate is None:
+                return None
+            s = str(candidate).lower()
+            if "aggregate" in s or "group" in s or "distinct" in s:
+                return "AggregateRel"
+            if "project" in s or "projection" in s:
+                return "ProjectRel"
+            if "filter" in s or "where" in s:
+                return "FilterRel"
+            if "limit" in s:
+                return "LimitRel"
+            if "sort" in s or "order" in s:
+                return "SortRel"
+            if "union" in s:
+                return "UnionRel"
+            if "exit" in s:
+                return "ExitRel"
+            # default: title-case the candidate and append Rel
+            token = str(candidate)
+            token = token.replace(" ", "_").replace("-", "_")
+            token = token[0].upper() + token[1:] if token else token
+            return f"{token}Rel"
+        except (AttributeError, ValueError, TypeError):
+            return None
+
+    # Store detailed stats in telemetry operations with node UID as key and type as field
     for nid, node in plan.nodes(True):
         if not node.is_not_explained:
             stat = node_stats.get(node.identity)
             if stat:
+                # Add node type to the stat dictionary
+                node_type = _get_logical_node_type(node)
+                if node_type:
+                    stat["type"] = node_type
+                # Remove identity field - it's redundant with the key
+                stat.pop("identity", None)
+                # Use node UID (nid) as the key
                 node.telemetry.operations[nid] = stat
 
     for nid, node in plan.nodes(True):
