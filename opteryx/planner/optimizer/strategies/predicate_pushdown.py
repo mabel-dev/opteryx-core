@@ -235,19 +235,33 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                     context.collected_predicates = []
                 elif node.type in ("cross join",):  # , "inner"):
                     # IMPROVE: add predicates to INNER JOIN conditions
-                    # we may be able to rewrite as an inner join
+                    # we may be able to rewrite as an inner join or non-equi join
                     remaining_predicates = []
+                    non_equi_ops = {"NotEq", "Gt", "GtEq", "Lt", "LtEq"}
+
                     for predicate in context.collected_predicates:
-                        if (
-                            len(predicate.relations) == 2
-                            and predicate.condition.value == "Eq"
-                            and set(node.right_relation_names + node.left_relation_names)
-                            == set(predicate.relations)
-                        ):
-                            node.type = "inner"
-                            node.on = _add_condition(node.on, predicate.condition)
-                            self.telemetry.optimization_predicate_pushdown_cross_join_to_inner_join += 1
+                        if set(node.right_relation_names).issubset(predicate.relations) and set(
+                            node.left_relation_names
+                        ).issubset(predicate.relations):
+                            # This predicate references both sides of the join
+                            if predicate.condition.value == "Eq":
+                                # Convert to inner join
+                                node.type = "inner"
+                                node.on = _add_condition(node.on, predicate.condition)
+                                self.telemetry.optimization_predicate_pushdown_cross_join_to_inner_join += 1
+                            elif predicate.condition.value in non_equi_ops:
+                                # Convert to non-equi join
+                                node.type = "non equi"
+                                node.on = _add_condition(node.on, predicate.condition)
+                                self.telemetry.optimization_predicate_pushdown_cross_join_to_inner_join += 1
+                            else:
+                                # Unsupported comparison - insert predicate above the join
+                                self.telemetry.optimization_predicate_pushdown += 1
+                                context.optimized_plan.insert_node_after(
+                                    predicate.nid, predicate, context.node_id
+                                )
                         else:
+                            # Single-relation predicates can be pushed past the join
                             remaining_predicates.append(predicate)
 
                     if node.on:
@@ -255,7 +269,7 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                             node.on, node.left_relation_names, node.right_relation_names
                         )
                         node.columns = get_all_nodes_of_type(node.on, (NodeType.IDENTIFIER,))
-                        context.collected_predicates = remaining_predicates
+                    context.collected_predicates = remaining_predicates
 
                 for predicate in context.collected_predicates:
                     remaining_predicates = []

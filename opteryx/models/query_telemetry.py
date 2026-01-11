@@ -46,6 +46,21 @@ class _QueryTelemetry:
         from opteryx.utils.firestore_utils import sanitize_for_firestore
 
         readings_dict = dict(self._reading)
+
+        # Remove connector-level stats that should only appear in operation/sensor stats
+        connector_only_keys = [
+            "rows_read",
+            "rows_seen",
+            "blobs_read",
+            "blobs_seen",
+            "bytes_raw",
+            "bytes_processed",
+            "columns_read",
+            "bytes_read",
+        ]
+        for key in connector_only_keys:
+            readings_dict.pop(key, None)
+
         for k, v in readings_dict.items():
             # times are recorded in ns but reported in seconds
             if k.startswith("time_"):
