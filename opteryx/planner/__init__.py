@@ -127,7 +127,6 @@ def query_planner(
     telemetry,
     output_format: str = "physical",
 ) -> Union[Generator[Any, Any, Any], Dict[str, Any]]:
-    from opteryx.exceptions import SqlError
     from opteryx.models import QueryProperties
     from opteryx.planner.ast_rewriter import do_ast_rewriter
     from opteryx.planner.binder import do_bind_phase
@@ -243,3 +242,197 @@ def query_planner(
         setattr(physical_plan, "_statistics_only_result", stats_result)
 
     return physical_plan
+
+
+def execute_logical_plan(
+    logical_plan,
+    connection=None,
+    qid: Optional[str] = None,
+    telemetry=None,
+    common_table_expressions=None,
+    visibility_filters: Optional[Dict[str, Any]] = None,
+    output_format: str = "physical",
+):
+    """
+    Execute an already-constructed logical plan through bind, optimizer and
+    physical planning so it can be executed by the executor or returned as
+    a Substrait plan. Intended for use by external services that generate
+    logical plans (eg. OData service).
+    """
+    import uuid
+
+    import pyarrow
+
+    from opteryx.constants import ResultType
+    from opteryx.exceptions import SqlError
+    from opteryx.managers.execution import execute as execute_plan
+    from opteryx.models import QueryProperties
+    from opteryx.models import QueryTelemetry
+    from opteryx.planner.binder import do_bind_phase
+    from opteryx.planner.optimizer import do_optimizer
+    from opteryx.planner.physical_planner import create_physical_plan
+
+    from opteryx.models import ExecutionContext
+
+    # Prepare qid and telemetry defaults
+    if qid is None:
+        qid = str(uuid.uuid4())
+    if telemetry is None:
+        telemetry = QueryTelemetry(qid)
+
+    # Determine execution context for binder
+    if connection is None:
+        conn_context = ExecutionContext(memberships=[])
+    elif hasattr(connection, "context"):
+        conn_context = connection.context
+    else:
+        conn_context = connection
+
+    # The Binder adds schema information to the logical plan
+    start = time.monotonic_ns()
+    bound_plan = do_bind_phase(
+        logical_plan,
+        connection=conn_context,
+        qid=qid,
+        common_table_expressions=None,  # executing logical plans: no CTEs
+        visibility_filters=visibility_filters,
+        telemetry=telemetry,
+    )
+    telemetry.time_planning_binder += time.monotonic_ns() - start
+
+    # Try statistics-only response strategy
+    from opteryx.planner.optimizer.strategies.statistics_only_response import (
+        try_statistics_only_response,
+    )
+
+    stats_result = try_statistics_only_response(bound_plan)
+    has_statistics_only = stats_result is not None
+    if has_statistics_only:
+        setattr(bound_plan, "_statistics_only_result", stats_result)
+
+    start = time.monotonic_ns()
+    optimized_plan = do_optimizer(bound_plan, telemetry)
+    telemetry.time_planning_optimizer += time.monotonic_ns() - start
+
+    # Choose output format
+    if output_format == "substrait":
+        try:
+            from opteryx.planner.substrait_builder import build_substrait_plan
+
+            start = time.monotonic_ns()
+            query_properties = QueryProperties(qid=qid, variables=connection.context.variables)
+            substrait_plan = build_substrait_plan(optimized_plan, query_properties)
+            telemetry.time_planning_physical_planner += time.monotonic_ns() - start
+
+            if has_statistics_only:
+                setattr(substrait_plan, "_statistics_only_result", stats_result)
+
+            return substrait_plan
+        except ImportError:
+            # fallback to traditional physical planner
+            pass
+
+    # Default: build physical plan
+    start = time.monotonic_ns()
+    variables = {}
+    try:
+        variables = connection.context.variables  # type: ignore
+    except (AttributeError, TypeError):
+        variables = {}
+
+    query_properties = QueryProperties(qid=qid, variables=variables)
+    physical_plan = create_physical_plan(optimized_plan, query_properties)
+    telemetry.time_planning_physical_planner += time.monotonic_ns() - start
+
+    if has_statistics_only:
+        setattr(physical_plan, "_statistics_only_result", stats_result)
+
+    # Execute the physical plan and return a single pyarrow.Table
+    results_generator, result_type = execute_plan(physical_plan, telemetry=telemetry)
+
+    # Handle statistics-only (execute_plan may have returned a simple generator)
+    if result_type == ResultType.NON_TABULAR:
+        import orso
+        from orso.schema import FlatColumn
+        from orso.schema import RelationSchema
+
+        # Consume generator to get the first non-empty result (if any)
+        data = next(results_generator, None)
+        if data is None:
+            # return an empty meta table
+            meta_dataframe = orso.DataFrame(
+                rows=[(0,)],
+                schema=RelationSchema(
+                    name="table",
+                    columns=[FlatColumn(name="rows_affected", type=OrsoTypes.INTEGER)],
+                ),
+            )
+            return meta_dataframe.arrow()
+        # If data is already an Arrow table, return it
+        if isinstance(data, pyarrow.Table):
+            return data
+        # else assume it's orso-like and convert
+        return data.arrow()
+
+    # For tabular results, the generator yields pyarrow tables (or EOS)
+    try:
+        first_table = next(results_generator, None)
+        if first_table is None:
+            # No rows; return empty table with schema from physical plan Exit node
+            from orso.schema import RelationSchema
+            from orso.schema import convert_orso_schema_to_arrow_schema
+
+            exit_node = physical_plan.get_exit_points()[0]
+            exit_instance = physical_plan[exit_node]
+            orso_schema = RelationSchema(
+                name="Relation", columns=[c.schema_column for c in exit_instance.columns]
+            )
+            arrow_schema = convert_orso_schema_to_arrow_schema(orso_schema, use_identities=True)
+            return pyarrow.Table.from_arrays(
+                [pyarrow.array([]) for _ in exit_instance.columns], schema=arrow_schema
+            )
+
+        # If result is a single table, return it directly
+        if (
+            isinstance(first_table, pyarrow.Table)
+            and getattr(first_table, "num_rows", None) is not None
+            and len(first_table.column_names) == len(set(first_table.column_names))
+        ):
+            # attempt to concatenate remaining tables if generator returns more
+            from itertools import chain
+
+            rest = results_generator
+            if rest is not None:
+                try:
+                    combined = pyarrow.concat_tables(
+                        chain([first_table], rest), promote_options="permissive"
+                    )
+                    return combined
+                except (pyarrow.ArrowInvalid, pyarrow.ArrowTypeError):
+                    return first_table
+            return first_table
+
+        # Otherwise, concatenate streaming tables handling duplicate names similarly to Cursor.execute_to_arrow
+        from itertools import chain
+
+        if first_table is not None:
+            column_names = first_table.column_names
+            if len(column_names) != len(set(column_names)):
+                temporary_names = [f"col_{i}" for i in range(len(column_names))]
+                first_table = first_table.rename_columns(temporary_names)
+                return_table = pyarrow.concat_tables(
+                    chain(
+                        [first_table],
+                        (t.rename_columns(temporary_names) for t in results_generator),
+                    ),
+                    promote_options="permissive",
+                )
+                return return_table.rename_columns(column_names)
+
+        table = pyarrow.concat_tables(
+            chain([first_table], results_generator), promote_options="permissive"
+        )
+        return table
+    except StopIteration:
+        # no results
+        return pyarrow.Table.from_batches([])

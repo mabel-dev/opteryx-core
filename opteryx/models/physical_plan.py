@@ -61,9 +61,11 @@ class PhysicalPlan(Graph):
         return traversal_list
 
     def label_join_legs(self):
+        print("Labeling join legs")
         # add the left/right labels to the edges coming into the joins
         joins = ((nid, node) for nid, node in self.nodes(True) if node.is_join)
         for nid, join in joins:
+            print(nid, join.left_readers, join.right_readers)
             for provider, provider_target, provider_relation in self.ingoing_edges(nid):
                 reader_edges = {
                     (source, target, relation)
@@ -75,6 +77,7 @@ class PhysicalPlan(Graph):
                     reader_edges.add((provider, provider_target, provider_relation))
 
                 for s, t, r in reader_edges:
+                    print("  checking", s, t, r, self[s].uuid if hasattr(self[s], "uuid") else None)
                     node = self[s]
                     if not hasattr(node, "uuid"):
                         continue

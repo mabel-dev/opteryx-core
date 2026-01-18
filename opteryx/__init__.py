@@ -95,6 +95,7 @@ __all__ = [
     "query",
     "query_to_arrow",
     "plan",
+    "execute_logical_plan",
     "register_workspace",
     "set_default_connector",
     "__author__",
@@ -294,6 +295,17 @@ def plan(
         return cur.plan(operation=operation, params=params, visibility_filters=visibility_filters)
     finally:
         cur.close()
+
+
+def execute_logical_plan(logical_plan, **kwargs):
+    """
+    Execute a logical plan by delegating to the planner module. qid, telemetry
+    and connection are optional to support external callers that only have a
+    logical plan (eg. OData service).
+    """
+    from opteryx import planner
+
+    return planner.execute_logical_plan(logical_plan, **kwargs)
 
 
 # Enable all warnings, including DeprecationWarning

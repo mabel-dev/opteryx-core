@@ -121,16 +121,7 @@ def create_physical_plan(logical_plan, query_properties) -> PhysicalPlan:
         # fmt: on
 
         # Copy optimizer/binder attached metadata from logical node to physical node
-        if hasattr(logical_node, "pruned_files"):
-            try:
-                node.pruned_files = logical_node.pruned_files
-            except Exception:
-                pass
-        if hasattr(logical_node, "manifest"):
-            try:
-                node.manifest = logical_node.manifest
-            except Exception:
-                pass
+        node.manifest = logical_node.manifest
 
         plan.add_node(nid, node)
 
