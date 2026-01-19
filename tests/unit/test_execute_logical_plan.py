@@ -1,7 +1,30 @@
+import os
+import sys
+
+sys.path.insert(1, os.path.join(sys.path[0], "../.."))
+sys.path.insert(1, os.path.join(sys.path[0], "../../../pyiceberg-firestore-gcs"))
+sys.path.insert(1, os.path.join(sys.path[0], "../../../opteryx-catalog"))
+
+FIRESTORE_DATABASE = os.environ.get("FIRESTORE_DATABASE")
+BUCKET_NAME = os.environ.get("GCS_BUCKET")
+GCP_PROJECT_ID = os.environ.get("GCP_PROJECT_ID")
+
 import pyarrow as pa
 import opteryx
 from opteryx.planner.logical_planner import do_logical_planning_phase
 from opteryx.third_party import sqloxide
+
+from opteryx.connectors import OpteryxConnector
+from opteryx import set_default_connector
+from opteryx_catalog import OpteryxCatalog
+
+set_default_connector(
+    OpteryxConnector,
+    catalog=OpteryxCatalog,
+    firestore_project=GCP_PROJECT_ID,
+    firestore_database=FIRESTORE_DATABASE,
+    gcs_bucket=BUCKET_NAME,
+)
 
 
 def run_logical(sql: str) -> pa.Table:
@@ -49,7 +72,7 @@ def test_planets_count():
 
 
 def test_planets_where_name():
-    tbl = run_logical("SELECT id, name FROM $planets WHERE name = 'Earth'")
+    tbl = run_logical("SELECT * FROM public.examples.planets WHERE name = 'Earth'")
     assert isinstance(tbl, pa.Table)
     assert tbl.num_rows == 1
     d = tbl.to_pydict()
@@ -61,3 +84,8 @@ def test_planets_order_by_id_limit():
     assert isinstance(tbl, pa.Table)
     assert tbl.num_rows == 2
     assert tbl.to_pydict()["id"] == [9, 8]
+
+if __name__ == "__main__":  # pragma: no cover
+    from tests import run_tests
+
+    run_tests()

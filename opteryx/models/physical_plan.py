@@ -61,7 +61,6 @@ class PhysicalPlan(Graph):
         return traversal_list
 
     def label_join_legs(self):
-        print("Labeling join legs")
         # add the left/right labels to the edges coming into the joins
         joins = ((nid, node) for nid, node in self.nodes(True) if node.is_join)
         for nid, join in joins:
