@@ -110,7 +110,6 @@ class Manifest:
         kept_files = []
 
         for file_entry in self.files:
-            print("Evaluating file:", file_entry.file_path)
             skip_file = False
 
             # Check each predicate
@@ -146,10 +145,11 @@ class Manifest:
                         continue
 
                     # Get bounds for this field
+                    if not file_entry.lower_bounds or not file_entry.upper_bounds:
+                        continue
+
                     min_value = file_entry.lower_bounds.get(field_id)
                     max_value = file_entry.upper_bounds.get(field_id)
-
-                    print(field_id, column_name, literal_value, min_value, max_value)
 
                     if min_value is not None and max_value is not None:
                         # Check if file can be pruned
