@@ -488,6 +488,16 @@ extensions = [
         language="c++",
         extra_compile_args=CPP_FLAGS,
     ),
+    # Helpers for relation statistics
+    Extension(
+        "opteryx.compiled.structures.relation_statistics",
+        sources=[
+            "opteryx/compiled/structures/relation_statistics.pyx",
+        ],
+        include_dirs=include_dirs,
+        language="c++",
+        extra_compile_args=CPP_FLAGS,
+    ),
     # Aggregations: count_distinct and group-by helpers (C++ implementations)
     Extension(
         "opteryx.compiled.aggregations.count_distinct",
