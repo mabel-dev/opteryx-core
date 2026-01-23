@@ -23,6 +23,7 @@ from typing import Tuple
 
 from orso.schema import RelationSchema
 
+from opteryx.compiled.structures.relation_statistics import to_int
 from opteryx.models.file_entry import FileEntry
 from opteryx.third_party.maki_nage.distogram import Distogram
 from opteryx.third_party.maki_nage.distogram import load
@@ -109,6 +110,7 @@ class Manifest:
         kept_files = []
 
         for file_entry in self.files:
+            print("Evaluating file:", file_entry.file_path)
             skip_file = False
 
             # Check each predicate
@@ -127,7 +129,7 @@ class Manifest:
                     # Normalize literal value
                     if hasattr(literal_value, "item"):
                         literal_value = literal_value.item()
-                    literal_value = str(literal_value).encode("utf-8")
+                    literal_value = to_int(literal_value)
 
                     # Get field_id for this column from schema
                     # Bounds are indexed by field_id (int)
@@ -147,13 +149,10 @@ class Manifest:
                     min_value = file_entry.lower_bounds.get(field_id)
                     max_value = file_entry.upper_bounds.get(field_id)
 
+                    print(field_id, column_name, literal_value, min_value, max_value)
+
                     if min_value is not None and max_value is not None:
                         # Check if file can be pruned
-                        if not isinstance(min_value, bytes):
-                            min_value = str(min_value).encode("utf-8")
-                        if not isinstance(max_value, bytes):
-                            max_value = str(max_value).encode("utf-8")
-
                         prune_func = handlers.get(predicate.value)
                         if prune_func and prune_func(literal_value, min_value, max_value):
                             skip_file = True

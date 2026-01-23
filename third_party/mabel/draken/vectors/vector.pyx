@@ -23,6 +23,7 @@ from libc.stdint cimport uint64_t, int64_t
 from cpython.mem cimport PyMem_Calloc
 
 from opteryx.draken.interop.arrow cimport vector_from_arrow
+from opteryx.compiled.structures.relation_statistics cimport to_int
 
 cdef const uint64_t MIX_HASH_CONSTANT = <uint64_t>0x9e3779b97f4a7c15ULL
 cdef const uint64_t NULL_HASH = <uint64_t>0x4c3f95a36ab8eccaULL
@@ -94,8 +95,6 @@ cdef class Vector:
             py_comp(out_buf, offset=offset)
             return
 
-        # Generic fallback: iterate values and call to_int
-        from opteryx.compiled.structures.relation_statistics import to_int
         cdef Py_ssize_t n = len(self)
         # Validate buffer size
         if out_buf.shape[0] - offset < n:
@@ -109,7 +108,7 @@ cdef class Vector:
             vals = [self[i] for i in range(n)]
 
         for i in range(n):
-            out_buf[offset + i] = <int64_t> to_int(vals[i])
+            out_buf[offset + i] = <int64_t>to_int(vals[i])
 
     cpdef int64_t[::1] compress(self):
         """Allocate an int64 buffer, call `compress`, and return the buffer.

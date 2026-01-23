@@ -266,13 +266,12 @@ def execute_logical_plan(
     from opteryx.constants import ResultType
     from opteryx.exceptions import SqlError
     from opteryx.managers.execution import execute as execute_plan
+    from opteryx.models import ExecutionContext
     from opteryx.models import QueryProperties
     from opteryx.models import QueryTelemetry
     from opteryx.planner.binder import do_bind_phase
     from opteryx.planner.optimizer import do_optimizer
     from opteryx.planner.physical_planner import create_physical_plan
-
-    from opteryx.models import ExecutionContext
 
     # Prepare qid and telemetry defaults
     if qid is None:

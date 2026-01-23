@@ -65,33 +65,17 @@ class ManifestPruningStrategy(OptimizationStrategy):
         if not context.optimized_plan:
             context.optimized_plan = context.pre_optimized_tree.copy()  # type: ignore
 
-        if node.node_type == LogicalPlanStepType.Filter:
-            # Collect predicates that might be useful for file pruning
-            # We'll apply them when we reach the SCAN node
-            if self._is_prunable_predicate(node.condition):
-                self.collected_predicates.append(node.condition)
-
-            # Keep the filter node (don't remove it)
-            context.optimized_plan[context.node_id] = node
-
-        elif node.node_type == LogicalPlanStepType.Scan:
+        if node.node_type == LogicalPlanStepType.Scan:
             # Try to prune files using manifest
-            if node.manifest is not None and self.collected_predicates:
+            if node.manifest is not None and node.predicates:
                 # Apply manifest-based pruning
                 original_count = node.manifest.get_file_count()
 
-                node.manifest.prune_files(self.collected_predicates)
+                node.manifest.prune_files(node.predicates)
 
                 pruned_count = node.manifest.get_file_count()
                 self.telemetry.files_pruned += original_count - pruned_count
 
-            # Clear collected predicates after processing scan
-            self.collected_predicates = []
-
-            context.optimized_plan[context.node_id] = node
-
-        else:
-            # For other node types, just copy them
             context.optimized_plan[context.node_id] = node
 
         return context
