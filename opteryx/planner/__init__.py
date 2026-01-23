@@ -48,11 +48,9 @@ import numpy
 from orso.schema import ConstantColumn
 from orso.types import OrsoTypes
 
-from opteryx import config
 from opteryx.datatypes.intervals import normalize_interval_value
 from opteryx.managers.expression import NodeType
 from opteryx.models import Node
-from opteryx.models import PhysicalPlan
 
 
 def build_literal_node(
@@ -153,6 +151,8 @@ def query_planner(
     try:
         parsed_statements = sqloxide.parse_sql(clean_sql, _dialect="opteryx")
     except ValueError as parser_error:
+        from opteryx.exceptions import SqlError
+
         raise SqlError(parser_error) from parser_error
     # AST Rewriter adds temporal filters and parameters to the AST
     start = time.monotonic_ns()
