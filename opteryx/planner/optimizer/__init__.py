@@ -78,6 +78,7 @@ from opteryx.planner.optimizer.strategies import PredicateRewriteStrategy
 from opteryx.planner.optimizer.strategies import ProjectionPushdownStrategy
 from opteryx.planner.optimizer.strategies import RedundantOperationsStrategy
 from opteryx.planner.optimizer.strategies import SplitConjunctivePredicatesStrategy
+from opteryx.planner.optimizer.strategies import StatisticsOnlyResponseStrategy
 
 from .strategies.optimization_strategy import OptimizerContext
 
@@ -92,6 +93,7 @@ class OptimizerVisitor:
         """
         self.strategies = [
             ConstantFoldingStrategy(telemetry),
+            StatisticsOnlyResponseStrategy(telemetry),
             BooleanSimplificationStrategy(telemetry),
             SplitConjunctivePredicatesStrategy(telemetry),
             CorrelatedFiltersStrategy(telemetry),
