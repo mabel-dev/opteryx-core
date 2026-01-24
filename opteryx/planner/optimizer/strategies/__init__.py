@@ -15,6 +15,7 @@ from .predicate_rewriter import PredicateRewriteStrategy
 from .projection_pushdown import ProjectionPushdownStrategy
 from .redundant_operators import RedundantOperationsStrategy
 from .split_conjunctive_predicates import SplitConjunctivePredicatesStrategy
+from .statistics_only_response import StatisticsOnlyResponseStrategy
 
 __all__ = [
     "BooleanSimplificationStrategy",
@@ -23,6 +24,7 @@ __all__ = [
     "DistinctPushdownStrategy",
     "JoinOrderingStrategy",
     "JoinRewriteStrategy",
+    "LimitFilesPruningStrategy",
     "LimitPushdownStrategy",
     "ManifestPruningStrategy",
     "OperatorFusionStrategy",
@@ -33,4 +35,5 @@ __all__ = [
     "ProjectionPushdownStrategy",
     "RedundantOperationsStrategy",
     "SplitConjunctivePredicatesStrategy",
+    "StatisticsOnlyResponseStrategy",
 ]

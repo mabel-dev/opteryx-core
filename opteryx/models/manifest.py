@@ -153,6 +153,19 @@ class Manifest:
 
                     if min_value is not None and max_value is not None:
                         # Check if file can be pruned
+                        import json
+
+                        print(
+                            json.dumps(
+                                {
+                                    "file": file_entry.file_path,
+                                    "predicate": predicate.value,
+                                    "literal": literal_value,
+                                    "min": min_value,
+                                    "max": max_value,
+                                }
+                            )
+                        )
                         prune_func = handlers.get(predicate.value)
                         if prune_func and prune_func(literal_value, min_value, max_value):
                             skip_file = True

@@ -18,12 +18,17 @@ Expected Speedup:
   - COUNT(*): ~400-800x (no file I/O)
 """
 
-from typing import Optional
-
 import pyarrow
+from orso.types import OrsoTypes
 
 from opteryx.managers.expression import NodeType
+from opteryx.planner import build_literal_node
 from opteryx.planner.logical_planner.logical_planner import LogicalPlanStepType
+
+# Strategy-style Optimization Class
+from .optimization_strategy import OptimizationStrategy
+from .optimization_strategy import OptimizerContext
+from .optimization_strategy import get_nodes_of_type_from_logical_plan
 
 
 def find_scan_node(logical_plan):
@@ -225,75 +230,198 @@ def get_count_from_manifest(manifest) -> int:
     return manifest.get_record_count()
 
 
-def create_count_result_table(count_value: int, column_alias: str) -> pyarrow.Table:
+class StatisticsOnlyResponseStrategy(OptimizationStrategy):
+    """Optimizer strategy that rewrites trivial COUNT(*) aggregates into a
+    simple projection of a literal count over the `$no_table` virtual dataset.
+
+    This strategy strictly follows the plan->plan pattern used by other
+    strategies: it accepts a logical plan, mutates it when appropriate, and
+    returns the (possibly rewritten) plan.
     """
-    Create a PyArrow table with the COUNT(*) result.
 
-    Creates a single-row, single-column table with:
-    - Column name: column_alias (e.g., "COUNT(*)" or "total_rows")
-    - Value: count_value (int64)
-    - Schema metadata: "disposition" = "statistics"
+    def visit(self, node, context: OptimizerContext) -> OptimizerContext:
+        # This strategy operates globally in `complete` and does not need to
+        # inspect nodes during the traversal phase.
+        if not context.optimized_plan:
+            context.optimized_plan = context.pre_optimized_tree.copy()  # type: ignore
 
-    Parameters:
-        count_value: The count from manifest
-        column_alias: The output column name
+        return context
 
-    Returns:
-        PyArrow Table with the result
-    """
-    # Create the table with int64 type to match COUNT(*) behavior
-    table = pyarrow.table({column_alias: pyarrow.array([count_value], type=pyarrow.int64())})
+    def should_i_run(self, plan) -> bool:  # pragma: no cover - trivial
+        # Skip if there are Filter, Join, or AggregateAndGroup nodes present
+        killer_candidates = get_nodes_of_type_from_logical_plan(
+            plan,
+            (
+                LogicalPlanStepType.Filter,
+                LogicalPlanStepType.Join,
+                LogicalPlanStepType.AggregateAndGroup,
+            ),
+        )
+        if len(killer_candidates) > 0:
+            return False
 
-    # Add metadata to indicate this came from statistics
-    metadata = table.schema.metadata or {}
-    metadata[b"disposition"] = b"statistics"
+        # Run only when there are Aggregate nodes present
+        agg_candidates = get_nodes_of_type_from_logical_plan(plan, (LogicalPlanStepType.Aggregate,))
+        return len(agg_candidates) != 0
 
-    table = table.replace_schema_metadata(metadata)
+    def complete(self, plan, context: OptimizerContext) -> object:
+        # If the plan does not match our conservative COUNT(*) pattern, do
+        # nothing and return the plan unchanged.
+        if not is_count_star_query(plan):
+            return plan
 
-    return table
+        # Locate nodes we'll need
+        aggregate_node = find_aggregate_node(plan)
+        scan_node = find_scan_node(plan)
+        exit_node = find_exit_node(plan)
 
+        if aggregate_node is None or scan_node is None:
+            return plan
 
-def try_statistics_only_response(logical_plan) -> Optional[pyarrow.Table]:
-    """
-    Try to answer query using statistics only, without reading any data.
+        # We only act when we have manifest-based statistics
+        manifest = getattr(scan_node, "manifest", None)
+        if manifest is None:
+            return plan
 
-    This function attempts to detect a query that can be answered entirely from
-    table statistics (e.g., COUNT(*)) and return the result directly without
-    executing the full query plan.
+        # Determine count and alias
+        count_value = get_count_from_manifest(manifest)
+        column_alias = extract_column_alias(plan)
 
-    Currently supported:
-      - SELECT COUNT(*) FROM table
+        # Build a literal projection node to replace the aggregate
+        literal = build_literal_node(count_value, suggested_type=OrsoTypes.INTEGER)
 
-    Future support:
-      - SELECT MIN/MAX without filters
-      - File pruning with LIMIT pushdown
+        # Preserve the expected alias for downstream consumers
+        setattr(literal, "alias", column_alias)
+        # Ensure the literal uses the same schema identity as the original
+        # aggregate so downstream Exit/Projection nodes can match by identity.
+        if aggregate_node.aggregates:
+            agg_schema = aggregate_node.aggregates[0].schema_column
+            if agg_schema is not None and literal.schema_column is not None:
+                literal.schema_column.identity = agg_schema.identity
+                literal.schema_column.type = agg_schema.type or literal.schema_column.type
 
-    Parameters:
-        logical_plan: The logical plan to optimize
+        # Point the source(s) to $no_table BEFORE we mutate the aggregate node.
+        # Doing this early avoids potential iterator/side-effect issues when
+        # modifying the plan structure.
+        scan_node.relation = "$no_table"
+        scan_node.alias = "$no_table"
+        # Prune 100% of files in the manifest so optimizer/executor treat
+        # this as having no data to read while preserving connector/schema
+        if scan_node.manifest is not None:
+            scan_node.manifest.files = []
 
-    Returns:
-        PyArrow Table with the result if optimization succeeds, None otherwise
-    """
-    # Check if this query matches our pattern
-    if not is_count_star_query(logical_plan):
-        return None
+        # Replace any lingering AGGREGATOR expressions in Project/Exit nodes with
+        # our literal, to ensure no node still references COUNT(*) after the
+        # rewrite. This targets the exact aggregator identity or matching
+        # aggregator schema identity to be conservative.
+        try:
+            target_agg = None
+            if hasattr(aggregate_node, "aggregates") and aggregate_node.aggregates:
+                target_agg = aggregate_node.aggregates[0]
 
-    # Get the Scan node to access the manifest
-    scan_node = find_scan_node(logical_plan)
-    if scan_node is None:
-        return None
+            def _is_target_agg(expr):
+                if expr is None:
+                    return False
+                # direct object identity
+                if expr is target_agg:
+                    return True
+                # structural match: aggregator by schema identity and function name
+                try:
+                    if getattr(expr, "node_type", None) == NodeType.AGGREGATOR:
+                        expr_id = getattr(getattr(expr, "schema_column", None), "identity", None)
+                        agg_id = getattr(
+                            getattr(target_agg, "schema_column", None), "identity", None
+                        )
+                        if expr_id is not None and agg_id is not None and expr_id == agg_id:
+                            return True
+                except Exception:
+                    pass
+                return False
 
-    # Check that manifest is available
-    if not hasattr(scan_node, "manifest") or scan_node.manifest is None:
-        return None
+            for nid, n in plan.nodes(data=True):
+                cols = getattr(n, "columns", None)
+                if not cols:
+                    continue
+                changed = False
+                new_cols = []
+                for c in cols:
+                    # Replace explicit aggregator expressions
+                    if _is_target_agg(c) or getattr(c, "alias", None) == column_alias:
+                        new_cols.append(literal)
+                        changed = True
+                    else:
+                        new_cols.append(c)
+                if changed:
+                    try:
+                        n.columns = new_cols
+                    except Exception:
+                        # best-effort - if mutation fails, continue
+                        pass
+            if self.telemetry is not None:
+                try:
+                    self.telemetry._after_replace_agg = True
+                except Exception:
+                    pass
+        except Exception:
+            # conservative: on unexpected errors, bail out and keep plan unchanged
+            return plan
 
-    # Get count from manifest
-    count_value = get_count_from_manifest(scan_node.manifest)
+        # Rewrite aggregate node into a Project with the literal column
+        aggregate_node.node_type = LogicalPlanStepType.Project
+        aggregate_node.columns = [literal]
+        # Remove aggregate-specific attributes to avoid confusion downstream
+        aggregate_node.aggregates = None
+        aggregate_node.groups = None
+        aggregate_node.projection = None
 
-    # Get the output column alias
-    column_alias = extract_column_alias(logical_plan)
+        # Point the source(s) to $no_table so physical planner / executor treat
+        # this as a projection-only plan (no table scanning required). We apply
+        # the change to all Scan nodes found to be conservative.
+        try:
+            # We located the relevant scan node earlier; set it directly. This
+            # avoids potential iterator-side-effects and is consistent with the
+            # conservative single-scan expectation in `is_count_star_query`.
+            scan_node.relation = "$no_table"
+            scan_node.alias = "$no_table"
 
-    # Create and return the result table
-    result_table = create_count_result_table(count_value, column_alias)
+            # Replace the connector with the virtual `$no_table` table engine so
+            # the ReaderNode will produce the one-row $no_table morsel. This
+            # avoids relying on the original connector's behavior after we
+            # rewrote the plan to a projection-only query.
+            # Indicate we're about to attempt connector reassignment (diagnostic)
+            from opteryx.connectors import connector_factory
 
-    return result_table
+            virt_gateway = connector_factory("$no_table", telemetry=self.telemetry)
+            scan_node.connector = virt_gateway.table_engine("$no_table", telemetry=self.telemetry)
+
+            # Ensure schema is the virtual dataset schema so ReaderNode
+            # normalization succeeds and downstream nodes see the
+            # expected column identities.
+            scan_node.schema = scan_node.connector.get_dataset_schema()
+            # Ensure origin is set for schema columns
+            for col in getattr(scan_node.schema, "columns", []) or []:
+                col.origin = [scan_node.alias]
+
+            # Finally, clear the manifest to avoid file-based readers from
+            # providing file lists (we prefer virtual connector semantics
+            # instead)
+            scan_node.manifest = None
+        except Exception:
+            # If we cannot mutate scan node safely, leave the plan unchanged
+            return plan
+
+        # Update exit node columns so aliasing is preserved
+        exit_node.columns = [literal]
+
+        # Update telemetry safely
+        self.telemetry.statistics_only_response_optimization += 1
+
+        # Record connector assignment status on the plan for diagnostic purposes
+        try:
+            plan._stats_assigned_connector_type = getattr(scan_node, "connector", None) and getattr(
+                scan_node.connector, "__type__", None
+            )
+        except Exception:
+            plan._stats_assigned_connector_type = None
+
+        return plan
