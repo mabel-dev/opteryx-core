@@ -29,6 +29,9 @@ from opteryx.compiled.joins import build_side_hash_map
 from opteryx.compiled.joins import get_last_inner_join_metrics
 from opteryx.compiled.joins import inner_join
 from opteryx.compiled.structures.bloom_filter import create_bloom_filter
+from opteryx.managers.expression import NodeType
+from opteryx.managers.expression import evaluate_and_append
+from opteryx.managers.expression import get_all_nodes_of_type
 from opteryx.models import QueryProperties
 from opteryx.utils.arrow import align_tables
 
@@ -42,6 +45,11 @@ class InnerJoinNode(JoinNode):
         JoinNode.__init__(self, properties=properties, **parameters)
 
         self.left_columns = parameters.get("left_columns")
+        # The ON condition (expression tree) for this join, if present
+        self.on = parameters.get("on")
+        # Names of relations feeding each side (used to decide which expressions belong to which side)
+        self.left_relation_names = parameters.get("left_relation_names") or []
+        self.right_relation_names = parameters.get("right_relation_names") or []
         self.left_relation = None
 
         self.right_columns = parameters.get("right_columns")
@@ -54,6 +62,36 @@ class InnerJoinNode(JoinNode):
         self.columns = parameters.get("columns")
 
         self.lock = Lock()
+
+    def _collect_expression_nodes_for_side(self, relation_names):
+        """Collect expression nodes from the ON condition which belong to the given side.
+
+        Only returns non-identifier expression operands that reference the provided
+        relation names (so they should be evaluatable against that side's table).
+        """
+        if not self.on:
+            return []
+        exprs = []
+        comparisons = get_all_nodes_of_type(self.on, (NodeType.COMPARISON_OPERATOR,))
+        for comp in comparisons:
+            if comp.value != "Eq":
+                continue
+            left = comp.left
+            right = comp.right
+
+            # helper to check if node references only given relations
+            def _refs_only(node):
+                rels = getattr(node, "relations", None)
+                if not rels:
+                    return False
+                return set(relation_names).issuperset(set(rels))
+
+            if left.node_type != NodeType.IDENTIFIER and _refs_only(left):
+                exprs.append(left)
+            if right.node_type != NodeType.IDENTIFIER and _refs_only(right):
+                exprs.append(right)
+
+        return exprs
 
     @property
     def name(self):  # pragma: no cover
@@ -73,6 +111,21 @@ class InnerJoinNode(JoinNode):
                         self.left_buffer, promote_options="none"
                     )
                     self.left_buffer.clear()
+
+                    # If the ON condition contains expressions that belong to the
+                    # left side, evaluate them here so the resulting columns exist
+                    # in the `left_relation` before we build the hash map.
+                    left_exprs = self._collect_expression_nodes_for_side(self.left_relation_names)
+                    if left_exprs and self.left_relation.num_rows > 0:
+                        old_cols = set(self.left_relation.column_names)
+                        print("old cols:", old_cols)
+                        self.left_relation = evaluate_and_append(left_exprs, self.left_relation)
+                        print("post eval cols:", self.left_relation.column_names)
+                        new_cols = set(self.left_relation.column_names) - old_cols
+                        print("new cols:", new_cols)
+                        # Update join columns to include newly added expression columns
+                        if new_cols:
+                            self.left_columns = list(self.left_columns or []) + list(new_cols)
 
                     start = time.monotonic_ns()
                     self.left_hash = build_side_hash_map(self.left_relation, self.left_columns)
@@ -112,6 +165,20 @@ class InnerJoinNode(JoinNode):
                 if morsel == EOS:
                     yield EOS
                     return
+
+                # Ensure any right-side expressions are evaluated on this morsel so
+                # the bloom filter and the join can reference the temporary columns.
+                right_exprs = self._collect_expression_nodes_for_side(self.right_relation_names)
+                if right_exprs and morsel.num_rows > 0:
+                    old_cols = set(morsel.column_names)
+                    print("old cols:", old_cols)
+                    morsel = evaluate_and_append(right_exprs, morsel)
+                    print("post eval cols:", morsel.column_names)
+                    new_cols = set(morsel.column_names) - old_cols
+                    print("new cols:", new_cols)
+                    # Update join columns to include newly added expression columns
+                    if new_cols:
+                        self.right_columns = list(self.right_columns or []) + list(new_cols)
 
                 if self.left_filter is not None:
                     # Filter the morsel using the bloom filter, it's a quick way to

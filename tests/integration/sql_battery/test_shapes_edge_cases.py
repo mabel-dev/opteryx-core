@@ -163,12 +163,12 @@ STATEMENTS = [
         ("SELECT is_reply_to FROM testdata.flat.formats.parquet WITH(NO_PARTITION) WHERE COALESCE(is_reply_to, -1) < 0", 74765, 1, None),
         # Names not found / clashes [#471]
         ("SELECT P.* FROM (SELECT * FROM $planets) AS P", 9, 20, None),
-        ("SELECT P0.id, P1.ID, P2.ID FROM $planets AS P0 JOIN (SELECT id AS ID, name FROM $planets AS ppp) AS P1 ON P0.name = P1.name JOIN (SELECT id, name AS ID FROM $planets AS pppp) AS P2 ON P0.name = P2.name", 9, 3, ColumnNotFoundError),
-        ("SELECT P0.id, P1.ID, P2.ID FROM $planets AS P0 JOIN (SELECT id AS ID, name FROM $planets AS ppp) AS P1 ON P0.name = P1.name JOIN (SELECT id, name AS ID FROM $planets AS pppp) AS P2 ON P0.name = P2.ID", 9, 3, None),
+        ("SELECT P0.id, P1.ID, P2.ID FROM $planets AS P0 JOIN (SELECT id AS ID, name FROM $planets AS ppp) AS P1 ON P0.name = P1.name JOIN (SELECT id, name AS N FROM $planets AS pppp) AS P2 ON P0.name = P2.N", 9, 3, ColumnNotFoundError),
+        ("SELECT P0.id, P1.ID, P2.ID FROM $planets AS P0 JOIN (SELECT id AS ID, name FROM $planets AS ppp) AS P1 ON P0.name = P1.name JOIN (SELECT id, name AS N FROM $planets AS pppp) AS P2 ON P0.name = P2.N", 9, 3, None),
         ("SELECT P0.id, P1.ID FROM $planets AS P0 INNER JOIN (SELECT id, name AS ID FROM $planets) AS P1 ON P0.name = P1.name", 9, 2, ColumnNotFoundError),
-        ("SELECT P0.id, P1.ID FROM $planets AS P0 INNER JOIN (SELECT id, name AS ID FROM $planets) AS P1 ON P0.name = P1.ID", 9, 2, None),
+        ("SELECT P0.id, P1.ID FROM $planets AS P0 INNER JOIN (SELECT id, name AS N FROM $planets) AS P1 ON P0.name = P1.N", 9, 2, None),
         ("SELECT P0.id, P1.ID FROM $planets AS P0 INNER JOIN (SELECT name, id AS ID FROM $planets) AS P1 USING (name)", 9, 2, None),
-        ("SELECT P0.id, P1.ID FROM $planets AS P0 LEFT JOIN (SELECT id, name AS ID FROM $planets) AS P1 ON P0.name = P1.ID", 9, 2, None),
+        ("SELECT P0.id, P1.ID FROM $planets AS P0 LEFT JOIN (SELECT id, name AS N FROM $planets) AS P1 ON P0.name = P1.N", 9, 2, None),
         # [#475] a variation of #471
         ("SELECT P0.id, P1.ID, P2.ID FROM $planets AS P0 JOIN (SELECT CONCAT_WS(' ', ARRAY_AGG(id)) AS ID, MAX(name) AS n FROM $planets AS Q1 GROUP BY gravity) AS P1 ON P0.name = P1.n JOIN (SELECT CONCAT_WS(' ', ARRAY_AGG(id)) AS ID, MAX(name) AS n FROM $planets AS Q2 GROUP BY gravity) AS P2 ON P0.name = P2.n", 8, 3, None),
         # no issue number - but these two caused a headache
@@ -487,6 +487,8 @@ STATEMENTS = [
         ("SELECT id FROM $planets WHERE id::VARBINARY NOT IN (b'1', b'3', b'5', b'7')", 5, 1, None),
         ("SELECT mass FROM $planets WHERE mass IN (0.330, 4.87, 5.97)", 3, 1, None),
         ("SELECT mass FROM $planets WHERE mass NOT IN (0.330, 4.87, 5.97)", 6, 1, None),
+        # Can't mod floats
+        ("SELECT mass % 1, mass FROM $planets", 9, 2, None),
 ]
 # fmt:on
 

@@ -143,6 +143,7 @@ OPERATOR_MAP: Dict[Tuple[OrsoTypes, OrsoTypes, str], OperatorMapType] = {
     (OrsoTypes.DOUBLE, OrsoTypes.INTEGER, "Multiply"): OperatorMapType(OrsoTypes.DOUBLE, None, 100.0),
     (OrsoTypes.DOUBLE, OrsoTypes.INTEGER, "Plus"): OperatorMapType(OrsoTypes.DOUBLE, None, 100.0),
     (OrsoTypes.DOUBLE, OrsoTypes.INTEGER, "Minus"): OperatorMapType(OrsoTypes.DOUBLE, None, 100.0),
+    (OrsoTypes.DOUBLE, OrsoTypes.INTEGER, "Modulo"): OperatorMapType(OrsoTypes.DOUBLE, None, 100.0),
     (OrsoTypes.INTEGER, OrsoTypes.ARRAY, "InList"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
     (OrsoTypes.INTEGER, OrsoTypes.ARRAY, "NotInList"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
     (OrsoTypes.INTEGER, OrsoTypes.DATE, "Minus"): OperatorMapType(OrsoTypes.INTERVAL, None, 100.0),
