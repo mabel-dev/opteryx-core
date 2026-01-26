@@ -366,6 +366,7 @@ extensions = [
         sources=[
             "third_party/mabel/draken/vectors/string_vector.pyx",
             "src/cpp/simd_hash.cpp",
+            "src/cpp/simd_string_ops.cpp",
             "src/cpp/cpu_features.cpp",
         ],
         include_dirs=include_dirs,
