@@ -40,6 +40,13 @@ std::vector<size_t> neon_find_all(const char* data, size_t length, char target =
 std::vector<size_t> avx_find_all(const char* data, size_t length, char target = '\n');
 
 /**
+ * Find all occurrences of target using best available SIMD (dispatcher).
+ * Automatically selects AVX2 on x86, NEON on ARM, or scalar fallback.
+ * Returns a vector containing the offsets of all occurrences.
+ */
+std::vector<size_t> simd_find_all(const char* data, size_t length, char target = '\n');
+
+/**
  * Count occurrences of target in data using NEON.
  * Returns the number of occurrences.
  */

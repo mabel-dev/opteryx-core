@@ -15,19 +15,29 @@ from opteryx.exceptions import InvalidFunctionParameterError
 
 def split(arr, delimiter=",", limit=None):
     """
-    Slice a list of strings from the right
+    Fast SIMD-based split for single-character delimiters.
+    Falls back to PyArrow for multi-character patterns or limits.
     """
     if not isinstance(delimiter, str):
         delimiter = delimiter[0]
-    if limit is not None:
-        limit = int(limit[0]) - 1
-        if limit < 0:
-            raise InvalidFunctionParameterError(
-                "`SPLIT` limit parameter must be greater than zero."
-            )
-    return compute.split_pattern(arr, pattern=delimiter, max_splits=limit).to_numpy(
-        zero_copy_only=False
-    )
+
+    # Fast path: single character delimiter, no limit - use direct Arrow processing
+    if len(delimiter) == 1 and limit is None:
+
+        from opteryx.compiled.list_ops import list_split
+
+        # Convert to Arrow if needed
+        if not isinstance(arr, pyarrow.Array):
+            arr = pyarrow.array(arr, type=pyarrow.string())
+
+        # Split using SIMD directly on Arrow buffers (zero-copy, fastest path)
+        return list_split(arr, ord(delimiter))
+
+    # Fallback: use PyArrow's split_pattern
+    delimiter = delimiter[0] if isinstance(delimiter, list) else delimiter
+    if limit:
+        limit = limit[0]
+    return compute.split_pattern(arr, delimiter, max_splits=limit or -1)
 
 
 def get_sha224(item):

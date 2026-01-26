@@ -78,6 +78,9 @@ from opteryx.compiled.list_ops import list_sha512
 from opteryx.compiled.list_ops import list_soundex
 from opteryx.compiled.list_ops import list_string_slice_left
 from opteryx.compiled.list_ops import list_string_slice_right
+from opteryx.draken.vectors.string_vector import StringVector
+from opteryx.draken.vectors.string_vector import lowercase as string_vector_lowercase
+from opteryx.draken.vectors.string_vector import uppercase as string_vector_uppercase
 from opteryx.exceptions import FunctionExecutionError
 from opteryx.exceptions import IncorrectTypeError
 from opteryx.functions import date_functions
@@ -86,6 +89,32 @@ from opteryx.functions import other_functions
 from opteryx.functions import string_functions
 from opteryx.third_party.cyan4973.xxhash import hash_bytes
 from opteryx.utils import dates
+
+
+def to_lower(arr):
+    """
+    Fast lowercase using buffer-level SIMD operations.
+    """
+    # Convert numpy array to Arrow if needed
+    if isinstance(arr, numpy.ndarray):
+        arr = pyarrow.array(arr)
+
+    vec = StringVector.from_arrow(arr)
+    result_vec = string_vector_lowercase(vec)
+    return result_vec.to_arrow()
+
+
+def to_upper(arr):
+    """
+    Fast uppercase using buffer-level SIMD operations.
+    """
+    # Convert numpy array to Arrow if needed
+    if isinstance(arr, numpy.ndarray):
+        arr = pyarrow.array(arr)
+
+    vec = StringVector.from_arrow(arr)
+    result_vec = string_vector_uppercase(vec)
+    return result_vec.to_arrow()
 
 
 def array_encode_utf8(arr):
@@ -546,8 +575,8 @@ FUNCTIONS = {
 
     # STRINGS
     "LENGTH": (list_length, "INTEGER", 1.0),  # LENGTH(str) -> int
-    "UPPER": (compute.utf8_upper, "VARCHAR", 1.0),  # UPPER(str) -> str
-    "LOWER": (compute.utf8_lower, "VARCHAR", 1.0),  # LOWER(str) -> str
+    "UPPER": (to_upper, "VARCHAR", 1.0),  # UPPER(str) -> str (buffer-level SIMD)
+    "LOWER": (to_lower, "VARCHAR", 1.0),  # LOWER(str) -> str (buffer-level SIMD)
     "LEFT": (list_string_slice_left, "VARCHAR", 1.0),
     "RIGHT": (list_string_slice_right, "VARCHAR", 1.0),
     "REVERSE": (compute.utf8_reverse, "VARCHAR", 1.0),

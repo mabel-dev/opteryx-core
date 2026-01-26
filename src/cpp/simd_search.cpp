@@ -316,8 +316,12 @@ static std::vector<size_t> avx_find_all_avx2(const char* data, size_t length, ch
 // If compiled without AVX2, avx_find_all_avx2 won't exist.
 #endif
 
-// Wrapper that dispatches to the best available implementation at runtime.
-std::vector<size_t> avx_find_all(const char* data, size_t length, char target) {
+// Architecture-neutral dispatcher for finding all occurrences.
+// Automatically selects the best SIMD implementation at runtime:
+// - AVX2 (32 bytes/iteration) on x86 with AVX2 support
+// - NEON (16 bytes/iteration) on ARM with NEON support  
+// - Scalar fallback on other architectures
+std::vector<size_t> simd_find_all(const char* data, size_t length, char target) {
     using fn_t = std::vector<size_t> (*)(const char*, size_t, char);
     static std::atomic<fn_t> cache{nullptr};
     fn_t fn = simd::select_dispatch<fn_t>(
@@ -326,10 +330,18 @@ std::vector<size_t> avx_find_all(const char* data, size_t length, char target) {
 #if defined(__AVX2__)
             { &cpu_supports_avx2, avx_find_all_avx2 },
 #endif
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+            { &cpu_supports_neon, neon_find_all },
+#endif
         },
         avx_find_all_scalar
     );
     return fn(data, length, target);
+}
+
+// Legacy wrapper for backward compatibility (deprecated)
+std::vector<size_t> avx_find_all(const char* data, size_t length, char target) {
+    return simd_find_all(data, length, target);
 }
 
 // Scalar fallback for avx_count

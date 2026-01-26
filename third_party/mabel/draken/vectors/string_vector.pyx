@@ -22,16 +22,39 @@ from cpython.mem cimport PyMem_Malloc, PyMem_Free
 from cpython.bytes cimport PyBytes_AS_STRING
 from cpython.bytes cimport PyBytes_FromStringAndSize
 from libc.stddef cimport size_t
-from libc.stdint cimport int32_t, intptr_t, uint8_t, uint64_t, int64_t
+from libc.stdint cimport int32_t, intptr_t, uint8_t, uint64_t, int64_t, uint32_t, uintptr_t
 from libc.string cimport memcpy, memset, memcmp
 from libc.stdlib cimport malloc, realloc, free
 
 from opteryx.draken.core.buffers cimport DrakenVarBuffer
 from opteryx.draken.core.buffers cimport DRAKEN_STRING
 from opteryx.draken.core.var_vector cimport alloc_var_buffer, buf_dtype
+from opteryx.draken.vectors.array_vector cimport ArrayVector, DrakenArrayBuffer
 
 cdef extern from "xxhash.h":
     uint64_t XXH3_64bits(const void* input, size_t length) nogil
+
+cdef extern from "simd_string_ops.h":
+    void simd_to_upper(char* data, size_t length)
+    void simd_to_lower(char* data, size_t length)
+
+cdef extern from "<vector>" namespace "std":
+    cdef cppclass vector[T]:
+        size_t size()
+        T& operator[](size_t)
+
+cdef extern from "simd_search.h":
+    vector[size_t] simd_find_all(const char* data, size_t length, char target)
+
+cdef extern from *:
+    """
+    #ifdef __GNUC__
+    #define PREFETCH(addr) __builtin_prefetch(addr, 0, 3)
+    #else
+    #define PREFETCH(addr)
+    #endif
+    """
+    void PREFETCH(const void* addr) nogil
 
 from opteryx.draken.vectors.vector cimport MIX_HASH_CONSTANT, Vector, NULL_HASH, simd_mix_hash
 
@@ -225,7 +248,7 @@ cdef class StringVector(Vector):
             buf[i] = 1 if memcmp(<char*>ptr.data + start, val_ptr, str_len) == 0 else 0
 
         return <int8_t[:n]> buf
-
+    
     cpdef list to_pylist(self):
         cdef DrakenVarBuffer* ptr = self.ptr
         cdef Py_ssize_t n = ptr.length
@@ -990,54 +1013,202 @@ cdef StringVector from_arrow_struct(object array):
 cpdef StringVector uppercase(StringVector input):
     """
     Return a new StringVector with all non-null values uppercased.
+    Uses SIMD operations on the entire data buffer for maximum performance.
     """
     cdef DrakenVarBuffer* in_ptr = input.ptr
-    cdef Py_ssize_t i, n = in_ptr.length
-    cdef int32_t start, end, length
-
-    # Estimate total bytes (uppercased values won't be longer)
+    cdef Py_ssize_t n = in_ptr.length
     cdef int32_t total_bytes = in_ptr.offsets[n]
+    cdef Py_ssize_t nb_size
 
-    # Allocate new buffer
+    # Allocate new buffer with same size
     cdef StringVector result = StringVector(n, total_bytes)
     cdef DrakenVarBuffer* out_ptr = result.ptr
 
     cdef char* in_data = <char*>in_ptr.data
     cdef char* out_data = <char*>out_ptr.data
-    cdef int32_t* out_offsets = out_ptr.offsets
-    cdef int32_t offset = 0
-    out_offsets[0] = 0
 
-    cdef char* src
-    cdef char ch
-    cdef int j
+    # Copy entire data buffer
+    if total_bytes > 0:
+        memcpy(out_data, in_data, total_bytes)
+        # Apply uppercase transformation to entire buffer using SIMD
+        simd_to_upper(out_data, total_bytes)
 
+    # Copy offsets
+    memcpy(out_ptr.offsets, in_ptr.offsets, (n + 1) * sizeof(int32_t))
+
+    # Copy null bitmap if present
+    if in_ptr.null_bitmap != NULL:
+        nb_size = (n + 7) // 8
+        out_ptr.null_bitmap = <uint8_t*> PyMem_Malloc(nb_size)
+        if out_ptr.null_bitmap == NULL:
+            raise MemoryError()
+        memcpy(out_ptr.null_bitmap, in_ptr.null_bitmap, nb_size)
+
+    return result
+
+
+cpdef StringVector lowercase(StringVector input):
+    """
+    Return a new StringVector with all non-null values lowercased.
+    Uses SIMD operations on the entire data buffer for maximum performance.
+    """
+    cdef DrakenVarBuffer* in_ptr = input.ptr
+    cdef Py_ssize_t n = in_ptr.length
+    cdef int32_t total_bytes = in_ptr.offsets[n]
+    cdef Py_ssize_t nb_size
+
+    # Allocate new buffer with same size
+    cdef StringVector result = StringVector(n, total_bytes)
+    cdef DrakenVarBuffer* out_ptr = result.ptr
+
+    cdef char* in_data = <char*>in_ptr.data
+    cdef char* out_data = <char*>out_ptr.data
+
+    # Copy entire data buffer
+    if total_bytes > 0:
+        memcpy(out_data, in_data, total_bytes)
+        # Apply lowercase transformation to entire buffer using SIMD
+        simd_to_lower(out_data, total_bytes)
+
+    # Copy offsets
+    memcpy(out_ptr.offsets, in_ptr.offsets, (n + 1) * sizeof(int32_t))
+
+    # Copy null bitmap if present
+    if in_ptr.null_bitmap != NULL:
+        nb_size = (n + 7) // 8
+        out_ptr.null_bitmap = <uint8_t*> PyMem_Malloc(nb_size)
+        if out_ptr.null_bitmap == NULL:
+            raise MemoryError()
+        memcpy(out_ptr.null_bitmap, in_ptr.null_bitmap, nb_size)
+
+    return result
+
+
+cpdef object split_single_char(StringVector input, char delimiter):
+    """
+    Fast SIMD-based split for single-character delimiter.
+    Returns an ArrayVector where each element is an array of strings.
+    
+    Uses SIMD to find all delimiter positions (AVX2 on x86, NEON on ARM),
+    then builds output in a single pass with dynamic allocation.
+    """
+    cdef DrakenVarBuffer* in_ptr = input.ptr
+    cdef size_t n = input.length
+    cdef char* data = <char*>in_ptr.data
+    cdef int32_t* in_offsets = in_ptr.offsets
+    cdef size_t total_bytes = in_offsets[n]
+    cdef size_t i, j
+    cdef int32_t start, end
+    cdef size_t delim_pos
+    
+    # Find all delimiter positions in the entire buffer using SIMD
+    cdef vector[size_t] delim_positions = simd_find_all(data, total_bytes, delimiter)
+    cdef size_t num_delims = delim_positions.size()
+    
+    # Pre-allocate with upper bounds (worst case: every delimiter creates a segment)
+    # This eliminates the counting pass
+    cdef size_t max_segments = total_bytes + n  # Worst case: every byte is delimiter + 1 per string
+    cdef size_t output_capacity = total_bytes  # Worst case: no delimiters removed
+    
+    # Create child StringVector with max possible segments
+    cdef StringVector child_vec = StringVector(max_segments)
+    cdef DrakenVarBuffer* child_ptr = child_vec.ptr
+    
+    # Allocate cache-aligned output buffer (64-byte aligned for optimal SIMD performance)
+    cdef size_t alignment = 64
+    cdef size_t aligned_size = output_capacity + alignment
+    cdef void* raw_buffer = PyMem_Malloc(aligned_size)
+    if raw_buffer == NULL:
+        raise MemoryError()
+    
+    # Align to 64-byte boundary (cache line)
+    cdef uintptr_t addr = <uintptr_t>raw_buffer
+    cdef uintptr_t aligned_addr = (addr + alignment - 1) & ~(alignment - 1)
+    child_ptr.data = <uint8_t*>aligned_addr
+    
+    # Create ArrayVector
+    cdef ArrayVector result = ArrayVector.__new__(ArrayVector)
+    cdef DrakenArrayBuffer* arr_ptr = <DrakenArrayBuffer*>malloc(sizeof(DrakenArrayBuffer))
+    if arr_ptr == NULL:
+        raise MemoryError()
+    
+    arr_ptr.offsets = <int32_t*>PyMem_Malloc((n + 1) * sizeof(int32_t))
+    if arr_ptr.offsets == NULL:
+        raise MemoryError()
+    arr_ptr.offsets[0] = 0
+    
+    arr_ptr.null_bitmap = NULL
+    arr_ptr.length = n
+    arr_ptr.values = NULL
+    arr_ptr.value_type = DRAKEN_STRING
+    
+    result.ptr = arr_ptr
+    result.owns_offsets = True
+    result.owns_null_bitmap = False
+    
+    # Single pass: copy data and build offsets
+    cdef char* child_data = <char*>child_ptr.data
+    cdef size_t read_pos = 0
+    cdef size_t write_pos = 0
+    cdef size_t segment_idx = 0
+    cdef size_t seg_len
+    cdef size_t next_delim_pos
+    cdef size_t delim_idx = 0
+    
+    # Process each input string
     for i in range(n):
-        if in_ptr.null_bitmap != NULL and ((in_ptr.null_bitmap[i >> 3] >> (i & 7)) & 1) == 0:
-            # Set null bit
-            if out_ptr.null_bitmap == NULL:
-                out_ptr.null_bitmap = <uint8_t*> malloc((n + 7) // 8)
-                for j in range((n + 7) // 8):
-                    out_ptr.null_bitmap[j] = 0xFF  # Initially mark all as valid
-
-            out_ptr.null_bitmap[i >> 3] &= ~(1 << (i & 7))  # Mark as null
-            out_offsets[i + 1] = offset
-            continue
-
-        # Get string bounds
-        start = in_ptr.offsets[i]
-        end = in_ptr.offsets[i + 1]
-        length = end - start
-        src = in_data + start
-
-        for j in range(length):
-            ch = src[j]
-            if 97 <= ch <= 122:  # 'a'..'z'
-                out_data[offset + j] = ch - 32
+        start = in_offsets[i]
+        end = in_offsets[i + 1]
+        
+        # Skip delimiters before this string
+        while delim_idx < num_delims and delim_positions[delim_idx] < start:
+            delim_idx += 1
+        
+        # Process this string's segments
+        read_pos = start
+        
+        # Handle each delimiter within this string
+        while delim_idx < num_delims and delim_positions[delim_idx] < end:
+            next_delim_pos = delim_positions[delim_idx]
+            
+            # Copy segment up to delimiter
+            child_ptr.offsets[segment_idx] = write_pos
+            seg_len = next_delim_pos - read_pos
+            if seg_len > 0:
+                # For small segments (< 16 bytes), avoid memcpy overhead
+                if seg_len < 16:
+                    for j in range(seg_len):
+                        child_data[write_pos + j] = data[read_pos + j]
+                else:
+                    memcpy(child_data + write_pos, data + read_pos, seg_len)
+                write_pos += seg_len
+            
+            segment_idx += 1
+            read_pos = next_delim_pos + 1  # Skip delimiter
+            delim_idx += 1
+        
+        # Copy final segment (after last delimiter or whole string if no delimiters)
+        child_ptr.offsets[segment_idx] = write_pos
+        seg_len = end - read_pos
+        if seg_len > 0:
+            # Same optimization for final segment
+            if seg_len < 16:
+                for j in range(seg_len):
+                    child_data[write_pos + j] = data[read_pos + j]
             else:
-                out_data[offset + j] = ch
-
-        offset += length
-        out_offsets[i + 1] = offset
-
+                memcpy(child_data + write_pos, data + read_pos, seg_len)
+            write_pos += seg_len
+        
+        segment_idx += 1
+        
+        # Set array offset for this row
+        arr_ptr.offsets[i + 1] = segment_idx
+    
+    # Set actual segment count and final offsets
+    child_ptr.length = segment_idx
+    child_ptr.offsets[segment_idx] = write_pos
+    
+    # Attach child vector to ArrayVector
+    result._child = child_vec
+    
     return result
