@@ -92,17 +92,13 @@ def _build_literal_node(value: Any) -> LiteralNode:
         raise ValueError(f"Unsupported literal type: {type(value)}")
 
 
-def parameter_list_binder(
-    node: Union[Dict, List], parameter_set: List[Any], connection, query_type
-) -> Union[Dict, List]:
+def parameter_list_binder(node: Union[Dict, List], parameter_set: List[Any]) -> Union[Dict, List]:
     """
     Recursively walk the AST replacing 'Placeholder' nodes with parameters.
 
     Parameters:
         node: The AST node or list of nodes.
         parameter_set: The list of parameters to bind.
-        connection: The database connection.
-        query_type: The type of the query.
 
     Returns:
         The AST with parameters bound.
@@ -111,9 +107,7 @@ def parameter_list_binder(
         ParameterError: If the number of placeholders and parameters do not match.
     """
     if isinstance(node, list):
-        return [
-            parameter_list_binder(child, parameter_set, connection, query_type) for child in node
-        ]
+        return [parameter_list_binder(child, parameter_set) for child in node]
 
     if isinstance(node, dict):
         if "Value" in node and "Placeholder" in node["Value"]["value"]:
@@ -127,21 +121,14 @@ def parameter_list_binder(
             if hasattr(placeholder_value, "value"):
                 placeholder_value = placeholder_value.value
             return _build_literal_node(placeholder_value)
-        return {
-            k: parameter_list_binder(v, parameter_set, connection, query_type)
-            for k, v in node.items()
-        }
+        return {k: parameter_list_binder(v, parameter_set) for k, v in node.items()}
 
     return node  # Leaf node
 
 
-def parameter_dict_binder(
-    node: Union[Dict, List], parameter_set: Dict[str, Any], connection, query_type
-) -> Dict[str, Any]:
+def parameter_dict_binder(node: Union[Dict, List], parameter_set: Dict[str, Any]) -> Dict[str, Any]:
     if isinstance(node, list):
-        return [
-            parameter_dict_binder(child, parameter_set, connection, query_type) for child in node
-        ]
+        return [parameter_dict_binder(child, parameter_set) for child in node]
 
     if isinstance(node, dict):
         if "Placeholder" in node:
@@ -153,10 +140,7 @@ def parameter_dict_binder(
                 raise ParameterError(f"Parameter not defined - {placeholder_name}")
             placeholder_value = parameter_set[placeholder_name]
             return _build_literal_node(placeholder_value)
-        return {
-            k: parameter_dict_binder(v, parameter_set, connection, query_type)
-            for k, v in node.items()
-        }
+        return {k: parameter_dict_binder(v, parameter_set) for k, v in node.items()}
     return node
 
 
@@ -298,30 +282,20 @@ def rewrite_json_accessors(node: Dict[str, Any]) -> Dict[str, Any]:
     return node
 
 
-def do_ast_rewriter(asts: List[dict], parameters: Union[list, dict], connection):
-    # get the query type
-    query_type = next(iter(asts))
+def do_ast_rewriter(asts: List[dict], parameters: Union[list, dict]):
     # bind the user provided parameters, we this that here because we want it after the
     # AST has been created (to avoid injection flaws) but also because the order
     # matters
     if isinstance(parameters, list) and len(parameters) > 0:
-        with_parameters_exchanged = parameter_list_binder(
-            asts,
-            parameter_set=parameters,
-            connection=connection,
-            query_type=query_type,
-        )
+        with_parameters_exchanged = parameter_list_binder(asts, parameter_set=parameters)
         if len(parameters) != 0:
             raise ParameterError(
                 "More parameters were provided than placeholders found in the query."
             )
+    elif isinstance(parameters, dict) and len(parameters) > 0:
+        with_parameters_exchanged = parameter_dict_binder(asts, parameter_set=parameters or {})
     else:
-        with_parameters_exchanged = parameter_dict_binder(
-            asts,
-            parameter_set=parameters or {},
-            connection=connection,
-            query_type=query_type,
-        )
+        with_parameters_exchanged = asts
 
     # Do some AST rewriting
     rewritten_query = with_parameters_exchanged

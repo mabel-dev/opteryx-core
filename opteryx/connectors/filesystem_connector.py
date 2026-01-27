@@ -167,8 +167,6 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
         """
         import asyncio
 
-        from opteryx import system_telemetry as system_statistics
-
         loop = asyncio.get_running_loop()
 
         def blocking_read():
@@ -190,7 +188,7 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
         while (ref is None or ref == -1) and attempts < max_retries:
             attempts += 1
             telemetry.stalls_io_waiting_on_engine += 1
-            system_statistics.cpu_wait_seconds += 0.1
+            telemetry.cpu_wait_seconds += 0.1
             await asyncio.sleep(0.1)
             try:
                 ref = await pool.commit(data)

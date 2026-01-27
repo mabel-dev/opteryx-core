@@ -3,8 +3,8 @@
 # See the License at http://www.apache.org/licenses/LICENSE-2.0
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
-from opteryx.constants.permissions import PERMISSIONS
+
 from opteryx.constants.query_status import QueryStatus
 from opteryx.constants.result_type import ResultType
 
-__all__ = ("PERMISSIONS", "QueryStatus", "ResultType")
+__all__ = ("QueryStatus", "ResultType")

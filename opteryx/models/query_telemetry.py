@@ -84,12 +84,12 @@ class QueryTelemetry(_QueryTelemetry):
 
     _instances: dict[str, _QueryTelemetry] = {}
 
-    def __new__(cls, qid=""):
-        if cls._instances.get(qid) is None:
-            cls._instances[qid] = _QueryTelemetry()
+    def __new__(cls, query_id=""):
+        if cls._instances.get(query_id) is None:
+            cls._instances[query_id] = _QueryTelemetry()
             if len(cls._instances.keys()) > 16:
                 # find the first key that is not "system"
                 key_to_remove = next((key for key in cls._instances if key != "system"), None)
                 if key_to_remove:
                     cls._instances.pop(key_to_remove)
-        return cls._instances[qid]
+        return cls._instances[query_id]

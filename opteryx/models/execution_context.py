@@ -8,19 +8,14 @@ from dataclasses import dataclass
 from dataclasses import field
 from typing import Iterable
 from typing import List
-from typing import Tuple
 
 import pyarrow
-from orso.tools import random_int
 from orso.types import OrsoTypes
 
 from opteryx.shared.variables import SystemVariables
 from opteryx.shared.variables import SystemVariablesContainer
 from opteryx.shared.variables import VariableOwner
 from opteryx.shared.variables import Visibility
-
-# History Item = [statement, success, execution start]
-HistoryItem = Tuple[str, bool, datetime.datetime]
 
 
 @dataclass
@@ -44,11 +39,11 @@ class ExecutionContext:
             Groups/roles the user belongs to.
         variables: dict
             System variables available during execution.
-        history: List[HistoryItem]
-            A history of queries executed in this context.
+        access_policies: Optional[List[dict]]
+            Policies defining access to datasets
     """
 
-    connection_id: int = field(default_factory=random_int, init=False)
+    query_id: str = None
     connected_at: datetime.datetime = field(
         default_factory=lambda: datetime.datetime.now(datetime.UTC), init=False
     )
@@ -56,7 +51,7 @@ class ExecutionContext:
     schema: str = None
     memberships: Iterable[str] = None
     variables: SystemVariablesContainer = field(init=False)
-    history: List[HistoryItem] = field(default_factory=list, init=False)
+    access_policies: List[dict] = field(default_factory=list)
 
     def __post_init__(self):
         """

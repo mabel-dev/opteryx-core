@@ -126,6 +126,9 @@ def array_encode_utf8(arr):
 
 
 def _get(array, key):
+    if hasattr(array, "to_numpy"):
+        array = array.to_numpy(False)
+
     # Determine the type of the first element (assuming homogeneous array)
     first_element = next((item for item in array if item is not None), None)
     if first_element is None:
@@ -207,25 +210,25 @@ def fixed_value_function(function, context):
     if function in ("VERSION",):
         return OrsoTypes.VARCHAR, opteryx.__version__
     if function in ("NOW", "UTC_TIMESTAMP"):
-        return OrsoTypes.TIMESTAMP, numpy.datetime64(context.connection.connected_at, "us")
+        return OrsoTypes.TIMESTAMP, numpy.datetime64(context.execution_context.connected_at, "us")
     if function in ("CURRENT_TIME",):
         # CURRENT_TIME is an alias for NOW, so we return the same value
-        return OrsoTypes.TIME, context.connection.connected_at.time()
+        return OrsoTypes.TIME, context.execution_context.connected_at.time()
     if function in ("CURRENT_TIMESTAMP",):
         # CURRENT_TIMESTAMP is an alias for NOW, so we return the same value
-        return OrsoTypes.TIMESTAMP, numpy.datetime64(context.connection.connected_at, "us")
+        return OrsoTypes.TIMESTAMP, numpy.datetime64(context.execution_context.connected_at, "us")
     if function in ("CURRENT_DATE", "TODAY"):
-        return OrsoTypes.DATE, numpy.datetime64(context.connection.connected_at.date())
+        return OrsoTypes.DATE, numpy.datetime64(context.execution_context.connected_at.date())
     if function in ("YESTERDAY",):
         return OrsoTypes.DATE, numpy.datetime64(
-            context.connection.connected_at.date() - datetime.timedelta(days=1), "D"
+            context.execution_context.connected_at.date() - datetime.timedelta(days=1), "D"
         )
     if function == "CONNECTION_ID":
-        return OrsoTypes.INTEGER, context.connection.connection_id
+        return OrsoTypes.INTEGER, context.execution_context.query_id
     if function == "DATABASE":
-        return OrsoTypes.VARCHAR, context.connection.schema or "DEFAULT"
+        return OrsoTypes.VARCHAR, context.execution_context.schema or "DEFAULT"
     if function == "USER":
-        return OrsoTypes.VARCHAR, context.connection.user or "ANONYMOUS"
+        return OrsoTypes.VARCHAR, context.execution_context.user or "ANONYMOUS"
     if function == "PI":
         return OrsoTypes.DOUBLE, 3.14159265358979323846264338327950288419716939937510
     if function == "PHI":
@@ -239,19 +242,19 @@ def fixed_value_function(function, context):
         return OrsoTypes.TIMESTAMP, numpy.datetime64(datetime.datetime.now(datetime.UTC), "us")
     if function == "UNIXTIME":
         # We should only ever get here if the function is called without parameters
-        return OrsoTypes.INTEGER, context.connection.connected_at.timestamp()
+        return OrsoTypes.INTEGER, context.execution_context.connected_at.timestamp()
     if function == "YEAR":
-        return OrsoTypes.INTEGER, context.connection.connected_at.year
+        return OrsoTypes.INTEGER, context.execution_context.connected_at.year
     if function == "MONTH":
-        return OrsoTypes.INTEGER, context.connection.connected_at.month
+        return OrsoTypes.INTEGER, context.execution_context.connected_at.month
     if function == "DAY":
-        return OrsoTypes.INTEGER, context.connection.connected_at.day
+        return OrsoTypes.INTEGER, context.execution_context.connected_at.day
     if function == "HOUR":
-        return OrsoTypes.INTEGER, context.connection.connected_at.hour
+        return OrsoTypes.INTEGER, context.execution_context.connected_at.hour
     if function == "MINUTE":
-        return OrsoTypes.INTEGER, context.connection.connected_at.minute
+        return OrsoTypes.INTEGER, context.execution_context.connected_at.minute
     if function == "SECOND":
-        return OrsoTypes.INTEGER, context.connection.connected_at.second
+        return OrsoTypes.INTEGER, context.execution_context.connected_at.second
     return None, None
 
 

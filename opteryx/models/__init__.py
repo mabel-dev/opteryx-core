@@ -4,7 +4,7 @@
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
 from opteryx.compiled.structures.node import Node
-from opteryx.models.connection_context import ExecutionContext
+from opteryx.models.execution_context import ExecutionContext
 from opteryx.models.file_entry import FileEntry
 from opteryx.models.logical_column import LogicalColumn
 from opteryx.models.manifest import Manifest

@@ -14,7 +14,7 @@ from opteryx.operators.base_plan_node import BasePlanNode
 
 
 def _build_test_node(max_buffer_size=2):
-    props = QueryProperties(qid="test", variables={})
+    props = QueryProperties(query_id="test", variables={})
     node = AggregateAndGroupNode.__new__(AggregateAndGroupNode)
     BasePlanNode.__init__(node, properties=props, columns=[])
 

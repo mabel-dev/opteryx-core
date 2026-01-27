@@ -9,27 +9,24 @@ Opteryx is a SQL query engine optimized for speed and efficiency.
 
 To get started:
     import opteryx
-    results = opteryx.query("SELECT * FROM my_table")
+    results = opteryx.session().execute("SELECT * FROM my_table")
 
-Opteryx handles parsing, planning, and execution of SQL queries with a focus on low-latency analytics over
-local or remote data sources.
+Opteryx handles parsing, planning, and execution of SQL queries with a focus on low-latency
+analytics over local or remote data sources.
 
-For more information check out https://opteryx.dev.
+For more information check out https://opteryx.app.
 """
 
 import datetime
 import os
 import platform
 import secrets
-import time
 import warnings
 from pathlib import Path
 
 from decimal import getcontext
-from typing import Optional, Union, Dict, Any, List, TYPE_CHECKING, Iterable
+from typing import Dict, Any, Iterable, Optional
 
-if TYPE_CHECKING:  # pragma: no cover - only for type checkers
-    import pyarrow
 
 # Set Decimal precision to 28 globally
 getcontext().prec = 28
@@ -77,8 +74,6 @@ if _env_path.exists():
 if OPTERYX_DEBUG:  # pragma: no cover
     from opteryx.debugging import OpteryxOrsoImportFinder
 
-from opteryx import config
-
 from opteryx.connectors import register_workspace
 from opteryx.connectors import set_default_connector
 
@@ -88,152 +83,29 @@ from opteryx.__version__ import __version__
 from opteryx.__version__ import __lib__
 
 
-__all__ = [
-    "analyze_query",
-    "connect",
-    "Connection",
-    "query",
-    "query_to_arrow",
-    "plan",
-    "execute_logical_plan",
-    "register_workspace",
-    "set_default_connector",
-    "__author__",
-    "__build__",
-    "__version__",
-    "__lib__",
-    "OPTERYX_DEBUG",
-]
-
-
-def connect(*args, **kwargs) -> "Connection":
+def session(
+    *,
+    user: Optional[str] = None,
+    memberships: Optional[Iterable[str]] = None,
+    schema: Optional[str] = None,
+    access_policies: Optional[Iterable[str]] = None,
+    query_id: Optional[str] = None,
+) -> "Session":
     """
-    Establish a new database connection and return a Connection object.
+    Create and return a new `Session` object (the canonical execution object).
 
-    Note: This function is designed to comply with the 'connect' method
-    described in PEP0249 for Python Database API Specification v2.0.
+    Example:
+        session = opteryx.session(user="alice", memberships=["opteryx"])
+        session.execute("SELECT 1")
     """
-    # Lazy import Connection
-    from opteryx.connection import Connection
+    from opteryx.query_session import Session
 
-    # Create and return a Connection object
-    return Connection(*args, **kwargs)
-
-
-def query(
-    operation: str,
-    params: Union[list, Dict, None] = None,
-    visibility_filters: Optional[Dict[str, Any]] = None,
-    **kwargs,
-):
-    """
-    Helper function to execute a query and return a cursor.
-
-    This function is designed to be similar to the DuckDB function of the same name.
-    It simplifies the process of executing queries by abstracting away the connection
-    and cursor creation steps.
-
-    Parameters:
-        operation: SQL query string
-        params: list of parameters to bind into the SQL query
-        kwargs: additional arguments for creating the Connection
-
-    Returns:
-        Executed cursor
-    """
-    # Lazy import Connection
-    from opteryx.connection import Connection
-
-    # Create a new database connection
-    conn = Connection(**kwargs)
-
-    # Create a new cursor object using the connection
-    curr = conn.cursor()
-    curr._owns_connection = True
-
-    # Execute the SQL query using the cursor
-    curr.execute(operation=operation, params=params, visibility_filters=visibility_filters)
-
-    # Return the executed cursor
-    return curr
-
-
-def query_to_arrow(
-    operation: str,
-    params: Union[List, Dict, None] = None,
-    visibility_filters: Optional[Dict[str, Any]] = None,
-    limit: int = None,
-    **kwargs,
-) -> "pyarrow.Table":
-    """
-    Helper function to execute a query and return a pyarrow Table.
-
-    This is the fastest way to get a pyarrow table from Opteryx, it bypasses needing
-    orso to create a Dataframe and converting from the Dataframe. This is fast, but
-    not doing it is faster.
-
-    Parameters:
-        operation: SQL query string
-        params: list of parameters to bind into the SQL query (optional)
-        limit: stop after this many rows (optional)
-        kwargs: additional arguments for creating the Connection
-
-    Returns:
-        pyarrow Table
-    """
-    # Lazy import Connection
-    from opteryx.connection import Connection
-
-    # Create a new database connection
-    conn = Connection(**kwargs)
-
-    # Create a new cursor object using the connection
-    curr = conn.cursor()
-    curr._owns_connection = True
-
-    # Execute the SQL query using the cursor
-    return curr.execute_to_arrow(
-        operation=operation, params=params, visibility_filters=visibility_filters, limit=limit
-    )
-
-
-def query_to_arrow_batches(
-    operation: str,
-    params: Union[List, Dict, None] = None,
-    batch_size: int = 1024,
-    limit: int = None,
-    visibility_filters: Optional[Dict[str, Any]] = None,
-    **kwargs,
-) -> "Iterable[pyarrow.RecordBatch]":
-    """
-    Helper function to execute a query and stream pyarrow RecordBatch objects.
-
-    Parameters:
-        operation: SQL query string
-        params: list of parameters to bind into the SQL query
-        batch_size: Number of rows per arrow record batch
-        limit: stop after this many rows (optional)
-        kwargs: additional arguments for creating the Connection
-    Returns:
-        Iterable over pyarrow.RecordBatch
-    """
-    # Lazy import Connection
-    from opteryx.connection import Connection
-
-    # Create a new database connection
-    conn = Connection(**kwargs)
-
-    # Create a new cursor object using the connection
-    curr = conn.cursor()
-    curr._owns_connection = True
-
-    # Execute the SQL query using the cursor
-    return curr.execute_to_arrow_batches(
-        operation=operation,
-        params=params,
-        batch_size=batch_size,
-        limit=limit,
-        visibility_filters=visibility_filters,
+    return Session(
+        user=user,
+        memberships=memberships,
+        schema=schema,
+        access_policies=access_policies,
+        query_id=query_id,
     )
 
 
@@ -274,93 +146,18 @@ def analyze_query(sql: str) -> Dict[str, Any]:
     return _parse_query_info(sql)
 
 
-def plan(
-    operation: str,
-    params: Optional[Iterable] = None,
-    visibility_filters: Optional[Dict[str, Any]] = None,
-    **kwargs,
-) -> dict:
-    """
-    Produce a planner-only representation of the given SQL without executing it.
-
-    This convenience wrapper creates a temporary `Connection` and `Cursor`, calls
-    `Cursor.plan(...)`, then closes the cursor and connection.
-    """
-    from opteryx.connection import Connection
-
-    conn = Connection(**kwargs)
-    cur = conn.cursor()
-    cur._owns_connection = True
-    try:
-        return cur.plan(operation=operation, params=params, visibility_filters=visibility_filters)
-    finally:
-        cur.close()
-
-
-def execute_logical_plan(logical_plan, **kwargs):
-    """
-    Execute a logical plan by delegating to the planner module. qid, telemetry
-    and connection are optional to support external callers that only have a
-    logical plan (eg. OData service).
-    """
-    from opteryx import planner
-
-    return planner.execute_logical_plan(logical_plan, **kwargs)
-
-
 # Enable all warnings, including DeprecationWarning
 warnings.simplefilter("once", DeprecationWarning)
 
-# Lazy initialization of system_telemetry
-_system_telemetry = None
-
-
-def _get_system_telemetry():
-    """
-    Lazy getter for system telemetry.
-
-    System telemetry are only created when first accessed, which avoids
-    importing the QueryTelemetry model (and its dependencies) during the
-    initial import of the opteryx module.
-
-    Returns:
-        QueryTelemetry: The global system telemetry object
-    """
-    global _system_telemetry
-    if _system_telemetry is None:
-        from opteryx.models import QueryTelemetry
-
-        _system_telemetry = QueryTelemetry("system")
-        _system_telemetry.start_time = time.time_ns()
-    return _system_telemetry
-
-
-# Provide access via module attribute
-def __getattr__(name):
-    """
-    Lazy load module attributes to improve import performance.
-
-    This function intercepts attribute access on the opteryx module to
-    implement lazy loading of heavy components like Connection and
-    system_telemetry. This reduces initial import time from ~500ms to ~130ms.
-
-    Supported lazy attributes:
-    - Connection: The main connection class
-    - system_telemetry: Global query telemetry object
-
-    Args:
-        name: The attribute name being accessed
-
-    Returns:
-        The requested attribute
-
-    Raises:
-        AttributeError: If the attribute doesn't exist
-    """
-    if name == "Connection":
-        from opteryx.connection import Connection
-
-        return Connection
-    elif name == "system_telemetry":
-        return _get_system_telemetry()
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+__all__ = [
+    "analyze_query",
+    "session",
+    "Session",
+    "register_workspace",
+    "set_default_connector",
+    "__author__",
+    "__build__",
+    "__version__",
+    "__lib__",
+    "OPTERYX_DEBUG",
+]

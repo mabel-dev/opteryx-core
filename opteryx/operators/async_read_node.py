@@ -110,7 +110,6 @@ class AsyncReadNode(ReaderNode):
             yield None
             return
 
-        from opteryx import system_telemetry
         from opteryx.connectors.io_systems import create_filesystem
 
         # Perform this step, time how long is spent doing work
@@ -170,7 +169,7 @@ class AsyncReadNode(ReaderNode):
                 # Increment stall count if the queue is empty (engine waiting on data).
                 self.telemetry.stalls_engine_waiting_on_data += 1
                 self.readings["stalls_engine_waiting_on_data"] += 1
-                system_telemetry.io_wait_seconds += 0.1
+                self.telemetry.io_wait_seconds += 0.1
                 continue  # Skip the rest of the loop and try to get an item again.
 
             if item is None:

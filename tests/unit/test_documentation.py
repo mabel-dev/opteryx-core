@@ -110,33 +110,6 @@ def test_permissions_example():
 
 
 @skip_if(is_version("3.9"))
-def test_role_based_permissions():
-    import opteryx
-
-    role_permissions = {
-        "admin": opteryx.constants.PERMISSIONS,
-        "user": {"Query"},
-        "agent": {"Analyze"},
-    }
-
-    def get_user_permissions(user_roles):
-        permissions = set()
-        for role in user_roles:
-            if role in role_permissions:
-                permissions |= role_permissions[role]
-        return permissions
-
-    perms = get_user_permissions(["admin"])
-    assert perms == opteryx.constants.PERMISSIONS
-    perms = get_user_permissions(["user"])
-    assert perms == {"Query"}
-    perms = get_user_permissions(["admin", "user"])
-    assert perms == opteryx.constants.PERMISSIONS
-    perms = get_user_permissions(["user", "agent"])
-    assert perms == {"Query", "Analyze"}
-
-
-@skip_if(is_version("3.9"))
 def test_membership_permissions():
     import opteryx
 

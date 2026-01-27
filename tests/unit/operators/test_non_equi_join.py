@@ -190,7 +190,7 @@ def test_non_equi_join_node():
     from opteryx.models import QueryProperties
     from unittest.mock import Mock
     
-    props = QueryProperties(qid="test", variables={})
+    props = QueryProperties(query_id="test", variables={})
     
     # Create mock objects for the "on" parameter structure
     left_mock = Mock()

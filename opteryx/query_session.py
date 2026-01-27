@@ -3,7 +3,25 @@
 # See the License at http://www.apache.org/licenses/LICENSE-2.0
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
-import datetime
+"""Session object that *is* the cursor.
+
+This implementation replaces the legacy `Cursor` by inheriting from it and
+making the session object the primary execution surface. The class keeps
+the `ExecutionContext` previously owned by `Connection` and preserves the
+cursor execution behavior by reusing the existing `Cursor` implementation.
+
+Design goals:
+- Session *replaces* Cursor (no internal delegation/wrapping)
+- Minimize code duplication by subclassing `Cursor`
+- Provide a minimalist `cursor()` compatibility that returns `self`
+- Keep `close()`, `__enter__/__exit__`, and execution methods unchanged
+  (they are inherited from `Cursor`)
+
+Note: This approach keeps the tested `Cursor` execution semantics and
+lets us collapse Connection+Cursor into a single object with minimal
+code churn.
+"""
+
 import time
 from typing import Any
 from typing import Dict
@@ -28,32 +46,59 @@ from opteryx.constants import ResultType
 from opteryx.exceptions import InconsistentSchemaError
 from opteryx.exceptions import InvalidCursorStateError
 from opteryx.exceptions import MissingSqlStatement
+from opteryx.exceptions import ProgrammingError
 from opteryx.exceptions import SqlError
 from opteryx.exceptions import UnsupportedSyntaxError
+from opteryx.models import ExecutionContext
 from opteryx.models import QueryTelemetry
 from opteryx.utils import sql
 
 
-class Cursor(DataFrame):
-    """
-    This class inherits from the orso DataFrame library to provide features such as fetch.
+class Session(DataFrame):
+    """Session acts as the canonical execution object and replaces Cursor.
+
+    It subclasses `Cursor` to reuse the DataFrame and execution logic and
+    sets up the `ExecutionContext` that planners expect on `connection.context`.
     """
 
-    def __init__(self, connection, qid: Optional[str] = None):
-        """
-        Initializes the Cursor object, setting the initial state and binding the connection.
+    def __init__(
+        self,
+        *,
+        user: Optional[str] = None,
+        memberships: Optional[Iterable[str]] = None,
+        schema: Optional[str] = None,
+        access_policies: Optional[Iterable[dict]] = None,
+        query_id: Optional[str] = None,
+        **kwargs,
+    ):
+        # input validation consistent with the old Connection
+        if memberships and not all(isinstance(v, str) for v in memberships):
+            raise ProgrammingError("Invalid memberships provided to Session")
+        if user and not isinstance(user, str):
+            raise ProgrammingError("Invalid user provided to Session")
+        if access_policies and not all(isinstance(v, dict) for v in access_policies):
+            raise ProgrammingError("Invalid access_policies provided to Session")
+        if memberships is None:
+            memberships = ["opteryx"]
+        if access_policies is None:
+            access_policies = [{"pattern": "*", "role": "owner"}]
 
-        Parameters:
-            connection: Connection object
-                The database connection object.
-        """
+        # Provide execution context expected by planner & execution code
+        self.context = ExecutionContext(
+            query_id=query_id,
+            user=user,
+            access_policies=access_policies,
+            schema=schema,
+            memberships=memberships,
+        )
+
+        # Initialize cursor-like state (merged from previous Cursor implementation)
         self.arraysize = 1
-        self._connection = connection
         self._query_planner = None
         self._collected_stats = None
         self._plan = None
-        self._qid = qid if qid is not None else str(uuid4())
-        self._telemetry = QueryTelemetry(self._qid)
+        self._query_id = query_id if query_id is not None else str(uuid4())
+        self._telemetry = QueryTelemetry(self._query_id)
         self._query_status = QueryStatus._UNDEFINED
         self._result_type = ResultType._UNDEFINED
         self._rowcount = None
@@ -61,16 +106,12 @@ class Cursor(DataFrame):
         self._owns_connection = False
         self._closed = False
         self._executed = False
+
         DataFrame.__init__(self, rows=[], schema=[])
 
     @property
-    def id(self) -> str:
-        """The unique internal reference for this query.
-
-        Returns:
-            The unique query identifier as a string.
-        """
-        return self._qid
+    def query_id(self) -> str:
+        return self._query_id
 
     def _inner_execute(
         self,
@@ -78,27 +119,11 @@ class Cursor(DataFrame):
         params: Union[Iterable, Dict, None] = None,
         visibility_filters: Optional[Dict[str, Any]] = None,
     ) -> Any:
-        """
-        Executes a single SQL operation within the current cursor.
-
-        Parameters:
-            operation: str
-                SQL operation to be executed.
-            params: Iterable/Dictionary, optional
-                Parameters for the SQL operation, defaults to None.
-        Returns:
-            Results of the query execution.
-        """
-        from opteryx import system_telemetry
         from opteryx.managers.execution import execute
         from opteryx.planner import query_planner
 
         if not operation:  # pragma: no cover
             raise MissingSqlStatement("SQL provided was empty.")
-
-        self._connection.context.history.append(
-            (operation, True, datetime.datetime.now(datetime.UTC))
-        )
 
         start = time.time_ns()
         try:
@@ -106,8 +131,8 @@ class Cursor(DataFrame):
                 operation=operation,
                 parameters=params,
                 visibility_filters=visibility_filters,
-                connection=self._connection,
-                qid=self.id,
+                execution_context=self.context,
+                query_id=self.query_id,
                 telemetry=self._telemetry,
             )
         except RuntimeError as err:  # pragma: no cover
@@ -116,14 +141,8 @@ class Cursor(DataFrame):
             self._telemetry.time_planning += time.time_ns() - start
 
         results = execute(self._plan, telemetry=self._telemetry)
-        system_telemetry.queries_executed += 1
 
-        if results is not None:
-            # we can't update tuples directly
-            entry = list(self._connection.context.history[-1])
-            entry[1] = True
-            self._connection.context.history[-1] = tuple(entry)
-            return results
+        return results
 
     def _execute_statements(
         self,
@@ -131,18 +150,6 @@ class Cursor(DataFrame):
         params: Optional[Iterable] = None,
         visibility_filters: Optional[Dict[str, Any]] = None,
     ):
-        """
-        Executes one or more SQL statements, properly handling comments, cleaning, and splitting.
-
-        Parameters:
-            operation: str
-                SQL operation(s) to be executed.
-            params: Iterable, optional
-                Parameters for the SQL operation(s), defaults to None.
-
-        Returns:
-            Results of the query execution, if any.
-        """
         self._telemetry.start_time = time.time_ns()
 
         if hasattr(operation, "decode"):
@@ -176,15 +183,6 @@ class Cursor(DataFrame):
         params: Optional[Iterable] = None,
         visibility_filters: Optional[Dict[str, Any]] = None,
     ):
-        """
-        Executes the provided SQL operation, converting results to internal DataFrame format.
-
-        Parameters:
-            operation: str
-                SQL operation to be executed.
-            params: Iterable, optional
-                Parameters for the SQL operation, defaults to None.
-        """
         self._ensure_open()
         start = time.time_ns()
         results = self._execute_statements(operation, params, visibility_filters)
@@ -225,19 +223,6 @@ class Cursor(DataFrame):
         params: Optional[Iterable] = None,
         visibility_filters: Optional[Dict[str, Any]] = None,
     ) -> dict:
-        """
-        Produce a planner-only representation of the given SQL without executing it.
-
-        Parameters:
-            operation: SQL query string
-            params: optional parameters for parameterized queries
-            visibility_filters: optional visibility filters passed to the binder
-            output: 'json' (default) or 'mermaid' to return a mermaid string
-
-        Returns:
-            A JSON serialized string describing the physical plan, or a mermaid string
-            if `output == 'mermaid'`.
-        """
         self._ensure_open()
 
         from opteryx.planner import query_planner
@@ -247,8 +232,8 @@ class Cursor(DataFrame):
             operation=operation,
             parameters=params,
             visibility_filters=visibility_filters,
-            connection=self._connection,
-            qid=self.id,
+            execution_context=self.context,
+            query_id=self.query_id,
             telemetry=self._telemetry,
         )
         self._telemetry.time_planning += time.time_ns() - start
@@ -275,7 +260,7 @@ class Cursor(DataFrame):
             return super().rowcount
         if self._result_type == ResultType.NON_TABULAR:
             return self._rowcount
-        raise InvalidCursorStateError("Cursor not in valid state to return a row count.")
+        raise InvalidCursorStateError("Session not in valid state to return a row count.")
 
     @property
     def description(self) -> Optional[Tuple[Tuple[Any, ...], ...]]:
@@ -291,17 +276,6 @@ class Cursor(DataFrame):
     ) -> pyarrow.Table:
         """
         Executes the SQL operation, bypassing conversion to Orso and returning directly in Arrow format.
-
-        Parameters:
-            operation: str
-                SQL operation to be executed.
-            params: Iterable, optional
-                Parameters for the SQL operation, defaults to None.
-            limit: int, optional
-                Limit on the number of records to return, defaults to all records.
-
-        Returns:
-            The query results in Arrow table format.
         """
         self._ensure_open()
         results = self._execute_statements(operation, params, visibility_filters)
@@ -370,8 +344,6 @@ class Cursor(DataFrame):
         Returns:
             A dictionary with nodes and edges representing the query plan, or None if no plan exists.
         """
-        if self._plan is None:
-            return None
 
         # build a JSON representation
         def _humanize_physical_type(class_name: str) -> str:
@@ -465,270 +437,24 @@ class Cursor(DataFrame):
 
     @property
     def telemetry(self) -> Dict[str, Any]:
-        """
-        Gets the execution telemetry.
-
-        Returns:
-            Dictionary containing query execution telemetry.
-        """
+        """Gets the execution telemetry as a dictionary."""
         if self._telemetry.end_time == 0:  # pragma: no cover
             self._telemetry.end_time = time.time_ns()
 
-        # Include mermaid diagram of the plan
+        # Include mermaid diagram of the plan if available
         if self._plan is not None:
             self._telemetry.plan = self.mermaid()
 
         return self._telemetry.as_dict()
 
     def mermaid(self) -> str:
-        """
-        Generates a Mermaid diagram representation of the query plan.
-
-        Returns:
-            A string containing the Mermaid diagram.
-        """
+        """Render the current plan as a mermaid diagram string."""
         from opteryx.utils import mermaid
 
         return mermaid.plan_to_mermaid(self._plan)
 
-    def execute_to_arrow_batches(
-        self,
-        operation: str,
-        params: Optional[Iterable] = None,
-        batch_size: int = 1024,
-        limit: Optional[int] = None,
-        visibility_filters: Optional[Dict[str, Any]] = None,
-    ):
-        """
-        Execute a SQL operation and stream pyarrow.RecordBatch objects.
-
-        This function mirrors execute_to_arrow but yields RecordBatches in
-        a streaming fashion and does not materialize the entire dataset in memory.
-
-        Parameters:
-            operation: SQL operation to be executed.
-            params: Optional parameters for parameterized queries.
-            batch_size: Number of rows per arrow record batch.
-            limit: Optional limit on the number of rows to return.
-        """
-        self._ensure_open()
-        start = time.time_ns()
-        results = self._execute_statements(operation, params, visibility_filters)
-        if results is None:
-            self._telemetry.time_executing += time.time_ns() - start
-            return
-        result_data, self._result_type = results
-
-        # Handle non-tabular results (e.g., SET operations)
-        if self._result_type == ResultType.NON_TABULAR:
-            import orso
-
-            meta_dataframe = orso.DataFrame(
-                rows=[(result_data.record_count,)],  # type: ignore
-                schema=RelationSchema(
-                    name="table",
-                    columns=[FlatColumn(name="rows_affected", type=OrsoTypes.INTEGER)],
-                ),
-            )  # type: ignore
-            table = meta_dataframe.arrow()
-            self._executed = True
-            # update description and state
-            self._schema = meta_dataframe._schema
-            self._description = self._schema_to_description(self._schema)
-            self._query_status = QueryStatus.SQL_SUCCESS
-            for batch in table.to_batches(max_chunksize=batch_size):
-                yield batch
-            # time_executing includes planning time, so subtract it to get just execution time
-            elapsed = time.time_ns() - start
-            self._telemetry.time_executing += elapsed - self._telemetry.time_planning
-            return
-
-        # If we have a single pyarrow.Table, iterate over its batches
-        if isinstance(result_data, pyarrow.Table):
-            table = result_data
-            if limit is not None:
-                # Limit by slicing rows first, then yield batches
-                table = table.slice(offset=0, length=limit)
-            self._executed = True
-            # set schema and description from this table so users can interrogate cursor
-            schema = table.schema
-            self._schema = RelationSchema(
-                name="table",
-                columns=[FlatColumn.from_arrow(field) for field in schema],
-            )
-            self._description = self._schema_to_description(self._schema)
-            self._query_status = QueryStatus.SQL_SUCCESS
-            for batch in table.to_batches(max_chunksize=batch_size):
-                yield batch
-            # time_executing includes planning time, so subtract it to get just execution time
-            elapsed = time.time_ns() - start
-            self._telemetry.time_executing += elapsed - self._telemetry.time_planning
-            return
-
-        # For a generator/iterator of pyarrow.Tables, optionally apply a limit and then
-        # yield batches from each morsel. We MUST NOT materialize the whole dataset.
-        morsels = result_data
-        if limit is not None:
-            morsels = utils.arrow.limit_records(morsels, limit)
-
-        last_morsel = None
-        # buffer of RecordBatches that are not yet large enough to emit
-        buffer_batches = []
-        buffered_rows = 0
-
-        def _consume_buffered_rows(target_rows: int):
-            """
-            Consume `target_rows` rows from the buffer_batches and return a pyarrow.RecordBatch.
-            This mutates buffer_batches and decreases buffered_rows accordingly.
-            """
-            nonlocal buffer_batches
-            nonlocal buffered_rows
-            rows_to_consume = target_rows
-            slices = []
-            # We will take slices from the start of buffer_batches until we have taken target_rows
-            while rows_to_consume > 0 and buffer_batches:
-                b = buffer_batches[0]
-                if b.num_rows <= rows_to_consume:
-                    slices.append(b)
-                    rows_to_consume -= b.num_rows
-                    buffer_batches.pop(0)
-                else:
-                    # take required rows from start and keep the remainder
-                    slices.append(b.slice(offset=0, length=rows_to_consume))
-                    buffer_batches[0] = b.slice(
-                        offset=rows_to_consume, length=b.num_rows - rows_to_consume
-                    )
-                    rows_to_consume = 0
-
-            if not slices:
-                return None
-
-            # Convert RecordBatch slices into a combined Table then a single RecordBatch
-            # Handle duplicate column names similar to execute_to_arrow
-            column_names = slices[0].schema.names
-            if len(column_names) != len(set(column_names)):
-                temporary_names = [f"col_{i}" for i in range(len(column_names))]
-                from itertools import chain
-
-                first_table = slices[0].to_table().rename_columns(temporary_names)
-                combined = pyarrow.concat_tables(
-                    chain(
-                        [first_table],
-                        (b.to_table().rename_columns(temporary_names) for b in slices[1:]),
-                    ),
-                    promote_options="permissive",
-                )
-                combined = combined.rename_columns(column_names)
-                combined = combined.combine_chunks()
-            else:
-                combined = pyarrow.Table.from_batches(slices).combine_chunks()
-            batches = combined.to_batches(max_chunksize=target_rows)
-            batch = batches[0] if batches else None
-            # update buffered_rows
-            buffered_rows = sum(b.num_rows for b in buffer_batches)
-            return batch
-
-        for morsel in morsels:
-            last_morsel = morsel
-            if morsel is None:
-                continue
-            # set schema and description on the first morsel so users can inspect cursor
-            if not getattr(self._schema, "columns", None):
-                self._schema = RelationSchema(
-                    name="table",
-                    columns=[FlatColumn.from_arrow(field) for field in morsel.schema],
-                )
-                self._description = self._schema_to_description(self._schema)
-                self._query_status = QueryStatus.SQL_SUCCESS
-
-            # iterate incoming morsel record batches and accumulate
-            for morsel_batch in morsel.to_batches(max_chunksize=batch_size):
-                buffer_batches.append(morsel_batch)
-                buffered_rows += morsel_batch.num_rows
-                while buffered_rows >= batch_size:
-                    batch = _consume_buffered_rows(batch_size)
-                    if batch is not None:
-                        self._executed = True
-                        yield batch
-                    else:
-                        break
-            # proceed to next morsel
-
-        # End of result stream: if there's anything left buffered, emit a final batch
-        if buffered_rows > 0:
-            # take everything that remains
-            combined = pyarrow.Table.from_batches(buffer_batches).combine_chunks()
-            # last chunk - convert to record batches and yield each (should be <= batch_size)
-            for batch in combined.to_batches(max_chunksize=batch_size):
-                self._executed = True
-                yield batch
-        else:
-            # if nothing was yielded and we got at least a last_morsel, ensure cursor description & state
-            if last_morsel is not None and not self._executed:
-                self._schema = RelationSchema(
-                    name="table",
-                    columns=[FlatColumn.from_arrow(field) for field in last_morsel.schema],
-                )
-                self._description = self._schema_to_description(self._schema)
-                self._query_status = QueryStatus.SQL_SUCCESS
-
-        # Mark executed if we emitted at least one morsel or had a last morsel
-        if last_morsel is not None:
-            self._executed = True
-
-        # time_executing includes planning time, so subtract it to get just execution time
-        elapsed = time.time_ns() - start
-        self._telemetry.time_executing += elapsed - self._telemetry.time_planning
-
-    @property
-    def messages(self) -> List[str]:
-        """
-        Gets the list of run-time warnings.
-
-        Returns:
-            List of warnings generated during query execution.
-        """
-        return self._telemetry.messages
-
-    def close(self):
-        """
-        Closes the cursor, releasing any resources.
-        """
-        if self._closed:
-            return
-        self._cursor = iter(())
-        self._description = None
-        connection = self._connection
-        self._connection = None
-        if connection is not None:
-            connection._unregister_cursor(self)
-            if self._owns_connection:
-                connection.close()
-        self._closed = True
-
-    def __enter__(self):
-        """Support context manager usage for cursors."""
-        self._ensure_open()
-        return self
-
-    def __exit__(self, exc_type, exc, traceback):
-        self.close()
-        return False
-
-    def _close_from_connection(self):
-        """Called by the Connection when it is closing."""
-        self._cursor = iter(())
-        self._description = None
-        self._connection = None
-        self._closed = True
-
-    def __repr__(self):  # pragma: no cover
-        """
-        Override the Orso repr
-
-        In notebooks we should return a table
-        """
-        return f"<opteryx.Cursor {self._state} (QID:{self.id})>"
+    def __repr__(self):  # pragma: no cover - helpful for debugging
+        return f"<opteryx.Session (QID:{self.query_id})>"
 
     def __bool__(self):
         """
@@ -737,8 +463,8 @@ class Cursor(DataFrame):
         return self._executed and not self._closed
 
     def _ensure_open(self):
-        if self._closed or self._connection is None:
-            raise InvalidCursorStateError("Cursor is closed.")
+        if self._closed:
+            raise InvalidCursorStateError("Session is closed.")
 
     @staticmethod
     def _schema_to_description(schema: Optional[RelationSchema]):
@@ -758,3 +484,175 @@ class Cursor(DataFrame):
                 )
             )
         return tuple(description)
+
+    def execute_to_arrow_batches(
+        self,
+        operation: str,
+        params: Optional[Iterable] = None,
+        batch_size: int = 1024,
+        limit: Optional[int] = None,
+        visibility_filters: Optional[Dict[str, Any]] = None,
+    ):
+        """Execute a SQL operation and stream pyarrow.RecordBatch objects.
+
+        Yields RecordBatch objects; keeps the session alive for the iterator lifetime.
+        """
+        self._ensure_open()
+        start = time.time_ns()
+        results = self._execute_statements(operation, params, visibility_filters)
+        if results is None:
+            self._telemetry.time_executing += time.time_ns() - start
+            return
+        result_data, self._result_type = results
+
+        # Handle non-tabular results
+        if self._result_type == ResultType.NON_TABULAR:
+            import orso
+
+            meta_dataframe = orso.DataFrame(
+                rows=[(result_data.record_count,)],  # type: ignore
+                schema=RelationSchema(
+                    name="table",
+                    columns=[FlatColumn(name="rows_affected", type=OrsoTypes.INTEGER)],
+                ),
+            )  # type: ignore
+            table = meta_dataframe.arrow()
+            self._executed = True
+            self._schema = meta_dataframe._schema
+            self._description = self._schema_to_description(self._schema)
+            self._query_status = QueryStatus.SQL_SUCCESS
+            for batch in table.to_batches(max_chunksize=batch_size):
+                yield batch
+            elapsed = time.time_ns() - start
+            self._telemetry.time_executing += elapsed - self._telemetry.time_planning
+            return
+
+        # Single table case
+        if isinstance(result_data, pyarrow.Table):
+            table = result_data
+            if limit is not None:
+                table = table.slice(offset=0, length=limit)
+            self._executed = True
+            schema = table.schema
+            self._schema = RelationSchema(
+                name="table",
+                columns=[FlatColumn.from_arrow(field) for field in schema],
+            )
+            self._description = self._schema_to_description(self._schema)
+            self._query_status = QueryStatus.SQL_SUCCESS
+            for batch in table.to_batches(max_chunksize=batch_size):
+                yield batch
+            elapsed = time.time_ns() - start
+            self._telemetry.time_executing += elapsed - self._telemetry.time_planning
+            return
+
+        # Iterator/generator of tables
+        morsels = result_data
+        if limit is not None:
+            morsels = utils.arrow.limit_records(morsels, limit)
+
+        last_morsel = None
+        buffer_batches = []
+        buffered_rows = 0
+
+        def _consume_buffered_rows(target_rows: int):
+            nonlocal buffer_batches
+            nonlocal buffered_rows
+            rows_to_consume = target_rows
+            slices = []
+            while rows_to_consume > 0 and buffer_batches:
+                b = buffer_batches[0]
+                if b.num_rows <= rows_to_consume:
+                    slices.append(b)
+                    rows_to_consume -= b.num_rows
+                    buffer_batches.pop(0)
+                else:
+                    slices.append(b.slice(offset=0, length=rows_to_consume))
+                    buffer_batches[0] = b.slice(
+                        offset=rows_to_consume, length=b.num_rows - rows_to_consume
+                    )
+                    rows_to_consume = 0
+
+            if not slices:
+                return None
+
+            column_names = slices[0].schema.names
+            if len(column_names) != len(set(column_names)):
+                temporary_names = [f"col_{i}" for i in range(len(column_names))]
+                from itertools import chain
+
+                first_table = slices[0].to_table().rename_columns(temporary_names)
+                combined = pyarrow.concat_tables(
+                    chain(
+                        [first_table],
+                        (b.to_table().rename_columns(temporary_names) for b in slices[1:]),
+                    ),
+                    promote_options="permissive",
+                )
+                combined = combined.rename_columns(column_names)
+                combined = combined.combine_chunks()
+            else:
+                combined = pyarrow.Table.from_batches(slices).combine_chunks()
+            batches = combined.to_batches(max_chunksize=target_rows)
+            batch = batches[0] if batches else None
+            buffered_rows = sum(b.num_rows for b in buffer_batches)
+            return batch
+
+        for morsel in morsels:
+            last_morsel = morsel
+            if morsel is None:
+                continue
+            if not getattr(self._schema, "columns", None):
+                self._schema = RelationSchema(
+                    name="table",
+                    columns=[FlatColumn.from_arrow(field) for field in morsel.schema],
+                )
+                self._description = self._schema_to_description(self._schema)
+                self._query_status = QueryStatus.SQL_SUCCESS
+
+            for morsel_batch in morsel.to_batches(max_chunksize=batch_size):
+                buffer_batches.append(morsel_batch)
+                buffered_rows += morsel_batch.num_rows
+                while buffered_rows >= batch_size:
+                    batch = _consume_buffered_rows(batch_size)
+                    if batch is not None:
+                        self._executed = True
+                        yield batch
+                    else:
+                        break
+
+        if buffered_rows > 0:
+            combined = pyarrow.Table.from_batches(buffer_batches).combine_chunks()
+            for batch in combined.to_batches(max_chunksize=batch_size):
+                self._executed = True
+                yield batch
+        else:
+            if last_morsel is not None and not self._executed:
+                self._schema = RelationSchema(
+                    name="table",
+                    columns=[FlatColumn.from_arrow(field) for field in last_morsel.schema],
+                )
+                self._description = self._schema_to_description(self._schema)
+                self._query_status = QueryStatus.SQL_SUCCESS
+
+        if last_morsel is not None:
+            self._executed = True
+
+        elapsed = time.time_ns() - start
+        self._telemetry.time_executing += elapsed - self._telemetry.time_planning
+
+    @property
+    def messages(self) -> List[str]:
+        return self._telemetry.messages
+
+    def close(self):
+        if self._closed:
+            return
+        self._cursor = iter(())
+        self._description = None
+        # best effort close of child cursors
+        try:
+            self._close_all_cursors()
+        except Exception:
+            pass
+        self._closed = True

@@ -23,7 +23,6 @@ def split(arr, delimiter=",", limit=None):
 
     # Fast path: single character delimiter, no limit - use direct Arrow processing
     if len(delimiter) == 1 and limit is None:
-
         from opteryx.compiled.list_ops import list_split
 
         # Convert to Arrow if needed
@@ -35,9 +34,11 @@ def split(arr, delimiter=",", limit=None):
 
     # Fallback: use PyArrow's split_pattern
     delimiter = delimiter[0] if isinstance(delimiter, list) else delimiter
-    if limit:
+    if limit is not None:
         limit = limit[0]
-    return compute.split_pattern(arr, delimiter, max_splits=limit or -1)
+        if limit < 1:
+            raise InvalidFunctionParameterError("SPLIT limit must be a greater than 0")
+    return compute.split_pattern(arr, delimiter, max_splits=limit or None)
 
 
 def get_sha224(item):

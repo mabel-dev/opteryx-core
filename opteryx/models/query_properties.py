@@ -14,12 +14,12 @@ class QueryProperties:
     Hints and properties to use when executing queries.
     """
 
-    def __init__(self, qid: str, variables):
+    def __init__(self, query_id: str, variables):
         # this is empty unless it's set as part of the query
         self.variables: dict[str, Any] = variables
         self.temporal_filters: list = []
         self.date = datetime.datetime.now(datetime.UTC).date()
         self.current_time = datetime.datetime.now(datetime.UTC)
         self.cache = None
-        self.qid = qid
+        self.query_id = query_id
         self.ctes: dict = {}

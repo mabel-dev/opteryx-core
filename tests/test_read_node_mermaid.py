@@ -12,11 +12,11 @@ sys.modules["opteryx"] = _opteryx_mod
 _models_mod = types.ModuleType("opteryx.models")
 
 class _QP:
-    def __init__(self, qid, variables):
-        self.qid = qid
+    def __init__(self, query_id, variables):
+        self.query_id = query_id
 
 class _QT:
-    def __init__(self, qid):
+    def __init__(self, query_id):
         # Provide any attributes that nodes might access during tests
         self.dataset_committed_at = None
 
