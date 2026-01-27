@@ -38,8 +38,9 @@ cdef extern from *:
     #define SHA512_Update CC_SHA512_Update
     #define SHA512_Final CC_SHA512_Final
     #else
-    #include <openssl/md5.h>
-    #include <openssl/sha.h>
+    #include "md5.h"
+    #include "sha1.h"
+    #include "sha2.h"
     #endif
     """
 

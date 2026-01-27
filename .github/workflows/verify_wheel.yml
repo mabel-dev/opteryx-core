@@ -1,0 +1,39 @@
+name: Verify Wheel
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-and-verify:
+    runs-on: ubuntu-latest
+    permissions: write-all
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.13'
+      - name: Install build deps
+        run: |
+          python -m pip install --upgrade pip setuptools wheel build cython
+          sudo apt-get update && sudo apt-get install -y zip unzip
+      - name: Build wheel
+        run: |
+          python -m build -w
+      - name: List dist
+        run: ls -lh dist
+      - name: Verify wheel inside manylinux container
+        env:
+          WHEEL: ${{ github.workspace }}/dist
+        run: |
+          set -euo pipefail
+          # find the wheel
+          W=$(ls $WHEEL/*.whl | head -n1)
+          echo "Wheel: $W"
+          docker run --rm -v "$WHEEL":/work -w /work quay.io/pypa/manylinux2014_x86_64 bash -lc "\
+            set -e; \
+            echo '=== .so files in wheel ==='; unzip -l $W | awk '/\.so$/ {print \$4}'; \
+            echo '=== Extract list_ops so and read deps ==='; unzip -p $W 'opteryx/compiled/list_ops/function_definitions.*.so' > /tmp/list_ops.so || true; \
+            file /tmp/list_ops.so || true; readelf -Ws /tmp/list_ops.so | grep -n 'list_contains_all' || true; \
+            ldd /tmp/list_ops.so || true; \
+            python -m pip install --upgrade pip setuptools wheel || true; pip install $W; python - <<'PY'\nimport importlib,traceback\ntry:\n  m=importlib.import_module('opteryx.compiled.list_ops')\n  print('IMPORT_OK', hasattr(m,'list_contains_all'))\nexcept Exception:\n  print('IMPORT_ERR')\n  traceback.print_exc()\nPY"

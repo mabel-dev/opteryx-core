@@ -133,6 +133,8 @@ include_dirs = [
     "third_party/cyan4973",
     "third_party/ulfjack/ryu",
     "third_party/alantsd",
+    # Vendored lightweight crypto implementations (MD5/SHA1/SHA256)
+    "third_party/crypto",
 ]
 
 # Common SIMD / environment C++ sources used by multiple extensions
@@ -564,9 +566,10 @@ generate_consolidated_module("opteryx/compiled/joins", "opteryx/compiled/joins/j
 
 # Add consolidated modules with their dependencies
 # Link args for list_ops (use -lcrypto on non-macOS and -pthread where appropriate)
+# Use vendored digests to avoid runtime libcrypto dependency on target systems
+# Vendored implementations: third_party/crypto/* (MD5, SHA1, SHA256)
 list_ops_link_args = []
-if not is_mac():
-    list_ops_link_args.append("-lcrypto")
+# Don't add -lcrypto; we vendor digest implementations to avoid DT_NEEDED on libcrypto
 if not is_win():
     list_ops_link_args.append("-pthread")
 
@@ -582,11 +585,18 @@ extensions.extend([
                 "src/cpp/simd_search.cpp",
                 "src/cpp/cpu_features.cpp",
             ])
+            # Vendored crypto sources (MD5, SHA1, SHA256)
+            + [
+                "third_party/crypto/md5.cpp",
+                "third_party/crypto/sha1.cpp",
+                "third_party/crypto/sha2.cpp",
+            ]
         ),
         include_dirs=include_dirs,
         language="c++",
         extra_compile_args=CPP_FLAGS,
         extra_link_args=list_ops_link_args,
+        define_macros=[("VENDORED_DIGESTS", "1")],
     ),
     Extension(
         "opteryx.compiled.joins.join_definitions", 
