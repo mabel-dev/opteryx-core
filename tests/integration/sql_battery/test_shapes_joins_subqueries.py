@@ -341,7 +341,8 @@ def test_sql_battery(statement:str, rows:int, columns:int, exception: Optional[E
 
     try:
         # query to arrow is the fastest way to query
-        result = opteryx.query_to_arrow(statement, memberships=["Apollo 11", "opteryx"])
+        session = opteryx.session(memberships=["Apollo 11", "opteryx"])
+        result = session.execute_to_arrow(statement)
         actual_rows, actual_columns = result.shape
         assert (
             rows == actual_rows

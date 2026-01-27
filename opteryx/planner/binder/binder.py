@@ -111,7 +111,7 @@ def locate_identifier(node: Node, context: Any) -> Tuple[Node, Dict]:
 
     def create_variable_node(node: Node, context: BindingContext) -> Node:
         """Populates a Node object for a variable."""
-        schema_column = context.connection.variables.as_column(node.value)
+        schema_column = context.execution_context.variables.as_column(node.value)
         new_node = Node(
             node_type=NodeType.LITERAL,
             schema_column=schema_column,

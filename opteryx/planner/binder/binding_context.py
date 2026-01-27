@@ -21,7 +21,7 @@ class BindingContext:
     Attributes:
         schemas: Dict[str, Any]
             Data schemas available during the binding phase.
-        qid: str
+        query_id: str
             Query ID.
         connection: ExecutionContext
             Query execution context.
@@ -30,20 +30,20 @@ class BindingContext:
     """
 
     schemas: Dict[str, Any]
-    qid: str
-    connection: ExecutionContext
+    query_id: str
+    execution_context: ExecutionContext
     relations: Dict[str, str]
     telemetry: QueryTelemetry
 
     @classmethod
-    def initialize(cls, qid: str, connection=None) -> "BindingContext":
+    def initialize(cls, query_id: str, execution_context=None) -> "BindingContext":
         """
         Initialize a new BindingContext with the given query ID and connection.
 
         Parameters:
-            qid: str
+            query_id: str
                 Query ID.
-            connection: Any, optional
+            execution_context: Any, optional
                 Database connection, defaults to None.
 
         Returns:
@@ -51,10 +51,10 @@ class BindingContext:
         """
         return cls(
             schemas={"$derived": derived.schema()},  # Replace with the actual schema
-            qid=qid,
-            connection=connection,
+            query_id=query_id,
+            execution_context=execution_context,
             relations={},
-            telemetry=QueryTelemetry(qid),
+            telemetry=QueryTelemetry(query_id),
         )
 
     def copy(self) -> "BindingContext":
@@ -66,8 +66,8 @@ class BindingContext:
         """
         return BindingContext(
             schemas=deepcopy(self.schemas),
-            qid=self.qid,
-            connection=self.connection,
+            query_id=self.query_id,
+            execution_context=self.execution_context,
             relations={k: v for k, v in self.relations.items()},
             telemetry=self.telemetry,
         )

@@ -120,8 +120,8 @@ def query_planner(
     operation: str,
     parameters: Union[Iterable, Dict, None],
     visibility_filters: Optional[Dict[str, Any]],
-    connection,
-    qid: str,
+    execution_context,
+    query_id: str,
     telemetry,
     output_format: str = "physical",
 ) -> Union[Generator[Any, Any, Any], Dict[str, Any]]:
@@ -156,11 +156,7 @@ def query_planner(
         raise SqlError(parser_error) from parser_error
     # AST Rewriter adds temporal filters and parameters to the AST
     start = time.monotonic_ns()
-    parsed_statement = do_ast_rewriter(
-        parsed_statements,
-        parameters=params,
-        connection=connection,
-    )[0]
+    parsed_statement = do_ast_rewriter(parsed_statements, parameters=params)[0]
     telemetry.time_planning_ast_rewriter += time.monotonic_ns() - start
 
     # Logical Planner converts ASTs to logical plans
@@ -177,17 +173,12 @@ def query_planner(
         except Exception:
             pass
 
-    if query_type not in connection.permissions:
-        from opteryx.exceptions import PermissionsError
-
-        raise PermissionsError(f"User does not have permission to execute '{query_type}' queries.")
-
     # The Binder adds schema information to the logical plan
     start = time.monotonic_ns()
     bound_plan = do_bind_phase(
         logical_plan,
-        connection=connection.context,
-        qid=qid,
+        execution_context=execution_context,
+        query_id=query_id,
         common_table_expressions=ctes,
         visibility_filters=visibility_filters,
         telemetry=telemetry,
@@ -205,7 +196,9 @@ def query_planner(
             from opteryx.planner.substrait_builder import build_substrait_plan
 
             start = time.monotonic_ns()
-            query_properties = QueryProperties(qid=qid, variables=connection.context.variables)
+            query_properties = QueryProperties(
+                query_id=query_id, variables=execution_context.variables
+            )
             substrait_plan = build_substrait_plan(optimized_plan, query_properties)
             telemetry.time_planning_physical_planner += time.monotonic_ns() - start
 
@@ -217,7 +210,7 @@ def query_planner(
     # Default: build traditional physical plan
     # before we write the new optimizer and execution engine, convert to a V1 plan
     start = time.monotonic_ns()
-    query_properties = QueryProperties(qid=qid, variables=connection.context.variables)
+    query_properties = QueryProperties(query_id=query_id, variables=execution_context.variables)
     physical_plan = create_physical_plan(optimized_plan, query_properties)
     telemetry.time_planning_physical_planner += time.monotonic_ns() - start
 
@@ -227,7 +220,7 @@ def query_planner(
 def execute_logical_plan(
     logical_plan,
     connection=None,
-    qid: Optional[str] = None,
+    query_id: Optional[str] = None,
     telemetry=None,
     common_table_expressions=None,
     visibility_filters: Optional[Dict[str, Any]] = None,
@@ -253,11 +246,11 @@ def execute_logical_plan(
     from opteryx.planner.optimizer import do_optimizer
     from opteryx.planner.physical_planner import create_physical_plan
 
-    # Prepare qid and telemetry defaults
-    if qid is None:
-        qid = str(uuid.uuid4())
+    # Prepare query_id and telemetry defaults
+    if query_id is None:
+        query_id = str(uuid.uuid4())
     if telemetry is None:
-        telemetry = QueryTelemetry(qid)
+        telemetry = QueryTelemetry(query_id)
 
     # Determine execution context for binder
     if connection is None:
@@ -272,7 +265,7 @@ def execute_logical_plan(
     bound_plan = do_bind_phase(
         logical_plan,
         connection=conn_context,
-        qid=qid,
+        query_id=query_id,
         common_table_expressions=None,  # executing logical plans: no CTEs
         visibility_filters=visibility_filters,
         telemetry=telemetry,
@@ -289,7 +282,9 @@ def execute_logical_plan(
             from opteryx.planner.substrait_builder import build_substrait_plan
 
             start = time.monotonic_ns()
-            query_properties = QueryProperties(qid=qid, variables=connection.context.variables)
+            query_properties = QueryProperties(
+                query_id=query_id, variables=connection.context.variables
+            )
             substrait_plan = build_substrait_plan(optimized_plan, query_properties)
             telemetry.time_planning_physical_planner += time.monotonic_ns() - start
 
@@ -306,7 +301,7 @@ def execute_logical_plan(
     except (AttributeError, TypeError):
         variables = {}
 
-    query_properties = QueryProperties(qid=qid, variables=variables)
+    query_properties = QueryProperties(query_id=query_id, variables=variables)
     physical_plan = create_physical_plan(optimized_plan, query_properties)
     telemetry.time_planning_physical_planner += time.monotonic_ns() - start
 

@@ -145,10 +145,9 @@ class OpteryxGcsFileSystem:
         """Open a GCS object for random access reading."""
         return GcsFile(path, self.session, self.access_token)
 
-    async def async_read_blob(self, *, blob_name, pool, session, statistics, **kwargs):
+    async def async_read_blob(self, *, blob_name, pool, session, telemetry, **kwargs):
         import asyncio
 
-        from opteryx import system_telemetry as system_statistics
         from opteryx.utils import paths
 
         # strip gs:// prefix
@@ -180,8 +179,8 @@ class OpteryxGcsFileSystem:
         attempts = 0
         while (ref is None or ref == -1) and attempts < max_retries:
             attempts += 1
-            statistics.stalls_io_waiting_on_engine += 1
-            system_statistics.cpu_wait_seconds += 0.1
+            telemetry.stalls_io_waiting_on_engine += 1
+            telemetry.cpu_wait_seconds += 0.1
             await asyncio.sleep(0.1)
             try:
                 ref = await pool.commit(data)
@@ -191,5 +190,5 @@ class OpteryxGcsFileSystem:
         if ref is None or ref == -1:
             # Give up and raise so caller can handle the failure instead of hanging
             raise DatasetReadError(f"Unable to commit data to MemoryPool after {attempts} attempts")
-        statistics.bytes_read += len(data)
+        telemetry.bytes_read += len(data)
         return ref

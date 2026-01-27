@@ -70,7 +70,8 @@ def test_sql_battery(statement:str, exception: Optional[Exception]):
 
     try:
         # query to arrow is the fastest way to query
-        result = opteryx.query_to_arrow(statement)
+        session = opteryx.session()
+        result = session.execute_to_arrow(statement)
         result.shape
         assert (
             exception is None
@@ -118,7 +119,7 @@ if __name__ == "__main__":  # pragma: no cover
         print("Warming up (cold start)...")
         start = time.monotonic_ns()
         try:
-            opteryx.query_to_arrow("SELECT COUNT(*) FROM scratch.hits;")
+            opteryx.session().execute_to_arrow("SELECT COUNT(*) FROM scratch.hits;")
             cold_time_ms = (time.monotonic_ns() - start) / 1e6
             print(f"Cold start: {cold_time_ms:.2f}ms\n")
         except Exception as e:
@@ -142,7 +143,8 @@ if __name__ == "__main__":  # pragma: no cover
                 gc.collect()
                 try:
                     start = time.monotonic_ns()
-                    result = opteryx.query_to_arrow(statement)
+                    session = opteryx.session()
+                    result = session.execute_to_arrow(statement)
                     elapsed_ms = (time.monotonic_ns() - start) / 1e6
                     times.append(elapsed_ms)
                 except Exception as e:

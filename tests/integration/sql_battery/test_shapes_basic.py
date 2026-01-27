@@ -63,7 +63,6 @@ STATEMENTS = [
         ("SELECT * FROM $no_table", 1, 1, None),
         ("SELECT * FROM $variables", 39, 5, None),
         ("SELECT * FROM testdata.missions", 4630, 8, None),
-        ("SELECT * FROM $telemetry", 5, 2, None),
         ("SELECT * FROM $stop_words", 305, 1, None),
         (b"SELECT * FROM testdata.satellites", 177, 8, None),
         ("SELECT * FROM testdata.missions", 4630, 8, None),
@@ -179,7 +178,8 @@ def test_sql_battery(statement:str, rows:int, columns:int, exception: Optional[E
 
     try:
         # query to arrow is the fastest way to query
-        result = opteryx.query_to_arrow(statement, memberships=["Apollo 11", "opteryx"])
+        session = opteryx.session(memberships=["Apollo 11", "opteryx"])
+        result = session.execute_to_arrow(statement)
         actual_rows, actual_columns = result.shape
         assert (
             rows == actual_rows

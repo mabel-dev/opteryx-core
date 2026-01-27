@@ -951,7 +951,7 @@ class BinderVisitor:
     def visit_scan(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
         from opteryx.connectors import connector_factory
         from opteryx.exceptions import DatabaseError
-        from opteryx.managers.permissions import can_read_table
+        from opteryx.managers.permissions import can_perform_action
 
         node.relation = node.relation.lower()
 
@@ -967,7 +967,7 @@ class BinderVisitor:
         # Create table-specific engine
         engine_kwargs = {}
         if hasattr(gateway, "variables"):
-            engine_kwargs["variables"] = context.connection.variables
+            engine_kwargs["variables"] = context.execution_context.variables
         if gateway.supports_diachronic:
             engine_kwargs["at_date"] = node.at_date
 
@@ -976,11 +976,13 @@ class BinderVisitor:
         )
 
         # ensure this user can read the table
-        if not can_read_table(context.connection.memberships, node.relation):
+        if not can_perform_action(
+            context.execution_context.access_policies, node.relation, action="READ"
+        ):
             raise PermissionError(f"User does not have permission to read {node.relation}")
 
         if hasattr(node.connector, "variables"):
-            node.connector.variables = context.connection.variables
+            node.connector.variables = context.execution_context.variables
         if gateway.supports_diachronic:
             node.connector.start_date = node.start_date
             node.connector.end_date = node.end_date
@@ -1019,7 +1021,7 @@ class BinderVisitor:
         return node, context
 
     def visit_set(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
-        node.variables = context.connection.variables
+        node.variables = context.execution_context.variables
         node.columns = []
         return node, context
 
@@ -1047,17 +1049,19 @@ class BinderVisitor:
         based on the view name.
         """
         from opteryx.connectors import connector_factory
-        from opteryx.managers.permissions import can_read_table
+        from opteryx.managers.permissions import can_perform_action
 
         # Get connector gateway (cached by prefix)
         node.connector = connector_factory(node.view_name, telemetry=context.telemetry)
 
         # Ensure this user can write to the view location
-        if not can_read_table(context.connection.memberships, node.view_name, action="WRITE"):
+        if not can_perform_action(
+            context.execution_context.access_policies, node.view_name, action="WRITE"
+        ):
             raise PermissionError(f"User does not have permission to create view {node.view_name}")
 
         if hasattr(node.connector, "variables"):
-            node.connector.variables = context.connection.variables
+            node.connector.variables = context.execution_context.variables
 
         node.columns = []
         return node, context
@@ -1071,17 +1075,19 @@ class BinderVisitor:
         based on the view name.
         """
         from opteryx.connectors import connector_factory
-        from opteryx.managers.permissions import can_read_table
+        from opteryx.managers.permissions import can_perform_action
 
         # Get connector gateway (cached by prefix)
         node.connector = connector_factory(node.view_name, telemetry=context.telemetry)
 
         # Ensure this user can write to the view location
-        if not can_read_table(context.connection.memberships, node.view_name, action="WRITE"):
+        if not can_perform_action(
+            context.execution_context.access_policies, node.view_name, action="WRITE"
+        ):
             raise PermissionError(f"User does not have permission to alter view {node.view_name}")
 
         if hasattr(node.connector, "variables"):
-            node.connector.variables = context.connection.variables
+            node.connector.variables = context.execution_context.variables
 
         node.columns = []
         return node, context
@@ -1095,7 +1101,7 @@ class BinderVisitor:
         and determine connectors for each view.
         """
         from opteryx.connectors import connector_factory
-        from opteryx.managers.permissions import can_read_table
+        from opteryx.managers.permissions import can_perform_action
 
         # Store connectors for each view to be dropped
         node.connectors = {}
@@ -1105,11 +1111,13 @@ class BinderVisitor:
             connector = connector_factory(view_name, telemetry=context.telemetry)
 
             # Ensure this user can drop the view
-            if not can_read_table(context.connection.memberships, view_name, action="WRITE"):
+            if not can_perform_action(
+                context.execution_context.access_policies, view_name, action="WRITE"
+            ):
                 raise PermissionError(f"User does not have permission to drop view {view_name}")
 
             if hasattr(connector, "variables"):
-                connector.variables = context.connection.variables
+                connector.variables = context.execution_context.variables
 
             node.connectors[view_name] = connector
 
@@ -1125,17 +1133,19 @@ class BinderVisitor:
         but we do need to determine the connector for storage.
         """
         from opteryx.connectors import connector_factory
-        from opteryx.managers.permissions import can_read_table
+        from opteryx.managers.permissions import can_perform_action
 
         # Get connector gateway (cached by prefix)
         node.connector = connector_factory(node.object_name, telemetry=context.telemetry)
 
         # Ensure this user can write to the object location
-        if not can_read_table(context.connection.memberships, node.object_name, action="WRITE"):
+        if not can_perform_action(
+            context.execution_context.access_policies, node.object_name, action="WRITE"
+        ):
             raise PermissionError(f"User does not have permission to comment on {node.object_name}")
 
         if hasattr(node.connector, "variables"):
-            node.connector.variables = context.connection.variables
+            node.connector.variables = context.execution_context.variables
 
         # COMMENT nodes don't have columns (non-tabular result)
         node.columns = []

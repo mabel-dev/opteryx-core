@@ -15,7 +15,6 @@ _MODULES = {
     "no_table": "opteryx.virtual_datasets.no_table_data",
     "planets": "opteryx.virtual_datasets.planet_data",
     "variables": "opteryx.virtual_datasets.variables_data",
-    "telemetry": "opteryx.virtual_datasets.telemetry",
     "stop_words": "opteryx.virtual_datasets.stop_words",
     "user": "opteryx.virtual_datasets.user",
 }

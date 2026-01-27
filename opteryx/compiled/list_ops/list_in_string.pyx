@@ -244,17 +244,14 @@ cdef inline int boyer_moore_horspool_case_insensitive(const char *haystack, size
     return 0
 
 
-cdef inline uint8_t[::1] _substring_in_single_array(object arrow_array, str needle):
-    """
-    Optimized version with better SIMD utilization and short-circuiting.
+cdef inline uint8_t[::1] _substring_in_single_array_impl(object arrow_array, const char *c_pattern, size_t pattern_length, unsigned char *skip_table):
+    """Internal implementation that accepts a precomputed pattern pointer and skip table.
+    This avoids repeated encoding/skip-table builds when scanning multiple chunks.
     """
     cdef:
         Py_ssize_t n
         numpy.ndarray[numpy.uint8_t, ndim=1] result
         uint8_t[::1] result_view
-        bytes needle_bytes
-        const char *c_pattern
-        size_t pattern_length
 
         # Arrow buffer pointers
         list buffers
@@ -271,14 +268,11 @@ cdef inline uint8_t[::1] _substring_in_single_array(object arrow_array, str need
         size_t i, byte_index, bit_index
         size_t start, end, length
         int index
+        char target
 
     n = len(arrow_array)
     result = numpy.zeros(n, dtype=numpy.uint8)
     result_view = result
-
-    needle_bytes = needle.encode('utf-8')
-    c_pattern = PyBytes_AsString(needle_bytes)
-    pattern_length = len(needle_bytes)
 
     # Arrow buffer pointers
     buffers = arrow_array.buffers()
@@ -303,13 +297,9 @@ cdef inline uint8_t[::1] _substring_in_single_array(object arrow_array, str need
     if len(buffers) > 2 and buffers[2]:
         data = <const char*><uintptr_t>(buffers[2].address)
 
-    # Precompute BMH skip table
-    cdef unsigned char skip_table[256]
-    if pattern_length > 0:
-        build_bmh_skip_table(c_pattern, pattern_length, skip_table)
-
-    # Special case: single character search
+    # Special case: single character search (use fast SIMD/arch searcher)
     if pattern_length == 1:
+        target = c_pattern[0]
         for i in range(n):
             # Check null bit
             if validity is not NULL:
@@ -322,7 +312,7 @@ cdef inline uint8_t[::1] _substring_in_single_array(object arrow_array, str need
             end = offsets[arr_offset + i + 1]
             length = end - start
 
-            if length > 0 and memchr(data + start, c_pattern[0], length) != NULL:
+            if length > 0 and searcher(data + start, length, target) != -1:
                 result_view[i] = 1
         return result_view
 
@@ -343,7 +333,7 @@ cdef inline uint8_t[::1] _substring_in_single_array(object arrow_array, str need
         if length < pattern_length:
             continue
 
-        # For very short strings, use direct search
+        # For very short strings, use direct BMH search
         if length <= 16 and pattern_length <= 4:
             if boyer_moore_horspool_with_table(
                 data + start, length, c_pattern, pattern_length, skip_table
@@ -351,7 +341,14 @@ cdef inline uint8_t[::1] _substring_in_single_array(object arrow_array, str need
                 result_view[i] = 1
             continue
 
-        # SIMD-based first-char search
+        # SIMD-based substring search for longer patterns/haystacks
+        if pattern_length >= 8 and length >= 64:
+            idx = simd_search_substring(data + start, length, c_pattern, pattern_length)
+            if idx != -1:
+                result_view[i] = 1
+                continue
+
+        # SIMD-based first-char search as heuristic
         index = searcher(data + start, length, c_pattern[0])
         if index == -1:
             continue
@@ -369,9 +366,28 @@ cdef inline uint8_t[::1] _substring_in_single_array(object arrow_array, str need
     return result_view
 
 
+cdef inline uint8_t[::1] _substring_in_single_array(object arrow_array, str needle):
+    """Wrapper kept for compatibility; encodes the needle and builds the skip table once before calling the impl."""
+    cdef:
+        bytes needle_bytes
+        const char *c_pattern
+        size_t pattern_length
+        unsigned char skip_table[256]
+
+    needle_bytes = needle.encode('utf-8')
+    c_pattern = PyBytes_AsString(needle_bytes)
+    pattern_length = len(needle_bytes)
+
+    if pattern_length > 0:
+        build_bmh_skip_table(c_pattern, pattern_length, skip_table)
+
+    return _substring_in_single_array_impl(arrow_array, c_pattern, pattern_length, skip_table)
+
+
 cpdef uint8_t[::1] list_in_string(object column, str needle):
     """
-    Optimized version with better memory handling.
+    Optimized version with better memory handling. Encodes `needle` once and reuses a single skip table
+    across chunks to avoid repeated work.
     """
     cdef:
         Py_ssize_t total_length
@@ -381,8 +397,19 @@ cpdef uint8_t[::1] list_in_string(object column, str needle):
         uint8_t[::1] chunk_view
         object chunk
 
+        bytes needle_bytes
+        const char *c_pattern
+        size_t pattern_length
+        unsigned char skip_table[256]
+
+    # Fast path for non-chunked arrays
     if not hasattr(column, "chunks"):
-        return _substring_in_single_array(column, needle)
+        needle_bytes = needle.encode('utf-8')
+        c_pattern = PyBytes_AsString(needle_bytes)
+        pattern_length = len(needle_bytes)
+        if pattern_length > 0:
+            build_bmh_skip_table(c_pattern, pattern_length, skip_table)
+        return _substring_in_single_array_impl(column, c_pattern, pattern_length, skip_table)
 
     # Precompute total length
     total_length = 0
@@ -393,10 +420,17 @@ cpdef uint8_t[::1] list_in_string(object column, str needle):
     final_result = numpy.zeros(total_length, dtype=numpy.uint8)
     final_view = final_result
 
+    # Pre-encode the needle and build the skip table once
+    needle_bytes = needle.encode('utf-8')
+    c_pattern = PyBytes_AsString(needle_bytes)
+    pattern_length = len(needle_bytes)
+    if pattern_length > 0:
+        build_bmh_skip_table(c_pattern, pattern_length, skip_table)
+
     # Process chunks
     offset = 0
     for chunk in chunks_list:
-        chunk_view = _substring_in_single_array(chunk, needle)
+        chunk_view = _substring_in_single_array_impl(chunk, c_pattern, pattern_length, skip_table)
         final_view[offset:offset + len(chunk)] = chunk_view[:]  # Use slice assignment
         offset += len(chunk)
 

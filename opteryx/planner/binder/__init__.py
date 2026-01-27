@@ -184,8 +184,8 @@ def bind_logical_relations(plan: LogicalPlan, ctes: dict, telemetry) -> LogicalP
 
 def do_bind_phase(
     plan: LogicalPlan,
-    connection=None,
-    qid: str = None,
+    execution_context=None,
+    query_id: str = None,
     common_table_expressions: dict = None,
     visibility_filters: dict = None,
     telemetry=None,
@@ -215,11 +215,11 @@ def do_bind_phase(
 
     binder_visitor = BinderVisitor()
     root_node = plan.get_exit_points()
-    context = BindingContext.initialize(qid=qid, connection=connection)
+    context = BindingContext.initialize(query_id=query_id, execution_context=execution_context)
 
     if len(root_node) > 1:
         raise InvalidInternalStateError(
-            f"{context.qid} - logical plan has {len(root_node)} heads - this is an error"
+            f"{context.query_id} - logical plan has {len(root_node)} heads - this is an error"
         )
 
     plan, _ = binder_visitor.traverse(plan, root_node[0], context=context)

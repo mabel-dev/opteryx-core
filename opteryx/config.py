@@ -107,10 +107,6 @@ GCP_PROJECT_ID: str = get("GCP_PROJECT_ID")
 MORSEL_SIZE: int = int(get("MORSEL_SIZE", 64 * 1024 * 1024))
 
 
-
-USE_PERMISSIONS_SERVICE: Optional[bool] = bool(get("USE_PERMISSIONS_SERVICE", False))
-"""If set, the URL of the external permissions service."""
-
 # fmt:on
 
 

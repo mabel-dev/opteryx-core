@@ -36,7 +36,7 @@ class BasePlanNode:
         from opteryx.models import QueryTelemetry
 
         self.properties: QueryProperties = properties
-        self.telemetry: QueryTelemetry = QueryTelemetry(properties.qid)
+        self.telemetry: QueryTelemetry = QueryTelemetry(properties.query_id)
         self.parameters = parameters
         self.execution_time = 0
         self.identity = random_string()
