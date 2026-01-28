@@ -123,7 +123,7 @@ def try_import_in_docker(wheel_host_path: Path) -> dict:
     wheel_name = wheel_host_path.name
     cmd = (
         f"docker run --rm -v '{wheel_host_path.parent.resolve()}':/work -w /work {image} "
-        f"bash -lc \"python -m pip install --upgrade pip setuptools wheel || true && pip install '{wheel_name}' && python - <<'PY'\nimport importlib, traceback\ntry:\n    m = importlib.import_module('opteryx.compiled.list_ops')\n    print('IMPORT_OK', hasattr(m, 'list_contains_all'))\nexcept Exception as e:\n    print('IMPORT_ERR')\n    traceback.print_exc()\nPY\""
+        f"bash -lc \"python -m pip install --upgrade pip setuptools wheel || true && pip install '{wheel_name}' && python - <<'PY'\nimport importlib, traceback, sys\ntry:\n    m = importlib.import_module('opteryx.compiled.list_ops')\n    if not hasattr(m, 'list_contains_any'):\n        print('MISSING_SYMBOL list_contains_any')\n        sys.exit(2)\n    print('IMPORT_OK')\nexcept Exception:\n    print('IMPORT_ERR')\n    traceback.print_exc()\n    sys.exit(1)\nPY\""
     )
     rc, out = run(cmd)
     return {"docker_import": out}

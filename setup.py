@@ -348,6 +348,9 @@ extensions = [
             "third_party/mabel/rugo/jsonl/decode.cpp",
             "third_party/mabel/rugo/jsonl/simdjson_wrapper.cpp",
             "third_party/tktech/simdjson/simdjson.cpp",
+            "src/cpp/simd_env.cpp",
+            "src/cpp/cpu_features.cpp",
+            "src/cpp/simd_search.cpp",
         ],
         include_dirs=include_dirs,
         language="c++",
@@ -368,6 +371,8 @@ extensions = [
         sources=[
             "third_party/mabel/draken/vectors/string_vector.pyx",
             "src/cpp/simd_hash.cpp",
+            "src/cpp/simd_env.cpp",
+            "src/cpp/simd_search.cpp",
             "src/cpp/simd_string_ops.cpp",
             "src/cpp/cpu_features.cpp",
         ],
@@ -569,7 +574,7 @@ generate_consolidated_module("opteryx/compiled/joins", "opteryx/compiled/joins/j
 # Use vendored digests to avoid runtime libcrypto dependency on target systems
 # Vendored implementations: third_party/crypto/* (MD5, SHA1, SHA256)
 list_ops_link_args = []
-# Don't add -lcrypto; we vendor digest implementations to avoid DT_NEEDED on libcrypto
+
 if not is_win():
     list_ops_link_args.append("-pthread")
 
@@ -584,13 +589,11 @@ extensions.extend([
                 "src/cpp/simd_env.cpp",
                 "src/cpp/simd_search.cpp",
                 "src/cpp/cpu_features.cpp",
-            ])
-            # Vendored crypto sources (MD5, SHA1, SHA256)
-            + [
                 "third_party/crypto/md5.cpp",
                 "third_party/crypto/sha1.cpp",
                 "third_party/crypto/sha2.cpp",
-            ]
+                "third_party/crypto/sha512.cpp",
+            ])
         ),
         include_dirs=include_dirs,
         language="c++",

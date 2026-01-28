@@ -67,11 +67,21 @@ class MemoryMappedFile:
     def close(self):
         """Close and cleanup the memory mapping."""
         if not self.closed:
-            from opteryx.compiled.io.disk_reader import unmap_memory
+            try:
+                # Import and call unmap_memory inside try/except because during
+                # interpreter shutdown the import machinery may be torn down
+                # (sys.meta_path can be None) which would raise ImportError.
+                from opteryx.compiled.io.disk_reader import unmap_memory
 
-            if self.mmap_obj is not None:
-                unmap_memory(self.mmap_obj)
-            self.closed = True
+                if self.mmap_obj is not None:
+                    unmap_memory(self.mmap_obj)
+            except Exception:
+                # Swallow any exception during cleanup; we're either shutting
+                # down or the compiled helper is unavailable. Destructor should
+                # never raise.
+                pass
+            finally:
+                self.closed = True
 
     def __enter__(self):
         return self
@@ -80,7 +90,12 @@ class MemoryMappedFile:
         self.close()
 
     def __del__(self):
-        self.close()
+        try:
+            self.close()
+        except Exception:
+            # Ensure destructor never propagates exceptions during interpreter
+            # shutdown when global state may be partially torn down.
+            pass
 
 
 class OpteryxLocalFileSystem:
