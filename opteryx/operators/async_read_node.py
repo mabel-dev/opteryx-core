@@ -67,18 +67,9 @@ async def fetch_data(manifest, pool, connector, reply_queue, telemetry):
                     # raise a clear exception which we'll forward.
                     # Try with session and statistics for filesystem readers
                     reference = await connector.async_read_blob(
-                        blob_name=blob_name, pool=pool, session=http_session, statistics=telemetry
+                        blob_name=blob_name, pool=pool, session=http_session, telemetry=telemetry
                     )
                     reply_queue.put((blob_name, reference))
-                except TypeError:
-                    # Fallback for connectors that don't accept session/statistics
-                    try:
-                        reference = await connector.async_read_blob(
-                            blob_name=blob_name, pool=pool, telemetry=telemetry
-                        )
-                        reply_queue.put((blob_name, reference))
-                    except Exception as err:
-                        reply_queue.put((blob_name, err))
                 except Exception as err:
                     # Pass the exception back so the reader loop can handle it
                     reply_queue.put((blob_name, err))
@@ -177,6 +168,7 @@ class AsyncReadNode(ReaderNode):
                 break
 
             blob_name, reference = item
+            print("ITEM:", blob_name, reference)
 
             decoder = get_decoder(blob_name)
 

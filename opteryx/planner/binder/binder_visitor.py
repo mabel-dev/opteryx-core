@@ -976,9 +976,7 @@ class BinderVisitor:
         )
 
         # ensure this user can read the table
-        if not can_perform_action(
-            context.execution_context, node.relation, action="READ"
-        ):
+        if not can_perform_action(context.execution_context, node.relation, action="READ"):
             raise PermissionError(f"User does not have permission to read {node.relation}")
 
         if hasattr(node.connector, "variables"):
@@ -1055,9 +1053,7 @@ class BinderVisitor:
         node.connector = connector_factory(node.view_name, telemetry=context.telemetry)
 
         # Ensure this user can write to the view location
-        if not can_perform_action(
-            context.execution_context, node.view_name, action="WRITE"
-        ):
+        if not can_perform_action(context.execution_context, node.view_name, action="WRITE"):
             raise PermissionError(f"User does not have permission to create view {node.view_name}")
 
         if hasattr(node.connector, "variables"):
@@ -1081,9 +1077,7 @@ class BinderVisitor:
         node.connector = connector_factory(node.view_name, telemetry=context.telemetry)
 
         # Ensure this user can write to the view location
-        if not can_perform_action(
-            context.execution_context, node.view_name, action="WRITE"
-        ):
+        if not can_perform_action(context.execution_context, node.view_name, action="WRITE"):
             raise PermissionError(f"User does not have permission to alter view {node.view_name}")
 
         if hasattr(node.connector, "variables"):
@@ -1111,9 +1105,7 @@ class BinderVisitor:
             connector = connector_factory(view_name, telemetry=context.telemetry)
 
             # Ensure this user can drop the view
-            if not can_perform_action(
-                context.execution_context, view_name, action="WRITE"
-            ):
+            if not can_perform_action(context.execution_context, view_name, action="WRITE"):
                 raise PermissionError(f"User does not have permission to drop view {view_name}")
 
             if hasattr(connector, "variables"):
@@ -1139,9 +1131,7 @@ class BinderVisitor:
         node.connector = connector_factory(node.object_name, telemetry=context.telemetry)
 
         # Ensure this user can write to the object location
-        if not can_perform_action(
-            context.execution_context, node.object_name, action="WRITE"
-        ):
+        if not can_perform_action(context.execution_context, node.object_name, action="WRITE"):
             raise PermissionError(f"User does not have permission to comment on {node.object_name}")
 
         if hasattr(node.connector, "variables"):
