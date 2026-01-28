@@ -7,6 +7,7 @@ from fnmatch import fnmatch
 from typing import Iterable
 
 from opteryx.exceptions import PermissionsError
+from opteryx.models import ExecutionContext
 
 ACTION_MAP = {
     "READ": {"reader", "writer", "owner"},
@@ -16,11 +17,11 @@ ACTION_MAP = {
 }
 
 
-def can_perform_action(policies: Iterable[dict], table: str, action: str = "READ") -> bool:
+def can_perform_action(execution_context: ExecutionContext, table: str, action: str = "READ") -> bool:
     """Check if any of the given roles can perform the action on the table.
 
     Args:
-        policies (Iterable[dict]): The policies to check.
+        execution_context (ExecutionContext): The execution context containing access policies.
         table (str): The table to check.
         action (str): The action to check. Defaults to "READ".
 
@@ -29,7 +30,14 @@ def can_perform_action(policies: Iterable[dict], table: str, action: str = "READ
     """
     if table.count(".") == 0:
         return action == "READ"  # Local table, allow reading, nothing else
+    if table.startswith("public."):
+        return action == "READ"  # Public schema, allow reading, nothing else
 
+    username = execution_context.user
+    if table.startswith(f"personal.{username}."):
+        return True  # Personal schema, allow all actions
+
+    policies: Iterable[dict] = execution_context.access_policies
     action_map = ACTION_MAP.get(action, set())
 
     try:
