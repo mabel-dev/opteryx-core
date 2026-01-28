@@ -62,10 +62,14 @@ def run_import_test(venv_python: Path):
         "print('PLATFORM', platform.platform(), platform.machine())\n"
         "try:\n"
         "    m = importlib.import_module('opteryx.compiled.list_ops')\n"
-        "    print('IMPORT_OK', hasattr(m, 'list_contains_all'))\n"
+        "    if not hasattr(m, 'list_contains_any'):\n"
+        "        print('MISSING_SYMBOL list_contains_any')\n"
+        "        sys.exit(2)\n"
+        "    print('IMPORT_OK')\n"
         "except Exception as e:\n"
         "    print('IMPORT_ERR')\n"
         "    traceback.print_exc()\n"
+        "    sys.exit(1)\n"
     )
     return run(f"'{py}' - <<'PY'\n{code}\nPY", check=False)
 
