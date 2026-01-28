@@ -977,7 +977,7 @@ class BinderVisitor:
 
         # ensure this user can read the table
         if not can_perform_action(
-            context.execution_context.access_policies, node.relation, action="READ"
+            context.execution_context, node.relation, action="READ"
         ):
             raise PermissionError(f"User does not have permission to read {node.relation}")
 
@@ -1056,7 +1056,7 @@ class BinderVisitor:
 
         # Ensure this user can write to the view location
         if not can_perform_action(
-            context.execution_context.access_policies, node.view_name, action="WRITE"
+            context.execution_context, node.view_name, action="WRITE"
         ):
             raise PermissionError(f"User does not have permission to create view {node.view_name}")
 
@@ -1082,7 +1082,7 @@ class BinderVisitor:
 
         # Ensure this user can write to the view location
         if not can_perform_action(
-            context.execution_context.access_policies, node.view_name, action="WRITE"
+            context.execution_context, node.view_name, action="WRITE"
         ):
             raise PermissionError(f"User does not have permission to alter view {node.view_name}")
 
@@ -1112,7 +1112,7 @@ class BinderVisitor:
 
             # Ensure this user can drop the view
             if not can_perform_action(
-                context.execution_context.access_policies, view_name, action="WRITE"
+                context.execution_context, view_name, action="WRITE"
             ):
                 raise PermissionError(f"User does not have permission to drop view {view_name}")
 
@@ -1140,7 +1140,7 @@ class BinderVisitor:
 
         # Ensure this user can write to the object location
         if not can_perform_action(
-            context.execution_context.access_policies, node.object_name, action="WRITE"
+            context.execution_context, node.object_name, action="WRITE"
         ):
             raise PermissionError(f"User does not have permission to comment on {node.object_name}")
 
