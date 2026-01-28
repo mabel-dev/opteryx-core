@@ -168,8 +168,6 @@ class AsyncReadNode(ReaderNode):
                 break
 
             blob_name, reference = item
-            print("ITEM:", blob_name, reference)
-
             decoder = get_decoder(blob_name)
 
             try:
