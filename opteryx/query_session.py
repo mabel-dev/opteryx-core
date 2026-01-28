@@ -49,6 +49,8 @@ from opteryx.exceptions import MissingSqlStatement
 from opteryx.exceptions import ProgrammingError
 from opteryx.exceptions import SqlError
 from opteryx.exceptions import UnsupportedSyntaxError
+from opteryx.managers.billing import BillingEventType
+from opteryx.managers.billing import write_billing_event
 from opteryx.models import ExecutionContext
 from opteryx.models import QueryTelemetry
 from opteryx.utils import sql
@@ -141,6 +143,17 @@ class Session(DataFrame):
             self._telemetry.time_planning += time.time_ns() - start
 
         results = execute(self._plan, telemetry=self._telemetry)
+
+        write_billing_event(
+            user=self.context.user,
+            query_id=self.query_id,
+            billing_event=BillingEventType.QUERY_EXECUTION,
+        )
+        write_billing_event(
+            user=self.context.user,
+            query_id=self.query_id,
+            billing_event=BillingEventType.DATA_PROCESSED_BYTES,
+        )
 
         return results
 
