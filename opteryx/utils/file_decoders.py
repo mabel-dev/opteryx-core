@@ -146,12 +146,6 @@ def parquet_decoder(
     Returns:
         Tuple containing number of rows, number of columns, and the table or schema.
     """
-
-    # COUNT(*) metadata fast-path disabled — prefer the normal read path.
-    # (Previously we returned a tiny table named "$COUNT(*)" and handled it
-    # specially in the aggregation operators; that code was fragile and has
-    # been removed.)
-
     # Return just the schema if that's all that's needed
     # We can use rugo's metadata reader which is faster than pyarrow's
     if just_schema:

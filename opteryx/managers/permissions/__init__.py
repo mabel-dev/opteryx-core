@@ -17,7 +17,9 @@ ACTION_MAP = {
 }
 
 
-def can_perform_action(execution_context: ExecutionContext, table: str, action: str = "READ") -> bool:
+def can_perform_action(
+    execution_context: ExecutionContext, table: str, action: str = "READ"
+) -> bool:
     """Check if any of the given roles can perform the action on the table.
 
     Args:
