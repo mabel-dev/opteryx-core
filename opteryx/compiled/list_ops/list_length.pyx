@@ -6,49 +6,54 @@
 # cython: wraparound=True
 # cython: boundscheck=False
 
-import numpy
-cimport numpy
-numpy.import_array()
-
 import pyarrow
+import array as _array
 
+# Native implementation provided by the vendored extension.
+# It accepts any object exposing the buffer protocol (e.g., NumPy arrays,
+# PyArrow buffers) and returns a `bytearray` containing packed uint32
+# values (native endianness).
+from opteryx.nanobind.list_length import offsets_to_lengths as offsets_to_lengths_native, offsets_to_lengths_into as offsets_to_lengths_into_native
 from libc.stdint cimport uint32_t
 
-cpdef numpy.ndarray[numpy.uint32_t, ndim=1] list_length(object array):
+cpdef uint32_t[::1] list_length(object array):
 
     cdef Py_ssize_t n
-    cdef numpy.ndarray[numpy.uint32_t, ndim=1] result
-    cdef uint32_t[::1] result_view
     cdef object val
     cdef uint32_t i
-    cdef numpy.ndarray[numpy.int32_t, ndim=1] offsets
+    cdef object native_buf
+    cdef uint32_t[::1] mv
+    cdef Py_ssize_t total_res_len = 0
+    cdef Py_ssize_t chunk_res_len = 0
+    cdef Py_ssize_t start = 0
 
-    # PyArrow fast path (uses offsets buffer)
-    if isinstance(array, (pyarrow.Array, pyarrow.ChunkedArray, pyarrow.lib.StringArray)):
-        if isinstance(array, pyarrow.ChunkedArray):
-            return numpy.concatenate([list_length(chunk) for chunk in array.chunks])
+    # Uses PyArrow offsets buffer
+    if isinstance(array, pyarrow.ChunkedArray):
+        # Precompute total length (sum of len(chunk) for each chunk)
+        for chunk in array.chunks:
+            total_res_len += len(chunk)
 
-        n = len(array)
+        out = _array.array('I', [0]) * total_res_len
+        # Fill each chunk into the appropriate slice of the out buffer
+        for chunk in array.chunks:
+            chunk_res_len = len(chunk)
+            if chunk_res_len > 0:
+                view = memoryview(out)[start:(start + chunk_res_len)]
+                offsets_buffer = chunk.buffers()[1]
+                offsets_to_lengths_into_native(offsets_buffer, view)
+                start += chunk_res_len
 
-        try:
-            offsets_buffer = array.buffers()[1]
-            offsets = numpy.frombuffer(offsets_buffer, dtype=numpy.int32, count=n + 1)
-            # Avoid negative indices when wraparound is disabled by using explicit slice bounds
-            offsets_end = offsets[1 : n + 1]
-            offsets_start = offsets[:n]
-            return (offsets_end - offsets_start).astype(numpy.uint32)
-        except Exception:
-            pass  # fallback if offsets unavailable
+        mv = memoryview(out)
+        return mv
 
-    n = array.shape[0]
-    result = numpy.empty(n, dtype=numpy.uint32)
-    result_view = result
+    n = len(array)
 
-    for i in range(n):
-        val = array[i]
-        if isinstance(val, (str, bytes, list, numpy.ndarray)):
-            result_view[i] = len(val)
-        else:
-            result_view[i] = 0
+    offsets_buffer = array.buffers()[1]
 
-    return result
+    res_len = n
+    out = _array.array('I', [0]) * res_len
+    offsets_to_lengths_into_native(offsets_buffer, out)
+
+    # Convert the filled array to a typed memoryview of uint32
+    mv = memoryview(out)
+    return mv

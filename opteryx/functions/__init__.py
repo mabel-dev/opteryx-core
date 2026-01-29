@@ -498,6 +498,12 @@ def select_values(boolean_arrays, value_arrays):
     return result
 
 
+def list_lengther(arr):
+    if isinstance(arr, numpy.ndarray):
+        arr = pyarrow.array(arr)
+    return pyarrow.array(list_length(arr), type=pyarrow.uint32())
+
+
 def sleep(x):
     time.sleep(x[0] / 1000)  # Sleep for x[0] milliseconds
     return x[0]
@@ -577,7 +583,7 @@ FUNCTIONS = {
     "ASCII": (string_functions.to_ascii, "INTEGER", 1.0),
 
     # STRINGS
-    "LENGTH": (list_length, "INTEGER", 1.0),  # LENGTH(str) -> int
+    "LENGTH": (list_lengther, "INTEGER", 1.0),  # LENGTH(str) -> int
     "UPPER": (to_upper, "VARCHAR", 1.0),  # UPPER(str) -> str (buffer-level SIMD)
     "LOWER": (to_lower, "VARCHAR", 1.0),  # LOWER(str) -> str (buffer-level SIMD)
     "LEFT": (list_string_slice_left, "VARCHAR", 1.0),

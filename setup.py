@@ -133,7 +133,7 @@ include_dirs = [
     "third_party/cyan4973",
     "third_party/ulfjack/ryu",
     "third_party/alantsd",
-    # Vendored lightweight crypto implementations (MD5/SHA1/SHA256)
+    "third_party/nanobind",
     "third_party/crypto",
 ]
 
@@ -261,6 +261,9 @@ extensions = [
         include_dirs=include_dirs,
         extra_compile_args=C_FLAGS + ["-std=c99", "-DBASE64_IMPLEMENTATION"],
     ),
+
+
+
     Extension(
         "opteryx.third_party.cyan4973.xxhash",
         sources=["opteryx/third_party/cyan4973/xxhash.pyx", "third_party/cyan4973/xxhash.c"],
@@ -417,6 +420,20 @@ extensions = [
         include_dirs=include_dirs,
         language="c++",
         extra_compile_args=CPP_FLAGS,
+    ),
+    # Lightweight C++ extension exposing SIMD string ops directly
+    Extension(
+        "opteryx.compiled.simd_strings",
+        sources=[
+            "src/cpp/simd_strings_extension.cpp",
+            "src/cpp/simd_search.cpp",
+            "src/cpp/simd_string_ops.cpp",
+            "src/cpp/cpu_features.cpp",
+        ],
+        include_dirs=include_dirs,
+        language="c++",
+        extra_compile_args=CPP_FLAGS,
+        extra_link_args=LD_EXTRA,
     ),
     Extension(
         name="opteryx.compiled.functions.timestamp",
@@ -613,6 +630,26 @@ extensions.extend([
         extra_compile_args=CPP_FLAGS,
     ),
 ])
+# Require vendored nanobind headers for building the nanobind-backed extension.
+if not (
+    os.path.exists("third_party/nanobind/nanobind.h")
+    or os.path.exists("third_party/nanobind/nanobind/nanobind.h")
+):
+    raise SystemExit(
+        "Vendored nanobind headers not found in third_party/nanobind.\n"
+        "Please run `python tools/vendor_nanobind.py --tag <tag>` or add the headers to the repo."
+    )
+
+extensions.append(
+    Extension(
+        "opteryx.nanobind.list_length",
+        sources=["src/cpp/list_length_native.cpp", "src/cpp/nanobind_shim.cpp"],
+        include_dirs=include_dirs + ["third_party/nanobind"],
+        extra_compile_args=CPP_FLAGS,
+        extra_link_args=LD_EXTRA,
+        language="c++",
+    )
+)
 
 # Setup configuration
 setup(

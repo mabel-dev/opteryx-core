@@ -145,14 +145,23 @@ class Session(DataFrame):
         results = execute(self._plan, telemetry=self._telemetry)
 
         write_billing_event(
-            user=self.context.user,
-            query_id=self.query_id,
             billing_event=BillingEventType.QUERY_EXECUTION,
+            billing_account="opteryx",
+            event_details={
+                "user": self.context.user,
+                "query_id": self.query_id,
+                "query": operation,
+            },
         )
         write_billing_event(
-            user=self.context.user,
-            query_id=self.query_id,
             billing_event=BillingEventType.DATA_PROCESSED_BYTES,
+            billing_account="opteryx",
+            event_details={
+                "user": self.context.user,
+                "query_id": self.query_id,
+                "query": operation,
+                "bytes_processed": self._telemetry.bytes_processed,
+            },
         )
 
         return results
