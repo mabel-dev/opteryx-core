@@ -78,7 +78,7 @@ cpdef int64_t to_int(object value):
 
     if value_type == datetime.date:
         # Converts to days since epoch (1970-01-01)
-        timestamp = int(value.strftime("%s"))
+        timestamp = int(value.strftime("%s")) * 1_000_000
         return _ensure_64bit_range(<int64_t>timestamp)
 
     if value_type == datetime.time:
