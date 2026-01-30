@@ -13,15 +13,12 @@ import array as _array
 # It accepts any object exposing the buffer protocol (e.g., NumPy arrays,
 # PyArrow buffers) and returns a `bytearray` containing packed uint32
 # values (native endianness).
-from opteryx.nanobind.list_length import offsets_to_lengths as offsets_to_lengths_native, offsets_to_lengths_into as offsets_to_lengths_into_native
+from opteryx.nanobind.list_length import offsets_to_lengths_into
 from libc.stdint cimport uint32_t
 
 cpdef uint32_t[::1] list_length(object array):
 
     cdef Py_ssize_t n
-    cdef object val
-    cdef uint32_t i
-    cdef object native_buf
     cdef uint32_t[::1] mv
     cdef Py_ssize_t total_res_len = 0
     cdef Py_ssize_t chunk_res_len = 0
@@ -40,7 +37,7 @@ cpdef uint32_t[::1] list_length(object array):
             if chunk_res_len > 0:
                 view = memoryview(out)[start:(start + chunk_res_len)]
                 offsets_buffer = chunk.buffers()[1]
-                offsets_to_lengths_into_native(offsets_buffer, view)
+                offsets_to_lengths_into(offsets_buffer, view)
                 start += chunk_res_len
 
         mv = memoryview(out)
@@ -52,7 +49,7 @@ cpdef uint32_t[::1] list_length(object array):
 
     res_len = n
     out = _array.array('I', [0]) * res_len
-    offsets_to_lengths_into_native(offsets_buffer, out)
+    offsets_to_lengths_into(offsets_buffer, out)
 
     # Convert the filled array to a typed memoryview of uint32
     mv = memoryview(out)
