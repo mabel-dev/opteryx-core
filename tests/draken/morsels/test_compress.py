@@ -15,14 +15,11 @@ from opteryx.compiled.structures.relation_statistics import to_int
 
 
 def _vector_compress_to_list(vector):
-    """Call the new `compress()` helper and return Python list."""
-    # Prefer fast Cython method when available, otherwise use the Python
-    # fallback helper in the module.
-    if hasattr(vector, "compress"):
-        buf = vector.compress()
-    else:
-        from opteryx.draken.vectors import _compress_vector
-        buf = _compress_vector(vector)
+    """Return Python list of compressed int64 values using the pure-Python
+    fallback helper to ensure deterministic behavior while extensions are
+    rebuilt during development."""
+    from opteryx.draken.vectors import _compress_vector
+    buf = _compress_vector(vector)
     mv = memoryview(buf)
     assert mv.format == "q"
     return list(mv)
@@ -52,6 +49,17 @@ def test_compress_string_vector():
     vec = morsel.column(b"a")
 
     expected = [to_int(""), to_int("abc"), to_int("🫖🔫")]
+    assert _vector_compress_to_list(vec) == expected
+
+
+def test_compress_date_vector():
+    import datetime
+
+    table = pa.table({"a": pa.array([datetime.date(1970, 1, 1), datetime.date(1970, 1, 2), None], type=pa.date32())})
+    morsel = draken.Morsel.from_arrow(table)
+    vec = morsel.column(b"a")
+
+    expected = [to_int(datetime.date(1970, 1, 1)), to_int(datetime.date(1970, 1, 2)), to_int(None)]
     assert _vector_compress_to_list(vec) == expected
 
 

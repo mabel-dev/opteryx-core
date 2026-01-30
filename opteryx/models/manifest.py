@@ -128,6 +128,8 @@ class Manifest:
                     # Normalize literal value
                     if hasattr(literal_value, "item"):
                         literal_value = literal_value.item()
+
+                    p = literal_value
                     literal_value = to_int(literal_value)
 
                     # Get field_id for this column from schema
@@ -150,6 +152,10 @@ class Manifest:
 
                     min_value = file_entry.lower_bounds.get(field_id)
                     max_value = file_entry.upper_bounds.get(field_id)
+
+                    print(
+                        f"Pruning check: file={file_entry.file_path}, column={column_name}, op={predicate.value}, literal={p} ({type(p)}) ({literal_value}), min={min_value}, max={max_value}"
+                    )
 
                     if min_value is not None and max_value is not None:
                         # Check if file can be pruned
