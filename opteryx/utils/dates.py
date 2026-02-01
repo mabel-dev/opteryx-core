@@ -11,6 +11,7 @@ import re
 from typing import Union
 
 import numpy
+import pyarrow
 
 TIMEDELTA_REGEX = (
     r"((?P<years>\d+)\s?(?:ys?|yrs?|years?))?\s*"
@@ -151,49 +152,9 @@ def date_trunc(truncate_to, date_values) -> numpy.ndarray:
     """
     Truncate an array of datetimes to a specified unit
     """
+    if not isinstance(date_values, pyarrow.Array):
+        date_values = pyarrow.array(date_values)
 
-    #    numpy.datetime64(int(date_values), 's').astype(datetime.datetime)
+    from opteryx.compiled.list_ops import list_date_trunc
 
-    date_values = numpy.array(date_values, dtype="datetime64")
-
-    if not isinstance(truncate_to, str):
-        truncate_to = truncate_to[0]  # [#325]
-
-    truncate_to = str(truncate_to).lower()
-
-    if truncate_to == "year":
-        return date_values.astype("datetime64[Y]").astype("datetime64[s]")
-    elif truncate_to == "quarter":
-        months = date_values.astype("datetime64[M]").astype(int) // 3 * 3
-        return numpy.array(
-            months,
-            dtype="datetime64[M]",
-        ).astype("datetime64[s]")
-    elif truncate_to == "month":
-        return date_values.astype("datetime64[M]").astype("datetime64[s]")
-    elif truncate_to == "week":
-        return (
-            (
-                date_values
-                - ((date_values.astype("datetime64[D]").astype(int) - 4) % 7).astype(
-                    "timedelta64[D]"
-                )
-            )
-            .astype("datetime64[D]")
-            .astype("datetime64[s]")
-        )
-    elif truncate_to == "day":
-        return date_values.astype("datetime64[D]").astype("datetime64[s]")
-    elif truncate_to == "hour":
-        timestamps = date_values.astype("datetime64[s]").astype("int64")
-        truncated = (timestamps // 3600) * 3600
-        return truncated.astype("datetime64[s]")
-    elif truncate_to == "minute":
-        timestamps = date_values.astype("datetime64[s]").astype("int64")
-        truncated = (timestamps // 60) * 60
-        return truncated.astype("datetime64[s]")
-    elif truncate_to == "second":
-        return date_values.astype("datetime64[s]")
-
-    else:
-        raise ValueError("Invalid unit: {}".format(truncate_to))
+    return list_date_trunc(truncate_to[0].item(), date_values)
