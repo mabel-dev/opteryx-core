@@ -6,8 +6,7 @@
 # cython: wraparound=False
 # cython: boundscheck=False
 
-from libc.stdint cimport int64_t, int32_t
-from libc.stdlib cimport malloc, free
+from libc.stdint cimport int64_t
 from cpython.array cimport array, clone
 import pyarrow as pa
 
@@ -42,15 +41,15 @@ cdef inline int64_t days_in_month(int64_t year, int64_t month) nogil:
     return DAYS_IN_MONTH[month - 1]
 
 cdef inline void seconds_to_date_parts(int64_t seconds_since_epoch,
-                                      int64_t* year, int64_t* month, int64_t* day,
-                                      int64_t* hour, int64_t* minute, int64_t* second) noexcept nogil:
+                                       int64_t* year, int64_t* month, int64_t* day,
+                                       int64_t* hour, int64_t* minute, int64_t* second) noexcept nogil:
     """
     Convert seconds since 1970-01-01 to date parts using pure integer math.
     Based on algorithm from: https://howardhinnant.github.io/date_algorithms.html
     """
     # First, handle negative timestamps (dates before 1970)
     cdef int64_t days_since_epoch, seconds_in_day, z, era, day_of_era, year_of_era
-    cdef int64_t day_of_year, mp, d
+    cdef int64_t day_of_year, mp
 
     # Break down seconds
     days_since_epoch = seconds_since_epoch // SECONDS_PER_DAY
@@ -81,7 +80,7 @@ cdef inline void seconds_to_date_parts(int64_t seconds_since_epoch,
     second[0] = seconds_in_day % SECONDS_PER_MINUTE
 
 cdef inline int64_t date_parts_to_seconds(int64_t year, int64_t month, int64_t day,
-                                         int64_t hour, int64_t minute, int64_t second) nogil:
+                                          int64_t hour, int64_t minute, int64_t second) nogil:
     """
     Convert date parts to seconds since 1970-01-01 using pure integer math.
     """
@@ -154,9 +153,8 @@ cdef inline int64_t truncate_second_inline(int64_t seconds) nogil:
 cdef inline int64_t truncate_month_fast(int64_t seconds) nogil:
     """Fast month truncation for years 1970-2100 using precomputed table"""
     cdef int64_t days_since_epoch = seconds // SECONDS_PER_DAY
-    cdef int64_t year, month, day, hour, minute, second
+    cdef int64_t year, month
     cdef int64_t leap_days, days_in_year
-    cdef int64_t m, bound
     cdef bint is_leap
 
     # For years 1970-2100, we can use a faster approximation
@@ -233,7 +231,7 @@ cpdef object list_date_trunc(str truncate_to, object timestamp_array):
     cdef int64_t* output_ptr
     cdef int64_t days_since_epoch, days_to_monday, temp_seconds
     cdef int64_t factor
-    cdef int64_t divisor_day, divisor_hour, divisor_minute, divisor_week
+    cdef int64_t divisor_day, divisor_hour, divisor_minute
     cdef array output_array
     cdef array template = array('q')  # 'q' = signed long long (int64)
 
@@ -263,7 +261,6 @@ cpdef object list_date_trunc(str truncate_to, object timestamp_array):
     divisor_day = SECONDS_PER_DAY * factor
     divisor_hour = SECONDS_PER_HOUR * factor
     divisor_minute = SECONDS_PER_MINUTE * factor
-    divisor_week = SECONDS_PER_WEEK * factor
 
     # Optimized loops working in native units - ordered by frequency!
     # Hot paths with manual loop unrolling for better performance
