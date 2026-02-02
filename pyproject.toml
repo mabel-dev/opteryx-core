@@ -12,7 +12,7 @@ dependencies = [
     'orjson==3.11.*',
     'orso==0.0.*',
     'psutil==7.2.*',
-    'pyarrow==23.*.*',
+    'pyarrow==23.0.*',
     'requests==2.32.*'
 ]
 
