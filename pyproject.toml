@@ -7,13 +7,13 @@ readme = {file = "README.md", content-type = "text/markdown"}
 authors = [{name='Justin Joyce', email='justin.joyce@joocer.com'}]
 maintainers = [{name='Justin Joyce', email='justin.joyce@joocer.com'}]
 dependencies = [
-    'aiohttp==3.13.3',
-    'numpy==2.4.1',
-    'orjson==3.11.5',
-    'orso==0.0.226',
-    'psutil==7.2.1',
-    'pyarrow==23.0.0',
-    'requests==2.32.5'
+    'aiohttp==3.13.*',
+    'numpy==2.4.*',
+    'orjson==3.11.*',
+    'orso==0.0.*',
+    'psutil==7.2.*',
+    'pyarrow==23.*.*',
+    'requests==2.32.*'
 ]
 
 [project.urls]
