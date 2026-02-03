@@ -239,6 +239,16 @@ class Session(DataFrame):
         self._telemetry.time_executing += elapsed - self._telemetry.time_planning
         self._executed = True
 
+    def execute_logical_plan(self, logical_plan, **kwargs):
+        """
+        Execute a logical plan by delegating to the planner module. qid, telemetry
+        and connection are optional to support external callers that only have a
+        logical plan (eg. OData service).
+        """
+        from opteryx import planner
+
+        return planner.execute_logical_plan(logical_plan, **kwargs)
+
     def plan(
         self,
         operation: str,
