@@ -77,9 +77,17 @@ cpdef int64_t to_int(object value):
         return _ensure_64bit_range(<int64_t>round(value.timestamp() * 1_000_000))
 
     if value_type == datetime.date:
-        # Converts to days since epoch (1970-01-01)
-        timestamp = int(value.strftime("%s")) * 1_000_000
-        return _ensure_64bit_range(<int64_t>timestamp)
+        # Calculate seconds since epoch using strftime (includes local timezone offset)
+        # This preserves the original behavior which accounts for system timezone
+        try:
+            timestamp_seconds = int(value.strftime("%s"))
+        except (ValueError, OSError):
+            # Fallback for pre-1970 dates: calculate manually
+            epoch = datetime.date(1970, 1, 1)
+            days_since_epoch = (value - epoch).days
+            timestamp_seconds = <int64_t>days_since_epoch * 86_400
+        # Convert seconds to microseconds
+        return _ensure_64bit_range(<int64_t>timestamp_seconds * 1_000_000)
 
     if value_type == datetime.time:
         result = value.hour * 3600 + value.minute * 60 + value.second
