@@ -12,6 +12,7 @@ cdef class TimestampVector(Vector):
     cdef Py_ssize_t null_bit_offset
     cdef DrakenFixedBuffer* ptr
     cdef bint owns_data
+    cdef str timestamp_unit  # 'ns', 'us', 'ms', or 's'
 
     cpdef TimestampVector take(self, int32_t[::1] indices)
 

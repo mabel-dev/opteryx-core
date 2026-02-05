@@ -38,11 +38,42 @@ from opteryx.draken.core.fixed_vector cimport buf_length
 from opteryx.draken.core.fixed_vector cimport free_fixed_buffer
 from opteryx.draken.vectors.vector cimport MIX_HASH_CONSTANT, Vector, NULL_HASH, mix_hash, simd_mix_hash
 
+# Constants for microseconds conversions
+cdef int64_t MICROSECONDS_PER_DAY = 86_400_000_000
+cdef int64_t MICROSECONDS_PER_SECOND = 1_000_000
+cdef int64_t MICROSECONDS_PER_MILLISECOND = 1_000
+cdef int64_t NULL_FLAG = <int64_t>-9223372036854775808
+
 
 cdef inline bint _bitmap_is_valid(uint8_t* bitmap, Py_ssize_t idx, Py_ssize_t bit_offset):
     cdef Py_ssize_t bit_index = idx + bit_offset
     cdef uint8_t byte = bitmap[bit_index >> 3]
     return (byte >> (bit_index & 7)) & 1
+
+cdef int64_t _safe_multiply_int64(int64_t value, int64_t factor):
+    """Multiply with overflow protection (clamp to int64_t limits)."""
+    if factor > 0:
+        if value > 0 and value > 9223372036854775807 // factor:
+            return 9223372036854775807
+        if value < 0 and value < -9223372036854775808 // factor:
+            return -9223372036854775808
+    return value * factor
+
+cdef int64_t scale_timestamp_to_micros(int64_t value, str unit):
+    """
+    Scale raw timestamp value from Arrow unit to microseconds.
+    Handles overflow by clamping to int64_t limits.
+    """
+    if unit == 'ns':
+        return value // 1_000  # Integer division: nanoseconds to microseconds
+    elif unit == 'us':
+        return value  # Already in microseconds
+    elif unit == 'ms':
+        return _safe_multiply_int64(value, MICROSECONDS_PER_MILLISECOND)
+    elif unit == 's':
+        return _safe_multiply_int64(value, MICROSECONDS_PER_SECOND)
+    else:
+        raise ValueError(f"Unknown timestamp unit: {unit}")
 
 cdef class TimestampVector(Vector):
 
@@ -54,6 +85,7 @@ cdef class TimestampVector(Vector):
         self.null_bit_offset = 0
         self._arrow_null_buf = None
         self._arrow_data_buf = None
+        self.timestamp_unit = 'us'  # Default to microseconds
 
         if wrap:
             self.ptr = NULL
@@ -349,12 +381,15 @@ cdef class TimestampVector(Vector):
             dst[i] = mix_hash(dst[i], value)
 
     cdef void compress_into(self, int64_t[::1] out_buf, Py_ssize_t offset=0) except *:
-        """Fast compress for TimestampVector: timestamps are already int64."""
+        """Fast compress for TimestampVector: scale raw int64 values to microseconds."""
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef int64_t* src = <int64_t*> ptr.data
         cdef Py_ssize_t n = ptr.length
-        cdef int64_t* dst_base
-        cdef int64_t NULL_FLAG = <int64_t> -9223372036854775808
+        cdef int64_t* dst = &out_buf[offset]
+        cdef uint8_t* null_bitmap = ptr.null_bitmap
+        cdef bint has_nulls = null_bitmap != NULL
+        cdef Py_ssize_t i
+        cdef int64_t value
 
         if n == 0:
             return
@@ -362,22 +397,18 @@ cdef class TimestampVector(Vector):
         if offset < 0 or offset + n > out_buf.shape[0]:
             raise ValueError("TimestampVector.compress: output buffer too small")
 
-        dst_base = &out_buf[0]
-        cdef int64_t* dst = dst_base + offset
-        cdef uint8_t* null_bitmap = ptr.null_bitmap
-        cdef bint has_nulls = null_bitmap != NULL
-        cdef Py_ssize_t i
-
-        if not has_nulls:
-            # Fast path: bulk copy
-            memcpy(<void*>dst, <const void*>src, <size_t>(n * sizeof(int64_t)))
-            return
-
-        for i in range(n):
-            if _bitmap_is_valid(null_bitmap, i, self.null_bit_offset):
-                dst[i] = src[i]
-            else:
-                dst[i] = NULL_FLAG
+        # Apply scale factor based on timestamp unit
+        if has_nulls:
+            for i in range(n):
+                if _bitmap_is_valid(null_bitmap, i, self.null_bit_offset):
+                    value = src[i]
+                    dst[i] = scale_timestamp_to_micros(value, self.timestamp_unit)
+                else:
+                    dst[i] = NULL_FLAG
+        else:
+            for i in range(n):
+                value = src[i]
+                dst[i] = scale_timestamp_to_micros(value, self.timestamp_unit)
 
     def __str__(self):
         cdef list vals = []
@@ -394,6 +425,17 @@ cdef TimestampVector from_arrow(object array):
     if vec.ptr == NULL:
         raise MemoryError()
     vec.owns_data = False
+
+    # Extract timestamp unit from Arrow's type metadata
+    cdef str timestamp_unit = 'us'  # Default fallback
+    try:
+        arrow_type = array.type
+        if hasattr(arrow_type, 'unit'):
+            timestamp_unit = arrow_type.unit
+    except:
+        pass  # Use default if metadata unavailable
+    
+    vec.timestamp_unit = timestamp_unit
 
     cdef object bufs = array.buffers()
     vec._arrow_null_buf = bufs[0]
