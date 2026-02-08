@@ -40,7 +40,7 @@ MAX_READ_BUFFER_CAPACITY = config.MAX_READ_BUFFER_CAPACITY
 ENABLE_ZERO_COPY = config.ENABLE_ZERO_COPY
 
 
-async def fetch_data(manifest, pool, connector, reply_queue, telemetry):
+async def fetch_data(manifest, pool, connector, reply_queue, telemetry, columns=None, filters=None):
     """
     Externalized async fetch loop.
 
@@ -50,6 +50,15 @@ async def fetch_data(manifest, pool, connector, reply_queue, telemetry):
     don't implement `async_read_blob` will cause a read error for each blob.
 
     The connector provided should implement `async_read_blob(blob_name, pool, telemetry, **kwargs)`.
+
+    Args:
+        manifest: File manifest with list of blobs to read
+        pool: AsyncMemoryPool to commit data to
+        connector: Connector implementing async_read_blob
+        reply_queue: Queue for returning (blob_name, reference) tuples
+        telemetry: Telemetry object for tracking
+        columns: Optional columns to project
+        filters: Optional filters to push down (DNF format)
     """
     import aiohttp
 
@@ -67,9 +76,15 @@ async def fetch_data(manifest, pool, connector, reply_queue, telemetry):
                     # raise a clear exception which we'll forward.
                     # Try with session and statistics for filesystem readers
                     reference = await connector.async_read_blob(
-                        blob_name=blob_name, pool=pool, session=http_session, telemetry=telemetry
+                        blob_name=blob_name,
+                        pool=pool,
+                        session=http_session,
+                        telemetry=telemetry,
+                        columns=columns,
+                        filters=filters,
                     )
-                    reply_queue.put((blob_name, reference))
+                    if reference is not None:
+                        reply_queue.put((blob_name, reference))
                 except Exception as err:
                     # Pass the exception back so the reader loop can handle it
                     reply_queue.put((blob_name, err))
@@ -142,6 +157,8 @@ class AsyncReadNode(ReaderNode):
                     reader,
                     data_queue,
                     self.telemetry,
+                    columns=self.columns,
+                    filters=self.predicates,
                 )
             ),
             daemon=True,
@@ -170,6 +187,15 @@ class AsyncReadNode(ReaderNode):
             blob_name, reference = item
             decoder = get_decoder(blob_name)
 
+            # Some connectors may return a tuple (ref, filters_applied). Support both styles.
+            filters_applied = False
+            if (
+                isinstance(reference, tuple)
+                and len(reference) == 2
+                and isinstance(reference[1], bool)
+            ):
+                reference, filters_applied = reference
+
             try:
                 # the sync readers include the decode time as part of the read time
                 try:
@@ -181,8 +207,9 @@ class AsyncReadNode(ReaderNode):
                     )
                     self.telemetry.bytes_read += len(blob_memory_view)
                     self.readings["bytes_read"] += len(blob_memory_view)
+                    selection_to_pass = None if filters_applied else self.predicates
                     decoded = decoder(
-                        blob_memory_view, projection=self.columns, selection=self.predicates
+                        blob_memory_view, projection=self.columns, selection=selection_to_pass
                     )
 
                     self.pool.release(reference)  # release also unlatches the segment
@@ -190,6 +217,9 @@ class AsyncReadNode(ReaderNode):
                     from pyarrow import ArrowInvalid
 
                     if isinstance(err, ArrowInvalid) and "No match for" in str(err):
+                        import traceback
+
+                        traceback.print_exc()
                         raise DataError(
                             f"Unable to read blob {blob_name} - this error is likely caused by a blob having an significantly different schema to previously handled blobs, or the data catalog."
                         )

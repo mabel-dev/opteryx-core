@@ -1,4 +1,5 @@
 import datetime
+import os
 from enum import Enum
 
 import orjson
@@ -43,5 +44,6 @@ def write_billing_event(billing_event: BillingEventType, billing_account: str, e
 
     structured_log["event"] = event_details
 
-    payload = orjson.dumps(structured_log).decode()
-    print(payload, flush=True)
+    if os.environ.get("K_SERVICE"):
+        payload = orjson.dumps(structured_log).decode()
+        print(payload, flush=True)

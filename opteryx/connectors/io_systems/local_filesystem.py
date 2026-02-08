@@ -214,24 +214,33 @@ class OpteryxLocalFileSystem:
 
         return infos[0] if single_path else infos
 
-    def open_input_stream(self, path: str):
+    def open_input_stream(self, path: str, columns=None, filters=None):
         """
         Open a file for reading as a stream.
 
         Args:
             path: Path to the file
+            columns: Not supported on local filesystem
+            filters: Not supported on local filesystem
 
         Returns:
             Stream wrapper backed by memory views
         """
+        if columns or filters:
+            raise NotImplementedError(
+                "Column projection and filtering are only supported for S3/MinIO storage. "
+                "Use S3 Select for remote filtering."
+            )
         return MemoryMappedFile(path)
 
-    def open_input_file(self, path: str):
+    def open_input_file(self, path: str, columns=None, filters=None):
         """
         Open a file for random access reading.
 
         Args:
             path: Path to the file
+            columns: Not supported on local filesystem
+            filters: Not supported on local filesystem
 
         Returns:
             Random access file object (same as stream for our implementation)
