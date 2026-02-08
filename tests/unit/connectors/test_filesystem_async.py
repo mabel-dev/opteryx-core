@@ -10,7 +10,7 @@ class FakeFS:
     def __init__(self, data: bytes):
         self._data = data
 
-    def open_input_stream(self, path: str):
+    def open_input_stream(self, path: str, columns=None, filters=None):
         return BytesIO(self._data)
 
 

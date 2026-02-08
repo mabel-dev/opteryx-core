@@ -29,6 +29,24 @@ class FakeMinioClient:
 
 def test_s3file_sets_filters_applied_and_memoryview():
     fs = FakeMinioClient(b"hello world")
+    # Ensure adapters imports don't blow up in test env - provide a minimal stub
+    import types, sys
+
+    adapters = types.ModuleType("adapters")
+    adapters.minio = types.ModuleType("adapters.minio")
+    mod = types.ModuleType("adapters.minio.parquet_output_serialization")
+    class ParquetOutputSerialization:
+        def __init__(self, *args, **kwargs):
+            pass
+    mod.ParquetOutputSerialization = ParquetOutputSerialization
+    sys.modules["adapters"] = adapters
+    sys.modules["adapters.minio"] = adapters.minio
+    sys.modules["adapters.minio.parquet_output_serialization"] = mod
+
+    # Avoid going through PredicatePushable.to_dnf machinery in this unit test
+    s3mod = __import__('opteryx.connectors.io_systems.s3_filesystem', fromlist=['*'])
+    s3mod._build_select_query = lambda columns, filters: "SELECT * FROM s3object"
+
     # Pass a simple truthy filters value
     f = S3File("s3://bucket/path/file.parquet", fs, columns=None, filters=[("a", "=", 1)])
 
@@ -55,6 +73,10 @@ async def test_opteryx_s3_async_read_blob_returns_tuple(monkeypatch):
     class FakeLoop:
         async def run_in_executor(self, *args, **kwargs):
             return b"data"
+        def is_closed(self):
+            return True
+        def close(self):
+            return None
 
     monkeypatch.setattr(asyncio, "get_event_loop", lambda: FakeLoop())
 
@@ -68,6 +90,11 @@ async def test_opteryx_s3_async_read_blob_returns_tuple(monkeypatch):
 
     pool = FakePool(123)
     telemetry = type("t", (), {"bytes_read": 0, "stalls_io_waiting_on_engine": 0, "cpu_wait_seconds": 0})()
+
+    # Avoid invoking rugo/parquet C code on invalid bytes; stub the metadata reader
+    import opteryx.rugo.parquet as parquet_meta
+
+    monkeypatch.setattr(parquet_meta, "read_metadata_from_memoryview", lambda mv, **kwargs: {"num_rows": 1})
 
     # Call with filters and expect a tuple return
     res = await fs.async_read_blob(blob_name="s3://mybucket/file.parquet", pool=pool, session=None, telemetry=telemetry, columns=None, filters=[("a", "=", 1)])
