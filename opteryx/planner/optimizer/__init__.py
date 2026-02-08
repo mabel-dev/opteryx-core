@@ -79,6 +79,7 @@ from opteryx.planner.optimizer.strategies import ProjectionPushdownStrategy
 from opteryx.planner.optimizer.strategies import RedundantOperationsStrategy
 from opteryx.planner.optimizer.strategies import SplitConjunctivePredicatesStrategy
 from opteryx.planner.optimizer.strategies import StatisticsOnlyResponseStrategy
+from opteryx.planner.optimizer.strategies import StorageCacheStrategy
 
 from .strategies.optimization_strategy import OptimizerContext
 
@@ -108,6 +109,7 @@ class OptimizerVisitor:
             OperatorFusionStrategy(telemetry),
             LimitPushdownStrategy(telemetry),
             LimitFilesPruningStrategy(telemetry),  # Prune files for LIMIT queries (after pushdown)
+            StorageCacheStrategy(telemetry),  # Rewrite file paths for optimized storage
             #            EmptyTableStrategy(telemetry),
             PredicateOrderingStrategy(telemetry),
             RedundantOperationsStrategy(telemetry),

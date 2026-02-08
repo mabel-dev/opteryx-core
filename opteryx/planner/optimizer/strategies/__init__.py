@@ -16,6 +16,7 @@ from .projection_pushdown import ProjectionPushdownStrategy
 from .redundant_operators import RedundantOperationsStrategy
 from .split_conjunctive_predicates import SplitConjunctivePredicatesStrategy
 from .statistics_only_response import StatisticsOnlyResponseStrategy
+from .storage_cache_strategy import StorageCacheStrategy
 
 __all__ = [
     "BooleanSimplificationStrategy",
@@ -36,4 +37,5 @@ __all__ = [
     "RedundantOperationsStrategy",
     "SplitConjunctivePredicatesStrategy",
     "StatisticsOnlyResponseStrategy",
+    "StorageCacheStrategy",
 ]

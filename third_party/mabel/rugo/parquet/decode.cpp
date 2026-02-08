@@ -89,7 +89,8 @@ static int32_t DecodeRLEBitPackedIndices(const uint8_t* data, size_t data_size,
       shift += 7;
     }
     
-    if ((header & 1) == 0) {
+    // fprintf(stderr, "      header=0x%x, LSB=%d (1=bitpacked, 0=rle)\n", header, header & 1);
+    if ((header & 1) == 1) {
       // Bit-packed run: (header >> 1) * 8 values
       int32_t num_groups = header >> 1;
       int32_t values_in_run = num_groups * 8;
@@ -118,12 +119,14 @@ static int32_t DecodeRLEBitPackedIndices(const uint8_t* data, size_t data_size,
       ptr += bytes_needed;
       
     } else {
-      // RLE run: (header >> 1) repetitions of next value
+      // RLE run: (header >> 1) repetitions of next value (LSB=0 means RLE)
       int32_t count = header >> 1;
       
       // Read the value (bit_width bits, but always read full bytes)
       uint32_t value = 0;
       int bytes_needed = (bit_width + 7) / 8;
+      // fprintf(stderr, "      RLE run: count=%d, bytes_needed=%d, ptr+bytes_needed vs end: %zu vs %zu\n", 
+      //         count, bytes_needed, (size_t)(ptr + bytes_needed), (size_t)end);
       for (int i = 0; i < bytes_needed && ptr < end; i++) {
         value |= ((uint32_t)(*ptr++)) << (i * 8);
       }
@@ -515,6 +518,26 @@ static PageHeader ParsePageHeader(TInput &in) {
       }
       break;
     }
+    case 7: { // dictionary_page_header (struct) - field type should be 12 for STRUCT
+      int16_t dph_last_id = 0;
+      while (true) {
+        auto dph_fh = ReadFieldHeader(in, dph_last_id);
+        if (dph_fh.type == 0)
+          break;
+        switch (dph_fh.id) {
+        case 1: // num_values
+          header.num_values = ReadI32(in);
+          break;
+        case 2: // encoding
+          header.encoding = ReadI32(in);
+          break;
+        default:
+          SkipField(in, dph_fh.type);
+          break;
+        }
+      }
+      break;
+    }
     default:
       SkipField(in, fh.type);
       break;
@@ -631,130 +654,9 @@ DecodedColumn DecodeColumn(const std::string &path,
       }
     }
 
-    int32_t num_values = target_col->num_values;
-    if (num_values <= 0) {
-      num_values = page_header.num_values;
-    }
-
-    // Skip repetition and definition levels according to Parquet spec
-    // For Data Page V1, both are RLE-encoded with 4-byte length prefixes when present
-    // They are only present if max_level > 0
-    
-    // Skip repetition levels (only if max_repetition_level > 0)
-    if (target_col->max_repetition_level > 0) {
-      size_t rep_level_bytes = SkipRLEBitPackedLevels(data_ptr, data_size, target_col->max_repetition_level);
-      data_ptr += rep_level_bytes;
-      data_size -= rep_level_bytes;
-    }
-    
-    // Skip definition levels (only if max_definition_level > 0)
-    if (target_col->max_definition_level > 0) {
-      size_t def_level_bytes = SkipRLEBitPackedLevels(data_ptr, data_size, target_col->max_definition_level);
-      data_ptr += def_level_bytes;
-      data_size -= def_level_bytes;
-    }
-
-    // Decode based on type and actual page encoding (from page header)
-    const uint8_t *data_end = data_ptr + data_size;
-    int32_t page_encoding = page_header.encoding;
-    
-    // DEBUG: Log encoding and type
-    std::cerr << "DEBUG: Decoding column '" << column_name << "' type=" << result.type 
-              << " encoding=" << page_encoding << " num_values=" << num_values 
-              << " data_size=" << data_size << std::endl;
-    
-    if (result.type == "int32") {
-      if (page_encoding == 4) {  // DELTA_BINARY_PACKED
-        // Use DELTA_BINARY_PACKED decoder
-        std::cerr << "DEBUG: Using DELTA_BINARY_PACKED for int32" << std::endl;
-        int32_t decoded = DecodeDeltaBinaryPacked(data_ptr, data_size, num_values, result.int32_values);
-        std::cerr << "DEBUG: Decoded " << decoded << " values" << std::endl;
-        result.success = (decoded == num_values);
-      } else {
-        // Use PLAIN encoding decoder
-        result.int32_values.reserve(num_values);
-        for (int32_t i = 0; i < num_values && data_ptr + 4 <= data_end; i++) {
-          int32_t value = ReadLE32(data_ptr);
-          result.int32_values.push_back(value);
-          data_ptr += 4;
-        }
-        result.success = (result.int32_values.size() == (size_t)num_values);
-      }
-    } else if (result.type == "int64") {
-      if (page_encoding == 4) {  // DELTA_BINARY_PACKED
-        // Use DELTA_BINARY_PACKED decoder
-        std::cerr << "DEBUG: Using DELTA_BINARY_PACKED for int64" << std::endl;
-        int32_t decoded = DecodeDeltaBinaryPacked(data_ptr, data_size, num_values, result.int64_values);
-        std::cerr << "DEBUG: Decoded " << decoded << " values" << std::endl;
-        result.success = (decoded == num_values);
-      } else {
-        // Use PLAIN encoding decoder
-        result.int64_values.reserve(num_values);
-        for (int32_t i = 0; i < num_values && data_ptr + 8 <= data_end; i++) {
-          int64_t value = ReadLE64(data_ptr);
-          result.int64_values.push_back(value);
-          data_ptr += 8;
-        }
-        result.success = (result.int64_values.size() == (size_t)num_values);
-      }
-    } else if (result.type == "byte_array") {
-      if (page_encoding == 6) {  // DELTA_BYTE_ARRAY
-        // Use DELTA_BYTE_ARRAY decoder
-        std::cerr << "DEBUG: Using DELTA_BYTE_ARRAY for byte_array" << std::endl;
-        int32_t decoded = DecodeDeltaByteArray(data_ptr, data_size, num_values, result.string_values);
-        std::cerr << "DEBUG: Decoded " << decoded << " values" << std::endl;
-        result.success = (decoded == num_values);
-      } else {
-        // PLAIN encoding for byte_array: each value is 4-byte length + data
-        result.string_values.reserve(num_values);
-        for (int32_t i = 0; i < num_values && data_ptr + 4 <= data_end; i++) {
-          int32_t length = ReadLE32(data_ptr);
-          data_ptr += 4;
-
-          if (data_ptr + length > data_end) {
-            break;
-          }
-
-          std::string value(reinterpret_cast<const char *>(data_ptr), length);
-          result.string_values.push_back(value);
-          data_ptr += length;
-        }
-        result.success = (result.string_values.size() == (size_t)num_values);
-      }
-    } else if (result.type == "boolean") {
-      // PLAIN encoding for boolean: 1 bit per value, packed into bytes
-      result.boolean_values.reserve(num_values);
-      for (int32_t i = 0; i < num_values && data_ptr < data_end; i++) {
-        // Each byte contains up to 8 boolean values
-        uint8_t byte_value = data_ptr[i / 8];
-        uint8_t bit_value = (byte_value >> (i % 8)) & 1;
-        result.boolean_values.push_back(bit_value);
-        if ((i + 1) % 8 == 0) {
-          data_ptr += 1;
-        }
-      }
-      // Move past the last partial byte if necessary
-      if (num_values % 8 != 0 && num_values > 0) {
-        data_ptr += 1;
-      }
-      result.success = (result.boolean_values.size() == (size_t)num_values);
-    } else if (result.type == "float32") {
-      result.float32_values.reserve(num_values);
-      for (int32_t i = 0; i < num_values && data_ptr + 4 <= data_end; i++) {
-        float value = ReadFloat32(data_ptr);
-        result.float32_values.push_back(value);
-        data_ptr += 4;
-      }
-      result.success = (result.float32_values.size() == (size_t)num_values);
-    } else if (result.type == "float64") {
-      result.float64_values.reserve(num_values);
-      for (int32_t i = 0; i < num_values && data_ptr + 8 <= data_end; i++) {
-        double value = ReadFloat64(data_ptr);
-        result.float64_values.push_back(value);
-        data_ptr += 8;
-      }
-      result.success = (result.float64_values.size() == (size_t)num_values);
-    }
+    // Delegate to DecodeColumnFromMemory which handles all decoding
+    // Pass the entire chunk data (with page header) for re-parsing
+    return DecodeColumnFromMemory(chunk_data.data(), chunk_data.size(), column_name, row_group, row_group_index);
 
   } catch (...) {
     result.success = false;
@@ -859,6 +761,11 @@ static DecodedColumn DecodeColumnFromChunk(const uint8_t* file_data, size_t file
         }
 
         dict_size = dict_page_header.num_values;
+        std::cerr << "DEBUG: dict_page_header.num_values=" << dict_page_header.num_values 
+                  << " encoding=" << dict_page_header.encoding
+                  << " compressed_size=" << dict_page_header.compressed_page_size
+                  << " uncompressed_size=" << dict_page_header.uncompressed_page_size << std::endl;
+        std::cerr << "DEBUG: Loaded dictionary, dict_size=" << dict_size << " type=" << result.type << std::endl;
         const uint8_t* dict_end = dict_data_ptr + dict_data_size;
 
         if (result.type == "int32") {
@@ -984,6 +891,12 @@ static DecodedColumn DecodeColumnFromChunk(const uint8_t* file_data, size_t file
               << " max_rep_level=" << target_col->max_repetition_level 
               << " max_def_level=" << target_col->max_definition_level << std::endl;
     
+    std::cerr << "DEBUG: First 20 bytes before level skip: ";
+    for (size_t i = 0; i < 20 && i < data_size; i++) {
+      fprintf(stderr, "%02x ", data_ptr[i]);
+    }
+    fprintf(stderr, "\n");
+
     // Skip repetition levels (only if max_repetition_level > 0)
     if (target_col->max_repetition_level > 0) {
       size_t rep_level_bytes = SkipRLEBitPackedLevels(data_ptr, data_size, target_col->max_repetition_level);
@@ -1029,8 +942,40 @@ static DecodedColumn DecodeColumnFromChunk(const uint8_t* file_data, size_t file
       
       std::cerr << "DEBUG: Bit width for indices=" << bit_width << std::endl;
       
+      std::cerr << "DEBUG: About to decode indices, data_size=" << data_size << ", first 20 bytes: ";
+      for (size_t i = 0; i < 20 && i < data_size; i++) {
+        fprintf(stderr, "%02x ", data_ptr[i]);
+      }
+      fprintf(stderr, "\n");
       std::vector<int32_t> indices;
-      int32_t decoded = DecodeRLEBitPackedIndices(data_ptr, data_size, num_values, bit_width, indices);
+      // For dictionary index data in Data Pages, there is NO 4-byte length prefix.
+      // The spec says: "1 byte bit_width + RLE/Bit-packed data"
+      // But DecodeRLEBitPackedIndices expects a 4-byte length prefix.
+      // Solution: add a synthetic 4-byte length prefix that represents the actual data size.
+      // We need to prepend 4 bytes that encode (data_size - 4) as little-endian.
+      // But it's easier to just skip the 4-byte prefix reading inside the function.
+      // For now, we'll manually construct the expected format:
+      // The first byte of data_ptr is the bit_width from the file format
+      // We need to skip it before creating the synthetic length prefix
+      uint8_t file_bit_width = data_ptr[0];
+      if (file_bit_width != (uint8_t)bit_width) {
+        std::cerr << "WARNING: File bit_width=" << (int)file_bit_width << " vs calculated=" << bit_width << std::endl;
+      }
+      data_ptr++;  // Skip bit_width byte
+      data_size--;  // Adjust remaining data size
+
+      // Create a temporary buffer with the 4-byte length prefix + data
+      std::vector<uint8_t> index_data_with_prefix;
+      index_data_with_prefix.resize(4 + data_size);
+      // Write length as little-endian 4 bytes
+      uint32_t data_len = data_size;
+      index_data_with_prefix[0] = (data_len >> 0) & 0xFF;
+      index_data_with_prefix[1] = (data_len >> 8) & 0xFF;
+      index_data_with_prefix[2] = (data_len >> 16) & 0xFF;
+      index_data_with_prefix[3] = (data_len >> 24) & 0xFF;
+      // Copy actual data
+      std::memcpy(index_data_with_prefix.data() + 4, data_ptr, data_size);
+      int32_t decoded = DecodeRLEBitPackedIndices(index_data_with_prefix.data(), index_data_with_prefix.size(), num_values, bit_width, indices);
       
       std::cerr << "DEBUG: Decoded " << decoded << " indices" << std::endl;
       
@@ -1233,8 +1178,11 @@ DecodedColumn DecodeColumnFromMemory(const uint8_t* data, size_t size,
       return result;
     }
 
-    // Check bounds
-    if (offset + total_size > (int64_t)size) {
+    // Check minimum bounds - offset must be within file
+    // Note: offset + size may extend past file end (into metadata area)
+    // which is OK - DecodeColumnFromChunk will handle reading available data
+    if (offset >= (int64_t)size) {
+      std::cerr << "DEBUG: Offset " << offset << " >= file size " << size << std::endl;
       return result;
     }
 

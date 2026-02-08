@@ -6,6 +6,7 @@ Test script to verify timestamp/date normalization works correctly.
 import datetime
 import sys
 
+
 # Test to_int() with dates
 def test_to_int_dates():
     """Test that to_int() correctly converts dates to microseconds since epoch."""
@@ -90,8 +91,9 @@ def test_arrow_timestamp_parsing():
     print("Testing Arrow timestamp parsing...")
     try:
         import pyarrow as pa
+
         from opteryx.draken.vectors.timestamp_vector import TimestampVector
-        
+
         # Create timestamps in different units
         timestamps_us = pa.array([1000000, 2000000, 3000000], type=pa.timestamp('us'))
         timestamps_ms = pa.array([1000, 2000, 3000], type=pa.timestamp('ms'))

@@ -143,34 +143,47 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
         Returns:
             Decoded data or schema
         """
-        # Open file through the filesystem
-        data = self.filesystem.open_input_file(blob_name)
+        # Open file through the filesystem, passing through projection/selection for remote filtering
+        data = self.filesystem.open_input_file(blob_name, columns=projection, filters=selection)
         self.telemetry.bytes_read += data.memoryview.nbytes
+
+        # If the underlying filesystem already applied the selection (e.g., S3 Select),
+        # don't pass the selection to the decoder again to avoid duplicate filtering.
+        selection_to_pass = None if getattr(data, "filters_applied", False) else selection
 
         # Decode the data
         result = decoder(
             data.memoryview,
             projection=projection,
-            selection=selection,
+            selection=selection_to_pass,
             just_schema=just_schema,
         )
 
         return result
 
-    async def async_read_blob(self, *, blob_name: str, pool, telemetry, **kwargs):
+    async def async_read_blob(
+        self, *, blob_name: str, pool, telemetry, columns=None, filters=None, **kwargs
+    ):
         """Asynchronous blob reader for filesystem-based tables.
 
         This method reads the blob using the underlying filesystem (in an
         executor to avoid blocking the event loop), commits the bytes into the
         provided AsyncMemoryPool and returns the pool reference. It retries
         commit failures a bounded number of times to avoid hanging.
+
+        Args:
+            blob_name: Path to the blob
+            pool: AsyncMemoryPool to commit data to
+            telemetry: Telemetry object for tracking
+            columns: Optional columns to project
+            filters: Optional filters to push down (DNF format)
         """
         import asyncio
 
         loop = asyncio.get_running_loop()
 
         def blocking_read():
-            f = self.filesystem.open_input_stream(blob_name)
+            f = self.filesystem.open_input_stream(blob_name, columns=columns, filters=filters)
             # Prefer getbuffer for BytesIO-like objects for speed
             if hasattr(f, "getbuffer"):
                 return f.getbuffer().tobytes()

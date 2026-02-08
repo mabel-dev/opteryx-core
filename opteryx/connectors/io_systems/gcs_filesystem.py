@@ -137,12 +137,34 @@ class OpteryxGcsFileSystem:
 
         return infos[0] if single_path else infos
 
-    def open_input_stream(self, path: str):
-        """Open a GCS object for reading as a stream."""
+    def open_input_stream(self, path: str, columns=None, filters=None):
+        """Open a GCS object for reading as a stream.
+
+        Args:
+            path: GCS object path
+            columns: Not supported on GCS
+            filters: Not supported on GCS
+        """
+        if columns or filters:
+            raise NotImplementedError(
+                "Column projection and filtering are only supported for S3/MinIO storage. "
+                "Use S3 Select for remote filtering."
+            )
         return GcsFile(path, self.session, self.access_token)
 
-    def open_input_file(self, path: str):
-        """Open a GCS object for random access reading."""
+    def open_input_file(self, path: str, columns=None, filters=None):
+        """Open a GCS object for random access reading.
+
+        Args:
+            path: GCS object path
+            columns: Not supported on GCS
+            filters: Not supported on GCS
+        """
+        if columns or filters:
+            raise NotImplementedError(
+                "Column projection and filtering are only supported for S3/MinIO storage. "
+                "Use S3 Select for remote filtering."
+            )
         return GcsFile(path, self.session, self.access_token)
 
     async def async_read_blob(self, *, blob_name, pool, session, telemetry, **kwargs):
@@ -155,7 +177,7 @@ class OpteryxGcsFileSystem:
             blob_name = blob_name[5:]
 
         bucket, _, _, _ = paths.get_parts(blob_name)
-        # DEBUG: print("READ   ", blob_name)
+        # DEBUG: print("[GS] READ   ", f"gs://{blob_name}")
 
         object_full_path = urllib.parse.quote(blob_name[(len(bucket) + 1) :], safe="")
 
