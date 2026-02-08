@@ -50,6 +50,28 @@ class ParquetOutputSerialization(OutputSerialization):
         return node
 
 
+def _format_value_for_sql(value):
+    """Format a Python value for embedding in an S3 Select SQL expression.
+
+    - None -> NULL
+    - strings and datetime-like -> quoted ISO strings
+    - numpy.datetime64 -> quoted datetime string
+    - others -> str(value)
+    """
+    import datetime as _dt
+
+    if value is None:
+        return "NULL"
+
+    if isinstance(value, (_dt.date, _dt.datetime)):
+        return f"'{value.isoformat()}'"
+
+    if isinstance(value, str):
+        return f"'{value}'"
+
+    return str(value)
+
+
 def _build_select_query(columns, filters):
     """Build S3 Select SQL query from columns and DNF filters.
 
@@ -72,7 +94,7 @@ def _build_select_query(columns, filters):
         conditions = []
         for and_group in dnf_filter:
             column, op, value = and_group
-            formatted_value = f"'{value}'" if isinstance(value, str) else str(value)
+            formatted_value = _format_value_for_sql(value)
             conditions.append(f"{column} {op} {formatted_value}")
 
         where_clause = " WHERE " + " AND ".join(conditions)
@@ -367,11 +389,8 @@ class OpteryxS3FileSystem:
             for and_group in filters:
                 and_conditions = []
                 for column, op, value in and_group:
-                    # Format value - quote strings, leave numbers/NULL as-is
-                    if isinstance(value, str):
-                        formatted_value = f"'{value}'"
-                    else:
-                        formatted_value = str(value) if value is not None else "NULL"
+                        # Format the value appropriately (dates/strings quoted, None -> NULL, etc.)
+                    formatted_value = _format_value_for_sql(value)
 
                     and_conditions.append(f'"{column}" {op} {formatted_value}')
 
