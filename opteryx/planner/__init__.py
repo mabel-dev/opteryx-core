@@ -264,7 +264,7 @@ def execute_logical_plan(
     start = time.monotonic_ns()
     bound_plan = do_bind_phase(
         logical_plan,
-        connection=conn_context,
+        execution_context=conn_context,
         query_id=query_id,
         common_table_expressions=None,  # executing logical plans: no CTEs
         visibility_filters=visibility_filters,
@@ -282,9 +282,7 @@ def execute_logical_plan(
             from opteryx.planner.substrait_builder import build_substrait_plan
 
             start = time.monotonic_ns()
-            query_properties = QueryProperties(
-                query_id=query_id, variables=connection.context.variables
-            )
+            query_properties = QueryProperties(query_id=query_id, variables=conn_context.variables)
             substrait_plan = build_substrait_plan(optimized_plan, query_properties)
             telemetry.time_planning_physical_planner += time.monotonic_ns() - start
 
@@ -297,7 +295,7 @@ def execute_logical_plan(
     start = time.monotonic_ns()
     variables = {}
     try:
-        variables = connection.context.variables  # type: ignore
+        variables = conn_context.variables  # type: ignore
     except (AttributeError, TypeError):
         variables = {}
 

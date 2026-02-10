@@ -388,7 +388,7 @@ class OpteryxS3FileSystem:
             for and_group in filters:
                 and_conditions = []
                 for column, op, value in and_group:
-                        # Format the value appropriately (dates/strings quoted, None -> NULL, etc.)
+                    # Format the value appropriately (dates/strings quoted, None -> NULL, etc.)
                     formatted_value = _format_value_for_sql(value)
 
                     and_conditions.append(f'"{column}" {op} {formatted_value}')

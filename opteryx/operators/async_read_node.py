@@ -192,16 +192,16 @@ class AsyncReadNode(ReaderNode):
             if isinstance(reference, Exception):
                 import warnings
 
-                self.telemetry.add_message(f"failed to read {blob_name} ({reference.__class__.__name__})")
+                self.telemetry.add_message(
+                    f"failed to read {blob_name} ({reference.__class__.__name__})"
+                )
                 self.readings["failed_reads"] += 1
                 warnings.warn(f"failed to read {blob_name} - {reference}")
                 continue
 
             # Some connectors may return a tuple (ref, filters_applied). Support both styles.
             filters_applied = False
-            if (
-                isinstance(reference, tuple)
-            ):
+            if isinstance(reference, tuple):
                 reference, filters_applied = reference
 
             try:
@@ -225,9 +225,7 @@ class AsyncReadNode(ReaderNode):
                     from pyarrow import ArrowInvalid
 
                     if isinstance(err, ArrowInvalid) and "No match for" in str(err):
-                        raise DataError(
-                            f"Unable to read blob {blob_name}"
-                        )
+                        raise DataError(f"Unable to read blob {blob_name}")
                     raise DataError(f"Unable to read blob {blob_name} - error {err}") from err
                 self.readings["time_reading_blobs"] += time.monotonic_ns() - start
                 num_rows, _, raw_bytes, morsel = decoded
