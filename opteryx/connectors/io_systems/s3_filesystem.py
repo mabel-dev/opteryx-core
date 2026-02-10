@@ -352,9 +352,8 @@ class OpteryxS3FileSystem:
             raise DatasetReadError(f"Unable to commit data to MemoryPool after {attempts} attempts")
 
         telemetry.bytes_read += len(data)
-        # Indicate whether the connector applied the selection filters remotely.
-        filters_applied = bool(filters)
-        return (ref, filters_applied)
+        # This connector can apply filters at read-time
+        return (ref, True)
 
     def _build_select_query(self, columns, filters):
         """Build S3 Select SQL query from columns and DNF filters.
