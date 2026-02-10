@@ -814,7 +814,7 @@ class BinderVisitor:
         columns = []
 
         # Handle wildcards, including qualified wildcards.
-        for column in node.columns + node.order_by_columns:
+        for column in list(node.columns) + list(node.order_by_columns):
             if column.node_type != NodeType.WILDCARD:
                 columns.append(column)
             elif column.value is None:
