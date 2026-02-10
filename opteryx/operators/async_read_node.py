@@ -187,12 +187,20 @@ class AsyncReadNode(ReaderNode):
             blob_name, reference = item
             decoder = get_decoder(blob_name)
 
+            # If the connector signalled an exception, handle it here rather than
+            # treating the exception object as a pool reference.
+            if isinstance(reference, Exception):
+                import warnings
+
+                self.telemetry.add_message(f"failed to read {blob_name} ({reference.__class__.__name__})")
+                self.readings["failed_reads"] += 1
+                warnings.warn(f"failed to read {blob_name} - {reference}")
+                continue
+
             # Some connectors may return a tuple (ref, filters_applied). Support both styles.
             filters_applied = False
             if (
                 isinstance(reference, tuple)
-                and len(reference) == 2
-                and isinstance(reference[1], bool)
             ):
                 reference, filters_applied = reference
 
@@ -207,7 +215,7 @@ class AsyncReadNode(ReaderNode):
                     )
                     self.telemetry.bytes_read += len(blob_memory_view)
                     self.readings["bytes_read"] += len(blob_memory_view)
-                    selection_to_pass = None if filters_applied else self.predicates
+                    selection_to_pass = [] if filters_applied else self.predicates
                     decoded = decoder(
                         blob_memory_view, projection=self.columns, selection=selection_to_pass
                     )
@@ -217,11 +225,8 @@ class AsyncReadNode(ReaderNode):
                     from pyarrow import ArrowInvalid
 
                     if isinstance(err, ArrowInvalid) and "No match for" in str(err):
-                        import traceback
-
-                        traceback.print_exc()
                         raise DataError(
-                            f"Unable to read blob {blob_name} - this error is likely caused by a blob having an significantly different schema to previously handled blobs, or the data catalog."
+                            f"Unable to read blob {blob_name}"
                         )
                     raise DataError(f"Unable to read blob {blob_name} - error {err}") from err
                 self.readings["time_reading_blobs"] += time.monotonic_ns() - start
@@ -252,6 +257,7 @@ class AsyncReadNode(ReaderNode):
                 if records_to_read <= 0:
                     break
             except Exception as err:
+                # Report and accumulate failure stats
                 self.telemetry.add_message(f"failed to read {blob_name} ({err.__class__.__name__})")
                 self.readings["failed_reads"] += 1
                 import warnings
