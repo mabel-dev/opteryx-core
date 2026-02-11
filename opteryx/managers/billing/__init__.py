@@ -36,11 +36,10 @@ def write_billing_event(billing_event: BillingEventType, billing_account: str, e
                 "Missing 'user' in event_details for DATA_PROCESSED_BYTES billing event"
             )
 
-    if billing_event == BillingEventType.DATA_STORAGE_BYTES:
-        if "bytes_stored" not in event_details:
-            raise ValueError(
-                "Missing 'bytes_stored' in event_details for DATA_STORAGE_BYTES billing event"
-            )
+    if billing_event == BillingEventType.DATA_STORAGE_BYTES and "bytes_stored" not in event_details:
+        raise ValueError(
+            "Missing 'bytes_stored' in event_details for DATA_STORAGE_BYTES billing event"
+        )
 
     structured_log["event"] = event_details
 

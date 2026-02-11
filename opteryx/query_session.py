@@ -128,6 +128,7 @@ class Session(DataFrame):
             raise MissingSqlStatement("SQL provided was empty.")
 
         start = time.time_ns()
+        processing_bytes_estimate = 0
         try:
             self._plan = query_planner(
                 operation=operation,
@@ -137,6 +138,25 @@ class Session(DataFrame):
                 query_id=self.query_id,
                 telemetry=self._telemetry,
             )
+
+            # Extract bytes estimate from scan nodes in the plan
+            for nid, node in self._plan.nodes(data=True):
+                if getattr(node, "is_scan", False):
+                    try:
+                        # Get structured config directly without full dict conversion
+                        node_config = (
+                            node.plan_config()
+                            if hasattr(node, "plan_config")
+                            else getattr(node, "config", None)
+                        )
+                        if isinstance(node_config, dict) and "projection" in node_config:
+                            for proj_col in node_config.get("projection", []):
+                                col_bytes = proj_col.get("total-bytes") or 0
+                                processing_bytes_estimate += col_bytes
+                    except Exception:
+                        # If extraction fails, continue without bytes for this node
+                        pass
+
         except RuntimeError as err:  # pragma: no cover
             raise SqlError(f"Error Executing SQL Statement ({err}) (QID:{self.id})") from err
         finally:
@@ -160,7 +180,7 @@ class Session(DataFrame):
                 "user": self.context.user,
                 "query_id": self.query_id,
                 "query": operation,
-                "bytes_processed": self._telemetry.bytes_processed,
+                "bytes_processed": processing_bytes_estimate,
             },
         )
 

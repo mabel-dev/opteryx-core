@@ -87,11 +87,7 @@ class StorageCacheStrategy(OptimizationStrategy):
 
         max_bytes = 30 * 1024 * 1024  # 30MB in bytes
 
-        for file_entry in node.manifest.files:
-            if file_entry.file_size_in_bytes > max_bytes:
-                return False
-
-        return True
+        return all(file_entry.file_size_in_bytes <= max_bytes for file_entry in node.manifest.files)
 
     @staticmethod
     def _rewrite_paths_to_s3(node: LogicalPlanNode) -> None:
