@@ -19,6 +19,8 @@ def get_view_plan(view_name: str, telemetry) -> dict:
         return None
     view_sql = definition.statement
     view_plan = _view_as_plan(view_sql)
+    # Copy the cached plan so mutations during binding don't affect the cache
+    view_plan = view_plan.copy()
     statistics_bound = _bind_row_count_estimate(view_plan, definition.last_row_count)
     return statistics_bound
 
