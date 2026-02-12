@@ -317,7 +317,9 @@ class OpteryxS3FileSystem:
         data = await loop.run_in_executor(
             None, _read_from_s3, self.minio, bucket, full_object_name, column_names, filters
         )
-        if data is None:
+
+        # S3 Select may return empty data when no rows match filters (valid case)
+        if not data:
             return
 
         try:
