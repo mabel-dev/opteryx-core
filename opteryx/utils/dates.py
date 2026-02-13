@@ -148,6 +148,65 @@ def parse_iso(value):
         return None
 
 
+def truncate_single(dt: datetime.datetime, unit: str) -> datetime.datetime:
+    """
+    Floor a datetime to the start of the specified unit.
+    
+    Supports units: 'second', 'minute', 'hour', 'day', 'week', 'month', 'quarter', 'year'
+    Week is ISO week (Monday-based).
+    """
+    if unit == "second":
+        return dt.replace(microsecond=0)
+    elif unit == "minute":
+        return dt.replace(second=0, microsecond=0)
+    elif unit == "hour":
+        return dt.replace(minute=0, second=0, microsecond=0)
+    elif unit == "day":
+        return dt.replace(hour=0, minute=0, second=0, microsecond=0)
+    elif unit == "week":
+        # ISO week: Monday is day 0. weekday() returns 0=Monday, 6=Sunday
+        days_since_monday = dt.weekday()
+        floor_date = dt.replace(hour=0, minute=0, second=0, microsecond=0)
+        return floor_date - datetime.timedelta(days=days_since_monday)
+    elif unit == "month":
+        return dt.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    elif unit == "quarter":
+        quarter_month = ((dt.month - 1) // 3) * 3 + 1
+        return dt.replace(month=quarter_month, day=1, hour=0, minute=0, second=0, microsecond=0)
+    elif unit == "year":
+        return dt.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
+    else:
+        raise ValueError(f"Unsupported truncation unit: {unit}")
+
+
+def add_single_unit(dt: datetime.datetime, unit: str, n: int = 1) -> datetime.datetime:
+    """
+    Add n units to a datetime.
+    
+    Supports units: 'second', 'minute', 'hour', 'day', 'week', 'month', 'quarter', 'year'
+    Week is treated as 7 days.
+    Month/quarter/year use add_months to handle edge cases (e.g., Jan 31 + 1 month = Feb 28/29).
+    """
+    if unit == "second":
+        return dt + datetime.timedelta(seconds=n)
+    elif unit == "minute":
+        return dt + datetime.timedelta(minutes=n)
+    elif unit == "hour":
+        return dt + datetime.timedelta(hours=n)
+    elif unit == "day":
+        return dt + datetime.timedelta(days=n)
+    elif unit == "week":
+        return dt + datetime.timedelta(days=n * 7)
+    elif unit == "month":
+        return add_months(dt, n)
+    elif unit == "quarter":
+        return add_months(dt, n * 3)
+    elif unit == "year":
+        return add_months(dt, n * 12)
+    else:
+        raise ValueError(f"Unsupported unit: {unit}")
+
+
 def date_trunc(truncate_to, date_values) -> numpy.ndarray:
     """
     Truncate an array of datetimes to a specified unit
