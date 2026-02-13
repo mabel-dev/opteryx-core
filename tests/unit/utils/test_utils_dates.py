@@ -69,6 +69,70 @@ def test_date_parser(string, expect):
     assert dates.parse_iso(string) == expect, f"{string}  {dates.parse_iso(string)}  {expect}"
 
 
+# Tests for truncate_single helper function
+TRUNCATE_SINGLE_TESTS = [
+    # (input_datetime, unit, expected_output)
+    # Second truncation
+    (datetime.datetime(2021, 2, 21, 12, 30, 45, 123456), "second", datetime.datetime(2021, 2, 21, 12, 30, 45, 0)),
+    # Minute truncation
+    (datetime.datetime(2021, 2, 21, 12, 30, 45, 123456), "minute", datetime.datetime(2021, 2, 21, 12, 30, 0, 0)),
+    # Hour truncation
+    (datetime.datetime(2021, 2, 21, 12, 30, 45, 123456), "hour", datetime.datetime(2021, 2, 21, 12, 0, 0, 0)),
+    # Day truncation
+    (datetime.datetime(2021, 2, 21, 12, 30, 45, 123456), "day", datetime.datetime(2021, 2, 21, 0, 0, 0, 0)),
+    # Week truncation (Monday-based)
+    (datetime.datetime(2021, 2, 21, 12, 30, 45, 123456), "week", datetime.datetime(2021, 2, 15, 0, 0, 0, 0)),  # 2021-02-21 is Sunday, Monday is 2021-02-15
+    (datetime.datetime(2021, 2, 22, 12, 30, 45, 123456), "week", datetime.datetime(2021, 2, 22, 0, 0, 0, 0)),  # 2021-02-22 is Monday
+    # Month truncation
+    (datetime.datetime(2021, 2, 21, 12, 30, 45, 123456), "month", datetime.datetime(2021, 2, 1, 0, 0, 0, 0)),
+    # Quarter truncation
+    (datetime.datetime(2021, 2, 21, 12, 30, 45, 123456), "quarter", datetime.datetime(2021, 1, 1, 0, 0, 0, 0)),
+    (datetime.datetime(2021, 5, 21, 12, 30, 45, 123456), "quarter", datetime.datetime(2021, 4, 1, 0, 0, 0, 0)),
+    (datetime.datetime(2021, 11, 21, 12, 30, 45, 123456), "quarter", datetime.datetime(2021, 10, 1, 0, 0, 0, 0)),
+    # Year truncation
+    (datetime.datetime(2021, 2, 21, 12, 30, 45, 123456), "year", datetime.datetime(2021, 1, 1, 0, 0, 0, 0)),
+]
+
+@pytest.mark.parametrize("input_dt, unit, expected", TRUNCATE_SINGLE_TESTS)
+def test_truncate_single(input_dt, unit, expected):
+    assert dates.truncate_single(input_dt, unit) == expected, f"truncate_single({input_dt}, {unit}) = {dates.truncate_single(input_dt, unit)}, expected {expected}"
+
+
+# Tests for add_single_unit helper function
+ADD_SINGLE_UNIT_TESTS = [
+    # (input_datetime, unit, n, expected_output)
+    # Second addition
+    (datetime.datetime(2021, 2, 21, 12, 30, 45, 0), "second", 1, datetime.datetime(2021, 2, 21, 12, 30, 46, 0)),
+    (datetime.datetime(2021, 2, 21, 12, 30, 45, 0), "second", 60, datetime.datetime(2021, 2, 21, 12, 31, 45, 0)),
+    # Minute addition
+    (datetime.datetime(2021, 2, 21, 12, 30, 0, 0), "minute", 1, datetime.datetime(2021, 2, 21, 12, 31, 0, 0)),
+    (datetime.datetime(2021, 2, 21, 12, 30, 0, 0), "minute", 60, datetime.datetime(2021, 2, 21, 13, 30, 0, 0)),
+    # Hour addition
+    (datetime.datetime(2021, 2, 21, 12, 0, 0, 0), "hour", 1, datetime.datetime(2021, 2, 21, 13, 0, 0, 0)),
+    (datetime.datetime(2021, 2, 21, 12, 0, 0, 0), "hour", 24, datetime.datetime(2021, 2, 22, 12, 0, 0, 0)),
+    # Day addition
+    (datetime.datetime(2021, 2, 21, 0, 0, 0, 0), "day", 1, datetime.datetime(2021, 2, 22, 0, 0, 0, 0)),
+    (datetime.datetime(2021, 2, 21, 0, 0, 0, 0), "day", 365, datetime.datetime(2022, 2, 21, 0, 0, 0, 0)),
+    # Week addition
+    (datetime.datetime(2021, 2, 21, 0, 0, 0, 0), "week", 1, datetime.datetime(2021, 2, 28, 0, 0, 0, 0)),
+    (datetime.datetime(2021, 2, 21, 0, 0, 0, 0), "week", 4, datetime.datetime(2021, 3, 21, 0, 0, 0, 0)),
+    # Month addition
+    (datetime.datetime(2021, 1, 31, 0, 0, 0, 0), "month", 1, datetime.datetime(2021, 2, 28, 0, 0, 0, 0)),  # end-of-month handling
+    (datetime.datetime(2021, 2, 21, 0, 0, 0, 0), "month", 1, datetime.datetime(2021, 3, 21, 0, 0, 0, 0)),
+    (datetime.datetime(2021, 2, 21, 0, 0, 0, 0), "month", 12, datetime.datetime(2022, 2, 21, 0, 0, 0, 0)),
+    # Quarter addition
+    (datetime.datetime(2021, 1, 15, 0, 0, 0, 0), "quarter", 1, datetime.datetime(2021, 4, 15, 0, 0, 0, 0)),
+    (datetime.datetime(2021, 1, 15, 0, 0, 0, 0), "quarter", 4, datetime.datetime(2022, 1, 15, 0, 0, 0, 0)),
+    # Year addition
+    (datetime.datetime(2020, 2, 29, 0, 0, 0, 0), "year", 1, datetime.datetime(2021, 2, 28, 0, 0, 0, 0)),  # leap year handling
+    (datetime.datetime(2021, 6, 15, 0, 0, 0, 0), "year", 1, datetime.datetime(2022, 6, 15, 0, 0, 0, 0)),
+]
+
+@pytest.mark.parametrize("input_dt, unit, n, expected", ADD_SINGLE_UNIT_TESTS)
+def test_add_single_unit(input_dt, unit, n, expected):
+    assert dates.add_single_unit(input_dt, unit, n) == expected, f"add_single_unit({input_dt}, {unit}, {n}) = {dates.add_single_unit(input_dt, unit, n)}, expected {expected}"
+
+
 if __name__ == "__main__":  # pragma: no cover
     print(f"RUNNING BATTERY OF {len(DATE_TESTS)} DATE TESTS")
     start = time.perf_counter_ns()
