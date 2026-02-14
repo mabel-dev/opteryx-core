@@ -42,7 +42,6 @@ STARTS_WITH(x, pattern)                     → x LIKE 'pattern%'
 a = ANY(z) AND b = ANY(z) AND c = ANY(z)    → z @>> (a, b, c)
 """
 
-import datetime
 import re
 from typing import Callable
 from typing import Dict
@@ -59,7 +58,9 @@ from opteryx.planner.binder.operator_map import determine_type
 from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner import LogicalPlanNode
 from opteryx.planner.logical_planner import LogicalPlanStepType
-from opteryx.utils.dates import truncate_single, add_single_unit, parse_iso
+from opteryx.utils.dates import add_single_unit
+from opteryx.utils.dates import parse_iso
+from opteryx.utils.dates import truncate_single
 from opteryx.utils.sql import sql_like_to_regex
 
 from .optimization_strategy import OptimizationStrategy
@@ -320,13 +321,13 @@ def rewrite_ored_eq_to_inlist(predicate, telemetry):
 def rewrite_date_trunc_to_range(predicate, telemetry: QueryTelemetry):
     """
     Rewrite DATE_TRUNC comparisons to range comparisons for better pushdown eligibility.
-    
+
     Examples:
     DATE_TRUNC('year', col) = '1970-01-01'  → col >= '1970-01-01' AND col < '1971-01-01'
     DATE_TRUNC('month', col) <= '2021-02-01' → col < '2021-03-01'
     DATE_TRUNC('day', col) > '2021-01-15'    → col >= '2021-01-16'
     """
-    
+
     # Extract the DATE_TRUNC function and the comparison value
     # Determine which side is the function and which is the literal
     if predicate.left.node_type == NodeType.FUNCTION and predicate.left.value == "DATE_TRUNC":
@@ -339,29 +340,36 @@ def rewrite_date_trunc_to_range(predicate, telemetry: QueryTelemetry):
         literal_node = predicate.left
         operator = predicate.value
         # Flip the operator if the function is on the right
-        flip_ops = {"Lt": "Gt", "Gt": "Lt", "LtEq": "GtEq", "GtEq": "LtEq", "Eq": "Eq", "NotEq": "NotEq"}
+        flip_ops = {
+            "Lt": "Gt",
+            "Gt": "Lt",
+            "LtEq": "GtEq",
+            "GtEq": "LtEq",
+            "Eq": "Eq",
+            "NotEq": "NotEq",
+        }
         operator = flip_ops.get(operator, operator)
         is_left_func = False
     else:
         return predicate
-    
+
     # Ensure the function has the right structure
     if len(func_node.parameters) != 2:
         return predicate
-    
+
     unit_node = func_node.parameters[0]
     column_node = func_node.parameters[1]
-    
+
     # Unit must be a literal string
     if unit_node.node_type != NodeType.LITERAL or not isinstance(unit_node.value, str):
         return predicate
-    
+
     unit = unit_node.value.lower()
-    
+
     # Literal must be a string or timestamp
     if literal_node.node_type != NodeType.LITERAL:
         return predicate
-    
+
     # Parse the literal value
     parsed_literal = parse_iso(literal_node.value)
     if parsed_literal is None:
@@ -374,17 +382,17 @@ def rewrite_date_trunc_to_range(predicate, telemetry: QueryTelemetry):
     except ValueError:
         # Unsupported unit
         return predicate
-    
+
     # Determine if the literal is aligned (already at the boundary)
-    is_aligned = (parsed_literal == floor_val)
-    
+    is_aligned = parsed_literal == floor_val
+
     telemetry.optimization_predicate_rewriter_date_trunc_to_range += 1
-    
+
     # Get the column's actual type to match the literal type
     column_type = OrsoTypes.VARCHAR
-    if hasattr(column_node, 'schema_column') and column_node.schema_column:
+    if hasattr(column_node, "schema_column") and column_node.schema_column:
         column_type = column_node.schema_column.type
-    
+
     # Helper function to create a literal timestamp node with VARCHAR type
     # (ISO format strings work fine for timestamp comparisons)
     def make_timestamp_literal(dt):
@@ -395,7 +403,7 @@ def rewrite_date_trunc_to_range(predicate, telemetry: QueryTelemetry):
         )
         lit.schema_column = ExpressionColumn(name="", type=column_type)
         return lit
-    
+
     # Rewrite based on operator and alignment
     if operator == "Eq":
         if not is_aligned:
@@ -404,11 +412,11 @@ def rewrite_date_trunc_to_range(predicate, telemetry: QueryTelemetry):
             predicate.type = OrsoTypes.BOOLEAN
             predicate.value = False
             return predicate
-        
+
         # Aligned equality: col >= floor AND col < next
         floor_literal = make_timestamp_literal(floor_val)
         next_literal = make_timestamp_literal(next_floor)
-        
+
         gte_pred = Node(
             node_type=NodeType.COMPARISON_OPERATOR,
             value="GtEq",
@@ -416,7 +424,7 @@ def rewrite_date_trunc_to_range(predicate, telemetry: QueryTelemetry):
             right=floor_literal,
             schema_column=ExpressionColumn(name="", type=OrsoTypes.BOOLEAN),
         )
-        
+
         lt_pred = Node(
             node_type=NodeType.COMPARISON_OPERATOR,
             value="Lt",
@@ -424,38 +432,38 @@ def rewrite_date_trunc_to_range(predicate, telemetry: QueryTelemetry):
             right=next_literal,
             schema_column=ExpressionColumn(name="", type=OrsoTypes.BOOLEAN),
         )
-        
+
         # Create AND node
         predicate.node_type = NodeType.AND
         predicate.value = "And"
         predicate.left = gte_pred
         predicate.right = lt_pred
-        
+
     elif operator == "Lt":
         # col < floor
         predicate.left = column_node
         predicate.right = make_timestamp_literal(floor_val)
         predicate.value = "Lt"
-        
+
     elif operator == "LtEq":
         # col < next_floor
         predicate.left = column_node
         predicate.value = "Lt"
         predicate.right = make_timestamp_literal(next_floor)
-        
+
     elif operator == "Gt":
         # col >= next_floor
         predicate.left = column_node
         predicate.value = "GtEq"
         predicate.right = make_timestamp_literal(next_floor)
-        
+
     elif operator == "GtEq":
         # col >= floor (aligned) or col >= next_floor (non-aligned)
         bound = floor_val if is_aligned else next_floor
         predicate.left = column_node
         predicate.value = "GtEq"
         predicate.right = make_timestamp_literal(bound)
-        
+
     elif operator == "NotEq":
         # col < floor OR col >= next_floor - create an OR node
         lt_pred = Node(
@@ -465,7 +473,7 @@ def rewrite_date_trunc_to_range(predicate, telemetry: QueryTelemetry):
             right=make_timestamp_literal(floor_val),
             schema_column=ExpressionColumn(name="", type=OrsoTypes.BOOLEAN),
         )
-        
+
         gte_pred = Node(
             node_type=NodeType.COMPARISON_OPERATOR,
             value="GtEq",
@@ -473,12 +481,12 @@ def rewrite_date_trunc_to_range(predicate, telemetry: QueryTelemetry):
             right=make_timestamp_literal(next_floor),
             schema_column=ExpressionColumn(name="", type=OrsoTypes.BOOLEAN),
         )
-        
+
         predicate.node_type = NodeType.OR
         predicate.value = "Or"
         predicate.left = lt_pred
         predicate.right = gte_pred
-    
+
     return predicate
 
 
@@ -517,8 +525,11 @@ def _rewrite_predicate(predicate, telemetry: QueryTelemetry):
 
     # Rewrite DATE_TRUNC comparisons to range comparisons
     if predicate.node_type == NodeType.COMPARISON_OPERATOR:
-        if (predicate.left.node_type == NodeType.FUNCTION and predicate.left.value == "DATE_TRUNC") or \
-           (predicate.right.node_type == NodeType.FUNCTION and predicate.right.value == "DATE_TRUNC"):
+        if (
+            predicate.left.node_type == NodeType.FUNCTION and predicate.left.value == "DATE_TRUNC"
+        ) or (
+            predicate.right.node_type == NodeType.FUNCTION and predicate.right.value == "DATE_TRUNC"
+        ):
             predicate = rewrite_date_trunc_to_range(predicate, telemetry)
             # After rewrite, return early if it's no longer a comparison (e.g., became a literal or AND node)
             if predicate.node_type != NodeType.COMPARISON_OPERATOR:

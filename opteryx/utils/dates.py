@@ -151,7 +151,7 @@ def parse_iso(value):
 def truncate_single(dt: datetime.datetime, unit: str) -> datetime.datetime:
     """
     Floor a datetime to the start of the specified unit.
-    
+
     Supports units: 'second', 'minute', 'hour', 'day', 'week', 'month', 'quarter', 'year'
     Week is ISO week (Monday-based).
     """
@@ -182,7 +182,7 @@ def truncate_single(dt: datetime.datetime, unit: str) -> datetime.datetime:
 def add_single_unit(dt: datetime.datetime, unit: str, n: int = 1) -> datetime.datetime:
     """
     Add n units to a datetime.
-    
+
     Supports units: 'second', 'minute', 'hour', 'day', 'week', 'month', 'quarter', 'year'
     Week is treated as 7 days.
     Month/quarter/year use add_months to handle edge cases (e.g., Jan 31 + 1 month = Feb 28/29).

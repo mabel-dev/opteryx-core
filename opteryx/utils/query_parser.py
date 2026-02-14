@@ -265,9 +265,11 @@ def parse_query_info(sql: str) -> Dict[str, Any]:
     """
     from opteryx.planner.sql_rewriter import do_sql_rewrite
     from opteryx.third_party import sqloxide
+    from opteryx.utils.sql import remove_comments
 
     # Clean the SQL using the same rewriter as the main query planner
-    clean_sql = do_sql_rewrite(sql)
+    decommented_sql = remove_comments(sql)
+    clean_sql = do_sql_rewrite(decommented_sql)
 
     # Parse the SQL to get the AST
     try:
