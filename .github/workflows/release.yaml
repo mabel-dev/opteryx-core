@@ -21,7 +21,7 @@ jobs:
             manylinux_image: "quay.io/pypa/manylinux2014_x86_64"
           - runner-python: "3.13"
             pybuild: "3.14t"
-            # try a newer manylinux variant for 3.14T (may include cp314T)
+            # try a newer manylinux variant for 3.14t (may include cp314t)
             manylinux_image: "quay.io/pypa/manylinux_2_31_x86_64"
     runs-on: ubuntu-latest
     steps:
@@ -41,17 +41,41 @@ jobs:
       - name: Build Wheels
         # Builds optimized wheels with LTO enabled for better xxhash and critical path performance
         # PGO (Profile-Guided Optimization) is supported but disabled by default
-        run: >
-          docker run --rm
-          -e PLAT=manylinux2014_x86_64
-          -e PACKAGE_NAME=opteryx
-          -e PYTHON_VERSION=${{ matrix.pybuild }}
-          -e OPTERYX_ENABLE_LTO=1
-          -e OPTERYX_ENABLE_PGO=0
-          -v `pwd`:/io
-          --workdir /io
-          ${{ matrix.manylinux_image }}
-          io/dev/build-wheels.sh
+        run: |
+          set -euo pipefail
+
+          DESIRED_IMAGE="${{ matrix.manylinux_image }}"
+          echo "Attempting to pull ${DESIRED_IMAGE}..."
+
+          # Try the configured image first; if it fails, try known fallbacks.
+          if docker pull "${DESIRED_IMAGE}" 2>/dev/null; then
+            IMAGE="${DESIRED_IMAGE}"
+          else
+            echo "Failed to pull ${DESIRED_IMAGE}; trying GHCR fallback..."
+            if docker pull ghcr.io/pypa/manylinux/manylinux_2_31_x86_64 2>/dev/null; then
+              IMAGE=ghcr.io/pypa/manylinux/manylinux_2_31_x86_64
+            elif docker pull quay.io/pypa/manylinux2014_x86_64 2>/dev/null; then
+              IMAGE=quay.io/pypa/manylinux2014_x86_64
+            else
+              echo "ERROR: no manylinux image available to run tests. Tried: ${DESIRED_IMAGE}, ghcr.io/pypa/manylinux/manylinux_2_31_x86_64, quay.io/pypa/manylinux2014_x86_64"
+              echo "Available /opt/python in runner for debugging:"
+              ls -1 /opt/python || true
+              exit 125
+            fi
+          fi
+
+          echo "Using container image: ${IMAGE}"
+
+          docker run --rm \
+            -e PLAT=manylinux2014_x86_64 \
+            -e PACKAGE_NAME=opteryx \
+            -e PYTHON_VERSION=${{ matrix.pybuild }} \
+            -e OPTERYX_ENABLE_LTO=1 \
+            -e OPTERYX_ENABLE_PGO=0 \
+            -v `pwd`:/io \
+            --workdir /io \
+            "${IMAGE}" \
+            io/dev/build-wheels.sh
 
       - name: Verify wheel xxhash SIMD backend (release)
         run: |
