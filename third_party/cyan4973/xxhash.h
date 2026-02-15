@@ -4724,10 +4724,7 @@ XXH3_len_0to16_64b(const xxh_u8* input, size_t len, const xxh_u8* secret, XXH64_
 XXH_FORCE_INLINE xxh_u64 XXH3_mix16B(const xxh_u8* XXH_RESTRICT input,
                                      const xxh_u8* XXH_RESTRICT secret, xxh_u64 seed64)
 {
-/* OPTERYX OPTIMIZATION: Removed GCC autovectorization hack.
- * The compiler guard disrupts optimization for minor gains. On modern CPUs,
- * scalar code is fine and the guard causes more problems than it solves.
- * Analytics workloads benefit from predictable, fast scalar execution. */
+    XXH_COMPILER_GUARD(seed64);
     {   xxh_u64 const input_lo = XXH_readLE64(input);
         xxh_u64 const input_hi = XXH_readLE64(input+8);
         return XXH3_mul128_fold64(
