@@ -21,8 +21,8 @@ jobs:
             manylinux_image: "quay.io/pypa/manylinux2014_x86_64"
           - runner-python: "3.13"
             pybuild: "3.14t"
-            # try a newer manylinux variant for 3.14t (may include cp314t)
-            manylinux_image: "quay.io/pypa/manylinux_2_31_x86_64"
+            # use GHCR manylinux image (public) for 3.14t
+            manylinux_image: "ghcr.io/pypa/manylinux/manylinux_2_31_x86_64"
     runs-on: ubuntu-latest
     steps:
       - name: Set up Python (runner)
