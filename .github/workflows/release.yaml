@@ -20,7 +20,7 @@ jobs:
             pybuild: "3.13"
             manylinux_image: "quay.io/pypa/manylinux2014_x86_64"
           - runner-python: "3.13"
-            pybuild: "3.14T"
+            pybuild: "3.14t"
             # try a newer manylinux variant for 3.14T (may include cp314T)
             manylinux_image: "quay.io/pypa/manylinux_2_31_x86_64"
     runs-on: ubuntu-latest
@@ -89,16 +89,16 @@ jobs:
           path: dist-linux-3.13
       - run: mv -v dist-linux-3.13/* dist/
 
-      - name: Stage linux 3.14T
+      - name: Stage linux 3.14t
         uses: actions/download-artifact@v4.1.7
         with:
-          name: dist-linux-3.14T
-          path: dist-linux-3.14T
+          name: dist-linux-3.14t
+          path: dist-linux-3.14t
       - run: |
-          if [ -d dist-linux-3.14T ]; then
-            mv -v dist-linux-3.14T/* dist/
+          if [ -d dist-linux-3.14t ]; then
+            mv -v dist-linux-3.14t/* dist/
           else
-            echo "dist-linux-3.14T artifact not found; skipping"
+            echo "dist-linux-3.14t artifact not found; skipping"
           fi
 
       - name: Publish distribution 📦 to PyPI
