@@ -14,7 +14,37 @@ export PATH="$HOME/.cargo/bin:$PATH"
 cd $GITHUB_WORKSPACE/io
 cd io
 
-PYBIN="/opt/python/cp${PYTHON_VERSION//.}-cp${PYTHON_VERSION//.}/bin"
+# Resolve /opt/python interpreter directories robustly for variants like cp314T, cp314t or cp314
+py_tag="${PYTHON_VERSION//./}"
+PYBIN_CANDIDATES=()
+
+# If the tag ends with a T/t (free-threaded), try with and without the suffix and both cases
+if [[ "$py_tag" =~ ^([0-9]+)([Tt])$ ]]; then
+  base="${BASH_REMATCH[1]}"
+  PYBIN_CANDIDATES+=("/opt/python/cp${py_tag}-cp${py_tag}/bin")
+  PYBIN_CANDIDATES+=("/opt/python/cp${base}-cp${base}/bin")
+  PYBIN_CANDIDATES+=("/opt/python/cp${base}T-cp${base}T/bin")
+  PYBIN_CANDIDATES+=("/opt/python/cp${base}t-cp${base}t/bin")
+else
+  PYBIN_CANDIDATES+=("/opt/python/cp${py_tag}-cp${py_tag}/bin")
+fi
+
+# Pick the first candidate that exists
+PYBIN=""
+for c in "${PYBIN_CANDIDATES[@]}"; do
+  if [ -x "${c}/python" ]; then
+    PYBIN="$c"
+    break
+  fi
+done
+
+if [ -z "$PYBIN" ]; then
+  echo "No matching /opt/python interpreter found for PYTHON_VERSION=${PYTHON_VERSION}"
+  echo "Tried these candidates:"
+  for c in "${PYBIN_CANDIDATES[@]}"; do echo "  - $c"; done
+  echo "Available /opt/python entries:"; ls -1 /opt/python || true
+  exit 1
+fi
 
 "${PYBIN}/python" -m pip install -U setuptools wheel setuptools-rust numpy cython auditwheel
 
