@@ -18,8 +18,11 @@ jobs:
         include:
           - runner-python: "3.13"
             pybuild: "3.13"
+            manylinux_image: "quay.io/pypa/manylinux2014_x86_64"
           - runner-python: "3.13"
             pybuild: "3.14T"
+            # try a newer manylinux variant for 3.14T (may include cp314T)
+            manylinux_image: "quay.io/pypa/manylinux_2_31_x86_64"
     runs-on: ubuntu-latest
     steps:
       - name: Set up Python (runner)
@@ -47,7 +50,7 @@ jobs:
           -e OPTERYX_ENABLE_PGO=0
           -v `pwd`:/io
           --workdir /io
-          quay.io/pypa/manylinux2014_x86_64
+          ${{ matrix.manylinux_image }}
           io/dev/build-wheels.sh
 
       - name: Verify wheel xxhash SIMD backend (release)
