@@ -1118,14 +1118,8 @@ XXH_PUBLIC_API XXH_PUREF XXH64_hash_t XXH64_hashFromCanonical(XXH_NOESCAPE const
  * Unless set explicitly, determined automatically.
  */
 #  define XXH_SCALAR 0 /*!< Portable scalar version */
-#  define XXH_SSE2   1 /*!< SSE2 for Pentium 4, Opteron, all x86_64. */
 #  define XXH_AVX2   2 /*!< AVX2 for Haswell and Bulldozer */
-#  define XXH_AVX512 3 /*!< AVX512 for Skylake and Icelake */
 #  define XXH_NEON   4 /*!< NEON for most ARMv7-A, all AArch64, and WASM SIMD128 */
-#  define XXH_VSX    5 /*!< VSX and ZVector for POWER8/z13 (64-bit) */
-#  define XXH_SVE    6 /*!< SVE for some ARMv8-A and ARMv9-A */
-#  define XXH_LSX    7 /*!< LSX (128-bit SIMD) for LoongArch64 */
-#  define XXH_LASX   8 /*!< LASX (256-bit SIMD) for LoongArch64 */
 
 
 /*-**********************************************************************
@@ -1403,7 +1397,9 @@ typedef struct {
  * @see XXH3_128bits_withSeed(), XXH3_128bits_withSecret(): other seeding variants
  * @see @ref single_shot_example "Single Shot Example" for an example.
  */
+#ifndef XXH_NO_XXH128
 XXH_PUBLIC_API XXH_PUREF XXH128_hash_t XXH3_128bits(XXH_NOESCAPE const void* data, size_t len);
+#endif
 /*! @brief Calculates 128-bit seeded variant of XXH3 hash of @p data.
  *
  * @param data The block of data to be hashed, at least @p length bytes in size.
@@ -1423,7 +1419,9 @@ XXH_PUBLIC_API XXH_PUREF XXH128_hash_t XXH3_128bits(XXH_NOESCAPE const void* dat
  * @see XXH3_128bits(), XXH3_128bits_withSecret(): other seeding variants
  * @see @ref single_shot_example "Single Shot Example" for an example.
  */
+#ifndef XXH_NO_XXH128
 XXH_PUBLIC_API XXH_PUREF XXH128_hash_t XXH3_128bits_withSeed(XXH_NOESCAPE const void* data, size_t len, XXH64_hash_t seed);
+#endif
 /*!
  * @brief Calculates 128-bit variant of XXH3 with a custom "secret".
  *
@@ -1451,7 +1449,9 @@ XXH_PUBLIC_API XXH_PUREF XXH128_hash_t XXH3_128bits_withSeed(XXH_NOESCAPE const 
  *
  * @see @ref single_shot_example "Single Shot Example" for an example.
  */
+#ifndef XXH_NO_XXH128
 XXH_PUBLIC_API XXH_PUREF XXH128_hash_t XXH3_128bits_withSecret(XXH_NOESCAPE const void* data, size_t len, XXH_NOESCAPE const void* secret, size_t secretSize);
+#endif
 
 /*******   Streaming   *******/
 #ifndef XXH_NO_STREAM
@@ -1485,7 +1485,9 @@ XXH_PUBLIC_API XXH_PUREF XXH128_hash_t XXH3_128bits_withSecret(XXH_NOESCAPE cons
  *
  * @see @ref streaming_example "Streaming Example"
  */
+#ifndef XXH_NO_XXH128
 XXH_PUBLIC_API XXH_errorcode XXH3_128bits_reset(XXH_NOESCAPE XXH3_state_t* statePtr);
+#endif
 
 /*!
  * @brief Resets an @ref XXH3_state_t with 64-bit seed to begin a new hash.
@@ -1506,7 +1508,9 @@ XXH_PUBLIC_API XXH_errorcode XXH3_128bits_reset(XXH_NOESCAPE XXH3_state_t* state
  *
  * @see @ref streaming_example "Streaming Example"
  */
+#ifndef XXH_NO_XXH128
 XXH_PUBLIC_API XXH_errorcode XXH3_128bits_reset_withSeed(XXH_NOESCAPE XXH3_state_t* statePtr, XXH64_hash_t seed);
+#endif
 /*!
  * @brief Resets an @ref XXH3_state_t with secret data to begin a new hash.
  *
@@ -1529,7 +1533,9 @@ XXH_PUBLIC_API XXH_errorcode XXH3_128bits_reset_withSeed(XXH_NOESCAPE XXH3_state
  *
  * @see @ref streaming_example "Streaming Example"
  */
+#ifndef XXH_NO_XXH128
 XXH_PUBLIC_API XXH_errorcode XXH3_128bits_reset_withSecret(XXH_NOESCAPE XXH3_state_t* statePtr, XXH_NOESCAPE const void* secret, size_t secretSize);
+#endif
 
 /*!
  * @brief Consumes a block of @p input to an @ref XXH3_state_t.
@@ -1569,7 +1575,9 @@ XXH_PUBLIC_API XXH_errorcode XXH3_128bits_update (XXH_NOESCAPE XXH3_state_t* sta
  *   digest, and update again.
  *
  */
+#ifndef XXH_NO_XXH128
 XXH_PUBLIC_API XXH_PUREF XXH128_hash_t XXH3_128bits_digest (XXH_NOESCAPE const XXH3_state_t* statePtr);
+#endif
 #endif /* !XXH_NO_STREAM */
 
 /* Following helper functions make it possible to compare XXH128_hast_t values.
@@ -3974,31 +3982,13 @@ XXH_PUBLIC_API XXH64_hash_t XXH64_hashFromCanonical(XXH_NOESCAPE const XXH64_can
 #endif
 
 #ifndef XXH_VECTOR    /* can be defined on command line */
-#  if defined(__ARM_FEATURE_SVE)
-#    define XXH_VECTOR XXH_SVE
-#  elif ( \
-        defined(__ARM_NEON__) || defined(__ARM_NEON) /* gcc */ \
+#  if (defined(__ARM_NEON__) || defined(__ARM_NEON) /* gcc */ \
      || defined(_M_ARM) || defined(_M_ARM64) || defined(_M_ARM64EC) /* msvc */ \
-     || (defined(__wasm_simd128__) && XXH_HAS_INCLUDE(<arm_neon.h>)) /* wasm simd128 via SIMDe */ \
-   ) && ( \
-        defined(_WIN32) || defined(__LITTLE_ENDIAN__) /* little endian only */ \
-    || (defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__) \
-   )
+     || (defined(__wasm_simd128__) && XXH_HAS_INCLUDE(<arm_neon.h>)) /* wasm simd128 via SIMDe */) \
+    && (defined(_WIN32) || defined(__LITTLE_ENDIAN__) || (defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__))
 #    define XXH_VECTOR XXH_NEON
-#  elif defined(__AVX512F__)
-#    define XXH_VECTOR XXH_AVX512
 #  elif defined(__AVX2__)
 #    define XXH_VECTOR XXH_AVX2
-#  elif defined(__SSE2__) || defined(_M_AMD64) || defined(_M_X64) || (defined(_M_IX86_FP) && (_M_IX86_FP == 2))
-#    define XXH_VECTOR XXH_SSE2
-#  elif (defined(__PPC64__) && defined(__POWER8_VECTOR__)) \
-     || (defined(__s390x__) && defined(__VEC__)) \
-     && defined(__GNUC__) /* TODO: IBM XL */
-#    define XXH_VECTOR XXH_VSX
-#  elif defined(__loongarch_asx)
-#    define XXH_VECTOR XXH_LASX
-#  elif defined(__loongarch_sx)
-#    define XXH_VECTOR XXH_LSX
 #  else
 #    define XXH_VECTOR XXH_SCALAR
 #  endif

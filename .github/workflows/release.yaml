@@ -32,11 +32,21 @@ jobs:
           -e PLAT=manylinux2014_x86_64
           -e PACKAGE_NAME=opteryx
           -e PYTHON_VERSION=${{ matrix.python-version }}
+          -e OPTERYX_ENABLE_LTO=1            # enable LTO for release wheels
+          -e OPTERYX_ENABLE_PGO=0            # PGO is supported via OPTERYX_ENABLE_PGO but disabled by default
           -v `pwd`:/io
           --workdir /io
           quay.io/pypa/manylinux2014_x86_64
           io/dev/build-wheels.sh
 
+      - name: Verify wheel xxhash SIMD backend (release)
+        run: |
+          # install the freshly built manylinux wheel and print the compiled xxhash backend
+          pip install io/dist/*manylinux2014_x86_64*.whl
+          python - <<'PY'
+import opteryx.third_party.cyan4973.xxhash as _xh
+print('release wheel xxhash compiled vector backend:', _xh.get_compiled_xxhash_vector())
+PY
       - name: Archive Wheels
         uses: actions/upload-artifact@v4
         with:
