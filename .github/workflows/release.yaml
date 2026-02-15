@@ -15,13 +15,17 @@ jobs:
       fail-fast: false
       max-parallel: 8
       matrix:
-        python-version: ["3.13"]
+        include:
+          - runner-python: "3.13"
+            pybuild: "3.13"
+          - runner-python: "3.13"
+            pybuild: "3.14T"
     runs-on: ubuntu-latest
     steps:
-      - name: Set up Python
+      - name: Set up Python (runner)
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: ${{ matrix.runner-python }}
 
       - name: Check out repository
         uses: actions/checkout@v4.1.7
@@ -38,7 +42,7 @@ jobs:
           docker run --rm
           -e PLAT=manylinux2014_x86_64
           -e PACKAGE_NAME=opteryx
-          -e PYTHON_VERSION=${{ matrix.python-version }}
+          -e PYTHON_VERSION=${{ matrix.pybuild }}
           -e OPTERYX_ENABLE_LTO=1
           -e OPTERYX_ENABLE_PGO=0
           -v `pwd`:/io
@@ -53,7 +57,7 @@ jobs:
       - name: Archive Wheels
         uses: actions/upload-artifact@v4
         with:
-          name: dist-linux-${{ matrix.python-version }}
+          name: dist-linux-${{ matrix.pybuild }}
           path: io/dist/*manylinux2014_x86_64*.whl
 
   upload:
@@ -81,6 +85,18 @@ jobs:
           name: dist-linux-3.13
           path: dist-linux-3.13
       - run: mv -v dist-linux-3.13/* dist/
+
+      - name: Stage linux 3.14T
+        uses: actions/download-artifact@v4.1.7
+        with:
+          name: dist-linux-3.14T
+          path: dist-linux-3.14T
+      - run: |
+          if [ -d dist-linux-3.14T ]; then
+            mv -v dist-linux-3.14T/* dist/
+          else
+            echo "dist-linux-3.14T artifact not found; skipping"
+          fi
 
       - name: Publish distribution 📦 to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
