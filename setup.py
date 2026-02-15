@@ -86,7 +86,7 @@ def detect_architecture():
 
 arch = detect_architecture()
 CPP_FLAGS = ["-O3", "-std=c++17"]
-C_FLAGS = ["-O3"]
+C_FLAGS = ["-O3", "-std=c11"]  # C11 required for xxhash _Alignas support
 
 # Optional build-time optimizations (LTO / PGO) are gated by environment
 # variables so CI/release automation can enable them without changing
@@ -97,7 +97,7 @@ OPTERYX_PGO_PHASE = os.environ.get("OPTERYX_PGO_PHASE", "generate").lower()  # '
 
 if is_win():
     CPP_FLAGS = ["/O2", "/std:c++17"]
-    C_FLAGS = ["/O2"]
+    C_FLAGS = ["/O2"]  # MSVC supports C11 by default in modern versions
     # MSVC LTO (link-time code generation)
     if OPTERYX_ENABLE_LTO:
         CPP_FLAGS.append('/GL')
