@@ -48,12 +48,8 @@ jobs:
 
       - name: Verify wheel xxhash SIMD backend (release)
         run: |
-          # install the freshly built manylinux wheel and print the compiled xxhash backend
           pip install io/dist/*manylinux2014_x86_64*.whl
-          python - <<'PY'
-import opteryx.third_party.cyan4973.xxhash as _xh
-print('release wheel xxhash compiled vector backend:', _xh.get_compiled_xxhash_vector())
-PY
+          python -c "import opteryx.third_party.cyan4973.xxhash as _xh; print('release wheel xxhash compiled vector backend:', _xh.get_compiled_xxhash_vector())"
       - name: Archive Wheels
         uses: actions/upload-artifact@v4
         with:
