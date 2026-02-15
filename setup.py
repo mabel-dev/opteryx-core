@@ -309,7 +309,13 @@ extensions = [
             "src/cpp/xxhash_build_info.c",
         ],
         include_dirs=include_dirs,
-        define_macros=[("XXH_NO_XXH128", "1")],
+        define_macros=[
+            ("XXH_NO_XXH128", "1"),
+            # Opteryx-specific optimizations for analytics workloads
+            ("XXH_INLINE_ALL", "1"),  # Force inlining for better optimization
+            ("XXH_ACCEPT_NULL_INPUT_POINTER", "0"),  # We never pass NULL
+            ("XXH_FORCE_ALIGN_CHECK", "0"),  # Inputs are properly aligned
+        ],
         extra_compile_args=C_FLAGS,
     ),
     Extension(

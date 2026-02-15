@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <atomic>
+#include <cstring>
 
 #include "simd_dispatch.h"
 #include "cpu_features.h"
@@ -11,6 +12,10 @@
 #include <immintrin.h>
 #elif defined(__ARM_NEON) || defined(__ARM_NEON__)
 #include <arm_neon.h>
+#endif
+
+#if defined(_MSC_VER)
+#include <intrin.h>
 #endif
 
 namespace {
