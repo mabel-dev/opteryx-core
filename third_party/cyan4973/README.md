@@ -163,7 +163,7 @@ The following macros can be set at compilation time to modify `libxxhash`'s beha
                   `2`: makes code as small as possible, performance may cry
 
 #### Build modifiers specific for XXH3
-- `XXH_VECTOR` : manually select a vector instruction set (default: auto-selected at compilation time). Available instruction sets are `XXH_SCALAR`, `XXH_SSE2`, `XXH_AVX2`, `XXH_AVX512`, `XXH_NEON` and `XXH_VSX`. Compiler may require additional flags to ensure proper support (for example, `gcc` on x86_64 requires `-mavx2` for `AVX2`, or `-mavx512f` for `AVX512`).
+- `XXH_VECTOR` : manually select a vector instruction set (default: auto-selected at compilation time). This build keeps only `XXH_SCALAR`, `XXH_AVX2` and `XXH_NEON` backends. Compiler may require additional flags to ensure proper support (for example, `gcc` on x86_64 requires `-mavx2` for `AVX2`).
 - `XXH_PREFETCH_DIST` : select prefetching distance. For close-to-metal adaptation to specific hardware platforms. XXH3 only.
 - `XXH_NO_PREFETCH` : disable prefetching. Some platforms or situations may perform better without prefetching. XXH3 only.
 

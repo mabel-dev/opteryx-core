@@ -16,6 +16,20 @@ cdef extern from "xxhash.h":
 cdef inline uint64_t cy_xxhash3_64(const void *key, size_t len) except? 0 nogil:
     return XXH3_64bits(key, len)
 
+# Diagnostic: expose which vector backend was compiled into the linked xxHash
+cdef extern from "xxhash_build_info.h":
+    const char* opteryx_xxhash_compiled_vector() nogil
+
+from cpython.unicode cimport PyUnicode_FromString
+
+cpdef str get_compiled_xxhash_vector():
+    """Return the vector backend that was compiled into xxhash (diagnostic).
+
+    Possible return values: 'avx2', 'neon', 'scalar'.
+    """
+    cdef const char* c_backend = opteryx_xxhash_compiled_vector()
+    return PyUnicode_FromString(c_backend)
+
 cpdef uint64_t hash_bytes(bytes key):
     """ Python-accessible function for hashing bytes. """
     cdef char* data

@@ -88,18 +88,55 @@ arch = detect_architecture()
 CPP_FLAGS = ["-O3", "-std=c++17"]
 C_FLAGS = ["-O3"]
 
+# Optional build-time optimizations (LTO / PGO) are gated by environment
+# variables so CI/release automation can enable them without changing
+# developer's local build defaults.
+OPTERYX_ENABLE_LTO = os.environ.get("OPTERYX_ENABLE_LTO", "0").lower() in ("1", "true", "yes")
+OPTERYX_ENABLE_PGO = os.environ.get("OPTERYX_ENABLE_PGO", "0").lower() in ("1", "true", "yes")
+OPTERYX_PGO_PHASE = os.environ.get("OPTERYX_PGO_PHASE", "generate").lower()  # 'generate' or 'use'
+
 if is_win():
     CPP_FLAGS = ["/O2", "/std:c++17"]
     C_FLAGS = ["/O2"]
+    # MSVC LTO (link-time code generation)
+    if OPTERYX_ENABLE_LTO:
+        CPP_FLAGS.append('/GL')
+        # linker flag /LTCG will be added via extra_link_args when needed
 elif is_linux():
     CPP_FLAGS.append("-fvisibility=default")
     C_FLAGS.append("-fvisibility=default")
+
+# Enable LTO for non-Windows when requested
+if OPTERYX_ENABLE_LTO and not is_win():
+    CPP_FLAGS.append("-flto")
+    C_FLAGS.append("-flto")
+    # ensure linker uses LTO as well
+    LD_EXTRA = list(LD_EXTRA) if 'LD_EXTRA' in globals() else []
+    LD_EXTRA.append("-flto")
+
+# PGO support (opt-in). The CI/release pipeline may run a profile-generate
+# build followed by exercising the binary and then a profile-use rebuild.
+if OPTERYX_ENABLE_PGO and not is_win():
+    if OPTERYX_PGO_PHASE == 'generate':
+        CPP_FLAGS.append("-fprofile-generate")
+        C_FLAGS.append("-fprofile-generate")
+    elif OPTERYX_PGO_PHASE == 'use':
+        CPP_FLAGS.append("-fprofile-use")
+        CPP_FLAGS.append("-fprofile-correction")
+        C_FLAGS.append("-fprofile-use")
+        C_FLAGS.append("-fprofile-correction")
+
 
 # On Linux builds (manylinux) prefer static linking of libstdc++/libgcc to avoid
 # runtime dependency on host-provided newer libstdc++ which can require
 # GLIBCXX/GLIBC versions not available on older manylinux targets.
 # macOS/Clang does not support -static-libgcc
 LD_EXTRA = ["-static-libstdc++"] if is_mac() else ["-static-libstdc++", "-static-libgcc"]
+
+# MSVC LTO linker flag when requested
+if is_win() and OPTERYX_ENABLE_LTO:
+    # '/LTCG' enables link-time code generation on MSVC
+    LD_EXTRA.append('/LTCG')
 
 # SIMD-specific flags (deterministic baseline to avoid host-specific AVX512/etc.)
 if arch == "x86_64":
@@ -266,8 +303,13 @@ extensions = [
 
     Extension(
         "opteryx.third_party.cyan4973.xxhash",
-        sources=["opteryx/third_party/cyan4973/xxhash.pyx", "third_party/cyan4973/xxhash.c"],
+        sources=[
+            "opteryx/third_party/cyan4973/xxhash.pyx",
+            "third_party/cyan4973/xxhash.c",
+            "src/cpp/xxhash_build_info.c",
+        ],
         include_dirs=include_dirs,
+        define_macros=[("XXH_NO_XXH128", "1")],
         extra_compile_args=C_FLAGS,
     ),
     Extension(

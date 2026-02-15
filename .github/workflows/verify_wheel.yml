@@ -20,6 +20,13 @@ jobs:
       - name: Build wheel
         run: |
           python -m build -w
+      - name: Install wheel and verify xxhash SIMD backend
+        run: |
+          pip install dist/*.whl
+          python - <<'PY'
+import opteryx.third_party.cyan4973.xxhash as _xh
+print('xxhash compiled vector backend:', _xh.get_compiled_xxhash_vector())
+PY
       - name: List dist
         run: ls -lh dist
       - name: Verify wheel inside manylinux container
