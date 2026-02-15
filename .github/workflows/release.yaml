@@ -77,10 +77,40 @@ jobs:
             "${IMAGE}" \
             io/dev/build-wheels.sh
 
-      - name: Verify wheel xxhash SIMD backend (release)
+      - name: Verify wheel xxhash SIMD backend (in manylinux container)
         run: |
-          pip install io/dist/*manylinux2014_x86_64*.whl
-          python -c "import opteryx.third_party.cyan4973.xxhash as _xh; print('release wheel xxhash compiled vector backend:', _xh.get_compiled_xxhash_vector())"
+          set -euo pipefail
+
+          # Run verification inside the manylinux container so we install the
+          # wheel using the *same* Python ABI it was built for.
+          docker run --rm \
+            -v `pwd`:/io \
+            --workdir /io \
+            "${{ matrix.manylinux_image }}" \
+            bash -lc '
+              set -euo pipefail
+              FOUND=0
+              echo "/opt/python entries:"
+              ls -1 /opt/python || true
+
+              for PY in /opt/python/*/bin/python*; do
+                echo "Trying interpreter: $PY"
+                VER=$($PY -c "import sys; print(f'cp{sys.version_info[0]}{sys.version_info[1]}')")
+                WHEEL=$(ls /io/io/dist/*${VER}*manylinux*.whl 2>/dev/null || true)
+                if [ -n "$WHEEL" ]; then
+                  echo "Installing $WHEEL with $PY"
+                  $PY -m pip install --no-deps "$WHEEL"
+                  $PY -c "import opteryx.third_party.cyan4973.xxhash as _xh; print('release wheel xxhash compiled vector backend:', _xh.get_compiled_xxhash_vector())"
+                  FOUND=1
+                fi
+              done
+
+              if [ "$FOUND" -eq 0 ]; then
+                echo "No compatible wheel found to verify; list dist:"
+                ls -1 /io/io/dist || true
+                exit 1
+              fi
+            '
       - name: Archive Wheels
         uses: actions/upload-artifact@v4
         with:
