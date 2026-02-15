@@ -4052,19 +4052,13 @@ XXH_PUBLIC_API XXH64_hash_t XXH64_hashFromCanonical(XXH_NOESCAPE const XXH64_can
  * OPTERYX OPTIMIZATION: Removed GCC -O2 pragma limitation.
  * 
  * Original code forced -O2 because GCC overly unrolled AVX2 code, but this costs
- * ~25% performance. Instead, we use targeted unroll pragmas to control specific loops.
+ * ~25% performance. With -O3 enabled at compile time and controlled via C_FLAGS,
+ * we get better performance on modern CPUs without excessive unrolling issues.
  * 
  * The split of _mm256_loadu_si256 for Sandy/Ivy Bridge is irrelevant - those CPUs 
  * don't support AVX2 anyway. Modern AVX2 CPUs (Haswell+) benefit from -O3.
  */
-#if XXH_VECTOR == XXH_AVX2 /* AVX2 */ \
-  && defined(__GNUC__) && !defined(__clang__) /* GCC, not Clang */ \
-  && defined(__OPTIMIZE__) && XXH_SIZE_OPT <= 0 /* respect -O0 and -Os */
-/* Keep optimization high but control unrolling in specific hot loops */
-#  pragma GCC optimize("-O3")
-/* Prevent excessive unrolling in accumulate loops */
-#  pragma GCC unroll 4
-#endif
+/* Note: Removed #pragma GCC unroll (invalid at file scope) and rely on -O3 for optimization */
 
 #if XXH_VECTOR == XXH_NEON
 
