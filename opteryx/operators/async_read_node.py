@@ -262,6 +262,7 @@ class AsyncReadNode(ReaderNode):
                         raise DataError(f"Unable to read blob {blob_name}")
                     raise DataError(f"Unable to read blob {blob_name} - error {err}") from err
                 self.readings["time_reading_blobs"] += time.monotonic_ns() - start
+                self.telemetry.time_reading_blobs += time.monotonic_ns() - start
                 num_rows, _, raw_bytes, morsel = decoded
                 self.readings["rows_seen"] += num_rows
 
@@ -277,8 +278,11 @@ class AsyncReadNode(ReaderNode):
                     morsel = morsel.cast(arrow_schema)
 
                 self.readings["blobs_read"] += 1
+                self.telemetry.blobs_read += 1
                 self.readings["rows_read"] += morsel.num_rows
+                self.telemetry.rows_read += morsel.num_rows
                 self.readings["bytes_processed"] += morsel.nbytes
+                self.telemetry.bytes_processed += morsel.nbytes
                 self.readings["bytes_raw"] += raw_bytes
 
                 self.readings["rows_seen"] += num_rows

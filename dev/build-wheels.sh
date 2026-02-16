@@ -51,8 +51,29 @@ fi
 NPROC=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 1)
 "${PYBIN}/python" setup.py build_ext --parallel "$NPROC" bdist_wheel
 
+# Repair wheels with auditwheel, preserving the 't' suffix for free-threaded builds
 for whl in dist/*.whl; do
-    auditwheel repair "$whl" -w dist/
+    # Check if this is a free-threaded build (cp*-cp*t or cp*t-cp*t pattern)
+    if [[ "$whl" =~ cp[0-9]+-cp[0-9]+t ]] || [[ "$whl" =~ cp[0-9]+t-cp[0-9]+t ]]; then
+        echo "Free-threaded wheel detected: $whl"
+        
+        auditwheel repair "$whl" -w dist/
+        
+        # Rename the repaired wheel to restore the 't' suffix in ABI tag
+        # PyArrow format: cp314-cp314t (no 't' on first, 't' on second)
+        repaired=$(ls -t dist/*manylinux*.whl | head -n1)
+        if [ -f "$repaired" ]; then
+            # Restore 't' suffix: cp314-cp314 -> cp314-cp314t
+            restored=$(echo "$repaired" | sed -E 's/-cp([0-9]+)-cp([0-9]+)-/-cp\1-cp\2t-/')
+            if [ "$repaired" != "$restored" ]; then
+                mv -v "$repaired" "$restored"
+                echo "Restored free-threaded ABI tag: $restored"
+            fi
+        fi
+    else
+        echo "Standard build wheel: $whl"
+        auditwheel repair "$whl" -w dist/
+    fi
 done
 
 # Generate symbol diagnostics for each wheel in parallel
