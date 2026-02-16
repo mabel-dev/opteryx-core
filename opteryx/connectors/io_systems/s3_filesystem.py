@@ -125,10 +125,11 @@ def _read_from_s3(client, bucket, object_name, columns, filters):
     else:
         reader = client.get_object(bucket_name=bucket, object_name=object_name)
 
-    payload = b""
+    chunks = []
     try:
         for chunk in reader.stream():
-            payload += chunk
+            chunks.append(chunk)
+        payload = b"".join(chunks)
     finally:
         reader.close()
 

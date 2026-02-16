@@ -99,6 +99,16 @@ MAX_READ_BUFFER_CAPACITY = READ_BUFFER_CAPACITY
 
 ENABLE_ZERO_COPY: bool = bool(get("ENABLE_ZERO_COPY", True))
 
+# Read Buffer Paged Memory Pool configuration
+READ_BUFFER_PAGE_SIZE: int = int(get("READ_BUFFER_PAGE_SIZE", 512 * 1024 * 1024))
+"""Size of each page in the read buffer memory pool (default: 512MB)."""
+
+READ_BUFFER_NUM_PAGES: Optional[int] = int(get("READ_BUFFER_NUM_PAGES", 0)) or None
+"""Number of pages in the read buffer memory pool (default: None = CPU count, min 2)."""
+
+READ_BUFFER_LOCK_TIMEOUT_MS: int = int(get("READ_BUFFER_LOCK_TIMEOUT_MS", 100))
+"""Lock acquisition timeout in milliseconds for read buffer memory pool (default: 100ms)."""
+
 
 # GCP project ID - for Google Cloud Data
 GCP_PROJECT_ID: str = get("GCP_PROJECT_ID") 
