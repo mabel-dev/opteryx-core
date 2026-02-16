@@ -23,9 +23,8 @@ from typing import List
 from typing import Optional
 from typing import Tuple
 
-import orjson
-
 from opteryx.exceptions import MissingDependencyError
+from opteryx.utils.json_compat import dumps as json_dumps
 
 
 def print_tree_inner(
@@ -104,10 +103,10 @@ class Graph(object):
                     "target": target,
                     "relationship": relationship,
                 }
-                edge_file.write(orjson.dumps(edge_record) + b"\n")
+                edge_file.write(json_dumps(edge_record) + b"\n")
         with open(path / "nodes.jsonl", "wb") as node_file:
             for nid, attr in self.nodes(data=True):
-                node_file.write(orjson.dumps({"nid": nid, "attributes": attr}) + b"\n")
+                node_file.write(json_dumps({"nid": nid, "attributes": attr}) + b"\n")
 
     def add_edge(self, source: str, target: str, relationship: Optional[str] = None):
         """

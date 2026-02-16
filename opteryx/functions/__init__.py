@@ -182,7 +182,7 @@ def _get_string(array, key):
 
 def cast_varchar(arr):
     if len(arr) > 0 and all(i is None or isinstance(i, dict) for i in arr[:100]):
-        return [orjson.dumps(n).decode() if n is not None else None for n in arr]
+        return [json_dumps(n).decode() if n is not None else None for n in arr]
     return compute.cast(arr, "string")
 
 
