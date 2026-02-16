@@ -52,26 +52,37 @@ NPROC=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 1)
 "${PYBIN}/python" setup.py build_ext --parallel "$NPROC" bdist_wheel
 
 # Repair wheels with auditwheel, preserving the 't' suffix for free-threaded builds
+# Check PYTHON_VERSION environment variable (e.g., "3.14t") to determine if this is free-threaded
+IS_FREE_THREADED=false
+if [[ "$PYTHON_VERSION" =~ [0-9]+\.[0-9]+[Tt]$ ]]; then
+    IS_FREE_THREADED=true
+    echo "Building free-threaded Python wheel (PYTHON_VERSION=$PYTHON_VERSION)"
+fi
+
 for whl in dist/*.whl; do
-    # Check if this is a free-threaded build (cp*-cp*t or cp*t-cp*t pattern)
-    if [[ "$whl" =~ cp[0-9]+-cp[0-9]+t ]] || [[ "$whl" =~ cp[0-9]+t-cp[0-9]+t ]]; then
-        echo "Free-threaded wheel detected: $whl"
+    [ -f "$whl" ] || continue
+    echo "Processing wheel: $whl"
+    
+    if [ "$IS_FREE_THREADED" = true ]; then
+        echo "  -> Free-threaded build detected"
         
         auditwheel repair "$whl" -w dist/
         
         # Rename the repaired wheel to restore the 't' suffix in ABI tag
         # PyArrow format: cp314-cp314t (no 't' on first, 't' on second)
-        repaired=$(ls -t dist/*manylinux*.whl | head -n1)
+        repaired=$(ls -t dist/*manylinux*.whl 2>/dev/null | head -n1)
         if [ -f "$repaired" ]; then
             # Restore 't' suffix: cp314-cp314 -> cp314-cp314t
             restored=$(echo "$repaired" | sed -E 's/-cp([0-9]+)-cp([0-9]+)-/-cp\1-cp\2t-/')
             if [ "$repaired" != "$restored" ]; then
                 mv -v "$repaired" "$restored"
-                echo "Restored free-threaded ABI tag: $restored"
+                echo "  -> Restored free-threaded ABI tag: $(basename $restored)"
+            else
+                echo "  -> Already has correct tag: $(basename $repaired)"
             fi
         fi
     else
-        echo "Standard build wheel: $whl"
+        echo "  -> Standard build"
         auditwheel repair "$whl" -w dist/
     fi
 done
