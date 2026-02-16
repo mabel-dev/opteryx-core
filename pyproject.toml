@@ -1,6 +1,6 @@
 [project]
 name = "opteryx_core"
-version = "0.6.24"
+version = "0.6.25"
 description = "Opteryx Query Engine"
 requires-python = '>=3.13'
 readme = {file = "README.md", content-type = "text/markdown"}
@@ -10,7 +10,8 @@ dependencies = [
     'aiohttp==3.13.*',
     'minio==7.2.20',
     'numpy==2.4.*',
-    'orjson==3.11.*',
+    # orjson is optional - falls back to stdlib json if unavailable (e.g., free-threaded Python 3.14t)
+    # 'orjson==3.11.*',
     'orso==0.0.*',
     'psutil==7.2.*',
     'pyarrow==23.0.*',
@@ -118,4 +119,7 @@ norecursedirs = ["scratch", ".*", "build", "dist", "tmp", "third_party", "rugo"]
 # don't become runtime dependencies.
 testing = [
     "freezegun",
+]
+performance = [
+    'orjson==3.11.*',  # Faster JSON serialization (not available on free-threaded Python)
 ]

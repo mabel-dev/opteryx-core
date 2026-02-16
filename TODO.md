@@ -1,0 +1,4 @@
+- Rewrite the interval code to use Draken (/datatypes/intervals.py)
+- Rewrite Rugo decoder to be mode modular
+- Review Draken date/timestamp handling, ensure able to quickly compare between values in these two encodings
+- BUG: count distinct it ignoring the distnct bit in and returning count

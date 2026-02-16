@@ -54,7 +54,7 @@ class Distogram:  # pragma: no cover
 
     ## all class methods below here have been added for Opteryx
     def dumps(self):  # pragma: no cover
-        import orjson
+        from opteryx.utils.json_compat import dumps as json_dumps
 
         def handler(obj):
             obj_type = type(obj)
@@ -64,7 +64,7 @@ class Distogram:  # pragma: no cover
                 return float(obj)
             raise TypeError
 
-        return orjson.dumps(self.dump(), default=handler)
+        return json_dumps(self.dump(), default=handler)
 
     def dump(self):
         bin_vals, bin_counts = zip(*self.bins)

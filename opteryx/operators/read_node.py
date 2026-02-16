@@ -17,13 +17,13 @@ import time
 from collections import defaultdict
 from typing import Generator
 
-import orjson
 import pyarrow
 from orso.schema import RelationSchema
 from orso.schema import convert_orso_schema_to_arrow_schema
 
 from opteryx import EOS
 from opteryx.models import QueryProperties
+from opteryx.utils.json_compat import dumps as json_dumps
 
 from . import BasePlanNode
 
@@ -46,7 +46,7 @@ def struct_to_jsonb(table: pyarrow.Table) -> pyarrow.Table:
         if pyarrow.types.is_struct(field.type):
             # Convert each row in the STRUCT column to a JSON string
             json_array = pyarrow.array(
-                [None if row is None else orjson.dumps(row) for row in table.column(i).to_pylist()],
+                [None if row is None else json_dumps(row) for row in table.column(i).to_pylist()],
                 type=pyarrow.binary(),
             )
 
@@ -74,7 +74,7 @@ def struct_to_jsonb(table: pyarrow.Table) -> pyarrow.Table:
                         if struct is None:
                             converted_list.append(None)
                         else:
-                            converted_list.append(orjson.dumps(struct))
+                            converted_list.append(json_dumps(struct))
                     converted_data.append(converted_list)
 
             # Build the new array

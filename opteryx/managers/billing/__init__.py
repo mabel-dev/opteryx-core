@@ -2,7 +2,7 @@ import datetime
 import os
 from enum import Enum
 
-import orjson
+from opteryx.utils.json_compat import dumps as json_dumps
 
 
 class BillingEventType(Enum):
@@ -44,5 +44,5 @@ def write_billing_event(billing_event: BillingEventType, billing_account: str, e
     structured_log["event"] = event_details
 
     if os.environ.get("K_SERVICE"):
-        payload = orjson.dumps(structured_log).decode()
+        payload = json_dumps(structured_log).decode()
         print(payload, flush=True)
