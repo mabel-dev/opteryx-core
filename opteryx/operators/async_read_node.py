@@ -39,6 +39,39 @@ CONCURRENT_READS = config.CONCURRENT_READS
 MAX_READ_BUFFER_CAPACITY = config.MAX_READ_BUFFER_CAPACITY
 ENABLE_ZERO_COPY = config.ENABLE_ZERO_COPY
 
+# Shared read buffer pool - persistent across queries
+_shared_read_buffer = None
+_buffer_lock = threading.Lock()
+
+
+def get_shared_read_buffer():
+    """
+    Get or create the shared read buffer pool.
+
+    The read buffer is a persistent, shared resource used across all
+    queries and datasets. Using PagedMemoryPool allows concurrent commits
+    from multiple async workers without serialization.
+
+    Returns:
+        PagedMemoryPool: The shared read buffer instance
+    """
+    global _shared_read_buffer
+
+    if _shared_read_buffer is None:
+        with _buffer_lock:
+            # Double-check pattern
+            if _shared_read_buffer is None:
+                try:
+                    # Try to use PagedMemoryPool for better concurrency
+                    from opteryx.compiled.structures.paged_memory_pool import PagedMemoryPool
+
+                    _shared_read_buffer = PagedMemoryPool(name="Shared Read Buffer")
+                except ImportError:
+                    # Fall back to single MemoryPool if PagedMemoryPool not available
+                    _shared_read_buffer = MemoryPool(MAX_READ_BUFFER_CAPACITY, "Shared Read Buffer")
+
+    return _shared_read_buffer
+
 
 async def fetch_data(manifest, pool, connector, reply_queue, telemetry, columns=None, filters=None):
     """
@@ -99,7 +132,8 @@ async def fetch_data(manifest, pool, connector, reply_queue, telemetry, columns=
 class AsyncReadNode(ReaderNode):
     def __init__(self, properties: QueryProperties, **parameters):
         ReaderNode.__init__(self, properties=properties, **parameters)
-        self.pool = MemoryPool(MAX_READ_BUFFER_CAPACITY, f"ReadBuffer <{self.parameters['alias']}>")
+        # Use the shared, persistent read buffer instead of creating per-node pools
+        self.pool = get_shared_read_buffer()
 
         self.predicates = parameters.get("predicates")
 
