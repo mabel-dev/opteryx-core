@@ -53,6 +53,8 @@ from opteryx.managers.billing import BillingEventType
 from opteryx.managers.billing import write_billing_event
 from opteryx.models import ExecutionContext
 from opteryx.models import QueryTelemetry
+from opteryx.tracing import flush_all
+from opteryx.tracing import record_event
 from opteryx.utils import sql
 
 
@@ -71,6 +73,7 @@ class Session(DataFrame):
         schema: Optional[str] = None,
         access_policies: Optional[Iterable[dict]] = None,
         query_id: Optional[str] = None,
+        io_trace_file: Optional[str] = None,
         **kwargs,
     ):
         # input validation consistent with the old Connection
@@ -110,6 +113,13 @@ class Session(DataFrame):
         self._executed = False
 
         DataFrame.__init__(self, rows=[], schema=[])
+
+        # Initialize IO tracing (if enabled)
+        self._io_trace_file = io_trace_file or config.OPTERYX_TRACE_FILE
+        if self._io_trace_file:
+            self._tracing_enabled = True
+        else:
+            self._tracing_enabled = False
 
     @property
     def query_id(self) -> str:
@@ -226,6 +236,11 @@ class Session(DataFrame):
         visibility_filters: Optional[Dict[str, Any]] = None,
     ):
         self._ensure_open()
+        if self._tracing_enabled:
+            try:
+                record_event("trace_session_start", session_id=self._query_id, query=operation)
+            except Exception:
+                pass
         start = time.time_ns()
         results = self._execute_statements(operation, params, visibility_filters)
         if results is not None:
@@ -707,4 +722,16 @@ class Session(DataFrame):
             self._close_all_cursors()
         except Exception:
             pass
+
+        # Flush any pending trace events
+        if self._tracing_enabled:
+            try:
+                from opteryx.tracing import event_recorder
+                from opteryx.tracing import record_event
+
+                record_event("trace_session_end", session_id=self._query_id)
+                event_recorder.flush_all()
+            except Exception:
+                pass  # Don't let tracing errors affect query close
+
         self._closed = True

@@ -76,6 +76,13 @@ DISABLE_OPTIMIZER: bool = bool(get("DISABLE_OPTIMIZER", False))
 
 OPTERYX_DEBUG: bool = bool(get("OPTERYX_DEBUG", False))
 """**DANGEROUS** Diagnostic and debug mode - generates a lot of log entries."""
+
+OPTERYX_TRACE: bool = bool(get("OPTERYX_TRACE", "").lower() in ("1", "true", "yes"))
+"""Enable IO layer tracing (records file operations to JSONLines file)."""
+
+OPTERYX_TRACE_FILE: str = str(get("OPTERYX_TRACE_FILE", ""))
+"""Path to write IO trace file (.jsonl format). Empty = no tracing."""
+
 MAX_CONSECUTIVE_CACHE_FAILURES: int = int(get("MAX_CONSECUTIVE_CACHE_FAILURES", 10))
 """Maximum number of consecutive cache failures before disabling cache usage."""
 
@@ -100,8 +107,8 @@ MAX_READ_BUFFER_CAPACITY = READ_BUFFER_CAPACITY
 ENABLE_ZERO_COPY: bool = bool(get("ENABLE_ZERO_COPY", True))
 
 # Read Buffer Paged Memory Pool configuration
-READ_BUFFER_PAGE_SIZE: int = int(get("READ_BUFFER_PAGE_SIZE", 512 * 1024 * 1024))
-"""Size of each page in the read buffer memory pool (default: 512MB)."""
+READ_BUFFER_PAGE_SIZE: int = int(get("READ_BUFFER_PAGE_SIZE", 256 * 1024 * 1024))
+"""Size of each page in the read buffer memory pool (default: 256MB)."""
 
 READ_BUFFER_NUM_PAGES: Optional[int] = int(get("READ_BUFFER_NUM_PAGES", 0)) or None
 """Number of pages in the read buffer memory pool (default: None = CPU count, min 2)."""
