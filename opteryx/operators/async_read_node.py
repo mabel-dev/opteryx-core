@@ -28,7 +28,6 @@ from opteryx import config
 from opteryx.exceptions import DataError
 from opteryx.models import QueryProperties
 from opteryx.shared import AsyncMemoryPool
-from opteryx.shared import MemoryPool
 from opteryx.utils.file_decoders import get_decoder
 
 from .read_node import ReaderNode
@@ -36,7 +35,6 @@ from .read_node import normalize_morsel
 from .read_node import struct_to_jsonb
 
 CONCURRENT_READS = config.CONCURRENT_READS
-MAX_READ_BUFFER_CAPACITY = config.MAX_READ_BUFFER_CAPACITY
 ENABLE_ZERO_COPY = config.ENABLE_ZERO_COPY
 
 # Shared read buffer pool - persistent across queries
@@ -61,14 +59,10 @@ def get_shared_read_buffer():
         with _buffer_lock:
             # Double-check pattern
             if _shared_read_buffer is None:
-                try:
-                    # Try to use PagedMemoryPool for better concurrency
-                    from opteryx.compiled.structures.paged_memory_pool import PagedMemoryPool
+                # Try to use PagedMemoryPool for better concurrency
+                from opteryx.compiled.structures.paged_memory_pool import PagedMemoryPool
 
-                    _shared_read_buffer = PagedMemoryPool(name="Shared Read Buffer")
-                except ImportError:
-                    # Fall back to single MemoryPool if PagedMemoryPool not available
-                    _shared_read_buffer = MemoryPool(MAX_READ_BUFFER_CAPACITY, "Shared Read Buffer")
+                _shared_read_buffer = PagedMemoryPool(name="Shared Read Buffer")
 
     return _shared_read_buffer
 
@@ -96,6 +90,7 @@ async def fetch_data(manifest, pool, connector, reply_queue, telemetry, columns=
     import aiohttp
 
     semaphore = asyncio.Semaphore(CONCURRENT_READS)
+    telemetry.download_wall_start_ns = 0  # reset so first download sets it
 
     # Create aiohttp session with per-host connection limit matching the semaphore.
     # Default aiohttp limit_per_host=2 would silently throttle all GCS/S3 reads
@@ -107,9 +102,17 @@ async def fetch_data(manifest, pool, connector, reply_queue, telemetry, columns=
     )
     async with aiohttp.ClientSession(connector=tcp_connector) as http_session:
 
-        async def fetch_and_process(blob_name):
+        async def fetch_and_process(blob_name, index):
+            # Stagger the initial burst: each worker waits index * 50ms before competing
+            # for a semaphore slot. Workers beyond CONCURRENT_READS will queue on the
+            # semaphore anyway, so the stagger only meaningfully affects the first batch.
+            if index < CONCURRENT_READS:
+                await asyncio.sleep(index * 0.1)
             async with semaphore:
                 start_per_blob = time.monotonic_ns()
+                # Record wall-clock start when the first download actually begins
+                if not telemetry.download_wall_start_ns:
+                    telemetry.download_wall_start_ns = start_per_blob
                 try:
                     from opteryx import config as _config
 
@@ -138,10 +141,11 @@ async def fetch_data(manifest, pool, connector, reply_queue, telemetry, columns=
                     # Pass the exception back so the reader loop can handle it
                     reply_queue.put((blob_name, err))
                 finally:
-                    telemetry.time_reading_blobs += time.monotonic_ns() - start_per_blob
+                    telemetry.time_downloading_blobs += time.monotonic_ns() - start_per_blob
 
-        tasks = [fetch_and_process(blob) for blob in manifest.get_file_paths()]
+        tasks = [fetch_and_process(blob, i) for i, blob in enumerate(manifest.get_file_paths())]
         await asyncio.gather(*tasks, return_exceptions=True)
+        telemetry.download_wall_clock_ns += time.monotonic_ns() - telemetry.download_wall_start_ns
         reply_queue.put(None)
 
 
@@ -263,8 +267,11 @@ class AsyncReadNode(ReaderNode):
                     blob_memory_view = self.pool.read(
                         reference, zero_copy=ENABLE_ZERO_COPY, latch=ENABLE_ZERO_COPY
                     )
-                    self.telemetry.bytes_read += len(blob_memory_view)
-                    self.readings["bytes_read"] += len(blob_memory_view)
+                    # bytes_read is already counted in async_read_blob (downloaded bytes);
+                    # track pool-read size separately as bytes_decoded (compressed parquet)
+                    self.readings["bytes_decoded"] = self.readings.get("bytes_decoded", 0) + len(
+                        blob_memory_view
+                    )
                     selection_to_pass = [] if filters_applied else self.predicates
                     if config.OPTERYX_TRACE:
                         from opteryx.tracing import record_event
@@ -282,8 +289,8 @@ class AsyncReadNode(ReaderNode):
                     if isinstance(err, ArrowInvalid) and "No match for" in str(err):
                         raise DataError(f"Unable to read blob {blob_name}")
                     raise DataError(f"Unable to read blob {blob_name} - error {err}") from err
-                self.readings["time_reading_blobs"] += time.monotonic_ns() - start
-                self.telemetry.time_reading_blobs += time.monotonic_ns() - start
+                self.readings["time_decoding_blobs"] += time.monotonic_ns() - start
+                self.telemetry.time_decoding_blobs += time.monotonic_ns() - start
                 num_rows, _, raw_bytes, morsel = decoded
                 self.readings["rows_seen"] += num_rows
                 if config.OPTERYX_TRACE:

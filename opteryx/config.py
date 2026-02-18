@@ -93,16 +93,7 @@ MAX_CONSECUTIVE_CACHE_FAILURES: int = int(get("MAX_CONSECUTIVE_CACHE_FAILURES", 
 MAX_LOCAL_BUFFER_CAPACITY: int
 """Local buffer pool size in either bytes or fraction of system memory (lazy)."""
 
-MAX_READ_BUFFER_CAPACITY: int
-"""Read buffer pool size in either bytes or fraction of system memory (lazy)."""
-
 CONCURRENT_READS:int = int(get("CONCURRENT_READS", max(system_gigabytes(), 2)))
-READ_BUFFER_CAPACITY:int = memory_allocation_calculation(float(get("MAX_READ_BUFFER_CAPACITY", 0.1)))
-
-# Backwards compatibility alias: some modules expect MAX_READ_BUFFER_CAPACITY
-# to be present on the `config` module. Provide an alias to the computed
-# `READ_BUFFER_CAPACITY` value so older callers continue to work.
-MAX_READ_BUFFER_CAPACITY = READ_BUFFER_CAPACITY
 
 ENABLE_ZERO_COPY: bool = bool(get("ENABLE_ZERO_COPY", True))
 
