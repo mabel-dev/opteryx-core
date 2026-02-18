@@ -84,7 +84,9 @@ SYSTEM_VARIABLES_DEFAULTS: Dict[str, VariableSchema] = {
     "default_tmp_storage_engine": (OrsoTypes.VARCHAR, "opteryx", VariableOwner.SERVER, Visibility.UNRESTRICTED),
 
     # These are Opteryx specific variables
-    "max_read_buffer_capacity": (OrsoTypes.INTEGER, config.MAX_READ_BUFFER_CAPACITY, VariableOwner.SERVER, Visibility.RESTRICTED),
+    "read_buffer_page_size": (OrsoTypes.INTEGER, config.READ_BUFFER_PAGE_SIZE, VariableOwner.SERVER, Visibility.RESTRICTED),
+    "read_buffer_num_pages": (OrsoTypes.INTEGER, config.READ_BUFFER_NUM_PAGES, VariableOwner.SERVER, Visibility.RESTRICTED),
+    "read_buffer_lock_timeout_ms": (OrsoTypes.INTEGER, config.READ_BUFFER_LOCK_TIMEOUT_MS, VariableOwner.SERVER, Visibility.RESTRICTED),
     "disable_optimizer": (OrsoTypes.BOOLEAN, config.DISABLE_OPTIMIZER, VariableOwner.USER, Visibility.RESTRICTED),
     "concurrent_reads": (OrsoTypes.INTEGER, config.CONCURRENT_READS, VariableOwner.SERVER, Visibility.RESTRICTED),
     "user_memberships": (OrsoTypes.ARRAY, [[]], VariableOwner.INTERNAL, Visibility.UNRESTRICTED),

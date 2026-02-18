@@ -127,7 +127,7 @@ def parquet_decoder(
     selection: Optional[list] = None,
     just_schema: bool = False,
     force_read: bool = False,
-    use_threads: bool = True,
+    use_threads: bool = False,
 ) -> Tuple[int, int, pyarrow.Table]:
     """
     Read parquet formatted files.
@@ -176,12 +176,6 @@ def parquet_decoder(
     # number of columns - try to derive, fallback to length of schema_names
     num_columns = rmeta.get("num_columns") or len(schema_names)
 
-    # total uncompressed size (rugo uses total_byte_size)
-    uncompressed_size = sum(
-        sum(col.get("total_byte_size", 0) for col in rg.get("columns", []))
-        for rg in rmeta.get("row_groups", [])
-    )
-
     # we need to work out if we have a selection which may force us
     # fetching columns just for filtering
     dnf_filter, processed_selection = (
@@ -207,7 +201,7 @@ def parquet_decoder(
     table = parquet.read_table(
         buffer,
         columns=selected_columns,
-        pre_buffer=True,
+        pre_buffer=False,
         filters=dnf_filter,
         use_threads=use_threads,
         use_pandas_metadata=False,
@@ -220,7 +214,7 @@ def parquet_decoder(
     return (
         num_rows,
         num_columns,
-        uncompressed_size,
+        0,
         table,
     )
 
