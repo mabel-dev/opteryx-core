@@ -28,6 +28,7 @@ from opteryx.exceptions import DatasetNotFoundError
 from opteryx.exceptions import DatasetReadError
 from opteryx.exceptions import EmptyDatasetError
 from opteryx.exceptions import UnsupportedFileTypeError
+from opteryx.tracing import record_event
 from opteryx.utils.file_decoders import TUPLE_OF_VALID_EXTENSIONS
 from opteryx.utils.file_decoders import get_decoder
 
@@ -143,14 +144,25 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
         Returns:
             Decoded data or schema
         """
+        from opteryx import config as _config
+
+        _tracing = _config.OPTERYX_TRACE
+        if _tracing:
+            record_event("download_start", file_id=blob_name)
         # Open file through the filesystem, passing through projection/selection for remote filtering
         data = self.filesystem.open_input_file(blob_name, columns=projection, filters=selection)
+        if _tracing:
+            record_event(
+                "download_complete", file_id=blob_name, bytes_received=data.memoryview.nbytes
+            )
         self.telemetry.bytes_read += data.memoryview.nbytes
 
         # If the underlying filesystem already applied the selection (e.g., S3 Select),
         # don't pass the selection to the decoder again to avoid duplicate filtering.
         selection_to_pass = None if getattr(data, "filters_applied", False) else selection
 
+        if _tracing:
+            record_event("decode_start", file_id=blob_name)
         # Decode the data
         result = decoder(
             data.memoryview,
@@ -158,6 +170,8 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
             selection=selection_to_pass,
             just_schema=just_schema,
         )
+        if _tracing:
+            record_event("decode_complete", file_id=blob_name)
 
         return result
 
@@ -234,6 +248,13 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
             PyArrow Tables or schemas
         """
         blob_names = self.get_list_of_blob_names(prefix=self.dataset, predicates=predicates or [])
+
+        from opteryx import config as _config
+
+        if _config.OPTERYX_TRACE:
+            record_event("dataset_discovered", dataset=self.dataset, file_count=len(blob_names))
+            for blob_name in blob_names:
+                record_event("file_discovered", file_id=blob_name, blob_name=blob_name)
 
         if just_schema:
             for blob_name in blob_names:

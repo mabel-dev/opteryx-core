@@ -58,24 +58,33 @@ class OpteryxOrsoImportLoader(importlib.abc.SourceLoader):
         # Delayed import to minimize startup overhead
         from pathlib import Path
 
-        try:
-            file_extension = Path(filepath).suffix
+        file_extension = Path(filepath).suffix
 
-            if file_extension != ".py":
-                return self.original_loader.get_data(filepath)
+        if file_extension != ".py":
+            return self.original_loader.get_data(filepath)
 
-            with open(filepath, "r", encoding="utf-8") as f:
-                original_source = f.read()
+        with open(filepath, "r", encoding="utf-8") as f:
+            original_source = f.read()
 
-            cleaned_source = self._enable_debug_messages(original_source)
-            return cleaned_source.encode("utf-8")
-
-        except Exception as e:
-            print(f"An error occurred: {e}")
-            return None
+        cleaned_source = self._enable_debug_messages(original_source)
+        cleaned_source = self._enable_trace_messages(cleaned_source)
+        return cleaned_source.encode("utf-8")
 
     def _enable_debug_messages(self, source: str) -> str:
         return source.replace("# DEBUG: ", "")
+
+    def _enable_trace_messages(self, source: str) -> str:
+        """Remove '# TRACE: ' prefix if tracing is enabled.
+
+        Uses environment variable directly to avoid circular import with config module.
+        """
+        from os import environ
+
+        # Check environment variable directly to avoid circular import
+        trace_enabled = environ.get("OPTERYX_TRACE", "").lower() in ("1", "true", "yes")
+        if not trace_enabled:
+            return source
+        return source.replace("# TRACE: ", "")
 
 
 # Register the custom MetaPathFinder

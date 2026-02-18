@@ -97,13 +97,26 @@ async def fetch_data(manifest, pool, connector, reply_queue, telemetry, columns=
 
     semaphore = asyncio.Semaphore(CONCURRENT_READS)
 
-    # Create aiohttp session for filesystem readers that need it
-    async with aiohttp.ClientSession() as http_session:
+    # Create aiohttp session with per-host connection limit matching the semaphore.
+    # Default aiohttp limit_per_host=2 would silently throttle all GCS/S3 reads
+    # to 2 concurrent connections regardless of the semaphore value.
+    # limit_per_host must match the semaphore — default of 2 would silently throttle
+    # all GCS/S3 reads to 2 concurrent connections per host regardless of CONCURRENT_READS.
+    tcp_connector = aiohttp.TCPConnector(
+        limit_per_host=CONCURRENT_READS, limit=CONCURRENT_READS * 2
+    )
+    async with aiohttp.ClientSession(connector=tcp_connector) as http_session:
 
         async def fetch_and_process(blob_name):
             async with semaphore:
                 start_per_blob = time.monotonic_ns()
                 try:
+                    from opteryx import config as _config
+
+                    if _config.OPTERYX_TRACE:
+                        from opteryx.tracing import record_event
+
+                        record_event("download_start", file_id=blob_name)
                     # Call the async reader. We pass the commonly-used args; filesystem
                     # readers that require other parameters should handle defaults or
                     # raise a clear exception which we'll forward.
@@ -116,6 +129,9 @@ async def fetch_data(manifest, pool, connector, reply_queue, telemetry, columns=
                         columns=columns,
                         filters=filters,
                     )
+                    if _config.OPTERYX_TRACE:
+                        elapsed_ms = (time.monotonic_ns() - start_per_blob) / 1_000_000
+                        record_event("download_complete", file_id=blob_name, elapsed_ms=elapsed_ms)
                     if reference is not None:
                         reply_queue.put((blob_name, reference))
                 except Exception as err:
@@ -250,6 +266,11 @@ class AsyncReadNode(ReaderNode):
                     self.telemetry.bytes_read += len(blob_memory_view)
                     self.readings["bytes_read"] += len(blob_memory_view)
                     selection_to_pass = [] if filters_applied else self.predicates
+                    if config.OPTERYX_TRACE:
+                        from opteryx.tracing import record_event
+
+                        _decode_start_ns = time.monotonic_ns()
+                        record_event("decode_start", file_id=blob_name)
                     decoded = decoder(
                         blob_memory_view, projection=self.columns, selection=selection_to_pass
                     )
@@ -265,6 +286,15 @@ class AsyncReadNode(ReaderNode):
                 self.telemetry.time_reading_blobs += time.monotonic_ns() - start
                 num_rows, _, raw_bytes, morsel = decoded
                 self.readings["rows_seen"] += num_rows
+                if config.OPTERYX_TRACE:
+                    from opteryx.tracing import record_event
+
+                    record_event(
+                        "decode_complete",
+                        file_id=blob_name,
+                        elapsed_ms=(time.monotonic_ns() - _decode_start_ns) / 1_000_000,
+                        rows_decoded=num_rows,
+                    )
 
                 if records_to_read < morsel.num_rows:
                     morsel = morsel.slice(0, records_to_read)
