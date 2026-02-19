@@ -175,60 +175,6 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
 
         return result
 
-    async def async_read_blob(
-        self, *, blob_name: str, pool, telemetry, columns=None, filters=None, **kwargs
-    ):
-        """Asynchronous blob reader for filesystem-based tables.
-
-        This method reads the blob using the underlying filesystem (in an
-        executor to avoid blocking the event loop), commits the bytes into the
-        provided AsyncMemoryPool and returns the pool reference. It retries
-        commit failures a bounded number of times to avoid hanging.
-
-        Args:
-            blob_name: Path to the blob
-            pool: AsyncMemoryPool to commit data to
-            telemetry: Telemetry object for tracking
-            columns: Optional columns to project
-            filters: Optional filters to push down (DNF format)
-        """
-        import asyncio
-
-        loop = asyncio.get_running_loop()
-
-        def blocking_read():
-            f = self.filesystem.open_input_stream(blob_name, columns=columns, filters=filters)
-            # Prefer getbuffer for BytesIO-like objects for speed
-            if hasattr(f, "getbuffer"):
-                return f.getbuffer().tobytes()
-            # Fallback to read
-            return f.read()
-
-        data = await loop.run_in_executor(None, blocking_read)
-
-        # Commit into the async pool
-        ref = await pool.commit(data)
-
-        # treat both None and -1 as commit failure and retry, but cap retries to avoid hanging
-        max_retries = 10
-        attempts = 0
-        while (ref is None or ref == -1) and attempts < max_retries:
-            attempts += 1
-            telemetry.stalls_io_waiting_on_engine += 1
-            telemetry.cpu_wait_seconds += 0.1
-            await asyncio.sleep(0.1)
-            try:
-                ref = await pool.commit(data)
-            except Exception:
-                ref = None
-
-        if ref is None or ref == -1:
-            # Give up and raise so caller can handle the failure instead of hanging
-            raise DatasetReadError(f"Unable to commit data to MemoryPool after {attempts} attempts")
-
-        telemetry.bytes_read += len(data)
-        return ref
-
     def read_dataset(
         self,
         columns: list = None,

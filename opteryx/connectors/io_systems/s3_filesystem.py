@@ -255,6 +255,55 @@ class OpteryxS3FileSystem:
 
         return infos[0] if single_path else infos
 
+    def stream_to(self, path: str, sink, chunk_size: int = 1 << 20) -> int:
+        """Stream an S3 object directly into *sink* without an intermediate buffer.
+
+        Calls ``sink.write(chunk)`` for each chunk returned by the MinIO
+        streaming response, giving callers a zero-copy path when *sink* writes
+        directly into a shared-memory slot.
+
+        Args:
+            path:       S3 object path including bucket as first component
+                        (e.g. ``my-bucket/path/to/file.parquet``).
+            sink:       Any object with a ``write(bytes) -> int`` method.
+            chunk_size: Streaming chunk size in bytes (default 1 MiB).
+
+        Returns:
+            Total bytes written to *sink*.
+        """
+        from opteryx.utils import paths
+
+        bucket, object_path, name, extension = paths.get_parts(path)
+        full_object_name = object_path + "/" + name + extension
+
+        response = self.minio.get_object(bucket_name=bucket, object_name=full_object_name)
+        total = 0
+        try:
+            for chunk in response.stream(amt=chunk_size):
+                sink.write(chunk)
+                total += len(chunk)
+        finally:
+            response.close()
+            response.release_conn()
+        return total
+
+    async def async_stream_to(
+        self,
+        path: str,
+        sink,
+        http_session=None,
+        chunk_size: int = 1 << 20,
+    ) -> int:
+        """Async variant of ``stream_to`` via ``asyncio.to_thread``.
+
+        MinIO has no native async API; this offloads the blocking call to a
+        thread so the event loop is not stalled.  ``http_session`` is accepted
+        but ignored (present for interface parity with the GCS implementation).
+        """
+        import asyncio
+
+        return await asyncio.to_thread(self.stream_to, path, sink, chunk_size)
+
     def open_input_stream(self, path: str, columns=None, filters=None):
         """Open an S3 object for reading as a stream.
 
@@ -274,89 +323,6 @@ class OpteryxS3FileSystem:
             filters: Optional DNF filter structure
         """
         return S3File(path, self.minio, columns=columns, filters=filters)
-
-    async def async_read_blob(
-        self, *, blob_name, pool, session, telemetry, columns=None, filters=None, **kwargs
-    ):
-        """
-        Asynchronously read an S3 object blob and commit to memory pool.
-
-        Uses a thread pool executor to avoid blocking the event loop on MinIO I/O.
-        Supports S3 Select for column projection and filtering.
-
-        Args:
-            blob_name: S3 object path (e.g., s3://bucket/key)
-            pool: AsyncMemoryPool instance
-            session: aiohttp session (unused for S3, but required for interface compatibility)
-            telemetry: Telemetry object for tracking metrics
-            columns: Optional list of column names to project
-            filters: Optional DNF filter structure for S3 Select
-            **kwargs: Additional parameters
-
-        Returns:
-            Reference to committed memory in pool
-
-        Raises:
-            DatasetReadError: If object cannot be read
-        """
-        import asyncio
-
-        from opteryx.exceptions import DatasetReadError
-        from opteryx.utils import paths
-
-        # Strip s3:// prefix
-        if blob_name.startswith("s3://"):
-            blob_name = blob_name[5:]
-
-        # DEBUG: print("[S3] READ   ", f"s3://{blob_name}")
-        bucket, object_path, name, extension = paths.get_parts(blob_name)
-        full_object_name = object_path + "/" + name + extension
-
-        # Run blocking MinIO I/O in thread pool to avoid blocking event loop
-        loop = asyncio.get_event_loop()
-        column_names = [col.source_column for col in columns] if columns else None
-        data = await loop.run_in_executor(
-            None, _read_from_s3, self.minio, bucket, full_object_name, column_names, filters
-        )
-
-        # S3 Select may return empty data when no rows match filters (valid case)
-        if not data:
-            return
-
-        try:
-            import opteryx.rugo.parquet as parquet_meta
-
-            metadata = parquet_meta.read_metadata_from_memoryview(
-                memoryview(data), schema_only=True, max_row_groups=1, include_statistics=False
-            )
-            if metadata["num_rows"] == 0:
-                return
-        except Exception as e:
-            print(f"Error reading Parquet metadata with rugo: {e}")
-            import traceback
-
-            traceback.print_exc()
-
-        # Commit to pool with retries
-        ref = await pool.commit(data)
-        max_retries = 10
-        attempts = 0
-        while (ref is None or ref == -1) and attempts < max_retries:
-            attempts += 1
-            telemetry.stalls_io_waiting_on_engine += 1
-            telemetry.cpu_wait_seconds += 0.1
-            await asyncio.sleep(0.1)
-            try:
-                ref = await pool.commit(data)
-            except Exception as e:
-                ref = None
-
-        if ref is None or ref == -1:
-            raise DatasetReadError(f"Unable to commit data to MemoryPool after {attempts} attempts")
-
-        telemetry.bytes_read += len(data)
-        # This connector can apply filters at read-time
-        return (ref, True)
 
     def _build_select_query(self, columns, filters):
         """Build S3 Select SQL query from columns and DNF filters.

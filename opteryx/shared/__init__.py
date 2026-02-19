@@ -4,7 +4,6 @@
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
 from opteryx.compiled.structures.memory_pool import MemoryPool
-from opteryx.shared.async_memory_pool import AsyncMemoryPool
 from opteryx.shared.materialized_datasets import MaterializedDatasets
 
-__all__ = ("AsyncMemoryPool", "MaterializedDatasets", "MemoryPool")
+__all__ = ("MaterializedDatasets", "MemoryPool")

@@ -80,9 +80,8 @@ def create_physical_plan(logical_plan, query_properties) -> PhysicalPlan:
                 # Use NullReaderNode to return empty table with correct schema
                 node = operators.NullReaderNode(query_properties, **node_config)
             elif connector and getattr(connector, "__synchronousity__", None) == "asynchronous":
-                # Use async reader for connectors that support async_read_blob()
-                node = operators.AsyncReadNode(query_properties, **node_config)
-                # Use async reader for connectors that support async_read_blob()
+                # IO-process-isolation reader: lock-free ring buffer, spawned worker process.
+                node = operators.IopsReadNode(query_properties, **node_config)
             else:
                 node = operators.ReaderNode(properties=query_properties, **node_config)
         elif node_type == LogicalPlanStepType.Set:
