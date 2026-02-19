@@ -243,3 +243,4 @@ hits/**
 tools/test_gharchive.py
 tools/load_gharchive.py
 tools/load_gh_messages.py
+opteryx/iops/ring_atomic.c

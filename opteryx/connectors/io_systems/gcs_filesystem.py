@@ -137,6 +137,115 @@ class OpteryxGcsFileSystem:
 
         return infos[0] if single_path else infos
 
+    def stream_to(self, path: str, sink, chunk_size: int = 1 << 20) -> int:
+        """Stream a GCS object directly into *sink* without an intermediate buffer.
+
+        Calls ``sink.write(chunk)`` for each network chunk received, giving
+        callers a zero-copy path when *sink* writes directly into a shared-memory
+        slot (e.g. ``_SlotWriter`` in ``opteryx.iops.worker``).
+
+        Refreshes the OAuth token if it has expired before making the request.
+
+        Args:
+            path:       GCS object path, with or without the ``gs://`` prefix.
+                        Must include the bucket name as the first path component
+                        (e.g. ``my-bucket/path/to/file.parquet``).
+            sink:       Any object with a ``write(bytes) -> int`` method.
+            chunk_size: HTTP streaming chunk size in bytes (default 1 MiB).
+
+        Returns:
+            Total bytes written to *sink*.
+        """
+        from opteryx.utils import paths
+
+        if path.startswith("gs://"):
+            path = path[5:]
+
+        # Refresh the credential token if it has expired.
+        if not self.client_credentials.valid:
+            from google.auth.transport.requests import Request
+
+            self.client_credentials.refresh(Request())
+            self.access_token = self.client_credentials.token
+
+        bucket, _, _, _ = paths.get_parts(path)
+        object_full_path = urllib.parse.quote(path[(len(bucket) + 1) :], safe="")
+        url = f"https://storage.googleapis.com/{bucket}/{object_full_path}"
+
+        response = self.session.get(
+            url,
+            headers={"Authorization": f"Bearer {self.access_token}", "Accept-Encoding": "identity"},
+            timeout=30,
+            stream=True,
+        )
+
+        if response.status_code != 200:
+            raise DatasetReadError(f"Unable to read '{path}' - {response.status_code}")
+
+        total = 0
+        for chunk in response.iter_content(chunk_size=chunk_size):
+            sink.write(chunk)
+            total += len(chunk)
+        return total
+
+    def _refresh_credentials(self) -> None:
+        """Synchronous credential refresh — safe to call from ``asyncio.to_thread``."""
+        from google.auth.transport.requests import Request
+
+        self.client_credentials.refresh(Request())
+        self.access_token = self.client_credentials.token
+
+    async def async_stream_to(
+        self,
+        path: str,
+        sink,
+        http_session,
+        chunk_size: int = 1 << 20,
+    ) -> int:
+        """Async variant of ``stream_to`` using a caller-provided ``aiohttp.ClientSession``.
+
+        Uses native aiohttp streaming so each ``await`` fully releases the GIL,
+        allowing many concurrent downloads on a single event-loop thread without
+        GIL contention.
+
+        The caller is responsible for:
+        - creating and owning the ``aiohttp.ClientSession``
+        - holding an ``asyncio.Lock`` around token refresh and calling
+          ``_refresh_credentials()`` via ``asyncio.to_thread`` before calling
+          this method when ``self.client_credentials.valid`` is ``False``.
+
+        Args:
+            path:         GCS object path, with or without ``gs://`` prefix.
+            sink:         Object with ``write(bytes) -> int``.
+            http_session: ``aiohttp.ClientSession`` to use for the request.
+            chunk_size:   Streaming chunk size in bytes (default 1 MiB).
+
+        Returns:
+            Total bytes written to *sink*.
+        """
+        from opteryx.utils import paths
+
+        if path.startswith("gs://"):
+            path = path[5:]
+
+        bucket, _, _, _ = paths.get_parts(path)
+        object_full_path = urllib.parse.quote(path[(len(bucket) + 1) :], safe="")
+        url = f"https://storage.googleapis.com/{bucket}/{object_full_path}"
+
+        headers = {
+            "Authorization": f"Bearer {self.access_token}",
+            "Accept-Encoding": "identity",
+        }
+
+        async with http_session.get(url, headers=headers) as response:
+            if response.status != 200:
+                raise DatasetReadError(f"Unable to read '{path}' - {response.status}")
+            total = 0
+            async for chunk in response.content.iter_chunked(chunk_size):
+                sink.write(chunk)
+                total += len(chunk)
+        return total
+
     def open_input_stream(self, path: str, columns=None, filters=None):
         """Open a GCS object for reading as a stream.
 
@@ -166,51 +275,3 @@ class OpteryxGcsFileSystem:
                 "Use S3 Select for remote filtering."
             )
         return GcsFile(path, self.session, self.access_token)
-
-    async def async_read_blob(self, *, blob_name, pool, session, telemetry, **kwargs):
-        import asyncio
-
-        from opteryx.utils import paths
-
-        # strip gs:// prefix
-        if blob_name.startswith("gs://"):
-            blob_name = blob_name[5:]
-
-        bucket, _, _, _ = paths.get_parts(blob_name)
-        # DEBUG: print("[GS] READ   ", f"gs://{blob_name}")
-
-        object_full_path = urllib.parse.quote(blob_name[(len(bucket) + 1) :], safe="")
-
-        url = f"https://storage.googleapis.com/{bucket}/{object_full_path}"
-
-        response = await session.get(
-            url,
-            headers={
-                "Authorization": f"Bearer {self.access_token}",
-                "Accept-Encoding": "identity",
-            },
-            timeout=30,
-        )
-
-        if response.status != 200:
-            raise DatasetReadError(f"Unable to read '{blob_name}' - {response.status}")
-        data = await response.read()
-        ref = await pool.commit(data)
-        # treat both None and -1 as commit failure and retry, but cap retries to avoid hanging
-        max_retries = 10
-        attempts = 0
-        while (ref is None or ref == -1) and attempts < max_retries:
-            attempts += 1
-            telemetry.stalls_io_waiting_on_engine += 1
-            telemetry.cpu_wait_seconds += 0.1
-            await asyncio.sleep(0.1)
-            try:
-                ref = await pool.commit(data)
-            except Exception as e:
-                ref = None
-
-        if ref is None or ref == -1:
-            # Give up and raise so caller can handle the failure instead of hanging
-            raise DatasetReadError(f"Unable to commit data to MemoryPool after {attempts} attempts")
-        telemetry.bytes_read += len(data)
-        return ref

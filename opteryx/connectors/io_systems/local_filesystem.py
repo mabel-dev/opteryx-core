@@ -214,6 +214,47 @@ class OpteryxLocalFileSystem:
 
         return infos[0] if single_path else infos
 
+    def stream_to(self, path: str, sink, chunk_size: int = 1 << 20) -> int:
+        """Stream a local file directly into *sink* without an intermediate buffer.
+
+        Calls ``sink.write(chunk)`` for each chunk read from the file, giving
+        callers a zero-copy path when *sink* writes directly into a shared-memory
+        slot.
+
+        Args:
+            path:       Absolute or relative path to the local file.
+            sink:       Any object with a ``write(bytes) -> int`` method.
+            chunk_size: Read chunk size in bytes (default 1 MiB).
+
+        Returns:
+            Total bytes written to *sink*.
+        """
+        total = 0
+        with open(path, "rb") as f:
+            while True:
+                chunk = f.read(chunk_size)
+                if not chunk:
+                    break
+                sink.write(chunk)
+                total += len(chunk)
+        return total
+
+    async def async_stream_to(
+        self,
+        path: str,
+        sink,
+        http_session=None,
+        chunk_size: int = 1 << 20,
+    ) -> int:
+        """Async variant of ``stream_to`` via ``asyncio.to_thread``.
+
+        Local disk I/O is blocking; this offloads it to a thread so the event
+        loop remains responsive.  ``http_session`` is accepted but ignored.
+        """
+        import asyncio
+
+        return await asyncio.to_thread(self.stream_to, path, sink, chunk_size)
+
     def open_input_stream(self, path: str, columns=None, filters=None):
         """
         Open a file for reading as a stream.

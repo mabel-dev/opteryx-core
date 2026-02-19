@@ -97,19 +97,24 @@ CONCURRENT_READS:int = int(get("CONCURRENT_READS", max(system_gigabytes(), 2)))
 
 ENABLE_ZERO_COPY: bool = bool(get("ENABLE_ZERO_COPY", True))
 
-# Read Buffer Paged Memory Pool configuration
-READ_BUFFER_PAGE_SIZE: int = int(get("READ_BUFFER_PAGE_SIZE", 256 * 1024 * 1024))
-"""Size of each page in the read buffer memory pool (default: 256MB)."""
-
-READ_BUFFER_NUM_PAGES: Optional[int] = int(get("READ_BUFFER_NUM_PAGES", 0)) or None
-"""Number of pages in the read buffer memory pool (default: None = CPU count, min 2)."""
-
-READ_BUFFER_LOCK_TIMEOUT_MS: int = int(get("READ_BUFFER_LOCK_TIMEOUT_MS", 100))
-"""Lock acquisition timeout in milliseconds for read buffer memory pool (default: 100ms)."""
-
-
 # GCP project ID - for Google Cloud Data
-GCP_PROJECT_ID: str = get("GCP_PROJECT_ID") 
+GCP_PROJECT_ID: str = get("GCP_PROJECT_ID")
+
+# IOPS ring buffer configuration
+IOPS_SLOT_SIZE: int = int(get("IOPS_SLOT_SIZE", 64 * 1024 * 1024))
+"""Size of each shared-memory ring slot in bytes (default: 64 MiB).
+Must be >= the largest Parquet blob you expect to read."""
+
+IOPS_MAX_INFLIGHT: int = int(get("IOPS_MAX_INFLIGHT", 0)) or CONCURRENT_READS
+"""Maximum number of concurrent blob downloads in the IOPS worker
+(default: CONCURRENT_READS)."""
+
+IOPS_SLOT_COUNT: int = int(get("IOPS_SLOT_COUNT", 0)) or max(IOPS_MAX_INFLIGHT * 2, 16)
+"""Total ring slots (default: 2 × IOPS_MAX_INFLIGHT, minimum 16).
+Must be >= IOPS_MAX_INFLIGHT."""
+
+IOPS_CHUNK_SIZE: int = int(get("IOPS_CHUNK_SIZE", 8 * 1024 * 1024))
+"""HTTP streaming chunk size for aiohttp downloads in bytes (default: 8 MiB)."""
 # size of morsels to push between steps
 # MORSEL_SIZE remains a plain constant
 MORSEL_SIZE: int = int(get("MORSEL_SIZE", 64 * 1024 * 1024))
@@ -122,6 +127,7 @@ MORSEL_SIZE: int = int(get("MORSEL_SIZE", 64 * 1024 * 1024))
 class Features:
     # Feature flags are used to enable or disable experimental features.
     enable_native_aggregator = bool(get("FEATURE_ENABLE_NATIVE_AGGREGATOR", False))
+    enable_iops = bool(get("FEATURE_ENABLE_IOPS", True))
     disable_nested_loop_join = bool(get("FEATURE_DISABLE_NESTED_LOOP_JOIN", False))
     force_nested_loop_join = bool(get("FEATURE_FORCE_NESTED_LOOP_JOIN", False))
     enable_free_threading = bool(get("FEATURE_ENABLE_FREE_THREADING", False))
