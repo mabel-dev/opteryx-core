@@ -35,10 +35,11 @@ static DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
     }
 
     // Guard: at least one supported encoding.
+    // IDs use Parquet spec values (post ZigZag-decode fix in metadata.cpp):
+    //   0=PLAIN, 2=PLAIN_DICTIONARY, 3=RLE, 8=RLE_DICTIONARY
     bool has_supported_encoding = false;
     for (int32_t enc : target_col->encodings) {
-      if (enc == 0 || enc == 4 || enc == 6 || enc == 2 || enc == 7 ||
-          enc == 8) {
+      if (enc == 0 || enc == 2 || enc == 3 || enc == 8) {
         has_supported_encoding = true;
         break;
       }
@@ -224,22 +225,12 @@ static DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
     if (encoding_requires_dictionary && dict_size == 0) return result;
 
     if (page_uses_dictionary) {
-      // Compute the bit-width needed to index into the dictionary.
-      int bit_width = 0;
-      int32_t max_index = dict_size - 1;
-      while (max_index > 0) { bit_width++; max_index >>= 1; }
-      if (bit_width == 0) bit_width = 1;
-
       // The on-disk format for dictionary-indexed Data Pages is:
-      //   1 byte: bit_width
+      //   1 byte: bit_width  (read directly from the page — do NOT recalculate)
       //   followed by: RLE/bit-packed data (no leading length prefix)
       // Our DecodeRLEBitPackedIndices expects a 4-byte length prefix, so we
       // construct a synthetic one.
-      uint8_t file_bit_width = data_ptr[0];
-      if (file_bit_width != (uint8_t)bit_width) {
-        std::cerr << "WARNING: File bit_width=" << (int)file_bit_width
-                  << " vs calculated=" << bit_width << std::endl;
-      }
+      int bit_width = (int)data_ptr[0];
       data_ptr++;
       data_size--;
 

@@ -94,20 +94,22 @@ const char *EncodingToString(int32_t enc) {
   case 0:
     return "PLAIN";
   case 1:
-    return "PLAIN_DICTIONARY";
+    return "GROUP_VAR_INT";        // deprecated
   case 2:
-    return "RLE";
+    return "PLAIN_DICTIONARY";
   case 3:
-    return "BIT_PACKED";
+    return "RLE";
   case 4:
-    return "DELTA_BINARY_PACKED";
+    return "BIT_PACKED";           // deprecated
   case 5:
-    return "DELTA_LENGTH_BYTE_ARRAY";
+    return "DELTA_BINARY_PACKED";
   case 6:
-    return "DELTA_BYTE_ARRAY";
+    return "DELTA_LENGTH_BYTE_ARRAY";
   case 7:
-    return "RLE_DICTIONARY";
+    return "DELTA_BYTE_ARRAY";
   case 8:
+    return "RLE_DICTIONARY";
+  case 9:
     return "BYTE_STREAM_SPLIT";
   default:
     return "UNKNOWN";
@@ -522,10 +524,10 @@ static void ParseColumnMeta(TInput &in, ColumnStats &cs,
       cs.physical_type = ParquetTypeToString(t);
       break;
     }
-    case 2: { // encodings
+    case 2: { // encodings (Thrift i32 enum — ZigZag encoded)
       auto lh = ReadListHeader(in);
       for (uint32_t i = 0; i < lh.size; i++) {
-        int32_t enc = ReadVarint(in);
+        int32_t enc = ReadI32(in);
         cs.encodings.push_back(enc);
       }
       break;

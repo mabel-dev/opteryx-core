@@ -606,17 +606,6 @@ extensions = [
         language="c++",
         extra_compile_args=CPP_FLAGS,
     ),
-    Extension(
-        "opteryx.compiled.io.disk_reader",
-        sources=[
-            "opteryx/compiled/io/disk_reader.pyx",
-            "src/cpp/disk_io.cpp",
-            "src/cpp/directories.cpp",
-        ],
-        include_dirs=include_dirs,
-        language="c++",
-        extra_compile_args=CPP_FLAGS,
-    ),
 ]
 
 # Auto-generate consolidated modules
@@ -694,9 +683,36 @@ if not (
 extensions.append(
     Extension(
         "opteryx.nanobind.list_length",
-        sources=["src/cpp/list_length_native.cpp", "src/cpp/nanobind_shim.cpp"],
-        include_dirs=include_dirs + ["third_party/nanobind"],
-        extra_compile_args=CPP_FLAGS,
+        sources=[
+            "src/cpp/list_length_native.cpp",
+            "third_party/nanobind/src/nb_combined.cpp",
+        ],
+        include_dirs=include_dirs + [
+            "third_party/nanobind",
+            "third_party/nanobind/src",
+            "third_party/nanobind/ext/robin_map/include",
+        ],
+        extra_compile_args=CPP_FLAGS + ["-fno-strict-aliasing", "-DNB_COMPACT_ASSERTIONS"],
+        extra_link_args=LD_EXTRA,
+        language="c++",
+    )
+)
+
+extensions.append(
+    Extension(
+        "opteryx.compiled.io.disk_reader",
+        sources=[
+            "src/cpp/disk_reader_native.cpp",
+            "src/cpp/disk_io.cpp",
+            "src/cpp/directories.cpp",
+            "third_party/nanobind/src/nb_combined.cpp",
+        ],
+        include_dirs=include_dirs + [
+            "third_party/nanobind",
+            "third_party/nanobind/src",
+            "third_party/nanobind/ext/robin_map/include",
+        ],
+        extra_compile_args=CPP_FLAGS + ["-fno-strict-aliasing", "-DNB_COMPACT_ASSERTIONS"],
         extra_link_args=LD_EXTRA,
         language="c++",
     )
