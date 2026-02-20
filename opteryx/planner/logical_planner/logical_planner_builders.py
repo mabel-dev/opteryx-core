@@ -9,7 +9,9 @@ helps to ensure new AST-based functionality can be added by adding
 a function and a reference to it in the dictionary.
 """
 
+import datetime
 import decimal
+import warnings
 from typing import Callable
 from typing import Dict
 from typing import List
@@ -31,84 +33,253 @@ from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.managers.expression import NodeType
 from opteryx.managers.expression import format_expression
 from opteryx.managers.expression.binary_operators import BINARY_OPERATORS
+from opteryx.managers.expression.binary_operators import binary_operations
 from opteryx.models import LogicalColumn
 from opteryx.models import Node
 from opteryx.utils import dates
 from opteryx.utils import suggest_alternative
 
 
-def extract_at_timestamp(version_clause) -> Optional[object]:
-    """
-    Extract and validate AT timestamp from the table version clause.
+def _evaluate_fixed_temporal_function(function_name: str):
+    now = datetime.datetime.now(datetime.UTC).replace(tzinfo=None)
+    if function_name in ("NOW", "CURRENT_TIMESTAMP", "UTC_TIMESTAMP"):
+        return now, OrsoTypes.TIMESTAMP
+    if function_name in ("CURRENT_DATE", "TODAY"):
+        return now.date(), OrsoTypes.DATE
+    if function_name == "YESTERDAY":
+        return (now - datetime.timedelta(days=1)).date(), OrsoTypes.DATE
+    if function_name == "CURRENT_TIME":
+        return now.time(), OrsoTypes.TIME
+    return None, None
 
-    Supports only: AT ( TIMESTAMP => 'YYYY-MM-DD HH:MM:SS' )
+
+def _extract_single_scalar(value):
+    if hasattr(value, "to_numpy"):
+        value = value.to_numpy(zero_copy_only=False)
+    if isinstance(value, numpy.ndarray):
+        if value.size != 1:
+            raise UnsupportedSyntaxError("Time-travel expressions must evaluate to a single scalar value.")
+        value = value.reshape(-1)[0]
+    elif isinstance(value, (list, tuple)):
+        if len(value) != 1:
+            raise UnsupportedSyntaxError("Time-travel expressions must evaluate to a single scalar value.")
+        value = value[0]
+
+    if hasattr(value, "as_py"):
+        value = value.as_py()
+    if isinstance(value, numpy.generic):
+        value = value.item()
+    return value
+
+
+def _as_binary_operand_array(value, value_type):
+    if value_type == OrsoTypes.INTERVAL:
+        arr = numpy.empty(1, dtype=object)
+        arr[0] = value
+        return arr
+    if value_type == OrsoTypes.TIMESTAMP:
+        timestamp = dates.parse_iso(value)
+        if timestamp is None:
+            raise UnsupportedSyntaxError("Unable to parse timestamp value in time-travel expression.")
+        return numpy.array([numpy.datetime64(timestamp, "us")])
+    if value_type == OrsoTypes.DATE:
+        dt = dates.parse_iso(value)
+        if dt is None:
+            raise UnsupportedSyntaxError("Unable to parse date value in time-travel expression.")
+        return numpy.array([numpy.datetime64(dt.date(), "D")])
+    return numpy.array([value])
+
+
+def _as_function_parameter_array(value, value_type):
+    if value_type in (OrsoTypes.TIMESTAMP, OrsoTypes.DATE):
+        dt = dates.parse_iso(value)
+        if dt is None:
+            raise UnsupportedSyntaxError("Unable to parse temporal function argument.")
+        return numpy.array([numpy.datetime64(dt, "us")])
+    return numpy.array([value])
+
+
+def _type_from_value(value):
+    if value is None:
+        return OrsoTypes.NULL
+    if isinstance(value, bool):
+        return OrsoTypes.BOOLEAN
+    if isinstance(value, (numpy.datetime64, datetime.datetime)):
+        return OrsoTypes.TIMESTAMP
+    if isinstance(value, datetime.time):
+        return OrsoTypes.TIME
+    if isinstance(value, datetime.date):
+        return OrsoTypes.DATE
+    if isinstance(value, (int, numpy.integer)):
+        return OrsoTypes.INTEGER
+    if isinstance(value, (float, numpy.floating)):
+        return OrsoTypes.DOUBLE
+    if isinstance(value, (bytes, bytearray)):
+        return OrsoTypes.BLOB
+    if isinstance(value, str):
+        return OrsoTypes.VARCHAR
+    if isinstance(value, tuple) and len(value) == 2:
+        return OrsoTypes.INTERVAL
+    if isinstance(value, numpy.ndarray) and value.shape == (2,):
+        return OrsoTypes.INTERVAL
+    return OrsoTypes._MISSING_TYPE
+
+
+def _interval_to_past_timestamp(interval_value):
+    months = abs(int(interval_value[0]))
+    microseconds = abs(int(interval_value[1]))
+    now = datetime.datetime.now(datetime.UTC).replace(tzinfo=None)
+    dt = dates.add_months(now, -months) if months else now
+    return dt - datetime.timedelta(microseconds=microseconds)
+
+
+def _evaluate_timetravel_expression(node, apply_interval_literal_to_now: bool = False):
+    if node.node_type == NodeType.LITERAL:
+        if node.type == OrsoTypes.INTERVAL and apply_interval_literal_to_now:
+            return _interval_to_past_timestamp(node.value), OrsoTypes.TIMESTAMP
+        return node.value, node.type
+
+    if node.node_type == NodeType.NESTED:
+        return _evaluate_timetravel_expression(node.centre, apply_interval_literal_to_now)
+
+    if node.node_type == NodeType.FUNCTION:
+        fixed_value, fixed_type = _evaluate_fixed_temporal_function(node.value)
+        if fixed_type is not None:
+            return fixed_value, fixed_type
+
+        parameter_values = []
+        for parameter in node.parameters:
+            value, value_type = _evaluate_timetravel_expression(parameter)
+            parameter_values.append(_as_function_parameter_array(value, value_type))
+
+        try:
+            result = functions.apply_function(node.value, *parameter_values)
+        except Exception as err:
+            raise UnsupportedSyntaxError(
+                f"Unable to evaluate time-travel function '{node.value}'."
+            ) from err
+
+        scalar = _extract_single_scalar(result)
+        return scalar, _type_from_value(scalar)
+
+    if node.node_type == NodeType.BINARY_OPERATOR:
+        left_value, left_type = _evaluate_timetravel_expression(node.left)
+        right_value, right_type = _evaluate_timetravel_expression(node.right)
+
+        left = _as_binary_operand_array(left_value, left_type)
+        right = _as_binary_operand_array(right_value, right_type)
+
+        try:
+            result = binary_operations(left, left_type, node.value, right, right_type)
+        except Exception as err:
+            raise UnsupportedSyntaxError(
+                f"Unable to evaluate time-travel expression with operator '{node.value}'."
+            ) from err
+
+        scalar = _extract_single_scalar(result)
+        return scalar, _type_from_value(scalar)
+
+    raise UnsupportedSyntaxError("Time-travel expression must resolve to a scalar value.")
+
+
+def _coerce_to_datetime(value):
+    if isinstance(value, datetime.time):
+        today_utc = datetime.datetime.now(datetime.UTC).date()
+        return datetime.datetime.combine(today_utc, value)
+    parsed = dates.parse_iso(value)
+    if parsed is None:
+        return None
+    return parsed
+
+
+def _extract_version_expression(version_clause):
+    if "ForSystemTimeAsOf" in version_clause:
+        raise UnsupportedSyntaxError(
+            "FOR SYSTEM_TIME AS OF is not supported. Use `TIMESTAMP AS OF <expression>`."
+        )
+
+    if "TimestampAsOf" in version_clause:
+        # Legacy/alternate parser shape:
+        # {"TimestampAsOf": <expr>}
+        return version_clause["TimestampAsOf"], False
+
+    if "Function" in version_clause:
+        function_wrapper = version_clause["Function"]
+        function_branch = function_wrapper.get("Function", function_wrapper)
+    else:
+        raise UnsupportedSyntaxError(
+            "Unsupported table version syntax. Use `AT(...)`, `BEFORE(...)`, or `FOR SYSTEM_TIME AS OF ...`."
+        )
+
+    if "Function" in function_branch:
+        function_branch = function_branch["Function"]
+
+    if "name" not in function_branch:
+        raise UnsupportedSyntaxError("Invalid time-travel clause.")
+
+    function_name = function_branch["name"][0]["Identifier"]["value"].upper()
+    if function_name != "AT":
+        raise UnsupportedSyntaxError(
+            f"Unsupported time-travel function '{function_name}'. Use `TIMESTAMP AS OF <expression>`."
+        )
+
+    args = function_branch.get("args", {}).get("List", {}).get("args", [])
+    if len(args) != 1:
+        raise UnsupportedSyntaxError(
+            f"AT expects exactly 1 argument, got {len(args)}."
+        )
+
+    warnings.warn(
+        "AT(TIMESTAMP => ...) is deprecated. Use `TIMESTAMP AS OF <expression>` instead.",
+        category=DeprecationWarning,
+        stacklevel=3,
+    )
+
+    arg = args[0]
+    if "Named" in arg:
+        named_arg = arg["Named"]
+        if named_arg["name"]["value"].upper() != "TIMESTAMP":
+            raise UnsupportedSyntaxError("Time-travel named argument must be TIMESTAMP => <expr>.")
+        return named_arg["arg"]["Expr"], False
+
+    raise UnsupportedSyntaxError("AT syntax must be `AT(TIMESTAMP => <expression>)`.")
+
+
+def extract_timetravel_timestamp(version_clause) -> Optional[object]:
+    """
+    Extract and evaluate a time-travel timestamp from the table version clause.
+
+    Supported syntax:
+        TIMESTAMP AS OF INTERVAL '1' DAY -- interpreted as current time minus 1 day
+        TIMESTAMP AS OF '2024-12-15 00:00:00'
+        TIMESTAMP AS OF CURRENT_DATE - INTERVAL '7' DAY
+        TIMESTAMP AS OF DATE_TRUNC('month', CURRENT_DATE)
+        AT(TIMESTAMP => '2024-12-15 00:00:00') -- legacy/alternate syntax
 
     Args:
         version_clause: The version field from the table AST
 
     Returns:
-        Parsed datetime object or None if no AT clause
+        Parsed datetime object or None if no version clause
 
     Raises:
-        UnsupportedSyntaxError: If syntax is not the supported AT format
+        UnsupportedSyntaxError: If syntax is unsupported or doesn't evaluate to one timestamp
     """
     if version_clause is None:
         return None
 
-    # Extract the Function structure
-    if "Function" not in version_clause:
-        raise UnsupportedSyntaxError("Unsupported table version syntax.")
+    expression_ast, is_before = _extract_version_expression(version_clause)
+    expression_node = build(expression_ast)
+    value, _ = _evaluate_timetravel_expression(expression_node, apply_interval_literal_to_now=True)
+    parsed_timestamp = _coerce_to_datetime(value)
 
-    func = version_clause["Function"]["Function"]
-
-    # Validate it's the AT function
-    func_name = func["name"][0]["Identifier"]["value"]
-    if func_name.upper() != "AT":
-        raise UnsupportedSyntaxError(
-            f"Unsupported time-travel function '{func_name}'. Only AT is supported."
-        )
-
-    # Validate we have exactly one argument
-    args = func.get("args", {}).get("List", {}).get("args", [])
-    if len(args) != 1:
-        raise UnsupportedSyntaxError(f"AT function expects 1 argument, got {len(args)}.")
-
-    # Extract the argument
-    arg = args[0]
-    if "Unnamed" not in arg:
-        raise UnsupportedSyntaxError("AT argument must be a timestamp expression.")
-
-    expr = arg["Unnamed"]["Expr"]
-
-    # Validate it's a TypedString with Timestamp type
-    if "TypedString" not in expr:
-        raise UnsupportedSyntaxError("AT argument must be a timestamp value.")
-
-    typed_string = expr["TypedString"]
-    data_type = typed_string.get("data_type")
-
-    # Validate data type is Timestamp
-    if not isinstance(data_type, dict) or "Timestamp" not in data_type:
-        raise UnsupportedSyntaxError("AT argument must be a TIMESTAMP value.")
-
-    # Extract the timestamp string value
-    value_expr = typed_string.get("value", {}).get("value", {})
-    timestamp_str = None
-
-    if "SingleQuotedString" in value_expr:
-        timestamp_str = value_expr["SingleQuotedString"]
-    elif "DoubleQuotedString" in value_expr:
-        timestamp_str = value_expr["DoubleQuotedString"]
-
-    if not timestamp_str:
-        raise UnsupportedSyntaxError("AT timestamp must be a quoted string.")
-
-    # Parse the timestamp string
-    parsed_timestamp = dates.parse_iso(timestamp_str)
     if parsed_timestamp is None:
         raise UnsupportedSyntaxError(
-            f"Invalid timestamp format: '{timestamp_str}'. Expected format: YYYY-MM-DD or YYYY-MM-DD HH:MM:SS"
+            "Time-travel expression must evaluate to a timestamp-compatible scalar value."
         )
+
+    if is_before:
+        parsed_timestamp = parsed_timestamp - datetime.timedelta(microseconds=1)
 
     return parsed_timestamp
 

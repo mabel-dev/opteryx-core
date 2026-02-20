@@ -73,6 +73,18 @@ STATEMENTS = [
         ("SELECT COUNT(*) FROM testdata.satellites", 1, 1, None),
         ("SELECT COUNT(*) FROM testdata.planets", 1, 1, None),
 
+        # Time-travel syntax (supported)
+        ("SELECT * FROM $planets TIMESTAMP AS OF INTERVAL '1' DAY", 9, 20, None),
+        ("SELECT * FROM $planets TIMESTAMP AS OF '2024-12-15 00:00:00'", 9, 20, None),
+        ("SELECT * FROM $planets TIMESTAMP AS OF CURRENT_DATE - INTERVAL '7' DAY", 9, 20, None),
+        ("SELECT * FROM $planets TIMESTAMP AS OF DATE_TRUNC('month', CURRENT_DATE)", 9, 20, None),
+        ("SELECT * FROM $planets AT(TIMESTAMP => '2024-12-15 00:00:00')", 9, 20, None),
+
+        # Time-travel syntax (unsupported)
+        ("SELECT * FROM $planets AT('2024-12-15 00:00:00')", None, None, UnsupportedSyntaxError),
+        ("SELECT * FROM $planets BEFORE(TIMESTAMP => '2024-12-15 00:00:00')", None, None, UnsupportedSyntaxError),
+        ("SELECT * FROM $planets FOR SYSTEM_TIME AS OF '2024-12-15 00:00:00'", None, None, UnsupportedSyntaxError),
+
         # Does the error tester work
         ("THIS IS NOT VALID SQL", None, None, SqlError),
 
@@ -197,6 +209,22 @@ def test_sql_battery(statement:str, rows:int, columns:int, exception: Optional[E
             raise ValueError(
                 f"{format_sql(statement)}\nQuery failed with error {type(error)} but error {exception} was expected"
             ) from error
+
+
+def test_timetravel_at_syntax_deprecation_warning():
+    """
+    AT(TIMESTAMP => ...) remains supported, but should emit a deprecation warning.
+    """
+    from opteryx.connectors import DiskConnector
+
+    opteryx.register_workspace("testdata", DiskConnector)
+    session = opteryx.session(memberships=["Apollo 11", "opteryx"])
+
+    with pytest.warns(DeprecationWarning, match=r"AT\(TIMESTAMP => \.\.\.\) is deprecated"):
+        result = session.execute_to_arrow(
+            "SELECT * FROM $planets AT(TIMESTAMP => '2024-12-15 00:00:00')"
+        )
+        assert result.shape == (9, 20)
 
 
 if __name__ == "__main__":  # pragma: no cover
