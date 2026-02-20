@@ -115,6 +115,12 @@ Must be >= IOPS_MAX_INFLIGHT."""
 
 IOPS_CHUNK_SIZE: int = int(get("IOPS_CHUNK_SIZE", 8 * 1024 * 1024))
 """HTTP streaming chunk size for aiohttp downloads in bytes (default: 8 MiB)."""
+
+IOPS_PREFAULT_MODE: str = str(get("IOPS_PREFAULT_MODE", "adaptive"))
+"""Shared-memory pre-fault mode: adaptive, full, first-slot, or none."""
+
+IOPS_REUSE_RING: bool = str(get("IOPS_REUSE_RING", "1")).lower() in ("1", "true", "yes")
+"""Reuse a compatible shared-memory ring allocation across readers in-process."""
 # size of morsels to push between steps
 # MORSEL_SIZE remains a plain constant
 MORSEL_SIZE: int = int(get("MORSEL_SIZE", 64 * 1024 * 1024))

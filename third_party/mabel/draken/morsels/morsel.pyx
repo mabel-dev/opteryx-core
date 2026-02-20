@@ -165,6 +165,57 @@ cdef class Morsel:
         return self
 
     @staticmethod
+    def from_vectors(list names, list vectors):
+        """Construct a Morsel directly from lists of column names and Draken Vector objects.
+
+        Unlike ``from_arrow`` this method does not touch PyArrow at all; it is
+        intended for use by native decoders (e.g. rugo) that produce Draken
+        vectors directly.
+
+        Args:
+            names:   List of column name strings (or bytes).
+            vectors: List of Draken Vector instances in the same order.
+
+        Returns:
+            A fully initialised Morsel.
+        """
+        cdef int i, n = len(vectors)
+        if len(names) != n:
+            raise ValueError("names and vectors must have the same length")
+        if n == 0:
+            raise ValueError("at least one column required")
+
+        cdef Morsel self = Morsel()
+        cdef Vector vec
+        cdef bytes encoded_name
+
+        self._columns = [None] * n
+        self._encoded_names = [None] * n
+        self.ptr = <DrakenMorsel*> PyMem_Malloc(sizeof(DrakenMorsel))
+        self.ptr.num_columns = n
+        self.ptr.num_rows = (<Vector>vectors[0]).length
+        self.ptr.columns = <void**> PyMem_Malloc(sizeof(void*) * n)
+        self.ptr.column_names = <const char**> PyMem_Malloc(sizeof(const char*) * n)
+        self.ptr.column_types = <DrakenType*> PyMem_Malloc(sizeof(DrakenType) * n)
+
+        for i in range(n):
+            vec = vectors[i]
+            self._columns[i] = vec
+
+            if isinstance(names[i], str):
+                encoded_name = names[i].encode("utf-8")
+            else:
+                encoded_name = names[i]
+            self._encoded_names[i] = encoded_name
+
+            self.ptr.columns[i] = <void*>vec
+            self.ptr.column_types[i] = vec.dtype
+            self.ptr.column_names[i] = <const char*>encoded_name
+
+        self._rebuild_name_to_index()
+        return self
+
+    @staticmethod
     def iter_from_arrow(object table, batch_size=None):
         """Yield ``Morsel`` instances from an Arrow table without forcing ``combine_chunks``."""
         import pyarrow as pa

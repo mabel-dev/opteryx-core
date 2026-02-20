@@ -54,9 +54,12 @@ before sending each request; ``payload.release()`` releases it.
 
 from __future__ import annotations
 
+import atexit
 import multiprocessing
+import threading
 from dataclasses import dataclass
 from dataclasses import field
+from multiprocessing.shared_memory import SharedMemory
 from typing import Iterator
 from typing import List
 from typing import Optional
@@ -68,12 +71,11 @@ from opteryx.iops.messages import decode_startup
 from opteryx.iops.messages import encode_request
 from opteryx.iops.ring import FREE
 from opteryx.iops.ring import READING
-from opteryx.iops.ring import READY
 from opteryx.iops.ring import RingConfig
 from opteryx.iops.ring import allocate_ring
 from opteryx.iops.ring import read_payload
-from opteryx.iops.ring import read_slot_header
 from opteryx.iops.ring import release_ring
+from opteryx.iops.ring import reset_ring_states
 from opteryx.iops.ring import write_slot_state
 from opteryx.iops.worker import io_worker
 
@@ -81,7 +83,7 @@ from opteryx.iops.worker import io_worker
 _DEFAULT_SHM_NAME = "opteryx_iops_ring"
 
 
-def _iops_defaults() -> tuple[int, int, int, int]:
+def _iops_defaults() -> tuple[int, int, int, int, str, bool]:
     """Read IOPS tuning values from config, with safe fallbacks."""
     try:
         from opteryx import config as _cfg
@@ -91,15 +93,89 @@ def _iops_defaults() -> tuple[int, int, int, int]:
             _cfg.IOPS_MAX_INFLIGHT,
             _cfg.IOPS_SLOT_COUNT,
             _cfg.IOPS_CHUNK_SIZE,
+            _cfg.IOPS_PREFAULT_MODE,
+            _cfg.IOPS_REUSE_RING,
         )
     except Exception:
         _inf = 8
-        return 64 * 1024 * 1024, _inf, max(_inf * 2, 16), 4 * 1024 * 1024
+        return 64 * 1024 * 1024, _inf, max(_inf * 2, 16), 4 * 1024 * 1024, "adaptive", True
 
 
-_DEFAULT_SLOT_SIZE, _DEFAULT_MAX_INFLIGHT, _DEFAULT_SLOT_COUNT, _DEFAULT_CHUNK_SIZE = (
-    _iops_defaults()
-)
+(
+    _DEFAULT_SLOT_SIZE,
+    _DEFAULT_MAX_INFLIGHT,
+    _DEFAULT_SLOT_COUNT,
+    _DEFAULT_CHUNK_SIZE,
+    _DEFAULT_PREFAULT_MODE,
+    _DEFAULT_REUSE_RING,
+) = _iops_defaults()
+
+
+@dataclass
+class _RingCacheEntry:
+    cfg: RingConfig
+    shm: SharedMemory
+    leased: bool = False
+
+
+_RING_CACHE_LOCK = threading.Lock()
+_RING_CACHE: Optional[_RingCacheEntry] = None
+
+
+def _shutdown_ring_cache() -> None:
+    global _RING_CACHE
+    with _RING_CACHE_LOCK:
+        cache_entry = _RING_CACHE
+        _RING_CACHE = None
+    if cache_entry is not None:
+        try:
+            release_ring(cache_entry.shm)
+        except Exception:
+            pass
+
+
+def _acquire_or_allocate_ring(cfg: RingConfig) -> tuple[SharedMemory, bool]:
+    """Get a cached compatible ring or allocate/cache a new one."""
+    global _RING_CACHE
+
+    evict: Optional[SharedMemory] = None
+    with _RING_CACHE_LOCK:
+        if _RING_CACHE is not None and _RING_CACHE.leased:
+            raise RuntimeError(
+                "Concurrent IOPSReader instances are not supported when IOPS_REUSE_RING is enabled."
+            )
+
+        if _RING_CACHE is not None and _RING_CACHE.cfg == cfg and not _RING_CACHE.leased:
+            _RING_CACHE.leased = True
+            return _RING_CACHE.shm, True
+
+        if _RING_CACHE is not None and not _RING_CACHE.leased and _RING_CACHE.cfg != cfg:
+            evict = _RING_CACHE.shm
+            _RING_CACHE = None
+
+    if evict is not None:
+        release_ring(evict)
+
+    shm = allocate_ring(cfg)
+
+    with _RING_CACHE_LOCK:
+        if _RING_CACHE is None:
+            _RING_CACHE = _RingCacheEntry(cfg=cfg, shm=shm, leased=True)
+            return shm, True
+
+    # Another thread populated the cache while we were allocating.
+    return shm, False
+
+
+def _release_cached_ring(shm: SharedMemory) -> bool:
+    with _RING_CACHE_LOCK:
+        if _RING_CACHE is not None and _RING_CACHE.shm is shm:
+            _RING_CACHE.leased = False
+            return True
+    return False
+
+
+atexit.register(_shutdown_ring_cache)
 
 
 @dataclass
@@ -183,7 +259,10 @@ class IOPSReader:
             max_inflight=_DEFAULT_MAX_INFLIGHT,
             shm_name=_DEFAULT_SHM_NAME,
             chunk_size=_DEFAULT_CHUNK_SIZE,
+            prefault_mode=_DEFAULT_PREFAULT_MODE,
         )
+        self._reuse_ring = _DEFAULT_REUSE_RING
+        self._using_cached_ring = False
         self._shm = None
         self._worker = None
         self._parent_conn = None
@@ -236,8 +315,10 @@ class IOPSReader:
 
         while received < total or sent < total:
             # ── Send phase: push as many requests as semaphore allows ─────────
+            blocked_on_sem = False
             while sent < total:
                 if not sem.acquire(block=False):
+                    blocked_on_sem = True
                     break
                 conn.send_bytes(encode_request(sent, blob_paths[sent]))
                 id_to_path[sent] = blob_paths[sent]
@@ -248,55 +329,54 @@ class IOPSReader:
             # submission order.  This eliminates head-of-line blocking: a slow
             # blob cannot stall all semaphore slots and starve the pipeline.
             if received < total:
-                if conn.poll(0):
-                    rc: ReadComplete = decode_complete(conn.recv_bytes())
-                    received += 1
-                    blob_path = id_to_path.pop(rc.request_id)
+                should_block_for_completion = sent == total or blocked_on_sem
 
-                    if not rc.ok:
-                        # Yield an error sentinel — no slot was allocated by the worker.
-                        payload = SlotPayload(
-                            slot_id=-1,
-                            data=memoryview(b""),
-                            length=0,
-                            request_id=rc.request_id,
-                            blob_path=blob_path,
-                            error=rc.error,
-                            _ring_buf=buf,
-                            _cfg=cfg,
-                            _sem=sem,
-                        )
-                    else:
-                        # Transition slot READY → READING; hand zero-copy view
-                        # to the caller.
-                        _state, _length, _rid = read_slot_header(buf, cfg, rc.slot_id)
-                        write_slot_state(buf, cfg, rc.slot_id, READING)
+                if should_block_for_completion or conn.poll(0):
+                    data = conn.recv_bytes()
+                else:
+                    continue
 
-                        raw = read_payload(shm, cfg, rc.slot_id, rc.length)
+                rc: ReadComplete = decode_complete(data)
+                received += 1
+                blob_path = id_to_path.pop(rc.request_id)
 
-                        payload = SlotPayload(
-                            slot_id=rc.slot_id,
-                            data=raw,
-                            length=rc.length,
-                            request_id=rc.request_id,
-                            blob_path=blob_path,
-                            gcs_latency_s=rc.gcs_latency_s,
-                            _ring_buf=buf,
-                            _cfg=cfg,
-                            _sem=sem,
-                        )
-                    self._live_payloads.append(payload)
-                    yield payload
-                    try:
-                        self._live_payloads.remove(payload)
-                    except ValueError:
-                        pass
-                elif sent == total:
-                    # Nothing left to send and nothing arrived — genuinely idle.
-                    # Yield the CPU briefly rather than burning a core on polling.
-                    import time as _time
+                if not rc.ok:
+                    # Yield an error sentinel — no slot was allocated by the worker.
+                    payload = SlotPayload(
+                        slot_id=-1,
+                        data=memoryview(b""),
+                        length=0,
+                        request_id=rc.request_id,
+                        blob_path=blob_path,
+                        error=rc.error,
+                        _ring_buf=buf,
+                        _cfg=cfg,
+                        _sem=sem,
+                    )
+                else:
+                    # Transition slot READY → READING; hand zero-copy view
+                    # to the caller.
+                    write_slot_state(buf, cfg, rc.slot_id, READING)
 
-                    _time.sleep(0.0005)
+                    raw = read_payload(shm, cfg, rc.slot_id, rc.length)
+
+                    payload = SlotPayload(
+                        slot_id=rc.slot_id,
+                        data=raw,
+                        length=rc.length,
+                        request_id=rc.request_id,
+                        blob_path=blob_path,
+                        gcs_latency_s=rc.gcs_latency_s,
+                        _ring_buf=buf,
+                        _cfg=cfg,
+                        _sem=sem,
+                    )
+                self._live_payloads.append(payload)
+                yield payload
+                try:
+                    self._live_payloads.remove(payload)
+                except ValueError:
+                    pass
 
     # ── Internal helpers ──────────────────────────────────────────────────────
 
@@ -304,23 +384,32 @@ class IOPSReader:
         """Allocate the ring buffer and start the IO worker process."""
         cfg = self._cfg
 
-        self._shm = allocate_ring(cfg)
+        if self._reuse_ring:
+            self._shm, self._using_cached_ring = _acquire_or_allocate_ring(cfg)
+            reset_ring_states(self._shm.buf, cfg)
+        else:
+            self._shm = allocate_ring(cfg)
+            self._using_cached_ring = False
         self._sem = multiprocessing.Semaphore(cfg.max_inflight)
 
-        parent_conn, child_conn = multiprocessing.Pipe()
-        self._parent_conn = parent_conn
+        try:
+            parent_conn, child_conn = multiprocessing.Pipe()
+            self._parent_conn = parent_conn
 
-        self._worker = multiprocessing.Process(
-            target=io_worker,
-            args=(cfg.shm_name, child_conn, self._protocol, cfg),
-            daemon=True,
-            name="opteryx-iops-worker",
-        )
-        self._worker.start()
-        child_conn.close()  # parent no longer needs the child end
+            self._worker = multiprocessing.Process(
+                target=io_worker,
+                args=(cfg.shm_name, child_conn, self._protocol, cfg),
+                daemon=True,
+                name="opteryx-iops-worker",
+            )
+            self._worker.start()
+            child_conn.close()  # parent no longer needs the child end
 
-        # Wait for the worker to signal readiness (or report an error).
-        decode_startup(parent_conn.recv_bytes())
+            # Wait for the worker to signal readiness (or report an error).
+            decode_startup(parent_conn.recv_bytes())
+        except Exception:
+            self._stop()
+            raise
 
     def _stop(self) -> None:
         """Gracefully shut down the worker and release all resources."""
@@ -341,13 +430,20 @@ class IOPSReader:
             if self._worker.is_alive():
                 self._worker.terminate()
                 self._worker.join(timeout=2)
+        self._worker = None
 
         if self._parent_conn is not None:
             self._parent_conn.close()
             self._parent_conn = None
 
-        # Release the shm.buf memoryview held inside ring helpers.
-        # release_ring() calls shm.close() + shm.unlink().
+        self._sem = None
+
+        # Release (or cache-release) the ring allocation.
         if self._shm is not None:
-            release_ring(self._shm)
+            if self._using_cached_ring:
+                if not _release_cached_ring(self._shm):
+                    release_ring(self._shm)
+            else:
+                release_ring(self._shm)
             self._shm = None
+            self._using_cached_ring = False

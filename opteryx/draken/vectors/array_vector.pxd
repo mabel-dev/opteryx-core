@@ -1,7 +1,8 @@
-from libc.stdint cimport uint64_t
+from libc.stdint cimport int32_t, uint8_t, uint64_t
 
 from opteryx.draken.core.buffers cimport DrakenArrayBuffer
 from opteryx.draken.vectors.vector cimport Vector
+from opteryx.draken.vectors.string_vector cimport StringVector
 
 
 cdef class ArrayVector(Vector):
@@ -26,3 +27,9 @@ cdef class ArrayVector(Vector):
 
 cdef ArrayVector from_arrow(object array)
 cdef ArrayVector from_sequence(object data)
+cdef ArrayVector array_vector_from_parts(
+    StringVector flat_child,
+    int32_t* offsets,
+    uint8_t* list_null_bitmap,
+    Py_ssize_t num_rows
+)

@@ -1,6 +1,11 @@
 """
 Test demonstrating that byte arrays are kept as raw binary (bytes), not UTF-8 strings.
 """
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+
 import opteryx.rugo.jsonl as jsonl
 
 print("="*70)
