@@ -1,127 +1,108 @@
 #include <Python.h>
+#include <nanobind/nanobind.h>
 #include <stdint.h>
 
-// offsets_to_lengths using the Python buffer protocol and returning a
-// bytearray of uint32 values (native endianness). This removes the
-// dependency on NumPy for this hot path while keeping the API flexible
-// (accepts any object that supports the buffer protocol, e.g., NumPy
-// arrays or PyArrow buffers).
-static PyObject * offsets_to_lengths(PyObject *self, PyObject *args) {
-    PyObject *offsets_obj = NULL;
-    if (!PyArg_ParseTuple(args, "O", &offsets_obj))
-        return NULL;
+namespace nb = nanobind;
 
-    Py_buffer view;
-    if (PyObject_GetBuffer(offsets_obj, &view, PyBUF_SIMPLE) != 0) {
-        PyErr_SetString(PyExc_TypeError, "object does not support buffer protocol");
-        return NULL;
+namespace {
+
+struct BufferView {
+    Py_buffer view {};
+    bool acquired = false;
+
+    ~BufferView() {
+        if (acquired) {
+            PyBuffer_Release(&view);
+        }
     }
 
-    // offsets must be int32, so buffer length must be multiple of 4
-    if (view.len % sizeof(int32_t) != 0) {
-        PyBuffer_Release(&view);
-        PyErr_SetString(PyExc_ValueError, "offsets buffer has invalid length");
-        return NULL;
+    BufferView(const BufferView&) = delete;
+    BufferView& operator=(const BufferView&) = delete;
+    BufferView() = default;
+};
+
+inline void acquire_buffer(nb::handle obj, int flags, BufferView& out, const char* err_msg) {
+    if (PyObject_GetBuffer(obj.ptr(), &out.view, flags) != 0) {
+        if (!PyErr_Occurred()) {
+            PyErr_SetString(PyExc_TypeError, err_msg);
+        }
+        throw nb::python_error();
+    }
+    out.acquired = true;
+}
+
+inline size_t validate_offsets_length(Py_ssize_t len_bytes) {
+    if (len_bytes % static_cast<Py_ssize_t>(sizeof(int32_t)) != 0) {
+        throw nb::value_error("offsets buffer has invalid length");
     }
 
-    size_t num_offsets = view.len / sizeof(int32_t);
+    size_t num_offsets = static_cast<size_t>(len_bytes) / sizeof(int32_t);
     if (num_offsets < 2) {
-        PyBuffer_Release(&view);
-        PyErr_SetString(PyExc_ValueError, "offsets must have length >= 2");
-        return NULL;
+        throw nb::value_error("offsets must have length >= 2");
     }
 
+    return num_offsets;
+}
+
+inline void compute_lengths(const int32_t* in, uint32_t* out, size_t n_out) {
+    for (size_t i = 0; i < n_out; ++i) {
+        out[i] = static_cast<uint32_t>(in[i + 1] - in[i]);
+    }
+}
+
+nb::bytearray offsets_to_lengths(nb::object offsets_obj) {
+    BufferView view_in;
+    acquire_buffer(offsets_obj, PyBUF_SIMPLE, view_in, "object does not support buffer protocol");
+
+    size_t num_offsets = validate_offsets_length(view_in.view.len);
     size_t res_len = num_offsets - 1;
-    // Create a bytearray of res_len * 4 bytes to hold uint32_t results
-    PyObject *out = PyByteArray_FromStringAndSize(NULL, res_len * sizeof(uint32_t));
-    if (!out) {
-        PyBuffer_Release(&view);
-        return NULL;
+
+    PyObject* out_obj = PyByteArray_FromStringAndSize(nullptr, static_cast<Py_ssize_t>(res_len * sizeof(uint32_t)));
+    if (!out_obj) {
+        throw nb::python_error();
     }
 
-    int32_t *in = (int32_t *) view.buf;
-    uint32_t *outp = (uint32_t *) PyByteArray_AsString(out);
+    nb::bytearray out = nb::steal<nb::bytearray>(out_obj);
+    auto* in = static_cast<const int32_t*>(view_in.view.buf);
+    auto* outp = reinterpret_cast<uint32_t*>(PyByteArray_AsString(out.ptr()));
+    compute_lengths(in, outp, res_len);
 
-    for (size_t i = 0; i < res_len; ++i) {
-        outp[i] = (uint32_t) (in[i + 1] - in[i]);
-    }
-
-    PyBuffer_Release(&view);
     return out;
 }
 
-static PyObject * offsets_to_lengths_into(PyObject *self, PyObject *args) {
-    PyObject *offsets_obj = NULL;
-    PyObject *out_obj = NULL;
-    if (!PyArg_ParseTuple(args, "OO", &offsets_obj, &out_obj))
-        return NULL;
+nb::object offsets_to_lengths_into(nb::object offsets_obj, nb::object out_obj) {
+    BufferView view_in;
+    BufferView view_out;
 
-    Py_buffer view_in;
-    if (PyObject_GetBuffer(offsets_obj, &view_in, PyBUF_SIMPLE) != 0) {
-        PyErr_SetString(PyExc_TypeError, "offsets object does not support buffer protocol");
-        return NULL;
-    }
+    acquire_buffer(offsets_obj, PyBUF_SIMPLE, view_in, "offsets object does not support buffer protocol");
+    acquire_buffer(out_obj, PyBUF_WRITABLE, view_out, "output object is not writable or does not support buffer protocol");
 
-    Py_buffer view_out;
-    if (PyObject_GetBuffer(out_obj, &view_out, PyBUF_WRITABLE) != 0) {
-        PyBuffer_Release(&view_in);
-        PyErr_SetString(PyExc_TypeError, "output object is not writable or does not support buffer protocol");
-        return NULL;
-    }
-
-    if (view_in.len % sizeof(int32_t) != 0) {
-        PyBuffer_Release(&view_in);
-        PyBuffer_Release(&view_out);
-        PyErr_SetString(PyExc_ValueError, "offsets buffer has invalid length");
-        return NULL;
-    }
-
-    size_t num_offsets = view_in.len / sizeof(int32_t);
-    if (num_offsets < 2) {
-        PyBuffer_Release(&view_in);
-        PyBuffer_Release(&view_out);
-        PyErr_SetString(PyExc_ValueError, "offsets must have length >= 2");
-        return NULL;
-    }
-
+    size_t num_offsets = validate_offsets_length(view_in.view.len);
     size_t res_len = num_offsets - 1;
-    if ((size_t)view_out.len != res_len * sizeof(uint32_t)) {
-        Py_ssize_t in_len = view_in.len;
-        Py_ssize_t out_len = view_out.len;
-        PyBuffer_Release(&view_in);
-        PyBuffer_Release(&view_out);
-        PyErr_Format(PyExc_ValueError, "output buffer has incorrect size (in_len=%zd, out_len=%zd, expected_out=%zu)", in_len, out_len, res_len * sizeof(uint32_t));
-        return NULL;
+    size_t expected_out_len = res_len * sizeof(uint32_t);
+
+    if (static_cast<size_t>(view_out.view.len) != expected_out_len) {
+        throw nb::value_error("output buffer has incorrect size");
     }
 
-    int32_t *in = (int32_t *) view_in.buf;
-    uint32_t *outp = (uint32_t *) view_out.buf;
+    auto* in = static_cast<const int32_t*>(view_in.view.buf);
+    auto* outp = static_cast<uint32_t*>(view_out.view.buf);
+    compute_lengths(in, outp, res_len);
 
-    for (size_t i = 0; i < res_len; ++i) {
-        outp[i] = (uint32_t) (in[i + 1] - in[i]);
-    }
-
-    PyBuffer_Release(&view_in);
-    PyBuffer_Release(&view_out);
-
-    Py_INCREF(out_obj);
     return out_obj;
 }
 
-static PyMethodDef ListLengthMethods[] = {
-    {"offsets_to_lengths", (PyCFunction) offsets_to_lengths, METH_VARARGS, "Convert int32 offsets -> uint32 lengths (returns bytearray)"},
-    {"offsets_to_lengths_into", (PyCFunction) offsets_to_lengths_into, METH_VARARGS, "Convert int32 offsets -> uint32 lengths into a provided writable buffer"},
-    {NULL, NULL, 0, NULL}
-};
+} // namespace
 
-static struct PyModuleDef list_length_module = {
-    PyModuleDef_HEAD_INIT,
-    "list_length",
-    NULL,
-    -1,
-    ListLengthMethods
-};
-
-PyMODINIT_FUNC PyInit_list_length(void) {
-    return PyModule_Create(&list_length_module);
+NB_MODULE(list_length, m) {
+    m.def(
+        "offsets_to_lengths",
+        &offsets_to_lengths,
+        "Convert int32 offsets -> uint32 lengths (returns bytearray)"
+    );
+    m.def(
+        "offsets_to_lengths_into",
+        &offsets_to_lengths_into,
+        "Convert int32 offsets -> uint32 lengths into a provided writable buffer"
+    );
 }

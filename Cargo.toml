@@ -22,6 +22,6 @@ version = "0.27"
 features = ["extension-module"]
 
 [dependencies.sqlparser]
-version = "0.60.0"
+version = "0.61.0"
 default-features = false
 features = ["serde"]
