@@ -373,6 +373,9 @@ extensions = [
             [
                 "third_party/mabel/rugo/parquet/parquet_reader.pyx",
                 "third_party/mabel/rugo/parquet/metadata.cpp",
+                "third_party/mabel/rugo/parquet/decode_encodings.cpp",
+                "third_party/mabel/rugo/parquet/decode_page.cpp",
+                "third_party/mabel/rugo/parquet/decode_column.cpp",
                 "third_party/mabel/rugo/parquet/decode.cpp",
                 "third_party/mabel/rugo/parquet/compression.cpp",
                 "third_party/mabel/rugo/parquet/bloom_filter.cpp",
