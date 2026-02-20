@@ -81,6 +81,7 @@ class RingConfig:
     max_inflight: int  # max simultaneous in-flight reads (e.g. 8)
     shm_name: str  # POSIX shared-memory name
     chunk_size: int = 4 * 1024 * 1024  # HTTP streaming chunk size in bytes (default 4 MiB)
+    prefault_mode: str = "adaptive"  # one of: adaptive, full, first-slot, none
 
     @property
     def slot_stride(self) -> int:
@@ -215,12 +216,33 @@ def allocate_ring(cfg: RingConfig) -> SharedMemory:
     for i in range(cfg.slot_count):
         write_slot_state(buf, cfg, i, FREE)
 
-    # Pre-fault every OS page so first writes don't stall on page faults
-    for off in range(0, cfg.total_size, 4096):
+    # Pre-fault selected pages so first writes don't stall on page faults.
+    mode = (cfg.prefault_mode or "adaptive").lower()
+    if mode == "adaptive":
+        # Full pre-fault is good for smaller rings; for larger rings it can
+        # dominate startup latency, so touch only the first slot.
+        mode = "full" if cfg.total_size <= (512 * 1024 * 1024) else "first-slot"
+
+    if mode == "full":
+        prefault_bytes = cfg.total_size
+    elif mode == "first-slot":
+        prefault_bytes = cfg.slot_stride
+    elif mode == "none":
+        prefault_bytes = 0
+    else:
+        prefault_bytes = cfg.slot_stride
+
+    for off in range(0, prefault_bytes, 4096):
         buf[off] = 0
 
     del buf
     return shm
+
+
+def reset_ring_states(buf, cfg: RingConfig) -> None:
+    """Reset all slots to FREE (used when reusing an existing ring allocation)."""
+    for i in range(cfg.slot_count):
+        write_slot_state(buf, cfg, i, FREE)
 
 
 def release_ring(shm: SharedMemory) -> None:

@@ -27,13 +27,15 @@ from cpython.sequence cimport PySequence_Fast_GET_ITEM, PySequence_Fast_GET_SIZE
 from libc.stddef cimport size_t
 from libc.stdint cimport int32_t, int8_t, intptr_t, uint8_t, uint64_t
 from libc.stdlib cimport free, malloc
-from libc.string cimport memset
+from libc.string cimport memcpy, memset
 
 from opteryx.draken.core.buffers cimport (
     DrakenArrayBuffer,
     DRAKEN_ARRAY,
     DRAKEN_NON_NATIVE,
+    DRAKEN_STRING,
 )
+from opteryx.draken.vectors.string_vector cimport StringVector
 from opteryx.draken.interop.arrow cimport arrow_type_to_draken, vector_from_arrow
 from opteryx.draken.vectors.vector cimport (
     MIX_HASH_CONSTANT,
@@ -474,3 +476,59 @@ cdef ArrayVector from_sequence(object data):
     
     arrow_array = pa.array(data)
     return from_arrow(arrow_array)
+
+
+cdef ArrayVector array_vector_from_parts(
+        StringVector flat_child,
+        int32_t* offsets,
+        uint8_t* list_null_bitmap,
+        Py_ssize_t num_rows):
+    """
+    Construct an ArrayVector directly from pre-decoded components.
+
+    Intended for use by native decoders (e.g. rugo) that have already decoded
+    a Parquet LIST column into its constituent parts without going through PyArrow.
+
+    Args:
+        flat_child:       Southern StringVector containing all concatenated list elements.
+        offsets:          (num_rows + 1) int32 offsets array; will be copied.
+        list_null_bitmap: Arrow validity bitmap for the outer list rows (1=valid, 0=null);
+                          pass NULL if all rows are non-null.
+        num_rows:         Number of outer (list) rows.
+
+    Returns:
+        ArrayVector that owns its offsets and null_bitmap buffers, holding
+        a strong Python reference to flat_child.
+    """
+    cdef ArrayVector vec = ArrayVector.__new__(ArrayVector)
+    cdef DrakenArrayBuffer* buf = _alloc_array_buffer()
+    cdef Py_ssize_t nb
+    cdef int32_t* offs_copy
+    cdef uint8_t* bm_copy
+
+    offs_copy = <int32_t*> malloc((num_rows + 1) * sizeof(int32_t))
+    if offs_copy == NULL:
+        raise MemoryError()
+    memcpy(offs_copy, offsets, (num_rows + 1) * sizeof(int32_t))
+
+    buf.offsets = offs_copy
+    buf.length = <size_t> num_rows
+    buf.value_type = DRAKEN_STRING
+    buf.values = <void*> flat_child
+
+    if list_null_bitmap != NULL:
+        nb = (num_rows + 7) >> 3
+        bm_copy = <uint8_t*> malloc(nb)
+        if bm_copy == NULL:
+            raise MemoryError()
+        memcpy(bm_copy, list_null_bitmap, nb)
+        buf.null_bitmap = bm_copy
+        vec.owns_null_bitmap = True
+    else:
+        buf.null_bitmap = NULL
+        vec.owns_null_bitmap = False
+
+    vec.ptr = buf
+    vec._child = flat_child
+    vec.owns_offsets = True
+    return vec

@@ -18,7 +18,7 @@ This matches Arrow's representation:
 
 from cpython.bytes cimport PyBytes_FromStringAndSize, PyBytes_AS_STRING
 from cpython.mem cimport PyMem_Malloc, PyMem_Free
-from libc.string cimport memset
+from libc.string cimport memcpy, memset
 
 from libc.stdint cimport int32_t, int8_t, intptr_t, uint64_t, uint8_t, int64_t
 from libc.stdlib cimport malloc
@@ -460,4 +460,40 @@ cdef BoolVector from_sequence(uint8_t[::1] data):
     vec.ptr.data = <void*> &data[0]
     vec.ptr.null_bitmap = NULL
 
+    return vec
+
+
+cdef BoolVector bool_vector_from_bits(
+        uint8_t* value_bits,
+        uint8_t* valid_bits,
+        Py_ssize_t n):
+    """
+    Construct a BoolVector directly from pre-packed bit buffers (Arrow layout).
+
+    This is intended for use by native decoders (e.g. rugo) that have already
+    produced Arrow-format bit buffers and need a zero-extra-copy Draken vector.
+
+    Args:
+        value_bits: 1-bit-per-row packed boolean values (Arrow PLAIN / LSB-first).
+                    Must have at least ceil(n / 8) bytes.
+        valid_bits:  Arrow validity bitmap (1 = valid, 0 = null), same layout.
+                    Pass NULL to indicate all rows are valid (no null bitmap allocated).
+        n:          Number of logical rows.
+
+    Returns:
+        BoolVector owning copies of both buffers.
+    """
+    cdef Py_ssize_t nb = (n + 7) >> 3
+    cdef uint8_t* bm
+    cdef BoolVector vec = BoolVector(<size_t>n)
+    # BoolVector(n) already allocates ptr.data via malloc; copy values in.
+    memcpy(<uint8_t*>vec.ptr.data, value_bits, nb)
+    if valid_bits != NULL:
+        bm = <uint8_t*> malloc(nb)
+        if bm == NULL:
+            raise MemoryError()
+        memcpy(bm, valid_bits, nb)
+        vec.ptr.null_bitmap = bm
+    else:
+        vec.ptr.null_bitmap = NULL
     return vec

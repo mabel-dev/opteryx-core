@@ -73,14 +73,17 @@ async def _async_main(pipe_conn, fs, cfg, shm) -> None:
     concurrently, and sends ``ReadComplete`` messages back when each finishes.
     """
     import asyncio
+    import queue
+    import threading
 
     import aiohttp
 
     loop = asyncio.get_running_loop()
     buf = shm.buf
-    send_lock = asyncio.Lock()  # serialise pipe_conn.send_bytes calls
     # GCS credential refresh lock: prevent concurrent refresh from multiple coroutines.
     refresh_lock = asyncio.Lock()
+    request_queue: asyncio.Queue[bytes] = asyncio.Queue()
+    send_queue: queue.SimpleQueue[bytes | None] = queue.SimpleQueue()
 
     async def _ensure_fresh_token() -> None:
         """Refresh GCS OAuth token if it has expired (no-op for non-GCS backends)."""
@@ -131,6 +134,10 @@ async def _async_main(pipe_conn, fs, cfg, shm) -> None:
 
             def write(self, b: bytes) -> int:
                 n = len(b)
+                if self.pos + n > cfg.slot_size:
+                    raise ValueError(
+                        f"Blob {blob_path!r} exceeds slot size {cfg.slot_size:,} bytes"
+                    )
                 slot_view[self.pos : self.pos + n] = b
                 self.pos += n
                 return n
@@ -146,37 +153,48 @@ async def _async_main(pipe_conn, fs, cfg, shm) -> None:
             # Release exported pointer before state transition.
             del slot_view, writer
 
-            if length > cfg.slot_size:
-                raise ValueError(
-                    f"Blob {blob_path!r} is {length:,} bytes; exceeds slot size {cfg.slot_size:,}"
-                )
-
             write_slot_header(buf, cfg, slot_id, READY, length, request_id)
-
-            async with send_lock:
-                await loop.run_in_executor(
-                    None,
-                    pipe_conn.send_bytes,
-                    encode_complete(request_id, slot_id, length, gcs_latency),
-                )
+            send_queue.put(encode_complete(request_id, slot_id, length, gcs_latency))
 
         except Exception as exc:
             del slot_view, writer
             write_slot_state(buf, cfg, slot_id, FREE)
-            async with send_lock:
-                await loop.run_in_executor(
-                    None,
-                    pipe_conn.send_bytes,
-                    encode_complete(request_id, -1, 0, error=str(exc)),
-                )
+            send_queue.put(encode_complete(request_id, -1, 0, error=str(exc)))
+
+    def _recv_loop() -> None:
+        """Blocking pipe receiver thread -> async request queue."""
+        try:
+            while True:
+                data = pipe_conn.recv_bytes()
+                loop.call_soon_threadsafe(request_queue.put_nowait, data)
+                if data == SHUTDOWN:
+                    break
+        except (EOFError, OSError):
+            # Treat pipe close as shutdown.
+            loop.call_soon_threadsafe(request_queue.put_nowait, SHUTDOWN)
+
+    def _send_loop() -> None:
+        """Blocking pipe sender thread fed by send_queue."""
+        while True:
+            data = send_queue.get()
+            if data is None:
+                return
+            try:
+                pipe_conn.send_bytes(data)
+            except (BrokenPipeError, EOFError, OSError):
+                return
+
+    recv_thread = threading.Thread(target=_recv_loop, name="opteryx-iops-recv", daemon=True)
+    send_thread = threading.Thread(target=_send_loop, name="opteryx-iops-send", daemon=True)
+    recv_thread.start()
+    send_thread.start()
 
     async with aiohttp.ClientSession(connector=tcp_conn) as http_session:
         active: set[asyncio.Task] = set()
 
-        # Main dispatch loop: blocking pipe reads are offloaded to a thread
-        # executor so the event loop remains free to run download coroutines.
+        # Main dispatch loop: requests are fed by a dedicated blocking recv thread.
         while True:
-            data = await loop.run_in_executor(None, pipe_conn.recv_bytes)
+            data = await request_queue.get()
 
             if data == SHUTDOWN:
                 break
@@ -189,6 +207,10 @@ async def _async_main(pipe_conn, fs, cfg, shm) -> None:
         # Drain all in-flight downloads before exiting.
         if active:
             await asyncio.gather(*active, return_exceptions=True)
+
+    send_queue.put(None)
+    send_thread.join(timeout=2)
+    recv_thread.join(timeout=2)
 
     # Release the persistent shm.buf memoryview.  Any live slice (slot_view)
     # from an in-flight download would keep an exported pointer alive and cause
