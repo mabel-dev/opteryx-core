@@ -138,4 +138,18 @@ impl Dialect for OpteryxDialect {
         true
     }
 
+    /// Returns true if the dialect supports modifiers on SELECT statements, such as `DISTINCT` or `ALL`.
+    /// This enables syntax like:
+    /// - SELECT 
+    ///    [HIGH_PRIORITY]
+    ///    [STRAIGHT_JOIN]
+    ///    [SQL_SMALL_RESULT]
+    ///    [SQL_BIG_RESULT]
+    ///    [SQL_BUFFER_RESULT]
+    ///    [SQL_NO_CACHE]
+    ///    [SQL_CALC_FOUND_ROWS]
+    fn supports_select_modifiers(&self) -> bool {
+        true
+    }
+
 }

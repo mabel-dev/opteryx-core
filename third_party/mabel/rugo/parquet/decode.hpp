@@ -6,6 +6,7 @@
 
 // Structure to hold decoded column data
 struct DecodedColumn {
+  std::vector<uint8_t> valid_bits;       // Arrow-style validity bitmap: 1=valid, 0=null; empty=all-valid
   std::vector<int32_t> int32_values;
   std::vector<int64_t> int64_values;
   std::vector<std::string> string_values;

@@ -36,6 +36,14 @@ int32_t DecodeRLEBitPackedIndices(const uint8_t *data, size_t data_size,
                                   int32_t num_values, int bit_width,
                                   std::vector<int32_t> &indices);
 
+// Variant that also returns the number of bytes consumed (including the 4-byte prefix).
+// On success, updates `bytes_consumed` with the total bytes read.
+// Returns the number of indices decoded, or -1 on error.
+int32_t DecodeRLEBitPackedIndicesWithConsumption(const uint8_t *data, size_t data_size,
+                                                 int32_t num_values, int bit_width,
+                                                 std::vector<int32_t> &indices,
+                                                 size_t &bytes_consumed);
+
 // ---------------------------------------------------------------------------
 // DELTA_BINARY_PACKED (encoding id 4) -- template; must live in header
 // ---------------------------------------------------------------------------
