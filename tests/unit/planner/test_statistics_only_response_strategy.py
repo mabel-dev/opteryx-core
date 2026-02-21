@@ -20,6 +20,12 @@ from opteryx.planner.optimizer.strategies.statistics_only_response import (
 from opteryx.planner.optimizer.strategies.statistics_only_response import (
     get_count_from_manifest,
 )
+from opteryx.planner.optimizer.strategies.statistics_only_response import (
+    is_simple_aggregate,
+)
+
+def _telemetry():
+    return types.SimpleNamespace(optimization_statistics_only_response=0)
 
 
 class MockManifest:
@@ -42,7 +48,16 @@ class MockAggregator:
         # Parameters: first parameter is wildcard for COUNT(*)
         self.parameters = [types.SimpleNamespace(node_type=NodeType.WILDCARD)]
         # Keep schema_column identity shape to match other code paths where needed
-        self.schema_column = types.SimpleNamespace(identity="$COUNT(*)")
+        self.schema_column = types.SimpleNamespace(identity="$COUNT(*)", type=None)
+        self.duplicate_treatment = None
+        self.condition = None
+
+
+class MockDistinctCountAggregator(MockAggregator):
+    def __init__(self):
+        super().__init__()
+        self.parameters = [types.SimpleNamespace(node_type=NodeType.IDENTIFIER)]
+        self.duplicate_treatment = "Distinct"
 
 
 def make_simple_count_plan(count=9, alias="my_count"):
@@ -76,7 +91,7 @@ def make_simple_count_plan(count=9, alias="my_count"):
 
 def test_strategy_rewrites_count_star_plan():
     plan = make_simple_count_plan(count=9, alias="total_count")
-    strategy = StatisticsOnlyResponseStrategy(telemetry=types.SimpleNamespace())
+    strategy = StatisticsOnlyResponseStrategy(telemetry=_telemetry())
 
     # Run the strategy's complete phase which performs the rewrite
     rewritten = strategy.complete(plan, None)
@@ -124,7 +139,7 @@ def test_strategy_rewrites_count_star_plan():
 
 def test_strategy_prunes_manifest():
     plan = make_simple_count_plan(count=9, alias="total_count")
-    strategy = StatisticsOnlyResponseStrategy(telemetry=__import__("types").SimpleNamespace())
+    strategy = StatisticsOnlyResponseStrategy(telemetry=_telemetry())
 
     # ensure manifest initially present
     scan_node = next(n for _, n in plan.nodes(data=True) if n.node_type == LogicalPlanStepType.Scan)
@@ -144,7 +159,7 @@ def test_strategy_no_manifest_leaves_plan_unchanged():
     scan_node = next(n for nid, n in plan.nodes(data=True) if n.node_type == LogicalPlanStepType.Scan)
     scan_node.manifest = None
 
-    strategy = StatisticsOnlyResponseStrategy(telemetry=types.SimpleNamespace())
+    strategy = StatisticsOnlyResponseStrategy(telemetry=_telemetry())
     rewritten = strategy.complete(plan, None)
 
     # Plan should be unchanged (still has Aggregate node)
@@ -157,3 +172,8 @@ def test_get_count_from_manifest():
     assert get_count_from_manifest(m) == 123
     # missing manifest returns 0
     assert get_count_from_manifest(None) == 0
+
+
+def test_is_simple_aggregate_rejects_count_distinct():
+    aggregate_node = types.SimpleNamespace(aggregates=[MockDistinctCountAggregator()])
+    assert not is_simple_aggregate(aggregate_node)
