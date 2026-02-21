@@ -1,6 +1,7 @@
 import os
 import sys
 import numpy
+import pyarrow
 
 sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 
@@ -94,6 +95,20 @@ def test_truncate_to_decade():
         pass
     except Exception as e:
         assert False, f"Unexpected exception: {e}"
+
+
+def test_truncate_int64_epoch_seconds():
+    values = numpy.array([1342095254], dtype=numpy.int64)
+    expected = numpy.datetime64("2012-07-12T12:14:00")
+    actual = date_trunc("minute", values).to_numpy(zero_copy_only=False)
+    assert actual[0] == expected
+
+
+def test_truncate_arrow_date32():
+    values = pyarrow.array([datetime(2012, 7, 12, tzinfo=timezone.utc).date()], type=pyarrow.date32())
+    expected = numpy.datetime64("2012-07-12T00:00:00")
+    actual = date_trunc("day", values).to_numpy(zero_copy_only=False)
+    assert actual[0] == expected
 
 
 if __name__ == "__main__":  # pragma: no cover

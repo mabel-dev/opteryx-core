@@ -729,7 +729,9 @@ def create_node_relation(relation: dict):
         # Extract and validate AT clause if present
         version_clause = table.get("version")
         if version_clause is not None:
-            from_step.at_date = logical_planner_builders.extract_timetravel_timestamp(version_clause)
+            from_step.at_date = logical_planner_builders.extract_timetravel_timestamp(
+                version_clause
+            )
 
         step_id = random_string()
         sub_plan.add_node(step_id, from_step)

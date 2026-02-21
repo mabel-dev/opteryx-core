@@ -12,6 +12,7 @@ from typing import Union
 
 import numpy
 import pyarrow
+from pyarrow import compute
 
 TIMEDELTA_REGEX = (
     r"((?P<years>\d+)\s?(?:ys?|yrs?|years?))?\s*"
@@ -211,9 +212,45 @@ def date_trunc(truncate_to, date_values) -> numpy.ndarray:
     """
     Truncate an array of datetimes to a specified unit
     """
-    if not isinstance(date_values, pyarrow.Array):
+    if isinstance(date_values, pyarrow.ChunkedArray):
+        date_values = date_values.combine_chunks()
+    elif not isinstance(date_values, pyarrow.Array):
         date_values = pyarrow.array(date_values)
+
+    if not isinstance(truncate_to, str):
+        truncate_to = truncate_to[0]
+        if hasattr(truncate_to, "as_py"):
+            truncate_to = truncate_to.as_py()
+        elif hasattr(truncate_to, "item"):
+            truncate_to = truncate_to.item()
+        truncate_to = str(truncate_to)
+
+    value_type = date_values.type
+    if pyarrow.types.is_date32(value_type) or pyarrow.types.is_date64(value_type):
+        date_values = compute.cast(date_values, pyarrow.timestamp("us"))
+    elif pyarrow.types.is_integer(value_type):
+        non_null_values = compute.drop_null(date_values)
+        unit = "us"
+        if len(non_null_values):
+            absolute_max = int(numpy.max(numpy.abs(non_null_values.to_numpy(zero_copy_only=False))))
+            if absolute_max < 10**7:
+                date_values = compute.cast(
+                    compute.cast(date_values, pyarrow.date32()), pyarrow.timestamp("s")
+                )
+                unit = None
+            elif absolute_max < 10**11:
+                unit = "s"
+            elif absolute_max < 10**14:
+                unit = "ms"
+            elif absolute_max < 10**17:
+                unit = "us"
+            else:
+                unit = "ns"
+        if unit:
+            date_values = compute.cast(date_values, pyarrow.timestamp(unit))
+    elif not pyarrow.types.is_timestamp(value_type):
+        date_values = compute.cast(date_values, pyarrow.timestamp("us"))
 
     from opteryx.compiled.list_ops import list_date_trunc
 
-    return list_date_trunc(truncate_to[0].item(), date_values)
+    return list_date_trunc(truncate_to, date_values)

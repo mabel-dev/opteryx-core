@@ -89,6 +89,7 @@ cdef extern from "metadata.hpp":
 
 cdef extern from "decode.hpp":
     cdef cppclass DecodedColumn:
+        vector[uint8_t] valid_bits
         vector[int32_t] int32_values
         vector[int64_t] int64_values
         vector[string] string_values

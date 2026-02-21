@@ -58,11 +58,15 @@ def _extract_single_scalar(value):
         value = value.to_numpy(zero_copy_only=False)
     if isinstance(value, numpy.ndarray):
         if value.size != 1:
-            raise UnsupportedSyntaxError("Time-travel expressions must evaluate to a single scalar value.")
+            raise UnsupportedSyntaxError(
+                "Time-travel expressions must evaluate to a single scalar value."
+            )
         value = value.reshape(-1)[0]
     elif isinstance(value, (list, tuple)):
         if len(value) != 1:
-            raise UnsupportedSyntaxError("Time-travel expressions must evaluate to a single scalar value.")
+            raise UnsupportedSyntaxError(
+                "Time-travel expressions must evaluate to a single scalar value."
+            )
         value = value[0]
 
     if hasattr(value, "as_py"):
@@ -80,7 +84,9 @@ def _as_binary_operand_array(value, value_type):
     if value_type == OrsoTypes.TIMESTAMP:
         timestamp = dates.parse_iso(value)
         if timestamp is None:
-            raise UnsupportedSyntaxError("Unable to parse timestamp value in time-travel expression.")
+            raise UnsupportedSyntaxError(
+                "Unable to parse timestamp value in time-travel expression."
+            )
         return numpy.array([numpy.datetime64(timestamp, "us")])
     if value_type == OrsoTypes.DATE:
         dt = dates.parse_iso(value)
@@ -225,9 +231,7 @@ def _extract_version_expression(version_clause):
 
     args = function_branch.get("args", {}).get("List", {}).get("args", [])
     if len(args) != 1:
-        raise UnsupportedSyntaxError(
-            f"AT expects exactly 1 argument, got {len(args)}."
-        )
+        raise UnsupportedSyntaxError(f"AT expects exactly 1 argument, got {len(args)}.")
 
     warnings.warn(
         "AT(TIMESTAMP => ...) is deprecated. Use `TIMESTAMP AS OF <expression>` instead.",
