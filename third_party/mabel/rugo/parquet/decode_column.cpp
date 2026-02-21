@@ -235,6 +235,10 @@ static DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
       }
 
       // Decode definition levels to build validity bitmap.
+      // Per the Parquet V1 spec, definition level data on disk is already
+      // prefixed with a 4-byte LE length.  Pass data_ptr directly — bounded
+      // to exactly 4 + real_length bytes — so DecodeRLEBitPackedIndices skips
+      // the real prefix and reads only the level bytes, not the value data.
       std::vector<int32_t> def_levels;
       if (target_col->max_definition_level > 0) {
         // Compute bit-width needed to encode levels 0..max_definition_level
@@ -242,26 +246,23 @@ static DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
         int32_t max_level = target_col->max_definition_level;
         while (max_level > 0) { def_bit_width++; max_level >>= 1; }
 
-        // Construct 4-byte length prefix for levels data (reuse DecodeRLEBitPackedIndicesWithConsumption).
-        std::vector<uint8_t> level_data_with_prefix(4 + data_size);
-        uint32_t data_len = (uint32_t)data_size;
-        level_data_with_prefix[0] = (data_len >>  0) & 0xFF;
-        level_data_with_prefix[1] = (data_len >>  8) & 0xFF;
-        level_data_with_prefix[2] = (data_len >> 16) & 0xFF;
-        level_data_with_prefix[3] = (data_len >> 24) & 0xFF;
-        std::memcpy(level_data_with_prefix.data() + 4, data_ptr, data_size);
+        // On-disk: [4-byte LE length][RLE level data …]
+        if (data_size < 4) return result;
+        uint32_t level_payload_bytes = ReadLE32(data_ptr);
+        size_t   level_slice_size    = 4 + (size_t)level_payload_bytes;
+        if (level_slice_size > data_size) return result;
 
         size_t bytes_consumed = 0;
         int32_t decoded_levels = DecodeRLEBitPackedIndicesWithConsumption(
-            level_data_with_prefix.data(), level_data_with_prefix.size(),
+            data_ptr, level_slice_size,
             page_values, def_bit_width, def_levels, bytes_consumed);
 
         if (decoded_levels != page_values) return result;
 
-        // Advance data_ptr past the definition level bytes.
-        data_ptr  += (bytes_consumed - 4);  // subtract the synthetic 4-byte prefix
-        data_size -= (bytes_consumed - 4);
-        
+        // Advance data_ptr past exactly the level bytes.
+        data_ptr  += level_slice_size;
+        data_size -= level_slice_size;
+
         // Accumulate definition levels for later validity bitmap construction.
         all_def_levels.insert(all_def_levels.end(), def_levels.begin(), def_levels.end());
       }
@@ -375,13 +376,26 @@ static DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
             }
           }
         } else if (result.type == "boolean") {
-          // PLAIN: 1 bit per value, LSB-first; bit index resets per page.
-          for (int32_t i = 0; i < page_values && data_ptr < data_end; i++) {
-            uint8_t byte_value = data_ptr[i / 8];
-            result.boolean_values.push_back((byte_value >> (i % 8)) & 1);
-            if ((i + 1) % 8 == 0) data_ptr++;
+          if (page_encoding == 3) {
+            // RLE encoding (encoding id 3): 4-byte LE length prefix + RLE/bit-packed
+            // data with bit_width=1.  Reuse DecodeRLEBitPackedIndices directly —
+            // the on-disk data already carries the 4-byte length prefix.
+            std::vector<int32_t> rle_vals;
+            int32_t decoded = DecodeRLEBitPackedIndices(
+                data_ptr, data_size, page_values, 1, rle_vals);
+            if (decoded != page_values) return result;
+            for (auto v : rle_vals)
+              result.boolean_values.push_back((uint8_t)(v & 1));
+          } else {
+            // PLAIN: 1 bit per value, LSB-first; bit index resets per page.
+            // Keep data_ptr fixed while indexing with i/8 to avoid double-advance.
+            const uint8_t *bool_start = data_ptr;
+            for (int32_t i = 0; i < page_values && bool_start + (i / 8) < data_end; i++) {
+              uint8_t byte_value = bool_start[i / 8];
+              result.boolean_values.push_back((byte_value >> (i % 8)) & 1);
+            }
+            data_ptr += (page_values + 7) / 8;
           }
-          if (page_values % 8 != 0 && page_values > 0) data_ptr++;
         } else if (result.type == "float32") {
           for (int32_t i = 0; i < page_values && data_ptr + 4 <= data_end; i++) {
             result.float32_values.push_back(ReadFloat32(data_ptr));
