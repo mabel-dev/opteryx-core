@@ -108,9 +108,19 @@ def is_simple_aggregate(aggregate_node) -> bool:
 
     agg_func = getattr(aggregate, "value", "").upper()
 
-    # COUNT(*) - no expression
+    # COUNT(*) only - must not be DISTINCT/FILTER and must target wildcard
     if agg_func == "COUNT":
-        return not (hasattr(aggregate, "expression") and aggregate.expression is not None)
+        if aggregate.duplicate_treatment == "Distinct":
+            return False
+
+        if aggregate.condition is not None:
+            return False
+
+        parameters = getattr(aggregate, "parameters", None)
+        if not parameters or len(parameters) != 1:
+            return False
+
+        return getattr(parameters[0], "node_type", None) == NodeType.WILDCARD
 
     # MIN/MAX - must have expression (column reference) and be a supported type
     if agg_func in ("MIN", "MAX"):
