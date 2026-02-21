@@ -31,6 +31,7 @@ from libc.stdint cimport int8_t
 from libc.stdint cimport intptr_t
 from libc.stdint cimport uint64_t
 from libc.stdint cimport uint8_t
+from libc.stdlib cimport free
 from libc.stdlib cimport malloc
 from libc.string cimport memset
 
@@ -41,6 +42,8 @@ from opteryx.draken.core.fixed_vector cimport buf_dtype
 from opteryx.draken.core.fixed_vector cimport buf_itemsize
 from opteryx.draken.core.fixed_vector cimport buf_length
 from opteryx.draken.core.fixed_vector cimport free_fixed_buffer
+from opteryx.draken.vectors.bool_vector cimport BoolVector
+from opteryx.draken.vectors.bool_vector cimport bool_vector_from_bits
 from opteryx.draken.vectors.vector cimport MIX_HASH_CONSTANT, NULL_HASH, Vector, mix_hash, simd_mix_hash
 
 DEF INTERVAL_HASH_CHUNK = 512
@@ -65,6 +68,12 @@ cdef int64_t MICROSECONDS_PER_DAY = 24 * MICROSECONDS_PER_HOUR
 cdef int64_t MICROSECONDS_PER_MILLISECOND = 1000
 cdef int64_t NANOSECONDS_PER_MICROSECOND = 1000
 cdef size_t INTERVAL_ITEMSIZE = sizeof(IntervalValue)
+cdef int8_t INTERVAL_OP_EQ = 0
+cdef int8_t INTERVAL_OP_NEQ = 1
+cdef int8_t INTERVAL_OP_GT = 2
+cdef int8_t INTERVAL_OP_GTE = 3
+cdef int8_t INTERVAL_OP_LT = 4
+cdef int8_t INTERVAL_OP_LTE = 5
 
 cdef inline bint _is_valid(DrakenFixedBuffer* ptr, Py_ssize_t idx) nogil:
     if ptr.null_bitmap == NULL:
@@ -110,6 +119,146 @@ cdef inline void _divmod_microseconds(int64_t total, int64_t* out_days, int64_t*
         r += MICROSECONDS_PER_DAY
     out_days[0] = q
     out_remainder[0] = r
+
+
+cdef inline int64_t _floor_div_int64(int64_t value, int64_t divisor) noexcept nogil:
+    cdef int64_t quotient = value / divisor
+    cdef int64_t remainder = value - quotient * divisor
+    if remainder != 0 and ((value < 0 and divisor > 0) or (value > 0 and divisor < 0)):
+        quotient -= 1
+    return quotient
+
+
+cdef inline bint _is_leap_year(int64_t year) noexcept nogil:
+    if year % 4 != 0:
+        return False
+    if year % 100 != 0:
+        return True
+    return year % 400 == 0
+
+
+cdef inline int64_t _days_in_month(int64_t year, int64_t month) noexcept nogil:
+    if month == 2:
+        if _is_leap_year(year):
+            return 29
+        return 28
+    if month == 4 or month == 6 or month == 9 or month == 11:
+        return 30
+    return 31
+
+
+cdef inline int64_t _days_from_civil(int64_t year, int64_t month, int64_t day) noexcept nogil:
+    cdef int64_t y = year - (1 if month <= 2 else 0)
+    cdef int64_t era = _floor_div_int64(y, 400)
+    cdef int64_t yoe = y - era * 400
+    cdef int64_t month_prime = month + (-3 if month > 2 else 9)
+    cdef int64_t doy = (153 * month_prime + 2) / 5 + day - 1
+    cdef int64_t doe = yoe * 365 + yoe / 4 - yoe / 100 + doy
+    return era * 146097 + doe - 719468
+
+
+cdef inline void _civil_from_days(
+    int64_t days,
+    int64_t* out_year,
+    int64_t* out_month,
+    int64_t* out_day,
+) noexcept nogil:
+    cdef int64_t z = days + 719468
+    cdef int64_t era = _floor_div_int64(z, 146097)
+    cdef int64_t doe = z - era * 146097
+    cdef int64_t yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365
+    cdef int64_t y = yoe + era * 400
+    cdef int64_t doy = doe - (365 * yoe + yoe / 4 - yoe / 100)
+    cdef int64_t mp = (5 * doy + 2) / 153
+    cdef int64_t day = doy - (153 * mp + 2) / 5 + 1
+    cdef int64_t month = mp + (3 if mp < 10 else -9)
+    y += 1 if month <= 2 else 0
+
+    out_year[0] = y
+    out_month[0] = month
+    out_day[0] = day
+
+
+cdef inline Py_ssize_t _resolve_broadcast_length(Py_ssize_t left_len, Py_ssize_t right_len) except -1:
+    if left_len == right_len:
+        return left_len
+    if left_len == 1:
+        return right_len
+    if right_len == 1:
+        return left_len
+    raise ValueError(
+        f"IntervalVector length mismatch: left={left_len}, right={right_len}. "
+        "Lengths must match or one side must be scalar."
+    )
+
+
+cdef inline Py_ssize_t _broadcast_index(Py_ssize_t i, Py_ssize_t source_len) nogil:
+    if source_len == 1:
+        return 0
+    return i
+
+
+cdef inline object _coerce_temporal_value(object value):
+    import datetime as _datetime
+
+    if value is None:
+        return None
+
+    if hasattr(value, "as_py"):
+        value = value.as_py()
+
+    if hasattr(value, "item"):
+        try:
+            maybe = value.item()
+            if isinstance(maybe, (_datetime.datetime, _datetime.date)):
+                value = maybe
+        except Exception:
+            pass
+
+    if isinstance(value, _datetime.datetime):
+        if value.tzinfo is not None:
+            value = value.astimezone(_datetime.timezone.utc).replace(tzinfo=None)
+        return value
+
+    if isinstance(value, _datetime.date):
+        return _datetime.datetime.combine(value, _datetime.time())
+
+    if isinstance(value, str):
+        parsed = _datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone(_datetime.timezone.utc).replace(tzinfo=None)
+        return parsed
+
+    return None
+
+
+cdef inline bint _extract_temporal_epoch_parts(
+    object value,
+    int64_t* out_days,
+    int64_t* out_day_microseconds,
+):
+    import datetime as _datetime
+
+    cdef object temporal = _coerce_temporal_value(value)
+    if temporal is None:
+        return False
+
+    if isinstance(temporal, _datetime.datetime):
+        out_days[0] = _days_from_civil(temporal.year, temporal.month, temporal.day)
+        out_day_microseconds[0] = (
+            temporal.hour * MICROSECONDS_PER_HOUR
+            + temporal.minute * MICROSECONDS_PER_MINUTE
+            + temporal.second * MICROSECONDS_PER_SECOND
+            + temporal.microsecond
+        )
+        return True
+
+    if isinstance(temporal, _datetime.date):
+        out_days[0] = _days_from_civil(temporal.year, temporal.month, temporal.day)
+        out_day_microseconds[0] = 0
+        return True
+
+    return False
 
 cdef class IntervalVector(Vector):
 
@@ -207,6 +356,261 @@ cdef class IntervalVector(Vector):
             buf_length(self.ptr),
             buffers,
         )
+
+    cpdef IntervalVector add_vector(self, IntervalVector other):
+        cdef DrakenFixedBuffer* left_ptr = self.ptr
+        cdef DrakenFixedBuffer* right_ptr = other.ptr
+        cdef Py_ssize_t left_len = left_ptr.length
+        cdef Py_ssize_t right_len = right_ptr.length
+        cdef Py_ssize_t out_len = _resolve_broadcast_length(left_len, right_len)
+        cdef IntervalVector out = IntervalVector(<size_t> out_len)
+        cdef IntervalValue* left_data = <IntervalValue*> left_ptr.data
+        cdef IntervalValue* right_data = <IntervalValue*> right_ptr.data
+        cdef IntervalValue* out_data = <IntervalValue*> out.ptr.data
+        cdef bint has_nulls = left_ptr.null_bitmap != NULL or right_ptr.null_bitmap != NULL
+        cdef uint8_t* out_null = NULL
+        cdef size_t nbytes = 0
+        cdef Py_ssize_t i
+        cdef Py_ssize_t left_index
+        cdef Py_ssize_t right_index
+
+        if has_nulls:
+            nbytes = (out_len + 7) >> 3
+            out_null = <uint8_t*> malloc(nbytes)
+            if out_null == NULL:
+                raise MemoryError()
+            memset(out_null, 0, nbytes)
+            out.ptr.null_bitmap = out_null
+        else:
+            out.ptr.null_bitmap = NULL
+
+        for i in range(out_len):
+            left_index = _broadcast_index(i, left_len)
+            right_index = _broadcast_index(i, right_len)
+
+            if has_nulls and (not _is_valid(left_ptr, left_index) or not _is_valid(right_ptr, right_index)):
+                out_data[i].months = 0
+                out_data[i].microseconds = 0
+                continue
+
+            out_data[i].months = left_data[left_index].months + right_data[right_index].months
+            out_data[i].microseconds = (
+                left_data[left_index].microseconds + right_data[right_index].microseconds
+            )
+            if has_nulls:
+                out_null[i >> 3] |= (1 << (i & 7))
+
+        return out
+
+    cpdef IntervalVector subtract_vector(self, IntervalVector other):
+        cdef DrakenFixedBuffer* left_ptr = self.ptr
+        cdef DrakenFixedBuffer* right_ptr = other.ptr
+        cdef Py_ssize_t left_len = left_ptr.length
+        cdef Py_ssize_t right_len = right_ptr.length
+        cdef Py_ssize_t out_len = _resolve_broadcast_length(left_len, right_len)
+        cdef IntervalVector out = IntervalVector(<size_t> out_len)
+        cdef IntervalValue* left_data = <IntervalValue*> left_ptr.data
+        cdef IntervalValue* right_data = <IntervalValue*> right_ptr.data
+        cdef IntervalValue* out_data = <IntervalValue*> out.ptr.data
+        cdef bint has_nulls = left_ptr.null_bitmap != NULL or right_ptr.null_bitmap != NULL
+        cdef uint8_t* out_null = NULL
+        cdef size_t nbytes = 0
+        cdef Py_ssize_t i
+        cdef Py_ssize_t left_index
+        cdef Py_ssize_t right_index
+
+        if has_nulls:
+            nbytes = (out_len + 7) >> 3
+            out_null = <uint8_t*> malloc(nbytes)
+            if out_null == NULL:
+                raise MemoryError()
+            memset(out_null, 0, nbytes)
+            out.ptr.null_bitmap = out_null
+        else:
+            out.ptr.null_bitmap = NULL
+
+        for i in range(out_len):
+            left_index = _broadcast_index(i, left_len)
+            right_index = _broadcast_index(i, right_len)
+
+            if has_nulls and (not _is_valid(left_ptr, left_index) or not _is_valid(right_ptr, right_index)):
+                out_data[i].months = 0
+                out_data[i].microseconds = 0
+                continue
+
+            out_data[i].months = left_data[left_index].months - right_data[right_index].months
+            out_data[i].microseconds = (
+                left_data[left_index].microseconds - right_data[right_index].microseconds
+            )
+            if has_nulls:
+                out_null[i >> 3] |= (1 << (i & 7))
+
+        return out
+
+    cpdef BoolVector compare_vector(
+        self,
+        IntervalVector other,
+        int8_t operation,
+        bint reject_month_components=False,
+    ):
+        cdef DrakenFixedBuffer* left_ptr = self.ptr
+        cdef DrakenFixedBuffer* right_ptr = other.ptr
+        cdef Py_ssize_t left_len = left_ptr.length
+        cdef Py_ssize_t right_len = right_ptr.length
+        cdef Py_ssize_t out_len = _resolve_broadcast_length(left_len, right_len)
+        cdef IntervalValue* left_data = <IntervalValue*> left_ptr.data
+        cdef IntervalValue* right_data = <IntervalValue*> right_ptr.data
+        cdef bint has_nulls = left_ptr.null_bitmap != NULL or right_ptr.null_bitmap != NULL
+        cdef size_t nbytes = (out_len + 7) >> 3
+        cdef uint8_t* value_bits = <uint8_t*> malloc(nbytes if nbytes > 0 else 1)
+        cdef uint8_t* valid_bits = NULL
+        cdef Py_ssize_t i
+        cdef Py_ssize_t left_index
+        cdef Py_ssize_t right_index
+        cdef int64_t left_months
+        cdef int64_t right_months
+        cdef bint comparison = False
+        cdef BoolVector out
+
+        if value_bits == NULL:
+            raise MemoryError()
+        memset(value_bits, 0, nbytes)
+
+        if has_nulls:
+            valid_bits = <uint8_t*> malloc(nbytes)
+            if valid_bits == NULL:
+                free(value_bits)
+                raise MemoryError()
+            memset(valid_bits, 0, nbytes)
+
+        try:
+            for i in range(out_len):
+                left_index = _broadcast_index(i, left_len)
+                right_index = _broadcast_index(i, right_len)
+
+                if has_nulls and (not _is_valid(left_ptr, left_index) or not _is_valid(right_ptr, right_index)):
+                    continue
+
+                if has_nulls:
+                    valid_bits[i >> 3] |= (1 << (i & 7))
+
+                left_months = left_data[left_index].months
+                right_months = right_data[right_index].months
+                if reject_month_components and (left_months != 0 or right_months != 0):
+                    raise ValueError("Cannot compare INTERVALs with MONTH or YEAR components.")
+
+                if operation == INTERVAL_OP_EQ:
+                    comparison = left_data[left_index].microseconds == right_data[right_index].microseconds
+                elif operation == INTERVAL_OP_NEQ:
+                    comparison = left_data[left_index].microseconds != right_data[right_index].microseconds
+                elif operation == INTERVAL_OP_GT:
+                    comparison = left_data[left_index].microseconds > right_data[right_index].microseconds
+                elif operation == INTERVAL_OP_GTE:
+                    comparison = left_data[left_index].microseconds >= right_data[right_index].microseconds
+                elif operation == INTERVAL_OP_LT:
+                    comparison = left_data[left_index].microseconds < right_data[right_index].microseconds
+                elif operation == INTERVAL_OP_LTE:
+                    comparison = left_data[left_index].microseconds <= right_data[right_index].microseconds
+                else:
+                    raise ValueError(f"Unsupported interval comparison operation code: {operation}")
+
+                if comparison:
+                    value_bits[i >> 3] |= (1 << (i & 7))
+
+            out = bool_vector_from_bits(
+                value_bits,
+                valid_bits if has_nulls else NULL,
+                out_len,
+            )
+            return out
+        finally:
+            free(value_bits)
+            if valid_bits != NULL:
+                free(valid_bits)
+
+    cpdef object apply_to_temporal(self, object values, int8_t signum=1):
+        import pyarrow as pa
+
+        cdef list temporal_values = []
+        cdef list rows = []
+        cdef object value
+        cdef DrakenFixedBuffer* ptr = self.ptr
+        cdef IntervalValue* intervals = <IntervalValue*> ptr.data
+        cdef Py_ssize_t interval_len = ptr.length
+        cdef Py_ssize_t row_len
+        cdef Py_ssize_t out_len
+        cdef Py_ssize_t i
+        cdef Py_ssize_t value_index
+        cdef Py_ssize_t interval_index
+        cdef int64_t epoch_days
+        cdef int64_t day_microseconds
+        cdef int64_t days_offset
+        cdef int64_t normalized_day_microseconds
+        cdef int64_t year
+        cdef int64_t month
+        cdef int64_t day
+        cdef int64_t month_index
+        cdef int64_t month_delta
+        cdef int64_t month_div
+        cdef int64_t last_day
+        cdef int64_t result_microseconds
+
+        if hasattr(values, "num_chunks"):
+            for chunk in values.chunks:
+                temporal_values.extend(chunk.to_pylist())
+        elif hasattr(values, "to_pylist"):
+            temporal_values = values.to_pylist()
+        elif hasattr(values, "to_numpy"):
+            values = values.to_numpy(zero_copy_only=False)
+            try:
+                temporal_values = list(values)
+            except TypeError:
+                temporal_values = [values]
+        else:
+            try:
+                temporal_values = list(values)
+            except TypeError:
+                temporal_values = [values]
+
+        row_len = len(temporal_values)
+        out_len = _resolve_broadcast_length(row_len, interval_len)
+        rows = [None] * out_len
+
+        for i in range(out_len):
+            value_index = _broadcast_index(i, row_len)
+            interval_index = _broadcast_index(i, interval_len)
+
+            if not _is_valid(ptr, interval_index):
+                continue
+
+            value = temporal_values[value_index]
+            if not _extract_temporal_epoch_parts(value, &epoch_days, &day_microseconds):
+                continue
+
+            _divmod_microseconds(
+                day_microseconds + intervals[interval_index].microseconds * signum,
+                &days_offset,
+                &normalized_day_microseconds,
+            )
+            epoch_days += days_offset
+            day_microseconds = normalized_day_microseconds
+
+            month_delta = intervals[interval_index].months * signum
+            if month_delta != 0:
+                _civil_from_days(epoch_days, &year, &month, &day)
+                month_index = (month - 1) + month_delta
+                month_div = _floor_div_int64(month_index, 12)
+                year += month_div
+                month = month_index - month_div * 12 + 1
+                last_day = _days_in_month(year, month)
+                if day > last_day:
+                    day = last_day
+                epoch_days = _days_from_civil(year, month, day)
+
+            result_microseconds = epoch_days * MICROSECONDS_PER_DAY + day_microseconds
+            rows[i] = result_microseconds
+
+        return pa.array(rows, type=pa.timestamp("us"))
 
     cpdef IntervalVector take(self, int32_t[::1] indices):
         cdef Py_ssize_t n = indices.shape[0]

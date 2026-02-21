@@ -6,12 +6,11 @@
 from typing import Callable
 from typing import Dict
 from typing import Iterable
+from typing import List
 from typing import Optional
 from typing import Tuple
 
-import numpy
 import pyarrow
-import pyarrow.compute
 from orso.types import OrsoTypes
 
 MICROSECONDS_PER_SECOND = 1_000_000
@@ -19,6 +18,12 @@ MICROSECONDS_PER_MINUTE = 60 * MICROSECONDS_PER_SECOND
 MICROSECONDS_PER_HOUR = 60 * MICROSECONDS_PER_MINUTE
 MICROSECONDS_PER_DAY = 24 * MICROSECONDS_PER_HOUR
 NANOSECONDS_PER_MICROSECOND = 1_000
+INTERVAL_OP_EQ = 0
+INTERVAL_OP_NEQ = 1
+INTERVAL_OP_GT = 2
+INTERVAL_OP_GTE = 3
+INTERVAL_OP_LT = 4
+INTERVAL_OP_LTE = 5
 
 
 def _normalise_interval_value(value) -> Tuple[int, int]:
@@ -29,8 +34,27 @@ def _normalise_interval_value(value) -> Tuple[int, int]:
         return (0, 0)
     if isinstance(value, tuple):
         return value
+    if isinstance(value, list):
+        if len(value) >= 3:
+            months, days, nanoseconds = value[:3]
+            micros = int(days) * MICROSECONDS_PER_DAY + int(nanoseconds) // NANOSECONDS_PER_MICROSECOND
+            return (int(months), micros)
+        if len(value) >= 2:
+            months, microseconds = value[:2]
+            return (int(months), int(microseconds))
     if hasattr(value, "as_py"):
         value = value.as_py()
+    if isinstance(value, dict):
+        months = value.get("months", 0)
+        if "microseconds" in value:
+            micros = value.get("microseconds", 0)
+        else:
+            days = value.get("days", 0)
+            nanoseconds = value.get("nanoseconds", 0)
+            micros = int(days) * MICROSECONDS_PER_DAY + int(nanoseconds) // NANOSECONDS_PER_MICROSECOND
+        if months is None or micros is None:
+            return (0, 0)
+        return (int(months), int(micros))
     if hasattr(value, "months") and hasattr(value, "nanoseconds"):
         months = int(value.months)
         micros = (
@@ -46,6 +70,69 @@ def normalize_interval_value(value) -> Tuple[int, int]:
     Public wrapper for interval normalization.
     """
     return _normalise_interval_value(value)
+
+
+def _coerce_interval_entry(entry) -> Optional[Tuple[int, int]]:
+    if entry is None:
+        return None
+    months, microseconds = _normalise_interval_value(entry)
+    if months is None or microseconds is None:
+        return None
+    return (int(months), int(microseconds))
+
+
+def _interval_rows_from_values(values) -> List[Optional[Tuple[int, int]]]:
+    if isinstance(values, pyarrow.ChunkedArray):
+        rows = []
+        for chunk in values.chunks:
+            rows.extend(_interval_rows_from_values(chunk))
+        return rows
+
+    if isinstance(values, pyarrow.Array):
+        # Fast-path when Draken can directly decode Arrow interval layouts.
+        try:
+            from opteryx.draken.interop.arrow import vector_from_arrow
+
+            vector = vector_from_arrow(values)
+            if vector.__class__.__name__ == "IntervalVector":
+                return [_coerce_interval_entry(value) for value in vector.to_pylist()]
+        except Exception:
+            pass
+
+        return [_coerce_interval_entry(value) for value in values.to_pylist()]
+
+    if hasattr(values, "to_numpy"):
+        values = values.to_numpy(zero_copy_only=False)
+
+    if isinstance(values, tuple):
+        return [_coerce_interval_entry(values)]
+
+    if isinstance(values, list):
+        return [_coerce_interval_entry(value) for value in values]
+
+    try:
+        return [_coerce_interval_entry(value) for value in values]
+    except TypeError:
+        return [_coerce_interval_entry(values)]
+
+
+def _as_interval_vector(values):
+    from opteryx.draken.interop.arrow import vector_from_arrow
+
+    if values.__class__.__name__ == "IntervalVector":
+        return values
+
+    if isinstance(values, pyarrow.Array):
+        try:
+            vector = vector_from_arrow(values)
+            if vector.__class__.__name__ == "IntervalVector":
+                return vector
+        except Exception:
+            pass
+
+    rows = _interval_rows_from_values(values)
+    mdn_array = _intervals_to_month_day_nano(rows)
+    return vector_from_arrow(mdn_array)
 
 
 def _intervals_to_month_day_nano(rows: Iterable[Optional[Tuple[int, int]]]) -> pyarrow.Array:
@@ -78,60 +165,8 @@ def to_arrow_interval(array: pyarrow.Array) -> pyarrow.Array:
     if pyarrow.types.is_interval(array.type) and array.type == pyarrow.month_day_nano_interval():
         return array
 
-    if pyarrow.types.is_list(array.type):
-        months = pyarrow.compute.list_element(array, 0)
-        microseconds = pyarrow.compute.list_element(array, 1)
-        rows = zip(months.to_pylist(), microseconds.to_pylist())
-        return _intervals_to_month_day_nano(rows)
-
-    if pyarrow.types.is_struct(array.type):
-        rows = array.to_pylist()
-        converted = []
-        for entry in rows:
-            if entry is None:
-                converted.append(None)
-                continue
-            months = entry.get("months", 0)
-            days = entry.get("days", 0)
-            nanoseconds = entry.get("nanoseconds", 0)
-            if months is None or days is None or nanoseconds is None:
-                converted.append(None)
-                continue
-            converted.append((int(months), int(days), int(nanoseconds)))
-        return pyarrow.array(converted, type=pyarrow.month_day_nano_interval())
-
-    # As a fallback, treat values as already normalised tuples.
-    return _intervals_to_month_day_nano(array.to_pylist())
-
-
-def add_months_numpy(dates, months_to_add):
-    """
-    Adds a specified number of months to dates in a numpy array, adjusting for end-of-month overflow.
-
-    Parameters:
-    - dates: np.ndarray of dates (numpy.datetime64)
-    - months_to_add: int, the number of months to add to each date
-
-    Returns:
-    - np.ndarray: Adjusted dates
-    """
-    # Convert dates to 'M' (month) granularity for addition
-    months = dates.astype("datetime64[M]")
-
-    # Add months (broadcasts the scalar value across the array)
-    new_dates = months + numpy.timedelta64(months_to_add, "M")
-
-    # Calculate the last day of the new month for each date
-    last_day_of_new_month = new_dates + numpy.timedelta64(1, "M") - numpy.timedelta64(1, "D")
-
-    # Calculate the day of the month for each original date
-    day_of_month = dates - months
-
-    # Adjust dates that would overflow their new month
-    overflow_mask = day_of_month > (last_day_of_new_month - new_dates)
-    adjusted_dates = numpy.where(overflow_mask, last_day_of_new_month, new_dates + day_of_month)
-
-    return adjusted_dates.astype("datetime64[us]")
+    rows = _interval_rows_from_values(array)
+    return _intervals_to_month_day_nano(rows)
 
 
 def _date_plus_interval(left, left_type, right, right_type, operator):
@@ -142,54 +177,55 @@ def _date_plus_interval(left, left_type, right, right_type, operator):
     if left_type == OrsoTypes.INTERVAL:
         left, right = right, left
 
-    months, microseconds = _normalise_interval_value(right[0])
-
-    if hasattr(left, "to_numpy"):
-        left = left.to_numpy(zero_copy_only=False)
-
-    result = left.astype("datetime64[us]") + (microseconds * signum)
-
-    # Handle months separately, requiring special logic
-    if months:
-        for index in range(len(result)):
-            result[index] = add_months_numpy(result[index], months * signum)
-
-    return result
+    interval_vector = _as_interval_vector(right)
+    return interval_vector.apply_to_temporal(left, signum)
 
 
-def _simple_interval_op(left, left_type, right, right_type, operator):
-    from opteryx.managers.expression.ops import _inner_filter_operations
+def _interval_interval_op(left, left_type, right, right_type, operator):
+    left_vector = _as_interval_vector(left)
+    right_vector = _as_interval_vector(right)
 
-    left_months = pyarrow.compute.list_element(left, 0)
-    left_microseconds = pyarrow.compute.list_element(left, 1)
+    if operator in ("Plus", "Minus"):
+        result_vector = (
+            left_vector.add_vector(right_vector)
+            if operator == "Plus"
+            else left_vector.subtract_vector(right_vector)
+        )
+        return result_vector.to_arrow_binary()
 
-    right_months = pyarrow.compute.list_element(right, 0)
-    right_microseconds = pyarrow.compute.list_element(right, 1)
+    compare_ops = {
+        "Eq": INTERVAL_OP_EQ,
+        "NotEq": INTERVAL_OP_NEQ,
+        "Gt": INTERVAL_OP_GT,
+        "GtEq": INTERVAL_OP_GTE,
+        "Lt": INTERVAL_OP_LT,
+        "LtEq": INTERVAL_OP_LTE,
+    }
 
-    if (
-        pyarrow.compute.any(pyarrow.compute.not_equal(left_months, 0)).as_py()
-        or pyarrow.compute.any(pyarrow.compute.not_equal(right_months, 0)).as_py()
-    ):
+    op_code = compare_ops.get(operator)
+    if op_code is None:
         from opteryx.exceptions import UnsupportedSyntaxError
 
-        raise UnsupportedSyntaxError("Cannot compare INTERVALs with MONTH or YEAR components.")
+        raise UnsupportedSyntaxError(f"Unsupported INTERVAL operation `{operator}`.")
 
-    #    months = _inner_filter_operations(left_months, operator, right_months)
-    #    months_eq = _inner_filter_operations(left_months, "Eq", right_months)
-    microseconds = _inner_filter_operations(left_microseconds, operator, right_microseconds)
+    try:
+        bool_vector = left_vector.compare_vector(right_vector, op_code, True)
+    except ValueError as err:
+        from opteryx.exceptions import UnsupportedSyntaxError
 
-    return microseconds
+        raise UnsupportedSyntaxError(str(err)) from err
+    return bool_vector.to_arrow()
 
 
 INTERVAL_KERNELS: Dict[Tuple[OrsoTypes, OrsoTypes, str], Optional[Callable]] = {
-    (OrsoTypes.INTERVAL, OrsoTypes.INTERVAL, "Plus"): _simple_interval_op,
-    (OrsoTypes.INTERVAL, OrsoTypes.INTERVAL, "Minus"): _simple_interval_op,
-    (OrsoTypes.INTERVAL, OrsoTypes.INTERVAL, "Eq"): _simple_interval_op,
-    (OrsoTypes.INTERVAL, OrsoTypes.INTERVAL, "NotEq"): _simple_interval_op,
-    (OrsoTypes.INTERVAL, OrsoTypes.INTERVAL, "Gt"): _simple_interval_op,
-    (OrsoTypes.INTERVAL, OrsoTypes.INTERVAL, "GtEq"): _simple_interval_op,
-    (OrsoTypes.INTERVAL, OrsoTypes.INTERVAL, "Lt"): _simple_interval_op,
-    (OrsoTypes.INTERVAL, OrsoTypes.INTERVAL, "LtEq"): _simple_interval_op,
+    (OrsoTypes.INTERVAL, OrsoTypes.INTERVAL, "Plus"): _interval_interval_op,
+    (OrsoTypes.INTERVAL, OrsoTypes.INTERVAL, "Minus"): _interval_interval_op,
+    (OrsoTypes.INTERVAL, OrsoTypes.INTERVAL, "Eq"): _interval_interval_op,
+    (OrsoTypes.INTERVAL, OrsoTypes.INTERVAL, "NotEq"): _interval_interval_op,
+    (OrsoTypes.INTERVAL, OrsoTypes.INTERVAL, "Gt"): _interval_interval_op,
+    (OrsoTypes.INTERVAL, OrsoTypes.INTERVAL, "GtEq"): _interval_interval_op,
+    (OrsoTypes.INTERVAL, OrsoTypes.INTERVAL, "Lt"): _interval_interval_op,
+    (OrsoTypes.INTERVAL, OrsoTypes.INTERVAL, "LtEq"): _interval_interval_op,
     (OrsoTypes.INTERVAL, OrsoTypes.TIMESTAMP, "Plus"): _date_plus_interval,
     (OrsoTypes.INTERVAL, OrsoTypes.TIMESTAMP, "Minus"): _date_plus_interval,
     (OrsoTypes.INTERVAL, OrsoTypes.DATE, "Plus"): _date_plus_interval,

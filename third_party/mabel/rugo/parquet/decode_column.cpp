@@ -168,6 +168,13 @@ static DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
     }
 
     int32_t total_needed    = target_col->num_values;  // 0 means "accumulate all"
+
+    // Accumulate definition levels across all pages to build validity bitmap later.
+    std::vector<int32_t> all_def_levels;
+    if (target_col->max_definition_level > 0) {
+      all_def_levels.reserve(total_needed > 0 ? total_needed : 100000);
+    }
+
     int32_t total_collected = 0;
     const uint8_t *cursor      = file_data + (uint64_t)target_col->data_page_offset;
     const uint8_t *chunk_limit = file_data + chunk_end;
@@ -217,18 +224,46 @@ static DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
         }
       }
 
-      // Step 3: Skip repetition and definition levels (Parquet Data Page V1)
+      // Step 3: Skip repetition levels; decode definition levels
+      
+      // Skip repetition levels if present (we don't use them yet).
       if (target_col->max_repetition_level > 0) {
         size_t skip = SkipRLEBitPackedLevels(
             data_ptr, data_size, target_col->max_repetition_level);
         data_ptr  += skip;
         data_size -= skip;
       }
+
+      // Decode definition levels to build validity bitmap.
+      std::vector<int32_t> def_levels;
       if (target_col->max_definition_level > 0) {
-        size_t skip = SkipRLEBitPackedLevels(
-            data_ptr, data_size, target_col->max_definition_level);
-        data_ptr  += skip;
-        data_size -= skip;
+        // Compute bit-width needed to encode levels 0..max_definition_level
+        int def_bit_width = 0;
+        int32_t max_level = target_col->max_definition_level;
+        while (max_level > 0) { def_bit_width++; max_level >>= 1; }
+
+        // Construct 4-byte length prefix for levels data (reuse DecodeRLEBitPackedIndicesWithConsumption).
+        std::vector<uint8_t> level_data_with_prefix(4 + data_size);
+        uint32_t data_len = (uint32_t)data_size;
+        level_data_with_prefix[0] = (data_len >>  0) & 0xFF;
+        level_data_with_prefix[1] = (data_len >>  8) & 0xFF;
+        level_data_with_prefix[2] = (data_len >> 16) & 0xFF;
+        level_data_with_prefix[3] = (data_len >> 24) & 0xFF;
+        std::memcpy(level_data_with_prefix.data() + 4, data_ptr, data_size);
+
+        size_t bytes_consumed = 0;
+        int32_t decoded_levels = DecodeRLEBitPackedIndicesWithConsumption(
+            level_data_with_prefix.data(), level_data_with_prefix.size(),
+            page_values, def_bit_width, def_levels, bytes_consumed);
+
+        if (decoded_levels != page_values) return result;
+
+        // Advance data_ptr past the definition level bytes.
+        data_ptr  += (bytes_consumed - 4);  // subtract the synthetic 4-byte prefix
+        data_size -= (bytes_consumed - 4);
+        
+        // Accumulate definition levels for later validity bitmap construction.
+        all_def_levels.insert(all_def_levels.end(), def_levels.begin(), def_levels.end());
       }
 
       const uint8_t *data_end = data_ptr + data_size;
@@ -363,6 +398,21 @@ static DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
       total_collected += page_values;
       cursor = compressed_data + compressed_size;
     }  // end page loop
+
+    // Build validity bitmap from accumulated definition levels.
+    if (!all_def_levels.empty()) {
+      int32_t total_rows = (int32_t)all_def_levels.size();
+      int32_t bitmap_bytes = (total_rows + 7) / 8;
+      result.valid_bits.resize(bitmap_bytes, 0);
+
+      int32_t max_def = target_col->max_definition_level;
+      for (int32_t i = 0; i < total_rows; i++) {
+        // Validity: 1 if def_level == max_definition_level (value present), 0 otherwise (null)
+        if (all_def_levels[i] == max_def) {
+          result.valid_bits[i / 8] |= (1 << (i % 8));
+        }
+      }
+    }
 
     // Success: all expected values collected (or at least some, if total unknown).
     if (total_needed > 0) {
