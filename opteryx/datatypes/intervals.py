@@ -37,7 +37,9 @@ def _normalise_interval_value(value) -> Tuple[int, int]:
     if isinstance(value, list):
         if len(value) >= 3:
             months, days, nanoseconds = value[:3]
-            micros = int(days) * MICROSECONDS_PER_DAY + int(nanoseconds) // NANOSECONDS_PER_MICROSECOND
+            micros = (
+                int(days) * MICROSECONDS_PER_DAY + int(nanoseconds) // NANOSECONDS_PER_MICROSECOND
+            )
             return (int(months), micros)
         if len(value) >= 2:
             months, microseconds = value[:2]
@@ -51,7 +53,9 @@ def _normalise_interval_value(value) -> Tuple[int, int]:
         else:
             days = value.get("days", 0)
             nanoseconds = value.get("nanoseconds", 0)
-            micros = int(days) * MICROSECONDS_PER_DAY + int(nanoseconds) // NANOSECONDS_PER_MICROSECOND
+            micros = (
+                int(days) * MICROSECONDS_PER_DAY + int(nanoseconds) // NANOSECONDS_PER_MICROSECOND
+            )
         if months is None or micros is None:
             return (0, 0)
         return (int(months), int(micros))

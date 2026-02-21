@@ -12,9 +12,19 @@ import os
 import struct
 
 cimport parquet_reader
-from libc.stdint cimport uint8_t
+from libc.stdint cimport uint8_t, int32_t, int64_t
+from libc.stdlib cimport malloc
+from libc.string cimport memcpy
 from libcpp.string cimport string
 from libcpp.vector cimport vector
+
+# Import Draken vector types and components
+from opteryx.draken.vectors.int64_vector cimport Int64Vector
+from opteryx.draken.vectors.float64_vector cimport Float64Vector
+from opteryx.draken.vectors.string_vector cimport StringVector, StringVectorBuilder
+from opteryx.draken.vectors.bool_vector cimport BoolVector, bool_vector_from_bits
+from opteryx.draken.vectors.vector cimport Vector
+from opteryx.draken.morsels.morsel cimport Morsel
 
 
 # --- value decoder ---
@@ -369,6 +379,152 @@ def can_decode_from_memory(data):
     return bool(parquet_reader.CanDecode(&mem_view[0], size))
 
 
+# --- Helper functions to build Draken vectors from DecodedColumn ---
+
+cdef Int64Vector _make_int64_vector(
+        parquet_reader.DecodedColumn& decoded_col,
+        int32_t num_rows):
+    """Build an Int64Vector from a DecodedColumn with int64_t values."""
+    cdef Int64Vector vec = Int64Vector(num_rows)
+    cdef int64_t* dst = <int64_t*> vec.ptr.data
+    cdef Py_ssize_t i, val_idx = 0
+    cdef Py_ssize_t nb_bytes
+    cdef uint8_t* nb
+    
+    # If we have a valid_bits bitmap, scatter values into positions and set null bitmap
+    if decoded_col.valid_bits.size() > 0:
+        for i in range(num_rows):
+            if (decoded_col.valid_bits[i >> 3] >> (i & 7)) & 1:
+                dst[i] = decoded_col.int64_values[val_idx]
+                val_idx += 1
+            else:
+                dst[i] = 0
+        # Copy null bitmap
+        nb_bytes = (num_rows + 7) >> 3
+        nb = <uint8_t*> malloc(nb_bytes)
+        if nb == NULL:
+            raise MemoryError()
+        memcpy(nb, decoded_col.valid_bits.data(), nb_bytes)
+        vec.ptr.null_bitmap = nb
+    else:
+        # No nulls: bulk copy
+        for i in range(num_rows):
+            dst[i] = decoded_col.int64_values[i]
+    
+    return vec
+
+
+cdef Float64Vector _make_float64_vector(
+        parquet_reader.DecodedColumn& decoded_col,
+        int32_t num_rows):
+    """Build a Float64Vector from a DecodedColumn with float64 values."""
+    cdef Float64Vector vec = Float64Vector(num_rows)
+    cdef double* dst = <double*> vec.ptr.data
+    cdef Py_ssize_t i, val_idx = 0
+    cdef Py_ssize_t nb_bytes
+    cdef uint8_t* nb
+    
+    if decoded_col.valid_bits.size() > 0:
+        for i in range(num_rows):
+            if (decoded_col.valid_bits[i >> 3] >> (i & 7)) & 1:
+                dst[i] = decoded_col.float64_values[val_idx]
+                val_idx += 1
+            else:
+                dst[i] = 0.0
+        nb_bytes = (num_rows + 7) >> 3
+        nb = <uint8_t*> malloc(nb_bytes)
+        if nb == NULL:
+            raise MemoryError()
+        memcpy(nb, decoded_col.valid_bits.data(), nb_bytes)
+        vec.ptr.null_bitmap = nb
+    else:
+        for i in range(num_rows):
+            dst[i] = decoded_col.float64_values[i]
+    
+    return vec
+
+
+cdef StringVector _make_string_vector(
+        parquet_reader.DecodedColumn& decoded_col,
+        int32_t num_rows):
+    """Build a StringVector from a DecodedColumn with string values."""
+    cdef Py_ssize_t val_idx = 0
+    cdef Py_ssize_t i
+    cdef Py_ssize_t estimated_bytes = 0
+    cdef Py_ssize_t num_values = decoded_col.string_values.size()
+    
+    # Estimate total bytes needed
+    for i in range(num_values):
+        estimated_bytes += decoded_col.string_values[i].size()
+    
+    # Add some overhead
+    if estimated_bytes == 0:
+        estimated_bytes = 1
+    else:
+        estimated_bytes = (estimated_bytes * 110) // 100
+    
+    cdef StringVectorBuilder builder = StringVectorBuilder(num_rows, estimated_bytes)
+    
+    if decoded_col.valid_bits.size() > 0:
+        for i in range(num_rows):
+            if (decoded_col.valid_bits[i >> 3] >> (i & 7)) & 1:
+                builder.append_bytes(
+                    <const char*>decoded_col.string_values[val_idx].data(),
+                    <Py_ssize_t>decoded_col.string_values[val_idx].size()
+                )
+                val_idx += 1
+            else:
+                builder.append_null()
+    else:
+        for i in range(num_rows):
+            builder.append_bytes(
+                <const char*>decoded_col.string_values[i].data(),
+                <Py_ssize_t>decoded_col.string_values[i].size()
+            )
+    
+    return builder.finish()
+
+
+cdef BoolVector _make_bool_vector(
+        parquet_reader.DecodedColumn& decoded_col,
+        int32_t num_rows):
+    """Build a BoolVector from a DecodedColumn with boolean values."""
+    cdef uint8_t* value_bits
+    cdef uint8_t* valid_bits
+    cdef Py_ssize_t i, val_idx = 0
+    cdef Py_ssize_t nb_bytes = (num_rows + 7) >> 3
+    
+    # Allocate and pack boolean values into bits
+    value_bits = <uint8_t*> malloc(nb_bytes)
+    if value_bits == NULL:
+        raise MemoryError()
+    
+    # Zero out the value_bits
+    for i in range(nb_bytes):
+        value_bits[i] = 0
+    
+    if decoded_col.valid_bits.size() > 0:
+        # We have a validity bitmap; values are scattered
+        for i in range(num_rows):
+            if (decoded_col.valid_bits[i >> 3] >> (i & 7)) & 1:
+                if decoded_col.boolean_values[val_idx]:
+                    value_bits[i >> 3] |= (1 << (i & 7))
+                val_idx += 1
+        # Copy valid_bits to a malloc'd buffer
+        valid_bits = <uint8_t*> malloc(nb_bytes)
+        if valid_bits == NULL:
+            raise MemoryError("Failed to allocate valid_bits")
+        memcpy(valid_bits, decoded_col.valid_bits.data(), nb_bytes)
+    else:
+        # All values are valid
+        for i in range(num_rows):
+            if decoded_col.boolean_values[i]:
+                value_bits[i >> 3] |= (1 << (i & 7))
+        valid_bits = NULL
+    
+    return bool_vector_from_bits(value_bits, valid_bits, num_rows)
+
+
 def read_parquet(data, column_names=None):
     """Read parquet data from memory with optional column selection.
 
@@ -417,43 +573,60 @@ def read_parquet(data, column_names=None):
     if not result.success:
         return None
 
-    # Convert result to Python structure
-    python_result = {
-        'success': True,
-        'column_names': [name.decode("utf-8") for name in result.column_names],
-        'row_groups': []
-    }
-
-    # Convert each row group
-    for rg_idx in range(result.row_groups.size()):
-        row_group = []
-        for col_idx in range(result.row_groups[rg_idx].size()):
-            column = result.row_groups[rg_idx][col_idx]
-
-            if not column.success:
-                row_group.append(None)
-                continue
-
-            col_type = column.type.decode("utf-8")
-
-            if col_type == "int32":
-                row_group.append(list(column.int32_values))
-            elif col_type == "int64":
-                row_group.append(list(column.int64_values))
-            elif col_type == "byte_array":
-                row_group.append([_safe_decode_utf8(s) for s in column.string_values])
-            elif col_type == "boolean":
-                row_group.append([bool(val) for val in column.boolean_values])
-            elif col_type == "float32":
-                row_group.append(list(column.float32_values))
-            elif col_type == "float64":
-                row_group.append(list(column.float64_values))
-            else:
-                row_group.append(None)
-
-        python_result['row_groups'].append(row_group)
-
-    return python_result
+    # Get column names for the Morsel
+    cdef list col_names = [name.decode("utf-8") for name in result.column_names]
+    
+    # For now, return the first row group as a Morsel
+    # (Most files have one row group; multi-row-group support comes later)
+    if result.row_groups.size() == 0:
+        return None
+    
+    # Build vectors for the first row group
+    cdef list vectors = []
+    cdef int32_t num_rows = 0
+    cdef Py_ssize_t col_idx, rg_idx = 0
+    cdef parquet_reader.DecodedColumn column
+    cdef str col_type
+    cdef Vector vec
+    
+    # Get num_rows from the first non-failed column
+    for col_idx in range(result.row_groups[rg_idx].size()):
+        if result.row_groups[rg_idx][col_idx].success:
+            num_rows = <int32_t>result.row_groups[rg_idx][col_idx].int64_values.size()
+            if num_rows == 0:
+                num_rows = <int32_t>result.row_groups[rg_idx][col_idx].string_values.size()
+            if num_rows == 0:
+                num_rows = <int32_t>result.row_groups[rg_idx][col_idx].boolean_values.size()
+            if num_rows > 0:
+                break
+    
+    # Build vector for each column, tracking only successful ones
+    cdef list successful_col_names = []
+    for col_idx in range(result.row_groups[rg_idx].size()):
+        column = result.row_groups[rg_idx][col_idx]
+        
+        if not column.success:
+            continue
+        
+        col_type = column.type.decode("utf-8")
+        
+        if col_type == "int64":
+            vec = _make_int64_vector(column, num_rows)
+        elif col_type == "byte_array":
+            vec = _make_string_vector(column, num_rows)
+        elif col_type == "boolean":
+            vec = _make_bool_vector(column, num_rows)
+        elif col_type == "float64":
+            vec = _make_float64_vector(column, num_rows)
+        else:
+            # Skip unsupported column types
+            continue
+        
+        vectors.append(vec)
+        successful_col_names.append(col_names[col_idx])
+    
+    # Create and return Morsel with only successful columns
+    return Morsel.from_vectors(successful_col_names, vectors)
 
 
 def decode_column_from_memory(data, str column_name, row_group_stats, int row_group_index):
