@@ -15,17 +15,23 @@ This module is intentionally Draken-native in the hot path:
 - does not convert to/from Arrow for storage I/O
 """
 
+from cpython.buffer cimport PyBUF_READ
+from cpython.buffer cimport PyBUF_WRITE
+from cpython.bytes cimport PyBytes_AS_STRING
 from cpython.bytes cimport PyBytes_AsStringAndSize
 from cpython.bytes cimport PyBytes_FromStringAndSize
+from cpython.memoryview cimport PyMemoryView_FromMemory
 from libc.stddef cimport size_t
 from libc.stdint cimport int32_t
 from libc.stdint cimport int64_t
 from libc.stdint cimport intptr_t
+from libc.stdint cimport uint16_t
 from libc.stdint cimport uint8_t
 from libc.stdint cimport uint32_t
 from libc.stdint cimport uint64_t
 from libc.stdlib cimport malloc
 from libc.string cimport memcpy
+from libc.string cimport memset
 
 from opteryx.draken.core.buffers cimport DrakenFixedBuffer
 from opteryx.draken.core.buffers cimport DrakenType
@@ -49,11 +55,13 @@ from opteryx.draken.vectors.string_vector cimport StringVector
 from opteryx.draken.vectors.time_vector cimport TimeVector
 from opteryx.draken.vectors.timestamp_vector cimport TimestampVector
 from opteryx.draken.vectors.vector cimport Vector
+from opteryx.third_party.cyan4973.xxhash cimport cy_xxhash3_64
 from opteryx.third_party.cyan4973.xxhash cimport hash_bytes
 
 import io
 import os
 import struct
+import threading
 
 
 MAGIC = b"DRKM"
@@ -105,6 +113,9 @@ class DrakenMorselCorruptionError(DrakenMorselStorageError):
     """Raised when DRKM payload validation fails."""
 
 
+_codec_tls = threading.local()
+
+
 def _codec_name_to_id(codec_name: str) -> int:
     c = codec_name.lower().strip()
     if c == "none":
@@ -127,30 +138,44 @@ def _codec_id_to_name(codec_id: int) -> str:
 
 
 def _load_lz4():
-    from opteryx.third_party.lz4 import lz4
-    return lz4
+    module = getattr(_codec_tls, "lz4_module", None)
+    if module is None:
+        from opteryx.third_party.lz4 import lz4 as lz4_module
+        _codec_tls.lz4_module = lz4_module
+        module = lz4_module
+    return module
 
 
 def _load_zstd():
-    from opteryx.third_party.facebook import zstd
-    return zstd
+    module = getattr(_codec_tls, "zstd_module", None)
+    if module is None:
+        from opteryx.third_party.facebook import zstd as zstd_module
+        _codec_tls.zstd_module = zstd_module
+        module = zstd_module
+    return module
 
 
-def _compress_payload(bytes payload, int codec_id, int zstd_level):
+def _compress_payload(object payload, int codec_id, int zstd_level):
     if codec_id == CODEC_NONE:
         return payload
     if codec_id == CODEC_LZ4:
         lz4 = _load_lz4()
         return lz4.compress_block(payload)
     if codec_id == CODEC_ZSTD:
-        zstd = _load_zstd()
-        zstd_compress = getattr(zstd, "compress", None)
+        zstd_compress = getattr(_codec_tls, "zstd_compress", None)
+        if zstd_compress is None:
+            zstd = _load_zstd()
+            zstd_compress = getattr(zstd, "compress", None)
+            _codec_tls.zstd_compress = zstd_compress
         if zstd_compress is None:
             raise DrakenMorselStorageError("zstd compression is unavailable in this build")
         try:
             return zstd_compress(payload, level=zstd_level)
         except TypeError:
-            return zstd_compress(payload)
+            try:
+                return zstd_compress(payload)
+            except TypeError:
+                return zstd_compress(bytes(payload))
     raise DrakenMorselStorageError(f"unsupported codec id {codec_id}")
 
 
@@ -178,11 +203,305 @@ cdef inline uint32_t _checksum32(bytes payload):
     return <uint32_t>(hash_bytes(payload) & 0xFFFFFFFF)
 
 
+cdef inline uint32_t _checksum32_ptr(const void* ptr, Py_ssize_t length):
+    cdef uint8_t zero = 0
+    if length <= 0:
+        return <uint32_t>(cy_xxhash3_64(<const void*>&zero, 0) & 0xFFFFFFFF)
+    if ptr == NULL:
+        raise DrakenMorselStorageError("attempted to checksum non-empty payload from NULL pointer")
+    return <uint32_t>(cy_xxhash3_64(ptr, <size_t>length) & 0xFFFFFFFF)
+
+
+cdef inline void _write_ptr_payload(object handle, const void* ptr, Py_ssize_t length):
+    cdef object mv
+    if length <= 0:
+        return
+    if ptr == NULL:
+        raise DrakenMorselStorageError("attempted to write non-empty payload from NULL pointer")
+    mv = PyMemoryView_FromMemory(<char*>ptr, length, PyBUF_READ)
+    handle.write(mv)
+
+
+cdef inline void _decompress_into_ptr(bytes compressed, int codec_id, int expected_len, void* dst):
+    cdef object lz4
+    cdef object zstd
+    cdef object decompress_into_fn
+    cdef object dst_view
+    cdef bytes payload
+    cdef char* src
+    cdef Py_ssize_t src_len
+    if expected_len <= 0:
+        return
+    if dst == NULL:
+        raise DrakenMorselStorageError("cannot decode into NULL destination pointer")
+
+    if codec_id == CODEC_NONE:
+        if PyBytes_AsStringAndSize(compressed, &src, &src_len) != 0:
+            raise ValueError("invalid raw segment payload")
+        if src_len != expected_len:
+            raise DrakenMorselCorruptionError(
+                f"raw segment length mismatch: expected {expected_len}, got {src_len}"
+            )
+        memcpy(dst, <const void*>src, <size_t>expected_len)
+        return
+
+    if codec_id == CODEC_LZ4:
+        lz4 = _load_lz4()
+        decompress_into_fn = getattr(lz4, "decompress_into", None)
+        if decompress_into_fn is not None:
+            dst_view = PyMemoryView_FromMemory(<char*>dst, expected_len, PyBUF_WRITE)
+            decompress_into_fn(compressed, dst_view, expected_len)
+            return
+        payload = _decompress_payload(compressed, codec_id, expected_len)
+        if len(payload) != expected_len:
+            raise DrakenMorselCorruptionError(
+                f"decompressed length mismatch: expected {expected_len}, got {len(payload)}"
+            )
+        if expected_len > 0:
+            memcpy(dst, <const void*>PyBytes_AS_STRING(payload), <size_t>expected_len)
+        return
+
+    if codec_id == CODEC_ZSTD:
+        zstd = _load_zstd()
+        decompress_into_fn = getattr(zstd, "decompress_into", None)
+        if decompress_into_fn is not None:
+            dst_view = PyMemoryView_FromMemory(<char*>dst, expected_len, PyBUF_WRITE)
+            decompress_into_fn(compressed, dst_view, expected_len)
+            return
+        payload = _decompress_payload(compressed, codec_id, expected_len)
+        if len(payload) != expected_len:
+            raise DrakenMorselCorruptionError(
+                f"decompressed length mismatch: expected {expected_len}, got {len(payload)}"
+            )
+        if expected_len > 0:
+            memcpy(dst, <const void*>PyBytes_AS_STRING(payload), <size_t>expected_len)
+        return
+
+    raise DrakenMorselStorageError(f"unsupported codec id {codec_id}")
+
+
 def _read_exact(handle, int size):
     payload = handle.read(size)
     if payload is None or len(payload) != size:
         raise DrakenMorselCorruptionError(f"unexpected EOF while reading {size} bytes")
     return payload
+
+
+cdef inline uint16_t _u16_le_read(const uint8_t* ptr):
+    return (<uint16_t>ptr[0]) | ((<uint16_t>ptr[1]) << 8)
+
+
+cdef inline uint32_t _u32_le_read(const uint8_t* ptr):
+    return (
+        (<uint32_t>ptr[0])
+        | ((<uint32_t>ptr[1]) << 8)
+        | ((<uint32_t>ptr[2]) << 16)
+        | ((<uint32_t>ptr[3]) << 24)
+    )
+
+
+cdef inline uint64_t _u64_le_read(const uint8_t* ptr):
+    return (
+        (<uint64_t>ptr[0])
+        | ((<uint64_t>ptr[1]) << 8)
+        | ((<uint64_t>ptr[2]) << 16)
+        | ((<uint64_t>ptr[3]) << 24)
+        | ((<uint64_t>ptr[4]) << 32)
+        | ((<uint64_t>ptr[5]) << 40)
+        | ((<uint64_t>ptr[6]) << 48)
+        | ((<uint64_t>ptr[7]) << 56)
+    )
+
+
+cdef inline void _u16_le_write(uint8_t* ptr, uint16_t value):
+    ptr[0] = <uint8_t>(value & 0xFF)
+    ptr[1] = <uint8_t>((value >> 8) & 0xFF)
+
+
+cdef inline void _u32_le_write(uint8_t* ptr, uint32_t value):
+    ptr[0] = <uint8_t>(value & 0xFF)
+    ptr[1] = <uint8_t>((value >> 8) & 0xFF)
+    ptr[2] = <uint8_t>((value >> 16) & 0xFF)
+    ptr[3] = <uint8_t>((value >> 24) & 0xFF)
+
+
+cdef inline void _u64_le_write(uint8_t* ptr, uint64_t value):
+    ptr[0] = <uint8_t>(value & 0xFF)
+    ptr[1] = <uint8_t>((value >> 8) & 0xFF)
+    ptr[2] = <uint8_t>((value >> 16) & 0xFF)
+    ptr[3] = <uint8_t>((value >> 24) & 0xFF)
+    ptr[4] = <uint8_t>((value >> 32) & 0xFF)
+    ptr[5] = <uint8_t>((value >> 40) & 0xFF)
+    ptr[6] = <uint8_t>((value >> 48) & 0xFF)
+    ptr[7] = <uint8_t>((value >> 56) & 0xFF)
+
+
+cdef inline bytes _encode_header(
+    uint64_t row_count,
+    uint32_t column_count,
+    uint32_t block_count,
+    uint64_t schema_fingerprint,
+    uint8_t default_codec,
+):
+    cdef bytes out = PyBytes_FromStringAndSize(NULL, HEADER_SIZE)
+    cdef uint8_t* ptr = <uint8_t*>PyBytes_AS_STRING(out)
+    memcpy(ptr, <const void*>PyBytes_AS_STRING(MAGIC), 4)
+    _u16_le_write(ptr + 4, <uint16_t>FORMAT_VERSION)
+    _u16_le_write(ptr + 6, 0)
+    _u64_le_write(ptr + 8, row_count)
+    _u32_le_write(ptr + 16, column_count)
+    _u32_le_write(ptr + 20, block_count)
+    _u64_le_write(ptr + 24, schema_fingerprint)
+    ptr[32] = default_codec
+    memset(ptr + 33, 0, 7)
+    return out
+
+
+cdef inline bytes _encode_column_entry(
+    uint16_t name_len,
+    uint16_t dtype,
+    uint8_t encoding,
+    uint8_t flags,
+    uint32_t block_start,
+    uint32_t block_end,
+):
+    cdef bytes out = PyBytes_FromStringAndSize(NULL, COLUMN_ENTRY_SIZE)
+    cdef uint8_t* ptr = <uint8_t*>PyBytes_AS_STRING(out)
+    _u16_le_write(ptr, name_len)
+    _u16_le_write(ptr + 2, dtype)
+    ptr[4] = encoding
+    ptr[5] = flags
+    _u32_le_write(ptr + 6, block_start)
+    _u32_le_write(ptr + 10, block_end)
+    return out
+
+
+cdef inline bytes _encode_block_header(
+    uint32_t block_id,
+    uint32_t column_id,
+    uint8_t segment_kind,
+    uint8_t codec,
+    uint64_t row_start,
+    uint32_t row_count,
+    uint8_t flags,
+    uint32_t raw_len,
+    uint32_t comp_len,
+    uint32_t checksum,
+):
+    cdef bytes out = PyBytes_FromStringAndSize(NULL, BLOCK_HEADER_SIZE)
+    cdef uint8_t* ptr = <uint8_t*>PyBytes_AS_STRING(out)
+    _u32_le_write(ptr, block_id)
+    _u32_le_write(ptr + 4, column_id)
+    ptr[8] = segment_kind
+    ptr[9] = codec
+    _u64_le_write(ptr + 10, row_start)
+    _u32_le_write(ptr + 18, row_count)
+    ptr[22] = flags
+    _u32_le_write(ptr + 23, raw_len)
+    _u32_le_write(ptr + 27, comp_len)
+    _u32_le_write(ptr + 31, checksum)
+    ptr[35] = 0
+    return out
+
+
+cdef inline bytes _encode_block_dir_entry(
+    uint32_t block_id,
+    uint32_t column_id,
+    uint8_t segment_kind,
+    uint64_t offset,
+    uint32_t total_len,
+):
+    cdef bytes out = PyBytes_FromStringAndSize(NULL, BLOCK_DIR_ENTRY_SIZE)
+    cdef uint8_t* ptr = <uint8_t*>PyBytes_AS_STRING(out)
+    _u32_le_write(ptr, block_id)
+    _u32_le_write(ptr + 4, column_id)
+    ptr[8] = segment_kind
+    ptr[9] = 0
+    ptr[10] = 0
+    ptr[11] = 0
+    _u64_le_write(ptr + 12, offset)
+    _u32_le_write(ptr + 20, total_len)
+    return out
+
+
+cdef inline bytes _encode_footer(
+    uint64_t dir_offset,
+    uint32_t dir_len,
+    uint32_t footer_checksum,
+    uint32_t block_count,
+):
+    cdef bytes out = PyBytes_FromStringAndSize(NULL, FOOTER_SIZE)
+    cdef uint8_t* ptr = <uint8_t*>PyBytes_AS_STRING(out)
+    _u64_le_write(ptr, dir_offset)
+    _u32_le_write(ptr + 8, dir_len)
+    _u32_le_write(ptr + 12, footer_checksum)
+    _u32_le_write(ptr + 16, block_count)
+    memcpy(ptr + 20, <const void*>PyBytes_AS_STRING(FOOTER_MAGIC), 4)
+    return out
+
+
+cdef inline tuple _decode_column_entry(bytes payload):
+    cdef const uint8_t* ptr = <const uint8_t*>PyBytes_AS_STRING(payload)
+    return (
+        <int>_u16_le_read(ptr),
+        <int>_u16_le_read(ptr + 2),
+        <int>ptr[4],
+        <int>ptr[5],
+        <int>_u32_le_read(ptr + 6),
+        <int>_u32_le_read(ptr + 10),
+    )
+
+
+cdef inline tuple _decode_header(bytes payload):
+    cdef const uint8_t* ptr = <const uint8_t*>PyBytes_AS_STRING(payload)
+    return (
+        payload[:4],
+        <int>_u16_le_read(ptr + 4),
+        <int>_u16_le_read(ptr + 6),
+        _u64_le_read(ptr + 8),
+        <int>_u32_le_read(ptr + 16),
+        <int>_u32_le_read(ptr + 20),
+        _u64_le_read(ptr + 24),
+        <int>ptr[32],
+    )
+
+
+cdef inline tuple _decode_footer(bytes payload):
+    cdef const uint8_t* ptr = <const uint8_t*>PyBytes_AS_STRING(payload)
+    return (
+        <int64_t>_u64_le_read(ptr),
+        <int>_u32_le_read(ptr + 8),
+        <uint32_t>_u32_le_read(ptr + 12),
+        <int>_u32_le_read(ptr + 16),
+        payload[20:24],
+    )
+
+
+cdef inline tuple _decode_block_dir_entry(bytes payload):
+    cdef const uint8_t* ptr = <const uint8_t*>PyBytes_AS_STRING(payload)
+    return (
+        <int>_u32_le_read(ptr),
+        <int>_u32_le_read(ptr + 4),
+        <int>ptr[8],
+        <int64_t>_u64_le_read(ptr + 12),
+        <int>_u32_le_read(ptr + 20),
+    )
+
+
+cdef inline tuple _decode_block_header(bytes payload):
+    cdef const uint8_t* ptr = <const uint8_t*>PyBytes_AS_STRING(payload)
+    return (
+        <int>_u32_le_read(ptr),
+        <int>_u32_le_read(ptr + 4),
+        <int>ptr[8],
+        <int>ptr[9],
+        _u64_le_read(ptr + 10),
+        <uint32_t>_u32_le_read(ptr + 18),
+        <int>ptr[22],
+        <int>_u32_le_read(ptr + 23),
+        <int>_u32_le_read(ptr + 27),
+        <uint32_t>_u32_le_read(ptr + 31),
+    )
 
 
 cdef inline bint _is_supported_fixed_type(int dtype):
@@ -216,21 +535,8 @@ cdef DrakenFixedBuffer* _fixed_ptr_from_vector(Vector vec, int dtype):
     return NULL
 
 
-cdef Vector _build_fixed_vector(
-    int dtype,
-    Py_ssize_t row_count,
-    bytes data_payload,
-    bytes null_payload,
-):
+cdef Vector _allocate_fixed_vector(int dtype, Py_ssize_t row_count):
     cdef Vector out
-    cdef DrakenFixedBuffer* ptr
-    cdef char* src
-    cdef Py_ssize_t data_len
-    cdef Py_ssize_t expected_data_len
-    cdef char* null_src
-    cdef Py_ssize_t null_len
-    cdef Py_ssize_t expected_null_len
-    cdef uint8_t* bitmap
 
     if dtype == DRAKEN_INT64:
         out = Int64Vector(<size_t>row_count)
@@ -252,6 +558,27 @@ cdef Vector _build_fixed_vector(
         out = IntervalVector(<size_t>row_count)
     else:
         raise DrakenMorselStorageError(f"unsupported fixed dtype {dtype}")
+
+    return out
+
+
+cdef Vector _build_fixed_vector(
+    int dtype,
+    Py_ssize_t row_count,
+    bytes data_payload,
+    bytes null_payload,
+):
+    cdef Vector out
+    cdef DrakenFixedBuffer* ptr
+    cdef char* src
+    cdef Py_ssize_t data_len
+    cdef Py_ssize_t expected_data_len
+    cdef char* null_src
+    cdef Py_ssize_t null_len
+    cdef Py_ssize_t expected_null_len
+    cdef uint8_t* bitmap
+
+    out = _allocate_fixed_vector(dtype, row_count)
 
     ptr = _fixed_ptr_from_vector(out, dtype)
     if ptr == NULL:
@@ -347,18 +674,47 @@ cdef Vector _build_string_vector(
     return out
 
 
+SINK_STREAM = 0
+SINK_PATH = 1
+SINK_RETURN_BYTES = 2
+SINK_BYTEARRAY = 3
+SINK_MEMORYVIEW = 4
+
+
 def _open_reader(path_or_handle):
     if hasattr(path_or_handle, "read"):
         return path_or_handle, False, None
+    if isinstance(path_or_handle, (bytes, bytearray, memoryview)):
+        return io.BytesIO(bytes(path_or_handle)), True, None
+    try:
+        mv = memoryview(path_or_handle)
+        return io.BytesIO(mv.tobytes()), True, None
+    except TypeError:
+        pass
     path = os.fspath(path_or_handle)
     return open(path, "rb"), True, path
 
 
 def _open_writer(path_or_handle):
+    if path_or_handle is None:
+        return io.BytesIO(), True, None, SINK_RETURN_BYTES, None
     if hasattr(path_or_handle, "write"):
-        return path_or_handle, False, None
+        return path_or_handle, False, None, SINK_STREAM, None
+    if isinstance(path_or_handle, bytearray):
+        return io.BytesIO(), True, None, SINK_BYTEARRAY, path_or_handle
+    if isinstance(path_or_handle, memoryview):
+        if path_or_handle.readonly:
+            raise TypeError("memoryview target for write_morsel must be writable")
+        return io.BytesIO(), True, None, SINK_MEMORYVIEW, path_or_handle
+    try:
+        mv = memoryview(path_or_handle)
+        if mv.readonly:
+            raise TypeError("buffer target for write_morsel must be writable")
+        return io.BytesIO(), True, None, SINK_MEMORYVIEW, mv
+    except TypeError:
+        pass
     path = os.fspath(path_or_handle)
-    return open(path, "wb"), True, path
+    return open(path, "wb"), True, path, SINK_PATH, None
 
 
 cpdef object write_morsel(object path_or_handle, Morsel morsel, dict options=None):
@@ -372,6 +728,8 @@ cpdef object write_morsel(object path_or_handle, Morsel morsel, dict options=Non
     cdef object handle
     cdef bint close_when_done
     cdef object resolved_path
+    cdef int sink_kind
+    cdef object sink_target
     cdef int i
     cdef int block_cursor = 0
     cdef list column_plans = []
@@ -398,7 +756,7 @@ cpdef object write_morsel(object path_or_handle, Morsel morsel, dict options=Non
     cdef int seg_kind
     cdef intptr_t ptr_value
     cdef Py_ssize_t seg_len
-    cdef bytes payload
+    cdef object segment_payload
     cdef bytes compressed
     cdef uint32_t checksum
     cdef int64_t block_offset
@@ -407,9 +765,11 @@ cpdef object write_morsel(object path_or_handle, Morsel morsel, dict options=Non
     cdef int64_t dir_offset
     cdef uint32_t footer_checksum = 0
     cdef bytearray dir_buffer = bytearray()
+    cdef bytes serialized_blob = b""
     cdef uint64_t raw_written = 0
     cdef uint64_t compressed_written = 0
     cdef uint64_t blocks_written = 0
+    cdef object sink_bytes_view
 
     if codec_id == CODEC_LZ4:
         lz4 = _load_lz4()
@@ -473,32 +833,27 @@ cpdef object write_morsel(object path_or_handle, Morsel morsel, dict options=Non
     if schema_blob:
         schema_fingerprint = hash_bytes(schema_blob)
 
-    handle, close_when_done, resolved_path = _open_writer(path_or_handle)
+    handle, close_when_done, resolved_path, sink_kind, sink_target = _open_writer(path_or_handle)
     try:
         handle.write(
-            struct.pack(
-                HEADER_FMT,
-                MAGIC,
-                FORMAT_VERSION,
-                0,
-                row_count,
-                column_count,
-                block_count,
+            _encode_header(
+                <uint64_t>row_count,
+                <uint32_t>column_count,
+                <uint32_t>block_count,
                 schema_fingerprint,
-                codec_id,
+                <uint8_t>codec_id,
             )
         )
 
         for (name_bytes, dtype, encoding, flags, block_start, block_end, segments) in column_plans:
             handle.write(
-                struct.pack(
-                    COLUMN_ENTRY_FMT,
-                    len(name_bytes),
-                    dtype,
-                    encoding,
-                    flags,
-                    block_start,
-                    block_end,
+                _encode_column_entry(
+                    <uint16_t>len(name_bytes),
+                    <uint16_t>dtype,
+                    <uint8_t>encoding,
+                    <uint8_t>flags,
+                    <uint32_t>block_start,
+                    <uint32_t>block_end,
                 )
             )
             handle.write(name_bytes)
@@ -506,42 +861,63 @@ cpdef object write_morsel(object path_or_handle, Morsel morsel, dict options=Non
         for col_idx, (_, _, _, _, _, _, segments) in enumerate(column_plans):
             for (seg_kind, ptr_value, seg_len) in segments:
                 block_id = len(block_dir)
-                payload = _bytes_from_pointer(<const void*>ptr_value, seg_len)
-                checksum = _checksum32(payload) if checksum_enabled else 0
-                compressed = _compress_payload(payload, codec_id, zstd_level)
+                checksum = _checksum32_ptr(<const void*>ptr_value, seg_len) if checksum_enabled else 0
                 block_offset = handle.tell()
-                header_blob = struct.pack(
-                    BLOCK_HEADER_FMT,
-                    block_id,
-                    col_idx,
-                    seg_kind,
-                    codec_id,
-                    0,
-                    row_count,
-                    0,
-                    len(payload),
-                    len(compressed),
-                    checksum,
-                )
-                handle.write(header_blob)
-                handle.write(compressed)
-                block_dir.append(
-                    (block_id, col_idx, seg_kind, block_offset, len(header_blob) + len(compressed))
-                )
-                raw_written += <uint64_t>len(payload)
-                compressed_written += <uint64_t>len(compressed)
+                if codec_id == CODEC_NONE:
+                    header_blob = _encode_block_header(
+                        <uint32_t>block_id,
+                        <uint32_t>col_idx,
+                        <uint8_t>seg_kind,
+                        <uint8_t>codec_id,
+                        0,
+                        <uint32_t>row_count,
+                        0,
+                        <uint32_t>seg_len,
+                        <uint32_t>seg_len,
+                        checksum,
+                    )
+                    handle.write(header_blob)
+                    _write_ptr_payload(handle, <const void*>ptr_value, seg_len)
+                    block_dir.append((block_id, col_idx, seg_kind, block_offset, len(header_blob) + seg_len))
+                    raw_written += <uint64_t>seg_len
+                    compressed_written += <uint64_t>seg_len
+                else:
+                    segment_payload = (
+                        PyMemoryView_FromMemory(<char*>ptr_value, seg_len, PyBUF_READ)
+                        if seg_len > 0
+                        else b""
+                    )
+                    compressed = _compress_payload(segment_payload, codec_id, zstd_level)
+                    header_blob = _encode_block_header(
+                        <uint32_t>block_id,
+                        <uint32_t>col_idx,
+                        <uint8_t>seg_kind,
+                        <uint8_t>codec_id,
+                        0,
+                        <uint32_t>row_count,
+                        0,
+                        <uint32_t>seg_len,
+                        <uint32_t>len(compressed),
+                        checksum,
+                    )
+                    handle.write(header_blob)
+                    handle.write(compressed)
+                    block_dir.append(
+                        (block_id, col_idx, seg_kind, block_offset, len(header_blob) + len(compressed))
+                    )
+                    raw_written += <uint64_t>seg_len
+                    compressed_written += <uint64_t>len(compressed)
                 blocks_written += 1
 
         dir_offset = handle.tell()
         for (block_id, col_idx, seg_kind, block_offset, total_len) in block_dir:
             dir_buffer.extend(
-                struct.pack(
-                    BLOCK_DIR_ENTRY_FMT,
-                    block_id,
-                    col_idx,
-                    seg_kind,
-                    block_offset,
-                    total_len,
+                _encode_block_dir_entry(
+                    <uint32_t>block_id,
+                    <uint32_t>col_idx,
+                    <uint8_t>seg_kind,
+                    <uint64_t>block_offset,
+                    <uint32_t>total_len,
                 )
             )
 
@@ -549,18 +925,41 @@ cpdef object write_morsel(object path_or_handle, Morsel morsel, dict options=Non
         handle.write(dir_blob)
         footer_checksum = _checksum32(dir_blob) if checksum_enabled else 0
         handle.write(
-            struct.pack(
-                FOOTER_FMT,
-                dir_offset,
-                len(dir_blob),
+            _encode_footer(
+                <uint64_t>dir_offset,
+                <uint32_t>len(dir_blob),
                 footer_checksum,
-                block_count,
-                FOOTER_MAGIC,
+                <uint32_t>block_count,
             )
         )
+        if sink_kind == SINK_RETURN_BYTES or sink_kind == SINK_BYTEARRAY or sink_kind == SINK_MEMORYVIEW:
+            serialized_blob = handle.getvalue()
     finally:
         if close_when_done:
             handle.close()
+
+    if sink_kind == SINK_RETURN_BYTES:
+        return serialized_blob
+
+    if sink_kind == SINK_BYTEARRAY:
+        sink_target[:] = serialized_blob
+    elif sink_kind == SINK_MEMORYVIEW:
+        sink_bytes_view = sink_target
+        if sink_bytes_view.ndim != 1:
+            try:
+                sink_bytes_view = sink_bytes_view.cast("B")
+            except (TypeError, ValueError):
+                raise TypeError("memoryview target for write_morsel must be contiguous")
+        elif sink_bytes_view.format != "B":
+            try:
+                sink_bytes_view = sink_bytes_view.cast("B")
+            except (TypeError, ValueError):
+                raise TypeError("memoryview target for write_morsel must be byte-addressable")
+        if len(serialized_blob) > sink_bytes_view.nbytes:
+            raise ValueError(
+                f"memoryview target too small for serialized morsel: need {len(serialized_blob)} bytes, got {sink_bytes_view.nbytes}"
+            )
+        sink_bytes_view[: len(serialized_blob)] = serialized_blob
 
     return {
         "path": resolved_path,
@@ -569,6 +968,7 @@ cpdef object write_morsel(object path_or_handle, Morsel morsel, dict options=Non
         "blocks": int(block_count),
         "bytes_raw_written": int(raw_written),
         "bytes_compressed_written": int(compressed_written),
+        "bytes_output": int(len(serialized_blob)) if serialized_blob else None,
         "codec_default": _codec_id_to_name(codec_id),
     }
 
@@ -625,13 +1025,18 @@ cpdef Morsel read_morsel(object path_or_handle, dict options=None):
     cdef list block_entries = []
     cdef list segment_store
     cdef object seg_map
+    cdef object seg_info
     cdef list vector_names = []
     cdef list vectors = []
-    cdef bytes null_payload
-    cdef bytes data_payload
-    cdef bytes offsets_payload
-    cdef bytes values_payload
     cdef Vector vec
+    cdef DrakenFixedBuffer* fixed_ptr
+    cdef DrakenVarBuffer* var_ptr
+    cdef uint8_t* bitmap
+    cdef object offsets_payload
+    cdef object values_payload
+    cdef Py_ssize_t expected_len
+    cdef Py_ssize_t null_len
+    cdef int64_t payload_offset
 
     handle, close_when_done, resolved_path = _open_reader(path_or_handle)
     try:
@@ -649,7 +1054,7 @@ cpdef Morsel read_morsel(object path_or_handle, dict options=None):
             block_count,
             schema_fingerprint,
             default_codec,
-        ) = struct.unpack(HEADER_FMT, header_bytes)
+        ) = _decode_header(header_bytes)
 
         if magic != MAGIC:
             raise DrakenMorselCorruptionError(f"invalid DRKM magic: {magic!r}")
@@ -659,7 +1064,7 @@ cpdef Morsel read_morsel(object path_or_handle, dict options=None):
             )
 
         for i in range(column_count):
-            col_meta = struct.unpack(COLUMN_ENTRY_FMT, _read_exact(handle, COLUMN_ENTRY_SIZE))
+            col_meta = _decode_column_entry(_read_exact(handle, COLUMN_ENTRY_SIZE))
             name_len = col_meta[0]
             dtype = col_meta[1]
             encoding = col_meta[2]
@@ -676,8 +1081,8 @@ cpdef Morsel read_morsel(object path_or_handle, dict options=None):
 
         handle.seek(file_size - FOOTER_SIZE, os.SEEK_SET)
         footer_bytes = _read_exact(handle, FOOTER_SIZE)
-        (dir_offset, dir_length, expected_footer_checksum, footer_block_count, footer_magic) = struct.unpack(
-            FOOTER_FMT, footer_bytes
+        (dir_offset, dir_length, expected_footer_checksum, footer_block_count, footer_magic) = _decode_footer(
+            footer_bytes
         )
         if footer_magic != FOOTER_MAGIC:
             raise DrakenMorselCorruptionError("invalid DRKM footer magic")
@@ -700,9 +1105,8 @@ cpdef Morsel read_morsel(object path_or_handle, dict options=None):
 
         for i in range(len(dir_blob) // BLOCK_DIR_ENTRY_SIZE):
             block_entries.append(
-                struct.unpack(
-                    BLOCK_DIR_ENTRY_FMT,
-                    dir_blob[i * BLOCK_DIR_ENTRY_SIZE : (i + 1) * BLOCK_DIR_ENTRY_SIZE],
+                _decode_block_dir_entry(
+                    dir_blob[i * BLOCK_DIR_ENTRY_SIZE : (i + 1) * BLOCK_DIR_ENTRY_SIZE]
                 )
             )
 
@@ -727,46 +1131,166 @@ cpdef Morsel read_morsel(object path_or_handle, dict options=None):
                 raw_len,
                 comp_len,
                 checksum,
-            ) = struct.unpack(BLOCK_HEADER_FMT, block_header)
-
-            compressed = _read_exact(handle, comp_len)
-            payload = _decompress_payload(compressed, codec_id, raw_len)
-            if len(payload) != raw_len:
-                raise DrakenMorselCorruptionError(
-                    f"decompressed length mismatch for block {block_id}: expected {raw_len}, got {len(payload)}"
-                )
-            if checksum_enabled and checksum:
-                if _checksum32(payload) != checksum:
-                    raise DrakenMorselCorruptionError(
-                        f"checksum mismatch for block {block_id}, column {col_idx}"
-                    )
+            ) = _decode_block_header(block_header)
             seg_map = segment_store[col_idx]
             if seg_kind in seg_map:
                 raise DrakenMorselCorruptionError(
                     f"duplicate segment kind {seg_kind} for column {col_idx}"
                 )
-            seg_map[seg_kind] = payload
+            seg_map[seg_kind] = (
+                codec_id,
+                raw_len,
+                comp_len,
+                checksum,
+                <int64_t>(block_offset + BLOCK_HEADER_SIZE),
+            )
 
         for i, (name_bytes, dtype, encoding, col_flags, block_start, block_end) in enumerate(columns):
             seg_map = segment_store[i]
             vector_names.append(name_bytes.decode("utf-8"))
-            null_payload = seg_map.get(SEG_NULL, b"")
 
             if encoding == ENCODING_FIXED:
-                data_payload = seg_map.get(SEG_DATA, None)
-                if data_payload is None:
+                vec = _allocate_fixed_vector(dtype, row_count)
+                fixed_ptr = _fixed_ptr_from_vector(vec, dtype)
+                if fixed_ptr == NULL:
+                    raise DrakenMorselStorageError(f"failed to allocate fixed vector for dtype {dtype}")
+
+                seg_info = seg_map.get(SEG_DATA, None)
+                if seg_info is None:
                     raise DrakenMorselCorruptionError(f"missing fixed data segment for column {i}")
-                vec = _build_fixed_vector(dtype, row_count, data_payload, null_payload)
+                codec_id = seg_info[0]
+                raw_len = seg_info[1]
+                comp_len = seg_info[2]
+                checksum = seg_info[3]
+                payload_offset = seg_info[4]
+
+                if dtype == DRAKEN_BOOL:
+                    expected_len = (row_count + 7) >> 3
+                else:
+                    expected_len = row_count * <Py_ssize_t>fixed_ptr.itemsize
+                if raw_len != expected_len:
+                    raise DrakenMorselCorruptionError(
+                        f"fixed payload length mismatch for column {i}: expected {expected_len}, got {raw_len}"
+                    )
+
+                handle.seek(payload_offset, os.SEEK_SET)
+                compressed = _read_exact(handle, comp_len)
+                _decompress_into_ptr(compressed, codec_id, raw_len, fixed_ptr.data)
+                if checksum_enabled and checksum:
+                    if _checksum32_ptr(<const void*>fixed_ptr.data, raw_len) != checksum:
+                        raise DrakenMorselCorruptionError(
+                            f"checksum mismatch for block data in column {i}"
+                        )
+
+                seg_info = seg_map.get(SEG_NULL, None)
+                if seg_info is not None:
+                    codec_id = seg_info[0]
+                    raw_len = seg_info[1]
+                    comp_len = seg_info[2]
+                    checksum = seg_info[3]
+                    payload_offset = seg_info[4]
+                    null_len = (row_count + 7) >> 3
+                    if raw_len != null_len:
+                        raise DrakenMorselCorruptionError(
+                            f"null bitmap length mismatch for column {i}: expected {null_len}, got {raw_len}"
+                        )
+                    if null_len > 0:
+                        bitmap = <uint8_t*>malloc(<size_t>null_len)
+                        if bitmap == NULL:
+                            raise MemoryError()
+                        handle.seek(payload_offset, os.SEEK_SET)
+                        compressed = _read_exact(handle, comp_len)
+                        _decompress_into_ptr(compressed, codec_id, raw_len, bitmap)
+                        if checksum_enabled and checksum:
+                            if _checksum32_ptr(<const void*>bitmap, raw_len) != checksum:
+                                raise DrakenMorselCorruptionError(
+                                    f"checksum mismatch for null bitmap in column {i}"
+                                )
+                        fixed_ptr.null_bitmap = bitmap
+                    else:
+                        fixed_ptr.null_bitmap = NULL
+                else:
+                    fixed_ptr.null_bitmap = NULL
             elif encoding == ENCODING_VAR:
-                offsets_payload = seg_map.get(SEG_OFFSETS, None)
-                values_payload = seg_map.get(SEG_VALUES, None)
-                if offsets_payload is None or values_payload is None:
-                    raise DrakenMorselCorruptionError(f"missing var-width segments for column {i}")
                 if dtype != DRAKEN_STRING:
                     raise DrakenMorselStorageError(
                         f"unsupported var-width dtype {dtype} in DRKM v1 reader"
                     )
-                vec = _build_string_vector(row_count, offsets_payload, values_payload, null_payload)
+                offsets_payload = seg_map.get(SEG_OFFSETS, None)
+                values_payload = seg_map.get(SEG_VALUES, None)
+                if offsets_payload is None or values_payload is None:
+                    raise DrakenMorselCorruptionError(f"missing var-width segments for column {i}")
+
+                vec = StringVector(<size_t>row_count, <size_t>values_payload[1])
+                var_ptr = (<StringVector>vec).ptr
+
+                codec_id = offsets_payload[0]
+                raw_len = offsets_payload[1]
+                comp_len = offsets_payload[2]
+                checksum = offsets_payload[3]
+                payload_offset = offsets_payload[4]
+                expected_len = (row_count + 1) * sizeof(int32_t)
+                if raw_len != expected_len:
+                    raise DrakenMorselCorruptionError(
+                        f"offset payload length mismatch for column {i}: expected {expected_len}, got {raw_len}"
+                    )
+                handle.seek(payload_offset, os.SEEK_SET)
+                compressed = _read_exact(handle, comp_len)
+                _decompress_into_ptr(compressed, codec_id, raw_len, var_ptr.offsets)
+                if checksum_enabled and checksum:
+                    if _checksum32_ptr(<const void*>var_ptr.offsets, raw_len) != checksum:
+                        raise DrakenMorselCorruptionError(
+                            f"checksum mismatch for offsets in column {i}"
+                        )
+
+                codec_id = values_payload[0]
+                raw_len = values_payload[1]
+                comp_len = values_payload[2]
+                checksum = values_payload[3]
+                payload_offset = values_payload[4]
+                handle.seek(payload_offset, os.SEEK_SET)
+                compressed = _read_exact(handle, comp_len)
+                _decompress_into_ptr(compressed, codec_id, raw_len, var_ptr.data)
+                if checksum_enabled and checksum:
+                    if _checksum32_ptr(<const void*>var_ptr.data, raw_len) != checksum:
+                        raise DrakenMorselCorruptionError(
+                            f"checksum mismatch for string values in column {i}"
+                        )
+
+                seg_info = seg_map.get(SEG_NULL, None)
+                if seg_info is not None:
+                    codec_id = seg_info[0]
+                    raw_len = seg_info[1]
+                    comp_len = seg_info[2]
+                    checksum = seg_info[3]
+                    payload_offset = seg_info[4]
+                    null_len = (row_count + 7) >> 3
+                    if raw_len != null_len:
+                        raise DrakenMorselCorruptionError(
+                            f"null bitmap length mismatch for column {i}: expected {null_len}, got {raw_len}"
+                        )
+                    if null_len > 0:
+                        bitmap = <uint8_t*>malloc(<size_t>null_len)
+                        if bitmap == NULL:
+                            raise MemoryError()
+                        handle.seek(payload_offset, os.SEEK_SET)
+                        compressed = _read_exact(handle, comp_len)
+                        _decompress_into_ptr(compressed, codec_id, raw_len, bitmap)
+                        if checksum_enabled and checksum:
+                            if _checksum32_ptr(<const void*>bitmap, raw_len) != checksum:
+                                raise DrakenMorselCorruptionError(
+                                    f"checksum mismatch for null bitmap in column {i}"
+                                )
+                        var_ptr.null_bitmap = bitmap
+                    else:
+                        var_ptr.null_bitmap = NULL
+                else:
+                    var_ptr.null_bitmap = NULL
+
+                if row_count > 0 and var_ptr.offsets[row_count] != values_payload[1]:
+                    raise DrakenMorselStorageError(
+                        f"offset tail mismatch in column {i}: expected {values_payload[1]}, got {var_ptr.offsets[row_count]}"
+                    )
             else:
                 raise DrakenMorselCorruptionError(f"invalid encoding kind {encoding} for column {i}")
 

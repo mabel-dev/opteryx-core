@@ -3,6 +3,11 @@ import struct
 import pyarrow as pa
 import pytest
 
+import os
+import sys
+
+sys.path.insert(1, os.path.join(sys.path[0], "../../../.."))
+
 from opteryx.draken import Morsel
 
 
@@ -52,6 +57,22 @@ def test_morsel_io_round_trip_none_codec(tmp_path):
     assert _as_py_columns(restored) == _as_py_columns(original)
 
 
+def test_morsel_io_round_trip_lz4_codec(tmp_path):
+    original = _sample_morsel()
+    path = tmp_path / "morsel_lz4.drkm"
+
+    stats = write_morsel(path, original, {"codec_default": "lz4", "checksum_enabled": True})
+    restored = read_morsel(path, {"checksum_enabled": True})
+
+    assert stats["rows"] == original.num_rows
+    assert stats["columns"] == original.num_columns
+    assert stats["codec_default"] == "lz4"
+    assert restored.num_rows == original.num_rows
+    assert restored.num_columns == original.num_columns
+    assert restored.column_names == original.column_names
+    assert _as_py_columns(restored) == _as_py_columns(original)
+
+
 def test_morsel_io_detects_payload_corruption(tmp_path):
     original = _sample_morsel()
     path = tmp_path / "morsel_corrupt.drkm"
@@ -75,3 +96,50 @@ def test_morsel_io_detects_payload_corruption(tmp_path):
 
     with pytest.raises(DrakenMorselStorageError):
         read_morsel(path, {"checksum_enabled": True})
+
+
+def test_morsel_io_round_trip_bytes_payload():
+    original = _sample_morsel()
+
+    payload = write_morsel(None, original, {"codec_default": "none", "checksum_enabled": True})
+    assert isinstance(payload, (bytes, bytearray))
+    assert len(payload) > 0
+
+    restored = read_morsel(payload, {"checksum_enabled": True})
+    assert restored.num_rows == original.num_rows
+    assert restored.num_columns == original.num_columns
+    assert restored.column_names == original.column_names
+    assert _as_py_columns(restored) == _as_py_columns(original)
+
+
+def test_morsel_io_round_trip_bytearray_and_memoryview():
+    original = _sample_morsel()
+
+    bytearray_sink = bytearray()
+    bytearray_stats = write_morsel(
+        bytearray_sink, original, {"codec_default": "none", "checksum_enabled": True}
+    )
+    assert bytearray_stats["path"] is None
+    assert bytearray_stats["bytes_output"] == len(bytearray_sink)
+    restored_from_bytearray = read_morsel(memoryview(bytearray_sink), {"checksum_enabled": True})
+    assert _as_py_columns(restored_from_bytearray) == _as_py_columns(original)
+
+    payload = write_morsel(None, original, {"codec_default": "none", "checksum_enabled": True})
+    target = bytearray(len(payload))
+    target_view = memoryview(target)
+    memoryview_stats = write_morsel(
+        target_view, original, {"codec_default": "none", "checksum_enabled": True}
+    )
+    assert memoryview_stats["bytes_output"] == len(payload)
+    restored_from_memoryview = read_morsel(
+        target_view[: memoryview_stats["bytes_output"]], {"checksum_enabled": True}
+    )
+    assert _as_py_columns(restored_from_memoryview) == _as_py_columns(original)
+
+
+def test_morsel_io_memoryview_target_too_small():
+    original = _sample_morsel()
+    payload = write_morsel(None, original, {"codec_default": "none", "checksum_enabled": True})
+    target = bytearray(max(1, len(payload) - 1))
+    with pytest.raises(ValueError, match="too small"):
+        write_morsel(memoryview(target), original, {"codec_default": "none", "checksum_enabled": True})

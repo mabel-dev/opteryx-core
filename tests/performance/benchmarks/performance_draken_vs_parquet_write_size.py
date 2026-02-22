@@ -86,7 +86,7 @@ def main():
                     lambda: write_morsel(
                         drkm_path,
                         morsel,
-                        {"codec_default": args.draken_codec, "checksum_enabled": True},
+                        {"codec_default": args.draken_codec, "checksum_enabled": False},
                     )
                 )
             )
