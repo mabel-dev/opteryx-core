@@ -3,6 +3,7 @@
 # See the License at http://www.apache.org/licenses/LICENSE-2.0
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
+import json
 import typing
 from os import environ
 from typing import Optional
@@ -67,6 +68,20 @@ def get(key: str, default: Optional[typing.Any] = None) -> Optional[typing.Any]:
     return environ.get(key, default=default)
 
 
+def parse_json(value: typing.Any, default: typing.Any = None) -> typing.Any:
+    """
+    Parse a JSON value from text or return the object when already structured.
+    """
+    if value is None:
+        return default
+    if isinstance(value, (dict, list, tuple)):
+        return value
+    text = str(value).strip()
+    if not text:
+        return default
+    return json.loads(text)
+
+
 # fmt:off
 
 # These are 'protected' properties which cannot be overridden by a single query
@@ -85,6 +100,22 @@ OPTERYX_TRACE_FILE: str = str(get("OPTERYX_TRACE_FILE", ""))
 
 MAX_CONSECUTIVE_CACHE_FAILURES: int = int(get("MAX_CONSECUTIVE_CACHE_FAILURES", 10))
 """Maximum number of consecutive cache failures before disabling cache usage."""
+
+KVSTORE_LOCATION: str = str(get("KVSTORE_LOCATION", "")).strip()
+"""Single-store KV location (e.g. file://, valkey://, gs://, memory://)."""
+
+KVSTORE_KEY_PREFIX: str = str(get("KVSTORE_KEY_PREFIX", "")).strip()
+"""Optional global key prefix applied to configured KV stores."""
+
+KVSTORE_LAYERS: list[typing.Any] = parse_json(get("KVSTORE_LAYERS", ""), default=[])
+"""Optional layered KV definition (JSON list/dict) used by `create_kv_store(None)`."""
+
+KVSTORE_PREWARM_MEMORY_POOLS: bool = str(get("KVSTORE_PREWARM_MEMORY_POOLS", "1")).lower() in (
+    "1",
+    "true",
+    "yes",
+)
+"""Pre-create global memory:// pools from configured KV layers at startup."""
 
 # These values are computed lazily via __getattr__ to avoid importing
 # psutil (and making expensive system calls) during module import.

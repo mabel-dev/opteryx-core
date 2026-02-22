@@ -17,9 +17,13 @@ from opteryx.managers.kvstores.file_kv_store import FileKeyValueStore
 from opteryx.managers.kvstores.gcs_kv_store import GCSKeyValueStore
 from opteryx.managers.kvstores.layered_kv_store import LayeredKeyValueStore
 from opteryx.managers.kvstores.memory_kv_store import MemoryPoolKeyValueStore
+from opteryx.managers.kvstores.memory_kv_store import ensure_memory_pool
 from opteryx.managers.kvstores.null_cache import NullCache
 from opteryx.managers.kvstores.s3_kv_store import S3KeyValueStore
+from opteryx.managers.kvstores.scoped_kv_store import ScopedKeyValueStore
 from opteryx.managers.kvstores.valkey import ValkeyCache
+
+_REQUIRED_CONTEXT_FIELDS = ("query_id", "operator_id")
 
 
 def _parse_max_bytes(value: Any) -> int | None:
@@ -37,6 +41,15 @@ def _normalize_prefix(prefix: bytes | str | None) -> str | None:
     if isinstance(prefix, bytes):
         return prefix.decode("utf-8")
     return str(prefix)
+
+
+def _render_prefix_template(prefix: bytes | str | None, query_id: str | None = None) -> str | None:
+    normalized = _normalize_prefix(prefix)
+    if normalized is None:
+        return None
+    if query_id is None:
+        return normalized
+    return normalized.replace("{query_id}", str(query_id))
 
 
 def _merge_prefix(base_prefix: bytes | str | None, extra_prefix: bytes | str | None) -> str | None:
@@ -71,9 +84,12 @@ def _extract_uri_options(location: str) -> tuple[str, int | None, str | None]:
     return clean_location, max_bytes, _normalize_prefix(uri_prefix)
 
 
-def _coerce_layer_spec(layer_spec: Any) -> tuple[str, int | None, str | None]:
+def _coerce_layer_spec(
+    layer_spec: Any, query_id: str | None = None
+) -> tuple[str, int | None, str | None]:
     if isinstance(layer_spec, str):
-        return _extract_uri_options(layer_spec.strip())
+        clean_location, max_bytes, layer_prefix = _extract_uri_options(layer_spec.strip())
+        return clean_location, max_bytes, _render_prefix_template(layer_prefix, query_id=query_id)
 
     if not isinstance(layer_spec, Mapping):
         raise TypeError("Layer definition must be a string URI or mapping")
@@ -88,6 +104,7 @@ def _coerce_layer_spec(layer_spec: Any) -> tuple[str, int | None, str | None]:
     dict_prefix = _normalize_prefix(layer_spec.get("key_prefix", layer_spec.get("prefix")))
 
     layer_prefix = _merge_prefix(dict_prefix, uri_prefix)
+    layer_prefix = _render_prefix_template(layer_prefix, query_id=query_id)
     return (
         clean_location,
         (dict_max_bytes if dict_max_bytes is not None else uri_max_bytes),
@@ -123,6 +140,7 @@ def _create_layered_store(
     *,
     key_prefix: bytes | str | None = None,
     location: str = "layered://",
+    query_id: str | None = None,
     **kwargs: Any,
 ) -> LayeredKeyValueStore:
     if not layer_specs:
@@ -132,11 +150,93 @@ def _create_layered_store(
 
     layers: list[tuple[BaseKeyValueStore, int | None]] = []
     for raw_layer in layer_specs:
-        layer_location, max_bytes, layer_prefix = _coerce_layer_spec(raw_layer)
+        layer_location, max_bytes, layer_prefix = _coerce_layer_spec(raw_layer, query_id=query_id)
         layer_store = _create_single_store(layer_location, key_prefix=layer_prefix, **kwargs)
         layers.append((layer_store, max_bytes))
 
     return LayeredKeyValueStore(layers=layers, location=location, key_prefix=key_prefix)
+
+
+def _load_kv_defaults_from_config() -> tuple[Any, str | None]:
+    from opteryx import config as opteryx_config
+
+    configured_layers = getattr(opteryx_config, "KVSTORE_LAYERS", None)
+    configured_location = getattr(opteryx_config, "KVSTORE_LOCATION", "")
+    configured_prefix = getattr(opteryx_config, "KVSTORE_KEY_PREFIX", None)
+
+    if configured_layers:
+        return configured_layers, _normalize_prefix(configured_prefix)
+    if configured_location:
+        return configured_location, _normalize_prefix(configured_prefix)
+    return None, _normalize_prefix(configured_prefix)
+
+
+def _wrap_with_context_enforcement(
+    store: BaseKeyValueStore,
+    enforced_context_fields: list[str] | tuple[str, ...] | None,
+) -> BaseKeyValueStore:
+    if not enforced_context_fields:
+        return store
+    if isinstance(store, ScopedKeyValueStore):
+        return store
+    return ScopedKeyValueStore(store=store, required_context_fields=list(enforced_context_fields))
+
+
+def _extract_all_locations(spec: Any) -> list[str]:
+    if spec is None:
+        return []
+    if isinstance(spec, Mapping):
+        layers = spec.get("layers")
+        if layers is not None:
+            if isinstance(layers, (str, bytes, bytearray)):
+                raise TypeError("`layers` must be a sequence of layer definitions")
+            locations: list[str] = []
+            for layer in layers:
+                clean_location, _max_bytes, _prefix = _coerce_layer_spec(layer, query_id=None)
+                locations.append(clean_location)
+            return locations
+        mapped_location = spec.get("location", spec.get("uri"))
+        if not mapped_location:
+            return []
+        clean_location, _max_bytes, _prefix = _extract_uri_options(str(mapped_location))
+        return [clean_location]
+
+    if isinstance(spec, Sequence) and not isinstance(spec, (str, bytes, bytearray)):
+        locations: list[str] = []
+        for layer in spec:
+            clean_location, _max_bytes, _prefix = _coerce_layer_spec(layer, query_id=None)
+            locations.append(clean_location)
+        return locations
+
+    location_str = str(spec).strip()
+    if not location_str:
+        return []
+
+    layered_parts = [part.strip() for part in location_str.split(";") if part.strip()]
+    if len(layered_parts) > 1:
+        locations: list[str] = []
+        for part in layered_parts:
+            clean_location, _max_bytes, _prefix = _extract_uri_options(part)
+            locations.append(clean_location)
+        return locations
+
+    clean_location, _max_bytes, _prefix = _extract_uri_options(location_str)
+    return [clean_location]
+
+
+def initialize_global_memory_pools(location: Any | None = None, **kwargs: Any) -> list[str]:
+    """
+    Prewarm global memory:// pools from explicit or configured KV layer definitions.
+    """
+    if location is None:
+        location, _configured_prefix = _load_kv_defaults_from_config()
+
+    initialized: list[str] = []
+    for layer_location in _extract_all_locations(location):
+        pool_name = ensure_memory_pool(layer_location, **kwargs)
+        if pool_name is not None:
+            initialized.append(pool_name)
+    return initialized
 
 
 def create_kv_store(
@@ -163,49 +263,84 @@ def create_kv_store(
     - `max_bytes`: capacity threshold for layer placement
     - `key_prefix` / `prefix`: key namespace prefix for that store/layer
     """
-    if not location:
-        return None
-
     if isinstance(location, BaseKeyValueStore):
-        return location
+        return _wrap_with_context_enforcement(location, _REQUIRED_CONTEXT_FIELDS)
 
     create_kwargs = dict(kwargs)
-    root_prefix = create_kwargs.pop("key_prefix", None)
+    query_id = create_kwargs.pop("query_id", None)
+    create_kwargs.pop("enforce_context_fields", None)
+    enforced_context_fields = _REQUIRED_CONTEXT_FIELDS
+    root_prefix = _render_prefix_template(create_kwargs.pop("key_prefix", None), query_id=query_id)
+
+    if not location:
+        location, configured_prefix = _load_kv_defaults_from_config()
+        if not location:
+            return None
+        root_prefix = _merge_prefix(
+            root_prefix, _render_prefix_template(configured_prefix, query_id=query_id)
+        )
 
     if isinstance(location, Mapping):
-        root_prefix = _merge_prefix(root_prefix, location.get("key_prefix", location.get("prefix")))
+        root_prefix = _merge_prefix(
+            root_prefix,
+            _render_prefix_template(
+                location.get("key_prefix", location.get("prefix")), query_id=query_id
+            ),
+        )
         layers = location.get("layers")
         if layers is not None:
             if isinstance(layers, (str, bytes, bytearray)):
                 raise TypeError("`layers` must be a sequence of layer definitions")
-            return _create_layered_store(
-                list(layers), key_prefix=root_prefix, location="layered://config", **create_kwargs
+            store = _create_layered_store(
+                list(layers),
+                key_prefix=root_prefix,
+                location="layered://config",
+                query_id=query_id,
+                **create_kwargs,
             )
+            return _wrap_with_context_enforcement(store, enforced_context_fields)
 
         mapped_location = location.get("location", location.get("uri"))
         if not mapped_location:
             raise ValueError("KV config mapping requires `location`/`uri` or `layers`")
         clean_location, _max_bytes, uri_prefix = _extract_uri_options(str(mapped_location))
-        return _create_single_store(
-            clean_location, key_prefix=_merge_prefix(root_prefix, uri_prefix), **create_kwargs
+        store = _create_single_store(
+            clean_location,
+            key_prefix=_merge_prefix(
+                root_prefix, _render_prefix_template(uri_prefix, query_id=query_id)
+            ),
+            **create_kwargs,
         )
+        return _wrap_with_context_enforcement(store, enforced_context_fields)
 
     if isinstance(location, Sequence) and not isinstance(location, (str, bytes, bytearray)):
-        return _create_layered_store(
-            list(location), key_prefix=root_prefix, location="layered://sequence", **create_kwargs
+        store = _create_layered_store(
+            list(location),
+            key_prefix=root_prefix,
+            location="layered://sequence",
+            query_id=query_id,
+            **create_kwargs,
         )
+        return _wrap_with_context_enforcement(store, enforced_context_fields)
 
     location_str = str(location).strip()
     layered_parts = [part.strip() for part in location_str.split(";") if part.strip()]
     if len(layered_parts) > 1:
-        return _create_layered_store(
+        store = _create_layered_store(
             layered_parts,
             key_prefix=root_prefix,
             location="layered://delimited",
+            query_id=query_id,
             **create_kwargs,
         )
+        return _wrap_with_context_enforcement(store, enforced_context_fields)
 
     clean_location, _max_bytes, uri_prefix = _extract_uri_options(location_str)
-    return _create_single_store(
-        clean_location, key_prefix=_merge_prefix(root_prefix, uri_prefix), **create_kwargs
+    store = _create_single_store(
+        clean_location,
+        key_prefix=_merge_prefix(
+            root_prefix, _render_prefix_template(uri_prefix, query_id=query_id)
+        ),
+        **create_kwargs,
     )
+    return _wrap_with_context_enforcement(store, enforced_context_fields)

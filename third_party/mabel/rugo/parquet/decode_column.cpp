@@ -47,6 +47,8 @@ static DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
     if (!has_supported_encoding) return result;
 
     result.type = target_col->physical_type;
+    result.max_rep_level = target_col->max_repetition_level;
+    result.max_def_level = target_col->max_definition_level;
 
     // -----------------------------------------------------------------
     // Step 1: Load dictionary page (if present)
@@ -169,8 +171,15 @@ static DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
 
     int32_t total_needed    = target_col->num_values;  // 0 means "accumulate all"
 
-    // Accumulate definition levels across all pages to build validity bitmap later.
+    // Accumulate repetition and definition levels across all pages.
+    // rep_levels: only populated when max_repetition_level > 0 (list columns).
+    // def_levels: used both for validity bitmap (all nullable columns) and for
+    //             list offset reconstruction (Step 10).
+    std::vector<int32_t> all_rep_levels;
     std::vector<int32_t> all_def_levels;
+    if (target_col->max_repetition_level > 0) {
+      all_rep_levels.reserve(total_needed > 0 ? total_needed : 100000);
+    }
     if (target_col->max_definition_level > 0) {
       all_def_levels.reserve(total_needed > 0 ? total_needed : 100000);
     }
@@ -224,14 +233,34 @@ static DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
         }
       }
 
-      // Step 3: Skip repetition levels; decode definition levels
-      
-      // Skip repetition levels if present (we don't use them yet).
+      // Step 3: Decode repetition levels; decode definition levels.
+
+      // Repetition levels (V1 pages: 4-byte LE length prefix).
+      // Per the Parquet spec encoding.md table: Data page v1 repetition levels
+      // are RLE/bit-packed and prefixed with a 4-byte LE length.
+      std::vector<int32_t> page_rep_levels;
       if (target_col->max_repetition_level > 0) {
-        size_t skip = SkipRLEBitPackedLevels(
-            data_ptr, data_size, target_col->max_repetition_level);
-        data_ptr  += skip;
-        data_size -= skip;
+        int rep_bit_width = 0;
+        int32_t max_rep = target_col->max_repetition_level;
+        while (max_rep > 0) { rep_bit_width++; max_rep >>= 1; }
+
+        if (data_size < 4) return result;
+        uint32_t rep_payload_bytes = ReadLE32(data_ptr);
+        size_t   rep_slice_size    = 4 + (size_t)rep_payload_bytes;
+        if (rep_slice_size > data_size) return result;
+
+        size_t bytes_consumed_rep = 0;
+        int32_t decoded_rep = DecodeRLEBitPackedIndicesWithConsumption(
+            data_ptr, rep_slice_size,
+            page_values, rep_bit_width, page_rep_levels, bytes_consumed_rep);
+
+        if (decoded_rep != page_values) return result;
+
+        data_ptr  += rep_slice_size;
+        data_size -= rep_slice_size;
+
+        all_rep_levels.insert(all_rep_levels.end(),
+                              page_rep_levels.begin(), page_rep_levels.end());
       }
 
       // Decode definition levels to build validity bitmap.
@@ -424,6 +453,12 @@ static DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
     }  // end page loop
 
     result.num_rows = total_collected;
+
+    // Store accumulated levels in result for use by the Cython binding.
+    // rep_levels and def_levels are needed for list column reconstruction (Step 10).
+    // valid_bits is built from def_levels for direct null-bitmap use by flat columns.
+    result.rep_levels = std::move(all_rep_levels);
+    result.def_levels = all_def_levels;  // keep a copy; move would invalidate the loop below
 
     // Build validity bitmap from accumulated definition levels.
     if (!all_def_levels.empty()) {

@@ -5,12 +5,15 @@
 
 from opteryx.managers.kvstores.base_kv_store import BaseKeyValueStore
 from opteryx.managers.kvstores.factory import create_kv_store
+from opteryx.managers.kvstores.factory import initialize_global_memory_pools
 from opteryx.managers.kvstores.file_kv_store import FileKeyValueStore
 from opteryx.managers.kvstores.gcs_kv_store import GCSKeyValueStore
 from opteryx.managers.kvstores.layered_kv_store import LayeredKeyValueStore
 from opteryx.managers.kvstores.memory_kv_store import MemoryPoolKeyValueStore
+from opteryx.managers.kvstores.memory_kv_store import list_memory_pools
 from opteryx.managers.kvstores.null_cache import NullCache
 from opteryx.managers.kvstores.s3_kv_store import S3KeyValueStore
+from opteryx.managers.kvstores.scoped_kv_store import ScopedKeyValueStore
 from opteryx.managers.kvstores.valkey import ValkeyCache
 
 __all__ = [
@@ -20,7 +23,10 @@ __all__ = [
     "GCSKeyValueStore",
     "MemoryPoolKeyValueStore",
     "LayeredKeyValueStore",
+    "ScopedKeyValueStore",
     "NullCache",
     "ValkeyCache",
     "create_kv_store",
+    "initialize_global_memory_pools",
+    "list_memory_pools",
 ]

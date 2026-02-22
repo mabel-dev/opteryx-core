@@ -15,6 +15,12 @@ struct DecodedColumn {
   std::vector<double> float64_values;    // for float64
   std::string type; // "int32", "int64", "string", "boolean", "float32", "float64"
   int32_t num_rows = 0;  // total rows including nulls (= sum of page_values)
+  int32_t max_rep_level = 0;  // from ColumnStats (needed by Cython for list offset reconstruction)
+  int32_t max_def_level = 0;  // from ColumnStats (needed by Cython for list offset reconstruction)
+  // Raw level vectors (populated when max_rep > 0 or max_def > 0, respectively).
+  // Used by the Cython binding for list column offset/null-bitmap reconstruction.
+  std::vector<int32_t> rep_levels;  // one entry per logical value (all pages)
+  std::vector<int32_t> def_levels;  // one entry per logical value (all pages)
   bool success = false;
 };
 
