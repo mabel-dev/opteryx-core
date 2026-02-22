@@ -6,7 +6,7 @@
 # cython: wraparound=False
 # cython: boundscheck=False
 
-from cpython.buffer cimport PyBUF_CONTIG_RO, PyBuffer_Release, PyObject_GetBuffer
+from cpython.buffer cimport PyBUF_CONTIG_RO, PyBUF_WRITABLE, PyBuffer_Release, PyObject_GetBuffer
 from cpython.bytes cimport PyBytes_FromStringAndSize
 from cpython.mem cimport PyMem_Malloc, PyMem_Free
 from cpython.unicode cimport PyUnicode_FromString
@@ -73,3 +73,45 @@ cpdef bytes decompress(object data):
         return py_bytes
     finally:
         PyBuffer_Release(&view)
+
+
+cpdef int decompress_into(object src, object dst, Py_ssize_t expected_size=-1):
+    cdef Py_buffer src_view
+    cdef Py_buffer dst_view
+    cdef const uint8_t* src_ptr
+    cdef size_t src_size
+    cdef size_t dst_capacity
+    cdef size_t result
+    cdef const char* err_ptr
+
+    if PyObject_GetBuffer(src, &src_view, PyBUF_CONTIG_RO) != 0:
+        raise TypeError("expected a readable source buffer")
+    if PyObject_GetBuffer(dst, &dst_view, PyBUF_WRITABLE) != 0:
+        PyBuffer_Release(&src_view)
+        raise TypeError("expected a writable destination buffer")
+
+    try:
+        src_ptr = <const uint8_t*>src_view.buf
+        src_size = <size_t>src_view.len
+        if expected_size < 0:
+            dst_capacity = <size_t>dst_view.len
+        else:
+            if expected_size > dst_view.len:
+                raise ValueError("destination buffer is smaller than expected_size")
+            dst_capacity = <size_t>expected_size
+
+        if dst_capacity == 0:
+            return 0
+
+        result = ZSTD_decompress(dst_view.buf, dst_capacity, src_ptr, src_size)
+        if ZSTD_isError(result):
+            err_ptr = ZSTD_getErrorName(result)
+            if err_ptr:
+                raise ValueError(PyUnicode_FromString(err_ptr))
+            raise ValueError("zstd decompression failed")
+        if result != dst_capacity:
+            raise ValueError(f"zstd decompressed size mismatch: expected {dst_capacity}, got {result}")
+        return <int>result
+    finally:
+        PyBuffer_Release(&dst_view)
+        PyBuffer_Release(&src_view)
