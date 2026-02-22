@@ -20,21 +20,12 @@ Best of three runs, lower is better
 500 cycles  jsonl took      18.6 seconds    ██▍
 500 cycles  jsonl_zstd      23.5 seconds    ████
 
-(results on M2 Mac - last updated 20251201)
-500 cycles  parquet_zstd    1.07 seconds
-500 cycles  parquet_snappy  0.92 seconds
-500 cycles  parquet_lz4     0.91 seconds
-500 cycles  ipc             2.40 seconds
-500 cycles  arrow_lz4       10.2 seconds
-500 cycles  ipc_zstd        10.3 seconds
-500 cycles  orc_snappy      13.8 seconds
-500 cycles  arrow           15.8 seconds
-500 cycles  orc_zstd        16.1 seconds
-500 cycles  ipc_lz4         9.14 seconds
-500 cycles  jsonl           34.8 seconds
-500 cycles  jsonl_zstd      59.3 seconds
-500 cycles  avro            171 seconds
-500 cycles  vortex          5.93 seconds 
+(results on M2 Mac - last updated 20260222)
+500 cycles of draken took           20.76932 seconds  # draken doesn't support pushdowns intentionally
+500 cycles of jsonl took            165.7076 seconds
+500 cycles of parquet took          21.917919 seconds
+500 cycles of parquet_snappy took   16.22569 seconds
+500 cycles of parquet_lz4 took      14.091697 seconds
 
 
 """
@@ -62,34 +53,24 @@ class Timer(object):
 
 
 FORMATS = (
-    "arrow",
-    "arrow_lz4",
+    "draken",
     "jsonl",
-    "orc",
-    "orc_snappy",
     "parquet",
     "parquet_snappy",
     "parquet_lz4",
-    "zstd",
-    "ipc",  # no compression
-    "ipc_lz4",
-    "ipc_zstd",
-    "avro",
-    "vortex"
 )
 
 
 if __name__ == "__main__":
     CYCLES = 500
 
-    opteryx.register_workspace("tests", DiskConnector)
+    opteryx.register_workspace("testdata", DiskConnector)
 
-    conn = opteryx.connect()
+    session = opteryx.session()
 
     for format in FORMATS:
         with Timer(f"{CYCLES} cycles of {format}"):
             for round in range(CYCLES):
-                cur = conn.cursor()
-                cur.execute_to_arrow(
-                    f"SELECT followers FROM testdata.flat.formats.{format} WITH(NO_PARTITION);"
+                session.execute_to_arrow(
+                    f"SELECT * FROM testdata.flat.formats.{format} WITH(NO_PARTITION);"
                 )

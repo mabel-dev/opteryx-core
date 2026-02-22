@@ -269,6 +269,17 @@ static DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
 
       const uint8_t *data_end = data_ptr + data_size;
 
+      // Compute the number of present (non-null) values in this page.
+      // The value stream only contains entries for present slots; null slots
+      // are represented solely in the validity bitmap built from def_levels.
+      int32_t present_count = page_values;  // default: all values present
+      if (!def_levels.empty()) {
+        int32_t max_def = target_col->max_definition_level;
+        present_count = 0;
+        for (int32_t dl : def_levels)
+          if (dl == max_def) ++present_count;
+      }
+
       // Step 4: Decode page values
       bool encoding_requires_dictionary =
           (page_header.encoding == 2 || page_header.encoding == 8);
@@ -279,6 +290,7 @@ static DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
       if (page_uses_dictionary) {
         // On-disk layout: 1 byte bit_width, then RLE/bit-packed indices
         // (no 4-byte length prefix). Construct synthetic prefix for decoder.
+        // The index stream contains only present_count entries (nulls omitted).
         int bit_width = (int)data_ptr[0];
         data_ptr++;
         data_size--;
@@ -294,9 +306,9 @@ static DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
         std::vector<int32_t> indices;
         int32_t decoded = DecodeRLEBitPackedIndices(
             index_data_with_prefix.data(), index_data_with_prefix.size(),
-            page_values, bit_width, indices);
+            present_count, bit_width, indices);
 
-        if (decoded != page_values) return result;
+        if (decoded != present_count) return result;
 
         if (result.type == "int32") {
           for (int32_t idx : indices) {
@@ -333,12 +345,12 @@ static DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
           if (page_encoding == 4) {
             std::vector<int32_t> page_ints;
             int32_t decoded = DecodeDeltaBinaryPacked(data_ptr, data_size,
-                                                       page_values, page_ints);
-            if (decoded != page_values) return result;
+                                                       present_count, page_ints);
+            if (decoded != present_count) return result;
             result.int32_values.insert(result.int32_values.end(),
                                         page_ints.begin(), page_ints.end());
           } else {
-            for (int32_t i = 0; i < page_values && data_ptr + 4 <= data_end; i++) {
+            for (int32_t i = 0; i < present_count && data_ptr + 4 <= data_end; i++) {
               result.int32_values.push_back(ReadLE32(data_ptr));
               data_ptr += 4;
             }
@@ -347,12 +359,12 @@ static DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
           if (page_encoding == 4) {
             std::vector<int64_t> page_ints;
             int32_t decoded = DecodeDeltaBinaryPacked(data_ptr, data_size,
-                                                       page_values, page_ints);
-            if (decoded != page_values) return result;
+                                                       present_count, page_ints);
+            if (decoded != present_count) return result;
             result.int64_values.insert(result.int64_values.end(),
                                         page_ints.begin(), page_ints.end());
           } else {
-            for (int32_t i = 0; i < page_values && data_ptr + 8 <= data_end; i++) {
+            for (int32_t i = 0; i < present_count && data_ptr + 8 <= data_end; i++) {
               result.int64_values.push_back(ReadLE64(data_ptr));
               data_ptr += 8;
             }
@@ -361,12 +373,12 @@ static DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
           if (page_encoding == 6) {
             std::vector<std::string> page_strs;
             int32_t decoded = DecodeDeltaByteArray(data_ptr, data_size,
-                                                    page_values, page_strs);
-            if (decoded != page_values) return result;
+                                                    present_count, page_strs);
+            if (decoded != present_count) return result;
             result.string_values.insert(result.string_values.end(),
                                          page_strs.begin(), page_strs.end());
           } else {
-            for (int32_t i = 0; i < page_values && data_ptr + 4 <= data_end; i++) {
+            for (int32_t i = 0; i < present_count && data_ptr + 4 <= data_end; i++) {
               int32_t length = ReadLE32(data_ptr);
               data_ptr += 4;
               if (data_ptr + length > data_end) break;
@@ -378,31 +390,29 @@ static DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
         } else if (result.type == "boolean") {
           if (page_encoding == 3) {
             // RLE encoding (encoding id 3): 4-byte LE length prefix + RLE/bit-packed
-            // data with bit_width=1.  Reuse DecodeRLEBitPackedIndices directly —
-            // the on-disk data already carries the 4-byte length prefix.
+            // data with bit_width=1.  The value stream contains only present values.
             std::vector<int32_t> rle_vals;
             int32_t decoded = DecodeRLEBitPackedIndices(
-                data_ptr, data_size, page_values, 1, rle_vals);
-            if (decoded != page_values) return result;
+                data_ptr, data_size, present_count, 1, rle_vals);
+            if (decoded != present_count) return result;
             for (auto v : rle_vals)
               result.boolean_values.push_back((uint8_t)(v & 1));
           } else {
-            // PLAIN: 1 bit per value, LSB-first; bit index resets per page.
-            // Keep data_ptr fixed while indexing with i/8 to avoid double-advance.
+            // PLAIN: 1 bit per present value, LSB-first; bit index resets per page.
             const uint8_t *bool_start = data_ptr;
-            for (int32_t i = 0; i < page_values && bool_start + (i / 8) < data_end; i++) {
+            for (int32_t i = 0; i < present_count && bool_start + (i / 8) < data_end; i++) {
               uint8_t byte_value = bool_start[i / 8];
               result.boolean_values.push_back((byte_value >> (i % 8)) & 1);
             }
-            data_ptr += (page_values + 7) / 8;
+            data_ptr += (present_count + 7) / 8;
           }
         } else if (result.type == "float32") {
-          for (int32_t i = 0; i < page_values && data_ptr + 4 <= data_end; i++) {
+          for (int32_t i = 0; i < present_count && data_ptr + 4 <= data_end; i++) {
             result.float32_values.push_back(ReadFloat32(data_ptr));
             data_ptr += 4;
           }
         } else if (result.type == "float64") {
-          for (int32_t i = 0; i < page_values && data_ptr + 8 <= data_end; i++) {
+          for (int32_t i = 0; i < present_count && data_ptr + 8 <= data_end; i++) {
             result.float64_values.push_back(ReadFloat64(data_ptr));
             data_ptr += 8;
           }
@@ -412,6 +422,8 @@ static DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
       total_collected += page_values;
       cursor = compressed_data + compressed_size;
     }  // end page loop
+
+    result.num_rows = total_collected;
 
     // Build validity bitmap from accumulated definition levels.
     if (!all_def_levels.empty()) {

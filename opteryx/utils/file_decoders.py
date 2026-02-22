@@ -7,6 +7,7 @@
 Decode files from a raw binary format to a PyArrow Table.
 """
 
+import io
 from enum import Enum
 from typing import BinaryIO
 from typing import Callable
@@ -382,6 +383,37 @@ def jsonl_decoder(
     return num_rows, len(table["column_names"]), len(buffer), arrow_table
 
 
+def drkm_decoder(
+    buffer: Union[memoryview, bytes, BinaryIO],
+    *,
+    projection: Optional[list] = None,
+    selection: Optional[list] = None,
+    just_schema: bool = False,
+    **kwargs,
+) -> Tuple[int, int, pyarrow.Table]:
+    from opteryx.draken.storage import read_morsel
+
+    if isinstance(buffer, memoryview):
+        raw = buffer.tobytes()
+    elif isinstance(buffer, bytes):
+        raw = buffer
+    else:
+        raw = buffer.read()
+
+    morsel = read_morsel(io.BytesIO(raw))
+    table = morsel.to_arrow()
+
+    if just_schema:
+        return convert_arrow_schema_to_orso_schema(table.schema, row_count_metric=table.num_rows)
+
+    if selection:
+        table = filter_records(selection, table)
+    if projection:
+        table = post_read_projector(table, projection)
+
+    return table.num_rows, table.num_columns, len(raw), table
+
+
 # for types we know about, set up how we handle them
 KNOWN_EXTENSIONS: Dict[str, Tuple[Callable, str]] = {
     "complete": (do_nothing, ExtentionType.CONTROL),
@@ -389,6 +421,7 @@ KNOWN_EXTENSIONS: Dict[str, Tuple[Callable, str]] = {
     "ignore": (do_nothing, ExtentionType.CONTROL),
     "jsonl": (jsonl_decoder, ExtentionType.DATA),
     "parquet": (parquet_decoder, ExtentionType.DATA),
+    "drkm": (drkm_decoder, ExtentionType.DATA),
     "vortex": (vortex_decoder, ExtentionType.DATA),
 }
 

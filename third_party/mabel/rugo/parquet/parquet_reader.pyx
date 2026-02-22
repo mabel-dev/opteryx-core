@@ -589,14 +589,10 @@ def read_parquet(data, column_names=None):
     cdef str col_type
     cdef Vector vec
     
-    # Get num_rows from the first non-failed column
+    # Get num_rows from the C++-computed total (includes null slots)
     for col_idx in range(result.row_groups[rg_idx].size()):
         if result.row_groups[rg_idx][col_idx].success:
-            num_rows = <int32_t>result.row_groups[rg_idx][col_idx].int64_values.size()
-            if num_rows == 0:
-                num_rows = <int32_t>result.row_groups[rg_idx][col_idx].string_values.size()
-            if num_rows == 0:
-                num_rows = <int32_t>result.row_groups[rg_idx][col_idx].boolean_values.size()
+            num_rows = result.row_groups[rg_idx][col_idx].num_rows
             if num_rows > 0:
                 break
     

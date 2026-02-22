@@ -244,3 +244,4 @@ tools/test_gharchive.py
 tools/load_gharchive.py
 tools/load_gh_messages.py
 opteryx/iops/ring_atomic.c
+third_party/mabel/draken/storage/morsel_io.cpp
