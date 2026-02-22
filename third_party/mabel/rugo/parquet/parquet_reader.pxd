@@ -96,6 +96,10 @@ cdef extern from "decode.hpp":
     cdef cppclass DecodedColumn:
         vector[uint8_t] valid_bits
         int32_t num_rows
+        int32_t max_rep_level
+        int32_t max_def_level
+        vector[int32_t] rep_levels
+        vector[int32_t] def_levels
         vector[int32_t] int32_values
         vector[int64_t] int64_values
         vector[string] string_values

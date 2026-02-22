@@ -13,7 +13,7 @@ import struct
 
 cimport parquet_reader
 from libc.stdint cimport uint8_t, int32_t, int64_t
-from libc.stdlib cimport malloc
+from libc.stdlib cimport malloc, free
 from libc.string cimport memcpy
 from libcpp.string cimport string
 from libcpp.vector cimport vector
@@ -23,6 +23,7 @@ from opteryx.draken.vectors.int64_vector cimport Int64Vector
 from opteryx.draken.vectors.float64_vector cimport Float64Vector
 from opteryx.draken.vectors.string_vector cimport StringVector, StringVectorBuilder
 from opteryx.draken.vectors.bool_vector cimport BoolVector, bool_vector_from_bits
+from opteryx.draken.vectors.array_vector cimport ArrayVector, array_vector_from_parts
 from opteryx.draken.vectors.vector cimport Vector
 from opteryx.draken.morsels.morsel cimport Morsel
 
@@ -527,6 +528,119 @@ cdef BoolVector _make_bool_vector(
     return bool_vector_from_bits(value_bits, valid_bits, num_rows)
 
 
+cdef ArrayVector _make_array_vector(
+        parquet_reader.DecodedColumn& decoded_col):
+    """Build an ArrayVector(StringVector) from a list column's rep/def levels.
+
+    Walks the rep_levels and def_levels vectors (one entry per logical slot)
+    to reconstruct Arrow-style list offsets and a list-level null bitmap,
+    then calls array_vector_from_parts to produce the ArrayVector.
+
+    Semantics (Parquet 3-level LIST, optional list, optional element):
+      rep == 0                : start of a new top-level row
+      def == 0 (with rep==0)  : outer list is null (no elements for this row)
+      def == 1 (with rep==0)  : outer list is non-null but empty
+      def == max_def - 1      : element within list is null
+      def == max_def          : element within list is present (string value)
+
+    This generalises cleanly to any depth: only the boundary values
+    max_def and max_def-1 need to be known, both stored in decoded_col.
+    """
+    cdef Py_ssize_t n_levels = decoded_col.rep_levels.size()
+    if n_levels == 0:
+        return None
+
+    cdef int32_t max_def = decoded_col.max_def_level
+
+    # Count logical rows (rep == 0 entries) and flat child elements
+    # in a single pass, so we can allocate exact-size buffers.
+    # flat_child_count = entries where def == max_def (real) or def == max_def-1 (null element)
+    cdef Py_ssize_t num_rows = 0
+    cdef Py_ssize_t flat_child_count = 0
+    cdef Py_ssize_t i
+    cdef int32_t max_def_m1 = max_def - 1
+    for i in range(n_levels):
+        if decoded_col.rep_levels[i] == 0:
+            num_rows += 1
+        if decoded_col.def_levels[i] >= max_def_m1:
+            flat_child_count += 1
+    if num_rows == 0:
+        return None
+
+    # Allocate offsets array (num_rows + 1) and list-level null bitmap.
+    cdef int32_t* offsets = <int32_t*> malloc((num_rows + 1) * sizeof(int32_t))
+    if offsets == NULL:
+        raise MemoryError()
+    cdef Py_ssize_t nb_bytes = (num_rows + 7) >> 3
+    cdef uint8_t* null_bitmap = <uint8_t*> malloc(nb_bytes)
+    if null_bitmap == NULL:
+        free(offsets)
+        raise MemoryError()
+    cdef Py_ssize_t b
+    for b in range(nb_bytes):
+        null_bitmap[b] = 0
+
+    # Estimate flat child capacity for StringVectorBuilder.
+    cdef Py_ssize_t n_values = decoded_col.string_values.size()
+    cdef Py_ssize_t estimated_bytes = 0
+    for i in range(n_values):
+        estimated_bytes += decoded_col.string_values[i].size()
+    estimated_bytes = max(estimated_bytes * 110 // 100, 1)
+
+    # Use flat_child_count as the exact row count for the StringVectorBuilder.
+    cdef StringVectorBuilder builder = StringVectorBuilder(flat_child_count, estimated_bytes)
+
+    cdef Py_ssize_t logical_row = -1
+    cdef Py_ssize_t flat_idx = 0
+    cdef Py_ssize_t val_idx = 0
+    cdef int32_t rep, def_
+
+    for i in range(n_levels):
+        rep = decoded_col.rep_levels[i]
+        def_ = decoded_col.def_levels[i]
+
+        if rep == 0:  # new top-level row
+            logical_row += 1
+            offsets[logical_row] = <int32_t> flat_idx
+            # def >= 1: outer optional group is present → list is non-null
+            if def_ >= 1:
+                null_bitmap[logical_row >> 3] |= (1 << (logical_row & 7))
+            # def == 0: remains 0 (null list) — no element added regardless
+
+        if def_ == max_def:
+            # Present element: consume next string value
+            builder.append_bytes(
+                <const char*> decoded_col.string_values[val_idx].data(),
+                <Py_ssize_t> decoded_col.string_values[val_idx].size()
+            )
+            val_idx += 1
+            flat_idx += 1
+        elif def_ == max_def - 1:
+            # Null element within a non-null list
+            builder.append_null()
+            flat_idx += 1
+        # def == 0 (null list) or def == 1 (empty list): no child element
+
+    # Write final end offset.
+    if logical_row >= 0:
+        offsets[logical_row + 1] = <int32_t> flat_idx
+
+    cdef StringVector flat_child = builder.finish()
+    cdef ArrayVector arr_vec = array_vector_from_parts(
+        flat_child, offsets, null_bitmap, <Py_ssize_t> num_rows
+    )
+
+    # array_vector_from_parts copies both buffers; free our originals.
+    free(offsets)
+    free(null_bitmap)
+
+    # Tell to_arrow() to cast the binary child to UTF-8 strings.
+    import pyarrow as _pa
+    arr_vec._child_arrow_type = _pa.utf8()
+
+    return arr_vec
+
+
 def read_parquet(data, column_names=None):
     """Read parquet data from memory with optional column selection.
 
@@ -610,6 +724,9 @@ def read_parquet(data, column_names=None):
         
         if col_type == "int64":
             vec = _make_int64_vector(column, num_rows)
+        elif col_type == "byte_array" and column.rep_levels.size() > 0:
+            # List column: use rep/def levels to reconstruct ArrayVector
+            vec = _make_array_vector(column)
         elif col_type == "byte_array":
             vec = _make_string_vector(column, num_rows)
         elif col_type == "boolean":

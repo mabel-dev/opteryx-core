@@ -3,6 +3,8 @@ from typing import Dict
 
 from opteryx.managers.kvstores import create_kv_store
 
+_CTX = {"query_id": "q1", "operator_id": "op1"}
+
 
 class FakeS3Client:
     def __init__(self):
@@ -54,13 +56,13 @@ def test_s3_kv_store_with_fake_client():
     try:
         store = create_kv_store("s3://mybucket/pfx", S3_END_POINT="minio", S3_ACCESS_KEY="a", S3_SECRET_KEY="b")
         key = b"0x1"
-        assert store.get(key) is None
+        assert store.get(key, **_CTX) is None
         val = b"abc"
-        store.set(key, val)
-        assert store.get(key) == val
-        assert store.contains([key]) == [key]
-        store.delete(key)
-        assert store.get(key) is None
+        store.set(key, val, **_CTX)
+        assert store.get(key, **_CTX) == val
+        assert store.contains([key], **_CTX) == [key]
+        store.delete(key, **_CTX)
+        assert store.get(key, **_CTX) is None
     finally:
         del sys.modules["minio"]
 
@@ -120,13 +122,13 @@ def test_gcs_kv_store_with_fake_client():
     try:
         store = create_kv_store("gs://bucket/pfx")
         key = b"0x1"
-        assert store.get(key) is None
+        assert store.get(key, **_CTX) is None
         val = b"hello"
-        store.set(key, val)
-        assert store.get(key) == val
-        assert store.contains([key]) == [key]
-        store.delete(key)
-        assert store.get(key) is None
+        store.set(key, val, **_CTX)
+        assert store.get(key, **_CTX) == val
+        assert store.contains([key], **_CTX) == [key]
+        store.delete(key, **_CTX)
+        assert store.get(key, **_CTX) is None
     finally:
         del sys.modules["google.cloud.storage"]
         del sys.modules["google.cloud"]
@@ -148,7 +150,7 @@ def test_s3_kv_store_with_fake_client_and_s3error_class():
     try:
         store = create_kv_store("s3://mybucket/pfx", S3_END_POINT="minio", S3_ACCESS_KEY="a", S3_SECRET_KEY="b")
         key = b"0x1"
-        assert store.get(key) is None
+        assert store.get(key, **_CTX) is None
     finally:
         del sys.modules["minio.error"]
         del sys.modules["minio"]
@@ -177,7 +179,7 @@ def test_gcs_kv_store_with_fake_client_and_googleapierror_class():
     try:
         store = create_kv_store("gs://bucket/pfx")
         key = b"0x1"
-        assert store.get(key) is None
+        assert store.get(key, **_CTX) is None
     finally:
         del sys.modules["google.api_core.exceptions"]
         del sys.modules["google.cloud.storage"]

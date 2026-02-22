@@ -149,6 +149,17 @@ def analyze_query(sql: str) -> Dict[str, Any]:
 # Enable all warnings, including DeprecationWarning
 warnings.simplefilter("once", DeprecationWarning)
 
+try:  # pragma: no cover - startup prewarm path is environment-dependent
+    from opteryx import config as _config
+
+    if _config.KVSTORE_PREWARM_MEMORY_POOLS:
+        from opteryx.managers.kvstores import initialize_global_memory_pools
+
+        initialize_global_memory_pools()
+except Exception:
+    # Prewarm failures should not block module import.
+    pass
+
 __all__ = [
     "analyze_query",
     "session",
