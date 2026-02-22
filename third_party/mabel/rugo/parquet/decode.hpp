@@ -9,7 +9,9 @@ struct DecodedColumn {
   std::vector<uint8_t> valid_bits;       // Arrow-style validity bitmap: 1=valid, 0=null; empty=all-valid
   std::vector<int32_t> int32_values;
   std::vector<int64_t> int64_values;
-  std::vector<std::string> string_values;
+  std::vector<std::string> string_values; // For byte_array: either flat values (dict_indices empty)
+                                           //   or the compact dictionary (dict_indices non-empty)
+  std::vector<int32_t> dict_indices;      // non-empty → string_values is the dict; per-row indices
   std::vector<uint8_t> boolean_values;   // for boolean (using uint8_t instead of bool)
   std::vector<float> float32_values;     // for float32
   std::vector<double> float64_values;    // for float64

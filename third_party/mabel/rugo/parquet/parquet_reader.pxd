@@ -103,6 +103,7 @@ cdef extern from "decode.hpp":
         vector[int32_t] int32_values
         vector[int64_t] int64_values
         vector[string] string_values
+        vector[int32_t] dict_indices
         vector[uint8_t] boolean_values
         vector[float] float32_values
         vector[double] float64_values

@@ -188,6 +188,11 @@ static DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
     const uint8_t *cursor      = file_data + (uint64_t)target_col->data_page_offset;
     const uint8_t *chunk_limit = file_data + chunk_end;
 
+    // When true, all byte_array data pages seen so far used dictionary encoding;
+    // dict_indices holds the per-row lookup indices.  As soon as a non-dict page
+    // is encountered we flush dict_indices → string_values and set this false.
+    bool byte_array_dict_mode = (result.type == "byte_array" && dict_size > 0);
+
     while (cursor < chunk_limit &&
            (total_needed <= 0 || total_collected < total_needed)) {
 
@@ -317,25 +322,15 @@ static DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
       if (encoding_requires_dictionary && dict_size == 0) return result;
 
       if (page_uses_dictionary) {
-        // On-disk layout: 1 byte bit_width, then RLE/bit-packed indices
-        // (no 4-byte length prefix). Construct synthetic prefix for decoder.
-        // The index stream contains only present_count entries (nulls omitted).
+        // On-disk layout: 1 byte bit_width, then RLE/bit-packed indices with no
+        // length prefix.  Read bit_width and decode directly — no synthetic copy.
         int bit_width = (int)data_ptr[0];
         data_ptr++;
         data_size--;
 
-        std::vector<uint8_t> index_data_with_prefix(4 + data_size);
-        uint32_t data_len = (uint32_t)data_size;
-        index_data_with_prefix[0] = (data_len >>  0) & 0xFF;
-        index_data_with_prefix[1] = (data_len >>  8) & 0xFF;
-        index_data_with_prefix[2] = (data_len >> 16) & 0xFF;
-        index_data_with_prefix[3] = (data_len >> 24) & 0xFF;
-        std::memcpy(index_data_with_prefix.data() + 4, data_ptr, data_size);
-
         std::vector<int32_t> indices;
-        int32_t decoded = DecodeRLEBitPackedIndices(
-            index_data_with_prefix.data(), index_data_with_prefix.size(),
-            present_count, bit_width, indices);
+        int32_t decoded = DecodeRLEBitPackedIndicesNoPrefix(
+            data_ptr, data_size, present_count, bit_width, indices);
 
         if (decoded != present_count) return result;
 
@@ -350,9 +345,10 @@ static DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
             result.int64_values.push_back(dict_int64[idx]);
           }
         } else if (result.type == "byte_array") {
+          // Store raw indices; dict moves into string_values after the page loop.
           for (int32_t idx : indices) {
             if (idx < 0 || idx >= (int32_t)dict_string.size()) return result;
-            result.string_values.push_back(dict_string[idx]);
+            result.dict_indices.push_back(idx);
           }
         } else if (result.type == "float32") {
           for (int32_t idx : indices) {
@@ -399,6 +395,13 @@ static DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
             }
           }
         } else if (result.type == "byte_array") {
+          // If previously in dict mode, flush indices → expanded strings before appending plain.
+          if (byte_array_dict_mode) {
+            for (int32_t idx : result.dict_indices)
+              result.string_values.push_back(dict_string[idx]);
+            result.dict_indices.clear();
+            byte_array_dict_mode = false;
+          }
           if (page_encoding == 6) {
             std::vector<std::string> page_strs;
             int32_t decoded = DecodeDeltaByteArray(data_ptr, data_size,
@@ -453,6 +456,13 @@ static DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
     }  // end page loop
 
     result.num_rows = total_collected;
+
+    // If every byte_array page used dictionary encoding, string_values is still empty
+    // and dict_indices holds all per-row lookup indices.  Move the compact dictionary
+    // into string_values now so the Cython layer can do a single index→string pass.
+    if (byte_array_dict_mode && !result.dict_indices.empty()) {
+      result.string_values = std::move(dict_string);
+    }
 
     // Store accumulated levels in result for use by the Cython binding.
     // rep_levels and def_levels are needed for list column reconstruction (Step 10).
