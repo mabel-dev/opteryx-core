@@ -910,53 +910,73 @@ static void ApplyLogicalTypes(
   }
 }
 
-// Enrich column stats with schema information for level data
+// Enrich column stats with schema information for level data.
+//
+// Uses the Dremel encoding rules (Parquet spec, parquet.thrift FieldRepetitionType):
+//   REPEATED (2) on the path from root to leaf: +1 max_rep_level, +1 max_def_level
+//   OPTIONAL (1) on the path from root to leaf: +1 max_def_level only
+//   REQUIRED (0) on the path from root to leaf: no contribution
+//
+// The root message node itself has no repetition_type and is not counted.
+// This correctly handles arbitrary nesting depth (flat columns, 3-level lists, maps, etc.)
+// without any special-casing of specific schema shapes.
 static void EnrichColumnStatsWithSchemaInfo(FileStats &fs) {
   if (fs.schema.empty()) {
     return;
   }
 
-  // Build a map from column name to schema element
-  std::unordered_map<std::string, const SchemaElement*> schema_map;
-  
-  std::function<void(const SchemaElement&, int)> walk_schema = 
-    [&](const SchemaElement& elem, int depth) {
-      std::string canonical = CanonicalizeColumnName(
-        elem.full_name.empty() ? elem.name : elem.full_name);
-      schema_map[canonical] = &elem;
-      
+  // Map from canonical leaf name to the ordered list of repetition_types
+  // of all schema nodes on the path: root's first-level child … leaf (inclusive).
+  std::unordered_map<std::string, std::vector<int32_t>> schema_path_map;
+  // Leaf's own repetition_type, stored separately for ColumnStats.repetition_type.
+  std::unordered_map<std::string, int32_t> schema_leaf_rep;
+
+  std::function<void(const SchemaElement&, std::vector<int32_t>)> walk_schema =
+    [&](const SchemaElement& elem, std::vector<int32_t> path) {
+      path.push_back(elem.repetition_type);
+
+      if (elem.children.empty()) {
+        // Leaf node: record the full ancestor + self repetition-type path.
+        std::string canonical = CanonicalizeColumnName(
+          elem.full_name.empty() ? elem.name : elem.full_name);
+        schema_path_map[canonical] = path;
+        schema_leaf_rep[canonical]  = elem.repetition_type;
+      }
+
       for (const auto& child : elem.children) {
-        walk_schema(child, depth + 1);
+        walk_schema(child, path);
       }
     };
-  
-  // Walk the schema starting from root
+
+  // Walk from the root's children (the root message node itself is not counted).
   for (const auto& root : fs.schema) {
     for (const auto& child : root.children) {
-      walk_schema(child, 1);
+      walk_schema(child, {});
     }
   }
 
-  // Enrich each column in each row group
+  // Apply Dremel level rules to every column in every row group.
   for (auto& rg : fs.row_groups) {
     for (auto& col : rg.columns) {
-      auto it = schema_map.find(col.name);
-      if (it != schema_map.end()) {
-        const SchemaElement* schema_elem = it->second;
-        col.repetition_type = schema_elem->repetition_type;
-        
-        // For non-nested columns (path contains no dots), max_repetition_level = 0
-        col.max_repetition_level = 0;  // We only support flat schemas
-        
-        // max_definition_level depends on whether column is required or optional
-        // 0 = REQUIRED, 1 = OPTIONAL, 2 = REPEATED
-        if (schema_elem->repetition_type == 0) {
-          // REQUIRED: no nulls possible
-          col.max_definition_level = 0;
-        } else {
-          // OPTIONAL or REPEATED: nulls possible
-          col.max_definition_level = 1;
+      auto it = schema_path_map.find(col.name);
+      if (it != schema_path_map.end()) {
+        const std::vector<int32_t>& path = it->second;
+
+        col.repetition_type = schema_leaf_rep[col.name];
+
+        int32_t max_rep = 0;
+        int32_t max_def = 0;
+        for (int32_t rep_type : path) {
+          if (rep_type == 2) {       // REPEATED: contributes to both levels
+            max_rep += 1;
+            max_def += 1;
+          } else if (rep_type == 1) { // OPTIONAL: contributes to def level only
+            max_def += 1;
+          }
+          // REQUIRED (0) or unset (-1): no contribution to either level
         }
+        col.max_repetition_level = max_rep;
+        col.max_definition_level = max_def;
       }
     }
   }

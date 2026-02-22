@@ -18,8 +18,25 @@ class BaseKeyValueStore:
     Base class for cache objects
     """
 
-    def __init__(self, location):
+    def __init__(self, location, key_prefix: bytes | str | None = None):
         self._location = location
+        if key_prefix is None:
+            self._key_prefix = b""
+        elif isinstance(key_prefix, bytes):
+            self._key_prefix = key_prefix
+        else:
+            self._key_prefix = str(key_prefix).encode("utf-8")
+
+        if self._key_prefix and not self._key_prefix.endswith(b"/"):
+            self._key_prefix += b"/"
+
+    def _normalize_key(self, key: bytes) -> bytes:
+        if not isinstance(key, (bytes, bytearray, memoryview)):
+            raise TypeError("key must be bytes-like")
+        key_bytes = bytes(key)
+        if not self._key_prefix:
+            return key_bytes
+        return self._key_prefix + key_bytes
 
     def get(self, key: bytes) -> Union[bytes, None]:
         """

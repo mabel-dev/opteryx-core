@@ -15,7 +15,7 @@ from urllib.parse import urlparse
 from orso.tools import single_item_cache
 
 from opteryx.exceptions import MissingDependencyError
-from opteryx.managers.kvstores import BaseKeyValueStore
+from opteryx.managers.kvstores.base_kv_store import BaseKeyValueStore
 
 GoogleAPIError = Exception
 
@@ -35,7 +35,7 @@ def _gcs_client(**_kwargs):
 
 
 class GCSKeyValueStore(BaseKeyValueStore):
-    def __init__(self, location: str, **_kwargs):
+    def __init__(self, location: str, key_prefix: bytes | str | None = None, **_kwargs):
         parsed = urlparse(location)
         if parsed.scheme != "gs":
             raise ValueError("location must be a gs:// URI")
@@ -44,9 +44,10 @@ class GCSKeyValueStore(BaseKeyValueStore):
         self._prefix = parsed.path.lstrip("/")
         self._client = _gcs_client(**_kwargs)
         self._bucket = self._client.bucket(self._bucket_name)
-        super().__init__(location)
+        super().__init__(location, key_prefix=key_prefix)
 
     def _object_name(self, key: bytes) -> str:
+        key = self._normalize_key(key)
         try:
             key_str = key.decode("utf-8")
         except UnicodeDecodeError:
