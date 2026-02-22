@@ -98,22 +98,19 @@ def _read_with_fastparquet(files: List[str]):
 def _read_with_rugo(files: List[str]) -> int:
     """Decode files using rugo.read_parquet and return total rows read.
 
-    Requires `opteryx.compiled.io.disk_reader.read_file()` for I/O (no fallback).
+    Requires `opteryx.compiled.io.disk_reader.read_file_mmap()` for I/O (no fallback).
+    Uses memoryview to avoid a bytes copy on the hot path.
     """
     import opteryx.rugo.parquet as rp
-    try:
-        from opteryx.compiled.io.disk_reader import read_file as _disk_read_file
-    except Exception as exc:
-        raise RuntimeError("compiled disk_reader.read_file() is required for rugo decode benchmark") from exc
+    from opteryx.compiled.io.disk_reader import read_file_mmap as _disk_read_mmap
+    from opteryx.compiled.io.disk_reader import unmap_memory as _unmap
 
     total_rows = 0
     for f in files:
-        buf = _disk_read_file(f)
-        res = rp.read_parquet(buf)
-        if not res:
-            # decoding failed for this file
-            continue
-        # res is now list[Morsel]; sum num_rows across all morsels
+        mm = _disk_read_mmap(f)
+        res = rp.read_parquet(mm)
+        _unmap(mm)
+        # res is list[Morsel]; sum num_rows across all morsels
         for morsel in res:
             total_rows += morsel.num_rows
     return total_rows
@@ -173,10 +170,12 @@ def test_parquet_decode_pyarrow_vs_fastparquet_prints():
             print(f"  → rows: {rows_rugo:,d}, avg: {rugo_avg:.4f}s, min: {min(rugo_times):.4f}s, max: {max(rugo_times):.4f}s\n")
 
             # verification pass: ensure rugo actually decoded column data for each file
-            from opteryx.compiled.io.disk_reader import read_file as _disk_read_file
+            from opteryx.compiled.io.disk_reader import read_file_mmap as _disk_read_mmap
+            from opteryx.compiled.io.disk_reader import unmap_memory as _unmap
             for f in files:
-                buf = _disk_read_file(f)
-                res = rp.read_parquet(buf)
+                mm = _disk_read_mmap(f)
+                res = rp.read_parquet(memoryview(mm))
+                _unmap(mm)
                 if not res:
                     pytest.fail("rugo.read_parquet failed to return a result")
 

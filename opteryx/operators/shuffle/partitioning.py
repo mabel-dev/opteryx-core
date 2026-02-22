@@ -5,7 +5,13 @@
 
 from __future__ import annotations
 
-import math
+try:  # pragma: no cover
+    from opteryx.compiled.structures.shuffle_partition import (
+        row_indexes_by_bin_flat as _row_indexes_by_bin_flat,
+    )
+except Exception:  # pragma: no cover
+    _row_indexes_by_bin_flat = None
+
 
 _ALLOWED_BIN_COUNTS = (1, 2, 4, 8, 16)
 
@@ -28,6 +34,8 @@ def normalize_num_bins(num_bins: int, allowed: tuple[int, ...] = _ALLOWED_BIN_CO
 
 
 def select_num_bins_from_rows(n_rows: int | None) -> int:
+    import math
+
     if n_rows is None or n_rows <= 0:
         return 1
     raw_bins = min(max(math.ceil(math.log2(n_rows)) - 16, 1), 16)
@@ -39,9 +47,10 @@ def row_indexes_by_bin(hashes, num_bins: int, shift_bits: int = 0) -> list[list[
     if shift_bits < 0:
         raise ValueError("shift_bits must be zero or positive")
 
-    mask = num_bins - 1
-    bins: list[list[int]] = [[] for _ in range(num_bins)]
-    for row_index, hash_value in enumerate(hashes):
-        bin_id = (int(hash_value) >> shift_bits) & mask
-        bins[bin_id].append(row_index)
-    return bins
+    if _row_indexes_by_bin_flat is None:
+        raise RuntimeError(
+            "Compiled shuffle partition kernel unavailable: "
+            "opteryx.compiled.structures.shuffle_partition.row_indexes_by_bin_flat"
+        )
+    flat, offsets = _row_indexes_by_bin_flat(hashes, num_bins, shift_bits)
+    return [list(flat[offsets[bin_id] : offsets[bin_id + 1]]) for bin_id in range(num_bins)]

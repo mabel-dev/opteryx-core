@@ -597,6 +597,15 @@ extensions = [
         language="c++",
         extra_compile_args=CPP_FLAGS,
     ),
+    Extension(
+        "opteryx.compiled.structures.shuffle_partition",
+        sources=[
+            "opteryx/compiled/structures/shuffle_partition.pyx",
+        ],
+        include_dirs=include_dirs,
+        language="c++",
+        extra_compile_args=CPP_FLAGS,
+    ),
     # (group_by_draken left as a pure-Python helper; skip compiling .pyx)
     Extension(
         "opteryx.compiled.table_ops.distinct",

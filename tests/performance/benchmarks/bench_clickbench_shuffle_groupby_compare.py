@@ -82,19 +82,30 @@ def _timed(
 
 
 def _timed_pipeline(
-    fn: Callable[[], tuple[object, dict[str, float]]],
+    fn: Callable[[], tuple],
     iterations: int,
 ):
+    # fn may return (result, stages) or (result, stages, metadata)
     fn()  # warm-up
     times = []
     stage_accumulator: dict[str, list[float]] = {}
     result = None
+    metadata_list: list = []
 
     for _ in range(iterations):
         start = time.perf_counter()
-        result, stages = fn()
+        output = fn()
         total = time.perf_counter() - start
         times.append(total)
+
+        # unpack the returned tuple
+        if len(output) == 2:
+            result, stages = output
+            meta = None
+        else:
+            result, stages, meta = output
+        metadata_list.append(meta)
+
         for name, stage_time in stages.items():
             stage_accumulator.setdefault(name, []).append(stage_time)
 
@@ -103,7 +114,11 @@ def _timed_pipeline(
         for name, samples in stage_accumulator.items()
         if samples
     }
-    return result, times, stage_averages
+
+    # return first metadata item (could be None)
+    combined_meta = metadata_list[0] if metadata_list else None
+
+    return result, times, stage_averages, combined_meta
 
 
 def _legacy_group_by(session, dataset: str):
@@ -111,8 +126,7 @@ def _legacy_group_by(session, dataset: str):
         f"SELECT UserID, COUNT(*) AS c "
         f"FROM {dataset} "
         f"GROUP BY UserID "
-        f"ORDER BY c DESC, UserID ASC "
-        f"LIMIT 10;"
+        f"ORDER BY c DESC, UserID ASC"
     )
     return session.execute_to_arrow(sql)
 
@@ -148,6 +162,8 @@ def _shuffle_group_by_pipeline(session, dataset: str):
     )
     group_by_operation.ingest_many(shuffled_morsels)
     grouped = group_by_operation.finalize()
+    # capture the number of distinct groups produced
+    group_count = int(getattr(grouped, "num_rows", 0))
     stages["group_by_total"] = time.perf_counter() - t2
 
     group_timings = group_by_operation.timings_seconds()
@@ -162,13 +178,9 @@ def _shuffle_group_by_pipeline(session, dataset: str):
         ]
     )
     sorted_morsel = sorter.sort_single_stream([grouped])
-    if sorted_morsel is None:
-        result = session.execute_to_arrow("SELECT 1 WHERE FALSE;")
-    else:
-        result = sorted_morsel.to_arrow().slice(0, 10)
     stages["merge"] = time.perf_counter() - t3
 
-    return result, stages
+    return sorted_morsel, stages, group_count
 
 
 def test_clickbench_groupby_shuffle_vs_legacy_prints():
@@ -182,21 +194,41 @@ def test_clickbench_groupby_shuffle_vs_legacy_prints():
     print(f"dataset: {dataset}")
     print(f"iterations: {iterations}")
 
+    # run the legacy SQL path and capture timing
     legacy_result, legacy_times = _timed(
         lambda: _legacy_group_by(session, dataset),
         iterations=iterations,
     )
-    pipeline_result, pipeline_times, stage_averages = _timed_pipeline(
+
+    # also ask SQL for the total number of groups (distinct UserID) as a reference
+    groups_table = session.execute_to_arrow(
+        f"SELECT COUNT(DISTINCT UserID) AS groups FROM {dataset};"
+    )
+    legacy_group_count = int(groups_table.to_pydict()["groups"][0])
+
+    # run the shuffle pipeline, which now returns an extra group_count metadata
+    pipeline_result, pipeline_times, stage_averages, pipeline_meta = _timed_pipeline(
         lambda: _shuffle_group_by_pipeline(session, dataset),
         iterations=iterations,
     )
+    # pipeline_meta may be a simple value or dict
+    if isinstance(pipeline_meta, dict):
+        pipeline_group_count = pipeline_meta.get("group_count", None)
+    else:
+        pipeline_group_count = pipeline_meta
 
-    legacy_rows = _rows_from_table(legacy_result)
-    pipeline_rows = _rows_from_table(pipeline_result)
-    assert legacy_rows == pipeline_rows, "Pipeline result differs from legacy SQL result"
+    legacy_rows = legacy_result.num_rows if legacy_result else None
+    pipeline_rows = pipeline_result.num_rows if pipeline_result else None
+    assert legacy_rows == pipeline_rows, f"Pipeline result differs from legacy SQL result: {pipeline_rows} != {legacy_rows}"
 
     legacy_avg = sum(legacy_times) / len(legacy_times)
     pipeline_avg = sum(pipeline_times) / len(pipeline_times)
+
+    # print group counts for sanity
+    print(f"legacy group count: {legacy_group_count}")
+    print(f"pipeline group count: {pipeline_group_count}")
+
+    assert pipeline_group_count == legacy_group_count, "Group counts differ between implementations"
 
     print("\nlegacy SQL path:")
     for i, t in enumerate(legacy_times, 1):

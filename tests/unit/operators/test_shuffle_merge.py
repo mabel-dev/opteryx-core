@@ -31,11 +31,13 @@ def test_shuffle_merge_operation_concatenates_streams_without_reordering():
 
 
 def test_shuffle_merge_sort_operation_kway_asc():
-    s1 = _morsel({"k": [1, 3, 5], "v": ["a", "c", "e"]})
-    s2 = _morsel({"k": [2, 4, 6], "v": ["b", "d", "f"]})
+    s1a = _morsel({"k": [1, 3], "v": ["a", "c"]})
+    s1b = _morsel({"k": [5], "v": ["e"]})
+    s2a = _morsel({"k": [2], "v": ["b"]})
+    s2b = _morsel({"k": [4, 6], "v": ["d", "f"]})
 
     sorter = ShuffleMergeSortOperation(order_by=[SortKey(column="k", direction="ASC")])
-    merged = sorter.merge_sorted_streams([[s1], [s2]])
+    merged = sorter.merge_sorted_streams([[s1a, s1b], [s2a, s2b]])
 
     assert [row["k"] for row in _rows(merged)] == [1, 2, 3, 4, 5, 6]
 
@@ -76,3 +78,13 @@ def test_shuffle_merge_sort_after_shuffle_bins():
 
     merged = sorter.merge_sorted_streams(sorted_bin_streams)
     assert [row["k"] for row in _rows(merged)] == [1, 2, 3, 4, 5, 6, 7, 8]
+
+
+def test_shuffle_merge_sort_with_limit():
+    s1 = _morsel({"k": [1, 3, 5], "v": ["a", "c", "e"]})
+    s2 = _morsel({"k": [2, 4, 6], "v": ["b", "d", "f"]})
+
+    sorter = ShuffleMergeSortOperation(order_by=[SortKey(column="k", direction="ASC")])
+    merged = sorter.merge_sorted_streams([[s1], [s2]], limit=3)
+
+    assert [row["k"] for row in _rows(merged)] == [1, 2, 3]

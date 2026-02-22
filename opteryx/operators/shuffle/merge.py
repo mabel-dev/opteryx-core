@@ -37,41 +37,84 @@ class ShuffleMergeOperation:
     """
 
     @staticmethod
-    def merge_streams(streams: Sequence[Iterable[Morsel] | Morsel]) -> list[Morsel]:
-        merged: list[Morsel] = []
+    def merge_streams(streams: Sequence[Iterable[Morsel] | Morsel]) -> Iterable[Morsel]:
         for stream in streams:
             if isinstance(stream, Morsel):
                 if stream.num_rows > 0:
-                    merged.append(stream)
+                    yield stream
                 continue
             for morsel in stream:
                 if morsel is None or morsel.num_rows == 0:
                     continue
-                merged.append(morsel)
-        return merged
+                yield morsel
 
 
 @dataclass
-class _SourceState:
+class _StreamCursor:
     source_id: int
-    column_names: list[bytes]
-    values_by_column: dict[bytes, list]
-    position: int = 0
+    morsels: Iterator[Morsel]
+    order_columns: list[bytes]
 
-    @property
-    def row_count(self) -> int:
-        if not self.column_names:
-            return 0
-        return len(self.values_by_column[self.column_names[0]])
+    schema_columns: list[bytes] | None = None
+    row_index: int = 0
+    row_count: int = 0
+    global_row_ordinal: int = 0
+    order_values: list[list] | None = None
+    column_values: list[list] | None = None
+
+    def _normalize_schema(self, morsel: Morsel) -> list[bytes]:
+        return [
+            name if isinstance(name, bytes) else str(name).encode("utf-8")
+            for name in morsel.column_names
+        ]
+
+    def _load_next_non_empty_morsel(self, expected_schema: list[bytes] | None) -> bool:
+        for morsel in self.morsels:
+            if morsel is None or morsel.num_rows == 0:
+                continue
+
+            schema = self._normalize_schema(morsel)
+            if expected_schema is not None and schema != expected_schema:
+                raise ValueError("all input streams must share the same schema")
+
+            self.schema_columns = schema
+            self.row_index = 0
+            self.row_count = morsel.num_rows
+            self.order_values = [morsel.column(col).to_pylist() for col in self.order_columns]
+            self.column_values = [morsel.column(col).to_pylist() for col in schema]
+            return True
+
+        self.row_index = 0
+        self.row_count = 0
+        self.order_values = None
+        self.column_values = None
+        return False
+
+    def initialize(self, expected_schema: list[bytes] | None) -> bool:
+        return self._load_next_non_empty_morsel(expected_schema)
+
+    def current_order_value(self, sort_index: int):
+        return self.order_values[sort_index][self.row_index]
+
+    def append_current_row_to(self, buffers: list[list]) -> None:
+        for col_index, values in enumerate(self.column_values):
+            buffers[col_index].append(values[self.row_index])
+
+    def advance(self, expected_schema: list[bytes]) -> bool:
+        self.global_row_ordinal += 1
+        self.row_index += 1
+        if self.row_index < self.row_count:
+            return True
+        return self._load_next_non_empty_morsel(expected_schema)
 
 
 @dataclass
 class _HeapItem:
-    state: _SourceState
+    cursor: _StreamCursor
     sorter: "ShuffleMergeSortOperation"
 
     def __lt__(self, other: "_HeapItem") -> bool:
-        return self.sorter._compare_rows(self.state, other.state) < 0
+        return self.sorter._compare_cursors(self.cursor, other.cursor) < 0
 
 
 class ShuffleMergeSortOperation:
@@ -100,6 +143,7 @@ class ShuffleMergeSortOperation:
                 )
 
         self.order_by = normalized
+        self._order_columns = [key.column for key in self.order_by]
         self._descending = [key.direction.upper().startswith("DESC") for key in self.order_by]
 
     def _iter_morsels(self, stream: Iterable[Morsel] | Morsel) -> Iterator[Morsel]:
@@ -109,43 +153,10 @@ class ShuffleMergeSortOperation:
         for morsel in stream:
             yield morsel
 
-    def _stream_to_source(
-        self, stream: Iterable[Morsel] | Morsel, source_id: int
-    ) -> _SourceState | None:
-        morsels = [m for m in self._iter_morsels(stream) if m is not None and m.num_rows > 0]
-        if not morsels:
-            return None
-
-        first_names = morsels[0].column_names
-        column_names = [
-            name if isinstance(name, bytes) else str(name).encode("utf-8") for name in first_names
-        ]
-        values_by_column = {name: [] for name in column_names}
-
-        for morsel in morsels:
-            current_names = [
-                name if isinstance(name, bytes) else str(name).encode("utf-8")
-                for name in morsel.column_names
-            ]
-            if current_names != column_names:
-                raise ValueError("all input streams must share the same schema")
-            for name in column_names:
-                values_by_column[name].extend(morsel.column(name).to_pylist())
-
-        return _SourceState(
-            source_id=source_id,
-            column_names=column_names,
-            values_by_column=values_by_column,
-            position=0,
-        )
-
-    def _compare_rows(self, left: _SourceState, right: _SourceState) -> int:
-        for index, key in enumerate(self.order_by):
-            column = (
-                key.column if isinstance(key.column, bytes) else str(key.column).encode("utf-8")
-            )
-            left_value = left.values_by_column[column][left.position]
-            right_value = right.values_by_column[column][right.position]
+    def _compare_cursors(self, left: _StreamCursor, right: _StreamCursor) -> int:
+        for index, _key in enumerate(self.order_by):
+            left_value = left.current_order_value(index)
+            right_value = right.current_order_value(index)
 
             left_is_null = left_value is None
             right_is_null = right_value is None
@@ -165,71 +176,170 @@ class ShuffleMergeSortOperation:
 
         if left.source_id != right.source_id:
             return -1 if left.source_id < right.source_id else 1
-        if left.position == right.position:
+        if left.global_row_ordinal == right.global_row_ordinal:
             return 0
-        return -1 if left.position < right.position else 1
+        return -1 if left.global_row_ordinal < right.global_row_ordinal else 1
 
-    def merge_sorted_streams(self, streams: Sequence[Iterable[Morsel] | Morsel]) -> Morsel | None:
-        sources = []
+    def _build_morsel(self, schema_columns: list[bytes], buffers: list[list]) -> Morsel:
+        names = [name.decode("utf-8") for name in schema_columns]
+        vectors = [vector_from_sequence(values) for values in buffers]
+        return Morsel.from_vectors(names, vectors)
+
+    def merge_sorted_streams_iter(
+        self,
+        streams: Sequence[Iterable[Morsel] | Morsel],
+        *,
+        limit: int | None = None,
+        batch_size: int = 65536,
+    ) -> Iterator[Morsel]:
+        if limit is not None and limit < 0:
+            raise ValueError("limit must be zero or positive")
+        if batch_size <= 0:
+            raise ValueError("batch_size must be positive")
+        if limit == 0:
+            return
+
+        expected_schema: list[bytes] | None = None
+        cursors: list[_StreamCursor] = []
         for source_id, stream in enumerate(streams):
-            source = self._stream_to_source(stream, source_id=source_id)
-            if source is not None:
-                sources.append(source)
+            cursor = _StreamCursor(
+                source_id=source_id,
+                morsels=self._iter_morsels(stream),
+                order_columns=self._order_columns,
+            )
+            if cursor.initialize(expected_schema):
+                if expected_schema is None:
+                    expected_schema = cursor.schema_columns
+                cursors.append(cursor)
 
-        if not sources:
-            return None
-
-        column_names = sources[0].column_names
-        for source in sources[1:]:
-            if source.column_names != column_names:
-                raise ValueError("all input streams must share the same schema")
+        if not cursors:
+            return
 
         heap: list[_HeapItem] = []
-        for source in sources:
-            if source.row_count > 0:
-                heappush(heap, _HeapItem(state=source, sorter=self))
+        for cursor in cursors:
+            heappush(heap, _HeapItem(cursor=cursor, sorter=self))
 
-        merged_values = {name: [] for name in column_names}
-        while heap:
-            current = heappop(heap).state
-            row_idx = current.position
-            for name in column_names:
-                merged_values[name].append(current.values_by_column[name][row_idx])
+        emitted = 0
+        output_buffers = [[] for _ in expected_schema]
+        while heap and (limit is None or emitted < limit):
+            cursor = heappop(heap).cursor
+            cursor.append_current_row_to(output_buffers)
+            emitted += 1
 
-            current.position += 1
-            if current.position < current.row_count:
-                heappush(heap, _HeapItem(state=current, sorter=self))
+            if emitted % batch_size == 0:
+                yield self._build_morsel(expected_schema, output_buffers)
+                output_buffers = [[] for _ in expected_schema]
 
-        names = [name.decode("utf-8") for name in column_names]
-        vectors = [vector_from_sequence(merged_values[name]) for name in column_names]
-        return Morsel.from_vectors(names, vectors)
+            if cursor.advance(expected_schema):
+                heappush(heap, _HeapItem(cursor=cursor, sorter=self))
 
-    def sort_single_stream(self, morsels: Sequence[Morsel]) -> Morsel | None:
-        source = self._stream_to_source(morsels, source_id=0)
-        if source is None:
+        if output_buffers and output_buffers[0]:
+            yield self._build_morsel(expected_schema, output_buffers)
+
+    def merge_sorted_streams(
+        self,
+        streams: Sequence[Iterable[Morsel] | Morsel],
+        *,
+        limit: int | None = None,
+        batch_size: int = 65536,
+    ) -> Morsel | None:
+        chunks = list(
+            self.merge_sorted_streams_iter(
+                streams,
+                limit=limit,
+                batch_size=batch_size,
+            )
+        )
+        if not chunks:
+            return None
+        if len(chunks) == 1:
+            return chunks[0]
+
+        schema_columns = [
+            name if isinstance(name, bytes) else str(name).encode("utf-8")
+            for name in chunks[0].column_names
+        ]
+        combined = [[] for _ in schema_columns]
+        for chunk in chunks:
+            current_schema = [
+                name if isinstance(name, bytes) else str(name).encode("utf-8")
+                for name in chunk.column_names
+            ]
+            if current_schema != schema_columns:
+                raise ValueError("merged chunks have inconsistent schema")
+            for index, name in enumerate(schema_columns):
+                combined[index].extend(chunk.column(name).to_pylist())
+
+        return self._build_morsel(schema_columns, combined)
+
+    def sort_single_stream(
+        self,
+        morsels: Sequence[Morsel],
+        *,
+        limit: int | None = None,
+    ) -> Morsel | None:
+        if limit is not None and limit < 0:
+            raise ValueError("limit must be zero or positive")
+        if limit == 0:
             return None
 
-        row_indexes = list(range(source.row_count))
+        filtered = [m for m in morsels if m is not None and m.num_rows > 0]
+        if not filtered:
+            return None
 
-        def _cmp(left_index: int, right_index: int) -> int:
-            left_state = _SourceState(
-                source_id=0,
-                column_names=source.column_names,
-                values_by_column=source.values_by_column,
-                position=left_index,
-            )
-            right_state = _SourceState(
-                source_id=0,
-                column_names=source.column_names,
-                values_by_column=source.values_by_column,
-                position=right_index,
-            )
-            return self._compare_rows(left_state, right_state)
+        schema_columns = [
+            name if isinstance(name, bytes) else str(name).encode("utf-8")
+            for name in filtered[0].column_names
+        ]
+        values_by_column = {name: [] for name in schema_columns}
+        for morsel in filtered:
+            current_schema = [
+                name if isinstance(name, bytes) else str(name).encode("utf-8")
+                for name in morsel.column_names
+            ]
+            if current_schema != schema_columns:
+                raise ValueError("all input morsels must share the same schema")
+            for name in schema_columns:
+                values_by_column[name].extend(morsel.column(name).to_pylist())
+
+        row_count = len(values_by_column[schema_columns[0]])
+        if row_count == 0:
+            return None
+
+        sort_columns = [values_by_column[col] for col in self._order_columns]
+        row_indexes = list(range(row_count))
+
+        def _cmp(left_idx: int, right_idx: int) -> int:
+            for index, _key in enumerate(self.order_by):
+                left_value = sort_columns[index][left_idx]
+                right_value = sort_columns[index][right_idx]
+
+                left_is_null = left_value is None
+                right_is_null = right_value is None
+                if left_is_null and right_is_null:
+                    continue
+                if left_is_null:
+                    return 1
+                if right_is_null:
+                    return -1
+                if left_value == right_value:
+                    continue
+
+                descending = self._descending[index]
+                if descending:
+                    return -1 if left_value > right_value else 1
+                return -1 if left_value < right_value else 1
+            if left_idx == right_idx:
+                return 0
+            return -1 if left_idx < right_idx else 1
 
         row_indexes.sort(key=cmp_to_key(_cmp))
-        names = [name.decode("utf-8") for name in source.column_names]
-        vectors = []
-        for name in source.column_names:
-            ordered = [source.values_by_column[name][row_idx] for row_idx in row_indexes]
-            vectors.append(vector_from_sequence(ordered))
-        return Morsel.from_vectors(names, vectors)
+        if limit is not None:
+            row_indexes = row_indexes[:limit]
+
+        buffers = [[] for _ in schema_columns]
+        for row_idx in row_indexes:
+            for col_idx, name in enumerate(schema_columns):
+                buffers[col_idx].append(values_by_column[name][row_idx])
+
+        return self._build_morsel(schema_columns, buffers)
