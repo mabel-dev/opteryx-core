@@ -14,6 +14,7 @@ struct DecodedColumn {
   std::vector<float> float32_values;     // for float32
   std::vector<double> float64_values;    // for float64
   std::string type; // "int32", "int64", "string", "boolean", "float32", "float64"
+  int32_t num_rows = 0;  // total rows including nulls (= sum of page_values)
   bool success = false;
 };
 

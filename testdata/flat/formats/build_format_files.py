@@ -1,84 +1,55 @@
 """
-Build different format files from a source JSONL file to test different format readers.
+Build format files used by read/write benchmarks.
+
+Currently supports generating Draken DRKM files for the tweets dataset.
 """
 
-# pragma: no cover
+from __future__ import annotations
 
-import orjson
-import pyarrow.feather
-import pyarrow.json
-import pyarrow.orc
-import pyarrow.parquet
-import zstandard
+import argparse
+from pathlib import Path
 
-import os, sys
-sys.path.insert(1, os.path.join(sys.path[0], "../../../../draken"))
+import pyarrow as pa
+import pyarrow.parquet as pq
 
-import glob
-print(glob.glob(os.path.join(sys.path[0], "../../../../draken") + "/**"))
-
-import orso
+from opteryx.draken import Morsel
+from opteryx.draken.storage import write_morsel
 
 
-def compress_zstandard(records):  # pragma: no cover
-    buffer = bytearray()
+def build_draken_file(codec: str = "lz4") -> Path:
+    root = Path(__file__).resolve().parent
+    src = root / "parquet" / "tweets.parquet"
+    dst_dir = root / "draken"
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    dst = dst_dir / "tweets.drkm"
 
-    for record in records:
-        serialized = orjson.dumps(record) + b"\n"
-        buffer.extend(serialized)
+    table = pq.read_table(src).combine_chunks()
+    supported_columns = [
+        field.name
+        for field in table.schema
+        if not pa.types.is_list(field.type) and not pa.types.is_large_list(field.type)
+    ]
+    table = table.select(supported_columns)
+    morsel = Morsel.from_arrow(table)
 
-    buffer = zstandard.compress(buffer)
+    stats = write_morsel(dst, morsel, {"codec_default": codec, "checksum_enabled": True})
+    print(f"wrote {dst}")
+    print(stats)
+    print(f"file_size_bytes={dst.stat().st_size}")
+    return dst
 
-    return buffer
+
+def main():
+    parser = argparse.ArgumentParser(description="Build benchmark format files.")
+    parser.add_argument(
+        "--draken-codec",
+        default="lz4",
+        choices=("lz4", "zstd", "none"),
+        help="Codec for DRKM output.",
+    )
+    args = parser.parse_args()
+    build_draken_file(codec=args.draken_codec)
 
 
-if __name__ == "__main__":  # pragma: no cover
-    # READ (JSONL)
-    with open("testdata/flat/formats/jsonl/tweets.jsonl", "rb") as stream:
-        source = pyarrow.json.read_json(stream)
-
-    # ARROW (feather)
-#    pyarrow.feather.write_feather(source, "testdata/formats/arrow/tweets.arrow", compression="zstd")
-
-    # ARROW (feather)
-#    pyarrow.feather.write_feather(
-#        source, "testdata/formats/arrow_lz4/tweets.arrow", compression="lz4"
-#    )
-
-    # ORC
-#    pyarrow.orc.write_table(source, "testdata/formats/orc/tweets.orc", compression="ZSTD")
-
-    # ORC
-#    pyarrow.orc.write_table(source, "testdata/formats/orc_snappy/tweets.orc", compression="snappy")
-
-    # PARQUET
-#    pyarrow.parquet.write_table(
-#        source, "testdata/formats/parquet/tweets.parquet", compression="zstd"
-#    )
-
-    # PARQUET
-#    pyarrow.parquet.write_table(
-#        source, "testdata/formats/parquet_snappy/tweets.parquet", compression="snappy"
-#    )
-
-    # PARQUET
-#    pyarrow.parquet.write_table(
-#        source, "testdata/formats/parquet_lz4/tweets.parquet", compression="lz4"
-#    )
-
-    # ZSTD
-#    zstd = compress_zstandard(source.to_pylist())
-#    with open("testdata/formats/zstd/tweets.zstd", "wb") as stream:
-#        stream.write(zstd)
-#    del zstd
-
-    # DRAKEN
-    from draken.compiled import create_sstable
-
-    builder = {}
-    df = orso.DataFrame.from_arrow(source)
-    for i, r in enumerate(df):
-        builder[str(i)] = r.values
-    sstable_bytes = create_sstable(builder, df.schema.to_dict(), 0)
-    with open(f"testdata/flat/formats/draken/tweets.draken", "wb") as f:
-        f.write(sstable_bytes)
+if __name__ == "__main__":
+    main()

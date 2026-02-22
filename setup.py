@@ -234,6 +234,11 @@ def get_zstd_vendor_sources():
         sources.append(f"{RUGO_PARQUET}/vendor/zstd/decompress/huf_decompress_amd64.S")
     return sources
 
+def get_lz4_vendor_sources():
+    """Return vendored lz4 block-codec sources."""
+    RUGO_PARQUET = "third_party/mabel/rugo/parquet"
+    return [f"{RUGO_PARQUET}/vendor/lz4/lz4.c"]
+
 def get_parquet_vendor_sources():
     """Return vendored zstd/snappy source files to build into parquet extension.
 
@@ -354,6 +359,13 @@ extensions = [
         extra_link_args=LD_EXTRA,
     ),
     Extension(
+        "opteryx.third_party.lz4.lz4",
+        sources=["opteryx/third_party/lz4/lz4.pyx"] + get_lz4_vendor_sources(),
+        include_dirs=include_dirs + ["third_party/mabel/rugo/parquet/vendor/lz4"],
+        extra_compile_args=C_FLAGS,
+        language="c",
+    ),
+    Extension(
         "opteryx.third_party.ulfjack.ryu",
         sources=["opteryx/third_party/ulfjack/ryu.pyx", "third_party/ulfjack/ryu/d2fixed.c"],
         include_dirs=include_dirs,
@@ -438,6 +450,7 @@ extensions = [
     make_draken_extension("vectors.date32_vector", "vectors/date32_vector.pyx"),
     make_draken_extension("vectors.timestamp_vector", "vectors/timestamp_vector.pyx"),
     make_draken_extension("morsels.morsel", "morsels/morsel.pyx"),
+    make_draken_extension("storage.morsel_io", "storage/morsel_io.pyx"),
     # Pre-generated C module for morsels.align (Cython-generated C source)
     Extension(
         "opteryx.draken.morsels.align",
