@@ -18,7 +18,7 @@ from urllib.parse import urlparse
 from orso.tools import single_item_cache
 
 from opteryx.exceptions import MissingDependencyError
-from opteryx.managers.kvstores import BaseKeyValueStore
+from opteryx.managers.kvstores.base_kv_store import BaseKeyValueStore
 
 Minio = None
 S3Error = Exception
@@ -59,7 +59,7 @@ def _s3_client(**_kwargs):
 class S3KeyValueStore(BaseKeyValueStore):
     """S3-backed store that maps key -> s3://bucket/prefix/<key>"""
 
-    def __init__(self, location: str, **_kwargs):
+    def __init__(self, location: str, key_prefix: bytes | str | None = None, **_kwargs):
         parsed = urlparse(location)
         if parsed.scheme != "s3":
             raise ValueError("location must be an s3:// URI")
@@ -68,9 +68,10 @@ class S3KeyValueStore(BaseKeyValueStore):
         # strip leading slash from path
         self._prefix = parsed.path.lstrip("/")
         self._client = _s3_client(**_kwargs)
-        super().__init__(location)
+        super().__init__(location, key_prefix=key_prefix)
 
     def _object_key(self, key: bytes) -> str:
+        key = self._normalize_key(key)
         try:
             key_str = key.decode("utf-8")
         except UnicodeDecodeError:

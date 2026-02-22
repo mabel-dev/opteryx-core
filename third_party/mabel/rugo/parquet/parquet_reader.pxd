@@ -46,6 +46,11 @@ cdef extern from "metadata.hpp":
         # Key/value metadata
         unordered_map[string, string] key_value_metadata
 
+        # Schema-derived level info (Dremel encoding)
+        int32_t repetition_type
+        int32_t max_definition_level
+        int32_t max_repetition_level
+
     cdef cppclass RowGroupStats:
         long long num_rows
         long long total_byte_size

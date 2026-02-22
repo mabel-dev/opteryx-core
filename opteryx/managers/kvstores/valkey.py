@@ -11,7 +11,7 @@ from orso.tools import single_item_cache
 
 from opteryx.config import MAX_CONSECUTIVE_CACHE_FAILURES
 from opteryx.exceptions import MissingDependencyError
-from opteryx.managers.kvstores import BaseKeyValueStore
+from opteryx.managers.kvstores.base_kv_store import BaseKeyValueStore
 
 
 @single_item_cache
@@ -35,9 +35,14 @@ class ValkeyCache(BaseKeyValueStore):
     errors: int = 0
     sets: int = 0
 
-    def __init__(self, location: str | None = None, **kwargs):
+    def __init__(
+        self,
+        location: str | None = None,
+        key_prefix: bytes | str | None = None,
+        **kwargs,
+    ):
         self._server = _valkey_server(**kwargs)
-        super().__init__(location)
+        super().__init__(location, key_prefix=key_prefix)
         if self._server is None:
             import datetime
 
@@ -47,6 +52,7 @@ class ValkeyCache(BaseKeyValueStore):
             self._consecutive_failures = 0
 
     def get(self, key: bytes) -> Union[bytes, None]:
+        key = self._normalize_key(key)
         if self._consecutive_failures >= MAX_CONSECUTIVE_CACHE_FAILURES:
             self.skips += 1
             return None
@@ -71,6 +77,7 @@ class ValkeyCache(BaseKeyValueStore):
         return None
 
     def set(self, key: bytes, value: bytes) -> None:
+        key = self._normalize_key(key)
         if self._consecutive_failures < MAX_CONSECUTIVE_CACHE_FAILURES:
             try:
                 self._server.set(key, value)
@@ -87,6 +94,7 @@ class ValkeyCache(BaseKeyValueStore):
             self.skips += 1
 
     def delete(self, key):
+        key = self._normalize_key(key)
         try:
             self._server.delete(key)
         except Exception as err:

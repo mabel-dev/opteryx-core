@@ -15,7 +15,7 @@ from typing import Iterable
 from typing import Union
 from urllib.parse import urlparse
 
-from opteryx.managers.kvstores import BaseKeyValueStore
+from opteryx.managers.kvstores.base_kv_store import BaseKeyValueStore
 
 
 class FileKeyValueStore(BaseKeyValueStore):
@@ -27,7 +27,7 @@ class FileKeyValueStore(BaseKeyValueStore):
 
     _base_path: str
 
-    def __init__(self, location: str, **_kwargs):
+    def __init__(self, location: str, key_prefix: bytes | str | None = None, **_kwargs):
         parsed = urlparse(location)
         if parsed.scheme == "file":
             path = parsed.path
@@ -44,9 +44,10 @@ class FileKeyValueStore(BaseKeyValueStore):
             os.makedirs(path, exist_ok=True)
 
         self._base_path = path
-        super().__init__(location)
+        super().__init__(location, key_prefix=key_prefix)
 
     def _filename(self, key: bytes) -> str:
+        key = self._normalize_key(key)
         # Keys are bytes - commonly hex strings b'0x...' - map to filenames
         try:
             key_str = key.decode("utf-8")
