@@ -78,9 +78,9 @@ def test_metadata(path: Path, raw: bytes) -> None:
 
 def test_data(path: Path, raw: bytes) -> None:
     """
-    Check decodability first; if supported, read all columns and verify we got
-    at least some values back.  Files that are unsupported by the rugo decoder
-    are marked SKIP rather than FAIL.
+    Check decodability first; if supported, decode all columns into a Morsel
+    and verify the result has rows and columns.
+    Files unsupported by the rugo decoder are marked SKIP rather than FAIL.
     """
     # Decodability check
     try:
@@ -93,25 +93,32 @@ def test_data(path: Path, raw: bytes) -> None:
         record("DATA", path.name, SKIP, "can_decode_from_memory() returned False")
         return
 
-    # Full read
+    # Full read — returns a list of Draken Morsels (one per row group)
     try:
-        result = rp.read_parquet(raw)
+        morsels = rp.read_parquet(raw)
     except Exception as exc:
-        record("DATA", path.name, FAIL, f"{type(exc).__name__}: {exc}\n         {traceback.format_exc().splitlines()[-2]}")
+        tb_line = traceback.format_exc().splitlines()[-2].strip()
+        record("DATA", path.name, FAIL, f"{type(exc).__name__}: {exc}\n         {tb_line}")
         return
 
-    if result is None:
-        record("DATA", path.name, FAIL, "read_parquet returned None")
+    if not morsels:
+        record("DATA", path.name, FAIL, "read_parquet returned None or empty list")
         return
 
-    if not result.get("success"):
-        record("DATA", path.name, FAIL, "result['success'] is False")
+    rows = sum(m.num_rows for m in morsels)
+    first = morsels[0]
+    cols = first.num_columns
+    col_names = [c.decode() if isinstance(c, bytes) else c for c in first.column_names]
+
+    if cols == 0:
+        record("DATA", path.name, FAIL, "decoded 0 columns")
         return
 
-    n = _count_values(result)
-    cols = result.get("column_names", [])
-    rg_count = len(result.get("row_groups", []))
-    record("DATA", path.name, PASS, f"{rg_count} row-group(s), {len(cols)} column(s), {n} total values")
+    col_summary = ", ".join(col_names[:5])
+    if len(col_names) > 5:
+        col_summary += " …"
+    record("DATA", path.name, PASS,
+           f"{len(morsels)} row-group(s), {rows:,} row(s), {cols} column(s): {col_summary}")
 
 
 # ──────────────────────────────────────────────────────────────────────────────

@@ -179,6 +179,69 @@ int32_t DecodeRLEBitPackedIndicesWithConsumption(const uint8_t *data, size_t dat
 }
 
 // ---------------------------------------------------------------------------
+// DecodeRLEBitPackedIndicesNoPrefix
+// Same as DecodeRLEBitPackedIndices but data points directly at the RLE
+// stream (no 4-byte length prefix).  The bit_width byte has already been
+// consumed by the caller.
+// ---------------------------------------------------------------------------
+
+int32_t DecodeRLEBitPackedIndicesNoPrefix(const uint8_t *data, size_t data_size,
+                                          int32_t num_values, int bit_width,
+                                          std::vector<int32_t> &indices) {
+  if (bit_width <= 0 || bit_width > 32) return -1;
+
+  indices.clear();
+  indices.reserve(num_values);
+
+  const uint8_t *ptr = data;
+  const uint8_t *end = data + data_size;
+
+  int32_t decoded = 0;
+  while (decoded < num_values && ptr < end) {
+    uint32_t header = 0;
+    int shift = 0;
+    while (ptr < end && shift < 32) {
+      uint8_t byte = *ptr++;
+      header |= ((uint32_t)(byte & 0x7F)) << shift;
+      if ((byte & 0x80) == 0) break;
+      shift += 7;
+    }
+
+    if ((header & 1) == 1) {
+      int32_t num_groups    = (int32_t)(header >> 1);
+      int32_t values_in_run = num_groups * 8;
+      int32_t bytes_needed  = (values_in_run * bit_width + 7) / 8;
+      if (ptr + bytes_needed > end) break;
+      for (int32_t i = 0; i < values_in_run && decoded < num_values; i++) {
+        uint32_t value   = 0;
+        int bit_pos      = i * bit_width;
+        int byte_pos     = bit_pos / 8;
+        int bit_offset   = bit_pos % 8;
+        for (int b = 0; b < 5 && byte_pos + b < bytes_needed; b++)
+          value |= ((uint32_t)ptr[byte_pos + b]) << (b * 8);
+        value = (value >> bit_offset) & ((1U << bit_width) - 1);
+        indices.push_back((int32_t)value);
+        decoded++;
+      }
+      ptr += bytes_needed;
+    } else {
+      int32_t count        = (int32_t)(header >> 1);
+      int     bytes_needed = (bit_width + 7) / 8;
+      uint32_t value       = 0;
+      for (int i = 0; i < bytes_needed && ptr < end; i++)
+        value |= ((uint32_t)(*ptr++)) << (i * 8);
+      value &= (1U << bit_width) - 1;
+      for (int32_t i = 0; i < count && decoded < num_values; i++) {
+        indices.push_back((int32_t)value);
+        decoded++;
+      }
+    }
+  }
+
+  return (decoded == num_values) ? decoded : -1;
+}
+
+// ---------------------------------------------------------------------------
 // SkipDeltaBinaryPacked  (internal helper -- not exposed in the header)
 // ---------------------------------------------------------------------------
 

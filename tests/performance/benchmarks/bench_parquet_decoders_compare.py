@@ -113,24 +113,9 @@ def _read_with_rugo(files: List[str]) -> int:
         if not res:
             # decoding failed for this file
             continue
-        # derive row count from first non-empty column in first row group
-        rg_list = res.get("row_groups") or []
-        if not rg_list:
-            continue
-        first_rg = rg_list[0]
-        row_count = 0
-        for col in first_rg:
-            if col is None:
-                continue
-            if isinstance(col, list):
-                row_count = len(col)
-                break
-        if row_count == 0:
-            # fallback to metadata for row count
-            md = rp.read_metadata_from_memoryview(buf, schema_only=True, max_row_groups=1, include_statistics=False)
-            if isinstance(md, dict):
-                row_count = md.get("num_rows", 0) or 0
-        total_rows += row_count
+        # res is now list[Morsel]; sum num_rows across all morsels
+        for morsel in res:
+            total_rows += morsel.num_rows
     return total_rows
 
 
@@ -188,27 +173,23 @@ def test_parquet_decode_pyarrow_vs_fastparquet_prints():
             print(f"  → rows: {rows_rugo:,d}, avg: {rugo_avg:.4f}s, min: {min(rugo_times):.4f}s, max: {max(rugo_times):.4f}s\n")
 
             # verification pass: ensure rugo actually decoded column data for each file
-            # we expect this may fail (prove incomplete decoding)
             from opteryx.compiled.io.disk_reader import read_file as _disk_read_file
             for f in files:
                 buf = _disk_read_file(f)
                 res = rp.read_parquet(buf)
-                if res is None or not res.get("success", False):
-                    pytest.fail("rugo.read_parquet failed to return a successful result")
+                if not res:
+                    pytest.fail("rugo.read_parquet failed to return a result")
 
-                # compare to PyArrow for row count and data presence
+                # compare to PyArrow for row count
                 arrow_table = pq.read_table(f)
                 expected_rows = arrow_table.num_rows
+                actual_rows = sum(m.num_rows for m in res)
+                if actual_rows != expected_rows:
+                    pytest.fail(f"rugo row count {actual_rows} != pyarrow {expected_rows} for {f}")
 
-                # check decoded rows from first non-empty column in first row_group
-                if not res.get("row_groups"):
-                    pytest.fail("rugo returned no row_groups for file")
-
-                for rg in res["row_groups"]:
-                    # ensure every column has data (not None/empty)
-                    for col_data in rg:
-                        if col_data is None or (isinstance(col_data, list) and len(col_data) == 0):
-                            pytest.fail("rugo failed to decode one or more columns (incomplete decoding)")
+                for morsel in res:
+                    if morsel.num_columns == 0:
+                        pytest.fail(f"rugo returned morsel with no columns for {f}")
         except RuntimeError as exc:
             # compiled disk_reader missing — treat as test error
             raise

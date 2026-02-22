@@ -384,6 +384,36 @@ def can_decode_from_memory(data):
 
 # --- Helper functions to build Draken vectors from DecodedColumn ---
 
+cdef Int64Vector _make_int64_from_int32_vector(
+        parquet_reader.DecodedColumn& decoded_col,
+        int32_t num_rows):
+    """Build an Int64Vector from a DecodedColumn with int32_t values (upcasting)."""
+    cdef Int64Vector vec = Int64Vector(num_rows)
+    cdef int64_t* dst = <int64_t*> vec.ptr.data
+    cdef Py_ssize_t i, val_idx = 0
+    cdef Py_ssize_t nb_bytes
+    cdef uint8_t* nb
+
+    if decoded_col.valid_bits.size() > 0:
+        for i in range(num_rows):
+            if (decoded_col.valid_bits[i >> 3] >> (i & 7)) & 1:
+                dst[i] = <int64_t>decoded_col.int32_values[val_idx]
+                val_idx += 1
+            else:
+                dst[i] = 0
+        nb_bytes = (num_rows + 7) >> 3
+        nb = <uint8_t*> malloc(nb_bytes)
+        if nb == NULL:
+            raise MemoryError()
+        memcpy(nb, decoded_col.valid_bits.data(), nb_bytes)
+        vec.ptr.null_bitmap = nb
+    else:
+        for i in range(num_rows):
+            dst[i] = <int64_t>decoded_col.int32_values[i]
+
+    return vec
+
+
 cdef Int64Vector _make_int64_vector(
         parquet_reader.DecodedColumn& decoded_col,
         int32_t num_rows):
@@ -455,7 +485,47 @@ cdef StringVector _make_string_vector(
     cdef Py_ssize_t i
     cdef Py_ssize_t estimated_bytes = 0
     cdef Py_ssize_t num_values = decoded_col.string_values.size()
-    
+    cdef int32_t dict_idx
+    cdef StringVectorBuilder dict_builder
+    cdef StringVectorBuilder builder
+
+    # ── Dict mode ─────────────────────────────────────────────────────────────
+    # string_values holds only the compact dictionary; dict_indices has one
+    # entry per (non-null) row pointing into string_values.
+    if decoded_col.dict_indices.size() > 0:
+        # Walk all dict_indices once to compute exact byte budget.
+        for i in range(<Py_ssize_t>decoded_col.dict_indices.size()):
+            dict_idx = decoded_col.dict_indices[i]
+            estimated_bytes += decoded_col.string_values[dict_idx].size()
+        if estimated_bytes == 0:
+            estimated_bytes = 1
+        else:
+            estimated_bytes = (estimated_bytes * 110) // 100
+
+        dict_builder = StringVectorBuilder(num_rows, estimated_bytes, resizable=True)
+
+        if decoded_col.valid_bits.size() > 0:
+            for i in range(num_rows):
+                if (decoded_col.valid_bits[i >> 3] >> (i & 7)) & 1:
+                    dict_idx = decoded_col.dict_indices[val_idx]
+                    dict_builder.append_bytes(
+                        <const char*>decoded_col.string_values[dict_idx].data(),
+                        <Py_ssize_t>decoded_col.string_values[dict_idx].size()
+                    )
+                    val_idx += 1
+                else:
+                    dict_builder.append_null()
+        else:
+            for i in range(num_rows):
+                dict_idx = decoded_col.dict_indices[i]
+                dict_builder.append_bytes(
+                    <const char*>decoded_col.string_values[dict_idx].data(),
+                    <Py_ssize_t>decoded_col.string_values[dict_idx].size()
+                )
+
+        return dict_builder.finish()
+
+    # ── Plain mode ────────────────────────────────────────────────────────────
     # Estimate total bytes needed
     for i in range(num_values):
         estimated_bytes += decoded_col.string_values[i].size()
@@ -466,7 +536,7 @@ cdef StringVector _make_string_vector(
     else:
         estimated_bytes = (estimated_bytes * 110) // 100
     
-    cdef StringVectorBuilder builder = StringVectorBuilder(num_rows, estimated_bytes)
+    builder = StringVectorBuilder(num_rows, estimated_bytes)
     
     if decoded_col.valid_bits.size() > 0:
         for i in range(num_rows):
@@ -581,14 +651,24 @@ cdef ArrayVector _make_array_vector(
         null_bitmap[b] = 0
 
     # Estimate flat child capacity for StringVectorBuilder.
+    # If dict mode is active, string_values is the compact dictionary;
+    # walk dict_indices to get the true expanded byte budget.
     cdef Py_ssize_t n_values = decoded_col.string_values.size()
     cdef Py_ssize_t estimated_bytes = 0
-    for i in range(n_values):
-        estimated_bytes += decoded_col.string_values[i].size()
+    cdef bint dict_mode = decoded_col.dict_indices.size() > 0
+    cdef int32_t _didx
+    if dict_mode:
+        for i in range(<Py_ssize_t>decoded_col.dict_indices.size()):
+            _didx = decoded_col.dict_indices[i]
+            estimated_bytes += decoded_col.string_values[_didx].size()
+    else:
+        for i in range(n_values):
+            estimated_bytes += decoded_col.string_values[i].size()
     estimated_bytes = max(estimated_bytes * 110 // 100, 1)
 
     # Use flat_child_count as the exact row count for the StringVectorBuilder.
-    cdef StringVectorBuilder builder = StringVectorBuilder(flat_child_count, estimated_bytes)
+    # resizable=True guards against any remaining estimate imprecision.
+    cdef StringVectorBuilder builder = StringVectorBuilder(flat_child_count, estimated_bytes, resizable=True)
 
     cdef Py_ssize_t logical_row = -1
     cdef Py_ssize_t flat_idx = 0
@@ -609,10 +689,17 @@ cdef ArrayVector _make_array_vector(
 
         if def_ == max_def:
             # Present element: consume next string value
-            builder.append_bytes(
-                <const char*> decoded_col.string_values[val_idx].data(),
-                <Py_ssize_t> decoded_col.string_values[val_idx].size()
-            )
+            if dict_mode:
+                _didx = decoded_col.dict_indices[val_idx]
+                builder.append_bytes(
+                    <const char*> decoded_col.string_values[_didx].data(),
+                    <Py_ssize_t> decoded_col.string_values[_didx].size()
+                )
+            else:
+                builder.append_bytes(
+                    <const char*> decoded_col.string_values[val_idx].data(),
+                    <Py_ssize_t> decoded_col.string_values[val_idx].size()
+                )
             val_idx += 1
             flat_idx += 1
         elif def_ == max_def - 1:
@@ -691,57 +778,59 @@ def read_parquet(data, column_names=None):
 
     # Get column names for the Morsel
     cdef list col_names = [name.decode("utf-8") for name in result.column_names]
-    
-    # For now, return the first row group as a Morsel
-    # (Most files have one row group; multi-row-group support comes later)
+
     if result.row_groups.size() == 0:
         return None
-    
-    # Build vectors for the first row group
+
+    cdef list all_morsels = []
     cdef list vectors = []
-    cdef int32_t num_rows = 0
-    cdef Py_ssize_t col_idx, rg_idx = 0
+    cdef list successful_col_names = []
+    cdef int32_t num_rows
+    cdef Py_ssize_t col_idx, rg_idx
     cdef parquet_reader.DecodedColumn column
     cdef str col_type
     cdef Vector vec
-    
-    # Get num_rows from the C++-computed total (includes null slots)
-    for col_idx in range(result.row_groups[rg_idx].size()):
-        if result.row_groups[rg_idx][col_idx].success:
-            num_rows = result.row_groups[rg_idx][col_idx].num_rows
-            if num_rows > 0:
-                break
-    
-    # Build vector for each column, tracking only successful ones
-    cdef list successful_col_names = []
-    for col_idx in range(result.row_groups[rg_idx].size()):
-        column = result.row_groups[rg_idx][col_idx]
-        
-        if not column.success:
-            continue
-        
-        col_type = column.type.decode("utf-8")
-        
-        if col_type == "int64":
-            vec = _make_int64_vector(column, num_rows)
-        elif col_type == "byte_array" and column.rep_levels.size() > 0:
-            # List column: use rep/def levels to reconstruct ArrayVector
-            vec = _make_array_vector(column)
-        elif col_type == "byte_array":
-            vec = _make_string_vector(column, num_rows)
-        elif col_type == "boolean":
-            vec = _make_bool_vector(column, num_rows)
-        elif col_type == "float64":
-            vec = _make_float64_vector(column, num_rows)
-        else:
-            # Skip unsupported column types
-            continue
-        
-        vectors.append(vec)
-        successful_col_names.append(col_names[col_idx])
-    
-    # Create and return Morsel with only successful columns
-    return Morsel.from_vectors(successful_col_names, vectors)
+
+    for rg_idx in range(<Py_ssize_t>result.row_groups.size()):
+        # Get row count from first successful column in this row group
+        num_rows = 0
+        for col_idx in range(<Py_ssize_t>result.row_groups[rg_idx].size()):
+            if result.row_groups[rg_idx][col_idx].success:
+                num_rows = result.row_groups[rg_idx][col_idx].num_rows
+                if num_rows > 0:
+                    break
+
+        vectors = []
+        successful_col_names = []
+
+        for col_idx in range(<Py_ssize_t>result.row_groups[rg_idx].size()):
+            column = result.row_groups[rg_idx][col_idx]
+            if not column.success:
+                continue
+
+            col_type = column.type.decode("utf-8")
+
+            if col_type == "int64":
+                vec = _make_int64_vector(column, num_rows)
+            elif col_type == "int32":
+                vec = _make_int64_from_int32_vector(column, num_rows)
+            elif col_type == "byte_array" and column.rep_levels.size() > 0:
+                vec = _make_array_vector(column)
+            elif col_type == "byte_array":
+                vec = _make_string_vector(column, num_rows)
+            elif col_type == "boolean":
+                vec = _make_bool_vector(column, num_rows)
+            elif col_type == "float64":
+                vec = _make_float64_vector(column, num_rows)
+            else:
+                continue
+
+            vectors.append(vec)
+            successful_col_names.append(col_names[col_idx])
+
+        all_morsels.append(Morsel.from_vectors(successful_col_names, vectors))
+
+    return all_morsels
 
 
 def decode_column_from_memory(data, str column_name, row_group_stats, int row_group_index):

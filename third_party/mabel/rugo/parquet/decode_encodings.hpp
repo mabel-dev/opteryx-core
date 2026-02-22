@@ -44,6 +44,11 @@ int32_t DecodeRLEBitPackedIndicesWithConsumption(const uint8_t *data, size_t dat
                                                  std::vector<int32_t> &indices,
                                                  size_t &bytes_consumed);
 
+// Variant with no 4-byte length prefix: data points directly at the RLE stream.
+int32_t DecodeRLEBitPackedIndicesNoPrefix(const uint8_t *data, size_t data_size,
+                                          int32_t num_values, int bit_width,
+                                          std::vector<int32_t> &indices);
+
 // ---------------------------------------------------------------------------
 // DELTA_BINARY_PACKED (encoding id 4) -- template; must live in header
 // ---------------------------------------------------------------------------
