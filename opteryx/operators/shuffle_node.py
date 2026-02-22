@@ -12,12 +12,12 @@ from typing import Any
 import pyarrow
 
 from opteryx import EOS
+from opteryx.compiled.structures.shuffle_partition import row_indexes_by_bin_flat
 from opteryx.draken.morsels.morsel import Morsel
 from opteryx.managers.kvstores import create_kv_store
 from opteryx.models import QueryProperties
 from opteryx.operators.shuffle import BinStore
 from opteryx.operators.shuffle.partitioning import normalize_num_bins
-from opteryx.operators.shuffle.partitioning import row_indexes_by_bin
 from opteryx.operators.shuffle.partitioning import select_num_bins_from_rows
 
 from . import BasePlanNode
@@ -151,18 +151,6 @@ class ShuffleNode(BasePlanNode):
     def _bin_key(self, bin_id: int) -> str:
         return f"pass/{self._pass_id}/bin/{bin_id}"
 
-    def _iter_chunks(self, morsel):
-        if morsel is EOS:
-            return ()
-        converted = self.ensure_draken_morsel(morsel)
-        if converted is EOS:
-            return ()
-        if isinstance(converted, Morsel):
-            return (converted,)
-        if isinstance(converted, Iterable):
-            return converted
-        return (converted,)
-
     def _append_fragment(self, bin_id: int, fragment) -> None:
         size_bytes = int(getattr(fragment, "nbytes", 0) or 0)
         self._bin_buffers[bin_id].append(fragment)
@@ -288,10 +276,17 @@ class ShuffleNode(BasePlanNode):
 
         columns = self.partition_columns if self.partition_columns else None
         hashes = chunk.hash(columns)
-        bins = row_indexes_by_bin(hashes, self.num_bins, self.shift_bits)
-        for bin_id, row_indexes in enumerate(bins):
-            if not row_indexes:
+        flat, offsets = row_indexes_by_bin_flat(hashes, self.num_bins, self.shift_bits)
+
+        # Iterate over bins using the offsets array
+        for bin_id in range(self.num_bins):
+            start = offsets[bin_id]
+            end = offsets[bin_id + 1]
+            if start == end:  # empty bin
                 continue
+
+            # `row_indexes` is a memoryview slice – it behaves like a sequence
+            row_indexes = flat[start:end]
             fragment = chunk.copy(mask=row_indexes)
             self._append_fragment(bin_id, fragment)
 
@@ -308,6 +303,7 @@ class ShuffleNode(BasePlanNode):
         self.readings["shuffle_chunks_out"] += emitted
 
     def execute(self, morsel: pyarrow.Table, **kwargs):
+        morsel = self.ensure_draken_morsel(morsel)
         _ = kwargs
 
         if morsel is EOS:
@@ -318,10 +314,16 @@ class ShuffleNode(BasePlanNode):
             yield EOS
             return
 
-        for chunk in self._iter_chunks(morsel):
-            if chunk is EOS:
-                continue
-            if getattr(chunk, "num_rows", 0) == 0:
+        if isinstance(morsel, Morsel):
+            morsels = (morsel,)
+        elif isinstance(morsel, Iterable):
+            morsels = morsel
+        else:  # pragma: no cover
+            yield None
+            return
+
+        for chunk in morsels:
+            if chunk.num_rows == 0:
                 continue
             self._partition_chunk(chunk)
 
