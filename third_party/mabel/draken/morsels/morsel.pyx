@@ -916,8 +916,6 @@ cdef class Morsel:
         cdef Py_ssize_t alloc_rows
         cdef uint64_t* out_buf
         cdef Vector vec
-        cdef uint64_t[::1] single_hash
-        cdef uint64_t mix_constant = <uint64_t>0x9e3779b97f4a7c15U
 
         if columns is None:
             column_indices = list(range(self.ptr.num_columns))
@@ -942,6 +940,10 @@ cdef class Morsel:
             if out_buf == NULL:
                 raise MemoryError()
             return <uint64_t[:row_count]> out_buf
+
+        if n_selected == 1:
+            vec = <Vector>self.ptr.columns[column_indices[0]]
+            return vec.hash()
 
         alloc_rows = row_count if row_count > 0 else 1
         out_buf = <uint64_t*> PyMem_Calloc(alloc_rows, sizeof(uint64_t))

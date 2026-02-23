@@ -136,6 +136,19 @@ class TestFloat64NullHandling:
         assert vec.min() == pytest.approx(0.0)
         assert vec.max() == pytest.approx(0.0)
 
+    def test_take_preserves_nulls(self):
+        """Test that take operation preserves null values."""
+        import numpy as np
+
+        arr = pa.array([1.5, None, 3.5, None, 5.5], type=pa.float64())
+        vec = Vector.from_arrow(arr)
+
+        indices = np.array([0, 1, 3], dtype=np.int32)
+        result = vec.take(indices)
+
+        assert result.to_pylist() == [1.5, None, None]
+        assert result.null_count == 2
+
 
 class TestStringNullHandling:
     """Test null handling in StringVector."""

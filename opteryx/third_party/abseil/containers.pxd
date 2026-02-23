@@ -18,11 +18,19 @@ cdef extern from "identity_hash.h":
 
 
 cdef extern from "absl/container/flat_hash_map.h" namespace "absl" nogil:
-    cdef cppclass flat_hash_map[K, V, HashFunc]:
+    cdef cppclass flat_hash_map[K, V, HashFunc=*]:
+        cppclass iterator:
+            pair[K, V]& operator*()
+            iterator operator++()
+            bint operator!=(iterator)
+
         flat_hash_map()
         V& operator[](K key)
         size_t size() const
         void clear()
+        void reserve(size_t value)
+        iterator begin()
+        iterator end()
 
 cdef class FlatHashMap:
     cdef flat_hash_map[uint64_t, vector[int64_t], IdentityHash] _map
