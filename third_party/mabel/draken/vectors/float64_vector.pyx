@@ -100,8 +100,36 @@ cdef class Float64Vector(Vector):
         cdef Float64Vector out = Float64Vector(<size_t>n)
         cdef double* src = <double*> self.ptr.data
         cdef double* dst = <double*> out.ptr.data
+        cdef uint8_t* src_null = <uint8_t*> self.ptr.null_bitmap
+        cdef Py_ssize_t out_nbytes
+        cdef uint8_t* out_null
+        cdef int32_t src_idx
+        cdef uint8_t byte
+
+        # If source has no null bitmap, copy directly.
+        if src_null == NULL:
+            for i in range(n):
+                dst[i] = src[indices[i]]
+            out.ptr.null_bitmap = NULL
+            return out
+
+        # Preserve nulls in the output bitmap.
+        out_nbytes = (n + 7) >> 3
+        out_null = <uint8_t*> malloc(out_nbytes)
+        if out_null == NULL:
+            raise MemoryError()
+        memset(out_null, 0, out_nbytes)
+
         for i in range(n):
-            dst[i] = src[indices[i]]
+            src_idx = indices[i]
+            byte = src_null[src_idx >> 3]
+            if byte & (1 << (src_idx & 7)):
+                dst[i] = src[src_idx]
+                out_null[i >> 3] |= (1 << (i & 7))
+            else:
+                dst[i] = 0.0
+
+        out.ptr.null_bitmap = out_null
         return out
 
     cpdef int8_t[::1] equals(self, double value):

@@ -56,9 +56,33 @@ cdef extern from *:
     """
     void PREFETCH(const void* addr) nogil
 
-from opteryx.draken.vectors.vector cimport MIX_HASH_CONSTANT, Vector, NULL_HASH, simd_mix_hash
+from opteryx.draken.vectors.vector cimport MIX_HASH_CONSTANT, Vector, NULL_HASH, mix_hash, simd_mix_hash
 
 DEF STRING_HASH_CHUNK = 256
+
+
+cdef inline uint64_t _load_le_u64_partial(const uint8_t* ptr, size_t n) nogil:
+    cdef uint64_t value = 0
+    cdef size_t i
+    for i in range(n):
+        value |= (<uint64_t>ptr[i]) << (i * 8)
+    return value
+
+
+cdef inline uint64_t _short_string_hash(const uint8_t* ptr, size_t n) nogil:
+    cdef uint64_t first
+    cdef uint64_t last
+    cdef uint64_t h
+
+    if n <= 8:
+        first = _load_le_u64_partial(ptr, n)
+        return mix_hash(<uint64_t>n, first)
+
+    # 9..16 bytes: combine first 8 and last 8 with length-based seed.
+    first = _load_le_u64_partial(ptr, 8)
+    last = _load_le_u64_partial(ptr + (n - 8), 8)
+    h = mix_hash(<uint64_t>n, first)
+    return mix_hash(h, last)
 
 
 cdef class StringVector(Vector):
@@ -316,13 +340,19 @@ cdef class StringVector(Vector):
                         start = offsets[idx]
                         end = offsets[idx + 1]
                         str_len = <size_t>(end - start)
-                        scratch[j] = XXH3_64bits(data + start, str_len)
+                        if str_len <= 16:
+                            scratch[j] = _short_string_hash(data + start, str_len)
+                        else:
+                            scratch[j] = XXH3_64bits(data + start, str_len)
                 else:
                     for j in range(block):
                         start = offsets[i + j]
                         end = offsets[i + j + 1]
                         str_len = <size_t>(end - start)
-                        scratch[j] = XXH3_64bits(data + start, str_len)
+                        if str_len <= 16:
+                            scratch[j] = _short_string_hash(data + start, str_len)
+                        else:
+                            scratch[j] = XXH3_64bits(data + start, str_len)
                 
                 simd_mix_hash(dst + i, scratch_ptr, <size_t> block)
                 i += block

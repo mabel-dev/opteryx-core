@@ -598,6 +598,24 @@ extensions = [
         extra_compile_args=CPP_FLAGS,
     ),
     Extension(
+        "opteryx.compiled.aggregations.aggregate_kernels",
+        sources=[
+            "opteryx/compiled/aggregations/aggregate_kernels.pyx",
+        ],
+        include_dirs=include_dirs,
+        language="c++",
+        extra_compile_args=CPP_FLAGS,
+    ),
+    Extension(
+        "opteryx.compiled.aggregations.group_state_store",
+        sources=[
+            "opteryx/compiled/aggregations/group_state_store.pyx",
+        ],
+        include_dirs=include_dirs,
+        language="c++",
+        extra_compile_args=CPP_FLAGS,
+    ),
+    Extension(
         "opteryx.compiled.structures.shuffle_partition",
         sources=[
             "opteryx/compiled/structures/shuffle_partition.pyx",

@@ -12,6 +12,7 @@ from opteryx.models import PhysicalPlan
 from opteryx.planner.logical_planner import LogicalPlanStepType
 
 ENABLE_NATIVE_AGGREGATOR: bool = features.enable_native_aggregator
+USE_DRAKEN_AGGREGATOR: bool = features.use_draken_aggregator
 
 
 def create_physical_plan(logical_plan, query_properties) -> PhysicalPlan:
@@ -29,7 +30,23 @@ def create_physical_plan(logical_plan, query_properties) -> PhysicalPlan:
             else:
                 node = operators.AggregateNode(query_properties, **{k:v for k,v in node_config.items() if k in ("aggregates", "all_relations")})
         elif node_type == LogicalPlanStepType.AggregateAndGroup:
-            if ENABLE_NATIVE_AGGREGATOR and all(agg.value in operators.SimpleAggregateAndGroupNode.SIMPLE_AGGREGATES and agg.duplicate_treatment != "Distinct"  for agg in node_config["aggregates"]):
+            if USE_DRAKEN_AGGREGATOR:
+                if operators.DrakenAggregateAndGroupNode.supports(
+                    node_config["aggregates"], node_config.get("groups")
+                ):
+                    node = operators.DrakenAggregateAndGroupNode(
+                        query_properties,
+                        **{
+                            k: v
+                            for k, v in node_config.items()
+                            if k in ("aggregates", "groups", "projection", "all_relations")
+                        },
+                    )
+                else:
+                    raise UnsupportedSyntaxError(
+                        "Draken aggregate/group mode is enabled and this aggregate shape is not supported."
+                    )
+            elif ENABLE_NATIVE_AGGREGATOR and all(agg.value in operators.SimpleAggregateAndGroupNode.SIMPLE_AGGREGATES and agg.duplicate_treatment != "Distinct"  for agg in node_config["aggregates"]):
                 node = operators.SimpleAggregateAndGroupNode(query_properties, **{k:v for k,v in node_config.items() if k in ("aggregates", "groups", "projection", "all_relations")})
             else:
                 node = operators.AggregateAndGroupNode(query_properties, **{k:v for k,v in node_config.items() if k in ("aggregates", "groups", "projection", "all_relations")})

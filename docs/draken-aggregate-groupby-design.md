@@ -8,6 +8,7 @@ Current `AggregateAndGroupNode` and `SimpleAggregateAndGroupNode` are still prim
 - No NumPy in aggregation/grouping kernels.
 - No Arrow in aggregation/grouping kernels.
 - Optional spill-to-disk for high-cardinality / large state.
+- Reuse existing shuffle/spill primitives and KV-backed spill layers rather than introducing a separate spill subsystem.
 
 This is a design doc only.
 
@@ -67,8 +68,8 @@ New Draken Cython/C++ component:
 
 Design notes:
 
-- Must not trust 64-bit hash alone (collision-safe equality check required).
-- Store group key fingerprint + row-id/key payload for exact compare.
+- Must not trust 64‑bit hash alone (there is always a non‑zero collision probability).  implementors should include a collision‑safe equality check; for example store a small fingerprint plus the full key payload, or keep the unhashed key values alongside the hash bucket.
+- Store group key fingerprint + row‑id/key payload for exact compare.
 - Keep keys in Draken-friendly representations (fixed-width inline, var-width arena offsets).
 
 ## 2) Aggregate Function State Kernels
@@ -93,7 +94,11 @@ Expected state layouts:
 Grouped aggregation depends on `evaluate_and_append`, which is Arrow/NumPy-oriented today. To keep this design constraint:
 
 - Add `evaluate_and_append_draken(expressions, morsel)` path.
-- Implement only required expression subset first (identifiers, literals, simple funcs used in clickbench group keys/agg args).
+- Implement only the required expression subset first, e.g. bare column references,
+  simple arithmetic, and the few functions used by ClickBench group keys and
+  aggregate arguments.  Further expressions can be added later; the bridge
+  will return an error if it encounters an unsupported expression in strict
+  mode.
 - Fallback policy:
   - v1 strict mode: fail if expression not supported in Draken path.
   - optional compatibility mode (feature flag): fallback to legacy node.
@@ -103,14 +108,29 @@ Grouped aggregation depends on `evaluate_and_append`, which is Arrow/NumPy-orien
 New component:
 
 - `GroupBySpillManager`
-- Handles partitioned write/read/merge lifecycle.
+- Handles partitioned write/read/merge lifecycle by delegating storage to existing shuffle spill capabilities.
 
 Responsibilities:
 
 - Track memory usage of hash table + state vectors + per-group distinct structures.
 - Trigger spill when budget exceeded.
-- Write partition files with deterministic format.
+- Write/read partition payloads through existing BinStore/KV scoped paths.
 - Coordinate final merge passes.
+
+Memory budget accounting (what is budgeted):
+
+1. Group index structures:
+- hash table buckets, occupancy metadata, collision chains/probe metadata.
+2. Group key storage:
+- fixed-width key vectors and var-width arenas/offset buffers.
+3. Aggregate state vectors:
+- per-aggregate state arrays (for example sum/count/min/max/seen flags).
+4. Distinct state:
+- per-group set handles and backing storage.
+5. Spill staging buffers:
+- serialized payload buffers pending write.
+6. Runtime overhead:
+- allocator fragmentation/headroom reserve.
 
 ---
 
@@ -120,7 +140,7 @@ Responsibilities:
 
 For each morsel:
 
-1. Compute group hash vector from key columns (`morsel.hash(columns=...)`).
+1. Compute group hash vector from key columns (`morsel.hash(columns=...)`).  In practice the planner will resolve and cache the column indices once; the hash call need only be passed a tuple of indices to avoid per‑morsel name lookups.
 2. Probe/insert rows into group table:
 - Probe by hash bucket.
 - For collisions, compare full key values.
@@ -131,12 +151,15 @@ For each morsel:
 
 When memory threshold reached:
 
-1. Partition all current groups by `hash % P` (power-of-two recommended).
-2. Serialize per-partition records:
-- Group key payload (typed)
-- Aggregate partial state payload
-3. Flush and clear in-memory store.
-4. Continue consuming input.
+1. Partition all current groups by `hash % P` (power‑of‑two recommended).
+   *In a pathological case a single partition may still exceed budget; the spill
+   manager should detect that and recursively repartition the oversized
+   partition (using a new pass id or increased bit‑shift) until all partitions
+   fit.*
+2. Serialize per‑partition partial state chunks using DRKM payloads.
+3. Persist chunks using existing shuffle spill stack (BinStore -> scoped layered KV stores).
+4. Flush and clear in-memory store.
+5. Continue consuming input.
 
 At EOS:
 
@@ -151,23 +174,17 @@ At EOS:
 
 ## Spill File Format (Proposed)
 
-Binary row-oriented records per partition, append-only:
+Use existing DRKM morsel payload format and existing manifest/chunk conventions from shuffle spill.
 
-- Header:
-  - magic/version
-  - query_id/operator_id
-  - schema descriptors (group key types, aggregate state types)
-- Repeated records:
-  - key hash (uint64)
-  - key fields (typed encoding; varlen prefixed)
-  - aggregate state blob(s)
-- Footer (optional):
-  - counts/checksum
+GroupBy-specific requirement:
+
+1. Partial aggregate state must be representable as Draken morsels for DRKM serde.
+2. Chunk and manifest lifecycle must use scoped context (`query_id`, `operator_id`).
+3. Any gap in existing spill interfaces should be raised as a bug against shared spill capability, not reimplemented locally.
 
 Design choice:
 
-- Keep format simple and self-describing for first iteration.
-- Compression optional (off by default in v1).
+- Do not introduce a second, group-by-specific file format in v1.
 
 ---
 
@@ -188,7 +205,10 @@ Optimization hooks:
 
 Semantics:
 
-- Maintain exact semantics in v1 (no approximate mode by default).
+- Existing hash-only distinct behavior is approximate when collisions occur.
+- v1 must explicitly choose one mode:
+  - preserve current hash-based approximate semantics, or
+  - implement exact value-aware distinct state.
 
 ---
 
@@ -215,19 +235,20 @@ Semantics:
 
 ## Spill I/O
 
-1. New temp-file manager for query-scoped spill files.
-2. Partition writer/reader with streaming iterator API.
+1. Integrate with existing shuffle spill storage stack (BinStore + layered KV stores).
+2. Raise bugs for deficiencies in shared spill interfaces instead of introducing separate group-by file spill logic.
 
 ---
 
 ## Planner / Operator Integration
 
-1. Physical planner selects `DrakenAggregateAndGroupNode` when feature flag enabled.
+1. Physical planner selects `DrakenAggregateAndGroupNode` when feature flag enabled, following the existing physical-planner operator decisioning patterns.
 2. Legacy nodes remain as fallback path.
 3. Suggested feature flags:
-- `FEATURE_DRAKEN_GROUPBY_V2`
-- `FEATURE_DRAKEN_GROUPBY_SPILL`
-- `FEATURE_DRAKEN_GROUPBY_STRICT_EXPRESSIONS`
+- `FEATURE_DRAKEN_GROUPBY_V2`  (enables the new operator path)
+- `FEATURE_DRAKEN_GROUPBY_SPILL`  (only has effect when V2 is enabled)
+- `FEATURE_DRAKEN_GROUPBY_STRICT_EXPRESSIONS`  (treat unsupported expressions
+   as hard errors)
 
 ---
 
@@ -235,7 +256,7 @@ Semantics:
 
 Add operator readings:
 
-- `groupby_rows_processed`
+- `groupby_rows_processed`  *(incremented in the probe/insert loop)*
 - `groupby_groups_created`
 - `groupby_hash_collisions`
 - `groupby_spill_count`
@@ -251,30 +272,111 @@ Add operator readings:
 
 ---
 
-## Rollout Plan
+## Phased Implementation Plan
 
-### Phase 1: In-Memory Draken GroupBy (No Spill)
+### Phase 1: Test Harness and Baselines (No Engine Wiring)
 
-- Implement `COUNT/SUM/MIN/MAX/AVG` grouped path.
-- Expression subset support required by clickbench.
-- Strict correctness tests vs legacy node.
+- Add golden correctness tests for grouped aggregates versus legacy behavior.
+- Add targeted performance harness for ClickBench group-by shapes.
+- Add stress tests for high-cardinality and null-heavy keys.
+- Keep all usage in standalone/post-shuffle paths only.
 
-### Phase 2: Spill Infrastructure
+### Phase 2: Core In-Memory GroupBy Kernel
 
-- Partition spill files.
-- Final merge pass.
-- Recursive repartition for oversized partitions.
+- Implement `group_state_store.pyx` for probe/insert, collision handling, and state indexing.
+- Implement `aggregate_kernels.pyx` for `COUNT/SUM/MIN/MAX/AVG/ANY_VALUE`.
+- Add `ShuffleGroupByOperationV2` wrapper to call compiled kernels.
+- Support strict Draken expression subset needed for ClickBench.
+- Acceptance gate: correctness parity on supported functions with no Arrow/NumPy in hot loop.
 
-### Phase 3: DISTINCT and Advanced Aggregates
+### Phase 3: Spill and Merge of Partial Aggregate State
 
-- Exact `COUNT(DISTINCT)` spill-aware merge.
-- `ANY_VALUE`/`ONE`.
-- Optional `ARRAY_AGG` follow-up.
+- Implement `GroupBySpillManager` using existing shuffle spill stack (BinStore + layered KV).
+- Spill partial aggregate state chunks as DRKM payloads.
+- Implement replay + merge and recursive repartition for oversized partitions.
+- Enforce hard-fail behavior on spill errors.
+- Acceptance gate: bounded-memory execution on large-cardinality workloads.
 
-### Phase 4: Default Enablement
+### Phase 4: Distinct Path and Distribution-Friendly State
 
-- A/B compare on ClickBench + SQL battery.
-- Enable by default after performance and correctness gates pass.
+- Implement per-group distinct hash state and merge behavior.
+- Keep existing hash-based 64-bit DISTINCT semantics in v1.
+- Ensure serialized distinct state can be fanned out/merged in future distributed steps.
+- Acceptance gate: stable distinct behavior across spill/replay cycles.
+
+### Phase 5: Hardening, Telemetry, and Tuning
+
+- Complete telemetry counters and timing buckets listed in this document.
+- Tune probe strategy, growth/load factors, and spill thresholds with benchmark feedback.
+- Validate behavior on SQL battery + ClickBench + pathological synthetic datasets.
+- Acceptance gate: measurable performance improvement over current shuffle group-by path.
+
+### Phase 6: Main Engine Wiring (Last Phase)
+
+- Wire `DrakenAggregateAndGroupNode` into physical planner decisioning.
+- Gate with existing feature flags for A/B testing.
+- Keep legacy and v2 dual-path only for validation window.
+- Execute cut-over plan to make v2 default after acceptance gates pass.
+- Acceptance gate: engine-integrated correctness/performance sign-off and hard cut-over readiness.
+
+---
+
+## Current Status
+
+### Phase 1 Status: In Progress (Substantial Completion)
+
+Implemented in repo:
+
+1. Expanded unit-level correctness/stress coverage for shuffle group-by:
+- `tests/unit/operators/test_shuffle_group_by_phase1.py`
+- Coverage includes:
+  - multi-key/multi-aggregate golden checks
+  - chunking invariance checks
+  - high-cardinality stress
+  - null-heavy stress
+  - legacy aggregate-spec compatibility path
+2. Added standalone baseline benchmark harness (no planner wiring):
+- `tests/performance/benchmarks/bench_clickbench_shuffle_groupby_phase1_baselines.py`
+3. Added benchmark compare path for SQL vs shuffle group-by variants:
+- `tests/performance/benchmarks/bench_clickbench_shuffle_groupby_compare.py`
+- Tracks legacy SQL, shuffle V1, and shuffle V2 timings and stage breakdowns.
+4. Added integration-level SQL-vs-shuffle golden pack:
+- `tests/integration/test_shuffle_groupby_golden.py`
+- Compares fixed query-shape outputs between SQL engine and shuffle post-group-by path.
+
+Validated:
+
+1. New and existing shuffle unit tests pass.
+2. Integration golden pack passes, including nullable numeric aggregate semantics parity.
+
+Phase 1 acceptance gate interpretation:
+
+1. Test harness and baseline scaffolding is in place.
+2. Correctness coverage is significantly expanded.
+3. Remaining Phase 1 work is optional polish (more shapes/fixtures), not blocker-level for entering Phase 2.
+
+### Phase 2 Status: Completed
+
+Implemented in repo:
+
+1. New compiled group-state kernel:
+- `opteryx/compiled/aggregations/group_state_store.pyx`
+2. New compiled aggregate kernel helpers:
+- `opteryx/compiled/aggregations/aggregate_kernels.pyx`
+3. New Python glue/operator surface for V2:
+- `opteryx/operators/group_state_store.py` (`ShuffleGroupByOperationV2`)
+4. Build wiring added:
+- `setup.py` now includes `opteryx.compiled.aggregations.group_state_store`
+- `setup.py` now includes `opteryx.compiled.aggregations.aggregate_kernels`
+
+Current behavior:
+
+1. `ShuffleGroupByOperationV2` requires compiled backend and fails fast if extension is unavailable.
+2. Group-state updates/finalize dispatch through precomputed aggregate function codes in Cython.
+3. Single-aggregate fast paths are implemented for common functions (`COUNT(*)`, `COUNT(col)`, `SUM`, `MIN`, `MAX`, `AVG`, `COUNT_DISTINCT`) to avoid generic list-state overhead.
+4. Typed int64-key fast paths are implemented for `COUNT(*)`, `COUNT(col)`, `SUM`, `MIN`, `MAX`, `AVG`, and `HASH_ONE`.
+5. Nullable float semantics are now preserved through shuffle partitioning (null bitmap preserved in `Float64Vector.take`), removing the previous nullable aggregate mismatch in post-shuffle group-by tests.
+6. Existing Phase 1/2 tests exercise the V2 semantics path and are passing.
 
 ---
 
@@ -290,38 +392,76 @@ Add operator readings:
 
 ## Open Questions / Unknowns
 
-1. Distinct semantics mode:
-- Do you want exact-only in v1, or permit optional approximate mode for very large groups?
-
-2. Memory budget source:
+1. Memory budget source:
 - Should group-by use a fixed budget from config/env, or derive from query/session limits?
-
-3. Spill location and lifecycle:
-- Preferred directory for spill files?
-- Must files be encrypted at rest, or is plaintext temp acceptable?
-
-4. Failure policy:
-- On spill failure (disk full / permission), should query fail hard or fallback to legacy Arrow node?
-
-5. Expression scope for v1:
-- Is it acceptable to support only clickbench-relevant expression forms first, then expand?
-
-6. Distinct data structure:
-- Do you prefer per-group hash sets (simple) or pooled/global segmented set handles (more complex, lower overhead)?
-
-7. Compatibility window:
-- Should both legacy and Draken group-by paths coexist long-term behind flags, or do you want a hard cutover target?
-
-8. Output boundary:
-- Is keeping Draken morsels all the way to `ExitNode` acceptable, with Arrow conversion only at API edge?
+- This budget applies to the runtime aggregate state as it is built (group index + key storage + aggregate state + distinct state + spill staging buffers).
 
 ---
 
-## Suggested Next Step
+## Decisions Captured
 
-After your answers to the open questions above, I can convert this into a concrete implementation plan with:
+---
 
-- file-by-file change list
-- kernel interfaces
-- phased PR breakdown
-- test matrix (correctness + performance + spill stress)
+## Next Steps / TODOs
+
+The work will be tracked directly in this document rather than via
+external issue trackers. Below are the immediate action items to move from
+Phase 2 completion into Phase 3.
+
+* **Baseline harness polish** – completed:
+  unit/integration baseline coverage is in place and nullable semantics
+  parity test now passes without `xfail`.
+* **Prototype kernels** – completed for Phase 2 scope:
+  `group_state_store.pyx` and `aggregate_kernels.pyx` are in active use for
+  standalone shuffle group-by.
+* **ShuffleGroupByOperationV2 wrapper** – completed:
+  `ShuffleGroupByOperationV2` exists, requires compiled backend, and is used
+  by current benchmarks/golden tests.
+* **Expression bridge stub** – implement a minimal
+  `evaluate_and_append_draken` that handles the small set of expressions
+  used by ClickBench queries and returns an error for anything else.
+* **Memory budget decision** – choose whether the budget is derived from
+  configuration, session limits, or a hard-coded constant and document the
+  chosen source here.
+* **Spill manager sketch** – draft the skeleton of `GroupBySpillManager` in
+  Python/Cython, reusing the shuffle spill interfaces; identify any
+  missing APIs and log them in the doc.
+* **Telemetry wiring** – map each of the listed readings to specific loops
+  in the code so that implementers know where to increment them.
+
+These items correspond to the Phase 1 and early Phase 2 tasks outlined
+previously.
+
+## Decisions Captured
+
+1. Spill path reuse:
+- Group-by spill must use existing shuffle spill/BinStore/KV infrastructure.
+- Deficiencies should be raised as bugs in shared spill capability.
+
+2. Spill failure policy:
+- Hard fail on spill failure; do not fallback to legacy Arrow path.
+
+3. Expression scope:
+- v1 may support clickbench-relevant expression subset first.
+- Planner/operator selection should follow existing physical planner decision patterns.
+
+4. Distinct distribution model:
+- Distinct state is per-group and must support multi-machine/distributed execution steps.
+
+5. Compatibility window:
+- Keep both legacy and Draken group-by paths only for A/B testing.
+- Target hard cut-over after validation; no long-term dual-path commitment.
+
+6. Output boundary:
+- Keep morsels Draken-native through to `ExitNode`.
+- Convert to Arrow only at API boundary as needed.
+
+7. Distinct semantics mode:
+- Keep existing hash-based (64-bit) distinct semantics in v1.
+- This is approximate under collisions and is an accepted v1 tradeoff.
+
+8. Distinct state structure:
+- Use per-group distinct hash structures.
+- This supports future fan-out/distributed work partitioning.
+
+---
