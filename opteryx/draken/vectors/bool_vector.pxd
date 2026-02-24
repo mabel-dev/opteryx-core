@@ -14,8 +14,8 @@ cdef class BoolVector(Vector):
 
     # Ops
     cpdef BoolVector take(self, int32_t[::1] indices)
-    cpdef int8_t[::1] equals(self, bint value)
-    cpdef int8_t[::1] not_equals(self, bint value)
+    cpdef BoolVector equals(self, bint value)
+    cpdef BoolVector not_equals(self, bint value)
     cpdef int8_t any(self)
     cpdef int8_t all(self)
     cpdef int8_t[::1] is_null(self)
@@ -24,6 +24,7 @@ cdef class BoolVector(Vector):
     cpdef BoolVector and_vector(self, BoolVector other)
     cpdef BoolVector or_vector(self, BoolVector other)
     cpdef BoolVector xor_vector(self, BoolVector other)
+    cpdef BoolVector not_vector(self)
 
 cdef BoolVector from_arrow(object array)
 cdef BoolVector from_sequence(uint8_t[::1] data)

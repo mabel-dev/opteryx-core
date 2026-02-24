@@ -160,211 +160,125 @@ cdef class Int64Vector(Vector):
         out.ptr.null_bitmap = out_null
         return out
 
-    cpdef BoolVector equals(self, int64_t value):
+    cdef inline bint _compare_int64_values(self, int64_t left, int64_t right, int op) nogil:
+        if op == 0:
+            return left == right
+        if op == 1:
+            return left != right
+        if op == 2:
+            return left > right
+        if op == 3:
+            return left >= right
+        if op == 4:
+            return left < right
+        return left <= right
+
+    cdef BoolVector _compare_scalar(self, int64_t value, int op):
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef int64_t* data = <int64_t*> ptr.data
+        cdef uint8_t* src_null = ptr.null_bitmap
         cdef Py_ssize_t i, n = ptr.length
         cdef Py_ssize_t nbytes = (n + 7) >> 3
-        cdef BoolVector out = BoolVector(<size_t> n)
+        cdef BoolVector out = BoolVector(<size_t>n)
         cdef uint8_t* dst = <uint8_t*> out.ptr.data
+        cdef uint8_t* out_null = NULL
+        cdef uint8_t mask
 
-        # zero init
-        for i in range(nbytes):
-            dst[i] = 0
+        memset(dst, 0, nbytes)
+        if src_null != NULL and nbytes != 0:
+            out_null = <uint8_t*> malloc(nbytes)
+            if out_null == NULL:
+                raise MemoryError()
+            memcpy(out_null, src_null, nbytes)
+            if (n & 7) != 0:
+                mask = <uint8_t>((1 << (n & 7)) - 1)
+                out_null[nbytes - 1] &= mask
+            out.ptr.null_bitmap = out_null
+        else:
+            out.ptr.null_bitmap = NULL
+
         for i in range(n):
-            if data[i] == value:
-                dst[i >> 3] |= (1 << (i & 7))
-        out.ptr.null_bitmap = NULL
+            if src_null == NULL or ((src_null[i >> 3] >> (i & 7)) & 1):
+                if self._compare_int64_values(data[i], value, op):
+                    dst[i >> 3] |= (1 << (i & 7))
         return out
+
+    cdef BoolVector _compare_vector(self, Int64Vector other, int op):
+        cdef DrakenFixedBuffer* ptr1 = self.ptr
+        cdef DrakenFixedBuffer* ptr2 = other.ptr
+        cdef int64_t* data1 = <int64_t*> ptr1.data
+        cdef int64_t* data2 = <int64_t*> ptr2.data
+        cdef uint8_t* null1 = ptr1.null_bitmap
+        cdef uint8_t* null2 = ptr2.null_bitmap
+        cdef Py_ssize_t i, n = ptr1.length
+        cdef Py_ssize_t nbytes = (n + 7) >> 3
+        cdef BoolVector out
+        cdef uint8_t* dst
+        cdef uint8_t* out_null = NULL
+        cdef bint valid1, valid2, valid
+
+        if n != ptr2.length:
+            raise ValueError("Vectors must have the same length")
+
+        out = BoolVector(<size_t>n)
+        dst = <uint8_t*> out.ptr.data
+        memset(dst, 0, nbytes)
+
+        if (null1 != NULL or null2 != NULL) and nbytes != 0:
+            out_null = <uint8_t*> malloc(nbytes)
+            if out_null == NULL:
+                raise MemoryError()
+            memset(out_null, 0, nbytes)
+            out.ptr.null_bitmap = out_null
+        else:
+            out.ptr.null_bitmap = NULL
+
+        for i in range(n):
+            valid1 = True if null1 == NULL else ((null1[i >> 3] >> (i & 7)) & 1) != 0
+            valid2 = True if null2 == NULL else ((null2[i >> 3] >> (i & 7)) & 1) != 0
+            valid = valid1 and valid2
+            if valid:
+                if out_null != NULL:
+                    out_null[i >> 3] |= (1 << (i & 7))
+                if self._compare_int64_values(data1[i], data2[i], op):
+                    dst[i >> 3] |= (1 << (i & 7))
+        return out
+
+    cpdef BoolVector equals(self, int64_t value):
+        return self._compare_scalar(value, 0)
 
     cpdef BoolVector equals_vector(self, Int64Vector other):
-        cdef DrakenFixedBuffer* ptr1 = self.ptr
-        cdef DrakenFixedBuffer* ptr2 = other.ptr
-        cdef int64_t* data1 = <int64_t*> ptr1.data
-        cdef int64_t* data2 = <int64_t*> ptr2.data
-        cdef Py_ssize_t i, n = ptr1.length
-        if n != ptr2.length:
-            raise ValueError("Vectors must have the same length")
-        cdef Py_ssize_t nbytes = (n + 7) >> 3
-        cdef BoolVector out = BoolVector(<size_t> n)
-        cdef uint8_t* dst = <uint8_t*> out.ptr.data
-        for i in range(nbytes):
-            dst[i] = 0
-        for i in range(n):
-            if data1[i] == data2[i]:
-                dst[i >> 3] |= (1 << (i & 7))
-        out.ptr.null_bitmap = NULL
-        return out
+        return self._compare_vector(other, 0)
 
     cpdef BoolVector not_equals(self, int64_t value):
-        cdef DrakenFixedBuffer* ptr = self.ptr
-        cdef int64_t* data = <int64_t*> ptr.data
-        cdef Py_ssize_t i, n = ptr.length
-        cdef Py_ssize_t nbytes = (n + 7) >> 3
-        cdef BoolVector out = BoolVector(<size_t> n)
-        cdef uint8_t* dst = <uint8_t*> out.ptr.data
-        for i in range(nbytes):
-            dst[i] = 0
-        for i in range(n):
-            if data[i] != value:
-                dst[i >> 3] |= (1 << (i & 7))
-        out.ptr.null_bitmap = NULL
-        return out
+        return self._compare_scalar(value, 1)
 
     cpdef BoolVector not_equals_vector(self, Int64Vector other):
-        cdef DrakenFixedBuffer* ptr1 = self.ptr
-        cdef DrakenFixedBuffer* ptr2 = other.ptr
-        cdef int64_t* data1 = <int64_t*> ptr1.data
-        cdef int64_t* data2 = <int64_t*> ptr2.data
-        cdef Py_ssize_t i, n = ptr1.length
-        if n != ptr2.length:
-            raise ValueError("Vectors must have the same length")
-        cdef Py_ssize_t nbytes = (n + 7) >> 3
-        cdef BoolVector out = BoolVector(<size_t> n)
-        cdef uint8_t* dst = <uint8_t*> out.ptr.data
-        for i in range(nbytes):
-            dst[i] = 0
-        for i in range(n):
-            if data1[i] != data2[i]:
-                dst[i >> 3] |= (1 << (i & 7))
-        out.ptr.null_bitmap = NULL
-        return out
+        return self._compare_vector(other, 1)
 
     cpdef BoolVector greater_than(self, int64_t value):
-        cdef DrakenFixedBuffer* ptr = self.ptr
-        cdef int64_t* data = <int64_t*> ptr.data
-        cdef Py_ssize_t i, n = ptr.length
-        cdef Py_ssize_t nbytes = (n + 7) >> 3
-        cdef BoolVector out = BoolVector(<size_t> n)
-        cdef uint8_t* dst = <uint8_t*> out.ptr.data
-        for i in range(nbytes):
-            dst[i] = 0
-        for i in range(n):
-            if data[i] > value:
-                dst[i >> 3] |= (1 << (i & 7))
-        out.ptr.null_bitmap = NULL
-        return out
+        return self._compare_scalar(value, 2)
 
     cpdef BoolVector greater_than_vector(self, Int64Vector other):
-        cdef DrakenFixedBuffer* ptr1 = self.ptr
-        cdef DrakenFixedBuffer* ptr2 = other.ptr
-        cdef int64_t* data1 = <int64_t*> ptr1.data
-        cdef int64_t* data2 = <int64_t*> ptr2.data
-        cdef Py_ssize_t i, n = ptr1.length
-        if n != ptr2.length:
-            raise ValueError("Vectors must have the same length")
-        cdef Py_ssize_t nbytes = (n + 7) >> 3
-        cdef BoolVector out = BoolVector(<size_t> n)
-        cdef uint8_t* dst = <uint8_t*> out.ptr.data
-        for i in range(nbytes):
-            dst[i] = 0
-        for i in range(n):
-            if data1[i] > data2[i]:
-                dst[i >> 3] |= (1 << (i & 7))
-        out.ptr.null_bitmap = NULL
-        return out
+        return self._compare_vector(other, 2)
 
     cpdef BoolVector greater_than_or_equals(self, int64_t value):
-        cdef DrakenFixedBuffer* ptr = self.ptr
-        cdef int64_t* data = <int64_t*> ptr.data
-        cdef Py_ssize_t i, n = ptr.length
-        cdef Py_ssize_t nbytes = (n + 7) >> 3
-        cdef BoolVector out = BoolVector(<size_t> n)
-        cdef uint8_t* dst = <uint8_t*> out.ptr.data
-        for i in range(nbytes):
-            dst[i] = 0
-        for i in range(n):
-            if data[i] >= value:
-                dst[i >> 3] |= (1 << (i & 7))
-        out.ptr.null_bitmap = NULL
-        return out
+        return self._compare_scalar(value, 3)
 
     cpdef BoolVector greater_than_or_equals_vector(self, Int64Vector other):
-        cdef DrakenFixedBuffer* ptr1 = self.ptr
-        cdef DrakenFixedBuffer* ptr2 = other.ptr
-        cdef int64_t* data1 = <int64_t*> ptr1.data
-        cdef int64_t* data2 = <int64_t*> ptr2.data
-        cdef Py_ssize_t i, n = ptr1.length
-        if n != ptr2.length:
-            raise ValueError("Vectors must have the same length")
-        cdef Py_ssize_t nbytes = (n + 7) >> 3
-        cdef BoolVector out = BoolVector(<size_t> n)
-        cdef uint8_t* dst = <uint8_t*> out.ptr.data
-        for i in range(nbytes):
-            dst[i] = 0
-        for i in range(n):
-            if data1[i] >= data2[i]:
-                dst[i >> 3] |= (1 << (i & 7))
-        out.ptr.null_bitmap = NULL
-        return out
+        return self._compare_vector(other, 3)
 
     cpdef BoolVector less_than(self, int64_t value):
-        cdef DrakenFixedBuffer* ptr = self.ptr
-        cdef int64_t* data = <int64_t*> ptr.data
-        cdef Py_ssize_t i, n = ptr.length
-        cdef Py_ssize_t nbytes = (n + 7) >> 3
-        cdef BoolVector out = BoolVector(<size_t> n)
-        cdef uint8_t* dst = <uint8_t*> out.ptr.data
-        for i in range(nbytes):
-            dst[i] = 0
-        for i in range(n):
-            if data[i] < value:
-                dst[i >> 3] |= (1 << (i & 7))
-        out.ptr.null_bitmap = NULL
-        return out
+        return self._compare_scalar(value, 4)
 
     cpdef BoolVector less_than_vector(self, Int64Vector other):
-        cdef DrakenFixedBuffer* ptr1 = self.ptr
-        cdef DrakenFixedBuffer* ptr2 = other.ptr
-        cdef int64_t* data1 = <int64_t*> ptr1.data
-        cdef int64_t* data2 = <int64_t*> ptr2.data
-        cdef Py_ssize_t i, n = ptr1.length
-        if n != ptr2.length:
-            raise ValueError("Vectors must have the same length")
-        cdef Py_ssize_t nbytes = (n + 7) >> 3
-        cdef BoolVector out = BoolVector(<size_t> n)
-        cdef uint8_t* dst = <uint8_t*> out.ptr.data
-        for i in range(nbytes):
-            dst[i] = 0
-        for i in range(n):
-            if data1[i] < data2[i]:
-                dst[i >> 3] |= (1 << (i & 7))
-        out.ptr.null_bitmap = NULL
-        return out
+        return self._compare_vector(other, 4)
 
     cpdef BoolVector less_than_or_equals(self, int64_t value):
-        cdef DrakenFixedBuffer* ptr = self.ptr
-        cdef int64_t* data = <int64_t*> ptr.data
-        cdef Py_ssize_t i, n = ptr.length
-        cdef Py_ssize_t nbytes = (n + 7) >> 3
-        cdef BoolVector out = BoolVector(<size_t> n)
-        cdef uint8_t* dst = <uint8_t*> out.ptr.data
-        for i in range(nbytes):
-            dst[i] = 0
-        for i in range(n):
-            if data[i] <= value:
-                dst[i >> 3] |= (1 << (i & 7))
-        out.ptr.null_bitmap = NULL
-        return out
+        return self._compare_scalar(value, 5)
 
     cpdef BoolVector less_than_or_equals_vector(self, Int64Vector other):
-        cdef DrakenFixedBuffer* ptr1 = self.ptr
-        cdef DrakenFixedBuffer* ptr2 = other.ptr
-        cdef int64_t* data1 = <int64_t*> ptr1.data
-        cdef int64_t* data2 = <int64_t*> ptr2.data
-        cdef Py_ssize_t i, n = ptr1.length
-        if n != ptr2.length:
-            raise ValueError("Vectors must have the same length")
-        cdef Py_ssize_t nbytes = (n + 7) >> 3
-        cdef BoolVector out = BoolVector(<size_t> n)
-        cdef uint8_t* dst = <uint8_t*> out.ptr.data
-        for i in range(nbytes):
-            dst[i] = 0
-        for i in range(n):
-            if data1[i] <= data2[i]:
-                dst[i >> 3] |= (1 << (i & 7))
-        out.ptr.null_bitmap = NULL
-        return out
+        return self._compare_vector(other, 5)
 
     cpdef int64_t sum(self):
         cdef DrakenFixedBuffer* ptr = self.ptr

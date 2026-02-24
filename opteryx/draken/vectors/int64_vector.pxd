@@ -14,6 +14,9 @@ cdef class Int64Vector(Vector):
     cdef bint owns_data
 
     cpdef Int64Vector take(self, int32_t[::1] indices)
+    cdef bint _compare_int64_values(self, int64_t left, int64_t right, int op) nogil
+    cdef BoolVector _compare_scalar(self, int64_t value, int op)
+    cdef BoolVector _compare_vector(self, Int64Vector other, int op)
 
     cpdef BoolVector equals(self, int64_t value)
     cpdef BoolVector equals_vector(self, Int64Vector other)

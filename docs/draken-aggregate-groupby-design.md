@@ -378,6 +378,22 @@ Current behavior:
 5. Nullable float semantics are now preserved through shuffle partitioning (null bitmap preserved in `Float64Vector.take`), removing the previous nullable aggregate mismatch in post-shuffle group-by tests.
 6. Existing Phase 1/2 tests exercise the V2 semantics path and are passing.
 
+### Phase 3 Status: Deferred
+
+Spill-to-disk for high-cardinality state has been explicitly deferred. The in-memory path is considered sufficient for current workloads. Phase 3 remains in the design as a future option but is not scheduled.
+
+Decision recorded: see Decisions Captured entry 9 (Spill deferred).
+
+### Phase 6 Status: Completed
+
+Engine wiring is in place:
+
+1. `DrakenAggregateAndGroupNode` is wired into the physical planner under `USE_DRAKEN_AGGREGATOR` / `ENABLE_NATIVE_AGGREGATOR` feature flags.
+2. Legacy `AggregateAndGroupNode` and `SimpleAggregateAndGroupNode` remain as fallback paths when the flag is disabled or the aggregate shape is unsupported.
+3. Unit tests covering planner flag routing are passing:
+- `tests/unit/planner/test_physical_planner_draken_agg_flag.py`
+4. `DrakenAggregateAndGroupNode.supports()` gates operator selection; unsupported shapes raise `UnsupportedSyntaxError` when the Draken flag is on.
+
 ---
 
 ## Risks
@@ -405,8 +421,7 @@ Current behavior:
 ## Next Steps / TODOs
 
 The work will be tracked directly in this document rather than via
-external issue trackers. Below are the immediate action items to move from
-Phase 2 completion into Phase 3.
+external issue trackers.
 
 * **Baseline harness polish** – completed:
   unit/integration baseline coverage is in place and nullable semantics
@@ -417,20 +432,19 @@ Phase 2 completion into Phase 3.
 * **ShuffleGroupByOperationV2 wrapper** – completed:
   `ShuffleGroupByOperationV2` exists, requires compiled backend, and is used
   by current benchmarks/golden tests.
-* **Expression bridge stub** – implement a minimal
-  `evaluate_and_append_draken` that handles the small set of expressions
-  used by ClickBench queries and returns an error for anything else.
-* **Memory budget decision** – choose whether the budget is derived from
-  configuration, session limits, or a hard-coded constant and document the
-  chosen source here.
-* **Spill manager sketch** – draft the skeleton of `GroupBySpillManager` in
-  Python/Cython, reusing the shuffle spill interfaces; identify any
-  missing APIs and log them in the doc.
-* **Telemetry wiring** – map each of the listed readings to specific loops
-  in the code so that implementers know where to increment them.
-
-These items correspond to the Phase 1 and early Phase 2 tasks outlined
-previously.
+* **Engine wiring** – completed (Phase 6):
+  `DrakenAggregateAndGroupNode` is selected by the physical planner under
+  feature flags; planner routing tests are passing.
+* **Spill manager** – deferred (Phase 3):
+  `GroupBySpillManager` and the associated memory budget decision are not
+  being pursued in the current cycle.  Revisit when workload analysis shows
+  in-memory state regularly exceeding available budget.
+* **Expression bridge stub** – outstanding:
+  A minimal `evaluate_and_append_draken` covering ClickBench expression
+  shapes is still needed.  Until then, non-identifier group expressions fall
+  back to the Arrow evaluation path inside `DrakenAggregateAndGroupNode`.
+* **Telemetry wiring** – outstanding:
+  Map each listed reading to specific loops in the code.
 
 ## Decisions Captured
 
@@ -463,5 +477,10 @@ previously.
 8. Distinct state structure:
 - Use per-group distinct hash structures.
 - This supports future fan-out/distributed work partitioning.
+
+9. Spill deferred:
+- Phase 3 (spill-to-disk) is deferred indefinitely.
+- The in-memory path is sufficient for current workloads.
+- Spill infrastructure should be revisited if high-cardinality workloads demonstrate consistent memory pressure.
 
 ---

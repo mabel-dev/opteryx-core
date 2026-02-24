@@ -12,6 +12,7 @@
 #include "decode_page.hpp"
 #include "compression.hpp"
 #include "metadata.hpp"
+#include "telemetry.hpp"
 #include <fstream>
 #include <iostream>
 #include <vector>
@@ -72,16 +73,19 @@ DecodedTable ReadParquet(const uint8_t *data, size_t size,
                          const std::vector<std::string> &column_names) {
   DecodedTable table;
   try {
+    RUGO_TEL_START(_meta_t0);
     FileStats metadata = ReadParquetMetadataFromBuffer(data, size);
+    RUGO_TEL_ACCUM(rugo_tel::metadata_s, _meta_t0);
 
     table.column_names = column_names;
     table.row_groups.resize(metadata.row_groups.size());
 
     for (size_t rg_idx = 0; rg_idx < metadata.row_groups.size(); rg_idx++) {
       const RowGroupStats &row_group = metadata.row_groups[rg_idx];
-      table.row_groups[rg_idx].resize(column_names.size());
+      size_t ncols = column_names.size();
+      table.row_groups[rg_idx].resize(ncols);
 
-      for (size_t col_idx = 0; col_idx < column_names.size(); col_idx++) {
+      for (size_t col_idx = 0; col_idx < ncols; col_idx++) {
         table.row_groups[rg_idx][col_idx] = DecodeColumnFromMemory(
             data, size, column_names[col_idx], row_group, (int)rg_idx);
       }

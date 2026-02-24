@@ -20,7 +20,7 @@ Used for high-performance temporal analytics and columnar data processing in Dra
 
 from cpython.bytes cimport PyBytes_FromStringAndSize, PyBytes_AS_STRING
 from cpython.mem cimport PyMem_Malloc, PyMem_Free
-from libc.string cimport memset
+from libc.string cimport memset, memcpy
 
 from libc.stdint cimport int32_t
 from libc.stdint cimport int64_t
@@ -38,6 +38,7 @@ from opteryx.draken.core.fixed_vector cimport buf_itemsize
 from opteryx.draken.core.fixed_vector cimport buf_length
 from opteryx.draken.core.fixed_vector cimport free_fixed_buffer
 from opteryx.draken.vectors.vector cimport MIX_HASH_CONSTANT, Vector, NULL_HASH, mix_hash, simd_mix_hash
+from opteryx.draken.vectors.bool_vector cimport BoolVector
 
 DEF DATE32_HASH_CHUNK = 1024
 
@@ -119,71 +120,66 @@ cdef class Date32Vector(Vector):
             dst[i] = src[indices[i]]
         return out
 
-    cpdef int8_t[::1] equals(self, int32_t value):
-        cdef DrakenFixedBuffer* ptr = self.ptr
-        cdef int32_t* data = <int32_t*> ptr.data
-        cdef Py_ssize_t i, n = ptr.length
-        cdef int8_t* buf = <int8_t*> PyMem_Malloc(n)
-        if buf == NULL:
-            raise MemoryError()
-        for i in range(n):
-            buf[i] = 1 if data[i] == value else 0
-        return <int8_t[:n]> buf
+    cdef inline bint _compare_date_values(self, int32_t left, int32_t right, int op) nogil:
+        if op == 0:
+            return left == right
+        if op == 1:
+            return left != right
+        if op == 2:
+            return left > right
+        if op == 3:
+            return left >= right
+        if op == 4:
+            return left < right
+        return left <= right
 
-    cpdef int8_t[::1] not_equals(self, int32_t value):
+    cdef BoolVector _compare_scalar(self, int32_t value, int op):
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef int32_t* data = <int32_t*> ptr.data
+        cdef uint8_t* src_null = ptr.null_bitmap
         cdef Py_ssize_t i, n = ptr.length
-        cdef int8_t* buf = <int8_t*> PyMem_Malloc(n)
-        if buf == NULL:
-            raise MemoryError()
-        for i in range(n):
-            buf[i] = 1 if data[i] != value else 0
-        return <int8_t[:n]> buf
+        cdef Py_ssize_t nbytes = (n + 7) >> 3
+        cdef BoolVector out = BoolVector(<size_t>n)
+        cdef uint8_t* dst = <uint8_t*> out.ptr.data
+        cdef uint8_t* out_null = NULL
+        cdef uint8_t mask
 
-    cpdef int8_t[::1] greater_than(self, int32_t value):
-        cdef DrakenFixedBuffer* ptr = self.ptr
-        cdef int32_t* data = <int32_t*> ptr.data
-        cdef Py_ssize_t i, n = ptr.length
-        cdef int8_t* buf = <int8_t*> PyMem_Malloc(n)
-        if buf == NULL:
-            raise MemoryError()
-        for i in range(n):
-            buf[i] = 1 if data[i] > value else 0
-        return <int8_t[:n]> buf
+        memset(dst, 0, nbytes)
+        if src_null != NULL and nbytes != 0:
+            out_null = <uint8_t*> malloc(nbytes)
+            if out_null == NULL:
+                raise MemoryError()
+            memcpy(out_null, src_null, nbytes)
+            if (n & 7) != 0:
+                mask = <uint8_t>((1 << (n & 7)) - 1)
+                out_null[nbytes - 1] &= mask
+            out.ptr.null_bitmap = out_null
+        else:
+            out.ptr.null_bitmap = NULL
 
-    cpdef int8_t[::1] greater_than_or_equals(self, int32_t value):
-        cdef DrakenFixedBuffer* ptr = self.ptr
-        cdef int32_t* data = <int32_t*> ptr.data
-        cdef Py_ssize_t i, n = ptr.length
-        cdef int8_t* buf = <int8_t*> PyMem_Malloc(n)
-        if buf == NULL:
-            raise MemoryError()
         for i in range(n):
-            buf[i] = 1 if data[i] >= value else 0
-        return <int8_t[:n]> buf
+            if src_null == NULL or ((src_null[i >> 3] >> (i & 7)) & 1):
+                if self._compare_date_values(data[i], value, op):
+                    dst[i >> 3] |= (1 << (i & 7))
+        return out
 
-    cpdef int8_t[::1] less_than(self, int32_t value):
-        cdef DrakenFixedBuffer* ptr = self.ptr
-        cdef int32_t* data = <int32_t*> ptr.data
-        cdef Py_ssize_t i, n = ptr.length
-        cdef int8_t* buf = <int8_t*> PyMem_Malloc(n)
-        if buf == NULL:
-            raise MemoryError()
-        for i in range(n):
-            buf[i] = 1 if data[i] < value else 0
-        return <int8_t[:n]> buf
+    cpdef BoolVector equals(self, int32_t value):
+        return self._compare_scalar(value, 0)
 
-    cpdef int8_t[::1] less_than_or_equals(self, int32_t value):
-        cdef DrakenFixedBuffer* ptr = self.ptr
-        cdef int32_t* data = <int32_t*> ptr.data
-        cdef Py_ssize_t i, n = ptr.length
-        cdef int8_t* buf = <int8_t*> PyMem_Malloc(n)
-        if buf == NULL:
-            raise MemoryError()
-        for i in range(n):
-            buf[i] = 1 if data[i] <= value else 0
-        return <int8_t[:n]> buf
+    cpdef BoolVector not_equals(self, int32_t value):
+        return self._compare_scalar(value, 1)
+
+    cpdef BoolVector greater_than(self, int32_t value):
+        return self._compare_scalar(value, 2)
+
+    cpdef BoolVector greater_than_or_equals(self, int32_t value):
+        return self._compare_scalar(value, 3)
+
+    cpdef BoolVector less_than(self, int32_t value):
+        return self._compare_scalar(value, 4)
+
+    cpdef BoolVector less_than_or_equals(self, int32_t value):
+        return self._compare_scalar(value, 5)
 
     cpdef int32_t min(self):
         cdef DrakenFixedBuffer* ptr = self.ptr

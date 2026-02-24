@@ -24,7 +24,7 @@ from cpython.mem cimport PyMem_Calloc
 from cpython.mem cimport PyMem_Free
 from cpython.mem cimport PyMem_Malloc
 from libc.string cimport strlen
-from libc.stdint cimport int32_t, int64_t
+from libc.stdint cimport int32_t, int64_t, uint8_t
 from libc.stdint cimport uint64_t
 
 from opteryx.draken.core.buffers cimport (
@@ -47,6 +47,7 @@ from opteryx.draken.core.buffers cimport (
     DRAKEN_TIMESTAMP64,
 )
 from opteryx.draken.vectors.vector cimport Vector
+from opteryx.draken.vectors.bool_vector cimport BoolVector
 from opteryx.draken.interop.arrow cimport vector_from_arrow
 import pyarrow as pa
 
@@ -497,9 +498,143 @@ cdef class Morsel:
 
         # Apply row filtering (mask) if specified
         if mask is not None:
-            result._take_inplace(mask)
+            if result._looks_like_boolean_mask(mask):
+                result._filter_mask_inplace(mask)
+            else:
+                result._take_inplace(mask)
 
         return result
+
+    def filter_mask(self, mask) -> Morsel:
+        """
+        Filter rows using a boolean mask (True keeps row, False/None drops row).
+
+        Args:
+            mask: BoolVector or boolean-like sequence with length == num_rows.
+
+        Returns:
+            Morsel: Self (for method chaining)
+        """
+        self._filter_mask_inplace(mask)
+        return self
+
+    cdef bint _looks_like_boolean_mask(self, object mask):
+        cdef object dtype
+        cdef object item
+
+        if isinstance(mask, BoolVector):
+            return True
+
+        # Arrow boolean arrays/chunked arrays
+        try:
+            if hasattr(mask, "type") and pa.types.is_boolean(mask.type):
+                return True
+        except Exception:
+            pass
+
+        # NumPy/pandas boolean arrays/series
+        try:
+            dtype = getattr(mask, "dtype", None)
+            if dtype is not None and str(dtype) in ("bool", "bool_"):
+                return True
+        except Exception:
+            pass
+
+        if isinstance(mask, (list, tuple)):
+            if len(mask) == 0:
+                return False
+            for item in mask:
+                if item is None:
+                    continue
+                if not isinstance(item, bool):
+                    return False
+            return True
+
+        return False
+
+    cdef void _filter_mask_inplace(self, object mask):
+        cdef Py_ssize_t i
+        cdef Py_ssize_t n_rows = self.ptr.num_rows
+        cdef Py_ssize_t selected = 0
+        cdef int32_t* indices_ptr = NULL
+        cdef int32_t[::1] indices_view
+        cdef BoolVector bool_mask
+        cdef uint8_t* data_bits
+        cdef uint8_t* valid_bits
+        cdef object py_mask
+        cdef object item
+        cdef bint keep
+
+        if n_rows == 0:
+            self._empty_inplace()
+            return
+
+        indices_ptr = <int32_t*> PyMem_Malloc(n_rows * sizeof(int32_t))
+        if indices_ptr == NULL:
+            raise MemoryError()
+
+        try:
+            if isinstance(mask, BoolVector):
+                bool_mask = <BoolVector> mask
+                if bool_mask.length != n_rows:
+                    raise ValueError(
+                        f"Boolean mask length {bool_mask.length} does not match morsel row count {n_rows}"
+                    )
+
+                data_bits = <uint8_t*> bool_mask.ptr.data
+                valid_bits = bool_mask.ptr.null_bitmap
+
+                for i in range(n_rows):
+                    if valid_bits != NULL and ((valid_bits[i >> 3] >> (i & 7)) & 1) == 0:
+                        continue
+                    if ((data_bits[i >> 3] >> (i & 7)) & 1) != 0:
+                        indices_ptr[selected] = <int32_t> i
+                        selected += 1
+
+                indices_view = <int32_t[:selected]> indices_ptr
+                self._take_inplace(indices_view)
+                return
+
+            if hasattr(mask, "to_pylist"):
+                py_mask = mask.to_pylist()
+            elif hasattr(mask, "tolist"):
+                py_mask = mask.tolist()
+            else:
+                py_mask = mask
+
+            if not hasattr(py_mask, "__len__"):
+                raise TypeError("filter_mask expects a boolean sequence")
+            if not hasattr(py_mask, "__getitem__"):
+                py_mask = list(py_mask)
+
+            if len(py_mask) != n_rows:
+                raise ValueError(
+                    f"Boolean mask length {len(py_mask)} does not match morsel row count {n_rows}"
+                )
+
+            for i in range(n_rows):
+                item = py_mask[i]
+                if hasattr(item, "as_py"):
+                    item = item.as_py()
+                elif hasattr(item, "item"):
+                    try:
+                        item = item.item()
+                    except Exception:
+                        pass
+                if item is None:
+                    continue
+                if isinstance(item, bool):
+                    keep = <bint> item
+                    if keep:
+                        indices_ptr[selected] = <int32_t> i
+                        selected += 1
+                    continue
+                raise TypeError("filter_mask expects booleans or nulls")
+
+            indices_view = <int32_t[:selected]> indices_ptr
+            self._take_inplace(indices_view)
+        finally:
+            PyMem_Free(indices_ptr)
 
     def empty(self) -> Morsel:
         """

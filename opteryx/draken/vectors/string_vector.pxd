@@ -2,6 +2,7 @@
 
 from libc.stdint cimport int32_t, int8_t, intptr_t, uint64_t, uint8_t
 from opteryx.draken.core.buffers cimport DrakenVarBuffer
+from opteryx.draken.vectors.bool_vector cimport BoolVector
 from opteryx.draken.vectors.vector cimport Vector
 
 
@@ -20,7 +21,7 @@ cdef class StringVector(Vector):
     cdef DrakenVarBuffer* ptr
     cdef bint owns_data
 
-    cpdef int8_t[::1] equals(self, bytes value)
+    cpdef BoolVector equals(self, bytes value)
     cdef void hash_into(self, uint64_t[::1] out_buf, Py_ssize_t offset=*) except *
     cpdef StringVector take(self, int32_t[::1] indices)
 

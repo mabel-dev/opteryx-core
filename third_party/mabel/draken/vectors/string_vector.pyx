@@ -57,6 +57,7 @@ cdef extern from *:
     void PREFETCH(const void* addr) nogil
 
 from opteryx.draken.vectors.vector cimport MIX_HASH_CONSTANT, Vector, NULL_HASH, mix_hash, simd_mix_hash
+from opteryx.draken.vectors.bool_vector cimport BoolVector
 
 DEF STRING_HASH_CHUNK = 256
 
@@ -236,17 +237,31 @@ cdef class StringVector(Vector):
         return count
 
     # Optimized equality check using SIMD-friendly operations
-    cpdef int8_t[::1] equals(self, bytes value):
+    cpdef BoolVector equals(self, bytes value):
         """
         Return mask: 1 if equal to value, else 0.
         Optimized version with reduced branching and better cache locality.
         """
         cdef DrakenVarBuffer* ptr = self.ptr
         cdef Py_ssize_t n = ptr.length
+        cdef Py_ssize_t nbytes = (n + 7) >> 3
         cdef uint8_t* nb_ptr = ptr.null_bitmap
-        cdef int8_t* buf = <int8_t*> PyMem_Malloc(n * sizeof(int8_t))
-        if buf == NULL:
-            raise MemoryError()
+        cdef BoolVector out = BoolVector(<size_t>n)
+        cdef uint8_t* dst = <uint8_t*> out.ptr.data
+        cdef uint8_t* out_null = NULL
+        cdef uint8_t mask
+        memset(dst, 0, nbytes)
+        if nb_ptr != NULL and nbytes != 0:
+            out_null = <uint8_t*> malloc(nbytes)
+            if out_null == NULL:
+                raise MemoryError()
+            memcpy(out_null, nb_ptr, nbytes)
+            if (n & 7) != 0:
+                mask = <uint8_t>((1 << (n & 7)) - 1)
+                out_null[nbytes - 1] &= mask
+            out.ptr.null_bitmap = out_null
+        else:
+            out.ptr.null_bitmap = NULL
 
         cdef char* val_ptr = PyBytes_AS_STRING(value)
         cdef Py_ssize_t val_len = len(value)
@@ -257,7 +272,6 @@ cdef class StringVector(Vector):
         for i in range(n):
             # Check null first (most likely to fail)
             if nb_ptr != NULL and ((nb_ptr[i >> 3] >> (i & 7)) & 1) == 0:
-                buf[i] = 0
                 continue
             
             start = ptr.offsets[i]
@@ -266,12 +280,12 @@ cdef class StringVector(Vector):
             
             # Length check before expensive memcmp
             if str_len != val_len:
-                buf[i] = 0
                 continue
 
-            buf[i] = 1 if memcmp(<char*>ptr.data + start, val_ptr, str_len) == 0 else 0
+            if memcmp(<char*>ptr.data + start, val_ptr, str_len) == 0:
+                dst[i >> 3] |= (1 << (i & 7))
 
-        return <int8_t[:n]> buf
+        return out
     
     cpdef list to_pylist(self):
         cdef DrakenVarBuffer* ptr = self.ptr
