@@ -981,20 +981,11 @@ _ENCODING_INT = {
 }
 
 
-def decode_column_from_chunk(chunk_bytes, col_stats):
-    """Decode a single column from an isolated range-read buffer.
+def decode_column_from_chunk_to_python(chunk_bytes, col_stats):
+    """Decode a single column from an isolated range-read buffer, returning a Python list.
 
-    This is the primary API for the columnar range-read design.  Rather than
-    passing the entire file into memory, the caller:
-
-      1. Reads only the bytes for this column chunk via read_ranges()
-         (from base_offset = min(dict_page_offset, data_page_offset) for
-          total_compressed_size bytes).
-      2. Passes those bytes here along with the column stats dict returned
-         by read_metadata() for the matching (row_group, column).
-
-    The function adjusts all absolute file offsets in col_stats to be
-    chunk-relative before calling the C++ DecodeColumnFromChunk.
+    For compatibility: returns a Python list instead of a Draken vector.
+    Prefer decode_column_from_chunk() which returns Draken vectors directly.
 
     Args:
         chunk_bytes: bytes / bytearray / memoryview — the raw column chunk.
@@ -1088,6 +1079,140 @@ def decode_column_from_chunk(chunk_bytes, col_stats):
         return list(result.float32_values)
     elif col_type == "float64":
         return list(result.float64_values)
+    else:
+        return None
+
+
+def decode_column_from_chunk(chunk_bytes, col_stats):
+    """Decode a single column from an isolated range-read buffer (default: returns Draken Vector).
+
+    This is the primary API for the columnar range-read design.  Rather than
+    passing the entire file into memory, the caller:
+
+      1. Reads only the bytes for this column chunk via read_ranges()
+         (from base_offset = min(dict_page_offset, data_page_offset) for
+          total_compressed_size bytes).
+      2. Passes those bytes here along with the column stats dict returned
+         by read_metadata() for the matching (row_group, column).
+
+    The function adjusts all absolute file offsets in col_stats to be
+    chunk-relative before calling the C++ DecodeColumnFromChunk.
+
+    Args:
+        chunk_bytes: bytes / bytearray / memoryview — the raw column chunk.
+        col_stats:   dict — one column entry from read_metadata()['row_groups'][rg]['columns'][i].
+
+    Returns a Draken Vector (Int64Vector, StringVector, Float64Vector, BoolVector, or ArrayVector),
+    or None on failure.
+    """
+    cdef const uint8_t[::1] mem_view
+    cdef size_t size
+    cdef parquet_reader.ColumnStats cpp_col
+    cdef parquet_reader.DecodedColumn result
+    cdef str col_type
+    cdef int32_t num_rows
+    cdef Py_ssize_t i
+    cdef dict_off
+    cdef data_off
+    cdef base_offset
+    cdef Float64Vector vec
+    cdef double* dst
+
+    if isinstance(chunk_bytes, (bytes, bytearray)):
+        mem_view = memoryview(chunk_bytes).cast('B')
+    elif isinstance(chunk_bytes, memoryview):
+        mem_view = chunk_bytes.cast('B')
+    else:
+        raise TypeError("chunk_bytes must be bytes, bytearray, or memoryview")
+
+    size = mem_view.shape[0]
+
+    # -----------------------------------------------------------------------
+    # Compute base_offset: the earliest byte of this column chunk in the file.
+    # All offsets stored in col_stats are absolute file positions; we subtract
+    # base_offset so they become offsets into chunk_bytes.
+    # -----------------------------------------------------------------------
+    dict_off = col_stats.get('dictionary_page_offset')
+    data_off = col_stats['data_page_offset']
+
+    if dict_off is not None and dict_off >= 0 and dict_off < data_off:
+        base_offset = dict_off
+    else:
+        base_offset = data_off
+
+    # -----------------------------------------------------------------------
+    # Populate cpp_col with chunk-relative offsets
+    # -----------------------------------------------------------------------
+    cpp_col.name = (col_stats.get('name') or '').encode('utf-8')
+    cpp_col.physical_type = (col_stats.get('physical_type') or '').encode('utf-8')
+
+    logical = col_stats.get('logical_type') or ''
+    cpp_col.logical_type = logical.encode('utf-8')
+
+    cpp_col.num_values             = col_stats.get('num_values') if col_stats.get('num_values') is not None else -1
+    cpp_col.total_uncompressed_size = col_stats.get('total_uncompressed_size') if col_stats.get('total_uncompressed_size') is not None else -1
+    cpp_col.total_compressed_size   = col_stats.get('total_compressed_size') if col_stats.get('total_compressed_size') is not None else -1
+
+    # Adjust absolute file offsets → chunk-relative
+    cpp_col.data_page_offset = (data_off - base_offset) if data_off is not None and data_off >= 0 else -1
+    cpp_col.index_page_offset = -1
+    cpp_col.dictionary_page_offset = (dict_off - base_offset) if dict_off is not None and dict_off >= 0 else -1
+
+    cpp_col.null_count     = col_stats.get('null_count')     if col_stats.get('null_count')     is not None else -1
+    cpp_col.distinct_count = col_stats.get('distinct_count') if col_stats.get('distinct_count') is not None else -1
+    cpp_col.bloom_offset   = -1
+    cpp_col.bloom_length   = -1
+
+    _tmp = col_stats.get('max_definition_level')
+    cpp_col.max_definition_level = _tmp if _tmp is not None else 0
+    _tmp = col_stats.get('max_repetition_level')
+    cpp_col.max_repetition_level = _tmp if _tmp is not None else 0
+
+    # Convert codec string → int (e.g. 'SNAPPY' → 1)
+    codec_str = col_stats.get('compression_codec') or 'UNCOMPRESSED'
+    cpp_col.codec = _CODEC_INT.get(codec_str, 0)
+
+    # Convert encoding strings → ints (e.g. ['PLAIN', 'RLE_DICTIONARY'] → [0, 8])
+    for enc_str in (col_stats.get('encodings') or []):
+        enc_int = _ENCODING_INT.get(enc_str, -1)
+        if enc_int >= 0:
+            cpp_col.encodings.push_back(enc_int)
+    if cpp_col.encodings.empty():
+        cpp_col.encodings.push_back(0)  # default: PLAIN
+
+    result = parquet_reader.DecodeColumnFromChunk(
+        &mem_view[0], size, &cpp_col)
+
+    if not result.success:
+        return None
+
+    col_type = result.type.decode("utf-8")
+    num_rows = <int32_t>result.num_rows
+
+    # Convert C++ DecodedColumn to Draken Vector using the same logic as read_parquet()
+    if col_type == "int32":
+        return _make_int64_from_int32_vector(result, num_rows)
+    
+    elif col_type == "int64":
+        return _make_int64_vector(result, num_rows)
+    
+    elif col_type == "byte_array":
+        return _make_string_vector(result, num_rows)
+    
+    elif col_type == "boolean":
+        return _make_bool_vector(result, num_rows)
+    
+    elif col_type == "float32":
+        # For float32, we upcast to float64 like we do int32→int64
+        vec = Float64Vector(num_rows)
+        dst = <double*> vec.ptr.data
+        for i in range(num_rows):
+            dst[i] = <double> result.float32_values[i]
+        return vec
+    
+    elif col_type == "float64":
+        return _make_float64_vector(result, num_rows)
+    
     else:
         return None
 
