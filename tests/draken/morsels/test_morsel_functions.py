@@ -159,6 +159,41 @@ def test_copy_mask_accepts_arrow_array_and_empty_selection():
     assert empty_filtered.num_columns == 1
 
 
+def test_filter_mask_accepts_bool_vector_and_nulls():
+    """Boolean vector masks should keep True rows and drop False/null rows."""
+    table = pa.table({"a": [10, 20, 30, 40]})
+    morsel = draken.Morsel.from_arrow(table)
+
+    mask = draken.Vector.from_arrow(pa.array([True, None, False, True], type=pa.bool_()))
+    result = morsel.filter_mask(mask)
+
+    assert result is morsel
+    assert morsel.shape == (2, 1)
+    assert morsel.column(b"a").to_pylist() == [10, 40]
+
+
+def test_copy_mask_accepts_python_boolean_mask():
+    """copy(mask=...) should detect pure-boolean masks and route to filter semantics."""
+    table = pa.table({"a": [1, 2, 3, 4]})
+    morsel = draken.Morsel.from_arrow(table)
+
+    filtered = morsel.copy(mask=[True, False, None, True])
+    assert filtered.shape == (2, 1)
+    assert filtered.column(b"a").to_pylist() == [1, 4]
+
+
+def test_filter_mask_accepts_numpy_boolean_array():
+    """NumPy bool masks should be treated as boolean filters."""
+    import numpy as np
+
+    table = pa.table({"a": [1, 2, 3, 4]})
+    morsel = draken.Morsel.from_arrow(table)
+
+    filtered = morsel.copy(mask=np.array([True, False, True, False], dtype=np.bool_))
+    assert filtered.shape == (2, 1)
+    assert filtered.column(b"a").to_pylist() == [1, 3]
+
+
 def test_take_method_signature():
     """Test that take method modifies morsel in-place and returns self."""
     table = pa.table({'a': [1, 2, 3, 4, 5], 'b': ['x', 'y', 'z', 'w', 'v']})

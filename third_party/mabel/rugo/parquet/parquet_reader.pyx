@@ -10,11 +10,68 @@
 import datetime
 import os
 import struct
+import time as _time
+
+# ---------------------------------------------------------------------------
+# Telemetry accumulators (reset with reset_telemetry(); read with get_telemetry())
+# ---------------------------------------------------------------------------
+_TEL = {
+    "cpp_decode_s":   0.0,   # time inside C++ ReadParquet()
+    "cython_int64_s": 0.0,   # _make_int64_vector / _make_int64_from_int32_vector
+    "cython_float_s": 0.0,   # _make_float64_vector
+    "cython_str_s":   0.0,   # _make_string_vector / _make_array_vector
+    "cython_bool_s":  0.0,   # _make_bool_vector
+    "cython_other_s": 0.0,   # anything else
+    "calls":          0,
+    "row_groups":      0,
+    "columns":         0,
+}
+
+
+def reset_telemetry():
+    """Zero all telemetry counters."""
+    for k in _TEL:
+        _TEL[k] = 0
+
+
+def get_telemetry():
+    """Return a copy of the current telemetry dict."""
+    return dict(_TEL)
+
+# ---------------------------------------------------------------------------
+# C++ phase telemetry (reset_cpp_telemetry / get_cpp_telemetry)
+# ---------------------------------------------------------------------------
+
+cdef extern from "telemetry.hpp" namespace "rugo_tel":
+    double metadata_s
+    double decompress_s
+    double dict_parse_s
+    double rle_s
+    double val_expand_s
+    long long calls
+    void reset() nogil
+
+
+def reset_cpp_telemetry():
+    """Zero all C++ phase telemetry accumulators."""
+    reset()
+
+
+def get_cpp_telemetry():
+    """Return a dict with C++ phase timing (seconds) since last reset."""
+    return {
+        "metadata_s":    metadata_s,
+        "decompress_s":  decompress_s,
+        "dict_parse_s":  dict_parse_s,
+        "rle_s":         rle_s,
+        "val_expand_s":  val_expand_s,
+        "calls":         calls,
+    }
 
 cimport parquet_reader
 from libc.stdint cimport uint8_t, int32_t, int64_t
 from libc.stdlib cimport malloc, free
-from libc.string cimport memcpy
+from libc.string cimport memcpy, memset
 from libcpp.string cimport string
 from libcpp.vector cimport vector
 
@@ -23,6 +80,7 @@ from opteryx.draken.vectors.int64_vector cimport Int64Vector
 from opteryx.draken.vectors.float64_vector cimport Float64Vector
 from opteryx.draken.vectors.string_vector cimport StringVector, StringVectorBuilder
 from opteryx.draken.vectors.bool_vector cimport BoolVector, bool_vector_from_bits
+from opteryx.draken.core.buffers cimport DrakenVarBuffer
 from opteryx.draken.vectors.array_vector cimport ArrayVector, array_vector_from_parts
 from opteryx.draken.vectors.vector cimport Vector
 from opteryx.draken.morsels.morsel cimport Morsel
@@ -440,9 +498,8 @@ cdef Int64Vector _make_int64_vector(
         memcpy(nb, decoded_col.valid_bits.data(), nb_bytes)
         vec.ptr.null_bitmap = nb
     else:
-        # No nulls: bulk copy
-        for i in range(num_rows):
-            dst[i] = decoded_col.int64_values[i]
+        # No nulls: bulk copy via memcpy (avoids Cython loop overhead)
+        memcpy(dst, decoded_col.int64_values.data(), <size_t>num_rows * sizeof(int64_t))
     
     return vec
 
@@ -471,8 +528,8 @@ cdef Float64Vector _make_float64_vector(
         memcpy(nb, decoded_col.valid_bits.data(), nb_bytes)
         vec.ptr.null_bitmap = nb
     else:
-        for i in range(num_rows):
-            dst[i] = decoded_col.float64_values[i]
+        # No nulls: bulk copy via memcpy (avoids Cython loop overhead)
+        memcpy(dst, decoded_col.float64_values.data(), <size_t>num_rows * sizeof(double))
     
     return vec
 
@@ -480,64 +537,119 @@ cdef Float64Vector _make_float64_vector(
 cdef StringVector _make_string_vector(
         parquet_reader.DecodedColumn& decoded_col,
         int32_t num_rows):
-    """Build a StringVector from a DecodedColumn with string values."""
-    cdef Py_ssize_t val_idx = 0
-    cdef Py_ssize_t i
-    cdef Py_ssize_t estimated_bytes = 0
-    cdef Py_ssize_t num_values = decoded_col.string_values.size()
+    """Build a StringVector from a DecodedColumn with string values.
+
+    Dict-mode path uses direct DrakenVarBuffer writes — no per-row function
+    calls into StringVectorBuilder:
+      1. Pre-materialise the compact dictionary as C ptr+len arrays (D<<N entries).
+      2. Count total bytes in one tight loop.
+      3. Allocate StringVector with exact capacity.
+      4. Expand: fill offsets[] + memcpy string data in one tight loop.
+    """
+    cdef Py_ssize_t i, d, val_idx
+    cdef Py_ssize_t num_values  = decoded_col.string_values.size()
+    cdef Py_ssize_t num_indices = decoded_col.dict_indices.size()
+    cdef Py_ssize_t num_dict
+    cdef Py_ssize_t estimated_bytes
     cdef int32_t dict_idx
-    cdef StringVectorBuilder dict_builder
+    cdef int32_t total_bytes
+    cdef int32_t offset, slen
+    cdef Py_ssize_t nb_bytes
+    cdef const char* sptr
+    cdef const char** dict_ptrs
+    cdef int32_t* dict_lens
+    cdef StringVector vec
+    cdef DrakenVarBuffer* buf
+    cdef char* dst
+    cdef int32_t* offsets
+    cdef uint8_t* nb
     cdef StringVectorBuilder builder
+    cdef const uint8_t* arena_data
 
     # ── Dict mode ─────────────────────────────────────────────────────────────
-    # string_values holds only the compact dictionary; dict_indices has one
-    # entry per (non-null) row pointing into string_values.
-    if decoded_col.dict_indices.size() > 0:
-        # Walk all dict_indices once to compute exact byte budget.
-        for i in range(<Py_ssize_t>decoded_col.dict_indices.size()):
-            dict_idx = decoded_col.dict_indices[i]
-            estimated_bytes += decoded_col.string_values[dict_idx].size()
-        if estimated_bytes == 0:
-            estimated_bytes = 1
-        else:
-            estimated_bytes = (estimated_bytes * 110) // 100
+    # C++ stores: string_dict_arena = flat packed bytes, string_dict_offsets/lens
+    # = per-entry index, dict_indices = one index per (non-null) row.
+    # We bypass StringVectorBuilder entirely and write directly to the
+    # DrakenVarBuffer data/offsets pointers to eliminate per-row call overhead.
+    if num_indices > 0:
+        num_dict = <Py_ssize_t>decoded_col.string_dict_lens.size()
+        arena_data = decoded_col.string_dict_arena.data()
 
-        dict_builder = StringVectorBuilder(num_rows, estimated_bytes, resizable=True)
+        # Step 1: pre-materialise dictionary as C pointer+length arrays
+        # One pass over D << N entries — very cheap.
+        dict_ptrs = <const char**>malloc(num_dict * sizeof(const char*))
+        dict_lens = <int32_t*>malloc(num_dict * sizeof(int32_t))
+        if dict_ptrs == NULL or dict_lens == NULL:
+            free(dict_ptrs)
+            free(dict_lens)
+            raise MemoryError()
+        for d in range(num_dict):
+            dict_ptrs[d] = <const char*>(arena_data + decoded_col.string_dict_offsets[d])
+            dict_lens[d] = decoded_col.string_dict_lens[d]
 
-        if decoded_col.valid_bits.size() > 0:
+        # Step 2: count total expanded bytes — tight loop, no Python overhead.
+        total_bytes = 0
+        for i in range(num_indices):
+            total_bytes += dict_lens[decoded_col.dict_indices[i]]
+        if total_bytes == 0:
+            total_bytes = 1
+
+        # Step 3: allocate StringVector with exact capacity and grab raw ptrs.
+        vec = StringVector(num_rows, total_bytes)
+        buf = vec.ptr
+        dst = <char*>buf.data
+        offsets = buf.offsets
+        offset = 0
+
+        # Step 4a: non-null path — no null bitmap required, tightest inner loop.
+        if decoded_col.valid_bits.size() == 0:
             for i in range(num_rows):
+                offsets[i] = offset
+                dict_idx = decoded_col.dict_indices[i]
+                slen = dict_lens[dict_idx]
+                if slen > 0:
+                    memcpy(dst + offset, dict_ptrs[dict_idx], slen)
+                offset += slen
+            offsets[num_rows] = offset
+
+        else:
+            # Step 4b: nullable — allocate and fill validity bitmap.
+            nb_bytes = (num_rows + 7) >> 3
+            nb = <uint8_t*>malloc(nb_bytes)
+            if nb == NULL:
+                free(dict_ptrs)
+                free(dict_lens)
+                raise MemoryError()
+            memset(nb, 0, nb_bytes)
+            val_idx = 0
+            for i in range(num_rows):
+                offsets[i] = offset
                 if (decoded_col.valid_bits[i >> 3] >> (i & 7)) & 1:
                     dict_idx = decoded_col.dict_indices[val_idx]
-                    dict_builder.append_bytes(
-                        <const char*>decoded_col.string_values[dict_idx].data(),
-                        <Py_ssize_t>decoded_col.string_values[dict_idx].size()
-                    )
                     val_idx += 1
-                else:
-                    dict_builder.append_null()
-        else:
-            for i in range(num_rows):
-                dict_idx = decoded_col.dict_indices[i]
-                dict_builder.append_bytes(
-                    <const char*>decoded_col.string_values[dict_idx].data(),
-                    <Py_ssize_t>decoded_col.string_values[dict_idx].size()
-                )
+                    slen = dict_lens[dict_idx]
+                    if slen > 0:
+                        memcpy(dst + offset, dict_ptrs[dict_idx], slen)
+                    offset += slen
+                    nb[i >> 3] |= (1 << (i & 7))
+            offsets[num_rows] = offset
+            buf.null_bitmap = nb
 
-        return dict_builder.finish()
+        free(dict_ptrs)
+        free(dict_lens)
+        return vec
 
-    # ── Plain mode ────────────────────────────────────────────────────────────
-    # Estimate total bytes needed
+    # ── Plain mode ─────────────────────────────────────────────────────────────
+    estimated_bytes = 0
     for i in range(num_values):
         estimated_bytes += decoded_col.string_values[i].size()
-    
-    # Add some overhead
     if estimated_bytes == 0:
         estimated_bytes = 1
     else:
         estimated_bytes = (estimated_bytes * 110) // 100
-    
+
     builder = StringVectorBuilder(num_rows, estimated_bytes)
-    
+    val_idx = 0
     if decoded_col.valid_bits.size() > 0:
         for i in range(num_rows):
             if (decoded_col.valid_bits[i >> 3] >> (i & 7)) & 1:
@@ -554,7 +666,6 @@ cdef StringVector _make_string_vector(
                 <const char*>decoded_col.string_values[i].data(),
                 <Py_ssize_t>decoded_col.string_values[i].size()
             )
-    
     return builder.finish()
 
 
@@ -731,21 +842,15 @@ cdef ArrayVector _make_array_vector(
 def read_parquet(data, column_names=None):
     """Read parquet data from memory with optional column selection.
 
-    This is the primary API for reading parquet data. It returns a structure
-    organized as [row_group][column] containing the decoded values.
+    Designed for serial use; Opteryx achieves parallelism by running
+    multiple read_parquet calls concurrently across different files.
 
     Args:
         data: bytes, bytearray, or memoryview containing parquet data
         column_names: list of column names to read, or None to read all columns
 
     Returns:
-        dict with:
-            'success': bool indicating if read was successful
-            'column_names': list of column names (same as input, or all columns if None)
-            'row_groups': list of row groups, each containing list of columns
-                         Each column is a list of decoded values
-
-        Returns None if reading failed.
+        list of Morsels (one per row group), or None if reading failed.
     """
     cdef const uint8_t[::1] mem_view
     cdef size_t size
@@ -764,14 +869,18 @@ def read_parquet(data, column_names=None):
     # Call the appropriate C++ function based on whether columns are specified
     cdef parquet_reader.DecodedTable result
 
+    cdef double _t0, _t1
+
+    _t0 = _time.perf_counter()
     if column_names is None:
-        # Decode all columns
         result = parquet_reader.ReadParquet(&mem_view[0], size)
     else:
-        # Decode specified columns
         for name in column_names:
             cpp_column_names.push_back(str(name).encode("utf-8"))
         result = parquet_reader.ReadParquet(&mem_view[0], size, cpp_column_names)
+    _t1 = _time.perf_counter()
+    _TEL["cpp_decode_s"] += _t1 - _t0
+    _TEL["calls"] += 1
 
     if not result.success:
         return None
@@ -803,34 +912,184 @@ def read_parquet(data, column_names=None):
         vectors = []
         successful_col_names = []
 
+        _TEL["row_groups"] += 1
+
         for col_idx in range(<Py_ssize_t>result.row_groups[rg_idx].size()):
             column = result.row_groups[rg_idx][col_idx]
             if not column.success:
                 continue
 
             col_type = column.type.decode("utf-8")
+            _t0 = _time.perf_counter()
 
             if col_type == "int64":
                 vec = _make_int64_vector(column, num_rows)
+                _TEL["cython_int64_s"] += _time.perf_counter() - _t0
             elif col_type == "int32":
                 vec = _make_int64_from_int32_vector(column, num_rows)
+                _TEL["cython_int64_s"] += _time.perf_counter() - _t0
             elif col_type == "byte_array" and column.rep_levels.size() > 0:
                 vec = _make_array_vector(column)
+                _TEL["cython_str_s"] += _time.perf_counter() - _t0
             elif col_type == "byte_array":
                 vec = _make_string_vector(column, num_rows)
+                _TEL["cython_str_s"] += _time.perf_counter() - _t0
             elif col_type == "boolean":
                 vec = _make_bool_vector(column, num_rows)
+                _TEL["cython_bool_s"] += _time.perf_counter() - _t0
             elif col_type == "float64":
                 vec = _make_float64_vector(column, num_rows)
+                _TEL["cython_float_s"] += _time.perf_counter() - _t0
             else:
+                _TEL["cython_other_s"] += _time.perf_counter() - _t0
                 continue
 
+            _TEL["columns"] += 1
             vectors.append(vec)
             successful_col_names.append(col_names[col_idx])
 
         all_morsels.append(Morsel.from_vectors(successful_col_names, vectors))
 
     return all_morsels
+
+
+# ---------------------------------------------------------------------------
+# Codec / encoding string → integer maps (Parquet Thrift enum values)
+# Used by decode_column_from_chunk to convert read_metadata dict output back
+# to the integer fields expected by the C++ ColumnStats struct.
+# ---------------------------------------------------------------------------
+_CODEC_INT = {
+    'UNCOMPRESSED': 0,
+    'SNAPPY':       1,
+    'GZIP':         2,
+    'LZO':          3,
+    'BROTLI':       4,
+    'LZ4':          4,
+    'ZSTD':         6,
+    'LZ4_RAW':      7,
+}
+
+_ENCODING_INT = {
+    'PLAIN':             0,
+    'PLAIN_DICTIONARY':  2,
+    'RLE':               3,
+    'BIT_PACKED':        4,
+    'DELTA_BINARY_PACKED': 4,
+    'DELTA_LENGTH_BYTE_ARRAY': 6,
+    'DELTA_BYTE_ARRAY':  7,
+    'RLE_DICTIONARY':    8,
+}
+
+
+def decode_column_from_chunk(chunk_bytes, col_stats):
+    """Decode a single column from an isolated range-read buffer.
+
+    This is the primary API for the columnar range-read design.  Rather than
+    passing the entire file into memory, the caller:
+
+      1. Reads only the bytes for this column chunk via read_ranges()
+         (from base_offset = min(dict_page_offset, data_page_offset) for
+          total_compressed_size bytes).
+      2. Passes those bytes here along with the column stats dict returned
+         by read_metadata() for the matching (row_group, column).
+
+    The function adjusts all absolute file offsets in col_stats to be
+    chunk-relative before calling the C++ DecodeColumnFromChunk.
+
+    Args:
+        chunk_bytes: bytes / bytearray / memoryview — the raw column chunk.
+        col_stats:   dict — one column entry from read_metadata()['row_groups'][rg]['columns'][i].
+
+    Returns a Python list of decoded values, or None on failure.
+    """
+    cdef const uint8_t[::1] mem_view
+    cdef size_t size
+    cdef parquet_reader.ColumnStats cpp_col
+
+    if isinstance(chunk_bytes, (bytes, bytearray)):
+        mem_view = memoryview(chunk_bytes).cast('B')
+    elif isinstance(chunk_bytes, memoryview):
+        mem_view = chunk_bytes.cast('B')
+    else:
+        raise TypeError("chunk_bytes must be bytes, bytearray, or memoryview")
+
+    size = mem_view.shape[0]
+
+    # -----------------------------------------------------------------------
+    # Compute base_offset: the earliest byte of this column chunk in the file.
+    # All offsets stored in col_stats are absolute file positions; we subtract
+    # base_offset so they become offsets into chunk_bytes.
+    # -----------------------------------------------------------------------
+    dict_off = col_stats.get('dictionary_page_offset')
+    data_off = col_stats['data_page_offset']
+
+    if dict_off is not None and dict_off >= 0 and dict_off < data_off:
+        base_offset = dict_off
+    else:
+        base_offset = data_off
+
+    # -----------------------------------------------------------------------
+    # Populate cpp_col with chunk-relative offsets
+    # -----------------------------------------------------------------------
+    cpp_col.name = (col_stats.get('name') or '').encode('utf-8')
+    cpp_col.physical_type = (col_stats.get('physical_type') or '').encode('utf-8')
+
+    logical = col_stats.get('logical_type') or ''
+    cpp_col.logical_type = logical.encode('utf-8')
+
+    cpp_col.num_values             = col_stats.get('num_values') if col_stats.get('num_values') is not None else -1
+    cpp_col.total_uncompressed_size = col_stats.get('total_uncompressed_size') if col_stats.get('total_uncompressed_size') is not None else -1
+    cpp_col.total_compressed_size   = col_stats.get('total_compressed_size') if col_stats.get('total_compressed_size') is not None else -1
+
+    # Adjust absolute file offsets → chunk-relative
+    cpp_col.data_page_offset = (data_off - base_offset) if data_off is not None and data_off >= 0 else -1
+    cpp_col.index_page_offset = -1
+    cpp_col.dictionary_page_offset = (dict_off - base_offset) if dict_off is not None and dict_off >= 0 else -1
+
+    cpp_col.null_count     = col_stats.get('null_count')     if col_stats.get('null_count')     is not None else -1
+    cpp_col.distinct_count = col_stats.get('distinct_count') if col_stats.get('distinct_count') is not None else -1
+    cpp_col.bloom_offset   = -1
+    cpp_col.bloom_length   = -1
+
+    _tmp = col_stats.get('max_definition_level')
+    cpp_col.max_definition_level = _tmp if _tmp is not None else 0
+    _tmp = col_stats.get('max_repetition_level')
+    cpp_col.max_repetition_level = _tmp if _tmp is not None else 0
+
+    # Convert codec string → int (e.g. 'SNAPPY' → 1)
+    codec_str = col_stats.get('compression_codec') or 'UNCOMPRESSED'
+    cpp_col.codec = _CODEC_INT.get(codec_str, 0)
+
+    # Convert encoding strings → ints (e.g. ['PLAIN', 'RLE_DICTIONARY'] → [0, 8])
+    for enc_str in (col_stats.get('encodings') or []):
+        enc_int = _ENCODING_INT.get(enc_str, -1)
+        if enc_int >= 0:
+            cpp_col.encodings.push_back(enc_int)
+    if cpp_col.encodings.empty():
+        cpp_col.encodings.push_back(0)  # default: PLAIN
+
+    cdef parquet_reader.DecodedColumn result = parquet_reader.DecodeColumnFromChunk(
+        &mem_view[0], size, &cpp_col)
+
+    if not result.success:
+        return None
+
+    cdef str col_type = result.type.decode("utf-8")
+
+    if col_type == "int32":
+        return list(result.int32_values)
+    elif col_type == "int64":
+        return list(result.int64_values)
+    elif col_type == "byte_array":
+        return [_safe_decode_utf8(s) for s in result.string_values]
+    elif col_type == "boolean":
+        return [bool(val) for val in result.boolean_values]
+    elif col_type == "float32":
+        return list(result.float32_values)
+    elif col_type == "float64":
+        return list(result.float64_values)
+    else:
+        return None
 
 
 def decode_column_from_memory(data, str column_name, row_group_stats, int row_group_index):

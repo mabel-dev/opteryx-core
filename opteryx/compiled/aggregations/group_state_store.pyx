@@ -72,6 +72,7 @@ cdef class GroupStateStore:
     cdef flat_hash_map[uint64_t, int64_t] _int64_count_distinct_counts
     cdef flat_hash_map[uint64_t, flat_hash_set[uint64_t, IdentityHash]] _int64_count_distinct_seen
     cdef flat_hash_set[uint64_t, IdentityHash] _int64_count_distinct_null_key_seen
+    cdef object _specialized_kernel
 
     def __cinit__(self, list group_by_columns, list aggregations):
         cdef object aggregation
@@ -95,6 +96,7 @@ cdef class GroupStateStore:
         self._int64_count_distinct_mode = False
         self._int64_count_distinct_seen_null_key = False
         self._int64_count_distinct_null_key_count = 0
+        self._specialized_kernel = None
 
         for aggregation in aggregations:
             function = aggregation[1]
@@ -164,6 +166,21 @@ cdef class GroupStateStore:
         ):
             self._int64_count_distinct_mode = True
 
+        try:
+            from opteryx.compiled.aggregations.group_by_draken import build_specialized_kernel
+            self._specialized_kernel = build_specialized_kernel(
+                self._group_by_columns,
+                self._agg_function_codes,
+                self._agg_columns,
+            )
+        except Exception:
+            self._specialized_kernel = None
+
+        if self._specialized_kernel is not None:
+            self._int64_count_star_mode = False
+            self._int64_typed_mode = MODE_GENERAL
+            self._int64_count_distinct_mode = False
+
     @property
     def rows_seen(self):
         return self._rows_seen
@@ -218,6 +235,11 @@ cdef class GroupStateStore:
 
         row_count = morsel.num_rows
         self._rows_seen += row_count
+
+        if self._specialized_kernel is not None:
+            if self._specialized_kernel.ingest(morsel):
+                return
+            self._specialized_kernel = None
 
         single_mode = self._single_mode
 
@@ -648,6 +670,9 @@ cdef class GroupStateStore:
 
         single_mode = self._single_mode
 
+        if self._specialized_kernel is not None:
+            return self._specialized_kernel.finalize_rows()
+
         if self._int64_count_star_mode:
             if (
                 self._int64_count_star_counts.size() == 0
@@ -788,6 +813,9 @@ cdef class GroupStateStore:
         cdef object counts
         cdef int64_t[::1] key_view
         cdef int64_t[::1] count_view
+
+        if self._specialized_kernel is not None:
+            return self._specialized_kernel.finalize_fast_columns()
 
         # Fast output path for int64-key COUNT(*) and COUNT(DISTINCT int64).
         if self._int64_count_star_mode:

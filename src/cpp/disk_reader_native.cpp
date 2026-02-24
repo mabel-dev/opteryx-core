@@ -132,6 +132,42 @@ nb::object read_file_impl(nb::str path, bool sequential, bool willneed, bool dro
     return make_memoryview_from_object(buffer.ptr());
 }
 
+nb::object read_slice_impl(nb::str path, size_t offset, size_t length, 
+                           bool sequential, bool willneed, bool drop_after) {
+    const char* c_path = path.c_str();
+    size_t file_size = 0;
+
+    if (!stat_file_size(c_path, file_size)) {
+        raise_path_error(-errno, c_path, "Failed to stat file");
+    }
+
+    // Clamp to valid range
+    if (offset >= file_size) {
+        return make_empty_memoryview();
+    }
+
+    size_t to_read = (offset + length > file_size) ? (file_size - offset) : length;
+    
+    if (to_read == 0) {
+        return make_empty_memoryview();
+    }
+
+    nb::bytearray buffer(nullptr, to_read);
+    auto* dst = reinterpret_cast<unsigned char*>(buffer.data());
+    size_t out_len = 0;
+
+    int rc = read_slice_pread(c_path, offset, length, dst, &out_len, sequential, willneed, drop_after);
+    if (rc != 0) {
+        raise_path_error(rc, c_path, "Failed to read file slice");
+    }
+
+    if (out_len < to_read) {
+        buffer.resize(out_len);
+    }
+
+    return make_memoryview_from_object(buffer.ptr());
+}
+
 void parse_extensions(nb::handle extensions_obj, std::vector<std::string>& storage) {
     if (extensions_obj.is_none()) {
         throw nb::value_error("extensions must be provided");
@@ -178,6 +214,33 @@ NB_MODULE(disk_reader, m) {
             return nb::bytes(nb::module_::import_("builtins").attr("bytes")(mv));
         },
         nb::arg("path"),
+        nb::arg("sequential") = true,
+        nb::arg("willneed") = true,
+        nb::arg("drop_after") = false
+    );
+
+    m.def(
+        "read_file_slice",
+        [](nb::str path, size_t offset, size_t length, bool sequential, bool willneed, bool drop_after) {
+            return read_slice_impl(path, offset, length, sequential, willneed, drop_after);
+        },
+        nb::arg("path"),
+        nb::arg("offset"),
+        nb::arg("length"),
+        nb::arg("sequential") = true,
+        nb::arg("willneed") = true,
+        nb::arg("drop_after") = false
+    );
+
+    m.def(
+        "read_file_slice_to_bytes",
+        [](nb::str path, size_t offset, size_t length, bool sequential, bool willneed, bool drop_after) {
+            nb::object mv = read_slice_impl(path, offset, length, sequential, willneed, drop_after);
+            return nb::bytes(nb::module_::import_("builtins").attr("bytes")(mv));
+        },
+        nb::arg("path"),
+        nb::arg("offset"),
+        nb::arg("length"),
         nb::arg("sequential") = true,
         nb::arg("willneed") = true,
         nb::arg("drop_after") = false
@@ -325,6 +388,60 @@ NB_MODULE(disk_reader, m) {
             return nb::steal<nb::object>(mv);
         },
         nb::arg("path")
+    );
+
+    m.def(
+        "read_file_mmap_slice",
+        [](nb::str path, size_t offset, size_t length) {
+            const char* c_path = path.c_str();
+            unsigned char* mapped_data = nullptr;
+            size_t mapped_size = 0;
+
+            int rc = read_slice_mmap(c_path, offset, length, &mapped_data, &mapped_size);
+            if (rc != 0) {
+                raise_path_error(rc, c_path, "Failed to mmap file slice");
+            }
+
+            if (mapped_data == nullptr || mapped_size == 0) {
+                return make_empty_memoryview();
+            }
+
+            // For mmap slices, we need to track the base pointer and full mapping size
+            // The mapped_data pointer we got is already offset, so we need to figure out
+            // the actual base and size. We'll store this in our tracking map.
+            // Load the file again to get the base (this is needed for proper cleanup)
+            unsigned char* base_ptr = nullptr;
+            size_t base_size = 0;
+            int rc_base = read_all_mmap(c_path, &base_ptr, &base_size);
+            
+            if (rc_base != 0) {
+                // Cleanup the slice we mapped
+                unsigned char* cleanup_ptr = mapped_data - offset;
+                unmap_memory_c(cleanup_ptr, base_size);
+                raise_path_error(rc_base, c_path, "Failed to track mmap base for slice");
+            }
+
+            PyObject* mv = PyMemoryView_FromMemory(
+                reinterpret_cast<char*>(mapped_data),
+                static_cast<Py_ssize_t>(mapped_size),
+                PyBUF_READ
+            );
+            if (mv == nullptr) {
+                unmap_memory_c(base_ptr, base_size);
+                throw nb::python_error();
+            }
+
+            {
+                std::lock_guard<std::mutex> lock(g_mmap_mutex);
+                Py_INCREF(mv);
+                g_mmaps.emplace(mv, MmapEntry{base_ptr, base_size});
+            }
+
+            return nb::steal<nb::object>(mv);
+        },
+        nb::arg("path"),
+        nb::arg("offset"),
+        nb::arg("length")
     );
 
     m.def(

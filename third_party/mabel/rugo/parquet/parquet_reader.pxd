@@ -1,5 +1,5 @@
 # parquet_reader.pxd
-from libc.stdint cimport uint8_t, int32_t, int64_t
+from libc.stdint cimport uint8_t, int32_t, int64_t, uint32_t
 from libcpp.string cimport string
 from libcpp.vector cimport vector
 from libcpp.unordered_map cimport unordered_map
@@ -109,6 +109,16 @@ cdef extern from "decode.hpp":
         vector[double] float64_values
         string type
         bint success
+        # Zero-copy output pointers (set by caller before decode)
+        int64_t* ext_int64
+        double*  ext_float64
+        int32_t* ext_int32
+        float*   ext_float32
+        int32_t  ext_written
+        # Flat arena for byte_array dict values (no per-entry std::string alloc)
+        vector[uint8_t]  string_dict_arena
+        vector[uint32_t] string_dict_offsets
+        vector[int32_t]  string_dict_lens
     
     cdef cppclass DecodedTable:
         vector[vector[DecodedColumn]] row_groups  # [row_group][column]
@@ -119,6 +129,8 @@ cdef extern from "decode.hpp":
     bint CanDecode(const uint8_t* data, size_t size)
     
     # New memory-based functions
+    DecodedColumn DecodeColumnFromChunk(const uint8_t* data, size_t size, const ColumnStats* col)
     DecodedColumn DecodeColumnFromMemory(const uint8_t* data, size_t size, const string& column_name, const RowGroupStats& row_group, int row_group_index)
+    DecodedColumn DecodeColumnFromMemory(const uint8_t* data, size_t size, const string& column_name, const RowGroupStats& row_group, int row_group_index, int64_t* ext_int64, double* ext_float64, int32_t* ext_int32, float* ext_float32)
     DecodedTable ReadParquet(const uint8_t* data, size_t size, const vector[string]& column_names)
     DecodedTable ReadParquet(const uint8_t* data, size_t size)

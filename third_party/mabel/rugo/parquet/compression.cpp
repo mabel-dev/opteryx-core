@@ -9,6 +9,18 @@
 namespace rugo {
 namespace compression {
 
+// ---------------------------------------------------------------------------
+// Thread-local ZSTD decompression context: created once per OS thread,
+// reused for every ZSTD_decompressDCtx() call in that thread.  This avoids
+// the ~128 KB internal malloc that ZSTD_decompress() performs per call.
+// ---------------------------------------------------------------------------
+namespace {
+    ZSTD_DCtx* get_thread_dctx() {
+        static thread_local ZSTD_DCtx* dctx = ZSTD_createDCtx();
+        return dctx;
+    }
+} // anonymous namespace
+
 std::vector<uint8_t> DecompressData(
     const uint8_t* compressed_data,
     size_t compressed_size, 
@@ -63,8 +75,8 @@ std::vector<uint8_t> DecompressZstd(
     
     std::vector<uint8_t> output(uncompressed_size);
     
-    // Use vendored zstd to decompress
-    size_t result = ZSTD_decompress(
+    size_t result = ZSTD_decompressDCtx(
+        get_thread_dctx(),
         output.data(), 
         uncompressed_size, 
         data, 
@@ -119,6 +131,57 @@ std::string CodecName(CompressionCodec codec) {
         case CompressionCodec::LZ4: return "LZ4";
         case CompressionCodec::ZSTD: return "ZSTD";
         default: return "UNKNOWN";
+    }
+}
+
+// ---------------------------------------------------------------------------
+// In-place decompression — writes into caller-supplied buffer.
+// resize() does not reallocate when new size <= capacity, so reusing the same
+// out_buf across consecutive pages in the same column chunk avoids per-page
+// heap allocation after the first page.
+// ---------------------------------------------------------------------------
+void DecompressInto(
+    const uint8_t* compressed_data,
+    size_t compressed_size,
+    size_t uncompressed_size,
+    CompressionCodec codec,
+    std::vector<uint8_t>& out_buf)
+{
+    switch (codec) {
+        case CompressionCodec::UNCOMPRESSED:
+            out_buf.assign(compressed_data, compressed_data + compressed_size);
+            break;
+
+        case CompressionCodec::SNAPPY: {
+            out_buf.resize(uncompressed_size);
+            if (!snappy::RawUncompress(
+                    reinterpret_cast<const char*>(compressed_data),
+                    compressed_size,
+                    reinterpret_cast<char*>(out_buf.data()))) {
+                throw std::runtime_error("Snappy decompression failed");
+            }
+            break;
+        }
+
+        case CompressionCodec::ZSTD: {
+            out_buf.resize(uncompressed_size);
+            size_t result = ZSTD_decompressDCtx(
+                get_thread_dctx(),
+                out_buf.data(), uncompressed_size,
+                compressed_data, compressed_size);
+            if (ZSTD_isError(result)) {
+                std::ostringstream oss;
+                oss << "Zstd decompression failed: " << ZSTD_getErrorName(result);
+                throw std::runtime_error(oss.str());
+            }
+            break;
+        }
+
+        default: {
+            std::ostringstream oss;
+            oss << "DecompressInto: unsupported codec " << static_cast<int>(codec);
+            throw std::runtime_error(oss.str());
+        }
     }
 }
 

@@ -76,14 +76,14 @@ class ShuffleGroupByOperationV2:
         if (
             len(self.aggregations) == 1
             and len(self.group_by_columns) == 1
-            and self.aggregations[0][1] in ("count", "count_distinct")
+            and self.aggregations[0][1] in ("count", "count_distinct", "mean", "avg")
             and hasattr(self._backend, "finalize_fast_columns")
         ):
             fast_columns = self._backend.finalize_fast_columns()
             if fast_columns is not None:
-                keys, counts = fast_columns
+                keys, values = fast_columns
                 names = [self.aggregations[0][0], self.group_by_columns[0].decode("utf-8")]
-                vectors = [vector_from_sequence(counts), vector_from_sequence(keys)]
+                vectors = [vector_from_sequence(values), vector_from_sequence(keys)]
                 return Morsel.from_vectors(names, vectors)
 
         rows = self._backend.finalize_rows()
@@ -123,18 +123,18 @@ class ShuffleGroupByOperationV2:
         if (
             len(self.aggregations) == 1
             and len(self.group_by_columns) == 1
-            and self.aggregations[0][1] in ("count", "count_distinct")
+            and self.aggregations[0][1] in ("count", "count_distinct", "mean", "avg")
             and hasattr(self._backend, "finalize_fast_columns")
         ):
             fast_columns = self._backend.finalize_fast_columns()
             if fast_columns is not None:
-                keys, counts = fast_columns
+                keys, values = fast_columns
                 names = [self.aggregations[0][0], self.group_by_columns[0].decode("utf-8")]
                 total = len(keys)
                 for start in range(0, total, chunk_size):
                     stop = min(total, start + chunk_size)
                     vectors = [
-                        vector_from_sequence(counts[start:stop]),
+                        vector_from_sequence(values[start:stop]),
                         vector_from_sequence(keys[start:stop]),
                     ]
                     yield Morsel.from_vectors(names, vectors)

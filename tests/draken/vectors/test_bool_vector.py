@@ -159,6 +159,25 @@ class TestBoolVectorOperations:
         assert result_list[0] == False
         # True OR True = True
         assert result_list[3] == True
+
+    def test_sql_three_valued_logic_and_or_xor(self):
+        """AND/OR/XOR should follow SQL three-valued logic."""
+        and_left = Vector.from_arrow(pa.array([False, None, True, None], type=pa.bool_()))
+        and_right = Vector.from_arrow(pa.array([None, False, None, True], type=pa.bool_()))
+        assert and_left.and_vector(and_right).to_pylist() == [False, False, None, None]
+
+        or_left = Vector.from_arrow(pa.array([True, None, False, None], type=pa.bool_()))
+        or_right = Vector.from_arrow(pa.array([None, True, None, False], type=pa.bool_()))
+        assert or_left.or_vector(or_right).to_pylist() == [True, True, None, None]
+
+        xor_left = Vector.from_arrow(pa.array([True, False, None, True], type=pa.bool_()))
+        xor_right = Vector.from_arrow(pa.array([False, True, True, None], type=pa.bool_()))
+        assert xor_left.xor_vector(xor_right).to_pylist() == [True, True, None, None]
+
+    def test_not_vector_with_nulls(self):
+        """NOT should invert booleans and preserve nulls."""
+        vec = Vector.from_arrow(pa.array([True, False, None], type=pa.bool_()))
+        assert vec.not_vector().to_pylist() == [False, True, None]
     
     def test_xor_vector_basic(self):
         """Test xor_vector operation with simple boolean values."""
@@ -249,7 +268,9 @@ class TestBoolVectorComparisons:
         result_list = list(result)
         
         assert result_list[0] == 1  # True == True
+        assert result_list[1] is None
         assert result_list[2] == 0  # False == True
+        assert result_list[3] is None
 
 
 class TestBoolVectorNullHandling:

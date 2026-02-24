@@ -24,6 +24,21 @@ struct DecodedColumn {
   std::vector<int32_t> rep_levels;  // one entry per logical value (all pages)
   std::vector<int32_t> def_levels;  // one entry per logical value (all pages)
   bool success = false;
+
+  // Flat arena for byte_array dict strings — eliminates one heap allocation per
+  // unique dictionary value (replaces the old std::vector<std::string> dict_string).
+  std::vector<uint8_t>  string_dict_arena;    // packed bytes for all dict entries
+  std::vector<uint32_t> string_dict_offsets;  // byte start offset per entry
+  std::vector<int32_t>  string_dict_lens;     // byte length per entry
+
+  // Zero-copy output pointers (optional). When non-null, numeric decode writes
+  // directly into the caller-supplied buffer, bypassing the internal std::vector<T>.
+  // Only used when max_definition_level == 0 (guaranteed non-nullable column).
+  int64_t* ext_int64   = nullptr;
+  double*  ext_float64 = nullptr;
+  int32_t* ext_int32   = nullptr;
+  float*   ext_float32 = nullptr;
+  int32_t  ext_written = 0;   // elements written to the active ext_* buffer
 };
 
 // Structure to hold a decoded table
@@ -43,18 +58,37 @@ bool CanDecode(const std::string &path);
 // Check if parquet data in memory can be decoded
 bool CanDecode(const uint8_t* data, size_t size);
 
-// NEW PRIMARY API: Read parquet data from memory view with column selection
-// Returns a table structure with decoded data organized by row groups and columns
-DecodedTable ReadParquet(const uint8_t* data, size_t size, const std::vector<std::string>& column_names);
+// NEW PRIMARY API: Read parquet data from memory view with column selection.
+// Designed to be called serially; Opteryx achieves parallelism at the
+// inter-file level by running multiple decode calls concurrently.
+DecodedTable ReadParquet(const uint8_t* data, size_t size,
+                         const std::vector<std::string>& column_names);
 
 // Overload that decodes all columns when none are specified
 DecodedTable ReadParquet(const uint8_t* data, size_t size);
 
-// Decode a specific column from memory buffer for a specific row group
+// Decode a single column chunk from an isolated range-read buffer.
+// Offsets in target_col must be relative to the start of the buffer
+// (i.e. subtract base_offset before calling).
+DecodedColumn DecodeColumnFromChunk(const uint8_t* data, size_t size,
+                                    const ColumnStats* target_col,
+                                    int64_t* ext_int64   = nullptr,
+                                    double*  ext_float64 = nullptr,
+                                    int32_t* ext_int32   = nullptr,
+                                    float*   ext_float32 = nullptr);
+
+// Decode a specific column from memory buffer for a specific row group.
+// Pass non-null ext_* pointer (pre-allocated, capacity >= row_group.num_rows)
+// to decode directly into a caller-supplied buffer and skip the internal
+// std::vector<T> entirely.  Only valid when max_definition_level == 0.
 DecodedColumn DecodeColumnFromMemory(const uint8_t* data, size_t size, 
                                    const std::string &column_name,
                                    const RowGroupStats &row_group, 
-                                   int row_group_index);
+                                   int row_group_index,
+                                   int64_t* ext_int64   = nullptr,
+                                   double*  ext_float64 = nullptr,
+                                   int32_t* ext_int32   = nullptr,
+                                   float*   ext_float32 = nullptr);
 
 // Legacy file-based functions (kept for backward compatibility)
 DecodedColumn DecodeColumn(const std::string &path, const std::string &column_name, 

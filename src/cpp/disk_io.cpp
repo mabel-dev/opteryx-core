@@ -271,6 +271,289 @@ int read_all_mmap(const char* path, uint8_t** dst, size_t* out_len) {
 #endif
 }
 
+// Slice/range read implementations - for blob store range requests
+
+#ifdef __linux__
+
+int read_slice_pread(const char* path, size_t offset, size_t length, uint8_t* dst, size_t* out_len,
+                     bool sequential, bool willneed, bool drop_after) {
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return -errno;
+
+    struct stat st;
+    if (fstat(fd, &st) != 0) { 
+        int e = -errno; 
+        close(fd); 
+        return e; 
+    }
+
+    size_t file_size = static_cast<size_t>(st.st_size);
+    
+    // Validate offset and length
+    if (offset >= file_size) {
+        close(fd);
+        *out_len = 0;
+        return 0;
+    }
+    
+    size_t to_read = (offset + length > file_size) ? (file_size - offset) : length;
+    
+    if (sequential) posix_fadvise(fd, static_cast<off_t>(offset), static_cast<off_t>(to_read), POSIX_FADV_SEQUENTIAL);
+    if (willneed) posix_fadvise(fd, static_cast<off_t>(offset), static_cast<off_t>(to_read), POSIX_FADV_WILLNEED);
+    
+    ssize_t n = pread(fd, dst, to_read, static_cast<off_t>(offset));
+    if (n < 0) {
+        int e = -errno;
+        close(fd);
+        return e;
+    }
+    
+    if (drop_after) posix_fadvise(fd, static_cast<off_t>(offset), static_cast<off_t>(to_read), POSIX_FADV_DONTNEED);
+    close(fd);
+    
+    *out_len = static_cast<size_t>(n);
+    return 0;
+}
+
+#elif defined(__APPLE__)
+
+int read_slice_pread(const char* path, size_t offset, size_t length, uint8_t* dst, size_t* out_len,
+                     bool sequential, bool willneed, bool drop_after) {
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return -errno;
+
+    struct stat st;
+    if (fstat(fd, &st) != 0) { 
+        int e = -errno; 
+        close(fd); 
+        return e; 
+    }
+
+    size_t file_size = static_cast<size_t>(st.st_size);
+    
+    // Validate offset and length
+    if (offset >= file_size) {
+        close(fd);
+        *out_len = 0;
+        return 0;
+    }
+    
+    size_t to_read = (offset + length > file_size) ? (file_size - offset) : length;
+    
+    if (sequential) fcntl(fd, F_RDAHEAD, 1);
+    if (drop_after) fcntl(fd, F_NOCACHE, 1);
+    
+    ssize_t n = pread(fd, dst, to_read, static_cast<off_t>(offset));
+    if (n < 0) {
+        int e = -errno;
+        close(fd);
+        return e;
+    }
+    
+    close(fd);
+    *out_len = static_cast<size_t>(n);
+    return 0;
+}
+
+#else
+// Windows slice read
+
+int read_slice_pread(const char* path, size_t offset, size_t length, uint8_t* dst, size_t* out_len,
+                     bool sequential, bool willneed, bool drop_after) {
+    HANDLE hFile = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, 
+                              NULL, OPEN_EXISTING, 
+                              FILE_ATTRIBUTE_NORMAL | 
+                              (sequential ? FILE_FLAG_SEQUENTIAL_SCAN : FILE_FLAG_RANDOM_ACCESS), 
+                              NULL);
+    if (hFile == INVALID_HANDLE_VALUE) {
+        return -1;
+    }
+
+    DWORD sizeHigh = 0;
+    DWORD sizeLow = GetFileSize(hFile, &sizeHigh);
+    size_t file_size = (static_cast<size_t>(sizeHigh) << 32) | sizeLow;
+
+    // Validate offset and length
+    if (offset >= file_size) {
+        CloseHandle(hFile);
+        *out_len = 0;
+        return 0;
+    }
+    
+    size_t to_read = (offset + length > file_size) ? (file_size - offset) : length;
+    
+    // Seek to offset
+    LARGE_INTEGER li;
+    li.QuadPart = static_cast<LONGLONG>(offset);
+    if (!SetFilePointerEx(hFile, li, NULL, FILE_BEGIN)) {
+        CloseHandle(hFile);
+        return -1;
+    }
+    
+    DWORD bytesRead = 0;
+    BOOL success = ReadFile(hFile, dst, static_cast<DWORD>(to_read), &bytesRead, NULL);
+    
+    CloseHandle(hFile);
+
+    if (!success) {
+        return -1;
+    }
+
+    *out_len = bytesRead;
+    return 0;
+}
+#endif
+
+// Slice mmap implementations
+
+#ifdef __linux__
+
+int read_slice_mmap(const char* path, size_t offset, size_t length, uint8_t** dst, size_t* out_len) {
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return -errno;
+
+    struct stat st;
+    if (fstat(fd, &st) != 0) { 
+        int e = -errno; 
+        close(fd); 
+        return e; 
+    }
+
+    size_t file_size = static_cast<size_t>(st.st_size);
+    
+    // Validate offset
+    if (offset >= file_size) {
+        close(fd);
+        *dst = nullptr;
+        *out_len = 0;
+        return 0;
+    }
+    
+    size_t to_map = (offset + length > file_size) ? (file_size - offset) : length;
+    
+    // Handle empty reads
+    if (to_map == 0) {
+        close(fd);
+        *dst = nullptr;
+        *out_len = 0;
+        return 0;
+    }
+    
+    // Map from the beginning and return pointer to offset within mapping
+    void* mapped = mmap(NULL, file_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    close(fd);
+
+    if (mapped == MAP_FAILED) {
+        return -errno;
+    }
+
+    *dst = static_cast<uint8_t*>(mapped) + offset;
+    *out_len = to_map;
+    
+    // Note: Caller must unmap the entire mapped region (subtract offset from ptr, add to size)
+    return 0;
+}
+
+#elif defined(__APPLE__)
+
+int read_slice_mmap(const char* path, size_t offset, size_t length, uint8_t** dst, size_t* out_len) {
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return -errno;
+
+    struct stat st {};
+    if (fstat(fd, &st) != 0) { 
+        int e = -errno; 
+        close(fd); 
+        return e; 
+    }
+
+    size_t file_size = static_cast<size_t>(st.st_size);
+    
+    // Validate offset
+    if (offset >= file_size) {
+        close(fd);
+        *dst = nullptr;
+        *out_len = 0;
+        return 0;
+    }
+    
+    size_t to_map = (offset + length > file_size) ? (file_size - offset) : length;
+    
+    // Handle empty reads
+    if (to_map == 0) {
+        close(fd);
+        *dst = nullptr;
+        *out_len = 0;
+        return 0;
+    }
+    
+    // Map from the beginning and return pointer to offset within mapping
+    void* mapped = mmap(NULL, file_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    close(fd);
+
+    if (mapped == MAP_FAILED) {
+        return -errno;
+    }
+
+    madvise(mapped, file_size, MADV_SEQUENTIAL);
+    
+    *dst = static_cast<uint8_t*>(mapped) + offset;
+    *out_len = to_map;
+    
+    // Note: Caller must unmap the entire mapped region (subtract offset from ptr, add to size)
+    return 0;
+}
+
+#else
+// Windows slice mmap
+
+int read_slice_mmap(const char* path, size_t offset, size_t length, uint8_t** dst, size_t* out_len) {
+    HANDLE hFile = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, 
+                              NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile == INVALID_HANDLE_VALUE) return -1;
+
+    DWORD sizeHigh = 0;
+    DWORD sizeLow = GetFileSize(hFile, &sizeHigh);
+    size_t file_size = (static_cast<size_t>(sizeHigh) << 32) | sizeLow;
+
+    // Validate offset
+    if (offset >= file_size) {
+        CloseHandle(hFile);
+        *dst = nullptr;
+        *out_len = 0;
+        return 0;
+    }
+    
+    size_t to_map = (offset + length > file_size) ? (file_size - offset) : length;
+    
+    // Handle empty reads
+    if (to_map == 0) {
+        CloseHandle(hFile);
+        *dst = nullptr;
+        *out_len = 0;
+        return 0;
+    }
+
+    HANDLE hMapping = CreateFileMappingA(hFile, NULL, PAGE_READONLY, 0, 0, NULL);
+    if (!hMapping) {
+        CloseHandle(hFile);
+        return -1;
+    }
+
+    void* mapped = MapViewOfFile(hMapping, FILE_MAP_READ, 0, 0, file_size);
+    CloseHandle(hMapping);
+    CloseHandle(hFile);
+
+    if (!mapped) return -1;
+
+    *dst = static_cast<uint8_t*>(mapped) + offset;
+    *out_len = to_map;
+    
+    // Note: Caller must unmap the entire mapped region (subtract offset from ptr, add to size)
+    return 0;
+}
+#endif
+
 int unmap_memory_c(unsigned char* addr, size_t size) {
 #ifdef __linux__
     return munmap(addr, size) == 0 ? 0 : -errno;

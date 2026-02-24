@@ -34,7 +34,10 @@ def _get_parquet_files() -> List[str]:
 
 
 def _read_with_pyarrow(files: List[str]) -> int:
-    """Read all files with PyArrow and return total rows read."""
+    """Read all files with PyArrow, forced to single thread for like-for-like comparison."""
+    import pyarrow as pa
+    pa.set_cpu_count(1)
+    pa.set_io_thread_count(1)
     total_rows = 0
     for f in files:
         table = pq.read_table(f)

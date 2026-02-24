@@ -5,6 +5,7 @@ from libc.stdint cimport uint64_t
 
 from opteryx.draken.core.buffers cimport DrakenFixedBuffer
 from opteryx.draken.vectors.vector cimport Vector
+from opteryx.draken.vectors.bool_vector cimport BoolVector
 
 cdef class Float64Vector(Vector):
     cdef object _arrow_data_buf
@@ -13,19 +14,22 @@ cdef class Float64Vector(Vector):
     cdef bint owns_data
 
     cpdef Float64Vector take(self, int32_t[::1] indices)
+    cdef bint _compare_float_values(self, double left, double right, int op) nogil
+    cdef BoolVector _compare_scalar(self, double value, int op)
+    cdef BoolVector _compare_vector(self, Float64Vector other, int op)
 
-    cpdef int8_t[::1] equals(self, double value)
-    cpdef int8_t[::1] equals_vector(self, Float64Vector other)
-    cpdef int8_t[::1] not_equals(self, double value)
-    cpdef int8_t[::1] not_equals_vector(self, Float64Vector other)
-    cpdef int8_t[::1] greater_than(self, double value)
-    cpdef int8_t[::1] greater_than_vector(self, Float64Vector other)
-    cpdef int8_t[::1] greater_than_or_equals(self, double value)
-    cpdef int8_t[::1] greater_than_or_equals_vector(self, Float64Vector other)
-    cpdef int8_t[::1] less_than(self, double value)
-    cpdef int8_t[::1] less_than_vector(self, Float64Vector other)
-    cpdef int8_t[::1] less_than_or_equals(self, double value)
-    cpdef int8_t[::1] less_than_or_equals_vector(self, Float64Vector other)
+    cpdef BoolVector equals(self, double value)
+    cpdef BoolVector equals_vector(self, Float64Vector other)
+    cpdef BoolVector not_equals(self, double value)
+    cpdef BoolVector not_equals_vector(self, Float64Vector other)
+    cpdef BoolVector greater_than(self, double value)
+    cpdef BoolVector greater_than_vector(self, Float64Vector other)
+    cpdef BoolVector greater_than_or_equals(self, double value)
+    cpdef BoolVector greater_than_or_equals_vector(self, Float64Vector other)
+    cpdef BoolVector less_than(self, double value)
+    cpdef BoolVector less_than_vector(self, Float64Vector other)
+    cpdef BoolVector less_than_or_equals(self, double value)
+    cpdef BoolVector less_than_or_equals_vector(self, Float64Vector other)
 
     cpdef int8_t[::1] is_null(self)
 

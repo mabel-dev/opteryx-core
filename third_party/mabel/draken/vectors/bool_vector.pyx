@@ -21,7 +21,7 @@ from cpython.mem cimport PyMem_Malloc, PyMem_Free
 from libc.string cimport memcpy, memset
 
 from libc.stdint cimport int32_t, int8_t, intptr_t, uint64_t, uint8_t, int64_t
-from libc.stdlib cimport malloc
+from libc.stdlib cimport malloc, free
 
 from opteryx.draken.core.buffers cimport DrakenFixedBuffer
 from opteryx.draken.core.buffers cimport DRAKEN_BOOL
@@ -105,7 +105,7 @@ cdef class BoolVector(Vector):
         return pa.Array.from_buffers(pa.bool_(), buf_length(self.ptr), buffers)
 
     cpdef BoolVector and_vector(self, BoolVector other):
-        """Element-wise AND between two BoolVector instances. Returns a new BoolVector."""
+        """Element-wise AND between two BoolVector instances with SQL null semantics."""
         cdef DrakenFixedBuffer* ptr1 = self.ptr
         cdef DrakenFixedBuffer* ptr2 = other.ptr
         cdef Py_ssize_t n = ptr1.length
@@ -117,16 +117,55 @@ cdef class BoolVector(Vector):
         cdef uint8_t* a = <uint8_t*> ptr1.data
         cdef uint8_t* b = <uint8_t*> ptr2.data
         cdef uint8_t* d = <uint8_t*> out.ptr.data
+        cdef uint8_t* a_null = ptr1.null_bitmap
+        cdef uint8_t* b_null = ptr2.null_bitmap
+        cdef uint8_t* out_null = NULL
+        cdef uint8_t a_valid, b_valid, a_val, b_val
+        cdef bint valid
+        cdef bint result_true
+        cdef bint all_valid = True
         cdef Py_ssize_t i
-        for i in range(nbytes):
-            d[i] = a[i] & b[i]
+        memset(d, 0, nbytes)
+        if nbytes != 0:
+            out_null = <uint8_t*> malloc(nbytes)
+            if out_null == NULL:
+                raise MemoryError()
+            memset(out_null, 0, nbytes)
+        for i in range(n):
+            a_valid = 1 if a_null == NULL else ((a_null[i >> 3] >> (i & 7)) & 1)
+            b_valid = 1 if b_null == NULL else ((b_null[i >> 3] >> (i & 7)) & 1)
+            a_val = (a[i >> 3] >> (i & 7)) & 1
+            b_val = (b[i >> 3] >> (i & 7)) & 1
 
-        # No null bitmap is created for the result (treat nulls as False)
-        out.ptr.null_bitmap = NULL
+            valid = False
+            result_true = False
+
+            # SQL 3VL: FALSE dominates, TRUE requires both valid+true, else NULL.
+            if (a_valid and not a_val) or (b_valid and not b_val):
+                valid = True
+                result_true = False
+            elif a_valid and b_valid:
+                valid = True
+                result_true = a_val and b_val
+
+            if valid:
+                if out_null != NULL:
+                    out_null[i >> 3] |= (1 << (i & 7))
+                if result_true:
+                    d[i >> 3] |= (1 << (i & 7))
+            else:
+                all_valid = False
+
+        if all_valid:
+            if out_null != NULL:
+                free(out_null)
+            out.ptr.null_bitmap = NULL
+        else:
+            out.ptr.null_bitmap = out_null
         return out
 
     cpdef BoolVector or_vector(self, BoolVector other):
-        """Element-wise OR between two BoolVector instances. Returns a new BoolVector."""
+        """Element-wise OR between two BoolVector instances with SQL null semantics."""
         cdef DrakenFixedBuffer* ptr1 = self.ptr
         cdef DrakenFixedBuffer* ptr2 = other.ptr
         cdef Py_ssize_t n = ptr1.length
@@ -138,15 +177,55 @@ cdef class BoolVector(Vector):
         cdef uint8_t* a = <uint8_t*> ptr1.data
         cdef uint8_t* b = <uint8_t*> ptr2.data
         cdef uint8_t* d = <uint8_t*> out.ptr.data
+        cdef uint8_t* a_null = ptr1.null_bitmap
+        cdef uint8_t* b_null = ptr2.null_bitmap
+        cdef uint8_t* out_null = NULL
+        cdef uint8_t a_valid, b_valid, a_val, b_val
+        cdef bint valid
+        cdef bint result_true
+        cdef bint all_valid = True
         cdef Py_ssize_t i
-        for i in range(nbytes):
-            d[i] = a[i] | b[i]
+        memset(d, 0, nbytes)
+        if nbytes != 0:
+            out_null = <uint8_t*> malloc(nbytes)
+            if out_null == NULL:
+                raise MemoryError()
+            memset(out_null, 0, nbytes)
+        for i in range(n):
+            a_valid = 1 if a_null == NULL else ((a_null[i >> 3] >> (i & 7)) & 1)
+            b_valid = 1 if b_null == NULL else ((b_null[i >> 3] >> (i & 7)) & 1)
+            a_val = (a[i >> 3] >> (i & 7)) & 1
+            b_val = (b[i >> 3] >> (i & 7)) & 1
 
-        out.ptr.null_bitmap = NULL
+            valid = False
+            result_true = False
+
+            # SQL 3VL: TRUE dominates, FALSE requires both valid+false, else NULL.
+            if (a_valid and a_val) or (b_valid and b_val):
+                valid = True
+                result_true = True
+            elif a_valid and b_valid:
+                valid = True
+                result_true = False
+
+            if valid:
+                if out_null != NULL:
+                    out_null[i >> 3] |= (1 << (i & 7))
+                if result_true:
+                    d[i >> 3] |= (1 << (i & 7))
+            else:
+                all_valid = False
+
+        if all_valid:
+            if out_null != NULL:
+                free(out_null)
+            out.ptr.null_bitmap = NULL
+        else:
+            out.ptr.null_bitmap = out_null
         return out
 
     cpdef BoolVector xor_vector(self, BoolVector other):
-        """Element-wise XOR between two BoolVector instances. Returns a new BoolVector."""
+        """Element-wise XOR between two BoolVector instances with SQL null semantics."""
         cdef DrakenFixedBuffer* ptr1 = self.ptr
         cdef DrakenFixedBuffer* ptr2 = other.ptr
         cdef Py_ssize_t n = ptr1.length
@@ -158,11 +237,74 @@ cdef class BoolVector(Vector):
         cdef uint8_t* a = <uint8_t*> ptr1.data
         cdef uint8_t* b = <uint8_t*> ptr2.data
         cdef uint8_t* d = <uint8_t*> out.ptr.data
+        cdef uint8_t* a_null = ptr1.null_bitmap
+        cdef uint8_t* b_null = ptr2.null_bitmap
+        cdef uint8_t* out_null = NULL
+        cdef uint8_t a_valid, b_valid, a_val, b_val
+        cdef bint all_valid = True
         cdef Py_ssize_t i
-        for i in range(nbytes):
-            d[i] = a[i] ^ b[i]
+        memset(d, 0, nbytes)
+        if nbytes != 0:
+            out_null = <uint8_t*> malloc(nbytes)
+            if out_null == NULL:
+                raise MemoryError()
+            memset(out_null, 0, nbytes)
+        for i in range(n):
+            a_valid = 1 if a_null == NULL else ((a_null[i >> 3] >> (i & 7)) & 1)
+            b_valid = 1 if b_null == NULL else ((b_null[i >> 3] >> (i & 7)) & 1)
+            if a_valid and b_valid:
+                if out_null != NULL:
+                    out_null[i >> 3] |= (1 << (i & 7))
+                a_val = (a[i >> 3] >> (i & 7)) & 1
+                b_val = (b[i >> 3] >> (i & 7)) & 1
+                if a_val != b_val:
+                    d[i >> 3] |= (1 << (i & 7))
+            else:
+                all_valid = False
 
-        out.ptr.null_bitmap = NULL
+        if all_valid:
+            if out_null != NULL:
+                free(out_null)
+            out.ptr.null_bitmap = NULL
+        else:
+            out.ptr.null_bitmap = out_null
+        return out
+
+    cpdef BoolVector not_vector(self):
+        """Element-wise NOT with SQL null semantics."""
+        cdef DrakenFixedBuffer* ptr = self.ptr
+        cdef Py_ssize_t n = ptr.length
+        cdef Py_ssize_t nbytes = (n + 7) >> 3
+        cdef BoolVector out = BoolVector(<size_t>n)
+        cdef uint8_t* src = <uint8_t*> ptr.data
+        cdef uint8_t* src_null = ptr.null_bitmap
+        cdef uint8_t* dst = <uint8_t*> out.ptr.data
+        cdef uint8_t* out_null = NULL
+        cdef bint all_valid = True
+        cdef Py_ssize_t i
+
+        memset(dst, 0, nbytes)
+        if nbytes != 0:
+            out_null = <uint8_t*> malloc(nbytes)
+            if out_null == NULL:
+                raise MemoryError()
+            memset(out_null, 0, nbytes)
+
+        for i in range(n):
+            if src_null == NULL or ((src_null[i >> 3] >> (i & 7)) & 1):
+                if out_null != NULL:
+                    out_null[i >> 3] |= (1 << (i & 7))
+                if ((src[i >> 3] >> (i & 7)) & 1) == 0:
+                    dst[i >> 3] |= (1 << (i & 7))
+            else:
+                all_valid = False
+
+        if all_valid:
+            if out_null != NULL:
+                free(out_null)
+            out.ptr.null_bitmap = NULL
+        else:
+            out.ptr.null_bitmap = out_null
         return out
 
     # -------- Ops --------
@@ -181,29 +323,63 @@ cdef class BoolVector(Vector):
                 dst[i >> 3] |= (1 << (i & 7))
         return out
 
-    cpdef int8_t[::1] equals(self, bint value):
+    cpdef BoolVector equals(self, bint value):
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef Py_ssize_t i, n = ptr.length
-        cdef int8_t* buf = <int8_t*> PyMem_Malloc(n)
-        if buf == NULL:
-            raise MemoryError()
+        cdef Py_ssize_t nbytes = (n + 7) >> 3
+        cdef BoolVector out = BoolVector(<size_t> n)
+        cdef uint8_t* src = <uint8_t*> ptr.data
+        cdef uint8_t* dst = <uint8_t*> out.ptr.data
+        cdef uint8_t* src_null = ptr.null_bitmap
+        cdef uint8_t* out_null = NULL
+        cdef uint8_t mask
         cdef int target = 1 if value else 0
+        memset(dst, 0, nbytes)
+        if src_null != NULL and nbytes != 0:
+            out_null = <uint8_t*> malloc(nbytes)
+            if out_null == NULL:
+                raise MemoryError()
+            memcpy(out_null, src_null, nbytes)
+            if (n & 7) != 0:
+                mask = <uint8_t>((1 << (n & 7)) - 1)
+                out_null[nbytes - 1] &= mask
+            out.ptr.null_bitmap = out_null
+        else:
+            out.ptr.null_bitmap = NULL
         for i in range(n):
-            val = ((<uint8_t*>ptr.data)[i >> 3] >> (i & 7)) & 1
-            buf[i] = 1 if val == target else 0
-        return <int8_t[:n]> buf
+            if src_null == NULL or ((src_null[i >> 3] >> (i & 7)) & 1):
+                if ((src[i >> 3] >> (i & 7)) & 1) == target:
+                    dst[i >> 3] |= (1 << (i & 7))
+        return out
 
-    cpdef int8_t[::1] not_equals(self, bint value):
+    cpdef BoolVector not_equals(self, bint value):
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef Py_ssize_t i, n = ptr.length
-        cdef int8_t* buf = <int8_t*> PyMem_Malloc(n)
-        if buf == NULL:
-            raise MemoryError()
+        cdef Py_ssize_t nbytes = (n + 7) >> 3
+        cdef BoolVector out = BoolVector(<size_t> n)
+        cdef uint8_t* src = <uint8_t*> ptr.data
+        cdef uint8_t* dst = <uint8_t*> out.ptr.data
+        cdef uint8_t* src_null = ptr.null_bitmap
+        cdef uint8_t* out_null = NULL
+        cdef uint8_t mask
         cdef int target = 1 if value else 0
+        memset(dst, 0, nbytes)
+        if src_null != NULL and nbytes != 0:
+            out_null = <uint8_t*> malloc(nbytes)
+            if out_null == NULL:
+                raise MemoryError()
+            memcpy(out_null, src_null, nbytes)
+            if (n & 7) != 0:
+                mask = <uint8_t>((1 << (n & 7)) - 1)
+                out_null[nbytes - 1] &= mask
+            out.ptr.null_bitmap = out_null
+        else:
+            out.ptr.null_bitmap = NULL
         for i in range(n):
-            val = ((<uint8_t*>ptr.data)[i >> 3] >> (i & 7)) & 1
-            buf[i] = 1 if val != target else 0
-        return <int8_t[:n]> buf
+            if src_null == NULL or ((src_null[i >> 3] >> (i & 7)) & 1):
+                if ((src[i >> 3] >> (i & 7)) & 1) != target:
+                    dst[i >> 3] |= (1 << (i & 7))
+        return out
 
     cdef void compress_into(self, int64_t[::1] out_buf, Py_ssize_t offset=0) except *:
         """Compress bools to int64_t where True=1, False=0, null=NULL_FLAG"""

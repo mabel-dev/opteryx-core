@@ -25,6 +25,16 @@ std::vector<uint8_t> DecompressData(
     CompressionCodec codec
 );
 
+// In-place variant: writes into caller-supplied buffer, resizing as needed.
+// Reusing the same buffer across calls avoids repeated heap allocation.
+void DecompressInto(
+    const uint8_t* compressed_data,
+    size_t compressed_size,
+    size_t uncompressed_size,
+    CompressionCodec codec,
+    std::vector<uint8_t>& out_buf
+);
+
 // Codec-specific implementations
 std::vector<uint8_t> DecompressSnappy(
     const uint8_t* data, 

@@ -11,6 +11,7 @@
 #include "decode_page.hpp"
 #include "compression.hpp"
 #include "metadata.hpp"
+#include "telemetry.hpp"
 #include <algorithm>
 #include <cstring>
 #include <iostream>
@@ -22,10 +23,20 @@
 // Decodes a single column starting at target_col->dictionary_page_offset (if
 // present) and target_col->data_page_offset inside the supplied memory region.
 
-static DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
-                                           size_t file_size,
-                                           const ColumnStats *target_col) {
+DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
+                                    size_t file_size,
+                                    const ColumnStats *target_col,
+                                    int64_t* ext_int64,
+                                    double*  ext_float64,
+                                    int32_t* ext_int32,
+                                    float*   ext_float32) {
   DecodedColumn result;
+  result.ext_int64   = ext_int64;
+  result.ext_float64 = ext_float64;
+  result.ext_int32   = ext_int32;
+  result.ext_float32 = ext_float32;
+  result.ext_written = 0;
+  ++rugo_tel::calls;
 
   try {
     // Guard: only supported codecs.
@@ -55,7 +66,6 @@ static DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
     // -----------------------------------------------------------------
     std::vector<int32_t>    dict_int32;
     std::vector<int64_t>    dict_int64;
-    std::vector<std::string> dict_string;
     std::vector<float>       dict_float32;
     std::vector<double>      dict_float64;
     int32_t dict_size = 0;
@@ -94,9 +104,12 @@ static DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
         } else {
           try {
             auto codec = rugo::compression::CodecFromInt(target_col->codec);
-            dict_decompressed_data = rugo::compression::DecompressData(
-                dict_compressed_data, dict_compressed_size,
-                dict_page_header.uncompressed_page_size, codec);
+            { RUGO_TEL_START(_dc_t0);
+              rugo::compression::DecompressInto(
+                  dict_compressed_data, dict_compressed_size,
+                  dict_page_header.uncompressed_page_size, codec,
+                  dict_decompressed_data);
+              RUGO_TEL_ACCUM(rugo_tel::decompress_s, _dc_t0); }
             dict_data_ptr  = dict_decompressed_data.data();
             dict_data_size = dict_decompressed_data.size();
           } catch (...) {
@@ -107,6 +120,7 @@ static DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
         dict_size = dict_page_header.num_values;
         const uint8_t *dict_end = dict_data_ptr + dict_data_size;
 
+        RUGO_TEL_START(_dp_t0);
         if (result.type == "int32") {
           dict_int32.reserve(dict_size);
           for (int32_t i = 0; i < dict_size && dict_data_ptr + 4 <= dict_end; i++) {
@@ -120,13 +134,20 @@ static DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
             dict_data_ptr += 8;
           }
         } else if (result.type == "byte_array") {
-          dict_string.reserve(dict_size);
+          // Build a flat arena: one allocation for all dict string bytes,
+          // plus offset/length arrays — no per-entry std::string heap alloc.
+          result.string_dict_arena.reserve(dict_data_size);
+          result.string_dict_offsets.reserve(dict_size);
+          result.string_dict_lens.reserve(dict_size);
           for (int32_t i = 0; i < dict_size && dict_data_ptr + 4 <= dict_end; i++) {
             int32_t length = ReadLE32(dict_data_ptr);
             dict_data_ptr += 4;
             if (dict_data_ptr + length > dict_end) break;
-            dict_string.emplace_back(
-                reinterpret_cast<const char *>(dict_data_ptr), length);
+            uint32_t off = (uint32_t)result.string_dict_arena.size();
+            result.string_dict_arena.insert(result.string_dict_arena.end(),
+                                            dict_data_ptr, dict_data_ptr + length);
+            result.string_dict_offsets.push_back(off);
+            result.string_dict_lens.push_back(length);
             dict_data_ptr += length;
           }
         } else if (result.type == "float32") {
@@ -142,6 +163,7 @@ static DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
             dict_data_ptr += 8;
           }
         }
+        RUGO_TEL_ACCUM(rugo_tel::dict_parse_s, _dp_t0);
       }
     }
 
@@ -228,9 +250,12 @@ static DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
       } else {
         try {
           auto codec = rugo::compression::CodecFromInt(target_col->codec);
-          page_decompressed_data = rugo::compression::DecompressData(
-              compressed_data, compressed_size,
-              page_header.uncompressed_page_size, codec);
+          { RUGO_TEL_START(_pg_t0);
+            rugo::compression::DecompressInto(
+                compressed_data, compressed_size,
+                page_header.uncompressed_page_size, codec,
+                page_decompressed_data);
+            RUGO_TEL_ACCUM(rugo_tel::decompress_s, _pg_t0); }
           data_ptr  = page_decompressed_data.data();
           data_size = page_decompressed_data.size();
         } catch (const std::exception &e) {
@@ -329,76 +354,177 @@ static DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
         data_size--;
 
         std::vector<int32_t> indices;
-        int32_t decoded = DecodeRLEBitPackedIndicesNoPrefix(
-            data_ptr, data_size, present_count, bit_width, indices);
+        { RUGO_TEL_START(_rle_t0);
+          int32_t decoded = DecodeRLEBitPackedIndicesNoPrefix(
+              data_ptr, data_size, present_count, bit_width, indices);
+          RUGO_TEL_ACCUM(rugo_tel::rle_s, _rle_t0);
+          if (decoded != present_count) return result; }
 
-        if (decoded != present_count) return result;
-
+        RUGO_TEL_START(_vx_t0);
         if (result.type == "int32") {
-          for (int32_t idx : indices) {
-            if (idx < 0 || idx >= (int32_t)dict_int32.size()) return result;
-            result.int32_values.push_back(dict_int32[idx]);
+          int32_t n = (int32_t)indices.size();
+          if (result.ext_int32) {
+            int32_t* edst = result.ext_int32 + result.ext_written;
+            for (int32_t i = 0; i < n; ++i) {
+              int32_t idx = indices[i];
+              if (idx < 0 || idx >= (int32_t)dict_int32.size()) return result;
+              edst[i] = dict_int32[idx];
+            }
+            result.ext_written += n;
+          } else {
+            size_t old_sz = result.int32_values.size();
+            result.int32_values.resize(old_sz + n);
+            int32_t* dst = result.int32_values.data() + old_sz;
+            for (int32_t i = 0; i < n; ++i) {
+              int32_t idx = indices[i];
+              if (idx < 0 || idx >= (int32_t)dict_int32.size()) return result;
+              dst[i] = dict_int32[idx];
+            }
           }
         } else if (result.type == "int64") {
-          for (int32_t idx : indices) {
-            if (idx < 0 || idx >= (int32_t)dict_int64.size()) return result;
-            result.int64_values.push_back(dict_int64[idx]);
+          int32_t n = (int32_t)indices.size();
+          if (result.ext_int64) {
+            int64_t* edst = result.ext_int64 + result.ext_written;
+            for (int32_t i = 0; i < n; ++i) {
+              int32_t idx = indices[i];
+              if (idx < 0 || idx >= (int32_t)dict_int64.size()) return result;
+              edst[i] = dict_int64[idx];
+            }
+            result.ext_written += n;
+          } else {
+            size_t old_sz = result.int64_values.size();
+            result.int64_values.resize(old_sz + n);
+            int64_t* dst = result.int64_values.data() + old_sz;
+            for (int32_t i = 0; i < n; ++i) {
+              int32_t idx = indices[i];
+              if (idx < 0 || idx >= (int32_t)dict_int64.size()) return result;
+              dst[i] = dict_int64[idx];
+            }
           }
         } else if (result.type == "byte_array") {
-          // Store raw indices; dict moves into string_values after the page loop.
+          // Store raw indices; arena dict is already in result.string_dict_*.
+          result.dict_indices.reserve(result.dict_indices.size() + indices.size());
           for (int32_t idx : indices) {
-            if (idx < 0 || idx >= (int32_t)dict_string.size()) return result;
+            if (idx < 0 || idx >= (int32_t)result.string_dict_lens.size()) return result;
             result.dict_indices.push_back(idx);
           }
         } else if (result.type == "float32") {
-          for (int32_t idx : indices) {
-            if (idx < 0 || idx >= (int32_t)dict_float32.size()) return result;
-            result.float32_values.push_back(dict_float32[idx]);
+          int32_t n = (int32_t)indices.size();
+          if (result.ext_float32) {
+            float* edst = result.ext_float32 + result.ext_written;
+            for (int32_t i = 0; i < n; ++i) {
+              int32_t idx = indices[i];
+              if (idx < 0 || idx >= (int32_t)dict_float32.size()) return result;
+              edst[i] = dict_float32[idx];
+            }
+            result.ext_written += n;
+          } else {
+            size_t old_sz = result.float32_values.size();
+            result.float32_values.resize(old_sz + n);
+            float* dst = result.float32_values.data() + old_sz;
+            for (int32_t i = 0; i < n; ++i) {
+              int32_t idx = indices[i];
+              if (idx < 0 || idx >= (int32_t)dict_float32.size()) return result;
+              dst[i] = dict_float32[idx];
+            }
           }
         } else if (result.type == "float64") {
-          for (int32_t idx : indices) {
-            if (idx < 0 || idx >= (int32_t)dict_float64.size()) return result;
-            result.float64_values.push_back(dict_float64[idx]);
+          int32_t n = (int32_t)indices.size();
+          if (result.ext_float64) {
+            double* edst = result.ext_float64 + result.ext_written;
+            for (int32_t i = 0; i < n; ++i) {
+              int32_t idx = indices[i];
+              if (idx < 0 || idx >= (int32_t)dict_float64.size()) return result;
+              edst[i] = dict_float64[idx];
+            }
+            result.ext_written += n;
+          } else {
+            size_t old_sz = result.float64_values.size();
+            result.float64_values.resize(old_sz + n);
+            double* dst = result.float64_values.data() + old_sz;
+            for (int32_t i = 0; i < n; ++i) {
+              int32_t idx = indices[i];
+              if (idx < 0 || idx >= (int32_t)dict_float64.size()) return result;
+              dst[i] = dict_float64[idx];
+            }
           }
         }
+        RUGO_TEL_ACCUM(rugo_tel::val_expand_s, _vx_t0);
 
       } else {
         // PLAIN or DELTA encoding
         int32_t page_encoding = page_header.encoding;
 
         if (result.type == "int32") {
-          if (page_encoding == 4) {
-            std::vector<int32_t> page_ints;
-            int32_t decoded = DecodeDeltaBinaryPacked(data_ptr, data_size,
-                                                       present_count, page_ints);
-            if (decoded != present_count) return result;
-            result.int32_values.insert(result.int32_values.end(),
-                                        page_ints.begin(), page_ints.end());
+          if (result.ext_int32) {
+            if (page_encoding == 4) {
+              std::vector<int32_t> page_ints;
+              int32_t decoded = DecodeDeltaBinaryPacked(data_ptr, data_size, present_count, page_ints);
+              if (decoded != present_count) return result;
+              std::copy(page_ints.begin(), page_ints.end(), result.ext_int32 + result.ext_written);
+              result.ext_written += (int32_t)page_ints.size();
+            } else {
+              int32_t* edst = result.ext_int32 + result.ext_written;
+              for (int32_t i = 0; i < present_count && data_ptr + 4 <= data_end; i++) {
+                *edst++ = ReadLE32(data_ptr);
+                data_ptr += 4;
+              }
+              result.ext_written += present_count;
+            }
           } else {
-            for (int32_t i = 0; i < present_count && data_ptr + 4 <= data_end; i++) {
-              result.int32_values.push_back(ReadLE32(data_ptr));
-              data_ptr += 4;
+            if (page_encoding == 4) {
+              std::vector<int32_t> page_ints;
+              int32_t decoded = DecodeDeltaBinaryPacked(data_ptr, data_size,
+                                                         present_count, page_ints);
+              if (decoded != present_count) return result;
+              result.int32_values.insert(result.int32_values.end(),
+                                          page_ints.begin(), page_ints.end());
+            } else {
+              for (int32_t i = 0; i < present_count && data_ptr + 4 <= data_end; i++) {
+                result.int32_values.push_back(ReadLE32(data_ptr));
+                data_ptr += 4;
+              }
             }
           }
         } else if (result.type == "int64") {
-          if (page_encoding == 4) {
-            std::vector<int64_t> page_ints;
-            int32_t decoded = DecodeDeltaBinaryPacked(data_ptr, data_size,
-                                                       present_count, page_ints);
-            if (decoded != present_count) return result;
-            result.int64_values.insert(result.int64_values.end(),
-                                        page_ints.begin(), page_ints.end());
+          if (result.ext_int64) {
+            if (page_encoding == 4) {
+              std::vector<int64_t> page_ints;
+              int32_t decoded = DecodeDeltaBinaryPacked(data_ptr, data_size, present_count, page_ints);
+              if (decoded != present_count) return result;
+              std::copy(page_ints.begin(), page_ints.end(), result.ext_int64 + result.ext_written);
+              result.ext_written += (int32_t)page_ints.size();
+            } else {
+              int64_t* edst = result.ext_int64 + result.ext_written;
+              for (int32_t i = 0; i < present_count && data_ptr + 8 <= data_end; i++) {
+                *edst++ = ReadLE64(data_ptr);
+                data_ptr += 8;
+              }
+              result.ext_written += present_count;
+            }
           } else {
-            for (int32_t i = 0; i < present_count && data_ptr + 8 <= data_end; i++) {
-              result.int64_values.push_back(ReadLE64(data_ptr));
-              data_ptr += 8;
+            if (page_encoding == 4) {
+              std::vector<int64_t> page_ints;
+              int32_t decoded = DecodeDeltaBinaryPacked(data_ptr, data_size,
+                                                         present_count, page_ints);
+              if (decoded != present_count) return result;
+              result.int64_values.insert(result.int64_values.end(),
+                                          page_ints.begin(), page_ints.end());
+            } else {
+              for (int32_t i = 0; i < present_count && data_ptr + 8 <= data_end; i++) {
+                result.int64_values.push_back(ReadLE64(data_ptr));
+                data_ptr += 8;
+              }
             }
           }
         } else if (result.type == "byte_array") {
           // If previously in dict mode, flush indices → expanded strings before appending plain.
           if (byte_array_dict_mode) {
             for (int32_t idx : result.dict_indices)
-              result.string_values.push_back(dict_string[idx]);
+              result.string_values.emplace_back(
+                  reinterpret_cast<const char*>(
+                      result.string_dict_arena.data() + result.string_dict_offsets[idx]),
+                  result.string_dict_lens[idx]);
             result.dict_indices.clear();
             byte_array_dict_mode = false;
           }
@@ -439,14 +565,32 @@ static DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
             data_ptr += (present_count + 7) / 8;
           }
         } else if (result.type == "float32") {
-          for (int32_t i = 0; i < present_count && data_ptr + 4 <= data_end; i++) {
-            result.float32_values.push_back(ReadFloat32(data_ptr));
-            data_ptr += 4;
+          if (result.ext_float32) {
+            float* edst = result.ext_float32 + result.ext_written;
+            for (int32_t i = 0; i < present_count && data_ptr + 4 <= data_end; i++) {
+              *edst++ = ReadFloat32(data_ptr);
+              data_ptr += 4;
+            }
+            result.ext_written += present_count;
+          } else {
+            for (int32_t i = 0; i < present_count && data_ptr + 4 <= data_end; i++) {
+              result.float32_values.push_back(ReadFloat32(data_ptr));
+              data_ptr += 4;
+            }
           }
         } else if (result.type == "float64") {
-          for (int32_t i = 0; i < present_count && data_ptr + 8 <= data_end; i++) {
-            result.float64_values.push_back(ReadFloat64(data_ptr));
-            data_ptr += 8;
+          if (result.ext_float64) {
+            double* edst = result.ext_float64 + result.ext_written;
+            for (int32_t i = 0; i < present_count && data_ptr + 8 <= data_end; i++) {
+              *edst++ = ReadFloat64(data_ptr);
+              data_ptr += 8;
+            }
+            result.ext_written += present_count;
+          } else {
+            for (int32_t i = 0; i < present_count && data_ptr + 8 <= data_end; i++) {
+              result.float64_values.push_back(ReadFloat64(data_ptr));
+              data_ptr += 8;
+            }
           }
         }
       }
@@ -458,11 +602,9 @@ static DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
     result.num_rows = total_collected;
 
     // If every byte_array page used dictionary encoding, string_values is still empty
-    // and dict_indices holds all per-row lookup indices.  Move the compact dictionary
-    // into string_values now so the Cython layer can do a single index→string pass.
-    if (byte_array_dict_mode && !result.dict_indices.empty()) {
-      result.string_values = std::move(dict_string);
-    }
+    // and dict_indices holds all per-row lookup indices.  The compact dictionary is
+    // already in result.string_dict_arena / string_dict_offsets / string_dict_lens;
+    // no action needed here.
 
     // Store accumulated levels in result for use by the Cython binding.
     // rep_levels and def_levels are needed for list column reconstruction (Step 10).
@@ -508,7 +650,11 @@ static DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
 DecodedColumn DecodeColumnFromMemory(const uint8_t *data, size_t size,
                                      const std::string &column_name,
                                      const RowGroupStats &row_group,
-                                     int row_group_index) {
+                                     int row_group_index,
+                                     int64_t* ext_int64,
+                                     double*  ext_float64,
+                                     int32_t* ext_int32,
+                                     float*   ext_float32) {
   DecodedColumn result;
 
   try {
@@ -526,7 +672,8 @@ DecodedColumn DecodeColumnFromMemory(const uint8_t *data, size_t size,
     if (offset < 0 || total_size <= 0) return result;
     if (offset >= (int64_t)size) return result;
 
-    return DecodeColumnFromChunk(data, size, target_col);
+    return DecodeColumnFromChunk(data, size, target_col,
+                                 ext_int64, ext_float64, ext_int32, ext_float32);
 
   } catch (...) {
     result.success = false;
