@@ -20,8 +20,12 @@ from opteryx.compiled.aggregations.aggregate_kernels cimport new_state
 from opteryx.compiled.aggregations.aggregate_kernels cimport update_state
 from opteryx.draken.vectors.int64_vector cimport Int64Vector
 from opteryx.draken.vectors.float64_vector cimport Float64Vector
+from opteryx.draken.vectors.integer_vector cimport IntegerVector
+from opteryx.draken.vectors.int64_vector cimport from_sequence as int64_from_sequence
+from opteryx.draken.vectors.float64_vector cimport from_sequence as float64_from_sequence
 
-from libc.stdint cimport int64_t, uint8_t, uint64_t
+from libc.stdint cimport int8_t, int16_t, int32_t, int64_t, uint8_t, uint64_t
+from libc.stdlib cimport malloc, free
 from libc.math cimport NAN
 from libc.stddef cimport size_t
 from cython.operator cimport dereference, preincrement
@@ -33,7 +37,47 @@ cdef int MODE_GENERAL = 0
 cdef int FAST_VALUE_UNKNOWN = 0
 cdef int FAST_VALUE_INT64 = 1
 cdef int FAST_VALUE_FLOAT64 = 2
+cdef int FAST_VALUE_INT_NARROW = 3
 cdef object _MISSING = object()
+
+
+cdef uint64_t* _widen_integer_vector_to_u64(
+    IntegerVector iv,
+    Py_ssize_t n,
+    uint8_t** out_null_bitmap,
+) except NULL:
+    """Widen IntegerVector data to a malloc'd uint64_t[n] buffer (sign-extended to int64).
+
+    Sets *out_null_bitmap to iv.ptr.null_bitmap (NULL for non-nullable columns).
+    Caller MUST free() the returned pointer.
+    """
+    cdef DrakenFixedBuffer* ptr = iv.ptr
+    cdef size_t itemsize = ptr.itemsize
+    cdef uint64_t* buf = <uint64_t*>malloc(n * sizeof(uint64_t))
+    cdef Py_ssize_t i
+    cdef int8_t* d8
+    cdef int16_t* d16
+    cdef int32_t* d32
+
+    if buf == NULL:
+        raise MemoryError("_widen_integer_vector_to_u64: malloc failed")
+
+    out_null_bitmap[0] = ptr.null_bitmap
+
+    if itemsize == 1:
+        d8 = <int8_t*>ptr.data
+        for i in range(n):
+            buf[i] = <uint64_t>(<int64_t>d8[i])
+    elif itemsize == 2:
+        d16 = <int16_t*>ptr.data
+        for i in range(n):
+            buf[i] = <uint64_t>(<int64_t>d16[i])
+    else:
+        d32 = <int32_t*>ptr.data
+        for i in range(n):
+            buf[i] = <uint64_t>(<int64_t>d32[i])
+
+    return buf
 
 
 cdef class GroupStateStore:
@@ -229,9 +273,17 @@ cdef class GroupStateStore:
         cdef uint64_t[::1] key_hashes
         cdef uint64_t key_hash
         cdef uint64_t distinct_value_u64
+        cdef IntegerVector key_int_vector
+        cdef IntegerVector value_int_vector
+        cdef DrakenFixedBuffer* int_value_ptr
+        cdef uint64_t* _narrow_key_buf
+        cdef uint64_t* _narrow_value_buf
 
         if morsel is None or morsel.num_rows == 0:
             return
+
+        _narrow_key_buf = NULL
+        _narrow_value_buf = NULL
 
         row_count = morsel.num_rows
         self._rows_seen += row_count
@@ -251,14 +303,19 @@ cdef class GroupStateStore:
             key_vector0 = key_vectors[0]
 
         if self._int64_count_star_mode:
-            if key_count != 1 or not isinstance(key_vector0, Int64Vector):
-                # This shape is not compatible with the int64 COUNT(*) fast path.
+            if key_count != 1 or not isinstance(key_vector0, (Int64Vector, IntegerVector)):
+                # This shape is not compatible with the integer COUNT(*) fast path.
                 self._int64_count_star_mode = False
             else:
-                key_int64_vector = <Int64Vector>key_vector0
-                key_ptr = key_int64_vector.ptr
-                key_data = <int64_t*>key_ptr.data
-                key_nulls = <uint8_t*>key_ptr.null_bitmap
+                if isinstance(key_vector0, Int64Vector):
+                    key_int64_vector = <Int64Vector>key_vector0
+                    key_ptr = key_int64_vector.ptr
+                    key_data = <int64_t*>key_ptr.data
+                    key_nulls = <uint8_t*>key_ptr.null_bitmap
+                else:
+                    _narrow_key_buf = _widen_integer_vector_to_u64(
+                        <IntegerVector>key_vector0, row_count, &key_nulls)
+                    key_data = <int64_t*>_narrow_key_buf
 
                 if self._int64_count_star_counts.size() == 0 and row_count > 0:
                     self._int64_count_star_counts.reserve(<size_t>(row_count * 2))
@@ -267,34 +324,47 @@ cdef class GroupStateStore:
                     for row_idx in range(row_count):
                         key_value = key_data[row_idx]
                         self._int64_count_star_counts[<uint64_t>key_value] += 1
-                    return
+                else:
+                    for row_idx in range(row_count):
+                        if (key_nulls[row_idx >> 3] >> (row_idx & 7)) & 1:
+                            key_value = key_data[row_idx]
+                            self._int64_count_star_counts[<uint64_t>key_value] += 1
+                        else:
+                            self._int64_count_star_seen_null = True
+                            self._int64_count_star_null_count += 1
 
-                for row_idx in range(row_count):
-                    if (key_nulls[row_idx >> 3] >> (row_idx & 7)) & 1:
-                        key_value = key_data[row_idx]
-                        self._int64_count_star_counts[<uint64_t>key_value] += 1
-                    else:
-                        self._int64_count_star_seen_null = True
-                        self._int64_count_star_null_count += 1
+                if _narrow_key_buf != NULL:
+                    free(_narrow_key_buf)
+                    _narrow_key_buf = NULL
                 return
 
         if self._int64_count_distinct_mode:
-            if key_count != 1 or not isinstance(key_vector0, Int64Vector):
+            if key_count != 1 or not isinstance(key_vector0, (Int64Vector, IntegerVector)):
                 self._int64_count_distinct_mode = False
             else:
                 value_vector0 = morsel.column(self._single_column)
-                if not isinstance(value_vector0, Int64Vector):
+                if not isinstance(value_vector0, (Int64Vector, IntegerVector)):
                     self._int64_count_distinct_mode = False
                 else:
-                    key_int64_vector = <Int64Vector>key_vector0
-                    key_ptr = key_int64_vector.ptr
-                    key_data = <int64_t*>key_ptr.data
-                    key_nulls = <uint8_t*>key_ptr.null_bitmap
+                    if isinstance(key_vector0, Int64Vector):
+                        key_int64_vector = <Int64Vector>key_vector0
+                        key_ptr = key_int64_vector.ptr
+                        key_data = <int64_t*>key_ptr.data
+                        key_nulls = <uint8_t*>key_ptr.null_bitmap
+                    else:
+                        _narrow_key_buf = _widen_integer_vector_to_u64(
+                            <IntegerVector>key_vector0, row_count, &key_nulls)
+                        key_data = <int64_t*>_narrow_key_buf
 
-                    value_i64_vector = <Int64Vector>value_vector0
-                    value_ptr = value_i64_vector.ptr
-                    value_i64_data = <int64_t*>value_ptr.data
-                    value_nulls = <uint8_t*>value_ptr.null_bitmap
+                    if isinstance(value_vector0, Int64Vector):
+                        value_i64_vector = <Int64Vector>value_vector0
+                        value_ptr = value_i64_vector.ptr
+                        value_i64_data = <int64_t*>value_ptr.data
+                        value_nulls = <uint8_t*>value_ptr.null_bitmap
+                    else:
+                        _narrow_value_buf = _widen_integer_vector_to_u64(
+                            <IntegerVector>value_vector0, row_count, &value_nulls)
+                        value_i64_data = <int64_t*>_narrow_value_buf
 
                     if self._int64_count_distinct_counts.size() == 0 and row_count > 0:
                         self._int64_count_distinct_counts.reserve(<size_t>(row_count * 2))
@@ -305,37 +375,51 @@ cdef class GroupStateStore:
                             distinct_value_u64 = <uint64_t>value_i64_data[row_idx]
                             if self._int64_count_distinct_seen[key_u64].insert(distinct_value_u64).second:
                                 self._int64_count_distinct_counts[key_u64] += 1
-                        return
+                    else:
+                        for row_idx in range(row_count):
+                            if value_nulls != NULL and not ((value_nulls[row_idx >> 3] >> (row_idx & 7)) & 1):
+                                continue
+                            distinct_value_u64 = <uint64_t>value_i64_data[row_idx]
+                            if key_nulls == NULL or ((key_nulls[row_idx >> 3] >> (row_idx & 7)) & 1):
+                                key_u64 = <uint64_t>key_data[row_idx]
+                                if self._int64_count_distinct_seen[key_u64].insert(distinct_value_u64).second:
+                                    self._int64_count_distinct_counts[key_u64] += 1
+                            else:
+                                self._int64_count_distinct_seen_null_key = True
+                                if self._int64_count_distinct_null_key_seen.insert(distinct_value_u64).second:
+                                    self._int64_count_distinct_null_key_count += 1
 
-                    for row_idx in range(row_count):
-                        if value_nulls != NULL and not ((value_nulls[row_idx >> 3] >> (row_idx & 7)) & 1):
-                            continue
-                        distinct_value_u64 = <uint64_t>value_i64_data[row_idx]
-                        if key_nulls == NULL or ((key_nulls[row_idx >> 3] >> (row_idx & 7)) & 1):
-                            key_u64 = <uint64_t>key_data[row_idx]
-                            if self._int64_count_distinct_seen[key_u64].insert(distinct_value_u64).second:
-                                self._int64_count_distinct_counts[key_u64] += 1
-                        else:
-                            self._int64_count_distinct_seen_null_key = True
-                            if self._int64_count_distinct_null_key_seen.insert(distinct_value_u64).second:
-                                self._int64_count_distinct_null_key_count += 1
+                    if _narrow_key_buf != NULL:
+                        free(_narrow_key_buf)
+                        _narrow_key_buf = NULL
+                    if _narrow_value_buf != NULL:
+                        free(_narrow_value_buf)
+                        _narrow_value_buf = NULL
                     return
 
         typed_mode = self._int64_typed_mode
         if typed_mode != MODE_GENERAL:
-            # Typed path is only valid for single non-null int64 keys.
-            if key_count != 1 or not isinstance(key_vector0, Int64Vector):
+            # Typed path is valid for single non-null integer (int64 or narrow) keys.
+            if key_count != 1 or not isinstance(key_vector0, (Int64Vector, IntegerVector)):
                 self._int64_typed_mode = MODE_GENERAL
                 self._int64_typed_value_type = FAST_VALUE_UNKNOWN
                 typed_mode = MODE_GENERAL
             else:
-                key_int64_vector = <Int64Vector>key_vector0
-                key_ptr = key_int64_vector.ptr
-                key_data = <int64_t*>key_ptr.data
-                key_nulls = <uint8_t*>key_ptr.null_bitmap
+                if isinstance(key_vector0, Int64Vector):
+                    key_int64_vector = <Int64Vector>key_vector0
+                    key_ptr = key_int64_vector.ptr
+                    key_data = <int64_t*>key_ptr.data
+                    key_nulls = <uint8_t*>key_ptr.null_bitmap
+                else:
+                    _narrow_key_buf = _widen_integer_vector_to_u64(
+                        <IntegerVector>key_vector0, row_count, &key_nulls)
+                    key_data = <int64_t*>_narrow_key_buf
 
-                # Any key bitmap (even if all-valid) routes through generic mode in v1.
+                # Any key bitmap (even if all-valid) routes through generic mode.
                 if key_nulls != NULL:
+                    if _narrow_key_buf != NULL:
+                        free(_narrow_key_buf)
+                        _narrow_key_buf = NULL
                     self._int64_typed_mode = MODE_GENERAL
                     self._int64_typed_value_type = FAST_VALUE_UNKNOWN
                     typed_mode = MODE_GENERAL
@@ -349,6 +433,8 @@ cdef class GroupStateStore:
                                 typed_value_type = FAST_VALUE_INT64
                             elif isinstance(value_vector0, Float64Vector):
                                 typed_value_type = FAST_VALUE_FLOAT64
+                            elif isinstance(value_vector0, IntegerVector):
+                                typed_value_type = FAST_VALUE_INT_NARROW
                             else:
                                 typed_value_type = FAST_VALUE_UNKNOWN
                             self._int64_typed_value_type = typed_value_type
@@ -364,7 +450,6 @@ cdef class GroupStateStore:
                                 self._int64_typed_rows[key_u64] += 1
                                 if value_nulls == NULL or ((value_nulls[row_idx >> 3] >> (row_idx & 7)) & 1):
                                     self._int64_typed_i64[key_u64] += 1
-                            return
                         elif isinstance(value_vector0, Float64Vector):
                             value_f64_vector = <Float64Vector>value_vector0
                             value_ptr = value_f64_vector.ptr
@@ -374,12 +459,39 @@ cdef class GroupStateStore:
                                 self._int64_typed_rows[key_u64] += 1
                                 if value_nulls == NULL or ((value_nulls[row_idx >> 3] >> (row_idx & 7)) & 1):
                                     self._int64_typed_i64[key_u64] += 1
+                        elif isinstance(value_vector0, IntegerVector):
+                            # COUNT(narrow_int_col): only need null bitmap, no data widening
+                            value_int_vector = <IntegerVector>value_vector0
+                            int_value_ptr = value_int_vector.ptr
+                            value_nulls = <uint8_t*>int_value_ptr.null_bitmap
+                            for row_idx in range(row_count):
+                                key_u64 = <uint64_t>key_data[row_idx]
+                                self._int64_typed_rows[key_u64] += 1
+                                if value_nulls == NULL or ((value_nulls[row_idx >> 3] >> (row_idx & 7)) & 1):
+                                    self._int64_typed_i64[key_u64] += 1
+                        else:
+                            if _narrow_key_buf != NULL:
+                                free(_narrow_key_buf)
+                                _narrow_key_buf = NULL
+                            self._int64_typed_mode = MODE_GENERAL
+                            self._int64_typed_value_type = FAST_VALUE_UNKNOWN
+                            typed_mode = MODE_GENERAL
+                        if typed_mode != MODE_GENERAL:
+                            if _narrow_key_buf != NULL:
+                                free(_narrow_key_buf)
+                                _narrow_key_buf = NULL
                             return
-                    elif typed_value_type == FAST_VALUE_INT64 and isinstance(value_vector0, Int64Vector):
-                        value_i64_vector = <Int64Vector>value_vector0
-                        value_ptr = value_i64_vector.ptr
-                        value_i64_data = <int64_t*>value_ptr.data
-                        value_nulls = <uint8_t*>value_ptr.null_bitmap
+                    elif typed_value_type in (FAST_VALUE_INT64, FAST_VALUE_INT_NARROW) and isinstance(value_vector0, (Int64Vector, IntegerVector)):
+                        # Int64 and narrow-int values share inner loops via aliased pointer.
+                        if isinstance(value_vector0, Int64Vector):
+                            value_i64_vector = <Int64Vector>value_vector0
+                            value_ptr = value_i64_vector.ptr
+                            value_i64_data = <int64_t*>value_ptr.data
+                            value_nulls = <uint8_t*>value_ptr.null_bitmap
+                        else:
+                            _narrow_value_buf = _widen_integer_vector_to_u64(
+                                <IntegerVector>value_vector0, row_count, &value_nulls)
+                            value_i64_data = <int64_t*>_narrow_value_buf
 
                         if typed_mode == AGG_SUM:
                             for row_idx in range(row_count):
@@ -388,7 +500,6 @@ cdef class GroupStateStore:
                                 if value_nulls == NULL or ((value_nulls[row_idx >> 3] >> (row_idx & 7)) & 1):
                                     self._int64_typed_i64[key_u64] += value_i64_data[row_idx]
                                     self._int64_typed_seen[key_u64] = 1
-                            return
                         elif typed_mode == AGG_MIN:
                             for row_idx in range(row_count):
                                 key_u64 = <uint64_t>key_data[row_idx]
@@ -398,7 +509,6 @@ cdef class GroupStateStore:
                                     if self._int64_typed_seen[key_u64] == 0 or value_i64 < self._int64_typed_i64[key_u64]:
                                         self._int64_typed_i64[key_u64] = value_i64
                                     self._int64_typed_seen[key_u64] = 1
-                            return
                         elif typed_mode == AGG_MAX:
                             for row_idx in range(row_count):
                                 key_u64 = <uint64_t>key_data[row_idx]
@@ -408,7 +518,6 @@ cdef class GroupStateStore:
                                     if self._int64_typed_seen[key_u64] == 0 or value_i64 > self._int64_typed_i64[key_u64]:
                                         self._int64_typed_i64[key_u64] = value_i64
                                     self._int64_typed_seen[key_u64] = 1
-                            return
                         elif typed_mode == AGG_AVG:
                             for row_idx in range(row_count):
                                 key_u64 = <uint64_t>key_data[row_idx]
@@ -416,7 +525,6 @@ cdef class GroupStateStore:
                                 if value_nulls == NULL or ((value_nulls[row_idx >> 3] >> (row_idx & 7)) & 1):
                                     self._int64_typed_f64[key_u64] += <double>value_i64_data[row_idx]
                                     self._int64_typed_count[key_u64] += 1
-                            return
                         elif typed_mode == AGG_HASH_ONE:
                             for row_idx in range(row_count):
                                 key_u64 = <uint64_t>key_data[row_idx]
@@ -426,7 +534,14 @@ cdef class GroupStateStore:
                                 if value_nulls == NULL or ((value_nulls[row_idx >> 3] >> (row_idx & 7)) & 1):
                                     self._int64_typed_i64[key_u64] = value_i64_data[row_idx]
                                     self._int64_typed_seen[key_u64] = 1
-                            return
+
+                        if _narrow_key_buf != NULL:
+                            free(_narrow_key_buf)
+                            _narrow_key_buf = NULL
+                        if _narrow_value_buf != NULL:
+                            free(_narrow_value_buf)
+                            _narrow_value_buf = NULL
+                        return
                     elif typed_value_type == FAST_VALUE_FLOAT64 and isinstance(value_vector0, Float64Vector):
                         value_f64_vector = <Float64Vector>value_vector0
                         value_ptr = value_f64_vector.ptr
@@ -440,7 +555,6 @@ cdef class GroupStateStore:
                                 if value_nulls == NULL or ((value_nulls[row_idx >> 3] >> (row_idx & 7)) & 1):
                                     self._int64_typed_f64[key_u64] += value_f64_data[row_idx]
                                     self._int64_typed_seen[key_u64] = 1
-                            return
                         elif typed_mode == AGG_MIN:
                             for row_idx in range(row_count):
                                 key_u64 = <uint64_t>key_data[row_idx]
@@ -450,7 +564,6 @@ cdef class GroupStateStore:
                                     if self._int64_typed_seen[key_u64] == 0 or value_f64 < self._int64_typed_f64[key_u64]:
                                         self._int64_typed_f64[key_u64] = value_f64
                                     self._int64_typed_seen[key_u64] = 1
-                            return
                         elif typed_mode == AGG_MAX:
                             for row_idx in range(row_count):
                                 key_u64 = <uint64_t>key_data[row_idx]
@@ -460,7 +573,6 @@ cdef class GroupStateStore:
                                     if self._int64_typed_seen[key_u64] == 0 or value_f64 > self._int64_typed_f64[key_u64]:
                                         self._int64_typed_f64[key_u64] = value_f64
                                     self._int64_typed_seen[key_u64] = 1
-                            return
                         elif typed_mode == AGG_AVG:
                             for row_idx in range(row_count):
                                 key_u64 = <uint64_t>key_data[row_idx]
@@ -468,10 +580,17 @@ cdef class GroupStateStore:
                                 if value_nulls == NULL or ((value_nulls[row_idx >> 3] >> (row_idx & 7)) & 1):
                                     self._int64_typed_f64[key_u64] += value_f64_data[row_idx]
                                     self._int64_typed_count[key_u64] += 1
-                            return
+
+                        if _narrow_key_buf != NULL:
+                            free(_narrow_key_buf)
+                            _narrow_key_buf = NULL
+                        return
 
                     # Unsupported typed value vector/type for this morsel;
                     # disable typed mode and continue through generic mode.
+                    if _narrow_key_buf != NULL:
+                        free(_narrow_key_buf)
+                        _narrow_key_buf = NULL
                     self._int64_typed_mode = MODE_GENERAL
                     self._int64_typed_value_type = FAST_VALUE_UNKNOWN
                     typed_mode = MODE_GENERAL
@@ -809,10 +928,18 @@ cdef class GroupStateStore:
         cdef Py_ssize_t n
         cdef Py_ssize_t idx
         cdef flat_hash_map[uint64_t, int64_t].iterator count_it
+        cdef flat_hash_map[uint64_t, int64_t].iterator rows_it
         cdef object keys
         cdef object counts
+        cdef object values
         cdef int64_t[::1] key_view
         cdef int64_t[::1] count_view
+        cdef int64_t[::1] value_i64_view
+        cdef double[::1] value_f64_view
+        cdef uint64_t key_u64
+        cdef int typed_mode
+        cdef int typed_value_type
+        cdef int64_t c
 
         if self._specialized_kernel is not None:
             return self._specialized_kernel.finalize_fast_columns()
@@ -838,25 +965,290 @@ cdef class GroupStateStore:
 
             return keys, counts
 
-        if not self._int64_count_distinct_mode:
+        if self._int64_count_distinct_mode:
+            if self._int64_count_distinct_seen_null_key:
+                return None
+
+            from array import array
+
+            n = <Py_ssize_t>self._int64_count_distinct_counts.size()
+            keys = array("q", [0]) * n
+            counts = array("q", [0]) * n
+            key_view = keys
+            count_view = counts
+
+            count_it = self._int64_count_distinct_counts.begin()
+            idx = 0
+            while count_it != self._int64_count_distinct_counts.end():
+                key_view[idx] = <int64_t>dereference(count_it).first
+                count_view[idx] = dereference(count_it).second
+                idx += 1
+                preincrement(count_it)
+
+            return keys, counts
+
+        # Fast output path for typed int64-key single-aggregate modes.
+        typed_mode = self._int64_typed_mode
+        if typed_mode == MODE_GENERAL:
             return None
-        if self._int64_count_distinct_seen_null_key:
-            return None
+
+        n = <Py_ssize_t>self._int64_typed_rows.size()
+        if n == 0:
+            from array import array
+            return array("q"), array("q")
 
         from array import array
 
-        n = <Py_ssize_t>self._int64_count_distinct_counts.size()
+        typed_value_type = self._int64_typed_value_type
         keys = array("q", [0]) * n
-        counts = array("q", [0]) * n
         key_view = keys
-        count_view = counts
 
-        count_it = self._int64_count_distinct_counts.begin()
-        idx = 0
-        while count_it != self._int64_count_distinct_counts.end():
-            key_view[idx] = <int64_t>dereference(count_it).first
-            count_view[idx] = dereference(count_it).second
-            idx += 1
-            preincrement(count_it)
+        if typed_mode == AGG_COUNT:
+            values = array("q", [0]) * n
+            value_i64_view = values
+            rows_it = self._int64_typed_rows.begin()
+            idx = 0
+            while rows_it != self._int64_typed_rows.end():
+                key_u64 = dereference(rows_it).first
+                key_view[idx] = <int64_t>key_u64
+                value_i64_view[idx] = self._int64_typed_i64[key_u64]
+                idx += 1
+                preincrement(rows_it)
+            return keys, values
 
-        return keys, counts
+        if typed_mode in (AGG_SUM, AGG_MIN, AGG_MAX, AGG_HASH_ONE):
+            # Any unseen value implies NULL output for that group; fallback to
+            # finalize_rows to preserve NULL semantics.
+            rows_it = self._int64_typed_rows.begin()
+            while rows_it != self._int64_typed_rows.end():
+                key_u64 = dereference(rows_it).first
+                if self._int64_typed_seen[key_u64] == 0:
+                    return None
+                preincrement(rows_it)
+
+            if typed_value_type == FAST_VALUE_FLOAT64:
+                values = array("d", [0.0]) * n
+                value_f64_view = values
+                rows_it = self._int64_typed_rows.begin()
+                idx = 0
+                while rows_it != self._int64_typed_rows.end():
+                    key_u64 = dereference(rows_it).first
+                    key_view[idx] = <int64_t>key_u64
+                    value_f64_view[idx] = self._int64_typed_f64[key_u64]
+                    idx += 1
+                    preincrement(rows_it)
+                return keys, values
+
+            values = array("q", [0]) * n
+            value_i64_view = values
+            rows_it = self._int64_typed_rows.begin()
+            idx = 0
+            while rows_it != self._int64_typed_rows.end():
+                key_u64 = dereference(rows_it).first
+                key_view[idx] = <int64_t>key_u64
+                value_i64_view[idx] = self._int64_typed_i64[key_u64]
+                idx += 1
+                preincrement(rows_it)
+            return keys, values
+
+        if typed_mode == AGG_AVG:
+            values = array("d", [0.0]) * n
+            value_f64_view = values
+            rows_it = self._int64_typed_rows.begin()
+            idx = 0
+            while rows_it != self._int64_typed_rows.end():
+                key_u64 = dereference(rows_it).first
+                c = self._int64_typed_count[key_u64]
+                if c == 0:
+                    return None
+                key_view[idx] = <int64_t>key_u64
+                value_f64_view[idx] = self._int64_typed_f64[key_u64] / c
+                idx += 1
+                preincrement(rows_it)
+            return keys, values
+
+        return None
+
+    cpdef object finalize_fast_columns_chunked(self, Py_ssize_t chunk_size=65536):
+        cdef list chunks
+        cdef Py_ssize_t total
+        cdef Py_ssize_t produced
+        cdef Py_ssize_t this_chunk
+        cdef Py_ssize_t idx
+        cdef flat_hash_map[uint64_t, int64_t].iterator count_it
+        cdef flat_hash_map[uint64_t, int64_t].iterator rows_it
+        cdef object keys
+        cdef object values
+        cdef int64_t[::1] key_view
+        cdef int64_t[::1] value_i64_view
+        cdef double[::1] value_f64_view
+        cdef uint64_t key_u64
+        cdef int typed_mode
+        cdef int typed_value_type
+        cdef int64_t c
+
+        if chunk_size <= 0:
+            raise ValueError("chunk_size must be positive")
+
+        if self._specialized_kernel is not None and hasattr(self._specialized_kernel, "finalize_fast_columns_chunked"):
+            return self._specialized_kernel.finalize_fast_columns_chunked(chunk_size)
+
+        chunks = []
+
+        if self._int64_count_star_mode:
+            if self._int64_count_star_seen_null:
+                return None
+            total = <Py_ssize_t>self._int64_count_star_counts.size()
+            produced = 0
+            count_it = self._int64_count_star_counts.begin()
+            from array import array
+            while produced < total:
+                this_chunk = chunk_size if (total - produced) > chunk_size else (total - produced)
+                keys = array("q", [0]) * this_chunk
+                values = array("q", [0]) * this_chunk
+                key_view = keys
+                value_i64_view = values
+                idx = 0
+                while idx < this_chunk and count_it != self._int64_count_star_counts.end():
+                    key_view[idx] = <int64_t>dereference(count_it).first
+                    value_i64_view[idx] = dereference(count_it).second
+                    idx += 1
+                    preincrement(count_it)
+                chunks.append((keys, values))
+                produced += this_chunk
+            return chunks
+
+        if self._int64_count_distinct_mode:
+            if self._int64_count_distinct_seen_null_key:
+                return None
+            total = <Py_ssize_t>self._int64_count_distinct_counts.size()
+            produced = 0
+            count_it = self._int64_count_distinct_counts.begin()
+            from array import array
+            while produced < total:
+                this_chunk = chunk_size if (total - produced) > chunk_size else (total - produced)
+                keys = array("q", [0]) * this_chunk
+                values = array("q", [0]) * this_chunk
+                key_view = keys
+                value_i64_view = values
+                idx = 0
+                while idx < this_chunk and count_it != self._int64_count_distinct_counts.end():
+                    key_view[idx] = <int64_t>dereference(count_it).first
+                    value_i64_view[idx] = dereference(count_it).second
+                    idx += 1
+                    preincrement(count_it)
+                chunks.append((keys, values))
+                produced += this_chunk
+            return chunks
+
+        typed_mode = self._int64_typed_mode
+        if typed_mode == MODE_GENERAL:
+            return None
+
+        total = <Py_ssize_t>self._int64_typed_rows.size()
+        if total == 0:
+            return []
+
+        # preserve null semantics; any null result requires fallback finalize_rows.
+        if typed_mode in (AGG_SUM, AGG_MIN, AGG_MAX, AGG_HASH_ONE):
+            rows_it = self._int64_typed_rows.begin()
+            while rows_it != self._int64_typed_rows.end():
+                key_u64 = dereference(rows_it).first
+                if self._int64_typed_seen[key_u64] == 0:
+                    return None
+                preincrement(rows_it)
+        elif typed_mode == AGG_AVG:
+            rows_it = self._int64_typed_rows.begin()
+            while rows_it != self._int64_typed_rows.end():
+                key_u64 = dereference(rows_it).first
+                c = self._int64_typed_count[key_u64]
+                if c == 0:
+                    return None
+                preincrement(rows_it)
+
+        typed_value_type = self._int64_typed_value_type
+        rows_it = self._int64_typed_rows.begin()
+        produced = 0
+        from array import array
+        while produced < total:
+            this_chunk = chunk_size if (total - produced) > chunk_size else (total - produced)
+            keys = array("q", [0]) * this_chunk
+            key_view = keys
+
+            if typed_mode == AGG_AVG or typed_value_type == FAST_VALUE_FLOAT64:
+                values = array("d", [0.0]) * this_chunk
+                value_f64_view = values
+                idx = 0
+                while idx < this_chunk and rows_it != self._int64_typed_rows.end():
+                    key_u64 = dereference(rows_it).first
+                    key_view[idx] = <int64_t>key_u64
+                    if typed_mode == AGG_COUNT:
+                        value_f64_view[idx] = <double>self._int64_typed_i64[key_u64]
+                    elif typed_mode == AGG_AVG:
+                        c = self._int64_typed_count[key_u64]
+                        value_f64_view[idx] = self._int64_typed_f64[key_u64] / c
+                    else:
+                        value_f64_view[idx] = self._int64_typed_f64[key_u64]
+                    idx += 1
+                    preincrement(rows_it)
+            else:
+                values = array("q", [0]) * this_chunk
+                value_i64_view = values
+                idx = 0
+                while idx < this_chunk and rows_it != self._int64_typed_rows.end():
+                    key_u64 = dereference(rows_it).first
+                    key_view[idx] = <int64_t>key_u64
+                    value_i64_view[idx] = self._int64_typed_i64[key_u64]
+                    idx += 1
+                    preincrement(rows_it)
+
+            chunks.append((keys, values))
+            produced += this_chunk
+
+        return chunks
+
+    cpdef object fast_finalize_unavailable_reason(self):
+        cdef flat_hash_map[uint64_t, int64_t].iterator rows_it
+        cdef uint64_t key_u64
+        cdef int typed_mode
+        cdef int64_t c
+
+        if self._specialized_kernel is not None:
+            if hasattr(self._specialized_kernel, "fast_finalize_unavailable_reason"):
+                return self._specialized_kernel.fast_finalize_unavailable_reason()
+            return "specialized kernel does not expose a fast-finalize diagnostic"
+
+        if self._int64_count_star_mode:
+            if self._int64_count_star_seen_null:
+                return "valid result contains NULL group keys; current fast columns cannot represent NULL-key groups"
+            return "fast COUNT(*) path is available"
+
+        if self._int64_count_distinct_mode:
+            if self._int64_count_distinct_seen_null_key:
+                return "valid result contains NULL group keys for COUNT(DISTINCT); current fast columns cannot represent NULL-key groups"
+            return "fast COUNT(DISTINCT) path is available"
+
+        typed_mode = self._int64_typed_mode
+        if typed_mode == MODE_GENERAL:
+            return "typed fast mode disabled for this query/data shape (not single int64-group-key typed mode)"
+
+        if typed_mode in (AGG_SUM, AGG_MIN, AGG_MAX, AGG_HASH_ONE):
+            rows_it = self._int64_typed_rows.begin()
+            while rows_it != self._int64_typed_rows.end():
+                key_u64 = dereference(rows_it).first
+                if self._int64_typed_seen[key_u64] == 0:
+                    return "valid result has one or more groups with NULL output; typed fast columns currently require non-NULL outputs"
+                preincrement(rows_it)
+            return "typed fast path is available"
+
+        if typed_mode == AGG_AVG:
+            rows_it = self._int64_typed_rows.begin()
+            while rows_it != self._int64_typed_rows.end():
+                key_u64 = dereference(rows_it).first
+                c = self._int64_typed_count[key_u64]
+                if c == 0:
+                    return "valid AVG result has one or more groups with no non-NULL values; typed fast columns currently require non-NULL outputs"
+                preincrement(rows_it)
+            return "typed AVG fast path is available"
+
+        return "fast finalize path unavailable for this mode"

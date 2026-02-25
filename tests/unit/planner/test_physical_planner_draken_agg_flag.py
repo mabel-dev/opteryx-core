@@ -4,7 +4,6 @@
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
 from opteryx.models import QueryProperties
-from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.planner.logical_planner.logical_planner import LogicalPlanStepType
 from opteryx.planner.physical_planner import create_physical_plan
 import opteryx.planner.physical_planner as physical_planner
@@ -93,7 +92,11 @@ def test_physical_planner_uses_draken_aggregate_and_group_when_flag_enabled(monk
     assert isinstance(plan[1], _DummyDrakenAggregateAndGroupNode)
 
 
-def test_physical_planner_fails_when_draken_not_supported(monkeypatch):
+def test_physical_planner_falls_back_to_native_when_draken_not_supported(monkeypatch):
+    """When Draken is enabled but does not support the query shape, the planner
+    should fall back to SimpleAggregateAndGroupNode (when ENABLE_NATIVE_AGGREGATOR
+    is True and all aggregates are simple), rather than raising an error."""
+
     class _UnsupportedDrakenNode(_DummyDrakenAggregateAndGroupNode):
         @staticmethod
         def supports(aggregates, groups=None):
@@ -128,14 +131,13 @@ def test_physical_planner_fails_when_draken_not_supported(monkeypatch):
         _DummyArrowAggregateAndGroupNode,
     )
 
-    try:
-        create_physical_plan(
-            _LogicalPlan(node),
-            QueryProperties(query_id="test-qid", variables={}),
-        )
-        assert False, "Expected UnsupportedSyntaxError when Draken mode cannot support aggregate shape"
-    except UnsupportedSyntaxError:
-        pass
+    plan = create_physical_plan(
+        _LogicalPlan(node),
+        QueryProperties(query_id="test-qid", variables={}),
+    )
+    # Should fall back to SimpleAggregateAndGroupNode since Draken doesn't support
+    # this shape but ENABLE_NATIVE_AGGREGATOR=True and COUNT is a simple aggregate.
+    assert isinstance(plan[1], _DummySimpleAggregateAndGroupNode)
 
 
 def test_physical_planner_uses_arrow_aggregate_and_group_when_flag_disabled(monkeypatch):

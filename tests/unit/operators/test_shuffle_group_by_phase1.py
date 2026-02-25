@@ -560,6 +560,61 @@ def test_phase1_v2_single_avg_disables_fast_columns_with_all_null_group():
     assert rows_by_key[2]["avg_v"] is None
 
 
+def test_phase1_v2_single_sum_uses_fast_columns_when_null_free():
+    try:
+        from opteryx.operators.group_state_store import ShuffleGroupByOperationV2
+    except ImportError:
+        return
+
+    rows = [
+        {"k": 1, "v": 2},
+        {"k": 1, "v": 3},
+        {"k": 2, "v": 10},
+        {"k": 2, "v": 20},
+    ]
+    table = _rows_to_table(rows, required_columns=["k", "v"])
+    morsel = Morsel.from_arrow(table)
+
+    operation = ShuffleGroupByOperationV2(
+        group_by_columns=["k"],
+        aggregations=[AggregationSpec(alias="sum_v", function="sum", column="v")],
+    )
+    operation.ingest(morsel)
+    fast_columns = operation._backend.finalize_fast_columns()
+
+    assert fast_columns is not None
+    keys, values = fast_columns
+    actual = {int(k): int(v) for k, v in zip(keys, values)}
+    assert actual == {1: 5, 2: 30}
+
+
+def test_phase1_v2_single_sum_disables_fast_columns_with_all_null_group():
+    try:
+        from opteryx.operators.group_state_store import ShuffleGroupByOperationV2
+    except ImportError:
+        return
+
+    rows = [
+        {"k": 1, "v": 2},
+        {"k": 1, "v": 3},
+        {"k": 2, "v": None},
+    ]
+    table = _rows_to_table(rows, required_columns=["k", "v"])
+    morsel = Morsel.from_arrow(table)
+
+    operation = ShuffleGroupByOperationV2(
+        group_by_columns=["k"],
+        aggregations=[AggregationSpec(alias="sum_v", function="sum", column="v")],
+    )
+    operation.ingest(morsel)
+    assert operation._backend.finalize_fast_columns() is None
+
+    rows = operation.finalize().to_arrow().to_pylist()
+    rows_by_key = {row["k"]: row for row in rows}
+    assert rows_by_key[1]["sum_v"] == 5
+    assert rows_by_key[2]["sum_v"] is None
+
+
 if __name__ == "__main__":
     from tests import run_tests
 

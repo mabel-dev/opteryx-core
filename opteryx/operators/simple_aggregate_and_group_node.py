@@ -97,8 +97,41 @@ class SimpleAggregateAndGroupNode(BasePlanNode):
         self.finalizer_map, self.finalizer_aggregations = build_finalizer_aggregations(
             self.aggregates
         )
+        self._is_multi_agg = len(self.aggregate_functions) > 1
+
+        self._use_draken_ops = False
+        try:
+            from opteryx.config import features
+
+            self._use_draken_ops = bool(features.use_draken_ops_kernels)
+        except Exception:
+            self._use_draken_ops = False
+
+        self._draken_ops_shape_supported = (
+            len(self.group_by_columns) == 1
+            and len(self.aggregate_functions) == 1
+            and (
+                (
+                    self.aggregate_functions[0][1] == "count"
+                    and self.aggregate_functions[0][0] == "*"
+                )
+                or (
+                    self.aggregate_functions[0][1] in ("mean", "count_distinct")
+                    and self.aggregate_functions[0][0] != "*"
+                )
+            )
+        )
 
         self.buffer = []
+
+    @staticmethod
+    def _concat_tables(tables):
+        if not tables:
+            return pyarrow.Table.from_pydict({})
+        try:
+            return pyarrow.concat_tables(tables, promote_options="none")
+        except Exception:
+            return pyarrow.concat_tables(tables, promote_options="permissive")
 
     @property
     def config(self):  # pragma: no cover
@@ -119,15 +152,25 @@ class SimpleAggregateAndGroupNode(BasePlanNode):
         if morsel == EOS:
             start = time.monotonic_ns()
 
+            self.readings["groupby_buffer_morsels"] += len(self.buffer)
+
             internal_names = list(self.finalizer_map.values()) + self.group_by_columns
             column_names = list(self.finalizer_map.keys()) + self.group_by_columns
 
-            groups = pyarrow.concat_tables(self.buffer, promote_options="permissive")
+            groups = self._concat_tables(self.buffer)
             self.buffer.clear()
+            phase2_rows_in = groups.num_rows
+            self.readings["groupby_phase2_rows_in"] += phase2_rows_in
             groups = groups.group_by(self.group_by_columns)
             groups = groups.aggregate(self.finalizer_aggregations)
             groups = groups.select(internal_names)
             groups = groups.rename_columns(column_names)
+            phase2_groups_out = groups.num_rows
+            self.readings["groupby_phase2_groups_out"] += phase2_groups_out
+
+            if self._is_multi_agg:
+                self.readings["groupby_multiagg_phase2_rows_in"] += phase2_rows_in
+                self.readings["groupby_multiagg_phase2_groups_out"] += phase2_groups_out
 
             self.readings["time_groupby_finalize"] += time.monotonic_ns() - start
 
@@ -145,6 +188,11 @@ class SimpleAggregateAndGroupNode(BasePlanNode):
             morsel = evaluate_and_append(self.evaluatable_nodes, morsel)
 
         morsel = evaluate_and_append(self.groups, morsel)
+        self.readings["groupby_phase1_rows_in"] += morsel.num_rows
+        self.readings["groupby_phase1_morsels_in"] += 1
+        if self._is_multi_agg:
+            self.readings["groupby_multiagg_phase1_rows_in"] += morsel.num_rows
+            self.readings["groupby_multiagg_phase1_morsels_in"] += 1
 
         # Add a "*" column, this is an int because when a bool it miscounts
         if "*" not in morsel.column_names:
@@ -154,19 +202,13 @@ class SimpleAggregateAndGroupNode(BasePlanNode):
 
         # use pyarrow to do phase 1 of the group by
         st = time.monotonic_ns()
-        # Try using Draken-based grouped aggregation when available and enabled in config
-        use_draken = False
-        try:
-            from opteryx.config import features
-
-            use_draken = bool(features.use_draken_ops_kernels)
-        except Exception:
-            use_draken = False
+        # Try using Draken-based grouped aggregation when available and shape-compatible.
+        use_draken = self._use_draken_ops and self._draken_ops_shape_supported
 
         if use_draken:
-            try:
-                from opteryx.compiled.aggregations.group_by_draken import group_by_morsel
+            from opteryx.compiled.aggregations.group_by_draken import group_by_morsel
 
+            try:
                 groups = group_by_morsel(
                     morsel,
                     self.group_by_columns,
@@ -174,6 +216,18 @@ class SimpleAggregateAndGroupNode(BasePlanNode):
                     internal_names,
                     column_names,
                 )
+            except Exception:
+                groups = None
+
+            if groups is None:
+                # Disable Draken ops for the rest of this operator execution to avoid
+                # repeated failures on unsupported runtime types.
+                self._use_draken_ops = False
+                groups = morsel.group_by(self.group_by_columns)
+                groups = groups.aggregate(self.aggregate_functions)
+                groups = groups.select(internal_names)
+                groups = groups.rename_columns(column_names)
+            else:
                 # If the group_by_morsel returned grouped values in internal names order,
                 # then rename to canonical alias names accordingly to keep downstream logic.
                 # If we receive a Draken Morsel, convert to Arrow for further ops
@@ -181,17 +235,16 @@ class SimpleAggregateAndGroupNode(BasePlanNode):
                     groups = groups.to_arrow()
                 # Rename first len(internal_names) columns to alias names
                 groups = groups.rename_columns(list(column_names))
-            except Exception:
-                # Fall back to pyarrow implementation if anything goes wrong
-                groups = morsel.group_by(self.group_by_columns)
-                groups = groups.aggregate(self.aggregate_functions)
-                groups = groups.select(internal_names)
-                groups = groups.rename_columns(column_names)
+
         else:
             groups = morsel.group_by(self.group_by_columns)
             groups = groups.aggregate(self.aggregate_functions)
             groups = groups.select(internal_names)
             groups = groups.rename_columns(column_names)
+
+        self.readings["groupby_phase1_groups_out"] += groups.num_rows
+        if self._is_multi_agg:
+            self.readings["groupby_multiagg_phase1_groups_out"] += groups.num_rows
         self.readings["time_pregrouping"] += time.monotonic_ns() - st
 
         self.buffer.append(groups)
