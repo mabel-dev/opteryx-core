@@ -39,6 +39,7 @@ class DrakenAggregateAndGroupNode(BasePlanNode):
     SUPPORTED_AGGREGATES = frozenset(
         {"COUNT", "SUM", "MIN", "MAX", "AVG", "COUNT_DISTINCT", "DISTINCT", "ONE", "ANY_VALUE"}
     )
+    FAST_PATH_AGGREGATES = frozenset({"COUNT", "AVG", "COUNT_DISTINCT", "DISTINCT"})
 
     def __init__(self, properties: QueryProperties, **parameters):
         super().__init__(properties=properties, **parameters)
@@ -76,17 +77,59 @@ class DrakenAggregateAndGroupNode(BasePlanNode):
         self._group_by = ShuffleGroupByOperationV2(
             group_by_columns=self.group_by_columns,
             aggregations=self._aggregation_specs,
+            strict_fast_path=True,
         )
 
     @staticmethod
     def supports(aggregates, groups=None) -> bool:
         groups = groups or []
 
+        # Deterministic strict-fast-path admission: only plan Draken group-by
+        # when current compiled fast kernels can execute without fallback.
+        if len(groups) != 1 or len(aggregates) != 1:
+            return False
+
+        group = groups[0]
+        if group.node_type != NodeType.IDENTIFIER:
+            return False
+        if getattr(group.schema_column, "type", None) != OrsoTypes.INTEGER:
+            return False
+        if bool(getattr(group.schema_column, "nullable", False)):
+            # Current strict fast finalize cannot emit nullable-key outputs.
+            return False
+
         for aggregate in aggregates:
             if aggregate.value not in DrakenAggregateAndGroupNode.SUPPORTED_AGGREGATES:
                 return False
             if not aggregate.parameters:
                 return False
+
+            if aggregate.value not in DrakenAggregateAndGroupNode.FAST_PATH_AGGREGATES:
+                # SUM/MIN/MAX/ONE/ANY_VALUE kernels are not admitted in strict mode
+                # until their fast finalize semantics are fully deterministic.
+                return False
+
+            # DISTINCT variants require a concrete column argument.
+            if aggregate.value in ("DISTINCT", "COUNT_DISTINCT"):
+                field_node = aggregate.parameters[0]
+                if field_node.node_type == NodeType.WILDCARD:
+                    return False
+                if field_node.node_type == NodeType.IDENTIFIER and bool(
+                    getattr(field_node.schema_column, "nullable", False)
+                ):
+                    # Nullable distinct inputs can require null-sensitive finalize paths.
+                    return False
+
+            # COUNT supports COUNT(*) and COUNT(col); COUNT(DISTINCT col) is
+            # represented by duplicate_treatment and normalized to count_distinct.
+            if aggregate.value == "COUNT" and aggregate.duplicate_treatment == "Distinct":
+                field_node = aggregate.parameters[0]
+                if field_node.node_type == NodeType.WILDCARD:
+                    return False
+                if field_node.node_type == NodeType.IDENTIFIER and bool(
+                    getattr(field_node.schema_column, "nullable", False)
+                ):
+                    return False
 
         return True
 
@@ -162,13 +205,58 @@ class DrakenAggregateAndGroupNode(BasePlanNode):
             draken = self.ensure_draken_morsel(morsel)
 
         if draken == EOS:
+            pre_backend_ns = self._group_by.readings.get("time_groupby_finalize_backend_ns", 0)
+            pre_rows_to_vectors_ns = self._group_by.readings.get(
+                "time_groupby_finalize_rows_to_vectors_ns", 0
+            )
+            pre_morsel_build_ns = self._group_by.readings.get(
+                "time_groupby_finalize_morsel_build_ns", 0
+            )
+            pre_rows_count = self._group_by.readings.get("groupby_finalize_rows_count", 0)
+            pre_chunks_emitted = self._group_by.readings.get("groupby_finalize_chunks_emitted", 0)
+            pre_fast_path_hits = self._group_by.readings.get("groupby_finalize_fast_path_hits", 0)
+
             st = time.monotonic_ns()
             emitted = 0
             for result in self._group_by.finalize_morsels(chunk_size=CHUNK_SIZE):
                 emitted += 1
-                yield result.to_arrow()
-            self.readings["time_groupby_finalize"] += time.monotonic_ns() - st
+                yield result
+            finalize_total_ns = time.monotonic_ns() - st
+            self.readings["time_groupby_finalize"] += finalize_total_ns
             self.readings["groupby_output_morsels"] += emitted
+
+            backend_delta_ns = (
+                self._group_by.readings.get("time_groupby_finalize_backend_ns", 0) - pre_backend_ns
+            )
+            rows_to_vectors_delta_ns = (
+                self._group_by.readings.get("time_groupby_finalize_rows_to_vectors_ns", 0)
+                - pre_rows_to_vectors_ns
+            )
+            morsel_build_delta_ns = (
+                self._group_by.readings.get("time_groupby_finalize_morsel_build_ns", 0)
+                - pre_morsel_build_ns
+            )
+            self.readings["time_groupby_finalize_backend"] += backend_delta_ns
+            self.readings["time_groupby_finalize_rows_to_vectors"] += rows_to_vectors_delta_ns
+            self.readings["time_groupby_finalize_morsel_build"] += morsel_build_delta_ns
+
+            accounted_ns = backend_delta_ns + rows_to_vectors_delta_ns + morsel_build_delta_ns
+            self.readings["time_groupby_finalize_accounted"] += accounted_ns
+            self.readings["time_groupby_finalize_emit_wait"] += max(
+                0, finalize_total_ns - accounted_ns
+            )
+
+            self.readings["groupby_finalize_rows"] += (
+                self._group_by.readings.get("groupby_finalize_rows_count", 0) - pre_rows_count
+            )
+            self.readings["groupby_finalize_chunks"] += (
+                self._group_by.readings.get("groupby_finalize_chunks_emitted", 0)
+                - pre_chunks_emitted
+            )
+            self.readings["groupby_finalize_fast_path_hits"] += (
+                self._group_by.readings.get("groupby_finalize_fast_path_hits", 0)
+                - pre_fast_path_hits
+            )
 
             yield EOS
             return
