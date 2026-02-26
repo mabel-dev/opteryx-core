@@ -21,12 +21,9 @@ from opteryx.compiled.aggregations.aggregate_kernels cimport update_state
 from opteryx.draken.vectors.int64_vector cimport Int64Vector
 from opteryx.draken.vectors.float64_vector cimport Float64Vector
 from opteryx.draken.vectors.integer_vector cimport IntegerVector
-from opteryx.draken.vectors.int64_vector cimport from_sequence as int64_from_sequence
-from opteryx.draken.vectors.float64_vector cimport from_sequence as float64_from_sequence
 
 from libc.stdint cimport int8_t, int16_t, int32_t, int64_t, uint8_t, uint64_t
 from libc.stdlib cimport malloc, free
-from libc.math cimport NAN
 from libc.stddef cimport size_t
 from cython.operator cimport dereference, preincrement
 from opteryx.third_party.abseil.containers cimport IdentityHash
@@ -273,7 +270,6 @@ cdef class GroupStateStore:
         cdef uint64_t[::1] key_hashes
         cdef uint64_t key_hash
         cdef uint64_t distinct_value_u64
-        cdef IntegerVector key_int_vector
         cdef IntegerVector value_int_vector
         cdef DrakenFixedBuffer* int_value_ptr
         cdef uint64_t* _narrow_key_buf

@@ -71,10 +71,7 @@ def _run_operation(
     output = {}
     for row in result:
         normalized_row = {name: _normalize_value(value) for name, value in row.items()}
-        if group_names:
-            key = tuple(normalized_row[group_name] for group_name in group_names)
-        else:
-            key = ()
+        key = tuple(normalized_row[group_name] for group_name in group_names) if group_names else ()
         output[key] = normalized_row
     return output
 
@@ -136,9 +133,8 @@ def _reference_group_by(
                 if value is None:
                     continue
                 key_state[alias].add(value)
-            elif function == "hash_one":
-                if key_state[alias] is _UNSET and value is not None:
-                    key_state[alias] = value
+            elif function == "hash_one" and key_state[alias] is _UNSET and value is not None:
+                key_state[alias] = value
 
     if not states:
         empty_key = ()

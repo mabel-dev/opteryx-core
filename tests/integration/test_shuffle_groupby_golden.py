@@ -68,7 +68,7 @@ def _assert_rows_equal(actual: list[dict], expected: list[dict], ordered_columns
 
     for actual_row, expected_row in zip(sorted_actual, sorted_expected):
         assert set(actual_row.keys()) == set(expected_row.keys())
-        for column in expected_row.keys():
+        for column in expected_row:
             a = _normalize_value(actual_row[column])
             e = _normalize_value(expected_row[column])
             if isinstance(e, float) or isinstance(a, float):

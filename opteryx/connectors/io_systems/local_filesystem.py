@@ -7,6 +7,8 @@ and stream wrappers for high-performance local file access.
 
 import datetime
 import os
+from typing import List
+from typing import Tuple
 
 
 class MemoryMappedFile:
@@ -213,6 +215,24 @@ class OpteryxLocalFileSystem:
             infos.append(info)
 
         return infos[0] if single_path else infos
+
+    def read_ranges(self, path: str, ranges: List[Tuple[int, int]]) -> List[bytes]:
+        """Read multiple byte ranges from a local file.
+
+        Args:
+            path: Absolute or relative path to the local file.
+            ranges: List of (offset, length) tuples specifying byte ranges to read.
+
+        Returns:
+            List of byte buffers in the same order as ranges.
+        """
+        result = []
+        with open(path, "rb") as f:
+            for offset, length in ranges:
+                f.seek(offset)
+                chunk = f.read(length)
+                result.append(chunk)
+        return result
 
     def stream_to(self, path: str, sink, chunk_size: int = 1 << 20) -> int:
         """Stream a local file directly into *sink* without an intermediate buffer.

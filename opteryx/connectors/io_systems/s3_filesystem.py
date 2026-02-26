@@ -10,12 +10,14 @@ import os
 from dataclasses import dataclass
 from typing import List
 from typing import Optional
+from typing import Tuple
 from typing import Union
 
 from minio.select import OutputSerialization
 from minio.xml import SubElement
 
 from opteryx.connectors.capabilities import PredicatePushable
+from opteryx.exceptions import DatasetReadError
 from opteryx.exceptions import MissingDependencyError
 from opteryx.exceptions import UnmetRequirementError
 from opteryx.third_party.alantsd.base64 import encode
@@ -254,6 +256,37 @@ class OpteryxS3FileSystem:
             infos.append(info)
 
         return infos[0] if single_path else infos
+
+    def read_ranges(self, path: str, ranges: List[Tuple[int, int]]) -> List[bytes]:
+        """Read multiple byte ranges from an S3 object using HTTP range requests.
+
+        Args:
+            path: S3 object path including bucket as first component
+                  (e.g. ``my-bucket/path/to/file.parquet``).
+            ranges: List of (offset, length) tuples specifying byte ranges to read.
+
+        Returns:
+            List of byte buffers in the same order as ranges.
+        """
+        from opteryx.utils import paths as path_utils
+
+        bucket, object_path, name, extension = path_utils.get_parts(path)
+        full_object_name = object_path + "/" + name + extension
+
+        result = []
+        for offset, length in ranges:
+            response = self.minio.get_object(
+                bucket_name=bucket,
+                object_name=full_object_name,
+                offset=offset,
+                length=length,
+            )
+            try:
+                chunk = response.read()
+                result.append(chunk)
+            finally:
+                response.close()
+        return result
 
     def stream_to(self, path: str, sink, chunk_size: int = 1 << 20) -> int:
         """Stream an S3 object directly into *sink* without an intermediate buffer.
