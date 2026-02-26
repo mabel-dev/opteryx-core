@@ -3,6 +3,9 @@
 # See the License at http://www.apache.org/licenses/LICENSE-2.0
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
+import pytest
+
+from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.models import QueryProperties
 from opteryx.planner.logical_planner.logical_planner import LogicalPlanStepType
 from opteryx.planner.physical_planner import create_physical_plan
@@ -57,6 +60,8 @@ class _DummyArrowAggregateAndGroupNode(_BaseDummyNode):
 
 
 def test_physical_planner_uses_draken_aggregate_and_group_when_flag_enabled(monkeypatch):
+    # group-by column details (type/nullable) are not inspected by our dummy
+    # node, so this test still works for nullability coverage.
     node = _LogicalNode(
         LogicalPlanStepType.AggregateAndGroup,
         properties={
@@ -92,10 +97,39 @@ def test_physical_planner_uses_draken_aggregate_and_group_when_flag_enabled(monk
     assert isinstance(plan[1], _DummyDrakenAggregateAndGroupNode)
 
 
-def test_physical_planner_falls_back_to_native_when_draken_not_supported(monkeypatch):
-    """When Draken is enabled but does not support the query shape, the planner
-    should fall back to SimpleAggregateAndGroupNode (when ENABLE_NATIVE_AGGREGATOR
-    is True and all aggregates are simple), rather than raising an error."""
+def test_supports_accepts_nullable_group_column():
+    """DrakenAggregateAndGroupNode.supports() should still return True when the
+    grouping column is nullable; null-key handling is implemented in the kernel."""
+
+    from opteryx.operators.draken_aggregate_and_group_node import DrakenAggregateAndGroupNode
+    from opteryx.managers.expression import NodeType
+    from orso.types import OrsoTypes
+
+    class FieldParam:
+        node_type = NodeType.WILDCARD
+
+    class Agg:
+        value = "COUNT"
+        duplicate_treatment = None
+        parameters = [FieldParam()]
+        class schema_column:
+            identity = b'col'
+
+    class Group:
+        node_type = NodeType.IDENTIFIER
+        class schema_column:
+            type = OrsoTypes.INTEGER
+            nullable = True
+            identity = b'key'
+    # We don't need to patch anything; nullable keys should pass.
+    assert DrakenAggregateAndGroupNode.supports([Agg()], [Group()])
+
+
+def test_physical_planner_errors_when_draken_not_supported(monkeypatch):
+    """When the DRAKEN flag is enabled the planner must *not* fall back to any
+    Python-based aggregate implementation.  If Draken.supports() returns False the
+    planner should raise an UnsupportedSyntaxError so callers see a clear, clean
+    failure rather than silently routing through the legacy path."""
 
     class _UnsupportedDrakenNode(_DummyDrakenAggregateAndGroupNode):
         @staticmethod
@@ -131,13 +165,11 @@ def test_physical_planner_falls_back_to_native_when_draken_not_supported(monkeyp
         _DummyArrowAggregateAndGroupNode,
     )
 
-    plan = create_physical_plan(
-        _LogicalPlan(node),
-        QueryProperties(query_id="test-qid", variables={}),
-    )
-    # Should fall back to SimpleAggregateAndGroupNode since Draken doesn't support
-    # this shape but ENABLE_NATIVE_AGGREGATOR=True and COUNT is a simple aggregate.
-    assert isinstance(plan[1], _DummySimpleAggregateAndGroupNode)
+    with pytest.raises(UnsupportedSyntaxError):
+        create_physical_plan(
+            _LogicalPlan(node),
+            QueryProperties(query_id="test-qid", variables={}),
+        )
 
 
 def test_physical_planner_uses_arrow_aggregate_and_group_when_flag_disabled(monkeypatch):

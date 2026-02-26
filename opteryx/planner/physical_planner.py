@@ -31,6 +31,9 @@ def create_physical_plan(logical_plan, query_properties) -> PhysicalPlan:
                 node = operators.AggregateNode(query_properties, **{k:v for k,v in node_config.items() if k in ("aggregates", "all_relations")})
         elif node_type == LogicalPlanStepType.AggregateAndGroup:
             if USE_DRAKEN_AGGREGATOR:
+                # Strict mode: when the flag is on we refuse to plan any Python
+                # aggregate operator.  The supports() guard must return True or
+                # we treat the query as unsupported rather than falling back.
                 if operators.DrakenAggregateAndGroupNode.supports(
                     node_config["aggregates"], node_config.get("groups")
                 ):
@@ -43,28 +46,10 @@ def create_physical_plan(logical_plan, query_properties) -> PhysicalPlan:
                         },
                     )
                 else:
-                    if ENABLE_NATIVE_AGGREGATOR and all(
-                        agg.value in operators.SimpleAggregateAndGroupNode.SIMPLE_AGGREGATES
-                        and agg.duplicate_treatment != "Distinct"
-                        for agg in node_config["aggregates"]
-                    ):
-                        node = operators.SimpleAggregateAndGroupNode(
-                            query_properties,
-                            **{
-                                k: v
-                                for k, v in node_config.items()
-                                if k in ("aggregates", "groups", "projection", "all_relations")
-                            },
-                        )
-                    else:
-                        node = operators.AggregateAndGroupNode(
-                            query_properties,
-                            **{
-                                k: v
-                                for k, v in node_config.items()
-                                if k in ("aggregates", "groups", "projection", "all_relations")
-                            },
-                        )
+                    # Fail coherently so callers can detect unsupported shapes
+                    raise UnsupportedSyntaxError(
+                        "Draken aggregator does not support this query shape"
+                    )
             elif ENABLE_NATIVE_AGGREGATOR and all(agg.value in operators.SimpleAggregateAndGroupNode.SIMPLE_AGGREGATES and agg.duplicate_treatment != "Distinct"  for agg in node_config["aggregates"]):
                 node = operators.SimpleAggregateAndGroupNode(query_properties, **{k:v for k,v in node_config.items() if k in ("aggregates", "groups", "projection", "all_relations")})
             else:
