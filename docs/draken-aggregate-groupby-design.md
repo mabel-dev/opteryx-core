@@ -243,8 +243,19 @@ Semantics:
 ## Planner / Operator Integration
 
 1. Physical planner selects `DrakenAggregateAndGroupNode` when feature flag enabled, following the existing physical-planner operator decisioning patterns.
-2. Legacy nodes remain as fallback path.
-3. Suggested feature flags:
+2. **Strict failure semantics at plan time:** once the flag is enabled the
+   planner will raise `UnsupportedSyntaxError` for any query shape that the
+   Draken kernel does not support.  There is no silent fallback to the legacy
+   Python operators – this ensures the “no Python fallback” rule is enforced
+   at the planning stage.
+3. The compiled kernel itself is *not* required to expose a specialized fast‑
+   finalize path; if a fast finalizer is unavailable the backend simply runs
+   the generic `finalize_rows()` path, which is still entirely Cython and
+   therefore imposes no Python fallback.  (This corresponds to
+   `strict_fast_path=False` in `ShuffleGroupByOperationV2`.)
+4. Legacy nodes remain available only when the flag is disabled; they are
+   never automatically chosen while the flag is true.
+4. Suggested feature flags:
 - `FEATURE_DRAKEN_GROUPBY_V2`  (enables the new operator path)
 - `FEATURE_DRAKEN_GROUPBY_SPILL`  (only has effect when V2 is enabled)
 - `FEATURE_DRAKEN_GROUPBY_STRICT_EXPRESSIONS`  (treat unsupported expressions

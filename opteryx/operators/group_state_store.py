@@ -10,6 +10,7 @@ import time
 from opteryx.draken.interop.arrow import vector_from_sequence
 from opteryx.draken.morsels.morsel import Morsel
 from opteryx.exceptions import ExecutionError
+import warnings
 
 _SUPPORTED_FUNCTIONS = frozenset(
     {"count", "sum", "min", "max", "mean", "avg", "count_distinct", "distinct", "hash_one"}
@@ -229,6 +230,12 @@ class ShuffleGroupByOperationV2:
                     self._raise_strict_fast_path_error(
                         "eligible chunked fast finalize returned None"
                     )
+                else:
+                    warnings.warn(
+                        "Draken fast-finalize chunked path unavailable; "
+                        "falling back to generic finalize_rows()", 
+                        stacklevel=2,
+                    )
 
             backend_st = time.monotonic_ns()
             fast_columns = self._backend.finalize_fast_columns()
@@ -258,6 +265,12 @@ class ShuffleGroupByOperationV2:
                 return
             if self.strict_fast_path:
                 self._raise_strict_fast_path_error("eligible fast finalize returned None")
+            else:
+                warnings.warn(
+                    "Draken fast-finalize path unavailable; "
+                    "falling back to generic finalize_rows()",
+                    stacklevel=2,
+                )
 
         elif self.strict_fast_path:
             self._raise_strict_fast_path_error(
