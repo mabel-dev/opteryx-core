@@ -91,12 +91,6 @@ class DrakenAggregateAndGroupNode(BasePlanNode):
 
         if not groups:
             return False
-        
-        # For now, restrict to IDENTIFIER group nodes to avoid segfaults with complex expressions.
-        # Expression evaluation in GROUP BY requires more careful handling of column projection.
-        group = groups[0]
-        if group.node_type != NodeType.IDENTIFIER:
-            return False
 
         for aggregate in aggregates:
             if aggregate.value not in DrakenAggregateAndGroupNode.SUPPORTED_AGGREGATES:
@@ -109,10 +103,8 @@ class DrakenAggregateAndGroupNode(BasePlanNode):
                 # until their fast finalize semantics are fully deterministic.
                 return False
 
-        # backend availability is no longer part of the admission check;
-        # structural properties alone determine whether we plan Draken.  The
-        # planner already enforces strict mode so an unsupported kernel path
-        # will raise at execution time rather than silently falling back.
+        # Allow expressions in GROUP BY - the execute() method already handles
+        # evaluation via evaluate_and_append(self.groups, arrow_table)
         return True
 
     @property

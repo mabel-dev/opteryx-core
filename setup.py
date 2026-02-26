@@ -85,7 +85,7 @@ def detect_architecture():
 
 
 arch = detect_architecture()
-CPP_FLAGS = ["-O3", "-std=c++17"]
+CPP_FLAGS = ["-O3", "-std=c++20"]
 C_FLAGS = ["-O3", "-std=c11"]  # C11 required for xxhash _Alignas support
 
 # Optional build-time optimizations (LTO / PGO) are gated by environment
@@ -96,7 +96,7 @@ OPTERYX_ENABLE_PGO = os.environ.get("OPTERYX_ENABLE_PGO", "0").lower() in ("1", 
 OPTERYX_PGO_PHASE = os.environ.get("OPTERYX_PGO_PHASE", "generate").lower()  # 'generate' or 'use'
 
 if is_win():
-    CPP_FLAGS = ["/O2", "/std:c++17"]
+    CPP_FLAGS = ["/O2", "/std:c++20"]
     C_FLAGS = ["/O2"]  # MSVC supports C11 by default in modern versions
     # MSVC LTO (link-time code generation)
     if OPTERYX_ENABLE_LTO:
@@ -279,6 +279,7 @@ extensions = [
         "opteryx.third_party.abseil.containers",
         sources=[
             "opteryx/third_party/abseil/containers.pyx",
+            "src/cpp/abseil_instantiations.cpp",
             "third_party/abseil/absl/hash/internal/hash.cc",
             "third_party/abseil/absl/hash/internal/city.cc",
             "third_party/abseil/absl/container/internal/raw_hash_set.cc",
@@ -609,13 +610,38 @@ extensions = [
         extra_compile_args=CPP_FLAGS,
     ),
     Extension(
-        "opteryx.compiled.aggregations.group_state_store",
+        "opteryx.compiled.aggregations.key_serializer",
         sources=[
-            "opteryx/compiled/aggregations/group_state_store.pyx",
+            "opteryx/compiled/aggregations/key_serializer.pyx",
         ],
         include_dirs=include_dirs,
         language="c++",
         extra_compile_args=CPP_FLAGS,
+    ),
+    Extension(
+        "opteryx.compiled.aggregations.key_serializer_zpp",
+        sources=[
+            "opteryx/compiled/aggregations/key_serializer_zpp.pyx",
+        ],
+        include_dirs=include_dirs,
+        language="c++",
+        extra_compile_args=CPP_FLAGS,
+    ),
+    Extension(
+        "opteryx.compiled.aggregations.group_state_store",
+        sources=[
+            "opteryx/compiled/aggregations/group_state_store.pyx",
+            "src/cpp/abseil_instantiations.cpp",
+            "third_party/abseil/absl/hash/internal/hash.cc",
+            "third_party/abseil/absl/hash/internal/city.cc",
+            "third_party/abseil/absl/container/internal/raw_hash_set.cc",
+            "third_party/abseil/absl/hash/internal/low_level_hash.cc",
+            "third_party/abseil/absl/base/internal/raw_logging.cc",
+        ],
+        include_dirs=include_dirs + ["third_party/abseil"],
+        language="c++",
+        extra_compile_args=CPP_FLAGS,
+        extra_link_args=LD_EXTRA,
     ),
     Extension(
         "opteryx.compiled.aggregations.group_by_draken",

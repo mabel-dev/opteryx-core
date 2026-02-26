@@ -2,43 +2,63 @@ suite: /Users/justin/Nextcloud/opteryx-cloud/opteryx-core/tests/performance/clic
 
 DRAKEN GROUP BY ENABLED
 
-Q01      257.66ms         254.89ms         252.60ms            255.05ms      252.60ms      257.66ms
-Q02      964.73ms         826.20ms         832.32ms            874.41ms      826.20ms      964.73ms
-Q03      996.66ms         792.62ms         784.61ms            857.96ms      784.61ms      996.66ms
-Q04      1197.32ms        755.12ms         742.07ms            898.17ms      742.07ms     1197.32ms
-Q05      3141.21ms        2687.28ms        2919.39ms          2915.96ms     2687.28ms     3141.21ms ⚠️ SLOW
-Q06      2290.71ms        1980.83ms        1936.76ms          2069.43ms     1936.76ms     2290.71ms
-Q07      815.12ms         756.16ms         741.07ms            770.78ms      741.07ms      815.12ms
-Q08      852.14ms         806.05ms         798.56ms            818.91ms      798.56ms      852.14ms
-Q09      3866.44ms        3639.45ms        3276.58ms          3594.16ms     3276.58ms     3866.44ms ⚠️ SLOW
-Q10      4334.36ms        3831.60ms        4374.72ms          4180.22ms     3831.60ms     4374.72ms ⚠️ SLOW
-Q11      1463.91ms        1001.02ms        1037.08ms          1167.34ms     1001.02ms     1463.91ms
-Q12      1203.16ms        1108.51ms        1101.18ms          1137.62ms     1101.18ms     1203.16ms
-Q13      7113.01ms        6338.63ms        6374.42ms          6608.69ms     6338.63ms     7113.01ms ⚠️ VERY SLOW
-Q14      7928.62ms        7611.30ms        7570.64ms          7703.52ms     7570.64ms     7928.62ms ⚠️ VERY SLOW
-Q15      7191.68ms        7037.58ms        6845.88ms          7025.05ms     6845.88ms     7191.68ms ⚠️ VERY SLOW
-Q16      7537.56ms        8170.83ms        8094.26ms          7934.21ms     7537.56ms     8170.83ms ⚠️ VERY SLOW
-Q17      20691.19ms       19563.66ms       18894.57ms        19716.47ms    18894.57ms    20691.19ms ⚠️ VERY SLOW
-Q18      18562.01ms       19062.26ms       18711.19ms        18778.48ms    18562.01ms    19062.26ms ⚠️ VERY SLOW
-Q19      40882.99ms       39040.68ms       38424.10ms        39449.26ms    38424.10ms    40882.99ms ⚠️ VERY SLOW
-Q20      1212.98ms        739.88ms         734.93ms            895.93ms      734.93ms     1212.98ms
-Q21      9804.32ms        7470.38ms        7463.58ms          8246.09ms     7463.58ms     9804.32ms ⚠️ VERY SLOW
-Q22      2907.71ms        2657.86ms        2776.78ms          2780.79ms     2657.86ms     2907.71ms ⚠️ SLOW
-Q23      5044.54ms        5570.22ms        5052.83ms          5222.53ms     5044.54ms     5570.22ms ⚠️ VERY SLOW
-Q24      35994.77ms       34129.19ms       34118.96ms        34747.64ms    34118.96ms    35994.77ms ⚠️ VERY SLOW
-Q25      2185.71ms        1346.42ms        1326.28ms          1619.47ms     1326.28ms     2185.71ms
-Q26      2773.81ms        2740.59ms        2730.33ms          2748.24ms     2730.33ms     2773.81ms ⚠️ SLOW
-Q27      2021.82ms        2054.27ms        2094.74ms          2056.94ms     2021.82ms     2094.74ms ⚠️ SLOW
-Q28      34859.20ms       34285.48ms       34839.66ms        34661.45ms    34285.48ms    34859.20ms ⚠️ VERY SLOW
-Q29      151505.41ms      152592.40ms      151615.87ms      151904.56ms   151505.41ms   152592.40ms ⚠️ VERY SLOW
-Q30      1238.68ms        907.41ms         900.32ms           1015.47ms      900.32ms     1238.68ms
-Q31      4424.88ms        3519.21ms        3565.22ms          3836.44ms     3519.21ms     4424.88ms ⚠️ SLOW
-Q32      5687.48ms        6309.84ms        6127.81ms          6041.71ms     5687.48ms     6309.84ms ⚠️ VERY SLOW
+Query    Iteration 1      Iteration 2      Iteration 3              Avg           Min           Max          
+------------------------------------------------------------------------------------------------------
+RUNNING CLICKBENCH BATTERY OF 43 QUERIES
+
+Q01      258.72ms         -                -                   258.72ms      258.72ms      258.72ms
+Q02      861.87ms         -                -                   861.87ms      861.87ms      861.87ms
+Q03      951.66ms         -                -                   951.66ms      951.66ms      951.66ms
+Q04      1206.32ms        -                -                  1206.32ms     1206.32ms     1206.32ms
+Q05      2837.79ms        -                -                  2837.79ms     2837.79ms     2837.79ms ⚠️ SLOW
+Q06      2441.96ms        -                -                  2441.96ms     2441.96ms     2441.96ms ⚠️ SLOW
+Q07      814.31ms         -                -                   814.31ms      814.31ms      814.31ms
+/Users/justin/Nextcloud/opteryx-cloud/opteryx-core/tests/performance/clickbench/../../../opteryx/operators/draken_aggregate_and_group_node.py:202: UserWarning: Draken fast-finalize chunked path unavailable; falling back to generic finalize_rows()
+  for result in self._group_by.finalize_morsels(chunk_size=CHUNK_SIZE):
+Q08      1707.41ms        -                -                  1707.41ms     1707.41ms     1707.41ms
+Q09      4192.69ms        -                -                  4192.69ms     4192.69ms     4192.69ms ⚠️ SLOW
+Q10      48142.45ms       -                -                 48142.45ms    48142.45ms    48142.45ms ⚠️ VERY SLOW
+/Users/justin/Nextcloud/opteryx-cloud/opteryx-core/tests/performance/clickbench/../../../opteryx/operators/draken_aggregate_and_group_node.py:202: UserWarning: Draken fast-finalize path unavailable; falling back to generic finalize_rows()
+  for result in self._group_by.finalize_morsels(chunk_size=CHUNK_SIZE):
+Q11      4820.08ms        -                -                  4820.08ms     4820.08ms     4820.08ms ⚠️ SLOW
+Q12      2153.66ms        -                -                  2153.66ms     2153.66ms     2153.66ms ⚠️ SLOW
+Q13      14373.92ms       -                -                 14373.92ms    14373.92ms    14373.92ms ⚠️ VERY SLOW
+Q14      28202.42ms       -                -                 28202.42ms    28202.42ms    28202.42ms ⚠️ VERY SLOW
+Q15      17431.32ms       -                -                 17431.32ms    17431.32ms    17431.32ms ⚠️ VERY SLOW
+Q16      4548.89ms        -                -                  4548.89ms     4548.89ms     4548.89ms ⚠️ SLOW
+Q17      97523.77ms       -                -                 97523.77ms    97523.77ms    97523.77ms ⚠️ VERY SLOW
+Q18      89949.49ms       -                -                 89949.49ms    89949.49ms    89949.49ms ⚠️ VERY SLOW
+Q19      105228.48ms      -                -                105228.48ms   105228.48ms   105228.48ms ⚠️ VERY SLOW
+Q20      3547.46ms        -                -                  3547.46ms     3547.46ms     3547.46ms ⚠️ SLOW
+Q21      9845.26ms        -                -                  9845.26ms     9845.26ms     9845.26ms ⚠️ VERY SLOW
+Q22      3047.53ms        -                -                  3047.53ms     3047.53ms     3047.53ms ⚠️ SLOW
+Q23      5804.10ms        -                -                  5804.10ms     5804.10ms     5804.10ms ⚠️ VERY SLOW
+Q24      34631.72ms       -                -                 34631.72ms    34631.72ms    34631.72ms ⚠️ VERY SLOW
+Q25      2357.69ms        -                -                  2357.69ms     2357.69ms     2357.69ms ⚠️ SLOW
+Q26      2976.43ms        -                -                  2976.43ms     2976.43ms     2976.43ms ⚠️ SLOW
+Q27      2133.73ms        -                -                  2133.73ms     2133.73ms     2133.73ms ⚠️ SLOW
+Q28      50064.57ms       -                -                 50064.57ms    50064.57ms    50064.57ms ⚠️ VERY SLOW
+Q29      ERROR: Draken aggregator does not support this query shape
+Q30      1059.91ms        -                -                  1059.91ms     1059.91ms     1059.91ms
+Q31      31584.59ms       -                -                 31584.59ms    31584.59ms    31584.59ms ⚠️ VERY SLOW
+Q32      130345.39ms      -                -                130345.39ms   130345.39ms   130345.39ms ⚠️ VERY SLOW
 Q33      ERROR: No statement found
-Q34      56962.87ms       63510.86ms       64733.48ms        61735.74ms    56962.87ms    64733.48ms ⚠️ VERY SLOW
-zsh: bus error  /Users/justin/.pyenv/versions/3.13.5/bin/python 
+Q34      85990.52ms       -                -                 85990.52ms    85990.52ms    85990.52ms ⚠️ VERY SLOW
+Q35      87050.24ms       -                -                 87050.24ms    87050.24ms    87050.24ms ⚠️ VERY SLOW
+Q36      55846.45ms       -                -                 55846.45ms    55846.45ms    55846.45ms ⚠️ VERY SLOW
+Q37      2165.13ms        -                -                  2165.13ms     2165.13ms     2165.13ms ⚠️ SLOW
+Q38      1030.63ms        -                -                  1030.63ms     1030.63ms     1030.63ms
+Q39      928.05ms         -                -                   928.05ms      928.05ms      928.05ms
+Q40      2082.15ms        -                -                  2082.15ms     2082.15ms     2082.15ms ⚠️ SLOW
+Q41      986.87ms         -                -                   986.87ms      986.87ms      986.87ms
+Q42      983.70ms         -                -                   983.70ms      983.70ms      983.70ms
+Q43      ERROR: Draken aggregator does not support this query shape
 
 DRAKEN GROUP BY DISABLED
+
+Query    Iteration 1      Iteration 2      Iteration 3              Avg           Min           Max          
+------------------------------------------------------------------------------------------------------
+RUNNING CLICKBENCH BATTERY OF 43 QUERIES
 
 Q01      247.59ms         250.35ms         243.68ms            247.21ms      243.68ms      250.35ms
 Q02      939.89ms         779.77ms         715.80ms            811.82ms      715.80ms      939.89ms
@@ -83,3 +103,15 @@ Q40      1742.17ms        1627.27ms        1618.51ms          1662.65ms     1618
 Q41      929.49ms         881.82ms         873.02ms            894.78ms      873.02ms      929.49ms
 Q42      912.05ms         893.13ms         884.25ms            896.47ms      884.25ms      912.05ms
 Q43      1038.27ms        1022.20ms        1033.27ms          1031.24ms     1022.20ms     1038.27ms
+
+
+
+
+
+
+Feature	Impact	Queries
+Multiple Aggregates	6 queries	Q10, Q22, Q23, Q29, Q31, Q32
+MIN() Aggregation	3 queries	Q22, Q23, Q29
+GROUP BY Expression (non-column)	2 queries	Q29, Q43
+AVG() Aggregation	3 queries	Q10, Q23, Q31, Q32
+SUM() Aggregation	3 queries	Q10, Q31, Q32

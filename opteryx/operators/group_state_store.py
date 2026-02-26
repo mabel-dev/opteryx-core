@@ -6,11 +6,11 @@
 from __future__ import annotations
 
 import time
+import warnings
 
 from opteryx.draken.interop.arrow import vector_from_sequence
 from opteryx.draken.morsels.morsel import Morsel
 from opteryx.exceptions import ExecutionError
-import warnings
 
 _SUPPORTED_FUNCTIONS = frozenset(
     {"count", "sum", "min", "max", "mean", "avg", "count_distinct", "distinct", "hash_one"}
@@ -233,7 +233,7 @@ class ShuffleGroupByOperationV2:
                 else:
                     warnings.warn(
                         "Draken fast-finalize chunked path unavailable; "
-                        "falling back to generic finalize_rows()", 
+                        "falling back to generic finalize_rows()",
                         stacklevel=2,
                     )
 

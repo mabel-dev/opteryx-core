@@ -727,6 +727,9 @@ cdef class GroupStateStore:
             if column not in source_vectors:
                 source_vectors[column] = morsel.column(column)
 
+        # Note: General mode aggregation uses Python dict _states (slower than specialized paths).
+        # TODO: Optimize by storing aggregation states in C++ containers like specialized modes do.
+
         agg_count = len(self._agg_function_codes)
         agg_function_codes = self._agg_function_codes
         agg_columns = self._agg_columns

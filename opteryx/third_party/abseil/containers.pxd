@@ -5,7 +5,7 @@
 # cython: overflowcheck=False
 # cython: lintrule=ignore
 
-from libc.stdint cimport int64_t, uint64_t, int32_t
+from libc.stdint cimport int64_t, uint64_t, int32_t, uint8_t
 from libc.stddef cimport size_t
 from libcpp.pair cimport pair
 from libcpp.vector cimport vector
@@ -39,6 +39,14 @@ cdef class FlatHashMap:
     cpdef size_t size(self)
     cpdef clear(self)
     cpdef vector[int64_t] get(self, uint64_t key)
+
+cdef class FlatHashMapByteVector:
+    cdef flat_hash_map[uint64_t, vector[uint8_t], IdentityHash] _map
+
+    cdef void store(self, uint64_t key, vector[uint8_t] value) noexcept nogil
+    cdef vector[uint8_t] retrieve(self, uint64_t key) noexcept nogil
+    cpdef size_t size(self)
+    cpdef clear(self)
 
 cdef extern from "absl/container/flat_hash_set.h" namespace "absl" nogil:
     cdef cppclass flat_hash_set[T, HashFunc]:
