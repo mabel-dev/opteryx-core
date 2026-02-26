@@ -90,6 +90,7 @@ from .aggregate_node import AGGREGATORS
 from .aggregate_node import AggregateNode  # aggregate data
 from .iops_read_node import IopsReadNode
 from .null_reader_node import NullReaderNode  # empty table for contradictory predicates
+from .parquet_read_node import ParquetReadNode
 from .simple_aggregate_node import SimpleAggregateNode  # aggregate data
 from .simple_aggregate_and_group_node import SimpleAggregateAndGroupNode  # aggregate data
 
@@ -136,6 +137,7 @@ __all__ = [
     "AggregateNode",
     "IopsReadNode",
     "NullReaderNode",
+    "ParquetReadNode",
     "SimpleAggregateNode",
     "SimpleAggregateAndGroupNode",
     "CrossJoinNode",

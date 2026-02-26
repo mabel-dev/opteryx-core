@@ -177,6 +177,11 @@ class Features:
     disable_predicate_ordering = bool(get("FEATURE_DISABLE_PREDICATE_ORDERING", False))
     disable_predicate_pushdown = bool(get("FEATURE_DISABLE_PREDICATE_PUSHDOWN", False))
     disable_manifest_pruning = bool(get("FEATURE_DISABLE_MANIFEST_PRUNING", False))
+    use_parquet_reader = str(get("FEATURE_USE_PARQUET_READER", "1")).lower() in (
+        "1",
+        "true",
+        "yes",
+    )
 
 
 features = Features()

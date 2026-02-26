@@ -9,6 +9,7 @@ import io
 import os
 import urllib.parse
 from typing import List
+from typing import Tuple
 from typing import Union
 
 from opteryx.exceptions import DatasetReadError
@@ -136,6 +137,41 @@ class OpteryxGcsFileSystem:
             infos.append(info)
 
         return infos[0] if single_path else infos
+
+    def read_ranges(self, path: str, ranges: List[Tuple[int, int]]) -> List[bytes]:
+        """Read multiple byte ranges from a GCS object using HTTP range requests.
+
+        Args:
+            path: GCS object path, with or without the ``gs://`` prefix.
+            ranges: List of (offset, length) tuples specifying byte ranges to read.
+
+        Returns:
+            List of byte buffers in the same order as ranges.
+        """
+        # Normalize path
+        if path.startswith("gs://"):
+            path = path[5:]
+
+        from opteryx.utils import paths as path_utils
+
+        bucket, _, _, _ = path_utils.get_parts(path)
+        object_full_path = urllib.parse.quote(path[(len(bucket) + 1) :], safe="")
+        url = f"https://storage.googleapis.com/{bucket}/{object_full_path}"
+
+        result = []
+        for offset, length in ranges:
+            # GCS range request: Range: bytes=offset-end (inclusive)
+            end = offset + length - 1
+            response = self.session.get(
+                url,
+                headers={
+                    "Authorization": f"Bearer {self.access_token}",
+                    "Range": f"bytes={offset}-{end}",
+                },
+                timeout=30,
+            )
+            result.append(response.content)
+        return result
 
     def stream_to(self, path: str, sink, chunk_size: int = 1 << 20) -> int:
         """Stream a GCS object directly into *sink* without an intermediate buffer.
