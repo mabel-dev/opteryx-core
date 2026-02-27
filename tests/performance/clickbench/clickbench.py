@@ -106,7 +106,7 @@ if __name__ == "__main__":  # pragma: no cover
 
     parser = argparse.ArgumentParser(description="ClickBench Performance Test")
     parser.add_argument('--warm', action='store_true', default=True, help='Run warm queries (3 iterations per query)')
-    parser.add_argument('--iterations', type=int, default=1, help='Number of iterations for warm queries (default: 3)')
+    parser.add_argument('--iterations', type=int, default=3, help='Number of iterations for warm queries (default: 3)')
     args = parser.parse_args()
 
     start_suite = time.monotonic_ns()
@@ -139,7 +139,7 @@ if __name__ == "__main__":  # pragma: no cover
 
     print(f"RUNNING CLICKBENCH BATTERY OF {len(STATEMENTS)} QUERIES\n")
     for index, (statement, err) in enumerate(STATEMENTS):
-        statement = statement.replace("testdata.clickbench_tiny", "scratch.hits")
+        statement = statement.replace("testdata.clickbench_tiny", "scratch.hits_single")
         printable = statement
         query_num = f"Q{(index + 1):02d}"
         

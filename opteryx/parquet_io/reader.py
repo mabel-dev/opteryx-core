@@ -25,8 +25,10 @@ The unit of work yielded to downstream operators is one row group:
 
 from __future__ import annotations
 
+import heapq
 import struct
 import time
+from collections import deque
 from concurrent.futures import FIRST_COMPLETED
 from concurrent.futures import Future
 from concurrent.futures import ThreadPoolExecutor
@@ -35,6 +37,7 @@ from concurrent.futures import wait
 from dataclasses import dataclass
 from dataclasses import field
 from typing import Any
+from typing import Deque
 from typing import Dict
 from typing import Iterator
 from typing import List
@@ -43,6 +46,7 @@ from typing import Tuple
 
 from opteryx.parquet_io.cache import InMemoryParquetCache
 from opteryx.parquet_io.cache import ParquetCache
+from opteryx.parquet_io.predicates import row_group_may_satisfy
 
 
 class ListColumnError(ValueError):
@@ -62,6 +66,10 @@ _PARQUET_FOOTER_SUFFIX = 8
 # files in a single read_ranges() call.  Files with footers larger than this fall back to a
 # second targeted read.
 _FOOTER_PREFETCH = 65536
+# Coalesce small gaps between nearby column chunks into fewer range reads.
+# This reduces request overhead on object storage with negligible over-read.
+_RANGE_COALESCE_MAX_GAP_BYTES = 64
+_RANGE_COALESCE_MAX_SPAN_BYTES = 32 * 1024 * 1024
 
 # Module-level thread pool shared across all queries (I/O bound; GIL released
 # on socket/disk reads so real parallelism is achieved).
@@ -71,7 +79,9 @@ _RANGE_POOL: ThreadPoolExecutor = ThreadPoolExecutor(
 )
 
 
-def _read_footer_payload(filesystem: Any, path: str) -> Tuple[bytes, int, int]:
+def _read_footer_payload(
+    filesystem: Any, path: str, file_size: Optional[int] = None
+) -> Tuple[bytes, int, int]:
     """Fetch footer bytes and build a parseable envelope.
 
     Issues a single speculative tail read of _FOOTER_PREFETCH bytes that covers
@@ -84,9 +94,10 @@ def _read_footer_payload(filesystem: Any, path: str) -> Tuple[bytes, int, int]:
     """
     start_ns = time.monotonic_ns()
 
-    # Step 1: resolve file size.
-    file_info = filesystem.get_file_info(path)
-    file_size: int = file_info.size
+    # Step 1: resolve file size (from manifest when available, otherwise stat call).
+    if file_size is None or file_size <= 0:
+        file_info = filesystem.get_file_info(path)
+        file_size = file_info.size
     if file_size < _PARQUET_FOOTER_SUFFIX:
         raise ValueError(f"File {path!r} is too small to be a valid Parquet file ({file_size} B)")
 
@@ -149,7 +160,12 @@ def _parse_footer_envelope(path: str, envelope: bytes, footer_bytes: int) -> dic
     return meta
 
 
-def fetch_footer(filesystem: Any, path: str, cache: Optional[ParquetCache] = None) -> dict:
+def fetch_footer(
+    filesystem: Any,
+    path: str,
+    cache: Optional[ParquetCache] = None,
+    file_size: Optional[int] = None,
+) -> dict:
     """Fetch and parse the Parquet footer for *path*, optionally caching the result.
 
     Uses two range reads:
@@ -176,7 +192,10 @@ def fetch_footer(filesystem: Any, path: str, cache: Optional[ParquetCache] = Non
         if cached is not None:
             return cached
 
-    envelope, footer_bytes, _ = _read_footer_payload(filesystem, path)
+    if file_size is None:
+        envelope, footer_bytes, _ = _read_footer_payload(filesystem, path)
+    else:
+        envelope, footer_bytes, _ = _read_footer_payload(filesystem, path, file_size)
     meta = _parse_footer_envelope(path, envelope, footer_bytes)
 
     if cache is not None:
@@ -293,13 +312,15 @@ def fetch_columns(
             compressed_size = col_stats["total_compressed_size"]
             range_bytes_requested += compressed_size
             ranges.append((base_offset, compressed_size))
-        range_request_count = len(ranges)
+        coalesced_ranges, coalesced_parts = _coalesce_ranges(ranges)
+        range_request_count = len(coalesced_ranges)
 
         # Batch read all missing column chunks
         read_start_ns = time.monotonic_ns()
-        raw_buffers = filesystem.read_ranges(path, ranges)
+        merged_raw_buffers = filesystem.read_ranges(path, coalesced_ranges)
         time_read_ranges_ns += time.monotonic_ns() - read_start_ns
-        bytes_fetched += sum(len(b) for b in raw_buffers)
+        bytes_fetched += sum(len(b) for b in merged_raw_buffers)
+        raw_buffers = _split_coalesced_buffers(merged_raw_buffers, coalesced_parts, len(misses))
 
         # Decode each chunk and populate cache
         for col_name, raw_bytes in zip(misses, raw_buffers):
@@ -357,6 +378,8 @@ def _iter_row_groups_v1(
     cache: Optional[ParquetCache] = None,
     max_workers: int = 16,
     decoder: Optional[Any] = None,
+    predicates: Optional[List] = None,
+    file_sizes: Optional[Dict[str, int]] = None,
 ) -> Iterator[Dict[str, Any]]:
     """Yield assembled row groups across multiple Parquet files.
 
@@ -425,21 +448,37 @@ def _iter_row_groups_v1(
         footer_fetch_ns: Dict[str, int] = {}
         footer_futures: Dict[Future, str] = {}
 
+        def _known_file_size(p: str) -> Optional[int]:
+            if not file_sizes:
+                return None
+            size = file_sizes.get(p)
+            return size if isinstance(size, int) and size > 0 else None
+
         for p in unique_paths:
             cached = cache.get_footer(p)
             if cached is not None:
                 footers[p] = cached
                 footer_fetch_ns[p] = 0
                 continue
-            fut = pool.submit(_read_footer_payload, filesystem, p)
+            known_size = _known_file_size(p)
+            if known_size is None:
+                fut = pool.submit(_read_footer_payload, filesystem, p)
+            else:
+                fut = pool.submit(_read_footer_payload, filesystem, p, known_size)
             footer_futures[fut] = p
 
         # Helper: fan out row-group tasks as soon as a file's footer is known.
         rg_futures: Dict[Future, Tuple[str, int]] = {}
+        rg_pruned_total: int = 0
 
         def _pipeline_rowgroups(p: str) -> None:
             """Immediately submit (path, rg_idx) tasks once the footer for p is known."""
+            nonlocal rg_pruned_total
             for rg_idx in range(len(footers[p]["row_groups"])):
+                rg_meta = footers[p]["row_groups"][rg_idx]
+                if predicates and not row_group_may_satisfy(rg_meta, predicates):
+                    rg_pruned_total += 1
+                    continue
                 submitted_ns = time.monotonic_ns()
                 fut = pool.submit(
                     _fetch_columns_task,
@@ -500,6 +539,7 @@ def _iter_row_groups_v1(
             row_group["__cache_column_misses__"] = cache_misses
             row_group["__task_queue_wait_ns__"] = task_queue_wait_ns
             row_group["__task_total_ns__"] = task_total_ns
+            row_group["__row_groups_pruned__"] = rg_pruned_total
             yield row_group
 
     finally:
@@ -519,7 +559,8 @@ class _ColumnWorkItem:
 class _FileState:
     file_seq: int
     path: str
-    total_rowgroups: int
+    total_rowgroups: int = 0
+    footer_ready: bool = False
     next_rg_idx: int = 0
     active_rowgroups: int = 0
 
@@ -576,6 +617,69 @@ def _column_chunk_range(col_stats: dict) -> Tuple[int, int]:
     return base_offset, col_stats["total_compressed_size"]
 
 
+def _coalesce_ranges(
+    ranges: List[Tuple[int, int]],
+) -> Tuple[List[Tuple[int, int]], List[List[Tuple[int, int, int]]]]:
+    """Merge nearby byte ranges and return slicing maps back to original order."""
+    if not ranges:
+        return [], []
+
+    indexed = sorted(enumerate(ranges), key=lambda item: item[1][0])
+    merged: List[Dict[str, Any]] = []
+
+    for original_idx, (offset, length) in indexed:
+        if not merged:
+            merged.append(
+                {
+                    "offset": offset,
+                    "length": length,
+                    "parts": [(original_idx, 0, length)],
+                }
+            )
+            continue
+
+        last = merged[-1]
+        last_offset = last["offset"]
+        last_end = last_offset + last["length"]
+        this_end = offset + length
+        gap = offset - last_end
+        next_span = max(last_end, this_end) - last_offset
+
+        if (
+            gap >= 0
+            and gap <= _RANGE_COALESCE_MAX_GAP_BYTES
+            and next_span <= _RANGE_COALESCE_MAX_SPAN_BYTES
+        ):
+            last["parts"].append((original_idx, offset - last_offset, length))
+            last["length"] = next_span
+            continue
+
+        merged.append(
+            {
+                "offset": offset,
+                "length": length,
+                "parts": [(original_idx, 0, length)],
+            }
+        )
+
+    merged_ranges = [(entry["offset"], entry["length"]) for entry in merged]
+    merged_parts = [entry["parts"] for entry in merged]
+    return merged_ranges, merged_parts
+
+
+def _split_coalesced_buffers(
+    merged_buffers: List[bytes],
+    merged_parts: List[List[Tuple[int, int, int]]],
+    expected_parts: int,
+) -> List[bytes]:
+    """Expand coalesced range buffers back into the original range order."""
+    expanded: List[bytes] = [b""] * expected_parts
+    for buffer, parts in zip(merged_buffers, merged_parts):
+        for original_idx, rel_offset, length in parts:
+            expanded[original_idx] = buffer[rel_offset : rel_offset + length]
+    return expanded
+
+
 def _fetch_rowgroup_task(
     filesystem: Any,
     path: str,
@@ -589,11 +693,14 @@ def _fetch_rowgroup_task(
 
     # Batch all column-chunk ranges into one vectored I/O call.
     ranges = [(work.offset, work.length) for work in column_work]
+    coalesced_ranges, coalesced_parts = _coalesce_ranges(ranges)
     read_start_ns = time.monotonic_ns()
-    raw_buffers = filesystem.read_ranges(path, ranges)
+    merged_raw_buffers = filesystem.read_ranges(path, coalesced_ranges)
     read_ns = time.monotonic_ns() - read_start_ns
 
-    bytes_fetched = sum(len(b) for b in raw_buffers)
+    raw_buffers = _split_coalesced_buffers(merged_raw_buffers, coalesced_parts, len(column_work))
+
+    bytes_fetched = sum(len(b) for b in merged_raw_buffers)
     bytes_requested = sum(work.length for work in column_work)
 
     decode_start_ns = time.monotonic_ns()
@@ -613,6 +720,7 @@ def _fetch_rowgroup_task(
         "columns": columns,
         "bytes_fetched": bytes_fetched,
         "bytes_requested": bytes_requested,
+        "range_request_count": len(coalesced_ranges),
         "read_ns": read_ns,
         "decode_ns": decode_ns,
         "queue_wait_ns": queue_wait_ns,
@@ -627,6 +735,8 @@ def _iter_row_groups_v2(
     cache: Optional[ParquetCache] = None,
     max_workers: int = 16,
     decoder: Optional[Any] = None,
+    predicates: Optional[List] = None,
+    file_sizes: Optional[Dict[str, int]] = None,
 ) -> Iterator[Dict[str, Any]]:
     if cache is None:
         cache = InMemoryParquetCache()
@@ -639,6 +749,13 @@ def _iter_row_groups_v2(
 
     decoder_fn = _resolve_decoder(decoder)
     unique_paths = list(dict.fromkeys(paths))
+    file_states = [_FileState(file_seq=i, path=p) for i, p in enumerate(paths)]
+    if not file_states:
+        return
+
+    file_indices_by_path: Dict[str, List[int]] = {}
+    for state in file_states:
+        file_indices_by_path.setdefault(state.path, []).append(state.file_seq)
 
     # Footer fetch: parallel payload reads + safe parse on caller thread.
     footers: Dict[str, dict] = {}
@@ -658,31 +775,33 @@ def _iter_row_groups_v2(
 
     futures: Dict[Future, Tuple[int, int]] = {}
     try:
+
+        def _known_file_size(p: str) -> Optional[int]:
+            if not file_sizes:
+                return None
+            size = file_sizes.get(p)
+            return size if isinstance(size, int) and size > 0 else None
+
+        def _mark_footer_ready(path: str, meta: dict) -> None:
+            footers[path] = meta
+            total = len(meta.get("row_groups", []))
+            for file_seq in file_indices_by_path.get(path, []):
+                state = file_states[file_seq]
+                state.total_rowgroups = total
+                state.footer_ready = True
+
         for p in unique_paths:
             cached = cache.get_footer(p)
             if cached is not None:
-                footers[p] = cached
                 footer_fetch_ns[p] = 0
+                _mark_footer_ready(p, cached)
                 continue
-            fut = pool.submit(_read_footer_payload, filesystem, p)
+            known_size = _known_file_size(p)
+            if known_size is None:
+                fut = pool.submit(_read_footer_payload, filesystem, p)
+            else:
+                fut = pool.submit(_read_footer_payload, filesystem, p, known_size)
             footer_futures[fut] = p
-
-        for fut in as_completed(footer_futures):
-            p = footer_futures[fut]
-            envelope, footer_bytes, fetch_ns = fut.result()
-            parse_start_ns = time.monotonic_ns()
-            meta = _parse_footer_envelope(p, envelope, footer_bytes)
-            parse_ns = time.monotonic_ns() - parse_start_ns
-            cache.set_footer(p, meta)
-            footers[p] = meta
-            footer_fetch_ns[p] = fetch_ns + parse_ns
-
-        file_states = [
-            _FileState(file_seq=i, path=p, total_rowgroups=len(footers[p]["row_groups"]))
-            for i, p in enumerate(paths)
-        ]
-        if not file_states:
-            return
 
         scan_start_ns = time.monotonic_ns()
         first_rowgroup_emit_ns: Optional[int] = None
@@ -690,12 +809,14 @@ def _iter_row_groups_v2(
         ranges_in_flight_peak = 0
         active_files_peak = 0
         active_rowgroups_peak = 0
+        rg_pruned_total: int = 0
 
         active_file_indices: List[int] = []
         next_file_idx = 0
         admission_seq = 0
         active_rowgroups: Dict[Tuple[int, int], _RowGroupState] = {}
-        ready_to_emit: List[Tuple[int, int]] = []
+        ready_to_emit: Deque[Tuple[int, int]] = deque()
+        pending_dispatch: List[Tuple[int, Tuple[int, int]]] = []
 
         def _admit_files() -> None:
             nonlocal next_file_idx, active_files_peak
@@ -712,18 +833,26 @@ def _iter_row_groups_v2(
             ready_to_emit.append(state.key)
 
         def _admit_rowgroups() -> None:
-            nonlocal admission_seq, active_rowgroups_peak
+            nonlocal admission_seq, active_rowgroups_peak, rg_pruned_total
             for file_idx in list(active_file_indices):
                 fstate = file_states[file_idx]
+                if not fstate.footer_ready:
+                    continue
                 while (
                     fstate.active_rowgroups < rowgroups_per_file
                     and fstate.next_rg_idx < fstate.total_rowgroups
                 ):
                     rg_idx = fstate.next_rg_idx
                     fstate.next_rg_idx += 1
-                    fstate.active_rowgroups += 1
 
                     rg_meta = footers[fstate.path]["row_groups"][rg_idx]
+
+                    # Phase 1 predicate pushdown: prune row groups using min/max stats.
+                    if predicates and not row_group_may_satisfy(rg_meta, predicates):
+                        rg_pruned_total += 1
+                        continue  # don't count as active; advance next_rg_idx only
+
+                    fstate.active_rowgroups += 1
                     name_to_stats: Dict[str, dict] = {
                         col["name"]: col for col in rg_meta["columns"]
                     }
@@ -755,26 +884,26 @@ def _iter_row_groups_v2(
                         rowgroup_state.cache_misses += 1
 
                     active_rowgroups[rowgroup_state.key] = rowgroup_state
+                    heapq.heappush(
+                        pending_dispatch, (rowgroup_state.admission_seq, rowgroup_state.key)
+                    )
 
-                if fstate.next_rg_idx >= fstate.total_rowgroups and fstate.active_rowgroups == 0:
+                if (
+                    fstate.footer_ready
+                    and fstate.next_rg_idx >= fstate.total_rowgroups
+                    and fstate.active_rowgroups == 0
+                ):
                     active_file_indices.remove(file_idx)
 
             active_rowgroups_peak = max(active_rowgroups_peak, len(active_rowgroups))
 
         def _dispatch_reads() -> None:
             nonlocal ranges_in_flight, ranges_in_flight_peak
-            while ranges_in_flight < global_ranges_cap:
-                # Find the next admitted, not-yet-dispatched row group (FIFO by admission order).
-                target = next(
-                    (
-                        s
-                        for s in sorted(active_rowgroups.values(), key=lambda s: s.admission_seq)
-                        if not s.dispatched
-                    ),
-                    None,
-                )
-                if target is None:
-                    return
+            while ranges_in_flight < global_ranges_cap and pending_dispatch:
+                _, key = heapq.heappop(pending_dispatch)
+                target = active_rowgroups.get(key)
+                if target is None or target.dispatched:
+                    continue
 
                 now_ns = time.monotonic_ns()
                 target.first_dispatch_ns = now_ns
@@ -798,7 +927,7 @@ def _iter_row_groups_v2(
             _dispatch_reads()
 
             while ready_to_emit:
-                key = ready_to_emit.pop(0)
+                key = ready_to_emit.popleft()
                 state = active_rowgroups.get(key)
                 if state is None:
                     continue
@@ -838,6 +967,7 @@ def _iter_row_groups_v2(
                 row_group["__time_to_first_rowgroup_ns__"] = (
                     completed_ns - scan_start_ns if first_rowgroup_emit_ns == completed_ns else 0
                 )
+                row_group["__row_groups_pruned__"] = rg_pruned_total
 
                 fstate = file_states[state.file_seq]
                 fstate.active_rowgroups -= 1
@@ -852,24 +982,33 @@ def _iter_row_groups_v2(
 
                 yield row_group
 
-            if not futures:
+            if not futures and not footer_futures:
                 if not active_rowgroups and next_file_idx >= len(file_states):
                     break
                 continue
 
-            done, _ = wait(set(futures.keys()), return_when=FIRST_COMPLETED)
+            done, _ = wait(set(futures) | set(footer_futures), return_when=FIRST_COMPLETED)
             for fut in done:
+                footer_path = footer_futures.pop(fut, None)
+                if footer_path is not None:
+                    envelope, footer_bytes, fetch_ns = fut.result()
+                    parse_start_ns = time.monotonic_ns()
+                    meta = _parse_footer_envelope(footer_path, envelope, footer_bytes)
+                    parse_ns = time.monotonic_ns() - parse_start_ns
+                    cache.set_footer(footer_path, meta)
+                    footer_fetch_ns[footer_path] = fetch_ns + parse_ns
+                    _mark_footer_ready(footer_path, meta)
+                    continue
+
                 key = futures.pop(fut)
                 ranges_in_flight -= 1
-
                 state = active_rowgroups.get(key)
                 if state is None:
                     continue
-
                 result = fut.result()
                 state.columns.update(result["columns"])
                 state.bytes_fetched += result["bytes_fetched"]
-                state.range_request_count += len(state.column_work)
+                state.range_request_count += result["range_request_count"]
                 state.range_bytes_requested += result["bytes_requested"]
                 state.time_read_ranges_ns += result["read_ns"]
                 state.time_decode_columns_ns += result["decode_ns"]
@@ -880,6 +1019,8 @@ def _iter_row_groups_v2(
 
     finally:
         for fut in list(futures):
+            fut.cancel()
+        for fut in list(footer_futures):
             fut.cancel()
         if local_pool:
             pool.shutdown(wait=False, cancel_futures=True)
@@ -892,6 +1033,8 @@ def iter_row_groups(
     cache: Optional[ParquetCache] = None,
     max_workers: int = 16,
     decoder: Optional[Any] = None,
+    predicates: Optional[List] = None,
+    file_sizes: Optional[Dict[str, int]] = None,
 ) -> Iterator[Dict[str, Any]]:
     """Yield assembled row groups using the configured scheduler implementation."""
     from opteryx.config import features
@@ -904,6 +1047,8 @@ def iter_row_groups(
             cache=cache,
             max_workers=max_workers,
             decoder=decoder,
+            predicates=predicates,
+            file_sizes=file_sizes,
         )
         return
 
@@ -914,4 +1059,6 @@ def iter_row_groups(
         cache=cache,
         max_workers=max_workers,
         decoder=decoder,
+        predicates=predicates,
+        file_sizes=file_sizes,
     )

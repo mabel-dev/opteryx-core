@@ -30,6 +30,8 @@ Usage
 
 from opteryx.parquet_io.cache import InMemoryParquetCache
 from opteryx.parquet_io.cache import ParquetCache
+from opteryx.parquet_io.predicates import extract_predicate_stats
+from opteryx.parquet_io.predicates import row_group_may_satisfy
 from opteryx.parquet_io.reader import ListColumnError
 from opteryx.parquet_io.reader import fetch_columns
 from opteryx.parquet_io.reader import fetch_footer
@@ -42,4 +44,6 @@ __all__ = [
     "ListColumnError",
     "ParquetCache",
     "InMemoryParquetCache",
+    "extract_predicate_stats",
+    "row_group_may_satisfy",
 ]

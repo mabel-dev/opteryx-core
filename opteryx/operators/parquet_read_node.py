@@ -38,6 +38,7 @@ from opteryx.models import QueryProperties
 from opteryx.parquet_io import InMemoryParquetCache
 from opteryx.parquet_io import fetch_footer
 from opteryx.parquet_io import iter_row_groups
+from opteryx.parquet_io.predicates import extract_predicate_stats
 from opteryx.utils.file_decoders import get_decoder
 
 from .read_node import ReaderNode
@@ -69,6 +70,7 @@ class ParquetReadNode(ReaderNode):
     def sensors(self):
         base = super().sensors()
         base["row_groups_read"] = self.readings.get("row_groups_read", 0)
+        base["row_groups_pruned"] = self.readings.get("parquet_row_groups_pruned", 0)
         base["files_read"] = self.readings.get("files_read", 0)
         decode_ns = self.readings.get("time_decoding_blobs", 0)
         if decode_ns > 0 and base["row_groups_read"] > 0:
@@ -128,11 +130,23 @@ class ParquetReadNode(ReaderNode):
         self.readings["parquet_active_files_peak"] += 0
         self.readings["parquet_active_rowgroups_peak"] += 0
         self.readings["time_to_first_rowgroup_ns"] += 0
+        self.readings["parquet_row_groups_pruned"] += 0
+
+        # Phase 1 predicate pushdown: extract (col, op, value) triples from pushed-down
+        # predicates so the reader can prune row groups using footer min/max stats.
+        predicate_stats = extract_predicate_stats(self.predicates or [])
 
         records_to_read = self.limit if self.limit is not None else float("inf")
         arrow_schema = convert_orso_schema_to_arrow_schema(orso_schema, use_identities=True)
 
         blob_paths = self.manifest.get_file_paths()
+        file_sizes = {}
+        files = getattr(self.manifest, "files", None)
+        if files:
+            for file_entry in files:
+                size = getattr(file_entry, "file_size_in_bytes", None)
+                if isinstance(size, int) and size > 0:
+                    file_sizes.setdefault(file_entry.file_path, size)
 
         # Resolve the filesystem: connectors that own a pre-configured filesystem
         # (FileSystemConnector subclasses) expose it directly.  For connectors that
@@ -160,9 +174,19 @@ class ParquetReadNode(ReaderNode):
 
         decode_start = time.monotonic_ns()
         try:
-            for row_group in iter_row_groups(filesystem, blob_paths, column_names, cache):
+            for row_group in iter_row_groups(
+                filesystem,
+                blob_paths,
+                column_names,
+                cache,
+                predicates=predicate_stats,
+                file_sizes=file_sizes or None,
+            ):
                 path = row_group.pop("__path__")
                 _ = row_group.pop("__row_group__")
+                self.readings["parquet_row_groups_pruned"] = row_group.pop(
+                    "__row_groups_pruned__", 0
+                )
                 self.bytes_in += row_group.pop("__bytes_fetched__", 0)
                 self.readings["parquet_footer_bytes"] += row_group.pop("__footer_bytes__", 0)
                 self.readings["parquet_range_request_count"] += row_group.pop(
@@ -223,6 +247,12 @@ class ParquetReadNode(ReaderNode):
                 # names so the morsel arrives downstream already correctly labelled.
                 identity_names = [name_to_identity[col] for col in row_group]
                 vectors = list(row_group.values())
+                if not identity_names:
+                    # Zero-projection query (e.g. COUNT(*) with a pushed-down WHERE
+                    # predicate that stripped all columns).  The reader cannot build a
+                    # Morsel with no columns; row-level filtering for this case is an
+                    # architectural concern for the planner, not the reader.
+                    continue
                 result_morsel = Morsel.from_vectors(identity_names, vectors)
 
                 num_rows = result_morsel.num_rows
