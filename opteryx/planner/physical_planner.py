@@ -111,8 +111,11 @@ def create_physical_plan(logical_plan, query_properties) -> PhysicalPlan:
                 # This is a Scan marked for empty result (contradictory predicates)
                 # Use NullReaderNode to return empty table with correct schema
                 node = operators.NullReaderNode(query_properties, **node_config)
-            elif USE_PARQUET_READER and connector and hasattr(connector, "filesystem") and _manifest_is_all_parquet(node_config.get("manifest")):
+            elif USE_PARQUET_READER and connector and _manifest_is_all_parquet(node_config.get("manifest")):
                 # Column-chunk range-read path: footer-first planning, per-row-group morsels.
+                # Works for any connector (local, GCS, S3, Opteryx catalog) — filesystem
+                # is resolved from file-path protocol inside ParquetReadNode if not provided
+                # directly by the connector.
                 node = operators.ParquetReadNode(query_properties, **node_config)
             elif connector and getattr(connector, "__synchronousity__", None) == "asynchronous":
                 # IO-process-isolation reader: lock-free ring buffer, spawned worker process.

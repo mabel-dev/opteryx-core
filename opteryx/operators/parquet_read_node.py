@@ -29,6 +29,9 @@ from __future__ import annotations
 import time
 from typing import Generator
 
+import pyarrow
+from orso.schema import convert_orso_schema_to_arrow_schema
+
 from opteryx import EOS
 from opteryx.draken.morsels.morsel import Morsel
 from opteryx.models import QueryProperties
@@ -51,6 +54,7 @@ class ParquetReadNode(ReaderNode):
     def __init__(self, properties: QueryProperties, **parameters) -> None:
         ReaderNode.__init__(self, properties=properties, **parameters)
         self.predicates = parameters.get("predicates")
+        self._parquet_files_seen: set = set()
 
     @property
     def name(self) -> str:  # pragma: no cover
@@ -61,6 +65,26 @@ class ParquetReadNode(ReaderNode):
         mermaid += f"{self.connector.dataset}<br />"
         mermaid += f"({self.execution_time / 1_000_000:,.2f}ms)"
         return mermaid + '")]'
+
+    def sensors(self):
+        base = super().sensors()
+        base["row_groups_read"] = self.readings.get("row_groups_read", 0)
+        base["files_read"] = self.readings.get("files_read", 0)
+        decode_ns = self.readings.get("time_decoding_blobs", 0)
+        if decode_ns > 0 and base["row_groups_read"] > 0:
+            base["rowgroups_completed_per_s"] = base["row_groups_read"] / (
+                decode_ns / 1_000_000_000
+            )
+        range_requests = self.readings.get("parquet_range_request_count", 0)
+        range_bytes = self.readings.get("parquet_range_bytes_requested", 0)
+        if range_requests:
+            base["parquet_avg_range_bytes"] = int(range_bytes / range_requests)
+        cache_hits = self.readings.get("parquet_column_cache_hits", 0)
+        cache_misses = self.readings.get("parquet_column_cache_misses", 0)
+        cache_lookups = cache_hits + cache_misses
+        if cache_lookups:
+            base["parquet_column_cache_hit_ratio"] = cache_hits / cache_lookups
+        return base
 
     def execute(self, morsel, **kwargs) -> Generator:
         if morsel == EOS:
@@ -87,16 +111,46 @@ class ParquetReadNode(ReaderNode):
         ]
         orso_schema.columns = orso_schema_cols
         self.readings["columns_read"] += len(orso_schema.columns)
+        self.readings["parquet_range_request_count"] += 0
+        self.readings["parquet_range_bytes_requested"] += 0
+        self.readings["parquet_footer_bytes"] += 0
+        self.readings["parquet_column_cache_hits"] += 0
+        self.readings["parquet_column_cache_misses"] += 0
+        self.readings["time_parquet_read_ranges_ns"] += 0
+        self.readings["time_parquet_decode_columns_ns"] += 0
+        self.readings["time_parquet_task_queue_wait_ns"] += 0
+        self.readings["time_parquet_task_total_ns"] += 0
+        self.readings["time_parquet_footer_fetch_ns"] += 0
+        self.readings["time_parquet_scheduler_wait_ns"] += 0
+        self.readings["time_parquet_rowgroup_completion_ns"] += 0
+        self.readings["parquet_rowgroup_peak_in_flight_max"] += 0
+        self.readings["parquet_ranges_in_flight_peak"] += 0
+        self.readings["parquet_active_files_peak"] += 0
+        self.readings["parquet_active_rowgroups_peak"] += 0
+        self.readings["time_to_first_rowgroup_ns"] += 0
 
         records_to_read = self.limit if self.limit is not None else float("inf")
+        arrow_schema = convert_orso_schema_to_arrow_schema(orso_schema, use_identities=True)
 
-        filesystem = self.connector.filesystem
+        blob_paths = self.manifest.get_file_paths()
+
+        # Resolve the filesystem: connectors that own a pre-configured filesystem
+        # (FileSystemConnector subclasses) expose it directly.  For connectors that
+        # don't (e.g. OpteryxConnector/IopsReadNode path), derive it from the
+        # storage protocol embedded in the file paths.
+        if hasattr(self.connector, "filesystem"):
+            filesystem = self.connector.filesystem
+        else:
+            from opteryx.connectors.io_systems import create_filesystem
+
+            first_path = blob_paths[0] if blob_paths else ""
+            protocol = first_path.split("://")[0] if "://" in first_path else ""
+            filesystem = create_filesystem(protocol)
         # Column names as they appear in the Parquet file (Parquet uses the
         # original names, not identity aliases).
         column_names = [col.name for col in orso_schema.columns]
         # Map data-file column name → query-engine identity for Morsel construction.
         name_to_identity = {col.name: col.identity for col in orso_schema.columns}
-        blob_paths = self.manifest.get_file_paths()
 
         # One cache per execute() call: footers shared across all row groups of
         # the same file; column chunks cached for reuse across row groups with
@@ -108,7 +162,61 @@ class ParquetReadNode(ReaderNode):
         try:
             for row_group in iter_row_groups(filesystem, blob_paths, column_names, cache):
                 path = row_group.pop("__path__")
-                rg_idx = row_group.pop("__row_group__")
+                _ = row_group.pop("__row_group__")
+                self.bytes_in += row_group.pop("__bytes_fetched__", 0)
+                self.readings["parquet_footer_bytes"] += row_group.pop("__footer_bytes__", 0)
+                self.readings["parquet_range_request_count"] += row_group.pop(
+                    "__range_request_count__", 0
+                )
+                self.readings["parquet_range_bytes_requested"] += row_group.pop(
+                    "__range_bytes_requested__", 0
+                )
+                self.readings["time_parquet_read_ranges_ns"] += row_group.pop(
+                    "__time_read_ranges_ns__", 0
+                )
+                self.readings["time_parquet_decode_columns_ns"] += row_group.pop(
+                    "__time_decode_columns_ns__", 0
+                )
+                self.readings["parquet_column_cache_hits"] += row_group.pop(
+                    "__cache_column_hits__", 0
+                )
+                self.readings["parquet_column_cache_misses"] += row_group.pop(
+                    "__cache_column_misses__", 0
+                )
+                self.readings["time_parquet_task_queue_wait_ns"] += row_group.pop(
+                    "__task_queue_wait_ns__", 0
+                )
+                self.readings["time_parquet_task_total_ns"] += row_group.pop("__task_total_ns__", 0)
+                self.readings["time_parquet_footer_fetch_ns"] += row_group.pop(
+                    "__footer_fetch_ns__", 0
+                )
+                self.readings["time_parquet_scheduler_wait_ns"] += row_group.pop(
+                    "__scheduler_wait_ns__", 0
+                )
+                self.readings["time_parquet_rowgroup_completion_ns"] += row_group.pop(
+                    "__rowgroup_completion_latency_ns__", 0
+                )
+                self.readings["parquet_rowgroup_peak_in_flight_max"] = max(
+                    self.readings.get("parquet_rowgroup_peak_in_flight_max", 0),
+                    row_group.pop("__rowgroup_peak_in_flight__", 0),
+                )
+                self.readings["parquet_ranges_in_flight_peak"] = max(
+                    self.readings.get("parquet_ranges_in_flight_peak", 0),
+                    row_group.pop("__ranges_in_flight_peak__", 0),
+                )
+                self.readings["parquet_active_files_peak"] = max(
+                    self.readings.get("parquet_active_files_peak", 0),
+                    row_group.pop("__active_files_peak__", 0),
+                )
+                self.readings["parquet_active_rowgroups_peak"] = max(
+                    self.readings.get("parquet_active_rowgroups_peak", 0),
+                    row_group.pop("__active_rowgroups_peak__", 0),
+                )
+                time_to_first_rowgroup_ns = row_group.pop("__time_to_first_rowgroup_ns__", 0)
+                if time_to_first_rowgroup_ns:
+                    existing = self.readings.get("time_to_first_rowgroup_ns", 0)
+                    if existing == 0 or time_to_first_rowgroup_ns < existing:
+                        self.readings["time_to_first_rowgroup_ns"] = time_to_first_rowgroup_ns
 
                 # Assemble the projected columns into a Draken Morsel directly.
                 # Each value is a DrakenVector; we map data-file names to identity
@@ -119,7 +227,13 @@ class ParquetReadNode(ReaderNode):
 
                 num_rows = result_morsel.num_rows
                 self.readings["rows_seen"] += num_rows
-                self.readings["blobs_seen"] += 1
+                self.readings["row_groups_read"] = self.readings.get("row_groups_read", 0) + 1
+
+                # Track distinct files (rg_idx==0 is the first row group of each file)
+                if path not in self._parquet_files_seen:
+                    self._parquet_files_seen.add(path)
+                    self.readings["files_read"] = len(self._parquet_files_seen)
+                    self.readings["blobs_seen"] += 1
 
                 # ── LIMIT enforcement ─────────────────────────────────────────
                 if records_to_read < num_rows:
@@ -128,8 +242,8 @@ class ParquetReadNode(ReaderNode):
                 else:
                     records_to_read -= num_rows
 
-                self.readings["blobs_read"] += 1
-                self.telemetry.blobs_read += 1
+                self.readings["blobs_read"] = len(self._parquet_files_seen)
+                self.telemetry.blobs_read = len(self._parquet_files_seen)
                 self.readings["rows_read"] += result_morsel.num_rows
                 self.telemetry.rows_read += result_morsel.num_rows
                 self.readings["bytes_processed"] += result_morsel.nbytes

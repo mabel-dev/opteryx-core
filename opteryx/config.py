@@ -156,6 +156,19 @@ IOPS_REUSE_RING: bool = str(get("IOPS_REUSE_RING", "1")).lower() in ("1", "true"
 # MORSEL_SIZE remains a plain constant
 MORSEL_SIZE: int = int(get("MORSEL_SIZE", 64 * 1024 * 1024))
 
+# Parquet row-group scheduler configuration (v2)
+PARQUET_FILES_IN_FLIGHT: int = int(get("PARQUET_FILES_IN_FLIGHT", 2))
+"""Maximum active parquet files admitted concurrently by the v2 scheduler."""
+
+PARQUET_ROWGROUPS_PER_FILE_IN_FLIGHT: int = int(get("PARQUET_ROWGROUPS_PER_FILE_IN_FLIGHT", 5))
+"""Maximum active row groups per active file for the v2 scheduler."""
+
+PARQUET_GLOBAL_RANGE_READERS: int = int(get("PARQUET_GLOBAL_RANGE_READERS", 24))
+"""Hard cap for in-flight column range reads across the full parquet scan."""
+
+PARQUET_RANGE_READERS_PER_ROWGROUP: int = int(get("PARQUET_RANGE_READERS_PER_ROWGROUP", 10))
+"""Cap for in-flight column range reads per row group."""
+
 
 # fmt:on
 
@@ -177,7 +190,14 @@ class Features:
     disable_predicate_ordering = bool(get("FEATURE_DISABLE_PREDICATE_ORDERING", False))
     disable_predicate_pushdown = bool(get("FEATURE_DISABLE_PREDICATE_PUSHDOWN", False))
     disable_manifest_pruning = bool(get("FEATURE_DISABLE_MANIFEST_PRUNING", False))
-    use_parquet_reader = str(get("FEATURE_USE_PARQUET_READER", "1")).lower() in (
+    use_parquet_reader = str(get("FEATURE_USE_PARQUET_READER", "0")).lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+    parquet_rowgroup_scheduler_v2 = str(
+        get("FEATURE_PARQUET_ROWGROUP_SCHEDULER_V2", "1")
+    ).lower() in (
         "1",
         "true",
         "yes",
