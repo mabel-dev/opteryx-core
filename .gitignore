@@ -212,8 +212,6 @@ tmp/**
 *.html
 opteryx/compiled/**/*.c*
 opteryx/compiled/**/*.h*
-!opteryx/compiled/aggregations/key_serializer.h
-Cargo.lock
 testdata/parquet_tests/hits_51.parquet
 
 opteryx/draken/vectors/_hash_api.c*

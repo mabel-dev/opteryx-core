@@ -619,15 +619,6 @@ extensions = [
         extra_compile_args=CPP_FLAGS,
     ),
     Extension(
-        "opteryx.compiled.aggregations.key_serializer_zpp",
-        sources=[
-            "opteryx/compiled/aggregations/key_serializer_zpp.pyx",
-        ],
-        include_dirs=include_dirs,
-        language="c++",
-        extra_compile_args=CPP_FLAGS,
-    ),
-    Extension(
         "opteryx.compiled.aggregations.group_state_store",
         sources=[
             "opteryx/compiled/aggregations/group_state_store.pyx",
