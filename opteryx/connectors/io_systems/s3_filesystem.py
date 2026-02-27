@@ -7,6 +7,8 @@ stream wrappers for high-performance S3 access.
 
 import io
 import os
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import as_completed
 from dataclasses import dataclass
 from typing import List
 from typing import Optional
@@ -21,6 +23,8 @@ from opteryx.exceptions import DatasetReadError
 from opteryx.exceptions import MissingDependencyError
 from opteryx.exceptions import UnmetRequirementError
 from opteryx.third_party.alantsd.base64 import encode
+
+_MAX_PARALLEL_RANGE_READS = 32
 
 
 @dataclass(frozen=True)
@@ -273,8 +277,12 @@ class OpteryxS3FileSystem:
         bucket, object_path, name, extension = path_utils.get_parts(path)
         full_object_name = object_path + "/" + name + extension
 
-        result = []
-        for offset, length in ranges:
+        if not ranges:
+            return []
+
+        # Avoid threadpool overhead for trivial calls.
+        if len(ranges) == 1:
+            offset, length = ranges[0]
             response = self.minio.get_object(
                 bucket_name=bucket,
                 object_name=full_object_name,
@@ -282,10 +290,40 @@ class OpteryxS3FileSystem:
                 length=length,
             )
             try:
-                chunk = response.read()
-                result.append(chunk)
+                return [response.read()]
             finally:
                 response.close()
+                if hasattr(response, "release_conn"):
+                    response.release_conn()
+
+        # Range requests are network-bound; issue a small bounded fanout and
+        # preserve the caller's range order in the output list.
+        worker_count = min(_MAX_PARALLEL_RANGE_READS, len(ranges))
+        result: List[bytes] = [b""] * len(ranges)
+
+        def _fetch(idx: int, offset: int, length: int) -> Tuple[int, bytes]:
+            response = self.minio.get_object(
+                bucket_name=bucket,
+                object_name=full_object_name,
+                offset=offset,
+                length=length,
+            )
+            try:
+                return idx, response.read()
+            finally:
+                response.close()
+                if hasattr(response, "release_conn"):
+                    response.release_conn()
+
+        with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="s3-range") as pool:
+            futures = [
+                pool.submit(_fetch, idx, offset, length)
+                for idx, (offset, length) in enumerate(ranges)
+            ]
+            for fut in as_completed(futures):
+                idx, chunk = fut.result()
+                result[idx] = chunk
+
         return result
 
     def stream_to(self, path: str, sink, chunk_size: int = 1 << 20) -> int:

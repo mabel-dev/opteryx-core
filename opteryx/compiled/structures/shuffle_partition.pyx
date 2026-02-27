@@ -62,12 +62,16 @@ cpdef tuple row_indexes_by_bin_flat(const uint64_t[::1] hashes,
 
     # ----- handle empty input -----
     if n_rows == 0:
-        flat_arr = view.array(shape=(0,),
-                                     itemsize=sizeof(Py_ssize_t),
-                                     format="l")
-        offsets_arr = view.array(shape=(num_bins + 1,),
-                                        itemsize=sizeof(Py_ssize_t),
-                                        format="l")
+        flat_arr = view.array(
+            shape=(0,),
+            itemsize=sizeof(Py_ssize_t),
+            format="l",
+        )
+        offsets_arr = view.array(
+            shape=(num_bins + 1,),
+            itemsize=sizeof(Py_ssize_t),
+            format="l",
+        )
         offsets = offsets_arr
         for i in range(num_bins + 1):
             offsets[i] = 0
@@ -99,12 +103,16 @@ cpdef tuple row_indexes_by_bin_flat(const uint64_t[::1] hashes,
                 counts_p[bin_id] += 1
 
         # ----- allocate the result arrays (Python objects, need GIL) -----
-        flat_arr = view.array(shape=(n_rows,),
-                                     itemsize=sizeof(Py_ssize_t),
-                                     format="l")
-        offsets_arr = view.array(shape=(num_bins + 1,),
-                                        itemsize=sizeof(Py_ssize_t),
-                                        format="l")
+        flat_arr = view.array(
+            shape=(n_rows,),
+            itemsize=sizeof(Py_ssize_t),
+            format="l",
+        )
+        offsets_arr = view.array(
+            shape=(num_bins + 1,),
+            itemsize=sizeof(Py_ssize_t),
+            format="l",
+        )
         flat = flat_arr
         offsets = offsets_arr
 

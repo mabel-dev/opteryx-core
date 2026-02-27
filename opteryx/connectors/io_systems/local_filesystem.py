@@ -7,8 +7,12 @@ and stream wrappers for high-performance local file access.
 
 import datetime
 import os
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import as_completed
 from typing import List
 from typing import Tuple
+
+_MAX_PARALLEL_RANGE_READS = 32
 
 
 class MemoryMappedFile:
@@ -226,13 +230,42 @@ class OpteryxLocalFileSystem:
         Returns:
             List of byte buffers in the same order as ranges.
         """
-        result = []
-        with open(path, "rb") as f:
-            for offset, length in ranges:
-                f.seek(offset)
-                chunk = f.read(length)
-                result.append(chunk)
-        return result
+        if not ranges:
+            return []
+
+        # Avoid threadpool overhead for trivial calls or environments without pread().
+        if len(ranges) == 1 or not hasattr(os, "pread"):
+            result = []
+            with open(path, "rb") as f:
+                for offset, length in ranges:
+                    f.seek(offset)
+                    result.append(f.read(length))
+            return result
+
+        # Use pread() to read independent ranges from one fd in parallel while
+        # preserving output order.
+        fd = os.open(path, os.O_RDONLY)
+        try:
+            worker_count = min(_MAX_PARALLEL_RANGE_READS, len(ranges))
+            result: List[bytes] = [b""] * len(ranges)
+
+            def _read_one(idx: int, offset: int, length: int) -> Tuple[int, bytes]:
+                return idx, os.pread(fd, length, offset)
+
+            with ThreadPoolExecutor(
+                max_workers=worker_count, thread_name_prefix="local-range"
+            ) as pool:
+                futures = [
+                    pool.submit(_read_one, idx, offset, length)
+                    for idx, (offset, length) in enumerate(ranges)
+                ]
+                for fut in as_completed(futures):
+                    idx, chunk = fut.result()
+                    result[idx] = chunk
+
+            return result
+        finally:
+            os.close(fd)
 
     def stream_to(self, path: str, sink, chunk_size: int = 1 << 20) -> int:
         """Stream a local file directly into *sink* without an intermediate buffer.

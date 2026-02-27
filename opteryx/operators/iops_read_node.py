@@ -117,6 +117,7 @@ class IopsReadNode(ReaderNode):
                     self.readings["bytes_decoded"] = (
                         self.readings.get("bytes_decoded", 0) + payload.length
                     )
+                    self.bytes_in += payload.length
                     decoded = decoder(
                         payload.data,
                         projection=self.columns,

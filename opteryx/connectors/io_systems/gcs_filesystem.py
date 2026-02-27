@@ -8,12 +8,16 @@ stream wrappers for high-performance GCS access.
 import io
 import os
 import urllib.parse
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import as_completed
 from typing import List
 from typing import Tuple
 from typing import Union
 
 from opteryx.exceptions import DatasetReadError
 from opteryx.exceptions import MissingDependencyError
+
+_MAX_PARALLEL_RANGE_READS = 32
 
 
 def get_storage_credentials():
@@ -118,8 +122,11 @@ class OpteryxGcsFileSystem:
         for path in paths:
             from opteryx.utils import paths as path_utils
 
-            bucket, _, _, _ = path_utils.get_parts(path)
-            object_full_path = urllib.parse.quote(path[(len(bucket) + 1) :], safe="")
+            # Strip gs:// prefix so get_parts sees "bucket/folder/file.parquet"
+            # (read_ranges does the same normalisation)
+            norm_path = path[5:] if path.startswith("gs://") else path
+            bucket, _, _, _ = path_utils.get_parts(norm_path)
+            object_full_path = urllib.parse.quote(norm_path[(len(bucket) + 1) :], safe="")
             url = f"https://storage.googleapis.com/{bucket}/{object_full_path}"
 
             # Use HEAD request to check if object exists and get size
@@ -158,9 +165,12 @@ class OpteryxGcsFileSystem:
         object_full_path = urllib.parse.quote(path[(len(bucket) + 1) :], safe="")
         url = f"https://storage.googleapis.com/{bucket}/{object_full_path}"
 
-        result = []
-        for offset, length in ranges:
-            # GCS range request: Range: bytes=offset-end (inclusive)
+        if not ranges:
+            return []
+
+        # Avoid threadpool overhead for trivial calls.
+        if len(ranges) == 1:
+            offset, length = ranges[0]
             end = offset + length - 1
             response = self.session.get(
                 url,
@@ -170,7 +180,34 @@ class OpteryxGcsFileSystem:
                 },
                 timeout=30,
             )
-            result.append(response.content)
+            return [response.content]
+
+        # Range requests are network-bound; issue a small bounded fanout and
+        # preserve the caller's range order in the output list.
+        worker_count = min(_MAX_PARALLEL_RANGE_READS, len(ranges))
+        result: List[bytes] = [b""] * len(ranges)
+
+        def _fetch(idx: int, offset: int, length: int) -> Tuple[int, bytes]:
+            end = offset + length - 1
+            response = self.session.get(
+                url,
+                headers={
+                    "Authorization": f"Bearer {self.access_token}",
+                    "Range": f"bytes={offset}-{end}",
+                },
+                timeout=30,
+            )
+            return idx, response.content
+
+        with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="gcs-range") as pool:
+            futures = [
+                pool.submit(_fetch, idx, offset, length)
+                for idx, (offset, length) in enumerate(ranges)
+            ]
+            for fut in as_completed(futures):
+                idx, chunk = fut.result()
+                result[idx] = chunk
+
         return result
 
     def stream_to(self, path: str, sink, chunk_size: int = 1 << 20) -> int:
