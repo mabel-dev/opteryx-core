@@ -57,7 +57,12 @@ def left_join(
     if filter_index:
         # We can just dispose of rows from the right relation that don't match
         # our bloom filter
-        possibly_matching_rows = filter_index.possibly_contains_many(right_relation, right_columns)
+        _pcm = filter_index.possibly_contains_many(right_relation, right_columns)
+        possibly_matching_rows = pyarrow.Array.from_buffers(
+            pyarrow.bool_(),
+            right_relation.num_rows,
+            [None, pyarrow.py_buffer(_pcm)],
+        )
         right_relation = right_relation.filter(possibly_matching_rows)
 
         # If there's no matching rows in the right relation, we can exit early

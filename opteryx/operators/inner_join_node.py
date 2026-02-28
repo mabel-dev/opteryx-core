@@ -184,8 +184,11 @@ class InnerJoinNode(JoinNode):
                     # Filter the morsel using the bloom filter, it's a quick way to
                     # reduce the number of rows that need to be joined.
                     start = time.monotonic_ns()
-                    maybe_in_left = self.left_filter.possibly_contains_many(
-                        morsel, self.right_columns
+                    _pcm = self.left_filter.possibly_contains_many(morsel, self.right_columns)
+                    maybe_in_left = pyarrow.Array.from_buffers(
+                        pyarrow.bool_(),
+                        morsel.num_rows,
+                        [None, pyarrow.py_buffer(_pcm)],
                     )
                     self.readings["time_bloom_filtering"] += time.monotonic_ns() - start
                     morsel = morsel.filter(maybe_in_left)

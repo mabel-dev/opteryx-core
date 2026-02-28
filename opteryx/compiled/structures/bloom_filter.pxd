@@ -7,7 +7,6 @@
 # cython: boundscheck=False
 
 from libc.stdint cimport uint8_t, uint32_t, uint64_t, int64_t
-cimport numpy
 
 # Declaration of the BloomFilter class
 cdef class BloomFilter:
@@ -18,7 +17,7 @@ cdef class BloomFilter:
 
     cdef inline void _add(self, const uint64_t item)
     cdef inline bint _possibly_contains(self, const uint64_t item)
-    cpdef numpy.ndarray[numpy.npy_bool, ndim=1] possibly_contains_many(self, object relation, list columns)
+    cpdef uint8_t[::1] possibly_contains_many(self, object relation, list columns)
 
     cpdef void add(self, const uint64_t item)
     cpdef bint possibly_contains(self, const uint64_t item)

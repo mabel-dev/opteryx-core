@@ -117,9 +117,8 @@ class _TrackingFilesystem:
                 if self._startup_target and self.started_total >= self._startup_target:
                     self.startup_reached.set()
 
-            if self._release_event is not None:
-                if not self._release_event.wait(timeout=5):
-                    raise TimeoutError("timed out waiting for test release_event")
+            if self._release_event is not None and not self._release_event.wait(timeout=5):
+                raise TimeoutError("timed out waiting for test release_event")
 
             if self._sleep_s:
                 time.sleep(self._sleep_s)

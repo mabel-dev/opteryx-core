@@ -213,7 +213,7 @@ def test_bloom_filter_no_keys():
     create_relation = FakeRelation({"items": pyarrow.array([], type=pyarrow.string())})
     bf = create_bloom_filter(create_relation, ["items"])
     test_relation = FakeRelation({"items": pyarrow.array([b"apple"], type=pyarrow.string())})
-    assert not bf.possibly_contains_many(test_relation, ["items"]).any(), f"BloomFilter failed to handle an empty array.\nseed: {SEED}"
+    assert not any(bf.possibly_contains_many(test_relation, ["items"])), f"BloomFilter failed to handle an empty array.\nseed: {SEED}"
 
 def test_bloom_filter_special_characters():
     """Test BloomFilter with strings containing special characters."""
@@ -315,7 +315,7 @@ def test_bloom_filter_false_positives():
     test_relation = FakeRelation({"items": pyarrow.array(tests)})
     hits = bf.possibly_contains_many(test_relation, ["items"])
     # FPR should be about 5%
-    hit_count = hits.tolist().count(True)
+    hit_count = hits.to_pylist().count(True)
     assert hit_count < (TEST_SAMPLE_SIZE * 0.90), f"BloomFilter returned too many false positives.\nseed: {SEED}\nhits: {hit_count}"
 
 

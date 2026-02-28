@@ -6,6 +6,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
 import opteryx.rugo.parquet as rp
@@ -164,6 +166,31 @@ def test_decode_dictionary_encoded_column():
     if data is not None:
         assert isinstance(data, list)
         assert len(data) == 500
+
+
+def test_decode_all_null_dictionary_encoded_zstd_column():
+    """Decode an all-null dictionary-encoded string column compressed with ZSTD."""
+    table = pa.table({"severity": pa.array([None] * 20000, type=pa.string())})
+    sink = pa.BufferOutputStream()
+    pq.write_table(table, sink, compression="zstd", use_dictionary=True, data_page_size=1024)
+    raw = sink.getvalue().to_pybytes()
+
+    metadata = rp.read_metadata_from_bytes(raw)
+    col_stats = metadata["row_groups"][0]["columns"][0]
+
+    dict_off = col_stats.get("dictionary_page_offset")
+    data_off = col_stats["data_page_offset"]
+    if dict_off is not None and dict_off >= 0 and dict_off < data_off:
+        base_offset = dict_off
+    else:
+        base_offset = data_off
+
+    chunk = raw[base_offset : base_offset + col_stats["total_compressed_size"]]
+    decoded = rp.decode_column_from_chunk(chunk, col_stats)
+
+    assert decoded is not None
+    assert len(decoded) == 20000
+    assert decoded.null_count == 20000
 
 
 if __name__ == "__main__":

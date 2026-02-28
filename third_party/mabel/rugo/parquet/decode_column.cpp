@@ -344,7 +344,12 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
           (page_header.encoding == 2 || page_header.encoding == 8);
       bool page_uses_dictionary = encoding_requires_dictionary && dict_size > 0;
 
-      if (encoding_requires_dictionary && dict_size == 0) return result;
+      // Some writers emit dictionary-encoded nullable pages where every row is
+      // null: dictionary page has 0 entries and present_count is 0.
+      // This is valid because no dictionary indices are consumed.
+      if (encoding_requires_dictionary && dict_size == 0 && present_count > 0) {
+        return result;
+      }
 
       if (page_uses_dictionary) {
         // On-disk layout: 1 byte bit_width, then RLE/bit-packed indices with no

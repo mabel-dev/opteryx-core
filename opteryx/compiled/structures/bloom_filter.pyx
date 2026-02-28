@@ -34,13 +34,15 @@ is the limit of what we think we should speculatively build.
 """
 
 from libc.stdlib cimport calloc, free
-from libc.stdint cimport uint64_t, uint32_t
+from libc.stdint cimport uint8_t, uint64_t, uint32_t
+from cpython.array cimport array, clone
 
 from opteryx.compiled.table_ops.hash_ops cimport compute_row_hashes
 from opteryx.compiled.table_ops.null_avoidant_ops cimport non_null_row_indices
 
-import numpy
-cimport numpy
+# Reusable template arrays for zero-copy clone allocations
+cdef array _UINT64_TEMPLATE = array('Q', [])
+cdef array _UINT8_TEMPLATE  = array('B', [])
 
 cdef extern from "<stdint.h>":
     ctypedef unsigned long uintptr_t
@@ -116,44 +118,42 @@ cdef class BloomFilter:
     cpdef bint possibly_contains(self, const uint64_t item):
         return self._possibly_contains(item)
 
-    cpdef numpy.ndarray[numpy.npy_bool, ndim=1] possibly_contains_many(self, object relation, list columns):
+    cpdef uint8_t[::1] possibly_contains_many(self, object relation, list columns):
         """
         Optimized batch checking with better memory access patterns.
+        Returns a bit-packed boolean buffer (LSB-first, PyArrow bool_ layout).
         """
         cdef Py_ssize_t num_rows = relation.num_rows
-        cdef numpy.ndarray[numpy.npy_bool, ndim=1] result = numpy.zeros(num_rows, dtype=numpy.bool_)
-        cdef uint8_t[::1] result_view = result
+        cdef Py_ssize_t num_bytes = (num_rows + 7) >> 3
+        cdef array result_arr = clone(_UINT8_TEMPLATE, num_bytes, True)  # zero-initialised
+        cdef uint8_t[::1] result = result_arr
         cdef int64_t[::1] valid_row_ids = non_null_row_indices(relation, columns)
         cdef Py_ssize_t num_valid_rows = valid_row_ids.shape[0]
-        cdef numpy.ndarray[numpy.uint64_t, ndim=1] row_hashes_np = numpy.zeros(num_rows, dtype=numpy.uint64)
-        cdef uint64_t[::1] row_hashes = row_hashes_np
+        cdef array row_hashes_arr = clone(_UINT64_TEMPLATE, num_rows, False)
+        cdef uint64_t[::1] row_hashes = row_hashes_arr
         cdef Py_ssize_t i
         cdef int64_t row_id
         cdef uint64_t hash_val, h1, h2, mask1, mask2
-
-        if num_valid_rows == 0:
-            return result
-
-        # Compute hashes only for non-null rows
-        compute_row_hashes(relation, columns, row_hashes)
-
-        # Precompute constants
         cdef uint64_t bit_mask = self.bit_mask
         cdef uint64_t golden_ratio = GOLDEN_RATIO
         cdef uint64_t* bit_array = self.bit_array
 
-        for i in range(num_valid_rows):
-            row_id = valid_row_ids[i]
-            hash_val = row_hashes[row_id]
+        if num_valid_rows > 0:
+            # Compute hashes only for non-null rows
+            compute_row_hashes(relation, columns, row_hashes)
 
-            h1 = hash_val & bit_mask
-            h2 = (hash_val * golden_ratio) & bit_mask
+            for i in range(num_valid_rows):
+                row_id = valid_row_ids[i]
+                hash_val = row_hashes[row_id]
 
-            mask1 = (<uint64_t>1) << (h1 & 0x3F)
-            mask2 = (<uint64_t>1) << (h2 & 0x3F)
+                h1 = hash_val & bit_mask
+                h2 = (hash_val * golden_ratio) & bit_mask
 
-            result_view[row_id] = (bit_array[h1 >> 6] & mask1) != 0 and \
-                (bit_array[h2 >> 6] & mask2) != 0
+                mask1 = (<uint64_t>1) << (h1 & 0x3F)
+                mask2 = (<uint64_t>1) << (h2 & 0x3F)
+
+                if (bit_array[h1 >> 6] & mask1) != 0 and (bit_array[h2 >> 6] & mask2) != 0:
+                    result[row_id >> 3] |= <uint8_t>(1 << (row_id & 7))
 
         return result
 
@@ -161,12 +161,12 @@ cpdef BloomFilter create_bloom_filter(object relation, list columns):
     """
     Optimized Bloom filter creation with better cache behavior.
     """
+    cdef array row_hashes_arr = clone(_UINT64_TEMPLATE, relation.num_rows, False)
     cdef:
         Py_ssize_t num_rows = relation.num_rows
         int64_t[::1] valid_row_ids = non_null_row_indices(relation, columns)
         Py_ssize_t num_valid_rows = valid_row_ids.shape[0]
-        numpy.ndarray[numpy.uint64_t, ndim=1] row_hashes_np = numpy.empty(num_rows, dtype=numpy.uint64)
-        uint64_t[::1] row_hashes = row_hashes_np
+        uint64_t[::1] row_hashes = row_hashes_arr
         Py_ssize_t i
         int64_t row_id
         BloomFilter bf = BloomFilter(num_valid_rows)
