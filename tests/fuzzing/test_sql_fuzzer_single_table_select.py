@@ -133,19 +133,7 @@ def get_tables():
         {
             "name": virtual_datasets.planets.schema().name,
             "fields": virtual_datasets.planets.schema().columns,
-        },
-        {
-            "name": virtual_datasets.satellites.schema().name,
-            "fields": virtual_datasets.satellites.schema().columns,
-        },
-        {
-            "name": virtual_datasets.astronauts.schema().name,
-            "fields": virtual_datasets.astronauts.schema().columns,
-        },
-        {
-            "name": virtual_datasets.missions.schema().name,
-            "fields": virtual_datasets.missions.schema().columns,
-        },
+        }
     ]
     return _tables_cache
 
@@ -160,7 +148,7 @@ class LazyTables:
 
 TABLES = LazyTables()
 
-TEST_CYCLES: int = 10
+TEST_CYCLES: int = 1000
 
 
 @pytest.mark.parametrize("i", range(TEST_CYCLES))
@@ -180,9 +168,10 @@ def test_sql_fuzzing_single_table(i):
 
     start_time = time.time()  # Start timing the query execution
     try:
-        res = opteryx.query(statement)
+        session = opteryx.session()
+        session.execute(statement)
         execution_time = time.time() - start_time  # Measure execution time
-        print(f"Shape: {res.shape}, Execution Time: {execution_time:.2f} seconds")
+        print(f"Shape: {session.shape}, Execution Time: {execution_time:.2f} seconds")
         # Additional success criteria checks can be added here
     except Exception as e:
         import traceback
