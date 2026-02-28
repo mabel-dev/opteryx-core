@@ -42,6 +42,8 @@ from opteryx.parquet_io.predicates import extract_predicate_stats
 from opteryx.utils.file_decoders import get_decoder
 
 from .read_node import ReaderNode
+from .read_node import normalize_morsel
+from .read_node import struct_to_jsonb
 
 
 class ParquetReadNode(ReaderNode):
@@ -87,6 +89,81 @@ class ParquetReadNode(ReaderNode):
         if cache_lookups:
             base["parquet_column_cache_hit_ratio"] = cache_hits / cache_lookups
         return base
+
+    @staticmethod
+    def _has_repeated_projection(meta: dict, column_names: list[str]) -> bool:
+        row_groups = meta.get("row_groups") or []
+        if not row_groups:
+            return False
+        name_to_stats = {col["name"]: col for col in row_groups[0].get("columns", [])}
+        for col_name in column_names:
+            stats = name_to_stats.get(col_name)
+            if stats and int(stats.get("max_repetition_level") or 0) > 0:
+                return True
+        return False
+
+    def _execute_full_file_fallback(
+        self,
+        filesystem,
+        blob_paths: list[str],
+        file_sizes: dict,
+        orso_schema,
+        arrow_schema,
+        records_to_read,
+    ):
+        result_morsel = None
+        for blob_name in blob_paths:
+            known_size = file_sizes.get(blob_name)
+            if not isinstance(known_size, int) or known_size <= 0:
+                known_size = filesystem.get_file_info(blob_name).size
+
+            read_start_ns = time.monotonic_ns()
+            (payload,) = filesystem.read_ranges(blob_name, [(0, known_size)])
+            self.readings["time_parquet_read_ranges_ns"] += time.monotonic_ns() - read_start_ns
+            self.bytes_in += len(payload)
+
+            decoder = get_decoder(blob_name)
+            decode_start_ns = time.monotonic_ns()
+            num_rows, _, raw_bytes, result_morsel = decoder(
+                memoryview(payload),
+                projection=self.columns,
+                selection=self.predicates,
+            )
+            decode_ns = time.monotonic_ns() - decode_start_ns
+            self.readings["time_decoding_blobs"] += decode_ns
+            self.telemetry.time_decoding_blobs += decode_ns
+
+            self.readings["rows_seen"] += num_rows
+
+            if records_to_read < result_morsel.num_rows:
+                result_morsel = result_morsel.slice(0, int(records_to_read))
+                records_to_read = 0
+            else:
+                records_to_read -= result_morsel.num_rows
+
+            result_morsel = struct_to_jsonb(result_morsel)
+            result_morsel = normalize_morsel(orso_schema, result_morsel)
+            if result_morsel.column_names != ["*"]:
+                result_morsel = result_morsel.cast(arrow_schema)
+
+            self.readings["blobs_read"] += 1
+            self.telemetry.blobs_read += 1
+            self.readings["rows_read"] += result_morsel.num_rows
+            self.telemetry.rows_read += result_morsel.num_rows
+            self.readings["bytes_processed"] += result_morsel.nbytes
+            self.telemetry.bytes_processed += result_morsel.nbytes
+            self.readings["bytes_raw"] += raw_bytes
+            self.telemetry.bytes_raw = getattr(self.telemetry, "bytes_raw", 0) + raw_bytes
+
+            yield result_morsel
+            if records_to_read <= 0:
+                break
+
+        if result_morsel is None:
+            self.readings["empty_datasets"] += 1
+            yield pyarrow.Table.from_arrays(
+                [pyarrow.array([]) for _ in arrow_schema], schema=arrow_schema
+            )
 
     def execute(self, morsel, **kwargs) -> Generator:
         if morsel == EOS:
@@ -170,6 +247,28 @@ class ParquetReadNode(ReaderNode):
         # the same file; column chunks cached for reuse across row groups with
         # identical content (rare but free).
         cache = InMemoryParquetCache()
+
+        # Range-read decoder currently returns flattened leaf values for some
+        # repeated/list columns. Detect projected repeated columns up front and
+        # route to the full-file decoder path for correctness.
+        for blob_name in blob_paths:
+            footer = fetch_footer(
+                filesystem,
+                blob_name,
+                cache=cache,
+                file_size=file_sizes.get(blob_name),
+            )
+            if self._has_repeated_projection(footer, column_names):
+                yield from self._execute_full_file_fallback(
+                    filesystem=filesystem,
+                    blob_paths=blob_paths,
+                    file_sizes=file_sizes,
+                    orso_schema=orso_schema,
+                    arrow_schema=arrow_schema,
+                    records_to_read=records_to_read,
+                )
+                return
+
         result_morsel = None
 
         decode_start = time.monotonic_ns()
