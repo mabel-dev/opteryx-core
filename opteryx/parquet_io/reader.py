@@ -337,7 +337,9 @@ def fetch_columns(
                         f"encodings={col_stats.get('encodings')})"
                     )
             except Exception as e:
-                raise RuntimeError(f"Failed to decode column '{col_name}' from {path}: {e}") from e
+                raise RuntimeError(
+                    f"Failed to decode column '{path}:{rg_idx}:{col_name}': {e}"
+                ) from e
 
             # Cache and add to results
             cache.set_column(path, rg_idx, col_name, decoded)
@@ -683,6 +685,7 @@ def _split_coalesced_buffers(
 def _fetch_rowgroup_task(
     filesystem: Any,
     path: str,
+    rg_idx: int,
     column_work: List[_ColumnWorkItem],
     decoder: Any,
     submitted_ns: int,
@@ -709,7 +712,7 @@ def _fetch_rowgroup_task(
         decoded = decoder(raw_bytes, work.stats)
         if decoded is None:
             raise RuntimeError(
-                f"Decoder returned None for column '{work.name}' "
+                f"Decoder returned None for column '{path}:{rg_idx}:{work.name}' "
                 f"(codec={work.stats.get('compression_codec')}, encodings={work.stats.get('encodings')})"
             )
         columns[work.name] = decoded
@@ -913,6 +916,7 @@ def _iter_row_groups_v2(
                     _fetch_rowgroup_task,
                     filesystem,
                     target.path,
+                    target.rg_idx,
                     target.column_work,
                     decoder_fn,
                     now_ns,
