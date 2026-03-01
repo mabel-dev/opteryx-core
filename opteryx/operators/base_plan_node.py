@@ -10,11 +10,15 @@ from typing import Optional
 from typing import Union
 
 import pyarrow
+import pyarrow.compute as pc
 from orso.tools import random_string
+from orso.types import OrsoTypes
 from pyarrow import Table
 
 from opteryx import EOS
 from opteryx.draken import Morsel
+from opteryx.managers.expression import NodeType
+from opteryx.managers.expression import get_all_nodes_of_type
 
 END = object()
 
@@ -187,6 +191,108 @@ class JoinNode(BasePlanNode):
 
         self.left_readers = parameters.get("left_readers")
         self.right_readers = parameters.get("right_readers")
+        self.left_relation_names = parameters.get("left_relation_names") or []
+        self.right_relation_names = parameters.get("right_relation_names") or []
+        self.on = parameters.get("on")
+        self._join_key_cast_plan = None
+
+    @staticmethod
+    def _join_numeric_target_arrow_type(left_type, right_type):
+        """
+        Return a target Arrow type for implicit numeric join-key coercion.
+        """
+        numeric_types = (OrsoTypes.INTEGER, OrsoTypes.DOUBLE, OrsoTypes.DECIMAL)
+        if left_type not in numeric_types or right_type not in numeric_types:
+            return None
+        if left_type in (OrsoTypes.DOUBLE, OrsoTypes.DECIMAL) or right_type in (
+            OrsoTypes.DOUBLE,
+            OrsoTypes.DECIMAL,
+        ):
+            return pyarrow.float64()
+        return pyarrow.int64()
+
+    def _build_join_key_cast_plan(self):
+        if self._join_key_cast_plan is not None:
+            return
+
+        self._join_key_cast_plan = []
+        if not self.on:
+            return
+
+        comparisons = get_all_nodes_of_type(self.on, (NodeType.COMPARISON_OPERATOR,))
+        seen = set()
+
+        for comparison in comparisons:
+            if comparison.value != "Eq":
+                continue
+
+            left = comparison.left
+            right = comparison.right
+            if not left or not right:
+                continue
+            if left.node_type != NodeType.IDENTIFIER or right.node_type != NodeType.IDENTIFIER:
+                continue
+            if not left.schema_column or not right.schema_column:
+                continue
+
+            left_rel = left.source
+            right_rel = right.source
+            left_identity = left.schema_column.identity
+            right_identity = right.schema_column.identity
+            left_type = left.schema_column.type
+            right_type = right.schema_column.type
+
+            if left_rel in self.left_relation_names and right_rel in self.right_relation_names:
+                left_column, right_column = left_identity, right_identity
+            elif left_rel in self.right_relation_names and right_rel in self.left_relation_names:
+                left_column, right_column = right_identity, left_identity
+                left_type, right_type = right_type, left_type
+            else:
+                continue
+
+            target_arrow_type = self._join_numeric_target_arrow_type(left_type, right_type)
+            if target_arrow_type is None:
+                continue
+
+            signature = (left_column, right_column, str(target_arrow_type))
+            if signature in seen:
+                continue
+            seen.add(signature)
+            self._join_key_cast_plan.append(
+                {
+                    "left_column": left_column,
+                    "right_column": right_column,
+                    "target_type": target_arrow_type,
+                }
+            )
+
+    def _apply_join_key_casts(self, table: Table, *, is_left: bool) -> Table:
+        """
+        Apply implicit join-key type coercions for numeric equality joins.
+        """
+        if table is None or table is EOS or table.num_rows == 0:
+            return table
+
+        self._build_join_key_cast_plan()
+        if not self._join_key_cast_plan:
+            return table
+
+        for cast_rule in self._join_key_cast_plan:
+            column_name = cast_rule["left_column"] if is_left else cast_rule["right_column"]
+            if column_name not in table.column_names:
+                continue
+
+            current = table.column(column_name)
+            target_type = cast_rule["target_type"]
+            if current.type == target_type:
+                continue
+
+            casted = pc.cast(current, target_type, safe=False)
+            field_index = table.schema.get_field_index(column_name)
+            table = table.set_column(field_index, pyarrow.field(column_name, target_type), casted)
+            self.readings["feature_implicit_join_key_cast"] += 1
+
+        return table
 
     def to_mermaid(self, nid):
         """

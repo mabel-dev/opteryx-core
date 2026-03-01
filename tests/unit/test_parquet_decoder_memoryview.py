@@ -1,7 +1,7 @@
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from opteryx.utils.file_decoders import parquet_decoder
+from opteryx.utils.parquet_decoder import parquet_decoder
 
 
 def make_parquet_bytes():

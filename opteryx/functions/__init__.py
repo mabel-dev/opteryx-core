@@ -449,6 +449,20 @@ def _iterate_double_parameter(func):
     return _inner
 
 
+def _iterate_double_parameter_swapped(func):
+    """
+    for functions called FUNCTION(literal, field) when planner supplies
+    arrays as (literal_values, field_values).
+    """
+
+    def _inner(array, literal):
+        if isinstance(array, str):
+            array = [array]
+        return pyarrow.array(func(literal[index], item) for index, item in enumerate(array))
+
+    return _inner
+
+
 def _coalesce(*arrays):
     """
     Element-wise coalesce function for multiple numpy arrays.
@@ -595,7 +609,7 @@ FUNCTIONS = {
     "CONCAT": (string_functions.concat, "VARCHAR", 1.0),
     "CONCAT_WS": (string_functions.concat_ws, "VARCHAR", 1.0),
     "SUBSTRING": (string_functions.substring, "VARCHAR", 1.0),
-    "POSITION": (_iterate_double_parameter(string_functions.position), "INTEGER", 1.0),
+    "POSITION": (_iterate_double_parameter_swapped(string_functions.position), "INTEGER", 1.0),
     "TRIM": (string_functions.trim, "VARCHAR", 1.0),
     "LTRIM": (string_functions.ltrim, "VARCHAR", 1.0),
     "RTRIM": (string_functions.rtrim, "VARCHAR", 1.0),

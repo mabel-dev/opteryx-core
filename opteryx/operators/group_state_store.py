@@ -12,11 +12,18 @@ from opteryx.draken.interop.arrow import vector_from_sequence
 from opteryx.draken.morsels.morsel import Morsel
 from opteryx.exceptions import ExecutionError
 
-_SUPPORTED_FUNCTIONS = frozenset(
-    {"count", "sum", "min", "max", "mean", "avg", "count_distinct", "distinct", "hash_one"}
-)
-
-_FAST_OUTPUT_FUNCTIONS = frozenset({"count", "count_distinct", "mean", "avg"})
+_SUPPORTED_FUNCTIONS = {
+    "count",
+    "sum",
+    "min",
+    "max",
+    "mean",
+    "avg",
+    "count_distinct",
+    "distinct",
+    "hash_one",
+}
+_FAST_OUTPUT_FUNCTIONS = {"count", "count_distinct", "mean", "avg"}
 
 
 def _normalize_column_name(column: str | bytes) -> bytes:

@@ -158,11 +158,33 @@ def regex_match_any(
     Returns:
         numpy.ndarray of object dtype (bool or None per row)
     """
-    patterns = patterns[0]
+    def _decode_text(value):
+        if isinstance(value, bytes):
+            return value.decode("utf-8", errors="replace")
+        return value
 
+    # We often receive a single container-wrapped value from expression eval:
+    # - [ ["%a%","%b%"] ]
+    # - [ "%a%" ]
+    # - Arrow array wrappers
     if hasattr(patterns, "to_pylist"):
         patterns = patterns.to_pylist()
-    if any(not isinstance(p, str) for p in patterns if p):
+    if isinstance(patterns, numpy.ndarray):
+        patterns = patterns.tolist()
+
+    if isinstance(patterns, (list, tuple)) and len(patterns) == 1:
+        first = patterns[0]
+        if hasattr(first, "to_pylist"):
+            first = first.to_pylist()
+        if isinstance(first, numpy.ndarray):
+            first = first.tolist()
+        patterns = first
+
+    if not isinstance(patterns, (list, tuple)):
+        patterns = [patterns]
+
+    patterns = [_decode_text(p) if p is not None else None for p in patterns]
+    if any(not isinstance(p, str) for p in patterns if p is not None):
         from opteryx.exceptions import IncorrectTypeError
 
         raise IncorrectTypeError("Patterns for LIKE ANY comparisons must be strings.")
@@ -187,10 +209,15 @@ def regex_match_any(
                     out[offset + i] = None
                 else:
                     sublist = values[offsets[i] : offsets[i + 1]]
+                    decoded_sublist = []
+                    for value in sublist:
+                        if value is None:
+                            continue
+                        decoded_sublist.append(_decode_text(value))
                     out[offset + i] = (
-                        (not any(combined_regex.search(x) for x in sublist))
+                        (not any(combined_regex.search(x) for x in decoded_sublist))
                         if invert
-                        else (any(combined_regex.search(x) for x in sublist))
+                        else (any(combined_regex.search(x) for x in decoded_sublist))
                     )
         else:
             validity = chunk.is_valid().to_numpy(False)
@@ -199,7 +226,8 @@ def regex_match_any(
                 if not validity[i]:
                     out[offset + i] = None
                 else:
-                    is_match = combined_regex.search(strings[i]) is not None
+                    text_value = _decode_text(strings[i])
+                    is_match = combined_regex.search(text_value) is not None
                     out[offset + i] = not is_match if invert else is_match
         offset += len(chunk)
 

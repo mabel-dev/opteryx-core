@@ -13,7 +13,6 @@ from opteryx.planner.logical_planner import LogicalPlanStepType
 
 ENABLE_NATIVE_AGGREGATOR: bool = features.enable_native_aggregator
 USE_DRAKEN_AGGREGATOR: bool = features.use_draken_aggregator
-USE_PARQUET_READER: bool = features.use_parquet_reader
 
 
 def _manifest_is_all_parquet(manifest) -> bool:
@@ -111,17 +110,19 @@ def create_physical_plan(logical_plan, query_properties) -> PhysicalPlan:
                 # This is a Scan marked for empty result (contradictory predicates)
                 # Use NullReaderNode to return empty table with correct schema
                 node = operators.NullReaderNode(query_properties, **node_config)
-            elif USE_PARQUET_READER and connector and _manifest_is_all_parquet(node_config.get("manifest")):
+            elif connector and _manifest_is_all_parquet(node_config.get("manifest")):
                 # Column-chunk range-read path: footer-first planning, per-row-group morsels.
                 # Works for any connector (local, GCS, S3, Opteryx catalog) — filesystem
                 # is resolved from file-path protocol inside ParquetReadNode if not provided
                 # directly by the connector.
                 node = operators.ParquetReadNode(query_properties, **node_config)
-            elif connector and getattr(connector, "__synchronousity__", None) == "asynchronous":
-                # IO-process-isolation reader: lock-free ring buffer, spawned worker process.
-                node = operators.IopsReadNode(query_properties, **node_config)
-            else:
+            elif connector and getattr(connector, "interal_only", False):
+                # Internal virtual datasets (for example $no_table) do not use file manifests.
                 node = operators.ReaderNode(properties=query_properties, **node_config)
+            else:
+                raise UnsupportedSyntaxError(
+                    "Only Parquet scans are supported. Non-parquet external scan paths have been removed."
+                )
         elif node_type == LogicalPlanStepType.Set:
             node = operators.SetVariableNode(query_properties, **node_config)
         elif node_type == LogicalPlanStepType.Show:

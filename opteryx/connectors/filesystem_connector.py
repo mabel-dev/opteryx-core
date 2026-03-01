@@ -25,14 +25,12 @@ from opteryx.connectors.capabilities import LimitPushable
 from opteryx.connectors.capabilities import PredicatePushable
 from opteryx.exceptions import DataError
 from opteryx.exceptions import DatasetNotFoundError
-from opteryx.exceptions import DatasetReadError
 from opteryx.exceptions import EmptyDatasetError
-from opteryx.exceptions import UnsupportedFileTypeError
 from opteryx.tracing import record_event
-from opteryx.utils.file_decoders import TUPLE_OF_VALID_EXTENSIONS
-from opteryx.utils.file_decoders import get_decoder
+from opteryx.utils.parquet_decoder import parquet_decoder
 
 OS_SEP = os.sep
+PARQUET_SUFFIX = ".parquet"
 
 
 class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
@@ -194,6 +192,7 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
             PyArrow Tables or schemas
         """
         blob_names = self.get_list_of_blob_names(prefix=self.dataset, predicates=predicates or [])
+        blob_names = [name for name in blob_names if name.lower().endswith(PARQUET_SUFFIX)]
 
         from opteryx import config as _config
 
@@ -205,10 +204,9 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
         if just_schema:
             for blob_name in blob_names:
                 try:
-                    decoder = get_decoder(blob_name)
                     schema = self.read_blob(
                         blob_name=blob_name,
-                        decoder=decoder,
+                        decoder=parquet_decoder,
                         just_schema=True,
                     )
                     blob_count = len(blob_names)
@@ -217,8 +215,6 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
                         schema.row_count_metric = None
                         self.telemetry.estimated_row_count += schema.row_count_estimate
                     yield schema
-                except UnsupportedFileTypeError:
-                    continue
                 except pyarrow.ArrowInvalid:
                     with self._stats_lock:
                         self.telemetry.unreadable_data_blobs += 1
@@ -246,8 +242,6 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
                         columns,
                         predicates,
                     )
-                except UnsupportedFileTypeError:
-                    continue
                 except pyarrow.ArrowInvalid:
                     with self._stats_lock:
                         self.telemetry.unreadable_data_blobs += 1
@@ -284,8 +278,6 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
                     blob_name = pending.pop(future)
                     try:
                         num_rows, _, raw_size, decoded = future.result()
-                    except UnsupportedFileTypeError:
-                        pass
                     except pyarrow.ArrowInvalid:
                         with self._stats_lock:
                             self.telemetry.unreadable_data_blobs += 1
@@ -313,10 +305,9 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
 
     def _read_blob_task(self, blob_name: str, columns, predicates):
         """Helper for reading a blob in a thread pool."""
-        decoder = get_decoder(blob_name)
         return self.read_blob(
             blob_name=blob_name,
-            decoder=decoder,
+            decoder=parquet_decoder,
             just_schema=False,
             projection=columns,
             selection=predicates,
@@ -366,38 +357,29 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
         # Build FileEntry objects from file metadata
         file_entries = []
         for blob_name in blob_names:
-            # Skip non-data files
-            if not any(blob_name.endswith(ext) for ext in TUPLE_OF_VALID_EXTENSIONS):
+            # Only Parquet files are supported in external scans.
+            if not blob_name.lower().endswith(PARQUET_SUFFIX):
                 continue
 
             try:
-                # Get decoder for this file format
-                _ = get_decoder(blob_name)
-
                 # Open the file and read just the metadata
                 file_stream = self.filesystem.open_input_file(blob_name)
 
                 # Determine file format
-                file_format = "PARQUET" if blob_name.endswith(".parquet") else "CSV"
+                file_format = "PARQUET"
 
-                # Extract record count from file metadata
-                # For Parquet, we can read metadata without reading row data
+                # Extract record count from Parquet metadata without reading row data.
                 record_count = 0
                 file_size = file_stream.size() if hasattr(file_stream, "size") else 0
 
-                if blob_name.endswith(".parquet"):
-                    try:
-                        import pyarrow.parquet as pq
+                try:
+                    import pyarrow.parquet as pq
 
-                        parquet_file = pq.ParquetFile(file_stream)
-                        record_count = parquet_file.metadata.num_rows
-                    except (OSError, ValueError, RuntimeError) as ex:
-                        # Fallback: set to 0 if we can't read metadata
-                        _ = ex
-                        record_count = 0
-                else:
-                    # For non-parquet files, we can't easily get the count without reading
-                    # For now, set to 0 (executor will read the actual count)
+                    parquet_file = pq.ParquetFile(file_stream)
+                    record_count = parquet_file.metadata.num_rows
+                except (OSError, ValueError, RuntimeError) as ex:
+                    # Fallback: set to 0 if we can't read metadata
+                    _ = ex
                     record_count = 0
 
                 # Create FileEntry

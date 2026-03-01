@@ -215,7 +215,7 @@ class OpteryxGcsFileSystem:
 
         Calls ``sink.write(chunk)`` for each network chunk received, giving
         callers a zero-copy path when *sink* writes directly into a shared-memory
-        slot (e.g. ``_SlotWriter`` in ``opteryx.iops.worker``).
+        slot.
 
         Refreshes the OAuth token if it has expired before making the request.
 

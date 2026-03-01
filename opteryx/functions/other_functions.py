@@ -252,13 +252,23 @@ def cosine_similarity(arr, val):
 
     if len(val) == 0:
         return []
-    tokenized_literal = tokenize_and_remove_punctuation(str(val[0]), STOP_WORDS)
+    literal = val[0]
+    if isinstance(literal, bytes):
+        literal = literal.decode("utf8", errors="ignore")
+    tokenized_literal = tokenize_and_remove_punctuation(str(literal), STOP_WORDS)
     if len(tokenized_literal) == 0:
         return [0.0] * len(arr)
     # print(len(val))
 
     # t = time.monotonic_ns()
-    tokenized_strings = [tokenize_and_remove_punctuation(s, STOP_WORDS) for s in arr] + [
+    def _to_text(value):
+        if value is None:
+            return ""
+        if isinstance(value, bytes):
+            return value.decode("utf8", errors="ignore")
+        return str(value)
+
+    tokenized_strings = [tokenize_and_remove_punctuation(_to_text(s), STOP_WORDS) for s in arr] + [
         tokenized_literal
     ]
     # print("time tokenizing ", time.monotonic_ns() - t)

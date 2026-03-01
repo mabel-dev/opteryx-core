@@ -89,10 +89,6 @@ SYSTEM_VARIABLES_DEFAULTS: Dict[str, VariableSchema] = {
     "user_memberships": (OrsoTypes.ARRAY, [[]], VariableOwner.INTERNAL, Visibility.UNRESTRICTED),
     "morsel_size": (OrsoTypes.INTEGER, config.MORSEL_SIZE, VariableOwner.SERVER, Visibility.RESTRICTED),
     "architecture": (OrsoTypes.ARRAY, cpu_architecture(), VariableOwner.SERVER, Visibility.RESTRICTED),
-    "iops_slot_size": (OrsoTypes.INTEGER, config.IOPS_SLOT_SIZE, VariableOwner.SERVER, Visibility.RESTRICTED),
-    "iops_slot_count": (OrsoTypes.INTEGER, config.IOPS_SLOT_COUNT, VariableOwner.SERVER, Visibility.RESTRICTED),
-    "iops_max_inflight": (OrsoTypes.INTEGER, config.IOPS_MAX_INFLIGHT, VariableOwner.SERVER, Visibility.RESTRICTED),
-    "iops_chunk_size": (OrsoTypes.INTEGER, config.IOPS_CHUNK_SIZE, VariableOwner.SERVER, Visibility.RESTRICTED),
 }
 # fmt: on
 

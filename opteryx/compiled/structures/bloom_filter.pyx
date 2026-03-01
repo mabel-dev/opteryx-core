@@ -42,7 +42,7 @@ from opteryx.compiled.table_ops.null_avoidant_ops cimport non_null_row_indices
 
 # Reusable template arrays for zero-copy clone allocations
 cdef array _UINT64_TEMPLATE = array('Q', [])
-cdef array _UINT8_TEMPLATE  = array('B', [])
+cdef array _UINT8_TEMPLATE = array('B', [])
 
 cdef extern from "<stdint.h>":
     ctypedef unsigned long uintptr_t
@@ -163,7 +163,6 @@ cpdef BloomFilter create_bloom_filter(object relation, list columns):
     """
     cdef array row_hashes_arr = clone(_UINT64_TEMPLATE, relation.num_rows, False)
     cdef:
-        Py_ssize_t num_rows = relation.num_rows
         int64_t[::1] valid_row_ids = non_null_row_indices(relation, columns)
         Py_ssize_t num_valid_rows = valid_row_ids.shape[0]
         uint64_t[::1] row_hashes = row_hashes_arr

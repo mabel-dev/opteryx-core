@@ -22,6 +22,7 @@ import time
 
 import numpy
 import pyarrow
+import pyarrow.compute as pc
 from pyarrow import Table
 
 from opteryx import EOS
@@ -55,6 +56,29 @@ class NestedLoopJoinNode(JoinNode):
     def config(self):  # pragma: no cover
         return ""
 
+    @staticmethod
+    def _filter_null_join_keys(table: Table, join_columns):
+        """
+        SQL inner-join semantics treat NULL join keys as non-matching.
+        Drop rows where any join key is NULL (or NaN in float columns).
+        """
+        if table is None or table.num_rows == 0 or not join_columns:
+            return table
+
+        mask = None
+        for column in join_columns:
+            if column not in table.column_names:
+                continue
+            column_data = table.column(column)
+            column_mask = pc.is_valid(column_data)
+            if pyarrow.types.is_floating(column_data.type):
+                column_mask = pc.and_(column_mask, pc.invert(pc.is_nan(column_data)))
+            mask = column_mask if mask is None else pc.and_(mask, column_mask)
+
+        if mask is None:
+            return table
+        return table.filter(mask)
+
     def execute(self, morsel: Table, join_leg: str) -> Table:
         morsel = self.ensure_arrow_table(morsel)
 
@@ -62,6 +86,10 @@ class NestedLoopJoinNode(JoinNode):
             if morsel == EOS:
                 self.left_relation = pyarrow.concat_tables(self.left_buffer, promote_options="none")
                 self.left_buffer.clear()
+                self.left_relation = self._apply_join_key_casts(self.left_relation, is_left=True)
+                self.left_relation = self._filter_null_join_keys(
+                    self.left_relation, self.left_columns
+                )
 
                 # build a bloom filter for the left relation if it's small enough
                 start = time.monotonic_ns()
@@ -98,6 +126,9 @@ class NestedLoopJoinNode(JoinNode):
                     morsel = morsel.filter(maybe_in_left)
                     eliminated_rows = len(maybe_in_left) - morsel.num_rows
                     self.readings["rows_eliminated_by_bloom_filter"] += eliminated_rows
+
+                morsel = self._apply_join_key_casts(morsel, is_left=False)
+                morsel = self._filter_null_join_keys(morsel, self.right_columns)
 
                 left_indexes, right_indexes = nested_loop_join(
                     self.left_relation, morsel, self.left_columns, self.right_columns

@@ -27,19 +27,27 @@ between I/O and decode across all files and row groups simultaneously.
 from __future__ import annotations
 
 import time
+from copy import deepcopy
 from typing import Generator
 
+import numpy
 import pyarrow
 from orso.schema import convert_orso_schema_to_arrow_schema
+from orso.tools import random_string
 
 from opteryx import EOS
 from opteryx.draken.morsels.morsel import Morsel
+from opteryx.managers.expression import NodeType
+from opteryx.managers.expression import evaluate
+from opteryx.managers.expression import evaluate_and_append
+from opteryx.managers.expression import get_all_nodes_of_type
+from opteryx.models import Node
 from opteryx.models import QueryProperties
 from opteryx.parquet_io import InMemoryParquetCache
 from opteryx.parquet_io import fetch_footer
 from opteryx.parquet_io import iter_row_groups
 from opteryx.parquet_io.predicates import extract_predicate_stats
-from opteryx.utils.file_decoders import get_decoder
+from opteryx.utils.parquet_decoder import parquet_decoder
 
 from .read_node import ReaderNode
 from .read_node import normalize_morsel
@@ -50,8 +58,8 @@ class ParquetReadNode(ReaderNode):
     """Read node backed by column-chunk range reads via ``parquet_io``.
 
     Activated for filesystem-backed connectors (GCS, S3, local) when the
-    manifest contains only ``.parquet`` files.  Falls back to the existing
-    ``IopsReadNode`` / ``ReaderNode`` paths for mixed or non-Parquet manifests.
+    manifest contains only ``.parquet`` files.  Non-parquet external scans are
+    rejected by the planner.
     """
 
     def __init__(self, properties: QueryProperties, **parameters) -> None:
@@ -74,6 +82,17 @@ class ParquetReadNode(ReaderNode):
         base["row_groups_read"] = self.readings.get("row_groups_read", 0)
         base["row_groups_pruned"] = self.readings.get("parquet_row_groups_pruned", 0)
         base["files_read"] = self.readings.get("files_read", 0)
+        base["parquet_filter_columns_read"] = self.readings.get("parquet_filter_columns_read", 0)
+        base["parquet_projection_columns_read"] = self.readings.get(
+            "parquet_projection_columns_read", 0
+        )
+        base["parquet_rows_before_filter"] = self.readings.get("parquet_rows_before_filter", 0)
+        base["parquet_rows_after_filter"] = self.readings.get("parquet_rows_after_filter", 0)
+        rows_before_filter = base["parquet_rows_before_filter"]
+        if rows_before_filter > 0:
+            base["parquet_filter_selectivity"] = (
+                base["parquet_rows_after_filter"] / rows_before_filter
+            )
         decode_ns = self.readings.get("time_decoding_blobs", 0)
         if decode_ns > 0 and base["row_groups_read"] > 0:
             base["rowgroups_completed_per_s"] = base["row_groups_read"] / (
@@ -102,13 +121,137 @@ class ParquetReadNode(ReaderNode):
                 return True
         return False
 
+    @staticmethod
+    def _extract_filter_identities(predicates) -> set[str]:
+        if not predicates:
+            return set()
+        identities = set()
+        for predicate in predicates:
+            identifiers = get_all_nodes_of_type(predicate, select_nodes=(NodeType.IDENTIFIER,))
+            for identifier in identifiers:
+                schema_column = getattr(identifier, "schema_column", None)
+                identity = getattr(schema_column, "identity", None)
+                if identity:
+                    identities.add(identity)
+        return identities
+
+    @staticmethod
+    def _compose_predicates(predicates):
+        if not predicates:
+            return None
+
+        predicate_nodes = [predicate.copy() for predicate in predicates if predicate is not None]
+        if not predicate_nodes:
+            return None
+
+        root = predicate_nodes.pop()
+        while predicate_nodes:
+            right = predicate_nodes.pop()
+            root = Node(
+                NodeType.AND,
+                left=root,
+                right=right,
+                schema_column=Node("schema_column", identity=random_string()),
+            )
+        return root
+
+    @staticmethod
+    def _mask_to_arrow(mask):
+        if isinstance(mask, pyarrow.BooleanArray):
+            return mask
+        if isinstance(mask, pyarrow.ChunkedArray):
+            return mask.combine_chunks()
+        if isinstance(mask, numpy.ndarray):
+            return pyarrow.array(mask, type=pyarrow.bool_())
+        if isinstance(mask, list):
+            return pyarrow.array(mask, type=pyarrow.bool_())
+        return pyarrow.array(numpy.asarray(mask, dtype=numpy.bool_), type=pyarrow.bool_())
+
+    def _apply_predicates_to_morsel(self, morsel: Morsel, predicate_root, eval_schema=None):
+        if predicate_root is None:
+            return morsel, morsel.num_rows, morsel.num_rows
+
+        source_table = morsel.to_arrow()
+        rows_before_filter = source_table.num_rows
+        eval_table = source_table
+
+        if eval_schema is not None and eval_table.column_names != ["*"]:
+            eval_table = self._cast_table_to_schema(eval_table, eval_schema)
+        if any(getattr(column, "num_chunks", 0) > 1 for column in eval_table.columns):
+            eval_table = eval_table.combine_chunks()
+
+        function_nodes = get_all_nodes_of_type(predicate_root, select_nodes=(NodeType.FUNCTION,))
+        if function_nodes:
+            eval_table = evaluate_and_append(function_nodes, eval_table)
+
+        mask = evaluate(predicate_root, eval_table)
+        filtered = source_table.filter(self._mask_to_arrow(mask))
+        if filtered.num_rows == 0:
+            return morsel.slice(0, 0), rows_before_filter, 0
+
+        # Arrow filter commonly yields chunked arrays. Draken Morsel conversion expects
+        # single-chunk arrays, so coalesce chunks before conversion for correctness.
+        if any(getattr(column, "num_chunks", 0) > 1 for column in filtered.columns):
+            filtered = filtered.combine_chunks()
+        return Morsel.from_arrow(filtered), rows_before_filter, filtered.num_rows
+
+    @staticmethod
+    def _cast_table_to_schema(table: pyarrow.Table, schema: pyarrow.Schema) -> pyarrow.Table:
+        if table.column_names == ["*"]:
+            return table
+
+        arrays = []
+        names = []
+        for field in schema:
+            if field.name not in table.column_names:
+                continue
+            column = table.column(field.name)
+            source_type = column.type
+            target_type = field.type
+            if source_type.equals(target_type):
+                arrays.append(column)
+                names.append(field.name)
+                continue
+
+            # Rugo decodes Parquet DATE logical values as integer day counts. Arrow's
+            # direct int64->date64 cast treats integers as milliseconds, so convert
+            # through date32 (days) first to preserve semantics.
+            if pyarrow.types.is_date64(target_type) and pyarrow.types.is_int64(source_type):
+                casted = pyarrow.compute.cast(column, pyarrow.int32())
+                casted = pyarrow.compute.cast(casted, pyarrow.date32())
+                casted = pyarrow.compute.cast(casted, pyarrow.date64())
+            elif pyarrow.types.is_date32(target_type) and pyarrow.types.is_int64(source_type):
+                casted = pyarrow.compute.cast(column, pyarrow.int32())
+                casted = pyarrow.compute.cast(casted, pyarrow.date32())
+            else:
+                casted = pyarrow.compute.cast(column, target_type)
+            arrays.append(casted)
+            names.append(field.name)
+
+        return pyarrow.Table.from_arrays(arrays, names=names)
+
+    @staticmethod
+    def _cast_morsel_to_schema(morsel: Morsel, schema: pyarrow.Schema) -> Morsel:
+        if morsel.num_rows == 0:
+            return morsel
+
+        table = morsel.to_arrow()
+        if table.column_names != ["*"]:
+            table = ParquetReadNode._cast_table_to_schema(table, schema)
+        if any(getattr(column, "num_chunks", 0) > 1 for column in table.columns):
+            table = table.combine_chunks()
+        return Morsel.from_arrow(table)
+
     def _execute_full_file_fallback(
         self,
         filesystem,
         blob_paths: list[str],
         file_sizes: dict,
-        orso_schema,
-        arrow_schema,
+        read_orso_schema,
+        read_arrow_schema,
+        output_arrow_schema,
+        output_identity_order,
+        predicate_root,
         records_to_read,
     ):
         result_morsel = None
@@ -122,18 +265,46 @@ class ParquetReadNode(ReaderNode):
             self.readings["time_parquet_read_ranges_ns"] += time.monotonic_ns() - read_start_ns
             self.bytes_in += len(payload)
 
-            decoder = get_decoder(blob_name)
             decode_start_ns = time.monotonic_ns()
-            num_rows, _, raw_bytes, result_morsel = decoder(
+            num_rows, _, raw_bytes, result_table = parquet_decoder(
                 memoryview(payload),
-                projection=self.columns,
-                selection=self.predicates,
+                projection=None,
+                selection=None,
             )
             decode_ns = time.monotonic_ns() - decode_start_ns
             self.readings["time_decoding_blobs"] += decode_ns
             self.telemetry.time_decoding_blobs += decode_ns
 
-            self.readings["rows_seen"] += num_rows
+            result_table = struct_to_jsonb(result_table)
+            result_table = normalize_morsel(read_orso_schema, result_table)
+            if result_table.column_names != ["*"]:
+                result_table = result_table.cast(read_arrow_schema)
+            if any(getattr(column, "num_chunks", 0) > 1 for column in result_table.columns):
+                result_table = result_table.combine_chunks()
+            result_morsel = Morsel.from_arrow(result_table)
+
+            rows_before_filter = result_morsel.num_rows
+            rows_after_filter = rows_before_filter
+            if predicate_root is not None:
+                result_morsel, rows_before_filter, rows_after_filter = (
+                    self._apply_predicates_to_morsel(
+                        result_morsel,
+                        predicate_root,
+                        eval_schema=read_arrow_schema,
+                    )
+                )
+
+            self.readings["parquet_rows_before_filter"] += rows_before_filter
+            self.readings["parquet_rows_after_filter"] += rows_after_filter
+            if self.readings["parquet_rows_before_filter"] > 0:
+                self.readings["parquet_filter_selectivity"] = (
+                    self.readings["parquet_rows_after_filter"]
+                    / self.readings["parquet_rows_before_filter"]
+                )
+
+            if output_identity_order:
+                result_morsel = result_morsel.select(output_identity_order)
+            result_morsel = self._cast_morsel_to_schema(result_morsel, output_arrow_schema)
 
             if records_to_read < result_morsel.num_rows:
                 result_morsel = result_morsel.slice(0, int(records_to_read))
@@ -141,10 +312,7 @@ class ParquetReadNode(ReaderNode):
             else:
                 records_to_read -= result_morsel.num_rows
 
-            result_morsel = struct_to_jsonb(result_morsel)
-            result_morsel = normalize_morsel(orso_schema, result_morsel)
-            if result_morsel.column_names != ["*"]:
-                result_morsel = result_morsel.cast(arrow_schema)
+            self.readings["rows_seen"] += result_morsel.num_rows
 
             self.readings["blobs_read"] += 1
             self.telemetry.blobs_read += 1
@@ -162,7 +330,7 @@ class ParquetReadNode(ReaderNode):
         if result_morsel is None:
             self.readings["empty_datasets"] += 1
             yield pyarrow.Table.from_arrays(
-                [pyarrow.array([]) for _ in arrow_schema], schema=arrow_schema
+                [pyarrow.array([]) for _ in output_arrow_schema], schema=output_arrow_schema
             )
 
     def execute(self, morsel, **kwargs) -> Generator:
@@ -170,26 +338,44 @@ class ParquetReadNode(ReaderNode):
             yield None
             return
 
-        orso_schema = self.parameters["schema"]
+        base_schema = self.parameters["schema"]
+        projected_identities = [column.schema_column.identity for column in (self.columns or [])]
+        projected_identity_set = set(projected_identities)
+        if not projected_identity_set:
+            projected_identities = [column.identity for column in base_schema.columns]
+            projected_identity_set = set(projected_identities)
+
+        filter_identity_set = self._extract_filter_identities(self.predicates)
+        required_identity_set = projected_identity_set.union(filter_identity_set)
+
+        read_schema = deepcopy(base_schema)
+        read_schema.columns = [
+            column for column in base_schema.columns if column.identity in required_identity_set
+        ]
+
+        output_schema = deepcopy(base_schema)
+        output_schema.columns = [
+            column for column in base_schema.columns if column.identity in projected_identity_set
+        ]
+        output_identity_order = [column.identity for column in output_schema.columns]
+        predicate_root = self._compose_predicates(self.predicates or [])
 
         # ── Empty manifest ────────────────────────────────────────────────────
         if not self.manifest or self.manifest.get_file_count() == 0:
             from orso import DataFrame
 
-            as_arrow = DataFrame(rows=[], schema=orso_schema).arrow()
-            renames = [orso_schema.column(col).identity for col in as_arrow.column_names]
+            as_arrow = DataFrame(rows=[], schema=output_schema).arrow()
+            renames = [output_schema.column(col).identity for col in as_arrow.column_names]
             as_arrow = as_arrow.rename_columns(renames)
             yield as_arrow
             return
 
-        # ── Project schema to requested columns only ──────────────────────────
-        orso_schema_cols = [
-            col
-            for col in orso_schema.columns
-            if col.identity in {c.schema_column.identity for c in self.columns}
-        ]
-        orso_schema.columns = orso_schema_cols
-        self.readings["columns_read"] += len(orso_schema.columns)
+        self.readings["columns_read"] += len(read_schema.columns)
+        self.readings["parquet_filter_columns_read"] += len(filter_identity_set)
+        self.readings["parquet_projection_columns_read"] += len(projected_identity_set)
+        self.readings["parquet_rows_before_filter"] += 0
+        self.readings["parquet_rows_after_filter"] += 0
+        self.readings["parquet_filter_selectivity"] += 0
         self.readings["parquet_range_request_count"] += 0
         self.readings["parquet_range_bytes_requested"] += 0
         self.readings["parquet_footer_bytes"] += 0
@@ -214,7 +400,8 @@ class ParquetReadNode(ReaderNode):
         predicate_stats = extract_predicate_stats(self.predicates or [])
 
         records_to_read = self.limit if self.limit is not None else float("inf")
-        arrow_schema = convert_orso_schema_to_arrow_schema(orso_schema, use_identities=True)
+        read_arrow_schema = convert_orso_schema_to_arrow_schema(read_schema, use_identities=True)
+        arrow_schema = convert_orso_schema_to_arrow_schema(output_schema, use_identities=True)
 
         blob_paths = self.manifest.get_file_paths()
         file_sizes = {}
@@ -227,7 +414,7 @@ class ParquetReadNode(ReaderNode):
 
         # Resolve the filesystem: connectors that own a pre-configured filesystem
         # (FileSystemConnector subclasses) expose it directly.  For connectors that
-        # don't (e.g. OpteryxConnector/IopsReadNode path), derive it from the
+        # don't (e.g. OpteryxConnector), derive it from the
         # storage protocol embedded in the file paths.
         if hasattr(self.connector, "filesystem"):
             filesystem = self.connector.filesystem
@@ -239,9 +426,9 @@ class ParquetReadNode(ReaderNode):
             filesystem = create_filesystem(protocol)
         # Column names as they appear in the Parquet file (Parquet uses the
         # original names, not identity aliases).
-        column_names = [col.name for col in orso_schema.columns]
+        column_names = [col.name for col in read_schema.columns]
         # Map data-file column name → query-engine identity for Morsel construction.
-        name_to_identity = {col.name: col.identity for col in orso_schema.columns}
+        name_to_identity = {col.name: col.identity for col in read_schema.columns}
 
         # One cache per execute() call: footers shared across all row groups of
         # the same file; column chunks cached for reuse across row groups with
@@ -249,8 +436,11 @@ class ParquetReadNode(ReaderNode):
         cache = InMemoryParquetCache()
 
         # Range-read decoder currently returns flattened leaf values for some
-        # repeated/list columns. Detect projected repeated columns up front and
-        # route to the full-file decoder path for correctness.
+        # repeated/list columns. Also, heterogeneous multi-file datasets may not
+        # contain every projected/predicate column in every file. Detect either
+        # case up front and route to full-file fallback for correctness.
+        has_repeated_projection = False
+        has_missing_required_columns = False
         for blob_name in blob_paths:
             footer = fetch_footer(
                 filesystem,
@@ -258,20 +448,34 @@ class ParquetReadNode(ReaderNode):
                 cache=cache,
                 file_size=file_sizes.get(blob_name),
             )
-            if self._has_repeated_projection(footer, column_names):
-                yield from self._execute_full_file_fallback(
-                    filesystem=filesystem,
-                    blob_paths=blob_paths,
-                    file_sizes=file_sizes,
-                    orso_schema=orso_schema,
-                    arrow_schema=arrow_schema,
-                    records_to_read=records_to_read,
-                )
-                return
+            has_repeated_projection = has_repeated_projection or self._has_repeated_projection(
+                footer, column_names
+            )
+            row_groups = footer.get("row_groups") or []
+            if row_groups:
+                available_columns = {col.get("name") for col in row_groups[0].get("columns", [])}
+                if any(col_name not in available_columns for col_name in column_names):
+                    has_missing_required_columns = True
+
+        if has_repeated_projection or has_missing_required_columns:
+            yield from self._execute_full_file_fallback(
+                filesystem=filesystem,
+                blob_paths=blob_paths,
+                file_sizes=file_sizes,
+                read_orso_schema=read_schema,
+                read_arrow_schema=read_arrow_schema,
+                output_arrow_schema=arrow_schema,
+                output_identity_order=output_identity_order,
+                predicate_root=predicate_root,
+                records_to_read=records_to_read,
+            )
+            return
 
         result_morsel = None
 
         decode_start = time.monotonic_ns()
+        total_rows_before_filter = 0
+        total_rows_after_filter = 0
         try:
             for row_group in iter_row_groups(
                 filesystem,
@@ -353,6 +557,21 @@ class ParquetReadNode(ReaderNode):
                     # architectural concern for the planner, not the reader.
                     continue
                 result_morsel = Morsel.from_vectors(identity_names, vectors)
+                rows_before_filter = result_morsel.num_rows
+                rows_after_filter = rows_before_filter
+                if predicate_root is not None:
+                    result_morsel, rows_before_filter, rows_after_filter = (
+                        self._apply_predicates_to_morsel(
+                            result_morsel,
+                            predicate_root,
+                            eval_schema=read_arrow_schema,
+                        )
+                    )
+                total_rows_before_filter += rows_before_filter
+                total_rows_after_filter += rows_after_filter
+                if output_identity_order:
+                    result_morsel = result_morsel.select(output_identity_order)
+                result_morsel = self._cast_morsel_to_schema(result_morsel, arrow_schema)
 
                 num_rows = result_morsel.num_rows
                 self.readings["rows_seen"] += num_rows
@@ -389,6 +608,12 @@ class ParquetReadNode(ReaderNode):
                 self.readings.get("time_decoding_blobs", 0) + decode_ns
             )
             self.telemetry.time_decoding_blobs += decode_ns
+            self.readings["parquet_rows_before_filter"] += total_rows_before_filter
+            self.readings["parquet_rows_after_filter"] += total_rows_after_filter
+            if total_rows_before_filter > 0:
+                self.readings["parquet_filter_selectivity"] = (
+                    total_rows_after_filter / total_rows_before_filter
+                )
 
         # ── Empty result guard ────────────────────────────────────────────────
         if result_morsel is None:

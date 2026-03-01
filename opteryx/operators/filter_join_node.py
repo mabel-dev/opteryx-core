@@ -63,6 +63,7 @@ class FilterJoinNode(JoinNode):
             if morsel == EOS:
                 yield EOS
             else:
+                morsel = self._apply_join_key_casts(morsel, is_left=True)
                 join_provider = providers.get(self.join_type)
                 yield join_provider(
                     relation=morsel,
@@ -70,6 +71,7 @@ class FilterJoinNode(JoinNode):
                     seen_hashes=self.right_hash_set,
                 )
         if join_leg == "right" and morsel != EOS:
+            morsel = self._apply_join_key_casts(morsel, is_left=False)
             start = time.monotonic_ns()
             self.right_hash_set = filter_join_set(morsel, self.right_columns, self.right_hash_set)
             self.readings["time_build_filter_hash_table"] += time.monotonic_ns() - start
