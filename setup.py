@@ -795,16 +795,6 @@ extensions.append(
     )
 )
 
-# IOPS ring buffer — atomic slot-state transitions (Phase 2, §17 of io-process/design.md)
-extensions.append(
-    Extension(
-        "opteryx.iops.ring_atomic",
-        sources=["opteryx/iops/ring_atomic.pyx"],
-        extra_compile_args=C_FLAGS,
-        language="c",
-    )
-)
-
 # Setup configuration
 setup(
     name=LIBRARY,

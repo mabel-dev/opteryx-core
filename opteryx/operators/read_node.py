@@ -22,6 +22,7 @@ from orso.schema import RelationSchema
 from orso.schema import convert_orso_schema_to_arrow_schema
 
 from opteryx import EOS
+from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.models import QueryProperties
 from opteryx.utils.json_compat import dumps as json_dumps
 
@@ -381,6 +382,12 @@ class ReaderNode(BasePlanNode):
         if morsel == EOS:
             yield None
             return
+
+        if self.connector and not getattr(self.connector, "interal_only", False):
+            raise UnsupportedSyntaxError(
+                "ReaderNode is restricted to internal virtual datasets. "
+                "Use ParquetReadNode for external table scans."
+            )
 
         morsel = None
         orso_schema = self.schema

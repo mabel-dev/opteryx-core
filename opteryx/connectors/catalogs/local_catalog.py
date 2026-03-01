@@ -87,7 +87,7 @@ class LocalOpteryxCatalog:
     - Each namespace contains tables (subdirectories or files)
     - Tables are either:
       * A directory containing parquet files
-      * A single parquet/csv/jsonl file
+      * A single parquet file
     """
 
     def __init__(self, name: str, root_path: str = ".", **properties):
@@ -115,12 +115,12 @@ class LocalOpteryxCatalog:
 
         # Single file table
         if os.path.isfile(path):
-            return path.endswith((".parquet", ".csv", ".jsonl", ".json"))
+            return path.endswith(".parquet")
 
         # Directory table - must contain data files
         if os.path.isdir(path):
             for item in os.listdir(path):
-                if item.endswith((".parquet", ".csv", ".jsonl", ".json")):
+                if item.endswith(".parquet"):
                     return True
         return False
 

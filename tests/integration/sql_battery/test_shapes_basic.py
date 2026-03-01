@@ -61,7 +61,7 @@ STATEMENTS = [
         ("SELECT * FROM $planets", 9, 20, None),
         ("SELECT * FROM testdata.astronauts", 357, 19, None),
         ("SELECT * FROM $no_table", 1, 1, None),
-        ("SELECT * FROM $variables", 42, 5, None),
+        ("SELECT * FROM $variables", 38, 5, None),
         ("SELECT * FROM testdata.missions", 4630, 8, None),
         ("SELECT * FROM $stop_words", 305, 1, None),
         (b"SELECT * FROM testdata.satellites", 177, 8, None),
@@ -139,10 +139,12 @@ STATEMENTS = [
         ("SELECT * FROM $planets WHERE name ILIKE 'm%'", 2, 20, None),
         ("SELECT * FROM $planets WHERE id IN (1, 3, 5)", 3, 20, None),
         ("SELECT * FROM $planets WHERE id NOT IN (1, 3, 5)", 6, 20, None),
+        ("SELECT name FROM testdata.satellites WHERE planetId = 3", 1, 1, None),
 
         # NULL handling
         ("SELECT * FROM $planets WHERE name IS NULL", 0, 20, None),
         ("SELECT * FROM $planets WHERE name IS NOT NULL", 9, 20, None),
+        ("SELECT name FROM testdata.satellites WHERE magnitude IS NULL", 6, 1, None),
 
         # Combining conditions
         ("SELECT * FROM $planets WHERE id > 3 AND id < 7", 3, 20, None),

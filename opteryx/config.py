@@ -131,27 +131,6 @@ ENABLE_ZERO_COPY: bool = bool(get("ENABLE_ZERO_COPY", True))
 # GCP project ID - for Google Cloud Data
 GCP_PROJECT_ID: str = get("GCP_PROJECT_ID")
 
-# IOPS ring buffer configuration
-IOPS_SLOT_SIZE: int = int(get("IOPS_SLOT_SIZE", 64 * 1024 * 1024))
-"""Size of each shared-memory ring slot in bytes (default: 64 MiB).
-Must be >= the largest Parquet blob you expect to read."""
-
-IOPS_MAX_INFLIGHT: int = int(get("IOPS_MAX_INFLIGHT", 0)) or CONCURRENT_READS
-"""Maximum number of concurrent blob downloads in the IOPS worker
-(default: CONCURRENT_READS)."""
-
-IOPS_SLOT_COUNT: int = int(get("IOPS_SLOT_COUNT", 0)) or max(IOPS_MAX_INFLIGHT * 2, 16)
-"""Total ring slots (default: 2 × IOPS_MAX_INFLIGHT, minimum 16).
-Must be >= IOPS_MAX_INFLIGHT."""
-
-IOPS_CHUNK_SIZE: int = int(get("IOPS_CHUNK_SIZE", 8 * 1024 * 1024))
-"""HTTP streaming chunk size for aiohttp downloads in bytes (default: 8 MiB)."""
-
-IOPS_PREFAULT_MODE: str = str(get("IOPS_PREFAULT_MODE", "adaptive"))
-"""Shared-memory pre-fault mode: adaptive, full, first-slot, or none."""
-
-IOPS_REUSE_RING: bool = str(get("IOPS_REUSE_RING", "1")).lower() in ("1", "true", "yes")
-"""Reuse a compatible shared-memory ring allocation across readers in-process."""
 # size of morsels to push between steps
 # MORSEL_SIZE remains a plain constant
 MORSEL_SIZE: int = int(get("MORSEL_SIZE", 64 * 1024 * 1024))
@@ -177,7 +156,6 @@ PARQUET_RANGE_READERS_PER_ROWGROUP: int = int(get("PARQUET_RANGE_READERS_PER_ROW
 class Features:
     # Feature flags are used to enable or disable experimental features.
     enable_native_aggregator = bool(get("FEATURE_ENABLE_NATIVE_AGGREGATOR", False))
-    enable_iops = bool(get("FEATURE_ENABLE_IOPS", True))
     disable_nested_loop_join = bool(get("FEATURE_DISABLE_NESTED_LOOP_JOIN", False))
     force_nested_loop_join = bool(get("FEATURE_FORCE_NESTED_LOOP_JOIN", False))
     enable_free_threading = bool(get("FEATURE_ENABLE_FREE_THREADING", False))
@@ -190,11 +168,6 @@ class Features:
     disable_predicate_ordering = bool(get("FEATURE_DISABLE_PREDICATE_ORDERING", False))
     disable_predicate_pushdown = bool(get("FEATURE_DISABLE_PREDICATE_PUSHDOWN", False))
     disable_manifest_pruning = bool(get("FEATURE_DISABLE_MANIFEST_PRUNING", False))
-    use_parquet_reader = str(get("FEATURE_USE_PARQUET_READER", "0")).lower() in (
-        "1",
-        "true",
-        "yes",
-    )
     parquet_rowgroup_scheduler_v2 = str(
         get("FEATURE_PARQUET_ROWGROUP_SCHEDULER_V2", "1")
     ).lower() in (

@@ -203,6 +203,7 @@ class OuterJoinNode(JoinNode):
             if morsel == EOS:
                 self.left_relation = pyarrow.concat_tables(self.left_buffer, promote_options="none")
                 self.left_buffer.clear()
+                self.left_relation = self._apply_join_key_casts(self.left_relation, is_left=True)
                 if self.join_type == "left outer":
                     start = time.monotonic_ns()
                     self.left_hash = build_side_hash_map(self.left_relation, self.left_columns)
@@ -228,6 +229,7 @@ class OuterJoinNode(JoinNode):
             if morsel == EOS:
                 right_relation = pyarrow.concat_tables(self.right_buffer, promote_options="none")
                 self.right_buffer.clear()
+                right_relation = self._apply_join_key_casts(right_relation, is_left=False)
 
                 join_provider = providers.get(self.join_type)
 

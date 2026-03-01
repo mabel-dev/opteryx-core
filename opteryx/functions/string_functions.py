@@ -204,10 +204,14 @@ def substring(
     return [_inner(val, _from, _for) for val, _from, _for in zip(arr, from_pos, count)]
 
 
-def position(sub, string):
+def position(string, sub):
     """
     Returns the starting position of the first instance of substring in string. Positions start with 1. If not found, 0 is returned.
     """
+    if isinstance(string, bytes):
+        string = string.decode("utf8", errors="ignore")
+    if isinstance(sub, bytes):
+        sub = sub.decode("utf8", errors="ignore")
     return string.find(sub) + 1
 
 
@@ -290,12 +294,22 @@ def match_against(arr, val):
 
     if len(val) == 0:
         return []
-    tokenized_literal = tokenize_and_remove_punctuation(str(val[0]), STOP_WORDS)
+    literal = val[0]
+    if isinstance(literal, bytes):
+        literal = literal.decode("utf8", errors="ignore")
+    tokenized_literal = tokenize_and_remove_punctuation(str(literal), STOP_WORDS)
 
     if len(tokenized_literal) == 0:
         return [False] * len(arr)
 
-    tokenized_strings = (tokenize_and_remove_punctuation(s, STOP_WORDS) for s in arr)
+    def _to_text(value):
+        if value is None:
+            return ""
+        if isinstance(value, bytes):
+            return value.decode("utf8", errors="ignore")
+        return str(value)
+
+    tokenized_strings = (tokenize_and_remove_punctuation(_to_text(s), STOP_WORDS) for s in arr)
 
     return [tokenized_literal.issubset(tok) for tok in tokenized_strings]
 

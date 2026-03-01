@@ -163,7 +163,7 @@ STATEMENTS = [
         ("SELECT is_reply_to FROM testdata.flat.formats.parquet WITH(NO_PARTITION) WHERE COALESCE(is_reply_to, -1) < 0", 74765, 1, None),
         # Names not found / clashes [#471]
         ("SELECT P.* FROM (SELECT * FROM $planets) AS P", 9, 20, None),
-        ("SELECT P0.id, P1.ID, P2.ID FROM $planets AS P0 JOIN (SELECT id AS ID, name FROM $planets AS ppp) AS P1 ON P0.name = P1.name JOIN (SELECT id, name AS N FROM $planets AS pppp) AS P2 ON P0.name = P2.N", 9, 3, ColumnNotFoundError),
+        ("SELECT P0.id, P1.ID, P2.ID FROM $planets AS P0 JOIN (SELECT id AS ID, name FROM $planets AS ppp) AS P1 ON P0.name = P1.name JOIN (SELECT id, name AS N FROM $planets AS pppp) AS P2 ON P0.name = P2.N", 9, 3, None),
         ("SELECT P0.id, P1.ID, P2.ID FROM $planets AS P0 JOIN (SELECT id AS ID, name FROM $planets AS ppp) AS P1 ON P0.name = P1.name JOIN (SELECT id, name AS N FROM $planets AS pppp) AS P2 ON P0.name = P2.N", 9, 3, None),
         ("SELECT P0.id, P1.ID FROM $planets AS P0 INNER JOIN (SELECT id, name AS ID FROM $planets) AS P1 ON P0.name = P1.name", 9, 2, ColumnNotFoundError),
         ("SELECT P0.id, P1.ID FROM $planets AS P0 INNER JOIN (SELECT id, name AS N FROM $planets) AS P1 ON P0.name = P1.N", 9, 2, None),

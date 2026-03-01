@@ -22,6 +22,7 @@ import time
 from threading import Lock
 
 import pyarrow
+import pyarrow.compute as pc
 from pyarrow import Table
 
 from opteryx import EOS
@@ -101,6 +102,30 @@ class InnerJoinNode(JoinNode):
     def config(self):  # pragma: no cover
         return ""
 
+    @staticmethod
+    def _filter_null_join_keys(table: Table, join_columns):
+        """
+        SQL inner-join semantics treat NULL join keys as non-matching.
+        Drop rows where any join key is NULL before hash build/probe.
+        """
+        if table is None or table.num_rows == 0 or not join_columns:
+            return table
+
+        mask = None
+        for column in join_columns:
+            if column not in table.column_names:
+                continue
+            column_data = table.column(column)
+            column_mask = pc.is_valid(column_data)
+            # In our float pipelines, NULLs may be represented as NaN.
+            if pyarrow.types.is_floating(column_data.type):
+                column_mask = pc.and_(column_mask, pc.invert(pc.is_nan(column_data)))
+            mask = column_mask if mask is None else pc.and_(mask, column_mask)
+
+        if mask is None:
+            return table
+        return table.filter(mask)
+
     def execute(self, morsel: Table, join_leg: str) -> Table:
         morsel = self.ensure_arrow_table(morsel)
 
@@ -118,14 +143,18 @@ class InnerJoinNode(JoinNode):
                     left_exprs = self._collect_expression_nodes_for_side(self.left_relation_names)
                     if left_exprs and self.left_relation.num_rows > 0:
                         old_cols = set(self.left_relation.column_names)
-                        print("old cols:", old_cols)
                         self.left_relation = evaluate_and_append(left_exprs, self.left_relation)
-                        print("post eval cols:", self.left_relation.column_names)
                         new_cols = set(self.left_relation.column_names) - old_cols
-                        print("new cols:", new_cols)
                         # Update join columns to include newly added expression columns
                         if new_cols:
                             self.left_columns = list(self.left_columns or []) + list(new_cols)
+
+                    self.left_relation = self._apply_join_key_casts(
+                        self.left_relation, is_left=True
+                    )
+                    self.left_relation = self._filter_null_join_keys(
+                        self.left_relation, self.left_columns
+                    )
 
                     start = time.monotonic_ns()
                     self.left_hash = build_side_hash_map(self.left_relation, self.left_columns)
@@ -171,14 +200,14 @@ class InnerJoinNode(JoinNode):
                 right_exprs = self._collect_expression_nodes_for_side(self.right_relation_names)
                 if right_exprs and morsel.num_rows > 0:
                     old_cols = set(morsel.column_names)
-                    print("old cols:", old_cols)
                     morsel = evaluate_and_append(right_exprs, morsel)
-                    print("post eval cols:", morsel.column_names)
                     new_cols = set(morsel.column_names) - old_cols
-                    print("new cols:", new_cols)
                     # Update join columns to include newly added expression columns
                     if new_cols:
                         self.right_columns = list(self.right_columns or []) + list(new_cols)
+
+                morsel = self._apply_join_key_casts(morsel, is_left=False)
+                morsel = self._filter_null_join_keys(morsel, self.right_columns)
 
                 if self.left_filter is not None:
                     # Filter the morsel using the bloom filter, it's a quick way to

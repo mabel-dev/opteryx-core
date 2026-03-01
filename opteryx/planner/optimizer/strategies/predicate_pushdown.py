@@ -245,11 +245,38 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                         ).issubset(predicate.relations):
                             # This predicate references both sides of the join
                             if predicate.condition.value == "Eq":
+                                # Only convert when the predicate can be represented as join fields.
+                                # Expressions like `s = e + INTERVAL '1' MONTH` must stay as filters.
+                                try:
+                                    extract_join_fields(
+                                        predicate.condition,
+                                        node.left_relation_names,
+                                        node.right_relation_names,
+                                    )
+                                except UnsupportedSyntaxError:
+                                    self.telemetry.optimization_predicate_pushdown += 1
+                                    context.optimized_plan.insert_node_after(
+                                        predicate.nid, predicate, context.node_id
+                                    )
+                                    continue
                                 # Convert to inner join
                                 node.type = "inner"
                                 node.on = _add_condition(node.on, predicate.condition)
                                 self.telemetry.optimization_predicate_pushdown_cross_join_to_inner_join += 1
                             elif predicate.condition.value in non_equi_ops:
+                                # Only convert when the predicate can be represented as join fields.
+                                try:
+                                    extract_join_fields(
+                                        predicate.condition,
+                                        node.left_relation_names,
+                                        node.right_relation_names,
+                                    )
+                                except UnsupportedSyntaxError:
+                                    self.telemetry.optimization_predicate_pushdown += 1
+                                    context.optimized_plan.insert_node_after(
+                                        predicate.nid, predicate, context.node_id
+                                    )
+                                    continue
                                 # Convert to non-equi join
                                 node.type = "non equi"
                                 node.on = _add_condition(node.on, predicate.condition)

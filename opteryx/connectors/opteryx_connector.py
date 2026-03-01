@@ -42,7 +42,7 @@ class OpteryxTable(Diachronic, PredicatePushable):
 
     __mode__ = "Blob"
     __type__ = "OPTERYX"
-    __synchronousity__ = "asynchronous"  # Used by physical planner to select operator
+    __synchronousity__ = "asynchronous"
 
     # Capability declarations (for plan-time)
     supports_diachronic = True  # Time-travel queries

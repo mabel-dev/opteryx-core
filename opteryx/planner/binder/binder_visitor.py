@@ -31,7 +31,23 @@ from opteryx.virtual_datasets import derived
 CAMEL_TO_SNAKE = re.compile(r"(?<!^)(?=[A-Z])")
 
 
-def get_mismatched_condition_column_types(node: Node, relaxed: bool = False) -> dict:
+def _is_numeric_join_coercible(left_type, right_type) -> bool:
+    """Return True when join-side implicit numeric coercion is safe."""
+    if left_type in (OrsoTypes.BOOLEAN, OrsoTypes.NULL) or right_type in (
+        OrsoTypes.BOOLEAN,
+        OrsoTypes.NULL,
+    ):
+        return False
+    return left_type in (OrsoTypes.INTEGER, OrsoTypes.DOUBLE, OrsoTypes.DECIMAL) and right_type in (
+        OrsoTypes.INTEGER,
+        OrsoTypes.DOUBLE,
+        OrsoTypes.DECIMAL,
+    )
+
+
+def get_mismatched_condition_column_types(
+    node: Node, relaxed: bool = False, allow_numeric_join_coercion: bool = False
+) -> dict:
     """
     Checks that the types of the fields involved a comparison are the same on both sides.
 
@@ -43,8 +59,12 @@ def get_mismatched_condition_column_types(node: Node, relaxed: bool = False) -> 
         a dictionary describing the columns
     """
     if node.node_type in (NodeType.AND, NodeType.OR, NodeType.XOR):
-        left_mismatches = get_mismatched_condition_column_types(node.left, relaxed)
-        right_mismatches = get_mismatched_condition_column_types(node.right, relaxed)
+        left_mismatches = get_mismatched_condition_column_types(
+            node.left, relaxed, allow_numeric_join_coercion
+        )
+        right_mismatches = get_mismatched_condition_column_types(
+            node.right, relaxed, allow_numeric_join_coercion
+        )
         return left_mismatches or right_mismatches
 
     elif node.node_type == NodeType.COMPARISON_OPERATOR:
@@ -61,6 +81,13 @@ def get_mismatched_condition_column_types(node: Node, relaxed: bool = False) -> 
         right_type = node.right.schema_column.type if node.right.schema_column else None
 
         if left_type and right_type and left_type != right_type:
+            if (
+                allow_numeric_join_coercion
+                and node.left.node_type == NodeType.IDENTIFIER
+                and node.right.node_type == NodeType.IDENTIFIER
+                and _is_numeric_join_coercible(left_type, right_type)
+            ):
+                return None
             if (
                 relaxed
                 and (left_type.is_numeric() and right_type.is_numeric())
@@ -551,13 +578,16 @@ class BinderVisitor:
 
             import requests
 
-            from opteryx.utils.file_decoders import get_decoder
+            from opteryx.utils.parquet_decoder import parquet_decoder
 
-            decoder = get_decoder(node.url)
+            if not str(node.url).lower().endswith(".parquet"):
+                raise UnsupportedSyntaxError("HTTP dataset constructor only supports Parquet.")
             response = requests.get(node.url, timeout=60)
 
             response.raise_for_status()
-            row_count, column_count, raw_bytes, data = decoder(response.content, force_read=True)
+            row_count, column_count, raw_bytes, data = parquet_decoder(
+                response.content, force_read=True
+            )
 
             schema = RelationSchema(
                 name=node.relation_name,
@@ -669,8 +699,16 @@ class BinderVisitor:
                 from opteryx.exceptions import UnsupportedSyntaxError
 
                 raise UnsupportedSyntaxError("Cannot CROSS JOIN more than two relations.")
-            node.left_relation_names = node.relation_names[0]
-            node.right_relation_names = node.relation_names[1]
+            node.left_relation_names = (
+                node.relation_names[0]
+                if isinstance(node.relation_names[0], list)
+                else [node.relation_names[0]]
+            )
+            node.right_relation_names = (
+                node.relation_names[1]
+                if isinstance(node.relation_names[1], list)
+                else [node.relation_names[1]]
+            )
             node.left_readers = node.readers[0]
             node.right_readers = node.readers[1]
             node.type = "cross join"
@@ -712,7 +750,11 @@ class BinderVisitor:
             node.left_columns, node.right_columns = extract_join_fields(
                 node.on, node.left_relation_names, node.right_relation_names
             )
-            mismatches = get_mismatched_condition_column_types(node.on, relaxed=False)
+            mismatches = get_mismatched_condition_column_types(
+                node.on,
+                relaxed=False,
+                allow_numeric_join_coercion=not bool(node.using),
+            )
             if mismatches:
                 from opteryx.exceptions import IncompatibleTypesError
 
