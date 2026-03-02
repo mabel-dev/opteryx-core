@@ -22,7 +22,7 @@ protobuf
 google-cloud-storage
 minio
 openpyxl
-vortex-data==0.59.4
+vortex-data==0.60.0
 
 setuptools_rust
 
