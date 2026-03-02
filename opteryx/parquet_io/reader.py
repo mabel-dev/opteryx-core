@@ -717,6 +717,7 @@ class _RowGroupState:
     cache_misses: int = 0
     task_queue_wait_ns: int = 0
     task_total_ns: int = 0
+    ready_queue_depth_at_ready: int = 0
 
     @property
     def key(self) -> Tuple[int, int]:
@@ -998,13 +999,16 @@ def _iter_row_groups_v2(
         active_files_peak = 0
         active_rowgroups_peak = 0
         rg_pruned_total: int = 0
+        scheduler_empty_wait_ns_total = 0
+        scheduler_empty_wait_events = 0
+        scheduler_empty_wait_ns_emitted = 0
+        scheduler_empty_wait_events_emitted = 0
 
         # Rolling admission queue of file indexes with remaining row groups.
         active_file_indices: Deque[int] = deque()
         next_file_idx = 0
         admission_seq = 0
         active_rowgroups: Dict[Tuple[int, int], _RowGroupState] = {}
-        completed_rowgroups: Dict[Tuple[int, int], _RowGroupState] = {}
         ready_to_emit: Deque[Tuple[int, int]] = deque()
         pending_dispatch: List[Tuple[int, Tuple[int, int]]] = []
         effective_files_in_flight = min(
@@ -1026,19 +1030,7 @@ def _iter_row_groups_v2(
                 return
             state.completed_ns = now_ns
             state.queued_for_emit = True
-            # Release scheduler credits as soon as work completes, not when
-            # the generator later emits the row group.
-            fstate = file_states[state.file_seq]
-            if fstate.active_rowgroups > 0:
-                fstate.active_rowgroups -= 1
-            active_rowgroups.pop(state.key, None)
-            completed_rowgroups[state.key] = state
-            if (
-                fstate.next_rg_idx >= fstate.total_rowgroups
-                and fstate.active_rowgroups == 0
-                and state.file_seq in active_file_indices
-            ):
-                active_file_indices.remove(state.file_seq)
+            state.ready_queue_depth_at_ready = len(ready_to_emit)
             ready_to_emit.append(state.key)
 
         def _admit_rowgroups() -> None:
@@ -1217,13 +1209,23 @@ def _iter_row_groups_v2(
 
             if ready_to_emit:
                 key = ready_to_emit.popleft()
-                state = completed_rowgroups.pop(key, None)
+                state = active_rowgroups.get(key)
                 if state is None:
                     continue
 
                 completed_ns = state.completed_ns or time.monotonic_ns()
                 if first_rowgroup_emit_ns is None:
                     first_rowgroup_emit_ns = completed_ns
+                emit_ns = time.monotonic_ns()
+                emit_wait_ns = max(0, emit_ns - completed_ns)
+                scheduler_empty_wait_ns_delta = (
+                    scheduler_empty_wait_ns_total - scheduler_empty_wait_ns_emitted
+                )
+                scheduler_empty_wait_events_delta = (
+                    scheduler_empty_wait_events - scheduler_empty_wait_events_emitted
+                )
+                scheduler_empty_wait_ns_emitted = scheduler_empty_wait_ns_total
+                scheduler_empty_wait_events_emitted = scheduler_empty_wait_events
 
                 row_group = {name: state.columns[name] for name in state.column_order}
                 footer_bytes = (
@@ -1254,10 +1256,24 @@ def _iter_row_groups_v2(
                 row_group["__active_files_peak__"] = active_files_peak
                 row_group["__active_rowgroups_peak__"] = active_rowgroups_peak
                 row_group["__rowgroups_in_flight_cap__"] = rowgroups_in_flight_cap
+                row_group["__emit_wait_ns__"] = emit_wait_ns
+                row_group["__emit_queue_depth_at_ready__"] = state.ready_queue_depth_at_ready
+                row_group["__scheduler_empty_wait_ns__"] = scheduler_empty_wait_ns_delta
+                row_group["__scheduler_empty_wait_events__"] = scheduler_empty_wait_events_delta
                 row_group["__time_to_first_rowgroup_ns__"] = (
                     completed_ns - scan_start_ns if first_rowgroup_emit_ns == completed_ns else 0
                 )
                 row_group["__row_groups_pruned__"] = rg_pruned_total
+
+                fstate = file_states[state.file_seq]
+                fstate.active_rowgroups -= 1
+                del active_rowgroups[key]
+
+                if (
+                    fstate.next_rg_idx >= fstate.total_rowgroups
+                    and state.file_seq in active_file_indices
+                ):
+                    active_file_indices.remove(state.file_seq)
 
                 yield row_group
                 continue
@@ -1271,7 +1287,6 @@ def _iter_row_groups_v2(
                 )
                 if (
                     not active_rowgroups
-                    and not completed_rowgroups
                     and not pending_dispatch
                     and not ready_to_emit
                     and all_files_exhausted
@@ -1279,7 +1294,12 @@ def _iter_row_groups_v2(
                     break
                 continue
 
+            wait_start_ns = time.monotonic_ns()
             _drain_completions(block=True)
+            waited_ns = time.monotonic_ns() - wait_start_ns
+            if waited_ns > 0:
+                scheduler_empty_wait_ns_total += waited_ns
+                scheduler_empty_wait_events += 1
 
     finally:
         for fut in list(futures):

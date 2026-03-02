@@ -6,21 +6,30 @@
 
 ```bash
 export OPTERYX_TRACE=1
-export OPTERYX_TRACE_FILE=/tmp/opteryx_trace.jsonl
+# enable tracing; events are kept in memory and accessed via
+# ``session.trace()``
 python your_query.py
 ```
 
 ### Option 2: Via Session Constructor
 
+Tracing can also be enabled when you create a `Session`. You do **not** need to
+provide a file path; events are kept in memory and can be accessed later via
+`session.trace()`.
+
 ```python
 from opteryx.query_session import Session
 
-session = Session(
-    sql="SELECT * FROM my_table",
-    io_trace_file="/tmp/trace.jsonl"
-)
-results = session.execute()
-session.close()  # Important: flushes trace to disk
+session = Session(sql="SELECT * FROM my_table")
+# run your query
+list(session.execute())
+
+# grab the trace events and do what you like with them
+events = list(session.trace())
+with open("/tmp/trace.jsonl", "w", encoding="utf-8") as f:
+    for ev in events:
+        f.write(json.dumps(ev) + "\n")
+# or pass `events` directly to a custom exporter
 ```
 
 ### Option 3: Direct Recording (Advanced)
@@ -30,13 +39,18 @@ from opteryx.tracing.event_recorder import record_event, flush_all
 from opteryx import config
 
 config.OPTERYX_TRACE = True
-config.OPTERYX_TRACE_FILE = "/tmp/trace.jsonl"
 
 record_event("my_event", file_id="test.parquet", duration_ms=100)
-flush_all()  # Write to disk
+# events are stored in memory; ``flush_all()`` simply makes them
+# available via ``session.trace()`` or to whatever exporter you choose
+flush_all()
 ```
 
 ## Generate Visualization
+
+Tracing no longer produces files automatically; if you want to use the
+command‑line tools you must first export the events yourself (see Option 2
+above).
 
 ### Generate HTML Waterfall Chart
 
@@ -44,7 +58,6 @@ flush_all()  # Write to disk
 python -m opteryx.tools.io_waterfall trace /tmp/trace.jsonl
 # Chart saved to: /tmp/waterfall_<timestamp>.html
 ```
-
 **With custom output:**
 ```bash
 python -m opteryx.tools.io_waterfall trace /tmp/trace.jsonl --output /tmp/my_chart.html
@@ -130,7 +143,6 @@ Trace files are JSONLines (.jsonl) format - one JSON object per line:
 
 ```bash
 OPTERYX_TRACE=1                           # Enable/disable tracing (0=off, 1=on)
-OPTERYX_TRACE_FILE=/path/to/trace.jsonl  # Output file path
 ```
 
 ### Code Configuration
@@ -139,7 +151,6 @@ OPTERYX_TRACE_FILE=/path/to/trace.jsonl  # Output file path
 from opteryx import config
 
 config.OPTERYX_TRACE = True
-config.OPTERYX_TRACE_FILE = "/tmp/trace.jsonl"
 ```
 
 ### Advanced Tuning
@@ -155,8 +166,10 @@ Edit `opteryx/tracing/config.py` for advanced options:
 ### Trace File Not Created
 
 - Check `OPTERYX_TRACE=1` is set
-- Verify `OPTERYX_TRACE_FILE` path is writable
-- Ensure `session.close()` is called (flushes to disk)
+- tracing path variables were removed; use `session.trace()` instead
+  only.  Prefer using `session.trace()` to grab events.
+- If you relied on the old file output, call `session.trace()` and write the
+  events yourself (see examples above).
 
 ### Chart Won't Open in Browser
 
@@ -182,7 +195,8 @@ Edit `opteryx/tracing/config.py` for advanced options:
 
 ```bash
 # 1. Run with tracing
-OPTERYX_TRACE=1 OPTERYX_TRACE_FILE=/tmp/trace.jsonl python my_query.py
+# (the file variable is legacy; tracing now lives in memory via session.trace())
+OPTERYX_TRACE=1 python my_query.py
 
 # 2. View stats
 python -m opteryx.tools.io_waterfall stats /tmp/trace.jsonl
@@ -209,8 +223,8 @@ python -m opteryx.tools.io_waterfall stats /tmp/trace.jsonl
 
 ```bash
 # Run two queries with different configurations
-OPTERYX_TRACE=1 OPTERYX_TRACE_FILE=/tmp/query_v1.jsonl python query.py
-OPTERYX_TRACE=1 OPTERYX_TRACE_FILE=/tmp/query_v2.jsonl python query.py
+OPTERYX_TRACE=1 python query.py
+OPTERYX_TRACE=1 python query.py
 
 # Compare stats
 echo "=== Version 1 ==="

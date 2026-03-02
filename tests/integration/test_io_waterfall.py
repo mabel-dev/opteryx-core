@@ -20,59 +20,25 @@ from opteryx.tools.io_waterfall.reader import TraceReader
 class TestIOWaterfallIntegration:
     """Integration tests for complete IO waterfall tracing system."""
     
-    def test_trace_file_creation_on_query(self):
-        """Test that a trace file is created when OPTERYX_TRACE is enabled."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            trace_file = Path(tmpdir) / "trace.jsonl"
-            
-            original_trace = config.OPTERYX_TRACE
-            original_file = config.OPTERYX_TRACE_FILE
-            try:
-                config.OPTERYX_TRACE = True
-                config.OPTERYX_TRACE_FILE = str(trace_file)
-                
-                # Create a session (simulating a query)
-                session = Session(io_trace_file=str(trace_file))
-                
-                # Manually record some events to simulate query execution
-                from opteryx.tracing.event_recorder import record_event, flush_all
-                
-                record_event("trace_session_start", session_id="test-1", query="SELECT * FROM data")
-                record_event("file_discovered", file_id="file1.parquet", bytes_total=1024)
-                record_event("download_start", file_id="file1.parquet")
-                record_event("download_complete", file_id="file1.parquet", bytes_received=1024)
-                record_event("decode_start", file_id="file1.parquet")
-                record_event("decode_complete", file_id="file1.parquet", rows_decoded=100)
-                
-                # Flush and close
-                flush_all()
-                session.close()
-                
-                # Verify trace file was created
-                assert trace_file.exists(), "Trace file should be created"
-                
-                # Verify trace file has content
-                with open(trace_file, 'r') as f:
-                    lines = f.readlines()
-                    assert len(lines) > 0, "Trace file should have events"
-                
-                # Parse and verify events
-                reader = TraceReader(trace_file)
-                events = list(reader.events())
-                
-                assert len(events) >= 6, "Should have at least 6 events"
-                
-                # Check event types
-                event_types = {e['type'] for e in events}
-                assert 'file_discovered' in event_types
-                assert 'download_start' in event_types
-                assert 'download_complete' in event_types
-                assert 'decode_start' in event_types
-                assert 'decode_complete' in event_types
-                
-            finally:
-                config.OPTERYX_TRACE = original_trace
-                config.OPTERYX_TRACE_FILE = original_file
+    def test_trace_buffering_on_query(self):
+        """When tracing is enabled the events produced by a real session are
+        retained in memory and accessible via ``session.trace()``.
+        """
+        original_trace = config.OPTERYX_TRACE
+        try:
+            config.OPTERYX_TRACE = True
+
+            session = Session()
+            session.execute("SELECT 1")
+            session.close()
+
+            events = list(session.trace())
+            assert len(events) >= 2
+            types = {e['type'] for e in events}
+            assert 'trace_session_start' in types
+            assert 'trace_session_end' in types
+        finally:
+            config.OPTERYX_TRACE = original_trace
     
     def test_trace_reader_parses_complete_trace(self):
         """Test that TraceReader correctly parses a complete trace file."""
@@ -183,7 +149,6 @@ class TestIOWaterfallIntegration:
     def test_real_query_generates_rich_trace(self):
         """Execute a simple parquet scan and confirm footer/column/rowgroup events."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            trace_file = Path(tmpdir) / "trace.jsonl"
             parquet_file = Path(tmpdir) / "data.parquet"
 
             # write a tiny parquet
@@ -195,21 +160,16 @@ class TestIOWaterfallIntegration:
             pq.write_table(pa.Table.from_pandas(df), parquet_file)
 
             original_trace = config.OPTERYX_TRACE
-            original_file = config.OPTERYX_TRACE_FILE
             try:
                 config.OPTERYX_TRACE = True
-                config.OPTERYX_TRACE_FILE = str(trace_file)
 
                 session = Session()
-                # force evaluate the cursor
-                results = session.execute(f"SELECT * FROM '{parquet_file}'")
-                list(results)
-                from opteryx.tracing.event_recorder import flush_all
-                flush_all()
+                # execute the query and drain results
+                list(session.execute(f"SELECT * FROM '{parquet_file}'"))
 
-                assert trace_file.exists(), "Trace file should be written"
-                reader = TraceReader(trace_file)
-                events = list(reader.events())
+                # pull the in‑memory trace events
+                events = list(session.trace())
+
                 # we expect at least one footer event and one column decode event
                 assert any(e.get("component") == "footer" for e in events), events
                 assert any(e.get("component") == "column" for e in events), events
@@ -218,12 +178,10 @@ class TestIOWaterfallIntegration:
                 assert any(e.get("connector") == "LOCAL" or e.get("connector") == "FILESYSTEM" for e in events), events
             finally:
                 config.OPTERYX_TRACE = original_trace
-                config.OPTERYX_TRACE_FILE = original_file
 
     def test_sampling_rate(self):
         """Sample rate 0 should suppress file-level events entirely."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            trace_file = Path(tmpdir) / "trace.jsonl"
             parquet_file = Path(tmpdir) / "data.parquet"
 
             import pandas as pd
@@ -234,25 +192,20 @@ class TestIOWaterfallIntegration:
             pq.write_table(pa.Table.from_pandas(df), parquet_file)
 
             original_trace = config.OPTERYX_TRACE
-            original_file = config.OPTERYX_TRACE_FILE
             original_rate = config.OPTERYX_TRACE_SAMPLE_RATE
             try:
                 config.OPTERYX_TRACE = True
-                config.OPTERYX_TRACE_FILE = str(trace_file)
                 config.OPTERYX_TRACE_SAMPLE_RATE = 0.0
 
                 session = Session()
                 list(session.execute(f"SELECT * FROM '{parquet_file}'"))
-                from opteryx.tracing.event_recorder import flush_all
-                flush_all()
 
-                events = list(TraceReader(trace_file).events())
-                # expect only session events
+                events = list(session.trace())
+                # expect only session events when sample rate is zero
                 assert all(e['type'].startswith('trace_session') for e in events), events
             finally:
                 config.OPTERYX_TRACE = original_trace
-                config.OPTERYX_TRACE_FILE = original_file
-                config.OPTERYX_TRACE_SAMPLE_RATE = original_rate
+
 
     def test_tracing_disabled_has_no_overhead(self):
         """Test that when tracing is disabled, there's minimal overhead."""

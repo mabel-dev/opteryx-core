@@ -112,20 +112,31 @@ opteryx/tools/io_waterfall/   ← Phase 2
 
 ### Configuration
 
-```python
-# Enable via environment variable
-export OPTERYX_IO_TRACE_FILE=/tmp/trace.jsonl
+Tracing is enabled with `OPTERYX_TRACE=1` (or programmatically
+via `config.OPTERYX_TRACE = True`).  No file is created by the engine;
+clients must export events themselves if they want to use the CLI tools.
+
+```bash
+export OPTERYX_TRACE=1
 opteryx query "SELECT ..."
+```
 
-# Or programmatically
-session = QuerySession(io_trace_file="/tmp/trace.jsonl")
+```python
+import opteryx
+from opteryx import config
+config.OPTERYX_TRACE = True
+session = opteryx.QuerySession()
 session.execute("SELECT ...")
+# export events manually
+with open("/tmp/trace.jsonl", "w") as f:
+    for ev in session.trace():
+        f.write(json.dumps(ev) + "\n")
+```
 
-# View chart
+# View chart (from file you created above)
 python -m opteryx.tools.io_waterfall /tmp/trace.jsonl
 # Outputs: /tmp/trace.jsonl.html
 # Open in browser
-```
 
 ### Performance Impact
 

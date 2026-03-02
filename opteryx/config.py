@@ -93,18 +93,14 @@ OPTERYX_DEBUG: bool = bool(get("OPTERYX_DEBUG", False))
 """**DANGEROUS** Diagnostic and debug mode - generates a lot of log entries."""
 
 OPTERYX_TRACE: bool = bool(get("OPTERYX_TRACE", "").lower() in ("1", "true", "yes"))
-"""Enable IO layer tracing (records file operations to JSONLines file)."""
-
-OPTERYX_TRACE_FILE: str = str(get("OPTERYX_TRACE_FILE", ""))
-"""Path to write IO trace file (.jsonl format). Empty = no tracing."""
-
+"""Enable IO layer tracing.  When true, events are recorded in memory and
+can be retrieved via :func:`~opteryx.query_session.Session.trace`."""
 OPTERYX_TRACE_SAMPLE_RATE: float = float(get("OPTERYX_TRACE_SAMPLE_RATE", 1.0))
 """Sampling rate for traced files (0.0–1.0). Defaults to 1.0 (100%).
 When tracing is enabled, each event carrying a ``file_id`` will be skipped
 with probability ``1 - OPTERYX_TRACE_SAMPLE_RATE``.  This provides a simple
 way to reduce overhead on large scans by only recording a fraction of files.
 """
-
 MAX_CONSECUTIVE_CACHE_FAILURES: int = int(get("MAX_CONSECUTIVE_CACHE_FAILURES", 10))
 """Maximum number of consecutive cache failures before disabling cache usage."""
 

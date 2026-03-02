@@ -26,6 +26,7 @@ import time
 from typing import Any
 from typing import Dict
 from typing import Iterable
+from typing import Iterator
 from typing import List
 from typing import Optional
 from typing import Tuple
@@ -73,9 +74,14 @@ class Session(DataFrame):
         schema: Optional[str] = None,
         access_policies: Optional[Iterable[dict]] = None,
         query_id: Optional[str] = None,
-        io_trace_file: Optional[str] = None,
         **kwargs,
     ):
+        # reject removed parameters explicitly
+        if "io_trace_file" in kwargs:
+            raise TypeError(
+                "io_trace_file argument has been removed; events are recorded in "
+                "memory and exposed via session.trace()"
+            )
         # input validation consistent with the old Connection
         if memberships and not all(isinstance(v, str) for v in memberships):
             raise ProgrammingError("Invalid memberships provided to Session")
@@ -114,12 +120,20 @@ class Session(DataFrame):
 
         DataFrame.__init__(self, rows=[], schema=[])
 
-        # Initialize IO tracing (if enabled)
-        self._io_trace_file = io_trace_file or config.OPTERYX_TRACE_FILE
-        if self._io_trace_file:
-            self._tracing_enabled = True
-        else:
-            self._tracing_enabled = False
+        # Initialize IO tracing state.  Tracing is governed solely by the
+        # global ``config.OPTERYX_TRACE`` flag and events are kept in memory.
+        # The engine no longer supports writing to a file, and there is no
+        # per-session path.  ``_tracing_enabled`` controls whether the session
+        # will emit start/end markers and allow ``session.trace()`` to run.
+        self._tracing_enabled = bool(config.OPTERYX_TRACE)
+
+        # if tracing is active, register our session id so the recorder can
+        # tag subsequent events automatically.  We push the id globally and
+        # clear it on close.
+        if self._tracing_enabled:
+            from opteryx.tracing import event_recorder
+
+            event_recorder._current_session_id = self._query_id
 
     @property
     def query_id(self) -> str:
@@ -712,6 +726,30 @@ class Session(DataFrame):
     def messages(self) -> List[str]:
         return self._telemetry.messages
 
+    # ------------------------------------------------------------------
+    def trace(self) -> Iterator[dict]:
+        """Yield trace events for this session.
+
+        The method will flush any pending events to disk before reading the
+        trace file.  It filters on ``session_id`` so you only see events
+        emitted by this session.  If tracing was never enabled for the
+        session a ``RuntimeError`` is raised.
+        """
+        if not self._tracing_enabled:
+            raise RuntimeError("IO tracing not enabled for this session")
+
+        from opteryx.tracing import event_recorder
+        from opteryx.tracing import flush_all
+
+        # flush any pending in‑memory events so they appear in the result
+        _ = flush_all()
+
+        # simply iterate the global buffer; file support has been removed.
+        with event_recorder._global_lock:
+            for ev in event_recorder._global_events:
+                if ev.get("session_id") == self._query_id:
+                    yield ev
+
     def close(self):
         if self._closed:
             return
@@ -723,7 +761,7 @@ class Session(DataFrame):
         except Exception:
             pass
 
-        # Flush any pending trace events
+        # Flush any pending trace events and emit end marker
         if self._tracing_enabled:
             try:
                 from opteryx.tracing import event_recorder
@@ -733,5 +771,13 @@ class Session(DataFrame):
                 event_recorder.flush_all()
             except Exception:
                 pass  # Don't let tracing errors affect query close
+            finally:
+                # clear the global session id if it's still pointing at us
+                from opteryx.tracing import event_recorder as _er
+
+                if _er._current_session_id == self._query_id:
+                    _er._current_session_id = None
+
+        # _old_trace_state is no longer used; there is nothing to restore.
 
         self._closed = True

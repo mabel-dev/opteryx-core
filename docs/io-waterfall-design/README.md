@@ -47,10 +47,9 @@ Start with [06-implementation-roadmap.md](06-implementation-roadmap.md) which de
 Query Engine
     ↓ (records events)
 Thread-Local Ring Buffers
-    ↓ (background flush)
-JSONLines Trace File ← Can be analyzed/debugged
-    ↓ (post-query)
-Python Visualization Tool
+    ↓ (events retained in memory)
+Python Visualization Tool  ← trace exported by client code
+# (the engine does not automatically write a JSONLines file)
     ↓ (generate)
 Interactive HTML Waterfall Chart
 ```
@@ -64,7 +63,7 @@ Interactive HTML Waterfall Chart
 | **Overhead Per Event** | ~90 nanoseconds |
 | **Format** | JSONLines (one event per line) |
 | **Visualization** | ECharts-based interactive HTML |
-| **Configuration** | Environment variable `OPTERYX_IO_TRACE_FILE` |
+| **Configuration** | `OPTERYX_TRACE=1` enables tracing; file variable ignored (legacy) |
 | **CLI** | `python -m opteryx.tools.io_waterfall <trace_file>` |
 
 ## Implementation Phases
@@ -79,18 +78,14 @@ Interactive HTML Waterfall Chart
 ## Usage Example (Post-Implementation)
 
 ```bash
-# Enable tracing for a query
-export OPTERYX_IO_TRACE_FILE=/tmp/io_trace.jsonl
+# Enable tracing for a query (trace is kept in memory)
+export OPTERYX_TRACE=1
 opteryx query "SELECT * FROM large_table"
 
-# Generate waterfall visualization
-python -m opteryx.tools.io_waterfall /tmp/io_trace.jsonl
-# Output: /tmp/io_trace.jsonl.html
-
-# View in browser
-open /tmp/io_trace.jsonl.html
+# If you want to visualize the trace you must export it yourself to a
+# file and then run the CLI tool on that file:
+#   python -m opteryx.tools.io_waterfall /path/to/exported_trace.jsonl
 ```
-
 ## Visualization Example
 
 ```
