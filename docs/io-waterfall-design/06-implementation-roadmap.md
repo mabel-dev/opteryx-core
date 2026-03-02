@@ -291,7 +291,7 @@ extras_require = {
 ### Soft Launch (Phase 1-2)
 - [ ] Merge to main branch but don't promote
 - [ ] No CLI in entrypoints (quiet release)
-- [ ] Only enable via environment variable: `OPTERYX_IO_TRACE_FILE`
+- [x] Only enable via environment variable: `OPTERYX_IO_TRACE_FILE` (deprecated/removed)
 - [ ] Users opt-in entirely
 
 ### Beta Period (2-4 weeks)

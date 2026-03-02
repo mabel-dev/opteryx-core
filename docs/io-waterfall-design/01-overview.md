@@ -48,17 +48,14 @@ This information should help identify:
                          └──────┬──────────┘
                                 │
                          ┌──────▼──────────┐
-                         │  Periodic Flush │
-                         │  to Disk        │
-                         │  (JSONLines or  │
-                         │   Binary)       │
-                         └──────┬──────────┘
-                                │
-                         ┌──────▼──────────┐
                          │  Post-Query     │
                          │  Visualization  │
                          │  (Python Tool)  │
                          └─────────────────┘
+
+(note: the engine no longer flushes to disk automatically; clients
+are responsible for exporting events when a file is required)
+
 ```
 
 ## Key Design Constraints
@@ -79,19 +76,30 @@ This information should help identify:
 
 ## Usage Pattern
 
+```bash
+# Enable tracing for a query (environment variable is now ignored but
+# shown here for historical reference)
+OPTERYX_TRACE=1 opteryx query "SELECT ..."
 ```
-# Enable tracing for a query
-OPTERYX_IO_TRACE_FILE=/tmp/io_trace.jsonl opteryx query "SELECT ..."
 
-# Or in Python
+```python
+# In Python, simply enable tracing and later inspect the session
 import opteryx
-session = opteryx.QuerySession(io_trace_file="/tmp/io_trace.jsonl")
+session = opteryx.QuerySession()
 session.execute("SELECT ...")
 
-# Post-query: visualize
-python -m opteryx.tools.io_waterfall /tmp/io_trace.jsonl --output /tmp/waterfall.html
+# read events from memory and optionally write them yourself
+events = list(session.trace())
+# e.g.:
+# with open("/tmp/trace.jsonl", "w") as f:
+#     for ev in events:
+#         f.write(json.dumps(ev) + "\n")
 ```
 
+# Post-query: visualize using a trace file you produced yourself
+python -m opteryx.tools.io_waterfall /tmp/io_trace.jsonl --output /tmp/waterfall.html
+
+(note that the core engine does **not** create this file automatically)
 ## Next Documents
 
 - **02-data-model.md** - Event schema and trace data structure

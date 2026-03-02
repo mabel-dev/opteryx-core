@@ -21,9 +21,22 @@ from opteryx.tracing.ring_buffer import RingBuffer
 # Thread-local storage for ring buffers - one per thread
 _thread_local = threading.local()
 
+# Global event store (always populated when tracing is enabled).
+# This allows clients to inspect or persist events without writing to a file.
+_global_events: list[dict] = []
+_global_lock = threading.Lock()
+
 # Global trace writer instance (initialized lazily)
 _trace_writer: Optional["TraceWriter"] = None
 _writer_lock = threading.Lock()
+
+# When a session is active we remember its ID here so that events can
+# be automatically tagged without callers needing to pass it explicitly.
+# The value is pushed by :class:`opteryx.query_session.Session` and cleared
+# on close; the simplest policy is globally scoped.  In the uncommon case
+# of concurrent sessions in the same process the last-started session will
+# win, which is acceptable for our current use cases.
+_current_session_id: Optional[str] = None
 
 
 def _get_thread_buffer() -> RingBuffer:
@@ -34,26 +47,16 @@ def _get_thread_buffer() -> RingBuffer:
 
 
 def _get_trace_writer() -> Optional["TraceWriter"]:
-    """Get the global trace writer instance, creating if needed."""
-    global _trace_writer
+    """Return a writer if one has been explicitly installed.
 
-    if _trace_writer is not None:
-        return _trace_writer
-
-    # Import here to avoid circular dependency
-    from opteryx import config
-
-    if not config.OPTERYX_TRACE or not config.OPTERYX_TRACE_FILE:
-        return None
-
-    # Create trace writer lazily on first event
-    with _writer_lock:
-        if _trace_writer is None:
-            from opteryx.tracing.trace_writer import TraceWriter
-
-            _trace_writer = TraceWriter(config.OPTERYX_TRACE_FILE)
-
-    return _trace_writer
+    The default policy for the engine is **not** to write trace events to a
+    file; they are collected in memory and surfaced via :meth:`Session.trace`.
+    A custom writer could be installed programmatically if needed, but the
+    core engine will never create one.
+    """
+    # always return None by default; keep the variable around for tests or
+    # future user-installed writers
+    return None
 
 
 def record_event(event_type: str, **kwargs) -> None:
@@ -82,9 +85,15 @@ def record_event(event_type: str, **kwargs) -> None:
     # Create event with timestamp
     event = {"type": event_type, "timestamp": time.perf_counter(), **kwargs}
 
-    # Write directly to the thread-safe writer queue.
-    # This avoids thread-local ring buffers which are not visible between threads
-    # (e.g. when record_event is called from a ThreadPoolExecutor worker).
+    # automatically decorate with session id if caller omitted it
+    if "session_id" not in event and _current_session_id is not None:
+        event["session_id"] = _current_session_id
+
+    # record to global list for later retrieval
+    with _global_lock:
+        _global_events.append(event)
+
+    # Write directly to the thread-safe writer queue if a file sink exists.
     writer = _get_trace_writer()
     if writer:
         writer.enqueue_events([event])
@@ -101,20 +110,25 @@ def _flush_thread_buffer() -> None:
             writer.enqueue_events(events)
 
 
-def flush_all() -> None:
+def flush_all() -> list[dict]:
     """
-    Flush all pending events to disk and wait for completion.
+    Flush all pending events and return the global event list.
 
-    Called automatically at the end of query execution. Safe to call multiple times.
+    If a trace writer is active (i.e. file logging is enabled) the writer will
+    be flushed and closed.  In all cases the current contents of the global
+    event list are returned so callers can inspect or persist them.  The list
+    is *not* cleared automatically; callers may call ``reset()`` if they wish to
+    discard old events.
     """
     global _trace_writer
-    # Use the existing writer directly (don't call _get_trace_writer which would
-    # create a new writer after the first flush_all sets _trace_writer = None)
     writer = _trace_writer
     if writer and writer.running:
         writer.flush()
         writer.close()
         _trace_writer = None
+
+    with _global_lock:
+        return list(_global_events)
 
 
 def reset() -> None:
@@ -125,9 +139,16 @@ def reset() -> None:
     if hasattr(_thread_local, "buffer"):
         _thread_local.buffer.clear()
 
-    # Close and reset writer
+    # Clear global event list
+    with _global_lock:
+        _global_events.clear()
+
+    # Writer is unused by default, but close if someone installed one
     if _trace_writer:
-        _trace_writer.close()
+        try:
+            _trace_writer.close()
+        except Exception:
+            pass
         _trace_writer = None
 
 

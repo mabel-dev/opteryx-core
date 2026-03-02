@@ -249,18 +249,15 @@ class TestTraceReader:
         try:
             config.OPTERYX_TRACE = True
             config.OPTERYX_TRACE_SAMPLE_RATE = 0.0
-            # create a real temporary trace file via recorder
-            from opteryx.tracing.event_recorder import record_event, flush_all
-            with tempfile.TemporaryDirectory() as tmpdir:
-                trace_path = Path(tmpdir) / "samp.jsonl"
-                config.OPTERYX_TRACE_FILE = str(trace_path)
-                record_event("download_start", file_id="foo")
-                record_event("download_complete", file_id="foo")
-                flush_all()
-                # with 0% sampling we expect no file-id events persisted
-                contents = trace_path.read_text()
-                assert "download_start" not in contents
-                assert "download_complete" not in contents
+            from opteryx.tracing.event_recorder import record_event, flush_all, _global_events
+            _global_events.clear()
+
+            record_event("download_start", file_id="foo")
+            record_event("download_complete", file_id="foo")
+            flush_all()
+            # with 0% sampling we expect the global list to contain only session or
+            # other non-file events
+            assert all(e.get("file_id") is None for e in _global_events)
         finally:
             config.OPTERYX_TRACE_SAMPLE_RATE = original_rate
             config.OPTERYX_TRACE = original_trace
@@ -274,7 +271,6 @@ class TestTraceReader:
         from opteryx.tracing.event_recorder import flush_all
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            trace_path = Path(tmpdir) / "fs_trace.jsonl"
             parquet_path = Path(tmpdir) / "data.parquet"
             # make a tiny parquet file
             import pandas as pd
@@ -282,23 +278,19 @@ class TestTraceReader:
             pq.write_table(df, parquet_path)
 
             original_trace = config.OPTERYX_TRACE
-            original_file = config.OPTERYX_TRACE_FILE
             try:
                 config.OPTERYX_TRACE = True
-                config.OPTERYX_TRACE_FILE = str(trace_path)
+                from opteryx.tracing.event_recorder import flush_all, _global_events
+                _global_events.clear()
                 # create table and read
                 fs = pa.fs.LocalFileSystem()
                 table = FileSystemTable(dataset=str(parquet_path), filesystem=fs, storage_type="LOCAL")
-                # consume generator
                 for _ in table.read_dataset():
                     pass
                 flush_all()
-                reader = TraceReader(trace_path)
-                events = list(reader.events())
-                assert any(e.get("connector") == "LOCAL" for e in events)
+                assert any(e.get("connector") == "LOCAL" for e in _global_events)
             finally:
                 config.OPTERYX_TRACE = original_trace
-                config.OPTERYX_TRACE_FILE = original_file
     
     def test_missing_file(self):
         """Test error handling for missing trace file."""
@@ -308,3 +300,21 @@ class TestTraceReader:
         
         with pytest.raises(FileNotFoundError):
             list(reader.events())
+
+    def test_session_trace_method(self):
+        """Session.trace() should iterate over the same events written to file."""
+        from opteryx import session, config
+        original_trace = config.OPTERYX_TRACE
+        try:
+            config.OPTERYX_TRACE = True
+            from opteryx.tracing.event_recorder import _global_events, flush_all
+            _global_events.clear()
+
+            sess = session()
+            sess.execute("SELECT 1")
+            sess.close()
+
+            events = list(sess.trace())
+            assert any(e.get("type") == "trace_session_start" for e in events)
+        finally:
+            config.OPTERYX_TRACE = original_trace

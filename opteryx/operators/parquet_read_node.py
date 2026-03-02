@@ -107,6 +107,10 @@ class ParquetReadNode(ReaderNode):
         cache_lookups = cache_hits + cache_misses
         if cache_lookups:
             base["parquet_column_cache_hit_ratio"] = cache_hits / cache_lookups
+        if base["row_groups_read"] > 0:
+            base["parquet_avg_emit_wait_ns"] = (
+                self.readings.get("time_parquet_emit_wait_ns", 0) / base["row_groups_read"]
+            )
         return base
 
     @staticmethod
@@ -400,10 +404,14 @@ class ParquetReadNode(ReaderNode):
         self.readings["time_parquet_footer_fetch_ns"] += 0
         self.readings["time_parquet_scheduler_wait_ns"] += 0
         self.readings["time_parquet_rowgroup_completion_ns"] += 0
+        self.readings["time_parquet_emit_wait_ns"] += 0
+        self.readings["time_parquet_scheduler_empty_wait_ns"] += 0
+        self.readings["parquet_scheduler_empty_wait_events"] += 0
         self.readings["parquet_rowgroup_peak_in_flight_max"] += 0
         self.readings["parquet_ranges_in_flight_peak"] += 0
         self.readings["parquet_active_files_peak"] += 0
         self.readings["parquet_active_rowgroups_peak"] += 0
+        self.readings["parquet_emit_queue_depth_at_ready_max"] += 0
         self.readings["time_to_first_rowgroup_ns"] += 0
         self.readings["parquet_row_groups_pruned"] += 0
 
@@ -559,6 +567,17 @@ class ParquetReadNode(ReaderNode):
                 self.readings["parquet_rowgroups_in_flight_cap"] = max(
                     self.readings.get("parquet_rowgroups_in_flight_cap", 0),
                     row_group.pop("__rowgroups_in_flight_cap__", 0),
+                )
+                self.readings["time_parquet_emit_wait_ns"] += row_group.pop("__emit_wait_ns__", 0)
+                self.readings["parquet_emit_queue_depth_at_ready_max"] = max(
+                    self.readings.get("parquet_emit_queue_depth_at_ready_max", 0),
+                    row_group.pop("__emit_queue_depth_at_ready__", 0),
+                )
+                self.readings["time_parquet_scheduler_empty_wait_ns"] += row_group.pop(
+                    "__scheduler_empty_wait_ns__", 0
+                )
+                self.readings["parquet_scheduler_empty_wait_events"] += row_group.pop(
+                    "__scheduler_empty_wait_events__", 0
                 )
                 time_to_first_rowgroup_ns = row_group.pop("__time_to_first_rowgroup_ns__", 0)
                 if time_to_first_rowgroup_ns:

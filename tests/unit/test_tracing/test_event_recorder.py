@@ -12,6 +12,8 @@ import pytest
 
 from opteryx import config
 from opteryx.tracing import event_recorder
+from opteryx.tracing.event_recorder import _global_events
+from opteryx.query_session import Session
 
 
 class TestEventRecorder:
@@ -28,28 +30,17 @@ class TestEventRecorder:
             event_recorder.record_event("test_event", key="value")
             # No assertion needed, just verify no exception
     
-    def test_record_event_with_mock_writer(self):
-        """Test event recording with mock writer."""
-        # Set config to enable tracing
+    def test_record_event_stores_global(self):
+        """Test that events are always stored in the global list."""
         original_trace = config.OPTERYX_TRACE
-        original_file = config.OPTERYX_TRACE_FILE
         try:
             config.OPTERYX_TRACE = True
-            config.OPTERYX_TRACE_FILE = "/tmp/trace_test.jsonl"
-            
-            with patch('opteryx.tracing.event_recorder._get_trace_writer') as mock_get_writer:
-                mock_writer = MagicMock()
-                mock_get_writer.return_value = mock_writer
-                
-                event_recorder.record_event("test_event", data=123)
-                
-                # Verify the event was recorded (buffer should not be empty)
-                # and would be sent to writer during flush
-                event_recorder._flush_thread_buffer()
-                assert mock_writer.enqueue_events.called
+            event_recorder.reset()
+            event_recorder.record_event("test_event", data=123)
+            with event_recorder._global_lock:
+                assert any(ev['type'] == 'test_event' for ev in _global_events)  # type: ignore
         finally:
             config.OPTERYX_TRACE = original_trace
-            config.OPTERYX_TRACE_FILE = original_file
     
     def test_record_event_fields(self):
         """Test that event fields are properly captured."""
@@ -124,39 +115,25 @@ class TestEventRecorder:
         finally:
             config.OPTERYX_TRACE = original_trace
     
-    def test_flush_to_writer(self):
-        """Test flushing thread buffer to writer."""
+    def test_flush_all_returns_events(self):
+        """flush_all should return the global events regardless of writer."""
         original_trace = config.OPTERYX_TRACE
-        original_file = config.OPTERYX_TRACE_FILE
         try:
             config.OPTERYX_TRACE = True
-            config.OPTERYX_TRACE_FILE = "/tmp/trace_test.jsonl"
-            
-            with patch('opteryx.tracing.event_recorder._get_trace_writer') as mock_get_writer:
-                mock_writer = MagicMock()
-                mock_get_writer.return_value = mock_writer
-                
-                # Record some events
-                event_recorder.record_event("event1", id=1)
-                event_recorder.record_event("event2", id=2)
-                
-                # Flush
-                event_recorder._flush_thread_buffer()
-                
-                # Verify enqueue was called
-                assert mock_writer.enqueue_events.called
+            event_recorder.reset()
+            event_recorder.record_event("e1")
+            event_recorder.record_event("e2")
+            events = event_recorder.flush_all()
+            assert len(events) >= 2
         finally:
             config.OPTERYX_TRACE = original_trace
-            config.OPTERYX_TRACE_FILE = original_file
 
     def test_sampling_respected(self):
         """When sample rate is zero, subsequent events are not recorded."""
         original_trace = config.OPTERYX_TRACE
-        original_file = config.OPTERYX_TRACE_FILE
         original_rate = config.OPTERYX_TRACE_SAMPLE_RATE
         try:
             config.OPTERYX_TRACE = True
-            config.OPTERYX_TRACE_FILE = "/tmp/trace_test.jsonl"
             config.OPTERYX_TRACE_SAMPLE_RATE = 0.0
 
             # record some events with a file_id
@@ -168,7 +145,6 @@ class TestEventRecorder:
             assert not events
         finally:
             config.OPTERYX_TRACE = original_trace
-            config.OPTERYX_TRACE_FILE = original_file
             config.OPTERYX_TRACE_SAMPLE_RATE = original_rate
 
 
@@ -176,24 +152,41 @@ class TestEventRecorderIntegration:
     """Integration tests for event recorder."""
     
     def test_multiple_flushes(self):
-        """Test multiple flush cycles."""
+        """Test multiple flush cycles do not crash and global events accumulate."""
         original_trace = config.OPTERYX_TRACE
-        original_file = config.OPTERYX_TRACE_FILE
         try:
             config.OPTERYX_TRACE = True
-            config.OPTERYX_TRACE_FILE = "/tmp/trace_test.jsonl"
-            
-            with patch('opteryx.tracing.event_recorder._get_trace_writer') as mock_get_writer:
-                mock_writer = MagicMock()
-                mock_get_writer.return_value = mock_writer
-                
-                # Multiple record/flush cycles
-                for cycle in range(3):
-                    event_recorder.record_event("cycle", num=cycle)
-                    event_recorder._flush_thread_buffer()
-                
-                # Should have enqueued multiple times
-                assert mock_writer.enqueue_events.call_count >= 1
+            event_recorder.reset()
+
+            # Multiple record/flush cycles
+            for cycle in range(3):
+                event_recorder.record_event("cycle", num=cycle)
+                event_recorder._flush_thread_buffer()
+
+            # ensure events are available globally
+            events = event_recorder.flush_all()
+            assert any(e.get("type") == "cycle" for e in events)
         finally:
             config.OPTERYX_TRACE = original_trace
-            config.OPTERYX_TRACE_FILE = original_file
+
+
+class TestSessionTrace:
+    """Tests for Session.trace() API."""
+
+    def test_session_trace_iterates(self, tmp_path):
+        original_trace = config.OPTERYX_TRACE
+        try:
+            # enable global tracing
+            config.OPTERYX_TRACE = True
+            session = Session()
+            # create a tiny parquet file and run a query to produce events
+            import pandas as pd
+            import pyarrow as pa, pyarrow.parquet as pq
+            data_file = tmp_path / "data.parquet"
+            pq.write_table(pa.Table.from_pandas(pd.DataFrame({"x": [1]})), str(data_file))
+            list(session.execute(f"SELECT * FROM '{data_file}'"))
+            events = list(session.trace())
+            assert any(e.get("type") == "trace_session_start" for e in events)
+        finally:
+            config.OPTERYX_TRACE = original_trace
+

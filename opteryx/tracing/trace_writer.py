@@ -20,10 +20,9 @@ from typing import Optional
 
 class TraceWriter:
     """
-    Writes trace events to a JSONLines file asynchronously.
-
-    Events are buffered in a queue and flushed to disk by a background thread.
-    This ensures query execution is never blocked by file I/O.
+    Optional helper class providing asynchronous file output for trace
+    events.  The engine no longer uses this by default; it is retained for
+    backwards compatibility and for users who wish to install a custom sink.
     """
 
     def __init__(self, output_file: str, max_queue_size: int = 100000):

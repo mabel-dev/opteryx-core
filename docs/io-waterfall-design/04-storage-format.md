@@ -223,15 +223,17 @@ $PROJECT_ROOT/traces/
 ```
 
 ### Custom Location
-```python
-QuerySession(io_trace_file="/home/user/my_traces/query_trace.jsonl")
-```
+Clients are free to choose where they persist trace events; the core
+engine does **not** write to disk automatically.  A session consumer may
+write a file using ``list(session.trace())`` and whatever path it prefers.
 
 ### Environment Variable
-```bash
-export OPTERYX_IO_TRACE_FILE=/home/user/traces/trace.jsonl
-opteryx query "SELECT ..."
-```
+
+There is no longer any environment variable used by the engine for
+tracing.  Tracing is simply enabled with ``OPTERYX_TRACE=1`` and events
+are kept in memory; clients must export them explicitly if they need
+files.  Any use of `OPTERYX_IO_TRACE_FILE` is ignored and should be
+removed from deployment scripts.
 
 ## Cleanup/Retention
 

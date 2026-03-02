@@ -223,8 +223,8 @@ def benchmark_query_with_trace():
     result1 = session.execute("SELECT * FROM table")
     time_without = time.perf_counter() - start
     
-    # Run 2: With tracing
-    session.io_trace_file = "/tmp/trace.jsonl"
+    # Run 2: With tracing enabled
+    config.OPTERYX_TRACE = True
     start = time.perf_counter()
     result2 = session.execute("SELECT * FROM table")
     time_with = time.perf_counter() - start
@@ -246,7 +246,7 @@ def benchmark_memory_usage():
     import psutil
     process = psutil.Process()
     
-    session.io_trace_file = "/tmp/trace.jsonl"
+    # tracing is enabled globally; no file path needed
     
     start_mem = process.memory_info().rss
     
