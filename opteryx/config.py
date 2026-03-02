@@ -98,6 +98,13 @@ OPTERYX_TRACE: bool = bool(get("OPTERYX_TRACE", "").lower() in ("1", "true", "ye
 OPTERYX_TRACE_FILE: str = str(get("OPTERYX_TRACE_FILE", ""))
 """Path to write IO trace file (.jsonl format). Empty = no tracing."""
 
+OPTERYX_TRACE_SAMPLE_RATE: float = float(get("OPTERYX_TRACE_SAMPLE_RATE", 1.0))
+"""Sampling rate for traced files (0.0–1.0). Defaults to 1.0 (100%).
+When tracing is enabled, each event carrying a ``file_id`` will be skipped
+with probability ``1 - OPTERYX_TRACE_SAMPLE_RATE``.  This provides a simple
+way to reduce overhead on large scans by only recording a fraction of files.
+"""
+
 MAX_CONSECUTIVE_CACHE_FAILURES: int = int(get("MAX_CONSECUTIVE_CACHE_FAILURES", 10))
 """Maximum number of consecutive cache failures before disabling cache usage."""
 
@@ -141,6 +148,18 @@ PARQUET_FILES_IN_FLIGHT: int = int(get("PARQUET_FILES_IN_FLIGHT", 2))
 
 PARQUET_ROWGROUPS_PER_FILE_IN_FLIGHT: int = int(get("PARQUET_ROWGROUPS_PER_FILE_IN_FLIGHT", 5))
 """Maximum active row groups per active file for the v2 scheduler."""
+
+PARQUET_ROWGROUPS_IN_FLIGHT: int = int(
+    get(
+        "PARQUET_ROWGROUPS_IN_FLIGHT",
+        PARQUET_FILES_IN_FLIGHT * PARQUET_ROWGROUPS_PER_FILE_IN_FLIGHT,
+    )
+)
+"""Maximum active row groups across the full parquet scan for the v2 scheduler.
+
+Defaults to ``PARQUET_FILES_IN_FLIGHT * PARQUET_ROWGROUPS_PER_FILE_IN_FLIGHT`` so
+introducing this cap does not silently reduce prior effective concurrency.
+"""
 
 PARQUET_GLOBAL_RANGE_READERS: int = int(get("PARQUET_GLOBAL_RANGE_READERS", 24))
 """Hard cap for in-flight column range reads across the full parquet scan."""

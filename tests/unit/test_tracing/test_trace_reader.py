@@ -117,6 +117,69 @@ class TestTraceReader:
             assert "max_concurrent_downloads" in stats
         finally:
             trace_file.unlink()
+
+    def test_operation_timelines_include_footer_and_rowgroup(self):
+        """Operation timelines should preserve footer and rowgroup activity."""
+        events = [
+            {"type": "trace_session_start", "timestamp": 0},
+            {"type": "file_discovered", "timestamp": 1, "file_id": "file1.parquet"},
+            {"type": "download_start", "timestamp": 2, "file_id": "file1.parquet", "component": "footer"},
+            {"type": "download_complete", "timestamp": 3, "file_id": "file1.parquet", "component": "footer", "bytes_received": 64},
+            {"type": "download_start", "timestamp": 4, "file_id": "file1.parquet", "component": "columns", "rg_idx": 0},
+            {"type": "download_complete", "timestamp": 6, "file_id": "file1.parquet", "component": "columns", "rg_idx": 0, "bytes_received": 1024},
+            {"type": "decode_start", "timestamp": 6.1, "file_id": "file1.parquet", "component": "rowgroup", "rg_idx": 0},
+            {"type": "decode_complete", "timestamp": 7, "file_id": "file1.parquet", "component": "rowgroup", "rg_idx": 0, "rows_decoded": 12},
+        ]
+        trace_file = self.create_trace_file(events)
+        try:
+            reader = TraceReader(trace_file)
+            operations = reader.operation_timelines()
+            assert len(operations) == 2
+
+            footer = [row for row in operations if row["component"] == "footer"]
+            rowgroup = [row for row in operations if row["component"] == "rowgroup"]
+
+            assert len(footer) == 1
+            assert footer[0]["download_start"] == 2
+            assert footer[0]["download_complete"] == 3
+
+            assert len(rowgroup) == 1
+            assert rowgroup[0]["download_start"] == 4
+            assert rowgroup[0]["download_complete"] == 6
+            assert rowgroup[0]["decode_start"] == 6.1
+            assert rowgroup[0]["decode_complete"] == 7
+            assert rowgroup[0]["rows_decoded"] == 12
+        finally:
+            trace_file.unlink()
+
+    def test_statistics_include_component_ops(self):
+        """Stats should include component-level operation counts and bytes."""
+        events = [
+            {"type": "trace_session_start", "timestamp": 0},
+            {"type": "file_discovered", "timestamp": 1, "file_id": "file1.parquet"},
+            {"type": "download_start", "timestamp": 2, "file_id": "file1.parquet", "component": "footer"},
+            {"type": "download_complete", "timestamp": 2.5, "file_id": "file1.parquet", "component": "footer", "bytes_received": 64},
+            {"type": "download_start", "timestamp": 3, "file_id": "file1.parquet", "component": "columns", "rg_idx": 0},
+            {"type": "download_complete", "timestamp": 4, "file_id": "file1.parquet", "component": "columns", "rg_idx": 0, "bytes_received": 512},
+            {"type": "decode_start", "timestamp": 4.1, "file_id": "file1.parquet", "component": "rowgroup", "rg_idx": 0},
+            {"type": "decode_complete", "timestamp": 5, "file_id": "file1.parquet", "component": "rowgroup", "rg_idx": 0, "rows_decoded": 7},
+        ]
+        trace_file = self.create_trace_file(events)
+        try:
+            reader = TraceReader(trace_file)
+            stats = reader.statistics()
+            assert stats["total_files"] == 1
+            assert stats["total_bytes"] == 576
+            assert stats["total_rows"] == 7
+            assert stats["footer_download_ops"] == 1
+            assert stats["rowgroup_download_ops"] == 1
+            assert stats["rowgroup_decode_ops"] == 1
+            assert stats["download_ops_by_component"]["footer"] == 1
+            assert stats["download_ops_by_component"]["rowgroup"] == 1
+            assert stats["download_bytes_by_component"]["footer"] == 64
+            assert stats["download_bytes_by_component"]["rowgroup"] == 512
+        finally:
+            trace_file.unlink()
     
     def test_malformed_line_strict(self):
         """Test strict mode with malformed JSON."""
@@ -158,13 +221,84 @@ class TestTraceReader:
         with tempfile.NamedTemporaryFile(mode='w', suffix='.jsonl', delete=False) as f:
             trace_file = Path(f.name)
         
+    def test_component_and_rowgroup_helpers(self):
+        """Verify the new helper methods filter by component and row group."""
+        events = [
+            {"type": "download_start", "timestamp": 1, "file_id": "a", "component": "footer"},
+            {"type": "download_complete", "timestamp": 2, "file_id": "a", "component": "footer"},
+            {"type": "decode_start", "timestamp": 3, "file_id": "a", "component": "rowgroup", "rg_idx": 0},
+            {"type": "decode_complete", "timestamp": 4, "file_id": "a", "component": "rowgroup", "rg_idx": 0},
+            {"type": "decode_start", "timestamp": 5, "file_id": "a", "component": "column", "rg_idx": 0, "column": "x"},
+            {"type": "decode_complete", "timestamp": 6, "file_id": "a", "component": "column", "rg_idx": 0, "column": "x"},
+        ]
+        trace_file = self.create_trace_file(events)
         try:
             reader = TraceReader(trace_file)
-            events = list(reader.events())
-            
-            assert events == []
+            assert len(reader.events_by_component("footer")) == 2
+            assert len(reader.events_by_component("rowgroup")) == 2
+            assert len(reader.events_by_component("column")) == 2
+            assert len(reader.events_for_row_group("a", 0)) == 4
         finally:
             trace_file.unlink()
+
+    def test_sampling_behavior(self):
+        """Verify that OPTERYX_TRACE_SAMPLE_RATE controls event recording."""
+        from opteryx import config
+        original_rate = config.OPTERYX_TRACE_SAMPLE_RATE
+        original_trace = config.OPTERYX_TRACE
+        try:
+            config.OPTERYX_TRACE = True
+            config.OPTERYX_TRACE_SAMPLE_RATE = 0.0
+            # create a real temporary trace file via recorder
+            from opteryx.tracing.event_recorder import record_event, flush_all
+            with tempfile.TemporaryDirectory() as tmpdir:
+                trace_path = Path(tmpdir) / "samp.jsonl"
+                config.OPTERYX_TRACE_FILE = str(trace_path)
+                record_event("download_start", file_id="foo")
+                record_event("download_complete", file_id="foo")
+                flush_all()
+                # with 0% sampling we expect no file-id events persisted
+                contents = trace_path.read_text()
+                assert "download_start" not in contents
+                assert "download_complete" not in contents
+        finally:
+            config.OPTERYX_TRACE_SAMPLE_RATE = original_rate
+            config.OPTERYX_TRACE = original_trace
+
+    def test_filesystem_table_connector_tag(self):
+        """Create a FileSystemTable and confirm traced events include connector."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+        from opteryx.connectors.filesystem_connector import FileSystemTable
+        from opteryx import config
+        from opteryx.tracing.event_recorder import flush_all
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            trace_path = Path(tmpdir) / "fs_trace.jsonl"
+            parquet_path = Path(tmpdir) / "data.parquet"
+            # make a tiny parquet file
+            import pandas as pd
+            df = pa.Table.from_pandas(pd.DataFrame({"a": [1, 2, 3]}))
+            pq.write_table(df, parquet_path)
+
+            original_trace = config.OPTERYX_TRACE
+            original_file = config.OPTERYX_TRACE_FILE
+            try:
+                config.OPTERYX_TRACE = True
+                config.OPTERYX_TRACE_FILE = str(trace_path)
+                # create table and read
+                fs = pa.fs.LocalFileSystem()
+                table = FileSystemTable(dataset=str(parquet_path), filesystem=fs, storage_type="LOCAL")
+                # consume generator
+                for _ in table.read_dataset():
+                    pass
+                flush_all()
+                reader = TraceReader(trace_path)
+                events = list(reader.events())
+                assert any(e.get("connector") == "LOCAL" for e in events)
+            finally:
+                config.OPTERYX_TRACE = original_trace
+                config.OPTERYX_TRACE_FILE = original_file
     
     def test_missing_file(self):
         """Test error handling for missing trace file."""

@@ -139,7 +139,7 @@ Typical query (1-10s): <0.05% overhead
 
 If too high, use sampling:
 ```python
-OPTERYX_TRACE_SAMPLE_RATE=0.1  # Trace 10% of files
+OPTERYX_TRACE_SAMPLE_RATE=0.1  # Trace 10% of files (default 1.0 = 100%)
 ```
 
 ### Visual Output

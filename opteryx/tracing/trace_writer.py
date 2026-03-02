@@ -130,6 +130,14 @@ class TraceWriter:
             self._summary_printed = True
             if self.events_written > 0:
                 print(f"[TRACE] Wrote {self.events_written} trace events to {self.output_file}")
+                # show sampling information if relevant
+                try:
+                    from opteryx import config as _cfg
+
+                    if _cfg.OPTERYX_TRACE_SAMPLE_RATE != 1.0:
+                        print(f"[TRACE] Sampling rate: {_cfg.OPTERYX_TRACE_SAMPLE_RATE}")
+                except Exception:
+                    pass
                 print(f"[TRACE] View waterfall chart:")
                 print(f"[TRACE]   python -m opteryx.tools.io_waterfall trace {self.output_file}")
                 print(f"[TRACE] View statistics:")

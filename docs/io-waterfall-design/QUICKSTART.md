@@ -118,8 +118,8 @@ Trace files are JSONLines (.jsonl) format - one JSON object per line:
 | Event | Fields | Meaning |
 |-------|--------|---------|
 | `trace_session_start` | session_id, query | Query started |
-| `file_discovered` | file_id, bytes_total | File identified |
-| `download_start` | file_id | Fetch begins |
+| `file_discovered` | file_id, bytes_total, connector | File identified |
+| `download_start` | file_id, component, rg_idx, columns | Fetch begins (component may be footer/column-batch)
 | `download_complete` | file_id, bytes_received | Fetch done |
 | `decode_start` | file_id | Parse begins |
 | `decode_complete` | file_id, rows_decoded | Parse done |

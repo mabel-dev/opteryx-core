@@ -394,6 +394,11 @@ NB_MODULE(disk_reader, m) {
         "read_file_mmap_slice",
         [](nb::str path, size_t offset, size_t length) {
             const char* c_path = path.c_str();
+            size_t base_size = 0;
+            if (!stat_file_size(c_path, base_size)) {
+                raise_path_error(-errno, c_path, "Failed to stat file");
+            }
+
             unsigned char* mapped_data = nullptr;
             size_t mapped_size = 0;
 
@@ -406,20 +411,9 @@ NB_MODULE(disk_reader, m) {
                 return make_empty_memoryview();
             }
 
-            // For mmap slices, we need to track the base pointer and full mapping size
-            // The mapped_data pointer we got is already offset, so we need to figure out
-            // the actual base and size. We'll store this in our tracking map.
-            // Load the file again to get the base (this is needed for proper cleanup)
-            unsigned char* base_ptr = nullptr;
-            size_t base_size = 0;
-            int rc_base = read_all_mmap(c_path, &base_ptr, &base_size);
-            
-            if (rc_base != 0) {
-                // Cleanup the slice we mapped
-                unsigned char* cleanup_ptr = mapped_data - offset;
-                unmap_memory_c(cleanup_ptr, base_size);
-                raise_path_error(rc_base, c_path, "Failed to track mmap base for slice");
-            }
+            // read_slice_mmap maps the whole file and returns base + offset.
+            // Track the real base pointer so unmap_memory() releases the correct mapping.
+            unsigned char* base_ptr = mapped_data - offset;
 
             PyObject* mv = PyMemoryView_FromMemory(
                 reinterpret_cast<char*>(mapped_data),

@@ -71,11 +71,13 @@ def test_sql_battery(statement:str, exception: Optional[Exception]):
 
     from opteryx.exceptions import UnsupportedSyntaxError, MissingSqlStatement
 
+    session = None
     try:
         # query to arrow is the fastest way to query
         session = opteryx.session()
         result = session.execute_to_arrow(statement)
         result.shape
+        result = None
         assert (
             exception is None
         ), f"Exception {exception} not raised but expected\n{format_sql(statement)}"
@@ -92,6 +94,9 @@ def test_sql_battery(statement:str, exception: Optional[Exception]):
             raise ValueError(
                 f"{format_sql(statement)}\nQuery failed with error {type(error)} but error {exception} was expected"
             ) from error
+    finally:
+        if session is not None:
+            session.close()
 
 
 if __name__ == "__main__":  # pragma: no cover
@@ -127,19 +132,26 @@ if __name__ == "__main__":  # pragma: no cover
         # Cold start
         print("Warming up (cold start)...")
         start = time.monotonic_ns()
+        warm_session = None
         try:
-            opteryx.session().execute_to_arrow("SELECT COUNT(*) FROM scratch.hits;")
+            warm_session = opteryx.session()
+            warm_result = warm_session.execute_to_arrow("SELECT COUNT(*) FROM scratch.hits;")
+            warm_result = None
             cold_time_ms = (time.monotonic_ns() - start) / 1e6
             print(f"Cold start: {cold_time_ms:.2f}ms\n")
         except Exception as e:
             print(f"Cold start failed: {e}\n")
+        finally:
+            if warm_session is not None:
+                warm_session.close()
         
         print(f"{'Query':<8} {'Iteration 1':<16} {'Iteration 2':<16} {'Iteration 3':<16}         {'Avg':<13} {'Min':<13} {'Max':<13}")
         print("-" * 102)
 
     print(f"RUNNING CLICKBENCH BATTERY OF {len(STATEMENTS)} QUERIES\n")
     for index, (statement, err) in enumerate(STATEMENTS):
-        statement = statement.replace("testdata.clickbench_tiny", "scratch.hits_single")
+        statement = statement.replace("testdata.clickbench_tiny", "scratch.hits")
+        #statement = statement.replace("testdata.clickbench_tiny", "scratch.hits_single")
         printable = statement
         query_num = f"Q{(index + 1):02d}"
         
@@ -150,11 +162,13 @@ if __name__ == "__main__":  # pragma: no cover
             
             for iteration in range(args.iterations):
                 gc.collect()
+                session = None
                 try:
                     start = time.monotonic_ns()
                     session = opteryx.session()
                     result = session.execute_to_arrow(statement)
                     elapsed_ms = (time.monotonic_ns() - start) / 1e6
+                    result = None
                     times.append(elapsed_ms)
                 except Exception as e:
                     query_failed = True
@@ -162,6 +176,9 @@ if __name__ == "__main__":  # pragma: no cover
                     failures.append((statement, e))
                     failed += 1
                     break
+                finally:
+                    if session is not None:
+                        session.close()
             
             if not query_failed and times:
                 avg_time = sum(times) / len(times)

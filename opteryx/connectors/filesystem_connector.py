@@ -146,32 +146,40 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
 
         _tracing = _config.OPTERYX_TRACE
         if _tracing:
-            record_event("download_start", file_id=blob_name)
-        # Open file through the filesystem, passing through projection/selection for remote filtering
+            record_event("download_start", file_id=blob_name, connector=self.__type__)
+        # Open file through the filesystem, passing through projection/selection for remote filtering.
+        # Ensure the stream is deterministically closed so memory-mapped handles don't accumulate.
         data = self.filesystem.open_input_file(blob_name, columns=projection, filters=selection)
-        if _tracing:
-            record_event(
-                "download_complete", file_id=blob_name, bytes_received=data.memoryview.nbytes
+        try:
+            if _tracing:
+                record_event(
+                    "download_complete",
+                    file_id=blob_name,
+                    bytes_received=data.memoryview.nbytes,
+                    connector=self.__type__,
+                )
+            self.telemetry.bytes_read += data.memoryview.nbytes
+
+            # If the underlying filesystem already applied the selection (e.g., S3 Select),
+            # don't pass the selection to the decoder again to avoid duplicate filtering.
+            selection_to_pass = None if getattr(data, "filters_applied", False) else selection
+
+            if _tracing:
+                record_event("decode_start", file_id=blob_name, connector=self.__type__)
+            result = decoder(
+                data.memoryview,
+                projection=projection,
+                selection=selection_to_pass,
+                just_schema=just_schema,
             )
-        self.telemetry.bytes_read += data.memoryview.nbytes
+            if _tracing:
+                record_event("decode_complete", file_id=blob_name, connector=self.__type__)
 
-        # If the underlying filesystem already applied the selection (e.g., S3 Select),
-        # don't pass the selection to the decoder again to avoid duplicate filtering.
-        selection_to_pass = None if getattr(data, "filters_applied", False) else selection
-
-        if _tracing:
-            record_event("decode_start", file_id=blob_name)
-        # Decode the data
-        result = decoder(
-            data.memoryview,
-            projection=projection,
-            selection=selection_to_pass,
-            just_schema=just_schema,
-        )
-        if _tracing:
-            record_event("decode_complete", file_id=blob_name)
-
-        return result
+            return result
+        finally:
+            close = getattr(data, "close", None)
+            if callable(close):
+                close()
 
     def read_dataset(
         self,
@@ -197,9 +205,20 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
         from opteryx import config as _config
 
         if _config.OPTERYX_TRACE:
-            record_event("dataset_discovered", dataset=self.dataset, file_count=len(blob_names))
+            # include storage type/connector so traces can be filtered by backend
+            record_event(
+                "dataset_discovered",
+                dataset=self.dataset,
+                file_count=len(blob_names),
+                connector=self.__type__,
+            )
             for blob_name in blob_names:
-                record_event("file_discovered", file_id=blob_name, blob_name=blob_name)
+                record_event(
+                    "file_discovered",
+                    file_id=blob_name,
+                    blob_name=blob_name,
+                    connector=self.__type__,
+                )
 
         if just_schema:
             for blob_name in blob_names:
@@ -362,34 +381,38 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
                 continue
 
             try:
-                # Open the file and read just the metadata
+                # Open the file and read just the metadata. Ensure stream closes promptly.
                 file_stream = self.filesystem.open_input_file(blob_name)
-
-                # Determine file format
-                file_format = "PARQUET"
-
-                # Extract record count from Parquet metadata without reading row data.
-                record_count = 0
-                file_size = file_stream.size() if hasattr(file_stream, "size") else 0
-
                 try:
-                    import pyarrow.parquet as pq
+                    # Determine file format
+                    file_format = "PARQUET"
 
-                    parquet_file = pq.ParquetFile(file_stream)
-                    record_count = parquet_file.metadata.num_rows
-                except (OSError, ValueError, RuntimeError) as ex:
-                    # Fallback: set to 0 if we can't read metadata
-                    _ = ex
+                    # Extract record count from Parquet metadata without reading row data.
                     record_count = 0
+                    file_size = file_stream.size() if hasattr(file_stream, "size") else 0
 
-                # Create FileEntry
-                entry = FileEntry(
-                    file_path=blob_name,
-                    file_format=file_format,
-                    record_count=record_count,
-                    file_size_in_bytes=file_size,
-                )
-                file_entries.append(entry)
+                    try:
+                        import pyarrow.parquet as pq
+
+                        parquet_file = pq.ParquetFile(file_stream)
+                        record_count = parquet_file.metadata.num_rows
+                    except (OSError, ValueError, RuntimeError) as ex:
+                        # Fallback: set to 0 if we can't read metadata
+                        _ = ex
+                        record_count = 0
+
+                    # Create FileEntry
+                    entry = FileEntry(
+                        file_path=blob_name,
+                        file_format=file_format,
+                        record_count=record_count,
+                        file_size_in_bytes=file_size,
+                    )
+                    file_entries.append(entry)
+                finally:
+                    close = getattr(file_stream, "close", None)
+                    if callable(close):
+                        close()
 
             except (OSError, ValueError, RuntimeError):
                 # Skip files we can't read metadata from
