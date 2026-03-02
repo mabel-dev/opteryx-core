@@ -2,7 +2,13 @@
 
 ## Event Types
 
-The trace system records five types of events for each file:
+The trace system records five core event types for each file (plus a variety
+of auxiliary events used by the new column‑chunk reader).  All events may
+optionally include a ``component`` tag allowing hierarchical drill‑down
+(e.g. ``footer``, ``rowgroup``, ``column``) and other identifying fields
+such as ``rg_idx`` or ``column``.
+
+The five core file-level events are:
 
 ### 1. File Discovery
 ```
@@ -10,8 +16,8 @@ The trace system records five types of events for each file:
   "type": "file_discovered",
   "timestamp": 1234567890.123456,
   "file_id": "s3://bucket/path/file.parquet.1",
-  "connector": "s3",
-  "size_bytes": 1048576
+  "connector": "s3",              # source connector/storage type
+  "size_bytes": 1048576            # optional known file size
 }
 ```
 
@@ -24,7 +30,10 @@ The trace system records five types of events for each file:
   "type": "download_start",
   "timestamp": 1234567890.234567,
   "file_id": "s3://bucket/path/file.parquet.1",
-  "connector": "s3"
+  "connector": "s3",             # propagated from discovery
+  "component": "footer",         # optional: footer/columns/column/rowgroup
+  "rg_idx": 0,                     # row group index when relevant
+  "columns": ["col1","col2"]   # which columns were requested (for column-batch)
 }
 ```
 
@@ -37,7 +46,10 @@ The trace system records five types of events for each file:
   "type": "download_complete",
   "timestamp": 1234567890.345678,
   "file_id": "s3://bucket/path/file.parquet.1",
-  "bytes_received": 1048576
+  "bytes_received": 1048576,
+  "component": "columns",        # which part of file was fetched
+  "rg_idx": 1,
+  "columns": ["a","b"]
 }
 ```
 
@@ -49,7 +61,10 @@ The trace system records five types of events for each file:
 {
   "type": "decode_start",
   "timestamp": 1234567890.456789,
-  "file_id": "s3://bucket/path/file.parquet.1"
+  "file_id": "s3://bucket/path/file.parquet.1",
+  "component": "column",        # or "rowgroup" for aggregate events
+  "rg_idx": 1,
+  "column": "a"
 }
 ```
 
@@ -63,7 +78,9 @@ The trace system records five types of events for each file:
   "timestamp": 1234567890.567890,
   "file_id": "s3://bucket/path/file.parquet.1",
   "rows_decoded": 12345,
-  "batches": 5
+  "batches": 5,
+  "component": "rowgroup",
+  "rg_idx": 0
 }
 ```
 

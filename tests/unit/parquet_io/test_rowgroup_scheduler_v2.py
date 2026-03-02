@@ -38,7 +38,7 @@ def _build_footers(paths, rowgroups, columns):
 
 
 def _patch_footer_helpers(monkeypatch, footers):
-    def _fake_read_footer_payload(filesystem, path):
+    def _fake_read_footer_payload(filesystem, path, file_size=None, connector=None):
         return path.encode("utf8"), 64, 1
 
     def _fake_parse_footer(path, envelope, footer_bytes):
@@ -55,13 +55,18 @@ def _set_scheduler_caps(
     *,
     files_in_flight,
     rowgroups_per_file,
+    rowgroups_in_flight=None,
     global_ranges,
     per_rowgroup_ranges,
 ):
     import opteryx.config as cfg
 
+    if rowgroups_in_flight is None:
+        rowgroups_in_flight = files_in_flight * rowgroups_per_file
+
     monkeypatch.setattr(cfg, "PARQUET_FILES_IN_FLIGHT", files_in_flight)
     monkeypatch.setattr(cfg, "PARQUET_ROWGROUPS_PER_FILE_IN_FLIGHT", rowgroups_per_file)
+    monkeypatch.setattr(cfg, "PARQUET_ROWGROUPS_IN_FLIGHT", rowgroups_in_flight)
     monkeypatch.setattr(cfg, "PARQUET_GLOBAL_RANGE_READERS", global_ranges)
     monkeypatch.setattr(cfg, "PARQUET_RANGE_READERS_PER_ROWGROUP", per_rowgroup_ranges)
 
@@ -92,6 +97,7 @@ class _TrackingFilesystem:
         self.started_by_rowgroup = Counter()
         self.started_total = 0
         self.read_order = []
+        self.started_at_by_rowgroup = {}
         self.startup_reached = threading.Event()
 
     def _rowgroup_for_offset(self, path, offset):
@@ -114,6 +120,7 @@ class _TrackingFilesystem:
                 self.started_by_rowgroup[rg_key] += 1
                 self.started_total += 1
                 self.read_order.append(rg_key)
+                self.started_at_by_rowgroup.setdefault(rg_key, []).append(time.monotonic())
                 if self._startup_target and self.started_total >= self._startup_target:
                     self.startup_reached.set()
 
@@ -259,6 +266,81 @@ def test_scheduler_v2_single_inflight_sequential_dispatch(monkeypatch):
     first_four = [rg_idx for _, rg_idx in fs.read_order[:4]]
     assert first_four == [0, 0, 0, 0]
     assert rows[0]["__row_group__"] == 0
+
+
+def test_scheduler_v2_refills_while_draining_ready_rows(monkeypatch):
+    paths = ["single.parquet"]
+    footers, base_by_path = _build_footers(paths, rowgroups=8, columns=1)
+    _patch_footer_helpers(monkeypatch, footers)
+    _set_scheduler_caps(
+        monkeypatch,
+        files_in_flight=1,
+        rowgroups_per_file=8,
+        global_ranges=4,
+        per_rowgroup_ranges=1,
+    )
+
+    fs = _TrackingFilesystem(base_by_path, sleep_s=0.001)
+
+    yielded_at = []
+    for _ in reader._iter_row_groups_v2(
+        fs,
+        paths,
+        ["c0"],
+        cache=InMemoryParquetCache(),
+        max_workers=8,
+        decoder=_fake_decoder,
+    ):
+        yielded_at.append(time.monotonic())
+        # Simulate downstream work while the scheduler should keep filling.
+        time.sleep(0.02)
+
+    assert len(yielded_at) == 8
+
+    with fs.lock:
+        first_start_by_rg = {
+            rg_idx: min(starts)
+            for (_, rg_idx), starts in fs.started_at_by_rowgroup.items()
+        }
+
+    assert len(first_start_by_rg) == 8
+    second_wave_start = min(
+        start_ts for rg_idx, start_ts in first_start_by_rg.items() if rg_idx >= 4
+    )
+    # If refill is continuous, second-wave reads start before we drain the first
+    # four emitted rows from the generator.
+    assert second_wave_start < yielded_at[3]
+
+
+def test_scheduler_v2_respects_global_rowgroups_in_flight_cap(monkeypatch):
+    paths = ["single.parquet"]
+    footers, base_by_path = _build_footers(paths, rowgroups=8, columns=6)
+    _patch_footer_helpers(monkeypatch, footers)
+    _set_scheduler_caps(
+        monkeypatch,
+        files_in_flight=1,
+        rowgroups_per_file=8,
+        rowgroups_in_flight=3,
+        global_ranges=8,
+        per_rowgroup_ranges=6,
+    )
+
+    fs = _TrackingFilesystem(base_by_path, sleep_s=0.001)
+
+    rows = list(
+        reader._iter_row_groups_v2(
+            fs,
+            paths,
+            [f"c{i}" for i in range(6)],
+            cache=InMemoryParquetCache(),
+            max_workers=8,
+            decoder=_fake_decoder,
+        )
+    )
+
+    assert len(rows) == 8
+    assert max(row["__active_rowgroups_peak__"] for row in rows) <= 3
+    assert max(row["__rowgroups_in_flight_cap__"] for row in rows) == 3
 
 
 def test_scheduler_v2_parity_with_v1(monkeypatch):

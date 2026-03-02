@@ -180,6 +180,80 @@ class TestIOWaterfallIntegration:
         finally:
             trace_file.unlink()
     
+    def test_real_query_generates_rich_trace(self):
+        """Execute a simple parquet scan and confirm footer/column/rowgroup events."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            trace_file = Path(tmpdir) / "trace.jsonl"
+            parquet_file = Path(tmpdir) / "data.parquet"
+
+            # write a tiny parquet
+            import pandas as pd
+            import pyarrow as pa
+            import pyarrow.parquet as pq
+
+            df = pd.DataFrame({"x": [1, 2, 3]})
+            pq.write_table(pa.Table.from_pandas(df), parquet_file)
+
+            original_trace = config.OPTERYX_TRACE
+            original_file = config.OPTERYX_TRACE_FILE
+            try:
+                config.OPTERYX_TRACE = True
+                config.OPTERYX_TRACE_FILE = str(trace_file)
+
+                session = Session()
+                # force evaluate the cursor
+                results = session.execute(f"SELECT * FROM '{parquet_file}'")
+                list(results)
+                from opteryx.tracing.event_recorder import flush_all
+                flush_all()
+
+                assert trace_file.exists(), "Trace file should be written"
+                reader = TraceReader(trace_file)
+                events = list(reader.events())
+                # we expect at least one footer event and one column decode event
+                assert any(e.get("component") == "footer" for e in events), events
+                assert any(e.get("component") == "column" for e in events), events
+                assert any(e.get("component") == "rowgroup" for e in events), events
+                # connector tag should be added by filesystem telemetry
+                assert any(e.get("connector") == "LOCAL" or e.get("connector") == "FILESYSTEM" for e in events), events
+            finally:
+                config.OPTERYX_TRACE = original_trace
+                config.OPTERYX_TRACE_FILE = original_file
+
+    def test_sampling_rate(self):
+        """Sample rate 0 should suppress file-level events entirely."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            trace_file = Path(tmpdir) / "trace.jsonl"
+            parquet_file = Path(tmpdir) / "data.parquet"
+
+            import pandas as pd
+            import pyarrow as pa
+            import pyarrow.parquet as pq
+
+            df = pd.DataFrame({"x": [1, 2]})
+            pq.write_table(pa.Table.from_pandas(df), parquet_file)
+
+            original_trace = config.OPTERYX_TRACE
+            original_file = config.OPTERYX_TRACE_FILE
+            original_rate = config.OPTERYX_TRACE_SAMPLE_RATE
+            try:
+                config.OPTERYX_TRACE = True
+                config.OPTERYX_TRACE_FILE = str(trace_file)
+                config.OPTERYX_TRACE_SAMPLE_RATE = 0.0
+
+                session = Session()
+                list(session.execute(f"SELECT * FROM '{parquet_file}'"))
+                from opteryx.tracing.event_recorder import flush_all
+                flush_all()
+
+                events = list(TraceReader(trace_file).events())
+                # expect only session events
+                assert all(e['type'].startswith('trace_session') for e in events), events
+            finally:
+                config.OPTERYX_TRACE = original_trace
+                config.OPTERYX_TRACE_FILE = original_file
+                config.OPTERYX_TRACE_SAMPLE_RATE = original_rate
+
     def test_tracing_disabled_has_no_overhead(self):
         """Test that when tracing is disabled, there's minimal overhead."""
         # This test verifies the pattern: when disabled, record_event is a no-op

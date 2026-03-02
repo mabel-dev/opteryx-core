@@ -158,6 +158,7 @@ def regex_match_any(
     Returns:
         numpy.ndarray of object dtype (bool or None per row)
     """
+
     def _decode_text(value):
         if isinstance(value, bytes):
             return value.decode("utf-8", errors="replace")

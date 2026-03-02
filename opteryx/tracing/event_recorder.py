@@ -65,9 +65,18 @@ def record_event(event_type: str, **kwargs) -> None:
     Thread-safe: writes directly to the writer's queue which is a thread.Queue.
     """
     # Import here to avoid circular dependency and check at call time
+    import random
+
     from opteryx import config
 
     if not config.OPTERYX_TRACE:
+        return
+
+    # sampling logic: if the caller supplied a file_id and the random draw is
+    # above the configured sample rate, skip the event entirely.  (We don't
+    # want to pay the cost of building the event object or queueing it.)
+    file_id = kwargs.get("file_id")
+    if file_id and random.random() > config.OPTERYX_TRACE_SAMPLE_RATE:
         return
 
     # Create event with timestamp

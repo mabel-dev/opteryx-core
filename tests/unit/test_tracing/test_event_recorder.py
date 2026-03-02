@@ -149,6 +149,28 @@ class TestEventRecorder:
             config.OPTERYX_TRACE = original_trace
             config.OPTERYX_TRACE_FILE = original_file
 
+    def test_sampling_respected(self):
+        """When sample rate is zero, subsequent events are not recorded."""
+        original_trace = config.OPTERYX_TRACE
+        original_file = config.OPTERYX_TRACE_FILE
+        original_rate = config.OPTERYX_TRACE_SAMPLE_RATE
+        try:
+            config.OPTERYX_TRACE = True
+            config.OPTERYX_TRACE_FILE = "/tmp/trace_test.jsonl"
+            config.OPTERYX_TRACE_SAMPLE_RATE = 0.0
+
+            # record some events with a file_id
+            for _ in range(5):
+                event_recorder.record_event("download_start", file_id="foo")
+            buffer = event_recorder._get_thread_buffer()
+            events = buffer.drain()
+            # should be empty because sampling filtered them
+            assert not events
+        finally:
+            config.OPTERYX_TRACE = original_trace
+            config.OPTERYX_TRACE_FILE = original_file
+            config.OPTERYX_TRACE_SAMPLE_RATE = original_rate
+
 
 class TestEventRecorderIntegration:
     """Integration tests for event recorder."""

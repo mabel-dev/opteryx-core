@@ -95,6 +95,12 @@ def cmd_stats(trace_file: str) -> None:
     print("=" * 50)
     print()
     print(f"  Total Files:             {stats['total_files']}")
+    print(f"  Total Ops:               {stats.get('total_operations', 0)}")
+    print(f"  Download Ops:            {stats.get('total_download_ops', 0)}")
+    print(f"  Decode Ops:              {stats.get('total_decode_ops', 0)}")
+    print(f"  Footer Downloads:        {stats.get('footer_download_ops', 0)}")
+    print(f"  Rowgroup Downloads:      {stats.get('rowgroup_download_ops', 0)}")
+    print(f"  Rowgroup Decodes:        {stats.get('rowgroup_decode_ops', 0)}")
     print(f"  Total Data:              {_format_bytes(stats['total_bytes'])}")
     print(f"  Total Rows:              {stats['total_rows']:,}")
     print()
@@ -102,9 +108,13 @@ def cmd_stats(trace_file: str) -> None:
     print(f"  Download Phase:          {_format_ms(stats['download_phase_duration_ms'])}")
     print(f"  Decode Phase:            {_format_ms(stats['decode_phase_duration_ms'])}")
     print()
-    print(f"  Avg Download/File:       {_format_ms(stats['avg_download_time_ms'])}")
-    print(f"  Avg Decode/File:         {_format_ms(stats['avg_decode_time_ms'])}")
+    print(f"  Avg Download/Op:         {_format_ms(stats['avg_download_time_ms'])}")
+    print(f"  Avg Decode/Op:           {_format_ms(stats['avg_decode_time_ms'])}")
     print(f"  Max Concurrent Downloads: {stats['max_concurrent_downloads']}")
+    if stats.get("max_concurrent_downloads_by_component"):
+        print("  Max Concurrent by Component:")
+        for component, count in sorted(stats["max_concurrent_downloads_by_component"].items()):
+            print(f"    - {component}: {count}")
     print()
 
 

@@ -11,6 +11,8 @@ structured access to events and computed metrics.
 """
 
 import json
+from collections import defaultdict
+from collections import deque
 from pathlib import Path
 from typing import Any
 from typing import Dict
@@ -44,6 +46,34 @@ class TraceReader:
         self._metadata: Optional[Dict[str, Any]] = None
         self._events: Optional[List[Dict[str, Any]]] = None
 
+    def _load_events(self) -> List[Dict[str, Any]]:
+        """Load and cache trace events from disk."""
+        if self._events is not None:
+            return self._events
+
+        if not self.filepath.exists():
+            raise FileNotFoundError(f"Trace file not found: {self.filepath}")
+
+        loaded: List[Dict[str, Any]] = []
+        with open(self.filepath, "r", encoding="utf-8") as f:
+            for line_no, line in enumerate(f, 1):
+                line = line.strip()
+                if not line:
+                    continue
+
+                try:
+                    event = json.loads(line)
+                    loaded.append(event)
+                except json.JSONDecodeError as e:
+                    if self.strict:
+                        raise ValueError(f"Parse error at line {line_no}: {e}")
+                    else:
+                        # Log warning but continue (in production, use logging module)
+                        print(f"Warning: Skipping invalid line {line_no}: {e}")
+
+        self._events = loaded
+        return self._events
+
     def events(self) -> Iterator[Dict[str, Any]]:
         """
         Iterate over all events in the trace file.
@@ -54,24 +84,7 @@ class TraceReader:
         Raises:
             ValueError: If strict=True and a line cannot be parsed
         """
-        if not self.filepath.exists():
-            raise FileNotFoundError(f"Trace file not found: {self.filepath}")
-
-        with open(self.filepath, "r", encoding="utf-8") as f:
-            for line_no, line in enumerate(f, 1):
-                line = line.strip()
-                if not line:
-                    continue
-
-                try:
-                    event = json.loads(line)
-                    yield event
-                except json.JSONDecodeError as e:
-                    if self.strict:
-                        raise ValueError(f"Parse error at line {line_no}: {e}")
-                    else:
-                        # Log warning but continue (in production, use logging module)
-                        print(f"Warning: Skipping invalid line {line_no}: {e}")
+        yield from self._load_events()
 
     def metadata(self) -> Dict[str, Any]:
         """
@@ -84,7 +97,7 @@ class TraceReader:
             return self._metadata
 
         # Find the trace_session_start event
-        for event in self.events():
+        for event in self._load_events():
             if event["type"] == "trace_session_start":
                 self._metadata = event
                 return self._metadata
@@ -110,7 +123,7 @@ class TraceReader:
         """
         timelines = {}
 
-        for event in self.events():
+        for event in self._load_events():
             file_id = event.get("file_id")
             if not file_id:
                 continue
@@ -138,6 +151,188 @@ class TraceReader:
 
         return timelines
 
+    @staticmethod
+    def _normalized_component(event: Dict[str, Any], phase: str) -> str:
+        """Normalize component names into stable operation groupings."""
+        component = event.get("component")
+        if not component:
+            return "file"
+        if phase == "download" and component == "columns":
+            # Downloaded bytes for a row group are emitted as `columns`.
+            # Align with decode `rowgroup` events so both phases share one lane.
+            return "rowgroup"
+        return str(component)
+
+    @staticmethod
+    def _operation_key(event: Dict[str, Any], phase: str) -> tuple:
+        """Build a key for matching start/complete events."""
+        file_id = event.get("file_id")
+        component = TraceReader._normalized_component(event, phase)
+        rg_idx = event.get("rg_idx")
+
+        if component == "rowgroup":
+            return file_id, component, rg_idx
+        if component == "column":
+            return file_id, component, rg_idx, event.get("column")
+        return file_id, component, None
+
+    @staticmethod
+    def _operation_label(
+        file_id: str, component: str, rg_idx: Any = None, column: Any = None
+    ) -> str:
+        """Human-readable label for one operation row."""
+        base = Path(file_id).name if file_id else "unknown"
+        if component == "file":
+            return base
+        if component == "footer":
+            return f"{base} [footer]"
+        if component == "rowgroup":
+            return f"{base} [rg {rg_idx}]"
+        if component == "column":
+            return f"{base} [rg {rg_idx} col {column}]"
+        return f"{base} [{component}]"
+
+    @staticmethod
+    def _row_start_timestamp(row: Dict[str, Any]) -> float:
+        """Earliest timestamp available for sorting rows on the timeline."""
+        candidates = [
+            row.get("download_start"),
+            row.get("download_complete"),
+            row.get("decode_start"),
+            row.get("decode_complete"),
+        ]
+        valid = [t for t in candidates if isinstance(t, (int, float))]
+        return min(valid) if valid else float("inf")
+
+    def operation_timelines(self) -> List[Dict[str, Any]]:
+        """
+        Build operation-level timelines from raw events.
+
+        Unlike ``file_timelines()``, this preserves footer and row-group activity
+        so the chart can represent the real scheduler behavior.
+        """
+        operations: List[Dict[str, Any]] = []
+        operations_by_key: Dict[tuple, List[int]] = defaultdict(list)
+        pending_download: Dict[tuple, deque] = defaultdict(deque)
+        pending_decode: Dict[tuple, deque] = defaultdict(deque)
+        op_counters: Dict[tuple, int] = defaultdict(int)
+
+        def new_operation(key: tuple) -> int:
+            if len(key) == 4:
+                file_id, component, rg_idx, column = key
+            else:
+                file_id, component, rg_idx = key
+                column = None
+
+            sequence = op_counters[key]
+            op_counters[key] += 1
+            op_id = f"{file_id}|{component}|{rg_idx}|{column}|{sequence}"
+            row = {
+                "id": op_id,
+                "file_id": file_id,
+                "component": component,
+                "rg_idx": rg_idx,
+                "column": column,
+                "label": self._operation_label(file_id, component, rg_idx, column),
+                "download_start": None,
+                "download_complete": None,
+                "decode_start": None,
+                "decode_complete": None,
+                "bytes_received": 0,
+                "rows_decoded": 0,
+            }
+            operations.append(row)
+            idx = len(operations) - 1
+            operations_by_key[key].append(idx)
+            return idx
+
+        for event in self._load_events():
+            event_type = event.get("type")
+            if event_type not in {
+                "download_start",
+                "download_complete",
+                "decode_start",
+                "decode_complete",
+            }:
+                continue
+
+            phase = "download" if event_type.startswith("download_") else "decode"
+            key = self._operation_key(event, phase)
+            if key[0] is None:
+                continue
+            if phase == "decode" and self._normalized_component(event, phase) == "column":
+                # Column decode emits "complete" events only and can produce
+                # thousands of instant points that drown the waterfall view.
+                continue
+
+            if event_type == "download_start":
+                idx = new_operation(key)
+                operations[idx]["download_start"] = event.get("timestamp")
+                pending_download[key].append(idx)
+                continue
+
+            if event_type == "download_complete":
+                idx = pending_download[key].popleft() if pending_download[key] else None
+                if idx is None:
+                    for candidate in reversed(operations_by_key.get(key, [])):
+                        if operations[candidate]["download_complete"] is None:
+                            idx = candidate
+                            break
+                if idx is None:
+                    idx = new_operation(key)
+                operations[idx]["download_complete"] = event.get("timestamp")
+                operations[idx]["bytes_received"] += int(event.get("bytes_received") or 0)
+                continue
+
+            if event_type == "decode_start":
+                idx = None
+                for candidate in reversed(operations_by_key.get(key, [])):
+                    row = operations[candidate]
+                    if row["decode_start"] is None and (
+                        row["download_start"] is not None or row["download_complete"] is not None
+                    ):
+                        idx = candidate
+                        break
+                if idx is None:
+                    idx = new_operation(key)
+                operations[idx]["decode_start"] = event.get("timestamp")
+                pending_decode[key].append(idx)
+                continue
+
+            # decode_complete
+            idx = pending_decode[key].popleft() if pending_decode[key] else None
+            if idx is None:
+                for candidate in reversed(operations_by_key.get(key, [])):
+                    row = operations[candidate]
+                    if row["decode_start"] is not None and row["decode_complete"] is None:
+                        idx = candidate
+                        break
+            if idx is None:
+                idx = new_operation(key)
+            operations[idx]["decode_complete"] = event.get("timestamp")
+            operations[idx]["rows_decoded"] = int(event.get("rows_decoded") or 0)
+
+        operations.sort(key=lambda row: (self._row_start_timestamp(row), row.get("label", "")))
+        return operations
+
+    # ---------------------------------------------------------------------
+    # Additional helpers for richer event inspection
+    def events_for_file(self, file_id: str):
+        """Return all events related to *file_id* (exact match)."""
+        return [e for e in self._load_events() if e.get("file_id") == file_id]
+
+    def events_by_component(self, component: str):
+        """Return all events tagged with a specific component string."""
+        return [e for e in self._load_events() if e.get("component") == component]
+
+    def events_for_row_group(self, file_id: str, rg_idx: int):
+        """Return events that include both *file_id* and a matching *rg_idx*."""
+        return [
+            e
+            for e in self._load_events()
+            if e.get("file_id") == file_id and e.get("rg_idx") == rg_idx
+        ]
+
     def statistics(self) -> Dict[str, Any]:
         """
         Compute statistics from the trace.
@@ -154,90 +349,134 @@ class TraceReader:
             - avg_download_time_ms: average per-file download time
             - avg_decode_time_ms: average per-file decode time
         """
-        timelines = self.file_timelines()
-
-        if not timelines:
+        events = self._load_events()
+        if not events:
             return {
                 "total_files": 0,
                 "total_bytes": 0,
                 "total_rows": 0,
+                "total_operations": 0,
+                "total_download_ops": 0,
+                "total_decode_ops": 0,
+                "footer_download_ops": 0,
+                "rowgroup_download_ops": 0,
+                "rowgroup_decode_ops": 0,
                 "download_phase_duration_ms": 0,
                 "decode_phase_duration_ms": 0,
                 "query_duration_ms": 0,
                 "max_concurrent_downloads": 0,
                 "avg_download_time_ms": 0,
                 "avg_decode_time_ms": 0,
+                "download_ops_by_component": {},
+                "download_bytes_by_component": {},
+                "decode_ops_by_component": {},
+                "max_concurrent_downloads_by_component": {},
             }
 
-        total_files = len(timelines)
-        total_bytes = sum(t.get("bytes_received", 0) for t in timelines.values())
-        total_rows = sum(t.get("rows_decoded", 0) for t in timelines.values())
+        operations = self.operation_timelines()
+        file_ids = {
+            e.get("file_id")
+            for e in events
+            if e.get("type") == "file_discovered" and e.get("file_id")
+        }
+        if not file_ids:
+            file_ids = {e.get("file_id") for e in events if e.get("file_id")}
 
-        # Find time boundaries
-        all_starts = [
-            t.get("download_start") for t in timelines.values() if t.get("download_start")
+        download_events = [
+            e for e in events if e.get("type") in ("download_start", "download_complete")
         ]
-        all_ends = [
-            t.get("decode_complete") for t in timelines.values() if t.get("decode_complete")
-        ]
+        decode_events = [e for e in events if e.get("type") in ("decode_start", "decode_complete")]
+        download_complete_events = [e for e in events if e.get("type") == "download_complete"]
+        decode_complete_events = [e for e in events if e.get("type") == "decode_complete"]
 
-        query_start = min(all_starts) if all_starts else None
-        query_end = max(all_ends) if all_ends else None
+        total_files = len(file_ids)
+        total_bytes = sum(int(e.get("bytes_received") or 0) for e in download_complete_events)
+        total_rows = sum(int(e.get("rows_decoded") or 0) for e in decode_complete_events)
 
-        query_duration_ms = (query_end - query_start) * 1000 if query_start and query_end else 0
+        timestamps = [
+            e.get("timestamp") for e in events if isinstance(e.get("timestamp"), (int, float))
+        ]
+        query_duration_ms = (max(timestamps) - min(timestamps)) * 1000 if timestamps else 0
 
-        # Download phase duration
-        download_starts = [
-            t.get("download_start") for t in timelines.values() if t.get("download_start")
-        ]
-        download_ends = [
-            t.get("download_complete") for t in timelines.values() if t.get("download_complete")
-        ]
+        download_starts = [e.get("timestamp") for e in events if e.get("type") == "download_start"]
+        download_ends = [e.get("timestamp") for e in events if e.get("type") == "download_complete"]
         download_phase_duration_ms = (
             (max(download_ends) - min(download_starts)) * 1000
             if download_starts and download_ends
             else 0
         )
 
-        # Decode phase duration
-        decode_starts = [t.get("decode_start") for t in timelines.values() if t.get("decode_start")]
-        decode_ends = [
-            t.get("decode_complete") for t in timelines.values() if t.get("decode_complete")
-        ]
+        decode_starts = [e.get("timestamp") for e in events if e.get("type") == "decode_start"]
+        decode_ends = [e.get("timestamp") for e in events if e.get("type") == "decode_complete"]
         decode_phase_duration_ms = (
             (max(decode_ends) - min(decode_starts)) * 1000 if decode_starts and decode_ends else 0
         )
 
-        # Average times
-        download_times = [
-            (t.get("download_complete", 0) - t.get("download_start", 0)) * 1000
-            for t in timelines.values()
-            if t.get("download_start") and t.get("download_complete")
+        download_durations = [
+            (op["download_complete"] - op["download_start"]) * 1000
+            for op in operations
+            if op.get("download_start") is not None and op.get("download_complete") is not None
         ]
-        avg_download_time_ms = sum(download_times) / len(download_times) if download_times else 0
-
-        decode_times = [
-            (t.get("decode_complete", 0) - t.get("decode_start", 0)) * 1000
-            for t in timelines.values()
-            if t.get("decode_start") and t.get("decode_complete")
-        ]
-        avg_decode_time_ms = sum(decode_times) / len(decode_times) if decode_times else 0
-
-        # Max concurrent downloads (simplified - count overlapping)
-        max_concurrent = self._compute_max_concurrency(
-            timelines, "download_start", "download_complete"
+        avg_download_time_ms = (
+            sum(download_durations) / len(download_durations) if download_durations else 0
         )
+
+        decode_durations = [
+            (op["decode_complete"] - op["decode_start"]) * 1000
+            for op in operations
+            if op.get("decode_start") is not None and op.get("decode_complete") is not None
+        ]
+        avg_decode_time_ms = (
+            sum(decode_durations) / len(decode_durations) if decode_durations else 0
+        )
+
+        download_ops_by_component: Dict[str, int] = defaultdict(int)
+        download_bytes_by_component: Dict[str, int] = defaultdict(int)
+        for event in download_complete_events:
+            component = self._normalized_component(event, "download")
+            download_ops_by_component[component] += 1
+            download_bytes_by_component[component] += int(event.get("bytes_received") or 0)
+
+        decode_ops_by_component: Dict[str, int] = defaultdict(int)
+        for event in decode_complete_events:
+            component = self._normalized_component(event, "decode")
+            if component == "column":
+                continue
+            decode_ops_by_component[component] += 1
+
+        max_concurrent = self._compute_max_concurrency_from_events(download_events)
+        max_concurrent_downloads_by_component: Dict[str, int] = {}
+        for component in set(download_ops_by_component):
+            component_events = [
+                e for e in download_events if self._normalized_component(e, "download") == component
+            ]
+            max_concurrent_downloads_by_component[component] = (
+                self._compute_max_concurrency_from_events(component_events)
+            )
+
+        total_download_ops = sum(download_ops_by_component.values())
+        total_decode_ops = sum(decode_ops_by_component.values())
 
         return {
             "total_files": total_files,
             "total_bytes": total_bytes,
             "total_rows": total_rows,
+            "total_operations": len(operations),
+            "total_download_ops": total_download_ops,
+            "total_decode_ops": total_decode_ops,
+            "footer_download_ops": download_ops_by_component.get("footer", 0),
+            "rowgroup_download_ops": download_ops_by_component.get("rowgroup", 0),
+            "rowgroup_decode_ops": decode_ops_by_component.get("rowgroup", 0),
             "download_phase_duration_ms": download_phase_duration_ms,
             "decode_phase_duration_ms": decode_phase_duration_ms,
             "query_duration_ms": query_duration_ms,
             "max_concurrent_downloads": max_concurrent,
             "avg_download_time_ms": avg_download_time_ms,
             "avg_decode_time_ms": avg_decode_time_ms,
+            "download_ops_by_component": dict(download_ops_by_component),
+            "download_bytes_by_component": dict(download_bytes_by_component),
+            "decode_ops_by_component": dict(decode_ops_by_component),
+            "max_concurrent_downloads_by_component": max_concurrent_downloads_by_component,
         }
 
     def _compute_max_concurrency(
@@ -263,3 +502,28 @@ class TraceReader:
             max_concurrent = max(max_concurrent, current)
 
         return max_concurrent
+
+    @staticmethod
+    def _compute_max_concurrency_from_events(events: List[Dict[str, Any]]) -> int:
+        """Compute max concurrency directly from raw start/complete events."""
+        timeline_points: List[tuple] = []
+        for event in events:
+            timestamp = event.get("timestamp")
+            if not isinstance(timestamp, (int, float)):
+                continue
+            if event.get("type") == "download_start":
+                timeline_points.append((timestamp, 1))
+            elif event.get("type") == "download_complete":
+                timeline_points.append((timestamp, -1))
+
+        if not timeline_points:
+            return 0
+
+        # End events are applied before starts at the same timestamp.
+        timeline_points.sort(key=lambda point: (point[0], point[1]))
+        current = 0
+        maximum = 0
+        for _, delta in timeline_points:
+            current += delta
+            maximum = max(maximum, current)
+        return maximum

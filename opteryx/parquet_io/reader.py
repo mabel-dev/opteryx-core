@@ -80,7 +80,10 @@ _RANGE_POOL: ThreadPoolExecutor = ThreadPoolExecutor(
 
 
 def _read_footer_payload(
-    filesystem: Any, path: str, file_size: Optional[int] = None
+    filesystem: Any,
+    path: str,
+    file_size: Optional[int] = None,
+    connector: Optional[str] = None,
 ) -> Tuple[bytes, int, int]:
     """Fetch footer bytes and build a parseable envelope.
 
@@ -92,6 +95,16 @@ def _read_footer_payload(
     Returns:
         tuple(envelope, bytes_fetched, elapsed_ns)
     """
+    # trace footer IO
+    from opteryx import config as _cfg
+    from opteryx.tracing import record_event
+
+    if _cfg.OPTERYX_TRACE:
+        kwargs = {"file_id": path, "component": "footer"}
+        if connector:
+            kwargs["connector"] = connector
+        record_event("download_start", **kwargs)
+
     start_ns = time.monotonic_ns()
 
     # Step 1: resolve file size (from manifest when available, otherwise stat call).
@@ -133,6 +146,17 @@ def _read_footer_payload(
         (footer_bytes_data,) = filesystem.read_ranges(path, [(footer_offset, footer_length)])
         bytes_fetched = prefetch_size + footer_length
 
+    # write completion event
+    if _cfg.OPTERYX_TRACE:
+        kwargs = {
+            "file_id": path,
+            "component": "footer",
+            "bytes_received": bytes_fetched,
+        }
+        if connector:
+            kwargs["connector"] = connector
+        record_event("download_complete", **kwargs)
+
     # Step 3: wrap footer bytes in a minimal Parquet envelope.
     # read_metadata_from_bytes expects: PAR1 + thrift_footer + uint32_LE(len) + PAR1.
     envelope = (
@@ -165,7 +189,16 @@ def fetch_footer(
     path: str,
     cache: Optional[ParquetCache] = None,
     file_size: Optional[int] = None,
+    connector: Optional[str] = None,
 ) -> dict:
+    """Fetch and parse the Parquet footer for *path*, optionally caching the result.
+
+    Instrumentation notes
+    ---------------------
+    A simple download-start/complete pair is recorded for the footer read so
+    that the visualization can show the two small range reads that precede
+    any column I/O.
+    """
     """Fetch and parse the Parquet footer for *path*, optionally caching the result.
 
     Uses two range reads:
@@ -193,9 +226,9 @@ def fetch_footer(
             return cached
 
     if file_size is None:
-        envelope, footer_bytes, _ = _read_footer_payload(filesystem, path)
+        envelope, footer_bytes, _ = _read_footer_payload(filesystem, path, connector=connector)
     else:
-        envelope, footer_bytes, _ = _read_footer_payload(filesystem, path, file_size)
+        envelope, footer_bytes, _ = _read_footer_payload(filesystem, path, file_size, connector)
     meta = _parse_footer_envelope(path, envelope, footer_bytes)
 
     if cache is not None:
@@ -210,6 +243,7 @@ def fetch_columns(
     column_names: List[str],
     cache: Optional[ParquetCache] = None,
     decoder: Optional[Any] = None,
+    connector: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Fetch and decode specific column chunks from a row group.
@@ -317,14 +351,57 @@ def fetch_columns(
 
         # Batch read all missing column chunks
         read_start_ns = time.monotonic_ns()
+        # record download of column-batch
+        from opteryx import config as _cfg
+        from opteryx.tracing import record_event
+
+        if _cfg.OPTERYX_TRACE:
+            kwargs = {
+                "file_id": path,
+                "component": "columns",
+                "rg_idx": rg_idx,
+                "columns": misses,
+                "ranges": len(coalesced_ranges),
+            }
+            if connector:
+                kwargs["connector"] = connector
+            record_event("download_start", **kwargs)
+
         merged_raw_buffers = filesystem.read_ranges(path, coalesced_ranges)
         time_read_ranges_ns += time.monotonic_ns() - read_start_ns
         bytes_fetched += sum(len(b) for b in merged_raw_buffers)
         raw_buffers = _split_coalesced_buffers(merged_raw_buffers, coalesced_parts, len(misses))
 
+        if _cfg.OPTERYX_TRACE:
+            kwargs = {
+                "file_id": path,
+                "component": "columns",
+                "rg_idx": rg_idx,
+                "columns": misses,
+                "bytes_received": bytes_fetched,
+            }
+            if connector:
+                kwargs["connector"] = connector
+            record_event("download_complete", **kwargs)
+
         # Decode each chunk and populate cache
         for col_name, raw_bytes in zip(misses, raw_buffers):
             col_stats = name_to_stats[col_name]
+
+            # record per-column decode events
+            from opteryx import config as _cfg
+            from opteryx.tracing import record_event
+
+            if _cfg.OPTERYX_TRACE:
+                kwargs = {
+                    "file_id": path,
+                    "component": "column",
+                    "rg_idx": rg_idx,
+                    "column": col_name,
+                }
+                if connector:
+                    kwargs["connector"] = connector
+                record_event("decode_start", **kwargs)
 
             try:
                 decode_start_ns = time.monotonic_ns()
@@ -340,6 +417,18 @@ def fetch_columns(
                 raise RuntimeError(
                     f"Failed to decode column '{path}:{rg_idx}:{col_name}': {e}"
                 ) from e
+
+            if _cfg.OPTERYX_TRACE:
+                kwargs = {
+                    "file_id": path,
+                    "component": "column",
+                    "rg_idx": rg_idx,
+                    "column": col_name,
+                    "rows_decoded": getattr(decoded, "num_rows", None) or 0,
+                }
+                if connector:
+                    kwargs["connector"] = connector
+                record_event("decode_complete", **kwargs)
 
             # Cache and add to results
             cache.set_column(path, rg_idx, col_name, decoded)
@@ -364,10 +453,46 @@ def _fetch_columns_task(
     column_names: List[str],
     cache: ParquetCache,
     decoder: Optional[Any] = None,
+    connector: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Wrapper around ``fetch_columns`` to capture pool queue and task timings."""
+    """Wrapper around ``fetch_columns`` to capture pool queue and task timings.
+
+    Also emits high‑level row-group decode events for tracing so that the
+    waterfall tool can collapse per-column activity if desired.
+    """
+    from opteryx import config as _cfg
+    from opteryx.tracing import record_event
+
     start_ns = time.monotonic_ns()
-    row_group = fetch_columns(filesystem, path, rg_idx, column_names, cache, decoder=decoder)
+
+    if _cfg.OPTERYX_TRACE:
+        kwargs = {
+            "file_id": path,
+            "component": "rowgroup",
+            "rg_idx": rg_idx,
+            "columns": column_names,
+        }
+        if connector:
+            kwargs["connector"] = connector
+        record_event("decode_start", **kwargs)
+
+    row_group = fetch_columns(
+        filesystem, path, rg_idx, column_names, cache, decoder=decoder, connector=connector
+    )
+
+    if _cfg.OPTERYX_TRACE:
+        kwargs = {
+            "file_id": path,
+            "component": "rowgroup",
+            "rg_idx": rg_idx,
+            "rows_decoded": sum(
+                (getattr(v, "num_rows", 0) for k, v in row_group.items() if not k.startswith("__"))
+            ),
+        }
+        if connector:
+            kwargs["connector"] = connector
+        record_event("decode_complete", **kwargs)
+
     row_group["__task_queue_wait_ns__"] = start_ns - submitted_ns
     row_group["__task_total_ns__"] = time.monotonic_ns() - start_ns
     return row_group
@@ -382,6 +507,7 @@ def _iter_row_groups_v1(
     decoder: Optional[Any] = None,
     predicates: Optional[List] = None,
     file_sizes: Optional[Dict[str, int]] = None,
+    connector: Optional[str] = None,
 ) -> Iterator[Dict[str, Any]]:
     """Yield assembled row groups across multiple Parquet files.
 
@@ -464,9 +590,9 @@ def _iter_row_groups_v1(
                 continue
             known_size = _known_file_size(p)
             if known_size is None:
-                fut = pool.submit(_read_footer_payload, filesystem, p)
+                fut = pool.submit(_read_footer_payload, filesystem, p, connector=connector)
             else:
-                fut = pool.submit(_read_footer_payload, filesystem, p, known_size)
+                fut = pool.submit(_read_footer_payload, filesystem, p, known_size, connector)
             footer_futures[fut] = p
 
         # Helper: fan out row-group tasks as soon as a file's footer is known.
@@ -491,6 +617,7 @@ def _iter_row_groups_v1(
                     column_names,
                     cache,
                     decoder,
+                    connector,
                 )
                 rg_futures[fut] = (p, rg_idx)
 
@@ -689,6 +816,7 @@ def _fetch_rowgroup_task(
     column_work: List[_ColumnWorkItem],
     decoder: Any,
     submitted_ns: int,
+    connector: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Fetch and decode all columns of one row group in a single batched read_ranges() call."""
     task_start_ns = time.monotonic_ns()
@@ -696,6 +824,16 @@ def _fetch_rowgroup_task(
 
     # Batch all column-chunk ranges into one vectored I/O call.
     ranges = [(work.offset, work.length) for work in column_work]
+
+    # tracing: download start for this row group
+    from opteryx import config as _cfg
+    from opteryx.tracing import record_event
+
+    if _cfg.OPTERYX_TRACE:
+        kwargs = {"file_id": path, "component": "columns", "rg_idx": rg_idx}
+        if connector:
+            kwargs["connector"] = connector
+        record_event("download_start", **kwargs)
     coalesced_ranges, coalesced_parts = _coalesce_ranges(ranges)
     read_start_ns = time.monotonic_ns()
     merged_raw_buffers = filesystem.read_ranges(path, coalesced_ranges)
@@ -705,6 +843,25 @@ def _fetch_rowgroup_task(
 
     bytes_fetched = sum(len(b) for b in merged_raw_buffers)
     bytes_requested = sum(work.length for work in column_work)
+
+    # tracing: download complete
+    if _cfg.OPTERYX_TRACE:
+        kwargs = {
+            "file_id": path,
+            "component": "columns",
+            "rg_idx": rg_idx,
+            "bytes_received": bytes_fetched,
+        }
+        if connector:
+            kwargs["connector"] = connector
+        record_event("download_complete", **kwargs)
+
+    # tracing: rowgroup decode start
+    if _cfg.OPTERYX_TRACE:
+        kwargs = {"file_id": path, "component": "rowgroup", "rg_idx": rg_idx}
+        if connector:
+            kwargs["connector"] = connector
+        record_event("decode_start", **kwargs)
 
     decode_start_ns = time.monotonic_ns()
     columns: Dict[str, Any] = {}
@@ -717,6 +874,32 @@ def _fetch_rowgroup_task(
             )
         columns[work.name] = decoded
     decode_ns = time.monotonic_ns() - decode_start_ns
+
+    # per-column decode events
+    if _cfg.OPTERYX_TRACE:
+        for work, raw_bytes in zip(column_work, raw_buffers):
+            col = work.name
+            kwargs = {
+                "file_id": path,
+                "component": "column",
+                "rg_idx": rg_idx,
+                "column": col,
+            }
+            if connector:
+                kwargs["connector"] = connector
+            record_event("decode_complete", **kwargs)
+
+    # rowgroup decode complete
+    if _cfg.OPTERYX_TRACE:
+        kwargs = {
+            "file_id": path,
+            "component": "rowgroup",
+            "rg_idx": rg_idx,
+            "rows_decoded": sum(getattr(v, "num_rows", 0) for v in columns.values()),
+        }
+        if connector:
+            kwargs["connector"] = connector
+        record_event("decode_complete", **kwargs)
 
     task_total_ns = time.monotonic_ns() - task_start_ns
     return {
@@ -740,6 +923,7 @@ def _iter_row_groups_v2(
     decoder: Optional[Any] = None,
     predicates: Optional[List] = None,
     file_sizes: Optional[Dict[str, int]] = None,
+    connector: Optional[str] = None,
 ) -> Iterator[Dict[str, Any]]:
     if cache is None:
         cache = InMemoryParquetCache()
@@ -748,6 +932,7 @@ def _iter_row_groups_v2(
 
     files_in_flight = max(1, int(_cfg.PARQUET_FILES_IN_FLIGHT))
     rowgroups_per_file = max(1, int(_cfg.PARQUET_ROWGROUPS_PER_FILE_IN_FLIGHT))
+    rowgroups_in_flight_cap = max(1, int(_cfg.PARQUET_ROWGROUPS_IN_FLIGHT))
     global_ranges_cap = max(1, int(_cfg.PARQUET_GLOBAL_RANGE_READERS))
 
     decoder_fn = _resolve_decoder(decoder)
@@ -801,9 +986,9 @@ def _iter_row_groups_v2(
                 continue
             known_size = _known_file_size(p)
             if known_size is None:
-                fut = pool.submit(_read_footer_payload, filesystem, p)
+                fut = pool.submit(_read_footer_payload, filesystem, p, connector=connector)
             else:
-                fut = pool.submit(_read_footer_payload, filesystem, p, known_size)
+                fut = pool.submit(_read_footer_payload, filesystem, p, known_size, connector)
             footer_futures[fut] = p
 
         scan_start_ns = time.monotonic_ns()
@@ -814,16 +999,24 @@ def _iter_row_groups_v2(
         active_rowgroups_peak = 0
         rg_pruned_total: int = 0
 
-        active_file_indices: List[int] = []
+        # Rolling admission queue of file indexes with remaining row groups.
+        active_file_indices: Deque[int] = deque()
         next_file_idx = 0
         admission_seq = 0
         active_rowgroups: Dict[Tuple[int, int], _RowGroupState] = {}
+        completed_rowgroups: Dict[Tuple[int, int], _RowGroupState] = {}
         ready_to_emit: Deque[Tuple[int, int]] = deque()
         pending_dispatch: List[Tuple[int, Tuple[int, int]]] = []
+        effective_files_in_flight = min(
+            len(file_states),
+            max(files_in_flight, global_ranges_cap),
+        )
 
         def _admit_files() -> None:
             nonlocal next_file_idx, active_files_peak
-            while len(active_file_indices) < files_in_flight and next_file_idx < len(file_states):
+            while len(active_file_indices) < effective_files_in_flight and next_file_idx < len(
+                file_states
+            ):
                 active_file_indices.append(next_file_idx)
                 next_file_idx += 1
             active_files_peak = max(active_files_peak, len(active_file_indices))
@@ -833,72 +1026,117 @@ def _iter_row_groups_v2(
                 return
             state.completed_ns = now_ns
             state.queued_for_emit = True
+            # Release scheduler credits as soon as work completes, not when
+            # the generator later emits the row group.
+            fstate = file_states[state.file_seq]
+            if fstate.active_rowgroups > 0:
+                fstate.active_rowgroups -= 1
+            active_rowgroups.pop(state.key, None)
+            completed_rowgroups[state.key] = state
+            if (
+                fstate.next_rg_idx >= fstate.total_rowgroups
+                and fstate.active_rowgroups == 0
+                and state.file_seq in active_file_indices
+            ):
+                active_file_indices.remove(state.file_seq)
             ready_to_emit.append(state.key)
 
         def _admit_rowgroups() -> None:
             nonlocal admission_seq, active_rowgroups_peak, rg_pruned_total
-            for file_idx in list(active_file_indices):
-                fstate = file_states[file_idx]
-                if not fstate.footer_ready:
-                    continue
-                while (
-                    fstate.active_rowgroups < rowgroups_per_file
-                    and fstate.next_rg_idx < fstate.total_rowgroups
-                ):
-                    rg_idx = fstate.next_rg_idx
-                    fstate.next_rg_idx += 1
+            # Keep enough ready work queued so dispatch can refill continuously
+            # as soon as reads complete, without waiting for large cohort refills.
+            admission_target = min(
+                rowgroups_in_flight_cap,
+                max(global_ranges_cap, files_in_flight),
+            )
+            while (
+                (len(pending_dispatch) + ranges_in_flight) < admission_target
+                and len(active_rowgroups) < rowgroups_in_flight_cap
+                and active_file_indices
+            ):
+                cycle_len = len(active_file_indices)
+                admitted_this_cycle = 0
 
-                    rg_meta = footers[fstate.path]["row_groups"][rg_idx]
+                # Round-robin: admit at most one row group per file per cycle.
+                for _ in range(cycle_len):
+                    if len(active_rowgroups) >= rowgroups_in_flight_cap:
+                        break
+                    file_idx = active_file_indices.popleft()
+                    fstate = file_states[file_idx]
+                    keep_active = True
 
-                    # Phase 1 predicate pushdown: prune row groups using min/max stats.
-                    if predicates and not row_group_may_satisfy(rg_meta, predicates):
-                        rg_pruned_total += 1
-                        continue  # don't count as active; advance next_rg_idx only
+                    if not fstate.footer_ready:
+                        # Footer still loading; keep file in the queue.
+                        keep_active = True
+                    elif fstate.next_rg_idx >= fstate.total_rowgroups:
+                        keep_active = False
+                    elif fstate.active_rowgroups >= rowgroups_per_file:
+                        # Per-file cap reached for now; revisit after completions.
+                        keep_active = True
+                    else:
+                        rg_idx = fstate.next_rg_idx
+                        fstate.next_rg_idx += 1
 
-                    fstate.active_rowgroups += 1
-                    name_to_stats: Dict[str, dict] = {
-                        col["name"]: col for col in rg_meta["columns"]
-                    }
+                        rg_meta = footers[fstate.path]["row_groups"][rg_idx]
 
-                    admitted_ns = time.monotonic_ns()
-                    rowgroup_state = _RowGroupState(
-                        file_seq=file_idx,
-                        path=fstate.path,
-                        rg_idx=rg_idx,
-                        admission_seq=admission_seq,
-                        admitted_ns=admitted_ns,
-                        column_order=list(column_names),
-                    )
-                    admission_seq += 1
+                        # Phase 1 predicate pushdown: prune row groups using min/max stats.
+                        if predicates and not row_group_may_satisfy(rg_meta, predicates):
+                            rg_pruned_total += 1
+                        else:
+                            fstate.active_rowgroups += 1
+                            name_to_stats: Dict[str, dict] = {
+                                col["name"]: col for col in rg_meta["columns"]
+                            }
 
-                    for col_name in column_names:
-                        if col_name not in name_to_stats:
-                            raise KeyError(
-                                f"Column '{col_name}' not found in row group {rg_idx}. "
-                                f"Available columns: {list(name_to_stats.keys())}"
+                            admitted_ns = time.monotonic_ns()
+                            rowgroup_state = _RowGroupState(
+                                file_seq=file_idx,
+                                path=fstate.path,
+                                rg_idx=rg_idx,
+                                admission_seq=admission_seq,
+                                admitted_ns=admitted_ns,
+                                column_order=list(column_names),
                             )
-                        col_stats = name_to_stats[col_name]
-                        offset, length = _column_chunk_range(col_stats)
-                        rowgroup_state.column_work.append(
-                            _ColumnWorkItem(
-                                name=col_name, stats=col_stats, offset=offset, length=length
+                            admission_seq += 1
+
+                            for col_name in column_names:
+                                if col_name not in name_to_stats:
+                                    raise KeyError(
+                                        f"Column '{col_name}' not found in row group {rg_idx}. "
+                                        f"Available columns: {list(name_to_stats.keys())}"
+                                    )
+                                col_stats = name_to_stats[col_name]
+                                offset, length = _column_chunk_range(col_stats)
+                                rowgroup_state.column_work.append(
+                                    _ColumnWorkItem(
+                                        name=col_name, stats=col_stats, offset=offset, length=length
+                                    )
+                                )
+                                rowgroup_state.cache_misses += 1
+
+                            active_rowgroups[rowgroup_state.key] = rowgroup_state
+                            heapq.heappush(
+                                pending_dispatch, (rowgroup_state.admission_seq, rowgroup_state.key)
                             )
-                        )
-                        rowgroup_state.cache_misses += 1
+                            admitted_this_cycle += 1
 
-                    active_rowgroups[rowgroup_state.key] = rowgroup_state
-                    heapq.heappush(
-                        pending_dispatch, (rowgroup_state.admission_seq, rowgroup_state.key)
-                    )
+                        keep_active = fstate.next_rg_idx < fstate.total_rowgroups
 
-                if (
-                    fstate.footer_ready
-                    and fstate.next_rg_idx >= fstate.total_rowgroups
-                    and fstate.active_rowgroups == 0
-                ):
-                    active_file_indices.remove(file_idx)
+                    if keep_active:
+                        active_file_indices.append(file_idx)
 
-            active_rowgroups_peak = max(active_rowgroups_peak, len(active_rowgroups))
+                    if (len(pending_dispatch) + ranges_in_flight) >= admission_target:
+                        break
+
+                active_rowgroups_peak = max(active_rowgroups_peak, len(active_rowgroups))
+
+                # If we couldn't admit anything this pass, stop and wait for
+                # either footers or task completions to free capacity.
+                if admitted_this_cycle == 0:
+                    break
+
+                # Refill active file queue as slots open up from exhausted files.
+                _admit_files()
 
         def _dispatch_reads() -> None:
             nonlocal ranges_in_flight, ranges_in_flight_peak
@@ -920,19 +1158,66 @@ def _iter_row_groups_v2(
                     target.column_work,
                     decoder_fn,
                     now_ns,
+                    connector,
                 )
                 futures[fut] = target.key
                 ranges_in_flight += 1
                 ranges_in_flight_peak = max(ranges_in_flight_peak, ranges_in_flight)
 
+        def _drain_completions(block: bool) -> bool:
+            nonlocal ranges_in_flight
+
+            waiting = set(futures) | set(footer_futures)
+            if not waiting:
+                return False
+
+            if block:
+                done, _ = wait(waiting, return_when=FIRST_COMPLETED)
+            else:
+                done, _ = wait(waiting, timeout=0, return_when=FIRST_COMPLETED)
+                if not done:
+                    return False
+
+            for fut in done:
+                footer_path = footer_futures.pop(fut, None)
+                if footer_path is not None:
+                    envelope, footer_bytes, fetch_ns = fut.result()
+                    parse_start_ns = time.monotonic_ns()
+                    meta = _parse_footer_envelope(footer_path, envelope, footer_bytes)
+                    parse_ns = time.monotonic_ns() - parse_start_ns
+                    cache.set_footer(footer_path, meta)
+                    footer_fetch_ns[footer_path] = fetch_ns + parse_ns
+                    _mark_footer_ready(footer_path, meta)
+                    continue
+
+                key = futures.pop(fut)
+                ranges_in_flight -= 1
+                state = active_rowgroups.get(key)
+                if state is None:
+                    continue
+                result = fut.result()
+                state.columns.update(result["columns"])
+                state.bytes_fetched += result["bytes_fetched"]
+                state.range_request_count += result["range_request_count"]
+                state.range_bytes_requested += result["bytes_requested"]
+                state.time_read_ranges_ns += result["read_ns"]
+                state.time_decode_columns_ns += result["decode_ns"]
+                state.task_queue_wait_ns += result["queue_wait_ns"]
+                state.task_total_ns += result["task_total_ns"]
+
+                _queue_ready(state, time.monotonic_ns())
+            return True
+
         while True:
+            # Drain completions first so freed slots can be reused before we emit.
+            _drain_completions(block=False)
             _admit_files()
             _admit_rowgroups()
             _dispatch_reads()
 
-            while ready_to_emit:
+            if ready_to_emit:
                 key = ready_to_emit.popleft()
-                state = active_rowgroups.get(key)
+                state = completed_rowgroups.pop(key, None)
                 if state is None:
                     continue
 
@@ -968,58 +1253,33 @@ def _iter_row_groups_v2(
                 row_group["__ranges_in_flight_peak__"] = ranges_in_flight_peak
                 row_group["__active_files_peak__"] = active_files_peak
                 row_group["__active_rowgroups_peak__"] = active_rowgroups_peak
+                row_group["__rowgroups_in_flight_cap__"] = rowgroups_in_flight_cap
                 row_group["__time_to_first_rowgroup_ns__"] = (
                     completed_ns - scan_start_ns if first_rowgroup_emit_ns == completed_ns else 0
                 )
                 row_group["__row_groups_pruned__"] = rg_pruned_total
 
-                fstate = file_states[state.file_seq]
-                fstate.active_rowgroups -= 1
-                del active_rowgroups[key]
-
-                if (
-                    fstate.next_rg_idx >= fstate.total_rowgroups
-                    and fstate.active_rowgroups == 0
-                    and state.file_seq in active_file_indices
-                ):
-                    active_file_indices.remove(state.file_seq)
-
                 yield row_group
+                continue
 
             if not futures and not footer_futures:
-                if not active_rowgroups and next_file_idx >= len(file_states):
+                all_files_exhausted = all(
+                    state.footer_ready
+                    and state.next_rg_idx >= state.total_rowgroups
+                    and state.active_rowgroups == 0
+                    for state in file_states
+                )
+                if (
+                    not active_rowgroups
+                    and not completed_rowgroups
+                    and not pending_dispatch
+                    and not ready_to_emit
+                    and all_files_exhausted
+                ):
                     break
                 continue
 
-            done, _ = wait(set(futures) | set(footer_futures), return_when=FIRST_COMPLETED)
-            for fut in done:
-                footer_path = footer_futures.pop(fut, None)
-                if footer_path is not None:
-                    envelope, footer_bytes, fetch_ns = fut.result()
-                    parse_start_ns = time.monotonic_ns()
-                    meta = _parse_footer_envelope(footer_path, envelope, footer_bytes)
-                    parse_ns = time.monotonic_ns() - parse_start_ns
-                    cache.set_footer(footer_path, meta)
-                    footer_fetch_ns[footer_path] = fetch_ns + parse_ns
-                    _mark_footer_ready(footer_path, meta)
-                    continue
-
-                key = futures.pop(fut)
-                ranges_in_flight -= 1
-                state = active_rowgroups.get(key)
-                if state is None:
-                    continue
-                result = fut.result()
-                state.columns.update(result["columns"])
-                state.bytes_fetched += result["bytes_fetched"]
-                state.range_request_count += result["range_request_count"]
-                state.range_bytes_requested += result["bytes_requested"]
-                state.time_read_ranges_ns += result["read_ns"]
-                state.time_decode_columns_ns += result["decode_ns"]
-                state.task_queue_wait_ns += result["queue_wait_ns"]
-                state.task_total_ns += result["task_total_ns"]
-
-                _queue_ready(state, time.monotonic_ns())
+            _drain_completions(block=True)
 
     finally:
         for fut in list(futures):
@@ -1039,6 +1299,7 @@ def iter_row_groups(
     decoder: Optional[Any] = None,
     predicates: Optional[List] = None,
     file_sizes: Optional[Dict[str, int]] = None,
+    connector: Optional[str] = None,
 ) -> Iterator[Dict[str, Any]]:
     """Yield assembled row groups using the configured scheduler implementation."""
     from opteryx.config import features
@@ -1053,6 +1314,7 @@ def iter_row_groups(
             decoder=decoder,
             predicates=predicates,
             file_sizes=file_sizes,
+            connector=connector,
         )
         return
 
@@ -1065,4 +1327,5 @@ def iter_row_groups(
         decoder=decoder,
         predicates=predicates,
         file_sizes=file_sizes,
+        connector=connector,
     )

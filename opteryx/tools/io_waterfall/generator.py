@@ -33,31 +33,45 @@ def generate_waterfall_html(trace_file: str, output_file: Optional[str] = None) 
 
     reader = TraceReader(trace_file)
     metadata = reader.metadata()
-    timelines = reader.file_timelines()
+    operations = reader.operation_timelines()
     stats = reader.statistics()
 
-    # Build ECharts configuration
-    echarts_config = _build_echarts_config(timelines, metadata, stats)
+    # keep raw events for drill-down support
+    all_events = list(reader.events())
+    # group events by file_id for quick lookup in JS
+    events_by_file: dict[str, list] = {}
+    for ev in all_events:
+        fid = ev.get("file_id")
+        if fid:
+            events_by_file.setdefault(fid, []).append(ev)
 
-    # Render HTML
-    html = _render_html_template(echarts_config, metadata, stats)
+    # row order (needed for click drill-down)
+    ordered_file_ids = [op.get("file_id") for op in operations]
 
-    # Write to file
+    # build chart configuration using helper
+    echarts_config = _build_echarts_config(operations, metadata)
+
+    # render HTML page
+    html = _render_html_template(echarts_config, metadata, stats, events_by_file, ordered_file_ids)
+
+    # write to disk
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(html)
 
     return str(output_path)
 
 
-def _build_echarts_config(timelines: dict, metadata: dict, stats: dict) -> dict:
-    """Build ECharts configuration for waterfall chart."""
+def _build_echarts_config(operations: list, metadata: dict) -> dict:
+    """Build ECharts configuration for waterfall chart.
 
-    # Sort files by download start time
-    sorted_files = sorted(timelines.items(), key=lambda x: x[1].get("download_start", float("inf")))
-
+    This logic was previously part of ``generate_waterfall_html`` but is
+    factored out so the CLI can validate the configuration independently and
+    to keep the main function concise.  The layout is identical to the
+    earlier implementation, including phases and zoom behaviour.
+    """
     # Find time boundaries (seconds)
     all_times = []
-    for timeline in timelines.values():
+    for timeline in operations:
         for key in ["download_start", "download_complete", "decode_start", "decode_complete"]:
             if timeline.get(key) is not None:
                 all_times.append(timeline[key])
@@ -70,30 +84,41 @@ def _build_echarts_config(timelines: dict, metadata: dict, stats: dict) -> dict:
         return (v - min_time) if v is not None else None
 
     # Short names for y-axis labels
-    short_names = [
-        (Path(fid).name if ("/" in fid or "\\" in fid) else fid) for fid, _ in sorted_files
-    ]
+    short_names = [op.get("label", "unknown") for op in operations]
 
-    # Data format (array per file):
-    # [catIndex, dl_start, dl_end, buf_start, buf_end, dec_start, dec_end, rows, name]
-    # dim:  0        1        2       3          4        5          6       7     8
+    # Data format (array per operation):
+    # [catIndex, dl_start, dl_end, buf_start, buf_end, dec_start, dec_end, rows, name,
+    #  component, rg_idx, bytes]
     series_data = []
-    for i, (file_id, tl) in enumerate(sorted_files):
+    for i, tl in enumerate(operations):
         dl_start = t(tl.get("download_start"))
         dl_end = t(tl.get("download_complete"))
         dec_start = t(tl.get("decode_start"))
         dec_end = t(tl.get("decode_complete"))
-        buf_start = dl_end  # buffer = gap between download_complete and decode_start
+        buf_start = dl_end
         buf_end = dec_start
         rows = tl.get("rows_decoded", 0) or 0
         series_data.append(
-            [i, dl_start, dl_end, buf_start, buf_end, dec_start, dec_end, rows, short_names[i]]
+            [
+                i,
+                dl_start,
+                dl_end,
+                buf_start,
+                buf_end,
+                dec_start,
+                dec_end,
+                rows,
+                short_names[i],
+                tl.get("component"),
+                tl.get("rg_idx"),
+                tl.get("bytes_received", 0) or 0,
+            ]
         )
 
     return {
         "title": {
             "text": "IO Waterfall Chart",
-            "subtext": f"Query: {metadata.get('query', 'Unknown')[:80]}",
+            "subtext": f"Query: {metadata.get('query', 'Unknown')[:120]}",
         },
         "tooltip": {
             "trigger": "item",
@@ -133,7 +158,7 @@ def _build_echarts_config(timelines: dict, metadata: dict, stats: dict) -> dict:
                 "type": "slider",
                 "yAxisIndex": [0],
                 "start": 0,
-                "end": min(100, max(20, round(2000 / max(len(short_names), 1)))),
+                "end": min(100, max(20, round(1200 / max(len(short_names), 1)))),
                 "width": 20,
                 "right": 8,
             },
@@ -142,13 +167,28 @@ def _build_echarts_config(timelines: dict, metadata: dict, stats: dict) -> dict:
     }
 
 
-def _render_html_template(echarts_config: dict, metadata: dict, stats: dict) -> str:
-    """Render the HTML template with embedded chart configuration."""
+def _render_html_template(
+    echarts_config: dict,
+    metadata: dict,
+    stats: dict,
+    events_by_file: dict,
+    ordered_file_ids: list,
+) -> str:
+    """Render the HTML template with embedded chart configuration.
+
+    ``events_by_file`` is a mapping file_id→list-of-events used by the
+    embedded drill-down click handler.  ``ordered_file_ids`` must correspond
+    to the order of rows in the waterfall chart so we can index into the map.
+    """
 
     query_text = metadata.get("query", "No query text available")
     session_id = metadata.get("session_id", "Unknown")
 
     stats_html = _format_stats(stats)
+
+    # JSON-serialize the auxiliary data for embedding in the page
+    events_json = json.dumps(events_by_file)
+    file_id_list_json = json.dumps(ordered_file_ids)
 
     html = f"""<!DOCTYPE html>
 <html>
@@ -261,9 +301,19 @@ def _render_html_template(echarts_config: dict, metadata: dict, stats: dict) -> 
     <script>
         var chart = echarts.init(document.getElementById('chart'));
 
-        // Data layout (per file, array format):
-        // [catIndex, dl_start, dl_end, buf_start, buf_end, dec_start, dec_end, rows, name]
-        //      0         1        2        3          4        5          6       7     8
+        // embed raw events for debugging/drill-down
+        var traceEvents = {events_json};
+
+        chart.on('click', function(params) {{
+            // params.dataIndex corresponds to the row index
+            var idx = params.dataIndex;
+            var fileId = {file_id_list_json}[idx];
+            console.log('Events for', fileId, traceEvents[fileId] || []);
+        }});
+
+        // Data layout (per operation):
+        // [catIndex, dl_start, dl_end, buf_start, buf_end, dec_start, dec_end,
+        //  rows, name, component, rg_idx, bytes]
 
         function renderItem(params, api) {{
             var cat      = api.value(0);   // category index
@@ -304,10 +354,16 @@ def _render_html_template(echarts_config: dict, metadata: dict, stats: dict) -> 
             var buf = d[4] != null && d[3] != null ? ((d[4]-d[3])*1000).toFixed(0)+'ms' : '—';
             var dec = d[6] != null && d[5] != null ? ((d[6]-d[5])*1000).toFixed(0)+'ms' : '—';
             var rows = d[7] ? d[7].toLocaleString() : '—';
+            var component = d[9] || 'file';
+            var rg = d[10] != null ? d[10] : '—';
+            var bytes = d[11] || 0;
             return '<b>' + name + '</b><br/>'
+                 + 'Component: ' + component + '<br/>'
+                 + 'Row Group: ' + rg + '<br/>'
                  + 'Download: ' + dl + '<br/>'
                  + 'Buffer: '   + buf + '<br/>'
                  + 'Decode: '   + dec + '<br/>'
+                 + 'Bytes: ' + bytes.toLocaleString() + '<br/>'
                  + 'Rows: '     + rows;
         }}
 
@@ -343,13 +399,19 @@ def _format_stats(stats: dict) -> str:
 
     stats_items = [
         ("Total Files", str(stats["total_files"]), ""),
+        ("Total Ops", str(stats.get("total_operations", 0)), ""),
+        ("Download Ops", str(stats.get("total_download_ops", 0)), ""),
+        ("Decode Ops", str(stats.get("total_decode_ops", 0)), ""),
+        ("Footer Downloads", str(stats.get("footer_download_ops", 0)), ""),
+        ("Rowgroup Downloads", str(stats.get("rowgroup_download_ops", 0)), ""),
+        ("Rowgroup Decodes", str(stats.get("rowgroup_decode_ops", 0)), ""),
         ("Total Data", format_bytes(stats["total_bytes"]), ""),
         ("Total Rows", f"{stats['total_rows']:,}", ""),
         ("Query Duration", format_time(stats["query_duration_ms"]), ""),
         ("Download Phase", format_time(stats["download_phase_duration_ms"]), ""),
         ("Decode Phase", format_time(stats["decode_phase_duration_ms"]), ""),
-        ("Avg Download/File", format_time(stats["avg_download_time_ms"]), ""),
-        ("Avg Decode/File", format_time(stats["avg_decode_time_ms"]), ""),
+        ("Avg Download/Op", format_time(stats["avg_download_time_ms"]), ""),
+        ("Avg Decode/Op", format_time(stats["avg_decode_time_ms"]), ""),
         ("Max Concurrent", str(stats["max_concurrent_downloads"]), "downloads"),
     ]
 

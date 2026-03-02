@@ -50,6 +50,10 @@ Legend:
 2. **Click to Expand**
    - Click file name → zoom into that file's timeline
    - Click phase → highlight all phases of that type across files
+   - (implementation note) In the current tool a click will also log the
+     underlying trace events for that file to the browser console, allowing
+     developers to inspect footer/row-group/column activity and build a
+     richer drill-down UI later.
 
 3. **Filtering/Sorting**
    ```

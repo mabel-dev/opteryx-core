@@ -199,6 +199,13 @@ class ParquetReadNode(ReaderNode):
     def _cast_table_to_schema(table: pyarrow.Table, schema: pyarrow.Schema) -> pyarrow.Table:
         if table.column_names == ["*"]:
             return table
+        if len(schema) == 0:
+            # Preserve row count for zero-column outputs (for example COUNT(*) pipelines)
+            # by dropping all columns from the current table instead of constructing a
+            # fresh empty table, which would have zero rows.
+            if table.num_columns == 0:
+                return table
+            return table.drop(table.column_names)
 
         arrays = []
         names = []
@@ -233,6 +240,10 @@ class ParquetReadNode(ReaderNode):
     @staticmethod
     def _cast_morsel_to_schema(morsel: Morsel, schema: pyarrow.Schema) -> Morsel:
         if morsel.num_rows == 0:
+            return morsel
+        if len(schema) == 0:
+            # Zero-projection pipelines (for example COUNT(*) with filters) still
+            # need row-bearing morsels for downstream operators to count rows.
             return morsel
 
         table = morsel.to_arrow()
@@ -341,12 +352,13 @@ class ParquetReadNode(ReaderNode):
         base_schema = self.parameters["schema"]
         projected_identities = [column.schema_column.identity for column in (self.columns or [])]
         projected_identity_set = set(projected_identities)
-        if not projected_identity_set:
-            projected_identities = [column.identity for column in base_schema.columns]
-            projected_identity_set = set(projected_identities)
 
         filter_identity_set = self._extract_filter_identities(self.predicates)
         required_identity_set = projected_identity_set.union(filter_identity_set)
+        if not required_identity_set and base_schema.columns:
+            # Zero-projection/no-filter scans still need one physical column so row
+            # counts flow through the pipeline. Keep output projection empty.
+            required_identity_set = {base_schema.columns[0].identity}
 
         read_schema = deepcopy(base_schema)
         read_schema.columns = [
@@ -418,12 +430,16 @@ class ParquetReadNode(ReaderNode):
         # storage protocol embedded in the file paths.
         if hasattr(self.connector, "filesystem"):
             filesystem = self.connector.filesystem
+            connector_type = (
+                getattr(self.connector, "storage_type", None) or self.connector.__type__
+            )
         else:
             from opteryx.connectors.io_systems import create_filesystem
 
             first_path = blob_paths[0] if blob_paths else ""
             protocol = first_path.split("://")[0] if "://" in first_path else ""
             filesystem = create_filesystem(protocol)
+            connector_type = protocol.upper() if protocol else "FILESYSTEM"
         # Column names as they appear in the Parquet file (Parquet uses the
         # original names, not identity aliases).
         column_names = [col.name for col in read_schema.columns]
@@ -484,6 +500,7 @@ class ParquetReadNode(ReaderNode):
                 cache,
                 predicates=predicate_stats,
                 file_sizes=file_sizes or None,
+                connector=connector_type,
             ):
                 path = row_group.pop("__path__")
                 _ = row_group.pop("__row_group__")
@@ -539,11 +556,20 @@ class ParquetReadNode(ReaderNode):
                     self.readings.get("parquet_active_rowgroups_peak", 0),
                     row_group.pop("__active_rowgroups_peak__", 0),
                 )
+                self.readings["parquet_rowgroups_in_flight_cap"] = max(
+                    self.readings.get("parquet_rowgroups_in_flight_cap", 0),
+                    row_group.pop("__rowgroups_in_flight_cap__", 0),
+                )
                 time_to_first_rowgroup_ns = row_group.pop("__time_to_first_rowgroup_ns__", 0)
                 if time_to_first_rowgroup_ns:
                     existing = self.readings.get("time_to_first_rowgroup_ns", 0)
                     if existing == 0 or time_to_first_rowgroup_ns < existing:
                         self.readings["time_to_first_rowgroup_ns"] = time_to_first_rowgroup_ns
+
+                # Drop any future scheduler metadata keys without breaking
+                # the row payload contract expected below.
+                for key in [k for k in row_group if k.startswith("__")]:
+                    row_group.pop(key, None)
 
                 # Assemble the projected columns into a Draken Morsel directly.
                 # Each value is a DrakenVector; we map data-file names to identity
