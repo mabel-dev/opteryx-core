@@ -1320,9 +1320,24 @@ def iter_row_groups(
     predicates: Optional[List] = None,
     file_sizes: Optional[Dict[str, int]] = None,
     connector: Optional[str] = None,
+    query_id: Optional[str] = None,
 ) -> Iterator[Dict[str, Any]]:
     """Yield assembled row groups using the configured scheduler implementation."""
     from opteryx.config import features
+
+    if features.io_process_rowgroup_ring:
+        from opteryx.parquet_io.io_process_ring import iter_row_groups_io_process_v2
+
+        yield from iter_row_groups_io_process_v2(
+            paths,
+            column_names,
+            max_workers=max_workers,
+            predicates=predicates,
+            file_sizes=file_sizes,
+            connector=connector,
+            query_id=query_id,
+        )
+        return
 
     if features.parquet_rowgroup_scheduler_v2:
         yield from _iter_row_groups_v2(

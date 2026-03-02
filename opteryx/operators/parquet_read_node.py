@@ -414,6 +414,24 @@ class ParquetReadNode(ReaderNode):
         self.readings["parquet_emit_queue_depth_at_ready_max"] += 0
         self.readings["time_to_first_rowgroup_ns"] += 0
         self.readings["parquet_row_groups_pruned"] += 0
+        self.readings["io_ring_slot_bytes"] += 0
+        self.readings["io_ring_slot_count"] += 0
+        self.readings["io_ring_total_bytes"] += 0
+        self.readings["io_ring_producer_full_wait_ns"] += 0
+        self.readings["io_ring_producer_full_wait_events"] += 0
+        self.readings["io_ring_consumer_empty_wait_ns"] += 0
+        self.readings["io_ring_consumer_empty_wait_events"] += 0
+        self.readings["io_transfer_ready_backlog_peak"] += 0
+        self.readings["io_transfer_emit_wait_ns"] += 0
+        self.readings["io_transfer_fragment_count_p50"] += 0
+        self.readings["io_transfer_fragment_count_p95"] += 0
+        self.readings["io_transfer_fragment_count_max"] += 0
+        self.readings["io_transfer_payload_bytes_p50"] += 0
+        self.readings["io_transfer_payload_bytes_p95"] += 0
+        self.readings["io_transfer_payload_bytes_max"] += 0
+        self.readings["io_rowgroup_slice_count"] += 0
+        self.readings["io_deserialize_ns"] += 0
+        self.readings["io_serialize_ns"] += 0
 
         # Phase 1 predicate pushdown: extract (col, op, value) triples from pushed-down
         # predicates so the reader can prune row groups using footer min/max stats.
@@ -509,6 +527,7 @@ class ParquetReadNode(ReaderNode):
                 predicates=predicate_stats,
                 file_sizes=file_sizes or None,
                 connector=connector_type,
+                query_id=getattr(self.properties, "query_id", None),
             ):
                 path = row_group.pop("__path__")
                 _ = row_group.pop("__row_group__")
@@ -579,6 +598,66 @@ class ParquetReadNode(ReaderNode):
                 self.readings["parquet_scheduler_empty_wait_events"] += row_group.pop(
                     "__scheduler_empty_wait_events__", 0
                 )
+                self.readings["io_ring_slot_bytes"] = max(
+                    self.readings.get("io_ring_slot_bytes", 0),
+                    row_group.pop("__io_ring_slot_bytes__", 0),
+                )
+                self.readings["io_ring_slot_count"] = max(
+                    self.readings.get("io_ring_slot_count", 0),
+                    row_group.pop("__io_ring_slot_count__", 0),
+                )
+                self.readings["io_ring_total_bytes"] = max(
+                    self.readings.get("io_ring_total_bytes", 0),
+                    row_group.pop("__io_ring_total_bytes__", 0),
+                )
+                self.readings["io_ring_producer_full_wait_ns"] += row_group.pop(
+                    "__io_ring_producer_full_wait_ns__", 0
+                )
+                self.readings["io_ring_producer_full_wait_events"] += row_group.pop(
+                    "__io_ring_producer_full_wait_events__", 0
+                )
+                self.readings["io_ring_consumer_empty_wait_ns"] += row_group.pop(
+                    "__io_ring_consumer_empty_wait_ns__", 0
+                )
+                self.readings["io_ring_consumer_empty_wait_events"] += row_group.pop(
+                    "__io_ring_consumer_empty_wait_events__", 0
+                )
+                self.readings["io_transfer_ready_backlog_peak"] = max(
+                    self.readings.get("io_transfer_ready_backlog_peak", 0),
+                    row_group.pop("__io_transfer_ready_backlog_peak__", 0),
+                )
+                self.readings["io_transfer_emit_wait_ns"] += row_group.pop(
+                    "__io_transfer_emit_wait_ns__", 0
+                )
+                self.readings["io_transfer_fragment_count_p50"] = max(
+                    self.readings.get("io_transfer_fragment_count_p50", 0),
+                    row_group.pop("__io_transfer_fragment_count_p50__", 0),
+                )
+                self.readings["io_transfer_fragment_count_p95"] = max(
+                    self.readings.get("io_transfer_fragment_count_p95", 0),
+                    row_group.pop("__io_transfer_fragment_count_p95__", 0),
+                )
+                self.readings["io_transfer_fragment_count_max"] = max(
+                    self.readings.get("io_transfer_fragment_count_max", 0),
+                    row_group.pop("__io_transfer_fragment_count_max__", 0),
+                )
+                self.readings["io_transfer_payload_bytes_p50"] = max(
+                    self.readings.get("io_transfer_payload_bytes_p50", 0),
+                    row_group.pop("__io_transfer_payload_bytes_p50__", 0),
+                )
+                self.readings["io_transfer_payload_bytes_p95"] = max(
+                    self.readings.get("io_transfer_payload_bytes_p95", 0),
+                    row_group.pop("__io_transfer_payload_bytes_p95__", 0),
+                )
+                self.readings["io_transfer_payload_bytes_max"] = max(
+                    self.readings.get("io_transfer_payload_bytes_max", 0),
+                    row_group.pop("__io_transfer_payload_bytes_max__", 0),
+                )
+                self.readings["io_rowgroup_slice_count"] += row_group.pop(
+                    "__io_rowgroup_slice_count__", 0
+                )
+                self.readings["io_deserialize_ns"] += row_group.pop("__io_deserialize_ns__", 0)
+                self.readings["io_serialize_ns"] += row_group.pop("__io_serialize_ns__", 0)
                 time_to_first_rowgroup_ns = row_group.pop("__time_to_first_rowgroup_ns__", 0)
                 if time_to_first_rowgroup_ns:
                     existing = self.readings.get("time_to_first_rowgroup_ns", 0)

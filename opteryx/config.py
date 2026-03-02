@@ -163,6 +163,19 @@ PARQUET_GLOBAL_RANGE_READERS: int = int(get("PARQUET_GLOBAL_RANGE_READERS", 24))
 PARQUET_RANGE_READERS_PER_ROWGROUP: int = int(get("PARQUET_RANGE_READERS_PER_ROWGROUP", 10))
 """Cap for in-flight column range reads per row group."""
 
+# IO process row-group ring transport configuration
+IO_RING_SLOT_BYTES: int = int(get("IO_RING_SLOT_BYTES", 32 * 1024 * 1024))
+"""Shared-memory slot size in bytes for FEATURE_IO_PROCESS_ROWGROUP_RING."""
+
+IO_RING_SLOT_COUNT: int = int(get("IO_RING_SLOT_COUNT", 64))
+"""Shared-memory slot count for FEATURE_IO_PROCESS_ROWGROUP_RING."""
+
+IO_MAX_FRAGMENTS_PER_TRANSFER: int = int(get("IO_MAX_FRAGMENTS_PER_TRANSFER", 8))
+"""Maximum fragments for one transfer before row-group slicing is applied."""
+
+IO_TARGET_SLICE_BYTES: int = int(get("IO_TARGET_SLICE_BYTES", 16 * 1024 * 1024))
+"""Target serialized bytes per row-group slice when slicing is required."""
+
 
 # fmt:on
 
@@ -186,6 +199,11 @@ class Features:
     parquet_rowgroup_scheduler_v2 = str(
         get("FEATURE_PARQUET_ROWGROUP_SCHEDULER_V2", "1")
     ).lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+    io_process_rowgroup_ring = str(get("FEATURE_IO_PROCESS_ROWGROUP_RING", "0")).lower() in (
         "1",
         "true",
         "yes",
