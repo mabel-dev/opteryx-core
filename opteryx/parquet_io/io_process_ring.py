@@ -422,6 +422,7 @@ def _io_worker(
                 max_workers = int(command.get("max_workers", 16))
                 connector = command.get("connector")
                 query_id_hash = _stable_u64(str(command.get("query_id", "")))
+                prefetched_footers = command.get("prefetched_footers") or {}
 
                 slot_payload_bytes = slot_bytes - 256
                 max_fragments = int(command["max_fragments_per_transfer"])
@@ -440,6 +441,7 @@ def _io_worker(
                     predicates=predicates,
                     file_sizes=file_sizes,
                     connector=connector,
+                    prefetched_footers=prefetched_footers,
                 ):
                     if cancel_event.is_set():
                         break
@@ -590,6 +592,7 @@ def iter_row_groups_io_process_v2(
     file_sizes: Optional[Dict[str, int]] = None,
     connector: Optional[str] = None,
     query_id: Optional[str] = None,
+    prefetched_footers: Optional[Dict[str, dict]] = None,
 ) -> Iterator[Dict[str, Any]]:
     """
     Process-isolated row-group iterator.
@@ -648,6 +651,7 @@ def iter_row_groups_io_process_v2(
                 "max_workers": max_workers,
                 "max_fragments_per_transfer": max_fragments,
                 "target_slice_bytes": target_slice_bytes,
+                "prefetched_footers": prefetched_footers,
             }
         )
 

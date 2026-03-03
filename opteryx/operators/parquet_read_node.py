@@ -483,6 +483,7 @@ class ParquetReadNode(ReaderNode):
         # case up front and route to full-file fallback for correctness.
         has_repeated_projection = False
         has_missing_required_columns = False
+        prefetched_footers: dict[str, dict] = {}
         for blob_name in blob_paths:
             footer = fetch_footer(
                 filesystem,
@@ -490,6 +491,7 @@ class ParquetReadNode(ReaderNode):
                 cache=cache,
                 file_size=file_sizes.get(blob_name),
             )
+            prefetched_footers[blob_name] = footer
             has_repeated_projection = has_repeated_projection or self._has_repeated_projection(
                 footer, column_names
             )
@@ -528,6 +530,7 @@ class ParquetReadNode(ReaderNode):
                 file_sizes=file_sizes or None,
                 connector=connector_type,
                 query_id=getattr(self.properties, "query_id", None),
+                prefetched_footers=prefetched_footers,
             ):
                 path = row_group.pop("__path__")
                 _ = row_group.pop("__row_group__")
