@@ -508,6 +508,7 @@ def _iter_row_groups_v1(
     predicates: Optional[List] = None,
     file_sizes: Optional[Dict[str, int]] = None,
     connector: Optional[str] = None,
+    prefetched_footers: Optional[Dict[str, dict]] = None,
 ) -> Iterator[Dict[str, Any]]:
     """Yield assembled row groups across multiple Parquet files.
 
@@ -582,7 +583,15 @@ def _iter_row_groups_v1(
             size = file_sizes.get(p)
             return size if isinstance(size, int) and size > 0 else None
 
+        prefetched_footers = prefetched_footers or {}
+
         for p in unique_paths:
+            prefetch_meta = prefetched_footers.get(p)
+            if prefetch_meta is not None:
+                footers[p] = prefetch_meta
+                footer_fetch_ns[p] = 0
+                cache.set_footer(p, prefetch_meta)
+                continue
             cached = cache.get_footer(p)
             if cached is not None:
                 footers[p] = cached
@@ -925,6 +934,7 @@ def _iter_row_groups_v2(
     predicates: Optional[List] = None,
     file_sizes: Optional[Dict[str, int]] = None,
     connector: Optional[str] = None,
+    prefetched_footers: Optional[Dict[str, dict]] = None,
 ) -> Iterator[Dict[str, Any]]:
     if cache is None:
         cache = InMemoryParquetCache()
@@ -979,7 +989,15 @@ def _iter_row_groups_v2(
                 state.total_rowgroups = total
                 state.footer_ready = True
 
+        prefetched_footers = prefetched_footers or {}
+
         for p in unique_paths:
+            prefetch_meta = prefetched_footers.get(p)
+            if prefetch_meta is not None:
+                footer_fetch_ns[p] = 0
+                cache.set_footer(p, prefetch_meta)
+                _mark_footer_ready(p, prefetch_meta)
+                continue
             cached = cache.get_footer(p)
             if cached is not None:
                 footer_fetch_ns[p] = 0
@@ -1321,6 +1339,7 @@ def iter_row_groups(
     file_sizes: Optional[Dict[str, int]] = None,
     connector: Optional[str] = None,
     query_id: Optional[str] = None,
+    prefetched_footers: Optional[Dict[str, dict]] = None,
 ) -> Iterator[Dict[str, Any]]:
     """Yield assembled row groups using the configured scheduler implementation."""
     from opteryx.config import features
@@ -1336,6 +1355,7 @@ def iter_row_groups(
             file_sizes=file_sizes,
             connector=connector,
             query_id=query_id,
+            prefetched_footers=prefetched_footers,
         )
         return
 
@@ -1350,6 +1370,7 @@ def iter_row_groups(
             predicates=predicates,
             file_sizes=file_sizes,
             connector=connector,
+            prefetched_footers=prefetched_footers,
         )
         return
 
@@ -1363,4 +1384,5 @@ def iter_row_groups(
         predicates=predicates,
         file_sizes=file_sizes,
         connector=connector,
+        prefetched_footers=prefetched_footers,
     )

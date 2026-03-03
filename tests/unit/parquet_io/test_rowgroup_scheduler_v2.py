@@ -343,6 +343,39 @@ def test_scheduler_v2_respects_global_rowgroups_in_flight_cap(monkeypatch):
     assert max(row["__rowgroups_in_flight_cap__"] for row in rows) == 3
 
 
+def test_scheduler_v2_reuses_prefetched_footers(monkeypatch):
+    paths = ["a.parquet", "b.parquet"]
+    footers, base_by_path = _build_footers(paths, rowgroups=2, columns=4)
+    _set_scheduler_caps(
+        monkeypatch,
+        files_in_flight=2,
+        rowgroups_per_file=2,
+        global_ranges=8,
+        per_rowgroup_ranges=4,
+    )
+
+    def _should_not_fetch(*_args, **_kwargs):
+        raise AssertionError("_read_footer_payload should not be called with prefetched_footers")
+
+    monkeypatch.setattr(reader, "_read_footer_payload", _should_not_fetch)
+
+    fs = _TrackingFilesystem(base_by_path, sleep_s=0.001)
+    rows = list(
+        reader._iter_row_groups_v2(
+            fs,
+            paths,
+            [f"c{i}" for i in range(4)],
+            cache=InMemoryParquetCache(),
+            max_workers=8,
+            decoder=_fake_decoder,
+            prefetched_footers=footers,
+        )
+    )
+
+    assert len(rows) == 4
+    assert {row["__path__"] for row in rows} == set(paths)
+
+
 def test_scheduler_v2_parity_with_v1(monkeypatch):
     paths = ["a.parquet", "b.parquet"]
     footers, base_by_path = _build_footers(paths, rowgroups=2, columns=5)
