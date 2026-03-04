@@ -18,6 +18,7 @@ import numpy
 import pyarrow
 from orso.types import OrsoTypes
 
+from opteryx import EMPTY
 from opteryx import EOS
 from opteryx.draken.morsels.morsel import Morsel
 from opteryx.exceptions import UnsupportedSyntaxError
@@ -241,7 +242,7 @@ class DrakenAggregateAndGroupNode(BasePlanNode):
                 draken = draken.select(self._required_columns)
             self._group_by.ingest(draken)
             self.readings["time_groupby_ingest"] += time.monotonic_ns() - ingest_start
-            yield None
+            yield EMPTY
             return
 
         for chunk in draken:
@@ -253,4 +254,4 @@ class DrakenAggregateAndGroupNode(BasePlanNode):
 
         self.readings["time_groupby_ingest"] += time.monotonic_ns() - ingest_start
 
-        yield None
+        yield EMPTY

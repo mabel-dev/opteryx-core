@@ -819,16 +819,15 @@ def _split_coalesced_buffers(
     return expanded
 
 
-def _fetch_rowgroup_task(
+def _read_rowgroup_task(
     filesystem: Any,
     path: str,
     rg_idx: int,
     column_work: List[_ColumnWorkItem],
-    decoder: Any,
     submitted_ns: int,
     connector: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Fetch and decode all columns of one row group in a single batched read_ranges() call."""
+    """Fetch all column chunks of one row group in a single batched read_ranges() call."""
     task_start_ns = time.monotonic_ns()
     queue_wait_ns = task_start_ns - submitted_ns
 
@@ -866,7 +865,33 @@ def _fetch_rowgroup_task(
             kwargs["connector"] = connector
         record_event("download_complete", **kwargs)
 
-    # tracing: rowgroup decode start
+    task_total_ns = time.monotonic_ns() - task_start_ns
+    return {
+        "raw_buffers": raw_buffers,
+        "bytes_fetched": bytes_fetched,
+        "bytes_requested": bytes_requested,
+        "range_request_count": len(coalesced_ranges),
+        "read_ns": read_ns,
+        "queue_wait_ns": queue_wait_ns,
+        "task_total_ns": task_total_ns,
+    }
+
+
+def _decode_rowgroup_task(
+    path: str,
+    rg_idx: int,
+    column_work: List[_ColumnWorkItem],
+    raw_buffers: List[bytes],
+    decoder: Any,
+    submitted_ns: int,
+    connector: Optional[str] = None,
+) -> Dict[str, Any]:
+    from opteryx import config as _cfg
+    from opteryx.tracing import record_event
+
+    task_start_ns = time.monotonic_ns()
+    queue_wait_ns = task_start_ns - submitted_ns
+
     if _cfg.OPTERYX_TRACE:
         kwargs = {"file_id": path, "component": "rowgroup", "rg_idx": rg_idx}
         if connector:
@@ -885,22 +910,18 @@ def _fetch_rowgroup_task(
         columns[work.name] = decoded
     decode_ns = time.monotonic_ns() - decode_start_ns
 
-    # per-column decode events
     if _cfg.OPTERYX_TRACE:
-        for work, raw_bytes in zip(column_work, raw_buffers):
-            col = work.name
+        for work, _raw_bytes in zip(column_work, raw_buffers):
             kwargs = {
                 "file_id": path,
                 "component": "column",
                 "rg_idx": rg_idx,
-                "column": col,
+                "column": work.name,
             }
             if connector:
                 kwargs["connector"] = connector
             record_event("decode_complete", **kwargs)
 
-    # rowgroup decode complete
-    if _cfg.OPTERYX_TRACE:
         kwargs = {
             "file_id": path,
             "component": "rowgroup",
@@ -911,16 +932,11 @@ def _fetch_rowgroup_task(
             kwargs["connector"] = connector
         record_event("decode_complete", **kwargs)
 
-    task_total_ns = time.monotonic_ns() - task_start_ns
     return {
         "columns": columns,
-        "bytes_fetched": bytes_fetched,
-        "bytes_requested": bytes_requested,
-        "range_request_count": len(coalesced_ranges),
-        "read_ns": read_ns,
         "decode_ns": decode_ns,
         "queue_wait_ns": queue_wait_ns,
-        "task_total_ns": task_total_ns,
+        "task_total_ns": time.monotonic_ns() - task_start_ns,
     }
 
 
@@ -945,6 +961,8 @@ def _iter_row_groups_v2(
     rowgroups_per_file = max(1, int(_cfg.PARQUET_ROWGROUPS_PER_FILE_IN_FLIGHT))
     rowgroups_in_flight_cap = max(1, int(_cfg.PARQUET_ROWGROUPS_IN_FLIGHT))
     global_ranges_cap = max(1, int(_cfg.PARQUET_GLOBAL_RANGE_READERS))
+    decode_workers = max(1, int(_cfg.PARQUET_DECODE_WORKERS))
+    raw_ring_cap = max(global_ranges_cap, int(_cfg.PARQUET_RAW_RING_CAP))
 
     decoder_fn = _resolve_decoder(decoder)
     unique_paths = list(dict.fromkeys(paths))
@@ -961,18 +979,23 @@ def _iter_row_groups_v2(
     footer_fetch_ns: Dict[str, int] = {}
     footer_futures: Dict[Future, str] = {}
 
-    pool: ThreadPoolExecutor
-    local_pool = False
+    read_pool: ThreadPoolExecutor
+    local_read_pool = False
     required_workers = max(max_workers, global_ranges_cap)
     if max_workers == 16 and required_workers <= 32:
-        pool = _RANGE_POOL
+        read_pool = _RANGE_POOL
     else:
-        pool = ThreadPoolExecutor(
+        read_pool = ThreadPoolExecutor(
             max_workers=required_workers, thread_name_prefix="parquet-io-v2-local"
         )
-        local_pool = True
+        local_read_pool = True
 
-    futures: Dict[Future, Tuple[int, int]] = {}
+    decode_pool = ThreadPoolExecutor(
+        max_workers=max(decode_workers, 1), thread_name_prefix="parquet-decode-v2-local"
+    )
+
+    read_futures: Dict[Future, Tuple[int, int]] = {}
+    decode_futures: Dict[Future, Tuple[int, int]] = {}
     try:
 
         def _known_file_size(p: str) -> Optional[int]:
@@ -1005,9 +1028,9 @@ def _iter_row_groups_v2(
                 continue
             known_size = _known_file_size(p)
             if known_size is None:
-                fut = pool.submit(_read_footer_payload, filesystem, p, connector=connector)
+                fut = read_pool.submit(_read_footer_payload, filesystem, p, connector=connector)
             else:
-                fut = pool.submit(_read_footer_payload, filesystem, p, known_size, connector)
+                fut = read_pool.submit(_read_footer_payload, filesystem, p, known_size, connector)
             footer_futures[fut] = p
 
         scan_start_ns = time.monotonic_ns()
@@ -1029,6 +1052,8 @@ def _iter_row_groups_v2(
         active_rowgroups: Dict[Tuple[int, int], _RowGroupState] = {}
         ready_to_emit: Deque[Tuple[int, int]] = deque()
         pending_dispatch: List[Tuple[int, Tuple[int, int]]] = []
+        raw_ring: Deque[Tuple[Tuple[int, int], List[bytes]]] = deque()
+        read_rowgroups_in_flight = 0
         effective_files_in_flight = min(
             len(file_states),
             max(files_in_flight, global_ranges_cap),
@@ -1052,7 +1077,7 @@ def _iter_row_groups_v2(
             ready_to_emit.append(state.key)
 
         def _admit_rowgroups() -> None:
-            nonlocal admission_seq, active_rowgroups_peak, rg_pruned_total
+            nonlocal admission_seq, active_rowgroups_peak, rg_pruned_total, read_rowgroups_in_flight
             # Keep enough ready work queued so dispatch can refill continuously
             # as soon as reads complete, without waiting for large cohort refills.
             admission_target = min(
@@ -1094,6 +1119,7 @@ def _iter_row_groups_v2(
                             rg_pruned_total += 1
                         else:
                             fstate.active_rowgroups += 1
+                            read_rowgroups_in_flight += 1
                             name_to_stats: Dict[str, dict] = {
                                 col["name"]: col for col in rg_meta["columns"]
                             }
@@ -1140,17 +1166,16 @@ def _iter_row_groups_v2(
 
                 active_rowgroups_peak = max(active_rowgroups_peak, len(active_rowgroups))
 
-                # If we couldn't admit anything this pass, stop and wait for
-                # either footers or task completions to free capacity.
-                if admitted_this_cycle == 0:
-                    break
-
                 # Refill active file queue as slots open up from exhausted files.
                 _admit_files()
 
         def _dispatch_reads() -> None:
             nonlocal ranges_in_flight, ranges_in_flight_peak
-            while ranges_in_flight < global_ranges_cap and pending_dispatch:
+            while (
+                ranges_in_flight < global_ranges_cap
+                and pending_dispatch
+                and len(raw_ring) < raw_ring_cap
+            ):
                 _, key = heapq.heappop(pending_dispatch)
                 target = active_rowgroups.get(key)
                 if target is None or target.dispatched:
@@ -1160,24 +1185,42 @@ def _iter_row_groups_v2(
                 target.first_dispatch_ns = now_ns
                 target.dispatched = True
 
-                fut = pool.submit(
-                    _fetch_rowgroup_task,
+                fut = read_pool.submit(
+                    _read_rowgroup_task,
                     filesystem,
                     target.path,
                     target.rg_idx,
                     target.column_work,
-                    decoder_fn,
                     now_ns,
                     connector,
                 )
-                futures[fut] = target.key
+                read_futures[fut] = target.key
                 ranges_in_flight += 1
                 ranges_in_flight_peak = max(ranges_in_flight_peak, ranges_in_flight)
 
-        def _drain_completions(block: bool) -> bool:
-            nonlocal ranges_in_flight
+        def _dispatch_decodes() -> None:
+            while raw_ring and len(decode_futures) < decode_workers:
+                key, raw_buffers = raw_ring.popleft()
+                state = active_rowgroups.get(key)
+                if state is None:
+                    continue
+                submit_ns = time.monotonic_ns()
+                fut = decode_pool.submit(
+                    _decode_rowgroup_task,
+                    state.path,
+                    state.rg_idx,
+                    state.column_work,
+                    raw_buffers,
+                    decoder_fn,
+                    submit_ns,
+                    connector,
+                )
+                decode_futures[fut] = key
 
-            waiting = set(futures) | set(footer_futures)
+        def _drain_completions(block: bool) -> bool:
+            nonlocal ranges_in_flight, read_rowgroups_in_flight
+
+            waiting = set(read_futures) | set(decode_futures) | set(footer_futures)
             if not waiting:
                 return False
 
@@ -1198,32 +1241,51 @@ def _iter_row_groups_v2(
                     cache.set_footer(footer_path, meta)
                     footer_fetch_ns[footer_path] = fetch_ns + parse_ns
                     _mark_footer_ready(footer_path, meta)
+                    _admit_rowgroups()
+                    _dispatch_reads()
                     continue
 
-                key = futures.pop(fut)
-                ranges_in_flight -= 1
-                state = active_rowgroups.get(key)
+                read_key = read_futures.pop(fut, None)
+                if read_key is not None:
+                    ranges_in_flight -= 1
+                    state = active_rowgroups.get(read_key)
+                    if state is None:
+                        continue
+                    result = fut.result()
+                    state.bytes_fetched += result["bytes_fetched"]
+                    state.range_request_count += result["range_request_count"]
+                    state.range_bytes_requested += result["bytes_requested"]
+                    state.time_read_ranges_ns += result["read_ns"]
+                    state.task_queue_wait_ns += result["queue_wait_ns"]
+                    state.task_total_ns += result["task_total_ns"]
+                    fstate = file_states[state.file_seq]
+                    fstate.active_rowgroups = max(0, fstate.active_rowgroups - 1)
+                    read_rowgroups_in_flight = max(0, read_rowgroups_in_flight - 1)
+                    raw_ring.append((read_key, result["raw_buffers"]))
+                    continue
+
+                decode_key = decode_futures.pop(fut, None)
+                if decode_key is None:
+                    continue
+                state = active_rowgroups.get(decode_key)
                 if state is None:
                     continue
                 result = fut.result()
                 state.columns.update(result["columns"])
-                state.bytes_fetched += result["bytes_fetched"]
-                state.range_request_count += result["range_request_count"]
-                state.range_bytes_requested += result["bytes_requested"]
-                state.time_read_ranges_ns += result["read_ns"]
                 state.time_decode_columns_ns += result["decode_ns"]
                 state.task_queue_wait_ns += result["queue_wait_ns"]
                 state.task_total_ns += result["task_total_ns"]
-
                 _queue_ready(state, time.monotonic_ns())
             return True
 
         while True:
             # Drain completions first so freed slots can be reused before we emit.
             _drain_completions(block=False)
+            _dispatch_decodes()
             _admit_files()
             _admit_rowgroups()
             _dispatch_reads()
+            _dispatch_decodes()
 
             if ready_to_emit:
                 key = ready_to_emit.popleft()
@@ -1284,7 +1346,6 @@ def _iter_row_groups_v2(
                 row_group["__row_groups_pruned__"] = rg_pruned_total
 
                 fstate = file_states[state.file_seq]
-                fstate.active_rowgroups -= 1
                 del active_rowgroups[key]
 
                 if (
@@ -1296,7 +1357,7 @@ def _iter_row_groups_v2(
                 yield row_group
                 continue
 
-            if not futures and not footer_futures:
+            if not read_futures and not decode_futures and not footer_futures:
                 all_files_exhausted = all(
                     state.footer_ready
                     and state.next_rg_idx >= state.total_rowgroups
@@ -1306,6 +1367,7 @@ def _iter_row_groups_v2(
                 if (
                     not active_rowgroups
                     and not pending_dispatch
+                    and not raw_ring
                     and not ready_to_emit
                     and all_files_exhausted
                 ):
@@ -1320,12 +1382,15 @@ def _iter_row_groups_v2(
                 scheduler_empty_wait_events += 1
 
     finally:
-        for fut in list(futures):
+        for fut in list(read_futures):
+            fut.cancel()
+        for fut in list(decode_futures):
             fut.cancel()
         for fut in list(footer_futures):
             fut.cancel()
-        if local_pool:
-            pool.shutdown(wait=False, cancel_futures=True)
+        if local_read_pool:
+            read_pool.shutdown(wait=False, cancel_futures=True)
+        decode_pool.shutdown(wait=False, cancel_futures=True)
 
 
 def iter_row_groups(

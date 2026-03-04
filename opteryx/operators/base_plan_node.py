@@ -15,10 +15,12 @@ from orso.tools import random_string
 from orso.types import OrsoTypes
 from pyarrow import Table
 
+from opteryx import EMPTY
 from opteryx import EOS
 from opteryx.draken import Morsel
 from opteryx.managers.expression import NodeType
 from opteryx.managers.expression import get_all_nodes_of_type
+from opteryx.tracing.event_recorder import record_event as _trace_record
 
 END = object()
 
@@ -115,6 +117,7 @@ class BasePlanNode:
         is_scan = self.is_scan
 
         # Process input metrics
+        num_rows = 0
         if hasattr(morsel, "num_rows"):
             num_rows = morsel.num_rows
             nbytes = morsel.nbytes
@@ -126,15 +129,31 @@ class BasePlanNode:
         generator = self.execute(morsel, join_leg=join_leg)
         empty_morsel = None
         at_least_one = False
+        _call_total_ns = 0
 
         while True:
             try:
                 start_time = time.monotonic_ns()
                 result = next(generator, END)
                 execution_time = time.monotonic_ns() - start_time
+                _call_total_ns += execution_time
 
                 self.execution_time += execution_time
                 telemetry.increase(time_stat_key, execution_time)
+
+                if result == EMPTY:
+                    # Node absorbed a morsel but produced nothing — record for
+                    # telemetry and dead-end here; nothing goes downstream.
+                    _trace_record(
+                        "operator_execute",
+                        operator_name=self.name,
+                        operator_id=self.identity,
+                        duration_ns=execution_time,
+                        rows_in=num_rows,
+                        rows_out=0,
+                        produced_rows=False,
+                    )
+                    continue
 
                 if result == END:
                     if not at_least_one and empty_morsel is not None:
@@ -156,6 +175,15 @@ class BasePlanNode:
 
                     if result_num_rows > 0:
                         at_least_one = True
+                        _trace_record(
+                            "operator_execute",
+                            operator_name=self.name,
+                            operator_id=self.identity,
+                            duration_ns=execution_time,
+                            rows_in=num_rows,
+                            rows_out=result_num_rows,
+                            produced_rows=True,
+                        )
                         yield result
                         continue
                     else:

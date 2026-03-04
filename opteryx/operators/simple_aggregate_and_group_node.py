@@ -18,6 +18,7 @@ import numpy
 import pyarrow
 from orso.types import OrsoTypes
 
+from opteryx import EMPTY
 from opteryx import EOS
 from opteryx.draken import Morsel
 from opteryx.managers.expression import NodeType
@@ -249,4 +250,4 @@ class SimpleAggregateAndGroupNode(BasePlanNode):
 
         self.buffer.append(groups)
 
-        yield None
+        yield EMPTY

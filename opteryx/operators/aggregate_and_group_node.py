@@ -20,6 +20,7 @@ import numpy
 import pyarrow
 from orso.types import OrsoTypes
 
+from opteryx import EMPTY
 from opteryx import EOS
 from opteryx.managers.expression import NodeType
 from opteryx.managers.expression import evaluate_and_append
@@ -279,4 +280,4 @@ class AggregateAndGroupNode(BasePlanNode):
         elif self._partial_aggregated and len(self.buffer) >= self.max_buffer_size:
             self.buffer = [self._merge_partial_buffer()]
 
-        yield None
+        yield EMPTY
