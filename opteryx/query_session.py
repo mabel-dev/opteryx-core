@@ -359,6 +359,12 @@ class Session(DataFrame):
         Executes the SQL operation, bypassing conversion to Orso and returning directly in Arrow format.
         """
         self._ensure_open()
+        if self._tracing_enabled:
+            try:
+                record_event("trace_session_start", session_id=self._query_id, query=operation)
+            except Exception:
+                pass
+        start = time.time_ns()
         results = self._execute_statements(operation, params, visibility_filters)
         if results is not None:
             result_data, self._result_type = results
@@ -403,6 +409,8 @@ class Session(DataFrame):
                 chain([first_table], result_data), promote_options="permissive"
             )
             self._executed = True
+            elapsed = time.time_ns() - start
+            self._telemetry.time_executing += elapsed - self._telemetry.time_planning
             return table
         except (
             pyarrow.ArrowInvalid,

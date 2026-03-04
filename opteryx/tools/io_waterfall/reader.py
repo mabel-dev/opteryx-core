@@ -315,6 +315,104 @@ class TraceReader:
         operations.sort(key=lambda row: (self._row_start_timestamp(row), row.get("label", "")))
         return operations
 
+    def exec_timelines(self) -> tuple:
+        """Return (ops, t0, total_duration) for the operator execution waterfall.
+
+        ops is a list of dicts with keys:
+            operator_name, operator_id, wall_start, wall_end, rows_out, duration_ns
+
+        wall_start / wall_end are relative to t0 (trace_session_start timestamp).
+        total_duration is the wall time of the full session in seconds.
+        Returns ([], None, None) when no operator_execute events are present.
+        """
+        events = self._load_events()
+        t0: Optional[float] = None
+        t_end: Optional[float] = None
+        for e in events:
+            if e["type"] == "trace_session_start":
+                t0 = e["timestamp"]
+            elif e["type"] == "trace_session_end":
+                t_end = e["timestamp"]
+
+        total_duration = (t_end - t0) if (t0 is not None and t_end is not None) else None
+
+        ops: List[Dict[str, Any]] = []
+        for e in events:
+            if e["type"] != "operator_execute":
+                continue
+            ts_end = e["timestamp"]
+            dur_ns = e.get("duration_ns", 0) or 0
+            dur_s = dur_ns / 1e9
+            ts_start = ts_end - dur_s
+            ts_start_rel = ts_start - t0 if t0 is not None else ts_start
+            ts_end_rel = ts_end - t0 if t0 is not None else ts_end
+            ops.append(
+                {
+                    "operator_name": e.get("operator_name", "unknown"),
+                    "operator_id": e.get("operator_id", ""),
+                    "wall_start": ts_start_rel,
+                    "wall_end": ts_end_rel,
+                    "rows_out": e.get("rows_out", 0) or 0,
+                    "duration_ns": dur_ns,
+                    "produced_rows": e.get("produced_rows", True),
+                }
+            )
+        return ops, t0, total_duration
+
+    def operator_profiles(self) -> List[Dict[str, Any]]:
+        """Return per-operator aggregated stats for the EXPLAIN ANALYZE profile chart.
+
+        Each entry covers one operator instance (unique operator_id) and contains
+        totals aggregated across all trace events: CPU time, rows in/out, call count.
+        Operators are ordered by first appearance (plan order, shallowest first).
+        """
+        events = self._load_events()
+        id_to_name: Dict[str, str] = {}
+        id_order: List[str] = []
+        agg: Dict[str, Dict] = {}
+
+        for e in events:
+            if e.get("type") != "operator_execute":
+                continue
+            oid = e.get("operator_id", "")
+            if oid not in id_to_name:
+                id_to_name[oid] = e.get("operator_name", "unknown")
+                id_order.append(oid)
+                agg[oid] = {
+                    "total_duration_ns": 0,
+                    "total_rows_in": 0,
+                    "total_rows_out": 0,
+                    "call_count": 0,
+                    "producing_calls": 0,
+                }
+            s = agg[oid]
+            s["total_duration_ns"] += e.get("duration_ns", 0) or 0
+            s["total_rows_in"] += e.get("rows_in", 0) or 0
+            s["total_rows_out"] += e.get("rows_out", 0) or 0
+            s["call_count"] += 1
+            if e.get("produced_rows", True):
+                s["producing_calls"] += 1
+
+        result = []
+        for oid in id_order:
+            s = agg[oid]
+            rows_in = s["total_rows_in"]
+            rows_out = s["total_rows_out"]
+            selectivity = (rows_out / rows_in * 100.0) if rows_in > 0 else None
+            result.append(
+                {
+                    "operator_id": oid,
+                    "operator_name": id_to_name[oid],
+                    "total_duration_ns": s["total_duration_ns"],
+                    "total_rows_in": rows_in,
+                    "total_rows_out": rows_out,
+                    "call_count": s["call_count"],
+                    "producing_calls": s["producing_calls"],
+                    "selectivity": round(selectivity, 4) if selectivity is not None else None,
+                }
+            )
+        return result
+
     # ---------------------------------------------------------------------
     # Additional helpers for richer event inspection
     def events_for_file(self, file_id: str):

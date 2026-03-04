@@ -41,6 +41,17 @@ def _generate_eos_marker() -> int:
 EOS: int = _generate_eos_marker()
 
 
+# empty-morsel marker — yielded by nodes that absorbed a morsel but produced no output
+# (e.g. Group By during accumulation).  __call__ intercepts this, records a trace
+# event, and dead-ends it — nothing is forwarded downstream.
+def _generate_empty_marker() -> int:
+    """Generate a random 64-bit signed empty-morsel marker."""
+    return secrets.randbits(64) - (1 << 63)
+
+
+EMPTY: int = _generate_empty_marker()
+
+
 def is_mac() -> bool:  # pragma: no cover
     """
     Check if the current platform is macOS.

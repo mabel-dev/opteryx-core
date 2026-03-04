@@ -51,8 +51,24 @@ def generate_waterfall_html(trace_file: str, output_file: Optional[str] = None) 
     # build chart configuration using helper
     echarts_config = _build_echarts_config(operations, metadata)
 
+    # collect operator execution timeline for second chart
+    exec_ops, _t0, total_duration = reader.exec_timelines()
+    exec_config = _build_exec_echarts_config(exec_ops, total_duration)
+
+    # collect per-operator profile totals for third chart
+    profiles = reader.operator_profiles()
+    profile_config = _build_profile_echarts_config(profiles)
+
     # render HTML page
-    html = _render_html_template(echarts_config, metadata, stats, events_by_file, ordered_file_ids)
+    html = _render_html_template(
+        echarts_config,
+        metadata,
+        stats,
+        events_by_file,
+        ordered_file_ids,
+        exec_config=exec_config,
+        profile_config=profile_config,
+    )
 
     # write to disk
     with open(output_path, "w", encoding="utf-8") as f:
@@ -167,12 +183,145 @@ def _build_echarts_config(operations: list, metadata: dict) -> dict:
     }
 
 
+# Fixed palette for operator execution chart — 15 visually distinct colours.
+_OP_PALETTE = [
+    "#4A90E2",
+    "#E24A4A",
+    "#7ED321",
+    "#F5A623",
+    "#9B59B6",
+    "#1ABC9C",
+    "#E67E22",
+    "#C0392B",
+    "#2ECC71",
+    "#3498DB",
+    "#F39C12",
+    "#8E44AD",
+    "#16A085",
+    "#D35400",
+    "#27AE60",
+]
+
+
+def _build_exec_echarts_config(
+    exec_ops: list,
+    total_duration: Optional[float],
+) -> Optional[dict]:
+    """Build ECharts config for the operator execution waterfall.
+
+    Returns None when there are no operator_execute events to display.
+
+    Lanes are per operator *instance* (keyed by operator_id).  When multiple
+    instances share the same name they get a numeric suffix: "Parquet Read [1]",
+    "Parquet Read [2]".
+
+    Non-producing calls (hash-build phase, zero-row outputs) are rendered at
+    reduced opacity so they are visually distinct from probe/producing bars.
+    """
+    if not exec_ops:
+        return None
+
+    # Determine lane order from first-appearance of each operator_id.
+    id_to_name: dict = {}
+    id_order: list = []  # operator_id strings in first-appearance order
+    for op in exec_ops:
+        oid = op["operator_id"]
+        if oid not in id_to_name:
+            id_to_name[oid] = op["operator_name"]
+            id_order.append(oid)
+
+    # Build labels: deduplicate per name with numeric suffix.
+    name_to_ids: dict = {}
+    for oid in id_order:
+        name = id_to_name[oid]
+        name_to_ids.setdefault(name, []).append(oid)
+
+    id_to_label: dict = {}
+    for name, ids in name_to_ids.items():
+        if len(ids) == 1:
+            id_to_label[ids[0]] = name
+        else:
+            for idx, oid in enumerate(ids, 1):
+                id_to_label[oid] = f"{name} [{idx}]"
+
+    categories = [id_to_label[oid] for oid in id_order]
+    id_to_cat: dict = {oid: i for i, oid in enumerate(id_order)}
+
+    # Assign one colour per label (i.e. per instance).
+    color_map = {oid: _OP_PALETTE[i % len(_OP_PALETTE)] for i, oid in enumerate(id_order)}
+
+    max_time = total_duration or max(op["wall_end"] for op in exec_ops)
+
+    series_data = [
+        [
+            id_to_cat[op["operator_id"]],  # 0: catIndex
+            op["wall_start"],  # 1: start_s
+            op["wall_end"],  # 2: end_s
+            op["rows_out"],  # 3: rows_out
+            id_to_label[op["operator_id"]],  # 4: label
+            round(op["duration_ns"] / 1e6, 3),  # 5: duration_ms
+            color_map[op["operator_id"]],  # 6: color
+            1 if op.get("produced_rows", True) else 0,  # 7: 1=probe 0=build
+        ]
+        for op in exec_ops
+    ]
+
+    return {
+        "categories": categories,
+        "max_time": round(max_time, 3),
+        "data": series_data,
+    }
+
+
+def _build_profile_echarts_config(profiles: list) -> Optional[dict]:
+    """Build config for the operator profile (EXPLAIN ANALYZE) bar chart.
+
+    Returns a dict with a ``data`` list where each entry has:
+        label, total_ms, rows_in, rows_out, calls, color, selectivity.
+    Returns None when there are no operator_execute events.
+    """
+    if not profiles:
+        return None
+
+    # Deduplicate labels exactly as the exec chart does.
+    name_to_ids: dict = {}
+    for p in profiles:
+        name_to_ids.setdefault(p["operator_name"], []).append(p["operator_id"])
+
+    id_to_label: dict = {}
+    for name, ids in name_to_ids.items():
+        if len(ids) == 1:
+            id_to_label[ids[0]] = name
+        else:
+            for idx, oid in enumerate(ids, 1):
+                id_to_label[oid] = f"{name} [{idx}]"
+
+    data = []
+    for i, p in enumerate(profiles):
+        oid = p["operator_id"]
+        data.append(
+            {
+                "label": id_to_label[oid],
+                "total_ms": round(p["total_duration_ns"] / 1e6, 1),
+                "rows_in": p["total_rows_in"],
+                "rows_out": p["total_rows_out"],
+                "calls": p["call_count"],
+                "color": _OP_PALETTE[i % len(_OP_PALETTE)],
+                "selectivity": p["selectivity"],
+            }
+        )
+
+    return {"data": data}
+
+
 def _render_html_template(
     echarts_config: dict,
     metadata: dict,
     stats: dict,
     events_by_file: dict,
     ordered_file_ids: list,
+    exec_config: Optional[dict] = None,
+    profile_config: Optional[dict] = None,
 ) -> str:
     """Render the HTML template with embedded chart configuration.
 
@@ -185,6 +334,50 @@ def _render_html_template(
     session_id = metadata.get("session_id", "Unknown")
 
     stats_html = _format_stats(stats)
+
+    # Build exec chart assets (empty string / null when no exec events).
+    exec_chart_height = 0
+    exec_section_html = ""
+    exec_config_json = "null"
+    if exec_config and exec_config.get("data"):
+        exec_chart_height = max(220, len(exec_config.get("categories", [])) * 40 + 90)
+        exec_config_json = json.dumps(exec_config)
+        seen_ops: dict = {}
+        for d in exec_config["data"]:
+            if d[4] not in seen_ops:
+                seen_ops[d[4]] = d[6]
+        legend_items = "".join(
+            f'<div class="legend-item">'
+            f'<div class="legend-color" style="background:{color}"></div>'
+            f"<span>{name}</span></div>"
+            for name, color in seen_ops.items()
+        )
+        exec_section_html = (
+            f'<div style="margin-top:30px;border-top:1px solid #e0e0e0;padding-top:20px;">'
+            f'<h2 style="color:#333;margin:0 0 12px 0;font-size:18px;">'
+            f"Operator Execution Waterfall</h2>"
+            f'<div id="exec-chart" style="width:100%;height:{exec_chart_height}px;'
+            f'margin-bottom:10px;"></div>'
+            f'<div class="legend">{legend_items}</div>'
+            f"</div>"
+        )
+
+    # Build operator profile (EXPLAIN ANALYZE) chart assets.
+    profile_section_html = ""
+    profile_config_json = "null"
+    if profile_config and profile_config.get("data"):
+        profile_chart_height = max(160, len(profile_config["data"]) * 52 + 70)
+        profile_config_json = json.dumps(profile_config)
+        profile_section_html = (
+            f'<div style="margin-top:30px;border-top:1px solid #e0e0e0;padding-top:20px;">'
+            f'<h2 style="color:#333;margin:0 0 4px 0;font-size:18px;">'
+            f"Operator Profile</h2>"
+            f'<p style="color:#888;font-size:12px;margin:0 0 12px 0;">'
+            f"Cumulative CPU time per operator. "
+            f"Labels show rows&nbsp;in&nbsp;→&nbsp;out and selectivity.</p>"
+            f'<div id="profile-chart" style="width:100%;height:{profile_chart_height}px;">'
+            f"</div></div>"
+        )
 
     # JSON-serialize the auxiliary data for embedding in the page
     events_json = json.dumps(events_by_file)
@@ -230,7 +423,7 @@ def _render_html_template(
             word-break: break-all;
             margin-top: 10px;
         }}
-        #chart {{ width: 100%; height: 640px; margin-bottom: 20px; }}
+        #io-chart {{ width: 100%; height: 640px; margin-bottom: 20px; }}
         .stats-section {{
             background-color: #f9f9f9;
             padding: 15px;
@@ -275,7 +468,7 @@ def _render_html_template(
             </div>
         </div>
 
-        <div id="chart"></div>
+        <div id="io-chart"></div>
 
         <div class="legend">
             <div class="legend-item">
@@ -292,6 +485,10 @@ def _render_html_template(
             </div>
         </div>
 
+        {exec_section_html}
+
+        {profile_section_html}
+
         <div class="stats-section">
             <h3>Summary Statistics</h3>
             {stats_html}
@@ -299,12 +496,12 @@ def _render_html_template(
     </div>
 
     <script>
-        var chart = echarts.init(document.getElementById('chart'));
+        var ioChart = echarts.init(document.getElementById('io-chart'));
 
         // embed raw events for debugging/drill-down
         var traceEvents = {events_json};
 
-        chart.on('click', function(params) {{
+        ioChart.on('click', function(params) {{
             // params.dataIndex corresponds to the row index
             var idx = params.dataIndex;
             var fileId = {file_id_list_json}[idx];
@@ -371,8 +568,125 @@ def _render_html_template(
         option.series[0].renderItem = renderItem;
         option.series[0].tooltip = {{ formatter: tooltipFmt }};
 
-        chart.setOption(option);
-        window.addEventListener('resize', function() {{ chart.resize(); }});
+        ioChart.setOption(option);
+        window.addEventListener('resize', function() {{ ioChart.resize(); }});
+
+        // ── Operator Execution Waterfall ──────────────────────────────────
+        var execConfig = {exec_config_json};
+        if (execConfig && execConfig.data && execConfig.data.length > 0) {{
+            var execChart = echarts.init(document.getElementById('exec-chart'));
+
+            function renderExecItem(params, api) {{
+                var cat    = api.value(0);
+                var start  = api.value(1);
+                var end    = api.value(2);
+                var color  = api.value(6);
+                var isProbe = api.value(7) === 1;
+                var barH   = Math.max(api.size([0, 1])[1] * 0.45, 4);
+                var p0 = api.coord([start, cat]);
+                var p1 = api.coord([end,   cat]);
+                var w  = Math.max(p1[0] - p0[0], 1);
+                return {{
+                    type: 'rect',
+                    shape: {{ x: p0[0], y: p0[1] - barH / 2, width: w, height: barH }},
+                    style: api.style({{ fill: color, opacity: isProbe ? 0.85 : 0.28 }})
+                }};
+            }}
+
+            execChart.setOption({{
+                grid: {{ left: '5px', right: '30px', top: '20px', bottom: '50px', containLabel: true }},
+                tooltip: {{ trigger: 'item', confine: true }},
+                xAxis: {{
+                    type: 'value', name: 'Time (s)', nameLocation: 'end',
+                    min: 0, max: execConfig.max_time,
+                }},
+                yAxis: {{
+                    type: 'category', data: execConfig.categories,
+                    inverse: true, axisLabel: {{ fontSize: 11 }},
+                }},
+                series: [{{
+                    type: 'custom',
+                    renderItem: renderExecItem,
+                    data: execConfig.data,
+                    encode: {{ y: 0, x: [1, 2] }},
+                    tooltip: {{
+                        formatter: function(params) {{
+                            var d = params.data;
+                            var phase = d[7] === 1 ? 'probe / emit' : 'build / no rows';
+                            var rowsLine = d[7] === 1
+                                ? 'Rows out: ' + (d[3] || 0).toLocaleString() + '<br/>'
+                                : '';
+                            return '<b>' + d[4] + '</b><br/>'
+                                 + 'Phase: ' + phase + '<br/>'
+                                 + 'Duration: ' + d[5].toFixed(1) + 'ms<br/>'
+                                 + rowsLine;
+                        }}
+                    }}
+                }}],
+                dataZoom: [
+                    {{ type: 'slider', xAxisIndex: [0], start: 0, end: 100, bottom: 10 }},
+                ],
+            }});
+            window.addEventListener('resize', function() {{ execChart.resize(); }});
+        }}
+        // ── Operator Profile (EXPLAIN ANALYZE) ─────────────────────────
+        var profileConfig = {profile_config_json};
+        if (profileConfig && profileConfig.data && profileConfig.data.length > 0) {{
+            var profileChart = echarts.init(document.getElementById('profile-chart'));
+            var pLabels = profileConfig.data.map(function(d) {{ return d.label; }});
+            profileChart.setOption({{
+                grid: {{ left: '5px', right: '220px', top: '10px', bottom: '30px', containLabel: true }},
+                tooltip: {{
+                    trigger: 'axis',
+                    axisPointer: {{ type: 'shadow' }},
+                    formatter: function(params) {{
+                        var d = profileConfig.data[params[0].dataIndex];
+                        var rowsIn  = d.rows_in  > 0 ? d.rows_in.toLocaleString()  : '\u2014';
+                        var rowsOut = d.rows_out > 0 ? d.rows_out.toLocaleString() : '\u2014';
+                        var sel = d.selectivity !== null
+                            ? d.selectivity.toFixed(3) + '%' : 'N/A';
+                        return '<b>' + d.label + '</b><br/>'
+                             + 'CPU: ' + d.total_ms.toLocaleString() + ' ms<br/>'
+                             + 'Calls: ' + d.calls.toLocaleString() + '<br/>'
+                             + 'Rows in: ' + rowsIn + '<br/>'
+                             + 'Rows out: ' + rowsOut + '<br/>'
+                             + 'Selectivity: ' + sel;
+                    }}
+                }},
+                xAxis: {{ type: 'value', name: 'CPU time (ms)', nameLocation: 'end' }},
+                yAxis: {{
+                    type: 'category',
+                    data: pLabels,
+                    inverse: true,
+                    axisLabel: {{ fontSize: 12 }},
+                }},
+                series: [{{
+                    type: 'bar',
+                    data: profileConfig.data.map(function(d) {{
+                        return {{ value: d.total_ms, itemStyle: {{ color: d.color }} }};
+                    }}),
+                    label: {{
+                        show: true,
+                        position: 'right',
+                        formatter: function(params) {{
+                            var d = profileConfig.data[params.dataIndex];
+                            var out = d.rows_out.toLocaleString();
+                            if (d.rows_in > 0) {{
+                                var inp = d.rows_in.toLocaleString();
+                                var sel = d.selectivity !== null
+                                    ? ' (' + d.selectivity.toFixed(1) + '%)' : '';
+                                return inp + ' \u2192 ' + out + sel;
+                            }}
+                            return out + ' rows';
+                        }},
+                        fontSize: 11,
+                        color: '#444',
+                    }},
+                    barMaxWidth: 40,
+                }}],
+            }});
+            window.addEventListener('resize', function() {{ profileChart.resize(); }});
+        }}
     </script>
 </body>
 </html>"""
