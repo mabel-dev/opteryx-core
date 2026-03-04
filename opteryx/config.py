@@ -101,6 +101,18 @@ When tracing is enabled, each event carrying a ``file_id`` will be skipped
 with probability ``1 - OPTERYX_TRACE_SAMPLE_RATE``.  This provides a simple
 way to reduce overhead on large scans by only recording a fraction of files.
 """
+OPTERYX_DISABLE_GC_DURING_QUERY: bool = str(
+    get("OPTERYX_DISABLE_GC_DURING_QUERY", "0")
+).lower() in (
+    "1",
+    "true",
+    "yes",
+)
+"""Disable Python cyclic GC while tabular query results are being consumed.
+
+Diagnostic setting for stall analysis. When enabled, GC is disabled when query
+execution starts and restored when result iteration completes.
+"""
 MAX_CONSECUTIVE_CACHE_FAILURES: int = int(get("MAX_CONSECUTIVE_CACHE_FAILURES", 10))
 """Maximum number of consecutive cache failures before disabling cache usage."""
 

@@ -1,3 +1,9 @@
+import gc
+from typing import Generator
+
+import pyarrow
+
+from opteryx import config
 from opteryx.config import features
 from opteryx.exceptions import InvalidInternalStateError
 from opteryx.utils.free_threading import is_free_threading_available
@@ -9,6 +15,25 @@ from .serial_engine import execute as serial_execute
 ENABLE_FREE_THREADING = features.enable_free_threading
 
 
+def _with_optional_gc_disabled(
+    results: Generator[pyarrow.Table, None, None],
+) -> Generator[pyarrow.Table, None, None]:
+    """Wrap result iteration with optional GC disable/restore for diagnostics."""
+    if not config.OPTERYX_DISABLE_GC_DURING_QUERY:
+        yield from results
+        return
+
+    gc_was_enabled = gc.isenabled()
+    if gc_was_enabled:
+        gc.disable()
+
+    try:
+        yield from results
+    finally:
+        if gc_was_enabled:
+            gc.enable()
+
+
 def execute(plan, telemetry):
     # Check if this plan has a statistics-only result (no execution needed)
     stats_result = getattr(plan, "_statistics_only_result", None)
@@ -17,7 +42,8 @@ def execute(plan, telemetry):
         def statistics_only_generator():
             yield stats_result
 
-        return statistics_only_generator(), ResultType.TABULAR
+        results, result_type = statistics_only_generator(), ResultType.TABULAR
+        return _with_optional_gc_disabled(results), result_type
 
     # Validate query plan to ensure it's acyclic
     if not plan.is_acyclic():
@@ -29,6 +55,10 @@ def execute(plan, telemetry):
     # Use parallel engine if free-threading is available, otherwise use serial
     if ENABLE_FREE_THREADING and is_free_threading_available():
         # DEBUG: print("\033[38;2;255;184;108mUsing parallel execution engine.\033[0m")
-        return parallel_execute(plan, telemetry=telemetry)
+        results, result_type = parallel_execute(plan, telemetry=telemetry)
     else:
-        return serial_execute(plan, telemetry=telemetry)
+        results, result_type = serial_execute(plan, telemetry=telemetry)
+
+    if result_type == ResultType.TABULAR:
+        return _with_optional_gc_disabled(results), result_type
+    return results, result_type
