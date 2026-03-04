@@ -27,6 +27,8 @@ between I/O and decode across all files and row groups simultaneously.
 from __future__ import annotations
 
 import time
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import as_completed
 from copy import deepcopy
 from typing import Generator
 
@@ -36,6 +38,7 @@ from orso.schema import convert_orso_schema_to_arrow_schema
 from orso.tools import random_string
 
 from opteryx import EOS
+from opteryx import config
 from opteryx.draken.morsels.morsel import Morsel
 from opteryx.managers.expression import NodeType
 from opteryx.managers.expression import evaluate
@@ -484,14 +487,30 @@ class ParquetReadNode(ReaderNode):
         has_repeated_projection = False
         has_missing_required_columns = False
         prefetched_footers: dict[str, dict] = {}
+
+        unique_blob_paths = list(dict.fromkeys(blob_paths))
+        footer_workers = max(1, int(config.PARQUET_PREFETCH_FOOTER_WORKERS))
+        if unique_blob_paths:
+            with ThreadPoolExecutor(
+                max_workers=min(footer_workers, len(unique_blob_paths)),
+                thread_name_prefix="parquet-footer-prefetch",
+            ) as footer_pool:
+                future_to_path = {
+                    footer_pool.submit(
+                        fetch_footer,
+                        filesystem,
+                        blob_name,
+                        None,
+                        file_sizes.get(blob_name),
+                    ): blob_name
+                    for blob_name in unique_blob_paths
+                }
+                for future in as_completed(future_to_path):
+                    blob_name = future_to_path[future]
+                    prefetched_footers[blob_name] = future.result()
+
         for blob_name in blob_paths:
-            footer = fetch_footer(
-                filesystem,
-                blob_name,
-                cache=cache,
-                file_size=file_sizes.get(blob_name),
-            )
-            prefetched_footers[blob_name] = footer
+            footer = prefetched_footers[blob_name]
             has_repeated_projection = has_repeated_projection or self._has_repeated_projection(
                 footer, column_names
             )

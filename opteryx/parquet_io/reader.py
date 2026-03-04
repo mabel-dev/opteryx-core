@@ -727,6 +727,8 @@ class _RowGroupState:
     task_queue_wait_ns: int = 0
     task_total_ns: int = 0
     ready_queue_depth_at_ready: int = 0
+    pending_cols: int = 0
+    decode_started: bool = False
 
     @property
     def key(self) -> Tuple[int, int]:
@@ -877,11 +879,11 @@ def _read_rowgroup_task(
     }
 
 
-def _decode_rowgroup_task(
+def _decode_column_task(
     path: str,
     rg_idx: int,
-    column_work: List[_ColumnWorkItem],
-    raw_buffers: List[bytes],
+    work: _ColumnWorkItem,
+    raw_bytes: bytes,
     decoder: Any,
     submitted_ns: int,
     connector: Optional[str] = None,
@@ -892,48 +894,29 @@ def _decode_rowgroup_task(
     task_start_ns = time.monotonic_ns()
     queue_wait_ns = task_start_ns - submitted_ns
 
-    if _cfg.OPTERYX_TRACE:
-        kwargs = {"file_id": path, "component": "rowgroup", "rg_idx": rg_idx}
-        if connector:
-            kwargs["connector"] = connector
-        record_event("decode_start", **kwargs)
-
     decode_start_ns = time.monotonic_ns()
-    columns: Dict[str, Any] = {}
-    for work, raw_bytes in zip(column_work, raw_buffers):
-        decoded = decoder(raw_bytes, work.stats)
-        if decoded is None:
-            raise RuntimeError(
-                f"Decoder returned None for column '{path}:{rg_idx}:{work.name}' "
-                f"(codec={work.stats.get('compression_codec')}, encodings={work.stats.get('encodings')})"
-            )
-        columns[work.name] = decoded
+    decoded = decoder(raw_bytes, work.stats)
+    if decoded is None:
+        raise RuntimeError(
+            f"Decoder returned None for column '{path}:{rg_idx}:{work.name}' "
+            f"(codec={work.stats.get('compression_codec')}, encodings={work.stats.get('encodings')})"
+        )
     decode_ns = time.monotonic_ns() - decode_start_ns
 
     if _cfg.OPTERYX_TRACE:
-        for work, _raw_bytes in zip(column_work, raw_buffers):
-            kwargs = {
-                "file_id": path,
-                "component": "column",
-                "rg_idx": rg_idx,
-                "column": work.name,
-            }
-            if connector:
-                kwargs["connector"] = connector
-            record_event("decode_complete", **kwargs)
-
         kwargs = {
             "file_id": path,
-            "component": "rowgroup",
+            "component": "column",
             "rg_idx": rg_idx,
-            "rows_decoded": sum(getattr(v, "num_rows", 0) for v in columns.values()),
+            "column": work.name,
         }
         if connector:
             kwargs["connector"] = connector
         record_event("decode_complete", **kwargs)
 
     return {
-        "columns": columns,
+        "name": work.name,
+        "decoded": decoded,
         "decode_ns": decode_ns,
         "queue_wait_ns": queue_wait_ns,
         "task_total_ns": time.monotonic_ns() - task_start_ns,
@@ -1052,7 +1035,7 @@ def _iter_row_groups_v2(
         active_rowgroups: Dict[Tuple[int, int], _RowGroupState] = {}
         ready_to_emit: Deque[Tuple[int, int]] = deque()
         pending_dispatch: List[Tuple[int, Tuple[int, int]]] = []
-        raw_ring: Deque[Tuple[Tuple[int, int], List[bytes]]] = deque()
+        raw_ring: Deque[Tuple[Tuple[int, int], _ColumnWorkItem, bytes]] = deque()
         read_rowgroups_in_flight = 0
         effective_files_in_flight = min(
             len(file_states),
@@ -1150,6 +1133,7 @@ def _iter_row_groups_v2(
                                 )
                                 rowgroup_state.cache_misses += 1
 
+                            rowgroup_state.pending_cols = len(rowgroup_state.column_work)
                             active_rowgroups[rowgroup_state.key] = rowgroup_state
                             heapq.heappush(
                                 pending_dispatch, (rowgroup_state.admission_seq, rowgroup_state.key)
@@ -1200,22 +1184,35 @@ def _iter_row_groups_v2(
 
         def _dispatch_decodes() -> None:
             while raw_ring and len(decode_futures) < decode_workers:
-                key, raw_buffers = raw_ring.popleft()
+                key, work, raw_bytes = raw_ring.popleft()
                 state = active_rowgroups.get(key)
                 if state is None:
                     continue
+                if not state.decode_started:
+                    state.decode_started = True
+                    if _cfg.OPTERYX_TRACE:
+                        from opteryx.tracing import record_event as _rec_ds
+
+                        kwargs = {
+                            "file_id": state.path,
+                            "component": "rowgroup",
+                            "rg_idx": state.rg_idx,
+                        }
+                        if connector:
+                            kwargs["connector"] = connector
+                        _rec_ds("decode_start", **kwargs)
                 submit_ns = time.monotonic_ns()
                 fut = decode_pool.submit(
-                    _decode_rowgroup_task,
+                    _decode_column_task,
                     state.path,
                     state.rg_idx,
-                    state.column_work,
-                    raw_buffers,
+                    work,
+                    raw_bytes,
                     decoder_fn,
                     submit_ns,
                     connector,
                 )
-                decode_futures[fut] = key
+                decode_futures[fut] = (key, work.name)
 
         def _drain_completions(block: bool) -> bool:
             nonlocal ranges_in_flight, read_rowgroups_in_flight
@@ -1261,21 +1258,40 @@ def _iter_row_groups_v2(
                     fstate = file_states[state.file_seq]
                     fstate.active_rowgroups = max(0, fstate.active_rowgroups - 1)
                     read_rowgroups_in_flight = max(0, read_rowgroups_in_flight - 1)
-                    raw_ring.append((read_key, result["raw_buffers"]))
+                    for _work, _raw in zip(state.column_work, result["raw_buffers"]):
+                        raw_ring.append((read_key, _work, _raw))
                     continue
 
-                decode_key = decode_futures.pop(fut, None)
-                if decode_key is None:
+                decode_info = decode_futures.pop(fut, None)
+                if decode_info is None:
                     continue
+                decode_key, col_name = decode_info
                 state = active_rowgroups.get(decode_key)
                 if state is None:
                     continue
                 result = fut.result()
-                state.columns.update(result["columns"])
+                state.columns[col_name] = result["decoded"]
                 state.time_decode_columns_ns += result["decode_ns"]
                 state.task_queue_wait_ns += result["queue_wait_ns"]
                 state.task_total_ns += result["task_total_ns"]
-                _queue_ready(state, time.monotonic_ns())
+                state.pending_cols -= 1
+                if state.pending_cols == 0:
+                    if _cfg.OPTERYX_TRACE:
+                        from opteryx.tracing import record_event as _rec_dc
+
+                        rows_decoded = sum(
+                            getattr(v, "num_rows", 0) for v in state.columns.values()
+                        )
+                        kwargs = {
+                            "file_id": state.path,
+                            "component": "rowgroup",
+                            "rg_idx": state.rg_idx,
+                            "rows_decoded": rows_decoded,
+                        }
+                        if connector:
+                            kwargs["connector"] = connector
+                        _rec_dc("decode_complete", **kwargs)
+                    _queue_ready(state, time.monotonic_ns())
             return True
 
         while True:
