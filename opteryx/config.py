@@ -163,6 +163,9 @@ PARQUET_GLOBAL_RANGE_READERS: int = int(get("PARQUET_GLOBAL_RANGE_READERS", 24))
 PARQUET_RANGE_READERS_PER_ROWGROUP: int = int(get("PARQUET_RANGE_READERS_PER_ROWGROUP", 10))
 """Cap for in-flight column range reads per row group."""
 
+PARQUET_PREFETCH_FOOTER_WORKERS: int = int(get("PARQUET_PREFETCH_FOOTER_WORKERS", 64))
+"""Concurrency for parquet footer prefetch in ParquetReadNode preflight."""
+
 PARQUET_ACTIVE_ROWGROUPS_TARGET: int = int(get("PARQUET_ACTIVE_ROWGROUPS_TARGET", 3))
 """Target active row groups for continuous-feed scheduling."""
 
