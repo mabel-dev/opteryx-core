@@ -16,6 +16,91 @@
 #include <cstring>
 #include <iostream>
 #include <stdexcept>
+#include <string>
+#include <unordered_map>
+
+namespace {
+
+inline uint8_t CodeWidthForDictSize(size_t dict_size) {
+  if (dict_size <= 256) return 1;
+  if (dict_size <= 65536) return 2;
+  return 4;
+}
+
+inline int32_t InternByteArrayToDictionary(
+    const char* value_ptr,
+    int32_t value_len,
+    std::unordered_map<std::string, int32_t>& dict_map,
+    std::vector<uint8_t>& arena,
+    std::vector<uint32_t>& offsets,
+    std::vector<int32_t>& lens) {
+  std::string key(value_ptr, static_cast<size_t>(value_len));
+  auto it = dict_map.find(key);
+  if (it != dict_map.end()) {
+    return it->second;
+  }
+
+  int32_t code = static_cast<int32_t>(lens.size());
+  uint32_t off = static_cast<uint32_t>(arena.size());
+  arena.insert(arena.end(), key.begin(), key.end());
+  offsets.push_back(off);
+  lens.push_back(value_len);
+  dict_map.emplace(std::move(key), code);
+  return code;
+}
+
+inline void SeedDictionaryMapFromArena(
+    std::unordered_map<std::string, int32_t>& dict_map,
+    const std::vector<uint8_t>& arena,
+    const std::vector<uint32_t>& offsets,
+    const std::vector<int32_t>& lens) {
+  dict_map.reserve(lens.size() * 2 + 1);
+  for (size_t i = 0; i < lens.size(); ++i) {
+    const char* ptr = reinterpret_cast<const char*>(arena.data() + offsets[i]);
+    dict_map.emplace(std::string(ptr, static_cast<size_t>(lens[i])),
+                     static_cast<int32_t>(i));
+  }
+}
+
+template <typename T>
+inline int32_t InternPrimitiveToDictionary(
+    T value,
+    std::unordered_map<T, int32_t>& dict_map,
+    std::vector<T>& dict_values) {
+  auto it = dict_map.find(value);
+  if (it != dict_map.end()) {
+    return it->second;
+  }
+
+  int32_t code = static_cast<int32_t>(dict_values.size());
+  dict_values.push_back(value);
+  dict_map.emplace(value, code);
+  return code;
+}
+
+template <typename T>
+inline void SeedPrimitiveDictionaryMap(
+    std::unordered_map<T, int32_t>& dict_map,
+    const std::vector<T>& dict_values) {
+  dict_map.reserve(dict_values.size() * 2 + 1);
+  for (size_t i = 0; i < dict_values.size(); ++i) {
+    dict_map.emplace(dict_values[i], static_cast<int32_t>(i));
+  }
+}
+
+inline uint32_t Float32Bits(float value) {
+  uint32_t bits;
+  std::memcpy(&bits, &value, sizeof(uint32_t));
+  return bits;
+}
+
+inline uint64_t Float64Bits(double value) {
+  uint64_t bits;
+  std::memcpy(&bits, &value, sizeof(uint64_t));
+  return bits;
+}
+
+}  // namespace
 
 // ---------------------------------------------------------------------------
 // DecodeColumnFromChunk (internal)
@@ -64,10 +149,6 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
     // -----------------------------------------------------------------
     // Step 1: Load dictionary page (if present)
     // -----------------------------------------------------------------
-    std::vector<int32_t>    dict_int32;
-    std::vector<int64_t>    dict_int64;
-    std::vector<float>       dict_float32;
-    std::vector<double>      dict_float64;
     int32_t dict_size = 0;
 
     // Keep decompressed buffers alive across dictionary and data page decoding.
@@ -84,6 +165,7 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
       PageHeader dict_page_header = ParsePageHeader(dict_header_in);
 
       if (dict_page_header.page_type == 2) {  // DICTIONARY_PAGE
+        result.dict_ordered = dict_page_header.dictionary_is_sorted;
         size_t dict_header_size = dict_header_in.p - dict_ptr;
         if (dict_header_size > (size_t)(dict_end_ptr - dict_ptr)) return result;
 
@@ -118,19 +200,22 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
         }
 
         dict_size = dict_page_header.num_values;
+        if (dict_size > 0) {
+          result.code_width = CodeWidthForDictSize(static_cast<size_t>(dict_size));
+        }
         const uint8_t *dict_end = dict_data_ptr + dict_data_size;
 
         RUGO_TEL_START(_dp_t0);
         if (result.type == "int32") {
-          dict_int32.reserve(dict_size);
+          result.dict_int32_values.reserve(dict_size);
           for (int32_t i = 0; i < dict_size && dict_data_ptr + 4 <= dict_end; i++) {
-            dict_int32.push_back(ReadLE32(dict_data_ptr));
+            result.dict_int32_values.push_back(ReadLE32(dict_data_ptr));
             dict_data_ptr += 4;
           }
         } else if (result.type == "int64") {
-          dict_int64.reserve(dict_size);
+          result.dict_int64_values.reserve(dict_size);
           for (int32_t i = 0; i < dict_size && dict_data_ptr + 8 <= dict_end; i++) {
-            dict_int64.push_back(ReadLE64(dict_data_ptr));
+            result.dict_int64_values.push_back(ReadLE64(dict_data_ptr));
             dict_data_ptr += 8;
           }
         } else if (result.type == "byte_array") {
@@ -151,15 +236,15 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
             dict_data_ptr += length;
           }
         } else if (result.type == "float32") {
-          dict_float32.reserve(dict_size);
+          result.dict_float32_values.reserve(dict_size);
           for (int32_t i = 0; i < dict_size && dict_data_ptr + 4 <= dict_end; i++) {
-            dict_float32.push_back(ReadFloat32(dict_data_ptr));
+            result.dict_float32_values.push_back(ReadFloat32(dict_data_ptr));
             dict_data_ptr += 4;
           }
         } else if (result.type == "float64") {
-          dict_float64.reserve(dict_size);
+          result.dict_float64_values.reserve(dict_size);
           for (int32_t i = 0; i < dict_size && dict_data_ptr + 8 <= dict_end; i++) {
-            dict_float64.push_back(ReadFloat64(dict_data_ptr));
+            result.dict_float64_values.push_back(ReadFloat64(dict_data_ptr));
             dict_data_ptr += 8;
           }
         }
@@ -210,10 +295,18 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
     const uint8_t *cursor      = file_data + (uint64_t)target_col->data_page_offset;
     const uint8_t *chunk_limit = file_data + chunk_end;
 
-    // When true, all byte_array data pages seen so far used dictionary encoding;
-    // dict_indices holds the per-row lookup indices.  As soon as a non-dict page
-    // is encountered we flush dict_indices → string_values and set this false.
+    // When true, byte_array values are kept dictionary-encoded. Mixed dict/plain
+    // pages are unified into a synthetic per-chunk dictionary via unified_dict_map.
     bool byte_array_dict_mode = (result.type == "byte_array" && dict_size > 0);
+    bool int32_dict_mode = (result.type == "int32" && dict_size > 0);
+    bool int64_dict_mode = (result.type == "int64" && dict_size > 0);
+    bool float32_dict_mode = (result.type == "float32" && dict_size > 0);
+    bool float64_dict_mode = (result.type == "float64" && dict_size > 0);
+    std::unordered_map<std::string, int32_t> unified_dict_map;
+    std::unordered_map<int32_t, int32_t> int32_dict_map;
+    std::unordered_map<int64_t, int32_t> int64_dict_map;
+    std::unordered_map<uint32_t, int32_t> float32_dict_map;
+    std::unordered_map<uint64_t, int32_t> float64_dict_map;
 
     while (cursor < chunk_limit &&
            (total_needed <= 0 || total_collected < total_needed)) {
@@ -367,43 +460,59 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
 
         RUGO_TEL_START(_vx_t0);
         if (result.type == "int32") {
-          int32_t n = (int32_t)indices.size();
-          if (result.ext_int32) {
-            int32_t* edst = result.ext_int32 + result.ext_written;
-            for (int32_t i = 0; i < n; ++i) {
-              int32_t idx = indices[i];
-              if (idx < 0 || idx >= (int32_t)dict_int32.size()) return result;
-              edst[i] = dict_int32[idx];
+          if (int32_dict_mode) {
+            result.dict_indices.reserve(result.dict_indices.size() + indices.size());
+            for (int32_t idx : indices) {
+              if (idx < 0 || idx >= (int32_t)result.dict_int32_values.size()) return result;
+              result.dict_indices.push_back(idx);
             }
-            result.ext_written += n;
           } else {
-            size_t old_sz = result.int32_values.size();
-            result.int32_values.resize(old_sz + n);
-            int32_t* dst = result.int32_values.data() + old_sz;
-            for (int32_t i = 0; i < n; ++i) {
-              int32_t idx = indices[i];
-              if (idx < 0 || idx >= (int32_t)dict_int32.size()) return result;
-              dst[i] = dict_int32[idx];
+            int32_t n = (int32_t)indices.size();
+            if (result.ext_int32) {
+              int32_t* edst = result.ext_int32 + result.ext_written;
+              for (int32_t i = 0; i < n; ++i) {
+                int32_t idx = indices[i];
+                if (idx < 0 || idx >= (int32_t)result.dict_int32_values.size()) return result;
+                edst[i] = result.dict_int32_values[idx];
+              }
+              result.ext_written += n;
+            } else {
+              size_t old_sz = result.int32_values.size();
+              result.int32_values.resize(old_sz + n);
+              int32_t* dst = result.int32_values.data() + old_sz;
+              for (int32_t i = 0; i < n; ++i) {
+                int32_t idx = indices[i];
+                if (idx < 0 || idx >= (int32_t)result.dict_int32_values.size()) return result;
+                dst[i] = result.dict_int32_values[idx];
+              }
             }
           }
         } else if (result.type == "int64") {
-          int32_t n = (int32_t)indices.size();
-          if (result.ext_int64) {
-            int64_t* edst = result.ext_int64 + result.ext_written;
-            for (int32_t i = 0; i < n; ++i) {
-              int32_t idx = indices[i];
-              if (idx < 0 || idx >= (int32_t)dict_int64.size()) return result;
-              edst[i] = dict_int64[idx];
+          if (int64_dict_mode) {
+            result.dict_indices.reserve(result.dict_indices.size() + indices.size());
+            for (int32_t idx : indices) {
+              if (idx < 0 || idx >= (int32_t)result.dict_int64_values.size()) return result;
+              result.dict_indices.push_back(idx);
             }
-            result.ext_written += n;
           } else {
-            size_t old_sz = result.int64_values.size();
-            result.int64_values.resize(old_sz + n);
-            int64_t* dst = result.int64_values.data() + old_sz;
-            for (int32_t i = 0; i < n; ++i) {
-              int32_t idx = indices[i];
-              if (idx < 0 || idx >= (int32_t)dict_int64.size()) return result;
-              dst[i] = dict_int64[idx];
+            int32_t n = (int32_t)indices.size();
+            if (result.ext_int64) {
+              int64_t* edst = result.ext_int64 + result.ext_written;
+              for (int32_t i = 0; i < n; ++i) {
+                int32_t idx = indices[i];
+                if (idx < 0 || idx >= (int32_t)result.dict_int64_values.size()) return result;
+                edst[i] = result.dict_int64_values[idx];
+              }
+              result.ext_written += n;
+            } else {
+              size_t old_sz = result.int64_values.size();
+              result.int64_values.resize(old_sz + n);
+              int64_t* dst = result.int64_values.data() + old_sz;
+              for (int32_t i = 0; i < n; ++i) {
+                int32_t idx = indices[i];
+                if (idx < 0 || idx >= (int32_t)result.dict_int64_values.size()) return result;
+                dst[i] = result.dict_int64_values[idx];
+              }
             }
           }
         } else if (result.type == "byte_array") {
@@ -414,43 +523,59 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
             result.dict_indices.push_back(idx);
           }
         } else if (result.type == "float32") {
-          int32_t n = (int32_t)indices.size();
-          if (result.ext_float32) {
-            float* edst = result.ext_float32 + result.ext_written;
-            for (int32_t i = 0; i < n; ++i) {
-              int32_t idx = indices[i];
-              if (idx < 0 || idx >= (int32_t)dict_float32.size()) return result;
-              edst[i] = dict_float32[idx];
+          if (float32_dict_mode) {
+            result.dict_indices.reserve(result.dict_indices.size() + indices.size());
+            for (int32_t idx : indices) {
+              if (idx < 0 || idx >= (int32_t)result.dict_float32_values.size()) return result;
+              result.dict_indices.push_back(idx);
             }
-            result.ext_written += n;
           } else {
-            size_t old_sz = result.float32_values.size();
-            result.float32_values.resize(old_sz + n);
-            float* dst = result.float32_values.data() + old_sz;
-            for (int32_t i = 0; i < n; ++i) {
-              int32_t idx = indices[i];
-              if (idx < 0 || idx >= (int32_t)dict_float32.size()) return result;
-              dst[i] = dict_float32[idx];
+            int32_t n = (int32_t)indices.size();
+            if (result.ext_float32) {
+              float* edst = result.ext_float32 + result.ext_written;
+              for (int32_t i = 0; i < n; ++i) {
+                int32_t idx = indices[i];
+                if (idx < 0 || idx >= (int32_t)result.dict_float32_values.size()) return result;
+                edst[i] = result.dict_float32_values[idx];
+              }
+              result.ext_written += n;
+            } else {
+              size_t old_sz = result.float32_values.size();
+              result.float32_values.resize(old_sz + n);
+              float* dst = result.float32_values.data() + old_sz;
+              for (int32_t i = 0; i < n; ++i) {
+                int32_t idx = indices[i];
+                if (idx < 0 || idx >= (int32_t)result.dict_float32_values.size()) return result;
+                dst[i] = result.dict_float32_values[idx];
+              }
             }
           }
         } else if (result.type == "float64") {
-          int32_t n = (int32_t)indices.size();
-          if (result.ext_float64) {
-            double* edst = result.ext_float64 + result.ext_written;
-            for (int32_t i = 0; i < n; ++i) {
-              int32_t idx = indices[i];
-              if (idx < 0 || idx >= (int32_t)dict_float64.size()) return result;
-              edst[i] = dict_float64[idx];
+          if (float64_dict_mode) {
+            result.dict_indices.reserve(result.dict_indices.size() + indices.size());
+            for (int32_t idx : indices) {
+              if (idx < 0 || idx >= (int32_t)result.dict_float64_values.size()) return result;
+              result.dict_indices.push_back(idx);
             }
-            result.ext_written += n;
           } else {
-            size_t old_sz = result.float64_values.size();
-            result.float64_values.resize(old_sz + n);
-            double* dst = result.float64_values.data() + old_sz;
-            for (int32_t i = 0; i < n; ++i) {
-              int32_t idx = indices[i];
-              if (idx < 0 || idx >= (int32_t)dict_float64.size()) return result;
-              dst[i] = dict_float64[idx];
+            int32_t n = (int32_t)indices.size();
+            if (result.ext_float64) {
+              double* edst = result.ext_float64 + result.ext_written;
+              for (int32_t i = 0; i < n; ++i) {
+                int32_t idx = indices[i];
+                if (idx < 0 || idx >= (int32_t)result.dict_float64_values.size()) return result;
+                edst[i] = result.dict_float64_values[idx];
+              }
+              result.ext_written += n;
+            } else {
+              size_t old_sz = result.float64_values.size();
+              result.float64_values.resize(old_sz + n);
+              double* dst = result.float64_values.data() + old_sz;
+              for (int32_t i = 0; i < n; ++i) {
+                int32_t idx = indices[i];
+                if (idx < 0 || idx >= (int32_t)result.dict_float64_values.size()) return result;
+                dst[i] = result.dict_float64_values[idx];
+              }
             }
           }
         }
@@ -461,7 +586,30 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
         int32_t page_encoding = page_header.encoding;
 
         if (result.type == "int32") {
-          if (result.ext_int32) {
+          if (int32_dict_mode) {
+            if (int32_dict_map.empty()) {
+              SeedPrimitiveDictionaryMap(int32_dict_map, result.dict_int32_values);
+            }
+            if (page_encoding == 4) {
+              std::vector<int32_t> page_ints;
+              int32_t decoded =
+                  DecodeDeltaBinaryPacked(data_ptr, data_size, present_count, page_ints);
+              if (decoded != present_count) return result;
+              result.dict_indices.reserve(result.dict_indices.size() + page_ints.size());
+              for (int32_t value : page_ints) {
+                int32_t code = InternPrimitiveToDictionary(value, int32_dict_map, result.dict_int32_values);
+                result.dict_indices.push_back(code);
+              }
+            } else {
+              result.dict_indices.reserve(result.dict_indices.size() + present_count);
+              for (int32_t i = 0; i < present_count && data_ptr + 4 <= data_end; i++) {
+                int32_t value = ReadLE32(data_ptr);
+                data_ptr += 4;
+                int32_t code = InternPrimitiveToDictionary(value, int32_dict_map, result.dict_int32_values);
+                result.dict_indices.push_back(code);
+              }
+            }
+          } else if (result.ext_int32) {
             if (page_encoding == 4) {
               std::vector<int32_t> page_ints;
               int32_t decoded = DecodeDeltaBinaryPacked(data_ptr, data_size, present_count, page_ints);
@@ -492,7 +640,30 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
             }
           }
         } else if (result.type == "int64") {
-          if (result.ext_int64) {
+          if (int64_dict_mode) {
+            if (int64_dict_map.empty()) {
+              SeedPrimitiveDictionaryMap(int64_dict_map, result.dict_int64_values);
+            }
+            if (page_encoding == 4) {
+              std::vector<int64_t> page_ints;
+              int32_t decoded =
+                  DecodeDeltaBinaryPacked(data_ptr, data_size, present_count, page_ints);
+              if (decoded != present_count) return result;
+              result.dict_indices.reserve(result.dict_indices.size() + page_ints.size());
+              for (int64_t value : page_ints) {
+                int32_t code = InternPrimitiveToDictionary(value, int64_dict_map, result.dict_int64_values);
+                result.dict_indices.push_back(code);
+              }
+            } else {
+              result.dict_indices.reserve(result.dict_indices.size() + present_count);
+              for (int32_t i = 0; i < present_count && data_ptr + 8 <= data_end; i++) {
+                int64_t value = ReadLE64(data_ptr);
+                data_ptr += 8;
+                int32_t code = InternPrimitiveToDictionary(value, int64_dict_map, result.dict_int64_values);
+                result.dict_indices.push_back(code);
+              }
+            }
+          } else if (result.ext_int64) {
             if (page_encoding == 4) {
               std::vector<int64_t> page_ints;
               int32_t decoded = DecodeDeltaBinaryPacked(data_ptr, data_size, present_count, page_ints);
@@ -523,30 +694,54 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
             }
           }
         } else if (result.type == "byte_array") {
-          // If previously in dict mode, flush indices → expanded strings before appending plain.
-          if (byte_array_dict_mode) {
-            for (int32_t idx : result.dict_indices)
-              result.string_values.emplace_back(
-                  reinterpret_cast<const char*>(
-                      result.string_dict_arena.data() + result.string_dict_offsets[idx]),
-                  result.string_dict_lens[idx]);
-            result.dict_indices.clear();
-            byte_array_dict_mode = false;
+          // Mixed dict/plain chunks stay dictionary-encoded by interning plain
+          // values into a synthetic unified dictionary (owning string keys).
+          if (byte_array_dict_mode && unified_dict_map.empty()) {
+            SeedDictionaryMapFromArena(
+                unified_dict_map,
+                result.string_dict_arena,
+                result.string_dict_offsets,
+                result.string_dict_lens);
           }
           if (page_encoding == 6) {
             std::vector<std::string> page_strs;
             int32_t decoded = DecodeDeltaByteArray(data_ptr, data_size,
                                                     present_count, page_strs);
             if (decoded != present_count) return result;
-            result.string_values.insert(result.string_values.end(),
-                                         page_strs.begin(), page_strs.end());
+            if (byte_array_dict_mode) {
+              result.dict_indices.reserve(result.dict_indices.size() + page_strs.size());
+              for (const auto& value : page_strs) {
+                int32_t code = InternByteArrayToDictionary(
+                    value.data(),
+                    static_cast<int32_t>(value.size()),
+                    unified_dict_map,
+                    result.string_dict_arena,
+                    result.string_dict_offsets,
+                    result.string_dict_lens);
+                result.dict_indices.push_back(code);
+              }
+            } else {
+              result.string_values.insert(result.string_values.end(),
+                                           page_strs.begin(), page_strs.end());
+            }
           } else {
             for (int32_t i = 0; i < present_count && data_ptr + 4 <= data_end; i++) {
               int32_t length = ReadLE32(data_ptr);
               data_ptr += 4;
               if (data_ptr + length > data_end) break;
-              result.string_values.emplace_back(
-                  reinterpret_cast<const char *>(data_ptr), length);
+              if (byte_array_dict_mode) {
+                int32_t code = InternByteArrayToDictionary(
+                    reinterpret_cast<const char*>(data_ptr),
+                    length,
+                    unified_dict_map,
+                    result.string_dict_arena,
+                    result.string_dict_offsets,
+                    result.string_dict_lens);
+                result.dict_indices.push_back(code);
+              } else {
+                result.string_values.emplace_back(
+                    reinterpret_cast<const char *>(data_ptr), length);
+              }
               data_ptr += length;
             }
           }
@@ -570,7 +765,30 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
             data_ptr += (present_count + 7) / 8;
           }
         } else if (result.type == "float32") {
-          if (result.ext_float32) {
+          if (float32_dict_mode) {
+            if (float32_dict_map.empty()) {
+              float32_dict_map.reserve(result.dict_float32_values.size() * 2 + 1);
+              for (size_t i = 0; i < result.dict_float32_values.size(); ++i) {
+                float32_dict_map.emplace(Float32Bits(result.dict_float32_values[i]), static_cast<int32_t>(i));
+              }
+            }
+            result.dict_indices.reserve(result.dict_indices.size() + present_count);
+            for (int32_t i = 0; i < present_count && data_ptr + 4 <= data_end; i++) {
+              float value = ReadFloat32(data_ptr);
+              data_ptr += 4;
+              uint32_t key = Float32Bits(value);
+              auto it = float32_dict_map.find(key);
+              int32_t code;
+              if (it == float32_dict_map.end()) {
+                code = static_cast<int32_t>(result.dict_float32_values.size());
+                float32_dict_map.emplace(key, code);
+                result.dict_float32_values.push_back(value);
+              } else {
+                code = it->second;
+              }
+              result.dict_indices.push_back(code);
+            }
+          } else if (result.ext_float32) {
             float* edst = result.ext_float32 + result.ext_written;
             for (int32_t i = 0; i < present_count && data_ptr + 4 <= data_end; i++) {
               *edst++ = ReadFloat32(data_ptr);
@@ -584,7 +802,30 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
             }
           }
         } else if (result.type == "float64") {
-          if (result.ext_float64) {
+          if (float64_dict_mode) {
+            if (float64_dict_map.empty()) {
+              float64_dict_map.reserve(result.dict_float64_values.size() * 2 + 1);
+              for (size_t i = 0; i < result.dict_float64_values.size(); ++i) {
+                float64_dict_map.emplace(Float64Bits(result.dict_float64_values[i]), static_cast<int32_t>(i));
+              }
+            }
+            result.dict_indices.reserve(result.dict_indices.size() + present_count);
+            for (int32_t i = 0; i < present_count && data_ptr + 8 <= data_end; i++) {
+              double value = ReadFloat64(data_ptr);
+              data_ptr += 8;
+              uint64_t key = Float64Bits(value);
+              auto it = float64_dict_map.find(key);
+              int32_t code;
+              if (it == float64_dict_map.end()) {
+                code = static_cast<int32_t>(result.dict_float64_values.size());
+                float64_dict_map.emplace(key, code);
+                result.dict_float64_values.push_back(value);
+              } else {
+                code = it->second;
+              }
+              result.dict_indices.push_back(code);
+            }
+          } else if (result.ext_float64) {
             double* edst = result.ext_float64 + result.ext_written;
             for (int32_t i = 0; i < present_count && data_ptr + 8 <= data_end; i++) {
               *edst++ = ReadFloat64(data_ptr);
@@ -605,6 +846,18 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
     }  // end page loop
 
     result.num_rows = total_collected;
+
+    if (result.type == "byte_array" && !result.string_dict_lens.empty()) {
+      result.code_width = CodeWidthForDictSize(result.string_dict_lens.size());
+    } else if (result.type == "int32" && !result.dict_int32_values.empty()) {
+      result.code_width = CodeWidthForDictSize(result.dict_int32_values.size());
+    } else if (result.type == "int64" && !result.dict_int64_values.empty()) {
+      result.code_width = CodeWidthForDictSize(result.dict_int64_values.size());
+    } else if (result.type == "float32" && !result.dict_float32_values.empty()) {
+      result.code_width = CodeWidthForDictSize(result.dict_float32_values.size());
+    } else if (result.type == "float64" && !result.dict_float64_values.empty()) {
+      result.code_width = CodeWidthForDictSize(result.dict_float64_values.size());
+    }
 
     // If every byte_array page used dictionary encoding, string_values is still empty
     // and dict_indices holds all per-row lookup indices.  The compact dictionary is

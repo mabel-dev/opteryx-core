@@ -15,6 +15,7 @@ struct PageHeader {
   int32_t compressed_page_size   = 0;
   int32_t num_values             = 0;
   int32_t encoding               = 0;  // PLAIN=0, DELTA_BINARY_PACKED=4, …
+  bool dictionary_is_sorted      = false;
 };
 
 // Parse a PageHeader from the given Thrift compact-protocol input stream.

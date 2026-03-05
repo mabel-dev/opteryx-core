@@ -6,11 +6,8 @@
 from __future__ import annotations
 
 import time
-import warnings
-
 from opteryx.draken.interop.arrow import vector_from_sequence
 from opteryx.draken.morsels.morsel import Morsel
-from opteryx.exceptions import ExecutionError
 
 _SUPPORTED_FUNCTIONS = {
     "count",
@@ -57,14 +54,12 @@ class ShuffleGroupByOperationV2:
         self,
         group_by_columns: list[str | bytes],
         aggregations: list[object],
-        strict_fast_path: bool = False,
     ):
         if not aggregations:
             raise ValueError("at least one aggregation is required")
         self.group_by_columns = [_normalize_column_name(column) for column in group_by_columns]
         self.aggregations = [self._normalize_aggregation(spec) for spec in aggregations]
         self._backend = _create_backend(self.group_by_columns, self.aggregations)
-        self.strict_fast_path = bool(strict_fast_path)
         self.readings = {
             "time_groupby_finalize_backend_ns": 0,
             "time_groupby_finalize_rows_to_vectors_ns": 0,
@@ -72,6 +67,8 @@ class ShuffleGroupByOperationV2:
             "groupby_finalize_rows_count": 0,
             "groupby_finalize_chunks_emitted": 0,
             "groupby_finalize_fast_path_hits": 0,
+            "draken_dict_groupby_fastpath_hits": 0,
+            "draken_dict_groupby_fastpath_fallbacks": 0,
         }
 
     def _is_fast_path_eligible(self) -> bool:
@@ -80,22 +77,6 @@ class ShuffleGroupByOperationV2:
             and len(self.group_by_columns) == 1
             and self.aggregations[0][1] in _FAST_OUTPUT_FUNCTIONS
             and hasattr(self._backend, "finalize_fast_columns")
-        )
-
-    def _raise_strict_fast_path_error(self, detail: str) -> None:
-        reason = None
-        if hasattr(self._backend, "fast_finalize_unavailable_reason"):
-            try:
-                reason = self._backend.fast_finalize_unavailable_reason()
-            except Exception:
-                reason = None
-
-        if reason:
-            detail = f"{detail}. reason: {reason}"
-
-        raise ExecutionError(
-            f"Draken strict fast-path execution failed: {detail}. "
-            "Fallback finalize paths are disabled."
         )
 
     @staticmethod
@@ -117,7 +98,15 @@ class ShuffleGroupByOperationV2:
         return str(alias), function, column
 
     def ingest(self, morsel: Morsel) -> None:
+        pre_dict_hits = getattr(self._backend, "dict_groupby_fastpath_hits", 0)
+        pre_dict_fallbacks = getattr(self._backend, "dict_groupby_fastpath_fallbacks", 0)
         self._backend.ingest(morsel)
+        self.readings["draken_dict_groupby_fastpath_hits"] += (
+            getattr(self._backend, "dict_groupby_fastpath_hits", 0) - pre_dict_hits
+        )
+        self.readings["draken_dict_groupby_fastpath_fallbacks"] += (
+            getattr(self._backend, "dict_groupby_fastpath_fallbacks", 0) - pre_dict_fallbacks
+        )
 
     def ingest_many(self, morsels) -> None:
         for morsel in morsels:
@@ -172,15 +161,6 @@ class ShuffleGroupByOperationV2:
                 self.readings["groupby_finalize_rows_count"] += len(keys)
                 self.readings["groupby_finalize_chunks_emitted"] += 1
                 return morsel
-            if self.strict_fast_path:
-                self._raise_strict_fast_path_error(
-                    "eligible fast finalize returned None (likely null-sensitive output)"
-                )
-
-        elif self.strict_fast_path:
-            self._raise_strict_fast_path_error(
-                "query shape is not eligible for single-key/single-aggregate fast finalize"
-            )
 
         backend_st = time.monotonic_ns()
         rows = self._backend.finalize_rows()
@@ -233,16 +213,6 @@ class ShuffleGroupByOperationV2:
                         self.readings["groupby_finalize_chunks_emitted"] += 1
                         yield morsel
                     return
-                if self.strict_fast_path:
-                    self._raise_strict_fast_path_error(
-                        "eligible chunked fast finalize returned None"
-                    )
-                else:
-                    warnings.warn(
-                        "Draken fast-finalize chunked path unavailable; "
-                        "falling back to generic finalize_rows()",
-                        stacklevel=2,
-                    )
 
             backend_st = time.monotonic_ns()
             fast_columns = self._backend.finalize_fast_columns()
@@ -270,19 +240,6 @@ class ShuffleGroupByOperationV2:
                     self.readings["groupby_finalize_chunks_emitted"] += 1
                     yield morsel
                 return
-            if self.strict_fast_path:
-                self._raise_strict_fast_path_error("eligible fast finalize returned None")
-            else:
-                warnings.warn(
-                    "Draken fast-finalize path unavailable; "
-                    "falling back to generic finalize_rows()",
-                    stacklevel=2,
-                )
-
-        elif self.strict_fast_path:
-            self._raise_strict_fast_path_error(
-                "query shape is not eligible for single-key/single-aggregate fast finalize"
-            )
 
         backend_st = time.monotonic_ns()
         rows = self._backend.finalize_rows()

@@ -227,14 +227,24 @@ class ParquetReadNode(ReaderNode):
                 names.append(field.name)
                 continue
 
+            source_value_type = source_type
+            if pyarrow.types.is_dictionary(source_type):
+                source_value_type = source_type.value_type
+
             # Rugo decodes Parquet DATE logical values as integer day counts. Arrow's
             # direct int64->date64 cast treats integers as milliseconds, so convert
             # through date32 (days) first to preserve semantics.
-            if pyarrow.types.is_date64(target_type) and pyarrow.types.is_int64(source_type):
+            if pyarrow.types.is_date64(target_type) and (
+                pyarrow.types.is_int64(source_value_type)
+                or pyarrow.types.is_int32(source_value_type)
+            ):
                 casted = pyarrow.compute.cast(column, pyarrow.int32())
                 casted = pyarrow.compute.cast(casted, pyarrow.date32())
                 casted = pyarrow.compute.cast(casted, pyarrow.date64())
-            elif pyarrow.types.is_date32(target_type) and pyarrow.types.is_int64(source_type):
+            elif pyarrow.types.is_date32(target_type) and (
+                pyarrow.types.is_int64(source_value_type)
+                or pyarrow.types.is_int32(source_value_type)
+            ):
                 casted = pyarrow.compute.cast(column, pyarrow.int32())
                 casted = pyarrow.compute.cast(casted, pyarrow.date32())
             else:

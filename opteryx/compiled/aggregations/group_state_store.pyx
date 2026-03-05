@@ -7,6 +7,7 @@
 
 from opteryx.draken.morsels.morsel cimport Morsel
 from opteryx.draken.core.buffers cimport DrakenFixedBuffer
+from opteryx.draken.vectors.dictionary_vector cimport DictionaryVector
 from opteryx.compiled.aggregations.aggregate_kernels cimport AGG_AVG
 from opteryx.compiled.aggregations.aggregate_kernels cimport AGG_COUNT
 from opteryx.compiled.aggregations.aggregate_kernels cimport AGG_COUNT_DISTINCT
@@ -114,6 +115,8 @@ cdef class GroupStateStore:
     cdef flat_hash_map[uint64_t, flat_hash_set[uint64_t, IdentityHash]] _int64_count_distinct_seen
     cdef flat_hash_set[uint64_t, IdentityHash] _int64_count_distinct_null_key_seen
     cdef object _specialized_kernel
+    cdef uint64_t _dict_groupby_fastpath_hits
+    cdef uint64_t _dict_groupby_fastpath_fallbacks
 
     def __cinit__(self, list group_by_columns, list aggregations):
         cdef object aggregation
@@ -138,6 +141,8 @@ cdef class GroupStateStore:
         self._int64_count_distinct_seen_null_key = False
         self._int64_count_distinct_null_key_count = 0
         self._specialized_kernel = None
+        self._dict_groupby_fastpath_hits = 0
+        self._dict_groupby_fastpath_fallbacks = 0
 
         for aggregation in aggregations:
             function = aggregation[1]
@@ -226,6 +231,14 @@ cdef class GroupStateStore:
     def rows_seen(self):
         return self._rows_seen
 
+    @property
+    def dict_groupby_fastpath_hits(self):
+        return self._dict_groupby_fastpath_hits
+
+    @property
+    def dict_groupby_fastpath_fallbacks(self):
+        return self._dict_groupby_fastpath_fallbacks
+
     cpdef void ingest(self, Morsel morsel):
         cdef Py_ssize_t row_count
         cdef Py_ssize_t row_idx
@@ -274,6 +287,8 @@ cdef class GroupStateStore:
         cdef DrakenFixedBuffer* int_value_ptr
         cdef uint64_t* _narrow_key_buf
         cdef uint64_t* _narrow_value_buf
+        cdef bint dict_fastpath_candidate = False
+        cdef object dict_candidate_vector
 
         if morsel is None or morsel.num_rows == 0:
             return
@@ -285,8 +300,21 @@ cdef class GroupStateStore:
         self._rows_seen += row_count
 
         if self._specialized_kernel is not None:
+            if len(self._group_by_columns) == 1 and len(self._agg_function_codes) == 1:
+                dict_candidate_vector = morsel.column(self._group_by_columns[0])
+                if isinstance(dict_candidate_vector, DictionaryVector):
+                    dict_fastpath_candidate = True
+                elif self._agg_function_codes[0] == AGG_COUNT_DISTINCT and self._agg_columns[0] is not None:
+                    dict_candidate_vector = morsel.column(self._agg_columns[0])
+                    if isinstance(dict_candidate_vector, DictionaryVector):
+                        dict_fastpath_candidate = True
+
             if self._specialized_kernel.ingest(morsel):
+                if dict_fastpath_candidate:
+                    self._dict_groupby_fastpath_hits += 1
                 return
+            if dict_fastpath_candidate:
+                self._dict_groupby_fastpath_fallbacks += 1
             self._specialized_kernel = None
 
         single_mode = self._single_mode

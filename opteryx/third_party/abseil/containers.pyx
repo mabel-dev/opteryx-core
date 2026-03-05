@@ -62,11 +62,17 @@ cdef class FlatHashMapByteVector:
 
 cdef extern from "absl/container/flat_hash_set.h" namespace "absl":
     cdef cppclass flat_hash_set[T, HashFunc]:
+        cppclass iterator:
+            T& operator*()
+            iterator operator++()
+            bint operator!=(iterator)
         flat_hash_set()
-        pair[long, bint] insert(T value)
+        pair[iterator, bint] insert(T value)
         size_t size() const
         bint contains(T value) const
         void reserve(int64_t value)
+        iterator begin()
+        iterator end()
 
 cdef class FlatHashSet:
     #cdef flat_hash_set[uint64_t, IdentityHash] _set

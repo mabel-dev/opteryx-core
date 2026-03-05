@@ -6,7 +6,7 @@ cdef extern from "core/buffers.h":
     ctypedef enum DrakenType:
         DRAKEN_INT8
         DRAKEN_INT16
-        DRAKEN_INT32,
+        DRAKEN_INT32
         DRAKEN_INT64
         DRAKEN_FLOAT32
         DRAKEN_FLOAT64
@@ -17,6 +17,7 @@ cdef extern from "core/buffers.h":
         DRAKEN_INTERVAL
         DRAKEN_BOOL
         DRAKEN_STRING
+        DRAKEN_DICTIONARY
         DRAKEN_ARRAY
 
         DRAKEN_NON_NATIVE
@@ -35,6 +36,15 @@ cdef extern from "core/buffers.h":
         int32_t* offsets           # [N+1] entries
         uint8_t* null_bitmap       # optional
         size_t length
+        DrakenType type
+
+    ctypedef struct DrakenDictionaryBuffer:
+        uint8_t* codes
+        uint8_t code_width
+        uint8_t* null_bitmap
+        size_t length
+        uint8_t ordered
+        DrakenVarBuffer* dictionary_values
         DrakenType type
 
     # Array column (list<T>)

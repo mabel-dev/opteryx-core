@@ -75,15 +75,9 @@ class DrakenAggregateAndGroupNode(BasePlanNode):
             spec.column for spec in self._aggregation_specs if spec.column not in (None, "*")
         )
         self._required_columns = list(dict.fromkeys(required_columns))
-        # we do NOT enable strict_fast_path at the backend level.  a missing
-        # fast-finalize result should not cause the query to fail – the kernel
-        # itself can still carry out the generic finalize_rows() path entirely
-        # in Cython.  this keeps the guarantee that no Python code is executed
-        # during aggregation, while avoiding spurious execution errors.
         self._group_by = ShuffleGroupByOperationV2(
             group_by_columns=self.group_by_columns,
             aggregations=self._aggregation_specs,
-            strict_fast_path=False,
         )
 
     @staticmethod

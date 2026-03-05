@@ -12,6 +12,10 @@ struct DecodedColumn {
   std::vector<std::string> string_values; // For byte_array: either flat values (dict_indices empty)
                                            //   or the compact dictionary (dict_indices non-empty)
   std::vector<int32_t> dict_indices;      // non-empty → string_values is the dict; per-row indices
+  std::vector<int32_t> dict_int32_values; // compact dictionary payload for int32 columns
+  std::vector<int64_t> dict_int64_values; // compact dictionary payload for int64 columns
+  std::vector<float> dict_float32_values; // compact dictionary payload for float32 columns
+  std::vector<double> dict_float64_values; // compact dictionary payload for float64 columns
   std::vector<uint8_t> boolean_values;   // for boolean (using uint8_t instead of bool)
   std::vector<float> float32_values;     // for float32
   std::vector<double> float64_values;    // for float64
@@ -30,6 +34,8 @@ struct DecodedColumn {
   std::vector<uint8_t>  string_dict_arena;    // packed bytes for all dict entries
   std::vector<uint32_t> string_dict_offsets;  // byte start offset per entry
   std::vector<int32_t>  string_dict_lens;     // byte length per entry
+  uint8_t code_width = 0;                     // bytes per code (1, 2, 4) for dict_indices
+  bool dict_ordered = false;                  // dictionary page is_sorted flag
 
   // Zero-copy output pointers (optional). When non-null, numeric decode writes
   // directly into the caller-supplied buffer, bypassing the internal std::vector<T>.

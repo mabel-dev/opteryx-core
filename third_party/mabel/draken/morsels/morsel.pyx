@@ -33,6 +33,7 @@ from opteryx.draken.core.buffers cimport (
     DRAKEN_ARRAY,
     DRAKEN_BOOL,
     DRAKEN_DATE32,
+    DRAKEN_DICTIONARY,
     DRAKEN_FLOAT32,
     DRAKEN_FLOAT64,
     DRAKEN_INT16,
@@ -72,6 +73,7 @@ cdef class DrakenTypeInt(int):
             43: "DRAKEN_INTERVAL",
             50: "DRAKEN_BOOL",
             60: "DRAKEN_STRING",
+            61: "DRAKEN_DICTIONARY",
             80: "DRAKEN_ARRAY",
             100: "DRAKEN_NON_NATIVE",
         }
@@ -892,6 +894,12 @@ cdef class Morsel:
             return pa.bool_()
         if dtype == DRAKEN_STRING:
             return pa.binary()
+        if dtype == DRAKEN_DICTIONARY:
+            try:
+                arr = src_vec.to_arrow()
+                return arr.type
+            except Exception:
+                return pa.dictionary(pa.uint32(), pa.binary())
         if dtype == DRAKEN_ARRAY:
             child_type = None
             child_dtype_obj = None

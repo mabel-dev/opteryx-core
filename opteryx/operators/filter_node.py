@@ -69,6 +69,8 @@ class FilterNode(BasePlanNode):
         if isinstance(mask, pyarrow.BooleanArray):
             # Already PyArrow - use directly
             filtered = morsel.filter(mask)
+        elif mask.__class__.__name__ == "BoolVector":
+            filtered = morsel.filter(mask.to_arrow())
         elif isinstance(mask, numpy.ndarray):
             # Convert numpy boolean to PyArrow BooleanArray
             # PyArrow's filter handles null values correctly in Kleene logic

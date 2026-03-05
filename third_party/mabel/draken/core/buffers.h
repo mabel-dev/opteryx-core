@@ -25,6 +25,7 @@ typedef enum {
 
     // String-like: 60–79
     DRAKEN_STRING         = 60,
+    DRAKEN_DICTIONARY     = 61,
 
     // Complex types: 80–99
     DRAKEN_ARRAY          = 80,
@@ -48,6 +49,16 @@ typedef struct {
     size_t length;
     DrakenType type;
 } DrakenVarBuffer;
+
+typedef struct {
+    uint8_t* codes;               // code stream, width selected by code_width
+    uint8_t code_width;           // bytes per code: 1, 2, or 4
+    uint8_t* null_bitmap;         // optional, 1 bit per row
+    size_t length;                // number of rows
+    uint8_t ordered;              // dictionary order flag from parquet/arrow metadata
+    DrakenVarBuffer* dictionary_values;  // dictionary payload buffer (type in DrakenVarBuffer.type)
+    DrakenType type;              // DRAKEN_DICTIONARY
+} DrakenDictionaryBuffer;
 
 typedef struct {
     int32_t* offsets;         // [length + 1] entries

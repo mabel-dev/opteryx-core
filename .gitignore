@@ -234,6 +234,8 @@ third_party/mabel/draken/vectors/int64_vector.c*
 third_party/mabel/draken/vectors/interval_vector.c*
 third_party/mabel/draken/vectors/string_vector.c*
 third_party/mabel/draken/vectors/time_vector.c*
+third_party/mabel/draken/vectors/dictionary_vector.c*
+third_party/mabel/draken/vectors/integer_vector.c*
 third_party/mabel/draken/vectors/timestamp_vector.c*
 third_party/mabel/draken/vectors/vector.c*
 third_party/mabel/rugo/jsonl/jsonl_reader.c*

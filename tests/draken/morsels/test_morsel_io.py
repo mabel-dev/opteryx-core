@@ -73,6 +73,38 @@ def test_morsel_io_round_trip_lz4_codec(tmp_path):
     assert _as_py_columns(restored) == _as_py_columns(original)
 
 
+def test_morsel_io_round_trip_dictionary_column(tmp_path):
+    dictionary = pa.array([b"one", None, b"three"], type=pa.binary())
+    indices = pa.array([0, 1, 2, None, 1, 0], type=pa.int8())
+    table = pa.table({"k": pa.DictionaryArray.from_arrays(indices, dictionary)})
+    original = Morsel.from_arrow(table)
+    path = tmp_path / "morsel_dict.drkm"
+
+    stats = write_morsel(path, original, {"codec_default": "none", "checksum_enabled": True})
+    restored = read_morsel(path, {"checksum_enabled": True})
+
+    assert stats["rows"] == original.num_rows
+    assert stats["columns"] == original.num_columns
+    assert restored.column(b"k").__class__.__name__ == "DictionaryVector"
+    assert _as_py_columns(restored) == _as_py_columns(original)
+
+
+def test_morsel_io_round_trip_numeric_dictionary_column(tmp_path):
+    dictionary = pa.array([10, 20, 30], type=pa.int32())
+    indices = pa.array([0, 1, 2, None, 1, 0], type=pa.int8())
+    table = pa.table({"k": pa.DictionaryArray.from_arrays(indices, dictionary)})
+    original = Morsel.from_arrow(table)
+    path = tmp_path / "morsel_dict_numeric.drkm"
+
+    stats = write_morsel(path, original, {"codec_default": "none", "checksum_enabled": True})
+    restored = read_morsel(path, {"checksum_enabled": True})
+
+    assert stats["rows"] == original.num_rows
+    assert stats["columns"] == original.num_columns
+    assert restored.column(b"k").__class__.__name__ == "DictionaryVector"
+    assert _as_py_columns(restored) == _as_py_columns(original)
+
+
 def test_morsel_io_detects_payload_corruption(tmp_path):
     original = _sample_morsel()
     path = tmp_path / "morsel_corrupt.drkm"
