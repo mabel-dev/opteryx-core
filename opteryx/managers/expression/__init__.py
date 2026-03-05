@@ -419,7 +419,7 @@ def get_all_nodes_of_type(root, select_nodes: tuple) -> list:
     return identifiers
 
 
-def evaluate_and_append(expressions, table: Table):
+def _evaluate_and_append_arrow(expressions, table: Table):
     """
     Evaluate an expression and add it to the table.
 
@@ -437,11 +437,22 @@ def evaluate_and_append(expressions, table: Table):
         if not should_evaluate(statement):
             continue
 
-        if table.num_rows > 0:
-            new_column = evaluate_statement(statement, table)
-        else:
-            # we make all unknown fields to object type
-            new_column = pyarrow.array([], type=statement.schema_column.arrow_field.type)
+        new_column = None
+        if statement.node_type == NodeType.LITERAL:
+            from opteryx.draken.vectors.constant_vector import from_scalar as constant_from_scalar
+
+            target_type = getattr(statement.schema_column, "arrow_field", None)
+            target_type = getattr(target_type, "type", None)
+            literal_vec = constant_from_scalar(statement.value, table.num_rows, dtype=target_type)
+            if literal_vec is not None:
+                new_column = literal_vec.to_arrow()
+
+        if new_column is None:
+            if table.num_rows > 0:
+                new_column = evaluate_statement(statement, table)
+            else:
+                # we make all unknown fields to object type
+                new_column = pyarrow.array([], type=statement.schema_column.arrow_field.type)
 
         # if we know the intended type of the result column, cast it
         field = statement.schema_column.identity
@@ -485,6 +496,69 @@ def evaluate_and_append(expressions, table: Table):
         existing_cols.add(identity)
 
     return table
+
+
+def _evaluate_and_append_morsel(expressions, morsel):
+    """
+    Evaluate expressions against a Draken Morsel.
+
+    Literal expressions are appended natively as ConstantVectors. If a non-literal
+    expression is encountered we fall back to Arrow evaluation for the remaining
+    expressions, then convert back to a Morsel.
+    """
+    from opteryx.draken.interop.arrow import vector_from_arrow
+    from opteryx.draken.morsels.morsel import Morsel
+    from opteryx.draken.vectors.constant_vector import from_scalar as constant_from_scalar
+
+    prioritized_expressions = prioritize_evaluation(expressions)
+    names = list(morsel.column_names)
+    vectors = [
+        morsel.column(name if isinstance(name, bytes) else name.encode("utf-8")) for name in names
+    ]
+    existing_cols = {name.decode("utf-8") if isinstance(name, bytes) else name for name in names}
+
+    for statement in prioritized_expressions:
+        identity = statement.schema_column.identity
+        if identity in existing_cols:
+            continue
+
+        if not should_evaluate(statement):
+            continue
+
+        if statement.node_type == NodeType.LITERAL:
+            target_type = getattr(statement.schema_column, "arrow_field", None)
+            target_type = getattr(target_type, "type", None)
+            literal_vec = constant_from_scalar(statement.value, morsel.num_rows, dtype=target_type)
+            if literal_vec is not None:
+                names.append(identity)
+                vectors.append(literal_vec)
+                existing_cols.add(identity)
+                continue
+
+        # Non-literal expressions still evaluate through Arrow today.
+        # Evaluate only the current expression and append its result vector so
+        # previously appended constant vectors remain native.
+        working_morsel = Morsel.from_vectors(names, vectors)
+        working_table = working_morsel.to_arrow()
+        evaluated = _evaluate_and_append_arrow([statement], working_table)
+        new_column = evaluated.column(identity)
+        if isinstance(new_column, pyarrow.ChunkedArray):
+            if new_column.num_chunks == 1:
+                new_column = new_column.chunk(0)
+            else:
+                new_column = new_column.combine_chunks()
+        names.append(identity)
+        vectors.append(vector_from_arrow(new_column))
+        existing_cols.add(identity)
+        continue
+
+    return Morsel.from_vectors(names, vectors)
+
+
+def evaluate_and_append(expressions, table: Table):
+    if table.__class__.__name__ == "Morsel":
+        return _evaluate_and_append_morsel(expressions, table)
+    return _evaluate_and_append_arrow(expressions, table)
 
 
 def should_evaluate(statement):

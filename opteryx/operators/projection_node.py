@@ -15,6 +15,7 @@ that performs column renames.
 import pyarrow
 
 from opteryx import EOS
+from opteryx.draken.morsels.morsel import Morsel
 from opteryx.managers.expression import NodeType
 from opteryx.managers.expression import evaluate_and_append
 from opteryx.models import QueryProperties
@@ -53,13 +54,52 @@ class ProjectionNode(BasePlanNode):
     def name(self):  # pragma: no cover
         return "Projection"
 
-    def execute(self, morsel: pyarrow.Table, **kwargs) -> pyarrow.Table:
-        morsel = self.ensure_arrow_table(morsel)
+    def _count_emitted_constant_literals(self, morsel: Morsel) -> int:
+        emitted = 0
+        for statement in self.evaluations:
+            if statement.node_type != NodeType.LITERAL:
+                continue
+            identity = statement.schema_column.identity
+            try:
+                col = morsel.column(
+                    identity if isinstance(identity, bytes) else identity.encode("utf-8")
+                )
+            except Exception:
+                continue
+            if col.__class__.__name__ == "ConstantVector":
+                emitted += 1
+        return emitted
 
+    def _execute_morsel_projection(self, morsel: Morsel):
+        morsel = evaluate_and_append(self.evaluations, morsel)
+        emitted = self._count_emitted_constant_literals(morsel)
+        if emitted:
+            self.readings["draken_constant_columns_emitted"] += emitted
+        return morsel.select(self.projection)
+
+    def execute(self, morsel: pyarrow.Table, **kwargs) -> pyarrow.Table:
         if morsel == EOS:
             yield EOS
             return
 
-        # If any of the columns need evaluating, we need to do that here
-        morsel = evaluate_and_append(self.evaluations, morsel)
-        yield morsel.select(self.projection)
+        # Keep Draken morsels native when possible to preserve constant vectors.
+        if isinstance(morsel, Morsel):
+            yield self._execute_morsel_projection(morsel)
+            return
+
+        table = self.ensure_arrow_table(morsel)
+
+        # Extend constant-native projection to Arrow inputs when literals are present
+        # by hopping through Morsel instead of Arrow literal expansion.
+        if any(statement.node_type == NodeType.LITERAL for statement in self.evaluations):
+            if any(getattr(column, "num_chunks", 0) > 1 for column in table.columns):
+                table = table.combine_chunks()
+            try:
+                yield self._execute_morsel_projection(Morsel.from_arrow(table))
+                return
+            except Exception:
+                # Defensive fallback: preserve pre-existing Arrow behavior.
+                pass
+
+        table = evaluate_and_append(self.evaluations, table)
+        yield table.select(self.projection)

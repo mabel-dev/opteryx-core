@@ -51,6 +51,7 @@ from opteryx.draken.vectors.float64_vector cimport Float64Vector
 from opteryx.draken.vectors.float64_vector cimport from_sequence as float64_from_sequence
 from opteryx.draken.vectors.bool_vector cimport BoolVector
 from opteryx.draken.vectors.bool_vector cimport from_sequence as bool_from_sequence
+from opteryx.draken.vectors.constant_vector cimport from_sequence as constant_from_sequence
 
 cdef void release_arrow_array(ArrowArray* arr) noexcept:
     free(<void*>arr.buffers)
@@ -193,8 +194,13 @@ cpdef object vector_from_sequence(object data, object dtype=None):
     except (TypeError, ValueError):
         pass
     
-    # Fallback: convert to Arrow then to Vector
-    # This handles varchar, varbinary, and other complex types
+    # Constant path for Python sequences (avoid materializing full repeated payloads).
+    const_vec = constant_from_sequence(data, dtype)
+    if const_vec is not None:
+        return const_vec
+
+    # Fallback: convert to Arrow then to Vector.
+    # This handles varchar, varbinary, and other complex types.
     arrow_array = pa.array(data)
     return vector_from_arrow(arrow_array)
 

@@ -9,6 +9,7 @@ import sys
 sys.path.insert(1, os.path.join(sys.path[0], "../../../.."))
 
 from opteryx.draken import Morsel
+from opteryx.draken.vectors.constant_vector import from_scalar as constant_from_scalar
 
 
 mio = pytest.importorskip("opteryx.draken.storage.morsel_io")
@@ -102,6 +103,28 @@ def test_morsel_io_round_trip_numeric_dictionary_column(tmp_path):
     assert stats["rows"] == original.num_rows
     assert stats["columns"] == original.num_columns
     assert restored.column(b"k").__class__.__name__ == "DictionaryVector"
+    assert _as_py_columns(restored) == _as_py_columns(original)
+
+
+def test_morsel_io_round_trip_constant_columns(tmp_path):
+    original = Morsel.from_vectors(
+        ["i", "n", "s"],
+        [
+            constant_from_scalar(7, 6),
+            constant_from_scalar(None, 6, dtype=pa.int64()),
+            constant_from_scalar("x", 6),
+        ],
+    )
+    path = tmp_path / "morsel_constant.drkm"
+
+    stats = write_morsel(path, original, {"codec_default": "none", "checksum_enabled": True})
+    restored = read_morsel(path, {"checksum_enabled": True})
+
+    assert stats["rows"] == original.num_rows
+    assert stats["columns"] == original.num_columns
+    assert restored.column(b"i").__class__.__name__ == "ConstantVector"
+    assert restored.column(b"n").__class__.__name__ == "ConstantVector"
+    assert restored.column(b"s").__class__.__name__ == "ConstantVector"
     assert _as_py_columns(restored) == _as_py_columns(original)
 
 

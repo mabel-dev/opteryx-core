@@ -22,6 +22,7 @@ from orso.types import OrsoTypes
 
 from opteryx import EMPTY
 from opteryx import EOS
+from opteryx.draken.morsels.morsel import Morsel
 from opteryx.managers.expression import NodeType
 from opteryx.managers.expression import evaluate_and_append
 from opteryx.managers.expression import get_all_nodes_of_type
@@ -33,6 +34,18 @@ from opteryx.operators.aggregate_node import project
 from . import BasePlanNode
 
 CHUNK_SIZE = 65536
+
+
+def _append_star_constant_morsel(morsel: Morsel) -> Morsel:
+    from opteryx.draken.vectors.constant_vector import from_scalar as constant_from_scalar
+
+    names = morsel.column_names
+    vectors = [
+        morsel.column(name if isinstance(name, bytes) else name.encode("utf-8")) for name in names
+    ]
+    names.append("*")
+    vectors.append(constant_from_scalar(1, morsel.num_rows, dtype=pyarrow.int8()))
+    return Morsel.from_vectors(names, vectors)
 
 
 class AggregateAndGroupNode(BasePlanNode):
@@ -153,8 +166,6 @@ class AggregateAndGroupNode(BasePlanNode):
         return "Group By"
 
     def execute(self, morsel: pyarrow.Table, **kwargs):
-        morsel = self.ensure_arrow_table(morsel)
-
         if morsel == EOS:
             if not self.buffer:
                 yield EOS
@@ -228,18 +239,29 @@ class AggregateAndGroupNode(BasePlanNode):
             yield EOS
             return
 
-        morsel = project(morsel, self.all_identifiers)
-        # Add a "*" column, this is an int because when a bool it miscounts
-        # FIX: Use int8 as the comment states (bool can miscount)
+        if isinstance(morsel, Morsel):
+            if self.all_identifiers:
+                morsel = morsel.select(self.all_identifiers)
+        else:
+            morsel = self.ensure_arrow_table(morsel)
+            morsel = project(morsel, self.all_identifiers)
+
+        # Add a "*" column; keep it constant-native while still in Morsel form.
         if "*" not in morsel.column_names:
-            morsel = morsel.append_column(
-                "*", [numpy.ones(shape=morsel.num_rows, dtype=numpy.int8)]
-            )
+            if isinstance(morsel, Morsel):
+                morsel = _append_star_constant_morsel(morsel)
+            else:
+                morsel = morsel.append_column(
+                    "*", [numpy.ones(shape=morsel.num_rows, dtype=numpy.int8)]
+                )
         eval_start = time.monotonic_ns()
         if self.evaluatable_nodes:
             morsel = evaluate_and_append(self.evaluatable_nodes, morsel)
         morsel = evaluate_and_append(self.groups, morsel)
         self.readings["time_group_by_evaluations"] += time.monotonic_ns() - eval_start
+
+        if isinstance(morsel, Morsel):
+            morsel = morsel.to_arrow()
 
         self.buffer.append(morsel)
 

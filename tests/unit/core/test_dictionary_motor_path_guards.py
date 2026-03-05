@@ -87,3 +87,36 @@ def test_dictionary_vector_predicate_kernel_section_has_no_arrow_or_numpy():
 
     for token in forbidden:
         assert token not in section, f"unexpected token in predicate kernel section: {token}"
+
+
+def test_expression_constant_fastpath_section_has_no_arrow_numpy_materialization():
+    text = _read("opteryx/managers/expression/ops.py")
+    section = _slice_between(
+        text,
+        "def _constant_fastpath(arr, operator, value):",
+        "def _dictionary_vector(arr):",
+    )
+
+    forbidden = (
+        "compute.",
+        "numpy.",
+        "to_numpy(",
+        "to_pylist(",
+    )
+
+    for token in forbidden:
+        assert token not in section, f"unexpected token in constant fastpath section: {token}"
+
+
+def test_constant_vector_predicate_kernel_section_has_no_arrow_or_numpy():
+    text = _read("third_party/mabel/draken/vectors/constant_vector.pyx")
+    section = _slice_between(
+        text,
+        "cpdef BoolVector less_than(self, object literal):",
+        "cdef void hash_into(",
+    )
+
+    forbidden = ("import pyarrow", "pyarrow", "numpy", "to_pylist")
+
+    for token in forbidden:
+        assert token not in section, f"unexpected token in constant predicate section: {token}"

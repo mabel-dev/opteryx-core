@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import time
+
 from opteryx.draken.interop.arrow import vector_from_sequence
 from opteryx.draken.morsels.morsel import Morsel
 
@@ -69,7 +70,17 @@ class ShuffleGroupByOperationV2:
             "groupby_finalize_fast_path_hits": 0,
             "draken_dict_groupby_fastpath_hits": 0,
             "draken_dict_groupby_fastpath_fallbacks": 0,
+            "draken_constant_groupby_fastpath_hits": 0,
+            "draken_constant_groupby_fastpath_fallbacks": 0,
+            "draken_constant_groupby_output_vector_hits": 0,
+            "draken_constant_groupby_output_vector_fallbacks": 0,
         }
+
+    def _record_constant_groupby_vector(self, vec) -> None:
+        if vec.__class__.__name__ == "ConstantVector":
+            self.readings["draken_constant_groupby_output_vector_hits"] += 1
+        else:
+            self.readings["draken_constant_groupby_output_vector_fallbacks"] += 1
 
     def _is_fast_path_eligible(self) -> bool:
         return (
@@ -100,12 +111,20 @@ class ShuffleGroupByOperationV2:
     def ingest(self, morsel: Morsel) -> None:
         pre_dict_hits = getattr(self._backend, "dict_groupby_fastpath_hits", 0)
         pre_dict_fallbacks = getattr(self._backend, "dict_groupby_fastpath_fallbacks", 0)
+        pre_const_hits = getattr(self._backend, "constant_groupby_fastpath_hits", 0)
+        pre_const_fallbacks = getattr(self._backend, "constant_groupby_fastpath_fallbacks", 0)
         self._backend.ingest(morsel)
         self.readings["draken_dict_groupby_fastpath_hits"] += (
             getattr(self._backend, "dict_groupby_fastpath_hits", 0) - pre_dict_hits
         )
         self.readings["draken_dict_groupby_fastpath_fallbacks"] += (
             getattr(self._backend, "dict_groupby_fastpath_fallbacks", 0) - pre_dict_fallbacks
+        )
+        self.readings["draken_constant_groupby_fastpath_hits"] += (
+            getattr(self._backend, "constant_groupby_fastpath_hits", 0) - pre_const_hits
+        )
+        self.readings["draken_constant_groupby_fastpath_fallbacks"] += (
+            getattr(self._backend, "constant_groupby_fastpath_fallbacks", 0) - pre_const_fallbacks
         )
 
     def ingest_many(self, morsels) -> None:
@@ -136,7 +155,10 @@ class ShuffleGroupByOperationV2:
                 key_outputs[key_idx].append(key[key_idx])
 
         vectors = [vector_from_sequence(output_values[idx]) for idx in range(agg_count)]
-        vectors.extend(vector_from_sequence(key_outputs[idx]) for idx in range(key_count))
+        for idx in range(key_count):
+            key_vec = vector_from_sequence(key_outputs[idx])
+            self._record_constant_groupby_vector(key_vec)
+            vectors.append(key_vec)
         return vectors
 
     def finalize(self) -> Morsel:
@@ -148,7 +170,9 @@ class ShuffleGroupByOperationV2:
                 keys, values = fast_columns
                 names = [self.aggregations[0][0], self.group_by_columns[0].decode("utf-8")]
                 build_st = time.monotonic_ns()
-                vectors = [vector_from_sequence(values), vector_from_sequence(keys)]
+                key_vec = vector_from_sequence(keys)
+                self._record_constant_groupby_vector(key_vec)
+                vectors = [vector_from_sequence(values), key_vec]
                 self.readings["time_groupby_finalize_rows_to_vectors_ns"] += (
                     time.monotonic_ns() - build_st
                 )
@@ -198,10 +222,9 @@ class ShuffleGroupByOperationV2:
                     for keys, values in fast_chunks:
                         self.readings["groupby_finalize_rows_count"] += len(keys)
                         vector_st = time.monotonic_ns()
-                        vectors = [
-                            vector_from_sequence(values),
-                            vector_from_sequence(keys),
-                        ]
+                        key_vec = vector_from_sequence(keys)
+                        self._record_constant_groupby_vector(key_vec)
+                        vectors = [vector_from_sequence(values), key_vec]
                         self.readings["time_groupby_finalize_rows_to_vectors_ns"] += (
                             time.monotonic_ns() - vector_st
                         )
@@ -225,10 +248,9 @@ class ShuffleGroupByOperationV2:
                 for start in range(0, total, chunk_size):
                     stop = min(total, start + chunk_size)
                     vector_st = time.monotonic_ns()
-                    vectors = [
-                        vector_from_sequence(values[start:stop]),
-                        vector_from_sequence(keys[start:stop]),
-                    ]
+                    key_vec = vector_from_sequence(keys[start:stop])
+                    self._record_constant_groupby_vector(key_vec)
+                    vectors = [vector_from_sequence(values[start:stop]), key_vec]
                     self.readings["time_groupby_finalize_rows_to_vectors_ns"] += (
                         time.monotonic_ns() - vector_st
                     )
