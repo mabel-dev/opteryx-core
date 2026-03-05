@@ -230,6 +230,13 @@ class ParquetReadNode(ReaderNode):
             source_value_type = source_type
             if pyarrow.types.is_dictionary(source_type):
                 source_value_type = source_type.value_type
+                # Avoid materializing dictionary columns if the value type matches the target.
+                # Rugo preserves dictionary encoding for performance (Draken Phase 5);
+                # the logical content is correct even if physical representation differs.
+                if source_value_type.equals(target_type):
+                    arrays.append(column)
+                    names.append(field.name)
+                    continue
 
             # Rugo decodes Parquet DATE logical values as integer day counts. Arrow's
             # direct int64->date64 cast treats integers as milliseconds, so convert
