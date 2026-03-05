@@ -5,7 +5,6 @@ and has been extensively modified for Opteryx.
 """
 
 import re
-from contextlib import suppress
 
 import numpy
 import pyarrow
@@ -13,6 +12,29 @@ from orso.types import OrsoTypes
 from pyarrow import compute
 
 from opteryx.compiled import list_ops
+
+_DICT_EXPR_TEL = {
+    "draken_dict_expr_fastpath_hits": 0,
+    "draken_dict_expr_fastpath_fallbacks": 0,
+}
+
+_DICT_FASTPATH_OPS = frozenset(
+    (
+        "Eq",
+        "NotEq",
+        "InList",
+        "NotInList",
+        "Like",
+        "NotLike",
+        "ILike",
+        "NotILike",
+        "RLike",
+        "NotRLike",
+    )
+)
+_DICT_NUMERIC_FASTPATH_OPS = frozenset(("Lt", "Gt", "LtEq", "GtEq"))
+# Dictionary child type ids from third_party/mabel/draken/core/buffers.h.
+_DICT_NUMERIC_CHILD_TYPES = frozenset((1, 2, 3, 4, 20, 21, 50))
 
 # Operators where null compression isn't safe
 skip_compression_ops = {
@@ -35,6 +57,108 @@ skip_compression_ops = {
     "AtArrow",
     "ArrayContainsAll",
 }
+
+
+def reset_dict_expr_telemetry():
+    _DICT_EXPR_TEL["draken_dict_expr_fastpath_hits"] = 0
+    _DICT_EXPR_TEL["draken_dict_expr_fastpath_fallbacks"] = 0
+
+
+def get_dict_expr_telemetry():
+    return dict(_DICT_EXPR_TEL)
+
+
+def _record_dict_hit():
+    _DICT_EXPR_TEL["draken_dict_expr_fastpath_hits"] += 1
+
+
+def _dictionary_vector(arr):
+    if arr.__class__.__name__ == "DictionaryVector":
+        return arr
+
+    if isinstance(arr, pyarrow.ChunkedArray):
+        if not pyarrow.types.is_dictionary(arr.type):
+            return None
+        if arr.num_chunks != 1:
+            raise NotImplementedError(
+                "Dictionary motor path does not support multi-chunk dictionary arrays."
+            )
+        arr = arr.chunk(0)
+
+    if isinstance(arr, pyarrow.DictionaryArray):
+        from opteryx.draken.interop.arrow import vector_from_arrow
+
+        vec = vector_from_arrow(arr)
+        if vec.__class__.__name__ == "DictionaryVector":
+            return vec
+        raise TypeError("Dictionary fastpath expected DictionaryVector conversion result.")
+
+    return None
+
+
+def _coerce_in_list_values(value):
+    to_pylist = getattr(value, "to_pylist", None)
+    if to_pylist is not None:
+        value = to_pylist()
+    if isinstance(value, (list, tuple, set)):
+        return value
+    return [value]
+
+
+def _dictionary_fastpath(arr, operator, value):
+    vec = _dictionary_vector(arr)
+    if vec is None:
+        return None
+
+    if operator == "Eq":
+        return vec.equals(value)
+    if operator == "NotEq":
+        return vec.not_equals(value)
+    if operator in ("InList", "NotInList"):
+        result = vec.in_list(_coerce_in_list_values(value))
+        if operator == "NotInList":
+            result = result.not_vector()
+        return result
+    if operator in ("Like", "NotLike"):
+        result = vec.like(value, False)
+        if operator == "NotLike":
+            result = result.not_vector()
+        return result
+    if operator in ("ILike", "NotILike"):
+        result = vec.like(value, True)
+        if operator == "NotILike":
+            result = result.not_vector()
+        return result
+    if operator in ("RLike", "NotRLike"):
+        result = vec.rlike(value)
+        if operator == "NotRLike":
+            result = result.not_vector()
+        return result
+    if operator == "Lt":
+        return vec.less_than(value)
+    if operator == "Gt":
+        return vec.greater_than(value)
+    if operator == "LtEq":
+        return vec.less_than_or_equals(value)
+    if operator == "GtEq":
+        return vec.greater_than_or_equals(value)
+
+    return None
+
+
+def _dictionary_supports_numeric_fastpath(arr):
+    vec = _dictionary_vector(arr)
+    if vec is None:
+        return False
+    return getattr(vec, "dictionary_value_type", None) in _DICT_NUMERIC_CHILD_TYPES
+
+
+def _has_dictionary_candidate(arr):
+    if isinstance(arr, pyarrow.ChunkedArray) and pyarrow.types.is_dictionary(arr.type):
+        return True
+    if isinstance(arr, pyarrow.DictionaryArray):
+        return True
+    return arr.__class__.__name__ == "DictionaryVector"
 
 
 def filter_operations(left_arr, left_type, operator, right_arr, right_type):
@@ -140,26 +264,85 @@ def _inner_filter_operations(arr, operator, value):
     Execute filter operations, this returns an array of the indexes of the rows that
     match the filter
     """
-    if not operator.startswith(("AnyOp", "AllOp")) and len(value) == 1:
-        value = value[0]
-        with suppress(AttributeError):
-            value = value.item()
-        if isinstance(value, (tuple, list)):
-            value = pyarrow.array(value)
+    if not operator.startswith(("AnyOp", "AllOp")):
+        try:
+            if len(value) == 1:
+                value = value[0]
+                try:
+                    value = value.item()
+                except AttributeError:
+                    pass
+                if isinstance(value, (tuple, list)):
+                    value = pyarrow.array(value)
+        except TypeError:
+            # Scalar literal (e.g. int/float/bool) - keep as-is.
+            pass
+
+    dict_candidate = _has_dictionary_candidate(arr)
+    numeric_dict_candidate = (
+        dict_candidate
+        and operator in _DICT_NUMERIC_FASTPATH_OPS
+        and _dictionary_supports_numeric_fastpath(arr)
+    )
+
+    if dict_candidate and operator not in _DICT_FASTPATH_OPS and not numeric_dict_candidate:
+        raise NotImplementedError(f"Dictionary motor path does not support operator `{operator}`.")
 
     if operator == "Eq":
+        if dict_candidate:
+            fast = _dictionary_fastpath(arr, operator, value)
+            if fast is not None:
+                _record_dict_hit()
+                return fast
+            raise RuntimeError("Dictionary fastpath failed for `Eq`.")
         return compute.equal(arr, value).to_numpy(False).astype(dtype=numpy.bool_)
     if operator == "NotEq":
+        if dict_candidate:
+            fast = _dictionary_fastpath(arr, operator, value)
+            if fast is not None:
+                _record_dict_hit()
+                return fast
+            raise RuntimeError("Dictionary fastpath failed for `NotEq`.")
         return compute.not_equal(arr, value).to_numpy(False).astype(dtype=numpy.bool_)
     if operator == "Lt":
+        if numeric_dict_candidate:
+            fast = _dictionary_fastpath(arr, operator, value)
+            if fast is not None:
+                _record_dict_hit()
+                return fast
+            raise RuntimeError("Dictionary fastpath failed for `Lt`.")
         return compute.less(arr, value).to_numpy(False).astype(dtype=numpy.bool_)
     if operator == "Gt":
+        if numeric_dict_candidate:
+            fast = _dictionary_fastpath(arr, operator, value)
+            if fast is not None:
+                _record_dict_hit()
+                return fast
+            raise RuntimeError("Dictionary fastpath failed for `Gt`.")
         return compute.greater(arr, value).to_numpy(False).astype(dtype=numpy.bool_)
     if operator == "LtEq":
+        if numeric_dict_candidate:
+            fast = _dictionary_fastpath(arr, operator, value)
+            if fast is not None:
+                _record_dict_hit()
+                return fast
+            raise RuntimeError("Dictionary fastpath failed for `LtEq`.")
         return compute.less_equal(arr, value).to_numpy(False).astype(dtype=numpy.bool_)
     if operator == "GtEq":
+        if numeric_dict_candidate:
+            fast = _dictionary_fastpath(arr, operator, value)
+            if fast is not None:
+                _record_dict_hit()
+                return fast
+            raise RuntimeError("Dictionary fastpath failed for `GtEq`.")
         return compute.greater_equal(arr, value).to_numpy(False).astype(dtype=numpy.bool_)
     if operator == "InList":
+        if dict_candidate:
+            fast = _dictionary_fastpath(arr, operator, value)
+            if fast is not None:
+                _record_dict_hit()
+                return fast
+            raise RuntimeError("Dictionary fastpath failed for `InList`.")
         from opteryx.draken.interop.arrow import vector_from_arrow
 
         to_pylist = getattr(value, "to_pylist", None)
@@ -183,6 +366,12 @@ def _inner_filter_operations(arr, operator, value):
 
         return list_ops.list_in_list(arr, values)
     if operator == "NotInList":
+        if dict_candidate:
+            fast = _dictionary_fastpath(arr, operator, value)
+            if fast is not None:
+                _record_dict_hit()
+                return fast
+            raise RuntimeError("Dictionary fastpath failed for `NotInList`.")
         from opteryx.draken.interop.arrow import vector_from_arrow
 
         to_pylist = getattr(value, "to_pylist", None)
@@ -233,22 +422,58 @@ def _inner_filter_operations(arr, operator, value):
         matches = numpy.frombuffer(matches, dtype=numpy.bool_)
         return numpy.invert(matches)
     if operator == "Like":
+        if dict_candidate:
+            fast = _dictionary_fastpath(arr, operator, value)
+            if fast is not None:
+                _record_dict_hit()
+                return fast
+            raise RuntimeError("Dictionary fastpath failed for `Like`.")
         return compute.match_like(arr, value).to_numpy(False).astype(dtype=numpy.bool_)
     if operator == "NotLike":
+        if dict_candidate:
+            fast = _dictionary_fastpath(arr, operator, value)
+            if fast is not None:
+                _record_dict_hit()
+                return fast
+            raise RuntimeError("Dictionary fastpath failed for `NotLike`.")
         matches = compute.match_like(arr, value).to_numpy(False).astype(dtype=numpy.bool_)
         return numpy.invert(matches)
     if operator == "ILike":
+        if dict_candidate:
+            fast = _dictionary_fastpath(arr, operator, value)
+            if fast is not None:
+                _record_dict_hit()
+                return fast
+            raise RuntimeError("Dictionary fastpath failed for `ILike`.")
         return (
             compute.match_like(arr, value, ignore_case=True)
             .to_numpy(False)
             .astype(dtype=numpy.bool_)
         )
     if operator == "NotILike":
+        if dict_candidate:
+            fast = _dictionary_fastpath(arr, operator, value)
+            if fast is not None:
+                _record_dict_hit()
+                return fast
+            raise RuntimeError("Dictionary fastpath failed for `NotILike`.")
         matches = compute.match_like(arr, value, ignore_case=True)
         return numpy.invert(matches)
     if operator == "RLike":
+        if dict_candidate:
+            fast = _dictionary_fastpath(arr, operator, value)
+            if fast is not None:
+                _record_dict_hit()
+                return fast
+            raise RuntimeError("Dictionary fastpath failed for `RLike`.")
         return compute.match_substring_regex(arr, value).to_numpy(False).astype(dtype=numpy.bool_)
     if operator == "NotRLike":
+        if dict_candidate:
+            fast = _dictionary_fastpath(arr, operator, value)
+            if fast is not None:
+                _record_dict_hit()
+                return fast
+            raise RuntimeError("Dictionary fastpath failed for `NotRLike`.")
         matches = compute.match_substring_regex(arr, value)  # [#325]
         return numpy.invert(matches)
     if operator == "AnyOpEq":

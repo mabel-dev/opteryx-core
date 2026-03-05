@@ -34,6 +34,9 @@ from . import BasePlanNode
 
 class HeapSortNode(BasePlanNode):
     _NULL_COMPRESSED = numpy.iinfo(numpy.int64).min
+    # Dictionary child type ids from third_party/mabel/draken/core/buffers.h.
+    # We only treat exact integer/boolean dictionary keys as exact-compressible.
+    _EXACT_DICTIONARY_CHILD_TYPES = frozenset({1, 2, 3, 4, 50})
     _EXACT_COMPRESS_VECTOR_TYPES = frozenset(
         {
             "BoolVector",
@@ -50,6 +53,15 @@ class HeapSortNode(BasePlanNode):
             "UInt64Vector",
         }
     )
+
+    @classmethod
+    def _is_exact_compressible_vector(cls, vector) -> bool:
+        vector_type = vector.__class__.__name__
+        if vector_type in cls._EXACT_COMPRESS_VECTOR_TYPES:
+            return True
+        if vector_type != "DictionaryVector":
+            return False
+        return getattr(vector, "dictionary_value_type", None) in cls._EXACT_DICTIONARY_CHILD_TYPES
 
     def __init__(self, properties: QueryProperties, **parameters):
         super().__init__(properties=properties, **parameters)
@@ -300,7 +312,7 @@ class HeapSortNode(BasePlanNode):
     ) -> list[int] | None:
         first_column = self.mapped_order[0][0]
         first_vector = morsel.column(first_column.encode())
-        if first_vector.__class__.__name__ not in self._EXACT_COMPRESS_VECTOR_TYPES:
+        if not self._is_exact_compressible_vector(first_vector):
             return None
 
         try:
@@ -327,8 +339,7 @@ class HeapSortNode(BasePlanNode):
     def _top_n_single_key_compressed(
         self, morsel: Morsel, vector, descending: bool, k: int
     ) -> Morsel | None:
-        vector_type = vector.__class__.__name__
-        if vector_type not in self._EXACT_COMPRESS_VECTOR_TYPES:
+        if not self._is_exact_compressible_vector(vector):
             return None
 
         try:

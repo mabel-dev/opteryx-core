@@ -1,4 +1,8 @@
-def build_specialized_kernel(list group_by_columns, list agg_function_codes, list agg_columns):
+def build_specialized_kernel(
+    list group_by_columns,
+    list agg_function_codes,
+    list agg_columns,
+):
     if len(group_by_columns) != 1 or len(agg_function_codes) != 1:
         return None
 

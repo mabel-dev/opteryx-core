@@ -255,9 +255,15 @@ def _inner_evaluate(root: Node, table: Table):
             )
 
             if not isinstance(left, pyarrow.Array):
-                left = pyarrow.array(left, type=pyarrow.bool_())
+                if left.__class__.__name__ == "BoolVector":
+                    left = left.to_arrow()
+                else:
+                    left = pyarrow.array(left, type=pyarrow.bool_())
             if not isinstance(right, pyarrow.Array):
-                right = pyarrow.array(right, type=pyarrow.bool_())
+                if right.__class__.__name__ == "BoolVector":
+                    right = right.to_arrow()
+                else:
+                    right = pyarrow.array(right, type=pyarrow.bool_())
 
             return LOGICAL_OPERATIONS[node_type](left, right)  # type:ignore
 
@@ -270,11 +276,14 @@ def _inner_evaluate(root: Node, table: Table):
             # Convert to numpy array if it's not already a PyArrow array
             # This handles memoryviews, Cython memoryviewslices, and other array-like objects
             if not isinstance(centre, pyarrow.Array):
-                centre = numpy.asarray(centre)
-                # Convert numeric types (e.g., uint8 from list_contains_any) to boolean
-                if numpy.issubdtype(centre.dtype, numpy.integer):
-                    centre = centre.astype(numpy.bool_)
-            centre = pyarrow.array(centre, type=pyarrow.bool_())
+                if centre.__class__.__name__ == "BoolVector":
+                    centre = centre.to_arrow()
+                else:
+                    centre = numpy.asarray(centre)
+                    # Convert numeric types (e.g., uint8 from list_contains_any) to boolean
+                    if numpy.issubdtype(centre.dtype, numpy.integer):
+                        centre = centre.astype(numpy.bool_)
+                    centre = pyarrow.array(centre, type=pyarrow.bool_())
             return pyarrow.compute.invert(centre)
 
     # INTERAL IDENTIFIERS
@@ -359,6 +368,8 @@ def _inner_evaluate(root: Node, table: Table):
 
 def evaluate(expression: Node, table: Table):
     result = _inner_evaluate(root=expression, table=table)
+    if result.__class__.__name__ == "BoolVector":
+        return result
     if not isinstance(result, (pyarrow.Array, numpy.ndarray)):
         result = numpy.array(result)
     return result

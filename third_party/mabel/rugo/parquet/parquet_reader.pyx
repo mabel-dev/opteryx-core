@@ -11,6 +11,7 @@ import datetime
 import os
 import struct
 import time as _time
+import opteryx.config as _opteryx_config
 
 # ---------------------------------------------------------------------------
 # Telemetry accumulators (reset with reset_telemetry(); read with get_telemetry())
@@ -25,6 +26,10 @@ _TEL = {
     "calls":          0,
     "row_groups":      0,
     "columns":         0,
+    "parquet_dict_columns_decoded": 0,
+    "parquet_dict_unique_values": 0,
+    "parquet_dict_code_width_bytes": 0,
+    "parquet_dict_materialize_fallbacks": 0,
 }
 
 
@@ -69,7 +74,7 @@ def get_cpp_telemetry():
     }
 
 cimport parquet_reader
-from libc.stdint cimport uint8_t, int32_t, int64_t
+from libc.stdint cimport uint8_t, uint16_t, uint32_t, int32_t, int64_t
 from libc.stdlib cimport malloc, free
 from libc.string cimport memcpy, memset
 from libcpp.string cimport string
@@ -79,8 +84,16 @@ from libcpp.vector cimport vector
 from opteryx.draken.vectors.int64_vector cimport Int64Vector
 from opteryx.draken.vectors.float64_vector cimport Float64Vector
 from opteryx.draken.vectors.string_vector cimport StringVector, StringVectorBuilder
+from opteryx.draken.vectors.dictionary_vector cimport DictionaryVector
 from opteryx.draken.vectors.bool_vector cimport BoolVector, bool_vector_from_bits
-from opteryx.draken.core.buffers cimport DrakenVarBuffer
+from opteryx.draken.core.buffers cimport (
+    DRAKEN_FLOAT32,
+    DRAKEN_FLOAT64,
+    DRAKEN_INT32,
+    DRAKEN_INT64,
+    DRAKEN_STRING,
+    DrakenVarBuffer,
+)
 from opteryx.draken.vectors.array_vector cimport ArrayVector, array_vector_from_parts
 from opteryx.draken.vectors.vector cimport Vector
 from opteryx.draken.morsels.morsel cimport Morsel
@@ -451,11 +464,25 @@ cdef Int64Vector _make_int64_from_int32_vector(
     cdef Py_ssize_t i, val_idx = 0
     cdef Py_ssize_t nb_bytes
     cdef uint8_t* nb
+    cdef int32_t code
+    cdef bint dict_mode = (
+        decoded_col.dict_indices.size() > 0
+        and decoded_col.dict_int32_values.size() > 0
+        and decoded_col.int32_values.size() == 0
+    )
 
     if decoded_col.valid_bits.size() > 0:
         for i in range(num_rows):
             if (decoded_col.valid_bits[i >> 3] >> (i & 7)) & 1:
-                dst[i] = <int64_t>decoded_col.int32_values[val_idx]
+                if dict_mode:
+                    if val_idx >= decoded_col.dict_indices.size():
+                        raise ValueError("dictionary index stream shorter than number of valid rows")
+                    code = decoded_col.dict_indices[val_idx]
+                    if code < 0 or code >= decoded_col.dict_int32_values.size():
+                        raise ValueError(f"dictionary index out of bounds at row {i}: {code}")
+                    dst[i] = <int64_t>decoded_col.dict_int32_values[code]
+                else:
+                    dst[i] = <int64_t>decoded_col.int32_values[val_idx]
                 val_idx += 1
             else:
                 dst[i] = 0
@@ -467,7 +494,13 @@ cdef Int64Vector _make_int64_from_int32_vector(
         vec.ptr.null_bitmap = nb
     else:
         for i in range(num_rows):
-            dst[i] = <int64_t>decoded_col.int32_values[i]
+            if dict_mode:
+                code = decoded_col.dict_indices[i]
+                if code < 0 or code >= decoded_col.dict_int32_values.size():
+                    raise ValueError(f"dictionary index out of bounds at row {i}: {code}")
+                dst[i] = <int64_t>decoded_col.dict_int32_values[code]
+            else:
+                dst[i] = <int64_t>decoded_col.int32_values[i]
 
     return vec
 
@@ -481,12 +514,26 @@ cdef Int64Vector _make_int64_vector(
     cdef Py_ssize_t i, val_idx = 0
     cdef Py_ssize_t nb_bytes
     cdef uint8_t* nb
+    cdef int32_t code
+    cdef bint dict_mode = (
+        decoded_col.dict_indices.size() > 0
+        and decoded_col.dict_int64_values.size() > 0
+        and decoded_col.int64_values.size() == 0
+    )
     
     # If we have a valid_bits bitmap, scatter values into positions and set null bitmap
     if decoded_col.valid_bits.size() > 0:
         for i in range(num_rows):
             if (decoded_col.valid_bits[i >> 3] >> (i & 7)) & 1:
-                dst[i] = decoded_col.int64_values[val_idx]
+                if dict_mode:
+                    if val_idx >= decoded_col.dict_indices.size():
+                        raise ValueError("dictionary index stream shorter than number of valid rows")
+                    code = decoded_col.dict_indices[val_idx]
+                    if code < 0 or code >= decoded_col.dict_int64_values.size():
+                        raise ValueError(f"dictionary index out of bounds at row {i}: {code}")
+                    dst[i] = decoded_col.dict_int64_values[code]
+                else:
+                    dst[i] = decoded_col.int64_values[val_idx]
                 val_idx += 1
             else:
                 dst[i] = 0
@@ -498,9 +545,65 @@ cdef Int64Vector _make_int64_vector(
         memcpy(nb, decoded_col.valid_bits.data(), nb_bytes)
         vec.ptr.null_bitmap = nb
     else:
-        # No nulls: bulk copy via memcpy (avoids Cython loop overhead)
-        memcpy(dst, decoded_col.int64_values.data(), <size_t>num_rows * sizeof(int64_t))
-    
+        if dict_mode:
+            for i in range(num_rows):
+                code = decoded_col.dict_indices[i]
+                if code < 0 or code >= decoded_col.dict_int64_values.size():
+                    raise ValueError(f"dictionary index out of bounds at row {i}: {code}")
+                dst[i] = decoded_col.dict_int64_values[code]
+        else:
+            # No nulls: bulk copy via memcpy (avoids Cython loop overhead)
+            memcpy(dst, decoded_col.int64_values.data(), <size_t>num_rows * sizeof(int64_t))
+
+    return vec
+
+
+cdef Float64Vector _make_float64_from_float32_vector(
+        parquet_reader.DecodedColumn& decoded_col,
+        int32_t num_rows):
+    """Build a Float64Vector from float32 values (upcasting), including dict-mode."""
+    cdef Float64Vector vec = Float64Vector(num_rows)
+    cdef double* dst = <double*> vec.ptr.data
+    cdef Py_ssize_t i, val_idx = 0
+    cdef Py_ssize_t nb_bytes
+    cdef uint8_t* nb
+    cdef int32_t code
+    cdef bint dict_mode = (
+        decoded_col.dict_indices.size() > 0
+        and decoded_col.dict_float32_values.size() > 0
+        and decoded_col.float32_values.size() == 0
+    )
+
+    if decoded_col.valid_bits.size() > 0:
+        for i in range(num_rows):
+            if (decoded_col.valid_bits[i >> 3] >> (i & 7)) & 1:
+                if dict_mode:
+                    if val_idx >= decoded_col.dict_indices.size():
+                        raise ValueError("dictionary index stream shorter than number of valid rows")
+                    code = decoded_col.dict_indices[val_idx]
+                    if code < 0 or code >= decoded_col.dict_float32_values.size():
+                        raise ValueError(f"dictionary index out of bounds at row {i}: {code}")
+                    dst[i] = <double>decoded_col.dict_float32_values[code]
+                else:
+                    dst[i] = <double>decoded_col.float32_values[val_idx]
+                val_idx += 1
+            else:
+                dst[i] = 0.0
+        nb_bytes = (num_rows + 7) >> 3
+        nb = <uint8_t*> malloc(nb_bytes)
+        if nb == NULL:
+            raise MemoryError()
+        memcpy(nb, decoded_col.valid_bits.data(), nb_bytes)
+        vec.ptr.null_bitmap = nb
+    else:
+        for i in range(num_rows):
+            if dict_mode:
+                code = decoded_col.dict_indices[i]
+                if code < 0 or code >= decoded_col.dict_float32_values.size():
+                    raise ValueError(f"dictionary index out of bounds at row {i}: {code}")
+                dst[i] = <double>decoded_col.dict_float32_values[code]
+            else:
+                dst[i] = <double>decoded_col.float32_values[i]
     return vec
 
 
@@ -513,11 +616,25 @@ cdef Float64Vector _make_float64_vector(
     cdef Py_ssize_t i, val_idx = 0
     cdef Py_ssize_t nb_bytes
     cdef uint8_t* nb
+    cdef int32_t code
+    cdef bint dict_mode = (
+        decoded_col.dict_indices.size() > 0
+        and decoded_col.dict_float64_values.size() > 0
+        and decoded_col.float64_values.size() == 0
+    )
     
     if decoded_col.valid_bits.size() > 0:
         for i in range(num_rows):
             if (decoded_col.valid_bits[i >> 3] >> (i & 7)) & 1:
-                dst[i] = decoded_col.float64_values[val_idx]
+                if dict_mode:
+                    if val_idx >= decoded_col.dict_indices.size():
+                        raise ValueError("dictionary index stream shorter than number of valid rows")
+                    code = decoded_col.dict_indices[val_idx]
+                    if code < 0 or code >= decoded_col.dict_float64_values.size():
+                        raise ValueError(f"dictionary index out of bounds at row {i}: {code}")
+                    dst[i] = decoded_col.dict_float64_values[code]
+                else:
+                    dst[i] = decoded_col.float64_values[val_idx]
                 val_idx += 1
             else:
                 dst[i] = 0.0
@@ -528,9 +645,16 @@ cdef Float64Vector _make_float64_vector(
         memcpy(nb, decoded_col.valid_bits.data(), nb_bytes)
         vec.ptr.null_bitmap = nb
     else:
-        # No nulls: bulk copy via memcpy (avoids Cython loop overhead)
-        memcpy(dst, decoded_col.float64_values.data(), <size_t>num_rows * sizeof(double))
-    
+        if dict_mode:
+            for i in range(num_rows):
+                code = decoded_col.dict_indices[i]
+                if code < 0 or code >= decoded_col.dict_float64_values.size():
+                    raise ValueError(f"dictionary index out of bounds at row {i}: {code}")
+                dst[i] = decoded_col.dict_float64_values[code]
+        else:
+            # No nulls: bulk copy via memcpy (avoids Cython loop overhead)
+            memcpy(dst, decoded_col.float64_values.data(), <size_t>num_rows * sizeof(double))
+
     return vec
 
 
@@ -667,6 +791,240 @@ cdef StringVector _make_string_vector(
                 <Py_ssize_t>decoded_col.string_values[i].size()
             )
     return builder.finish()
+
+
+cdef inline uint8_t _code_width_from_dict_size(Py_ssize_t dict_size):
+    if dict_size <= 256:
+        return 1
+    if dict_size <= 65536:
+        return 2
+    return 4
+
+
+cdef inline bint _decoded_has_dictionary(parquet_reader.DecodedColumn& decoded_col):
+    cdef bytes col_type = decoded_col.type
+    if decoded_col.dict_indices.size() == 0:
+        return False
+    if col_type == b"byte_array":
+        return decoded_col.string_dict_lens.size() > 0
+    if col_type == b"int32":
+        return decoded_col.dict_int32_values.size() > 0
+    if col_type == b"int64":
+        return decoded_col.dict_int64_values.size() > 0
+    if col_type == b"float32":
+        return decoded_col.dict_float32_values.size() > 0
+    if col_type == b"float64":
+        return decoded_col.dict_float64_values.size() > 0
+    return False
+
+
+cdef inline Py_ssize_t _decoded_dict_size(parquet_reader.DecodedColumn& decoded_col):
+    cdef bytes col_type = decoded_col.type
+    if col_type == b"byte_array":
+        return decoded_col.string_dict_lens.size()
+    if col_type == b"int32":
+        return decoded_col.dict_int32_values.size()
+    if col_type == b"int64":
+        return decoded_col.dict_int64_values.size()
+    if col_type == b"float32":
+        return decoded_col.dict_float32_values.size()
+    if col_type == b"float64":
+        return decoded_col.dict_float64_values.size()
+    return 0
+
+
+cdef inline double _dictionary_ratio_limit():
+    cdef double ratio_limit = 0.5
+    cdef object ratio_obj = _opteryx_config.PARQUET_DICT_MAX_CARDINALITY_RATIO
+    try:
+        ratio_limit = float(ratio_obj)
+    except Exception:
+        ratio_limit = 0.5
+    if ratio_limit < 0.0:
+        return 0.0
+    return ratio_limit
+
+
+cdef inline bint _should_emit_dictionary_vector(
+        parquet_reader.DecodedColumn& decoded_col,
+        int32_t num_rows):
+    cdef Py_ssize_t dict_size
+    if not _decoded_has_dictionary(decoded_col):
+        return False
+    dict_size = _decoded_dict_size(decoded_col)
+    if dict_size <= 0:
+        return False
+
+    # Cardinality fallback is only applied for string dictionaries.
+    if decoded_col.type == b"byte_array":
+        if num_rows <= 0:
+            return False
+        if (<double>dict_size / <double>num_rows) > _dictionary_ratio_limit():
+            return False
+    return True
+
+
+cdef DictionaryVector _make_dictionary_vector(
+        parquet_reader.DecodedColumn& decoded_col,
+        int32_t num_rows):
+    """Build a DictionaryVector from decoded parquet dictionary payload."""
+    cdef bytes col_type = decoded_col.type
+    cdef Py_ssize_t dict_size = 0
+    cdef Py_ssize_t i
+    cdef Py_ssize_t val_idx
+    cdef Py_ssize_t nb_bytes
+    cdef uint8_t* nb
+    cdef uint8_t code_width
+    cdef int32_t code
+    cdef Py_ssize_t dict_bytes = 0
+    cdef int32_t itemsize = 0
+    cdef int dict_value_type = DRAKEN_STRING
+    cdef DictionaryVector vec
+    cdef uint8_t* code_u8
+    cdef uint16_t* code_u16
+    cdef uint32_t* code_u32
+    cdef uint8_t bit
+    cdef uint8_t byte
+    cdef int32_t running = 0
+
+    if col_type == b"byte_array":
+        dict_size = decoded_col.string_dict_lens.size()
+        dict_bytes = decoded_col.string_dict_arena.size()
+        dict_value_type = DRAKEN_STRING
+    elif col_type == b"int32":
+        dict_size = decoded_col.dict_int32_values.size()
+        itemsize = sizeof(int32_t)
+        dict_bytes = dict_size * itemsize
+        dict_value_type = DRAKEN_INT32
+    elif col_type == b"int64":
+        dict_size = decoded_col.dict_int64_values.size()
+        itemsize = sizeof(int64_t)
+        dict_bytes = dict_size * itemsize
+        dict_value_type = DRAKEN_INT64
+    elif col_type == b"float32":
+        dict_size = decoded_col.dict_float32_values.size()
+        itemsize = sizeof(float)
+        dict_bytes = dict_size * itemsize
+        dict_value_type = DRAKEN_FLOAT32
+    elif col_type == b"float64":
+        dict_size = decoded_col.dict_float64_values.size()
+        itemsize = sizeof(double)
+        dict_bytes = dict_size * itemsize
+        dict_value_type = DRAKEN_FLOAT64
+    else:
+        raise ValueError(f"unsupported dictionary type for decoded column: {col_type!r}")
+
+    if dict_size == 0:
+        raise ValueError("dictionary vector requires non-empty dictionary")
+
+    code_width = decoded_col.code_width if decoded_col.code_width in (1, 2, 4) else _code_width_from_dict_size(dict_size)
+    if dict_bytes == 0:
+        dict_bytes = 1
+
+    vec = DictionaryVector(
+        <size_t>num_rows,
+        <size_t>dict_size,
+        <size_t>dict_bytes,
+        code_width,
+        bool(decoded_col.dict_ordered),
+        dict_value_type,
+    )
+
+    if dict_value_type == DRAKEN_STRING:
+        # Copy dictionary bytes
+        if decoded_col.string_dict_arena.size() > 0:
+            memcpy(
+                vec.ptr.dictionary_values.data,
+                decoded_col.string_dict_arena.data(),
+                <size_t>decoded_col.string_dict_arena.size(),
+            )
+
+        # Convert [offset, len] pairs to Arrow-style cumulative offsets.
+        vec.ptr.dictionary_values.offsets[0] = 0
+        running = 0
+        for i in range(dict_size):
+            running += decoded_col.string_dict_lens[i]
+            vec.ptr.dictionary_values.offsets[i + 1] = running
+    else:
+        if dict_value_type == DRAKEN_INT32:
+            memcpy(
+                vec.ptr.dictionary_values.data,
+                decoded_col.dict_int32_values.data(),
+                <size_t>dict_bytes,
+            )
+        elif dict_value_type == DRAKEN_INT64:
+            memcpy(
+                vec.ptr.dictionary_values.data,
+                decoded_col.dict_int64_values.data(),
+                <size_t>dict_bytes,
+            )
+        elif dict_value_type == DRAKEN_FLOAT32:
+            memcpy(
+                vec.ptr.dictionary_values.data,
+                decoded_col.dict_float32_values.data(),
+                <size_t>dict_bytes,
+            )
+        elif dict_value_type == DRAKEN_FLOAT64:
+            memcpy(
+                vec.ptr.dictionary_values.data,
+                decoded_col.dict_float64_values.data(),
+                <size_t>dict_bytes,
+            )
+        for i in range(dict_size + 1):
+            vec.ptr.dictionary_values.offsets[i] = <int32_t>(i * itemsize)
+
+    if decoded_col.valid_bits.size() > 0:
+        nb_bytes = (num_rows + 7) >> 3
+        nb = <uint8_t*> malloc(nb_bytes)
+        if nb == NULL:
+            raise MemoryError()
+        memcpy(nb, decoded_col.valid_bits.data(), nb_bytes)
+        vec.ptr.null_bitmap = nb
+
+    val_idx = 0
+    code_u8 = <uint8_t*>vec.ptr.codes
+    code_u16 = <uint16_t*>vec.ptr.codes
+    code_u32 = <uint32_t*>vec.ptr.codes
+
+    if decoded_col.valid_bits.size() > 0:
+        for i in range(num_rows):
+            byte = decoded_col.valid_bits[i >> 3]
+            bit = (byte >> (i & 7)) & 1
+            if bit:
+                if val_idx >= decoded_col.dict_indices.size():
+                    raise ValueError("dictionary index stream shorter than number of valid rows")
+                code = decoded_col.dict_indices[val_idx]
+                val_idx += 1
+                if code < 0 or code >= dict_size:
+                    raise ValueError(f"dictionary index out of bounds at row {i}: {code}")
+            else:
+                code = 0
+
+            if code_width == 1:
+                code_u8[i] = <uint8_t>code
+            elif code_width == 2:
+                code_u16[i] = <uint16_t>code
+            else:
+                code_u32[i] = <uint32_t>code
+    else:
+        if decoded_col.dict_indices.size() != num_rows:
+            raise ValueError("dictionary index stream length does not match row count")
+        for i in range(num_rows):
+            code = decoded_col.dict_indices[i]
+            if code < 0 or code >= dict_size:
+                raise ValueError(f"dictionary index out of bounds at row {i}: {code}")
+            if code_width == 1:
+                code_u8[i] = <uint8_t>code
+            elif code_width == 2:
+                code_u16[i] = <uint16_t>code
+            else:
+                code_u32[i] = <uint32_t>code
+
+    _TEL["parquet_dict_columns_decoded"] += 1
+    _TEL["parquet_dict_unique_values"] += dict_size
+    _TEL["parquet_dict_code_width_bytes"] += code_width
+
+    return vec
 
 
 cdef BoolVector _make_bool_vector(
@@ -923,22 +1281,52 @@ def read_parquet(data, column_names=None):
             _t0 = _time.perf_counter()
 
             if col_type == "int64":
-                vec = _make_int64_vector(column, num_rows)
+                if _should_emit_dictionary_vector(column, num_rows):
+                    vec = _make_dictionary_vector(column, num_rows)
+                else:
+                    if _decoded_has_dictionary(column):
+                        _TEL["parquet_dict_materialize_fallbacks"] += 1
+                    vec = _make_int64_vector(column, num_rows)
                 _TEL["cython_int64_s"] += _time.perf_counter() - _t0
             elif col_type == "int32":
-                vec = _make_int64_from_int32_vector(column, num_rows)
+                if _should_emit_dictionary_vector(column, num_rows):
+                    vec = _make_dictionary_vector(column, num_rows)
+                else:
+                    if _decoded_has_dictionary(column):
+                        _TEL["parquet_dict_materialize_fallbacks"] += 1
+                    vec = _make_int64_from_int32_vector(column, num_rows)
                 _TEL["cython_int64_s"] += _time.perf_counter() - _t0
             elif col_type == "byte_array" and column.rep_levels.size() > 0:
                 vec = _make_array_vector(column)
+                if column.string_dict_lens.size() > 0:
+                    _TEL["parquet_dict_materialize_fallbacks"] += 1
                 _TEL["cython_str_s"] += _time.perf_counter() - _t0
             elif col_type == "byte_array":
-                vec = _make_string_vector(column, num_rows)
+                if _should_emit_dictionary_vector(column, num_rows):
+                    vec = _make_dictionary_vector(column, num_rows)
+                else:
+                    if _decoded_has_dictionary(column):
+                        _TEL["parquet_dict_materialize_fallbacks"] += 1
+                    vec = _make_string_vector(column, num_rows)
                 _TEL["cython_str_s"] += _time.perf_counter() - _t0
             elif col_type == "boolean":
                 vec = _make_bool_vector(column, num_rows)
                 _TEL["cython_bool_s"] += _time.perf_counter() - _t0
+            elif col_type == "float32":
+                if _should_emit_dictionary_vector(column, num_rows):
+                    vec = _make_dictionary_vector(column, num_rows)
+                else:
+                    if _decoded_has_dictionary(column):
+                        _TEL["parquet_dict_materialize_fallbacks"] += 1
+                    vec = _make_float64_from_float32_vector(column, num_rows)
+                _TEL["cython_float_s"] += _time.perf_counter() - _t0
             elif col_type == "float64":
-                vec = _make_float64_vector(column, num_rows)
+                if _should_emit_dictionary_vector(column, num_rows):
+                    vec = _make_dictionary_vector(column, num_rows)
+                else:
+                    if _decoded_has_dictionary(column):
+                        _TEL["parquet_dict_materialize_fallbacks"] += 1
+                    vec = _make_float64_vector(column, num_rows)
                 _TEL["cython_float_s"] += _time.perf_counter() - _t0
             else:
                 _TEL["cython_other_s"] += _time.perf_counter() - _t0
@@ -1066,19 +1454,46 @@ def decode_column_from_chunk_to_python(chunk_bytes, col_stats):
         return None
 
     cdef str col_type = result.type.decode("utf-8")
+    cdef int32_t num_rows = <int32_t>result.num_rows
 
     if col_type == "int32":
-        return list(result.int32_values)
+        if _should_emit_dictionary_vector(result, num_rows):
+            return _make_dictionary_vector(result, <int32_t>result.num_rows).to_pylist()
+        if _decoded_has_dictionary(result):
+            _TEL["parquet_dict_materialize_fallbacks"] += 1
+        return _make_int64_from_int32_vector(result, num_rows).to_pylist()
     elif col_type == "int64":
-        return list(result.int64_values)
+        if _should_emit_dictionary_vector(result, num_rows):
+            return _make_dictionary_vector(result, <int32_t>result.num_rows).to_pylist()
+        if _decoded_has_dictionary(result):
+            _TEL["parquet_dict_materialize_fallbacks"] += 1
+        return _make_int64_vector(result, num_rows).to_pylist()
     elif col_type == "byte_array":
-        return [_safe_decode_utf8(s) for s in result.string_values]
+        if _should_emit_dictionary_vector(result, num_rows):
+            return [
+                _safe_decode_utf8(v) if v is not None else None
+                for v in _make_dictionary_vector(result, <int32_t>result.num_rows).to_pylist()
+            ]
+        if _decoded_has_dictionary(result):
+            _TEL["parquet_dict_materialize_fallbacks"] += 1
+        return [
+            _safe_decode_utf8(v) if v is not None else None
+            for v in _make_string_vector(result, <int32_t>result.num_rows).to_pylist()
+        ]
     elif col_type == "boolean":
         return [bool(val) for val in result.boolean_values]
     elif col_type == "float32":
-        return list(result.float32_values)
+        if _should_emit_dictionary_vector(result, num_rows):
+            return _make_dictionary_vector(result, <int32_t>result.num_rows).to_pylist()
+        if _decoded_has_dictionary(result):
+            _TEL["parquet_dict_materialize_fallbacks"] += 1
+        return _make_float64_from_float32_vector(result, num_rows).to_pylist()
     elif col_type == "float64":
-        return list(result.float64_values)
+        if _should_emit_dictionary_vector(result, num_rows):
+            return _make_dictionary_vector(result, <int32_t>result.num_rows).to_pylist()
+        if _decoded_has_dictionary(result):
+            _TEL["parquet_dict_materialize_fallbacks"] += 1
+        return _make_float64_vector(result, num_rows).to_pylist()
     else:
         return None
 
@@ -1111,12 +1526,9 @@ def decode_column_from_chunk(chunk_bytes, col_stats):
     cdef parquet_reader.DecodedColumn result
     cdef str col_type
     cdef int32_t num_rows
-    cdef Py_ssize_t i
     cdef dict_off
     cdef data_off
     cdef base_offset
-    cdef Float64Vector vec
-    cdef double* dst
 
     if isinstance(chunk_bytes, (bytes, bytearray)):
         mem_view = memoryview(chunk_bytes).cast('B')
@@ -1191,26 +1603,41 @@ def decode_column_from_chunk(chunk_bytes, col_stats):
 
     # Convert C++ DecodedColumn to Draken Vector using the same logic as read_parquet()
     if col_type == "int32":
+        if _should_emit_dictionary_vector(result, num_rows):
+            return _make_dictionary_vector(result, num_rows)
+        if _decoded_has_dictionary(result):
+            _TEL["parquet_dict_materialize_fallbacks"] += 1
         return _make_int64_from_int32_vector(result, num_rows)
     
     elif col_type == "int64":
+        if _should_emit_dictionary_vector(result, num_rows):
+            return _make_dictionary_vector(result, num_rows)
+        if _decoded_has_dictionary(result):
+            _TEL["parquet_dict_materialize_fallbacks"] += 1
         return _make_int64_vector(result, num_rows)
     
     elif col_type == "byte_array":
+        if _should_emit_dictionary_vector(result, num_rows):
+            return _make_dictionary_vector(result, num_rows)
+        if _decoded_has_dictionary(result):
+            _TEL["parquet_dict_materialize_fallbacks"] += 1
         return _make_string_vector(result, num_rows)
     
     elif col_type == "boolean":
         return _make_bool_vector(result, num_rows)
     
     elif col_type == "float32":
-        # For float32, we upcast to float64 like we do int32→int64
-        vec = Float64Vector(num_rows)
-        dst = <double*> vec.ptr.data
-        for i in range(num_rows):
-            dst[i] = <double> result.float32_values[i]
-        return vec
+        if _should_emit_dictionary_vector(result, num_rows):
+            return _make_dictionary_vector(result, num_rows)
+        if _decoded_has_dictionary(result):
+            _TEL["parquet_dict_materialize_fallbacks"] += 1
+        return _make_float64_from_float32_vector(result, num_rows)
     
     elif col_type == "float64":
+        if _should_emit_dictionary_vector(result, num_rows):
+            return _make_dictionary_vector(result, num_rows)
+        if _decoded_has_dictionary(result):
+            _TEL["parquet_dict_materialize_fallbacks"] += 1
         return _make_float64_vector(result, num_rows)
     
     else:
@@ -1310,7 +1737,10 @@ def decode_column_from_memory(data, str column_name, row_group_stats, int row_gr
     elif col_type == "int64":
         return list(result.int64_values)
     elif col_type == "byte_array":
-        return [_safe_decode_utf8(s) for s in result.string_values]
+        return [
+            _safe_decode_utf8(v) if v is not None else None
+            for v in _make_string_vector(result, <int32_t>result.num_rows).to_pylist()
+        ]
     elif col_type == "boolean":
         return [bool(val) for val in result.boolean_values]
     elif col_type == "float32":

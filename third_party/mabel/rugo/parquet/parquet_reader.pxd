@@ -104,6 +104,10 @@ cdef extern from "decode.hpp":
         vector[int64_t] int64_values
         vector[string] string_values
         vector[int32_t] dict_indices
+        vector[int32_t] dict_int32_values
+        vector[int64_t] dict_int64_values
+        vector[float] dict_float32_values
+        vector[double] dict_float64_values
         vector[uint8_t] boolean_values
         vector[float] float32_values
         vector[double] float64_values
@@ -119,6 +123,8 @@ cdef extern from "decode.hpp":
         vector[uint8_t]  string_dict_arena
         vector[uint32_t] string_dict_offsets
         vector[int32_t]  string_dict_lens
+        uint8_t code_width
+        bint dict_ordered
     
     cdef cppclass DecodedTable:
         vector[vector[DecodedColumn]] row_groups  # [row_group][column]

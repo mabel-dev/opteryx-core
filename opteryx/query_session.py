@@ -182,7 +182,7 @@ class Session(DataFrame):
                         pass
 
         except RuntimeError as err:  # pragma: no cover
-            raise SqlError(f"Error Executing SQL Statement ({err}) (QID:{self.id})") from err
+            raise SqlError(f"Error Executing SQL Statement ({err}) (QID:{self.query_id})") from err
         finally:
             self._telemetry.time_planning += time.time_ns() - start
 
@@ -419,12 +419,14 @@ class Session(DataFrame):
             # DEBUG: print(err)
             if "struct" in str(err):
                 raise InconsistentSchemaError(
-                    f"Unable to resolve different schemas, most likely related to a STRUCT column. (QID:{self.id})"
+                    f"Unable to resolve different schemas, most likely related to a STRUCT column. (QID:{self.query_id})"
                 ) from err
 
             from opteryx.exceptions import DataError
 
-            raise DataError(f"Unable to build result dataset ({err}) (QID:{self.id})") from err
+            raise DataError(
+                f"Unable to build result dataset ({err}) (QID:{self.query_id})"
+            ) from err
 
     def _get_plan_dict(self) -> Optional[dict]:
         """

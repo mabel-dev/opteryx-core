@@ -159,6 +159,33 @@ def test_copy_mask_accepts_arrow_array_and_empty_selection():
     assert empty_filtered.num_columns == 1
 
 
+def test_copy_mask_dictionary_column_preserves_encoding_and_shares_payload():
+    table = pa.table(
+        {
+            "k": pa.DictionaryArray.from_arrays(
+                pa.array([0, 1, None, 2, 1], type=pa.int8()),
+                pa.array([b"a", b"b", b"c"], type=pa.binary()),
+            )
+        }
+    )
+    morsel = draken.Morsel.from_arrow(table)
+
+    filtered = morsel.copy(mask=[0, 2, 4])
+    filtered_arrow = filtered.to_arrow()
+    source_arrow = morsel.to_arrow()
+
+    filtered_col = filtered_arrow.column("k").chunk(0)
+    source_col = source_arrow.column("k").chunk(0)
+
+    assert pa.types.is_dictionary(filtered_col.type)
+    assert filtered_col.to_pylist() == [b"a", None, b"b"]
+
+    src_dict = source_col.dictionary
+    out_dict = filtered_col.dictionary
+    assert out_dict.buffers()[1].address == src_dict.buffers()[1].address
+    assert out_dict.buffers()[2].address == src_dict.buffers()[2].address
+
+
 def test_filter_mask_accepts_bool_vector_and_nulls():
     """Boolean vector masks should keep True rows and drop False/null rows."""
     table = pa.table({"a": [10, 20, 30, 40]})

@@ -9,7 +9,7 @@
         ],
         "extra_compile_args": [
             "-O3",
-            "-std=c++17",
+            "-std=c++20",
             "-Wno-unused-function",
             "-Wno-unreachable-code-fallthrough",
             "-Wno-sign-compare",

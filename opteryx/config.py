@@ -234,11 +234,53 @@ PARQUET_SPECULATIVE_RG_BYTES: int = int(get("PARQUET_SPECULATIVE_RG_BYTES", 0))
 """Minimum estimated column-batch size (bytes) for speculative row-group
 prefetch (§4).  Set 0 to disable speculative reads entirely."""
 
+PARQUET_DICT_MAX_CARDINALITY_RATIO: float = float(get("PARQUET_DICT_MAX_CARDINALITY_RATIO", 0.5))
+"""Maximum dict_size / row_count ratio to keep native dictionary vectors.
+
+When the ratio is exceeded, decode materializes to plain vectors.
+"""
+
 # Deprecation check: warn if caller set the old key without setting the new one.
 if environ.get("PARQUET_READ_DECODE_BUFFER_CAP") and not environ.get("PARQUET_RAW_RING_CAP"):
     import warnings
     warnings.warn(
         "PARQUET_READ_DECODE_BUFFER_CAP is deprecated; set PARQUET_RAW_RING_CAP instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+
+if environ.get("FEATURE_DRAKEN_DICT_EXPR_STRICT") is not None:
+    import warnings
+    warnings.warn(
+        "FEATURE_DRAKEN_DICT_EXPR_STRICT is retired and ignored; "
+        "dictionary expression execution is strict-only.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+
+if environ.get("FEATURE_DRAKEN_DICT_EXPR_FASTPATH") is not None:
+    import warnings
+    warnings.warn(
+        "FEATURE_DRAKEN_DICT_EXPR_FASTPATH is retired and ignored; "
+        "dictionary expression fastpath is always enabled for dictionary candidates.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+
+if environ.get("FEATURE_DRAKEN_DICT_GROUPBY_FASTPATH") is not None:
+    import warnings
+    warnings.warn(
+        "FEATURE_DRAKEN_DICT_GROUPBY_FASTPATH is retired and ignored; "
+        "dictionary group-by fastpath is always enabled for dictionary candidates.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+
+if environ.get("FEATURE_PARQUET_NATIVE_DICTIONARY") is not None:
+    import warnings
+    warnings.warn(
+        "FEATURE_PARQUET_NATIVE_DICTIONARY is retired and ignored; "
+        "native parquet dictionary decode is always enabled (ratio-gated).",
         DeprecationWarning,
         stacklevel=2,
     )

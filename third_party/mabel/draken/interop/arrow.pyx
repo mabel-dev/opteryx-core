@@ -42,6 +42,7 @@ from opteryx.draken.vectors.interval_vector cimport (
     from_arrow_binary as interval_from_arrow_binary,
 )
 from opteryx.draken.vectors.array_vector cimport from_arrow as array_from_arrow
+from opteryx.draken.vectors.dictionary_vector cimport from_arrow as dictionary_from_arrow
 
 from opteryx.draken.vectors.arrow_vector import from_arrow as arrow_from_arrow
 from opteryx.draken.vectors.int64_vector cimport Int64Vector
@@ -113,6 +114,11 @@ cpdef object vector_from_arrow(object array):
         # num_chunks == 0: empty array, proceed with it as-is
 
     pa_type = array.type
+    if pa.types.is_dictionary(pa_type):
+        try:
+            return dictionary_from_arrow(array)
+        except TypeError:
+            return arrow_from_arrow(array)
     if pa_type.equals(pa.int64()):
         return int64_from_arrow(array)
     if pa_type.equals(pa.int8()) or pa_type.equals(pa.int16()) or pa_type.equals(pa.int32()):
@@ -222,6 +228,19 @@ cpdef DrakenType arrow_type_to_draken(object dtype):
         return DrakenType.DRAKEN_BOOL
     elif pa.types.is_string(dtype) or pa.types.is_large_string(dtype):
         return DrakenType.DRAKEN_STRING
+    elif pa.types.is_dictionary(dtype):
+        if (
+            pa.types.is_string(dtype.value_type)
+            or pa.types.is_binary(dtype.value_type)
+            or pa.types.is_int8(dtype.value_type)
+            or pa.types.is_int16(dtype.value_type)
+            or pa.types.is_int32(dtype.value_type)
+            or pa.types.is_int64(dtype.value_type)
+            or pa.types.is_float32(dtype.value_type)
+            or pa.types.is_float64(dtype.value_type)
+        ):
+            return DrakenType.DRAKEN_DICTIONARY
+        return DrakenType.DRAKEN_NON_NATIVE
     elif pa.types.is_list(dtype) or pa.types.is_large_list(dtype):
         return DrakenType.DRAKEN_ARRAY
     elif pa.types.is_fixed_size_binary(dtype) and dtype.byte_width == 16:

@@ -50,11 +50,17 @@ cdef class FlatHashMapByteVector:
 
 cdef extern from "absl/container/flat_hash_set.h" namespace "absl" nogil:
     cdef cppclass flat_hash_set[T, HashFunc]:
+        cppclass iterator:
+            T& operator*()
+            iterator operator++()
+            bint operator!=(iterator)
         flat_hash_set()
-        pair[long, bint] insert(T value)
+        pair[iterator, bint] insert(T value)
         size_t size() const
         bint contains(T value) const
         void reserve(int64_t value)
+        iterator begin()
+        iterator end()
 
 cdef extern from "flat_hash_set_helpers.h" namespace "opteryx" nogil:
     void flat_hash_set_insert_many(
