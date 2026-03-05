@@ -2,442 +2,287 @@
 
 ## Context
 
-Constant columns—where every value (except possibly nulls) is identical—occur frequently in real workloads:
+Constant columns (all rows share one value, optionally with nulls) are common:
+1. `SELECT 1 AS batch_id, ...`
+2. constant projections from folded expressions
+3. constant dimensions in grouped outputs
 
-1. **Synthetic keys**: `SELECT 1 AS batch_id, col1, col2 FROM table`
-2. **Materialized constants**: Subqueries projecting literals
-3. **GROUP BY results**: Post-aggregation columns with repeated constants
-4. **CASE expressions**: Branches that resolve to the same value
-
-Current behavior materializes constant columns as full-width data (e.g., 1M copies of the value `42`). This wastes memory and decode bandwidth.
+Today, many constants are expanded to full-width arrays in Python expression paths, which defeats memory and execution efficiency.
 
 ## Goals
 
-1. Store constant columns with minimal memory footprint (single value + null map).
-2. Decode constant columns in O(1) time (no iteration or decompression).
-3. Fast-path constant columns in expressions, filters, and group-by kernels.
-4. Enable planner optimizations that recognize and produce constant columns.
+1. Represent constant columns in Draken with O(1) value storage (+ optional null bitmap).
+2. Preserve constant representation through execution motor paths where possible.
+3. Speed up predicate/grouping behavior on constant columns without regressing non-constant paths.
+4. Keep design aligned with engine principles (no new Python/Arrow/NumPy in motor kernels).
 
 ## Non-Goals (v1)
 
-1. Constant-column-aware sort or distinct operations (v1 accepts materialization for these).
-2. Mixed-type constant columns (all constants are of the declared column type).
-3. Parquet native constant encoding (Parquet does not support this; will be created in-memory by planner/operators).
+1. Arrow-side constant detection/import (no O(n) constant scanning during Arrow import).
+2. Constant-specialized sort/distinct kernels.
+3. New Parquet constant encoding (constants are produced in planner/operator/runtime, not from Parquet format).
+4. Arrow-first execution paths outside Draken motor flow are not part of v1 optimization guarantees.
 
-## Engine-Principle Constraints (Mandatory)
+## Engine-Principle Constraints
 
-These constraints align this design with `docs/engine-principles.md`:
-
-1. **Static dispatch, not dynamic**: Constant kernels use `switch (column.type)` at the top level; no runtime (is_constant ? constant_path : slow_path) checks in hot loops.
-2. **Fail visibly**: If a constant buffer is malformed (null value pointer, length mismatch, incorrect null bitmap), reject it explicitly before execution.
-3. **No Python in kernels**: Constant vector implementations use direct C++, not Python/Cython fallbacks.
-4. **Arrow at boundaries only**: `to_arrow()` expands the constant into a full Arrow array (not a constant-encoded Arrow format); `vector_from_arrow()` recognizes trivial-predicate Arrow arrays and can opt into constant representation.
+1. Python is glue only: constant motor kernels must not rely on Python per-row loops.
+2. Arrow is boundary only: constant kernels do not call Arrow compute.
+3. No new NumPy in motor code for constant paths.
+4. Fail visibly on malformed constant buffers; no silent broad fallback.
 
 ## Key Design
 
-### 1) Constant Type Specification
+### 1) Draken Type + Buffer
 
-#### Enum Value
+Add `DRAKEN_CONSTANT = 62` to `third_party/mabel/draken/core/buffers.h`.
 
-Add to `third_party/mabel/draken/core/buffers.h`:
-
-```c
-enum DrakenType {
-    // ... existing types ...
-    DRAKEN_STRING     = 60,
-    DRAKEN_DICTIONARY = 61,
-    DRAKEN_CONSTANT   = 62,  // NEW
-    // ... rest ...
-};
-```
-
-#### Buffer Structure
+Add a buffer:
 
 ```c
-struct DrakenConstantBuffer {
-    DrakenType type;              // DRAKEN_CONSTANT
-    DrakenType value_type;        // type of the constant value (e.g., DRAKEN_INT32)
-    void* value;                  // pointer to single value in heap
-                                  // - For fixed-width types: raw bytes (int32*, float64*, etc.)
-                                  // - For STRING: pointer to DrakenVarBuffer
-    uint32_t length;              // number of logical rows
-    uint8_t* null_bitmap;         // nullable: per-row bit map; nullptr if no nulls
-};
+typedef struct {
+    DrakenType type;          // DRAKEN_CONSTANT
+    DrakenType value_type;    // scalar value type
+    void* value;              // owned scalar payload (or owned child payload handle)
+    size_t length;            // logical row count
+    uint8_t* null_bitmap;     // optional row validity bitmap
+} DrakenConstantBuffer;
 ```
 
-#### Ownership & Lifetime
+Notes:
+1. `length` is `size_t` (matches existing Draken buffers).
+2. `null_bitmap == nullptr` means all rows valid.
+3. Constant value is ignored on null rows.
+4. v1 supported constant value types: `INT64`, `FLOAT64`, `BOOL`, `STRING`.
+5. All-null constant columns are valid in v1:
+   - `null_bitmap` marks all rows null.
+   - `value` may point to a type-valid placeholder payload and is never read for null rows.
 
-1. **Value ownership**: `DrakenConstantBuffer` owns the heap allocation for `value`:
-   - For STRING: owns the child `DrakenVarBuffer*` (freed in destructor).
-   - For fixed types: owns the heap-allocated scalar (freed in destructor).
-2. **Null bitmap ownership**: Owned by the buffer; freed in destructor.
-3. **Thread safety**: Read-only after construction, safe to share across threads without locking.
+### 2) ConstantVector Wrapper
 
-#### Null Semantics
+Create:
+1. `third_party/mabel/draken/vectors/constant_vector.pxd`
+2. `third_party/mabel/draken/vectors/constant_vector.pyx`
 
-1. `null_bitmap` is optional; `nullptr` means no nulls, all `length` rows are valid.
-2. When `null_bitmap` is present, it follows the same bit-ordering as `DrakenFixedBuffer` (little-endian, bit 0 = first row).
-3. If a row is marked null, the constant `value` is ignored; reading that row returns null.
-4. **Example**: A constant column of `[42, 42, NULL, 42]` has `value = 42` and `null_bitmap` with bit 2 set.
+Core API (v1):
+1. `__getitem__`
+2. `to_pylist`
+3. `to_arrow` (expand to full Arrow array)
+4. `take` (v1 may materialize)
+5. `hash_into`
+6. `compress_into`
+7. predicates: `equals`, `not_equals`, `in_list`
 
-### 2) Cython Vector Wrapper
+`take()` semantics (v1):
+1. Empty or all-null take result remains `ConstantVector`.
+2. Any non-empty index selection over a constant input remains `ConstantVector` with updated length/null bitmap.
+3. v1 does not require fast-pathing arbitrary mixed-type index containers; non-native index inputs may materialize indices first, but result should remain constant when possible.
 
-Create `third_party/mabel/draken/vectors/constant_vector.pyx` (+ `.pxd`):
+`hash_into()` semantics (must match existing grouping/distinct semantics):
+1. Native 64-bit primitives hash/key as their raw 64-bit value.
+2. Variable-width values (for example `STRING`) hash/key via XXHash64(value bytes).
+3. Null rows use existing engine null-hash behavior.
 
-```cython
-# constant_vector.pyx
+Implementation pattern:
+1. `.pyx/.pxd` first-class implementation (consistent with current Draken vectors).
+2. Generated `.cpp` is an artifact, not the design target.
+3. Add manual native helper only if profiling proves necessary.
 
-cdef class ConstantVector(DrakenVector):
-    """Read-only vector wrapping a constant value."""
-    
-    cdef DrakenConstantBuffer* _buffer
-    cdef DrakenType _value_type
-    
-    def __init__(self, DrakenConstantBuffer* buffer):
-        self._buffer = buffer
-        self._value_type = buffer.value_type
-        
-    @property
-    def length(self) -> uint32_t:
-        return self._buffer.length
-    
-    @property
-    def type(self) -> DrakenType:
-        return DRAKEN_CONSTANT
-    
-    @property
-    def value_type(self) -> DrakenType:
-        return self._value_type
-    
-    def __getitem__(self, int64_t index):
-        """Return the value at index, or None if null."""
-        if self._is_null(index):
-            return None
-        return self._get_value()
-    
-    def to_pylist(self) -> list:
-        """Expand to Python list."""
-        value = self._get_value()
-        null_bitmap = self._buffer.null_bitmap
-        if null_bitmap == NULL:
-            return [value] * self._buffer.length
-        else:
-            return [None if self._is_null(i) else value 
-                    for i in range(self._buffer.length)]
-    
-    def to_arrow(self):
-        """Convert to pyarrow array (expands to full width)."""
-        cdef uint32_t length = self._buffer.length
-        cdef list py_list = self.to_pylist()
-        return pyarrow.array(py_list, type=arrow_type_from_draken(self._value_type))
-    
-    def take(self, indices: DrakenFixedBuffer or ConstantVector or ...) -> DrakenVector:
-        """Return a new vector with rows selected by indices."""
-        # If indices is also constant, result is constant.
-        # Otherwise, expand to fixed buffer and take.
-        # (v1: always materialize as fixed buffer; v2 optimize constant indices)
-        ...
-    
-    def hash_into(self, output_buffer: DrakenFixedBuffer):
-        """Hash the constant value `length` times into output buffer."""
-        ...
-    
-    def compress_into(self, output_buffer: DrakenFixedBuffer):
-        """Compress the constant into output buffer (e.g., for dictionary compression)."""
-        ...
-    
-    # Predicates (these are instant)
-    def equals(self, other):
-        """Fast equality check."""
-        if isinstance(other, ConstantVector):
-            return self._buffer.value == other._buffer.value and \
-                   self._buffers_equal(self._buffer.null_bitmap, other._buffer.null_bitmap)
-        else:
-            # Materialize self and compare
-            return to_fixed_buffer().equals(other)
-    
-    cdef bint _is_null(self, uint32_t index):
-        """Check if row is null."""
-        if self._buffer.null_bitmap == NULL:
-            return False
-        return is_bit_set(self._buffer.null_bitmap, index)
-    
-    cdef object _get_value(self):
-        """Extract the constant value as a Python object."""
-        # Dispatch on self._value_type
-        if self._value_type == DRAKEN_INT32:
-            return (<int32_t*>self._buffer.value)[0]
-        elif self._value_type == DRAKEN_STRING:
-            return extract_draken_string(<DrakenVarBuffer*>self._buffer.value)
-        # ... etc for all types ...
-```
+### 3) Planner/Executor Handoff
 
-**Key Methods** (as per dictionary design):
-- `__getitem__`, `to_pylist`, `to_arrow`, `take`, `hash_into`, `compress_into`
-- `equals`, `not_equals`, `in_list` (predicates)
-- Optional v2: `like`, `ilike` for STRING constants
+Constants must be emitted before Python literal expansion paths.
 
-### 3) Column Creation from Planner/Operators
+Execution contract:
+1. Planner/binder marks constant output expressions (`ConstantColumn`/literal-folded outputs).
+2. Execution node producing the projection emits `ConstantVector` directly.
+3. Downstream operators consume constant vectors without forcing expansion unless required.
 
-#### In the Planner
+Primary node targets:
+1. `ProjectionNode` (first and required)
+2. follow-on support in aggregate/group output paths where constants appear
 
-Recognize constant expressions and tag them. Example:
+### 4) Expression and Grouping Behavior
 
-```python
-# In the planner's projection builder:
-if expression_is_constant(expr):
-    column = create_constant_column(
-        value=evaluate_constant(expr),
-        length=num_rows,
-        nulls=None  # or a bitmap if expr can be null
-    )
-```
+Expression path:
+1. Add constant-aware dispatch in expression ops for supported predicates.
+2. Avoid per-row materialized comparisons for constant-vs-literal cases.
 
-#### Operator Support
+Grouping path:
+1. Detect constant group keys and avoid unnecessary hash/group state work when semantics allow.
+2. Preserve existing null semantics.
 
-Operators that produce constants (or can detect them):
+### 5) Arrow Interop Scope (v1)
 
-1. **ProjectionOperator**: Detects constant projections; creates `ConstantVector`.
-2. **LimitOperator**: Can create a constant length column if needed.
-3. **JoinOperator** (future): Recognize constant join keys.
+1. `ConstantVector.to_arrow()` is supported (expanded Arrow array).
+2. Arrow import does not attempt constant detection in v1.
+3. Constant import detection can be a v2 metadata-driven optimization.
 
-### 4) Expression & Kernel Dispatch
+### 6) Spill/DRKM Behavior (v1)
 
-#### In Expression Evaluator
-
-When a column is constant, short-circuit evaluation:
-
-```c
-switch (left_column.type) {
-    case DRAKEN_CONSTANT:
-        // Fastest path: apply operation to single value, broadcast result
-        return apply_predicate_constant(operation, 
-                                        ((DrakenConstantBuffer*)left_column)->value,
-                                        right_value);
-    case DRAKEN_FIXED:
-        // Standard path for fixed columns
-        return apply_predicate_fixed(operation, left_column, right_value);
-    // ... etc ...
-}
-```
-
-#### Example: Filter with `col == 42` (col is constant 42)
-
-1. Evaluate constant: `42 == 42 → true`
-2. Result: Either all-true vector or all-false vector (depending on null bitmap).
-3. Cost: O(1) instead of O(n) scan.
-
-#### Example: GROUP BY a Constant
-
-1. Planner recognizes constant column.
-2. All rows belong to a single group.
-3. GROUP BY reduces to a single aggregate row (no need for hash table).
-
-### 5) Arrow Interop
-
-#### `vector_from_arrow(arrow_array) -> DrakenVector`
-
-When receiving an Arrow array:
-- Check if it's trivial (constant value, possibly with nulls).
-- If yes, create `ConstantVector`.
-- Otherwise, create `FixedVector` or `DictionaryVector` as today.
-
-**Heuristic**: An array is constant if all non-null values are identical.
-
-```cython
-def vector_from_arrow(arrow_array):
-    if array_is_constant(arrow_array):
-        return ConstantVector.from_arrow(arrow_array)
-    else:
-        # Fall through to existing logic
-        ...
-```
-
-#### `ConstantVector.to_arrow() -> pyarrow.Array`
-
-Expand the constant into a full `pyarrow.Array` for export.
-
-```cython
-def to_arrow(self):
-    return pyarrow.array([self._get_value() if not self._is_null(i) 
-                          else None for i in range(self.length)],
-                         type=...)
-```
-
----
+1. v1 should preserve constant representation across DRKM spill/restore where practical.
+2. If constant-native DRKM segment support is not implemented in the first pass, spill must materialize explicitly and visibly (telemetry-backed) with correctness parity.
+3. Preferred direction: add constant-native DRKM encoding/decoding to avoid expansion churn in spill-heavy workloads.
 
 ## Implementation Plan
 
-### Phase 1: Foundation (2–3 days)
+### Phase 1: Foundation
 
-**Milestone 1.1: C++ Buffer & Enum**
-- [ ] Add `DRAKEN_CONSTANT` to `DrakenType` enum in `buffers.h`
-- [ ] Define `DrakenConstantBuffer` struct
-- [ ] Implement basic accessors (value getter, null bitmap check)
-- [ ] Write unit tests for buffer lifecycle and null bitmap bit operations
+Core:
+- [ ] Add `DRAKEN_CONSTANT` enum entry.
+- [ ] Add `DrakenConstantBuffer` with `size_t length`.
+- [ ] Implement `ConstantVector` skeleton (`.pxd/.pyx`) with ownership + null semantics.
 
-**Milestone 1.2: Cython Vector Wrapper**
-- [ ] Create `constant_vector.pyx` and `constant_vector.pxd`
-- [ ] Implement `__init__`, `length`, `type`, `value_type` properties
-- [ ] Implement `__getitem__` and `to_pylist`
-- [ ] Implement `to_arrow`
-- [ ] Unit tests: basic access, null handling, type correctness
+Tests:
+- [ ] Buffer lifecycle and ownership tests.
+- [ ] Null bitmap semantics tests.
+- [ ] Basic value-type coverage tests.
+- [ ] All-null constant column tests.
 
-### Phase 2: Operator Integration (2–3 days)
+### Phase 2: Projection Wiring
 
-**Milestone 2.1: Planner Recognition**
-- [ ] Add `is_constant_expression()` predicate to planner
-- [ ] Add `create_constant_column()` helper in planner
-- [ ] Update `ProjectionOperator` to emit `ConstantVector` for constant projections
-- [ ] End-to-end test: `SELECT 42, 100, NULL LIMIT 1000` produces constant columns
+Core:
+- [ ] Add planner/executor handoff for constant outputs.
+- [ ] Update `ProjectionNode` output path to emit `ConstantVector` for eligible columns.
+- [ ] Ensure constant outputs bypass Python literal full-width expansion paths.
 
-**Milestone 2.2: Kernel Dispatch**
-- [ ] Update expression evaluator to dispatch on `DRAKEN_CONSTANT` type
-- [ ] Implement fast-path for constant predicates (`equals`, `in_list`, numeric comparisons)
-- [ ] Unit tests: constant == constant, constant == fixed, constant IN (...)
+Tests:
+- [ ] `SELECT 42`/`SELECT 42, 'x', NULL` projection shape tests.
+- [ ] Mixed constant + non-constant projection tests.
 
-### Phase 3: Expression & GROUP BY (2–3 days)
+### Phase 3: Predicate + Grouping Consumption
 
-**Milestone 3.1: Predicate Kernels**
-- [ ] Implement `equals`, `not_equals`, `in_list` fast-path methods
-- [ ] Implement basic arithmetic kernels for constant numeric columns
-- [ ] Tests: filter, arithmetic, null handling
+Core:
+- [ ] Add constant-aware predicate dispatch for supported ops.
+- [ ] Add constant group-key optimization path in group planning/runtime.
+- [ ] Add explicit malformed-buffer validation checks.
 
-**Milestone 3.2: GROUP BY Optimization**
-- [ ] Detect constant group keys in planner
-- [ ] If all group keys are constant, reduce to single-row aggregation
-- [ ] Tests: `SELECT const_col, SUM(x) FROM table GROUP BY const_col`
+Tests:
+- [ ] Predicate parity tests vs materialized baseline.
+- [ ] Group-by parity tests for constant keys.
+- [ ] Null behavior parity tests.
 
-### Phase 4: Arrow Interop & Optimization (1–2 days)
+### Phase 4: Hardening + Export
 
-**Milestone 4.1: Arrow Import**
-- [ ] Implement `array_is_constant(pyarrow.Array) -> bool`
-- [ ] Implement `ConstantVector.from_arrow(pyarrow.Array)`
-- [ ] Update `vector_from_arrow()` to recognize and wrap constant arrays
-- [ ] Tests: import Arrow constant arrays, verify memory footprint
+Core:
+- [ ] Finalize `to_arrow()` behavior and docs.
+- [ ] Implement or explicitly defer constant-native DRKM spill format with measured impact.
+- [ ] Add regression guards preventing Python/Arrow/NumPy creep in constant motor paths.
+- [ ] Add benchmark harness and reproducible report.
 
-**Milestone 4.2: Take & Compression (optional v1)**
-- [ ] Implement `take()` (v1: materialize; v2: optimize constant indices)
-- [ ] Implement `hash_into()` for hash-based operations
-- [ ] Tests: take operations on constant columns
+Tests/Benchmarks:
+- [ ] Memory benchmark: large constant column vs materialized baseline.
+- [ ] Predicate microbench on constant columns.
+- [ ] Spill benchmark: constant-native vs materialized spill path.
+- [ ] Non-constant regression benchmark.
 
----
+## Implementation Status (2026-03-05)
 
-## Test Approach
+Completed in code:
+1. `DRAKEN_CONSTANT` + `DrakenConstantBuffer` are implemented in Draken core buffers.
+2. `ConstantVector` is implemented with native ownership/null handling, predicates, hashing, `take`, and Arrow export.
+3. DRKM spill/restore supports constant-native encode/decode paths (no forced materialization for supported constant types).
+4. `vector_from_sequence` detects constant Python sequences and emits `ConstantVector`.
+5. Expression predicate fastpath supports constant vectors (`Eq`, `NotEq`, `InList`, `NotInList`, `Lt`, `Gt`, `LtEq`, `GtEq`) with telemetry.
+6. Projection/evaluation now keeps constant literals native on `Morsel` paths:
+   - literal-only projections keep `ConstantVector` end-to-end
+   - mixed non-literal + literal evaluation keeps literal outputs as `ConstantVector`
+7. Projection telemetry now includes `draken_constant_columns_emitted` on native morsel projection paths.
+8. Unit coverage exists for:
+   - constant vector semantics
+   - constant expression fastpath
+   - morsel literal projection + mixed projection constant preservation
+   - group-by constant-output telemetry (single-group hit vs multi-group fallback)
+9. `ConstantVector.to_arrow()` no longer depends on `pyarrow.compute`; null application uses direct Arrow buffer assembly.
+10. Initial constant motor guard tests are in place (`constant_vector.pyx`: no NumPy dependency, no Arrow compute dependency).
+11. Runtime constant group-key fastpath is implemented for:
+    - single-key `COUNT(*)`
+    - single-key `COUNT(col)`
+    - single-key `SUM` / `MIN` / `MAX` / `AVG` / `COUNT(DISTINCT)`
+    when the key input vector is `ConstantVector`, with telemetry counters:
+    - `draken_constant_groupby_fastpath_hits`
+    - `draken_constant_groupby_fastpath_fallbacks`
+12. Phase-5 guard coverage now checks multiple constant motor files (`constant_vector.pyx`, compiled group-state store, DRKM morsel I/O) for:
+    - no NumPy imports
+    - no `pyarrow.compute` usage
+    - no `.to_pylist(...)` calls in compiled constant group-by path
+13. Reproducible benchmark harness added:
+    - `tests/performance/benchmarks/bench_constant_columns_phase5.py`
+    - compares constant vs materialized repeated-key paths for group-by runtime, predicate runtime, and DRKM spill bytes/time.
+14. Fixed backend finalize-mode interaction:
+    - when constant fastpath populates `_states`, finalize no longer incorrectly short-circuits through empty int64-typed finalize modes.
+    - this restores correct grouped outputs for constant-key aggregates like `SUM`.
+15. Reproducible performance report artifact added:
+    - `docs/constant-column-phase5-performance-report.md`
+    - includes runtime + memory/size measurements for constant vs materialized baseline at two scales.
+16. Projection constant handoff now also covers Arrow-input projection literals:
+    - `ProjectionNode` routes Arrow inputs with literal projections through a Morsel evaluation path.
+    - this preserves `ConstantVector` emission and telemetry (`draken_constant_columns_emitted`) even when upstream operators emitted Arrow tables.
 
-### Unit Tests
+Still pending for full completion:
+1. End-to-end planner/executor constant handoff across remaining non-Projection projection-producing paths (for example legacy aggregate/group nodes that still force Arrow materialization before expression projection).
 
-#### File: `tests/draken/test_constant_vector.py`
+## Telemetry
 
-1. **Buffer Lifecycle**
-   - Create with null bitmap, release, verify no leaks
-   - Null bitmap bit operations correctness
+Add counters:
+1. `draken_constant_columns_emitted`
+2. `draken_constant_predicate_fastpath_hits`
+3. `draken_constant_predicate_fastpath_fallbacks`
+4. `draken_constant_groupby_fastpath_hits`
+5. `draken_constant_groupby_fastpath_fallbacks`
+6. `draken_constant_spill_materializations`
 
-2. **Vector Access**
-   - `__getitem__` on valid rows
-   - `__getitem__` on null rows returns None
-   - `to_pylist()` correctness for constant + nulls
-   - `length` property
+## Test Plan
 
-3. **Type Dispatch**
-   - INT32, INT64, FLOAT64, STRING constants
-   - Mixed nulls and non-nulls
+### Unit
 
-### Integration Tests
+1. `ConstantVector` lifecycle, `__getitem__`, null bitmap semantics.
+2. Type dispatch for int/float/string constant payloads.
+3. `hash_into`/`compress_into` correctness.
 
-#### File: `tests/operators/test_constant_projection.py`
+### Integration
 
-1. **Projection Operator**
-   - `SELECT 42` produces constant column
-   - `SELECT 42, 100, 'hello'` produces three constant columns
-   - `SELECT col1, 42 FROM table` mixes regular and constant
-   - Null constants: `SELECT NULL`
+1. Projection emits `ConstantVector` on eligible constant outputs.
+2. Filter parity on constant columns vs materialized baseline.
+3. Group-by parity with constant keys.
+4. Spill/restore parity on constant columns.
 
-2. **Filter on Constants**
-   - `WHERE 1 = 1` (always true)
-   - `WHERE 1 = 0` (always false)
-   - `WHERE NULL` (all nulls, no rows pass)
-   - Mixed: `WHERE const_col = value`
+### Regression Guards
 
-3. **GROUP BY Constants**
-   - `SELECT const_col, COUNT(*) FROM table GROUP BY const_col`
-   - Single aggregation row produced
-   - Multiple aggregate functions
+1. Source-level guard tests for constant motor paths:
+   - no Arrow compute tokens
+   - no new NumPy tokens
+   - no Python materialization tokens in motor sections
 
-### End-to-End Tests
+### Performance
 
-#### File: `tests/e2e/test_constant_columns_e2e.py`
+1. Memory reduction for large constant columns.
+2. Constant predicate and group-key speedups.
+3. No measurable regressions on non-constant workloads.
 
-1. **Synthetic Workloads**
-   - Batch ID column: `SELECT batch_id, col1 FROM (SELECT '2026-03' AS batch_id, * FROM data)`
-   - Constant join key: `SELECT *, 'USA' AS country FROM orders`
-
-2. **Memory Footprint**
-   - Constant column with 1M rows: verify < 1KB overhead (vs. full column)
-   - Null bitmap: 1M rows with 50% nulls = 62.5KB (vs. 4MB for int32 full)
-
-3. **Query Performance**
-   - Filter on constant: O(1) planning, O(1) predicate evaluation
-   - GROUP BY constant: Single aggregation row
-
-### Benchmark Tests
-
-#### File: `tests/benchmarks/bench_constant_columns.py`
-
-1. **Access Speed**
-   - `__getitem__` on 1M-element constant vs. fixed vector
-   - `to_pylist()` expansion cost
-
-2. **Filter Speed**
-   - `WHERE const_col = X` vs. `WHERE fixed_col = X` (should be instant)
-   - `WHERE NULL` (should be instant false)
-
-3. **GROUP BY Speed**
-   - `GROUP BY constant` vs. `GROUP BY fixed` (should be 10–100x faster for single key)
-
----
-
-## Rollout & Gating
-
-### Phase 1–2 (MVP)
-
-- Constant columns work end-to-end.
-- Planner detects and creates them.
-- Filters and basic expressions fast-path them.
-- Arrow import recognizes trivial constant arrays.
-
-### Phase 3+ (Optimization)
-
-- GROUP BY constant automatic single-row reduction.
-- Advanced kernel fast-paths (STRING LIKE, arithmetic).
-- Compression and take optimizations.
-
-### Feature Flag (Optional)
-
-```python
-# In query planner:
-if config.ENABLE_CONSTANT_COLUMNS:
-    detect_and_create_constant_columns()
-```
-
----
-
-## Risk & Mitigations
+## Risks and Mitigations
 
 | Risk | Mitigation |
-|------|-----------|
-| Constant buffer lifetime bugs | Strict ownership; unit tests for leak detection; ASAN in CI |
-| Null bitmap off-by-one errors | Bit-level tests; consistent implementation with `DrakenFixedBuffer` |
-| Expression kernel dispatch complexity | Single `switch (type)` at top level; no nested if-else in hot loops |
-| Arrow interop misses edge cases | Comprehensive import/export tests; fall back to non-constant on uncertainty |
-
----
+|---|---|
+| Constant path bypassed by early Python materialization | Enforce planner/executor constant handoff and projection emission |
+| Ownership/null correctness bugs | strict constructor/destructor invariants + bitmap tests |
+| Engine-principle drift | add motor-path regression guard tests |
+| Over-scoped v1 | keep Arrow constant import detection out of v1 |
 
 ## Success Criteria
 
-1. ✅ Constant columns created and accessed with 100% correctness.
-2. ✅ Memory footprint < 1KB for 1M-row constant (vs. 4–8MB for full column).
-3. ✅ Filter on constant column instant (< 1µs for row-group decision).
-4. ✅ GROUP BY constant column fast-pathed to single aggregation.
-5. ✅ Arrow import recognizes trivial constant arrays.
-6. ✅ No performance regression on non-constant columns.
+1. Constant columns are emitted as `ConstantVector` in supported projection paths.
+2. Constant storage is O(1) with respect to row count (plus bitmap when needed).
+3. Predicate/grouping correctness matches materialized baseline.
+4. Documented time/RAM benefits demonstrated on benchmark harness.
+5. No regression on non-constant execution paths.
+
+## Release Gates
+
+1. Correctness:
+   - Targeted constant unit/integration suites pass.
+   - No regressions in quick battery (`make t`) attributable to constant paths.
+2. Performance:
+   - Constant projection/filter workloads show measurable speedup vs materialized baseline.
+   - Constant memory footprint remains O(1)+bitmap and materially below full-column materialization.
+3. Stability:
+   - Fastpath fallback rates are low and explained by unsupported shapes.
+   - If spill materialization remains in v1, its rate/impact is quantified and accepted explicitly.

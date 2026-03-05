@@ -433,6 +433,7 @@ extensions = [
     make_draken_extension("vectors.array_vector", "vectors/array_vector.pyx"),
     make_draken_extension("vectors.time_vector", "vectors/time_vector.pyx"),
     make_draken_extension("vectors.interval_vector", "vectors/interval_vector.pyx"),
+    make_draken_extension("vectors.constant_vector", "vectors/constant_vector.pyx"),
     make_draken_extension("vectors.dictionary_vector", "vectors/dictionary_vector.pyx"),
     make_draken_extension("vectors.int64_vector", "vectors/int64_vector.pyx", language="c++"),
     make_draken_extension("vectors.integer_vector", "vectors/integer_vector.pyx", language="c++"),

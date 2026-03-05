@@ -14,6 +14,7 @@ from opteryx.draken.interop.arrow import vector_from_sequence
 from opteryx.draken.vectors.int64_vector import Int64Vector
 from opteryx.draken.vectors.float64_vector import Float64Vector
 from opteryx.draken.vectors.bool_vector import BoolVector
+from opteryx.draken.vectors.constant_vector import ConstantVector
 
 
 class TestVectorFromSequenceInt64:
@@ -314,9 +315,28 @@ class TestVectorFromSequenceFallback:
         """Test that float32 arrays fall back to Arrow."""
         arr = array('f', [1.0, 2.0, 3.0])  # 'f' = float (float32)
         vec = vector_from_sequence(arr)
-        
+
         arrow_result = vec.to_arrow()
         assert len(arrow_result) == 3
+
+
+class TestVectorFromSequenceConstant:
+    """Tests for constant sequence detection."""
+
+    def test_constant_int_sequence(self):
+        vec = vector_from_sequence([7, 7, 7, 7])
+        assert isinstance(vec, ConstantVector)
+        assert vec.to_pylist() == [7, 7, 7, 7]
+
+    def test_constant_with_null_bitmap_sequence(self):
+        vec = vector_from_sequence([b"x", None, b"x", b"x"])
+        assert isinstance(vec, ConstantVector)
+        assert vec.to_pylist() == [b"x", None, b"x", b"x"]
+
+    def test_non_constant_sequence_falls_back(self):
+        vec = vector_from_sequence([1, 2, 1])
+        assert not isinstance(vec, ConstantVector)
+        assert vec.to_arrow().to_pylist() == [1, 2, 1]
 
 
 class TestVectorFromSequenceWithDtype:

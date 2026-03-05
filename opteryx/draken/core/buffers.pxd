@@ -18,6 +18,7 @@ cdef extern from "core/buffers.h":
         DRAKEN_BOOL
         DRAKEN_STRING
         DRAKEN_DICTIONARY
+        DRAKEN_CONSTANT
         DRAKEN_ARRAY
 
         DRAKEN_NON_NATIVE
@@ -46,6 +47,17 @@ cdef extern from "core/buffers.h":
         uint8_t ordered
         DrakenVarBuffer* dictionary_values
         DrakenType type
+
+    ctypedef struct DrakenConstantStringPayload:
+        uint8_t* data
+        int32_t length
+
+    ctypedef struct DrakenConstantBuffer:
+        DrakenType type
+        DrakenType value_type
+        void* value
+        size_t length
+        uint8_t* null_bitmap
 
     # Array column (list<T>)
     ctypedef struct DrakenArrayBuffer:

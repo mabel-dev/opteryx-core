@@ -26,6 +26,7 @@ typedef enum {
     // String-like: 60–79
     DRAKEN_STRING         = 60,
     DRAKEN_DICTIONARY     = 61,
+    DRAKEN_CONSTANT       = 62,
 
     // Complex types: 80–99
     DRAKEN_ARRAY          = 80,
@@ -59,6 +60,19 @@ typedef struct {
     DrakenVarBuffer* dictionary_values;  // dictionary payload buffer (type in DrakenVarBuffer.type)
     DrakenType type;              // DRAKEN_DICTIONARY
 } DrakenDictionaryBuffer;
+
+typedef struct {
+    uint8_t* data;
+    int32_t length;
+} DrakenConstantStringPayload;
+
+typedef struct {
+    DrakenType type;          // DRAKEN_CONSTANT
+    DrakenType value_type;    // scalar value type
+    void* value;              // owned scalar payload
+    size_t length;            // logical row count
+    uint8_t* null_bitmap;     // optional row validity bitmap
+} DrakenConstantBuffer;
 
 typedef struct {
     int32_t* offsets;         // [length + 1] entries

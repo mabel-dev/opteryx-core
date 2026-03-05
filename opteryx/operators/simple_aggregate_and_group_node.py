@@ -35,6 +35,18 @@ from . import BasePlanNode
 CHUNK_SIZE = 65536
 
 
+def _append_star_constant_morsel(morsel: Morsel) -> Morsel:
+    from opteryx.draken.vectors.constant_vector import from_scalar as constant_from_scalar
+
+    names = morsel.column_names
+    vectors = [
+        morsel.column(name if isinstance(name, bytes) else name.encode("utf-8")) for name in names
+    ]
+    names.append("*")
+    vectors.append(constant_from_scalar(1, morsel.num_rows, dtype=pyarrow.int8()))
+    return Morsel.from_vectors(names, vectors)
+
+
 def build_finalizer_aggregations(aggregators):
     column_map = {}
     aggs = []
@@ -145,8 +157,6 @@ class SimpleAggregateAndGroupNode(BasePlanNode):
         return "Group By Simple"
 
     def execute(self, morsel: pyarrow.Table, **kwargs):
-        morsel = self.ensure_arrow_table(morsel)
-
         internal_names = list(self.column_map.values()) + self.group_by_columns
         column_names = list(self.column_map.keys()) + self.group_by_columns
 
@@ -182,7 +192,12 @@ class SimpleAggregateAndGroupNode(BasePlanNode):
             yield EOS
             return
 
-        morsel = project(morsel, self.all_identifiers)
+        if isinstance(morsel, Morsel):
+            if self.all_identifiers:
+                morsel = morsel.select(self.all_identifiers)
+        else:
+            morsel = self.ensure_arrow_table(morsel)
+            morsel = project(morsel, self.all_identifiers)
 
         # Allow grouping by functions by evaluating them first
         if self.evaluatable_nodes:
@@ -197,9 +212,17 @@ class SimpleAggregateAndGroupNode(BasePlanNode):
 
         # Add a "*" column, this is an int because when a bool it miscounts
         if "*" not in morsel.column_names:
-            morsel = morsel.append_column(
-                "*", [numpy.full(shape=morsel.num_rows, fill_value=1, dtype=numpy.int8)]
-            )
+            if isinstance(morsel, Morsel):
+                morsel = _append_star_constant_morsel(morsel)
+            else:
+                morsel = morsel.append_column(
+                    "*", [numpy.full(shape=morsel.num_rows, fill_value=1, dtype=numpy.int8)]
+                )
+
+        if isinstance(morsel, Morsel):
+            morsel_arrow = morsel.to_arrow()
+        else:
+            morsel_arrow = morsel
 
         # use pyarrow to do phase 1 of the group by
         st = time.monotonic_ns()
@@ -224,7 +247,7 @@ class SimpleAggregateAndGroupNode(BasePlanNode):
                 # Disable Draken ops for the rest of this operator execution to avoid
                 # repeated failures on unsupported runtime types.
                 self._use_draken_ops = False
-                groups = morsel.group_by(self.group_by_columns)
+                groups = morsel_arrow.group_by(self.group_by_columns)
                 groups = groups.aggregate(self.aggregate_functions)
                 groups = groups.select(internal_names)
                 groups = groups.rename_columns(column_names)
@@ -238,7 +261,7 @@ class SimpleAggregateAndGroupNode(BasePlanNode):
                 groups = groups.rename_columns(list(column_names))
 
         else:
-            groups = morsel.group_by(self.group_by_columns)
+            groups = morsel_arrow.group_by(self.group_by_columns)
             groups = groups.aggregate(self.aggregate_functions)
             groups = groups.select(internal_names)
             groups = groups.rename_columns(column_names)

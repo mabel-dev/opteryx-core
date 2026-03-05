@@ -7,7 +7,9 @@
 
 from opteryx.draken.morsels.morsel cimport Morsel
 from opteryx.draken.core.buffers cimport DrakenFixedBuffer
+from opteryx.draken.core.buffers cimport DrakenConstantBuffer
 from opteryx.draken.vectors.dictionary_vector cimport DictionaryVector
+from opteryx.draken.vectors.constant_vector cimport ConstantVector
 from opteryx.compiled.aggregations.aggregate_kernels cimport AGG_AVG
 from opteryx.compiled.aggregations.aggregate_kernels cimport AGG_COUNT
 from opteryx.compiled.aggregations.aggregate_kernels cimport AGG_COUNT_DISTINCT
@@ -117,6 +119,8 @@ cdef class GroupStateStore:
     cdef object _specialized_kernel
     cdef uint64_t _dict_groupby_fastpath_hits
     cdef uint64_t _dict_groupby_fastpath_fallbacks
+    cdef uint64_t _constant_groupby_fastpath_hits
+    cdef uint64_t _constant_groupby_fastpath_fallbacks
 
     def __cinit__(self, list group_by_columns, list aggregations):
         cdef object aggregation
@@ -143,6 +147,8 @@ cdef class GroupStateStore:
         self._specialized_kernel = None
         self._dict_groupby_fastpath_hits = 0
         self._dict_groupby_fastpath_fallbacks = 0
+        self._constant_groupby_fastpath_hits = 0
+        self._constant_groupby_fastpath_fallbacks = 0
 
         for aggregation in aggregations:
             function = aggregation[1]
@@ -239,6 +245,14 @@ cdef class GroupStateStore:
     def dict_groupby_fastpath_fallbacks(self):
         return self._dict_groupby_fastpath_fallbacks
 
+    @property
+    def constant_groupby_fastpath_hits(self):
+        return self._constant_groupby_fastpath_hits
+
+    @property
+    def constant_groupby_fastpath_fallbacks(self):
+        return self._constant_groupby_fastpath_fallbacks
+
     cpdef void ingest(self, Morsel morsel):
         cdef Py_ssize_t row_count
         cdef Py_ssize_t row_idx
@@ -289,6 +303,15 @@ cdef class GroupStateStore:
         cdef uint64_t* _narrow_value_buf
         cdef bint dict_fastpath_candidate = False
         cdef object dict_candidate_vector
+        cdef ConstantVector key_constant_vector
+        cdef DrakenConstantBuffer* key_const_ptr
+        cdef uint8_t* key_const_nulls
+        cdef object key_const_scalar
+        cdef Py_ssize_t key_const_valid_rows
+        cdef Py_ssize_t key_const_null_rows
+        cdef bint key_const_valid
+        cdef object key_const_state
+        cdef object key_const_null_state
 
         if morsel is None or morsel.num_rows == 0:
             return
@@ -325,6 +348,186 @@ cdef class GroupStateStore:
         key_count = len(key_vectors)
         if key_count == 1:
             key_vector0 = key_vectors[0]
+
+        # Constant group-key fast path for the common single-aggregate shapes.
+        # This avoids per-row hash/key materialization when all rows share one
+        # logical key value (with optional NULL-key rows via bitmap).
+        if key_count == 1 and isinstance(key_vector0, ConstantVector):
+            if single_mode == AGG_COUNT_STAR:
+                key_constant_vector = <ConstantVector>key_vector0
+                key_const_ptr = key_constant_vector.ptr
+                key_const_nulls = <uint8_t*>key_const_ptr.null_bitmap
+                key_const_scalar = key_constant_vector.scalar_value()
+                key_const_valid_rows = 0
+                key_const_null_rows = 0
+
+                if key_const_nulls == NULL:
+                    key_const_valid_rows = row_count
+                else:
+                    for row_idx in range(row_count):
+                        key_const_valid = ((key_const_nulls[row_idx >> 3] >> (row_idx & 7)) & 1) != 0
+                        if key_const_valid:
+                            key_const_valid_rows += 1
+                        else:
+                            key_const_null_rows += 1
+
+                if key_const_valid_rows > 0:
+                    key_const_state = self._states.get(key_const_scalar)
+                    if key_const_state is None:
+                        self._states[key_const_scalar] = key_const_valid_rows
+                    else:
+                        self._states[key_const_scalar] = key_const_state + key_const_valid_rows
+
+                if key_const_null_rows > 0:
+                    key_const_null_state = self._states.get(None)
+                    if key_const_null_state is None:
+                        self._states[None] = key_const_null_rows
+                    else:
+                        self._states[None] = key_const_null_state + key_const_null_rows
+
+                self._constant_groupby_fastpath_hits += 1
+                return
+
+            if single_mode == AGG_COUNT:
+                key_constant_vector = <ConstantVector>key_vector0
+                key_const_ptr = key_constant_vector.ptr
+                key_const_nulls = <uint8_t*>key_const_ptr.null_bitmap
+                key_const_scalar = key_constant_vector.scalar_value()
+                single_column = self._single_column
+                single_vector = morsel.column(single_column)
+
+                if key_const_nulls == NULL:
+                    key_const_state = self._states.get(key_const_scalar)
+                    if key_const_state is None:
+                        key_const_state = 0
+                    for row_idx in range(row_count):
+                        value = single_vector[row_idx]
+                        if value is not None:
+                            key_const_state += 1
+                    self._states[key_const_scalar] = key_const_state
+                else:
+                    key_const_state = self._states.get(key_const_scalar)
+                    if key_const_state is None:
+                        key_const_state = 0
+                    key_const_null_state = self._states.get(None)
+                    if key_const_null_state is None:
+                        key_const_null_state = 0
+                    key_const_valid_rows = 0
+                    key_const_null_rows = 0
+
+                    for row_idx in range(row_count):
+                        key_const_valid = ((key_const_nulls[row_idx >> 3] >> (row_idx & 7)) & 1) != 0
+                        value = single_vector[row_idx]
+                        if key_const_valid:
+                            key_const_valid_rows += 1
+                            if value is not None:
+                                key_const_state += 1
+                        else:
+                            key_const_null_rows += 1
+                            if value is not None:
+                                key_const_null_state += 1
+
+                    if key_const_valid_rows > 0:
+                        self._states[key_const_scalar] = key_const_state
+                    if key_const_null_rows > 0:
+                        self._states[None] = key_const_null_state
+
+                self._constant_groupby_fastpath_hits += 1
+                return
+
+            if single_mode in (AGG_SUM, AGG_MIN, AGG_MAX, AGG_AVG, AGG_COUNT_DISTINCT):
+                key_constant_vector = <ConstantVector>key_vector0
+                key_const_ptr = key_constant_vector.ptr
+                key_const_nulls = <uint8_t*>key_const_ptr.null_bitmap
+                key_const_scalar = key_constant_vector.scalar_value()
+                single_column = self._single_column
+                single_vector = morsel.column(single_column)
+
+                key_const_state = self._states.get(key_const_scalar, _MISSING)
+                key_const_null_state = self._states.get(None, _MISSING)
+                key_const_valid_rows = 0
+                key_const_null_rows = 0
+
+                for row_idx in range(row_count):
+                    if key_const_nulls == NULL:
+                        key_const_valid = True
+                    else:
+                        key_const_valid = ((key_const_nulls[row_idx >> 3] >> (row_idx & 7)) & 1) != 0
+
+                    value = single_vector[row_idx]
+
+                    if key_const_valid:
+                        key_const_valid_rows += 1
+                        if single_mode == AGG_SUM:
+                            if key_const_state is _MISSING:
+                                key_const_state = None
+                            if value is not None:
+                                key_const_state = value if key_const_state is None else key_const_state + value
+                        elif single_mode == AGG_MIN:
+                            if key_const_state is _MISSING:
+                                key_const_state = None
+                            if value is not None:
+                                if key_const_state is None or value < key_const_state:
+                                    key_const_state = value
+                        elif single_mode == AGG_MAX:
+                            if key_const_state is _MISSING:
+                                key_const_state = None
+                            if value is not None:
+                                if key_const_state is None or value > key_const_state:
+                                    key_const_state = value
+                        elif single_mode == AGG_AVG:
+                            if key_const_state is _MISSING:
+                                key_const_state = [0, 0]
+                            if value is not None:
+                                key_const_state[0] += value
+                                key_const_state[1] += 1
+                        else:  # AGG_COUNT_DISTINCT
+                            if key_const_state is _MISSING:
+                                key_const_state = set()
+                            if value is not None:
+                                key_const_state.add(value)
+                    else:
+                        key_const_null_rows += 1
+                        if single_mode == AGG_SUM:
+                            if key_const_null_state is _MISSING:
+                                key_const_null_state = None
+                            if value is not None:
+                                key_const_null_state = (
+                                    value if key_const_null_state is None else key_const_null_state + value
+                                )
+                        elif single_mode == AGG_MIN:
+                            if key_const_null_state is _MISSING:
+                                key_const_null_state = None
+                            if value is not None:
+                                if key_const_null_state is None or value < key_const_null_state:
+                                    key_const_null_state = value
+                        elif single_mode == AGG_MAX:
+                            if key_const_null_state is _MISSING:
+                                key_const_null_state = None
+                            if value is not None:
+                                if key_const_null_state is None or value > key_const_null_state:
+                                    key_const_null_state = value
+                        elif single_mode == AGG_AVG:
+                            if key_const_null_state is _MISSING:
+                                key_const_null_state = [0, 0]
+                            if value is not None:
+                                key_const_null_state[0] += value
+                                key_const_null_state[1] += 1
+                        else:  # AGG_COUNT_DISTINCT
+                            if key_const_null_state is _MISSING:
+                                key_const_null_state = set()
+                            if value is not None:
+                                key_const_null_state.add(value)
+
+                if key_const_valid_rows > 0:
+                    self._states[key_const_scalar] = key_const_state
+                if key_const_null_rows > 0:
+                    self._states[None] = key_const_null_state
+
+                self._constant_groupby_fastpath_hits += 1
+                return
+
+            self._constant_groupby_fastpath_fallbacks += 1
 
         if self._int64_count_star_mode:
             if key_count != 1 or not isinstance(key_vector0, (Int64Vector, IntegerVector)):
@@ -824,91 +1027,99 @@ cdef class GroupStateStore:
                 self._int64_count_star_counts.size() == 0
                 and not self._int64_count_star_seen_null
             ):
-                if self._group_by_columns:
+                if self._states:
+                    self._int64_count_star_mode = False
+                elif self._group_by_columns:
                     return []
+            if self._int64_count_star_mode:
+                rows = []
+                count_it = self._int64_count_star_counts.begin()
+                while count_it != self._int64_count_star_counts.end():
+                    rows.append(
+                            (
+                                (<int64_t>dereference(count_it).first,),
+                                [dereference(count_it).second],
+                            )
+                    )
+                    preincrement(count_it)
+                if self._int64_count_star_seen_null:
+                    rows.append(((None,), [self._int64_count_star_null_count]))
+                return rows
 
-            rows = []
-            count_it = self._int64_count_star_counts.begin()
-            while count_it != self._int64_count_star_counts.end():
-                rows.append(
+        if self._int64_count_distinct_mode:
+            if self._int64_count_distinct_counts.size() == 0:
+                if self._states:
+                    self._int64_count_distinct_mode = False
+                elif self._group_by_columns and not self._int64_count_distinct_seen_null_key:
+                    return []
+            if self._int64_count_distinct_mode:
+                rows = []
+                count_it = self._int64_count_distinct_counts.begin()
+                while count_it != self._int64_count_distinct_counts.end():
+                    rows.append(
                         (
                             (<int64_t>dereference(count_it).first,),
                             [dereference(count_it).second],
                         )
-                )
-                preincrement(count_it)
-            if self._int64_count_star_seen_null:
-                rows.append(((None,), [self._int64_count_star_null_count]))
-            return rows
-
-        if self._int64_count_distinct_mode:
-            if self._int64_count_distinct_counts.size() == 0:
-                if self._group_by_columns and not self._int64_count_distinct_seen_null_key:
-                    return []
-
-            rows = []
-            count_it = self._int64_count_distinct_counts.begin()
-            while count_it != self._int64_count_distinct_counts.end():
-                rows.append(
-                    (
-                        (<int64_t>dereference(count_it).first,),
-                        [dereference(count_it).second],
                     )
-                )
-                preincrement(count_it)
-            if self._int64_count_distinct_seen_null_key:
-                rows.append(((None,), [self._int64_count_distinct_null_key_count]))
-            return rows
+                    preincrement(count_it)
+                if self._int64_count_distinct_seen_null_key:
+                    rows.append(((None,), [self._int64_count_distinct_null_key_count]))
+                return rows
 
         typed_mode = self._int64_typed_mode
         typed_value_type = self._int64_typed_value_type
         if typed_mode != MODE_GENERAL:
             if self._int64_typed_rows.size() == 0:
-                if self._group_by_columns:
+                if self._states:
+                    self._int64_typed_mode = MODE_GENERAL
+                    typed_mode = MODE_GENERAL
+                elif self._group_by_columns:
                     return []
-            rows = []
-            rows_it = self._int64_typed_rows.begin()
-            while rows_it != self._int64_typed_rows.end():
-                key_u64 = dereference(rows_it).first
-                if typed_mode == AGG_COUNT:
-                    finalized_value = self._int64_typed_i64[key_u64]
-                elif typed_mode == AGG_SUM:
-                    if self._int64_typed_seen[key_u64] == 0:
-                        finalized_value = None
-                    elif typed_value_type == FAST_VALUE_FLOAT64:
-                        finalized_value = self._int64_typed_f64[key_u64]
-                    else:
+            if typed_mode != MODE_GENERAL:
+                rows = []
+                rows_it = self._int64_typed_rows.begin()
+                while rows_it != self._int64_typed_rows.end():
+                    key_u64 = dereference(rows_it).first
+                    if typed_mode == AGG_COUNT:
                         finalized_value = self._int64_typed_i64[key_u64]
-                elif typed_mode == AGG_MIN:
-                    if self._int64_typed_seen[key_u64] == 0:
-                        finalized_value = None
-                    elif typed_value_type == FAST_VALUE_FLOAT64:
-                        finalized_value = self._int64_typed_f64[key_u64]
+                    elif typed_mode == AGG_SUM:
+                        if self._int64_typed_seen[key_u64] == 0:
+                            finalized_value = None
+                        elif typed_value_type == FAST_VALUE_FLOAT64:
+                            finalized_value = self._int64_typed_f64[key_u64]
+                        else:
+                            finalized_value = self._int64_typed_i64[key_u64]
+                    elif typed_mode == AGG_MIN:
+                        if self._int64_typed_seen[key_u64] == 0:
+                            finalized_value = None
+                        elif typed_value_type == FAST_VALUE_FLOAT64:
+                            finalized_value = self._int64_typed_f64[key_u64]
+                        else:
+                            finalized_value = self._int64_typed_i64[key_u64]
+                    elif typed_mode == AGG_MAX:
+                        if self._int64_typed_seen[key_u64] == 0:
+                            finalized_value = None
+                        elif typed_value_type == FAST_VALUE_FLOAT64:
+                            finalized_value = self._int64_typed_f64[key_u64]
+                        else:
+                            finalized_value = self._int64_typed_i64[key_u64]
+                    elif typed_mode == AGG_AVG:
+                        c = self._int64_typed_count[key_u64]
+                        finalized_value = None if c == 0 else (self._int64_typed_f64[key_u64] / c)
+                    elif typed_mode == AGG_HASH_ONE:
+                        if self._int64_typed_seen[key_u64] == 0:
+                            finalized_value = None
+                        elif typed_value_type == FAST_VALUE_FLOAT64:
+                            finalized_value = self._int64_typed_f64[key_u64]
+                        else:
+                            finalized_value = self._int64_typed_i64[key_u64]
                     else:
-                        finalized_value = self._int64_typed_i64[key_u64]
-                elif typed_mode == AGG_MAX:
-                    if self._int64_typed_seen[key_u64] == 0:
                         finalized_value = None
-                    elif typed_value_type == FAST_VALUE_FLOAT64:
-                        finalized_value = self._int64_typed_f64[key_u64]
-                    else:
-                        finalized_value = self._int64_typed_i64[key_u64]
-                elif typed_mode == AGG_AVG:
-                    c = self._int64_typed_count[key_u64]
-                    finalized_value = None if c == 0 else (self._int64_typed_f64[key_u64] / c)
-                elif typed_mode == AGG_HASH_ONE:
-                    if self._int64_typed_seen[key_u64] == 0:
-                        finalized_value = None
-                    elif typed_value_type == FAST_VALUE_FLOAT64:
-                        finalized_value = self._int64_typed_f64[key_u64]
-                    else:
-                        finalized_value = self._int64_typed_i64[key_u64]
-                else:
-                    finalized_value = None
 
-                rows.append(((<int64_t>key_u64,), [finalized_value]))
-                preincrement(rows_it)
-            return rows
+                    rows.append(((<int64_t>key_u64,), [finalized_value]))
+                    preincrement(rows_it)
+                return rows
 
         if not self._states:
             if self._group_by_columns:

@@ -16,6 +16,8 @@ from opteryx.compiled import list_ops
 _DICT_EXPR_TEL = {
     "draken_dict_expr_fastpath_hits": 0,
     "draken_dict_expr_fastpath_fallbacks": 0,
+    "draken_constant_predicate_fastpath_hits": 0,
+    "draken_constant_predicate_fastpath_fallbacks": 0,
 }
 
 _DICT_FASTPATH_OPS = frozenset(
@@ -33,6 +35,9 @@ _DICT_FASTPATH_OPS = frozenset(
     )
 )
 _DICT_NUMERIC_FASTPATH_OPS = frozenset(("Lt", "Gt", "LtEq", "GtEq"))
+_CONSTANT_FASTPATH_OPS = frozenset(
+    ("Eq", "NotEq", "InList", "NotInList", "Lt", "Gt", "LtEq", "GtEq")
+)
 # Dictionary child type ids from third_party/mabel/draken/core/buffers.h.
 _DICT_NUMERIC_CHILD_TYPES = frozenset((1, 2, 3, 4, 20, 21, 50))
 
@@ -62,6 +67,8 @@ skip_compression_ops = {
 def reset_dict_expr_telemetry():
     _DICT_EXPR_TEL["draken_dict_expr_fastpath_hits"] = 0
     _DICT_EXPR_TEL["draken_dict_expr_fastpath_fallbacks"] = 0
+    _DICT_EXPR_TEL["draken_constant_predicate_fastpath_hits"] = 0
+    _DICT_EXPR_TEL["draken_constant_predicate_fastpath_fallbacks"] = 0
 
 
 def get_dict_expr_telemetry():
@@ -70,6 +77,50 @@ def get_dict_expr_telemetry():
 
 def _record_dict_hit():
     _DICT_EXPR_TEL["draken_dict_expr_fastpath_hits"] += 1
+
+
+def _record_constant_hit():
+    _DICT_EXPR_TEL["draken_constant_predicate_fastpath_hits"] += 1
+
+
+def _record_constant_fallback():
+    _DICT_EXPR_TEL["draken_constant_predicate_fastpath_fallbacks"] += 1
+
+
+def _constant_vector(arr):
+    if arr.__class__.__name__ == "ConstantVector":
+        return arr
+    return None
+
+
+def _has_constant_candidate(arr):
+    return arr.__class__.__name__ == "ConstantVector"
+
+
+def _constant_fastpath(arr, operator, value):
+    vec = _constant_vector(arr)
+    if vec is None:
+        return None
+
+    if operator == "Eq":
+        return vec.equals(value)
+    if operator == "NotEq":
+        return vec.not_equals(value)
+    if operator in ("InList", "NotInList"):
+        result = vec.in_list(_coerce_in_list_values(value))
+        if operator == "NotInList":
+            result = result.not_vector()
+        return result
+    if operator == "Lt":
+        return vec.less_than(value)
+    if operator == "Gt":
+        return vec.greater_than(value)
+    if operator == "LtEq":
+        return vec.less_than_or_equals(value)
+    if operator == "GtEq":
+        return vec.greater_than_or_equals(value)
+
+    return None
 
 
 def _dictionary_vector(arr):
@@ -170,6 +221,9 @@ def filter_operations(left_arr, left_type, operator, right_arr, right_type):
     """
     if len(left_arr) == 0 or len(right_arr) == 0:
         return numpy.empty(0, dtype=bool)
+
+    if _has_constant_candidate(left_arr):
+        return _inner_filter_operations(left_arr, operator, right_arr)
 
     # INTEGERS and DECIMALS don't play nicely so we cast the INTS to DOUBLES
     if left_type == OrsoTypes.DECIMAL and right_type == OrsoTypes.INTEGER:
@@ -279,11 +333,23 @@ def _inner_filter_operations(arr, operator, value):
             pass
 
     dict_candidate = _has_dictionary_candidate(arr)
+    constant_candidate = _has_constant_candidate(arr)
     numeric_dict_candidate = (
         dict_candidate
         and operator in _DICT_NUMERIC_FASTPATH_OPS
         and _dictionary_supports_numeric_fastpath(arr)
     )
+
+    if constant_candidate and operator not in _CONSTANT_FASTPATH_OPS:
+        raise NotImplementedError(f"Constant motor path does not support operator `{operator}`.")
+
+    if constant_candidate:
+        fast = _constant_fastpath(arr, operator, value)
+        if fast is not None:
+            _record_constant_hit()
+            return fast
+        _record_constant_fallback()
+        raise RuntimeError(f"Constant fastpath failed for `{operator}`.")
 
     if dict_candidate and operator not in _DICT_FASTPATH_OPS and not numeric_dict_candidate:
         raise NotImplementedError(f"Dictionary motor path does not support operator `{operator}`.")
