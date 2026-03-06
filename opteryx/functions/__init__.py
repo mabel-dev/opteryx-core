@@ -523,20 +523,7 @@ FUNCTIONS = {
     "ENDS_WITH": (lambda x: None, "BOOLEAN", 1.0),  # always rewritten as a LIKE
     # DEBUG: "SLEEP": (lambda x: [sleep(x)], OrsoTypes.NULL, 10.0), # SLEEP is only available in 'debug' mode
 
-    # TYPE CONVERSION
-    # Note: CAST operations (INTEGER, DOUBLE, VARCHAR, BLOB, DECIMAL and their TRY_ variants)
-    # are now handled as NodeType.CAST nodes in the planner/binder/evaluator pipeline.
-    # Legacy entries removed as part of Phase 6: Cleanup legacy function routing.
-    # See opteryx/expression/casts.py for cast kernel implementations.
-    "ARRAY": (other_functions.array_cast, "VARIANT", 1.0),
-    "TIMESTAMP": (lambda x: compute.cast(x, pyarrow.timestamp("us")), "TIMESTAMP", 1.0),
-    "BOOLEAN": (lambda x: compute.cast(x, "bool"), "BOOLEAN", 1.0),
-    "DATE": (lambda x: compute.cast(x, pyarrow.date32()), "DATE", 1.0),
-    "PASSTHRU": (lambda x: x, "VARIANT", 1.0),
-    "TRY_ARRAY": (other_functions.array_cast_safe, "VARIANT", 1.0),
-    "TRY_TIMESTAMP": (try_cast("TIMESTAMP"), "TIMESTAMP", 1.0),
-    "TRY_BOOLEAN": (try_cast("BOOLEAN"), "BOOLEAN", 1.0),
-    "TRY_DATE": (try_cast("DATE"), "DATE", 1.0),
+    "PASSTHRU": (lambda x: x, "VARIANT", 1.0),  # Not a real cast, kept for compatibility
 
     # CHARS
     "CHAR": (string_functions.to_char, "VARCHAR", 1.0),
@@ -576,7 +563,6 @@ FUNCTIONS = {
     "SHA384": (_iterate_single_parameter(string_functions.get_sha384), "BLOB", 1.0),
     "SHA512": (_sha512, "BLOB", 1.0),
     "RANDOM": (number_functions.random_number, "DOUBLE", 1.0),
-    "RAND": (number_functions.random_number, "DOUBLE", 1.0),
     "NORMAL": (number_functions.random_normal, "DOUBLE", 1.0),
     "RANDOM_STRING": (number_functions.random_strings, "BLOB", 1.0),
     "BASE64_ENCODE": (string_functions.base64_encode, "BLOB", 1.0),
@@ -595,7 +581,6 @@ FUNCTIONS = {
     "SEARCH": (other_functions.search, "BOOLEAN", 1.0),
     "COALESCE": (_coalesce, "VARIANT", 1.0),
     "IFNULL": (other_functions.if_null, "VARIANT", 1.0),
-    "IFNOTNULL": (other_functions.if_not_null, "VARIANT", 1.0),
     "SORT": (_sort(numpy.sort), "ARRAY", 1.0),
     "GREATEST": (_iterate_single_parameter(numpy.nanmax), "VARIANT", 1.0),
     "LEAST": (_iterate_single_parameter(numpy.nanmin), "VARIANT", 1.0),
@@ -614,7 +599,6 @@ FUNCTIONS = {
     "CEIL": (number_functions.ceiling, "DOUBLE", 1.0),
     "ABS": (compute.abs, "VARIANT", 1.0),
     "SIGN": (compute.sign, "INTEGER", 1.0),
-    "SIGNUM": (compute.sign, "INTEGER", 1.0),
     "SQRT": (compute.sqrt, "DOUBLE", 1.0),
     "TRUNC": (compute.trunc, "INTEGER", 1.0),
     "PI": (lambda x: None, "DOUBLE", 1.0),
@@ -637,18 +621,7 @@ FUNCTIONS = {
     "CURRENT_TIME": (lambda x: None, "TIME", 1.0),
     "CURRENT_TIMESTAMP": (lambda x: None, "TIMESTAMP", 1.0),
     "UTC_TIMESTAMP": (lambda x: None, "INTEGER", 1.0),
-    "NOW": (lambda x: None, "TIMESTAMP", 1.0),
     "CURRENT_DATE": (lambda x: None, "DATE", 1.0),
-    "TODAY": (lambda x: None, "TIMESTAMP", 1.0),
-    "YESTERDAY": (lambda x: None, "TIMESTAMP", 1.0),
-    "YEAR": (compute.year, "INTEGER", 1.0),
-    "MONTH": (compute.month, "INTEGER", 1.0),
-    "DAY": (compute.day, "INTEGER", 1.0),
-    "WEEK": (compute.iso_week, "INTEGER", 1.0),
-    "HOUR": (compute.hour, "INTEGER", 1.0),
-    "MINUTE": (compute.minute, "INTEGER", 1.0),
-    "SECOND": (compute.second, "INTEGER", 1.0),
-    "QUARTER": (compute.quarter, "INTEGER", 1.0),
     "FROM_UNIXTIME": (date_functions.from_unixtimestamp, "TIMESTAMP", 1.0),
     "UNIXTIME": (date_functions.unixtime, "INTEGER", 1.0),
 }
