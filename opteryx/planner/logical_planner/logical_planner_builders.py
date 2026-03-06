@@ -438,12 +438,12 @@ def cast(branch, alias: Optional[List[str]] = None, key=None):
     """
     from opteryx.planner import build_literal_node
 
-    args = [build(branch["expr"])]
+    source_expr = build(branch["expr"])
     kind = branch["kind"]
     raw_data_type = branch["data_type"]
 
     # Extract the base data type from the AST structure
-    data_type = _extract_data_type(raw_data_type, branch, args, build_literal_node)
+    data_type = _extract_data_type(raw_data_type, branch, [source_expr], build_literal_node)
 
     # Validate and normalize the data type
     normalized_type = _normalize_cast_type(data_type)
@@ -453,14 +453,15 @@ def cast(branch, alias: Optional[List[str]] = None, key=None):
         normalized_type = "TRY_" + normalized_type
 
     # Handle literal value casting at compile time
-    if args[0].node_type == NodeType.LITERAL:
-        return _cast_literal_value(args[0], normalized_type, kind, alias)
+    if source_expr.node_type == NodeType.LITERAL:
+        return _cast_literal_value(source_expr, normalized_type, kind, alias)
 
-    # For non-literals, return a function node that will be evaluated at runtime
+    # For non-literals, return a CAST node that will be evaluated at runtime
+    # CAST nodes have the source in 'left', target type in 'value', and optional params in 'parameters'
     return Node(
-        NodeType.FUNCTION,
+        NodeType.CAST,
+        left=source_expr,
         value=normalized_type.upper(),
-        parameters=args,
         alias=alias,
     )
 

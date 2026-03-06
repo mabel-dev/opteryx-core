@@ -83,6 +83,12 @@ from opteryx.draken.vectors.string_vector import lowercase as string_vector_lowe
 from opteryx.draken.vectors.string_vector import uppercase as string_vector_uppercase
 from opteryx.exceptions import FunctionExecutionError
 from opteryx.exceptions import IncorrectTypeError
+from opteryx.expression.casts import cast
+from opteryx.expression.casts import cast_to_blob
+from opteryx.expression.casts import cast_to_double
+from opteryx.expression.casts import cast_to_int
+from opteryx.expression.casts import cast_to_varchar
+from opteryx.expression.casts import try_cast
 from opteryx.functions import date_functions
 from opteryx.functions import number_functions
 from opteryx.functions import other_functions
@@ -277,173 +283,8 @@ def safe(func, *parms, **kwargs):
         return None
 
 
-def try_cast(_type):
-    """cast a column to a specified type"""
-
-    def _inner(arr, *args):
-        args = [a[0] for a in args]
-        kwargs = {}
-
-        caster = OrsoTypes[_type].parse
-
-        sig = inspect.signature(caster)
-        params = list(sig.parameters.values())[1:]  # skip the first param (`value`)
-
-        kwargs = {param.name: arg for param, arg in zip(params, args)}
-
-        return [safe(caster, i, **kwargs) for i in arr]
-
-    return _inner
-
-
-def cast(_type):
-    """cast a column to a specified type"""
-
-    def _inner(arr, *args):
-        args = [a[0] for a in args]
-        kwargs = {}
-
-        caster = OrsoTypes[_type].parse
-
-        if _type == "DECIMAL":
-            # DECIMAL requires special handling for precision and scale
-            if len(args) == 2:
-                kwargs["precision"] = args[0]
-                kwargs["scale"] = args[1]
-            elif len(args) == 1:
-                kwargs["precision"] = args[0]
-                kwargs["scale"] = 0
-        elif _type in ("VARCHAR", "BLOB", "VARBINARY") and len(args) == 1:
-            # VARCHAR and BLOB can take a single argument for length
-            kwargs["length"] = args[0]
-        elif _type == "ARRAY" and len(args) == 1:
-            # ARRAY can take a single argument for the element type
-            kwargs["element_type"] = args[0]
-
-        return [caster(i, **kwargs) for i in arr]
-
-    return _inner
-
-
-def cast_to_varchar(arr, *args):
-    from opteryx.third_party.ulfjack.ryu import format_double_array_ascii
-
-    if hasattr(arr, "to_numpy"):
-        arr = arr.to_numpy(False)
-    if arr.dtype == numpy.float64:
-        # If the array is a float64, we can use the fast format_double_array_strings
-        return format_double_array_ascii(arr)
-    if arr.dtype == numpy.int64:
-        from opteryx.compiled.list_ops import list_cast_int64_to_ascii
-        from opteryx.draken.interop.arrow import vector_from_arrow
-
-        return list_cast_int64_to_ascii(vector_from_arrow(pyarrow.array(arr))).to_arrow()
-    if arr.dtype == numpy.uint64:
-        from opteryx.compiled.list_ops import list_cast_uint64_to_ascii
-        from opteryx.draken.interop.arrow import vector_from_arrow
-
-        return list_cast_uint64_to_ascii(
-            vector_from_arrow(pyarrow.array(arr.view(numpy.int64)))
-        ).to_arrow()
-
-    caster = OrsoTypes.VARCHAR.parse
-    kwargs = {}
-    if len(args) == 1:
-        # If a length is provided, we can use it
-        kwargs["length"] = int(args[0])
-    # If the array is an int64, we can convert it to strings directly
-    return [caster(i, **kwargs) if i is not None else None for i in arr]
-
-
-def cast_to_blob(arr, *args):
-    if hasattr(arr, "to_numpy"):
-        arr = arr.to_numpy(False)
-    if arr.dtype == numpy.float64:
-        # If the array is a float64, we can use the fast format_double_array_strings
-        from opteryx.third_party.ulfjack.ryu import format_double_array_bytes
-
-        return format_double_array_bytes(arr)
-    if arr.dtype == numpy.int64:
-        from opteryx.compiled.list_ops import list_cast_int64_to_bytes
-        from opteryx.draken.interop.arrow import vector_from_arrow
-
-        return list_cast_int64_to_bytes(vector_from_arrow(pyarrow.array(arr))).to_arrow()
-    if arr.dtype == numpy.uint64:
-        from opteryx.compiled.list_ops import list_cast_uint64_to_bytes
-        from opteryx.draken.interop.arrow import vector_from_arrow
-
-        return list_cast_uint64_to_bytes(
-            vector_from_arrow(pyarrow.array(arr.view(numpy.int64)))
-        ).to_arrow()
-
-    caster = OrsoTypes.BLOB.parse
-    kwargs = {}
-    if len(args) == 1:
-        # If a length is provided, we can use it
-        kwargs["length"] = int(args[0])
-    # If the array is an int64, we can convert it to strings directly
-    return [caster(i, **kwargs) if i is not None else None for i in arr]
-
-
-def cast_to_double(arr, *args):
-    """
-    Casts an array to double precision floating point numbers.
-    If the array is already of type double, it returns the array as is.
-    If the array is a string, it attempts to parse each string to a double.
-    If the array is an integer, it converts each integer to a double.
-    """
-    from opteryx.third_party.fastfloat.fast_float import parse_ascii_array_to_double
-    from opteryx.third_party.fastfloat.fast_float import parse_byte_array_to_double
-
-    if hasattr(arr, "to_numpy"):
-        arr = arr.to_numpy(False)
-    if arr.dtype == numpy.float64:
-        return arr
-    if arr.dtype == numpy.int64:
-        return arr.astype(numpy.float64)
-    if numpy.issubdtype(arr.dtype, numpy.object_):
-        if isinstance(arr[0], str):
-            return parse_ascii_array_to_double(arr)
-        elif isinstance(arr[0], bytes):
-            return parse_byte_array_to_double(arr)
-    if numpy.issubdtype(arr.dtype, numpy.str_):
-        return parse_ascii_array_to_double(arr.astype(object))
-
-    caster = OrsoTypes.DOUBLE.parse
-    return [caster(i) if i is not None else None for i in arr]
-
-
-def cast_to_int(arr, *args):
-    from opteryx.compiled.list_ops import list_cast_ascii_to_int
-    from opteryx.compiled.list_ops import list_cast_bytes_to_int
-
-    if hasattr(arr, "to_numpy"):
-        arr = arr.to_numpy(False)
-    if numpy.issubdtype(arr.dtype, numpy.object_):
-        if isinstance(arr[0], str):
-            from opteryx.draken.interop.arrow import vector_from_arrow
-
-            return list_cast_ascii_to_int(
-                vector_from_arrow(pyarrow.array(arr, type=pyarrow.string()))
-            ).to_arrow()
-        elif isinstance(arr[0], bytes):
-            from opteryx.draken.interop.arrow import vector_from_arrow
-
-            return list_cast_bytes_to_int(
-                vector_from_arrow(pyarrow.array(arr, type=pyarrow.binary()))
-            ).to_arrow()
-    if numpy.issubdtype(arr.dtype, numpy.str_):
-        from opteryx.draken.interop.arrow import vector_from_arrow
-
-        return list_cast_ascii_to_int(
-            vector_from_arrow(pyarrow.array(arr.astype(object), type=pyarrow.string()))
-        ).to_arrow()
-    if numpy.issubdtype(arr.dtype, numpy.datetime64):
-        arr = arr.astype("M8[us]")  # microseconds
-        return arr.astype(numpy.int64)
-
-    caster = OrsoTypes.INTEGER.parse
-    return [caster(i) if i is not None else None for i in arr]
+# Cast functions have been moved to opteryx.expression.casts
+# They are imported at the top of this file for backward compatibility
 
 
 def _iterate_single_parameter(func):
@@ -683,26 +524,18 @@ FUNCTIONS = {
     # DEBUG: "SLEEP": (lambda x: [sleep(x)], OrsoTypes.NULL, 10.0), # SLEEP is only available in 'debug' mode
 
     # TYPE CONVERSION
+    # Note: CAST operations (INTEGER, DOUBLE, VARCHAR, BLOB, DECIMAL and their TRY_ variants)
+    # are now handled as NodeType.CAST nodes in the planner/binder/evaluator pipeline.
+    # Legacy entries removed as part of Phase 6: Cleanup legacy function routing.
+    # See opteryx/expression/casts.py for cast kernel implementations.
     "ARRAY": (other_functions.array_cast, "VARIANT", 1.0),
     "TIMESTAMP": (lambda x: compute.cast(x, pyarrow.timestamp("us")), "TIMESTAMP", 1.0),
     "BOOLEAN": (lambda x: compute.cast(x, "bool"), "BOOLEAN", 1.0),
-    "INTEGER": (cast_to_int, "INTEGER", 1.0),
-    "DOUBLE": (cast_to_double, "DOUBLE", 1.0),
-    "DECIMAL": (cast("DECIMAL"), "DECIMAL", 1.0),
-    "VARCHAR": (cast_to_varchar, "VARCHAR", 1.0),
     "DATE": (lambda x: compute.cast(x, pyarrow.date32()), "DATE", 1.0),
     "PASSTHRU": (lambda x: x, "VARIANT", 1.0),
-    "BLOB": (cast_to_blob, "BLOB", 1.0),
-    "VARBINARY": (cast_to_blob, "BLOB", 1.0),
     "TRY_ARRAY": (other_functions.array_cast_safe, "VARIANT", 1.0),
     "TRY_TIMESTAMP": (try_cast("TIMESTAMP"), "TIMESTAMP", 1.0),
     "TRY_BOOLEAN": (try_cast("BOOLEAN"), "BOOLEAN", 1.0),
-    "TRY_VARCHAR": (try_cast("VARCHAR"), "VARCHAR", 1.0),
-    "TRY_BLOB": (try_cast("BLOB"), "BLOB", 1.0),
-    "TRY_VARBINARY": (try_cast("BLOB"), "BLOB", 1.0),
-    "TRY_INTEGER": (try_cast("INTEGER"), "INTEGER", 1.0),
-    "TRY_DECIMAL": (try_cast("DECIMAL"), "DECIMAL", 1.0),
-    "TRY_DOUBLE": (try_cast("DOUBLE"), "DOUBLE", 1.0),
     "TRY_DATE": (try_cast("DATE"), "DATE", 1.0),
 
     # CHARS
