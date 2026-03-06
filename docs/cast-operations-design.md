@@ -8,14 +8,15 @@
 
 ## Completed Implementation
 
-**All Six Phases Complete:**
+**All Seven Phases Complete:**
 
 1. ✅ **Phase 1**: Extract cast kernels to `opteryx/expression/casts.py` (197 lines, 17 tests)
 2. ✅ **Phase 2**: Planner emits `NodeType.CAST` instead of `NodeType.FUNCTION`
 3. ✅ **Phase 3**: Binder binds CAST nodes with type information
 4. ✅ **Phase 4**: Evaluator dispatches CAST at runtime
 5. ✅ **Phase 5**: Optimizer implements nested cast simplification
-6. ✅ **Phase 6**: Legacy function routing removed - CAST kernels no longer in `FUNCTIONS` dict
+6. ✅ **Phase 6**: Legacy function routing removed - basic CAST kernels (INTEGER, DOUBLE, VARCHAR, BLOB, DECIMAL)
+7. ✅ **Phase 7**: Extended CAST path - migrate ARRAY, TIMESTAMP, DATE, BOOLEAN and TRY_ variants
 
 ---
 
@@ -80,17 +81,21 @@ Execute: Kernel applies conversion (id array → varchar array)
 ## Migration Status
 
 ### What Changed
-- ❌ Legacy entries removed from `FUNCTIONS` dict:
-  - `"INTEGER"`, `"DOUBLE"`, `"VARCHAR"`, `"BLOB"`, `"DECIMAL"` (aliases removed)
+- ❌ **Phase 6**: Removed from `FUNCTIONS` dict:
+  - `"INTEGER"`, `"DOUBLE"`, `"VARCHAR"`, `"BLOB"`, `"DECIMAL"`
   - `"TRY_INTEGER"`, `"TRY_DOUBLE"`, `"TRY_VARCHAR"`, `"TRY_BLOB"`, `"TRY_VARBINARY"`, `"TRY_DECIMAL"`
+- ❌ **Phase 7**: Removed additional entries from `FUNCTIONS` dict:
+  - `"ARRAY"`, `"TRY_ARRAY"` (specialized array casting now via NodeType.CAST)
+  - `"TIMESTAMP"`, `"TRY_TIMESTAMP"` (temporal casting now via NodeType.CAST)
+  - `"DATE"`, `"TRY_DATE"` (date casting now via NodeType.CAST)
+  - `"BOOLEAN"`, `"TRY_BOOLEAN"` (boolean casting now via NodeType.CAST)
 - ✅ Cast kernels remain importable directly: `from opteryx.expression.casts import cast, try_cast`
 - ✅ Public catalog continues to exclude casts (non-scalar operation)
 - ✅ All CAST operations route through NodeType.CAST pipeline
 - ✅ Zero SQL behavior regressions
 
 ### What Stayed
-- ARRAY and TRY_ARRAY (specialized array handling, not part of standard type cast system)
-- TIMESTAMP/DATE/BOOLEAN casts (kept in FUNCTIONS for now - can be migrated separately)
+- PASSTHRU (not a real cast, kept for compatibility)
 - Import exports of `cast`, `try_cast`, `safe` for direct code usage
 
 ---
@@ -101,7 +106,7 @@ Execute: Kernel applies conversion (id array → varchar array)
 - ✅ Expression tests validate CAST kernel functionality  
 - ✅ Query execution verified with projection test
 - ✅ Optimizer simplification tested
-- ✅ Zero regressions across all six phases
+- ✅ All seven phases validated with zero regressions
 
 ---
 
