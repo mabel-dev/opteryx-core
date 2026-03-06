@@ -40,6 +40,7 @@ from orso.schema import FlatColumn
 from orso.schema import RelationSchema
 from orso.types import OrsoTypes
 
+from opteryx import EOS
 from opteryx import config
 from opteryx import utils
 from opteryx.constants import QueryStatus
@@ -356,8 +357,13 @@ class Session(DataFrame):
         visibility_filters: Optional[Dict[str, Any]] = None,
     ) -> pyarrow.Table:
         """
-        Executes the SQL operation, bypassing conversion to Orso and returning directly in Arrow format.
+        Executes the SQL operation and returns results in Arrow format.
+
+        The query engine emits Draken morsels. This method converts them to PyArrow.
+        Vectors handle their own type conversions (e.g., IntervalVector → month_day_nano_interval).
         """
+        from opteryx.draken.morsels.morsel import Morsel
+
         self._ensure_open()
         if self._tracing_enabled:
             try:
@@ -383,40 +389,70 @@ class Session(DataFrame):
                 return meta_dataframe.arrow()
 
             if limit is not None:
-                result_data = utils.arrow.limit_records(result_data, limit)  # type: ignore
+                # Handle both Draken morsels and Arrow tables
+                if isinstance(result_data, Morsel) or (
+                    hasattr(result_data, "__iter__") and not isinstance(result_data, pyarrow.Table)
+                ):
+                    # Convert morsels to Arrow first, then limit
+                    tables = []
+                    count = 0
+                    for morsel in result_data:
+                        if count >= limit:
+                            break
+                        table = morsel.to_arrow() if isinstance(morsel, Morsel) else morsel
+                        if table.num_rows + count > limit:
+                            table = table.slice(0, limit - count)
+                        tables.append(table)
+                        count += table.num_rows
+                    result_data = tables if tables else [pyarrow.Table.from_batches([])]
+                else:
+                    result_data = utils.arrow.limit_records(result_data, limit)  # type: ignore
 
+        # Handle single Arrow table (direct result or from fallback path)
         if isinstance(result_data, pyarrow.Table):
             self._executed = True
             return result_data
+
+        # Handle Draken morsels or iterables of morsels/tables
         try:
-            # arrow allows duplicate column names, but not when concatting
             from itertools import chain
 
-            first_table = next(result_data, None)
-            if first_table is not None:
-                column_names = first_table.column_names
-                if len(column_names) != len(set(column_names)):
-                    temporary_names = [f"col_{i}" for i in range(len(column_names))]
-                    first_table = first_table.rename_columns(temporary_names)
-                    return_table = pyarrow.concat_tables(
-                        chain(
-                            [first_table], (t.rename_columns(temporary_names) for t in result_data)
-                        ),
-                        promote_options="permissive",
-                    )
-                    return return_table.rename_columns(column_names)
-            table = pyarrow.concat_tables(
-                chain([first_table], result_data), promote_options="permissive"
-            )
+            # Convert morsels to Arrow tables
+            arrow_tables = []
+            for item in result_data:
+                if isinstance(item, Morsel):
+                    arrow_tables.append(item.to_arrow())
+                elif isinstance(item, pyarrow.Table):
+                    arrow_tables.append(item)
+                elif item is not None:
+                    # Skip EOS and other sentinel values
+                    continue
+
+            if not arrow_tables:
+                # Return empty table
+                self._executed = True
+                return pyarrow.Table.from_batches([])
+
+            # Handle duplicate column names in concatenation
+            first_table = arrow_tables[0]
+            column_names = first_table.column_names
+            if len(column_names) != len(set(column_names)):
+                temporary_names = [f"col_{i}" for i in range(len(column_names))]
+                arrow_tables = [t.rename_columns(temporary_names) for t in arrow_tables]
+                result_table = pyarrow.concat_tables(arrow_tables, promote_options="permissive")
+                result_table = result_table.rename_columns(column_names)
+            else:
+                result_table = pyarrow.concat_tables(arrow_tables, promote_options="permissive")
+
             self._executed = True
             elapsed = time.time_ns() - start
             self._telemetry.time_executing += elapsed - self._telemetry.time_planning
-            return table
+            return result_table
+
         except (
             pyarrow.ArrowInvalid,
             pyarrow.ArrowTypeError,
         ) as err:  # pragma: no cover
-            # DEBUG: print(err)
             if "struct" in str(err):
                 raise InconsistentSchemaError(
                     f"Unable to resolve different schemas, most likely related to a STRUCT column. (QID:{self.query_id})"
@@ -637,12 +673,11 @@ class Session(DataFrame):
             self._telemetry.time_executing += elapsed - self._telemetry.time_planning
             return
 
-        # Iterator/generator of tables
-        morsels = result_data
-        if limit is not None:
-            morsels = utils.arrow.limit_records(morsels, limit)
+        # Iterator/generator of Draken morsels or Arrow tables
+        from opteryx.draken.morsels.morsel import Morsel
 
-        last_morsel = None
+        items = result_data
+        last_item = None
         buffer_batches = []
         buffered_rows = 0
 
@@ -689,21 +724,45 @@ class Session(DataFrame):
             buffered_rows = sum(b.num_rows for b in buffer_batches)
             return batch
 
-        for morsel in morsels:
-            last_morsel = morsel
-            if morsel is None:
+        row_count = 0
+        for item in items:
+            if item is None or item is EOS:
                 continue
+
+            last_item = item
+
+            # Convert Draken morsel to Arrow table
+            if isinstance(item, Morsel):
+                arrow_table = item.to_arrow()
+            else:
+                # Already an Arrow table or batch
+                arrow_table = item if isinstance(item, pyarrow.Table) else item.to_table()
+
+            # Initialize schema from first morsel/table
             if not getattr(self._schema, "columns", None):
                 self._schema = RelationSchema(
                     name="table",
-                    columns=[FlatColumn.from_arrow(field) for field in morsel.schema],
+                    columns=[FlatColumn.from_arrow(field) for field in arrow_table.schema],
                 )
                 self._description = self._schema_to_description(self._schema)
                 self._query_status = QueryStatus.SQL_SUCCESS
 
-            for morsel_batch in morsel.to_batches(max_chunksize=batch_size):
-                buffer_batches.append(morsel_batch)
-                buffered_rows += morsel_batch.num_rows
+            # Convert Arrow table to batches and buffer
+            for batch in arrow_table.to_batches(max_chunksize=batch_size):
+                buffer_batches.append(batch)
+                buffered_rows += batch.num_rows
+                row_count += batch.num_rows
+
+                if limit is not None and row_count >= limit:
+                    # Yield remaining buffered data up to limit
+                    batch = _consume_buffered_rows(limit - (row_count - batch.num_rows))
+                    if batch is not None:
+                        self._executed = True
+                        yield batch
+                    elapsed = time.time_ns() - start
+                    self._telemetry.time_executing += elapsed - self._telemetry.time_planning
+                    return
+
                 while buffered_rows >= batch_size:
                     batch = _consume_buffered_rows(batch_size)
                     if batch is not None:
@@ -718,15 +777,19 @@ class Session(DataFrame):
                 self._executed = True
                 yield batch
         else:
-            if last_morsel is not None and not self._executed:
+            if last_item is not None and not self._executed:
+                if isinstance(last_item, Morsel):
+                    schema = last_item.to_arrow().schema
+                else:
+                    schema = last_item.schema
                 self._schema = RelationSchema(
                     name="table",
-                    columns=[FlatColumn.from_arrow(field) for field in last_morsel.schema],
+                    columns=[FlatColumn.from_arrow(field) for field in schema],
                 )
                 self._description = self._schema_to_description(self._schema)
                 self._query_status = QueryStatus.SQL_SUCCESS
 
-        if last_morsel is not None:
+        if last_item is not None:
             self._executed = True
 
         elapsed = time.time_ns() - start

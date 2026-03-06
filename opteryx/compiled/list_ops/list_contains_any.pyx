@@ -6,38 +6,46 @@
 # cython: wraparound=False
 # cython: boundscheck=False
 
-import numpy
-cimport numpy
-numpy.import_array()
-
 from libc.stdint cimport uint8_t
+from libc.string cimport memset
 
-cpdef uint8_t[::1] list_contains_any(object[::1] array, set items):
+from opteryx.draken.vectors.array_vector cimport ArrayVector
+from opteryx.draken.vectors.bool_vector cimport BoolVector
+
+
+cpdef BoolVector list_contains_any(ArrayVector vec, set items):
     """
-    Check if any of the elements in the subarrays of the input array are present in the items array.
+    For each row in an ArrayVector, test whether any element in that row appears
+    in *items*.
 
     Parameters:
-        array: numpy.ndarray
-            A numpy array of object arrays, where each subarray contains elements to be checked.
-        items: numpy.ndarray
-            A numpy array containing the items to check for in the subarrays of `array`.
+        vec:   ArrayVector — a Draken list-typed column.
+        items: set of values to test membership against.
 
     Returns:
-        numpy.ndarray: A numpy array of uint8 (0 or 1) indicating the presence of any items in the subarrays.
+        BoolVector: True at position i iff vec[i] contains at least one item.
+        Null rows produce False.
     """
+    cdef Py_ssize_t n = vec.length
+    cdef Py_ssize_t nbytes = (n + 7) >> 3
+    cdef BoolVector out = BoolVector(<size_t>n)
+    cdef uint8_t* dst = <uint8_t*>out.ptr.data
+    cdef Py_ssize_t i
+    cdef object row
+    cdef object elem
 
-    cdef Py_ssize_t size = array.shape[0]
-    cdef Py_ssize_t i, j
-    cdef numpy.ndarray test_set
+    memset(dst, 0, nbytes)
 
-    cdef numpy.ndarray[numpy.uint8_t, ndim=1] res = numpy.zeros(size, dtype=numpy.uint8)
-    cdef uint8_t[::1] res_view = res
+    if n == 0 or not items:
+        return out
 
-    for i in range(size):
-        test_set = array[i]
-        if test_set is not None and test_set.shape[0] > 0:
-            for j in range(test_set.shape[0]):
-                if test_set[j] in items:
-                    res_view[i] = 1
-                    break
-    return res
+    for i in range(n):
+        row = vec[i]
+        if row is None:
+            continue
+        for elem in row:
+            if elem in items:
+                dst[i >> 3] |= (1 << (i & 7))
+                break
+
+    return out

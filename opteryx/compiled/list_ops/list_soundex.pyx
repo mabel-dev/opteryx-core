@@ -6,32 +6,44 @@
 # cython: wraparound=False
 # cython: boundscheck=False
 
-import numpy
-cimport numpy
-numpy.import_array()
+from libc.stdint cimport int32_t, uint8_t
+
+from opteryx.draken.vectors.string_vector cimport StringVector
+from opteryx.draken.vectors import string_vector as string_vector_module
+from opteryx.draken.core.buffers cimport DrakenVarBuffer
 
 
-cpdef numpy.ndarray list_soundex(numpy.ndarray arr):
+cpdef StringVector list_soundex(StringVector vec):
     """
-    Calculate soundex codes for array of strings.
-
-    Parameters:
-        arr: Array of strings
+    Compute Soundex codes for each element of a StringVector.
 
     Returns:
-        Array of soundex codes
+        StringVector: Soundex codes (e.g. 'A123' or '0000' for empty).
     """
     from opteryx.third_party.fuzzy import soundex
 
-    cdef Py_ssize_t i, n = arr.size
-    cdef numpy.ndarray[object, ndim=1] result = numpy.empty(n, dtype=object)
-    cdef object string_val
+    cdef DrakenVarBuffer* ptr = vec.ptr
+    cdef Py_ssize_t n = ptr.length
+    cdef Py_ssize_t i
+    cdef int32_t start, end
+    cdef uint8_t* null_bm = ptr.null_bitmap
+    cdef bytes raw
+    cdef str text, code
+
+    builder = string_vector_module.StringVectorBuilder.with_estimate(n, 4)
 
     for i in range(n):
-        string_val = arr[i]
-        if string_val and string_val is not None:
-            result[i] = soundex(string_val)
+        if null_bm != NULL and not ((null_bm[i >> 3] >> (i & 7)) & 1):
+            builder.append_null()
         else:
-            result[i] = None
+            start = ptr.offsets[i]
+            end = ptr.offsets[i + 1]
+            if end == start:
+                builder.append_null()
+            else:
+                raw = bytes(<uint8_t*>ptr.data + start)[:end - start]
+                text = raw.decode("utf-8", "replace")
+                code = soundex(text)
+                builder.append(code.encode("utf-8") if code else b"")
 
-    return result
+    return builder.finish()

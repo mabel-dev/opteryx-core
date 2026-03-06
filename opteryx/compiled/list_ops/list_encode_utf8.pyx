@@ -6,22 +6,12 @@
 # cython: wraparound=False
 # cython: boundscheck=False
 
-import numpy
-cimport numpy
-numpy.import_array()
+from opteryx.draken.vectors.string_vector cimport StringVector
 
-from cpython.unicode cimport PyUnicode_AsUTF8String
 
-cpdef numpy.ndarray list_encode_utf8(numpy.ndarray inp):
+cpdef StringVector list_encode_utf8(StringVector vec):
     """
-    Parallel UTF-8 encode all elements of a 1D ndarray of "object" dtype.
+    'Encode to UTF-8' — since StringVector stores UTF-8 bytes natively,
+    this is an identity operation.
     """
-    cdef Py_ssize_t n = inp.shape[0]
-    cdef numpy.ndarray out = numpy.empty(n, dtype=object)
-    cdef object[:] inp_view = inp
-    cdef object[:] out_view = out
-
-    for i in range(n):
-        out_view[i] = PyUnicode_AsUTF8String(inp_view[i])
-
-    return out
+    return vec

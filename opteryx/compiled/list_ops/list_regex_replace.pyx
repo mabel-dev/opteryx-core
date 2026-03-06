@@ -98,7 +98,7 @@ cpdef object list_regex_replace(object data, bytes pattern, bytes replacement):
                 # Append directly from C++ string to Draken builder (zero-copy from builder's perspective)
                 builder.append_bytes(value_str.c_str(), value_str.size())
 
-        # Build and return as PyArrow array
-        return builder.finish().to_arrow()
+        # Return as StringVector
+        return builder.finish()
     finally:
         del regex

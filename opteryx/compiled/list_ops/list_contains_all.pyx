@@ -6,49 +6,60 @@
 # cython: wraparound=False
 # cython: boundscheck=False
 
-import numpy
-cimport numpy
-numpy.import_array()
-
 from libc.stdint cimport uint8_t
+from libc.string cimport memset
 
-cpdef uint8_t[::1] list_contains_all(object[::1] array, set items):
+from opteryx.draken.vectors.array_vector cimport ArrayVector
+from opteryx.draken.vectors.bool_vector cimport BoolVector
+
+
+cpdef BoolVector list_contains_all(ArrayVector vec, set items):
     """
-    Check if all of the elements in `items` are present in each subarray of the input array.
+    For each row in an ArrayVector, test whether all elements in *items* appear
+    in that row.
 
     Parameters:
-        array: numpy.ndarray
-            A numpy array of object arrays, where each subarray contains elements to be checked.
-        items: set
-            A Python set containing the items that must all be present.
+        vec:   ArrayVector — a Draken list-typed column.
+        items: set of values that must all be present.
 
     Returns:
-        numpy.ndarray: A numpy array of uint8 (0 or 1) indicating whether all items are present
-                       in the subarray (1 = all present, 0 = not all present).
+        BoolVector: True at position i iff every item in *items* appears in vec[i].
+        Null rows produce False.
+        If *items* is empty the result is trivially True for every non-null row.
     """
-    cdef Py_ssize_t size = array.shape[0]
-    cdef Py_ssize_t i, j
-    cdef numpy.ndarray test_set
-    cdef object element
+    cdef Py_ssize_t n = vec.length
+    cdef Py_ssize_t nbytes = (n + 7) >> 3
+    cdef BoolVector out = BoolVector(<size_t>n)
+    cdef uint8_t* dst = <uint8_t*>out.ptr.data
+    cdef Py_ssize_t i, nitems
+    cdef object row
+    cdef object elem
     cdef set found
 
-    cdef numpy.ndarray[numpy.uint8_t, ndim=1] res = numpy.zeros(size, dtype=numpy.uint8)
-    cdef uint8_t[::1] res_view = res
+    memset(dst, 0, nbytes)
 
+    if n == 0:
+        return out
+
+    # Empty items set: vacuously True for every non-null row
     if not items:
-        # If items is empty, trivially true for all rows
-        res_view[:] = 1
-        return res
+        for i in range(n):
+            if vec[i] is not None:
+                dst[i >> 3] |= (1 << (i & 7))
+        return out
 
-    for i in range(size):
-        test_set = array[i]
-        if test_set is not None and test_set.shape[0] > 0:
-            found = set()
-            for j in range(test_set.shape[0]):
-                element = test_set[j]
-                if element in items:
-                    found.add(element)
-                    if len(found) == len(items):
-                        res_view[i] = 1
-                        break
-    return res
+    nitems = len(items)
+
+    for i in range(n):
+        row = vec[i]
+        if row is None:
+            continue
+        found = set()
+        for elem in row:
+            if elem in items:
+                found.add(elem)
+                if len(found) == nitems:
+                    dst[i >> 3] |= (1 << (i & 7))
+                    break
+
+    return out

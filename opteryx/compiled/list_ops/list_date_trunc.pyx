@@ -10,6 +10,8 @@ from libc.stdint cimport int64_t
 from cpython.array cimport array, clone
 import pyarrow as pa
 
+from opteryx.draken.vectors.timestamp_vector cimport TimestampVector, from_arrow as ts_from_arrow
+
 # Constants
 cdef const int64_t SECONDS_PER_MINUTE = 60
 cdef const int64_t SECONDS_PER_HOUR = 3600
@@ -202,26 +204,25 @@ cdef inline int64_t truncate_month_fast(int64_t seconds) nogil:
         return truncate_month_inline(seconds)
 
 # Main fast processing function - delegates to optimized list_date_trunc
-cpdef object date_trunc_fast(str truncate_to, object timestamp_array):
+cpdef object date_trunc_fast(str truncate_to, TimestampVector timestamp_array):
     """
     Fast date truncation using pure integer arithmetic.
 
     Args:
         truncate_to: "year", "quarter", "month", "week", "day", "hour", "minute", "second"
-        timestamp_array: Arrow array of int64 timestamps or numpy datetime64
+        timestamp_array: TimestampVector of timestamps.
 
     Returns:
-        Arrow array or numpy datetime64 array of truncated timestamps (preserving input unit)
+        TimestampVector of truncated timestamps.
     """
-    # Delegate to optimized implementation to avoid code duplication
     return list_date_trunc(truncate_to, timestamp_array)
 
 # Ultra-fast version with SIMD-like loop unrolling
-cpdef object list_date_trunc(str truncate_to, object timestamp_array):
+cpdef object list_date_trunc(str truncate_to, TimestampVector timestamp_array):
     """
     Ultra-fast date truncation with loop unrolling for maximum speed.
     Works directly in native timestamp units to avoid conversion overhead.
-    Optimized for PyArrow timestamp arrays with zero-copy buffer access.
+    Optimized for Draken TimestampVector with zero-copy buffer access.
     """
     cdef str op = truncate_to.lower()
     cdef str unit
@@ -235,13 +236,10 @@ cpdef object list_date_trunc(str truncate_to, object timestamp_array):
     cdef array output_array
     cdef array template = array('q')  # 'q' = signed long long (int64)
 
-    # Direct Arrow buffer access (zero-copy!)
-    unit = timestamp_array.type.unit
-    length = len(timestamp_array)
-
-    # Get pointer to Arrow buffer data
-    cdef object arrow_buffer = timestamp_array.buffers()[1]
-    data_ptr = <int64_t*><uintptr_t>arrow_buffer.address
+    # Access Draken TimestampVector buffers directly
+    unit = timestamp_array.timestamp_unit
+    length = <int64_t>timestamp_array.ptr.length
+    data_ptr = <int64_t*>timestamp_array.ptr.data
 
     # Map unit to factor
     if unit == 'ms':
@@ -332,4 +330,4 @@ cpdef object list_date_trunc(str truncate_to, object timestamp_array):
     else:
         raise ValueError(f"Invalid unit: {truncate_to}")
 
-    return pa.array(output_array, type=pa.timestamp(unit))
+    return ts_from_arrow(pa.array(output_array, type=pa.timestamp(unit)))

@@ -26,6 +26,10 @@ _DICT_FASTPATH_OPS = frozenset(
         "NotEq",
         "InList",
         "NotInList",
+        "InStr",
+        "NotInStr",
+        "IInStr",
+        "NotIInStr",
         "Like",
         "NotLike",
         "ILike",
@@ -318,6 +322,10 @@ def _inner_filter_operations(arr, operator, value):
     Execute filter operations, this returns an array of the indexes of the rows that
     match the filter
     """
+    # Convert Draken vectors to Arrow if needed
+    if hasattr(arr, "to_arrow") and not isinstance(arr, (pyarrow.Array, pyarrow.ChunkedArray)):
+        arr = arr.to_arrow()
+
     if not operator.startswith(("AnyOp", "AllOp")):
         try:
             if len(value) == 1:
@@ -463,26 +471,38 @@ def _inner_filter_operations(arr, operator, value):
         return numpy.invert(matches.astype(dtype=numpy.bool_))
     if operator == "InStr":
         needle = str(value)
-        if not isinstance(arr, (pyarrow.Array, pyarrow.ChunkedArray)):
+        # Convert Draken vectors to Arrow if needed
+        if hasattr(arr, "to_arrow"):
+            arr = arr.to_arrow()
+        elif not isinstance(arr, (pyarrow.Array, pyarrow.ChunkedArray)):
             arr = pyarrow.array(arr, type=pyarrow.binary())
         matches = list_ops.list_in_string(arr, needle)
         return numpy.frombuffer(matches, dtype=numpy.bool_)
     if operator == "NotInStr":
         needle = str(value)
-        if not isinstance(arr, (pyarrow.Array, pyarrow.ChunkedArray)):
+        # Convert Draken vectors to Arrow if needed
+        if hasattr(arr, "to_arrow"):
+            arr = arr.to_arrow()
+        elif not isinstance(arr, (pyarrow.Array, pyarrow.ChunkedArray)):
             arr = pyarrow.array(arr, type=pyarrow.binary())
         matches = list_ops.list_in_string(arr, needle)
         matches = numpy.frombuffer(matches, dtype=numpy.bool_)
         return numpy.invert(matches)
     if operator == "IInStr":
         needle = str(value)
-        if not isinstance(arr, (pyarrow.Array, pyarrow.ChunkedArray)):
+        # Convert Draken vectors to Arrow if needed
+        if hasattr(arr, "to_arrow"):
+            arr = arr.to_arrow()
+        elif not isinstance(arr, (pyarrow.Array, pyarrow.ChunkedArray)):
             arr = pyarrow.array(arr, type=pyarrow.binary())
         matches = list_ops.list_in_string_case_insensitive(arr, needle)
         return numpy.frombuffer(matches, dtype=numpy.bool_)
     if operator == "NotIInStr":
         needle = str(value)
-        if not isinstance(arr, (pyarrow.Array, pyarrow.ChunkedArray)):
+        # Convert Draken vectors to Arrow if needed
+        if hasattr(arr, "to_arrow"):
+            arr = arr.to_arrow()
+        elif not isinstance(arr, (pyarrow.Array, pyarrow.ChunkedArray)):
             arr = pyarrow.array(arr, type=pyarrow.binary())
         matches = list_ops.list_in_string_case_insensitive(arr, needle)
         matches = numpy.frombuffer(matches, dtype=numpy.bool_)

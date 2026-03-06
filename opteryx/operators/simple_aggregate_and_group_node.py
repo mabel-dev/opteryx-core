@@ -219,10 +219,7 @@ class SimpleAggregateAndGroupNode(BasePlanNode):
                     "*", [numpy.full(shape=morsel.num_rows, fill_value=1, dtype=numpy.int8)]
                 )
 
-        if isinstance(morsel, Morsel):
-            morsel_arrow = morsel.to_arrow()
-        else:
-            morsel_arrow = morsel
+        morsel_arrow = morsel.to_arrow() if isinstance(morsel, Morsel) else morsel
 
         # use pyarrow to do phase 1 of the group by
         st = time.monotonic_ns()

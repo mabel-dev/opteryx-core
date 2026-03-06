@@ -5,10 +5,11 @@ import pyarrow as pa
 sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 
 from opteryx.compiled.list_ops import list_allop_neq
+from opteryx.draken.interop.arrow import vector_from_arrow
 
 def _test_all_neq_comparison(literal, test_value, expected_result, _type=pa.string()):
-    array = pa.array([test_value], type=pa.list_(_type))
-    result = list(list_allop_neq(literal, array))
+    array = vector_from_arrow(pa.array([test_value], type=pa.list_(_type)))
+    result = list_allop_neq(literal, array).to_pylist()
     assert result == [expected_result], f"Expected all({test_value}) != {literal} to be {expected_result}, got {result[0]}"
 
 def test_all_neq_basic():
@@ -36,7 +37,7 @@ def test_all_neq_unicode_and_edge():
 
 def test_all_neq_floats():
     _test_all_neq_comparison(1.0, [1.0, 2.0], 0, pa.float64())
-    _test_all_neq_comparison(float("nan"), [float("nan")], 0, pa.float64())
+    _test_all_neq_comparison(float("nan"), [float("nan")], 1, pa.float64())  # nan != nan is True per IEEE 754
     _test_all_neq_comparison(2.0, [1.0, 3.0], 1, pa.float64())
 
 def test_all_neq_nulls_strings():
@@ -48,7 +49,7 @@ def test_all_neq_nulls_strings():
     # NEW CASES: all nulls
     _test_all_neq_comparison("a", [None, None], 0)  # can't prove they're all not equal
     _test_all_neq_comparison(None, [None], 0)       # None != None is unknown → false
-    _test_all_neq_comparison(None, ["a"], 1)        # "a" != None → True
+    _test_all_neq_comparison(None, ["a"], 0)        # NULL literal → UNKNOWN → False (SQL NULL semantics)
     _test_all_neq_comparison(None, ["a", None], 0)  # One unknown = whole result unknown = false
 
     # Mixing nulls and matches

@@ -24,13 +24,14 @@ def split(arr, delimiter=",", limit=None):
     # Fast path: single character delimiter, no limit - use direct Arrow processing
     if len(delimiter) == 1 and limit is None:
         from opteryx.compiled.list_ops import list_split
+        from opteryx.draken.interop.arrow import vector_from_arrow
 
         # Convert to Arrow if needed
         if not isinstance(arr, pyarrow.Array):
             arr = pyarrow.array(arr, type=pyarrow.string())
 
-        # Split using SIMD directly on Arrow buffers (zero-copy, fastest path)
-        return list_split(arr, ord(delimiter))
+        # Split using SIMD directly on StringVector buffers (zero-copy, fastest path)
+        return list_split(vector_from_arrow(arr), ord(delimiter))
 
     # Fallback: use PyArrow's split_pattern
     delimiter = delimiter[0] if isinstance(delimiter, list) else delimiter
@@ -235,25 +236,28 @@ def rtrim(*args):
 
 def levenshtein(a, b):
     from opteryx.compiled.list_ops import list_levenshtein
+    from opteryx.draken.interop.arrow import vector_from_arrow
 
-    # Convert to numpy arrays with object dtype if needed
+    # Normalise to PyArrow arrays
     if hasattr(a, "to_numpy"):
         a = a.to_numpy(zero_copy_only=False)
     if hasattr(b, "to_numpy"):
         b = b.to_numpy(zero_copy_only=False)
 
-    # Ensure arrays are numpy arrays with object dtype
-    if not isinstance(a, numpy.ndarray):
-        a = numpy.array(a, dtype=object)
-    elif a.dtype.kind in ["U", "S"]:  # Unicode or byte string dtypes
-        a = a.astype(object)
+    if not isinstance(a, pyarrow.Array):
+        if not isinstance(a, numpy.ndarray):
+            a = numpy.array(a, dtype=object)
+        elif a.dtype.kind in ["U", "S"]:
+            a = a.astype(object)
+        a = pyarrow.array(a)
+    if not isinstance(b, pyarrow.Array):
+        if not isinstance(b, numpy.ndarray):
+            b = numpy.array(b, dtype=object)
+        elif b.dtype.kind in ["U", "S"]:
+            b = b.astype(object)
+        b = pyarrow.array(b)
 
-    if not isinstance(b, numpy.ndarray):
-        b = numpy.array(b, dtype=object)
-    elif b.dtype.kind in ["U", "S"]:  # Unicode or byte string dtypes
-        b = b.astype(object)
-
-    return list_levenshtein(a, b)
+    return list_levenshtein(vector_from_arrow(a), vector_from_arrow(b)).to_arrow()
 
 
 def to_char(arr) -> List[str]:
@@ -362,6 +366,6 @@ def regex_replace(array, _pattern, _replacement):
     replacement = as_bytes(_replacement[0])
 
     try:
-        return list_regex_replace(data_vector, pattern, replacement)
+        return list_regex_replace(data_vector, pattern, replacement).to_arrow()
     except ValueError as exc:
         raise InvalidFunctionParameterError(str(exc)) from exc

@@ -6,64 +6,57 @@
 # cython: wraparound=False
 # cython: boundscheck=False
 
-import numpy
-cimport numpy
-numpy.import_array()
+from libc.stdint cimport int64_t, uint8_t
 
-from libc.stdint cimport int64_t, uint64_t
-from cpython.bytes cimport PyBytes_FromStringAndSize
+from opteryx.draken.vectors.int64_vector cimport Int64Vector
+from opteryx.draken.vectors.string_vector cimport StringVector
+from opteryx.draken.vectors import string_vector as string_vector_module
 
-cdef inline char* int64_to_str_ptr(int64_t value, char* buf) nogil:
-    cdef uint64_t val
+
+cdef inline int int64_to_str_buf(int64_t value, char* buf) nogil:
+    """Write ASCII digits of value into buf (21 chars) and return length."""
+    cdef unsigned long long uval
     cdef int i = 20
-    cdef bint is_negative = value < 0
+    cdef bint neg = value < 0
 
     if value == 0:
-        buf[19] = 48  # '0'
-        return buf + 19
+        buf[19] = 48
+        return 1
 
-    val = <uint64_t>(-value) if is_negative else <uint64_t>value
-
-    while val != 0:
+    uval = <unsigned long long>(-value) if neg else <unsigned long long>value
+    while uval != 0:
         i -= 1
-        buf[i] = 48 + (val % 10)
-        val //= 10
+        buf[i] = 48 + (uval % 10)
+        uval //= 10
 
-    if is_negative:
+    if neg:
         i -= 1
-        buf[i] = 45  # '-'
+        buf[i] = 45
 
-    return buf + i
+    return 20 - i
 
 
-cpdef numpy.ndarray list_cast_int64_to_bytes(const int64_t[:] arr):
-    cdef Py_ssize_t i, n = arr.shape[0]
+cpdef StringVector list_cast_int64_to_bytes(Int64Vector vec):
+    """Cast an Int64Vector to a StringVector of UTF-8 decimal bytes."""
+    cdef Py_ssize_t n = vec.ptr.length
+    cdef int64_t* src = <int64_t*>vec.ptr.data
+    cdef uint8_t* null_bm = vec.ptr.null_bitmap
     cdef char buf[21]
-    cdef char* ptr
     cdef int length
+    cdef Py_ssize_t i
 
-    cdef numpy.ndarray[object, ndim=1] result = numpy.empty(n, dtype=object)
-    cdef object[:] result_view = result
+    builder = string_vector_module.StringVectorBuilder.with_estimate(n, 8)
 
     for i in range(n):
-        ptr = int64_to_str_ptr(arr[i], buf)
-        length = buf + 20 - ptr
-        result_view[i] = PyBytes_FromStringAndSize(ptr, length)
+        if null_bm != NULL and not ((null_bm[i >> 3] >> (i & 7)) & 1):
+            builder.append_null()
+        else:
+            length = int64_to_str_buf(src[i], buf)
+            builder.append_bytes(buf + (20 - length), length)
 
-    return result
+    return builder.finish()
 
-cpdef numpy.ndarray list_cast_int64_to_ascii(const int64_t[:] arr):
-    cdef Py_ssize_t i, n = arr.shape[0]
-    cdef char buf[21]
-    cdef char* ptr
-    cdef int length
 
-    cdef numpy.ndarray[object, ndim=1] result = numpy.empty(n, dtype=object)
-    cdef object[:] result_view = result
-
-    for i in range(n):
-        ptr = int64_to_str_ptr(arr[i], buf)
-        length = buf + 20 - ptr
-        result_view[i] = PyBytes_FromStringAndSize(ptr, length).decode("ascii")
-
-    return result
+cpdef StringVector list_cast_int64_to_ascii(Int64Vector vec):
+    """Cast an Int64Vector to a StringVector of ASCII decimal strings (same as bytes)."""
+    return list_cast_int64_to_bytes(vec)

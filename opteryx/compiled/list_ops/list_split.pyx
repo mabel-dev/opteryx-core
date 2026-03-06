@@ -174,21 +174,20 @@ cdef class _BufferCleanup:
         else:
             free(self.ptr)
 
-cpdef object list_split(object arrow_array, char delimiter):
+from opteryx.draken.vectors.string_vector cimport StringVector
+from opteryx.draken.core.buffers cimport DrakenVarBuffer
+
+cpdef object list_split(StringVector vec, char delimiter):
     """
     FAST string splitting that actually compiles.
     Works on x86 and ARM, no compiler errors.
     """
-    # Extract Arrow buffers
-    cdef object buffers = arrow_array.buffers()
-    cdef int64_t n = len(arrow_array)
-    cdef int64_t offset = arrow_array.offset
+    # Access Draken StringVector buffers directly
+    cdef DrakenVarBuffer* dptr = vec.ptr
+    cdef int64_t n = <int64_t>dptr.length
 
-    # Get raw pointers
-    cdef uintptr_t data_addr = buffers[2].address
-    cdef uintptr_t offs_addr = buffers[1].address
-    cdef const char* raw_data = <const char*>data_addr
-    cdef const int32_t* offsets = <const int32_t*>offs_addr + offset
+    cdef const char* raw_data = <const char*>dptr.data
+    cdef const int32_t* offsets = dptr.offsets
 
     cdef int64_t i
     cdef int64_t start, end
