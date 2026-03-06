@@ -62,6 +62,7 @@ from opteryx.config import DISABLE_OPTIMIZER
 from opteryx.models import QueryTelemetry
 from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.optimizer.strategies import BooleanSimplificationStrategy
+from opteryx.planner.optimizer.strategies import CastSimplificationStrategy
 from opteryx.planner.optimizer.strategies import ConstantFoldingStrategy
 from opteryx.planner.optimizer.strategies import CorrelatedFiltersStrategy
 from opteryx.planner.optimizer.strategies import DistinctPushdownStrategy
@@ -96,6 +97,7 @@ class OptimizerVisitor:
             ConstantFoldingStrategy(telemetry),
             StatisticsOnlyResponseStrategy(telemetry),
             BooleanSimplificationStrategy(telemetry),
+            CastSimplificationStrategy(telemetry),
             SplitConjunctivePredicatesStrategy(telemetry),
             CorrelatedFiltersStrategy(telemetry),
             PredicateRewriteStrategy(telemetry),

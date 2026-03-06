@@ -434,6 +434,55 @@ def inner_binder(node: Node, context: BindingContext) -> Tuple[Node, Any]:
             node.schema_column = schema_column
             node.query_column = node.alias or column_name
 
+        elif node_type == NodeType.CAST:
+            # Handle CAST operations (CAST(expr AS type))
+            # The source expression is already bound via recursive traversal above
+            # node.value contains the target type name (e.g., "VARCHAR", "INTEGER", "DOUBLE", "BLOB")
+
+            # Define aliases for the schema column
+            aliases = [node.alias] if node.alias else []
+
+            # Map type name to OrsoType
+            target_type_name = node.value.upper()
+            result_type = OrsoTypes[target_type_name]
+
+            element_type = None
+            precision = 38
+            scale = 21
+
+            # Handle type-specific parameters
+            if target_type_name == "DECIMAL" and len(node.parameters) > 1:
+                # CAST(expr AS DECIMAL(precision, scale))
+                precision = (
+                    int(node.parameters[1].value)
+                    if node.parameters[1].node_type == NodeType.LITERAL
+                    else 38
+                )
+                scale = (
+                    int(node.parameters[2].value)
+                    if len(node.parameters) > 2 and node.parameters[2].node_type == NodeType.LITERAL
+                    else 21
+                )
+
+            if target_type_name == "ARRAY" and len(node.parameters) > 1:
+                # CAST(expr AS ARRAY(element_type)) - extract element type
+                # For now, use VARIANT as element_type; can be refined later
+                element_type = OrsoTypes.VARIANT
+
+            schema_column = FunctionColumn(
+                name=column_name,
+                type=result_type,
+                element_type=element_type,
+                aliases=aliases,
+                precision=precision,
+                scale=scale,
+            )
+            schema_column.identity = column_name
+            schemas["$derived"].columns.append(schema_column)
+            node.derived_from = []
+            node.schema_column = schema_column
+            node.query_column = node.alias or column_name
+
         elif node.value and node.value.startswith(
             (
                 "AnyOp",

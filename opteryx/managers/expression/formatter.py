@@ -84,6 +84,15 @@ def format_expression(root, qualify: bool = False):
                 limit = f" LIMIT {root.limit}" if root.limit else ""
                 return f"{root.value.upper()}({distinct}{root.parameters[0].current_name}{order}{limit})"
             return f"{root.value.upper()}({distinct}{','.join([format_expression(e, qualify) for e in root.parameters])}{order})"
+        if node_type == NodeType.CAST:
+            # Format CAST expressions: expr::TYPE or expr::TYPE(params)
+            source_expr = format_expression(root.left, qualify)
+            target_type = root.value
+            if root.parameters:
+                # Include parameters like precision/scale if present
+                params = ",".join([format_expression(p, qualify) for p in root.parameters])
+                return f"{source_expr}::{target_type}({params})"
+            return f"{source_expr}::{target_type}"
         if node_type == NodeType.WILDCARD:
             if root.value:
                 return f"{root.value[0]}.*"

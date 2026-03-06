@@ -81,6 +81,7 @@ class NodeType(int, Enum):
     LITERAL = 42  # 0010 1010
     EXPRESSION_LIST = 43  # 0010 1011 (CASE WHEN)
     EVALUATED = 44  # 0010 1100 - memoize results
+    CAST = 45  # 0010 1101 - type casting
 
 
 LOGICAL_OPERATIONS: Dict[NodeType, Callable] = {
@@ -296,6 +297,38 @@ def _inner_evaluate(root: Node, table: Table):
             result = apply_function(root.value, *parameters)
             if isinstance(result, list):
                 result = numpy.array(result)
+            return result
+        if node_type == NodeType.CAST:
+            # Handle CAST operations (CAST(expr AS type), TRY_CAST, SAFE_CAST)
+            from opteryx.expression.casts import cast
+            from opteryx.expression.casts import try_cast
+
+            # Evaluate source expression
+            source = _inner_evaluate(root.left, table)
+
+            # Determine if this is a safe cast (TRY_CAST/SAFE_CAST) or regular cast
+            # TRY_ prefix in node.value indicates safe cast
+            is_safe_cast = root.value.startswith("TRY_")
+
+            # Get the target type name (remove TRY_ prefix if present)
+            target_type = root.value[4:] if is_safe_cast else root.value
+
+            # Get the appropriate cast kernel
+            kernel = try_cast(target_type) if is_safe_cast else cast(target_type)
+
+            # Handle optional precision/scale/length parameters from node.parameters
+            params = []
+            if root.parameters:
+                # Parameters were already bound by binder if needed
+                params = [_inner_evaluate(param, table) for param in root.parameters]
+
+            # Apply the cast kernel(s, *params)
+            result = kernel(source, *params)
+
+            # Ensure result is a numpy array
+            if isinstance(result, list):
+                result = numpy.array(result)
+
             return result
         if node_type == NodeType.AGGREGATOR:
             # detected as an aggregator, but here it's an identifier because it
@@ -565,6 +598,7 @@ def should_evaluate(statement):
     """Determine if the given statement should be evaluated."""
     valid_node_types = {
         NodeType.FUNCTION,
+        NodeType.CAST,
         NodeType.BINARY_OPERATOR,
         NodeType.COMPARISON_OPERATOR,
         NodeType.UNARY_OPERATOR,
