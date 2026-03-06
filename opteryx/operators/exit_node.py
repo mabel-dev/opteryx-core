@@ -17,12 +17,10 @@ This does two things that the projection node doesn't do:
 This node doesn't do any calculations, it is a pure Projection.
 """
 
-import pyarrow
-from orso.types import OrsoTypes
-from pyarrow import Table
+from collections.abc import Iterable
 
 from opteryx import EOS
-from opteryx.datatypes.intervals import to_arrow_interval
+from opteryx.draken.morsels.morsel import Morsel
 from opteryx.exceptions import AmbiguousIdentifierError
 from opteryx.exceptions import InvalidInternalStateError
 from opteryx.models import QueryProperties
@@ -60,7 +58,9 @@ class ExitNode(BasePlanNode):
                 # else:
                 final_names.append(column.alias)
 
-        self.final_columns = final_columns
+        self.final_columns = [
+            final.encode("utf-8") if isinstance(final, str) else final for final in final_columns
+        ]
         self.final_names = final_names
 
     @property
@@ -71,71 +71,66 @@ class ExitNode(BasePlanNode):
     def name(self):  # pragma: no cover
         return "Exit"
 
-    def execute(self, morsel: Table, **kwargs) -> Table:
-        morsel = self.ensure_arrow_table(morsel)
+    def execute(self, morsel, **kwargs):
+        """Execute exit node: Draken-native column projection.
+
+        The query engine (motor) is Draken-native throughout. Exit node formats results
+        for the cursor layer, which is responsible for converting to the user's desired
+        output format (Arrow, JSON, CSV, MessagePack, etc).
+        """
+        morsel = self.ensure_draken_morsel(morsel)
 
         # Exit doesn't return EOS
         if morsel == EOS:
             if not self.at_least_one:
-                from orso.schema import RelationSchema
-                from orso.schema import convert_orso_schema_to_arrow_schema
+                # Return empty Draken morsel with correct schema
+                from opteryx.draken.interop.arrow import vector_from_sequence
 
-                orso_schema = RelationSchema(
-                    name="Relation", columns=[c.schema_column for c in self.columns]
-                )
-                arrow_shema = convert_orso_schema_to_arrow_schema(orso_schema, use_identities=True)
+                # Create empty vectors with correct types
+                vectors = []
+                for _ in self.columns:
+                    # Empty vector with correct type info
+                    vectors.append(vector_from_sequence([]))
 
-                morsel = pyarrow.Table.from_arrays(
-                    [pyarrow.array([]) for _ in self.columns],
-                    schema=arrow_shema,
-                )
-                morsel = morsel.select(self.final_columns)
-                morsel = morsel.rename_columns(self.final_names)
+                morsel = Morsel.from_vectors(self.final_names, vectors)
                 yield morsel
 
             yield EOS
             return
 
-        if morsel.num_rows == 0:
+        # Handle both single Morsel and Iterable of Morsels (from streaming)
+        if isinstance(morsel, Morsel):
+            morsels = (morsel,)
+        elif isinstance(morsel, Iterable):
+            morsels = morsel
+        else:  # pragma: no cover
             yield None
             return
 
-        self.at_least_one = True
-
-        if not set(self.final_columns).issubset(morsel.column_names):  # pragma: no cover
-            mapping = {
-                name: int_name for name, int_name in zip(self.final_columns, self.final_names)
-            }
-            missing_references = {
-                mapping.get(ref): ref
-                for ref in self.final_columns
-                if ref not in morsel.column_names
-            }
-
-            raise InvalidInternalStateError(
-                f"The following fields were not in the resultset - {', '.join(missing_references.keys())}"
-            )
-
-        morsel = morsel.select(self.final_columns)
-
-        for index, column in enumerate(self.columns):
-            column_array = morsel.column(index)
-            column_identity = column.schema_column.identity
-            column_type = column.schema_column.type
-
-            if column_type == OrsoTypes.INTERVAL:
-                converted = to_arrow_interval(column_array)
-                morsel = morsel.set_column(index, column_identity, converted)
+        for chunk in morsels:
+            if chunk is EOS or chunk.num_rows == 0:
                 continue
 
-            if column_type == OrsoTypes.VARCHAR and (
-                pyarrow.types.is_binary(column_array.type)
-                or pyarrow.types.is_large_binary(column_array.type)
-                or pyarrow.types.is_fixed_size_binary(column_array.type)
-            ):
-                converted = column_array.cast(pyarrow.string())
-                morsel = morsel.set_column(index, column_identity, converted)
+            self.at_least_one = True
 
-        morsel = morsel.rename_columns(self.final_names)
+            # Column validation on morsel
+            morsel_column_names = chunk.column_names
+            if not set(self.final_columns).issubset(morsel_column_names):  # pragma: no cover
+                mapping = {
+                    name: int_name for name, int_name in zip(self.final_columns, self.final_names)
+                }
+                missing_references = {
+                    mapping.get(ref): ref
+                    for ref in self.final_columns
+                    if ref not in morsel_column_names
+                }
 
-        yield morsel
+                raise InvalidInternalStateError(
+                    f"The following fields were not in the resultset - {', '.join(missing_references.keys())}"
+                )
+
+            # column selection and renaming
+            chunk = chunk.select(self.final_columns)
+            chunk = chunk.rename(self.final_names)
+
+            yield chunk

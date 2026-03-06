@@ -32,9 +32,13 @@ cimport numpy
 numpy.import_array()
 
 from cpython.bytes cimport PyBytes_AsString
-from libc.stdint cimport int32_t, uint8_t, uintptr_t
-from libc.string cimport memchr, memcpy
+from libc.stdint cimport int32_t, uint8_t, uint64_t
+from libc.string cimport memchr, memcpy, memset
 import platform
+
+from opteryx.draken.vectors.string_vector cimport StringVector
+from opteryx.draken.vectors.bool_vector cimport BoolVector
+from opteryx.draken.core.buffers cimport DrakenVarBuffer
 
 
 cdef extern from "string.h":
@@ -244,299 +248,156 @@ cdef inline int boyer_moore_horspool_case_insensitive(const char *haystack, size
     return 0
 
 
-cdef inline uint8_t[::1] _substring_in_single_array_impl(object arrow_array, const char *c_pattern, size_t pattern_length, unsigned char *skip_table):
-    """Internal implementation that accepts a precomputed pattern pointer and skip table.
-    This avoids repeated encoding/skip-table builds when scanning multiple chunks.
+cdef inline void _search_draken_string_vec(
+        DrakenVarBuffer* ptr,
+        const char* c_pattern,
+        size_t pattern_length,
+        unsigned char* skip_table,
+        uint8_t* dst,
+        Py_ssize_t n):
+    """
+    Case-sensitive BMH search over every string in a DrakenVarBuffer,
+    writing per-row result bits into dst (which must be pre-zeroed).
     """
     cdef:
-        Py_ssize_t n
-        numpy.ndarray[numpy.uint8_t, ndim=1] result
-        uint8_t[::1] result_view
-
-        # Arrow buffer pointers
-        list buffers
-        const uint8_t* validity
-        const int32_t* offsets
-        const char* data
-
-        # Arrow indexing
-        size_t arr_offset
-        size_t offset_in_bits
-        size_t offset_in_bytes
-
-        # For loop variables
-        size_t i, byte_index, bit_index
-        size_t start, end, length
+        uint8_t* nulls = ptr.null_bitmap
+        const char* data = <const char*>ptr.data
+        int32_t start, end
+        size_t length
+        Py_ssize_t i
         int index
         char target
 
-    n = len(arrow_array)
-    result = numpy.zeros(n, dtype=numpy.uint8)
-    result_view = result
-
-    # Arrow buffer pointers
-    buffers = arrow_array.buffers()
-    validity = NULL
-    offsets = NULL
-    data = NULL
-
-    # Arrow indexing
-    arr_offset = arrow_array.offset
-    offset_in_bits = arr_offset & 7
-    offset_in_bytes = arr_offset >> 3
-
-    # Early return for edge cases
-    if pattern_length == 0 or n == 0:
-        return result_view
-
-    # Get raw pointers from buffers
-    if len(buffers) > 0 and buffers[0]:
-        validity = <const uint8_t*><uintptr_t>(buffers[0].address)
-    if len(buffers) > 1 and buffers[1]:
-        offsets = <const int32_t*><uintptr_t>(buffers[1].address)
-    if len(buffers) > 2 and buffers[2]:
-        data = <const char*><uintptr_t>(buffers[2].address)
-
-    # Special case: single character search (use fast SIMD/arch searcher)
     if pattern_length == 1:
         target = c_pattern[0]
         for i in range(n):
-            # Check null bit
-            if validity is not NULL:
-                byte_index = offset_in_bytes + ((offset_in_bits + i) >> 3)
-                bit_index = (offset_in_bits + i) & 7
-                if not (validity[byte_index] & (1 << bit_index)):
-                    continue
-
-            start = offsets[arr_offset + i]
-            end = offsets[arr_offset + i + 1]
-            length = end - start
-
-            if length > 0 and searcher(data + start, length, target) != -1:
-                result_view[i] = 1
-        return result_view
-
-    # Main search loop
-    for i in range(n):
-        # Check null bit
-        if validity is not NULL:
-            byte_index = offset_in_bytes + ((offset_in_bits + i) >> 3)
-            bit_index = (offset_in_bits + i) & 7
-            if not (validity[byte_index] & (1 << bit_index)):
+            if nulls != NULL and not ((nulls[i >> 3] >> (i & 7)) & 1):
                 continue
+            start = ptr.offsets[i]
+            end = ptr.offsets[i + 1]
+            length = <size_t>(end - start)
+            if length > 0 and searcher(data + start, length, target) != -1:
+                dst[i >> 3] |= (1 << (i & 7))
+        return
 
-        # Get string boundaries
-        start = offsets[arr_offset + i]
-        end = offsets[arr_offset + i + 1]
-        length = end - start
-
+    for i in range(n):
+        if nulls != NULL and not ((nulls[i >> 3] >> (i & 7)) & 1):
+            continue
+        start = ptr.offsets[i]
+        end = ptr.offsets[i + 1]
+        length = <size_t>(end - start)
         if length < pattern_length:
             continue
 
-        # For very short strings, use direct BMH search
         if length <= 16 and pattern_length <= 4:
             if boyer_moore_horspool_with_table(
                 data + start, length, c_pattern, pattern_length, skip_table
             ):
-                result_view[i] = 1
+                dst[i >> 3] |= (1 << (i & 7))
             continue
 
-        # SIMD-based substring search for longer patterns/haystacks
         if pattern_length >= 8 and length >= 64:
-            idx = simd_search_substring(data + start, length, c_pattern, pattern_length)
-            if idx != -1:
-                result_view[i] = 1
+            if simd_search_substring(data + start, length, c_pattern, pattern_length) != -1:
+                dst[i >> 3] |= (1 << (i & 7))
                 continue
 
-        # SIMD-based first-char search as heuristic
         index = searcher(data + start, length, c_pattern[0])
         if index == -1:
             continue
-
-        # BMH from SIMD-found position
         if boyer_moore_horspool_with_table(
-            data + start + index,
-            length - index,
-            c_pattern,
-            pattern_length,
-            skip_table
+            data + start + index, length - index, c_pattern, pattern_length, skip_table
         ):
-            result_view[i] = 1
-
-    return result_view
+            dst[i >> 3] |= (1 << (i & 7))
 
 
-cdef inline uint8_t[::1] _substring_in_single_array(object arrow_array, str needle):
-    """Wrapper kept for compatibility; encodes the needle and builds the skip table once before calling the impl."""
-    cdef:
-        bytes needle_bytes
-        const char *c_pattern
-        size_t pattern_length
-        unsigned char skip_table[256]
-
-    needle_bytes = needle.encode('utf-8')
-    c_pattern = PyBytes_AsString(needle_bytes)
-    pattern_length = len(needle_bytes)
-
-    if pattern_length > 0:
-        build_bmh_skip_table(c_pattern, pattern_length, skip_table)
-
-    return _substring_in_single_array_impl(arrow_array, c_pattern, pattern_length, skip_table)
-
-
-cpdef uint8_t[::1] list_in_string(object column, str needle):
+cdef inline void _search_draken_string_vec_case_insensitive(
+        DrakenVarBuffer* ptr,
+        const char* c_pattern,
+        size_t pattern_length,
+        uint8_t* dst,
+        Py_ssize_t n):
     """
-    Optimized version with better memory handling. Encodes `needle` once and reuses a single skip table
-    across chunks to avoid repeated work.
+    Case-insensitive BMH search over every string in a DrakenVarBuffer,
+    writing per-row result bits into dst (which must be pre-zeroed).
     """
     cdef:
-        Py_ssize_t total_length
-        numpy.ndarray[numpy.uint8_t, ndim=1] final_result
-        uint8_t[::1] final_view
-        Py_ssize_t offset = 0
-        uint8_t[::1] chunk_view
-        object chunk
-
-        bytes needle_bytes
-        const char *c_pattern
-        size_t pattern_length
-        unsigned char skip_table[256]
-
-    # Fast path for non-chunked arrays
-    if not hasattr(column, "chunks"):
-        needle_bytes = needle.encode('utf-8')
-        c_pattern = PyBytes_AsString(needle_bytes)
-        pattern_length = len(needle_bytes)
-        if pattern_length > 0:
-            build_bmh_skip_table(c_pattern, pattern_length, skip_table)
-        return _substring_in_single_array_impl(column, c_pattern, pattern_length, skip_table)
-
-    # Precompute total length
-    total_length = 0
-    chunks_list = list(column.chunks)  # Convert to list once
-    for chunk in chunks_list:
-        total_length += len(chunk)
-
-    final_result = numpy.zeros(total_length, dtype=numpy.uint8)
-    final_view = final_result
-
-    # Pre-encode the needle and build the skip table once
-    needle_bytes = needle.encode('utf-8')
-    c_pattern = PyBytes_AsString(needle_bytes)
-    pattern_length = len(needle_bytes)
-    if pattern_length > 0:
-        build_bmh_skip_table(c_pattern, pattern_length, skip_table)
-
-    # Process chunks
-    offset = 0
-    for chunk in chunks_list:
-        chunk_view = _substring_in_single_array_impl(chunk, c_pattern, pattern_length, skip_table)
-        final_view[offset:offset + len(chunk)] = chunk_view[:]  # Use slice assignment
-        offset += len(chunk)
-
-    return final_view
-
-
-cdef inline uint8_t[::1] _substring_in_single_array_case_insensitive(object arrow_array, str needle):
-    """
-    Optimized case-insensitive search with better ASCII handling.
-    """
-    cdef:
-        Py_ssize_t n
-        numpy.ndarray[numpy.uint8_t, ndim=1] result
-        uint8_t[::1] result_view
-        bytes needle_bytes
-        const char *c_pattern
-        size_t pattern_length
-
-        list buffers
-        const uint8_t* validity
-        const int32_t* offsets
-        const char* data
-
-        Py_ssize_t arr_offset
-        Py_ssize_t offset_in_bits
-        Py_ssize_t offset_in_bytes
-
-        Py_ssize_t i, byte_index, bit_index
-        Py_ssize_t start, end, length
-
-    n = len(arrow_array)
-    result = numpy.zeros(n, dtype=numpy.uint8)
-    result_view = result
-
-    needle_bytes = needle.encode('utf-8')
-    c_pattern = PyBytes_AsString(needle_bytes)
-    pattern_length = len(needle_bytes)
-
-    buffers = arrow_array.buffers()
-    validity = NULL
-    offsets = NULL
-    data = NULL
-
-    arr_offset = arrow_array.offset
-    offset_in_bits = arr_offset & 7
-    offset_in_bytes = arr_offset >> 3
-
-    if pattern_length == 0 or n == 0:
-        return result_view
-
-    if len(buffers) > 0 and buffers[0]:
-        validity = <const uint8_t*><uintptr_t>(buffers[0].address)
-    if len(buffers) > 1 and buffers[1]:
-        offsets = <const int32_t*><uintptr_t>(buffers[1].address)
-    if len(buffers) > 2 and buffers[2]:
-        data = <const char*><uintptr_t>(buffers[2].address)
+        uint8_t* nulls = ptr.null_bitmap
+        const char* data = <const char*>ptr.data
+        int32_t start, end
+        size_t length
+        Py_ssize_t i
 
     for i in range(n):
-        # Check null bit
-        if validity is not NULL:
-            byte_index = offset_in_bytes + ((offset_in_bits + i) >> 3)
-            bit_index = (offset_in_bits + i) & 7
-            if not (validity[byte_index] & (1 << bit_index)):
-                continue
-
-        start = offsets[arr_offset + i]
-        end = offsets[arr_offset + i + 1]
-        length = end - start
-
+        if nulls != NULL and not ((nulls[i >> 3] >> (i & 7)) & 1):
+            continue
+        start = ptr.offsets[i]
+        end = ptr.offsets[i + 1]
+        length = <size_t>(end - start)
         if length < pattern_length:
             continue
-
         if boyer_moore_horspool_case_insensitive(
-            data + start, <size_t>length, c_pattern, pattern_length
+            data + start, length, c_pattern, pattern_length
         ):
-            result_view[i] = 1
-
-    return result_view
+            dst[i >> 3] |= (1 << (i & 7))
 
 
-cpdef uint8_t[::1] list_in_string_case_insensitive(object column, str needle):
+cpdef BoolVector list_in_string(StringVector vec, str needle):
     """
-    Optimized case-insensitive version.
+    Case-sensitive substring scan over a Draken StringVector.
+
+    Returns a BoolVector: True at position i iff needle appears in vec[i].
+    Null input rows produce False (not null) in the output.
     """
     cdef:
-        Py_ssize_t total_length = 0
-        numpy.ndarray[numpy.uint8_t, ndim=1] final_result
-        uint8_t[::1] final_view
-        Py_ssize_t offset = 0
-        uint8_t[::1] chunk_view
-        object chunk
+        DrakenVarBuffer* ptr = vec.ptr
+        Py_ssize_t n = ptr.length
+        Py_ssize_t nbytes = (n + 7) >> 3
+        BoolVector out = BoolVector(<size_t>n)
+        uint8_t* dst = <uint8_t*>out.ptr.data
+        bytes needle_bytes
+        const char* c_pattern
+        size_t pattern_length
+        unsigned char skip_table[256]
 
-    if not hasattr(column, "chunks"):
-        return _substring_in_single_array_case_insensitive(column, needle)
+    memset(dst, 0, nbytes)
 
-    chunks_list = list(column.chunks)
-    for chunk in chunks_list:
-        total_length += len(chunk)
+    needle_bytes = needle.encode('utf-8')
+    c_pattern = PyBytes_AsString(needle_bytes)
+    pattern_length = len(needle_bytes)
 
-    final_result = numpy.empty(total_length, dtype=numpy.uint8)
-    final_view = final_result
+    if pattern_length == 0 or n == 0:
+        return out
 
-    offset = 0
-    for chunk in chunks_list:
-        chunk_view = _substring_in_single_array_case_insensitive(chunk, needle)
-        final_view[offset:offset + len(chunk)] = chunk_view[:]
-        offset += len(chunk)
+    build_bmh_skip_table(c_pattern, pattern_length, skip_table)
+    _search_draken_string_vec(ptr, c_pattern, pattern_length, skip_table, dst, n)
+    return out
 
-    return final_view
+
+cpdef BoolVector list_in_string_case_insensitive(StringVector vec, str needle):
+    """
+    Case-insensitive substring scan over a Draken StringVector.
+
+    Returns a BoolVector: True at position i iff needle appears (case-insensitively)
+    in vec[i].  Null input rows produce False in the output.
+    """
+    cdef:
+        DrakenVarBuffer* ptr = vec.ptr
+        Py_ssize_t n = ptr.length
+        Py_ssize_t nbytes = (n + 7) >> 3
+        BoolVector out = BoolVector(<size_t>n)
+        uint8_t* dst = <uint8_t*>out.ptr.data
+        bytes needle_bytes
+        const char* c_pattern
+        size_t pattern_length
+
+    memset(dst, 0, nbytes)
+
+    needle_bytes = needle.encode('utf-8')
+    c_pattern = PyBytes_AsString(needle_bytes)
+    pattern_length = len(needle_bytes)
+
+    if pattern_length == 0 or n == 0:
+        return out
+
+    _search_draken_string_vec_case_insensitive(ptr, c_pattern, pattern_length, dst, n)
+    return out

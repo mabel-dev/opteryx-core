@@ -121,12 +121,12 @@ def _ip_containment(left: List[Optional[str]], right: List[str]) -> List[Optiona
 
     try:
         normalized_left = [_normalize_ip(v) for v in left]
-        # list_ip_in_cidr expects a numpy.ndarray (dtype=object) of Python str
-        # objects; ensure we pass the correct type to avoid TypeError.
-        import numpy as _numpy
+        import pyarrow as _pyarrow
 
-        arr = _numpy.asarray(normalized_left, dtype=object)
-        return list_ip_in_cidr(arr, str(right[0]))
+        from opteryx.draken.interop.arrow import vector_from_arrow as _vector_from_arrow
+
+        arr = _pyarrow.array(normalized_left, type=_pyarrow.string())
+        return list_ip_in_cidr(_vector_from_arrow(arr), str(right[0]))
     except (IndexError, AttributeError, ValueError, TypeError) as err:
         from opteryx.exceptions import IncorrectTypeError
 

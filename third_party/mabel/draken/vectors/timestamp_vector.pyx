@@ -147,8 +147,7 @@ cdef class TimestampVector(Vector):
 
         buffers.append(data_buf)
 
-        # Default to microsecond precision
-        return pa.Array.from_buffers(pa.timestamp('us'), buf_length(self.ptr), buffers)
+        return pa.Array.from_buffers(pa.timestamp(self.timestamp_unit), buf_length(self.ptr), buffers)
 
     # -------- Example op --------
     cpdef TimestampVector take(self, int32_t[::1] indices):

@@ -166,8 +166,12 @@ def _get(array, key):
         raise IncorrectTypeError("VARCHAR and ARRAY values must be subscripted with NUMERIC values")
     if isinstance(first_element, (list, str, pyarrow.ListScalar, bytes, numpy.ndarray)):
         from opteryx.compiled.list_ops import list_get_element
+        from opteryx.draken.interop.arrow import vector_from_arrow
 
-        return list_get_element(array, index)
+        pa_arr = pyarrow.array(
+            [r if not isinstance(r, pyarrow.ListScalar) else r.as_py() for r in array]
+        )
+        return list_get_element(vector_from_arrow(pa_arr), index)
 
     raise IncorrectTypeError(f"Cannot subscript {type(first_element).__name__} values")
 
@@ -331,12 +335,16 @@ def cast_to_varchar(arr, *args):
         return format_double_array_ascii(arr)
     if arr.dtype == numpy.int64:
         from opteryx.compiled.list_ops import list_cast_int64_to_ascii
+        from opteryx.draken.interop.arrow import vector_from_arrow
 
-        return list_cast_int64_to_ascii(arr)
+        return list_cast_int64_to_ascii(vector_from_arrow(pyarrow.array(arr))).to_arrow()
     if arr.dtype == numpy.uint64:
         from opteryx.compiled.list_ops import list_cast_uint64_to_ascii
+        from opteryx.draken.interop.arrow import vector_from_arrow
 
-        return list_cast_uint64_to_ascii(arr)
+        return list_cast_uint64_to_ascii(
+            vector_from_arrow(pyarrow.array(arr.view(numpy.int64)))
+        ).to_arrow()
 
     caster = OrsoTypes.VARCHAR.parse
     kwargs = {}
@@ -357,12 +365,16 @@ def cast_to_blob(arr, *args):
         return format_double_array_bytes(arr)
     if arr.dtype == numpy.int64:
         from opteryx.compiled.list_ops import list_cast_int64_to_bytes
+        from opteryx.draken.interop.arrow import vector_from_arrow
 
-        return list_cast_int64_to_bytes(arr)
+        return list_cast_int64_to_bytes(vector_from_arrow(pyarrow.array(arr))).to_arrow()
     if arr.dtype == numpy.uint64:
         from opteryx.compiled.list_ops import list_cast_uint64_to_bytes
+        from opteryx.draken.interop.arrow import vector_from_arrow
 
-        return list_cast_uint64_to_bytes(arr)
+        return list_cast_uint64_to_bytes(
+            vector_from_arrow(pyarrow.array(arr.view(numpy.int64)))
+        ).to_arrow()
 
     caster = OrsoTypes.BLOB.parse
     kwargs = {}
@@ -409,11 +421,23 @@ def cast_to_int(arr, *args):
         arr = arr.to_numpy(False)
     if numpy.issubdtype(arr.dtype, numpy.object_):
         if isinstance(arr[0], str):
-            return list_cast_ascii_to_int(arr)
+            from opteryx.draken.interop.arrow import vector_from_arrow
+
+            return list_cast_ascii_to_int(
+                vector_from_arrow(pyarrow.array(arr, type=pyarrow.string()))
+            ).to_arrow()
         elif isinstance(arr[0], bytes):
-            return list_cast_bytes_to_int(arr)
+            from opteryx.draken.interop.arrow import vector_from_arrow
+
+            return list_cast_bytes_to_int(
+                vector_from_arrow(pyarrow.array(arr, type=pyarrow.binary()))
+            ).to_arrow()
     if numpy.issubdtype(arr.dtype, numpy.str_):
-        return list_cast_ascii_to_int(arr.astype(object))
+        from opteryx.draken.interop.arrow import vector_from_arrow
+
+        return list_cast_ascii_to_int(
+            vector_from_arrow(pyarrow.array(arr.astype(object), type=pyarrow.string()))
+        ).to_arrow()
     if numpy.issubdtype(arr.dtype, numpy.datetime64):
         arr = arr.astype("M8[us]")  # microseconds
         return arr.astype(numpy.int64)
@@ -512,10 +536,99 @@ def select_values(boolean_arrays, value_arrays):
     return result
 
 
-def list_lengther(arr):
+def _soundex(arr):
+    from opteryx.draken.interop.arrow import vector_from_arrow
+
     if isinstance(arr, numpy.ndarray):
         arr = pyarrow.array(arr)
-    return pyarrow.array(list_length(arr), type=pyarrow.uint32())
+    return list_soundex(vector_from_arrow(arr)).to_arrow()
+
+
+def _initcap(arr):
+    from opteryx.draken.interop.arrow import vector_from_arrow
+
+    if isinstance(arr, numpy.ndarray):
+        arr = pyarrow.array(arr)
+    return list_initcap(vector_from_arrow(arr)).to_arrow()
+
+
+def _md5(arr):
+    from opteryx.draken.interop.arrow import vector_from_arrow
+
+    if isinstance(arr, numpy.ndarray):
+        arr = pyarrow.array(arr)
+    return list_md5(vector_from_arrow(arr)).to_arrow()
+
+
+def _sha1(arr):
+    from opteryx.draken.interop.arrow import vector_from_arrow
+
+    if isinstance(arr, numpy.ndarray):
+        arr = pyarrow.array(arr)
+    return list_sha1(vector_from_arrow(arr)).to_arrow()
+
+
+def _sha256(arr):
+    from opteryx.draken.interop.arrow import vector_from_arrow
+
+    if isinstance(arr, numpy.ndarray):
+        arr = pyarrow.array(arr)
+    return list_sha256(vector_from_arrow(arr)).to_arrow()
+
+
+def _sha512(arr):
+    from opteryx.draken.interop.arrow import vector_from_arrow
+
+    if isinstance(arr, numpy.ndarray):
+        arr = pyarrow.array(arr)
+    return list_sha512(vector_from_arrow(arr)).to_arrow()
+
+
+def _replace(data, search, replace_val):
+    from opteryx.draken.interop.arrow import vector_from_arrow
+
+    if isinstance(data, numpy.ndarray):
+        data = pyarrow.array(data)
+    data_vec = vector_from_arrow(data)
+    if isinstance(search, numpy.ndarray):
+        search = search[0]
+    if isinstance(replace_val, numpy.ndarray):
+        replace_val = replace_val[0]
+    if isinstance(search, str):
+        search = search.encode("utf-8")
+    if isinstance(replace_val, str):
+        replace_val = replace_val.encode("utf-8")
+    return list_replace(data_vec, search, replace_val).to_arrow()
+
+
+def _string_slice_left(arr, length):
+    from opteryx.draken.interop.arrow import vector_from_arrow
+
+    if isinstance(arr, numpy.ndarray):
+        arr = pyarrow.array(arr)
+    if isinstance(length, numpy.ndarray):
+        length = int(length[0])
+    return list_string_slice_left(vector_from_arrow(arr), length).to_arrow()
+
+
+def _string_slice_right(arr, length):
+    from opteryx.draken.interop.arrow import vector_from_arrow
+
+    if isinstance(arr, numpy.ndarray):
+        arr = pyarrow.array(arr)
+    if isinstance(length, numpy.ndarray):
+        length = int(length[0])
+    return list_string_slice_right(vector_from_arrow(arr), length).to_arrow()
+
+
+def list_lengther(arr):
+    from opteryx.draken.interop.arrow import vector_from_arrow
+
+    if isinstance(arr, numpy.ndarray):
+        arr = pyarrow.array(arr.tolist())
+    elif not isinstance(arr, pyarrow.Array):
+        arr = pyarrow.array(arr)
+    return list_length(vector_from_arrow(arr)).to_arrow()
 
 
 def sleep(x):
@@ -600,12 +713,12 @@ FUNCTIONS = {
     "LENGTH": (list_lengther, "INTEGER", 1.0),  # LENGTH(str) -> int
     "UPPER": (to_upper, "VARCHAR", 1.0),  # UPPER(str) -> str (buffer-level SIMD)
     "LOWER": (to_lower, "VARCHAR", 1.0),  # LOWER(str) -> str (buffer-level SIMD)
-    "LEFT": (list_string_slice_left, "VARCHAR", 1.0),
-    "RIGHT": (list_string_slice_right, "VARCHAR", 1.0),
+    "LEFT": (_string_slice_left, "VARCHAR", 1.0),
+    "RIGHT": (_string_slice_right, "VARCHAR", 1.0),
     "REVERSE": (compute.utf8_reverse, "VARCHAR", 1.0),
-    "SOUNDEX": (list_soundex, "VARCHAR", 1.0),
+    "SOUNDEX": (_soundex, "VARCHAR", 1.0),
     "TITLE": (compute.utf8_title, "VARCHAR", 1.0),
-    "INITCAP": (list_initcap, "VARCHAR", 1.0),
+    "INITCAP": (_initcap, "VARCHAR", 1.0),
     "CONCAT": (string_functions.concat, "VARCHAR", 1.0),
     "CONCAT_WS": (string_functions.concat_ws, "VARCHAR", 1.0),
     "SUBSTRING": (string_functions.substring, "VARCHAR", 1.0),
@@ -618,17 +731,17 @@ FUNCTIONS = {
     "LEVENSHTEIN": (string_functions.levenshtein, "INTEGER", 1.0),
     "SPLIT": (string_functions.split, "ARRAY<VARCHAR>", 1.0),
     "MATCH_AGAINST": (string_functions.match_against, "BOOLEAN", 1.0),
-    "REPLACE": (list_replace, "VARCHAR", 1.0),
+    "REPLACE": (_replace, "VARCHAR", 1.0),
     "REGEXP_REPLACE": (string_functions.regex_replace, "BLOB", 1.0),
 
     # HASHING & ENCODING
     "HASH": (_iterate_single_parameter(lambda x: hex(hash_bytes(str(x).encode()))[2:]), "BLOB", 1.0),
-    "MD5": (list_md5, "BLOB", 1.0),
-    "SHA1": (list_sha1, "BLOB", 1.0),
+    "MD5": (_md5, "BLOB", 1.0),
+    "SHA1": (_sha1, "BLOB", 1.0),
     "SHA224": (_iterate_single_parameter(string_functions.get_sha224), "BLOB", 1.0),
-    "SHA256": (list_sha256, "BLOB", 1.0),
+    "SHA256": (_sha256, "BLOB", 1.0),
     "SHA384": (_iterate_single_parameter(string_functions.get_sha384), "BLOB", 1.0),
-    "SHA512": (list_sha512, "BLOB", 1.0),
+    "SHA512": (_sha512, "BLOB", 1.0),
     "RANDOM": (number_functions.random_number, "DOUBLE", 1.0),
     "RAND": (number_functions.random_number, "DOUBLE", 1.0),
     "NORMAL": (number_functions.random_normal, "DOUBLE", 1.0),

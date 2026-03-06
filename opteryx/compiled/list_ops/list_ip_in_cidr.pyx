@@ -6,82 +6,109 @@
 # cython: wraparound=False
 # cython: boundscheck=False
 
-from libc.stdint cimport uint32_t, int8_t
-from libc.stdlib cimport strtol
-from libc.string cimport strlen
-from cpython cimport PyUnicode_AsUTF8String
+from libc.stdint cimport uint8_t, uint32_t, int8_t, int32_t
+from libc.string cimport memset
 
-import numpy
-cimport numpy
-numpy.import_array()
+from opteryx.draken.vectors.string_vector cimport StringVector
+from opteryx.draken.vectors.bool_vector cimport BoolVector
+from opteryx.draken.core.buffers cimport DrakenVarBuffer
 
-cdef inline uint32_t ip_to_int(const char* ip):
 
-    # Check if the input string is at least 7 characters long
-    if strlen(ip) < 7:
-        raise ValueError("Invalid IP address: too short")
-
+cdef inline int parse_ip_to_int(const char* ip, size_t length, uint32_t* out) nogil:
+    """
+    Convert an IPv4 string (not NUL-terminated) to uint32.
+    Returns 0 on success, -1 on parse error (invalid IP).
+    """
     cdef uint32_t result = 0
-    cdef uint32_t num = 0
-    cdef int8_t shift = 24  # Start with the leftmost byte
-    cdef char* end
+    cdef uint32_t num
+    cdef int8_t shift = 24
+    cdef size_t i = 0
+    cdef char c
+    cdef int octet_count = 0
+    cdef int digit_count
 
-    # Convert each part of the IP to an integer
-    for _ in range(4):
-        num = strtol(ip, &end, 10)  # Convert substring to long
-        if num > 255 or ip == end or (end[0] not in (b'.', b'\0') and _ < 3):  # Validate octet and check for non-digit characters
-            raise ValueError("Invalid IP address: invalid part")
+    while octet_count < 4:
+        num = 0
+        digit_count = 0
+        while i < length:
+            c = ip[i]
+            if c < 48 or c > 57:  # not a digit
+                break
+            num = num * 10 + (c - 48)
+            digit_count += 1
+            i += 1
+        if digit_count == 0:
+            return -1  # empty octet
+        if num > 255:
+            return -1  # octet out of range
         result += num << shift
         shift -= 8
-        if end[0] == b'\0':  # Check if end of string
-            break
-        ip = end + 1  # Move to the next part
+        octet_count += 1
+        if octet_count < 4:
+            if i >= length or ip[i] != 46:  # 46 = '.'
+                return -1  # missing dot or extra chars
+            i += 1  # skip '.'
+        else:
+            if i < length:
+                return -1  # trailing garbage
 
-    if shift != -8 or end[0] != b'\0':  # Ensure exactly 4 octets and end of string
-        raise ValueError("Invalid IP address: not enough parts")
-
-    return result
+    out[0] = result
+    return 0
 
 
-cpdef numpy.ndarray[numpy.uint8_t, ndim=1] list_ip_in_cidr(numpy.ndarray ip_addresses, str cidr):
+cpdef BoolVector list_ip_in_cidr(StringVector vec, str cidr):
     """
-    Check if IP addresses are within a CIDR block.
+    Check if each IP address in vec falls within a CIDR block.
 
     Parameters:
-        ip_addresses: Array of IP address strings
-        cidr: CIDR notation string (e.g., "192.168.1.0/24")
+        vec: StringVector of IP address strings.
+        cidr: CIDR notation string (e.g. "192.168.1.0/24").
 
     Returns:
-        Boolean array indicating which IPs are in the CIDR block
+        BoolVector: True where the IP is inside the CIDR block.
     """
-
-    # CIDR validation...
     cdef int slash_idx = cidr.find('/')
     if slash_idx == -1:
-        raise ValueError("Invalid CIDR notation")
-    cdef int mask_size = int(cidr[slash_idx+1:])
+        raise ValueError("Invalid CIDR notation: missing /")
+    cdef int mask_size = int(cidr[slash_idx + 1:])
     if mask_size < 0 or mask_size > 32:
-        raise ValueError("Invalid CIDR notation")
+        raise ValueError("Invalid CIDR notation: mask out of range")
 
-    cdef str base_ip_str = cidr[:slash_idx]
+    cdef bytes base_ip_bytes = cidr[:slash_idx].encode("ascii")
     cdef uint32_t netmask = (0xFFFFFFFF << (32 - mask_size)) & 0xFFFFFFFF
-    cdef uint32_t base_ip = ip_to_int(PyUnicode_AsUTF8String(base_ip_str))
+    cdef uint32_t base_ip = 0
+    if parse_ip_to_int(base_ip_bytes, len(base_ip_bytes), &base_ip) != 0:
+        raise ValueError(f"Invalid CIDR base address: {cidr[:slash_idx]}")
 
-    cdef bytes ip_bytes
+    cdef DrakenVarBuffer* ptr = vec.ptr
+    cdef Py_ssize_t n = ptr.length
+    cdef Py_ssize_t nbytes = (n + 7) >> 3
 
-    cdef Py_ssize_t arr_len = ip_addresses.shape[0]
-    cdef numpy.ndarray[numpy.uint8_t, ndim=1] result = numpy.zeros(arr_len, dtype=numpy.uint8)
+    cdef BoolVector out = BoolVector(<size_t>n)
+    cdef uint8_t* dst = <uint8_t*>out.ptr.data
+    memset(dst, 0, nbytes)
 
-    # Use memoryview for input if possible
+    cdef uint8_t* null_bm = ptr.null_bitmap
     cdef Py_ssize_t i
-    cdef object ip_address
+    cdef int32_t start, end
     cdef uint32_t ip_int
 
-    for i in range(arr_len):
-        ip_address = ip_addresses[i]
-        if ip_address is not None:
-            ip_bytes = PyUnicode_AsUTF8String(ip_address)
-            ip_int = ip_to_int(ip_bytes)
-            result[i] = (ip_int & netmask) == base_ip
+    for i in range(n):
+        # Skip nulls
+        if null_bm != NULL and not ((null_bm[i >> 3] >> (i & 7)) & 1):
+            continue
+        start = ptr.offsets[i]
+        end = ptr.offsets[i + 1]
+        if end <= start:
+            continue
+        if parse_ip_to_int(
+            <const char*>ptr.data + start, <size_t>(end - start), &ip_int
+        ) != 0:
+            raise ValueError(
+                f"Invalid IP address: "
+                f"{(<char*>ptr.data + start)[:end - start].decode('ascii', 'replace')}"
+            )
+        if (ip_int & netmask) == base_ip:
+            dst[i >> 3] |= (<uint8_t>1 << (i & 7))
 
-    return result
+    return out

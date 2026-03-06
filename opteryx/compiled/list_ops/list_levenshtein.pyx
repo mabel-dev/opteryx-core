@@ -6,82 +6,93 @@
 # cython: wraparound=False
 # cython: boundscheck=False
 
-import numpy as np
-cimport numpy as cnp
-cnp.import_array()
-from libc.stdint cimport int64_t
+from libc.stdint cimport int64_t, int32_t, uint8_t
+
+import numpy
+cimport numpy
+numpy.import_array()
+
+from opteryx.draken.vectors.string_vector cimport StringVector
+from opteryx.draken.vectors.int64_vector cimport Int64Vector, from_sequence as int64_from_sequence
+from opteryx.draken.core.buffers cimport DrakenVarBuffer
 
 
-cdef inline int64_t min3(int64_t x, int64_t y, int64_t z) nogil:
-    """Utility function to find the minimum of three integers."""
+cdef inline int64_t _min3(int64_t x, int64_t y, int64_t z) nogil:
     if x <= y:
-        if x <= z:
-            return x
-        return z
-    if y <= z:
-        return y
-    return z
+        return x if x <= z else z
+    return y if y <= z else z
 
 
-cdef inline int64_t levenshtein_single(str string1, str string2):
-    """
-    Calculate the Levenshtein distance between two strings.
+cdef int64_t levenshtein_bytes(
+        const uint8_t* s1, int32_t len1,
+        const uint8_t* s2, int32_t len2) except -1:
+    """Compute Levenshtein distance between two byte strings."""
+    if len1 < len2:
+        # Swap so s1 is the longer string
+        s1, s2 = s2, s1
+        len1, len2 = len2, len1
 
-    Parameters:
-        string1 (str): The first string to compare.
-        string2 (str): The second string to compare.
-
-    Returns:
-        int: The Levenshtein distance between string1 and string2.
-    """
-    if len(string1) < len(string2):
-        string1, string2 = string2, string1
-
-    cdef int len1 = len(string1)
-    cdef int len2 = len(string2) + 1
-
-    cdef int64_t i, j
-
-    # Allocate a numpy array and create a memory view from it
-    cdef int64_t[:] dp = np.zeros((len1 + 1) * len2, dtype=np.int64)
+    cdef int32_t len2_1 = len2 + 1
+    cdef numpy.ndarray[int64_t, ndim=1] dp_arr = numpy.zeros(
+        (len1 + 1) * len2_1, dtype=numpy.int64
+    )
+    cdef int64_t[::1] dp = dp_arr
+    cdef int32_t i, j
 
     for i in range(len1 + 1):
-        for j in range(len2):
+        for j in range(len2_1):
             if i == 0:
                 dp[j] = j
             elif j == 0:
-                dp[i * len2] = i
-            elif string1[i - 1] == string2[j - 1]:
-                dp[i * len2 + j] = dp[(i - 1) * len2 + (j - 1)]
+                dp[i * len2_1] = i
+            elif s1[i - 1] == s2[j - 1]:
+                dp[i * len2_1 + j] = dp[(i - 1) * len2_1 + (j - 1)]
             else:
-                dp[i * len2 + j] = 1 + min3(
-                    dp[(i - 1) * len2 + j],  # Remove
-                    dp[i * len2 + (j - 1)],  # Insert
-                    dp[(i - 1) * len2 + (j - 1)]  # Replace
+                dp[i * len2_1 + j] = 1 + _min3(
+                    dp[(i - 1) * len2_1 + j],
+                    dp[i * len2_1 + (j - 1)],
+                    dp[(i - 1) * len2_1 + (j - 1)]
                 )
 
-    return dp[len1 * len2 + (len2 - 1)]
+    return dp[len1 * len2_1 + len2]
 
 
-cpdef cnp.ndarray[cnp.int64_t, ndim=1] list_levenshtein(cnp.ndarray[object, ndim=1] a, cnp.ndarray[object, ndim=1] b):
+cpdef Int64Vector list_levenshtein(StringVector a, StringVector b):
     """
-    Calculate Levenshtein distance for arrays of strings.
+    Compute Levenshtein distance for each row pair in StringVectors a and b.
 
     Parameters:
-        a: Array of strings
-        b: Array of strings
+        a: StringVector of strings.
+        b: StringVector of strings (same length as a).
 
     Returns:
-        Array of integers representing Levenshtein distances
+        Int64Vector: Levenshtein distances; -1 where either input is null.
     """
-    cdef Py_ssize_t size = len(a)
-    cdef cnp.ndarray[cnp.int64_t, ndim=1] result = np.zeros(size, dtype=np.int64)
+    cdef DrakenVarBuffer* ap = a.ptr
+    cdef DrakenVarBuffer* bp = b.ptr
+    cdef Py_ssize_t n = ap.length
     cdef Py_ssize_t i
+    cdef int32_t a_start, a_end, b_start, b_end
 
-    for i in range(size):
-        if a[i] is None or b[i] is None:
-            result[i] = -1  # or some other value to indicate null
-        else:
-            result[i] = levenshtein_single(str(a[i]), str(b[i]))
+    cdef numpy.ndarray[int64_t, ndim=1] result = numpy.zeros(n, dtype=numpy.int64)
+    cdef int64_t[::1] result_view = result
 
-    return result
+    for i in range(n):
+        if ap.null_bitmap != NULL and not ((ap.null_bitmap[i >> 3] >> (i & 7)) & 1):
+            result_view[i] = -1
+            continue
+        if bp.null_bitmap != NULL and not ((bp.null_bitmap[i >> 3] >> (i & 7)) & 1):
+            result_view[i] = -1
+            continue
+
+        a_start = ap.offsets[i]
+        a_end = ap.offsets[i + 1]
+        b_start = bp.offsets[i]
+        b_end = bp.offsets[i + 1]
+
+        result_view[i] = levenshtein_bytes(
+            <const uint8_t*>ap.data + a_start, a_end - a_start,
+            <const uint8_t*>bp.data + b_start, b_end - b_start
+        )
+
+    return int64_from_sequence(result_view)

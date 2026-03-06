@@ -23,13 +23,17 @@ from cpython.bytes cimport PyBytes_FromStringAndSize
 from cpython.mem cimport PyMem_Calloc
 from cpython.mem cimport PyMem_Free
 from cpython.mem cimport PyMem_Malloc
-from libc.string cimport strlen
+from libc.stddef cimport size_t
+from libc.stdlib cimport malloc
+from libc.string cimport memcpy, memset, strlen
 from libc.stdint cimport int32_t, int64_t, uint8_t
 from libc.stdint cimport uint64_t
 
 from opteryx.draken.core.buffers cimport (
+    DrakenFixedBuffer,
     DrakenMorsel,
     DrakenType,
+    DrakenVarBuffer,
     DRAKEN_ARRAY,
     DRAKEN_BOOL,
     DRAKEN_CONSTANT,
@@ -50,7 +54,16 @@ from opteryx.draken.core.buffers cimport (
 )
 from opteryx.draken.vectors.vector cimport Vector
 from opteryx.draken.vectors.bool_vector cimport BoolVector
+from opteryx.draken.vectors.date32_vector cimport Date32Vector
+from opteryx.draken.vectors.float64_vector cimport Float64Vector
+from opteryx.draken.vectors.int64_vector cimport Int64Vector
+from opteryx.draken.vectors.integer_vector cimport IntegerVector
+from opteryx.draken.vectors.interval_vector cimport IntervalVector
+from opteryx.draken.vectors.string_vector cimport StringVector
+from opteryx.draken.vectors.time_vector cimport TimeVector
+from opteryx.draken.vectors.timestamp_vector cimport TimestampVector
 from opteryx.draken.interop.arrow cimport vector_from_arrow
+from opteryx.draken.interop.arrow cimport vector_from_sequence
 import pyarrow as pa
 
 # Python helper: int subclass for DrakenType enum debugging
@@ -80,6 +93,174 @@ cdef class DrakenTypeInt(int):
             100: "DRAKEN_NON_NATIVE",
         }
         return mapping.get(int(self), f"UNKNOWN({int(self)})")
+
+
+cdef inline bint _bitmap_get(uint8_t* bitmap, Py_ssize_t index):
+    return ((bitmap[index >> 3] >> (index & 7)) & 1) != 0
+
+
+cdef inline void _bitmap_set(uint8_t* bitmap, Py_ssize_t index):
+    bitmap[index >> 3] |= <uint8_t>(1 << (index & 7))
+
+
+cdef inline void _bitmap_clear(uint8_t* bitmap, Py_ssize_t index):
+    bitmap[index >> 3] &= <uint8_t>(~(1 << (index & 7)))
+
+
+cdef void _copy_bits(
+    uint8_t* src,
+    Py_ssize_t src_offset,
+    uint8_t* dst,
+    Py_ssize_t dst_offset,
+    Py_ssize_t length,
+):
+    cdef Py_ssize_t i
+    cdef Py_ssize_t src_index
+    cdef Py_ssize_t dst_index
+    for i in range(length):
+        src_index = src_offset + i
+        dst_index = dst_offset + i
+        if _bitmap_get(src, src_index):
+            _bitmap_set(dst, dst_index)
+        else:
+            _bitmap_clear(dst, dst_index)
+
+
+cdef uint8_t* _merge_null_bitmaps(
+    uint8_t* left_bitmap,
+    Py_ssize_t left_offset,
+    Py_ssize_t left_rows,
+    uint8_t* right_bitmap,
+    Py_ssize_t right_offset,
+    Py_ssize_t right_rows,
+) except *:
+    cdef Py_ssize_t total_rows = left_rows + right_rows
+    cdef Py_ssize_t null_bytes
+    cdef Py_ssize_t i
+    cdef uint8_t* merged
+    cdef uint8_t trailing_mask
+
+    if total_rows == 0:
+        return NULL
+
+    if left_bitmap == NULL and right_bitmap == NULL:
+        return NULL
+
+    null_bytes = (total_rows + 7) // 8
+    merged = <uint8_t*> malloc(null_bytes)
+    if merged == NULL:
+        raise MemoryError()
+
+    memset(merged, 0xFF, null_bytes)
+
+    if left_bitmap != NULL:
+        for i in range(left_rows):
+            if not _bitmap_get(left_bitmap, left_offset + i):
+                _bitmap_clear(merged, i)
+
+    if right_bitmap != NULL:
+        for i in range(right_rows):
+            if not _bitmap_get(right_bitmap, right_offset + i):
+                _bitmap_clear(merged, left_rows + i)
+
+    if (total_rows & 7) != 0:
+        trailing_mask = <uint8_t>((1 << (total_rows & 7)) - 1)
+        merged[null_bytes - 1] &= trailing_mask
+
+    return merged
+
+
+cdef void _concat_fixed_buffers(
+    DrakenFixedBuffer* out_ptr,
+    DrakenFixedBuffer* left_ptr,
+    DrakenFixedBuffer* right_ptr,
+    Py_ssize_t left_rows,
+    Py_ssize_t right_rows,
+    Py_ssize_t left_null_offset=0,
+    Py_ssize_t right_null_offset=0,
+) except *:
+    cdef Py_ssize_t left_bytes = left_rows * <Py_ssize_t>left_ptr.itemsize
+    cdef Py_ssize_t right_bytes = right_rows * <Py_ssize_t>left_ptr.itemsize
+    cdef uint8_t* merged_nulls
+
+    if left_bytes > 0 and left_ptr.data != NULL:
+        memcpy(out_ptr.data, left_ptr.data, left_bytes)
+    if right_bytes > 0 and right_ptr.data != NULL:
+        memcpy(<char*>out_ptr.data + left_bytes, right_ptr.data, right_bytes)
+
+    merged_nulls = _merge_null_bitmaps(
+        left_ptr.null_bitmap,
+        left_null_offset,
+        left_rows,
+        right_ptr.null_bitmap,
+        right_null_offset,
+        right_rows,
+    )
+    out_ptr.null_bitmap = merged_nulls
+
+
+cdef void _concat_bool_buffers(
+    DrakenFixedBuffer* out_ptr,
+    DrakenFixedBuffer* left_ptr,
+    DrakenFixedBuffer* right_ptr,
+    Py_ssize_t left_rows,
+    Py_ssize_t right_rows,
+) except *:
+    cdef Py_ssize_t total_rows = left_rows + right_rows
+    cdef Py_ssize_t packed_bytes = (total_rows + 7) // 8
+    cdef uint8_t* out_bits = <uint8_t*> out_ptr.data
+
+    if packed_bytes > 0:
+        memset(out_bits, 0, packed_bytes)
+        if left_rows > 0:
+            _copy_bits(<uint8_t*>left_ptr.data, 0, out_bits, 0, left_rows)
+        if right_rows > 0:
+            _copy_bits(<uint8_t*>right_ptr.data, 0, out_bits, left_rows, right_rows)
+
+    out_ptr.null_bitmap = _merge_null_bitmaps(
+        left_ptr.null_bitmap,
+        0,
+        left_rows,
+        right_ptr.null_bitmap,
+        0,
+        right_rows,
+    )
+
+
+cdef void _concat_string_buffers(
+    StringVector out_vec,
+    StringVector left_vec,
+    StringVector right_vec,
+    Py_ssize_t left_rows,
+    Py_ssize_t right_rows,
+) except *:
+    cdef DrakenVarBuffer* out_ptr = out_vec.ptr
+    cdef DrakenVarBuffer* left_ptr = left_vec.ptr
+    cdef DrakenVarBuffer* right_ptr = right_vec.ptr
+    cdef Py_ssize_t i
+    cdef Py_ssize_t left_bytes = <Py_ssize_t>left_ptr.offsets[left_rows]
+    cdef Py_ssize_t right_bytes = <Py_ssize_t>right_ptr.offsets[right_rows]
+
+    if left_bytes > 0 and left_ptr.data != NULL:
+        memcpy(out_ptr.data, left_ptr.data, left_bytes)
+    if right_bytes > 0 and right_ptr.data != NULL:
+        memcpy(out_ptr.data + left_bytes, right_ptr.data, right_bytes)
+
+    out_ptr.offsets[0] = 0
+    for i in range(1, left_rows + 1):
+        out_ptr.offsets[i] = left_ptr.offsets[i]
+    for i in range(1, right_rows + 1):
+        out_ptr.offsets[left_rows + i] = <int32_t>(left_bytes + right_ptr.offsets[i])
+
+    out_ptr.null_bitmap = _merge_null_bitmaps(
+        left_ptr.null_bitmap,
+        0,
+        left_rows,
+        right_ptr.null_bitmap,
+        0,
+        right_rows,
+    )
+
 
 cdef class Morsel:
 
@@ -521,6 +702,191 @@ cdef class Morsel:
         """
         self._filter_mask_inplace(mask)
         return self
+
+    cpdef void append(self, Morsel other):
+        """Append another morsel's rows to this morsel in-place."""
+        cdef Py_ssize_t i
+        cdef Py_ssize_t n_columns
+        cdef Py_ssize_t left_rows
+        cdef Py_ssize_t right_rows
+        cdef Py_ssize_t total_rows
+        cdef Vector left_vec
+        cdef Vector right_vec
+        cdef Vector new_vec
+        cdef list values
+
+        cdef Int64Vector out_i64
+        cdef Float64Vector out_f64
+        cdef BoolVector out_bool
+        cdef IntegerVector out_int
+        cdef Date32Vector out_date32
+        cdef TimeVector out_time
+        cdef TimestampVector out_ts
+        cdef IntervalVector out_interval
+        cdef StringVector out_str
+        cdef Py_ssize_t total_string_bytes
+
+        if other is None:
+            return
+        if self.ptr is NULL or other.ptr is NULL:
+            raise ValueError("Cannot append uninitialized morsels")
+
+        n_columns = self.ptr.num_columns
+        if n_columns != other.ptr.num_columns:
+            raise ValueError(
+                f"Cannot append morsel with {other.ptr.num_columns} columns "
+                f"to morsel with {n_columns} columns"
+            )
+
+        for i in range(n_columns):
+            if self._encoded_names[i] != other._encoded_names[i]:
+                raise ValueError(
+                    f"Cannot append morsels with different schemas: "
+                    f"column {i} differs ({self._encoded_names[i]!r} != {other._encoded_names[i]!r})"
+                )
+
+        right_rows = other.ptr.num_rows
+        if right_rows == 0:
+            return
+
+        left_rows = self.ptr.num_rows
+        total_rows = left_rows + right_rows
+
+        for i in range(n_columns):
+            left_vec = <Vector> self.ptr.columns[i]
+            right_vec = <Vector> other.ptr.columns[i]
+
+            if isinstance(left_vec, Int64Vector) and isinstance(right_vec, Int64Vector):
+                out_i64 = Int64Vector(<size_t>total_rows)
+                _concat_fixed_buffers(
+                    out_i64.ptr,
+                    (<Int64Vector>left_vec).ptr,
+                    (<Int64Vector>right_vec).ptr,
+                    left_rows,
+                    right_rows,
+                )
+                new_vec = <Vector>out_i64
+
+            elif isinstance(left_vec, Float64Vector) and isinstance(right_vec, Float64Vector):
+                out_f64 = Float64Vector(<size_t>total_rows)
+                _concat_fixed_buffers(
+                    out_f64.ptr,
+                    (<Float64Vector>left_vec).ptr,
+                    (<Float64Vector>right_vec).ptr,
+                    left_rows,
+                    right_rows,
+                )
+                new_vec = <Vector>out_f64
+
+            elif isinstance(left_vec, BoolVector) and isinstance(right_vec, BoolVector):
+                out_bool = BoolVector(<size_t>total_rows)
+                _concat_bool_buffers(
+                    out_bool.ptr,
+                    (<BoolVector>left_vec).ptr,
+                    (<BoolVector>right_vec).ptr,
+                    left_rows,
+                    right_rows,
+                )
+                new_vec = <Vector>out_bool
+
+            elif isinstance(left_vec, IntegerVector) and isinstance(right_vec, IntegerVector):
+                if (<IntegerVector>left_vec).ptr.type != (<IntegerVector>right_vec).ptr.type:
+                    values = left_vec.to_pylist()
+                    values.extend(right_vec.to_pylist())
+                    new_vec = <Vector>vector_from_sequence(values, self.ptr.column_types[i])
+                else:
+                    out_int = IntegerVector((<IntegerVector>left_vec).ptr.type, <size_t>total_rows)
+                    _concat_fixed_buffers(
+                        out_int.ptr,
+                        (<IntegerVector>left_vec).ptr,
+                        (<IntegerVector>right_vec).ptr,
+                        left_rows,
+                        right_rows,
+                    )
+                    new_vec = <Vector>out_int
+
+            elif isinstance(left_vec, Date32Vector) and isinstance(right_vec, Date32Vector):
+                out_date32 = Date32Vector(<size_t>total_rows)
+                _concat_fixed_buffers(
+                    out_date32.ptr,
+                    (<Date32Vector>left_vec).ptr,
+                    (<Date32Vector>right_vec).ptr,
+                    left_rows,
+                    right_rows,
+                )
+                new_vec = <Vector>out_date32
+
+            elif isinstance(left_vec, TimeVector) and isinstance(right_vec, TimeVector):
+                if (<TimeVector>left_vec).is_time64 != (<TimeVector>right_vec).is_time64:
+                    values = left_vec.to_pylist()
+                    values.extend(right_vec.to_pylist())
+                    new_vec = <Vector>vector_from_sequence(values, self.ptr.column_types[i])
+                else:
+                    out_time = TimeVector(<size_t>total_rows, (<TimeVector>left_vec).is_time64)
+                    _concat_fixed_buffers(
+                        out_time.ptr,
+                        (<TimeVector>left_vec).ptr,
+                        (<TimeVector>right_vec).ptr,
+                        left_rows,
+                        right_rows,
+                    )
+                    new_vec = <Vector>out_time
+
+            elif isinstance(left_vec, TimestampVector) and isinstance(right_vec, TimestampVector):
+                out_ts = TimestampVector(<size_t>total_rows)
+                out_ts.timestamp_unit = (<TimestampVector>left_vec).timestamp_unit
+                out_ts.null_bit_offset = 0
+                _concat_fixed_buffers(
+                    out_ts.ptr,
+                    (<TimestampVector>left_vec).ptr,
+                    (<TimestampVector>right_vec).ptr,
+                    left_rows,
+                    right_rows,
+                    (<TimestampVector>left_vec).null_bit_offset,
+                    (<TimestampVector>right_vec).null_bit_offset,
+                )
+                new_vec = <Vector>out_ts
+
+            elif isinstance(left_vec, IntervalVector) and isinstance(right_vec, IntervalVector):
+                out_interval = IntervalVector(<size_t>total_rows)
+                _concat_fixed_buffers(
+                    out_interval.ptr,
+                    (<IntervalVector>left_vec).ptr,
+                    (<IntervalVector>right_vec).ptr,
+                    left_rows,
+                    right_rows,
+                )
+                new_vec = <Vector>out_interval
+
+            elif isinstance(left_vec, StringVector) and isinstance(right_vec, StringVector):
+                total_string_bytes = (
+                    (<StringVector>left_vec).ptr.offsets[left_rows]
+                    + (<StringVector>right_vec).ptr.offsets[right_rows]
+                )
+                out_str = StringVector(<size_t>total_rows, <size_t>total_string_bytes)
+                _concat_string_buffers(
+                    out_str,
+                    <StringVector>left_vec,
+                    <StringVector>right_vec,
+                    left_rows,
+                    right_rows,
+                )
+                new_vec = <Vector>out_str
+
+            else:
+                # Generic fallback keeps API coverage for less common vector
+                # classes. This path avoids Morsel<->Arrow conversion, but may
+                # still use Arrow internally in vector_from_sequence for some
+                # dtypes.
+                values = left_vec.to_pylist()
+                values.extend(right_vec.to_pylist())
+                new_vec = <Vector>vector_from_sequence(values, self.ptr.column_types[i])
+
+            self._columns[i] = new_vec
+            self.ptr.columns[i] = <void*> new_vec
+            self.ptr.column_types[i] = new_vec.dtype
+
+        self.ptr.num_rows = total_rows
 
     cdef bint _looks_like_boolean_mask(self, object mask):
         cdef object dtype

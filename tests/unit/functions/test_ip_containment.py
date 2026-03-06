@@ -3,9 +3,10 @@ import sys
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
+import pyarrow as pa
 import pytest
-import numpy
 from opteryx.compiled.list_ops import list_ip_in_cidr
+from opteryx.draken.interop.arrow import vector_from_arrow
 
 TESTS = [
     # Test case 1: Single IP in CIDR
@@ -163,17 +164,18 @@ TESTS = [
     (["192.168.1.0"], "192.168.0.0/23", [True]),
 
     # additional edge cases: Very small subnets
-    (["192.168.1.2", "192.168.1.3", "192.168.1.4"], "192.168.1.2/31", [True, True]),
+    (["192.168.1.2", "192.168.1.3", "192.168.1.4"], "192.168.1.2/31", [True, True, False]),
 ]
 
 
 @pytest.mark.parametrize("ips, cidr, expected", TESTS)
 def test_ip_containment(ips, cidr, expected):
     try:
-        result = list_ip_in_cidr(numpy.array(ips), cidr)
-        assert (x == y for x, y in zip(result, expected))
+        vec = vector_from_arrow(pa.array(ips, type=pa.string()))
+        result = list_ip_in_cidr(vec, cidr).to_arrow().to_pylist()
+        assert result == expected, (ips, cidr, expected, result)
     except AssertionError as e:
-        assert False, (ips, cidr, expected, result)
+        assert False, (ips, cidr, expected, e)
     except Exception as e:
         assert expected == type(e), (ips, cidr, expected, type(e))
         

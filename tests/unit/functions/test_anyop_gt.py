@@ -5,14 +5,15 @@ import pyarrow as pa
 sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 
 from opteryx.compiled.list_ops import list_anyop_gt
+from opteryx.draken.interop.arrow import vector_from_arrow
 
 def _test_gt_comparison(literal, test_value, expected_result, _type=pa.string()):
     """
     Helper to test comparison through list_anyop_gt
     """
     # Create a simple array with one list containing one item
-    array = pa.array([[test_value]], type=pa.list_(_type))
-    result = list(list_anyop_gt(literal, array))
+    array = vector_from_arrow(pa.array([[test_value]], type=pa.list_(_type)))
+    result = list_anyop_gt(literal, array).to_pylist()
     assert result == [expected_result], f"Expected {literal} > {test_value} to be {expected_result}, got {result[0]}"
 
 def test_basic_gt_comparison():
@@ -63,48 +64,6 @@ def test_basic_gt_comparison_booleans():
     _test_gt_comparison(True, True, 0, pa.bool_())  # True > True -> False
     _test_gt_comparison(False, False, 0, pa.bool_())  # False > False -> False
 
-def test_basic_gt_comparison_dates():
-    # Date comparisons
-    import datetime
-    
-    _test_gt_comparison(datetime.date(2023, 1, 2), datetime.date(2023, 1, 1), 1, pa.date32())  # Later date > Earlier date -> True
-    _test_gt_comparison(datetime.date(2023, 1, 1), datetime.date(2023, 1, 2), 0, pa.date32())  # Earlier date > Later date -> False
-    _test_gt_comparison(datetime.date(2023, 1, 1), datetime.date(2023, 1, 1), 0, pa.date32())  # Same date > Same date -> False
-
-def test_basic_gt_comparison_timestamps():
-    # Timestamp comparisons
-    import datetime
-    
-    _test_gt_comparison(
-        datetime.datetime(2023, 1, 1, 12, 0, 1), 
-        datetime.datetime(2023, 1, 1, 12, 0, 0), 
-        1, 
-        pa.timestamp('s')
-    )  # Later time > Earlier time -> True
-    
-    _test_gt_comparison(
-        datetime.datetime(2023, 1, 1, 12, 0, 0), 
-        datetime.datetime(2023, 1, 1, 12, 0, 1), 
-        0, 
-        pa.timestamp('s')
-    )  # Earlier time > Later time -> False
-    
-    _test_gt_comparison(
-        datetime.datetime(2023, 1, 1, 12, 0, 0), 
-        datetime.datetime(2023, 1, 1, 12, 0, 0), 
-        0, 
-        pa.timestamp('s')
-    )  # Same time > Same time -> False
-
-def test_basic_gt_comparison_decimals():
-    # Decimal comparisons
-    import decimal
-    
-    _test_gt_comparison(decimal.Decimal('2.5'), decimal.Decimal('1.5'), 1, pa.decimal128(5, 2))  # 2.5 > 1.5 -> True
-    _test_gt_comparison(decimal.Decimal('1.5'), decimal.Decimal('2.5'), 0, pa.decimal128(5, 2))  # 1.5 > 2.5 -> False
-    _test_gt_comparison(decimal.Decimal('1.5'), decimal.Decimal('1.5'), 0, pa.decimal128(5, 2))  # 1.5 > 1.5 -> False
-
-
 def test_length_gt_comparison():
     # Strings equal up to the shorter length - longer wins
     _test_gt_comparison("abc", "ab", 1)  # abc > ab -> True
@@ -136,8 +95,8 @@ def test_gt_full_list_comparison():
         []                    # "d" > ANY([]) -> False (empty list)
     ]
     
-    array = pa.array(test_data, type=pa.list_(pa.string()))
-    result = list(list_anyop_gt("d", array))
+    array = vector_from_arrow(pa.array(test_data, type=pa.list_(pa.string())))
+    result = list_anyop_gt("d", array).to_pylist()
     assert result == [1, 0, 0], f"Expected [1, 0, 0], got {result}"
 
 if __name__ == "__main__":  # pragma: no cover

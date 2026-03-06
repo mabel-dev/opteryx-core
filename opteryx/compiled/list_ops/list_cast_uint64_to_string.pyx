@@ -6,58 +6,47 @@
 # cython: wraparound=False
 # cython: boundscheck=False
 
-import numpy
-cimport numpy
-numpy.import_array()
+from libc.stdint cimport uint64_t, uint8_t
 
-from libc.stdint cimport int64_t, uint64_t
-from cpython.bytes cimport PyBytes_FromStringAndSize
+from opteryx.draken.vectors.int64_vector cimport Int64Vector
+from opteryx.draken.vectors.string_vector cimport StringVector
+from opteryx.draken.vectors import string_vector as string_vector_module
 
-cdef inline char* uint64_to_str_ptr(uint64_t value, char* buf) nogil:
-    cdef int64_t val
+
+cdef inline int uint64_to_str_buf(uint64_t value, char* buf) nogil:
+    """Write ASCII digits of value into buf (20 chars) and return length."""
     cdef int i = 20
-
     if value == 0:
-        buf[19] = 48  # '0'
-        return buf + 19
-
-    val = <int64_t>value
-
-    while val != 0:
+        buf[19] = 48
+        return 1
+    while value != 0:
         i -= 1
-        buf[i] = 48 + (val % 10)
-        val //= 10
+        buf[i] = 48 + (value % 10)
+        value //= 10
+    return 20 - i
 
-    return buf + i
 
-cpdef numpy.ndarray list_cast_uint64_to_bytes(const uint64_t[:] arr):
-    cdef Py_ssize_t i, n = arr.shape[0]
+cpdef StringVector list_cast_uint64_to_bytes(Int64Vector vec):
+    """Cast an Int64Vector (reinterpreted as uint64) to a StringVector of decimal strings."""
+    cdef Py_ssize_t n = vec.ptr.length
+    cdef uint64_t* src = <uint64_t*>vec.ptr.data
+    cdef uint8_t* null_bm = vec.ptr.null_bitmap
     cdef char buf[21]
-    cdef char* ptr
     cdef int length
+    cdef Py_ssize_t i
 
-    cdef numpy.ndarray[object, ndim=1] result = numpy.empty(n, dtype=object)
-    cdef object[:] result_view = result
+    builder = string_vector_module.StringVectorBuilder.with_estimate(n, 10)
 
     for i in range(n):
-        ptr = uint64_to_str_ptr(arr[i], buf)
-        length = buf + 20 - ptr
-        result_view[i] = PyBytes_FromStringAndSize(ptr, length)
+        if null_bm != NULL and not ((null_bm[i >> 3] >> (i & 7)) & 1):
+            builder.append_null()
+        else:
+            length = uint64_to_str_buf(src[i], buf)
+            builder.append_bytes(buf + (20 - length), length)
 
-    return result
+    return builder.finish()
 
-cpdef numpy.ndarray list_cast_uint64_to_ascii(const uint64_t[:] arr):
-    cdef Py_ssize_t i, n = arr.shape[0]
-    cdef char buf[21]
-    cdef char* ptr
-    cdef int length
 
-    cdef numpy.ndarray[object, ndim=1] result = numpy.empty(n, dtype=object)
-    cdef object[:] result_view = result
-
-    for i in range(n):
-        ptr = uint64_to_str_ptr(arr[i], buf)
-        length = buf + 20 - ptr
-        result_view[i] = PyBytes_FromStringAndSize(ptr, length).decode("ascii")
-
-    return result
+cpdef StringVector list_cast_uint64_to_ascii(Int64Vector vec):
+    """Same as list_cast_uint64_to_bytes."""
+    return list_cast_uint64_to_bytes(vec)

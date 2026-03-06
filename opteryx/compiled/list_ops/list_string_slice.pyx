@@ -6,102 +6,104 @@
 # cython: wraparound=False
 # cython: boundscheck=False
 
-import numpy
-cimport numpy
-numpy.import_array()
+from libc.stdint cimport int32_t, uint8_t
+
+from opteryx.draken.vectors.string_vector cimport StringVector
+from opteryx.draken.vectors import string_vector as string_vector_module
+from opteryx.draken.core.buffers cimport DrakenVarBuffer
 
 
-cpdef numpy.ndarray list_string_slice_left(object arr, object length):
+cpdef StringVector list_string_slice_left(StringVector vec, object length):
     """
-    Slice strings from the left (beginning).
+    Slice each string from the left (beginning) up to 'length' bytes.
 
     Parameters:
-        arr: Array of strings
-        length: Length to slice (can be scalar or array)
+        vec: StringVector of strings.
+        length: int scalar or iterable of ints — number of bytes to keep.
 
     Returns:
-        Array of sliced strings
+        StringVector: sliced strings.
     """
-
-    if hasattr(arr, "to_numpy"):
-        arr = arr.to_numpy(zero_copy_only=False)
-
-    cdef Py_ssize_t i, n = len(arr)
-    cdef numpy.ndarray[object, ndim=1] result = numpy.empty(n, dtype=object)
-    cdef numpy.ndarray length_arr
-    cdef object string_val
+    cdef DrakenVarBuffer* ptr = vec.ptr
+    cdef Py_ssize_t n = ptr.length
+    cdef uint8_t* null_bm = ptr.null_bitmap
+    cdef Py_ssize_t i
+    cdef int32_t start, end, row_len
     cdef int slice_len
 
-    if n == 0:
-        return result
-
-    # Handle scalar length
-    if not hasattr(length, "__iter__"):
-        length_arr = numpy.full(n, length, dtype=object)
+    # Normalize length to a list
+    cdef list length_list
+    if hasattr(length, "__iter__") and not isinstance(length, (str, bytes)):
+        try:
+            length_list = list(length)
+        except TypeError:
+            length_list = [int(length)] * n
     else:
-        if hasattr(length, "to_numpy"):
-            length_arr = length.to_numpy(zero_copy_only=False)
-        else:
-            length_arr = numpy.asarray(length)
+        length_list = [int(length)] * n
 
-    # Convert input array to numpy if needed
-    if hasattr(arr, "to_numpy"):
-        arr = arr.to_numpy(zero_copy_only=False)
+    builder = string_vector_module.StringVectorBuilder.with_estimate(n, 8)
 
     for i in range(n):
-        string_val = arr[i]
-        if string_val is None:
-            result[i] = None
+        if null_bm != NULL and not ((null_bm[i >> 3] >> (i & 7)) & 1):
+            builder.append_null()
         else:
-            slice_len = int(length_arr[i])
-            result[i] = string_val[:slice_len]
+            start = ptr.offsets[i]
+            end = ptr.offsets[i + 1]
+            row_len = end - start
+            slice_len = int(length_list[i])
+            if slice_len < 0:
+                slice_len = max(0, row_len + slice_len)
+            if slice_len > row_len:
+                slice_len = row_len
+            builder.append_bytes(<const char*>ptr.data + start, slice_len)
 
-    return result
+    return builder.finish()
 
 
-cpdef numpy.ndarray list_string_slice_right(object arr, object length):
+cpdef StringVector list_string_slice_right(StringVector vec, object length):
     """
-    Slice strings from the right (end).
+    Slice each string from the right (end) keeping 'length' bytes.
 
     Parameters:
-        arr: Array of strings
-        length: Length to slice (can be scalar or array)
+        vec: StringVector of strings.
+        length: int scalar or iterable of ints — number of bytes to keep from the right.
 
     Returns:
-        Array of sliced strings
+        StringVector: sliced strings.
     """
+    cdef DrakenVarBuffer* ptr = vec.ptr
+    cdef Py_ssize_t n = ptr.length
+    cdef uint8_t* null_bm = ptr.null_bitmap
+    cdef Py_ssize_t i
+    cdef int32_t start, end, row_len
+    cdef int slice_len, actual_start
 
-    if hasattr(arr, "to_numpy"):
-        arr = arr.to_numpy(zero_copy_only=False)
-
-    cdef Py_ssize_t i, n = len(arr)
-    cdef numpy.ndarray[object, ndim=1] result = numpy.empty(n, dtype=object)
-    cdef numpy.ndarray length_arr
-    cdef object string_val
-    cdef int slice_len
-
-    if n == 0:
-        return result
-
-    # Handle scalar length
-    if not hasattr(length, "__iter__"):
-        length_arr = numpy.full(n, length, dtype=object)
+    cdef list length_list
+    if hasattr(length, "__iter__") and not isinstance(length, (str, bytes)):
+        try:
+            length_list = list(length)
+        except TypeError:
+            length_list = [int(length)] * n
     else:
-        if hasattr(length, "to_numpy"):
-            length_arr = length.to_numpy(zero_copy_only=False)
-        else:
-            length_arr = numpy.asarray(length)
+        length_list = [int(length)] * n
 
-    # Convert input array to numpy if needed
-    if hasattr(arr, "to_numpy"):
-        arr = arr.to_numpy(zero_copy_only=False)
+    builder = string_vector_module.StringVectorBuilder.with_estimate(n, 8)
 
     for i in range(n):
-        string_val = arr[i]
-        if string_val is None:
-            result[i] = None
+        if null_bm != NULL and not ((null_bm[i >> 3] >> (i & 7)) & 1):
+            builder.append_null()
         else:
-            slice_len = int(length_arr[i])
-            result[i] = string_val[-slice_len:]
+            start = ptr.offsets[i]
+            end = ptr.offsets[i + 1]
+            row_len = end - start
+            slice_len = int(length_list[i])
+            if slice_len < 0:
+                slice_len = 0
+            if slice_len > row_len:
+                slice_len = row_len
+            actual_start = row_len - slice_len
+            builder.append_bytes(
+                <const char*>ptr.data + start + actual_start, slice_len
+            )
 
-    return result
+    return builder.finish()

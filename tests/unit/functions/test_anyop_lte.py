@@ -5,10 +5,11 @@ import pyarrow as pa
 sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 
 from opteryx.compiled.list_ops import list_anyop_lte
+from opteryx.draken.interop.arrow import vector_from_arrow
 
 def _test_comparison(literal, test_value, expected_result, _type=pa.string()):
-    array = pa.array([[test_value]], type=pa.list_(_type))
-    result = list(list_anyop_lte(literal, array))
+    array = vector_from_arrow(pa.array([[test_value]], type=pa.list_(_type)))
+    result = list_anyop_lte(literal, array).to_pylist()
     assert result == [expected_result], f"Expected {literal} <= {test_value} to be {expected_result}, got {result[0]}"
 
 def test_basic_comparison_strings():

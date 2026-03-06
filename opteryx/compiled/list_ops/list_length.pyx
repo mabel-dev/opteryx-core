@@ -3,54 +3,42 @@
 # cython: cdivision=True
 # cython: initializedcheck=False
 # cython: infer_types=True
-# cython: wraparound=True
+# cython: wraparound=False
 # cython: boundscheck=False
 
-import pyarrow
-import array as _array
+from libc.stdint cimport int64_t, uint8_t
 
-# Native implementation provided by the vendored extension.
-# It accepts any object exposing the buffer protocol (e.g., NumPy arrays,
-# PyArrow buffers) and returns a `bytearray` containing packed uint32
-# values (native endianness).
-from opteryx.nanobind.list_length import offsets_to_lengths_into
-from libc.stdint cimport uint32_t
+import numpy
+cimport numpy
+numpy.import_array()
 
-cpdef uint32_t[::1] list_length(object array):
+from opteryx.draken.vectors.array_vector cimport ArrayVector
+from opteryx.draken.vectors.int64_vector cimport Int64Vector, from_sequence as int64_from_sequence
+from opteryx.draken.core.buffers cimport DrakenArrayBuffer
 
-    cdef Py_ssize_t n
-    cdef uint32_t[::1] mv
-    cdef Py_ssize_t total_res_len = 0
-    cdef Py_ssize_t chunk_res_len = 0
-    cdef Py_ssize_t start = 0
 
-    # Uses PyArrow offsets buffer
-    if isinstance(array, pyarrow.ChunkedArray):
-        # Precompute total length (sum of len(chunk) for each chunk)
-        for chunk in array.chunks:
-            total_res_len += len(chunk)
+cpdef Int64Vector list_length(ArrayVector vec):
+    """
+    Compute the length (number of elements) of each row in an ArrayVector.
 
-        out = _array.array('I', [0]) * total_res_len
-        # Fill each chunk into the appropriate slice of the out buffer
-        for chunk in array.chunks:
-            chunk_res_len = len(chunk)
-            if chunk_res_len > 0:
-                view = memoryview(out)[start:(start + chunk_res_len)]
-                offsets_buffer = chunk.buffers()[1]
-                offsets_to_lengths_into(offsets_buffer, view)
-                start += chunk_res_len
+    Parameters:
+        vec: ArrayVector of lists.
 
-        mv = memoryview(out)
-        return mv
+    Returns:
+        Int64Vector: element counts per row (0 for null rows).
+    """
+    cdef DrakenArrayBuffer* ptr = vec.ptr
+    cdef Py_ssize_t n = ptr.length
+    cdef Py_ssize_t i
+    cdef uint8_t* null_bm = ptr.null_bitmap
 
-    n = len(array)
+    cdef numpy.ndarray[int64_t, ndim=1] result = numpy.zeros(n, dtype=numpy.int64)
+    cdef int64_t[::1] result_view = result
 
-    offsets_buffer = array.buffers()[1]
+    for i in range(n):
+        if null_bm != NULL and not ((null_bm[i >> 3] >> (i & 7)) & 1):
+            result_view[i] = 0
+        else:
+            result_view[i] = ptr.offsets[i + 1] - ptr.offsets[i]
 
-    res_len = n
-    out = _array.array('I', [0]) * res_len
-    offsets_to_lengths_into(offsets_buffer, out)
-
-    # Convert the filled array to a typed memoryview of uint32
-    mv = memoryview(out)
-    return mv
+    return int64_from_sequence(result_view)

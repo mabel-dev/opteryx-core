@@ -189,7 +189,13 @@ def date_diff(part, start, end):
             dtype=numpy.int64,
         )
 
-    return list_date_diff(start, end, part)
+    import pyarrow as _pyarrow
+
+    from opteryx.draken.interop.arrow import vector_from_arrow as _vector_from_arrow
+
+    start_vec = _vector_from_arrow(_pyarrow.array(start, type=_pyarrow.timestamp("us")))
+    end_vec = _vector_from_arrow(_pyarrow.array(end, type=_pyarrow.timestamp("us")))
+    return list_date_diff(start_vec, end_vec, part).to_arrow()
 
 
 def time_diff(time1, time2):

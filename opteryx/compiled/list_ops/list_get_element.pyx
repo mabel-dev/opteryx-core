@@ -6,42 +6,28 @@
 # cython: wraparound=False
 # cython: boundscheck=False
 
-import numpy
-cimport numpy
-numpy.import_array()
+from opteryx.draken.vectors.array_vector cimport ArrayVector
 
-cpdef numpy.ndarray list_get_element(numpy.ndarray[object, ndim=1] array, int key):
+
+cpdef list list_get_element(ArrayVector vec, int key):
     """
-    Fetches elements from each sub-array of an array at a given index.
-
-    Note:
-        the sub array could be a numpy array a string etc.
+    Extract element at index 'key' from each row of an ArrayVector.
 
     Parameters:
-        array (numpy.ndarray): A 1D NumPy array of 1D NumPy arrays.
-        key (int): The index at which to retrieve the element from each sub-array.
+        vec: ArrayVector of lists.
+        key: zero-based index to retrieve.
 
     Returns:
-        numpy.ndarray: A NumPy array containing the elements at the given index from each sub-array.
+        Python list of extracted elements (None for nulls or out-of-range rows).
     """
-    cdef Py_ssize_t n = array.size
+    cdef Py_ssize_t n = vec.ptr.length
+    cdef Py_ssize_t i
+    cdef object row
+    cdef list result = [None] * n
 
-    # Check if the array is empty
-    if n == 0:
-        return numpy.empty(0, dtype=object)
-
-    # Preallocate result array with the appropriate type
-    cdef numpy.ndarray result = numpy.empty(n, dtype=object)
-    cdef object[:] result_view = result
-    cdef object sub_array
-    cdef Py_ssize_t i = 0
-
-    # Iterate over the array using memory views for efficient access
     for i in range(n):
-        sub_array = <object>array[i]
-        if sub_array is not None and len(sub_array) > key:
-            result_view[i] = sub_array[key]
-        else:
-            result_view[i] = None
+        row = vec[i]
+        if row is not None and len(row) > key:
+            result[i] = row[key]
 
     return result

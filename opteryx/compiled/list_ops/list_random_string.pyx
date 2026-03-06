@@ -6,53 +6,47 @@
 # cython: wraparound=False
 # cython: boundscheck=False
 
-import numpy
-cimport numpy
-numpy.import_array()
-
 from libc.time cimport time
 
-cdef bytes alphabet = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_/"
-
-# Seed for xorshift32 PRNG
-cdef unsigned int xorshift32_state = <unsigned int>time(NULL)
+from opteryx.draken.vectors.string_vector cimport StringVector
+from opteryx.draken.vectors import string_vector as string_vector_module
 
 
-def list_random_strings(int row_count, int width) -> numpy.ndarray:
+cdef bytes _ALPHABET = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_/"
+cdef unsigned int _rng_state = <unsigned int>time(NULL)
+
+
+cdef inline unsigned int _xorshift32() nogil:
+    global _rng_state
+    cdef unsigned int x = _rng_state
+    x ^= x << 13
+    x ^= x >> 17
+    x ^= x << 5
+    _rng_state = x
+    return x
+
+
+def list_random_strings(int row_count, int width) -> StringVector:
     """
-    Generates a NumPy array of random fixed-width strings, repeated `row_count` times.
+    Generate row_count random fixed-width ASCII strings.
 
     Parameters:
-        row_count: int
-            The number of random strings to generate.
-        width: int
-            The length of each random string.
+        row_count: number of strings to generate.
+        width: length of each string in bytes.
 
     Returns:
-        A NumPy array containing `row_count` random strings of fixed width.
+        StringVector of random strings.
     """
+    builder = string_vector_module.StringVectorBuilder.with_estimate(row_count, width)
 
-    # Allocate NumPy array with fixed-width strings, dtype='S{width}'
-    cdef numpy.ndarray result = numpy.empty((row_count,), dtype=f'S{width}')
+    cdef int i, j
+    cdef unsigned int rv
+    cdef char buf[4096]
 
-    cdef unsigned int total_chars = row_count * width
-    cdef unsigned int i
-    cdef unsigned char rand_value
-    cdef char* ptr = <char*>result.data
+    for i in range(row_count):
+        for j in range(width):
+            rv = _xorshift32() & 0x3F
+            buf[j] = _ALPHABET[rv]
+        builder.append_bytes(buf, width)
 
-    for i from 0 <= i < total_chars:
-        rand_value = xorshift32() & 0x3F  # Random value limited to 64 (alphabet size)
-        ptr[0] = alphabet[rand_value]
-        ptr += 1
-
-    return result
-
-
-cdef inline unsigned int xorshift32():
-    global xorshift32_state  # Declare as global to modify the module-level variable
-    cdef unsigned int x = xorshift32_state
-    x ^= (x << 13)
-    x ^= (x >> 17)
-    x ^= (x << 5)
-    xorshift32_state = x
-    return x
+    return builder.finish()
