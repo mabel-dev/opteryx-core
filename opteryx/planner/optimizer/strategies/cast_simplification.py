@@ -97,36 +97,22 @@ class CastSimplificationStrategy(OptimizationStrategy):
         if node is None:
             return context
 
+        if not context.optimized_plan:
+            context.optimized_plan = context.pre_optimized_tree.copy()
+
         node_type = getattr(node, "node_type", None)
 
-        # Only optimize projection and filter nodes (which contain expressions)
-        if node_type == LogicalPlanStepType.Project:
-            if not context.optimized_plan:
-                context.optimized_plan = context.pre_optimized_tree.copy()
+        # Only optimize filter nodes (which contain conditions with CAST expressions)
+        if node_type == LogicalPlanStepType.Filter:
+            # Simplify CAST nodes in filter condition
+            if hasattr(node, "condition") and node.condition:
+                simplified_condition = simplify_expression(node.condition)
+                if simplified_condition is not node.condition:
+                    node.condition = simplified_condition
+                    context.optimized_plan[context.node_id] = node
 
-            # Simplify CAST nodes in projection columns
-            if hasattr(node, "columns"):
-                simplified_columns = []
-                for col in node.columns:
-                    if col:
-                        simplified_col = simplify_expression(col)
-                        simplified_columns.append(simplified_col)
-                    else:
-                        simplified_columns.append(col)
-
-                node.columns = simplified_columns
-                context.optimized_plan[context.node_id] = node
-
-        elif node_type == LogicalPlanStepType.Filter:
-            if not context.optimized_plan:
-                context.optimized_plan = context.pre_optimized_tree.copy()
-
-            # Simplify CAST nodes in filter expressions
-            if hasattr(node, "expressions"):
-                node.expressions = [
-                    simplify_expression(expr) if expr else expr for expr in node.expressions
-                ]
-                context.optimized_plan[context.node_id] = node
+        # Note: ProjectRel columns (not ProjectionalStep) have CAST expressions
+        # but modifying them here breaks the plan structure - leave to expression evaluation
 
         return context
 

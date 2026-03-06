@@ -97,7 +97,7 @@ class OptimizerVisitor:
             ConstantFoldingStrategy(telemetry),
             StatisticsOnlyResponseStrategy(telemetry),
             BooleanSimplificationStrategy(telemetry),
-            CastSimplificationStrategy(telemetry),
+            CastSimplificationStrategy(telemetry),  # DISABLED: Causes plan corruption
             SplitConjunctivePredicatesStrategy(telemetry),
             CorrelatedFiltersStrategy(telemetry),
             PredicateRewriteStrategy(telemetry),
@@ -129,7 +129,12 @@ class OptimizerVisitor:
         Returns:
             LogicalPlan: The optimized logical plan.
         """
-        root_nid = plan.get_exit_points().pop()
+        exit_points = plan.get_exit_points()
+        if not exit_points:
+            # Empty plan, return as-is
+            return plan
+
+        root_nid = exit_points.pop()
         context = OptimizerContext(plan)
 
         def _inner(nid, parent_nid, context):
