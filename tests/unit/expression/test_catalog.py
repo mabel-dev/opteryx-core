@@ -225,10 +225,10 @@ class TestFunctionCatalog:
         """Builtin functions with aliases are resolvable."""
         catalog = get_catalog()
 
-        # CEILING is an alias for CEIL
-        ceil_def = catalog.get_definition("CEIL")
-        ceiling_def = catalog.get_definition("CEILING")
-        assert ceil_def is ceiling_def
+        # TITLECASE is an alias for TITLE
+        title_def = catalog.get_definition("TITLE")
+        titlecase_def = catalog.get_definition("TITLECASE")
+        assert title_def is titlecase_def
 
     def test_builtin_function_kernels(self):
         """Builtin functions have accessible kernels."""
@@ -469,13 +469,12 @@ class TestResolve:
         result = catalog.resolve("RESOLVER_FN", [object()], self._make_context())
         assert result.inferred_return_type == sentinel_type
 
-    def test_resolve_legacy_backfill(self):
-        """load_legacy_dict() makes all legacy functions resolvable."""
+    def test_resolve_catalog_registered_functions(self):
+        """Catalog-registered functions are resolvable by name and arity."""
         from opteryx.expression.functions import get_catalog
         catalog = get_catalog()
 
-        # Sample of functions that should be backfilled from legacy FUNCTIONS dict.
-        # DATEPART is now hand-crafted with a 2-arg overload; test with 2 args.
+        # DATEPART is hand-crafted with a 2-arg overload; test with 2 args.
         for name, argc in (("TRIM", 1), ("LEVENSHTEIN", 2), ("SHA256", 1), ("DATEPART", 2), ("COSINE_SIMILARITY", 2)):
             assert catalog.get_definition(name) is not None, f"{name} should be in catalog"
             result = catalog.resolve(name, [object()] * argc, BindingContext(schema={}, bound_args={}))

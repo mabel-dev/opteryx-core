@@ -8,9 +8,6 @@ The implementations themselves are in:
     opteryx/expression/functions/implementations/
         arithmetic.py, text.py, temporal.py, logical.py,
         hash_encoding.py, utility.py
-
-During the migration period, kernels are imported from the legacy
-opteryx.functions module until implementations/ modules are complete.
 """
 
 from orso.types import OrsoTypes
@@ -208,7 +205,7 @@ def _builtin_arithmetic_functions() -> list[FunctionDefinition]:
         ),
         FunctionDefinition(
             name="CEIL",
-            aliases=("CEILING",),
+            aliases=(),
             category="arithmetic",
             volatility="immutable",
             deterministic=True,
@@ -324,12 +321,15 @@ def _case_return_type(arg_nodes) -> OrsoTypes:
 
 def _builtin_logical_functions() -> list[FunctionDefinition]:
     """Logical and control flow functions."""
-    from opteryx.functions import FUNCTIONS as _LEGACY
-    from opteryx.functions import other_functions
+    import numpy
 
-    _coalesce_kernel = _LEGACY["COALESCE"][0]
-    _iif_kernel = _LEGACY["IIF"][0]
-    _case_kernel = _LEGACY["CASE"][0]
+    from opteryx.functions import _coalesce
+    from opteryx.functions import other_functions
+    from opteryx.functions import select_values
+
+    _coalesce_kernel = _coalesce
+    _iif_kernel = numpy.where
+    _case_kernel = select_values
 
     _variadic_any = (
         ParameterSpec(name="arg0", type_family="any"),
@@ -513,142 +513,59 @@ def _builtin_logical_functions() -> list[FunctionDefinition]:
 
 
 def _builtin_aggregate_functions() -> list[FunctionDefinition]:
-    """Aggregate functions (GROUP BY targets)."""
+    # Aggregates are dispatched by draken via AGGREGATORS in aggregate_node.py,
+    # not by the function catalog. Returning an empty list keeps callers intact
+    # while ensuring aggregates are NOT visible to is_function() checks.
+    return []
 
-    def _same_as_arg0(arg_nodes) -> OrsoTypes:
-        sc = getattr(arg_nodes[0], "schema_column", None)
-        return sc.type if sc is not None else OrsoTypes.NULL
 
-    def _array_agg_return_type(arg_nodes):
-        sc = getattr(arg_nodes[0], "schema_column", None)
-        element_type = sc.type if sc is not None else OrsoTypes.NULL
-        return (OrsoTypes.ARRAY, element_type)
+def _builtin_constant_functions() -> list[FunctionDefinition]:
+    """Zero-parameter plan-time constants folded to literals by the binder.
 
-    _placeholder = lambda *args: None  # aggregators dispatched by draken, not apply_function
+    These functions carry no runtime kernel — the binder rewrites them to
+    LITERAL nodes via fixed_value_function() before the expression evaluator
+    sees them.  They must be present in the catalog so that is_function()
+    recognises them as valid function names during AST construction.
+    """
+    _noop = lambda: None  # noqa: E731 — never called at runtime
+
+    def _make(name, return_type, aliases=(), summary=""):
+        return FunctionDefinition(
+            name=name,
+            aliases=aliases,
+            category="constant",
+            volatility="stable",
+            deterministic=False,
+            lifecycle=LifecycleSpec(status="active"),
+            summary=summary,
+            documentation=summary,
+            overloads=(
+                FunctionOverload(
+                    id=f"{name}_0",
+                    parameters=(),
+                    return_spec=ReturnSpec(mode="fixed", fixed_type=return_type),
+                    kernel=KernelSpec(id="constant", callable_ref=_noop, cost_us_per_million=0.1),
+                ),
+            ),
+        )
 
     return [
-        FunctionDefinition(
-            name="COUNT",
-            aliases=("COUNT_STAR",),
-            category="aggregate",
-            volatility="immutable",
-            deterministic=True,
-            lifecycle=LifecycleSpec(status="active"),
-            summary="Count rows.",
-            documentation="Returns the number of non-null rows.",
-            overloads=(
-                FunctionOverload(
-                    id="COUNT_variadic",
-                    parameters=(
-                        ParameterSpec(name="expr", type_family="any", variadic=True, optional=True),
-                    ),
-                    return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.INTEGER),
-                    kernel=KernelSpec(
-                        id="default", callable_ref=_placeholder, cost_us_per_million=1.0
-                    ),
-                ),
-            ),
+        _make("CURRENT_DATE", OrsoTypes.DATE, aliases=("TODAY",), summary="Current date."),
+        _make("YESTERDAY", OrsoTypes.DATE, summary="Yesterday's date."),
+        _make("CURRENT_TIME", OrsoTypes.TIME, summary="Current time."),
+        _make(
+            "NOW",
+            OrsoTypes.TIMESTAMP,
+            aliases=("UTC_TIMESTAMP", "CURRENT_TIMESTAMP"),
+            summary="Current timestamp.",
         ),
-        FunctionDefinition(
-            name="AVG",
-            aliases=("MEAN",),
-            category="aggregate",
-            volatility="immutable",
-            deterministic=True,
-            lifecycle=LifecycleSpec(status="active"),
-            summary="Arithmetic mean.",
-            documentation="Returns the arithmetic mean of non-null values.",
-            overloads=(
-                FunctionOverload(
-                    id="AVG_1",
-                    parameters=(ParameterSpec(name="expr", type_family="numeric"),),
-                    return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.DOUBLE),
-                    kernel=KernelSpec(
-                        id="default", callable_ref=_placeholder, cost_us_per_million=2.0
-                    ),
-                ),
-            ),
-        ),
-        FunctionDefinition(
-            name="SUM",
-            aliases=(),
-            category="aggregate",
-            volatility="immutable",
-            deterministic=True,
-            lifecycle=LifecycleSpec(status="active"),
-            summary="Sum of values.",
-            documentation="Returns the sum of non-null values.",
-            overloads=(
-                FunctionOverload(
-                    id="SUM_1",
-                    parameters=(ParameterSpec(name="expr", type_family="numeric"),),
-                    return_spec=ReturnSpec(mode="resolver", resolver=_same_as_arg0),
-                    kernel=KernelSpec(
-                        id="default", callable_ref=_placeholder, cost_us_per_million=2.0
-                    ),
-                ),
-            ),
-        ),
-        FunctionDefinition(
-            name="MAX",
-            aliases=(),
-            category="aggregate",
-            volatility="immutable",
-            deterministic=True,
-            lifecycle=LifecycleSpec(status="active"),
-            summary="Maximum value.",
-            documentation="Returns the maximum non-null value.",
-            overloads=(
-                FunctionOverload(
-                    id="MAX_1",
-                    parameters=(ParameterSpec(name="expr", type_family="any"),),
-                    return_spec=ReturnSpec(mode="same_as_arg", arg_index=0),
-                    kernel=KernelSpec(
-                        id="default", callable_ref=_placeholder, cost_us_per_million=2.0
-                    ),
-                ),
-            ),
-        ),
-        FunctionDefinition(
-            name="MIN",
-            aliases=(),
-            category="aggregate",
-            volatility="immutable",
-            deterministic=True,
-            lifecycle=LifecycleSpec(status="active"),
-            summary="Minimum value.",
-            documentation="Returns the minimum non-null value.",
-            overloads=(
-                FunctionOverload(
-                    id="MIN_1",
-                    parameters=(ParameterSpec(name="expr", type_family="any"),),
-                    return_spec=ReturnSpec(mode="same_as_arg", arg_index=0),
-                    kernel=KernelSpec(
-                        id="default", callable_ref=_placeholder, cost_us_per_million=2.0
-                    ),
-                ),
-            ),
-        ),
-        FunctionDefinition(
-            name="ARRAY_AGG",
-            aliases=(),
-            category="aggregate",
-            volatility="immutable",
-            deterministic=True,
-            lifecycle=LifecycleSpec(status="active"),
-            summary="Aggregate values into an array.",
-            documentation="Collects all non-null values into an array.",
-            overloads=(
-                FunctionOverload(
-                    id="ARRAY_AGG_1",
-                    parameters=(ParameterSpec(name="expr", type_family="any"),),
-                    return_spec=ReturnSpec(mode="resolver", resolver=_array_agg_return_type),
-                    kernel=KernelSpec(
-                        id="default", callable_ref=_placeholder, cost_us_per_million=5.0
-                    ),
-                ),
-            ),
-        ),
+        _make("VERSION", OrsoTypes.VARCHAR, summary="Database version string."),
+        _make("CONNECTION_ID", OrsoTypes.INTEGER, summary="Current connection identifier."),
+        _make("DATABASE", OrsoTypes.VARCHAR, summary="Current database name."),
+        _make("USER", OrsoTypes.VARCHAR, summary="Current user name."),
+        _make("PI", OrsoTypes.DOUBLE, summary="Mathematical constant π."),
+        _make("PHI", OrsoTypes.DOUBLE, summary="Golden ratio φ."),
+        _make("E", OrsoTypes.DOUBLE, summary="Euler's number e."),
     ]
 
 
@@ -702,7 +619,14 @@ def _builtin_temporal_extra_functions() -> list[FunctionDefinition]:
 
 def _builtin_utility_functions() -> list[FunctionDefinition]:
     """Utility functions: array ops, subscript, element access."""
-    from opteryx.functions import FUNCTIONS as _LEGACY
+    import numpy
+
+    from opteryx.functions import _iterate_single_parameter as _isingle
+    from opteryx.functions import _sort as _sort_factory
+
+    _greatest_kernel = _isingle(numpy.nanmax)
+    _least_kernel = _isingle(numpy.nanmin)
+    _sort_kernel = _sort_factory(numpy.sort)
 
     def _element_type_return(arg_nodes) -> OrsoTypes:
         """Return the element type of the first arg (for GREATEST/LEAST/SORT)."""
@@ -739,7 +663,7 @@ def _builtin_utility_functions() -> list[FunctionDefinition]:
                     return_spec=ReturnSpec(mode="resolver", resolver=_element_type_return),
                     kernel=KernelSpec(
                         id="default",
-                        callable_ref=_LEGACY["GREATEST"][0],
+                        callable_ref=_greatest_kernel,
                         cost_us_per_million=3.0,
                     ),
                 ),
@@ -761,7 +685,7 @@ def _builtin_utility_functions() -> list[FunctionDefinition]:
                     return_spec=ReturnSpec(mode="resolver", resolver=_element_type_return),
                     kernel=KernelSpec(
                         id="default",
-                        callable_ref=_LEGACY["LEAST"][0],
+                        callable_ref=_least_kernel,
                         cost_us_per_million=3.0,
                     ),
                 ),
@@ -783,7 +707,7 @@ def _builtin_utility_functions() -> list[FunctionDefinition]:
                     return_spec=ReturnSpec(mode="same_as_arg", arg_index=0),
                     kernel=KernelSpec(
                         id="default",
-                        callable_ref=_LEGACY["SORT"][0],
+                        callable_ref=_sort_kernel,
                         cost_us_per_million=5.0,
                     ),
                 ),
@@ -842,14 +766,636 @@ def _builtin_utility_functions() -> list[FunctionDefinition]:
     ]
 
 
+def _builtin_text_extended_functions() -> list[FunctionDefinition]:
+    """Remaining string/text functions not in the core text group."""
+    from pyarrow import compute
+
+    from opteryx.functions import _get_string
+    from opteryx.functions import _initcap
+    from opteryx.functions import _iterate_double_parameter_swapped
+    from opteryx.functions import _replace
+    from opteryx.functions import _soundex
+    from opteryx.functions import _string_slice_left
+    from opteryx.functions import _string_slice_right
+    from opteryx.functions import string_functions
+
+    _position_kernel = _iterate_double_parameter_swapped(string_functions.position)
+
+    def _make(
+        name,
+        callable_ref,
+        ret,
+        params,
+        aliases=(),
+        cost=5.0,
+        null_policy="strict",
+        summary="",
+        doc="",
+    ):
+        return FunctionDefinition(
+            name=name,
+            aliases=aliases,
+            category="text",
+            volatility="immutable",
+            deterministic=True,
+            lifecycle=LifecycleSpec(status="active"),
+            summary=summary or name,
+            documentation=doc or summary or name,
+            overloads=(
+                FunctionOverload(
+                    id=f"{name}_default",
+                    parameters=params,
+                    return_spec=ReturnSpec(mode="fixed", fixed_type=ret),
+                    kernel=KernelSpec(
+                        id="default",
+                        callable_ref=callable_ref,
+                        null_policy=null_policy,
+                        cost_us_per_million=cost,
+                    ),
+                ),
+            ),
+        )
+
+    _s = ParameterSpec(name="str", type_family="string")
+    _n = ParameterSpec(name="n", type_family="integer")
+    _any = ParameterSpec(name="val", type_family="any")
+
+    return [
+        _make(
+            "CHAR",
+            string_functions.to_char,
+            OrsoTypes.VARCHAR,
+            (_any,),
+            summary="Convert codepoint to character.",
+        ),
+        _make(
+            "ASCII",
+            string_functions.to_ascii,
+            OrsoTypes.INTEGER,
+            (_s,),
+            summary="Return ASCII codepoint of first character.",
+        ),
+        _make(
+            "LEFT",
+            _string_slice_left,
+            OrsoTypes.VARCHAR,
+            (_s, _n),
+            summary="Return leftmost N characters.",
+        ),
+        _make(
+            "RIGHT",
+            _string_slice_right,
+            OrsoTypes.VARCHAR,
+            (_s, _n),
+            summary="Return rightmost N characters.",
+        ),
+        _make(
+            "REVERSE", compute.utf8_reverse, OrsoTypes.VARCHAR, (_s,), summary="Reverse a string."
+        ),
+        _make(
+            "SOUNDEX", _soundex, OrsoTypes.VARCHAR, (_s,), summary="Return Soundex phonetic code."
+        ),
+        _make(
+            "TITLE",
+            compute.utf8_title,
+            OrsoTypes.VARCHAR,
+            (_s,),
+            aliases=("TITLECASE",),
+            summary="Convert string to title case.",
+        ),
+        _make(
+            "INITCAP",
+            _initcap,
+            OrsoTypes.VARCHAR,
+            (_s,),
+            summary="Capitalise first letter of each word.",
+        ),
+        _make(
+            "CONCAT_WS",
+            string_functions.concat_ws,
+            OrsoTypes.VARCHAR,
+            (
+                ParameterSpec(name="sep", type_family="string"),
+                ParameterSpec(name="str1", type_family="string"),
+                ParameterSpec(name="more", type_family="string", variadic=True, optional=True),
+            ),
+            summary="Concatenate with separator.",
+            null_policy="passthrough",
+        ),
+        _make(
+            "POSITION",
+            _position_kernel,
+            OrsoTypes.INTEGER,
+            (
+                ParameterSpec(name="needle", type_family="string"),
+                ParameterSpec(name="haystack", type_family="string"),
+            ),
+            summary="Find position of substring.",
+        ),
+        _make(
+            "TRIM",
+            string_functions.trim,
+            OrsoTypes.VARCHAR,
+            (_s, ParameterSpec(name="chars", type_family="string", optional=True)),
+            null_policy="passthrough",
+            summary="Trim leading and trailing characters.",
+        ),
+        _make(
+            "LTRIM",
+            string_functions.ltrim,
+            OrsoTypes.VARCHAR,
+            (_s, ParameterSpec(name="chars", type_family="string", optional=True)),
+            null_policy="passthrough",
+            summary="Trim leading characters.",
+        ),
+        _make(
+            "RTRIM",
+            string_functions.rtrim,
+            OrsoTypes.VARCHAR,
+            (_s, ParameterSpec(name="chars", type_family="string", optional=True)),
+            null_policy="passthrough",
+            summary="Trim trailing characters.",
+        ),
+        _make(
+            "LPAD",
+            string_functions.left_pad,
+            OrsoTypes.VARCHAR,
+            (
+                _s,
+                ParameterSpec(name="width", type_family="integer"),
+                ParameterSpec(name="fill", type_family="string", optional=True),
+            ),
+            summary="Left-pad string to width.",
+        ),
+        _make(
+            "RPAD",
+            string_functions.right_pad,
+            OrsoTypes.VARCHAR,
+            (
+                _s,
+                ParameterSpec(name="width", type_family="integer"),
+                ParameterSpec(name="fill", type_family="string", optional=True),
+            ),
+            summary="Right-pad string to width.",
+        ),
+        _make(
+            "LEVENSHTEIN",
+            string_functions.levenshtein,
+            OrsoTypes.INTEGER,
+            (
+                ParameterSpec(name="a", type_family="string"),
+                ParameterSpec(name="b", type_family="string"),
+            ),
+            cost=50.0,
+            summary="Levenshtein edit distance between two strings.",
+        ),
+        _make(
+            "SPLIT",
+            string_functions.split,
+            OrsoTypes.ARRAY,
+            (
+                _s,
+                ParameterSpec(name="delimiter", type_family="string", optional=True),
+                ParameterSpec(name="limit", type_family="integer", optional=True),
+            ),
+            null_policy="passthrough",
+            summary="Split string into array.",
+        ),
+        _make(
+            "MATCH_AGAINST",
+            string_functions.match_against,
+            OrsoTypes.BOOLEAN,
+            (
+                _s,
+                ParameterSpec(name="pattern", type_family="string"),
+            ),
+            cost=20.0,
+            summary="Full-text match.",
+        ),
+        _make(
+            "REPLACE",
+            _replace,
+            OrsoTypes.VARCHAR,
+            (
+                _s,
+                ParameterSpec(name="search", type_family="string"),
+                ParameterSpec(name="replacement", type_family="string"),
+            ),
+            summary="Replace occurrences of substring.",
+        ),
+        _make(
+            "REGEXP_REPLACE",
+            string_functions.regex_replace,
+            OrsoTypes.BLOB,
+            (
+                _s,
+                ParameterSpec(name="pattern", type_family="string"),
+                ParameterSpec(name="replacement", type_family="string"),
+            ),
+            cost=30.0,
+            summary="Replace regex matches.",
+        ),
+        _make(
+            "GET_STRING",
+            _get_string,
+            OrsoTypes.VARCHAR,
+            (
+                ParameterSpec(name="struct", type_family="any"),
+                ParameterSpec(name="key", type_family="string"),
+            ),
+            summary="Extract string field from struct/map.",
+        ),
+    ]
+
+
+def _builtin_hash_encoding_functions() -> list[FunctionDefinition]:
+    """Hash, encoding, and random-generation functions."""
+    from opteryx.functions import _iterate_single_parameter as _isingle
+    from opteryx.functions import _md5
+    from opteryx.functions import _sha1
+    from opteryx.functions import _sha256
+    from opteryx.functions import _sha512
+    from opteryx.functions import number_functions
+    from opteryx.functions import string_functions
+    from opteryx.third_party.cyan4973.xxhash import hash_bytes
+
+    _hash_kernel = _isingle(lambda x: hex(hash_bytes(str(x).encode()))[2:])
+    _sha224_kernel = _isingle(string_functions.get_sha224)
+    _sha384_kernel = _isingle(string_functions.get_sha384)
+    _base85_enc_kernel = _isingle(string_functions.get_base85_encode)
+    _base85_dec_kernel = _isingle(string_functions.get_base85_decode)
+    _hex_enc_kernel = _isingle(string_functions.get_hex_encode)
+    _hex_dec_kernel = _isingle(string_functions.get_hex_decode)
+
+    def _make(
+        name,
+        callable_ref,
+        ret,
+        params,
+        aliases=(),
+        cost=10.0,
+        volatility="immutable",
+        null_policy="strict",
+        summary="",
+    ):
+        return FunctionDefinition(
+            name=name,
+            aliases=aliases,
+            category="hash_encoding",
+            volatility=volatility,
+            deterministic=volatility == "immutable",
+            lifecycle=LifecycleSpec(status="active"),
+            summary=summary or name,
+            documentation=summary or name,
+            overloads=(
+                FunctionOverload(
+                    id=f"{name}_default",
+                    parameters=params,
+                    return_spec=ReturnSpec(mode="fixed", fixed_type=ret),
+                    kernel=KernelSpec(
+                        id="default",
+                        callable_ref=callable_ref,
+                        null_policy=null_policy,
+                        cost_us_per_million=cost,
+                    ),
+                ),
+            ),
+        )
+
+    _any = ParameterSpec(name="val", type_family="any")
+    _n = ParameterSpec(name="n", type_family="integer")
+    _b = ParameterSpec(name="blob", type_family="any")
+
+    return [
+        _make("HASH", _hash_kernel, OrsoTypes.BLOB, (_any,), cost=15.0, summary="Generic hash."),
+        _make("MD5", _md5, OrsoTypes.BLOB, (_any,), cost=12.0, summary="MD5 hash."),
+        _make("SHA1", _sha1, OrsoTypes.BLOB, (_any,), cost=12.0, summary="SHA-1 hash."),
+        _make(
+            "SHA224", _sha224_kernel, OrsoTypes.BLOB, (_any,), cost=14.0, summary="SHA-224 hash."
+        ),
+        _make("SHA256", _sha256, OrsoTypes.BLOB, (_any,), cost=14.0, summary="SHA-256 hash."),
+        _make(
+            "SHA384", _sha384_kernel, OrsoTypes.BLOB, (_any,), cost=14.0, summary="SHA-384 hash."
+        ),
+        _make("SHA512", _sha512, OrsoTypes.BLOB, (_any,), cost=14.0, summary="SHA-512 hash."),
+        _make(
+            "RANDOM",
+            number_functions.random_number,
+            OrsoTypes.DOUBLE,
+            (_n,),
+            volatility="volatile",
+            summary="Generate random numbers.",
+        ),
+        _make(
+            "NORMAL",
+            number_functions.random_normal,
+            OrsoTypes.DOUBLE,
+            (_n,),
+            volatility="volatile",
+            summary="Generate normally-distributed random numbers.",
+        ),
+        _make(
+            "RANDOM_STRING",
+            number_functions.random_strings,
+            OrsoTypes.BLOB,
+            (_n,),
+            volatility="volatile",
+            summary="Generate random strings.",
+        ),
+        _make(
+            "BASE64_ENCODE",
+            string_functions.base64_encode,
+            OrsoTypes.BLOB,
+            (_b,),
+            summary="Base64 encode.",
+        ),
+        _make(
+            "BASE64_DECODE",
+            string_functions.base64_decode,
+            OrsoTypes.BLOB,
+            (_b,),
+            summary="Base64 decode.",
+        ),
+        _make("BASE85_ENCODE", _base85_enc_kernel, OrsoTypes.BLOB, (_b,), summary="Base85 encode."),
+        _make("BASE85_DECODE", _base85_dec_kernel, OrsoTypes.BLOB, (_b,), summary="Base85 decode."),
+        _make("HEX_ENCODE", _hex_enc_kernel, OrsoTypes.BLOB, (_b,), summary="Hex encode."),
+        _make("HEX_DECODE", _hex_dec_kernel, OrsoTypes.BLOB, (_b,), summary="Hex decode."),
+    ]
+
+
+def _builtin_array_misc_functions() -> list[FunctionDefinition]:
+    """Array membership tests and miscellaneous column-level functions."""
+    from opteryx.compiled.vector_ops import vector_contains_all
+    from opteryx.compiled.vector_ops import vector_contains_any
+    from opteryx.functions import _iterate_double_parameter as _idouble
+    from opteryx.functions import other_functions
+
+    _array_contains_kernel = _idouble(other_functions.array_contains)
+    _array_contains_any_kernel = lambda x, y: vector_contains_any(x, set(y[0]))
+    _array_contains_all_kernel = lambda x, y: vector_contains_all(x, set(y[0]))
+
+    def _make(
+        name, callable_ref, ret, params, aliases=(), cost=8.0, null_policy="strict", summary=""
+    ):
+        return FunctionDefinition(
+            name=name,
+            aliases=aliases,
+            category="array",
+            volatility="immutable",
+            deterministic=True,
+            lifecycle=LifecycleSpec(status="active"),
+            summary=summary or name,
+            documentation=summary or name,
+            overloads=(
+                FunctionOverload(
+                    id=f"{name}_default",
+                    parameters=params,
+                    return_spec=ReturnSpec(mode="fixed", fixed_type=ret),
+                    kernel=KernelSpec(
+                        id="default",
+                        callable_ref=callable_ref,
+                        null_policy=null_policy,
+                        cost_us_per_million=cost,
+                    ),
+                ),
+            ),
+        )
+
+    _arr = ParameterSpec(name="arr", type_family="array")
+    _item = ParameterSpec(name="item", type_family="any")
+    _set = ParameterSpec(name="items", type_family="array")
+
+    return [
+        _make(
+            "ARRAY_CONTAINS",
+            _array_contains_kernel,
+            OrsoTypes.BOOLEAN,
+            (_arr, _item),
+            summary="Test if array contains item.",
+        ),
+        _make(
+            "ARRAY_CONTAINS_ANY",
+            _array_contains_any_kernel,
+            OrsoTypes.BOOLEAN,
+            (_arr, _set),
+            null_policy="passthrough",
+            summary="Test if array contains any item from set.",
+        ),
+        _make(
+            "ARRAY_CONTAINS_ALL",
+            _array_contains_all_kernel,
+            OrsoTypes.BOOLEAN,
+            (_arr, _set),
+            null_policy="passthrough",
+            summary="Test if array contains all items from set.",
+        ),
+        _make(
+            "JSONB_OBJECT_KEYS",
+            other_functions.jsonb_object_keys,
+            OrsoTypes.ARRAY,
+            (ParameterSpec(name="json", type_family="any"),),
+            cost=15.0,
+            summary="Extract keys from JSON object.",
+        ),
+        _make(
+            "HUMANIZE",
+            other_functions.humanize,
+            OrsoTypes.VARCHAR,
+            (ParameterSpec(name="val", type_family="any"),),
+            cost=10.0,
+            summary="Format number in human-readable form.",
+        ),
+        _make(
+            "COSINE_SIMILARITY",
+            other_functions.cosine_similarity,
+            OrsoTypes.DOUBLE,
+            (_arr, ParameterSpec(name="vec", type_family="array")),
+            cost=30.0,
+            summary="Cosine similarity between two vectors.",
+        ),
+    ]
+
+
+def _builtin_arithmetic_extended_functions() -> list[FunctionDefinition]:
+    """Numeric functions not in the core arithmetic group."""
+    from pyarrow import compute
+
+    from opteryx.functions import number_functions
+
+    def _make(
+        name, callable_ref, ret, params, aliases=(), cost=2.0, null_policy="strict", summary=""
+    ):
+        return FunctionDefinition(
+            name=name,
+            aliases=aliases,
+            category="arithmetic",
+            volatility="immutable",
+            deterministic=True,
+            lifecycle=LifecycleSpec(status="active"),
+            summary=summary or name,
+            documentation=summary or name,
+            overloads=(
+                FunctionOverload(
+                    id=f"{name}_default",
+                    parameters=params,
+                    return_spec=ReturnSpec(mode="fixed", fixed_type=ret),
+                    kernel=KernelSpec(
+                        id="default",
+                        callable_ref=callable_ref,
+                        null_policy=null_policy,
+                        cost_us_per_million=cost,
+                    ),
+                ),
+            ),
+        )
+
+    _num = ParameterSpec(name="num", type_family="numeric")
+
+    return [
+        _make(
+            "SIGN", compute.sign, OrsoTypes.INTEGER, (_num,), summary="Sign of number (-1, 0, 1)."
+        ),
+        _make("TRUNC", compute.trunc, OrsoTypes.INTEGER, (_num,), summary="Truncate to integer."),
+        _make(
+            "POWER",
+            number_functions.safe_power,
+            OrsoTypes.DOUBLE,
+            (_num, ParameterSpec(name="exp", type_family="numeric")),
+            aliases=("POW",),
+            cost=5.0,
+            summary="Raise base to exponent.",
+        ),
+        _make("LN", compute.ln, OrsoTypes.DOUBLE, (_num,), summary="Natural logarithm."),
+        _make("LOG10", compute.log10, OrsoTypes.DOUBLE, (_num,), summary="Base-10 logarithm."),
+        _make("LOG2", compute.log2, OrsoTypes.DOUBLE, (_num,), summary="Base-2 logarithm."),
+        _make(
+            "LOG",
+            compute.logb,
+            OrsoTypes.DOUBLE,
+            (_num, ParameterSpec(name="base", type_family="numeric")),
+            summary="Logarithm with arbitrary base.",
+        ),
+    ]
+
+
+def _builtin_temporal_functions() -> list[FunctionDefinition]:
+    """Full temporal function set."""
+    from opteryx.functions import date_functions
+    from opteryx.utils.dates import date_trunc
+
+    def _make(
+        name, callable_ref, ret, params, aliases=(), cost=4.0, null_policy="strict", summary=""
+    ):
+        return FunctionDefinition(
+            name=name,
+            aliases=aliases,
+            category="temporal",
+            volatility="immutable",
+            deterministic=True,
+            lifecycle=LifecycleSpec(status="active"),
+            summary=summary or name,
+            documentation=summary or name,
+            overloads=(
+                FunctionOverload(
+                    id=f"{name}_default",
+                    parameters=params,
+                    return_spec=ReturnSpec(mode="fixed", fixed_type=ret),
+                    kernel=KernelSpec(
+                        id="default",
+                        callable_ref=callable_ref,
+                        null_policy=null_policy,
+                        cost_us_per_million=cost,
+                    ),
+                ),
+            ),
+        )
+
+    _part = ParameterSpec(name="part", type_family="string", constant_only=True)
+    _date = ParameterSpec(name="date", type_family="temporal")
+
+    return [
+        _make(
+            "DATE_TRUNC",
+            date_trunc,
+            OrsoTypes.TIMESTAMP,
+            (_part, _date),
+            aliases=("DATETRUNC",),
+            summary="Truncate date/timestamp to specified granularity.",
+        ),
+        _make(
+            "TIME_BUCKET",
+            date_functions.date_floor,
+            OrsoTypes.TIMESTAMP,
+            (
+                ParameterSpec(name="magnitude", type_family="numeric"),
+                ParameterSpec(name="units", type_family="string", constant_only=True),
+                _date,
+            ),
+            summary="Bucket date into fixed-width intervals.",
+        ),
+        _make(
+            "DATEDIFF",
+            date_functions.date_diff,
+            OrsoTypes.INTEGER,
+            (_part, _date, ParameterSpec(name="end", type_family="temporal")),
+            aliases=("DATE_DIFF",),
+            cost=5.0,
+            summary="Difference between two dates in the specified unit.",
+        ),
+        _make(
+            "TIMEDIFF",
+            date_functions.time_diff,
+            OrsoTypes.INTEGER,
+            (
+                ParameterSpec(name="time1", type_family="temporal"),
+                ParameterSpec(name="time2", type_family="temporal"),
+            ),
+            aliases=("TIME_DIFF",),
+            cost=5.0,
+            summary="Difference between two times.",
+        ),
+        _make(
+            "DATE_FORMAT",
+            date_functions.date_format,
+            OrsoTypes.VARCHAR,
+            (_date, ParameterSpec(name="pattern", type_family="string", constant_only=True)),
+            cost=6.0,
+            summary="Format date/timestamp as string.",
+        ),
+        _make(
+            "FROM_UNIXTIME",
+            date_functions.from_unixtimestamp,
+            OrsoTypes.TIMESTAMP,
+            (ParameterSpec(name="ts", type_family="numeric"),),
+            cost=4.0,
+            summary="Convert Unix timestamp to TIMESTAMP.",
+        ),
+        _make(
+            "UNIXTIME",
+            date_functions.unixtime,
+            OrsoTypes.INTEGER,
+            (_date,),
+            aliases=("TO_UNIXTIME",),
+            cost=3.0,
+            summary="Convert TIMESTAMP to Unix epoch seconds.",
+        ),
+    ]
+
+
 def get_builtin_functions() -> list[FunctionDefinition]:
     """Load all builtin function definitions."""
     functions = []
     functions.extend(_builtin_text_functions())
+    functions.extend(_builtin_text_extended_functions())
     functions.extend(_builtin_arithmetic_functions())
+    functions.extend(_builtin_arithmetic_extended_functions())
     functions.extend(_builtin_type_conversion_functions())
     functions.extend(_builtin_logical_functions())
     functions.extend(_builtin_aggregate_functions())
+    functions.extend(_builtin_constant_functions())
     functions.extend(_builtin_temporal_extra_functions())
+    functions.extend(_builtin_temporal_functions())
     functions.extend(_builtin_utility_functions())
+    functions.extend(_builtin_hash_encoding_functions())
+    functions.extend(_builtin_array_misc_functions())
     return functions

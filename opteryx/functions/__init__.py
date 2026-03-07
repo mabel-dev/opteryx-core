@@ -6,50 +6,20 @@
 """
 SQL Functions Module
 
-This module provides all SQL functions available in Opteryx queries. Functions are
-organized by category and automatically registered for use in SQL expressions.
+This module provides kernel implementations for SQL functions available in
+Opteryx queries. Functions are registered in the catalog via
+opteryx.expression.functions.native_function_registrar and dispatched through
+the expression evaluator (opteryx.expression.evaluator).
 
-Categories:
-- Arithmetic: Mathematical operations and calculations
-- String: Text manipulation (UPPER, LOWER, SUBSTRING, CONCAT, etc.)
-- Date/Time: Temporal operations (NOW, DATE_TRUNC, EXTRACT, etc.)
-- Aggregate: Aggregation functions (SUM, COUNT, AVG, MIN, MAX, etc.)
-- Conditional: Logic functions (CASE, COALESCE, NULLIF, etc.)
-- Array: Array operations and manipulations
-- Encoding: Base64, hex, and other encoding/decoding functions
-- Other: Utility and specialized functions
-
-Function Registration:
-Functions are registered in the FUNCTIONS dictionary with their implementation,
-return type, and cost estimate for query optimization.
-
-Structure:
-- function_name: (implementation_function, return_type, cost_estimate)
-- return_type: PyArrow data type or "VARIANT" for dynamic types
-- cost_estimate: Relative execution cost (currently always 1.0)
+This module contains:
+- Kernel callables used by the catalog registrar
+- Utility helpers (iterate wrappers, null-handling combinators)
+- Re-exports of implementations from expression/functions/implementations/
 
 Adding New Functions:
-1. Implement the function logic in the appropriate category module
-2. Add to the FUNCTIONS dictionary below
-3. Add comprehensive tests in tests/functions/
-4. Update documentation if the function introduces new patterns
-
-Example:
-    # Using functions in queries
-    SELECT UPPER(name), DATE_TRUNC('month', created_at) FROM users
-
-    # Function returns PyArrow arrays and handles null values
-    def my_string_function(arr):
-        return pa.compute.upper(arr)
-
-    # Register in FUNCTIONS dictionary
-    FUNCTIONS['MY_UPPER'] = (my_string_function, 'VARCHAR', 1.0)
-
-Performance Notes:
-- Functions should operate on PyArrow arrays for vectorization
-- Use PyArrow compute functions when available for best performance
-- Handle null values appropriately
-- Consider memory usage for large arrays
+1. Implement the kernel in the appropriate implementations/ module
+2. Register it in native_function_registrar.py
+3. Add tests in tests/functions/
 """
 
 import datetime
@@ -301,238 +271,24 @@ def select_values(boolean_arrays, value_arrays):
     return result
 
 
-# _soundex, _initcap, _md5, _sha1, _sha256, _sha512, _replace,
-# _string_slice_left, _string_slice_right, vector_lengther
-# imported from opteryx.expression.functions.implementations.text at the top.
-
-
 def sleep(x):
     time.sleep(x[0] / 1000)  # Sleep for x[0] milliseconds
     return x[0]
-
-
-DEPRECATED_FUNCTIONS = {
-    "LIST": "ARRAY_AGG",  # deprecated, removed 0.21.0
-    "MAXIMUM": "MAX",  # deprecated, removed 0.21.0
-    "MINIMUM": "MIN",  # deprecated, removed 0.21.0
-    "AVERAGE": "AVG",  # deprecated, removed 0.21.0
-    "CEILING": "CEIL",  # deprecated, removed 0.21.0
-    "ABSOLUTE": "ABS",  # deprecated, removed 0.21.0
-    "TRUNCATE": "TRUNC",  # deprecated, removed 0.21.0
-    "LIST_CONTAINS_ANY": "ARRAY_CONTAINS_ANY",  # deprecated, removed 0.22.0
-    "LIST_CONTAINS_ALL": "ARRAY_CONTAINS_ALL",  # deprecated, removed 0.22.0
-    "STRUCT": None,  # deprecated, removed 0.22.0,
-    "NUMERIC": "DOUBLE",  # deprecated, removed 0.22.0
-    "LIST_CONTAINS": "ARRAY_CONTAINS",  # deprecated, removed 0.24.0
-    "STR": "VARCHAR",  # deprecated, removed 0.24.0
-    "STRING": "VARCHAR",  # deprecated, removed 0.24.0
-    "FLOAT": "DOUBLE",  # deprecated, removed 0.24.0
-    "TRY_NUMERIC": "TRY_DOUBLE",  # deprecated, removed 0.24.0
-    "TRY_STRING": "TRY_VARCHAR",  # deprecated, removed 0.24.0
-    "TRY_STRUCT": None,  # deprecated, removed 0.24.0
-    "LEN": "LENGTH",  # deprecated, removed 0.24.0
-    "INT": "INTEGER",  # remove 0.27.0
-    "GET": None,  # remove 0.28.0
-    "SEARCH": None,  # remove 0.28.0
-    "BLOB": "VARBINARY",  # remove 0.29.0
-    "TRY_BLOB": "TRY_VARBINARY",  # remove 0.29.0
-}
-
-# fmt:off
-# Function definition look up table
-# <function_name>: (function, return_type, cost_estimate)
-# Note: * Return_type of VARIANT is used for functions that can return any type of data and the
-#         actual type will be determined at runtime.
-#       * cost_estimate is a float that represents the estimated time to execute a function
-#         one million times - this is currently always 1.0 and is not used. 
-FUNCTIONS = {
-
-    # These functions are rewritten at plan time, they're here so the function resolver in the 
-    # first phase of planning can find them
-    "VERSION": (lambda x: None, "VARCHAR", 1.0),
-    "CONNECTION_ID": (lambda x: None, "VARCHAR", 1.0),
-    "DATABASE": (lambda x: None, "VARCHAR", 1.0),
-    "USER": (lambda x: None, "VARCHAR", 1.0),
-    "STARTS_WITH": (lambda x: None, "BOOLEAN", 1.0),  # always rewritten as a LIKE
-    "ENDS_WITH": (lambda x: None, "BOOLEAN", 1.0),  # always rewritten as a LIKE
-    # DEBUG: "SLEEP": (lambda x: [sleep(x)], OrsoTypes.NULL, 10.0), # SLEEP is only available in 'debug' mode
-
-    "PASSTHRU": (lambda x: x, "VARIANT", 1.0),  # Not a real cast, kept for compatibility
-
-    # CHARS
-    "CHAR": (string_functions.to_char, "VARCHAR", 1.0),
-    "ASCII": (string_functions.to_ascii, "INTEGER", 1.0),
-
-    # STRINGS
-    "LENGTH": (vector_lengther, "INTEGER", 1.0),  # LENGTH(str) -> int
-    "UPPER": (to_upper, "VARCHAR", 1.0),  # UPPER(str) -> str (buffer-level SIMD)
-    "LOWER": (to_lower, "VARCHAR", 1.0),  # LOWER(str) -> str (buffer-level SIMD)
-    "LEFT": (_string_slice_left, "VARCHAR", 1.0),
-    "RIGHT": (_string_slice_right, "VARCHAR", 1.0),
-    "REVERSE": (compute.utf8_reverse, "VARCHAR", 1.0),
-    "SOUNDEX": (_soundex, "VARCHAR", 1.0),
-    "TITLE": (compute.utf8_title, "VARCHAR", 1.0),
-    "INITCAP": (_initcap, "VARCHAR", 1.0),
-    "CONCAT": (string_functions.concat, "VARCHAR", 1.0),
-    "CONCAT_WS": (string_functions.concat_ws, "VARCHAR", 1.0),
-    "SUBSTRING": (string_functions.substring, "VARCHAR", 1.0),
-    "POSITION": (_iterate_double_parameter_swapped(string_functions.position), "INTEGER", 1.0),
-    "TRIM": (string_functions.trim, "VARCHAR", 1.0),
-    "LTRIM": (string_functions.ltrim, "VARCHAR", 1.0),
-    "RTRIM": (string_functions.rtrim, "VARCHAR", 1.0),
-    "LPAD": (string_functions.left_pad, "VARCHAR", 1.0),
-    "RPAD": (string_functions.right_pad, "VARCHAR", 1.0),
-    "LEVENSHTEIN": (string_functions.levenshtein, "INTEGER", 1.0),
-    "SPLIT": (string_functions.split, "ARRAY<VARCHAR>", 1.0),
-    "MATCH_AGAINST": (string_functions.match_against, "BOOLEAN", 1.0),
-    "REPLACE": (_replace, "VARCHAR", 1.0),
-    "REGEXP_REPLACE": (string_functions.regex_replace, "BLOB", 1.0),
-
-    # HASHING & ENCODING
-    "HASH": (_iterate_single_parameter(lambda x: hex(hash_bytes(str(x).encode()))[2:]), "BLOB", 1.0),
-    "MD5": (_md5, "BLOB", 1.0),
-    "SHA1": (_sha1, "BLOB", 1.0),
-    "SHA224": (_iterate_single_parameter(string_functions.get_sha224), "BLOB", 1.0),
-    "SHA256": (_sha256, "BLOB", 1.0),
-    "SHA384": (_iterate_single_parameter(string_functions.get_sha384), "BLOB", 1.0),
-    "SHA512": (_sha512, "BLOB", 1.0),
-    "RANDOM": (number_functions.random_number, "DOUBLE", 1.0),
-    "NORMAL": (number_functions.random_normal, "DOUBLE", 1.0),
-    "RANDOM_STRING": (number_functions.random_strings, "BLOB", 1.0),
-    "BASE64_ENCODE": (string_functions.base64_encode, "BLOB", 1.0),
-    "BASE64_DECODE": (string_functions.base64_decode, "BLOB", 1.0),
-    "BASE85_ENCODE": (_iterate_single_parameter(string_functions.get_base85_encode), "BLOB", 1.0),
-    "BASE85_DECODE": (_iterate_single_parameter(string_functions.get_base85_decode), "BLOB", 1.0),
-    "HEX_ENCODE": (_iterate_single_parameter(string_functions.get_hex_encode), "BLOB", 1.0),
-    "HEX_DECODE": (_iterate_single_parameter(string_functions.get_hex_decode), "BLOB", 1.0),
-
-    # OTHER
-    "GET_STRING": (_get_string, "VARCHAR", 1.0),
-    "ARRAY_CONTAINS": (_iterate_double_parameter(other_functions.array_contains), "BOOLEAN", 1.0),
-    "ARRAY_CONTAINS_ANY": (lambda x, y: vector_contains_any(x, set(y[0])), "BOOLEAN", 1.0),
-    "ARRAY_CONTAINS_ALL": (lambda x, y: vector_contains_all(x, set(y[0])), "BOOLEAN", 1.0),
-    "COALESCE": (_coalesce, "VARIANT", 1.0),
-    "IFNULL": (other_functions.if_null, "VARIANT", 1.0),
-    "SORT": (_sort(numpy.sort), "ARRAY", 1.0),
-    "GREATEST": (_iterate_single_parameter(numpy.nanmax), "VARIANT", 1.0),
-    "LEAST": (_iterate_single_parameter(numpy.nanmin), "VARIANT", 1.0),
-    "IIF": (numpy.where, "VARIANT", 1.0),
-    "NULLIF": (other_functions.null_if, "VARIANT", 1.0),
-    "CASE": (select_values, "VARIANT", 1.0),
-    "JSONB_OBJECT_KEYS": (other_functions.jsonb_object_keys, "ARRAY<VARCHAR>", 1.0),
-    "HUMANIZE": (other_functions.humanize, "VARCHAR", 1.0),
-
-    # Vector
-    "COSINE_SIMILARITY": (other_functions.cosine_similarity, "DOUBLE", 1.0),
-
-    # NUMERIC
-    "ROUND": (number_functions.round, "DOUBLE", 1.0),
-    "FLOOR": (number_functions.floor, "DOUBLE", 1.0),
-    "CEIL": (number_functions.ceiling, "DOUBLE", 1.0),
-    "ABS": (compute.abs, "VARIANT", 1.0),
-    "SIGN": (compute.sign, "INTEGER", 1.0),
-    "SQRT": (compute.sqrt, "DOUBLE", 1.0),
-    "TRUNC": (compute.trunc, "INTEGER", 1.0),
-    "PI": (lambda x: None, "DOUBLE", 1.0),
-    "PHI": (lambda x: None, "DOUBLE", 1.0),
-    "E": (lambda x: None, "DOUBLE", 1.0),
-    "INT": (_iterate_single_parameter(int), "INTEGER", 1.0),
-    "POWER": (number_functions.safe_power, "DOUBLE", 1.0),
-    "LN": (compute.ln, "DOUBLE", 1.0),
-    "LOG10": (compute.log10, "DOUBLE", 1.0),
-    "LOG2": (compute.log2, "DOUBLE", 1.0),
-    "LOG": (compute.logb, "DOUBLE", 1.0),
-
-    # DATES & TIMES
-    "DATE_TRUNC": (dates.date_trunc, "TIMESTAMP", 1.0),
-    "TIME_BUCKET": (date_functions.date_floor, "TIMESTAMP", 1.0),
-    "DATEDIFF": (date_functions.date_diff, "INTEGER", 1.0),
-    "TIMEDIFF": (date_functions.time_diff, "INTEGER", 1.0),
-    "DATEPART": (date_functions.date_part, "VARIANT", 1.0),
-    "DATE_FORMAT": (date_functions.date_format, "VARCHAR", 1.0),
-    "CURRENT_TIME": (lambda x: None, "TIME", 1.0),
-    "CURRENT_TIMESTAMP": (lambda x: None, "TIMESTAMP", 1.0),
-    "UTC_TIMESTAMP": (lambda x: None, "INTEGER", 1.0),
-    "CURRENT_DATE": (lambda x: None, "DATE", 1.0),
-    "FROM_UNIXTIME": (date_functions.from_unixtimestamp, "TIMESTAMP", 1.0),
-    "UNIXTIME": (date_functions.unixtime, "INTEGER", 1.0),
-}
-
-# fmt:on
-
-
-def apply_function(function: str = None, *parameters):
-    compressed = False
-
-    if (
-        not isinstance(parameters[0], int)
-        and function
-        not in (
-            "IFNULL",
-            "LIST_CONTAINS_ANY",
-            "LIST_CONTAINS_ALL",
-            "ARRAY_CONTAINS_ANY",
-            "ARRAY_CONTAINS_ALL",
-            "CONCAT",
-            "CONCAT_WS",
-            "IIF",
-            "COALESCE",
-            "SUBSTRING",
-            "CASE",
-        )
-        and all(isinstance(arr, numpy.ndarray) for arr in parameters)
-    ):
-        morsel_size = len(parameters[0])
-        null_positions = numpy.zeros(morsel_size, dtype=numpy.bool_)
-
-        for parameter in parameters:
-            # compute null positions
-            if parameter.dtype.kind == "f":
-                parameter_nulls_positions = compute.is_null(parameter, nan_is_null=True)
-            else:
-                parameter_nulls_positions = compute.is_null(parameter)
-            null_positions = numpy.logical_or(
-                null_positions,
-                parameter_nulls_positions,
-            )
-
-        # Early exit if all values are null
-        if null_positions.all():
-            return numpy.full(morsel_size, None, dtype=object)
-
-        if null_positions.any():
-            # if we have nulls and the value array is a numpy arrays, we can speed things
-            # up by removing the nulls from the calculations, we add the rows back in
-            # later
-            valid_positions = ~null_positions
-            parameters = [arr.compress(valid_positions) for arr in parameters]
-            compressed = True
-
-    try:
-        interim_results = FUNCTIONS[function][0](*parameters)
-    except FunctionExecutionError as e:
-        raise e
-    except Exception as e:
-        raise FunctionExecutionError(message=e, function=function) from e
-
-    if compressed:
-        # fill the result set
-        results = numpy.full(morsel_size, None, dtype=object)
-        numpy.place(results, valid_positions, interim_results)
-        return results
-
-    return interim_results
 
 
 def is_function(name: str) -> bool:
     """
     Check if the given name is a valid function name.
     """
-    return name.upper() in FUNCTIONS
+    from opteryx.expression.functions import get_catalog
+
+    return get_catalog().get_definition(name.upper()) is not None
 
 
 def functions() -> list[str]:
     """
     Return a list of all available function names.
     """
-    return list(FUNCTIONS.keys())
+    from opteryx.expression.functions import get_catalog
+
+    return [f.name for f in get_catalog().list_functions()]
