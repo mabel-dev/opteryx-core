@@ -17,7 +17,6 @@ def apply_bounded_function(node, *parameters) -> Any:
     """Apply a bound FUNCTION node to its already-evaluated parameters.
 
     Uses node.function_ref (set by binder) for kernel dispatch and null policy.
-    Falls back to the legacy apply_function if function_ref is not set.
 
     Null policy (kernel.null_policy):
         "strict"      — strip null rows before calling the kernel and fill them back after.
@@ -28,9 +27,10 @@ def apply_bounded_function(node, *parameters) -> Any:
     """
     func_ref = getattr(node, "function_ref", None)
     if func_ref is None:
-        from opteryx.functions import apply_function
-
-        return apply_function(node.value, *parameters)
+        raise FunctionExecutionError(
+            message=f"Function '{node.value}' was not bound — function_ref is None.",
+            function=node.value,
+        )
 
     kernel = func_ref.selected_overload.kernel
 

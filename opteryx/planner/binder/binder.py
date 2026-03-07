@@ -23,7 +23,6 @@ from opteryx.exceptions import IncompatibleTypesError
 from opteryx.exceptions import InvalidInternalStateError
 from opteryx.exceptions import UnexpectedDatasetReferenceError
 from opteryx.expression.functions import get_catalog as _get_function_catalog
-from opteryx.functions import DEPRECATED_FUNCTIONS
 from opteryx.functions import fixed_value_function
 from opteryx.managers.expression import NodeType
 from opteryx.models import Node
@@ -281,17 +280,6 @@ def inner_binder(node: Node, context: BindingContext) -> Tuple[Node, Any]:
 
     elif node_type != NodeType.SUBQUERY and not node.do_not_create_column:
         if node_type in (NodeType.FUNCTION, NodeType.AGGREGATOR):
-            if node.value in DEPRECATED_FUNCTIONS:
-                import warnings
-
-                replacement = DEPRECATED_FUNCTIONS[node.value]
-                if replacement is not None:
-                    message = f"Function '{node.value}' is deprecated and will be removed in a future version. Use '{DEPRECATED_FUNCTIONS[node.value]}' instead."
-                else:
-                    message = f"Function '{node.value}' is deprecated and will be removed in a future version."
-                context.telemetry.add_message(message)
-                warnings.warn(message, category=DeprecationWarning, stacklevel=2)
-
             # we need to add this new column to the schema
             aliases = [node.alias] if node.alias else []
             result_type = None

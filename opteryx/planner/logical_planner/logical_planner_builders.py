@@ -159,7 +159,14 @@ def _evaluate_timetravel_expression(node, apply_interval_literal_to_now: bool = 
             parameter_values.append(_as_function_parameter_array(value, value_type))
 
         try:
-            result = functions.apply_function(node.value, *parameter_values)
+            from opteryx.expression.functions import get_catalog as _get_catalog
+
+            _func_def = _get_catalog().get_definition(node.value)
+            if _func_def is None or not _func_def.overloads:
+                raise UnsupportedSyntaxError(f"Unknown function '{node.value}'.")
+            result = _func_def.overloads[0].kernel.callable_ref(*parameter_values)
+        except UnsupportedSyntaxError:
+            raise
         except Exception as err:
             raise UnsupportedSyntaxError(
                 f"Unable to evaluate time-travel function '{node.value}'."
@@ -702,15 +709,6 @@ def function(branch, alias: Optional[List[str]] = None, key=None):
             filter_condition = build(filter_condition)
     else:  # pragma: no cover
         from opteryx.exceptions import FunctionNotFoundError
-        from opteryx.functions import DEPRECATED_FUNCTIONS
-
-        if func in DEPRECATED_FUNCTIONS:
-            alt = DEPRECATED_FUNCTIONS.get(func)
-            if alt:
-                raise UnsupportedSyntaxError(
-                    f"Function '{func}' has been deprecated, '{alt}' offers similar functionality."
-                )
-            raise UnsupportedSyntaxError(f"Function '{func}' has been deprecated.")
 
         likely_match = suggest_alternative(func, operators.aggregators() + functions.functions())
         if likely_match is None:
