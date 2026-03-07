@@ -58,10 +58,6 @@ from opteryx.expression.functions.implementations.text import _string_slice_righ
 from opteryx.expression.functions.implementations.text import to_lower
 from opteryx.expression.functions.implementations.text import to_upper
 from opteryx.expression.functions.implementations.text import vector_lengther
-from opteryx.functions import date_functions
-from opteryx.functions import number_functions
-from opteryx.functions import other_functions
-from opteryx.functions import string_functions
 from opteryx.third_party.cyan4973.xxhash import hash_bytes
 from opteryx.utils import dates
 
