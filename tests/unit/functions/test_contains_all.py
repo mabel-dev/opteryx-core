@@ -19,12 +19,12 @@ from opteryx.draken.interop.arrow import vector_from_arrow
 
 def _array_vec(rows):
     """Build an ArrayVector from a list of int rows (each row is a list or None)."""
-    return vector_from_arrow(pa.array(rows, type=pa.vector_(pa.int64())))
+    return vector_from_arrow(pa.array(rows, type=pa.list_(pa.int64())))
 
 
 def _str_array_vec(rows):
     """Build an ArrayVector of string rows."""
-    return vector_from_arrow(pa.array(rows, type=pa.vector_(pa.string())))
+    return vector_from_arrow(pa.array(rows, type=pa.list_(pa.string())))
 
 
 def _result(bool_vec):
