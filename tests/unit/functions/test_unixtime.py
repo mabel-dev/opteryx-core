@@ -5,8 +5,8 @@ import numpy
 
 sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 
-from opteryx.functions.date_functions import unixtime
-from opteryx.functions.date_functions import from_unixtimestamp
+from opteryx.expression.functions.implementations.temporal import unixtime
+from opteryx.expression.functions.implementations.temporal import from_unixtimestamp
 
 
 def test_unixtime_with_datetime64():

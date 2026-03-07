@@ -282,7 +282,9 @@ def filter_operations(left_arr, left_type, operator, right_arr, right_type):
     if (
         OrsoTypes.TIMESTAMP in (left_type, right_type) or OrsoTypes.DATE in (left_type, right_type)
     ) and OrsoTypes.INTEGER in (left_type, right_type):
-        from opteryx.functions.date_functions import convert_int64_array_to_pyarrow_datetime
+        from opteryx.expression.functions.implementations.temporal import (
+            convert_int64_array_to_pyarrow_datetime,
+        )
 
         if left_type == OrsoTypes.INTEGER:
             left_arr = convert_int64_array_to_pyarrow_datetime(left_arr)
