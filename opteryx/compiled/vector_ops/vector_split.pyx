@@ -195,7 +195,7 @@ cpdef object vector_split(StringVector vec, char delimiter):
     # Handle empty array
     if n <= 0:
         import pyarrow as pa
-        return pa.array([], type=pa.vector_(pa.binary()))
+        return pa.array([], type=pa.list_(pa.binary()))
 
     cdef int64_t total_bytes = offsets[n] - offsets[0]
     cdef int64_t base = offsets[0]
@@ -230,7 +230,7 @@ cpdef object vector_split(StringVector vec, char delimiter):
             else:
                 results.append([b''])
 
-        return pa.array(results, type=pa.vector_(pa.binary()))
+        return pa.array(results, type=pa.list_(pa.binary()))
 
     # Count delimiters per string
     cdef size_t* string_delim_counts = <size_t*>calloc(n, sizeof(size_t))
@@ -388,7 +388,7 @@ cpdef object vector_split(StringVector vec, char delimiter):
 
     # Create list array
     cdef object vector_array = pa.Array.from_buffers(
-        pa.vector_(pa.binary()), n,
+        pa.list_(pa.binary()), n,
         [None, vector_offs_buf],
         children=[child_array]
     )

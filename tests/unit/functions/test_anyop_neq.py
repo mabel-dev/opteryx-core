@@ -8,7 +8,7 @@ from opteryx.compiled.vector_ops import vector_anyop_neq
 from opteryx.draken.interop.arrow import vector_from_arrow
 
 def _test_neq_comparison(literal, test_value, expected_result, _type=pa.string()):
-    array = vector_from_arrow(pa.array([[test_value]], type=pa.vector_(_type)))
+    array = vector_from_arrow(pa.array([[test_value]], type=pa.list_(_type)))
     result = vector_anyop_neq(literal, array).to_pylist()
     assert result == [expected_result], f"Expected {literal} != {test_value} to be {expected_result}, got {result[0]}"
 
@@ -48,87 +48,87 @@ def test_comparison_longer_strings():
 
 def test_comparison_with_int_lists():
     # Test with lists containing multiple values
-    array = vector_from_arrow(pa.array([[1, 2, 3]], type=pa.vector_(pa.int64())))
+    array = vector_from_arrow(pa.array([[1, 2, 3]], type=pa.list_(pa.int64())))
     result = vector_anyop_neq(1, array).to_pylist()
     assert result == [1], "Expected 1 != [1,2,3] to be True (as 2,3 are different)"
     
-    array = vector_from_arrow(pa.array([[1, 1, 1]], type=pa.vector_(pa.int64())))
+    array = vector_from_arrow(pa.array([[1, 1, 1]], type=pa.list_(pa.int64())))
     result = vector_anyop_neq(1, array).to_pylist()
     assert result == [0], "Expected 1 != [1,1,1] to be False (as all elements are 1)"
     
     # Test with empty list
-    array = vector_from_arrow(pa.array([[]], type=pa.vector_(pa.int64())))
+    array = vector_from_arrow(pa.array([[]], type=pa.list_(pa.int64())))
     result = vector_anyop_neq(1, array).to_pylist()
     assert result == [0], "Expected 1 != [] to be False (empty list has no different values)"
 
 def test_comparison_with_string_lists():
     # Test with lists containing multiple string values
-    array = vector_from_arrow(pa.array([["apple", "banana", "cherry"]], type=pa.vector_(pa.string())))
+    array = vector_from_arrow(pa.array([["apple", "banana", "cherry"]], type=pa.list_(pa.string())))
     result = vector_anyop_neq("apple", array).to_pylist()
     assert result == [1], "Expected 'apple' != ['apple','banana','cherry'] to be True (as 'banana','cherry' are different)"
     
-    array = vector_from_arrow(pa.array([["apple", "apple", "apple"]], type=pa.vector_(pa.string())))
+    array = vector_from_arrow(pa.array([["apple", "apple", "apple"]], type=pa.list_(pa.string())))
     result = vector_anyop_neq("apple", array).to_pylist()
     assert result == [0], "Expected 'apple' != ['apple','apple','apple'] to be False (as all elements are 'apple')"
     
     # Test with mixed case strings
-    array = vector_from_arrow(pa.array([["Apple", "apple", "APPLE"]], type=pa.vector_(pa.string())))
+    array = vector_from_arrow(pa.array([["Apple", "apple", "APPLE"]], type=pa.list_(pa.string())))
     result = vector_anyop_neq("apple", array).to_pylist()
     assert result == [1], "Expected 'apple' != ['Apple','apple','APPLE'] to be True (case sensitivity)"
     
     # Test with varying string lengths
-    array = vector_from_arrow(pa.array([["a", "aa", "aaa"]], type=pa.vector_(pa.string())))
+    array = vector_from_arrow(pa.array([["a", "aa", "aaa"]], type=pa.list_(pa.string())))
     result = vector_anyop_neq("a", array).to_pylist()
     assert result == [1], "Expected 'a' != ['a','aa','aaa'] to be True (as 'aa','aaa' are different)"
     
     # Test with empty string in list
-    array = vector_from_arrow(pa.array([["", "apple", ""]], type=pa.vector_(pa.string())))
+    array = vector_from_arrow(pa.array([["", "apple", ""]], type=pa.list_(pa.string())))
     result = vector_anyop_neq("", array).to_pylist()
     assert result == [1], "Expected '' != ['','apple',''] to be True (as 'apple' is different)"
     
     # Test with special characters
-    array = vector_from_arrow(pa.array([["a\nb", "a b", "a\tb"]], type=pa.vector_(pa.string())))
+    array = vector_from_arrow(pa.array([["a\nb", "a b", "a\tb"]], type=pa.list_(pa.string())))
     result = vector_anyop_neq("a b", array).to_pylist()
     assert result == [1], "Expected 'a b' != ['a\\nb','a b','a\\tb'] to be True (different whitespace)"
 
 def test_comparison_with_binary_lists():
     # Test with lists containing binary values
-    array = vector_from_arrow(pa.array([[b"data", b"info", b"bytes"]], type=pa.vector_(pa.binary())))
+    array = vector_from_arrow(pa.array([[b"data", b"info", b"bytes"]], type=pa.list_(pa.binary())))
     result = vector_anyop_neq(b"data", array).to_pylist()
     assert result == [1], "Expected b'data' != [b'data',b'info',b'bytes'] to be True (as others are different)"
     
-    array = vector_from_arrow(pa.array([[b"data", b"data", b"data"]], type=pa.vector_(pa.binary())))
+    array = vector_from_arrow(pa.array([[b"data", b"data", b"data"]], type=pa.list_(pa.binary())))
     result = vector_anyop_neq(b"data", array).to_pylist()
     assert result == [0], "Expected b'data' != [b'data',b'data',b'data'] to be False (as all elements are b'data')"
     
     # Test with empty binary
-    array = vector_from_arrow(pa.array([[b""]], type=pa.vector_(pa.binary())))
+    array = vector_from_arrow(pa.array([[b""]], type=pa.list_(pa.binary())))
     result = vector_anyop_neq(b"", array).to_pylist()
     assert result == [0], "Expected b'' != [b''] to be False (both are empty)"
     
     # Test with binary containing zeros and non-printable characters
-    array = vector_from_arrow(pa.array([[b"\x00\x01\x02", b"\x00\x01\x03"]], type=pa.vector_(pa.binary())))
+    array = vector_from_arrow(pa.array([[b"\x00\x01\x02", b"\x00\x01\x03"]], type=pa.list_(pa.binary())))
     result = vector_anyop_neq(b"\x00\x01\x02", array).to_pylist()
     assert result == [1], "Expected comparison with binary data to work correctly"
     
     # Test with longer binary data
     large_binary = b"x" * 1000
-    array = vector_from_arrow(pa.array([[large_binary, large_binary + b"y"]], type=pa.vector_(pa.binary())))
+    array = vector_from_arrow(pa.array([[large_binary, large_binary + b"y"]], type=pa.list_(pa.binary())))
     result = vector_anyop_neq(large_binary, array).to_pylist()
     assert result == [1], "Expected large binary != [large_binary, large_binary+'y'] to be True"
     
     # Test with UTF-8 content stored as binary
-    array = vector_from_arrow(pa.array([[b"\xf0\x9f\x98\x80", b"\xf0\x9f\x98\x81"]], type=pa.vector_(pa.binary())))  # 😀, 😁 emojis
+    array = vector_from_arrow(pa.array([[b"\xf0\x9f\x98\x80", b"\xf0\x9f\x98\x81"]], type=pa.list_(pa.binary())))  # 😀, 😁 emojis
     result = vector_anyop_neq(b"\xf0\x9f\x98\x80", array).to_pylist()
     assert result == [1], "Expected binary emoji comparison to work correctly"
 
 def test_comparison_with_nulls():
     # Test with null values
-    array = vector_from_arrow(pa.array([[None]], type=pa.vector_(pa.string())))
+    array = vector_from_arrow(pa.array([[None]], type=pa.list_(pa.string())))
     result = vector_anyop_neq("a", array).to_pylist()
     assert result == [0], "Expected 'a' != [None] to be False (null elements skipped)"
     
-    array = vector_from_arrow(pa.array([[None, "a", None]], type=pa.vector_(pa.string())))
+    array = vector_from_arrow(pa.array([[None, "a", None]], type=pa.list_(pa.string())))
     result = vector_anyop_neq("a", array).to_pylist()
     assert result == [0], "Expected 'a' != [None,'a',None] to be False (null skipped, 'a' equals literal)"
     _test_neq_comparison(-1, -2, 1, pa.int64())  # -1 != -2 -> True
@@ -198,37 +198,37 @@ def test_comparison_binary_edge_cases():
 
 def test_comparison_list_edge_cases():
     # Empty list comparison
-    array = vector_from_arrow(pa.array([[]], type=pa.vector_(pa.string())))
+    array = vector_from_arrow(pa.array([[]], type=pa.list_(pa.string())))
     result = vector_anyop_neq("a", array).to_pylist()
     assert result == [0], "Expected 'a' != [] to be False (no different values)"
     
     # Single element matching
-    array = vector_from_arrow(pa.array([["a"]], type=pa.vector_(pa.string())))
+    array = vector_from_arrow(pa.array([["a"]], type=pa.list_(pa.string())))
     result = vector_anyop_neq("a", array).to_pylist()
     assert result == [0], "Expected 'a' != ['a'] to be False"
     
     # All nulls
-    array = vector_from_arrow(pa.array([[None, None, None]], type=pa.vector_(pa.string())))
+    array = vector_from_arrow(pa.array([[None, None, None]], type=pa.list_(pa.string())))
     result = vector_anyop_neq("a", array).to_pylist()
     assert result == [0], "Expected 'a' != [None,None,None] to be False (all nulls skipped, no non-null differs from 'a')"
     
     # Multiple rows
-    array = vector_from_arrow(pa.array([["a"], ["b"], ["a", "b"], []], type=pa.vector_(pa.string())))
+    array = vector_from_arrow(pa.array([["a"], ["b"], ["a", "b"], []], type=pa.list_(pa.string())))
     result = vector_anyop_neq("a", array).to_pylist()
     assert result == [0, 1, 1, 0], f"Expected [0, 1, 1, 0], got {result}"
 
 def test_comparison_list_floats():
     # Float list comparisons
-    array = vector_from_arrow(pa.array([[1.0, 2.0, 3.0]], type=pa.vector_(pa.float64())))
+    array = vector_from_arrow(pa.array([[1.0, 2.0, 3.0]], type=pa.list_(pa.float64())))
     result = vector_anyop_neq(1.0, array).to_pylist()
     assert result == [1], "Expected 1.0 != [1.0,2.0,3.0] to be True (2.0,3.0 are different)"
     
-    array = vector_from_arrow(pa.array([[1.0, 1.0, 1.0]], type=pa.vector_(pa.float64())))
+    array = vector_from_arrow(pa.array([[1.0, 1.0, 1.0]], type=pa.list_(pa.float64())))
     result = vector_anyop_neq(1.0, array).to_pylist()
     assert result == [0], "Expected 1.0 != [1.0,1.0,1.0] to be False"
     
     # Infinity
-    array = vector_from_arrow(pa.array([[float("inf"), 1.0]], type=pa.vector_(pa.float64())))
+    array = vector_from_arrow(pa.array([[float("inf"), 1.0]], type=pa.list_(pa.float64())))
     result = vector_anyop_neq(1.0, array).to_pylist()
     assert result == [1], "Expected 1.0 != [inf,1.0] to be True (inf is different)"
 
@@ -243,11 +243,11 @@ def test_comparison_list_dates():
     date2_days = (date2 - datetime.date(1970, 1, 1)).days
     
     # Test with date32 array but compare using integer days
-    array = vector_from_arrow(pa.array([[date1_days, date2_days]], type=pa.vector_(pa.int32())))
+    array = vector_from_arrow(pa.array([[date1_days, date2_days]], type=pa.list_(pa.int32())))
     result = vector_anyop_neq(date1_days, array).to_pylist()
     assert result[0] == 1, f"Expected date comparison to return True for different dates, got {result}"
     
-    array = vector_from_arrow(pa.array([[date1_days, date1_days]], type=pa.vector_(pa.int32())))
+    array = vector_from_arrow(pa.array([[date1_days, date1_days]], type=pa.list_(pa.int32())))
     result = vector_anyop_neq(date1_days, array).to_pylist()
     assert result[0] == 0, f"Expected date comparison to return False for same dates, got {result}"
 

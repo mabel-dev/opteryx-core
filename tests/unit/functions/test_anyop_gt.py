@@ -12,7 +12,7 @@ def _test_gt_comparison(literal, test_value, expected_result, _type=pa.string())
     Helper to test comparison through vector_anyop_gt
     """
     # Create a simple array with one list containing one item
-    array = vector_from_arrow(pa.array([[test_value]], type=pa.vector_(_type)))
+    array = vector_from_arrow(pa.array([[test_value]], type=pa.list_(_type)))
     result = vector_anyop_gt(literal, array).to_pylist()
     assert result == [expected_result], f"Expected {literal} > {test_value} to be {expected_result}, got {result[0]}"
 
@@ -95,7 +95,7 @@ def test_gt_full_list_comparison():
         []                    # "d" > ANY([]) -> False (empty list)
     ]
     
-    array = vector_from_arrow(pa.array(test_data, type=pa.vector_(pa.string())))
+    array = vector_from_arrow(pa.array(test_data, type=pa.list_(pa.string())))
     result = vector_anyop_gt("d", array).to_pylist()
     assert result == [1, 0, 0], f"Expected [1, 0, 0], got {result}"
 
