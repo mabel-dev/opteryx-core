@@ -21,6 +21,7 @@ class OperatorMapType(NamedTuple):
 OPERATOR_MAP: Dict[Tuple[OrsoTypes, OrsoTypes, str], OperatorMapType] = {
     (OrsoTypes.ARRAY, OrsoTypes.ARRAY, "AtArrow"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
     (OrsoTypes.ARRAY, OrsoTypes.ARRAY, "ArrayContainsAll"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
+    (OrsoTypes.ARRAY, OrsoTypes.INTEGER, "MapAccess"): OperatorMapType(OrsoTypes._MISSING_TYPE, None, 100.0),
     (OrsoTypes.BLOB, OrsoTypes.VARCHAR, "Eq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
     (OrsoTypes.BLOB, OrsoTypes.VARCHAR, "NotEq"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
     (OrsoTypes.BLOB, OrsoTypes.VARCHAR, "Gt"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
@@ -54,6 +55,7 @@ OPERATOR_MAP: Dict[Tuple[OrsoTypes, OrsoTypes, str], OperatorMapType] = {
     (OrsoTypes.BLOB, OrsoTypes.BLOB, "RLike"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
     (OrsoTypes.BLOB, OrsoTypes.BLOB, "NotRLike"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
     (OrsoTypes.BLOB, OrsoTypes.BLOB, "StringConcat"): OperatorMapType(OrsoTypes.BLOB, None, 100.0),
+    (OrsoTypes.BLOB, OrsoTypes.INTEGER, "MapAccess"): OperatorMapType(OrsoTypes.BLOB, None, 100.0),
     (OrsoTypes.BLOB, OrsoTypes.ARRAY, "InList"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
     (OrsoTypes.BLOB, OrsoTypes.ARRAY, "NotInList"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
     (OrsoTypes.BOOLEAN, OrsoTypes.ARRAY, "InList"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
@@ -276,6 +278,7 @@ OPERATOR_MAP: Dict[Tuple[OrsoTypes, OrsoTypes, str], OperatorMapType] = {
     (OrsoTypes.VARCHAR, OrsoTypes.VARCHAR, "NotRLike"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
     (OrsoTypes.VARCHAR, OrsoTypes.VARCHAR, "BitwiseOr"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
     (OrsoTypes.VARCHAR, OrsoTypes.VARCHAR, "StringConcat"): OperatorMapType(OrsoTypes.VARCHAR, None, 100.0),
+    (OrsoTypes.VARCHAR, OrsoTypes.INTEGER, "MapAccess"): OperatorMapType(OrsoTypes.VARCHAR, None, 100.0),
     (OrsoTypes.VARCHAR, OrsoTypes.BLOB, "Arrow"): OperatorMapType(OrsoTypes._MISSING_TYPE, None, 100.0),
     (OrsoTypes.VARCHAR, OrsoTypes.BLOB, "LongArrow"): OperatorMapType(OrsoTypes.BLOB, None, 100.0),
     (OrsoTypes.VARCHAR, OrsoTypes.BLOB, "AtQuestion"): OperatorMapType(OrsoTypes.BOOLEAN, None, 100.0),
@@ -353,6 +356,17 @@ def determine_type(node) -> OrsoTypes:
 
         raise IncorrectTypeError(
             f"Unable to perform `{format_expression(node)}` because the values are not acceptable types for this operation. {left_type} and {right_type} were provided, you may need to cast one or both values to acceptable types."
+        )
+
+    if operator == "MapAccess" and left_type == OrsoTypes.ARRAY and right_type == OrsoTypes.INTEGER:
+        # ARRAY<T>[INTEGER] resolves to T when we know the element type.
+        element_type = None
+        if node.left.schema_column is not None:
+            element_type = node.left.schema_column.element_type
+        return (
+            element_type
+            if element_type not in (None, 0, OrsoTypes._MISSING_TYPE, OrsoTypes.NULL)
+            else OrsoTypes._MISSING_TYPE
         )
 
     return result.result_type

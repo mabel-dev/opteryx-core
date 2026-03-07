@@ -6,7 +6,7 @@ Includes:
 - Random generation: RANDOM, RAND, NORMAL, RANDOM_STRING
 - Statistics: GREATEST, LEAST
 - Sorting: SORT
-- Access: GET, GET_STRING
+- Access: GET_STRING
 - Text formatting: HUMANIZE
 - Vector operations: COSINE_SIMILARITY
 """

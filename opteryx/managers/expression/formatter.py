@@ -98,6 +98,11 @@ def format_expression(root, qualify: bool = False):
                 return f"{root.value[0]}.*"
             return "*"
         if node_type == NodeType.BINARY_OPERATOR:
+            if root.value == "MapAccess":
+                return (
+                    f"{format_expression(root.left, qualify)}"
+                    f"[{format_expression(root.right, qualify)}]"
+                )
             _map = {
                 "StringConcat": "||",
                 "Plus": "+",

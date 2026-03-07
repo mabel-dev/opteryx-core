@@ -30,6 +30,7 @@ from orso.tools import random_string
 from orso.types import OrsoTypes
 
 from opteryx.managers.expression import NodeType
+from opteryx.managers.expression import get_all_nodes_of_type
 from opteryx.models import Node
 from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner import LogicalPlanNode
@@ -73,11 +74,9 @@ DEFAULT_SELECTIVITY = {
 
 def _contains_function(node):
     """Return True if the comparison involves any function call on either side."""
-
-    def is_fn(n):
-        return getattr(n, "node_type", None) == NodeType.FUNCTION
-
-    return is_fn(node) or is_fn(getattr(node, "left", None)) or is_fn(getattr(node, "right", None))
+    if node is None:
+        return False
+    return bool(get_all_nodes_of_type(node, (NodeType.FUNCTION,)))
 
 
 def _estimate_selectivity(condition):

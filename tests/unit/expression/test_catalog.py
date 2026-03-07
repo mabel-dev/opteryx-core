@@ -3,11 +3,13 @@
 import pytest
 
 from opteryx.expression.functions import (
+    BindingContext,
     FunctionDefinition,
     FunctionOverload,
     KernelSpec,
     LifecycleSpec,
     ParameterSpec,
+    ResolvedFunction,
     ReturnSpec,
     get_catalog,
 )
@@ -239,3 +241,243 @@ class TestFunctionCatalog:
         # Get cost for LOWER
         lower_cost = catalog.get_cost("LOWER")
         assert lower_cost == 5.0
+
+
+class TestResolve:
+    """Tests for FunctionCatalog.resolve() overload resolution."""
+
+    def _make_catalog(self) -> "FunctionCatalog":
+        """Fresh isolated catalog (not the singleton) for test isolation."""
+        from opteryx.expression.functions.catalog import FunctionCatalog
+        cat = FunctionCatalog.__new__(FunctionCatalog)
+        cat._functions = {}
+        cat._aliases = {}
+        return cat
+
+    def _make_context(self):
+        return BindingContext(schema={}, bound_args={})
+
+    def test_resolve_returns_none_for_unknown_function(self):
+        """resolve() returns None for unregistered function name."""
+        catalog = self._make_catalog()
+        result = catalog.resolve("NONEXISTENT", [], self._make_context())
+        assert result is None
+
+    def test_resolve_basic(self):
+        """resolve() returns ResolvedFunction for a registered function."""
+        from opteryx.expression.functions import (
+            FunctionDefinition, FunctionOverload, KernelSpec,
+            LifecycleSpec, ParameterSpec, ReturnSpec, ResolvedFunction,
+        )
+        from orso.types import OrsoTypes
+
+        catalog = self._make_catalog()
+        catalog.register(FunctionDefinition(
+            name="MY_UPPER",
+            aliases=(),
+            category="text",
+            volatility="immutable",
+            deterministic=True,
+            lifecycle=LifecycleSpec(status="active"),
+            summary="",
+            documentation="",
+            overloads=(
+                FunctionOverload(
+                    id="MY_UPPER_1",
+                    parameters=(ParameterSpec(name="s", type_family="string"),),
+                    return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.VARCHAR),
+                    kernel=KernelSpec(id="default", callable_ref=str.upper, cost_us_per_million=1.0),
+                ),
+            ),
+        ))
+
+        node = object()  # no .type attribute
+        result = catalog.resolve("MY_UPPER", [node], self._make_context())
+
+        assert isinstance(result, ResolvedFunction)
+        assert result.function_definition.name == "MY_UPPER"
+        assert result.inferred_return_type == OrsoTypes.VARCHAR
+        assert result.selected_overload.id == "MY_UPPER_1"
+
+    def test_resolve_via_alias(self):
+        """resolve() resolves aliases to the canonical function."""
+        from opteryx.expression.functions import (
+            FunctionDefinition, FunctionOverload, KernelSpec,
+            LifecycleSpec, ParameterSpec, ReturnSpec,
+        )
+        from orso.types import OrsoTypes
+
+        catalog = self._make_catalog()
+        catalog.register(FunctionDefinition(
+            name="CANONICAL_FN",
+            aliases=("ALIAS_FN",),
+            category="test",
+            volatility="immutable",
+            deterministic=True,
+            lifecycle=LifecycleSpec(status="active"),
+            summary="",
+            documentation="",
+            overloads=(
+                FunctionOverload(
+                    id="CANONICAL_FN_1",
+                    parameters=(ParameterSpec(name="x", type_family="any"),),
+                    return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.INTEGER),
+                    kernel=KernelSpec(id="default", callable_ref=lambda x: x, cost_us_per_million=1.0),
+                ),
+            ),
+        ))
+
+        result = catalog.resolve("ALIAS_FN", [object()], self._make_context())
+        assert result is not None
+        assert result.function_definition.name == "CANONICAL_FN"
+
+    def test_resolve_arity_mismatch_raises(self):
+        """resolve() raises TypeError when no overload matches the argument count."""
+        from opteryx.expression.functions import (
+            FunctionDefinition, FunctionOverload, KernelSpec,
+            LifecycleSpec, ParameterSpec, ReturnSpec,
+        )
+        from orso.types import OrsoTypes
+
+        catalog = self._make_catalog()
+        catalog.register(FunctionDefinition(
+            name="FIXED_ARITY",
+            aliases=(),
+            category="test",
+            volatility="immutable",
+            deterministic=True,
+            lifecycle=LifecycleSpec(status="active"),
+            summary="",
+            documentation="",
+            overloads=(
+                FunctionOverload(
+                    id="FIXED_ARITY_2",
+                    parameters=(
+                        ParameterSpec(name="a", type_family="any"),
+                        ParameterSpec(name="b", type_family="any"),
+                    ),
+                    return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.INTEGER),
+                    kernel=KernelSpec(id="default", callable_ref=lambda a, b: a, cost_us_per_million=1.0),
+                ),
+            ),
+        ))
+
+        with pytest.raises(TypeError, match="does not accept"):
+            catalog.resolve("FIXED_ARITY", [object()], self._make_context())  # 1 arg, needs 2
+
+    def test_resolve_variadic(self):
+        """resolve() matches variadic overloads with any number of args."""
+        from opteryx.expression.functions import (
+            FunctionDefinition, FunctionOverload, KernelSpec,
+            LifecycleSpec, ParameterSpec, ReturnSpec,
+        )
+        from orso.types import OrsoTypes
+
+        catalog = self._make_catalog()
+        catalog.register(FunctionDefinition(
+            name="VARIADIC_FN",
+            aliases=(),
+            category="test",
+            volatility="immutable",
+            deterministic=True,
+            lifecycle=LifecycleSpec(status="active"),
+            summary="",
+            documentation="",
+            overloads=(
+                FunctionOverload(
+                    id="VARIADIC_FN_1",
+                    parameters=(ParameterSpec(name="args", type_family="any", variadic=True),),
+                    return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.VARCHAR),
+                    kernel=KernelSpec(id="default", callable_ref=lambda *a: a, cost_us_per_million=1.0),
+                ),
+            ),
+        ))
+
+        # Should match 0, 1, 3, 10 args
+        ctx = self._make_context()
+        for n in (1, 3, 10):
+            result = catalog.resolve("VARIADIC_FN", [object()] * n, ctx)
+            assert result is not None, f"Expected match for {n} args"
+
+    def test_resolve_return_type_same_as_arg(self):
+        """resolve() uses first arg type for same_as_arg return spec."""
+        from opteryx.expression.functions import (
+            FunctionDefinition, FunctionOverload, KernelSpec,
+            LifecycleSpec, ParameterSpec, ReturnSpec,
+        )
+        from orso.types import OrsoTypes
+
+        catalog = self._make_catalog()
+        catalog.register(FunctionDefinition(
+            name="PASSTHRU_FN",
+            aliases=(),
+            category="test",
+            volatility="immutable",
+            deterministic=True,
+            lifecycle=LifecycleSpec(status="active"),
+            summary="",
+            documentation="",
+            overloads=(
+                FunctionOverload(
+                    id="PASSTHRU_FN_1",
+                    parameters=(ParameterSpec(name="x", type_family="any"),),
+                    return_spec=ReturnSpec(mode="same_as_arg", arg_index=0),
+                    kernel=KernelSpec(id="default", callable_ref=lambda x: x, cost_us_per_million=0.0),
+                ),
+            ),
+        ))
+
+        class NodeWithType:
+            type = OrsoTypes.DOUBLE
+
+        result = catalog.resolve("PASSTHRU_FN", [NodeWithType()], self._make_context())
+        assert result.inferred_return_type == OrsoTypes.DOUBLE
+
+    def test_resolve_return_type_resolver(self):
+        """resolve() calls resolver function to infer return type."""
+        from opteryx.expression.functions import (
+            FunctionDefinition, FunctionOverload, KernelSpec,
+            LifecycleSpec, ParameterSpec, ReturnSpec,
+        )
+        from orso.types import OrsoTypes
+
+        sentinel_type = OrsoTypes.TIMESTAMP
+
+        def my_resolver(arg_nodes):
+            return sentinel_type
+
+        catalog = self._make_catalog()
+        catalog.register(FunctionDefinition(
+            name="RESOLVER_FN",
+            aliases=(),
+            category="test",
+            volatility="immutable",
+            deterministic=True,
+            lifecycle=LifecycleSpec(status="active"),
+            summary="",
+            documentation="",
+            overloads=(
+                FunctionOverload(
+                    id="RESOLVER_FN_1",
+                    parameters=(ParameterSpec(name="x", type_family="any"),),
+                    return_spec=ReturnSpec(mode="resolver", resolver=my_resolver),
+                    kernel=KernelSpec(id="default", callable_ref=lambda x: x, cost_us_per_million=0.0),
+                ),
+            ),
+        ))
+
+        result = catalog.resolve("RESOLVER_FN", [object()], self._make_context())
+        assert result.inferred_return_type == sentinel_type
+
+    def test_resolve_legacy_backfill(self):
+        """load_legacy_dict() makes all legacy functions resolvable."""
+        from opteryx.expression.functions import get_catalog
+        catalog = get_catalog()
+
+        # Sample of functions that should be backfilled from legacy FUNCTIONS dict.
+        # DATEPART is now hand-crafted with a 2-arg overload; test with 2 args.
+        for name, argc in (("TRIM", 1), ("LEVENSHTEIN", 2), ("SHA256", 1), ("DATEPART", 2), ("COSINE_SIMILARITY", 2)):
+            assert catalog.get_definition(name) is not None, f"{name} should be in catalog"
+            result = catalog.resolve(name, [object()] * argc, BindingContext(schema={}, bound_args={}))
+            assert result is not None, f"resolve('{name}') should return a match"
+

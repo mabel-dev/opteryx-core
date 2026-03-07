@@ -131,57 +131,6 @@ def array_encode_utf8(arr):
         return [None if s is None else str(s).encode() for s in arr]
 
 
-def _get(array, key):
-    if hasattr(array, "to_numpy"):
-        array = array.to_numpy(False)
-
-    # Determine the type of the first element (assuming homogeneous array)
-    first_element = next((item for item in array if item is not None), None)
-    if first_element is None:
-        return numpy.full(len(array), None)
-
-    key = key[0]
-    if isinstance(first_element, dict):
-        # Handle dict type
-        from opteryx.compiled.list_ops import cython_arrow_op
-
-        return cython_arrow_op(array, key)
-    if isinstance(key, str):
-        from opteryx.third_party.tktech import csimdjson as simdjson
-
-        if hasattr(array, "to_numpy"):
-            array = array.to_numpy(False)
-
-        def extract(doc, elem):
-            value = simdjson.Parser().parse(doc).get(elem)  # type:ignore
-            if hasattr(value, "as_list"):
-                return value.as_list()
-            if hasattr(value, "as_dict"):
-                return value.as_dict()
-            return value
-
-        try:
-            return pyarrow.array([None if d is None else extract(d, key) for d in array])
-        except ValueError:
-            raise IncorrectTypeError(
-                "VARCHAR subscripts can only be used on STRUCT or columns with valid JSON documents."
-            )
-    try:
-        index = int(key)
-    except Exception:
-        raise IncorrectTypeError("VARCHAR and ARRAY values must be subscripted with NUMERIC values")
-    if isinstance(first_element, (list, str, pyarrow.ListScalar, bytes, numpy.ndarray)):
-        from opteryx.compiled.list_ops import list_get_element
-        from opteryx.draken.interop.arrow import vector_from_arrow
-
-        pa_arr = pyarrow.array(
-            [r if not isinstance(r, pyarrow.ListScalar) else r.as_py() for r in array]
-        )
-        return list_get_element(vector_from_arrow(pa_arr), index)
-
-    raise IncorrectTypeError(f"Cannot subscript {type(first_element).__name__} values")
-
-
 def _get_string(array, key):
     key = key[0]
     return pyarrow.array(
@@ -573,7 +522,6 @@ FUNCTIONS = {
     "HEX_DECODE": (_iterate_single_parameter(string_functions.get_hex_decode), "BLOB", 1.0),
 
     # OTHER
-    "GET": (_get, "VARIANT", 1.0),
     "GET_STRING": (_get_string, "VARCHAR", 1.0),
     "ARRAY_CONTAINS": (_iterate_double_parameter(other_functions.list_contains), "BOOLEAN", 1.0),
     "ARRAY_CONTAINS_ANY": (lambda x, y: list_contains_any(x, set(y[0])), "BOOLEAN", 1.0),
