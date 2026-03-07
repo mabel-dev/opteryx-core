@@ -94,6 +94,37 @@ def _base_cost(condition):
     return BASIC_COMPARISON_COSTS.get(col_type.type, 10.0)
 
 
+def _catalog_function_cost(node) -> float:
+    """Sum catalog cost estimates for all FUNCTION nodes in the expression subtree.
+
+    Falls back to 100.0 µs/million for any function with cost 0.0 (legacy backfill entries
+    that don't have measured costs should be treated as expensive, not free).
+    """
+    from opteryx.expression.functions import get_catalog
+
+    _UNKNOWN_COST = 100.0
+    total = 0.0
+    for func_node in get_all_nodes_of_type(node, (NodeType.FUNCTION,)):
+        cost = get_catalog().get_cost(func_node.value) or 0.0
+        total += cost if cost > 0.0 else _UNKNOWN_COST
+    return total
+
+
+def _order_complex_predicates(predicates, telemetry):
+    """Order function-containing predicates by estimated catalog cost."""
+    if len(predicates) <= 1:
+        return predicates
+
+    costs = [_catalog_function_cost(p.condition) for p in predicates]
+    order = sorted(range(len(predicates)), key=lambda i: costs[i])
+    ordered = [predicates[i] for i in order]
+
+    if any(predicates[i] is not ordered[i] for i in range(len(ordered))):
+        telemetry.optimization_cost_based_predicate_ordering += 1
+
+    return ordered
+
+
 def _order_simple_predicates(predicates, telemetry):
     """Order simple (non-function) predicates by brute-force cost if small, else by cost heuristic."""
 
@@ -239,9 +270,10 @@ def order_predicates(predicates: list, telemetry) -> list:
         simple.append(pred)
 
     ordered_simple = _order_simple_predicates(simple, telemetry)
+    ordered_complex = _order_complex_predicates(complex_preds, telemetry)
 
     # Maintain original order for complex/function predicates appended after simples
-    return ordered_simple + complex_preds
+    return ordered_simple + ordered_complex
 
 
 class PredicateOrderingStrategy(OptimizationStrategy):

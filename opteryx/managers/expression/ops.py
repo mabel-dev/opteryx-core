@@ -11,7 +11,7 @@ import pyarrow
 from orso.types import OrsoTypes
 from pyarrow import compute
 
-from opteryx.compiled import list_ops
+from opteryx.compiled import vector_ops
 
 _DICT_EXPR_TEL = {
     "draken_dict_expr_fastpath_hits": 0,
@@ -438,7 +438,7 @@ def _inner_filter_operations(arr, operator, value):
         if isinstance(arr, pyarrow.Array):
             arr = vector_from_arrow(arr)
 
-        return list_ops.list_in_list(arr, values)
+        return vector_ops.vector_in_list(arr, values)
     if operator == "NotInList":
         if dict_candidate:
             fast = _dictionary_fastpath(arr, operator, value)
@@ -467,7 +467,7 @@ def _inner_filter_operations(arr, operator, value):
         if isinstance(arr, pyarrow.Array):
             arr = vector_from_arrow(arr)
 
-        matches = list_ops.list_in_list(arr, values)
+        matches = vector_ops.vector_in_list(arr, values)
         return numpy.invert(matches.astype(dtype=numpy.bool_))
     if operator == "InStr":
         needle = str(value)
@@ -476,7 +476,7 @@ def _inner_filter_operations(arr, operator, value):
             arr = arr.to_arrow()
         elif not isinstance(arr, (pyarrow.Array, pyarrow.ChunkedArray)):
             arr = pyarrow.array(arr, type=pyarrow.binary())
-        matches = list_ops.list_in_string(arr, needle)
+        matches = vector_ops.vector_in_string(arr, needle)
         return numpy.frombuffer(matches, dtype=numpy.bool_)
     if operator == "NotInStr":
         needle = str(value)
@@ -485,7 +485,7 @@ def _inner_filter_operations(arr, operator, value):
             arr = arr.to_arrow()
         elif not isinstance(arr, (pyarrow.Array, pyarrow.ChunkedArray)):
             arr = pyarrow.array(arr, type=pyarrow.binary())
-        matches = list_ops.list_in_string(arr, needle)
+        matches = vector_ops.vector_in_string(arr, needle)
         matches = numpy.frombuffer(matches, dtype=numpy.bool_)
         return numpy.invert(matches)
     if operator == "IInStr":
@@ -495,7 +495,7 @@ def _inner_filter_operations(arr, operator, value):
             arr = arr.to_arrow()
         elif not isinstance(arr, (pyarrow.Array, pyarrow.ChunkedArray)):
             arr = pyarrow.array(arr, type=pyarrow.binary())
-        matches = list_ops.list_in_string_case_insensitive(arr, needle)
+        matches = vector_ops.vector_in_string_case_insensitive(arr, needle)
         return numpy.frombuffer(matches, dtype=numpy.bool_)
     if operator == "NotIInStr":
         needle = str(value)
@@ -504,7 +504,7 @@ def _inner_filter_operations(arr, operator, value):
             arr = arr.to_arrow()
         elif not isinstance(arr, (pyarrow.Array, pyarrow.ChunkedArray)):
             arr = pyarrow.array(arr, type=pyarrow.binary())
-        matches = list_ops.list_in_string_case_insensitive(arr, needle)
+        matches = vector_ops.vector_in_string_case_insensitive(arr, needle)
         matches = numpy.frombuffer(matches, dtype=numpy.bool_)
         return numpy.invert(matches)
     if operator == "Like":
@@ -563,21 +563,21 @@ def _inner_filter_operations(arr, operator, value):
         matches = compute.match_substring_regex(arr, value)  # [#325]
         return numpy.invert(matches)
     if operator == "AnyOpEq":
-        return list_ops.list_anyop_eq(literal=arr[0], column=value)
+        return vector_ops.vector_anyop_eq(literal=arr[0], column=value)
     if operator == "AnyOpNotEq":
-        return list_ops.list_anyop_neq(literal=arr[0], column=value)
+        return vector_ops.vector_anyop_neq(literal=arr[0], column=value)
     if operator == "AnyOpGt":
-        return list_ops.list_anyop_gt(arr[0], value)
+        return vector_ops.vector_anyop_gt(arr[0], value)
     if operator == "AnyOpLt":
-        return list_ops.list_anyop_lt(arr[0], value)
+        return vector_ops.vector_anyop_lt(arr[0], value)
     if operator == "AnyOpGtEq":
-        return list_ops.list_anyop_gte(arr[0], value)
+        return vector_ops.vector_anyop_gte(arr[0], value)
     if operator == "AnyOpLtEq":
-        return list_ops.list_anyop_lte(arr[0], value)
+        return vector_ops.vector_anyop_lte(arr[0], value)
     if operator == "AllOpEq":
-        return list_ops.list_allop_eq(arr[0], value)
+        return vector_ops.vector_allop_eq(arr[0], value)
     if operator == "AllOpNotEq":
-        return list_ops.list_allop_neq(arr[0], value)
+        return vector_ops.vector_allop_neq(arr[0], value)
 
     if operator == "AnyOpILike":
         from opteryx.utils.sql import regex_match_any
@@ -643,7 +643,7 @@ def _inner_filter_operations(arr, operator, value):
         )
 
     if operator == "AtArrow":
-        from opteryx.compiled.list_ops import list_contains_any
+        from opteryx.compiled.vector_ops import vector_contains_any
 
         if len(arr) == 0:
             return numpy.array([], dtype=numpy.bool_)
@@ -671,10 +671,10 @@ def _inner_filter_operations(arr, operator, value):
         if to_pylist is not None:
             value = to_pylist()
 
-        return list_contains_any(arr, set(value))
+        return vector_contains_any(arr, set(value))
 
     if operator == "ArrayContainsAll":
-        from opteryx.compiled.list_ops import list_contains_all
+        from opteryx.compiled.vector_ops import vector_contains_all
 
         to_pylist = getattr(value, "to_pylist", None)
         if to_pylist is not None:
@@ -687,6 +687,6 @@ def _inner_filter_operations(arr, operator, value):
         if len(arr) == 1 and len(value) != 0:
             raise ValueError("Unable to execute @>>, check form matches `column @>> (values)`.")
 
-        return list_contains_all(arr, set(value))
+        return vector_contains_all(arr, set(value))
 
     raise NotImplementedError(f"Operator {operator} is not implemented!")  # pragma: no cover

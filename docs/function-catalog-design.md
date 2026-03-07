@@ -20,19 +20,20 @@
 **Function Catalog Consolidation:**
 - ✅ Removed 8 redundant date extraction functions (YEAR, MONTH, DAY, WEEK, HOUR, MINUTE, SECOND, QUARTER) → unified under DATEPART
 - ✅ Removed 5 duplicate function aliases (RAND→RANDOM, SIGNUM→SIGN, NOW→CURRENT_TIMESTAMP, TODAY→CURRENT_DATE, YESTERDAY)
-- ✅ Reduced function catalog from 111 to 105 entries (5% reduction)
+- ✅ Reduced function catalog from 111 to 105 entries (5% reduction), then to 92 (further cleanup)
 - ✅ Fixed CastSimplificationStrategy to properly handle Filter.condition (not `.expressions`)
 
 **Phase 1: Catalog Adapter (COMPLETE):**
 - ✅ Created `opteryx/expression/functions/catalog.py` — all dataclasses + `FunctionCatalog` class (396 lines)
 - ✅ `resolve()` implemented — arity filtering, type-family scoring, alias resolution, all `ReturnSpec` modes
 - ✅ `from_legacy_dict()` and `load_legacy_dict()` added for migration bridge
-- ✅ `get_catalog()` auto-backfills all 105 legacy functions on first call (zero manual registration needed)
+- ✅ `get_catalog()` auto-backfills all legacy functions on first call (zero manual registration needed)
 - ✅ `builtin_functions.py` renamed to `native_function_registrar.py` for clarity
 - ✅ 8 new `TestResolve` tests added; 35/35 unit expression tests passing
 
 **Current State:**
-- All 105 scalar functions resolvable via `get_catalog().resolve()`
+- All 92 scalar functions resolvable via `get_catalog().resolve()`
+- `GET` function removed from `FUNCTIONS` dict; subscript access (`arr[0]`, `struct->'key'`) is now handled as `NodeType.BINARY_OPERATOR` (`MapAccess`/`Arrow`) in the planner — not a catalog function
 - ~12 functions have full metadata in `native_function_registrar.py`; remaining 93 are backfilled from legacy dict
 - Integration tests: 85/88 passing (3 pre-existing failures unrelated to this work)
 - **Next:** Phase 2 — Binder adoption (binder imports catalog, uses `resolve()` instead of manual FUNCTIONS lookup)
@@ -51,8 +52,17 @@ During Phase 1, nodes without a `.type` attribute (pre-binding) all score 2 per 
 **4. The singleton pattern causes test pollution**  
 Since `get_catalog()` returns a global singleton and tests register functions into it (`catalog.register()`), test-local functions leak across test cases. The `TestResolve` tests work around this by using `FunctionCatalog.__new__(FunctionCatalog)` to create isolated instances. Future tests should follow the same pattern — never register into the singleton.
 
-**5. `OrsoTypes = Any` stub in catalog.py needs replacing before Phase 2**  
-`catalog.py` currently stubs `OrsoTypes = Any` to avoid a circular import. Before Phase 2, this must be resolved: either import from `orso.types` directly (the correct type), or enforce that the type stub only exists in test stubs. Until resolved, type annotations in `ResolvedArg` and `ResolvedFunction` are not validated.
+**6. `GET` is not a catalog function — subscript access is a binary operator**  
+`GET(arr, 0)` and `arr[0]` / `struct->'key'` are handled by the planner as `NodeType.BINARY_OPERATOR` (`MapAccess` and `Arrow` operators), not as function catalog entries. `GET` is in `DEPRECATED_FUNCTIONS` with `None` as replacement (removed in 0.28.0). Do not add a GET entry to `native_function_registrar.py`; the subscript path bypasses the function catalog entirely.
+
+**7. `null_policy` belongs on `KernelSpec`, not on `FunctionDefinition`**  
+Null handling is a property of the kernel implementation, not of the logical function. A future overload of CONCAT might handle nulls differently than the current one. Annotate `null_policy` on each `KernelSpec` individually. The evaluator reads `node.function_ref.selected_overload.kernel.null_policy` — this is the correct access path.
+
+**8. The evaluator fallback path must stay until `managers/expression` is removed**  
+`apply_bounded_function` falls back to legacy `apply_function` when `node.function_ref` is `None`. This covers any FUNCTION node that was not bound (e.g., nodes produced by legacy code paths or tests that skip the binder). The fallback can only be removed once `managers/expression/__init__.py` is deleted and the new evaluator is the sole execution path.
+
+**9. Phase 4 (optimizer cost) can use `catalog.get_cost(func_name)` directly**  
+`FunctionCatalog.get_cost()` already exists and returns `cost_us_per_million` from the selected kernel. `predicate_ordering.py` currently has hardcoded costs in `_base_cost()` — replace with `get_cost()` lookups, falling back to a conservative default (e.g. `100.0`) for functions not yet in the catalog or legacy backfill entries (which have cost `0.0` by default, so treat `0.0` as "unknown" not "free").
 
 ---
 
@@ -431,7 +441,7 @@ CAST operations have completed a parallel migration path (Phases 1-5 completed, 
 - Processed separately from the function catalog in binder, optimizer, and evaluator
 - Out of scope for this catalog design (which focuses on scalar functions)
 
-The following phases describe the migration of the remaining 105 scalar functions from legacy FUNCTIONS dict to the new FunctionCatalog system.
+The following phases describe the migration of the remaining 92 scalar functions from legacy FUNCTIONS dict to the new FunctionCatalog system.
 
 ### Phase 1: Introduce Catalog Adapter
 
@@ -569,7 +579,7 @@ CATALOG.register(
 
 **Step 4: Adapter for migration** ✅ COMPLETE
 
-`FunctionCatalog.from_legacy_dict(legacy_dict)` and `load_legacy_dict(legacy_dict)` implemented. `get_catalog()` auto-calls `load_legacy_dict(FUNCTIONS)` on first use, making all 105 scalar functions immediately resolvable without manual registration.
+`FunctionCatalog.from_legacy_dict(legacy_dict)` and `load_legacy_dict(legacy_dict)` implemented. `get_catalog()` auto-calls `load_legacy_dict(FUNCTIONS)` on first use, making all 92 scalar functions immediately resolvable without manual registration.
 
 > **Caveat:** Legacy entries use a single variadic overload (`any`, optional) — arity is not validated and type scoring is imprecise. Replace with proper overload definitions in `native_function_registrar.py` as part of Phase 2.
 
@@ -583,43 +593,74 @@ CATALOG.register(
 - `test_resolve_variadic`
 - `test_resolve_return_type_same_as_arg`
 - `test_resolve_return_type_resolver`
-- `test_resolve_legacy_backfill` — verifies all 105 functions resolvable
+- `test_resolve_legacy_backfill` — verifies all 92 functions resolvable
 
-Total: 35/35 expression unit tests passing.
+Total: 44/44 expression unit tests passing.
 
-**Step 6: Evaluation hotpath** — deferred to Phase 3 (after Phase 2 binder adoption validates resolve() in production path)
+**Step 6: Evaluation hotpath** — completed in Phase 3.
 
-### Phase 2: Binder Adoption
+### Phase 2: Binder Adoption ✅ COMPLETE
 
-- Binder imports catalog from `opteryx.expression.functions`.
-- Binder resolves via catalog and stores function references (first as function name, optionally deeplinked).
-- Keep existing manual rules as fallback behind feature flag, with telemetry.
+- Binder imports catalog via `_get_function_catalog()` singleton.
+- 80-line per-function `if/elif` type-inference chain replaced with 3-line `catalog.resolve()` delegation.
+- `node.function_ref` (a `ResolvedFunction`) stored on every bound FUNCTION node.
+- Literal coercion for CASE/COALESCE/IFNULL preserved in binder (AST mutation, not type inference).
+- Integration test baseline: 71 failing (pre-existing, identical before and after).
 
-### Phase 3: Evaluator Adoption
+### Phase 3: Evaluator Adoption ✅ COMPLETE
 
-- `apply_function` in `opteryx/expression/evaluator/` uses bound function references.
-- Fall back to legacy `FUNCTIONS` dict only for unbound legacy nodes (feature flagged).
+- `apply_bounded_function(node, *parameters)` implemented in `opteryx/expression/evaluator/__init__.py`.
+- Dispatches via `node.function_ref.selected_overload.kernel.callable_ref` — zero name lookup.
+- Null policy driven by `kernel.null_policy` (declared in `KernelSpec`):
+  - `"strict"` (default): strip nulls before kernel call, backfill after. Fast path for pure functions.
+  - `"passthrough"`: all rows including nulls forwarded to kernel. Required for COALESCE, CASE, IIF, IFNULL, IFNOTNULL, CONCAT, SUBSTRING.
+- `null_policy="passthrough"` annotated on 7 kernel specs in `native_function_registrar.py`.
+- Falls back to legacy `apply_function` for nodes where `function_ref` is not set (pre-bound or legacy paths).
 
-### Phase 4: Optimizer Cost Adoption
+### Phase 4: Optimizer Cost Adoption ✅ COMPLETE
 
-> **Status:** Not started. Current `predicate_ordering.py` uses its own `_base_cost()` and `_estimate_selectivity()` functions with hardcoded costs — not catalog-aware.
+- `_catalog_function_cost(node)` added to `predicate_ordering.py` — walks the expression subtree, sums `catalog.get_cost()` for every FUNCTION node, falls back to 100.0 µs/million for cost=0.0 entries (legacy backfill, treated as unknown/expensive per Lesson 9).
+- `_order_complex_predicates(predicates, telemetry)` added — orders function-containing predicates by ascending catalog cost using the same greedy approach as simple predicates.
+- `order_predicates()` now returns `ordered_simple + ordered_complex` instead of `ordered_simple + complex_preds` (unordered). Both buckets are now cost-ordered.
+- `_base_cost()` (type-based comparison costs) left unchanged — it answers a different question (comparison operator cost by data type, not function execution cost).
+- Telemetry counter `optimization_cost_based_predicate_ordering` incremented when complex predicates are reordered.
 
-- Migrate `opteryx/planner/optimizer/strategies/predicate_ordering.py` to import costs from `opteryx.expression.functions.catalog`.
-- Replace hardcoded cost values in `_base_cost()` with `catalog.get_cost(func_name)` lookups.
-- Fallback: use conservative constant (e.g., 100 µs/million) if function not in catalog.
-- Telemetry compares predicate ordering impact before/after.
+### Phase 5a: Kernel Migration (prerequisite for expression engine rewrite)
 
-### Phase 5: Cleanup
+> **Status:** Next up. Prerequisite for the expression engine rewrite — the new evaluator must be able to import kernels from `opteryx/expression/functions/implementations/` directly.
 
-- Remove legacy `opteryx/functions/` folder (or rename to `opteryx/legacy_functions/` for transition).
-- Remove `DEPRECATED_FUNCTIONS` map; lifecycle now managed by catalog.
-- Deprecate `function_signatures.json` in favor of generated docs from catalog.
+The 4 kernel files in `opteryx/functions/` are pure computation with no dispatch logic. Moving them is mechanical:
+
+- `opteryx/functions/string_functions.py` → `opteryx/expression/functions/implementations/string.py`
+- `opteryx/functions/number_functions.py` → `opteryx/expression/functions/implementations/numeric.py`  
+- `opteryx/functions/date_functions.py` → `opteryx/expression/functions/implementations/temporal.py`
+- `opteryx/functions/other_functions.py` → `opteryx/expression/functions/implementations/other.py`
+
+After moving:
+- Update import paths in `native_function_registrar.py` to use the new locations.
+- `opteryx/functions/__init__.py` becomes a thin shim re-importing from the new locations, so `managers/expression` (which calls `apply_function` via the `FUNCTIONS` dict) continues working unchanged.
+- `function_signatures.json` stays in place (Phase 6 concern).
+
+### Expression Engine Rewrite (sequenced after Phase 5a)
+
+With kernels in `opteryx/expression/functions/implementations/`, the new evaluator can import directly from there. `managers/expression/__init__.py` and `apply_function` remain alive but are no longer called by the new engine. This is the correct point to do the expression engine rewrite — clean import targets, no circular deps, no need to touch `opteryx/functions/` during the rewrite.
+
+### Phase 5b: Dispatch Machinery Cleanup (after expression engine rewrite is live)
+
+Once the expression engine is the live execution path and `managers/expression/__init__.py` has no callers:
+
+- Delete `managers/expression/__init__.py` — `apply_function` has no live callers.
+- Remove `FUNCTIONS` dict from `opteryx/functions/__init__.py` — backfill in `catalog.py` no longer needed.
+- Remove `DEPRECATED_FUNCTIONS` — lifecycle is now catalog-managed (`LifecycleSpec`).
+- Remove `fixed_value_function` — move zero-arg function handling into binder internals or catalog.
+- Delete the now-empty `opteryx/functions/__init__.py` shim.
+- Deprecate `function_signatures.json` in favour of generated docs from catalog (Phase 6).
 
 ### Phase 6: Docs and Tooling
 
-> **Deferred:** Do not begin until Phases 1–5 are complete.
+> **Deferred:** Do not begin until Phases 1–5b are complete.
 
-- Generate `function_signatures.json` from catalog.
+- Generate `function_signatures.json` from catalog metadata.
 - Export catalog metadata for IDE plugins and external validators.
 
 ---
@@ -639,23 +680,42 @@ opteryx/expression/
 
 **Key insight:** CAST is now a first-class AST construct (NodeType.CAST) and NOT part of the function catalog. This was extracted in Phase 5 of CAST operations migration. The planner emits NodeType.CAST nodes directly, the binder typifies them, the optimizer simplifies nested casts (cast_simplification strategy fixed, verified stable), and the evaluator dispatches to cast kernels via NodeType registry.
 
-### Scalar Function Catalog (105 consolidated functions)
+### Scalar Function Catalog (92 consolidated functions)
 
-**Current implementation:**
+**Current implementation (Phases 1–4 complete):**
 ```
-opteryx/functions/__init__.py    # FUNCTIONS dict, 105 entries (consolidated from 111)
-                                 # Categories: String, Arithmetic, Temporal, Logical, Hash, Utility
-                                 # Removed 30 functions:
-                                 #   • 6 legacy CAST entries (Phase 6)
-                                 #   • 9 extended CAST entries (Phase 7)
-                                 #   • 8 date part functions consolidated to DATEPART (Phase 8)
-                                 #   • 5 duplicate aliases (Phase 9)
+opteryx/expression/
+  evaluator/__init__.py           # apply_bounded_function — dispatches via node.function_ref.kernel
+                                  # Falls back to legacy apply_function if function_ref not set
+  functions/
+    __init__.py                   # Exports: get_catalog()
+    catalog.py                    # FunctionCatalog, FunctionDefinition, FunctionOverload,
+                                  # KernelSpec, ReturnSpec, ResolvedFunction, LifecycleSpec
+    native_function_registrar.py  # All managed FunctionDefinitions with resolver callbacks
+    implementations/              # STUBS — kernel callables not yet moved here (Phase 5a)
+      __init__.py
+      string.py                   # stub
+      numeric.py                  # stub
+      temporal.py                 # stub
+      other.py                    # stub
+      utility.py                  # stub
+
+opteryx/functions/               # LEGACY — to be migrated in Phase 5a/5b
+  __init__.py                    # FUNCTIONS dict (92 entries), apply_function, DEPRECATED_FUNCTIONS
+                                 # Will become a shim after Phase 5a, deleted after Phase 5b
+  string_functions.py            # → implementations/string.py (Phase 5a)
+  number_functions.py            # → implementations/numeric.py (Phase 5a)
+  date_functions.py              # → implementations/temporal.py (Phase 5a)
+  other_functions.py             # → implementations/other.py (Phase 5a)
+  function_signatures.json       # Legacy docs — replaced by catalog export in Phase 6
+
 opteryx/managers/expression/
-  ops.py                         # Binary operators (Plus, Minus, Multiply, Eq, etc.)
-                                 # NOT part of scalar function catalog
+  __init__.py                    # Current live evaluator — calls apply_function
+                                 # TO BE DELETED after expression engine rewrite
+  ops.py                        # Binary operators — NOT part of scalar function catalog
 ```
 
-**Categories in current FUNCTIONS (105 entries):**
+**Categories in current FUNCTIONS (92 entries):**
 - **String operations:** UPPER, LOWER, CONCAT, SUBSTRING, TRIM, LPAD, RPAD, LENGTH, LEVENSHTEIN, SPLIT, REPLACE, REVERSE, FORMAT, LIKE, etc.
 - **Arithmetic:** ROUND, FLOOR, CEIL, ABS, SQRT, POWER, LN, LOG10, LOG2, SIGN, TRUNC, etc.
 - **Temporal:** DATE_TRUNC, DATEDIFF, DATEPART (consolidated from YEAR/MONTH/DAY/etc.), NOW, TODAY, YESTERDAY, etc.
@@ -668,44 +728,33 @@ opteryx/managers/expression/
 - Kept explicit functions for common operations (UPPER, LOWER) over parametric dispatch to maintain usability
 - Stopped further consolidation to balance usability vs. planner complexity
 
-### Proposed future expression subsystem (Phase 6+)
-
+**Target structure after Phase 5a (kernel migration):**
 ```
 opteryx/expression/
-  __init__.py
+  evaluator/__init__.py           # apply_bounded_function (live), apply_function fallback
   functions/
-    __init__.py                  # Exports: catalog, FunctionDefinition, FunctionOverload
-    catalog.py                   # FunctionCatalog, resolution logic (270+ lines planned)
-    implementations/             # Kernel callables, organized by semantic domain
+    __init__.py
+    catalog.py
+    native_function_registrar.py
+    implementations/
       __init__.py
-      text.py                    # UPPER, LOWER, CONCAT, SUBSTRING, TRIM, SPLIT, REPLACE, etc.
-      arithmetic.py              # ROUND, FLOOR, CEIL, ABS, SQRT, POWER, LN, LOG10, LOG2, SIGN
-      temporal.py                # DATE_TRUNC, DATEDIFF, DATEPART, NOW, TODAY, YESTERDAY, etc.
-      logical.py                 # COALESCE, IFNULL, IFNOTNULL, NULLIF, CASE, IIF, SEARCH
-      hash_encoding.py           # MD5, SHA1, SHA256, SHA512, BASE64_*, HEX_*
-      utility.py                 # ARRAY_CONTAINS, GREATEST, LEAST, RANDOM, SORT, etc.
-    tests/
-      test_catalog.py            # Planned unit tests
+      string.py                   # kernels from string_functions.py
+      numeric.py                  # kernels from number_functions.py
+      temporal.py                 # kernels from date_functions.py
+      other.py                    # kernels from other_functions.py
+      utility.py
+
+opteryx/functions/               # shim — re-imports from opteryx/expression/functions/implementations/
+  __init__.py                    # FUNCTIONS dict still present for managers/expression compat
+  function_signatures.json       # until Phase 6
 ```
 
-**Migration path note:**
-- Current implementation in `/opteryx/functions/__init__.py` will be refactored into proposed `opteryx/expression/functions/` structure
-- CAST operations are complete and separate (no migration needed)
-- Binary operators remain in `opteryx/managers/expression/ops.py`
-- Aggregate functions remain in operators subsystem
-
-**Import patterns:**
-- Binder: `from opteryx.expression.functions import catalog`
-- Optimizer: `from opteryx.expression.functions import catalog`
-- Evaluator: `from opteryx.expression.functions import catalog`
-- Docs tools: `from opteryx.expression.functions import FunctionDefinition`
-- Kernel implementations: `from opteryx.expression.functions.implementations import text` (or appropriate module)
-
-**Current implementation (pending refactoring in Phase 1+):**
-- `opteryx/functions/__init__.py` contains FUNCTIONS dict with 105 consolidated scalar functions
-- This is the source-of-truth until Phase 1+ completes catalog refactoring
-- Phase 1 will migrate to new `opteryx/expression/functions/catalog.py` structure
-- Legacy FUNCTIONS dict will be removed once evaluator is fully adopted (estimated Phase 3+)
+**Import patterns (current and target):**
+- Binder: `from opteryx.expression.functions import get_catalog as _get_function_catalog` ✅
+- Optimizer: `from opteryx.expression.functions import get_catalog` ✅
+- Evaluator: `from opteryx.expression.evaluator import apply_bounded_function` ✅ (new engine)
+- Kernel implementations: `from opteryx.expression.functions.implementations import string` (after Phase 5a)
+- Docs tools: `from opteryx.expression.functions.catalog import FunctionDefinition`
 
 ---
 
@@ -720,22 +769,28 @@ opteryx/expression/
 ✅ 30 CAST-related entries removed from FUNCTIONS dict (6 + 9 from phases 6-7)
 ✅ All unit tests passing (27/27 expression tests)
 
-### For Scalar Function Catalog (Current state)
-1. Parameter validation failures happen in binder, not execution.
-2. Return types for scalar functions are inferred from apply_function dispatch or catalog resolution.
-3. Execution hotpath (kernel lookup by function name) has basic string map, no complex selection logic.
-4. Optimizer can score function predicates using execution time estimates.
-5. 105 scalar functions consolidated and stable (from original 111).
-6. Date extraction consolidated to unified DATEPART function (8 removed in Phase 8).
-7. Adding a function requires FUNCTIONS dict registration and tests (simple, linear structure).
+### For Scalar Function Catalog (Phases 1–4 — COMPLETE)
+✅ Parameter validation failures happen in binder (catalog.resolve() raises TypeError on arity mismatch).
+✅ Return types for scalar functions inferred via catalog.resolve() — per-function resolver callbacks.
+✅ Execution hotpath (apply_bounded_function) dispatches via node.function_ref.kernel.callable_ref — no string map.
+✅ Optimizer scores function predicates using catalog.get_cost() — complex predicates now cost-ordered.
+✅ 92 scalar functions consolidated and stable (from original 111 → 105 → 92).
+✅ Date extraction consolidated to unified DATEPART function (8 removed in Phase 8).
+✅ Adding a function requires one FunctionDefinition entry in native_function_registrar.py.
 
-### For Proposed Future Catalog (Phase 6+)
-The following acceptance criteria apply to the refactored structure planned in Phase 6:
-1. Typed overload resolution unifies polymorphic functions (COALESCE, CASE, GET).
-2. Execution hotpath uses overload ID dispatch (no string maps in hot path).
-3. Optimizer generates accurate cost estimates for predicate ordering.
-4. Docs export is generated from catalog metadata (single source of truth).
-5. Adding a function requires one catalog entry and tests, no duplicate metadata.
+### For Phase 5a: Kernel Migration
+1. All 4 kernel files moved to `opteryx/expression/functions/implementations/`.
+2. `native_function_registrar.py` imports from new locations only.
+3. `opteryx/functions/__init__.py` is a pure shim — no kernel logic, only re-imports.
+4. All 44 expression unit tests still passing.
+5. Integration test baseline unchanged.
+
+### For Phase 5b: Dispatch Machinery Cleanup (post expression engine rewrite)
+1. `managers/expression/__init__.py` deleted.
+2. `apply_function` has no callers — removed from `opteryx/functions/__init__.py`.
+3. `FUNCTIONS` dict removed — catalog backfill no longer needed.
+4. `DEPRECATED_FUNCTIONS` removed — lifecycle managed by `LifecycleSpec` in catalog.
+5. `opteryx/functions/__init__.py` shim deleted entirely.
 
 
 ---

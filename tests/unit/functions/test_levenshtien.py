@@ -6,7 +6,7 @@ sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 import pyarrow as pa
 import pytest
 
-from opteryx.compiled.list_ops import list_levenshtein
+from opteryx.compiled.vector_ops import vector_levenshtein
 from opteryx.draken.interop.arrow import vector_from_arrow
 
 # fmt:off
@@ -156,7 +156,7 @@ TESTS = [
 def test_levenshtien_battery(a, b, distance):
     a_vec = vector_from_arrow(pa.array([a], type=pa.string()))
     b_vec = vector_from_arrow(pa.array([b], type=pa.string()))
-    calculated_distance = list_levenshtein(a_vec, b_vec).to_arrow().to_pylist()[0]
+    calculated_distance = vector_levenshtein(a_vec, b_vec).to_arrow().to_pylist()[0]
     assert (
         calculated_distance == distance
     ), f"for {a}/{b} - expected: '{distance}', got: '{calculated_distance}'"

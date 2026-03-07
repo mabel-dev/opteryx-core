@@ -26,10 +26,10 @@ from opteryx.expression.functions import ReturnSpec
 def _builtin_text_functions() -> list[FunctionDefinition]:
     """Text/string manipulation functions."""
     # Import existing implementations
-    from opteryx.functions import list_lengther
     from opteryx.functions import string_functions
     from opteryx.functions import to_lower
     from opteryx.functions import to_upper
+    from opteryx.functions import vector_lengther
 
     return [
         FunctionDefinition(
@@ -92,7 +92,7 @@ def _builtin_text_functions() -> list[FunctionDefinition]:
                     return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.INTEGER),
                     kernel=KernelSpec(
                         id="default",
-                        callable_ref=list_lengther,
+                        callable_ref=vector_lengther,
                         cost_us_per_million=3.0,
                     ),
                 ),
@@ -120,6 +120,7 @@ def _builtin_text_functions() -> list[FunctionDefinition]:
                     kernel=KernelSpec(
                         id="default",
                         callable_ref=string_functions.concat,
+                        null_policy="passthrough",
                         cost_us_per_million=8.0,
                     ),
                 ),
@@ -145,6 +146,7 @@ def _builtin_text_functions() -> list[FunctionDefinition]:
                     kernel=KernelSpec(
                         id="default",
                         callable_ref=string_functions.substring,
+                        null_policy="passthrough",
                         cost_us_per_million=6.0,
                     ),
                 ),
@@ -352,6 +354,7 @@ def _builtin_logical_functions() -> list[FunctionDefinition]:
                     kernel=KernelSpec(
                         id="default",
                         callable_ref=_coalesce_kernel,
+                        null_policy="passthrough",
                         cost_us_per_million=5.0,
                     ),
                 ),
@@ -377,6 +380,7 @@ def _builtin_logical_functions() -> list[FunctionDefinition]:
                     kernel=KernelSpec(
                         id="default",
                         callable_ref=other_functions.if_null,
+                        null_policy="passthrough",
                         cost_us_per_million=4.0,
                     ),
                 ),
@@ -402,6 +406,7 @@ def _builtin_logical_functions() -> list[FunctionDefinition]:
                     kernel=KernelSpec(
                         id="default",
                         callable_ref=other_functions.if_null,  # same kernel, different semantics handled by evaluator
+                        null_policy="passthrough",
                         cost_us_per_million=4.0,
                     ),
                 ),
@@ -453,6 +458,7 @@ def _builtin_logical_functions() -> list[FunctionDefinition]:
                     kernel=KernelSpec(
                         id="default",
                         callable_ref=_iif_kernel,
+                        null_policy="passthrough",
                         cost_us_per_million=2.0,
                     ),
                 ),
@@ -497,6 +503,7 @@ def _builtin_logical_functions() -> list[FunctionDefinition]:
                     kernel=KernelSpec(
                         id="default",
                         callable_ref=_case_kernel,
+                        null_policy="passthrough",
                         cost_us_per_million=3.0,
                     ),
                 ),

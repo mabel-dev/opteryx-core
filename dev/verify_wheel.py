@@ -8,9 +8,9 @@ Usage examples:
 What it does:
   - downloads the wheel (if a URL is provided)
   - lists .so files contained in the wheel
-  - searches for opteryx/compiled/list_ops*.so
+  - searches for opteryx/compiled/vector_ops*.so
   - extracts that .so and runs `file` and (where possible) `ldd`/`readelf` to inspect dynamic deps
-  - attempts to grep for the symbol `list_contains_all` in the symbol table
+  - attempts to grep for the symbol `vector_contains_all` in the symbol table
   - optionally uses a manylinux Docker image to run Linux-native tools for inspection and to try `pip install` + import
 
 This script is intended as a reproducible, easy-to-run diagnostic for the packaging/ABI issue.
@@ -72,7 +72,7 @@ def download_wheel(url: str, dest_dir: Path) -> Path:
     return dest
 
 
-def list_so_files(wheel: Path) -> list[str]:
+def vector_so_files(wheel: Path) -> list[str]:
     # Escape the backslash in the regex to avoid SyntaxWarning on Python.
     code, out = run(f"unzip -l {wheel} | awk '/\\.so$/ {{print $4}}'")
     if code != 0:
@@ -80,9 +80,9 @@ def list_so_files(wheel: Path) -> list[str]:
     return [line.strip() for line in out.splitlines() if line.strip()]
 
 
-def find_list_ops_member(so_list: list[str]) -> str | None:
+def find_vector_ops_member(so_list: list[str]) -> str | None:
     for p in so_list:
-        if "opteryx/compiled" in p and "list_ops" in p and p.endswith(".so"):
+        if "opteryx/compiled" in p and "vector_ops" in p and p.endswith(".so"):
             return p
     return None
 
@@ -123,7 +123,7 @@ def try_import_in_docker(wheel_host_path: Path) -> dict:
     wheel_name = wheel_host_path.name
     cmd = (
         f"docker run --rm -v '{wheel_host_path.parent.resolve()}':/work -w /work {image} "
-        f"bash -lc \"python -m pip install --upgrade pip setuptools wheel || true && pip install '{wheel_name}' && python - <<'PY'\nimport importlib, traceback, sys\ntry:\n    m = importlib.import_module('opteryx.compiled.list_ops')\n    if not hasattr(m, 'list_contains_any'):\n        print('MISSING_SYMBOL list_contains_any')\n        sys.exit(2)\n    print('IMPORT_OK')\nexcept Exception:\n    print('IMPORT_ERR')\n    traceback.print_exc()\n    sys.exit(1)\nPY\""
+        f"bash -lc \"python -m pip install --upgrade pip setuptools wheel || true && pip install '{wheel_name}' && python - <<'PY'\nimport importlib, traceback, sys\ntry:\n    m = importlib.import_module('opteryx.compiled.vector_ops')\n    if not hasattr(m, 'vector_contains_any'):\n        print('MISSING_SYMBOL vector_contains_any')\n        sys.exit(2)\n    print('IMPORT_OK')\nexcept Exception:\n    print('IMPORT_ERR')\n    traceback.print_exc()\n    sys.exit(1)\nPY\""
     )
     rc, out = run(cmd)
     return {"docker_import": out}
@@ -159,17 +159,17 @@ def main():
             raise SystemExit("Wheel url or path not found: {wheel_src}")
 
         print('\n=== Wheel .so listing ===')
-        so_list = list_so_files(wheel_path)
+        so_list = vector_so_files(wheel_path)
         if not so_list:
             print("No .so files found in wheel")
         else:
             for s in so_list:
                 print(s)
 
-        print('\n=== Looking for list_ops binary ===')
-        member = find_list_ops_member(so_list)
+        print('\n=== Looking for vector_ops binary ===')
+        member = find_vector_ops_member(so_list)
         if not member:
-            print("No opteryx/compiled/list_ops*.so member found in the wheel")
+            print("No opteryx/compiled/vector_ops*.so member found in the wheel")
             sys.exit(2)
 
         print(f"Found member: {member}")
@@ -183,10 +183,10 @@ def main():
             print('readelf not available locally; consider running with Docker to inspect symbols')
         else:
             # quick symbol check
-            if 'list_contains_all' in local_info['readelf_symbols']:
-                print('\nSymbol `list_contains_all` FOUND in readelf output')
+            if 'vector_contains_all' in local_info['readelf_symbols']:
+                print('\nSymbol `vector_contains_all` FOUND in readelf output')
             else:
-                print('\nSymbol `list_contains_all` NOT found in local readelf output')
+                print('\nSymbol `vector_contains_all` NOT found in local readelf output')
 
         if not args.no_docker:
             print('\n=== Docker-based inspection (manylinux2014_x86_64) ===')

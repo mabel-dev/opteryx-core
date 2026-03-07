@@ -1,38 +1,78 @@
 """Expression evaluator: hotpath for function execution.
 
 The evaluator executes bound function expressions with minimal dispatch overhead.
-Binder attaches a function reference (e.g., "ADD" or "ADD:integer_integer") to each node,
-and the evaluator simply looks up and invokes the kernel.
+The binder attaches a ResolvedFunction reference (node.function_ref) to each FUNCTION node;
+the evaluator uses that to dispatch directly to the kernel, bypassing all name-based lookup.
 """
 
 from typing import Any
-from typing import Optional
 
-from opteryx.expression.functions import get_catalog
+import numpy
+import pyarrow.compute as compute
 
-# TODO: Implement apply_function and related hotpath dispatch
-# Example:
-#
-# def apply_function(node, args) -> Any:
-#     """Apply a bound function to arguments.
-#
-#     Args:
-#         node: AST node with .function_ref attribute (e.g., "add" or "add:integer_integer")
-#         args: List of evaluated argument values
-#
-#     Returns:
-#         Result of applying the kernel to args.
-#     """
-#     func_ref = node.function_ref
-#     catalog = get_catalog()
-#
-#     if ":" in func_ref:
-#         func_name, kernel_id = func_ref.split(":")
-#         kernel = catalog.get_kernel(func_name, kernel_id)
-#     else:
-#         kernel = catalog.get_default_kernel(func_ref)
-#
-#     if kernel is None:
-#         raise ValueError(f"Unknown function: {func_ref}")
-#
-#     return kernel(args)
+from opteryx.exceptions import FunctionExecutionError
+
+
+def apply_bounded_function(node, *parameters) -> Any:
+    """Apply a bound FUNCTION node to its already-evaluated parameters.
+
+    Uses node.function_ref (set by binder) for kernel dispatch and null policy.
+    Falls back to the legacy apply_function if function_ref is not set.
+
+    Null policy (kernel.null_policy):
+        "strict"      — strip null rows before calling the kernel and fill them back after.
+                        Fast path for functions that return NULL on any NULL input.
+        "passthrough" — pass all rows including nulls; the kernel handles nulls itself.
+                        Required for COALESCE, CASE, IIF, IFNULL, CONCAT, SUBSTRING, etc.
+        "custom"      — reserved for kernels with bespoke null handling logic (not yet used).
+    """
+    func_ref = getattr(node, "function_ref", None)
+    if func_ref is None:
+        from opteryx.functions import apply_function
+
+        return apply_function(node.value, *parameters)
+
+    kernel = func_ref.selected_overload.kernel
+
+    compressed = False
+    if (
+        kernel.null_policy == "strict"
+        and len(parameters) > 0
+        and not isinstance(parameters[0], int)
+        and all(isinstance(arr, numpy.ndarray) for arr in parameters)
+    ):
+        morsel_size = len(parameters[0])
+        null_positions = numpy.zeros(morsel_size, dtype=numpy.bool_)
+
+        for arr in parameters:
+            if arr.dtype.kind == "f":
+                null_positions = numpy.logical_or(
+                    null_positions, compute.is_null(arr, nan_is_null=True)
+                )
+            else:
+                null_positions = numpy.logical_or(null_positions, compute.is_null(arr))
+
+        if null_positions.all():
+            return numpy.full(morsel_size, None, dtype=object)
+
+        if null_positions.any():
+            valid_positions = ~null_positions
+            parameters = [arr.compress(valid_positions) for arr in parameters]
+            compressed = True
+
+    try:
+        result = kernel.callable_ref(*parameters)
+    except FunctionExecutionError as e:
+        raise e
+    except Exception as e:
+        raise FunctionExecutionError(message=e, function=node.value) from e
+
+    if isinstance(result, list):
+        result = numpy.array(result)
+
+    if compressed:
+        out = numpy.full(morsel_size, None, dtype=object)
+        numpy.place(out, valid_positions, result)
+        return out
+
+    return result
