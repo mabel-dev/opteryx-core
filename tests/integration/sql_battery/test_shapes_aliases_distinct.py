@@ -656,7 +656,7 @@ STATEMENTS = [
         ("SELECT * FROM $planets CROSS JOIN UNNEST(name) AS G", None, None, IncorrectTypeError),
 
         ("SELECT VARCHAR(birth_place) FROM testdata.astronauts", 357, 1, None),
-        ("SELECT name FROM testdata.astronauts WHERE GET(VARCHAR(birth_place), 'state') = birth_place['state']", 357, 1, None),
+        ("SELECT name FROM testdata.astronauts WHERE CAST(birth_place AS VARCHAR)['state'] = birth_place['state']", 357, 1, None),
 
         ("SELECT * FROM testdata.missions WHERE MATCH (Location) AGAINST ('Florida USA')", 911, 8, None),
         ("SELECT * FROM testdata.missions WHERE MATCH (Location) AGAINST ('Russia, Kapustin')", 112, 8, None),

@@ -5,6 +5,7 @@ Includes:
 - String analysis: LENGTH, SOUNDEX
 - String manipulation: LEFT, RIGHT, REVERSE, CONCAT, CONCAT_WS, SUBSTRING, POSITION, TRIM, LTRIM, RTRIM, LPAD, RPAD, LEVENSHTEIN, SPLIT, REPLACE, REGEXP_REPLACE
 - String matching: MATCH_AGAINST
+- Character conversion: CHAR, ASCII
 """
 
 # TODO: Implement text kernels

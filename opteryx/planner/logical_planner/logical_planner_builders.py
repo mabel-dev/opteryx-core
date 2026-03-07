@@ -848,9 +848,10 @@ def json_access(branch, alias: Optional[List[str]] = None, key=None):
         )
 
     return Node(
-        NodeType.FUNCTION,
-        value="GET",
-        parameters=[identifier_node, key_node],
+        NodeType.BINARY_OPERATOR,
+        value="MapAccess",
+        left=identifier_node,
+        right=key_node,
         alias=alias or f"{identifier_node.current_name}[{key_value}]",
     )
 
@@ -956,26 +957,6 @@ def literal_string(branch, alias: Optional[List[str]] = None, key=None):
                 alias=alias,
             )
     return Node(NodeType.LITERAL, type=OrsoTypes.VARCHAR, value=branch, alias=alias)
-
-
-def map_access(branch, alias: Optional[List[str]] = None, key=None):
-    # Identifier[key] -> GET(Identifier, key)
-
-    identifier_node = build(branch["column"])
-    key_node = build(branch["keys"][0]["key"])
-    key_value = key_node.value
-    if isinstance(key_value, str):
-        key_value = f"'{key_value}'"
-
-    if key_node.node_type != NodeType.LITERAL:
-        raise UnsupportedSyntaxError("Subscript values must be literals")
-
-    return Node(
-        NodeType.FUNCTION,
-        value="GET",
-        parameters=[identifier_node, key_node],
-        alias=alias or f"{identifier_node.current_name}[{key_value}]",
-    )
 
 
 def match_against(branch, alias: Optional[List[str]] = None, key=None):
@@ -1224,7 +1205,6 @@ BUILDERS = {
     "IsTrue": is_compare,
     "JsonAccess": json_access,
     "Like": pattern_match,
-    "MapAccess": map_access,
     "MatchAgainst": match_against,
     "Nested": nested,
     "Null": literal_null,

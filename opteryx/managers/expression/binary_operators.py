@@ -80,6 +80,69 @@ def LongArrowOp(documents, elements) -> pyarrow.Array:
     return pyarrow.array(extracted_values, type=pyarrow.binary())
 
 
+def MapAccessOp(array, key):
+    """Map/iterable subscript accessor."""
+    from opteryx.exceptions import IncorrectTypeError
+
+    if hasattr(array, "to_numpy"):
+        array = array.to_numpy(False)
+
+    # Determine the type of the first non-null element.
+    first_element = next((item for item in array if item is not None), None)
+    if first_element is None:
+        return numpy.full(len(array), None)
+
+    raw_key = key[0]
+    if hasattr(raw_key, "as_py"):
+        raw_key = raw_key.as_py()
+    if (
+        raw_key is None
+        or isinstance(raw_key, (bool, numpy.bool_))
+        or not isinstance(raw_key, (int, numpy.integer))
+    ):
+        raise IncorrectTypeError("Map/iterable values must be subscripted with INTEGER values")
+    index = int(raw_key)
+
+    if isinstance(first_element, str):
+        return pyarrow.array(
+            [
+                None
+                if value is None
+                else (value[index] if -len(value) <= index < len(value) else None)
+                for value in array
+            ],
+            type=pyarrow.string(),
+        )
+
+    if isinstance(first_element, (bytes, bytearray, memoryview)):
+        return pyarrow.array(
+            [
+                None
+                if value is None
+                else (
+                    bytes(value)[index : index + 1]
+                    if -len(bytes(value)) <= index < len(bytes(value))
+                    else None
+                )
+                for value in array
+            ],
+            type=pyarrow.binary(),
+        )
+
+    if isinstance(first_element, (list, pyarrow.ListScalar, numpy.ndarray)):
+        from opteryx.compiled.list_ops import list_get_element
+        from opteryx.draken.interop.arrow import vector_from_arrow
+
+        pa_arr = pyarrow.array(
+            [r if not isinstance(r, pyarrow.ListScalar) else r.as_py() for r in array]
+        )
+        return list_get_element(vector_from_arrow(pa_arr), index)
+
+    raise IncorrectTypeError(
+        f"Map access is not supported for {type(first_element).__name__} values"
+    )
+
+
 def _ip_containment(left: List[Optional[str]], right: List[str]) -> List[Optional[bool]]:
     """
     Check if each IP address in 'left' is contained within the network specified in 'right'.
@@ -214,7 +277,8 @@ OPERATOR_FUNCTION_MAP: Dict[str, Any] = {
     "ShiftLeft": numpy.left_shift,
     "ShiftRight": numpy.right_shift,
     "Arrow": ArrowOp,
-    "LongArrow": LongArrowOp
+    "LongArrow": LongArrowOp,
+    "MapAccess": MapAccessOp,
 }
 
 BINARY_OPERATORS = set(OPERATOR_FUNCTION_MAP.keys())

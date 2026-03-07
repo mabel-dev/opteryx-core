@@ -22,8 +22,8 @@ from opteryx.exceptions import ColumnNotFoundError
 from opteryx.exceptions import IncompatibleTypesError
 from opteryx.exceptions import InvalidInternalStateError
 from opteryx.exceptions import UnexpectedDatasetReferenceError
+from opteryx.expression.functions import get_catalog as _get_function_catalog
 from opteryx.functions import DEPRECATED_FUNCTIONS
-from opteryx.functions import FUNCTIONS
 from opteryx.functions import fixed_value_function
 from opteryx.managers.expression import NodeType
 from opteryx.models import Node
@@ -217,8 +217,6 @@ def inner_binder(node: Node, context: BindingContext) -> Tuple[Node, Any]:
     (executing comparisons).
     """
     # Import relevant classes and functions
-    from orso.types import find_compatible_type
-
     from opteryx.managers.expression import ExpressionColumn
     from opteryx.managers.expression import format_expression
     from opteryx.managers.expression import get_all_nodes_of_type
@@ -313,113 +311,54 @@ def inner_binder(node: Node, context: BindingContext) -> Tuple[Node, Any]:
                 node.type = result_type
                 node.value = fixed_function_result
             else:
-                _, result_type, _ = FUNCTIONS.get(node.value, (None, "VARIANT", None))
                 element_type = None  # for types with elements (ARRAYs)
                 precision = 38  # Maximum precision for Decimal128
                 scale = 21  # A reasonable scale that's less than precision
 
-                if node.value == "DECIMAL":
-                    result_type = OrsoTypes.DECIMAL
-                    precision = node.parameters[1].value if len(node.parameters) > 1 else precision
+                # DECIMAL carries precision/scale as parameters — extract before catalog lookup
+                if node.value == "DECIMAL" and len(node.parameters) > 1:
+                    precision = node.parameters[1].value
                     scale = node.parameters[2].value if len(node.parameters) > 2 else scale
 
-                # If we don't know the return type from the function name, we can usually
-                # work it out from the parameters - all of the aggs are worked out this way
-                # even COUNT which is always an integer.
-                if result_type == "VARIANT":
-                    # Some functions return a fixed type, so return that type
-                    if node.value == "COUNT":
-                        result_type = OrsoTypes.INTEGER
-                    elif node.value == "AVG":
-                        result_type = OrsoTypes.DOUBLE
-                    elif node.value in ("ARRAY", "TRY_ARRAY"):
-                        result_type, _, _, _, element_type = OrsoTypes.from_name(
-                            f"ARRAY<{node.parameters[1].value}>"
-                        )
-                    elif node.value == "ARRAY_AGG":
-                        result_type = OrsoTypes.ARRAY
-                        element_type = node.parameters[0].schema_column.type
-                    # Some functions return different types based on the input
-                    # we need to find the first non-null parameter
-                    elif node.value == "CASE":
-                        for param in node.parameters[1].parameters:
-                            if param.node_type in (
-                                NodeType.LITERAL,
-                                NodeType.IDENTIFIER,
-                                NodeType.FUNCTION,
-                            ) and param.schema_column.type not in (
-                                OrsoTypes.NULL,
-                                0,
-                                OrsoTypes._MISSING_TYPE,
-                            ):
-                                result_type = param.schema_column.type
-                                break
-                        # if we have a type, we should ensure all the parameters are the same type
-                        if result_type not in (OrsoTypes._MISSING_TYPE, 0):
-                            parameters = []
-                            for param in node.parameters[1].parameters:
-                                if param.node_type == NodeType.LITERAL and param.value is not None:
-                                    param.value = result_type.parse(param.value)
-                                    param.type = result_type
-                                    param.schema_column.type = result_type
-                                parameters.append(param)
-                            node.parameters[1].parameters = parameters
-                    elif node.value == "IIF":
-                        result_type = node.parameters[1].schema_column.type
-                    elif node.value in ("ABS", "MAX", "MIN", "NULLIF", "PASSTHRU", "SUM"):
-                        result_type = node.parameters[0].schema_column.type
-                    elif node.value in ("GREATEST", "LEAST", "SORT"):
-                        result_type = node.parameters[0].schema_column.element_type
-                    # Some functions support nulls different positions
-                    elif node.value in ("COALESCE", "IFNULL", "IFNOTNULL"):
-                        discovered_types = []
-                        for param in node.parameters:
-                            if param.node_type in (
-                                NodeType.LITERAL,
-                                NodeType.IDENTIFIER,
-                                NodeType.FUNCTION,
-                                NodeType.AGGREGATOR,
-                            ) and param.schema_column.type not in (
-                                OrsoTypes.NULL,
-                                0,
-                                OrsoTypes._MISSING_TYPE,
-                            ):
-                                discovered_types.append(param.schema_column.type)
-                        result_type = find_compatible_type(discovered_types)
-                        # if we have a type, we should ensure all the parameters are the same type
-                        if result_type not in (OrsoTypes._MISSING_TYPE, 0):
-                            parameters = []
-                            for param in node.parameters:
-                                if (
-                                    param.node_type == NodeType.LITERAL
-                                    and param.value is not None
-                                    and param.value != set()
-                                ):
-                                    param.value = result_type.parse(param.value)
-                                    param.type = result_type
-                                    param.schema_column.type = result_type
-                                parameters.append(param)
-                            node.parameters = parameters
-                    # some functions return different types based on fixed input
-                    elif node.value == "DATEPART":
-                        datepart = node.parameters[0].value.lower()
-                        if datepart in ("epoch", "juian"):
-                            result_type = OrsoTypes.DOUBLE
-                        elif datepart == "day":
-                            result_type = OrsoTypes.VARCHAR
-                        elif datepart == "date":
-                            result_type = OrsoTypes.DATE
-                        else:
-                            result_type = OrsoTypes.INTEGER
-                    # Some function we don't know the return type until run time
-                    elif node.value == "GET":
-                        result_type = 0
-                        if node.parameters[1].type == OrsoTypes.INTEGER:
-                            schema_column = node.parameters[0].schema_column
-                            if schema_column.type == OrsoTypes.ARRAY:
-                                result_type = schema_column.element_type
-                            elif schema_column.type in (OrsoTypes.VARCHAR, OrsoTypes.BLOB):
-                                result_type = schema_column.type
+                # Ask the catalog for the return type (catalog owns type reasoning)
+                _resolved = _get_function_catalog().resolve(node.value, list(node.parameters))
+                if _resolved is not None:
+                    result_type = _resolved.inferred_return_type
+                    element_type = _resolved.inferred_element_type
+                    node.function_ref = _resolved
+                else:
+                    result_type = OrsoTypes.NULL  # unknown function; type resolved at runtime
+
+                # Literal coercion: binder's job — mutate AST nodes to match the resolved type.
+                # This is NOT type inference; it's making literals consistent with the
+                # surrounding expression's type after the catalog has declared the return type.
+                if node.value == "CASE" and result_type not in (
+                    OrsoTypes._MISSING_TYPE,
+                    OrsoTypes.NULL,
+                    0,
+                ):
+                    for param in node.parameters[1].parameters:
+                        if param.node_type == NodeType.LITERAL and param.value is not None:
+                            param.value = result_type.parse(param.value)
+                            param.type = result_type
+                            param.schema_column.type = result_type
+                elif node.value in ("COALESCE", "IFNULL", "IFNOTNULL") and result_type not in (
+                    OrsoTypes._MISSING_TYPE,
+                    OrsoTypes.NULL,
+                    0,
+                ):
+                    parameters = []
+                    for param in node.parameters:
+                        if (
+                            param.node_type == NodeType.LITERAL
+                            and param.value is not None
+                            and param.value != set()
+                        ):
+                            param.value = result_type.parse(param.value)
+                            param.type = result_type
+                            param.schema_column.type = result_type
+                        parameters.append(param)
+                    node.parameters = parameters
 
                 schema_column = FunctionColumn(
                     name=column_name,

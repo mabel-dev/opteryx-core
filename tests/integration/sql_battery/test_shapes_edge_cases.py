@@ -238,7 +238,7 @@ STATEMENTS = [
         ("SELECT COUNT(*) FROM testdata.missions WHERE Lauched_at < '1970-01-01'", 1, 1, None),
         # 1875 - can't replicate error with test data, these are similar cases
         ("SELECT * FROM testdata.astronauts WHERE IFNULL(birth_place->'state', 'home') == 'CA'", 25, 19, None),
-        ("SELECT * FROM testdata.astronauts WHERE IFNULL(GET(birth_place,'state'), 'home') == 'CA'", 25, 19, None),
+        ("SELECT * FROM testdata.astronauts WHERE IFNULL(birth_place['state'], 'home') == 'CA'", 25, 19, None),
         # 1880
         ("SELECT name, mission FROM (SELECT name, missions FROM testdata.astronauts) as nauts CROSS JOIN UNNEST (nauts.missions) AS mission WHERE mission != 'Apollo 11'", 843, 2, None),
         ("SELECT name, mission FROM (SELECT name, missions FROM testdata.astronauts) as nauts CROSS JOIN UNNEST (nauts.missions) AS mission WHERE mission > 'Apollo 11'", 837, 2, None),
