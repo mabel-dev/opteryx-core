@@ -697,8 +697,8 @@ def generate_consolidated_module(module_dir, output_file):
 
     print(f"Generated {output_file} with {len(pyx_files)} includes")
 
-# Generate list_ops, joins, and aggregation kernels
-generate_consolidated_module("opteryx/compiled/list_ops", "opteryx/compiled/list_ops/list_ops.pyx")
+# Generate vector_ops, joins, and aggregation kernels
+generate_consolidated_module("opteryx/compiled/vector_ops", "opteryx/compiled/vector_ops/vector_ops.pyx")
 generate_consolidated_module("opteryx/compiled/joins", "opteryx/compiled/joins/joins.pyx")
 generate_consolidated_module(
     "opteryx/compiled/aggregations/group_by_draken_kernels",
@@ -706,19 +706,19 @@ generate_consolidated_module(
 )
 
 # Add consolidated modules with their dependencies
-# Link args for list_ops (use -lcrypto on non-macOS and -pthread where appropriate)
+# Link args for vector_ops (use -lcrypto on non-macOS and -pthread where appropriate)
 # Use vendored digests to avoid runtime libcrypto dependency on target systems
 # Vendored implementations: third_party/crypto/* (MD5, SHA1, SHA256)
-list_ops_link_args = []
+vector_ops_link_args = []
 
 if not is_win():
-    list_ops_link_args.append("-pthread")
+    vector_ops_link_args.append("-pthread")
 
 extensions.extend([
     Extension(
-        "opteryx.compiled.list_ops.function_definitions",
+        "opteryx.compiled.vector_ops.function_definitions",
         sources=(
-            ["opteryx/compiled/list_ops/list_ops.pyx"]
+            ["opteryx/compiled/vector_ops/vector_ops.pyx"]
             + sorted(glob.glob("third_party/re2/re2/*.cc") + [
                 "third_party/re2/util/strutil.cc",
                 "third_party/re2/util/rune.cc",
@@ -734,7 +734,7 @@ extensions.extend([
         include_dirs=include_dirs,
         language="c++",
         extra_compile_args=CPP_FLAGS,
-        extra_link_args=list_ops_link_args,
+        extra_link_args=vector_ops_link_args,
         define_macros=[("VENDORED_DIGESTS", "1")],
     ),
     Extension(
@@ -761,9 +761,9 @@ if not (
 
 extensions.append(
     Extension(
-        "opteryx.nanobind.list_length",
+        "opteryx.nanobind.vector_length",
         sources=[
-            "src/cpp/list_length_native.cpp",
+            "src/cpp/vector_length_native.cpp",
             "third_party/nanobind/src/nb_combined.cpp",
         ],
         include_dirs=include_dirs + [

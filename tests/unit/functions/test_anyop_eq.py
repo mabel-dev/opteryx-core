@@ -4,12 +4,12 @@ import pyarrow as pa
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
-from opteryx.compiled.list_ops import list_anyop_eq
+from opteryx.compiled.vector_ops import vector_anyop_eq
 from opteryx.draken.interop.arrow import vector_from_arrow
 
 def _test_eq_comparison(literal, test_value, expected_result, _type=pa.string()):
-    array = vector_from_arrow(pa.array([[test_value]], type=pa.list_(_type)))
-    result = list_anyop_eq(literal, array).to_pylist()
+    array = vector_from_arrow(pa.array([[test_value]], type=pa.vector_(_type)))
+    result = vector_anyop_eq(literal, array).to_pylist()
     assert result == [expected_result], f"Expected {literal} == {test_value} to be {expected_result} got {result[0]}"
 
 def test_eq_strings():
@@ -53,13 +53,13 @@ def test_eq_booleans():
     _test_eq_comparison(False, True, 0, pa.bool_())
 
 def test_eq_list_comparison():
-    array = vector_from_arrow(pa.array([["a", "b", "c"], ["x", "y", "z"], []], type=pa.list_(pa.string())))
-    result = list_anyop_eq("b", array).to_pylist()
+    array = vector_from_arrow(pa.array([["a", "b", "c"], ["x", "y", "z"], []], type=pa.vector_(pa.string())))
+    result = vector_anyop_eq("b", array).to_pylist()
     assert result == [1, 0, 0], f"Expected [1, 0, 0], got {result}"
 
 def test_eq_nulls():
-    array = vector_from_arrow(pa.array([[None, "a"], [None], []], type=pa.list_(pa.string())))
-    result = list_anyop_eq("a", array).to_pylist()
+    array = vector_from_arrow(pa.array([[None, "a"], [None], []], type=pa.vector_(pa.string())))
+    result = vector_anyop_eq("a", array).to_pylist()
     assert result == [1, 0, 0], f"Expected [1, 0, 0], got {result}"
 
 def test_eq_float_precision():
@@ -73,8 +73,8 @@ def test_eq_string_unicode_and_bytes():
     _test_eq_comparison("💡", "💡 ", 0, pa.string())
 
 def test_eq_lists_with_nulls_and_values():
-    array = vector_from_arrow(pa.array([[None, "a", "b"], [None], ["a"]], type=pa.list_(pa.string())))
-    result = list_anyop_eq("a", array).to_pylist()
+    array = vector_from_arrow(pa.array([[None, "a", "b"], [None], ["a"]], type=pa.vector_(pa.string())))
+    result = vector_anyop_eq("a", array).to_pylist()
     assert result == [1, 0, 1], f"Expected [1, 0, 1], got {result}"
 
 def test_eq_large_numbers():
@@ -137,64 +137,64 @@ def test_eq_binary_edge_cases():
 
 def test_eq_list_empty_and_nulls():
     # Empty list
-    array = vector_from_arrow(pa.array([[]], type=pa.list_(pa.string())))
-    result = list_anyop_eq("a", array).to_pylist()
+    array = vector_from_arrow(pa.array([[]], type=pa.vector_(pa.string())))
+    result = vector_anyop_eq("a", array).to_pylist()
     assert result == [0], f"Expected [0] for empty list, got {result}"
     
     # List with only nulls
-    array = vector_from_arrow(pa.array([[None, None]], type=pa.list_(pa.string())))
-    result = list_anyop_eq("a", array).to_pylist()
+    array = vector_from_arrow(pa.array([[None, None]], type=pa.vector_(pa.string())))
+    result = vector_anyop_eq("a", array).to_pylist()
     assert result == [0], f"Expected [0] for null-only list, got {result}"
     
     # Multiple rows with various null patterns
-    array = vector_from_arrow(pa.array([[None, "a"], ["a"], [None], []], type=pa.list_(pa.string())))
-    result = list_anyop_eq("a", array).to_pylist()
+    array = vector_from_arrow(pa.array([[None, "a"], ["a"], [None], []], type=pa.vector_(pa.string())))
+    result = vector_anyop_eq("a", array).to_pylist()
     assert result == [1, 1, 0, 0], f"Expected [1, 1, 0, 0], got {result}"
 
 def test_eq_list_duplicates():
     # List with duplicates
-    array = vector_from_arrow(pa.array([["a", "a", "a"]], type=pa.list_(pa.string())))
-    result = list_anyop_eq("a", array).to_pylist()
+    array = vector_from_arrow(pa.array([["a", "a", "a"]], type=pa.vector_(pa.string())))
+    result = vector_anyop_eq("a", array).to_pylist()
     assert result == [1], f"Expected [1], got {result}"
     
     # Mixed duplicates
-    array = vector_from_arrow(pa.array([["a", "b", "a", "b"]], type=pa.list_(pa.string())))
-    result = list_anyop_eq("a", array).to_pylist()
+    array = vector_from_arrow(pa.array([["a", "b", "a", "b"]], type=pa.vector_(pa.string())))
+    result = vector_anyop_eq("a", array).to_pylist()
     assert result == [1], f"Expected [1], got {result}"
 
 def test_eq_list_binary():
     # Binary list comparisons
-    array = vector_from_arrow(pa.array([[b"test", b"data"]], type=pa.list_(pa.binary())))
-    result = list_anyop_eq(b"test", array).to_pylist()
+    array = vector_from_arrow(pa.array([[b"test", b"data"]], type=pa.vector_(pa.binary())))
+    result = vector_anyop_eq(b"test", array).to_pylist()
     assert result == [1], f"Expected [1], got {result}"
     
-    array = vector_from_arrow(pa.array([[b"test", b"data"]], type=pa.list_(pa.binary())))
-    result = list_anyop_eq(b"other", array).to_pylist()
+    array = vector_from_arrow(pa.array([[b"test", b"data"]], type=pa.vector_(pa.binary())))
+    result = vector_anyop_eq(b"other", array).to_pylist()
     assert result == [0], f"Expected [0], got {result}"
 
 def test_eq_list_integers():
     # Integer list comparisons
-    array = vector_from_arrow(pa.array([[1, 2, 3]], type=pa.list_(pa.int64())))
-    result = list_anyop_eq(2, array).to_pylist()
+    array = vector_from_arrow(pa.array([[1, 2, 3]], type=pa.vector_(pa.int64())))
+    result = vector_anyop_eq(2, array).to_pylist()
     assert result == [1], f"Expected [1], got {result}"
     
-    array = vector_from_arrow(pa.array([[1, 2, 3]], type=pa.list_(pa.int64())))
-    result = list_anyop_eq(5, array).to_pylist()
+    array = vector_from_arrow(pa.array([[1, 2, 3]], type=pa.vector_(pa.int64())))
+    result = vector_anyop_eq(5, array).to_pylist()
     assert result == [0], f"Expected [0], got {result}"
     
     # Negative numbers
-    array = vector_from_arrow(pa.array([[-1, -2, -3]], type=pa.list_(pa.int64())))
-    result = list_anyop_eq(-2, array).to_pylist()
+    array = vector_from_arrow(pa.array([[-1, -2, -3]], type=pa.vector_(pa.int64())))
+    result = vector_anyop_eq(-2, array).to_pylist()
     assert result == [1], f"Expected [1], got {result}"
 
 def test_eq_list_floats():
     # Float list comparisons
-    array = vector_from_arrow(pa.array([[1.1, 2.2, 3.3]], type=pa.list_(pa.float64())))
-    result = list_anyop_eq(2.2, array).to_pylist()
+    array = vector_from_arrow(pa.array([[1.1, 2.2, 3.3]], type=pa.vector_(pa.float64())))
+    result = vector_anyop_eq(2.2, array).to_pylist()
     assert result == [1], f"Expected [1], got {result}"
     
-    array = vector_from_arrow(pa.array([[1.1, 2.2, 3.3]], type=pa.list_(pa.float64())))
-    result = list_anyop_eq(4.4, array).to_pylist()
+    array = vector_from_arrow(pa.array([[1.1, 2.2, 3.3]], type=pa.vector_(pa.float64())))
+    result = vector_anyop_eq(4.4, array).to_pylist()
     assert result == [0], f"Expected [0], got {result}"
 
 if __name__ == "__main__":  # pragma: no cover

@@ -1,7 +1,7 @@
 import numpy as np
 import pyarrow as pa
-from opteryx.compiled.list_ops import list_length
-from opteryx.nanobind.list_length import offsets_to_lengths as offsets_to_lengths_native
+from opteryx.compiled.vector_ops import vector_length
+from opteryx.nanobind.vector_length import offsets_to_lengths as offsets_to_lengths_native
 
 
 def test_offsets_to_lengths_matches_numpy():
@@ -21,7 +21,7 @@ def test_list_length_on_listarray():
     values = [[str(i)] * (i % 5) for i in range(n)]
     arr = pa.array(values)
 
-    res = list_length(arr)
+    res = vector_length(arr)
     res_np = np.frombuffer(res, dtype=np.uint32)
     offsets = np.frombuffer(arr.buffers()[1], dtype=np.int32, count=n + 1)
     expected = (offsets[1:] - offsets[:-1]).astype(np.uint32)

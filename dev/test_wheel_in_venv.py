@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create a venv, install a wheel, and test importing opteryx.compiled.list_ops.
+"""Create a venv, install a wheel, and test importing opteryx.compiled.vector_ops.
 
 Usage examples:
   WHEEL_URL="/path/or/url/to/opteryx_core.whl" python dev/test_wheel_in_venv.py
@@ -8,7 +8,7 @@ Usage examples:
 What it does:
   - create a temporary venv
   - pip install the wheel
-  - attempt to import opteryx.compiled.list_ops and check for `list_contains_all`
+  - attempt to import opteryx.compiled.vector_ops and check for `vector_contains_all`
   - locate the installed .so file and run `file`, `nm`, and `ldd`/`readelf` where available
 
 This is intended for quick reproduction on a developer machine or CI (Linux preferred).
@@ -61,9 +61,9 @@ def run_import_test(venv_python: Path):
         "print('PY', sys.version)\n"
         "print('PLATFORM', platform.platform(), platform.machine())\n"
         "try:\n"
-        "    m = importlib.import_module('opteryx.compiled.list_ops')\n"
-        "    if not hasattr(m, 'list_contains_any'):\n"
-        "        print('MISSING_SYMBOL list_contains_any')\n"
+        "    m = importlib.import_module('opteryx.compiled.vector_ops')\n"
+        "    if not hasattr(m, 'vector_contains_any'):\n"
+        "        print('MISSING_SYMBOL vector_contains_any')\n"
         "        sys.exit(2)\n"
         "    print('IMPORT_OK')\n"
         "except Exception as e:\n"
@@ -88,7 +88,7 @@ def find_installed_wheel_files(venv_python: Path) -> list[Path]:
 def inspect_binary(binpath: Path):
     print('\nBinary inspection for:', binpath)
     run(f"file '{binpath}' || true")
-    run(f"nm '{binpath}' | grep -n 'list_contains_all' || true")
+    run(f"nm '{binpath}' | grep -n 'vector_contains_all' || true")
     # Try readelf / ldd where available
     run(f"readelf -Ws '{binpath}' | head -n 200 || true")
     run(f"ldd '{binpath}' || true")

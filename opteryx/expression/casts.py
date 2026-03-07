@@ -76,7 +76,7 @@ def cast(_type):
 
 
 def _cast_to_binary_representation(
-    arr, format_double_func, list_cast_int64_func, list_cast_uint64_func, caster_type, *args
+    arr, format_double_func, vector_cast_int64_func, vector_cast_uint64_func, caster_type, *args
 ):
     """Internal helper for casting to binary representations (VARCHAR and BLOB).
 
@@ -86,8 +86,8 @@ def _cast_to_binary_representation(
     Args:
         arr: Input array
         format_double_func: Function to format float64 arrays (format_double_array_ascii or format_double_array_bytes)
-        list_cast_int64_func: Function to cast int64 arrays
-        list_cast_uint64_func: Function to cast uint64 arrays
+        vector_cast_int64_func: Function to cast int64 arrays
+        vector_cast_uint64_func: Function to cast uint64 arrays
         caster_type: Type constant for OrsoTypes lookup (e.g., OrsoTypes.VARCHAR)
         *args: Optional length argument
     """
@@ -100,12 +100,12 @@ def _cast_to_binary_representation(
     if arr.dtype == numpy.int64:
         from opteryx.draken.interop.arrow import vector_from_arrow
 
-        return list_cast_int64_func(vector_from_arrow(pyarrow.array(arr))).to_arrow()
+        return vector_cast_int64_func(vector_from_arrow(pyarrow.array(arr))).to_arrow()
 
     if arr.dtype == numpy.uint64:
         from opteryx.draken.interop.arrow import vector_from_arrow
 
-        return list_cast_uint64_func(
+        return vector_cast_uint64_func(
             vector_from_arrow(pyarrow.array(arr.view(numpy.int64)))
         ).to_arrow()
 
@@ -122,15 +122,15 @@ def cast_to_varchar(arr, *args):
     Uses optimized paths for float64 and int64 arrays when possible,
     falling back to generic conversion for other types.
     """
-    from opteryx.compiled.list_ops import list_cast_int64_to_ascii
-    from opteryx.compiled.list_ops import list_cast_uint64_to_ascii
+    from opteryx.compiled.vector_ops import vector_cast_int64_to_ascii
+    from opteryx.compiled.vector_ops import vector_cast_uint64_to_ascii
     from opteryx.third_party.ulfjack.ryu import format_double_array_ascii
 
     return _cast_to_binary_representation(
         arr,
         format_double_array_ascii,
-        list_cast_int64_to_ascii,
-        list_cast_uint64_to_ascii,
+        vector_cast_int64_to_ascii,
+        vector_cast_uint64_to_ascii,
         OrsoTypes.VARCHAR,
         *args,
     )
@@ -142,15 +142,15 @@ def cast_to_blob(arr, *args):
     Uses optimized paths for float64 and int64 arrays when possible,
     falling back to generic conversion for other types.
     """
-    from opteryx.compiled.list_ops import list_cast_int64_to_bytes
-    from opteryx.compiled.list_ops import list_cast_uint64_to_bytes
+    from opteryx.compiled.vector_ops import vector_cast_int64_to_bytes
+    from opteryx.compiled.vector_ops import vector_cast_uint64_to_bytes
     from opteryx.third_party.ulfjack.ryu import format_double_array_bytes
 
     return _cast_to_binary_representation(
         arr,
         format_double_array_bytes,
-        list_cast_int64_to_bytes,
-        list_cast_uint64_to_bytes,
+        vector_cast_int64_to_bytes,
+        vector_cast_uint64_to_bytes,
         OrsoTypes.BLOB,
         *args,
     )
@@ -190,8 +190,8 @@ def cast_to_int(arr, *args):
     Uses optimized C++ paths for string/byte parsing and date conversion,
     with generic fallback for other types.
     """
-    from opteryx.compiled.list_ops import list_cast_ascii_to_int
-    from opteryx.compiled.list_ops import list_cast_bytes_to_int
+    from opteryx.compiled.vector_ops import vector_cast_ascii_to_int
+    from opteryx.compiled.vector_ops import vector_cast_bytes_to_int
 
     if hasattr(arr, "to_numpy"):
         arr = arr.to_numpy(False)
@@ -199,19 +199,19 @@ def cast_to_int(arr, *args):
         if isinstance(arr[0], str):
             from opteryx.draken.interop.arrow import vector_from_arrow
 
-            return list_cast_ascii_to_int(
+            return vector_cast_ascii_to_int(
                 vector_from_arrow(pyarrow.array(arr, type=pyarrow.string()))
             ).to_arrow()
         elif isinstance(arr[0], bytes):
             from opteryx.draken.interop.arrow import vector_from_arrow
 
-            return list_cast_bytes_to_int(
+            return vector_cast_bytes_to_int(
                 vector_from_arrow(pyarrow.array(arr, type=pyarrow.binary()))
             ).to_arrow()
     if numpy.issubdtype(arr.dtype, numpy.str_):
         from opteryx.draken.interop.arrow import vector_from_arrow
 
-        return list_cast_ascii_to_int(
+        return vector_cast_ascii_to_int(
             vector_from_arrow(pyarrow.array(arr.astype(object), type=pyarrow.string()))
         ).to_arrow()
     if numpy.issubdtype(arr.dtype, numpy.datetime64):

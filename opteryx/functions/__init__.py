@@ -65,22 +65,9 @@ from pyarrow import ArrowNotImplementedError
 from pyarrow import compute
 
 import opteryx
-from opteryx.compiled.list_ops import list_contains_all
-from opteryx.compiled.list_ops import list_contains_any
-from opteryx.compiled.list_ops import list_encode_utf8 as to_blob
-from opteryx.compiled.list_ops import list_initcap
-from opteryx.compiled.list_ops import list_length
-from opteryx.compiled.list_ops import list_md5
-from opteryx.compiled.list_ops import list_replace
-from opteryx.compiled.list_ops import list_sha1
-from opteryx.compiled.list_ops import list_sha256
-from opteryx.compiled.list_ops import list_sha512
-from opteryx.compiled.list_ops import list_soundex
-from opteryx.compiled.list_ops import list_string_slice_left
-from opteryx.compiled.list_ops import list_string_slice_right
-from opteryx.draken.vectors.string_vector import StringVector
-from opteryx.draken.vectors.string_vector import lowercase as string_vector_lowercase
-from opteryx.draken.vectors.string_vector import uppercase as string_vector_uppercase
+from opteryx.compiled.vector_ops import vector_contains_all
+from opteryx.compiled.vector_ops import vector_contains_any
+from opteryx.compiled.vector_ops import vector_encode_utf8 as to_blob
 from opteryx.exceptions import FunctionExecutionError
 from opteryx.exceptions import IncorrectTypeError
 from opteryx.expression.casts import cast
@@ -89,6 +76,18 @@ from opteryx.expression.casts import cast_to_double
 from opteryx.expression.casts import cast_to_int
 from opteryx.expression.casts import cast_to_varchar
 from opteryx.expression.casts import try_cast
+from opteryx.expression.functions.implementations.text import _initcap
+from opteryx.expression.functions.implementations.text import _md5
+from opteryx.expression.functions.implementations.text import _replace
+from opteryx.expression.functions.implementations.text import _sha1
+from opteryx.expression.functions.implementations.text import _sha256
+from opteryx.expression.functions.implementations.text import _sha512
+from opteryx.expression.functions.implementations.text import _soundex
+from opteryx.expression.functions.implementations.text import _string_slice_left
+from opteryx.expression.functions.implementations.text import _string_slice_right
+from opteryx.expression.functions.implementations.text import to_lower
+from opteryx.expression.functions.implementations.text import to_upper
+from opteryx.expression.functions.implementations.text import vector_lengther
 from opteryx.functions import date_functions
 from opteryx.functions import number_functions
 from opteryx.functions import other_functions
@@ -96,36 +95,12 @@ from opteryx.functions import string_functions
 from opteryx.third_party.cyan4973.xxhash import hash_bytes
 from opteryx.utils import dates
 
-
-def to_lower(arr):
-    """
-    Fast lowercase using buffer-level SIMD operations.
-    """
-    # Convert numpy array to Arrow if needed
-    if isinstance(arr, numpy.ndarray):
-        arr = pyarrow.array(arr)
-
-    vec = StringVector.from_arrow(arr)
-    result_vec = string_vector_lowercase(vec)
-    return result_vec.to_arrow()
+# to_lower, to_upper imported from opteryx.expression.functions.implementations.text
 
 
-def to_upper(arr):
-    """
-    Fast uppercase using buffer-level SIMD operations.
-    """
-    # Convert numpy array to Arrow if needed
-    if isinstance(arr, numpy.ndarray):
-        arr = pyarrow.array(arr)
-
-    vec = StringVector.from_arrow(arr)
-    result_vec = string_vector_uppercase(vec)
-    return result_vec.to_arrow()
-
-
-def array_encode_utf8(arr):
+def vector_encode_utf8(arr):
     try:
-        # array_encode_utf8 is fast but brittle
+        # vector_encode_utf8 is fast but brittle
         return to_blob(arr)
     except Exception:
         return [None if s is None else str(s).encode() for s in arr]
@@ -326,99 +301,9 @@ def select_values(boolean_arrays, value_arrays):
     return result
 
 
-def _soundex(arr):
-    from opteryx.draken.interop.arrow import vector_from_arrow
-
-    if isinstance(arr, numpy.ndarray):
-        arr = pyarrow.array(arr)
-    return list_soundex(vector_from_arrow(arr)).to_arrow()
-
-
-def _initcap(arr):
-    from opteryx.draken.interop.arrow import vector_from_arrow
-
-    if isinstance(arr, numpy.ndarray):
-        arr = pyarrow.array(arr)
-    return list_initcap(vector_from_arrow(arr)).to_arrow()
-
-
-def _md5(arr):
-    from opteryx.draken.interop.arrow import vector_from_arrow
-
-    if isinstance(arr, numpy.ndarray):
-        arr = pyarrow.array(arr)
-    return list_md5(vector_from_arrow(arr)).to_arrow()
-
-
-def _sha1(arr):
-    from opteryx.draken.interop.arrow import vector_from_arrow
-
-    if isinstance(arr, numpy.ndarray):
-        arr = pyarrow.array(arr)
-    return list_sha1(vector_from_arrow(arr)).to_arrow()
-
-
-def _sha256(arr):
-    from opteryx.draken.interop.arrow import vector_from_arrow
-
-    if isinstance(arr, numpy.ndarray):
-        arr = pyarrow.array(arr)
-    return list_sha256(vector_from_arrow(arr)).to_arrow()
-
-
-def _sha512(arr):
-    from opteryx.draken.interop.arrow import vector_from_arrow
-
-    if isinstance(arr, numpy.ndarray):
-        arr = pyarrow.array(arr)
-    return list_sha512(vector_from_arrow(arr)).to_arrow()
-
-
-def _replace(data, search, replace_val):
-    from opteryx.draken.interop.arrow import vector_from_arrow
-
-    if isinstance(data, numpy.ndarray):
-        data = pyarrow.array(data)
-    data_vec = vector_from_arrow(data)
-    if isinstance(search, numpy.ndarray):
-        search = search[0]
-    if isinstance(replace_val, numpy.ndarray):
-        replace_val = replace_val[0]
-    if isinstance(search, str):
-        search = search.encode("utf-8")
-    if isinstance(replace_val, str):
-        replace_val = replace_val.encode("utf-8")
-    return list_replace(data_vec, search, replace_val).to_arrow()
-
-
-def _string_slice_left(arr, length):
-    from opteryx.draken.interop.arrow import vector_from_arrow
-
-    if isinstance(arr, numpy.ndarray):
-        arr = pyarrow.array(arr)
-    if isinstance(length, numpy.ndarray):
-        length = int(length[0])
-    return list_string_slice_left(vector_from_arrow(arr), length).to_arrow()
-
-
-def _string_slice_right(arr, length):
-    from opteryx.draken.interop.arrow import vector_from_arrow
-
-    if isinstance(arr, numpy.ndarray):
-        arr = pyarrow.array(arr)
-    if isinstance(length, numpy.ndarray):
-        length = int(length[0])
-    return list_string_slice_right(vector_from_arrow(arr), length).to_arrow()
-
-
-def list_lengther(arr):
-    from opteryx.draken.interop.arrow import vector_from_arrow
-
-    if isinstance(arr, numpy.ndarray):
-        arr = pyarrow.array(arr.tolist())
-    elif not isinstance(arr, pyarrow.Array):
-        arr = pyarrow.array(arr)
-    return list_length(vector_from_arrow(arr)).to_arrow()
+# _soundex, _initcap, _md5, _sha1, _sha256, _sha512, _replace,
+# _string_slice_left, _string_slice_right, vector_lengther
+# imported from opteryx.expression.functions.implementations.text at the top.
 
 
 def sleep(x):
@@ -479,7 +364,7 @@ FUNCTIONS = {
     "ASCII": (string_functions.to_ascii, "INTEGER", 1.0),
 
     # STRINGS
-    "LENGTH": (list_lengther, "INTEGER", 1.0),  # LENGTH(str) -> int
+    "LENGTH": (vector_lengther, "INTEGER", 1.0),  # LENGTH(str) -> int
     "UPPER": (to_upper, "VARCHAR", 1.0),  # UPPER(str) -> str (buffer-level SIMD)
     "LOWER": (to_lower, "VARCHAR", 1.0),  # LOWER(str) -> str (buffer-level SIMD)
     "LEFT": (_string_slice_left, "VARCHAR", 1.0),
@@ -523,10 +408,9 @@ FUNCTIONS = {
 
     # OTHER
     "GET_STRING": (_get_string, "VARCHAR", 1.0),
-    "ARRAY_CONTAINS": (_iterate_double_parameter(other_functions.list_contains), "BOOLEAN", 1.0),
-    "ARRAY_CONTAINS_ANY": (lambda x, y: list_contains_any(x, set(y[0])), "BOOLEAN", 1.0),
-    "ARRAY_CONTAINS_ALL": (lambda x, y: list_contains_all(x, set(y[0])), "BOOLEAN", 1.0),
-    "SEARCH": (other_functions.search, "BOOLEAN", 1.0),
+    "ARRAY_CONTAINS": (_iterate_double_parameter(other_functions.array_contains), "BOOLEAN", 1.0),
+    "ARRAY_CONTAINS_ANY": (lambda x, y: vector_contains_any(x, set(y[0])), "BOOLEAN", 1.0),
+    "ARRAY_CONTAINS_ALL": (lambda x, y: vector_contains_all(x, set(y[0])), "BOOLEAN", 1.0),
     "COALESCE": (_coalesce, "VARIANT", 1.0),
     "IFNULL": (other_functions.if_null, "VARIANT", 1.0),
     "SORT": (_sort(numpy.sort), "ARRAY", 1.0),

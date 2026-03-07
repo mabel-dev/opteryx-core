@@ -8,14 +8,14 @@ sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
 from opteryx.draken import Vector
 from opteryx.draken.interop.arrow import vector_from_arrow
-from opteryx.compiled import list_ops as compiled_list_ops
+from opteryx.compiled import vector_ops as compiled_vector_ops
 from opteryx.functions import string_functions
 
-list_initcap = getattr(compiled_list_ops, "list_initcap")
-list_regex_replace = getattr(compiled_list_ops, "list_regex_replace")
-list_replace = getattr(compiled_list_ops, "list_replace")
-list_string_slice_right = getattr(compiled_list_ops, "list_string_slice_right")
-list_string_slice_left = getattr(compiled_list_ops, "list_string_slice_left")
+vector_initcap = getattr(compiled_vector_ops, "vector_initcap")
+vector_regex_replace = getattr(compiled_vector_ops, "vector_regex_replace")
+vector_replace = getattr(compiled_vector_ops, "vector_replace")
+vector_string_slice_right = getattr(compiled_vector_ops, "vector_string_slice_right")
+vector_string_slice_left = getattr(compiled_vector_ops, "vector_string_slice_left")
 
 
 def _to_sv(lst):
@@ -32,7 +32,7 @@ def _sv_to_list(sv):
 
 
 def test_slice_left():
-    slicer = lambda arr, n: _sv_to_list(list_string_slice_left(_to_sv(arr), n))
+    slicer = lambda arr, n: _sv_to_list(vector_string_slice_left(_to_sv(arr), n))
 
     # fmt:off
     assert slicer(["abcdef"], 3) == ["abc"]
@@ -46,7 +46,7 @@ def test_slice_left():
 
 
 def test_slice_right():
-    slicer = lambda arr, n: _sv_to_list(list_string_slice_right(_to_sv(arr), n))
+    slicer = lambda arr, n: _sv_to_list(vector_string_slice_right(_to_sv(arr), n))
 
     # fmt:off
     assert slicer(["abcdef"], 3) == ["def"]
@@ -74,25 +74,25 @@ def test_random_string():
 
 def test_compiled_replace():
     data = _to_sv(["hello world", "banana", None])
-    result = _sv_to_list(list_replace(data, b"l", b"L"))
+    result = _sv_to_list(vector_replace(data, b"l", b"L"))
     assert result == ["heLLo worLd", "banana", None]
 
 
 def test_compiled_replace_bytes():
     data = vector_from_arrow(pyarrow.array([b"abcabc", b"", None], type=pyarrow.binary()))
-    result = _sv_to_list(list_replace(data, b"abc", b"x"))
+    result = _sv_to_list(vector_replace(data, b"abc", b"x"))
     assert result == ["xx", "", None]
 
 
 def test_compiled_initcap():
     data = _to_sv(["hello world", "AmiGoS", "o'connor", "3rd street", None])
-    result = _sv_to_list(list_initcap(data))
+    result = _sv_to_list(vector_initcap(data))
     assert result == ["Hello World", "Amigos", "O'Connor", "3rd Street", None]
 
 
 def test_compiled_initcap_bytes():
     data = vector_from_arrow(pyarrow.array([b"mixed CASE"], type=pyarrow.binary()))
-    result = _sv_to_list(list_initcap(data))
+    result = _sv_to_list(vector_initcap(data))
     assert result == ["Mixed Case"]
 
 
@@ -102,7 +102,7 @@ def test_re2_list_regex_replace_strings():
     pattern = rb"\d+"
     replacement = b""
 
-    result = list_regex_replace(data, pattern, replacement).to_pylist()
+    result = vector_regex_replace(data, pattern, replacement).to_pylist()
 
     assert result == [b"abc", b"xyz", None]
 
@@ -112,7 +112,7 @@ def test_re2_list_regex_replace_bytes():
     pattern = b"^https?"
     replacement = b""
 
-    result = list_regex_replace(data, pattern, replacement).to_pylist()
+    result = vector_regex_replace(data, pattern, replacement).to_pylist()
 
     assert result == [b"://a.example", b"://b.example"]
 

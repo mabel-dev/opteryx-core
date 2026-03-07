@@ -5,7 +5,7 @@ sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
 import pyarrow as pa
 import pytest
-from opteryx.compiled.list_ops import list_ip_in_cidr
+from opteryx.compiled.vector_ops import vector_ip_in_cidr
 from opteryx.draken.interop.arrow import vector_from_arrow
 
 TESTS = [
@@ -172,7 +172,7 @@ TESTS = [
 def test_ip_containment(ips, cidr, expected):
     try:
         vec = vector_from_arrow(pa.array(ips, type=pa.string()))
-        result = list_ip_in_cidr(vec, cidr).to_arrow().to_pylist()
+        result = vector_ip_in_cidr(vec, cidr).to_arrow().to_pylist()
         assert result == expected, (ips, cidr, expected, result)
     except AssertionError as e:
         assert False, (ips, cidr, expected, e)

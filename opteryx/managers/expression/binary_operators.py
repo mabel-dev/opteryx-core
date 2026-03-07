@@ -14,7 +14,7 @@ import pyarrow
 from orso.types import OrsoTypes
 from pyarrow import compute
 
-from opteryx.compiled import list_ops
+from opteryx.compiled import vector_ops
 from opteryx.datatypes.intervals import MICROSECONDS_PER_DAY
 from opteryx.third_party.tktech import csimdjson as simdjson
 
@@ -28,7 +28,7 @@ def ArrowOp(documents, elements) -> pyarrow.Array:
 
     # Fast path: if the documents are dicts, delegate to the cython optimized op
     if len(documents) > 0 and isinstance(documents[0], dict):
-        return list_ops.cython_arrow_op(documents, element)
+        return vector_ops.cython_arrow_op(documents, element)
 
     if hasattr(documents, "to_numpy"):
         documents = documents.to_numpy(zero_copy_only=False)
@@ -58,7 +58,7 @@ def LongArrowOp(documents, elements) -> pyarrow.Array:
     element = elements[0]
 
     if len(documents) > 0 and isinstance(documents[0], dict):
-        return list_ops.cython_long_arrow_op(documents, element)
+        return vector_ops.cython_long_arrow_op(documents, element)
 
     if hasattr(documents, "to_numpy"):
         documents = documents.to_numpy(zero_copy_only=False)
@@ -130,13 +130,13 @@ def MapAccessOp(array, key):
         )
 
     if isinstance(first_element, (list, pyarrow.ListScalar, numpy.ndarray)):
-        from opteryx.compiled.list_ops import list_get_element
+        from opteryx.compiled.vector_ops import vector_get_element
         from opteryx.draken.interop.arrow import vector_from_arrow
 
         pa_arr = pyarrow.array(
             [r if not isinstance(r, pyarrow.ListScalar) else r.as_py() for r in array]
         )
-        return list_get_element(vector_from_arrow(pa_arr), index)
+        return vector_get_element(vector_from_arrow(pa_arr), index)
 
     raise IncorrectTypeError(
         f"Map access is not supported for {type(first_element).__name__} values"
@@ -158,7 +158,7 @@ def _ip_containment(left: List[Optional[str]], right: List[str]) -> List[Optiona
             A list of boolean values indicating if each corresponding IP in 'left' is in 'right'.
     """
 
-    from opteryx.compiled.list_ops import list_ip_in_cidr
+    from opteryx.compiled.vector_ops import vector_ip_in_cidr
 
     # Normalize the left values to Python str (or None). The compiled
     # Cython routine expects Python str objects; some readers return bytes
@@ -189,7 +189,7 @@ def _ip_containment(left: List[Optional[str]], right: List[str]) -> List[Optiona
         from opteryx.draken.interop.arrow import vector_from_arrow as _vector_from_arrow
 
         arr = _pyarrow.array(normalized_left, type=_pyarrow.string())
-        return list_ip_in_cidr(_vector_from_arrow(arr), str(right[0]))
+        return vector_ip_in_cidr(_vector_from_arrow(arr), str(right[0]))
     except (IndexError, AttributeError, ValueError, TypeError) as err:
         from opteryx.exceptions import IncorrectTypeError
 
