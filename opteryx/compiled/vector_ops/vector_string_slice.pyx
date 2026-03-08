@@ -9,8 +9,37 @@
 from libc.stdint cimport int32_t, uint8_t
 
 from opteryx.draken.vectors.string_vector cimport StringVector
+from opteryx.draken.vectors.int64_vector cimport Int64Vector, from_sequence as int64_from_sequence
 from opteryx.draken.vectors import string_vector as string_vector_module
 from opteryx.draken.core.buffers cimport DrakenVarBuffer
+
+# ---------------------------------------------------------------------------
+# additional utilities
+# ---------------------------------------------------------------------------
+
+cpdef Int64Vector vector_string_length(StringVector vec):
+    """Return byte-length of each string in a StringVector.
+
+    This mirrors the behaviour of the previous Arrow-based implementation but
+    operates entirely within the Draken world.  The result is an
+    ``Int64Vector`` which is compatible with all downstream kernels including
+    filtering and aggregation.
+    """
+    cdef DrakenVarBuffer* ptr = vec.ptr
+    cdef Py_ssize_t n = ptr.length
+    cdef uint8_t* null_bm = ptr.null_bitmap
+    cdef numpy.ndarray[int64_t, ndim=1] result = numpy.zeros(n, dtype=numpy.int64)
+    cdef int64_t[::1] rview = result
+    cdef Py_ssize_t i
+
+    for i in range(n):
+        if null_bm != NULL and not ((null_bm[i >> 3] >> (i & 7)) & 1):
+            rview[i] = 0
+        else:
+            rview[i] = ptr.offsets[i + 1] - ptr.offsets[i]
+
+    return int64_from_sequence(rview)
+
 
 
 cpdef StringVector vector_string_slice_left(StringVector vec, object length):

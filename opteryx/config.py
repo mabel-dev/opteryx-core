@@ -353,7 +353,12 @@ class Features:
     force_nested_loop_join = bool(get("FEATURE_FORCE_NESTED_LOOP_JOIN", False))
     enable_free_threading = bool(get("FEATURE_ENABLE_FREE_THREADING", False))
     use_draken_ops_kernels = bool(get("FEATURE_USE_DRAKEN_OPS_KERNELS", False))
-    use_draken_aggregator = str(get("FEATURE_USE_DRAKEN_AGGREGATOR", "0")).lower() in (
+    # Historically draken aggregation was opt-in, but as the engine
+    # matures we want the native aggregator to be the primary path.  Make
+    # the feature enabled by default; callers can still disable it via the
+    # environment variable if they need to exercise the legacy Arrow-based
+    # implementation for comparison or debugging.
+    use_draken_aggregator = str(get("FEATURE_USE_DRAKEN_AGGREGATOR", "1")).lower() in (
         "1",
         "true",
         "yes",

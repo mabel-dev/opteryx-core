@@ -20,6 +20,7 @@ from typing import Union
 
 import numpy
 import pyarrow
+import pyarrow as pa
 from pyarrow import compute
 
 from opteryx.compiled.vector_ops import vector_initcap
@@ -65,13 +66,56 @@ def to_upper(arr):
 
 
 def vector_lengther(arr):
-    from opteryx.draken.interop.arrow import vector_from_arrow
+    """Return string lengths using the Draken StringVector API.
 
+    This implementation converts the input to a ``StringVector`` and then
+    computes lengths by looking at the internal offsets buffer.  No Arrow
+    compute kernels are used at all, and dictionary inputs are handled by the
+    vector conversion step.
+    """
+
+    from opteryx.draken.interop.arrow import vector_from_arrow
+    from opteryx.draken.vectors.string_vector import StringVector
+
+    # normalise to Arrow array then to Draken vector
     if isinstance(arr, numpy.ndarray):
         arr = pyarrow.array(arr.tolist())
     elif not isinstance(arr, pyarrow.Array):
         arr = pyarrow.array(arr)
-    return vector_length(vector_from_arrow(arr)).to_arrow()
+
+    sv: StringVector
+    if isinstance(arr, StringVector):
+        sv = arr
+    else:
+        sv = vector_from_arrow(arr)
+
+    # ``vector_from_arrow`` can yield a DictionaryVector when the input is
+    # dictionary-encoded.  The later logic assumes a real StringVector so we
+    # eagerly convert any dictionary result back into strings via an Arrow
+    # cast.  This keeps the implementation simple and avoids duplicating the
+    # length logic for dictionaries.
+    from opteryx.draken.vectors.dictionary_vector import DictionaryVector
+
+    if not isinstance(sv, StringVector) and isinstance(sv, DictionaryVector):
+        # convert through Arrow and back to get a homogeneous StringVector
+        sv = vector_from_arrow(sv.to_arrow().cast(pyarrow.string()))
+
+    # offsets memoryview of length n+1
+    offs = sv.lengths()
+    n = offs.shape[0] - 1
+    # compute byte lengths into pyarrow array directly
+    import numpy as _np
+    import pyarrow as _pa
+
+    # collect results respecting nulls
+    vals = []
+    nb = sv.null_bitmap()
+    for i in range(n):
+        if nb is not None and not ((nb[i >> 3] >> (i & 7)) & 1):
+            vals.append(None)
+        else:
+            vals.append(int(offs[i + 1] - offs[i]))
+    return _pa.array(vals, type=_pa.int64())
 
 
 def _initcap(arr):

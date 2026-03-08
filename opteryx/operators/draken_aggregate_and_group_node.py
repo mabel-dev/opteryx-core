@@ -40,7 +40,22 @@ class DrakenAggregateAndGroupNode(BasePlanNode):
     SUPPORTED_AGGREGATES = frozenset(
         {"COUNT", "SUM", "MIN", "MAX", "AVG", "COUNT_DISTINCT", "DISTINCT", "ONE", "ANY_VALUE"}
     )
-    FAST_PATH_AGGREGATES = frozenset({"COUNT", "SUM", "AVG", "MIN", "COUNT_DISTINCT", "DISTINCT"})
+    # MAX was previously omitted: the Draken kernel implemented it but
+    # the planner refused to use it in strict mode until we were confident
+    # the fast-finalize semantics were deterministic.  With the rewritten
+    # expression engine and proper handling of dictionary columns we can
+    # safely include it and avoid the Arrow fallback entirely.
+    FAST_PATH_AGGREGATES = frozenset(
+        {
+            "COUNT",
+            "SUM",
+            "AVG",
+            "MIN",
+            "MAX",  # added
+            "COUNT_DISTINCT",
+            "DISTINCT",
+        }
+    )
 
     def __init__(self, properties: QueryProperties, **parameters):
         super().__init__(properties=properties, **parameters)

@@ -262,16 +262,6 @@ def _evaluate_timetravel_expression(node, apply_interval_literal_to_now: bool = 
     raise UnsupportedSyntaxError("Time-travel expression must resolve to a scalar value.")
 
 
-def _coerce_to_datetime(value):
-    if isinstance(value, datetime.time):
-        today_utc = datetime.datetime.now(datetime.UTC).date()
-        return datetime.datetime.combine(today_utc, value)
-    parsed = dates.parse_iso(value)
-    if parsed is None:
-        return None
-    return parsed
-
-
 def _extract_version_expression(version_clause):
     if "ForSystemTimeAsOf" in version_clause:
         raise UnsupportedSyntaxError(
@@ -353,8 +343,6 @@ def extract_timetravel_timestamp(version_clause) -> Optional[object]:
     expression_ast = _extract_version_expression(version_clause)
     expression_node = build(expression_ast)
     value, _ = _evaluate_timetravel_expression(expression_node, apply_interval_literal_to_now=True)
-
-    print(expression_ast, expression_node, value)
 
     if value is None:
         raise UnsupportedSyntaxError(
