@@ -425,10 +425,8 @@ def _interval_compare(op: str, vec, right):
 
 
 def _dict_compare(op: str, vec, right):
-    if isinstance(right, (list, tuple, set, frozenset)):
-        value_list = list(right)
-    else:
-        value_list = right  # keep scalar as-is for non-list ops
+    # keep scalar as-is for non-list ops
+    value_list = list(right) if isinstance(right, (list, tuple, set, frozenset)) else right
 
     if op == "Eq":
         return vec.equals(right)
@@ -595,7 +593,7 @@ def draken_compare(op: str, left, right):
         parser = simdjson.Parser()
 
         if not path.startswith("$."):
-            result = [None if doc is None else path in parser.parse(doc).keys() for doc in docs]
+            result = [None if doc is None else path in parser.parse(doc) for doc in docs]
         else:
 
             def _pointer(jsonpath: str) -> str:
@@ -797,10 +795,7 @@ def _eval_value(node, morsel):
             from opteryx.expression.binary_operators import LongArrowOp
 
             docs = left_vec.to_pylist()
-            if op == "Arrow":
-                result = ArrowOp(docs, [right_val])
-            else:
-                result = LongArrowOp(docs, [right_val])
+            result = ArrowOp(docs, [right_val]) if op == "Arrow" else LongArrowOp(docs, [right_val])
             return vector_from_arrow(result)
 
         raise NotImplementedError(
@@ -824,7 +819,7 @@ def _eval_value(node, morsel):
 
         arrow_table = morsel.to_arrow()
         result = _inner_evaluate(node, arrow_table)
-        if isinstance(result, _pa.Array) or isinstance(result, _pa.ChunkedArray):
+        if isinstance(result, (_pa.Array, _pa.ChunkedArray)):
             return vector_from_arrow(result)
         return vector_from_sequence(result)
 
