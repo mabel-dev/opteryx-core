@@ -22,6 +22,7 @@ from orso.schema import RelationSchema
 from orso.schema import convert_orso_schema_to_arrow_schema
 
 from opteryx import EOS
+from opteryx.draken.morsels.morsel import Morsel
 from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.models import QueryProperties
 from opteryx.utils.json_compat import dumps as json_dumps
@@ -405,8 +406,9 @@ class ReaderNode(BasePlanNode):
 
         records_to_read = self.limit if self.limit is not None else float("inf")
 
-        for morsel in reader:
-            # try to make each morsel have the same schema
+        for raw in reader:
+            # Connectors yield Morsel; extract Arrow table for schema-alignment preprocessing.
+            morsel = raw.to_arrow()
 
             if records_to_read < morsel.num_rows:
                 morsel = morsel.slice(0, records_to_read)
@@ -425,7 +427,7 @@ class ReaderNode(BasePlanNode):
             self.telemetry.blobs_read += 1
             self.telemetry.rows_read += morsel.num_rows
             self.telemetry.bytes_processed += morsel.nbytes
-            yield morsel
+            yield Morsel.from_arrow(morsel)
             start_clock = time.monotonic_ns()
 
             if records_to_read <= 0:

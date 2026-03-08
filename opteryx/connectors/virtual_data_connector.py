@@ -20,6 +20,7 @@ from orso.schema import RelationSchema
 
 from opteryx.connectors.base.base_connector import BaseConnector
 from opteryx.connectors.base.base_connector import BaseTable
+from opteryx.draken.morsels.morsel import Morsel
 from opteryx.exceptions import DatasetNotFoundError
 from opteryx.utils import arrow
 
@@ -128,7 +129,7 @@ class VirtualDataTable(BaseTable):
             **kwargs: Additional read parameters
 
         Yields:
-            pyarrow.Table chunks
+            Morsel chunks
         """
         data_provider, _ = _load_provider(self.dataset)
         if data_provider is None:
@@ -137,7 +138,7 @@ class VirtualDataTable(BaseTable):
                 suggestion=suggestion, dataset=self.dataset, connector=self.__type__
             )
         table = data_provider.read(at_date=kwargs.get("at_date"), variables=self.variables)
-        yield arrow.post_read_projector(table, columns)
+        yield Morsel.from_arrow(arrow.post_read_projector(table, columns))
 
 
 class SampleDatasetReader:

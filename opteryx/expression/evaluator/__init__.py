@@ -158,26 +158,72 @@ def _coerce_interval(value) -> tuple:
     raise TypeError(f"Cannot coerce {type(value)!r} to interval literal")
 
 
-# --- IS NULL helper (Phase 4 target: eliminate pyarrow) ---
+# --- IS NULL helper ---
+
+# Vector class names whose is_null() returns int8_t[::1] (1=null, 0=valid).
+# These are all fixed-buffer types backed by DrakenFixedBuffer.
+_FIXED_BUFFER_VECTOR_CLASSES = frozenset(
+    {
+        "BoolVector",
+        "Int64Vector",
+        "Float64Vector",
+        "Date32Vector",
+        "IntervalVector",
+        "TimestampVector",
+        "TimeVector",
+    }
+)
 
 
 def _is_null_as_boolvector(vec):
     """Return BoolVector where True = SQL NULL position.
 
-    DictionaryVector has a native is_null_boolvector() that handles both null-bitmap
-    nulls and NaN-encoded nulls in float32/float64 dictionary values without any
-    Arrow round-trip.
-
-    All other vector types: use Arrow round-trip via pc.is_null(), which correctly
-    handles null bitmaps across all Arrow-based vector types.
+    Dispatch order:
+      1. DictionaryVector  → native is_null_boolvector() (handles NaN-encoded nulls)
+      2. Fixed-buffer types (Int64, Float64, Date32, Timestamp, Time, Interval,
+         Bool) → is_null() returns int8_t[::1]; packed to BoolVector via Cython
+      3. ConstantVector    → O(1) scalar_value() check; all-true or all-false
+      4. StringVector / ArrayVector → null_bitmap() memoryview (inverted) path
+      5. ArrowVector and other unrecognized types → Arrow round-trip via pc.is_null
     """
-    if vec.__class__.__name__ == "DictionaryVector":
+    from opteryx.compiled.vector_ops.function_definitions import bool_vector_all_true
+    from opteryx.compiled.vector_ops.function_definitions import bool_vector_from_int8_mask
+    from opteryx.compiled.vector_ops.function_definitions import (
+        bool_vector_from_inverted_null_bitmap,
+    )
+    from opteryx.draken.vectors.bool_vector import BoolVector
+
+    cls_name = vec.__class__.__name__
+    n = len(vec)
+
+    if cls_name == "DictionaryVector":
         return vec.is_null_boolvector()
-    import pyarrow.compute as pc
 
-    from opteryx.draken.interop.arrow import vector_from_arrow
+    if cls_name in _FIXED_BUFFER_VECTOR_CLASSES:
+        return bool_vector_from_int8_mask(vec.is_null(), n)
 
-    return vector_from_arrow(pc.is_null(vec.to_arrow()))
+    if cls_name == "ConstantVector":
+        if vec.scalar_value() is None:
+            return bool_vector_all_true(n)
+        return BoolVector(n)  # all-false: non-null constant has no nulls
+
+    # StringVector and ArrayVector expose null information via null_bitmap()
+    nb = vec.null_bitmap()
+    if nb is not None:
+        return bool_vector_from_inverted_null_bitmap(nb, n)
+    # null_bitmap() == None can mean no nulls OR that the type doesn't implement it
+    # For types that don't override null_bitmap() (e.g. ArrowVector, StringVector
+    # when all rows are valid), check null_count first to avoid Arrow round-trip
+    if getattr(vec, "null_count", 0) == 0:
+        return BoolVector(n)  # confirmed no nulls
+
+    # Arrow fallback: for ArrowVector and any other unrecognized type that wraps
+    # a PyArrow array with nulls but doesn't expose a native null bitmap
+    import pyarrow.compute as _pc
+
+    from opteryx.draken.interop.arrow import vector_from_arrow as _vfa
+
+    return _vfa(_pc.is_null(vec.to_arrow()))
 
 
 # --- Per-type comparison dispatchers ---
@@ -431,6 +477,35 @@ def _constant_compare(op: str, vec, right):
     raise NotImplementedError(f"ConstantVector: unsupported op {op!r}")
 
 
+_ARROW_COMPARE_OPS = {
+    "Eq": "equal",
+    "NotEq": "not_equal",
+    "Gt": "greater",
+    "GtEq": "greater_equal",
+    "Lt": "less",
+    "LtEq": "less_equal",
+}
+
+
+def _arrow_vector_compare(op: str, vec, right):
+    """Fallback comparison for ArrowVector (unrecognized Arrow types like decimal128).
+
+    Delegates to ``pyarrow.compute`` and returns a BoolVector.  There is no coercion
+    of the scalar *right* here — PyArrow handles the cast implicitly.
+    """
+    import pyarrow as pa
+    import pyarrow.compute as pc
+
+    from opteryx.draken.vectors.bool_vector import BoolVector
+
+    pc_op = _ARROW_COMPARE_OPS.get(op)
+    if pc_op is None:
+        raise NotImplementedError(f"ArrowVector: unsupported op {op!r}")
+    arr = vec.to_arrow() if not isinstance(vec._arr, pa.Array) else vec._arr
+    bool_arr = getattr(pc, pc_op)(arr, right)
+    return BoolVector.from_arrow(bool_arr)
+
+
 def draken_compare(op: str, left, right):
     """Dispatch a scalar or vector comparison to the appropriate Draken vector method.
 
@@ -547,6 +622,17 @@ def draken_compare(op: str, left, right):
     if negate:
         op = _NEGATED_OPS[op]
 
+    # Normalize: if left is a Python scalar and right is a Draken vector, swap them
+    # and invert the directional operator so semantics remain correct.
+    # e.g. 'Earth' = g.name  →  g.name = 'Earth' (Eq is symmetric, no flip needed)
+    # e.g. 5 > g.id          →  g.id < 5           (Gt → Lt)
+    if isinstance(left, (str, int, float, bytes, bool, type(None))) and hasattr(
+        right, "null_count"
+    ):
+        _FLIP_OPS = {"Gt": "Lt", "Lt": "Gt", "GtEq": "LtEq", "LtEq": "GtEq"}
+        op = _FLIP_OPS.get(op, op)
+        left, right = right, left
+
     cls = left.__class__.__name__
 
     if cls == "StringVector":
@@ -565,6 +651,8 @@ def draken_compare(op: str, left, right):
         result = _dict_compare(op, left, right)
     elif cls == "ConstantVector":
         result = _constant_compare(op, left, right)
+    elif cls == "ArrowVector":
+        result = _arrow_vector_compare(op, left, right)
     else:
         raise NotImplementedError(f"draken_compare: unsupported vector type {cls!r}")
 
@@ -822,8 +910,21 @@ def evaluate_draken(node, morsel):
     if node_type == NodeType.DNF:
         result = evaluate_draken(node.parameters[0], morsel)
         for sub in node.parameters[1:]:
+            if not result.any():
+                return result  # short-circuit: already all-false
             result = result.and_vector(evaluate_draken(sub, morsel))
         return result
+
+    if node_type == NodeType.LITERAL:
+        # Scalar boolean literal in WHERE (e.g. WHERE False, WHERE True).
+        # NULL literal → all-false (NULL is not truthy in SQL WHERE).
+        import pyarrow as pa
+
+        from opteryx.draken.vectors.bool_vector import BoolVector
+
+        val = node.value
+        scalar = bool(val) if val is not None else False
+        return BoolVector.from_arrow(pa.array([scalar] * morsel.num_rows, type=pa.bool_()))
 
     if node_type == NodeType.COMPARISON_OPERATOR:
         left = _eval_value(node.left, morsel)

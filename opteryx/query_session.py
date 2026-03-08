@@ -276,7 +276,16 @@ class Session(DataFrame):
                 self._rowcount = result_data.record_count  # type: ignore
                 self._query_status = result_data.status  # type: ignore
             elif self._result_type == ResultType.TABULAR:
-                self._rows, self._schema = converters.from_arrow(result_data)
+                # Ensure each item in result_data is an Arrow Table before passing to
+                # converters.from_arrow, which expects pyarrow.Table items.
+                def _to_arrow_gen(items):
+                    for item in items:
+                        if hasattr(item, "to_arrow"):
+                            yield item.to_arrow()
+                        else:
+                            yield item
+
+                self._rows, self._schema = converters.from_arrow(_to_arrow_gen(result_data))
                 self._cursor = iter(self._rows)
                 self._query_status = QueryStatus.SQL_SUCCESS
             else:  # pragma: no cover
