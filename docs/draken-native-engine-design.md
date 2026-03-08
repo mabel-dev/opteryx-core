@@ -245,7 +245,7 @@ Draken-native code might be less convenient (e.g., Morsel API vs Arrow API) but:
   - 457 passing / 111 failing — identical to Arrow path ✅
 
 ### What's Next 🔄
-1. **Promote `FEATURE_USE_DRAKEN_FILTER`** to on-by-default (parity confirmed)
+1. ✅ **Promote `FEATURE_USE_DRAKEN_FILTER`** to on-by-default — **done** (`config.py` default changed to `True`)
 2. **Phase 4:** Draken-native type casting in ParquetReadNode
 3. **Phase 5:** Draken sort kernel (SortNode)
 4. **Benchmark** to quantify overhead reduction in filter-heavy workloads
@@ -334,7 +334,7 @@ The cursor layer becomes a simple format adapter:
 
 ---
 
-**Next Action:** Promote `FEATURE_USE_DRAKEN_FILTER` to on-by-default — parity validated (457/111 identical to Arrow path). Then Phase 4: Draken-native type casting in ParquetReadNode.
+**Next Action:** Phase 4 — Draken-native type casting in ParquetReadNode. (`FEATURE_USE_DRAKEN_FILTER` now defaults to `True`; field confirmed stable at 457 pass / 111 fail.)
 
 ---
 

@@ -21,12 +21,6 @@ from typing import Tuple
 import numpy
 from orso.types import OrsoTypes
 
-# Epoch constants for converting datetime literals to Draken-native integers.
-# DATE literals are stored as int (days since epoch, fits int32).
-# TIMESTAMP literals are stored as int (microseconds since epoch, int64).
-_EPOCH_DATE = datetime.date(1970, 1, 1)
-_EPOCH_DT = datetime.datetime(1970, 1, 1)
-
 from opteryx import functions
 from opteryx import operators
 from opteryx.datatypes.intervals import MICROSECONDS_PER_DAY
@@ -45,6 +39,12 @@ from opteryx.models import LogicalColumn
 from opteryx.models import Node
 from opteryx.utils import dates
 from opteryx.utils import suggest_alternative
+
+# Epoch constants for converting datetime literals to Draken-native integers.
+# DATE literals are stored as int (days since epoch, fits int32).
+# TIMESTAMP literals are stored as int (microseconds since epoch, int64).
+_EPOCH_DATE = datetime.date(1970, 1, 1)
+_EPOCH_DT = datetime.datetime(1970, 1, 1)
 
 
 def _evaluate_fixed_temporal_function(function_name: str):
@@ -1113,7 +1113,10 @@ def typed_string(branch, alias: Optional[List[str]] = None, key=None):
     data_value = build(branch["value"]).value
 
     Datatype_Map: Dict[str, Tuple[str, Callable]] = {
-        "TIMESTAMP": (OrsoTypes.TIMESTAMP, lambda x: int((dates.parse_iso(x) - _EPOCH_DT).total_seconds() * 1_000_000)),
+        "TIMESTAMP": (
+            OrsoTypes.TIMESTAMP,
+            lambda x: int((dates.parse_iso(x) - _EPOCH_DT).total_seconds() * 1_000_000),
+        ),
         "DATE": (OrsoTypes.DATE, lambda x: (dates.parse_iso(x).date() - _EPOCH_DATE).days),
         "INTEGER": (OrsoTypes.INTEGER, numpy.int64),
         "DOUBLE": (OrsoTypes.DOUBLE, numpy.float64),

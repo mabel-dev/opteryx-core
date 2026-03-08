@@ -41,8 +41,6 @@ from opteryx import EOS
 from opteryx import config
 from opteryx.draken.morsels.morsel import Morsel
 from opteryx.managers.expression import NodeType
-from opteryx.managers.expression import evaluate
-from opteryx.managers.expression import evaluate_and_append
 from opteryx.managers.expression import get_all_nodes_of_type
 from opteryx.models import Node
 from opteryx.models import QueryProperties
@@ -164,45 +162,31 @@ class ParquetReadNode(ReaderNode):
             )
         return root
 
-    @staticmethod
-    def _mask_to_arrow(mask):
-        if isinstance(mask, pyarrow.BooleanArray):
-            return mask
-        if isinstance(mask, pyarrow.ChunkedArray):
-            return mask.combine_chunks()
-        if isinstance(mask, numpy.ndarray):
-            return pyarrow.array(mask, type=pyarrow.bool_())
-        if isinstance(mask, list):
-            return pyarrow.array(mask, type=pyarrow.bool_())
-        return pyarrow.array(numpy.asarray(mask, dtype=numpy.bool_), type=pyarrow.bool_())
+    def _apply_predicates_to_morsel(self, morsel: Morsel, predicate_root):
+        """Apply a predicate tree to a Draken Morsel without Arrow round-trip.
 
-    def _apply_predicates_to_morsel(self, morsel: Morsel, predicate_root, eval_schema=None):
+        Evaluates the expression tree natively over Draken vectors and applies
+        the resulting BoolVector mask via Morsel.filter_mask.  The eval_schema
+        pre-cast is no longer needed: the Draken evaluator handles Date32Vector
+        integer encoding directly.
+        """
         if predicate_root is None:
             return morsel, morsel.num_rows, morsel.num_rows
 
-        source_table = morsel.to_arrow()
-        rows_before_filter = source_table.num_rows
-        eval_table = source_table
+        from opteryx.expression.evaluator import evaluate_and_append_draken
+        from opteryx.expression.evaluator import evaluate_draken
 
-        if eval_schema is not None and eval_table.column_names != ["*"]:
-            eval_table = self._cast_table_to_schema(eval_table, eval_schema)
-        if any(getattr(column, "num_chunks", 0) > 1 for column in eval_table.columns):
-            eval_table = eval_table.combine_chunks()
+        rows_before_filter = morsel.num_rows
 
         function_nodes = get_all_nodes_of_type(predicate_root, select_nodes=(NodeType.FUNCTION,))
         if function_nodes:
-            eval_table = evaluate_and_append(function_nodes, eval_table)
+            morsel = evaluate_and_append_draken(function_nodes, morsel)
 
-        mask = evaluate(predicate_root, eval_table)
-        filtered = source_table.filter(self._mask_to_arrow(mask))
+        mask = evaluate_draken(predicate_root, morsel)
+        filtered = morsel.filter_mask(mask)
         if filtered.num_rows == 0:
             return morsel.slice(0, 0), rows_before_filter, 0
-
-        # Arrow filter commonly yields chunked arrays. Draken Morsel conversion expects
-        # single-chunk arrays, so coalesce chunks before conversion for correctness.
-        if any(getattr(column, "num_chunks", 0) > 1 for column in filtered.columns):
-            filtered = filtered.combine_chunks()
-        return Morsel.from_arrow(filtered), rows_before_filter, filtered.num_rows
+        return filtered, rows_before_filter, filtered.num_rows
 
     @staticmethod
     def _cast_table_to_schema(table: pyarrow.Table, schema: pyarrow.Schema) -> pyarrow.Table:
@@ -327,7 +311,6 @@ class ParquetReadNode(ReaderNode):
                     self._apply_predicates_to_morsel(
                         result_morsel,
                         predicate_root,
-                        eval_schema=read_arrow_schema,
                     )
                 )
 
@@ -732,7 +715,6 @@ class ParquetReadNode(ReaderNode):
                         self._apply_predicates_to_morsel(
                             result_morsel,
                             predicate_root,
-                            eval_schema=read_arrow_schema,
                         )
                     )
                 total_rows_before_filter += rows_before_filter
