@@ -3,7 +3,7 @@ import pytest
 import sys
 
 os.environ.pop("OPTERYX_DEBUG", None)
-os.environ["FEATURE_USE_DRAKEN_AGGREGATOR"] = "1"
+os.environ["FEATURE_USE_DRAKEN_AGGREGATOR"] = "0"
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../../../orso"))
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))

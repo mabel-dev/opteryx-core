@@ -64,8 +64,14 @@ def convert_int64_array_to_pyarrow_datetime(values: numpy.ndarray) -> pyarrow.Ar
 def date_part(part, arr):
     """
     Also the EXTRACT function - we extract a given part from an array of dates.
+
+    Accepts any temporal input: Draken vectors, PyArrow arrays, or Python
+    scalars/sequences.  All input is normalised to a pyarrow.Array before the
+    component is extracted with a pyarrow.compute kernel — no numpy coercion.
     """
-    j2000_scalar = numpy.array([numpy.datetime64("2000-01-01T12:00:00", "us")])
+    j2000_scalar = pyarrow.array(
+        [datetime.datetime(2000, 1, 1, 12, 0, 0)], type=pyarrow.timestamp("us")
+    )
     extractors = {
         "nanosecond": compute.nanosecond,
         "nanoseconds": compute.nanosecond,
@@ -90,19 +96,29 @@ def date_part(part, arr):
         "isoyear": compute.iso_year,
         "decade": lambda x: compute.divide(compute.year(x), 10),
         "century": lambda x: compute.add(compute.divide(compute.year(x), 100), 1),
-        "epoch": lambda x: compute.divide(compute.cast(x, "int64"), 1000000.00),
+        "epoch": lambda x: compute.divide(compute.cast(x, "int64"), 1_000_000.0),
         "julian": lambda x: compute.add(
-            compute.divide(compute.milliseconds_between(x, j2000_scalar), 86400000.0),
-            2451545.0,
+            compute.divide(
+                compute.milliseconds_between(compute.cast(x, pyarrow.timestamp("ms")), j2000_scalar),
+                86_400_000.0,
+            ),
+            2_451_545.0,
         ),
     }
 
-    if not hasattr(arr, "__iter__"):
-        arr = numpy.array([arr])
+    # --- Normalise to a flat pyarrow.Array (zero-copy for Draken vectors) ---
+    if hasattr(arr, "to_arrow"):
+        # Draken vectors (Date32Vector, TimestampVector, ArrowVector, …)
+        arr = arr.to_arrow()
 
-    arr = numpy.array(arr, dtype="datetime64[us]")
+    if isinstance(arr, pyarrow.ChunkedArray):
+        arr = arr.combine_chunks() if arr.num_chunks > 1 else arr.chunk(0)
 
-    part = part[0].lower()  # [#325]
+    if not isinstance(arr, pyarrow.Array):
+        # Numpy arrays or plain Python sequences: wrap in pyarrow (no datetime64 cast)
+        arr = pyarrow.array(arr)
+
+    part = (part[0] if not isinstance(part, str) else part).lower()  # [#325]
     if part in extractors:
         return extractors[part](arr)
 
@@ -119,8 +135,13 @@ def date_part(part, arr):
 
 
 def date_diff(part, start, end):
-    """calculate the difference between timestamps"""
+    """Calculate the difference between two timestamps.
+
+    All inputs are normalised to pyarrow timestamp[us] arrays first so that
+    no numpy datetime64 intermediates are needed.
+    """
     from opteryx.compiled.vector_ops import vector_date_diff
+    from opteryx.draken.interop.arrow import vector_from_arrow as _vfa
 
     arrow_extractors = {
         "months": compute.month_interval_between,
@@ -133,62 +154,32 @@ def date_diff(part, start, end):
     if not part.endswith("s"):
         part += "s"
 
+    def _to_timestamp_us(arr):
+        """Return a flat pyarrow timestamp[us] Array from any input type."""
+        if hasattr(arr, "to_arrow"):
+            arr = arr.to_arrow()
+        if isinstance(arr, pyarrow.ChunkedArray):
+            arr = arr.combine_chunks() if arr.num_chunks > 1 else arr.chunk(0)
+        if isinstance(arr, pyarrow.Array):
+            if pyarrow.types.is_timestamp(arr.type):
+                return arr if arr.type == pyarrow.timestamp("us") else arr.cast(pyarrow.timestamp("us"))
+            if pyarrow.types.is_date32(arr.type):
+                return arr.cast(pyarrow.timestamp("us"))
+            return arr.cast(pyarrow.timestamp("us"))
+        # Python scalars / sequences / numpy arrays
+        return pyarrow.array(arr).cast(pyarrow.timestamp("us"))
+
+    start_arr = _to_timestamp_us(start)
+    end_arr = _to_timestamp_us(end)
+
     if part in arrow_extractors:
-        diff = arrow_extractors[part](start, end)
+        diff = arrow_extractors[part](start_arr, end_arr)
         if not hasattr(diff, "__iter__"):
-            diff = numpy.array([diff])
+            diff = [diff]
         return [i.as_py() for i in diff]
 
-    # --- normalize `start` ---
-    if isinstance(start, numpy.ndarray):
-        if start.dtype == numpy.int64:
-            pass
-        elif numpy.issubdtype(start.dtype, numpy.datetime64):
-            start = start.astype("datetime64[us]").astype(numpy.int64)
-        else:
-            start = numpy.array(
-                [
-                    int(x.timestamp() * 1_000_000) if isinstance(x, datetime.datetime) else 0
-                    for x in start
-                ],
-                dtype=numpy.int64,
-            )
-    elif isinstance(start, pyarrow.Array):
-        start = start.cast("timestamp[us]").to_numpy()
-    else:
-        start = numpy.array(
-            [int(x.timestamp() * 1_000_000) for x in numpy.atleast_1d(start)],
-            dtype=numpy.int64,
-        )
-
-    # --- normalize `end` ---
-    if isinstance(end, numpy.ndarray):
-        if end.dtype == numpy.int64:
-            pass
-        elif numpy.issubdtype(end.dtype, numpy.datetime64):
-            end = end.astype("datetime64[us]").astype(numpy.int64)
-        else:
-            end = numpy.array(
-                [
-                    int(x.timestamp() * 1_000_000) if isinstance(x, datetime.datetime) else 0
-                    for x in end
-                ],
-                dtype=numpy.int64,
-            )
-    elif isinstance(end, pyarrow.Array):
-        end = end.cast("timestamp[us]").to_numpy()
-    else:
-        end = numpy.array(
-            [int(x.timestamp() * 1_000_000) for x in numpy.atleast_1d(end)],
-            dtype=numpy.int64,
-        )
-
-    import pyarrow as _pyarrow
-
-    from opteryx.draken.interop.arrow import vector_from_arrow as _vector_from_arrow
-
-    start_vec = _vector_from_arrow(_pyarrow.array(start, type=_pyarrow.timestamp("us")))
-    end_vec = _vector_from_arrow(_pyarrow.array(end, type=_pyarrow.timestamp("us")))
+    start_vec = _vfa(start_arr)
+    end_vec = _vfa(end_arr)
     return vector_date_diff(start_vec, end_vec, part).to_arrow()
 
 

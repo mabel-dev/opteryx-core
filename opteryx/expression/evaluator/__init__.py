@@ -166,11 +166,14 @@ def _is_null_as_boolvector(vec):
     nulls and NaN-encoded nulls in float32/float64 dictionary values without any
     Arrow round-trip.
 
-    Other vector types expose is_null() directly.
+    All other vector types: use Arrow round-trip via pc.is_null(), which correctly
+    handles null bitmaps across all Arrow-based vector types.
     """
     if vec.__class__.__name__ == "DictionaryVector":
         return vec.is_null_boolvector()
-    return vec.is_null()
+    import pyarrow.compute as pc
+    from opteryx.draken.interop.arrow import vector_from_arrow
+    return vector_from_arrow(pc.is_null(vec.to_arrow()))
 
 
 # --- Per-type comparison dispatchers ---
@@ -290,6 +293,12 @@ def _timestamp_compare(op: str, vec, right):
         if fn is None:
             raise NotImplementedError(f"TimestampVector vector-vector: unsupported op {op!r}")
         return fn(right)
+    elif right.__class__.__name__ == "Date32Vector":
+        # Cross-type: upcast the Date32Vector to Timestamp and delegate.
+        import pyarrow as _pa
+        from opteryx.draken.interop.arrow import vector_from_arrow as _vfa
+        ts_right = _vfa(right.to_arrow().cast(_pa.timestamp("us")))
+        return _timestamp_compare(op, vec, ts_right)
     else:
         value = _coerce_timestamp(right)
 
@@ -323,6 +332,12 @@ def _date32_compare(op: str, vec, right):
         if fn is None:
             raise NotImplementedError(f"Date32Vector vector-vector: unsupported op {op!r}")
         return fn(right)
+    elif right.__class__.__name__ == "TimestampVector":
+        # Cross-type: upcast the Date32Vector to Timestamp and delegate.
+        import pyarrow as _pa
+        from opteryx.draken.interop.arrow import vector_from_arrow as _vfa
+        ts_left = _vfa(vec.to_arrow().cast(_pa.timestamp("us")))
+        return _timestamp_compare(op, ts_left, right)
     else:
         value = _coerce_date32(right)
 
@@ -457,15 +472,69 @@ def draken_compare(op: str, left, right):
     if op == "AtArrow":
         from opteryx.compiled.vector_ops import vector_contains_any
 
-        return vector_contains_any(left, set(right) if right is not None else set())
+        items = set(right) if right is not None else set()
+        # ArrayVector stores strings as bytes; coerce str literals to bytes
+        items = {v.encode() if isinstance(v, str) else v for v in items}
+        return vector_contains_any(left, items)
     if op == "ArrayContainsAll":
         from opteryx.compiled.vector_ops import vector_contains_all
 
-        return vector_contains_all(left, set(right) if right is not None else set())
+        items = set(right) if right is not None else set()
+        items = {v.encode() if isinstance(v, str) else v for v in items}
+        return vector_contains_all(left, items)
 
-    # AnyOpLike/ILike and AtQuestion are not yet Draken-native
-    if op in ("AnyOpLike", "AnyOpNotLike", "AnyOpILike", "AnyOpNotILike", "AtQuestion"):
-        raise NotImplementedError(f"draken_compare: {op!r} not yet Draken-native (Phase 3)")
+    # --- AnyOp LIKE: left is the literal pattern, right is the ArrayVector column ---
+    if op == "AnyOpLike":
+        from opteryx.compiled.vector_ops import vector_anyop_like
+
+        return vector_anyop_like(left, right)
+    if op == "AnyOpNotLike":
+        from opteryx.compiled.vector_ops import vector_anyop_like
+
+        return vector_anyop_like(left, right).not_vector()
+    if op == "AnyOpILike":
+        from opteryx.compiled.vector_ops import vector_anyop_ilike
+
+        return vector_anyop_ilike(left, right)
+    if op == "AnyOpNotILike":
+        from opteryx.compiled.vector_ops import vector_anyop_ilike
+
+        return vector_anyop_ilike(left, right).not_vector()
+
+    # --- AtQuestion: left is StringVector (JSON docs), right is the literal path ---
+    if op == "AtQuestion":
+        import pyarrow as pa
+        from opteryx.draken.interop.arrow import vector_from_arrow
+        from opteryx.third_party.tktech import csimdjson as simdjson
+
+        docs = left.to_pylist()  # list of bytes or None
+        path = right  # JSON path string (e.g. "key" or "$.key.sub")
+        parser = simdjson.Parser()
+
+        if not path.startswith("$."):
+            result = [
+                None if doc is None else path in parser.parse(doc).keys()
+                for doc in docs
+            ]
+        else:
+            def _pointer(jsonpath: str) -> str:
+                ptr = jsonpath[1:].replace(".", "/").replace("[", "/").replace("]", "")
+                return ptr
+
+            json_pointer = _pointer(path)
+
+            def _check(doc):
+                if doc is None:
+                    return None
+                try:
+                    parser.parse(doc).at_pointer(json_pointer)
+                    return True
+                except Exception:
+                    return False
+
+            result = [_check(doc) for doc in docs]
+
+        return vector_from_arrow(pa.array(result, type=pa.bool_()))
 
     negate = op in _NEGATED_OPS
     if negate:
@@ -495,6 +564,96 @@ def draken_compare(op: str, left, right):
     return result.not_vector() if negate else result
 
 
+# --- Native Draken binary operator handler ---
+
+import pyarrow as _pa
+import pyarrow.compute as _pc
+
+_DATE_TYPES = frozenset(("Date32Vector", "TimestampVector"))
+_INTERVAL_TYPES = frozenset(("IntervalVector",))
+_TEMPORAL_TYPES = _DATE_TYPES | _INTERVAL_TYPES
+_EPOCH_DATE_DAYS = 0  # days-since-epoch base is 1970-01-01
+
+
+def _date_minus_date_draken(left_vec, right_vec):
+    """Subtract two date/timestamp vectors → IntervalVector (no numpy)."""
+    import pyarrow as pa
+    import pyarrow.compute as pc
+    from opteryx.datatypes.intervals import MICROSECONDS_PER_DAY, _intervals_to_month_day_nano
+    from opteryx.draken.interop.arrow import vector_from_arrow
+
+    left_arr = left_vec.to_arrow()
+    right_arr = right_vec.to_arrow()
+
+    # Unify to microsecond integers for the subtraction.
+    if pa.types.is_date32(left_arr.type):
+        # date32 days → int32; multiply to microseconds via int64
+        left_us = pc.multiply(left_arr.cast(pa.int32()).cast(pa.int64()),
+                              pa.scalar(MICROSECONDS_PER_DAY, pa.int64()))
+    else:
+        left_us = left_arr.cast(pa.timestamp("us")).cast(pa.int64())
+
+    if pa.types.is_date32(right_arr.type):
+        right_us = pc.multiply(right_arr.cast(pa.int32()).cast(pa.int64()),
+                               pa.scalar(MICROSECONDS_PER_DAY, pa.int64()))
+    else:
+        right_us = right_arr.cast(pa.timestamp("us")).cast(pa.int64())
+
+    diff_us = pc.subtract(left_us, right_us)
+
+    rows = [
+        None if not d.is_valid else (0, d.as_py())
+        for d in diff_us
+    ]
+    return vector_from_arrow(_intervals_to_month_day_nano(rows))
+
+
+def _date_interval_op_draken(left_vec, right_vec, op):
+    """Add/subtract an IntervalVector to/from a date/timestamp vector → TimestampVector."""
+    from opteryx.datatypes.intervals import _as_interval_vector
+    from opteryx.draken.interop.arrow import vector_from_arrow
+
+    signum = 1 if op == "Plus" else -1
+
+    if right_vec.__class__.__name__ in _INTERVAL_TYPES:
+        date_vec, interval_vec = left_vec, _as_interval_vector(right_vec)
+    else:
+        date_vec, interval_vec = right_vec, _as_interval_vector(left_vec)
+
+    result_arr = interval_vec.apply_to_temporal(date_vec.to_arrow(), signum)
+    return vector_from_arrow(result_arr)
+
+
+def _eval_binary_op_draken(node, morsel):
+    """Handle BINARY_OPERATOR natively over Draken vectors for temporal arithmetic.
+
+    Returns a Draken vector, or None if the operation is not handled here
+    (caller falls through to the Arrow path).
+    """
+    from opteryx.managers.expression import NodeType
+
+    op = node.value
+    left = _eval_value(node.left, morsel)
+    right = _eval_value(node.right, morsel)
+
+    left_cls = left.__class__.__name__
+    right_cls = right.__class__.__name__
+
+    # DATE/TIMESTAMP - DATE/TIMESTAMP  → IntervalVector
+    if op == "Minus" and left_cls in _DATE_TYPES and right_cls in _DATE_TYPES:
+        return _date_minus_date_draken(left, right)
+
+    # DATE/TIMESTAMP +/- INTERVAL  →  TimestampVector
+    # INTERVAL +/- DATE/TIMESTAMP  →  TimestampVector
+    if op in ("Plus", "Minus"):
+        if left_cls in _DATE_TYPES and right_cls in _INTERVAL_TYPES:
+            return _date_interval_op_draken(left, right, op)
+        if left_cls in _INTERVAL_TYPES and right_cls in _DATE_TYPES:
+            return _date_interval_op_draken(right, left, op)
+
+    return None  # not handled — caller uses Arrow fallback
+
+
 # --- Expression tree walker helpers ---
 
 
@@ -507,20 +666,79 @@ def _eval_value(node, morsel):
 
     node_type = node.node_type
 
+
     if node_type == NodeType.LITERAL:
         return node.value
 
     if node_type == NodeType.IDENTIFIER:
-        return morsel.column(node.schema_column.identity.encode())
+        vec = morsel.column(node.schema_column.identity.encode())
+        # RUGO stores some types (e.g. date32) as ArrowVector; unwrap to native.
+        if vec.__class__.__name__ == "ArrowVector":
+            from opteryx.draken.interop.arrow import vector_from_arrow
+            return vector_from_arrow(vec.to_arrow())
+        return vec
 
     if node_type == NodeType.EVALUATED:
-        return morsel.column(node.schema_column.identity.encode())
+        vec = morsel.column(node.schema_column.identity.encode())
+        if vec.__class__.__name__ == "ArrowVector":
+            from opteryx.draken.interop.arrow import vector_from_arrow
+            return vector_from_arrow(vec.to_arrow())
+        return vec
 
     if node_type == NodeType.NESTED:
         return _eval_value(node.centre, morsel)
 
-    # For other node types, fall through to full evaluation
+    if node_type == NodeType.EXTRACTION_OPERATOR:
+        left_vec = _eval_value(node.left, morsel)
+        right_val = node.right.value  # scalar literal key (str) or index (int)
+        op = node.value  # "Arrow", "LongArrow", or "MapAccess"
+
+        if op == "MapAccess":
+            from opteryx.compiled.vector_ops import vector_get_element
+            from opteryx.draken.interop.arrow import vector_from_sequence
+
+            return vector_from_sequence(vector_get_element(left_vec, int(right_val)))
+
+        if op in ("Arrow", "LongArrow"):
+            from opteryx.draken.interop.arrow import vector_from_arrow
+            from opteryx.managers.expression.binary_operators import ArrowOp, LongArrowOp
+
+            docs = left_vec.to_pylist()
+            if op == "Arrow":
+                result = ArrowOp(docs, [right_val])
+            else:
+                result = LongArrowOp(docs, [right_val])
+            return vector_from_arrow(result)
+
+        raise NotImplementedError(
+            f"_eval_value: EXTRACTION_OPERATOR {op!r} not supported in Draken path"
+        )
+
+    # --- Arrow-path fallback for node types not yet natively supported ---
+    # BINARY_OPERATOR (date/interval arithmetic), CAST, and FUNCTION nodes all
+    from opteryx.managers.expression import NodeType as _NT
+
+    if node.node_type == _NT.BINARY_OPERATOR:
+        result = _eval_binary_op_draken(node, morsel)
+        if result is not None:
+            return result
+        # Fall through to Arrow path for ops not yet handled natively.
+
+    if node.node_type in (_NT.BINARY_OPERATOR, _NT.CAST, _NT.FUNCTION):
+        from opteryx.draken.interop.arrow import vector_from_arrow
+        from opteryx.draken.interop.arrow import vector_from_sequence
+        from opteryx.managers.expression import _inner_evaluate
+        arrow_table = morsel.to_arrow()
+        result = _inner_evaluate(node, arrow_table)
+        if isinstance(result, _pa.Array) or isinstance(result, _pa.ChunkedArray):
+            return vector_from_arrow(result)
+        return vector_from_sequence(result)
+
+    # Predicate sub-expressions (AND/OR/NOT/COMPARISON_OPERATOR inside a value
+    # context, e.g. CASE conditions): evaluate as a BoolVector via the predicate
+    # walker.  Everything else raises immediately so gaps are visible.
     return evaluate_draken(node, morsel)
+
 
 
 def _unary_draken(op: str, centre_node, morsel):
@@ -665,7 +883,12 @@ def evaluate_and_append_draken(nodes, morsel):
             "ConstantVector",
             "ArrayVector",
         ):
-            result = vector_from_sequence(result)
+            import pyarrow as _pa
+            from opteryx.draken.interop.arrow import vector_from_arrow as _vfa
+            if isinstance(result, (_pa.Array, _pa.ChunkedArray)):
+                result = _vfa(result)
+            else:
+                result = vector_from_sequence(result)
         col_names.append(identity)
         col_vecs.append(result)
         existing.add(identity)
