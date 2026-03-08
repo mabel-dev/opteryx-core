@@ -12,7 +12,7 @@ from orso.types import OrsoTypes
 
 import opteryx
 import opteryx.virtual_datasets
-from opteryx.managers.expression import NodeType, evaluate
+from opteryx.expression import NodeType, evaluate
 from opteryx.models import Node, QueryTelemetry
 
 stats = QueryTelemetry()

@@ -75,7 +75,7 @@ def _try_extract(node) -> Optional[Tuple[str, str, Any]]:
         return None
 
     # Import here to avoid circular imports at module load time.
-    from opteryx.managers.expression import NodeType
+    from opteryx.expression import NodeType
 
     if node.node_type != NodeType.COMPARISON_OPERATOR:
         return None

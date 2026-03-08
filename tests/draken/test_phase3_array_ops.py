@@ -27,7 +27,7 @@ from orso.types import OrsoTypes
 from opteryx.draken.interop.arrow import vector_from_arrow, vector_from_sequence
 from opteryx.draken.morsels.morsel import Morsel
 from opteryx.expression.evaluator import draken_compare, evaluate_draken
-from opteryx.managers.expression import NodeType
+from opteryx.expression import NodeType
 from opteryx.models import Node
 
 

@@ -21,9 +21,9 @@ from orso.types import OrsoTypes
 
 from opteryx.exceptions import UnnamedColumnError
 from opteryx.exceptions import UnsupportedSyntaxError
-from opteryx.managers.expression import NodeType
-from opteryx.managers.expression import format_expression
-from opteryx.managers.expression import get_all_nodes_of_type
+from opteryx.expression import NodeType
+from opteryx.expression import format_expression
+from opteryx.expression import get_all_nodes_of_type
 from opteryx.models import LogicalColumn
 from opteryx.models import Node
 from opteryx.planner import build_literal_node

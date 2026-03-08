@@ -10,7 +10,7 @@ from orso.schema import FlatColumn
 from orso.types import OrsoTypes
 
 from opteryx.exceptions import IncorrectTypeError
-from opteryx.managers.expression import NodeType
+from opteryx.expression import NodeType
 from opteryx.models import Node
 from opteryx.planner.binder.operator_map import determine_type
 

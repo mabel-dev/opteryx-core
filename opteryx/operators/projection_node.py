@@ -16,8 +16,8 @@ from collections.abc import Iterable
 
 from opteryx import EOS
 from opteryx.draken.morsels.morsel import Morsel
-from opteryx.managers.expression import NodeType
-from opteryx.managers.expression import evaluate_and_append
+from opteryx.expression import NodeType
+from opteryx.expression import evaluate_and_append
 from opteryx.models import QueryProperties
 
 from . import BasePlanNode
@@ -46,7 +46,7 @@ class ProjectionNode(BasePlanNode):
 
     @property
     def config(self):  # pragma: no cover
-        from opteryx.managers.expression import format_expression
+        from opteryx.expression import format_expression
 
         return ", ".join(format_expression(col) for col in self.columns)
 

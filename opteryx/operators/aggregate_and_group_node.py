@@ -23,9 +23,9 @@ from orso.types import OrsoTypes
 from opteryx import EMPTY
 from opteryx import EOS
 from opteryx.draken.morsels.morsel import Morsel
-from opteryx.managers.expression import NodeType
-from opteryx.managers.expression import evaluate_and_append
-from opteryx.managers.expression import get_all_nodes_of_type
+from opteryx.expression import NodeType
+from opteryx.expression import evaluate_and_append
+from opteryx.expression import get_all_nodes_of_type
 from opteryx.models import QueryProperties
 from opteryx.operators.aggregate_node import build_aggregations
 from opteryx.operators.aggregate_node import extract_evaluations
@@ -157,7 +157,7 @@ class AggregateAndGroupNode(BasePlanNode):
 
     @property
     def config(self):  # pragma: no cover
-        from opteryx.managers.expression import format_expression
+        from opteryx.expression import format_expression
 
         return f"AGGREGATE ({', '.join(format_expression(col) for col in self.aggregates)}) GROUP BY ({', '.join(format_expression(col) for col in self.groups)})"
 

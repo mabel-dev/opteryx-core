@@ -173,8 +173,6 @@ class SampleDatasetReader:
             A pyarrow Table representing a chunk or morsel of the dataset.
             raises StopIteration if the dataset is exhausted.
         """
-        import pyarrow
-
         if self.exhausted:
             raise StopIteration("Dataset has been read.")
 

@@ -31,7 +31,7 @@ def if_null(values, replacements):
     """
     Replace null values in the input array with corresponding values from the replacement array.
     """
-    from opteryx.managers.expression.unary_operations import _is_null
+    from opteryx.expression.unary_operations import _is_null
 
     is_null_mask = _is_null(values)
 
@@ -83,7 +83,7 @@ def if_not_null(values: numpy.ndarray, replacements: numpy.ndarray) -> numpy.nda
         if value is NOT null → use replacement
         if value IS null → keep the original null
     """
-    from opteryx.managers.expression.unary_operations import _is_not_null
+    from opteryx.expression.unary_operations import _is_not_null
 
     if hasattr(replacements, "to_numpy"):
         replacements = replacements.to_numpy(zero_copy_only=False)

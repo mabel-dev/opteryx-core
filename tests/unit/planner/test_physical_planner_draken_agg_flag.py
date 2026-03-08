@@ -102,7 +102,7 @@ def test_supports_accepts_nullable_group_column():
     grouping column is nullable; null-key handling is implemented in the kernel."""
 
     from opteryx.operators.draken_aggregate_and_group_node import DrakenAggregateAndGroupNode
-    from opteryx.managers.expression import NodeType
+    from opteryx.expression import NodeType
     from orso.types import OrsoTypes
 
     class FieldParam:

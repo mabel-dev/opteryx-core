@@ -22,9 +22,9 @@ from opteryx.exceptions import ColumnNotFoundError
 from opteryx.exceptions import IncompatibleTypesError
 from opteryx.exceptions import InvalidInternalStateError
 from opteryx.exceptions import UnexpectedDatasetReferenceError
+from opteryx.expression import NodeType
 from opteryx.expression.functions import get_catalog as _get_function_catalog
 from opteryx.functions import fixed_value_function
-from opteryx.managers.expression import NodeType
 from opteryx.models import Node
 from opteryx.planner.binder.binding_context import BindingContext
 from opteryx.planner.binder.operator_map import determine_type
@@ -216,9 +216,9 @@ def inner_binder(node: Node, context: BindingContext) -> Tuple[Node, Any]:
     (executing comparisons).
     """
     # Import relevant classes and functions
-    from opteryx.managers.expression import ExpressionColumn
-    from opteryx.managers.expression import format_expression
-    from opteryx.managers.expression import get_all_nodes_of_type
+    from opteryx.expression import ExpressionColumn
+    from opteryx.expression import format_expression
+    from opteryx.expression import get_all_nodes_of_type
 
     # Retrieve the node type for further processing.
     node_type = node.node_type

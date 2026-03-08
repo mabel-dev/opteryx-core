@@ -28,7 +28,7 @@ from opteryx.draken.interop.arrow import vector_from_arrow
 from opteryx.draken.morsels.morsel import Morsel
 from opteryx.draken.storage.morsel_io import write_morsel
 from opteryx.draken.vectors.constant_vector import from_scalar as constant_from_scalar
-from opteryx.managers.expression.ops import filter_operations
+from opteryx.expression.ops import filter_operations
 from opteryx.operators.group_state_store import ShuffleGroupByOperationV2
 from opteryx.operators.shuffle import AggregationSpec
 

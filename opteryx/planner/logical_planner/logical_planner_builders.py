@@ -23,18 +23,18 @@ from orso.types import OrsoTypes
 
 from opteryx import functions
 from opteryx import operators
-from opteryx.datatypes.intervals import MICROSECONDS_PER_DAY
-from opteryx.datatypes.intervals import MICROSECONDS_PER_HOUR
-from opteryx.datatypes.intervals import MICROSECONDS_PER_MINUTE
-from opteryx.datatypes.intervals import MICROSECONDS_PER_SECOND
 from opteryx.exceptions import ArrayWithMixedTypesError
 from opteryx.exceptions import SqlError
 from opteryx.exceptions import UnsupportedSyntaxError
-from opteryx.managers.expression import NodeType
-from opteryx.managers.expression import format_expression
-from opteryx.managers.expression.binary_operators import BINARY_OPERATORS
-from opteryx.managers.expression.binary_operators import EXTRACTION_OPERATORS
-from opteryx.managers.expression.binary_operators import binary_operations
+from opteryx.expression import NodeType
+from opteryx.expression import format_expression
+from opteryx.expression.binary_operators import BINARY_OPERATORS
+from opteryx.expression.binary_operators import EXTRACTION_OPERATORS
+from opteryx.expression.binary_operators import binary_operations
+from opteryx.expression.intervals import MICROSECONDS_PER_DAY
+from opteryx.expression.intervals import MICROSECONDS_PER_HOUR
+from opteryx.expression.intervals import MICROSECONDS_PER_MINUTE
+from opteryx.expression.intervals import MICROSECONDS_PER_SECOND
 from opteryx.models import LogicalColumn
 from opteryx.models import Node
 from opteryx.utils import dates

@@ -5,7 +5,7 @@ from orso.schema import FlatColumn
 from orso.tools import random_string
 from orso.types import OrsoTypes
 
-from opteryx.datatypes.intervals import MICROSECONDS_PER_SECOND
+from opteryx.expression.intervals import MICROSECONDS_PER_SECOND
 
 
 @dataclass(init=False)

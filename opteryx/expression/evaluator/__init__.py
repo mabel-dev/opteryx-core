@@ -15,7 +15,6 @@ from typing import Any
 import numpy
 import pyarrow as _pa
 import pyarrow.compute as compute
-import pyarrow.compute as _pc
 
 from opteryx.exceptions import FunctionExecutionError
 
@@ -457,7 +456,7 @@ def _dict_compare(op: str, vec, right):
 
 
 def _constant_compare(op: str, vec, right):
-    from opteryx.managers.expression.ops import _coerce_in_list_values
+    from opteryx.expression.ops import _coerce_in_list_values
 
     if isinstance(right, (list, tuple, set, frozenset)):
         right = _coerce_in_list_values(right)
@@ -673,9 +672,9 @@ def _date_minus_date_draken(left_vec, right_vec):
     import pyarrow as pa
     import pyarrow.compute as pc
 
-    from opteryx.datatypes.intervals import MICROSECONDS_PER_DAY
-    from opteryx.datatypes.intervals import _intervals_to_month_day_nano
     from opteryx.draken.interop.arrow import vector_from_arrow
+    from opteryx.expression.intervals import MICROSECONDS_PER_DAY
+    from opteryx.expression.intervals import _intervals_to_month_day_nano
 
     left_arr = left_vec.to_arrow()
     right_arr = right_vec.to_arrow()
@@ -704,8 +703,8 @@ def _date_minus_date_draken(left_vec, right_vec):
 
 def _date_interval_op_draken(left_vec, right_vec, op):
     """Add/subtract an IntervalVector to/from a date/timestamp vector → TimestampVector."""
-    from opteryx.datatypes.intervals import _as_interval_vector
     from opteryx.draken.interop.arrow import vector_from_arrow
+    from opteryx.expression.intervals import _as_interval_vector
 
     signum = 1 if op == "Plus" else -1
 
@@ -724,8 +723,6 @@ def _eval_binary_op_draken(node, morsel):
     Returns a Draken vector, or None if the operation is not handled here
     (caller falls through to the Arrow path).
     """
-    from opteryx.managers.expression import NodeType
-
     op = node.value
     left = _eval_value(node.left, morsel)
     right = _eval_value(node.right, morsel)
@@ -756,7 +753,7 @@ def _eval_value(node, morsel):
 
     Used to resolve the operands of a COMPARISON_OPERATOR node.
     """
-    from opteryx.managers.expression import NodeType
+    from opteryx.expression import NodeType
 
     node_type = node.node_type
 
@@ -796,8 +793,8 @@ def _eval_value(node, morsel):
 
         if op in ("Arrow", "LongArrow"):
             from opteryx.draken.interop.arrow import vector_from_arrow
-            from opteryx.managers.expression.binary_operators import ArrowOp
-            from opteryx.managers.expression.binary_operators import LongArrowOp
+            from opteryx.expression.binary_operators import ArrowOp
+            from opteryx.expression.binary_operators import LongArrowOp
 
             docs = left_vec.to_pylist()
             if op == "Arrow":
@@ -812,7 +809,7 @@ def _eval_value(node, morsel):
 
     # --- Arrow-path fallback for node types not yet natively supported ---
     # BINARY_OPERATOR (date/interval arithmetic), CAST, and FUNCTION nodes all
-    from opteryx.managers.expression import NodeType as _NT
+    from opteryx.expression import NodeType as _NT
 
     if node.node_type == _NT.BINARY_OPERATOR:
         result = _eval_binary_op_draken(node, morsel)
@@ -823,7 +820,7 @@ def _eval_value(node, morsel):
     if node.node_type in (_NT.BINARY_OPERATOR, _NT.CAST, _NT.FUNCTION):
         from opteryx.draken.interop.arrow import vector_from_arrow
         from opteryx.draken.interop.arrow import vector_from_sequence
-        from opteryx.managers.expression import _inner_evaluate
+        from opteryx.expression import _inner_evaluate
 
         arrow_table = morsel.to_arrow()
         result = _inner_evaluate(node, arrow_table)
@@ -839,8 +836,6 @@ def _eval_value(node, morsel):
 
 def _unary_draken(op: str, centre_node, morsel):
     """Evaluate a UNARY_OPERATOR node, returning a BoolVector."""
-    from opteryx.managers.expression import NodeType
-
     vec = _eval_value(centre_node, morsel)
 
     if op == "IsNull":
@@ -879,7 +874,7 @@ def evaluate_draken(node, morsel):
     Returns:
         BoolVector — SQL three-valued-logic null semantics throughout.
     """
-    from opteryx.managers.expression import NodeType
+    from opteryx.expression import NodeType
 
     node_type = node.node_type
 
@@ -935,6 +930,11 @@ def evaluate_draken(node, morsel):
         return _unary_draken(node.value, node.centre, morsel)
 
     if node_type == NodeType.FUNCTION:
+        if node.value == "PASSTHRU":
+            # The optimizer creates unbound PASSTHRU wrappers post-binding
+            # (e.g. collapsing LIKE OR LIKE → RLIKE wrapped in PASSTHRU).
+            # PASSTHRU is identity: just evaluate the inner predicate.
+            return evaluate_draken(node.parameters[0], morsel)
         parameters = [_eval_value(param, morsel) for param in node.parameters]
         if len(parameters) == 0:
             parameters = [morsel.num_rows]
@@ -973,6 +973,10 @@ def evaluate_and_append_draken(nodes, morsel):
     existing = {n.decode() if isinstance(n, bytes) else n for n in col_names}
 
     for node in nodes:
+        if node.value == "PASSTHRU":
+            # PASSTHRU is an optimizer-created predicate wrapper, not a column
+            # producer. evaluate_draken handles it inline; skip pre-evaluation.
+            continue
         identity = node.schema_column.identity
         if identity in existing:
             continue

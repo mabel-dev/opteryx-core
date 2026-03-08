@@ -6,7 +6,7 @@ import pytest
 sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 
 from opteryx.exceptions import UnsupportedSyntaxError
-from opteryx.managers.expression import NodeType
+from opteryx.expression import NodeType
 from opteryx.planner.ast_rewriter import do_ast_rewriter
 from opteryx.planner.logical_planner import LogicalPlanStepType
 from opteryx.planner.logical_planner import do_logical_planning_phase

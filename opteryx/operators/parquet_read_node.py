@@ -40,8 +40,8 @@ from orso.tools import random_string
 from opteryx import EOS
 from opteryx import config
 from opteryx.draken.morsels.morsel import Morsel
-from opteryx.managers.expression import NodeType
-from opteryx.managers.expression import get_all_nodes_of_type
+from opteryx.expression import NodeType
+from opteryx.expression import get_all_nodes_of_type
 from opteryx.models import Node
 from opteryx.models import QueryProperties
 from opteryx.parquet_io import InMemoryParquetCache

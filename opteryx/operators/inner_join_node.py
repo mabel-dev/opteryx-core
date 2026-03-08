@@ -30,9 +30,9 @@ from opteryx.compiled.joins import build_side_hash_map
 from opteryx.compiled.joins import get_last_inner_join_metrics
 from opteryx.compiled.joins import inner_join
 from opteryx.compiled.structures.bloom_filter import create_bloom_filter
-from opteryx.managers.expression import NodeType
-from opteryx.managers.expression import evaluate_and_append
-from opteryx.managers.expression import get_all_nodes_of_type
+from opteryx.expression import NodeType
+from opteryx.expression import evaluate_and_append
+from opteryx.expression import get_all_nodes_of_type
 from opteryx.models import QueryProperties
 from opteryx.utils.arrow import align_tables
 

@@ -90,7 +90,7 @@ class Manifest:
         Returns:
             Filtered list of FileEntry objects
         """
-        from opteryx.managers.expression import NodeType
+        from opteryx.expression import NodeType
 
         # Define handlers for each comparison operator
         # Returns True if file can be pruned (skipped)

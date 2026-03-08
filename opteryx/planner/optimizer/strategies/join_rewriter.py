@@ -14,7 +14,7 @@ Rewrite joins to more efficient versions based on heuristics.
 We collect references to LEFT JOINs and the right relation as we traverse the plan.
 """
 
-from opteryx.managers.expression import NodeType
+from opteryx.expression import NodeType
 from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner import LogicalPlanNode
 from opteryx.planner.logical_planner import LogicalPlanStepType

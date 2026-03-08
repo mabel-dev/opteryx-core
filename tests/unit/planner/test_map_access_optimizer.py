@@ -7,7 +7,7 @@ from orso.schema import ConstantColumn
 from orso.schema import FlatColumn
 from orso.types import OrsoTypes
 
-from opteryx.managers.expression import NodeType
+from opteryx.expression import NodeType
 from opteryx.models import Node
 from opteryx.models import QueryTelemetry
 from opteryx.planner.logical_planner import LogicalPlanNode
