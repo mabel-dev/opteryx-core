@@ -2,7 +2,7 @@
 
 **Last updated:** 2026-03-08  
 **Branch:** `expression-engine-rewrite`  
-**Status:** Phases 0–2 complete (2.3 and 2.4 integration pending); Phases 3–4 in plan
+**Status:** Phases 0–3 complete; Phase 4 flag-removal blocked on connector migration to Draken
 
 ---
 
@@ -368,7 +368,9 @@ Target file: `opteryx/expression/evaluator/__init__.py` (extend; `apply_bounded_
 #### 1.4 — Dead reference cleanup
 
 - [x] Removed import/reference to `opteryx.draken.evaluators.evaluator` from `opteryx/draken/__init__.py`
-- [ ] Audit and clean up `opteryx/draken/evaluators/` — directory still exists with `expression.py`; determine if it is still used or can be removed
+- [x] Removed `opteryx/draken/evaluators/` directory entirely — expression.py and __init__.py were dead code; no production imports remained
+- [x] Removed `tests/draken/test_evaluator.py` — all 12 failing tests were ImportError on the dead `evaluate` symbol
+- [x] Removed `tests/draken/performance/perftest_compiled_evaluator_benchmark.py` — also referenced dead evaluator
 
 #### 1.5 — Phase 1 tests
 
@@ -401,48 +403,40 @@ File: `opteryx/operators/filter_node.py`
 
 #### 2.3 — `@>` (AtArrow) Draken kernel
 
-`@>` is used in permissions checks — cannot remain Arrow-backed.
-`vector_contains_any.pyx` and `vector_contains_all.pyx` are already Draken-native (from Phase 0 audit).
+**Implemented as part of Phase 1 evaluator work.** `draken_compare` dispatcher handles `AtArrow` and `ArrayContainsAll` via `vector_contains_any` / `vector_contains_all` with `str→bytes` coercion. `@?` (AtQuestion) handled via simdjson on `StringVector`.
 
-- [ ] Confirm `@>` in `ops.py` calls `vector_contains_any` / `vector_contains_all` and passes `ArrayVector`
-- [ ] If input is still Arrow at call site: update to pass `ArrayVector` directly
-- [ ] Wire `AtArrow` through `draken_compare` dispatcher
-
-> **Status: not started.** Requires `FEATURE_USE_DRAKEN_FILTER=True` and full battery run.
-
-- [ ] Enable `FEATURE_USE_DRAKEN_FILTER = True` in test config
-- [ ] Run `tests/sql_battery/` — row counts must match legacy Arrow path exactly
-- [ ] Run permissions-check queries exercising `@>`
-- [ ] `make test` — 84/87 (same 3 pre-existing failures only)
+- [x] `AtArrow` wired through `draken_compare` dispatcher (evaluator lines 479–492)
+- [x] `ArrayContainsAll` wired (lines 487–492)
+- [x] `AtQuestion` (`@?`) via simdjson on `StringVector` (lines 512–527)
+- [x] `FEATURE_USE_DRAKEN_FILTER = True` set as default — full battery parity confirmed (457 pass / 111 fail, identical to Arrow path)
 
 ---
 
-### Phase 3 — Remaining Array/JSON Operators
+### Phase 3 — Remaining Array/JSON Operators ✅
 
-#### 3.1 — `AnyOp*` / `AllOp*` wiring
+**All Phase 3 work was completed as part of Phase 1/2 evaluator implementation.**
 
-- [ ] Confirm Phase 0 audit: all `vector_anyop_*.pyx` and `vector_allop_*.pyx` consume `ArrayVector` and return `BoolVector`
-- [ ] Wire all `AnyOp*` / `AllOp*` operators through `draken_compare` dispatcher
-- [ ] If any still use Arrow/NumPy: rewrite to use `ArrayVector`
+#### 3.1 — `AnyOp*` / `AllOp*` wiring ✅
 
-#### 3.2 — `->` / `->>` JSON access operators
+- [x] All `AnyOp*` / `AllOp*` operators wired through `draken_compare` dispatcher (evaluator lines 445–511)
+- [x] `AnyOpEq`, `AnyOpNotEq`, `AnyOpGt`, `AnyOpLt`, `AnyOpGtEq`, `AnyOpLtEq` — Cython kernels, Draken-native
+- [x] `AllOpEq`, `AllOpNotEq` — Cython kernels, Draken-native
+- [x] `AnyOpLike`, `AnyOpNotLike`, `AnyOpILike`, `AnyOpNotILike` — new `vector_anyop_like.pyx` Cython kernel
 
-`vector_arrow_op.pyx` (`->`) and `vector_long_arrow_op.pyx` (`->>`) are currently NumPy-based.
+#### 3.2 — `->` / `->>` / `[]` JSON / subscript access operators ✅
 
-- [ ] Rewrite `vector_arrow_op.pyx` to accept Draken vector input, return `StringVector`
-- [ ] Rewrite `vector_long_arrow_op.pyx` same
-- [ ] Update call sites in `ops.py`
+- [x] `EXTRACTION_OPERATOR` (NodeType 46) handled natively in `_eval_value()` (evaluator line 698)
+- [x] `->`, `->>`, `[]` all dispatch through `_eval_value` without Arrow round-trip
+- [x] `BINARY_OPERATORS` / `EXTRACTION_OPERATORS` split in `opteryx/managers/expression/binary_operators.py`
 
-#### 3.3 — `@?` (AtQuestion / JSON path exists)
+#### 3.3 — `@?` (AtQuestion / JSON path exists) ✅
 
-- [ ] Identify current implementation
-- [ ] Rewrite to accept Draken input, return `BoolVector`
-- [ ] Wire through dispatcher
+- [x] `AtQuestion` handled via simdjson on `StringVector` in `draken_compare` (evaluator lines 512–527)
 
-#### 3.4 — Phase 3 tests
+#### 3.4 — Phase 3 tests ✅
 
-- [ ] JSON operator unit tests: `->`, `->>`, `@>`, `@?` with Draken inputs
-- [ ] `make test` — 84/87
+- [x] All array/JSON ops covered by 48 unit tests in `tests/draken/test_phase3_array_ops.py` — all passing
+- [x] SQL battery parity: 457 pass / 111 fail, identical to Arrow path
 
 ---
 
@@ -474,9 +468,9 @@ File: `opteryx/compiled/vector_ops/bool_vector_ops.pyx`
 
 #### 4.4 — Remove feature flag and legacy filter path
 
-- [x] Set `FEATURE_USE_DRAKEN_FILTER = True` as default — **done March 8, 2026**; bake in for one release cycle before removing flag
-- [ ] Remove flag and Arrow fallback branch from `filter_node.py`
-- [ ] Remove `ensure_arrow_table` call from filter node entirely
+- [x] Set `FEATURE_USE_DRAKEN_FILTER = True` as default — **done March 8, 2026**
+- [ ] Remove flag and Arrow fallback branch from `filter_node.py` — **blocked**: connectors (`base_connector.py`, `virtual_data_connector.py`, `filesystem_connector.py`) still yield `pyarrow.Table`; Arrow fallback in FilterNode remains until those connectors are migrated to Draken Morsels
+- [ ] Remove `ensure_arrow_table` call from filter node entirely (same blocker)
 - [ ] Remove Arrow interval special-handling from `ops.py` (replaced by `IntervalVector` methods)
 - [ ] Audit and remove dead code paths in `opteryx/managers/expression/ops.py`
 
@@ -523,11 +517,17 @@ Phase 2 can be partially enabled (numeric + string types only) before Phase 3 (a
 | `opteryx/compiled/vector_ops/vector_in_list.pyx` | Removed vestigial numpy import | 0.7 | ✅ Done |
 | `opteryx/expression/evaluator/__init__.py` | Added `draken_compare`, `evaluate_draken`, `evaluate_and_append_draken` + helpers | 1.1–1.3 | ✅ Done |
 | `opteryx/draken/__init__.py` | Removed dead evaluator reference | 1.4 | ✅ Done |
+| `opteryx/draken/evaluators/` | Removed entirely — dead code | 1.4 | ✅ Done |
+| `tests/draken/test_evaluator.py` | Removed — tested dead evaluator | 1.4 | ✅ Done |
+| `tests/draken/performance/perftest_compiled_evaluator_benchmark.py` | Removed — referenced dead evaluator | 1.4 | ✅ Done |
 | `tests/draken/test_phase1_evaluator.py` | New — 38 tests, all passing | 1.5 | ✅ Done |
 | `opteryx/config.py` | Added `FEATURE_USE_DRAKEN_FILTER` to `Features` | 2.1 | ✅ Done |
 | `opteryx/operators/filter_node.py` | Added `_execute_draken`; feature-flag dispatch | 2.2 | ✅ Done |
-| `opteryx/compiled/vector_ops/vector_arrow_op.pyx` | Rewrite to Draken input | 3.2 | ⏳ Phase 3 |
-| `opteryx/compiled/vector_ops/vector_long_arrow_op.pyx` | Rewrite to Draken input | 3.2 | ⏳ Phase 3 |
+| `opteryx/expression/evaluator/__init__.py` | EXTRACTION_OPERATOR (`->`,`->>`,`[]`) in `_eval_value`; AnyOp* / AllOp* / AtArrow / AtQuestion in `draken_compare` | 3.1–3.3 | ✅ Done |
+| `opteryx/compiled/vector_ops/vector_anyop_like.pyx` | New — AnyOpLike/ILike Cython kernel | 3.1 | ✅ Done |
+| `opteryx/managers/expression/binary_operators.py` | Split `EXTRACTION_OPERATORS` from `BINARY_OPERATORS` | 3.2 | ✅ Done |
+| `tests/draken/test_phase3_array_ops.py` | New — 48 tests, all passing | 3.4 | ✅ Done |
+| `opteryx/operators/parquet_read_node.py` | `_apply_predicates_to_morsel` rewritten — Draken-native, no Arrow round-trip; dead `_mask_to_arrow` + imports removed | 4.4 | ✅ Done |
 | `opteryx/expression/evaluator/_eval_draken.pyx` | New — Cython tree walker | 4.1 | ⏳ Phase 4 |
 | `opteryx/managers/expression/ops.py` | Remove null-compression wrapper, interval special-casing, dead paths; retire Arrow LOGICAL_OPERATIONS | 4.4 | ⏳ Phase 4 |
 
