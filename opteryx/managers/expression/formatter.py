@@ -98,11 +98,6 @@ def format_expression(root, qualify: bool = False):
                 return f"{root.value[0]}.*"
             return "*"
         if node_type == NodeType.BINARY_OPERATOR:
-            if root.value == "MapAccess":
-                return (
-                    f"{format_expression(root.left, qualify)}"
-                    f"[{format_expression(root.right, qualify)}]"
-                )
             _map = {
                 "StringConcat": "||",
                 "Plus": "+",
@@ -116,6 +111,15 @@ def format_expression(root, qualify: bool = False):
                 "BitwiseXor": "^",
                 "ShiftLeft": "<<",
                 "ShiftRight": ">>",
+            }
+            return f"{format_expression(root.left, qualify)} {_map.get(root.value, root.value).upper()} {format_expression(root.right, qualify)}"
+        if node_type == NodeType.EXTRACTION_OPERATOR:
+            if root.value == "MapAccess":
+                return (
+                    f"{format_expression(root.left, qualify)}"
+                    f"[{format_expression(root.right, qualify)}]"
+                )
+            _map = {
                 "Arrow": "->",
                 "LongArrow": "->>",
             }

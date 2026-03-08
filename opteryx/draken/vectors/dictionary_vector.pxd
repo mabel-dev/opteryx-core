@@ -18,6 +18,7 @@ cdef class DictionaryVector(Vector):
     cpdef DictionaryVector take(self, int32_t[::1] indices)
     cpdef list to_pylist(self)
     cpdef object null_bitmap(self)
+    cpdef BoolVector is_null_boolvector(self)
     cpdef BoolVector equals(self, object literal)
     cpdef BoolVector not_equals(self, object literal)
     cpdef BoolVector less_than(self, object literal)

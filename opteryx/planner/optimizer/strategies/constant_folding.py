@@ -78,7 +78,11 @@ def fold_constants(root: Node, telemetry: QueryTelemetry) -> Node:
         root.parameters = [fold_constants(p, telemetry) for p in root.parameters]
         return root
 
-    if root.node_type in {NodeType.COMPARISON_OPERATOR, NodeType.BINARY_OPERATOR}:
+    if root.node_type in {
+        NodeType.COMPARISON_OPERATOR,
+        NodeType.BINARY_OPERATOR,
+        NodeType.EXTRACTION_OPERATOR,
+    }:
         # if we have a binary expression, try to fold each side
         root.left = fold_constants(root.left, telemetry)
         root.right = fold_constants(root.right, telemetry)

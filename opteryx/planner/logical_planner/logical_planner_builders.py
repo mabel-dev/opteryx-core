@@ -33,6 +33,7 @@ from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.managers.expression import NodeType
 from opteryx.managers.expression import format_expression
 from opteryx.managers.expression.binary_operators import BINARY_OPERATORS
+from opteryx.managers.expression.binary_operators import EXTRACTION_OPERATORS
 from opteryx.managers.expression.binary_operators import binary_operations
 from opteryx.models import LogicalColumn
 from opteryx.models import Node
@@ -175,7 +176,7 @@ def _evaluate_timetravel_expression(node, apply_interval_literal_to_now: bool = 
         scalar = _extract_single_scalar(result)
         return scalar, _type_from_value(scalar)
 
-    if node.node_type == NodeType.BINARY_OPERATOR:
+    if node.node_type in (NodeType.BINARY_OPERATOR, NodeType.EXTRACTION_OPERATOR):
         left_value, left_type = _evaluate_timetravel_expression(node.left)
         right_value, right_type = _evaluate_timetravel_expression(node.right)
 
@@ -386,6 +387,8 @@ def binary_op(branch, alias: Optional[List[str]] = None, key=None):
     operator_type = NodeType.COMPARISON_OPERATOR
     if operator in BINARY_OPERATORS:
         operator_type = NodeType.BINARY_OPERATOR
+    elif operator in EXTRACTION_OPERATORS:
+        operator_type = NodeType.EXTRACTION_OPERATOR
     if operator == "And":
         operator_type = NodeType.AND
     if operator == "Or":
@@ -838,7 +841,7 @@ def json_access(branch, alias: Optional[List[str]] = None, key=None):
     if isinstance(key_value, str):
         key_value = f"'{key_value}'"
         return Node(
-            NodeType.BINARY_OPERATOR,
+            NodeType.EXTRACTION_OPERATOR,
             value="Arrow",
             left=identifier_node,
             right=key_node,
@@ -846,7 +849,7 @@ def json_access(branch, alias: Optional[List[str]] = None, key=None):
         )
 
     return Node(
-        NodeType.BINARY_OPERATOR,
+        NodeType.EXTRACTION_OPERATOR,
         value="MapAccess",
         left=identifier_node,
         right=key_node,

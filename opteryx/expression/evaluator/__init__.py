@@ -160,20 +160,17 @@ def _coerce_interval(value) -> tuple:
 
 
 def _is_null_as_boolvector(vec):
-    """Return BoolVector where True = null position of vec.
+    """Return BoolVector where True = SQL NULL position.
 
-    Uses to_arrow() + pa.compute.is_null() for portability across all vector types.
-    DictionaryVector and other types do not expose is_null() as a Python method.
+    DictionaryVector has a native is_null_boolvector() that handles both null-bitmap
+    nulls and NaN-encoded nulls in float32/float64 dictionary values without any
+    Arrow round-trip.
 
-    TODO(Phase4): eliminate pyarrow dependency — build BoolVector directly from
-    the null_bitmap memoryview without Arrow round-trip.
+    Other vector types expose is_null() directly.
     """
-    import pyarrow as pa
-    import pyarrow.compute as pc
-
-    from opteryx.draken.interop.arrow import vector_from_arrow
-
-    return vector_from_arrow(pc.is_null(vec.to_arrow()))
+    if vec.__class__.__name__ == "DictionaryVector":
+        return vec.is_null_boolvector()
+    return vec.is_null()
 
 
 # --- Per-type comparison dispatchers ---
@@ -416,12 +413,60 @@ def draken_compare(op: str, left, right):
 
     Args:
         op:    Opteryx operator string ("Eq", "Gt", "InList", "Like", etc.)
-        left:  A Draken vector (the column being filtered)
+        left:  A Draken vector (the column being filtered), or a scalar for AnyOp/AllOp
         right: A Python scalar, Python collection (InList), or another Draken vector
 
     Returns:
         BoolVector with SQL three-valued-logic null semantics.
     """
+    # --- AnyOp / AllOp: left is the scalar literal, right is the ArrayVector column ---
+    if op == "AnyOpEq":
+        from opteryx.compiled.vector_ops import vector_anyop_eq
+
+        return vector_anyop_eq(literal=left, column=right)
+    if op == "AnyOpNotEq":
+        from opteryx.compiled.vector_ops import vector_anyop_neq
+
+        return vector_anyop_neq(literal=left, column=right)
+    if op == "AnyOpGt":
+        from opteryx.compiled.vector_ops import vector_anyop_gt
+
+        return vector_anyop_gt(left, right)
+    if op == "AnyOpLt":
+        from opteryx.compiled.vector_ops import vector_anyop_lt
+
+        return vector_anyop_lt(left, right)
+    if op == "AnyOpGtEq":
+        from opteryx.compiled.vector_ops import vector_anyop_gte
+
+        return vector_anyop_gte(left, right)
+    if op == "AnyOpLtEq":
+        from opteryx.compiled.vector_ops import vector_anyop_lte
+
+        return vector_anyop_lte(left, right)
+    if op == "AllOpEq":
+        from opteryx.compiled.vector_ops import vector_allop_eq
+
+        return vector_allop_eq(left, right)
+    if op == "AllOpNotEq":
+        from opteryx.compiled.vector_ops import vector_allop_neq
+
+        return vector_allop_neq(left, right)
+
+    # --- AtArrow / ArrayContainsAll: left is the ArrayVector column, right is a literal list ---
+    if op == "AtArrow":
+        from opteryx.compiled.vector_ops import vector_contains_any
+
+        return vector_contains_any(left, set(right) if right is not None else set())
+    if op == "ArrayContainsAll":
+        from opteryx.compiled.vector_ops import vector_contains_all
+
+        return vector_contains_all(left, set(right) if right is not None else set())
+
+    # AnyOpLike/ILike and AtQuestion are not yet Draken-native
+    if op in ("AnyOpLike", "AnyOpNotLike", "AnyOpILike", "AnyOpNotILike", "AtQuestion"):
+        raise NotImplementedError(f"draken_compare: {op!r} not yet Draken-native (Phase 3)")
+
     negate = op in _NEGATED_OPS
     if negate:
         op = _NEGATED_OPS[op]

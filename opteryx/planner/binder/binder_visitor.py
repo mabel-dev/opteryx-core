@@ -105,6 +105,8 @@ def get_mismatched_condition_column_types(
                 or node.right.node_type == NodeType.COMPARISON_OPERATOR
                 or node.left.node_type == NodeType.BINARY_OPERATOR
                 or node.right.node_type == NodeType.BINARY_OPERATOR
+                or node.left.node_type == NodeType.EXTRACTION_OPERATOR
+                or node.right.node_type == NodeType.EXTRACTION_OPERATOR
             ):
                 return None  # it's compound so don't make a decision here
             return {

@@ -1,0 +1,303 @@
+"""
+Phase 3 unit tests: AnyOp/AllOp/AtArrow operators in the Draken evaluator.
+
+Covers:
+- draken_compare: AnyOpEq / AnyOpNotEq
+- draken_compare: AnyOpGt / AnyOpLt / AnyOpGtEq / AnyOpLtEq
+- draken_compare: AllOpEq / AllOpNotEq
+- draken_compare: AtArrow (column @> literal_list)
+- draken_compare: ArrayContainsAll (column @>> literal_list)
+- IS NULL on DictionaryVector with NaN-encoded nulls (native is_null_boolvector)
+- IS NULL on DictionaryVector with bitmap nulls
+"""
+
+import os
+import sys
+
+import pyarrow as pa
+import pytest
+
+sys.path.insert(1, os.path.join(sys.path[0], "../.."))
+
+from orso.schema import FlatColumn
+from orso.types import OrsoTypes
+
+from opteryx.draken.interop.arrow import vector_from_arrow, vector_from_sequence
+from opteryx.draken.morsels.morsel import Morsel
+from opteryx.expression.evaluator import draken_compare, evaluate_draken
+from opteryx.managers.expression import NodeType
+from opteryx.models import Node
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def bv_to_list(bv):
+    return bv.to_pylist()
+
+
+def _array_vec(rows):
+    """Create an ArrayVector from a list of lists (with possible None rows)."""
+    return vector_from_arrow(pa.array(rows, type=pa.list_(pa.int64())))
+
+
+def _array_vec_str(rows):
+    return vector_from_arrow(pa.array(rows, type=pa.list_(pa.string())))
+
+
+def _dict_vec_float(values):
+    """Create a DictionaryVector from float64 values (may contain float('nan') for SQL NULL)."""
+    return vector_from_arrow(
+        pa.array(values, type=pa.float64()).dictionary_encode()
+    )
+
+
+def _morsel(col_identity: str, vec):
+    return Morsel.from_vectors([col_identity], [vec])
+
+
+def _col(name: str, dtype=OrsoTypes.ARRAY) -> FlatColumn:
+    c = FlatColumn(name=name, type=dtype)
+    c.identity = name
+    return c
+
+
+def _identifier_node(col: FlatColumn):
+    return Node(NodeType.IDENTIFIER, schema_column=col)
+
+
+def _literal_node(value):
+    return Node(NodeType.LITERAL, value=value)
+
+
+def _comparison_node(op: str, left_node, right_node):
+    n = Node(NodeType.COMPARISON_OPERATOR, value=op)
+    n.left = left_node
+    n.right = right_node
+    return n
+
+
+def _unary_node(op: str, centre_node):
+    n = Node(NodeType.UNARY_OPERATOR, value=op)
+    n.centre = centre_node
+    return n
+
+
+# ---------------------------------------------------------------------------
+# AnyOp: scalar = ANY(array_column)
+# convention: left=literal, right=ArrayVector column
+# ---------------------------------------------------------------------------
+
+
+class TestAnyOpEq:
+    def test_basic(self):
+        col = _array_vec([[1, 2, 3], [4, 5], [6]])
+        result = draken_compare("AnyOpEq", 2, col)
+        assert bv_to_list(result) == [True, False, False]
+
+    def test_match_multiple_rows(self):
+        col = _array_vec([[10], [5, 10], [1, 2]])
+        result = draken_compare("AnyOpEq", 10, col)
+        assert bv_to_list(result) == [True, True, False]
+
+    def test_no_match(self):
+        col = _array_vec([[1, 2], [3, 4]])
+        result = draken_compare("AnyOpEq", 99, col)
+        assert bv_to_list(result) == [False, False]
+
+    def test_null_row(self):
+        col = _array_vec([[1, 2], None, [2, 3]])
+        result = draken_compare("AnyOpEq", 2, col)
+        assert bv_to_list(result) == [True, False, True]
+
+    def test_null_literal(self):
+        col = _array_vec([[1, 2], [3, 4]])
+        result = draken_compare("AnyOpEq", None, col)
+        assert bv_to_list(result) == [False, False]
+
+
+class TestAnyOpNotEq:
+    def test_basic(self):
+        col = _array_vec([[1, 1], [1, 2], [2, 2]])
+        result = draken_compare("AnyOpNotEq", 1, col)
+        # row0: [1,1] — no element != 1 → False; row1: 2 != 1 → True; row2: all != 1 → True
+        assert bv_to_list(result) == [False, True, True]
+
+
+class TestAnyOpComparisons:
+    def test_gt(self):
+        col = _array_vec([[1, 2], [3, 4], [1]])
+        result = draken_compare("AnyOpGt", 2, col)
+        # AnyOpGt: literal > ANY(row) → any element < literal (convention: col contains vals, literal is right side)
+        # Actually: "2 > ANY(row)" means any row element is < 2
+        # For vector_anyop_gt: literal > elem
+        assert bv_to_list(result) == [True, False, True]
+
+    def test_lt(self):
+        col = _array_vec([[1, 5], [6, 7]])
+        result = draken_compare("AnyOpLt", 4, col)
+        # "4 < ANY(row)" means any element > 4
+        assert bv_to_list(result) == [True, True]
+
+    def test_gte(self):
+        col = _array_vec([[2, 3], [4, 5]])
+        result = draken_compare("AnyOpGtEq", 3, col)
+        # "3 >= ANY(row)" means any element <= 3
+        assert bv_to_list(result) == [True, False]
+
+    def test_lte(self):
+        col = _array_vec([[2, 3], [1, 5]])
+        result = draken_compare("AnyOpLtEq", 3, col)
+        # "3 <= ANY(row)" means any element >= 3
+        assert bv_to_list(result) == [True, True]
+
+
+# ---------------------------------------------------------------------------
+# AllOp: scalar op ALL(array_column)
+# ---------------------------------------------------------------------------
+
+
+class TestAllOpEq:
+    def test_all_equal(self):
+        col = _array_vec([[5, 5], [5, 6], [5]])
+        result = draken_compare("AllOpEq", 5, col)
+        assert bv_to_list(result) == [True, False, True]
+
+    def test_null_row(self):
+        col = _array_vec([[5, 5], None, [5]])
+        result = draken_compare("AllOpEq", 5, col)
+        assert bv_to_list(result) == [True, False, True]
+
+
+class TestAllOpNotEq:
+    def test_none_equal(self):
+        col = _array_vec([[1, 2], [3, 5], [5, 5]])
+        result = draken_compare("AllOpNotEq", 5, col)
+        assert bv_to_list(result) == [True, True, False]
+
+
+# ---------------------------------------------------------------------------
+# AtArrow: column @> [values]  (array column contains any of values)
+# convention: left=ArrayVector, right=literal list
+# ---------------------------------------------------------------------------
+
+
+class TestAtArrow:
+    def test_basic(self):
+        col = _array_vec([[1, 2, 3], [4, 5], [6]])
+        result = draken_compare("AtArrow", col, [2, 6])
+        assert bv_to_list(result) == [True, False, True]
+
+    def test_string(self):
+        col = _array_vec_str([["a", "b"], ["c"], ["d", "e"]])
+        result = draken_compare("AtArrow", col, {"a", "e"})
+        assert bv_to_list(result) == [True, False, True]
+
+    def test_no_match(self):
+        col = _array_vec([[1, 2], [3, 4]])
+        result = draken_compare("AtArrow", col, [9, 10])
+        assert bv_to_list(result) == [False, False]
+
+    def test_null_row(self):
+        col = _array_vec([[1, 2], None, [3]])
+        result = draken_compare("AtArrow", col, [1])
+        assert bv_to_list(result) == [True, False, False]
+
+    def test_empty_literal_set(self):
+        col = _array_vec([[1, 2], [3]])
+        result = draken_compare("AtArrow", col, [])
+        assert bv_to_list(result) == [False, False]
+
+
+# ---------------------------------------------------------------------------
+# ArrayContainsAll: column must contain all values in literal_set
+# ---------------------------------------------------------------------------
+
+
+class TestArrayContainsAll:
+    def test_all_present(self):
+        col = _array_vec([[1, 2, 3], [1, 3], [2, 3]])
+        result = draken_compare("ArrayContainsAll", col, [1, 3])
+        assert bv_to_list(result) == [True, True, False]
+
+    def test_empty_required_set(self):
+        col = _array_vec([[1], [2, 3]])
+        result = draken_compare("ArrayContainsAll", col, [])
+        # Vacuously true for all non-null rows
+        assert bv_to_list(result) == [True, True]
+
+
+# ---------------------------------------------------------------------------
+# IS NULL: native DictionaryVector.is_null_boolvector()
+# ---------------------------------------------------------------------------
+
+
+class TestIsNullDictionaryVector:
+    def test_nan_encoded_nulls(self):
+        """NaN in float dict values should produce IS NULL = True."""
+        vec = _dict_vec_float([1.0, float("nan"), 2.0, float("nan"), 3.0])
+        result = vec.is_null_boolvector()
+        assert bv_to_list(result) == [False, True, False, True, False]
+
+    def test_no_nulls(self):
+        vec = _dict_vec_float([1.0, 2.0, 3.0])
+        result = vec.is_null_boolvector()
+        assert bv_to_list(result) == [False, False, False]
+
+    def test_all_null(self):
+        vec = _dict_vec_float([float("nan"), float("nan")])
+        result = vec.is_null_boolvector()
+        assert bv_to_list(result) == [True, True]
+
+    def test_bitmap_nulls(self):
+        """Proper Arrow null bitmap (not NaN) should also produce IS NULL = True."""
+        arr = pa.array([1.0, None, 2.0, None], type=pa.float64()).dictionary_encode()
+        vec = vector_from_arrow(arr)
+        result = vec.is_null_boolvector()
+        assert bv_to_list(result) == [False, True, False, True]
+
+    def test_mixed_nan_and_value(self):
+        """Mix of normal values, NaN, and repeated values."""
+        vals = [5.0, float("nan"), 5.0, 10.0, float("nan")]
+        vec = _dict_vec_float(vals)
+        result = vec.is_null_boolvector()
+        assert bv_to_list(result) == [False, True, False, False, True]
+
+
+class TestIsNullViaEvaluateDraken:
+    """IS NULL test through the full evaluate_draken path (morsel → BoolVector)."""
+
+    def test_is_null_dict_float_via_evaluator(self):
+        col = _col("mag", OrsoTypes.DOUBLE)
+        vec = _dict_vec_float([1.0, float("nan"), 3.0])
+        m = _morsel("mag", vec)
+        tree = _unary_node("IsNull", _identifier_node(col))
+        result = evaluate_draken(tree, m)
+        assert bv_to_list(result) == [False, True, False]
+
+    def test_is_not_null_dict_float_via_evaluator(self):
+        col = _col("mag", OrsoTypes.DOUBLE)
+        vec = _dict_vec_float([float("nan"), 2.0, float("nan")])
+        m = _morsel("mag", vec)
+        tree = _unary_node("IsNotNull", _identifier_node(col))
+        result = evaluate_draken(tree, m)
+        assert bv_to_list(result) == [False, True, False]
+
+
+# ---------------------------------------------------------------------------
+# AnyOpLike / AtQuestion: expected to raise NotImplementedError (not yet native)
+# ---------------------------------------------------------------------------
+
+
+class TestUnimplementedOps:
+    def test_anyop_like_raises(self):
+        col = _array_vec_str([["foo", "bar"]])
+        with pytest.raises(NotImplementedError, match="AnyOpLike"):
+            draken_compare("AnyOpLike", "fo%", col)
+
+    def test_atquestion_raises(self):
+        col = vector_from_arrow(pa.array([b'{"a":1}'], type=pa.binary()))
+        with pytest.raises(NotImplementedError, match="AtQuestion"):
+            draken_compare("AtQuestion", col, "$.a")

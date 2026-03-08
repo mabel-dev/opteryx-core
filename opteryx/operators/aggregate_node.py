@@ -155,6 +155,7 @@ def extract_evaluations(aggregates):
         select_nodes=(
             NodeType.FUNCTION,
             NodeType.BINARY_OPERATOR,
+            NodeType.EXTRACTION_OPERATOR,
             NodeType.COMPARISON_OPERATOR,
             NodeType.LITERAL,
         ),
