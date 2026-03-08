@@ -18,8 +18,8 @@ from pyarrow import parquet
 import opteryx.rugo.parquet as parquet_meta
 from opteryx.compiled.structures.memory_view_stream import MemoryViewStream
 from opteryx.connectors.capabilities import PredicatePushable
-from opteryx.managers.expression import NodeType
-from opteryx.managers.expression import get_all_nodes_of_type
+from opteryx.expression import NodeType
+from opteryx.expression import get_all_nodes_of_type
 from opteryx.models import Node
 from opteryx.rugo.converters.orso import rugo_to_orso_schema
 
@@ -28,9 +28,9 @@ def filter_records(filters: Optional[list], table: pyarrow.Table) -> pyarrow.Tab
     """
     Apply residual filters to a PyArrow table after read-time pushdown.
     """
-    from opteryx.managers.expression import evaluate
-    from opteryx.managers.expression import evaluate_and_append
-    from opteryx.managers.expression import get_all_nodes_of_type
+    from opteryx.expression import evaluate
+    from opteryx.expression import evaluate_and_append
+    from opteryx.expression import get_all_nodes_of_type
 
     if isinstance(filters, list) and filters:
         filter_copy = [f.copy() for f in filters]

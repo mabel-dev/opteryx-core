@@ -15,7 +15,7 @@ from orso.types import OrsoTypes
 from pyarrow import compute
 
 from opteryx.compiled import vector_ops
-from opteryx.datatypes.intervals import MICROSECONDS_PER_DAY
+from opteryx.expression.intervals import MICROSECONDS_PER_DAY
 from opteryx.third_party.tktech import csimdjson as simdjson
 
 # Initialize simdjson parser once
@@ -221,7 +221,7 @@ def binary_operations(
         raise NotImplementedError(f"Operator `{operator}` is not implemented!")
 
     if OrsoTypes.INTERVAL in (left_type, right_type):
-        from opteryx.datatypes.intervals import INTERVAL_KERNELS
+        from opteryx.expression.intervals import INTERVAL_KERNELS
 
         function = INTERVAL_KERNELS.get((left_type, right_type, operator))
         if function is None:
@@ -241,7 +241,7 @@ def binary_operations(
         # date - date = INTERVAL (months=0, microseconds=days_diff * MICROS_PER_DAY)
         # Normalise both sides to a pyarrow date32 or timestamp array — avoids the
         # numpy object-array-of-datetime.date path that breaks astype(int64).
-        from opteryx.datatypes.intervals import _intervals_to_month_day_nano
+        from opteryx.expression.intervals import _intervals_to_month_day_nano
 
         def _to_pyarrow_date(arr):
             if hasattr(arr, "to_arrow"):

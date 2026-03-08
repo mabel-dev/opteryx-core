@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 
 from opteryx.exceptions import IncorrectTypeError
-from opteryx.managers.expression.binary_operators import MapAccessOp
+from opteryx.expression.binary_operators import MapAccessOp
 
 
 def _to_list(result):

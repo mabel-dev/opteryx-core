@@ -30,7 +30,7 @@ Key benefits:
 - Catalog-aware (leverages Iceberg/PyIceberg statistics)
 """
 
-from opteryx.managers.expression import NodeType
+from opteryx.expression import NodeType
 from opteryx.models import Node
 from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner import LogicalPlanNode

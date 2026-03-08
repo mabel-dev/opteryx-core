@@ -6,9 +6,9 @@ import pytest
 
 sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 
-from opteryx.managers.expression.ops import _inner_filter_operations
-from opteryx.managers.expression.ops import get_dict_expr_telemetry
-from opteryx.managers.expression.ops import reset_dict_expr_telemetry
+from opteryx.expression.ops import _inner_filter_operations
+from opteryx.expression.ops import get_dict_expr_telemetry
+from opteryx.expression.ops import reset_dict_expr_telemetry
 
 
 def _as_list(result):

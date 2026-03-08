@@ -16,9 +16,9 @@ import pyarrow
 
 from opteryx import EOS
 from opteryx.exceptions import UnsupportedSyntaxError
-from opteryx.managers.expression import NodeType
-from opteryx.managers.expression import evaluate_and_append
-from opteryx.managers.expression import get_all_nodes_of_type
+from opteryx.expression import NodeType
+from opteryx.expression import evaluate_and_append
+from opteryx.expression import get_all_nodes_of_type
 from opteryx.models import QueryProperties
 
 from . import BasePlanNode

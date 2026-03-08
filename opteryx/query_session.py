@@ -55,7 +55,6 @@ from opteryx.managers.billing import BillingEventType
 from opteryx.managers.billing import write_billing_event
 from opteryx.models import ExecutionContext
 from opteryx.models import QueryTelemetry
-from opteryx.tracing import flush_all
 from opteryx.tracing import record_event
 from opteryx.utils import sql
 
@@ -424,8 +423,6 @@ class Session(DataFrame):
 
         # Handle Draken morsels or iterables of morsels/tables
         try:
-            from itertools import chain
-
             # Convert morsels to Arrow tables
             arrow_tables = []
             for item in result_data:

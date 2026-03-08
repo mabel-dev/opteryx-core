@@ -21,7 +21,7 @@ import pyarrow
 from orso.schema import FlatColumn
 
 from opteryx import EOS
-from opteryx.managers.expression import NodeType
+from opteryx.expression import NodeType
 from opteryx.models import LogicalColumn
 from opteryx.models import QueryProperties
 from opteryx.third_party.abseil.containers import FlatHashSet

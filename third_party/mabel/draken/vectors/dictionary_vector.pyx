@@ -1307,6 +1307,105 @@ cdef class DictionaryVector(Vector):
 
         return out
 
+    cpdef BoolVector contains(self, object substr, bint ignore_case=False):
+        """Return mask: 1 if element contains substr, else 0. Propagates NULLs."""
+        cdef DrakenDictionaryBuffer* ptr = self.ptr
+        cdef DrakenVarBuffer* dict_buf = ptr.dictionary_values
+        cdef Py_ssize_t n = ptr.length
+        cdef Py_ssize_t nbytes = (n + 7) >> 3
+        cdef Py_ssize_t dict_n = 0
+        cdef Py_ssize_t i, j, p, q
+        cdef int32_t start, end
+        cdef Py_ssize_t str_len
+        cdef uint8_t byte
+        cdef uint32_t code
+        cdef bint found
+        cdef object substr_bytes_obj = _coerce_literal_bytes(substr)
+        cdef bytes substr_bytes
+        cdef const uint8_t* ndl_ptr
+        cdef Py_ssize_t ndl_len
+        cdef uint8_t* ndl_lower = NULL
+        cdef BoolVector out = BoolVector(<size_t>n)
+        cdef uint8_t* out_bits = <uint8_t*>out.ptr.data
+        cdef uint8_t* dict_matches = NULL
+
+        if dict_buf != NULL and not _is_string_dict_type(dict_buf.type):
+            raise TypeError("Dictionary CONTAINS kernels require string dictionary values")
+
+        if nbytes > 0:
+            memset(out_bits, 0, nbytes)
+        out.ptr.null_bitmap = NULL
+
+        if substr_bytes_obj is None or dict_buf == NULL or dict_buf.length == 0:
+            return out
+
+        substr_bytes = substr_bytes_obj
+        ndl_ptr = <const uint8_t*>PyBytes_AS_STRING(substr_bytes)
+        ndl_len = len(substr_bytes)
+
+        dict_n = dict_buf.length
+        dict_matches = <uint8_t*>malloc(dict_n)
+        if dict_matches == NULL:
+            raise MemoryError()
+        memset(dict_matches, 0, dict_n)
+
+        if ignore_case and ndl_len > 0:
+            ndl_lower = <uint8_t*>malloc(<size_t>ndl_len)
+            if ndl_lower == NULL:
+                free(dict_matches)
+                raise MemoryError()
+            for j in range(ndl_len):
+                ndl_lower[j] = _ascii_lower(ndl_ptr[j])
+
+        try:
+            for i in range(dict_n):
+                if dict_buf.null_bitmap != NULL:
+                    byte = dict_buf.null_bitmap[i >> 3]
+                    if ((byte >> (i & 7)) & 1) == 0:
+                        continue
+                start = dict_buf.offsets[i]
+                end = dict_buf.offsets[i + 1]
+                str_len = end - start
+                if ndl_len == 0:
+                    dict_matches[i] = 1
+                    continue
+                if ndl_len > str_len:
+                    continue
+                found = False
+                for p in range(str_len - ndl_len + 1):
+                    if ignore_case:
+                        q = 0
+                        while q < ndl_len and _ascii_lower(dict_buf.data[start + p + q]) == ndl_lower[q]:
+                            q += 1
+                        if q == ndl_len:
+                            found = True
+                            break
+                    else:
+                        if dict_buf.data[start + p] == ndl_ptr[0]:
+                            q = 1
+                            while q < ndl_len and dict_buf.data[start + p + q] == ndl_ptr[q]:
+                                q += 1
+                            if q == ndl_len:
+                                found = True
+                                break
+                if found:
+                    dict_matches[i] = 1
+
+            for i in range(n):
+                if ptr.null_bitmap != NULL:
+                    byte = ptr.null_bitmap[i >> 3]
+                    if ((byte >> (i & 7)) & 1) == 0:
+                        continue
+                code = _read_code(ptr, i)
+                if code < dict_n and dict_matches[code] != 0:
+                    _set_true_bit(out_bits, i)
+        finally:
+            free(dict_matches)
+            if ndl_lower != NULL:
+                free(ndl_lower)
+
+        return out
+
     cpdef DictionaryVector take(self, int32_t[::1] indices):
         cdef DrakenDictionaryBuffer* src = self.ptr
         cdef DrakenVarBuffer* src_dict = src.dictionary_values

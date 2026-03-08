@@ -13,7 +13,7 @@ import types
 from opteryx.planner.logical_planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner.logical_planner import LogicalPlanNode
 from opteryx.planner.logical_planner.logical_planner import LogicalPlanStepType
-from opteryx.managers.expression import NodeType
+from opteryx.expression import NodeType
 from opteryx.planner.optimizer.strategies.statistics_only_response import (
     StatisticsOnlyResponseStrategy,
 )

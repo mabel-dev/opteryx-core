@@ -7,7 +7,7 @@ from typing import Tuple
 from orso.types import OrsoTypes
 
 from opteryx.exceptions import IncorrectTypeError
-from opteryx.managers.expression import NodeType
+from opteryx.expression import NodeType
 from opteryx.utils.sql import convert_camel_to_sql_case
 
 
@@ -352,7 +352,7 @@ def determine_type(node) -> OrsoTypes:
     result = OPERATOR_MAP.get((left_type, right_type, operator))
 
     if result is None:
-        from opteryx.managers.expression import format_expression
+        from opteryx.expression import format_expression
 
         raise IncorrectTypeError(
             f"Unable to perform `{format_expression(node)}` because the values are not acceptable types for this operation. {left_type} and {right_type} were provided, you may need to cast one or both values to acceptable types."

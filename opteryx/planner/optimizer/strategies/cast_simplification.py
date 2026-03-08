@@ -13,7 +13,7 @@ Optimizes CAST operations by:
 4. Removing unnecessary type conversions
 """
 
-from opteryx.managers.expression import NodeType
+from opteryx.expression import NodeType
 from opteryx.planner.logical_planner import LogicalPlanStepType
 from opteryx.planner.optimizer.strategies.optimization_strategy import OptimizationStrategy
 from opteryx.planner.optimizer.strategies.optimization_strategy import OptimizerContext

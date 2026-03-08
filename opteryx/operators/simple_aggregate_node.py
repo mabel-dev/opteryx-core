@@ -18,8 +18,8 @@ import pyarrow
 
 from opteryx import EOS
 from opteryx.compiled.aggregations.count_distinct import count_distinct
-from opteryx.managers.expression import NodeType
-from opteryx.managers.expression import evaluate_and_append
+from opteryx.expression import NodeType
+from opteryx.expression import evaluate_and_append
 from opteryx.models import QueryProperties
 from opteryx.operators.aggregate_node import extract_evaluations
 

@@ -21,9 +21,9 @@ we've rewritten expressions at part of other optimizations which can be folded.
 
 from orso.types import OrsoTypes
 
-from opteryx.managers.expression import NodeType
-from opteryx.managers.expression import evaluate
-from opteryx.managers.expression import get_all_nodes_of_type
+from opteryx.expression import NodeType
+from opteryx.expression import evaluate
+from opteryx.expression import get_all_nodes_of_type
 from opteryx.models import Node
 from opteryx.models import QueryTelemetry
 from opteryx.planner import build_literal_node

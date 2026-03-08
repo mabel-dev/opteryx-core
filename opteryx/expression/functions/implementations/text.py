@@ -44,7 +44,10 @@ from opteryx.exceptions import InvalidFunctionParameterError
 
 def to_lower(arr):
     """Fast lowercase using buffer-level SIMD operations."""
-    if isinstance(arr, numpy.ndarray):
+    if hasattr(arr, "to_arrow"):
+        # Draken vector (StringVector, DictionaryVector, etc.)
+        arr = arr.to_arrow()
+    elif isinstance(arr, numpy.ndarray):
         arr = pyarrow.array(arr)
     vec = StringVector.from_arrow(arr)
     return string_vector_lowercase(vec).to_arrow()
@@ -52,7 +55,10 @@ def to_lower(arr):
 
 def to_upper(arr):
     """Fast uppercase using buffer-level SIMD operations."""
-    if isinstance(arr, numpy.ndarray):
+    if hasattr(arr, "to_arrow"):
+        # Draken vector (StringVector, DictionaryVector, etc.)
+        arr = arr.to_arrow()
+    elif isinstance(arr, numpy.ndarray):
         arr = pyarrow.array(arr)
     vec = StringVector.from_arrow(arr)
     return string_vector_uppercase(vec).to_arrow()

@@ -28,7 +28,7 @@ from orso.types import OrsoTypes
 from opteryx.draken.interop.arrow import vector_from_arrow, vector_from_sequence
 from opteryx.draken.morsels.morsel import Morsel
 from opteryx.expression.evaluator import draken_compare, evaluate_draken
-from opteryx.managers.expression import NodeType
+from opteryx.expression import NodeType
 from opteryx.models import Node
 
 
@@ -367,12 +367,12 @@ class TestEvaluateDrakenTreeWalker:
 
 
 # ---------------------------------------------------------------------------
-# Phase 2: _execute_draken path via FilterNode (feature-flag gated)
+# Phase 2: FilterNode draken path
 # ---------------------------------------------------------------------------
 
 
 class TestFilterNodeDrakenPath:
-    """Smoke tests for FilterNode._execute_draken with FEATURE_USE_DRAKEN_FILTER."""
+    """Smoke tests for FilterNode (now unconditionally Draken-native)."""
 
     def _make_filter_node(self, filter_tree):
         from opteryx.models import QueryProperties
@@ -382,10 +382,7 @@ class TestFilterNodeDrakenPath:
         return FilterNode(props, filter=filter_tree)
 
     def test_draken_filter_gt(self, monkeypatch):
-        """FilterNode with Draken morsel and FEATURE_USE_DRAKEN_FILTER=True."""
-        from opteryx.config import Features
-        monkeypatch.setattr(Features, "use_draken_filter", True)
-
+        """FilterNode with Draken morsel."""
         col = FlatColumn(name="val", type=OrsoTypes.INTEGER)
         vec = vector_from_arrow(pa.array([10, 20, 30, 40], type=pa.int64()))
         morsel = _morsel(col.identity, vec)
@@ -400,9 +397,6 @@ class TestFilterNodeDrakenPath:
         assert result_morsel.num_rows == 2  # 30, 40
 
     def test_draken_filter_all_false_yields_empty(self, monkeypatch):
-        from opteryx.config import Features
-        monkeypatch.setattr(Features, "use_draken_filter", True)
-
         col = FlatColumn(name="val", type=OrsoTypes.INTEGER)
         vec = vector_from_arrow(pa.array([1, 2, 3], type=pa.int64()))
         morsel = _morsel(col.identity, vec)

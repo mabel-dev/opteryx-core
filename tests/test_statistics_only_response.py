@@ -17,7 +17,7 @@ from opteryx.planner.optimizer.strategies.statistics_only_response import (
     create_count_result_table,
 )
 from opteryx.planner.logical_planner.logical_planner import LogicalPlanStepType
-from opteryx.managers.expression import NodeType
+from opteryx.expression import NodeType
 
 
 class MockNode:

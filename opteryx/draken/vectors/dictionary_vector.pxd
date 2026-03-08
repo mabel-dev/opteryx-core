@@ -28,6 +28,7 @@ cdef class DictionaryVector(Vector):
     cpdef BoolVector in_list(self, object literals)
     cpdef BoolVector like(self, object pattern, bint ignore_case=*)
     cpdef BoolVector rlike(self, object pattern)
+    cpdef BoolVector contains(self, object substr, bint ignore_case=*)
     cdef void hash_into(self, uint64_t[::1] out_buf, Py_ssize_t offset=*) except *
 
 

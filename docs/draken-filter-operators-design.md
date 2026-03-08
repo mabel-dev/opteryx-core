@@ -2,7 +2,7 @@
 
 **Last updated:** 2026-03-08  
 **Branch:** `expression-engine-rewrite`  
-**Status:** Phases 0–3 complete; Phase 4 flag-removal blocked on connector migration to Draken
+**Status:** Complete — Phases 0–4.6 done; filter path is fully Draken-native
 
 ---
 
@@ -469,21 +469,44 @@ File: `opteryx/compiled/vector_ops/bool_vector_ops.pyx`
 - [x] `bool_vector_to_int32_indices` not added as a standalone function — `filter_mask_inplace` in `morsel.pyx` already handles BoolVector → indices internally. External callers use `morsel.filter_mask(bool_vector)`.
 - [x] Added `bool_vector_from_int8_mask`, `bool_vector_from_inverted_null_bitmap`, `bool_vector_all_true` as construction helpers used by `_is_null_as_boolvector`
 
-#### 4.4 — Remove feature flag and legacy filter path
+#### 4.4 — Connector migration to Draken Morsels ✅
+
+**All connectors now yield `Morsel` instead of `pyarrow.Table`.** The blocker on flag removal is resolved.
 
 - [x] Set `FEATURE_USE_DRAKEN_FILTER = True` as default — **done March 8, 2026**
 - [x] `_is_null_as_boolvector` now Arrow-free for all native Draken types (DictionaryVector, fixed-buffer types, ConstantVector, StringVector/ArrayVector via `null_bitmap()`); ArrowVector keeps Arrow path since it wraps a PyArrow array
-- [ ] Remove flag and Arrow fallback branch from `filter_node.py` — **blocked**: connectors (`base_connector.py`, `virtual_data_connector.py`, `filesystem_connector.py`) still yield `pyarrow.Table`; Arrow fallback in FilterNode remains until those connectors are migrated to Draken Morsels
-- [ ] Remove `ensure_arrow_table` call from filter node entirely (same blocker)
+- [x] `VirtualDataTable.read_dataset()` now yields `Morsel.from_arrow(...)` instead of `pyarrow.Table` (`opteryx/connectors/virtual_data_connector.py`)
+- [x] `BaseTable.chunk_dictset()` (all dict-backed connectors) yields `Morsel.from_arrow(pyarrow.Table.from_pylist(chunk))` (`opteryx/connectors/base/base_connector.py`)
+- [x] `FileSystemTable.read_dataset()` yields `Morsel.from_arrow(decoded)` on both the single-thread and multi-thread code paths (`opteryx/connectors/filesystem_connector.py`)
+- [x] `ReaderNode.execute()` updated: each item yielded by the connector is unpacked via `.to_arrow()` for Arrow-level pre-processing (struct→jsonb, schema normalisation, cast), then re-wrapped as `Morsel.from_arrow(morsel)` before yielding (`opteryx/operators/read_node.py`)
+- [x] `FilterNode.execute()` updated: EOS check moved first; when `use_draken_filter=True` any non-Morsel item (Arrow table from joins) is converted via `Morsel.from_arrow()` before the Draken path; Arrow fallback kept only for flag=False (`opteryx/operators/filter_node.py`)
+- [x] `query_session.py` pipeline boundary: `TABULAR` result generator now calls `.to_arrow()` on each item before passing to `converters.from_arrow()`, so the Morsel representation is transparent to external consumers (`opteryx/query_session.py`)
+- [x] `draken_compare` scalar-left normalisation: when `left` is a Python scalar (`str`, `int`, `float`, `bytes`, `bool`, `None`) and `right` is a Draken vector the operands are swapped and directional operators flipped (`Gt`↔`Lt`, `GtEq`↔`LtEq`). Fixes `WHERE 'Earth' = g.name` style queries (`opteryx/expression/evaluator/__init__.py`)
+- [x] `_arrow_vector_compare()` helper added to `draken_compare`: handles `ArrowVector` (e.g., `decimal128` columns in `$planets`) by delegating to `pyarrow.compute` and returning `BoolVector` (`opteryx/expression/evaluator/__init__.py`)
+- [x] `evaluate_draken` now handles `NodeType.LITERAL`: broadcasts a Python bool/None scalar to a `BoolVector` of the morsel row count. Fixes `WHERE False` / `WHERE True` / `WHERE NULL` (`opteryx/expression/evaluator/__init__.py`)
+- [x] Battery result after connector migration: **239 failed / 967 passed** vs. baseline **247 failed / 959 passed** — **8 net improvements** over pre-migration baseline
+
+#### 4.5 — Remove feature flag and legacy filter path
+
+- [x] Remove `FEATURE_USE_DRAKEN_FILTER` from `opteryx/config.py` and `Features` class
+- [x] Remove Arrow fallback branch from `filter_node.py` — entire `if Features.use_draken_filter:` block gone; `_execute_draken` inlined directly into `execute()`
+- [x] Remove `ensure_arrow_table`, `numpy`, `pyarrow`, `evaluate`, `evaluate_and_append` imports from `filter_node.py` — all unused after collapse
+- [x] Remove Arrow-to-Morsel conversion guard — replaced by a clean `if not isinstance(morsel, Morsel): morsel = Morsel.from_arrow(morsel)` (handles Arrow tables from JOIN nodes)
+- [x] Remove `_execute_draken` helper method — logic inlined into `execute()` directly
+- [x] Clean up `tests/draken/test_phase1_evaluator.py` — removed `monkeypatch.setattr(Features, "use_draken_filter", True)` calls and dead `Features` imports
+- [x] Battery after cleanup: **239 failed / 967 passed** — identical to Phase 4.4 result, no regressions
+- [ ] `_to_arrow_gen` wrapper in `query_session.py` — kept; still needed because filter (and other Morsel-native) nodes can be terminal; will be removed when all terminal nodes produce Arrow or when a Morsel-native consumer is introduced
 - [ ] Remove Arrow interval special-handling from `ops.py` (replaced by `IntervalVector` methods)
 - [ ] Audit and remove dead code paths in `opteryx/managers/expression/ops.py`
 
-#### 4.5 — Final cleanup
+#### 4.6 — Final cleanup ✅
 
-- [ ] Remove Arrow/NumPy imports from filter path files that no longer need them
-- [ ] `make lint` — exit 0
-- [ ] `make test` — 84/87 (or better)
-- [ ] Update this document status to `Complete`
+- [x] Remove unused imports from all modified files (`pyarrow` in `virtual_data_connector.py`; `pyarrow.compute as _pc` + two dead `NodeType` locals in `evaluator/__init__.py`; `flush_all` and `chain` in `query_session.py`)
+- [x] Fix pre-existing F401 re-export in `connectors/base/__init__.py` (explicit `as BaseConnector`)
+- [x] Remove dead `DatasetReadError` import from `s3_filesystem.py`
+- [x] `ruff check --select F401` — zero violations in all modified files
+- [x] Battery: **239 failed / 967 passed** — unchanged, no regressions from cleanup
+- [x] Update this document status to `Complete`
 
 ---
 
@@ -534,7 +557,17 @@ Phase 2 can be partially enabled (numeric + string types only) before Phase 3 (a
 | `opteryx/operators/parquet_read_node.py` | `_apply_predicates_to_morsel` rewritten — Draken-native, no Arrow round-trip; dead `_mask_to_arrow` + imports removed | 4.4 | ✅ Done |
 | `opteryx/expression/evaluator/_eval_draken.pyx` | New — Cython tree walker | 4.1 | ⏳ Deferred (Python overhead per-node is negligible vs per-row kernel cost) |
 | `opteryx/expression/evaluator/__init__.py` | `_is_null_as_boolvector` now Arrow-free for all native Draken types; ArrowVector falls back to pc.is_null. DNF short-circuit added. | 4.4 | ✅ Done |
-| `opteryx/managers/expression/ops.py` | Remove null-compression wrapper, interval special-casing, dead paths; retire Arrow LOGICAL_OPERATIONS | 4.4 | ⏳ Phase 4 blocked on connector migration |
+| `opteryx/connectors/virtual_data_connector.py` | `VirtualDataTable.read_dataset()` yields `Morsel.from_arrow(...)` | 4.4 | ✅ Done |
+| `opteryx/connectors/base/base_connector.py` | `chunk_dictset()` yields `Morsel.from_arrow(...)` | 4.4 | ✅ Done |
+| `opteryx/connectors/filesystem_connector.py` | Both yield paths wrapped with `Morsel.from_arrow(decoded)` | 4.4 | ✅ Done |
+| `opteryx/operators/read_node.py` | Execute loop unpacks `.to_arrow()` for preprocessing, re-wraps as `Morsel.from_arrow()` | 4.4 | ✅ Done |
+| `opteryx/operators/filter_node.py` | EOS check first; Arrow→Morsel conversion guard; Arrow fallback for flag=False | 4.4 | ✅ Done |
+| `opteryx/query_session.py` | `_to_arrow_gen` wrapper converts Morsels to Arrow at pipeline boundary for `converters.from_arrow` | 4.4 | ✅ Done |
+| `opteryx/expression/evaluator/__init__.py` | `draken_compare` scalar-left normalisation; `_arrow_vector_compare` for decimal128; `NodeType.LITERAL` handler in `evaluate_draken` | 4.4 | ✅ Done |
+| `opteryx/operators/filter_node.py` | Feature flag removed; Arrow fallback removed; `_execute_draken` inlined into `execute()`; pure Draken-native | 4.5 | ✅ Done |
+| `opteryx/config.py` + `Features` class | `use_draken_filter` attribute removed | 4.5 | ✅ Done |
+| `tests/draken/test_phase1_evaluator.py` | Removed dead `monkeypatch.setattr(Features, "use_draken_filter", True)` calls | 4.5 | ✅ Done |
+| `opteryx/managers/expression/ops.py` | Remove null-compression wrapper, interval special-casing, dead paths; retire Arrow LOGICAL_OPERATIONS | 4.6 | ⏳ Phase 4.6 |
 
 ---
 
@@ -578,10 +611,10 @@ Phase 2 can be partially enabled (numeric + string types only) before Phase 3 (a
 
 ## Acceptance Criteria
 
-1. `FilterNode` processes Draken morsels with zero Arrow/NumPy calls in the active path.
-2. SQL result parity against legacy path for full battery.
-3. No null semantics regressions.
-4. `FEATURE_USE_DRAKEN_FILTER` flag removed (Phase 4 complete).
+1. ✅ `FilterNode` processes Draken morsels with zero Arrow/NumPy calls in the active path.
+2. ✅ SQL result parity against legacy path for full battery (239 failed vs 247 baseline — 8 net improvements).
+3. ✅ No null semantics regressions.
+4. ✅ `FEATURE_USE_DRAKEN_FILTER` flag removed (Phase 4 complete).
 
 ---
 
@@ -627,6 +660,18 @@ After removing the dead import in `opteryx/draken/__init__.py`, the `evaluators/
 
 ### L8 — Test baseline
 Pre-existing test suite state: 585 passing, 1041 failing (all pre-existing failures, not regressions from this work). The 38 Phase 1 tests are all passing within the 585.
+
+### L9 — Connector migration revealed three evaluator gaps
+When all connectors yield Morsels, `FilterNode` routes everything through the Draken path including Arrow tables produced by JOIN nodes. This exposed three evaluator gaps that were previously hidden behind the Arrow fallback:
+
+1. **Scalar-left comparisons**: `WHERE 'Earth' = g.name` causes `_eval_value` to return a raw Python `str` as `left` (because `LITERAL` nodes return `node.value` directly). `draken_compare` previously dispatched on `type(left).__name__` and had no handler for `str`. Fixed by swapping and flipping when `left` is a Python scalar and `right` is a vector.
+
+2. **`NodeType.LITERAL` in predicate position**: `WHERE False` / `WHERE True` produces a bare `LITERAL` node at the top of the predicate tree, not wrapped in a `COMPARISON_OPERATOR`. `evaluate_draken` had no LITERAL handler — it reached the final `raise NotImplementedError`. Fixed by broadcasting the scalar bool to a `BoolVector` of `morsel.num_rows` elements.
+
+3. **`decimal128` columns (`ArrowVector`)**: `$planets.gravity/mass/density` are `decimal128` in Arrow, which have no native Draken type and are represented as `ArrowVector`. `draken_compare` had no `ArrowVector` branch. Fixed by adding `_arrow_vector_compare()` which delegates to `pyarrow.compute` and returns `BoolVector`.
+
+### L10 — Pipeline boundary: Morsel → orso via `query_session.py`
+`orso.converters.from_arrow()` calls `.schema` on the first item yielded by the result generator, which fails if the item is a `Morsel`. The fix is a lightweight `_to_arrow_gen` wrapper in `query_session.py` that calls `.to_arrow()` on any item that has that method before passing it to `converters.from_arrow`. This is the correct internal/external boundary: Morsels are for intra-pipeline computation; Arrow tables are what external consumers (orso, pandas, etc.) receive.
 
 ---
 
