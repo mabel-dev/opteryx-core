@@ -70,6 +70,7 @@ _FOOTER_PREFETCH = 65536
 # This reduces request overhead on object storage with negligible over-read.
 _RANGE_COALESCE_MAX_GAP_BYTES = 64
 _RANGE_COALESCE_MAX_SPAN_BYTES = 32 * 1024 * 1024
+_LOCAL_SERIAL_COMBINE_READ_RATIO = 0.5
 
 # Module-level thread pool shared across all queries (I/O bound; GIL released
 # on socket/disk reads so real parallelism is achieved).
@@ -923,6 +924,344 @@ def _decode_column_task(
     }
 
 
+def _connector_name(filesystem: Any, connector: Optional[str]) -> Optional[str]:
+    if connector:
+        return str(connector).upper()
+
+    try:
+        from opteryx.connectors.io_systems.local_filesystem import OpteryxLocalFileSystem
+
+        if isinstance(filesystem, OpteryxLocalFileSystem):
+            return "LOCAL"
+    except Exception:
+        pass
+
+    return None
+
+
+def _serial_reader_selected(
+    filesystem: Any,
+    connector: Optional[str],
+    serial_targets: frozenset[str],
+) -> bool:
+    if not serial_targets:
+        return False
+    if "ALL" in serial_targets:
+        return True
+    resolved = _connector_name(filesystem, connector)
+    return resolved in serial_targets if resolved is not None else False
+
+
+def _yield_with_scan_strategy(
+    row_groups: Iterator[Dict[str, Any]],
+    strategy: str,
+) -> Iterator[Dict[str, Any]]:
+    for row_group in row_groups:
+        row_group["__parquet_scan_strategy__"] = strategy
+        yield row_group
+
+
+def _iter_row_groups_local_serial(
+    filesystem: Any,
+    paths: List[str],
+    column_names: List[str],
+    cache: Optional[ParquetCache] = None,
+    max_workers: int = 16,
+    decoder: Optional[Any] = None,
+    predicates: Optional[List] = None,
+    file_sizes: Optional[Dict[str, int]] = None,
+    connector: Optional[str] = None,
+    prefetched_footers: Optional[Dict[str, dict]] = None,
+) -> Iterator[Dict[str, Any]]:
+    """Synchronous local-storage fast path.
+
+    This bypasses the process-ring/thread-pool schedulers entirely for local
+    storage when the feature flag is enabled. It still reads only projected
+    columns, processes one row group at a time, and issues one range read per
+    column chunk to avoid pulling unnecessary data.
+    """
+    if cache is None:
+        cache = InMemoryParquetCache()
+
+    from opteryx import config as _cfg
+
+    decoder_fn = _resolve_decoder(decoder)
+    prefetched_footers = prefetched_footers or {}
+    file_sizes = file_sizes or {}
+
+    footers: Dict[str, dict] = {}
+    footer_fetch_ns: Dict[str, int] = {}
+    unique_paths = list(dict.fromkeys(paths))
+
+    for path in unique_paths:
+        prefetch_meta = prefetched_footers.get(path)
+        if prefetch_meta is not None:
+            cache.set_footer(path, prefetch_meta)
+            footers[path] = prefetch_meta
+            footer_fetch_ns[path] = 0
+            continue
+
+        cached = cache.get_footer(path)
+        if cached is not None:
+            footers[path] = cached
+            footer_fetch_ns[path] = 0
+            continue
+
+        known_size = file_sizes.get(path)
+        if not isinstance(known_size, int) or known_size <= 0:
+            known_size = None
+
+        envelope, footer_bytes, fetch_ns = _read_footer_payload(
+            filesystem,
+            path,
+            known_size,
+            connector,
+        )
+        parse_start_ns = time.monotonic_ns()
+        meta = _parse_footer_envelope(path, envelope, footer_bytes)
+        parse_ns = time.monotonic_ns() - parse_start_ns
+        cache.set_footer(path, meta)
+        footers[path] = meta
+        footer_fetch_ns[path] = fetch_ns + parse_ns
+
+    scan_start_ns = time.monotonic_ns()
+    first_rowgroup_emit_ns: Optional[int] = None
+    rg_pruned_total = 0
+
+    trace_enabled = bool(_cfg.OPTERYX_TRACE)
+    record_event = None
+    if trace_enabled:
+        from opteryx.tracing import record_event as _record_event
+
+        record_event = _record_event
+
+    for path in paths:
+        meta = footers[path]
+        row_groups = meta.get("row_groups", [])
+
+        for rg_idx, rg_meta in enumerate(row_groups):
+            if predicates and not row_group_may_satisfy(rg_meta, predicates):
+                rg_pruned_total += 1
+                continue
+
+            rowgroup_start_ns = time.monotonic_ns()
+            name_to_stats: Dict[str, dict] = {col["name"]: col for col in rg_meta["columns"]}
+            row_group: Dict[str, Any] = {}
+            bytes_fetched = 0
+            range_request_count = 0
+            range_bytes_requested = 0
+            time_read_ranges_ns = 0
+            time_decode_columns_ns = 0
+            cache_hits = 0
+            cache_misses = 0
+            miss_work: List[Tuple[str, dict, int, int]] = []
+            projected_bytes = 0
+            rowgroup_bytes = sum(
+                int(col.get("total_compressed_size") or 0) for col in rg_meta.get("columns", [])
+            )
+
+            if trace_enabled:
+                kwargs = {
+                    "file_id": path,
+                    "component": "rowgroup",
+                    "rg_idx": rg_idx,
+                }
+                if connector:
+                    kwargs["connector"] = connector
+                record_event("decode_start", **kwargs)
+
+            for col_name in column_names:
+                col_stats = name_to_stats.get(col_name)
+                if col_stats is None:
+                    raise KeyError(
+                        f"Column '{col_name}' not found in row group {rg_idx}. "
+                        f"Available columns: {list(name_to_stats.keys())}"
+                    )
+
+                cached = cache.get_column(path, rg_idx, col_name)
+                if cached is not None:
+                    row_group[col_name] = cached
+                    cache_hits += 1
+                    continue
+
+                cache_misses += 1
+                offset, length = _column_chunk_range(col_stats)
+                projected_bytes += length
+                range_bytes_requested += length
+                miss_work.append((col_name, col_stats, offset, length))
+
+            combine_reads = (
+                bool(miss_work)
+                and rowgroup_bytes > 0
+                and projected_bytes >= (rowgroup_bytes * _LOCAL_SERIAL_COMBINE_READ_RATIO)
+            )
+
+            if combine_reads:
+                span_start = min(offset for _, _, offset, _ in miss_work)
+                span_end = max(offset + length for _, _, offset, length in miss_work)
+                span_length = span_end - span_start
+
+                if trace_enabled:
+                    kwargs = {
+                        "file_id": path,
+                        "component": "columns",
+                        "rg_idx": rg_idx,
+                        "columns": [col_name for col_name, *_ in miss_work],
+                        "ranges": 1,
+                    }
+                    if connector:
+                        kwargs["connector"] = connector
+                    record_event("download_start", **kwargs)
+
+                read_start_ns = time.monotonic_ns()
+                (span_buffer,) = filesystem.read_ranges(path, [(span_start, span_length)])
+                read_elapsed_ns = time.monotonic_ns() - read_start_ns
+                time_read_ranges_ns += read_elapsed_ns
+                bytes_fetched += len(span_buffer)
+                range_request_count += 1
+
+                if trace_enabled:
+                    kwargs = {
+                        "file_id": path,
+                        "component": "columns",
+                        "rg_idx": rg_idx,
+                        "columns": [col_name for col_name, *_ in miss_work],
+                        "bytes_received": len(span_buffer),
+                    }
+                    if connector:
+                        kwargs["connector"] = connector
+                    record_event("download_complete", **kwargs)
+
+                decoded_inputs = [
+                    (
+                        col_name,
+                        col_stats,
+                        span_buffer[offset - span_start : offset - span_start + length],
+                    )
+                    for col_name, col_stats, offset, length in miss_work
+                ]
+            else:
+                decoded_inputs = []
+                for col_name, col_stats, offset, length in miss_work:
+                    range_request_count += 1
+                    if trace_enabled:
+                        kwargs = {
+                            "file_id": path,
+                            "component": "column",
+                            "rg_idx": rg_idx,
+                            "column": col_name,
+                        }
+                        if connector:
+                            kwargs["connector"] = connector
+                        record_event("download_start", **kwargs)
+
+                    read_start_ns = time.monotonic_ns()
+                    (raw_bytes,) = filesystem.read_ranges(path, [(offset, length)])
+                    read_elapsed_ns = time.monotonic_ns() - read_start_ns
+                    time_read_ranges_ns += read_elapsed_ns
+                    bytes_fetched += len(raw_bytes)
+
+                    if trace_enabled:
+                        kwargs = {
+                            "file_id": path,
+                            "component": "column",
+                            "rg_idx": rg_idx,
+                            "column": col_name,
+                            "bytes_received": len(raw_bytes),
+                        }
+                        if connector:
+                            kwargs["connector"] = connector
+                        record_event("download_complete", **kwargs)
+
+                    decoded_inputs.append((col_name, col_stats, raw_bytes))
+
+            for col_name, col_stats, raw_bytes in decoded_inputs:
+                if trace_enabled:
+                    kwargs = {
+                        "file_id": path,
+                        "component": "column",
+                        "rg_idx": rg_idx,
+                        "column": col_name,
+                    }
+                    if connector:
+                        kwargs["connector"] = connector
+                    record_event("decode_start", **kwargs)
+
+                decode_start_ns = time.monotonic_ns()
+                decoded = decoder_fn(raw_bytes, col_stats)
+                decode_elapsed_ns = time.monotonic_ns() - decode_start_ns
+                time_decode_columns_ns += decode_elapsed_ns
+                if decoded is None:
+                    raise RuntimeError(
+                        f"Decoder returned None for column '{path}:{rg_idx}:{col_name}' "
+                        f"(codec={col_stats.get('compression_codec')}, encodings={col_stats.get('encodings')})"
+                    )
+
+                if trace_enabled:
+                    kwargs = {
+                        "file_id": path,
+                        "component": "column",
+                        "rg_idx": rg_idx,
+                        "column": col_name,
+                    }
+                    if connector:
+                        kwargs["connector"] = connector
+                    record_event("decode_complete", **kwargs)
+
+                cache.set_column(path, rg_idx, col_name, decoded)
+                row_group[col_name] = decoded
+
+            completed_ns = time.monotonic_ns()
+            if first_rowgroup_emit_ns is None:
+                first_rowgroup_emit_ns = completed_ns
+
+            if trace_enabled:
+                rows_decoded = sum(getattr(v, "num_rows", 0) for v in row_group.values())
+                kwargs = {
+                    "file_id": path,
+                    "component": "rowgroup",
+                    "rg_idx": rg_idx,
+                    "rows_decoded": rows_decoded,
+                }
+                if connector:
+                    kwargs["connector"] = connector
+                record_event("decode_complete", **kwargs)
+
+            footer_bytes = meta.get("__footer_bytes__", 0) if rg_idx == 0 else 0
+            footer_time_ns = footer_fetch_ns.get(path, 0) if rg_idx == 0 else 0
+
+            row_group["__path__"] = path
+            row_group["__row_group__"] = rg_idx
+            row_group["__bytes_fetched__"] = bytes_fetched + footer_bytes
+            row_group["__footer_bytes__"] = footer_bytes
+            row_group["__footer_fetch_ns__"] = footer_time_ns
+            row_group["__range_request_count__"] = range_request_count
+            row_group["__range_bytes_requested__"] = range_bytes_requested
+            row_group["__time_read_ranges_ns__"] = time_read_ranges_ns
+            row_group["__time_decode_columns_ns__"] = time_decode_columns_ns
+            row_group["__cache_column_hits__"] = cache_hits
+            row_group["__cache_column_misses__"] = cache_misses
+            row_group["__task_queue_wait_ns__"] = 0
+            row_group["__task_total_ns__"] = completed_ns - rowgroup_start_ns
+            row_group["__scheduler_wait_ns__"] = 0
+            row_group["__rowgroup_completion_latency_ns__"] = completed_ns - rowgroup_start_ns
+            row_group["__rowgroup_peak_in_flight__"] = 1
+            row_group["__ranges_in_flight_peak__"] = 1 if range_request_count else 0
+            row_group["__active_files_peak__"] = 1
+            row_group["__active_rowgroups_peak__"] = 1
+            row_group["__rowgroups_in_flight_cap__"] = 1
+            row_group["__emit_wait_ns__"] = 0
+            row_group["__emit_queue_depth_at_ready__"] = 0
+            row_group["__scheduler_empty_wait_ns__"] = 0
+            row_group["__scheduler_empty_wait_events__"] = 0
+            row_group["__time_to_first_rowgroup_ns__"] = (
+                completed_ns - scan_start_ns if first_rowgroup_emit_ns == completed_ns else 0
+            )
+            row_group["__row_groups_pruned__"] = rg_pruned_total
+
+            yield row_group
+
+
 def _iter_row_groups_v2(
     filesystem: Any,
     paths: List[str],
@@ -1425,23 +1764,62 @@ def iter_row_groups(
     """Yield assembled row groups using the configured scheduler implementation."""
     from opteryx.config import features
 
+    if _serial_reader_selected(filesystem, connector, features.use_serial_reader):
+        yield from _yield_with_scan_strategy(
+            _iter_row_groups_local_serial(
+                filesystem,
+                paths,
+                column_names,
+                cache=cache,
+                max_workers=max_workers,
+                decoder=decoder,
+                predicates=predicates,
+                file_sizes=file_sizes,
+                connector=connector,
+                prefetched_footers=prefetched_footers,
+            ),
+            "local_serial",
+        )
+        return
+
     if features.io_process_rowgroup_ring:
         from opteryx.parquet_io.io_process_ring import iter_row_groups_io_process_v2
 
-        yield from iter_row_groups_io_process_v2(
-            paths,
-            column_names,
-            max_workers=max_workers,
-            predicates=predicates,
-            file_sizes=file_sizes,
-            connector=connector,
-            query_id=query_id,
-            prefetched_footers=prefetched_footers,
+        yield from _yield_with_scan_strategy(
+            iter_row_groups_io_process_v2(
+                paths,
+                column_names,
+                max_workers=max_workers,
+                predicates=predicates,
+                file_sizes=file_sizes,
+                connector=connector,
+                query_id=query_id,
+                prefetched_footers=prefetched_footers,
+            ),
+            "io_process_ring",
         )
         return
 
     if features.parquet_rowgroup_scheduler_v2:
-        yield from _iter_row_groups_v2(
+        yield from _yield_with_scan_strategy(
+            _iter_row_groups_v2(
+                filesystem,
+                paths,
+                column_names,
+                cache=cache,
+                max_workers=max_workers,
+                decoder=decoder,
+                predicates=predicates,
+                file_sizes=file_sizes,
+                connector=connector,
+                prefetched_footers=prefetched_footers,
+            ),
+            "v2",
+        )
+        return
+
+    yield from _yield_with_scan_strategy(
+        _iter_row_groups_v1(
             filesystem,
             paths,
             column_names,
@@ -1452,18 +1830,6 @@ def iter_row_groups(
             file_sizes=file_sizes,
             connector=connector,
             prefetched_footers=prefetched_footers,
-        )
-        return
-
-    yield from _iter_row_groups_v1(
-        filesystem,
-        paths,
-        column_names,
-        cache=cache,
-        max_workers=max_workers,
-        decoder=decoder,
-        predicates=predicates,
-        file_sizes=file_sizes,
-        connector=connector,
-        prefetched_footers=prefetched_footers,
+        ),
+        "v1",
     )

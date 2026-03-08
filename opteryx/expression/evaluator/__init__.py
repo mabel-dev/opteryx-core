@@ -162,14 +162,18 @@ def _coerce_interval(value) -> tuple:
 def _is_null_as_boolvector(vec):
     """Return BoolVector where True = null position of vec.
 
-    TODO(Phase4): eliminate pyarrow dependency — requires native BoolVector
-    construction from int8 memoryview.
+    Uses to_arrow() + pa.compute.is_null() for portability across all vector types.
+    DictionaryVector and other types do not expose is_null() as a Python method.
+
+    TODO(Phase4): eliminate pyarrow dependency — build BoolVector directly from
+    the null_bitmap memoryview without Arrow round-trip.
     """
     import pyarrow as pa
+    import pyarrow.compute as pc
 
     from opteryx.draken.interop.arrow import vector_from_arrow
 
-    return vector_from_arrow(pa.array([x != 0 for x in vec.is_null()], type=pa.bool_()))
+    return vector_from_arrow(pc.is_null(vec.to_arrow()))
 
 
 # --- Per-type comparison dispatchers ---

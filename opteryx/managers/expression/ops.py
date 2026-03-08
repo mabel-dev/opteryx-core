@@ -470,7 +470,7 @@ def _inner_filter_operations(arr, operator, value):
             arr = vector_from_arrow(arr)
 
         matches = vector_ops.vector_in_list(arr, values)
-        return numpy.invert(matches.astype(dtype=numpy.bool_))
+        return matches.not_vector()
     if operator == "InStr":
         needle = str(value)
         # Convert Draken vectors to Arrow if needed
