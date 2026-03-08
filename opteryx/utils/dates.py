@@ -239,15 +239,11 @@ def date_trunc(truncate_to, date_values) -> numpy.ndarray:
         non_null_values = compute.drop_null(date_values)
         unit = "us"
         if len(non_null_values):
-            absolute_max = int(
-                numpy.max(numpy.abs(non_null_values.to_numpy(zero_copy_only=False)))
-            )
+            absolute_max = int(numpy.max(numpy.abs(non_null_values.to_numpy(zero_copy_only=False))))
             if absolute_max < 10**7:
                 # treat values as date32 (days since epoch).  Arrow cannot cast
                 # int64 directly to date32 so we construct the array manually.
-                date_values = pyarrow.array(
-                    date_values.to_pylist(), type=pyarrow.date32()
-                )
+                date_values = pyarrow.array(date_values.to_pylist(), type=pyarrow.date32())
                 # promote to timestamp seconds for the trunc kernel
                 date_values = compute.cast(date_values, pyarrow.timestamp("s"))
                 unit = None

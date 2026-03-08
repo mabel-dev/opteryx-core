@@ -125,6 +125,32 @@ def test_supports_accepts_nullable_group_column():
     assert DrakenAggregateAndGroupNode.supports([Agg()], [Group()])
 
 
+def test_draken_supports_max_in_fast_path():
+    """The draken planner should accept ``MAX`` aggregates when grouping."""
+
+    from opteryx.operators.draken_aggregate_and_group_node import DrakenAggregateAndGroupNode
+    from opteryx.expression import NodeType
+
+    class FieldParam:
+        node_type = NodeType.WILDCARD
+
+    class Agg:
+        value = "MAX"
+        duplicate_treatment = None
+        parameters = [FieldParam()]
+        class schema_column:
+            identity = b'val'
+
+    class Group:
+        node_type = NodeType.IDENTIFIER
+        class schema_column:
+            identity = b'key'
+
+    # sanity check constant
+    assert "MAX" in DrakenAggregateAndGroupNode.FAST_PATH_AGGREGATES
+    assert DrakenAggregateAndGroupNode.supports([Agg()], [Group()])
+
+
 def test_physical_planner_errors_when_draken_not_supported(monkeypatch):
     """When the DRAKEN flag is enabled the planner must *not* fall back to any
     Python-based aggregate implementation.  If Draken.supports() returns False the

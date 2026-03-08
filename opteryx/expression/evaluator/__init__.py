@@ -634,7 +634,18 @@ def draken_compare(op: str, left, right):
 
     if cls == "StringVector":
         result = _string_compare(op, left, right)
-    elif cls == "Int64Vector":
+    elif cls == "Int64Vector" or cls == "IntegerVector":
+        # ``IntegerVector`` is the fixed-width integer type for int8/int16/int32
+        # widths; it does not implement the same scalar comparison methods that
+        # _int64_compare expects.  Promote to a true 64-bit integer vector by
+        # casting through Arrow so the kernels are available.
+        if cls == "IntegerVector":
+            import pyarrow as pa
+
+            from opteryx.draken.interop.arrow import vector_from_arrow
+
+            arrow_arr = left.to_arrow().cast(pa.int64())
+            left = vector_from_arrow(arrow_arr)
         result = _int64_compare(op, left, right)
     elif cls == "Float64Vector":
         result = _float64_compare(op, left, right)
