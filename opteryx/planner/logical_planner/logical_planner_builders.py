@@ -21,6 +21,12 @@ from typing import Tuple
 import numpy
 from orso.types import OrsoTypes
 
+# Epoch constants for converting datetime literals to Draken-native integers.
+# DATE literals are stored as int (days since epoch, fits int32).
+# TIMESTAMP literals are stored as int (microseconds since epoch, int64).
+_EPOCH_DATE = datetime.date(1970, 1, 1)
+_EPOCH_DT = datetime.datetime(1970, 1, 1)
+
 from opteryx import functions
 from opteryx import operators
 from opteryx.datatypes.intervals import MICROSECONDS_PER_DAY
@@ -88,21 +94,26 @@ def _as_binary_operand_array(value, value_type):
             raise UnsupportedSyntaxError(
                 "Unable to parse timestamp value in time-travel expression."
             )
-        return numpy.array([numpy.datetime64(timestamp, "us")])
+        return numpy.array([int((timestamp - _EPOCH_DT).total_seconds() * 1_000_000)])
     if value_type == OrsoTypes.DATE:
         dt = dates.parse_iso(value)
         if dt is None:
             raise UnsupportedSyntaxError("Unable to parse date value in time-travel expression.")
-        return numpy.array([numpy.datetime64(dt.date(), "D")])
+        return numpy.array([(dt.date() - _EPOCH_DATE).days])
     return numpy.array([value])
 
 
 def _as_function_parameter_array(value, value_type):
-    if value_type in (OrsoTypes.TIMESTAMP, OrsoTypes.DATE):
+    if value_type == OrsoTypes.TIMESTAMP:
         dt = dates.parse_iso(value)
         if dt is None:
             raise UnsupportedSyntaxError("Unable to parse temporal function argument.")
-        return numpy.array([numpy.datetime64(dt, "us")])
+        return numpy.array([int((dt - _EPOCH_DT).total_seconds() * 1_000_000)])
+    if value_type == OrsoTypes.DATE:
+        dt = dates.parse_iso(value)
+        if dt is None:
+            raise UnsupportedSyntaxError("Unable to parse temporal function argument.")
+        return numpy.array([(dt.date() - _EPOCH_DATE).days])
     return numpy.array([value])
 
 
@@ -948,13 +959,13 @@ def literal_string(branch, alias: Optional[List[str]] = None, key=None):
                 return Node(
                     NodeType.LITERAL,
                     type=OrsoTypes.DATE,
-                    value=numpy.datetime64(dte_value, "D"),
+                    value=(dte_value.date() - _EPOCH_DATE).days,
                     alias=alias,
                 )
             return Node(
                 NodeType.LITERAL,
                 type=OrsoTypes.TIMESTAMP,
-                value=numpy.datetime64(dte_value, "us"),
+                value=int((dte_value - _EPOCH_DT).total_seconds() * 1_000_000),
                 alias=alias,
             )
     return Node(NodeType.LITERAL, type=OrsoTypes.VARCHAR, value=branch, alias=alias)
@@ -1102,8 +1113,8 @@ def typed_string(branch, alias: Optional[List[str]] = None, key=None):
     data_value = build(branch["value"]).value
 
     Datatype_Map: Dict[str, Tuple[str, Callable]] = {
-        "TIMESTAMP": (OrsoTypes.TIMESTAMP, lambda x: numpy.datetime64(x, "us")),
-        "DATE": (OrsoTypes.DATE, lambda x: numpy.datetime64(x, "D")),
+        "TIMESTAMP": (OrsoTypes.TIMESTAMP, lambda x: int((dates.parse_iso(x) - _EPOCH_DT).total_seconds() * 1_000_000)),
+        "DATE": (OrsoTypes.DATE, lambda x: (dates.parse_iso(x).date() - _EPOCH_DATE).days),
         "INTEGER": (OrsoTypes.INTEGER, numpy.int64),
         "DOUBLE": (OrsoTypes.DOUBLE, numpy.float64),
         "DECIMAL": (OrsoTypes.DECIMAL, decimal.Decimal),

@@ -238,20 +238,34 @@ def binary_operations(
         and left_type in (OrsoTypes.DATE, OrsoTypes.TIMESTAMP)
         and right_type in (OrsoTypes.DATE, OrsoTypes.TIMESTAMP)
     ):
-        # substracting dates results in an INTERVAL (months, seconds)
-        arr = OPERATOR_FUNCTION_MAP["Minus"](left, right)
-        arr64 = arr.astype(numpy.int64)
+        # date - date = INTERVAL (months=0, microseconds=days_diff * MICROS_PER_DAY)
+        # Normalise both sides to a pyarrow date32 or timestamp array — avoids the
+        # numpy object-array-of-datetime.date path that breaks astype(int64).
+        from opteryx.datatypes.intervals import _intervals_to_month_day_nano
 
-        # Arrow represents nulls as INT64_MIN
-        null_mask = arr64 == numpy.iinfo(numpy.int64).min
-        if arr.dtype.name == "timedelta64[D]":
-            result = [
-                (None if is_null else (0, v * MICROSECONDS_PER_DAY))
-                for v, is_null in zip(arr64, null_mask)
-            ]
-        else:
-            result = [(0, v) if not is_null else None for v, is_null in zip(arr64, null_mask)]
-        return pyarrow.array(result)
+        def _to_pyarrow_date(arr):
+            if hasattr(arr, "to_arrow"):
+                return arr.to_arrow()
+            if isinstance(arr, pyarrow.ChunkedArray):
+                return arr.combine_chunks() if arr.num_chunks > 1 else arr.chunk(0)
+            if isinstance(arr, pyarrow.Array):
+                return arr
+            # numpy object array (datetime.date values from _inner_evaluate)
+            return pyarrow.array(arr)
+
+        left_arr = _to_pyarrow_date(left)
+        right_arr = _to_pyarrow_date(right)
+
+        # Cast to int32 days-since-epoch (date32 → int32 is zero-copy in Arrow)
+        left_days = left_arr.cast(pyarrow.int32())
+        right_days = right_arr.cast(pyarrow.int32())
+        day_diff = compute.subtract(left_days, right_days)
+
+        rows = [
+            None if not d.is_valid else (0, d.as_py() * MICROSECONDS_PER_DAY)
+            for d in day_diff
+        ]
+        return _intervals_to_month_day_nano(rows)
 
     elif operator == "BitwiseOr" and OrsoTypes.VARCHAR in (left_type, right_type):
         return _ip_containment(left, right)
