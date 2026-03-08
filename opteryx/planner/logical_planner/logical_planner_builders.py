@@ -151,6 +151,39 @@ def _interval_to_past_timestamp(interval_value):
     return dt - datetime.timedelta(microseconds=microseconds)
 
 
+def _apply_interval_scalar(base_value, base_type, interval_value, operator: str):
+    """Apply an INTERVAL to a DATE or TIMESTAMP scalar.
+
+    The expression engine relies on the generic ``binary_operations`` path
+    which converts dates to plain integers.  Unfortunately the interval
+    kernels expect a PyArrow temporal array and therefore return ``null``
+    when provided with a raw integer.  That bug manifests during
+    timetravel evaluation, e.g. ``CURRENT_DATE - INTERVAL '7' DAY``;
+    the arithmetic ends up producing ``None`` which is later treated as a
+    failure to resolve the expression.
+
+    To keep the timetravel evaluator simple we perform the arithmetic
+    ourselves using Python's ``datetime`` helpers.  This bypasses the
+    broken kernel and ensures the result is a sensible ``datetime``.
+    The returned value is always a ``datetime.datetime`` so that callers
+    can assume a timestamp-like object (even if the input was a plain
+    date).
+    """
+    # convert date-only values into datetimes at midnight
+    if isinstance(base_value, datetime.date) and not isinstance(base_value, datetime.datetime):
+        result = datetime.datetime.combine(base_value, datetime.time())
+    else:
+        result = base_value
+
+    sign = 1 if operator == "Plus" else -1
+    months, micros = interval_value
+    if months:
+        result = dates.add_months(result, sign * int(months))
+    if micros:
+        result = result + datetime.timedelta(microseconds=sign * int(micros))
+    return result
+
+
 def _evaluate_timetravel_expression(node, apply_interval_literal_to_now: bool = False):
     if node.node_type == NodeType.LITERAL:
         if node.type == OrsoTypes.INTERVAL and apply_interval_literal_to_now:
@@ -191,6 +224,28 @@ def _evaluate_timetravel_expression(node, apply_interval_literal_to_now: bool = 
         left_value, left_type = _evaluate_timetravel_expression(node.left)
         right_value, right_type = _evaluate_timetravel_expression(node.right)
 
+        # short‑circuit arithmetic when one side is a DATE/TIMESTAMP and the
+        # other is an INTERVAL.  The generic kernel path converts dates to
+        # plain integers which then causes ``IntervalVector.apply_to_temporal``
+        # to bail out and return null.  We can evaluate these cases directly
+        # using Python's datetime helpers.
+        if node.value in ("Plus", "Minus"):
+            if (
+                left_type in (OrsoTypes.DATE, OrsoTypes.TIMESTAMP)
+                and right_type == OrsoTypes.INTERVAL
+            ):
+                return _apply_interval_scalar(
+                    left_value, left_type, right_value, node.value
+                ), OrsoTypes.TIMESTAMP
+            if left_type == OrsoTypes.INTERVAL and right_type in (
+                OrsoTypes.DATE,
+                OrsoTypes.TIMESTAMP,
+            ):
+                # interval +/- date is effectively the same as date +/- interval
+                return _apply_interval_scalar(
+                    right_value, right_type, left_value, node.value
+                ), OrsoTypes.TIMESTAMP
+
         left = _as_binary_operand_array(left_value, left_type)
         right = _as_binary_operand_array(right_value, right_type)
 
@@ -226,21 +281,23 @@ def _extract_version_expression(version_clause):
     if "TimestampAsOf" in version_clause:
         # Legacy/alternate parser shape:
         # {"TimestampAsOf": <expr>}
-        return version_clause["TimestampAsOf"], False
+        return version_clause["TimestampAsOf"]
 
     if "Function" in version_clause:
         function_wrapper = version_clause["Function"]
         function_branch = function_wrapper.get("Function", function_wrapper)
     else:
         raise UnsupportedSyntaxError(
-            "Unsupported table version syntax. Use `AT(...)`, `BEFORE(...)`, or `FOR SYSTEM_TIME AS OF ...`."
+            "Unsupported table version syntax. Use `TIMESTAMP AS OF <expression>`."
         )
 
     if "Function" in function_branch:
         function_branch = function_branch["Function"]
 
     if "name" not in function_branch:
-        raise UnsupportedSyntaxError("Invalid time-travel clause.")
+        raise UnsupportedSyntaxError(
+            "Invalid time-travel clause, use `TIMESTAMP AS OF <expression>`."
+        )
 
     function_name = function_branch["name"][0]["Identifier"]["value"].upper()
     if function_name != "AT":
@@ -250,7 +307,9 @@ def _extract_version_expression(version_clause):
 
     args = function_branch.get("args", {}).get("List", {}).get("args", [])
     if len(args) != 1:
-        raise UnsupportedSyntaxError(f"AT expects exactly 1 argument, got {len(args)}.")
+        raise UnsupportedSyntaxError(
+            f"Time-travel syntax expects exactly 1 argument, got {len(args)}."
+        )
 
     warnings.warn(
         "AT(TIMESTAMP => ...) is deprecated. Use `TIMESTAMP AS OF <expression>` instead.",
@@ -263,9 +322,9 @@ def _extract_version_expression(version_clause):
         named_arg = arg["Named"]
         if named_arg["name"]["value"].upper() != "TIMESTAMP":
             raise UnsupportedSyntaxError("Time-travel named argument must be TIMESTAMP => <expr>.")
-        return named_arg["arg"]["Expr"], False
+        return named_arg["arg"]["Expr"]
 
-    raise UnsupportedSyntaxError("AT syntax must be `AT(TIMESTAMP => <expression>)`.")
+    raise UnsupportedSyntaxError("Time-travel syntax must be `TIMESTAMP AS OF <expression>`.")
 
 
 def extract_timetravel_timestamp(version_clause) -> Optional[object]:
@@ -291,20 +350,18 @@ def extract_timetravel_timestamp(version_clause) -> Optional[object]:
     if version_clause is None:
         return None
 
-    expression_ast, is_before = _extract_version_expression(version_clause)
+    expression_ast = _extract_version_expression(version_clause)
     expression_node = build(expression_ast)
     value, _ = _evaluate_timetravel_expression(expression_node, apply_interval_literal_to_now=True)
-    parsed_timestamp = _coerce_to_datetime(value)
 
-    if parsed_timestamp is None:
+    print(expression_ast, expression_node, value)
+
+    if value is None:
         raise UnsupportedSyntaxError(
-            "Time-travel expression must evaluate to a timestamp-compatible scalar value."
+            "Time-travel expression must be `TIMESTAMP AS OF <expression>`."
         )
 
-    if is_before:
-        parsed_timestamp = parsed_timestamp - datetime.timedelta(microseconds=1)
-
-    return parsed_timestamp
+    return value
 
 
 def any_op(branch, alias: Optional[List[str]] = None, key=None):

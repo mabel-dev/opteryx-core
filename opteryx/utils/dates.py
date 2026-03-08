@@ -229,14 +229,27 @@ def date_trunc(truncate_to, date_values) -> numpy.ndarray:
     if pyarrow.types.is_date32(value_type) or pyarrow.types.is_date64(value_type):
         date_values = compute.cast(date_values, pyarrow.timestamp("us"))
     elif pyarrow.types.is_integer(value_type):
+        # PyArrow currently does not support a direct cast from int64 to date32
+        # (see ARROW-XXXX).  Our earlier approach relied on the kernel to handle
+        # this, which raised ``ArrowNotImplementedError`` when the integer array
+        # was promoted to int64 (the common case with dates represented as days
+        # since epoch).  Work around the limitation by constructing a new
+        # array with the desired logical type before performing further
+        # conversions.
         non_null_values = compute.drop_null(date_values)
         unit = "us"
         if len(non_null_values):
-            absolute_max = int(numpy.max(numpy.abs(non_null_values.to_numpy(zero_copy_only=False))))
+            absolute_max = int(
+                numpy.max(numpy.abs(non_null_values.to_numpy(zero_copy_only=False)))
+            )
             if absolute_max < 10**7:
-                date_values = compute.cast(
-                    compute.cast(date_values, pyarrow.date32()), pyarrow.timestamp("s")
+                # treat values as date32 (days since epoch).  Arrow cannot cast
+                # int64 directly to date32 so we construct the array manually.
+                date_values = pyarrow.array(
+                    date_values.to_pylist(), type=pyarrow.date32()
                 )
+                # promote to timestamp seconds for the trunc kernel
+                date_values = compute.cast(date_values, pyarrow.timestamp("s"))
                 unit = None
             elif absolute_max < 10**11:
                 unit = "s"

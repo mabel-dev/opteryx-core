@@ -613,7 +613,7 @@ def _inner_filter_operations(arr, operator, value):
         if not value.startswith("$."):
             # Not a JSONPath, treat as a simple key existence check
             return pyarrow.array(
-                [value in parser.parse(doc).keys() for doc in arr],
+                [value in parser.parse(doc) for doc in arr],
                 type=pyarrow.bool_(),  # type: ignore
             )
 
