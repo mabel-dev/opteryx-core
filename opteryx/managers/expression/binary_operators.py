@@ -281,6 +281,7 @@ OPERATOR_FUNCTION_MAP: Dict[str, Any] = {
     "MapAccess": MapAccessOp,
 }
 
-BINARY_OPERATORS = set(OPERATOR_FUNCTION_MAP.keys())
+BINARY_OPERATORS = set(OPERATOR_FUNCTION_MAP.keys()) - {"Arrow", "LongArrow", "MapAccess"}
+EXTRACTION_OPERATORS = {"Arrow", "LongArrow", "MapAccess"}
 
 # fmt:on

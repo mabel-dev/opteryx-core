@@ -82,6 +82,7 @@ class NodeType(int, Enum):
     EXPRESSION_LIST = 43  # 0010 1011 (CASE WHEN)
     EVALUATED = 44  # 0010 1100 - memoize results
     CAST = 45  # 0010 1101 - type casting
+    EXTRACTION_OPERATOR = 46  # 0010 1110 - value extraction: ->, ->>, []
 
 
 LOGICAL_OPERATIONS: Dict[NodeType, Callable] = {
@@ -374,6 +375,17 @@ def _inner_evaluate(root: Node, table: Table):
                 root.right.schema_column.type,
             )
             return result
+        if node_type == NodeType.EXTRACTION_OPERATOR:
+            left = _inner_evaluate(root.left, table)
+            right = _inner_evaluate(root.right, table)
+            result = binary_operations(
+                left,
+                root.left.schema_column.type,
+                root.value,
+                right,
+                root.right.schema_column.type,
+            )
+            return result
         if node_type == NodeType.WILDCARD:
             return numpy.full(table.num_rows, "*", dtype=numpy.str_)
         if node_type == NodeType.SUBQUERY:
@@ -597,6 +609,7 @@ def should_evaluate(statement):
         NodeType.FUNCTION,
         NodeType.CAST,
         NodeType.BINARY_OPERATOR,
+        NodeType.EXTRACTION_OPERATOR,
         NodeType.COMPARISON_OPERATOR,
         NodeType.UNARY_OPERATOR,
         NodeType.NESTED,

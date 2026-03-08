@@ -863,6 +863,81 @@ cdef class DictionaryVector(Vector):
 
         return out
 
+    cpdef BoolVector is_null_boolvector(self):
+        """Return a BoolVector where True = SQL NULL position.
+
+        Handles both null-bitmap nulls (ptr.null_bitmap) and NaN-encoded nulls
+        in float32/float64 dictionary values. No Arrow round-trip.
+        """
+        cdef DrakenDictionaryBuffer* ptr = self.ptr
+        cdef DrakenVarBuffer* dict_buf = ptr.dictionary_values
+        cdef Py_ssize_t n = ptr.length
+        cdef Py_ssize_t nbytes = (n + 7) >> 3
+        cdef Py_ssize_t dict_n = 0
+        cdef Py_ssize_t i
+        cdef uint32_t code
+        cdef uint8_t byte
+        cdef uint8_t* dict_null = NULL
+        cdef BoolVector out = BoolVector(<size_t>n)
+        cdef uint8_t* out_bits = <uint8_t*>out.ptr.data
+        cdef int dict_type = DRAKEN_STRING
+        cdef float fval
+        cdef double dval
+
+        if nbytes > 0:
+            memset(out_bits, 0, nbytes)
+        out.ptr.null_bitmap = NULL
+
+        if dict_buf != NULL:
+            dict_n = dict_buf.length
+            dict_type = dict_buf.type
+
+        if dict_n > 0:
+            dict_null = <uint8_t*>malloc(dict_n)
+            if dict_null == NULL:
+                raise MemoryError()
+            memset(dict_null, 0, dict_n)
+            try:
+                for i in range(dict_n):
+                    # Dict-level null bitmap (proper Arrow nulls in the dictionary)
+                    if dict_buf.null_bitmap != NULL:
+                        byte = dict_buf.null_bitmap[i >> 3]
+                        if ((byte >> (i & 7)) & 1) == 0:
+                            dict_null[i] = 1
+                            continue
+                    # NaN-encoded null — float32/float64 only (IEEE 754: NaN != NaN)
+                    if dict_type == DRAKEN_FLOAT32:
+                        fval = (<float*>dict_buf.data)[i]
+                        if fval != fval:
+                            dict_null[i] = 1
+                    elif dict_type == DRAKEN_FLOAT64:
+                        dval = (<double*>dict_buf.data)[i]
+                        if dval != dval:
+                            dict_null[i] = 1
+
+                for i in range(n):
+                    # Row-level null bitmap (proper Arrow nulls on the indices)
+                    if ptr.null_bitmap != NULL:
+                        byte = ptr.null_bitmap[i >> 3]
+                        if ((byte >> (i & 7)) & 1) == 0:
+                            _set_true_bit(out_bits, i)
+                            continue
+                    # Dict-level null (NaN or bitmap)
+                    code = _read_code(ptr, i)
+                    if code < <uint32_t>dict_n and dict_null[code] != 0:
+                        _set_true_bit(out_bits, i)
+            finally:
+                free(dict_null)
+        else:
+            # Empty dictionary — only row-level bitmap nulls possible
+            if ptr.null_bitmap != NULL:
+                for i in range(n):
+                    byte = ptr.null_bitmap[i >> 3]
+                    if ((byte >> (i & 7)) & 1) == 0:
+                        _set_true_bit(out_bits, i)
+
+        return out
+
     cpdef BoolVector less_than(self, object literal):
         return self._compare_numeric(literal, 0)
 
