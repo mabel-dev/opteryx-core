@@ -261,10 +261,7 @@ def binary_operations(
         right_days = right_arr.cast(pyarrow.int32())
         day_diff = compute.subtract(left_days, right_days)
 
-        rows = [
-            None if not d.is_valid else (0, d.as_py() * MICROSECONDS_PER_DAY)
-            for d in day_diff
-        ]
+        rows = [None if not d.is_valid else (0, d.as_py() * MICROSECONDS_PER_DAY) for d in day_diff]
         return _intervals_to_month_day_nano(rows)
 
     elif operator == "BitwiseOr" and OrsoTypes.VARCHAR in (left_type, right_type):

@@ -353,7 +353,7 @@ class Features:
     force_nested_loop_join = bool(get("FEATURE_FORCE_NESTED_LOOP_JOIN", False))
     enable_free_threading = bool(get("FEATURE_ENABLE_FREE_THREADING", False))
     use_draken_ops_kernels = bool(get("FEATURE_USE_DRAKEN_OPS_KERNELS", False))
-    use_draken_filter = bool(get("FEATURE_USE_DRAKEN_FILTER", False))
+    use_draken_filter = bool(get("FEATURE_USE_DRAKEN_FILTER", True))
     use_draken_aggregator = str(get("FEATURE_USE_DRAKEN_AGGREGATOR", "0")).lower() in (
         "1",
         "true",

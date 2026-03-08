@@ -99,7 +99,9 @@ def date_part(part, arr):
         "epoch": lambda x: compute.divide(compute.cast(x, "int64"), 1_000_000.0),
         "julian": lambda x: compute.add(
             compute.divide(
-                compute.milliseconds_between(compute.cast(x, pyarrow.timestamp("ms")), j2000_scalar),
+                compute.milliseconds_between(
+                    compute.cast(x, pyarrow.timestamp("ms")), j2000_scalar
+                ),
                 86_400_000.0,
             ),
             2_451_545.0,
@@ -162,7 +164,11 @@ def date_diff(part, start, end):
             arr = arr.combine_chunks() if arr.num_chunks > 1 else arr.chunk(0)
         if isinstance(arr, pyarrow.Array):
             if pyarrow.types.is_timestamp(arr.type):
-                return arr if arr.type == pyarrow.timestamp("us") else arr.cast(pyarrow.timestamp("us"))
+                return (
+                    arr
+                    if arr.type == pyarrow.timestamp("us")
+                    else arr.cast(pyarrow.timestamp("us"))
+                )
             if pyarrow.types.is_date32(arr.type):
                 return arr.cast(pyarrow.timestamp("us"))
             return arr.cast(pyarrow.timestamp("us"))

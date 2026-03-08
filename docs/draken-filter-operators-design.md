@@ -474,7 +474,7 @@ File: `opteryx/compiled/vector_ops/bool_vector_ops.pyx`
 
 #### 4.4 — Remove feature flag and legacy filter path
 
-- [ ] Set `FEATURE_USE_DRAKEN_FILTER = True` as default; bake in for one release cycle
+- [x] Set `FEATURE_USE_DRAKEN_FILTER = True` as default — **done March 8, 2026**; bake in for one release cycle before removing flag
 - [ ] Remove flag and Arrow fallback branch from `filter_node.py`
 - [ ] Remove `ensure_arrow_table` call from filter node entirely
 - [ ] Remove Arrow interval special-handling from `ops.py` (replaced by `IntervalVector` methods)
