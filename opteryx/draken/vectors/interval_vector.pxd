@@ -24,6 +24,13 @@ cdef class IntervalVector(Vector):
     cpdef IntervalVector add_vector(self, IntervalVector other)
     cpdef IntervalVector subtract_vector(self, IntervalVector other)
     cpdef BoolVector compare_vector(self, IntervalVector other, int8_t operation, bint reject_month_components=*)
+    cdef BoolVector _compare_scalar(self, int64_t sc_months, int64_t sc_microseconds, int8_t operation, bint reject_month_components)
+    cpdef BoolVector equals(self, object literal)
+    cpdef BoolVector not_equals(self, object literal)
+    cpdef BoolVector less_than(self, object literal)
+    cpdef BoolVector greater_than(self, object literal)
+    cpdef BoolVector less_than_or_equals(self, object literal)
+    cpdef BoolVector greater_than_or_equals(self, object literal)
     cpdef object apply_to_temporal(self, object values, int8_t signum=*)
 
     cpdef uint64_t[::1] hash(self)

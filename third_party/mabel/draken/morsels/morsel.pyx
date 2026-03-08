@@ -961,6 +961,10 @@ cdef class Morsel:
                         indices_ptr[selected] = <int32_t> i
                         selected += 1
 
+                if selected == 0:
+                    self._empty_inplace()
+                    return
+
                 indices_view = <int32_t[:selected]> indices_ptr
                 self._take_inplace(indices_view)
                 return
