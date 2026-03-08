@@ -22,6 +22,15 @@ cdef class StringVector(Vector):
     cdef bint owns_data
 
     cpdef BoolVector equals(self, bytes value)
+    cpdef BoolVector not_equals(self, bytes value)
+    cpdef BoolVector less_than(self, bytes value)
+    cpdef BoolVector greater_than(self, bytes value)
+    cpdef BoolVector less_than_or_equals(self, bytes value)
+    cpdef BoolVector greater_than_or_equals(self, bytes value)
+    cpdef BoolVector in_list(self, object value_set)
+    cpdef BoolVector like(self, bytes pattern, bint ignore_case=*)
+    cpdef BoolVector rlike(self, bytes pattern)
+    cpdef BoolVector contains(self, bytes substr, bint ignore_case=*)
     cdef void hash_into(self, uint64_t[::1] out_buf, Py_ssize_t offset=*) except *
     cpdef StringVector take(self, int32_t[::1] indices)
 
