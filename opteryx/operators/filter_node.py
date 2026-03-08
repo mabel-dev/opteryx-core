@@ -46,22 +46,23 @@ class FilterNode(BasePlanNode):
     def name(self):  # pragma: no cover
         return "Filter"
 
-    def execute(self, morsel: pyarrow.Table, **kwargs) -> pyarrow.Table:
+    def execute(self, morsel, **kwargs):
         from opteryx.config import Features
-
-        if (
-            Features.use_draken_filter
-            and morsel.__class__.__name__ == "Morsel"
-            and morsel is not EOS
-        ):
-            yield from self._execute_draken(morsel)
-            return
-
-        morsel = self.ensure_arrow_table(morsel)
 
         if morsel is EOS:
             yield EOS
             return
+
+        if Features.use_draken_filter:
+            if morsel.__class__.__name__ != "Morsel":
+                from opteryx.draken.morsels.morsel import Morsel
+
+                morsel = Morsel.from_arrow(morsel)
+            yield from self._execute_draken(morsel)
+            return
+
+        # Arrow fallback (only when FEATURE_USE_DRAKEN_FILTER=False)
+        morsel = self.ensure_arrow_table(morsel)
 
         if morsel.num_rows == 0:
             yield morsel

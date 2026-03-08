@@ -23,6 +23,7 @@ from opteryx.connectors.base.base_connector import BaseConnector
 from opteryx.connectors.base.base_connector import BaseTable
 from opteryx.connectors.capabilities import LimitPushable
 from opteryx.connectors.capabilities import PredicatePushable
+from opteryx.draken.morsels.morsel import Morsel
 from opteryx.exceptions import DataError
 from opteryx.exceptions import DatasetNotFoundError
 from opteryx.exceptions import EmptyDatasetError
@@ -187,7 +188,7 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
         predicates: list = None,
         just_schema: bool = False,
         **kwargs,
-    ) -> pyarrow.Table:
+    ) -> Morsel:
         """
         Read the entire dataset from the filesystem.
 
@@ -197,7 +198,7 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
             just_schema: If True, only return schema
 
         Yields:
-            PyArrow Tables or schemas
+            Morsel or schemas
         """
         blob_names = self.get_list_of_blob_names(prefix=self.dataset, predicates=predicates or [])
         blob_names = [name for name in blob_names if name.lower().endswith(PARQUET_SUFFIX)]
@@ -271,7 +272,7 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
                     ) from err
 
                 decoded = process_result(num_rows, raw_size, decoded)
-                yield decoded
+                yield Morsel.from_arrow(decoded)
         else:
             # Multi-threaded path
             blob_iter = iter(blob_names)
@@ -308,7 +309,7 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
                         ) from err
                     else:
                         decoded = process_result(num_rows, raw_size, decoded)
-                        yield decoded
+                        yield Morsel.from_arrow(decoded)
 
                     try:
                         next_blob = next(blob_iter)

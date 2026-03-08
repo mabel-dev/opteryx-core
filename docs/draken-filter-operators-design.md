@@ -355,10 +355,10 @@ Target file: `opteryx/expression/evaluator/__init__.py` (extend; `apply_bounded_
 - [x] `NodeType.NOT` → `BoolVector.not_vector()`
 - [x] `NodeType.XOR` → `BoolVector.xor_vector()`
 - [x] `NodeType.UNARY_OPERATOR` dispatches `IS NULL` / `IS NOT NULL` / `IS TRUE` / `IS FALSE`
-- [x] IS NULL uses `_is_null_as_boolvector` (still uses pyarrow internally — TODO Phase 4)
+- [x] IS NULL uses `_is_null_as_boolvector` (Arrow-free for all native types; ArrowVector falls back to `pc.is_null` since it wraps a PyArrow array)
 - [x] `NodeType.FUNCTION` → `apply_bounded_function(node, morsel)` (existing)
-- [x] `NodeType.DNF` handled (nested AND of OR conditions)
-- [x] No `import pyarrow` or `import numpy` in the dispatch/walker path (pyarrow used only inside `_is_null_as_boolvector`)
+- [x] `NodeType.DNF` handled (nested AND, with short-circuit early exit)
+- [x] No `import pyarrow` or `import numpy` in the dispatch/walker path (pyarrow used only inside `_is_null_as_boolvector` ArrowVector fallback)
 
 #### 1.3 — `evaluate_and_append_draken`
 
@@ -451,24 +451,28 @@ File: `opteryx/expression/evaluator/_eval_draken.pyx` (new)
 - [ ] Re-export from `opteryx/expression/evaluator/__init__.py`
 - [ ] Benchmark: morsel filter time before/after for 5-condition AND query
 
+**Deferred**: tree-walker Python overhead is O(nodes), not O(rows). For typical
+morsels (128 K rows) this is negligible vs. the per-row comparison kernel cost.
+Will revisit if profiling shows measurable impact.
+
 #### 4.2 — AND-chain compaction kernel
 
 File: `opteryx/compiled/vector_ops/bool_vector_ops.pyx`
 
-- [ ] Add `kleene_and_chain(list masks, bint short_circuit) -> BoolVector`
-- [ ] Iterate raw BoolVector bitmap buffers with early exit when running mask is all-false
+- [x] Added `bool_vector_and_chain(list masks) -> BoolVector` with early exit when running mask is all-false
+- [x] DNF path in `evaluate_draken` now short-circuits via `.any()` check between sub-expressions
 
 #### 4.3 — BoolVector → indices bridge
 
 File: `opteryx/compiled/vector_ops/bool_vector_ops.pyx`
 
-- [ ] Add `bool_vector_to_int32_indices(BoolVector mask) -> int32_t[::1]`
-- [ ] Single-pass bitmap scan using byte-level bit manipulation
-- [ ] Benchmark against `_filter_mask_inplace` to decide which path `apply_bool_vector_filter` should use
+- [x] `bool_vector_to_int32_indices` not added as a standalone function — `filter_mask_inplace` in `morsel.pyx` already handles BoolVector → indices internally. External callers use `morsel.filter_mask(bool_vector)`.
+- [x] Added `bool_vector_from_int8_mask`, `bool_vector_from_inverted_null_bitmap`, `bool_vector_all_true` as construction helpers used by `_is_null_as_boolvector`
 
 #### 4.4 — Remove feature flag and legacy filter path
 
 - [x] Set `FEATURE_USE_DRAKEN_FILTER = True` as default — **done March 8, 2026**
+- [x] `_is_null_as_boolvector` now Arrow-free for all native Draken types (DictionaryVector, fixed-buffer types, ConstantVector, StringVector/ArrayVector via `null_bitmap()`); ArrowVector keeps Arrow path since it wraps a PyArrow array
 - [ ] Remove flag and Arrow fallback branch from `filter_node.py` — **blocked**: connectors (`base_connector.py`, `virtual_data_connector.py`, `filesystem_connector.py`) still yield `pyarrow.Table`; Arrow fallback in FilterNode remains until those connectors are migrated to Draken Morsels
 - [ ] Remove `ensure_arrow_table` call from filter node entirely (same blocker)
 - [ ] Remove Arrow interval special-handling from `ops.py` (replaced by `IntervalVector` methods)
@@ -506,7 +510,7 @@ Phase 2 can be partially enabled (numeric + string types only) before Phase 3 (a
 |---|---|---|---|
 | `third_party/mabel/draken/morsels/morsel.pyx` | Bugfix: zero-row crash in `_filter_mask_inplace`; ~~`apply_bool_vector_filter`~~ not needed | 0.1 | ✅ Done |
 | `tests/unit/draken/test_vector_null_propagation.py` | Covered by Phase 1.5 unit tests instead | 0.2 | ✅ Done (merged) |
-| `opteryx/compiled/vector_ops/bool_vector_ops.pyx` | ~~Kleene AND/OR~~ not needed. AND-chain + indices kernels still Phase 4. | 0.3, 4.2, 4.3 | ⏳ Phase 4 only |
+| `opteryx/compiled/vector_ops/bool_vector_ops.pyx` | New — `bool_vector_and_chain` (short-circuit AND), `bool_vector_from_int8_mask`, `bool_vector_from_inverted_null_bitmap`, `bool_vector_all_true` | 0.3, 4.2, 4.3 | ✅ Done |
 | `opteryx/draken/vectors/string_vector.pyx` + `.pxd` | Added 9 comparison kernels | 0.4 | ✅ Done |
 | `opteryx/compiled/vector_ops/vector_in_list_numeric.pyx` | New — shared numeric in_list kernel | 0.5 | ✅ Done |
 | `opteryx/draken/vectors/int64_vector.pyx` + `.pxd` | Added `in_list` wrapper | 0.5 | ✅ Done |
@@ -528,8 +532,9 @@ Phase 2 can be partially enabled (numeric + string types only) before Phase 3 (a
 | `opteryx/managers/expression/binary_operators.py` | Split `EXTRACTION_OPERATORS` from `BINARY_OPERATORS` | 3.2 | ✅ Done |
 | `tests/draken/test_phase3_array_ops.py` | New — 48 tests, all passing | 3.4 | ✅ Done |
 | `opteryx/operators/parquet_read_node.py` | `_apply_predicates_to_morsel` rewritten — Draken-native, no Arrow round-trip; dead `_mask_to_arrow` + imports removed | 4.4 | ✅ Done |
-| `opteryx/expression/evaluator/_eval_draken.pyx` | New — Cython tree walker | 4.1 | ⏳ Phase 4 |
-| `opteryx/managers/expression/ops.py` | Remove null-compression wrapper, interval special-casing, dead paths; retire Arrow LOGICAL_OPERATIONS | 4.4 | ⏳ Phase 4 |
+| `opteryx/expression/evaluator/_eval_draken.pyx` | New — Cython tree walker | 4.1 | ⏳ Deferred (Python overhead per-node is negligible vs per-row kernel cost) |
+| `opteryx/expression/evaluator/__init__.py` | `_is_null_as_boolvector` now Arrow-free for all native Draken types; ArrowVector falls back to pc.is_null. DNF short-circuit added. | 4.4 | ✅ Done |
+| `opteryx/managers/expression/ops.py` | Remove null-compression wrapper, interval special-casing, dead paths; retire Arrow LOGICAL_OPERATIONS | 4.4 | ⏳ Phase 4 blocked on connector migration |
 
 ---
 
@@ -606,8 +611,16 @@ indices_view = <int32_t[:selected]> indices_ptr
 ### L5 — `Node.schema_column.identity` for column lookup
 In `_eval_value`, identifier nodes expose the column via `node.schema_column` (a `FlatColumn` with `.identity` attribute — a hex string). `morsel.column()` takes `bytes`, so the call is `morsel.column(node.schema_column.identity.encode())`.
 
-### L6 — `_is_null_as_boolvector` still uses pyarrow
-The current implementation in `opteryx/expression/evaluator/__init__.py` constructs a `pa.array` from the `is_null()` int8 memoryview, then calls `vector_from_arrow`. This is a known TODO for Phase 4: construct the BoolVector directly from the `int8_t` memoryview without any Arrow call.
+### L6 — `_is_null_as_boolvector` — Arrow path eliminated for native types ✅
+`_is_null_as_boolvector` in `opteryx/expression/evaluator/__init__.py` now uses
+Arrow-free dispatch:
+- `DictionaryVector` → `is_null_boolvector()` (native, handles NaN nulls)
+- Fixed-buffer types (Int64, Float64, Date32, Timestamp, Time, Interval, Bool) → `is_null() -> int8_t[::1]` → `bool_vector_from_int8_mask()` (Cython)
+- `ConstantVector` → `scalar_value() is None` → O(1) all-true/all-false
+- StringVector / ArrayVector → `null_bitmap()` → `bool_vector_from_inverted_null_bitmap()` (Cython)
+- `ArrowVector` (wraps non-native Arrow types like date64) → Arrow path preserved since the wrapped array IS already Arrow
+
+The Cython helpers (`bool_vector_from_int8_mask`, `bool_vector_from_inverted_null_bitmap`, `bool_vector_all_true`) are in `opteryx/compiled/vector_ops/bool_vector_ops.pyx`.
 
 ### L7 — `opteryx/draken/evaluators/` directory is not empty
 After removing the dead import in `opteryx/draken/__init__.py`, the `evaluators/` directory still contains `expression.py`. Whether this file is still referenced elsewhere must be audited before removal (tracked in Phase 1.4 second checkbox).
