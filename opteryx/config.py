@@ -82,6 +82,29 @@ def parse_json(value: typing.Any, default: typing.Any = None) -> typing.Any:
     return json.loads(text)
 
 
+def parse_connector_targets(
+    value: typing.Any, default: Optional[typing.Iterable[str]] = None
+) -> frozenset[str]:
+    """
+    Parse a connector selector string such as ``LOCAL,S3`` into uppercase tokens.
+    """
+    if value is None:
+        value = default
+    if value is None:
+        return frozenset()
+    if isinstance(value, str):
+        items = [part.strip().upper() for part in value.split(",") if part.strip()]
+    else:
+        items = [str(part).strip().upper() for part in value if str(part).strip()]
+    if not items:
+        return frozenset()
+    if "ALL" in items:
+        return frozenset({"ALL"})
+    if "NONE" in items:
+        return frozenset()
+    return frozenset(items)
+
+
 # fmt:off
 
 # These are 'protected' properties which cannot be overridden by a single query
@@ -299,6 +322,26 @@ IO_TARGET_SLICE_BYTES: int = int(get("IO_TARGET_SLICE_BYTES", 16 * 1024 * 1024))
 """Target serialized bytes per row-group slice when slicing is required."""
 
 
+_serial_reader_setting = get("FEATURE_USE_SERIAL_READER", None)
+if _serial_reader_setting is None and environ.get("FEATURE_PARQUET_LOCAL_SERIAL_FASTPATH") is not None:
+    import warnings
+
+    warnings.warn(
+        "FEATURE_PARQUET_LOCAL_SERIAL_FASTPATH is deprecated; use FEATURE_USE_SERIAL_READER "
+        "with values such as LOCAL or NONE.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    _serial_reader_setting = (
+        "LOCAL"
+        if str(environ.get("FEATURE_PARQUET_LOCAL_SERIAL_FASTPATH", "0")).lower()
+        in ("1", "true", "yes")
+        else "NONE"
+    )
+if _serial_reader_setting is None:
+    _serial_reader_setting = "LOCAL"
+
+
 # fmt:on
 
 
@@ -331,6 +374,7 @@ class Features:
         "true",
         "yes",
     )
+    use_serial_reader = parse_connector_targets(_serial_reader_setting, default=("LOCAL",))
     parquet_thread_scheduler = str(get("FEATURE_PARQUET_THREAD_SCHEDULER", "0")).lower() in (
         "1",
         "true",

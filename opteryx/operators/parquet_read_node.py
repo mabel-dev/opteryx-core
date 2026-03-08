@@ -114,6 +114,8 @@ class ParquetReadNode(ReaderNode):
             base["parquet_avg_emit_wait_ns"] = (
                 self.readings.get("time_parquet_emit_wait_ns", 0) / base["row_groups_read"]
             )
+        if self.readings.get("parquet_scan_strategy"):
+            base["parquet_scan_strategy"] = self.readings["parquet_scan_strategy"]
         return base
 
     @staticmethod
@@ -697,6 +699,9 @@ class ParquetReadNode(ReaderNode):
                 )
                 self.readings["io_deserialize_ns"] += row_group.pop("__io_deserialize_ns__", 0)
                 self.readings["io_serialize_ns"] += row_group.pop("__io_serialize_ns__", 0)
+                scan_strategy = row_group.pop("__parquet_scan_strategy__", None)
+                if scan_strategy:
+                    self.readings["parquet_scan_strategy"] = scan_strategy
                 time_to_first_rowgroup_ns = row_group.pop("__time_to_first_rowgroup_ns__", 0)
                 if time_to_first_rowgroup_ns:
                     existing = self.readings.get("time_to_first_rowgroup_ns", 0)
