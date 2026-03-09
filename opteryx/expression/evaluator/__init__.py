@@ -778,7 +778,9 @@ def _eval_value(node, morsel):
             return vector_from_arrow(vec.to_arrow())
         return vec
 
-    if node_type == NodeType.EVALUATED:
+    if node_type in (NodeType.EVALUATED, NodeType.AGGREGATOR):
+        # AGGREGATOR nodes in HAVING expressions refer to columns that have
+        # already been materialised by the preceding GROUP BY node.
         vec = morsel.column(node.schema_column.identity.encode())
         if vec.__class__.__name__ == "ArrowVector":
             from opteryx.draken.interop.arrow import vector_from_arrow

@@ -1231,11 +1231,13 @@ def read_parquet(data, column_names=None):
 
     _t0 = _time.perf_counter()
     if column_names is None:
-        result = parquet_reader.ReadParquet(&mem_view[0], size)
+        with nogil:
+            result = parquet_reader.ReadParquet(&mem_view[0], size)
     else:
         for name in column_names:
             cpp_column_names.push_back(str(name).encode("utf-8"))
-        result = parquet_reader.ReadParquet(&mem_view[0], size, cpp_column_names)
+        with nogil:
+            result = parquet_reader.ReadParquet(&mem_view[0], size, cpp_column_names)
     _t1 = _time.perf_counter()
     _TEL["cpp_decode_s"] += _t1 - _t0
     _TEL["calls"] += 1
@@ -1447,8 +1449,9 @@ def decode_column_from_chunk_to_python(chunk_bytes, col_stats):
     if cpp_col.encodings.empty():
         cpp_col.encodings.push_back(0)  # default: PLAIN
 
-    cdef parquet_reader.DecodedColumn result = parquet_reader.DecodeColumnFromChunk(
-        &mem_view[0], size, &cpp_col)
+    cdef parquet_reader.DecodedColumn result
+    with nogil:
+        result = parquet_reader.DecodeColumnFromChunk(&mem_view[0], size, &cpp_col)
 
     if not result.success:
         return None
@@ -1592,8 +1595,8 @@ def decode_column_from_chunk(chunk_bytes, col_stats):
     if cpp_col.encodings.empty():
         cpp_col.encodings.push_back(0)  # default: PLAIN
 
-    result = parquet_reader.DecodeColumnFromChunk(
-        &mem_view[0], size, &cpp_col)
+    with nogil:
+        result = parquet_reader.DecodeColumnFromChunk(&mem_view[0], size, &cpp_col)
 
     if not result.success:
         return None
@@ -1724,8 +1727,10 @@ def decode_column_from_memory(data, str column_name, row_group_stats, int row_gr
         cpp_col.codec = col.codec if col.codec is not None else -1
         cpp_row_group.columns.push_back(cpp_col)
 
-    cdef parquet_reader.DecodedColumn result = parquet_reader.DecodeColumnFromMemory(
-        &mem_view[0], size, cpp_column, cpp_row_group, row_group_index)
+    cdef parquet_reader.DecodedColumn result
+    with nogil:
+        result = parquet_reader.DecodeColumnFromMemory(
+            &mem_view[0], size, cpp_column, cpp_row_group, row_group_index)
 
     if not result.success:
         return None

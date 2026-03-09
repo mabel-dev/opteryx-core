@@ -596,8 +596,6 @@ def _datepart_return_type(arg_nodes) -> OrsoTypes:
     part = str(part_val).lower()
     if part in ("epoch", "julian"):
         return OrsoTypes.DOUBLE
-    if part == "day":
-        return OrsoTypes.VARCHAR
     if part == "date":
         return OrsoTypes.DATE
     return OrsoTypes.INTEGER

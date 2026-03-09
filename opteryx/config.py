@@ -322,27 +322,8 @@ IO_TARGET_SLICE_BYTES: int = int(get("IO_TARGET_SLICE_BYTES", 16 * 1024 * 1024))
 """Target serialized bytes per row-group slice when slicing is required."""
 
 
-_serial_reader_setting = get("FEATURE_USE_SERIAL_READER", None)
-if _serial_reader_setting is None and environ.get("FEATURE_PARQUET_LOCAL_SERIAL_FASTPATH") is not None:
-    import warnings
+_serial_reader_setting = get("FEATURE_USE_SERIAL_READER", "LOCAL")
 
-    warnings.warn(
-        "FEATURE_PARQUET_LOCAL_SERIAL_FASTPATH is deprecated; use FEATURE_USE_SERIAL_READER "
-        "with values such as LOCAL or NONE.",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    _serial_reader_setting = (
-        "LOCAL"
-        if str(environ.get("FEATURE_PARQUET_LOCAL_SERIAL_FASTPATH", "0")).lower()
-        in ("1", "true", "yes")
-        else "NONE"
-    )
-if _serial_reader_setting is None:
-    _serial_reader_setting = "LOCAL"
-
-
-# fmt:on
 
 
 # FEATURE FLAGS
@@ -353,37 +334,17 @@ class Features:
     force_nested_loop_join = bool(get("FEATURE_FORCE_NESTED_LOOP_JOIN", False))
     enable_free_threading = bool(get("FEATURE_ENABLE_FREE_THREADING", False))
     use_draken_ops_kernels = bool(get("FEATURE_USE_DRAKEN_OPS_KERNELS", False))
-    # Historically draken aggregation was opt-in, but as the engine
-    # matures we want the native aggregator to be the primary path.  Make
-    # the feature enabled by default; callers can still disable it via the
-    # environment variable if they need to exercise the legacy Arrow-based
-    # implementation for comparison or debugging.
-    use_draken_aggregator = str(get("FEATURE_USE_DRAKEN_AGGREGATOR", "1")).lower() in (
-        "1",
-        "true",
-        "yes",
-    )
+    use_draken_inner_join = str(get("FEATURE_USE_DRAKEN_INNER_JOIN", "1")).lower() in ("1", "true", "yes")
+    use_draken_aggregator = str(get("FEATURE_USE_DRAKEN_AGGREGATOR", "1")).lower() in ("1", "true", "yes")
     disable_predicate_ordering = bool(get("FEATURE_DISABLE_PREDICATE_ORDERING", False))
     disable_predicate_pushdown = bool(get("FEATURE_DISABLE_PREDICATE_PUSHDOWN", False))
     disable_manifest_pruning = bool(get("FEATURE_DISABLE_MANIFEST_PRUNING", False))
-    parquet_rowgroup_scheduler_v2 = str(
-        get("FEATURE_PARQUET_ROWGROUP_SCHEDULER_V2", "1")
-    ).lower() in (
-        "1",
-        "true",
-        "yes",
-    )
-    io_process_rowgroup_ring = str(get("FEATURE_IO_PROCESS_ROWGROUP_RING", "0")).lower() in (
-        "1",
-        "true",
-        "yes",
-    )
+    parquet_rowgroup_scheduler_v2 = str(get("FEATURE_PARQUET_ROWGROUP_SCHEDULER_V2", "1")).lower() in ("1", "true", "yes")
+    io_process_rowgroup_ring = str(get("FEATURE_IO_PROCESS_ROWGROUP_RING", "0")).lower() in ("1", "true", "yes")
     use_serial_reader = parse_connector_targets(_serial_reader_setting, default=("LOCAL",))
-    parquet_thread_scheduler = str(get("FEATURE_PARQUET_THREAD_SCHEDULER", "0")).lower() in (
-        "1",
-        "true",
-        "yes",
-    )
+    parquet_thread_scheduler = str(get("FEATURE_PARQUET_THREAD_SCHEDULER", "0")).lower() in ("1", "true", "yes")
 
 
 features = Features()
+
+# fmt:on

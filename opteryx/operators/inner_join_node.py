@@ -26,9 +26,12 @@ import pyarrow.compute as pc
 from pyarrow import Table
 
 from opteryx import EOS
+from opteryx import config
+from opteryx.compiled.joins import build_side_carchar_map
 from opteryx.compiled.joins import build_side_hash_map
 from opteryx.compiled.joins import get_last_inner_join_metrics
 from opteryx.compiled.joins import inner_join
+from opteryx.compiled.joins import inner_join_carchar
 from opteryx.compiled.structures.bloom_filter import create_bloom_filter
 from opteryx.expression import NodeType
 from opteryx.expression import evaluate_and_append
@@ -61,6 +64,10 @@ class InnerJoinNode(JoinNode):
         self.left_filter = None
 
         self.columns = parameters.get("columns")
+        self.join_backend = str(config.get("FEATURE_INNER_JOIN_BACKEND", "abseil")).strip().lower()
+        self.carchar_probe_load_factor = float(
+            config.get("FEATURE_CARCHAR_PROBE_LOAD_FACTOR", 0.35)
+        )
 
         self.lock = Lock()
 
@@ -157,7 +164,15 @@ class InnerJoinNode(JoinNode):
                     )
 
                     start = time.monotonic_ns()
-                    self.left_hash = build_side_hash_map(self.left_relation, self.left_columns)
+                    if self.join_backend == "carchar":
+                        self.left_hash = build_side_carchar_map(
+                            self.left_relation,
+                            self.left_columns,
+                            self.carchar_probe_load_factor,
+                        )
+                        self.readings["feature_inner_join_backend_carchar"] += 1
+                    else:
+                        self.left_hash = build_side_hash_map(self.left_relation, self.left_columns)
                     self.readings["time_inner_join_build_side_hash_map"] += (
                         time.monotonic_ns() - start
                     )
@@ -233,9 +248,14 @@ class InnerJoinNode(JoinNode):
                     self.readings["rows_eliminated_by_bloom_filter"] += eliminated_rows
 
                 # do the join
-                left_indicies, right_indicies = inner_join(
-                    morsel, self.right_columns, self.left_hash
-                )
+                if self.join_backend == "carchar":
+                    left_indicies, right_indicies = inner_join_carchar(
+                        morsel, self.right_columns, self.left_hash
+                    )
+                else:
+                    left_indicies, right_indicies = inner_join(
+                        morsel, self.right_columns, self.left_hash
+                    )
 
                 # record detailed timing and row counts for diagnostics
                 (

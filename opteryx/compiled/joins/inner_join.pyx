@@ -10,6 +10,8 @@ import numpy
 cimport numpy
 numpy.import_array()
 
+import opteryx.config
+
 from libc.stdint cimport int64_t, uint64_t
 from libc.stddef cimport size_t
 from libcpp.vector cimport vector
@@ -132,3 +134,82 @@ cpdef FlatHashMap build_side_hash_map(object relation, list join_columns):
         ht.insert(row_hashes[row_idx], row_idx)
 
     return ht
+
+
+cpdef object build_side_carchar_map(
+    object relation,
+    list join_columns,
+    double probe_load_factor=0.35,
+):
+    cdef object carchar_native
+    cdef object ht
+    cdef int64_t num_rows = relation.num_rows
+    cdef int64_t[::1] non_null_indices = non_null_row_indices(relation, join_columns)
+    cdef uint64_t[::1] row_hashes = numpy.empty(num_rows, dtype=numpy.uint64)
+
+    compute_row_hashes(relation, join_columns, row_hashes)
+
+    import opteryx.nanobind.carchar_native as carchar_native
+
+    ht = carchar_native.CarcharJoinEngine(
+        int(non_null_indices.shape[0]),
+        0,
+        0.80,
+        probe_load_factor,
+    )
+    if non_null_indices.shape[0] == 0:
+        ht.seal()
+        return ht
+
+    ht.insert_batch(
+        numpy.asarray(row_hashes)[numpy.asarray(non_null_indices, dtype=numpy.int64)],
+        numpy.asarray(non_null_indices, dtype=numpy.int64),
+    )
+    ht.seal()
+    return ht
+
+
+cpdef tuple inner_join_carchar(object right_relation, list join_columns, object left_hash_table):
+    global last_hash_time_ns, last_probe_time_ns, last_materialize_time_ns
+    global last_rows_hashed, last_candidate_rows, last_result_rows
+    cdef int64_t num_rows = right_relation.num_rows
+    cdef int64_t[::1] non_null_indices = non_null_row_indices(right_relation, join_columns)
+    cdef Py_ssize_t candidate_count = non_null_indices.shape[0]
+
+    if candidate_count == 0 or num_rows == 0:
+        last_hash_time_ns = 0
+        last_probe_time_ns = 0
+        last_rows_hashed = num_rows
+        last_candidate_rows = candidate_count
+        last_result_rows = 0
+        last_materialize_time_ns = 0
+        return numpy.empty(0, dtype=numpy.int64), numpy.empty(0, dtype=numpy.int64)
+
+    cdef uint64_t[::1] row_hashes = numpy.empty(num_rows, dtype=numpy.uint64)
+    cdef long long t_start = perf_counter_ns()
+    compute_row_hashes(right_relation, join_columns, row_hashes)
+    cdef long long t_after_hash = perf_counter_ns()
+    last_hash_time_ns = t_after_hash - t_start
+
+    cdef numpy.ndarray[numpy.uint64_t, ndim=1] probe_hashes = numpy.asarray(row_hashes)[
+        numpy.asarray(non_null_indices, dtype=numpy.int64)
+    ]
+    cdef numpy.ndarray[numpy.int64_t, ndim=1] probe_rows = numpy.asarray(
+        non_null_indices, dtype=numpy.int64
+    )
+
+    cdef long long t_before_probe = perf_counter_ns()
+    left_np, right_np = left_hash_table.probe_join_indices(probe_hashes, probe_rows)
+    cdef long long t_after_probe = perf_counter_ns()
+    last_probe_time_ns = t_after_probe - t_before_probe
+    last_rows_hashed = num_rows
+    last_candidate_rows = candidate_count
+
+    cdef long long t_before_numpy = perf_counter_ns()
+    left_np = numpy.asarray(left_np, dtype=numpy.int64)
+    right_np = numpy.asarray(right_np, dtype=numpy.int64)
+    cdef long long t_after_numpy = perf_counter_ns()
+    last_result_rows = left_np.shape[0]
+    last_materialize_time_ns = t_after_numpy - t_before_numpy
+
+    return left_np, right_np

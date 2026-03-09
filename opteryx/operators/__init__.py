@@ -105,6 +105,7 @@ from .function_dataset_node import FunctionDatasetNode  # Dataset Constructors
 from .heap_sort_node import HeapSortNode  # Heap
 
 # from .information_schema_node import InformationSchemaNode  # information_schema
+from .draken_inner_join_node import DrakenInnerJoinNode
 from .inner_join_node import InnerJoinNode
 from .nested_loop_join_node import NestedLoopJoinNode
 from .non_equi_join_node import NonEquiJoinNode
@@ -147,6 +148,7 @@ __all__ = [
     "FilterNode",
     "FunctionDatasetNode",
     "HeapSortNode",
+    "DrakenInnerJoinNode",
     "InnerJoinNode",
     "NestedLoopJoinNode",
     "NonEquiJoinNode",

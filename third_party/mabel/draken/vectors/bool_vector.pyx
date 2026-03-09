@@ -313,14 +313,35 @@ cdef class BoolVector(Vector):
         cdef BoolVector out = BoolVector(<size_t>n)
         cdef uint8_t* src = <uint8_t*> self.ptr.data
         cdef uint8_t* dst = <uint8_t*> out.ptr.data
-        # zero init
+        cdef uint8_t* src_null = self.ptr.null_bitmap
+        cdef uint8_t* out_null = NULL
+        cdef Py_ssize_t length = self.ptr.length
+        cdef int32_t idx
         cdef Py_ssize_t out_nbytes = (n + 7) >> 3
+        # zero init
         for i in range(out_nbytes):
             dst[i] = 0
+
+        if src_null != NULL and out_nbytes > 0:
+            out_null = <uint8_t*> malloc(out_nbytes)
+            if out_null == NULL:
+                raise MemoryError()
+            memset(out_null, 0, out_nbytes)
+
         for i in range(n):
             idx = indices[i]
+            if idx < 0 or idx >= length:
+                if out_null != NULL:
+                    free(out_null)
+                raise IndexError("Index out of bounds")
+            if src_null != NULL and ((src_null[idx >> 3] >> (idx & 7)) & 1) == 0:
+                continue
+            if out_null != NULL:
+                out_null[i >> 3] |= (1 << (i & 7))
             if ((src[idx >> 3] >> (idx & 7)) & 1) != 0:
                 dst[i >> 3] |= (1 << (i & 7))
+
+        out.ptr.null_bitmap = out_null
         return out
 
     cpdef BoolVector equals(self, bint value):

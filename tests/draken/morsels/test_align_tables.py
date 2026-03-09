@@ -138,6 +138,30 @@ def test_duplicate_columns():
     print("  ✓ Duplicate columns test passed")
 
 
+def test_align_tables_preserves_null_markers():
+    """-1 indices should produce null-padded output across vector types."""
+    source_table = pa.table({
+        "flag": pa.array([True, None, False], type=pa.bool_()),
+        "value": pa.array([b"a", None, b"c"]),
+    })
+    append_table = pa.table({
+        "rhs": pa.array([10, 20, None], type=pa.int64()),
+    })
+
+    source_morsel = Morsel.from_arrow(source_table)
+    append_morsel = Morsel.from_arrow(append_table)
+
+    source_indices = np.array([0, -1, 1, 2], dtype=np.int32)
+    append_indices = np.array([2, 1, -1, 0], dtype=np.int32)
+
+    result = align_tables_pyarray(source_morsel, append_morsel, source_indices, append_indices)
+    result_arrow = result.to_arrow()
+
+    assert result_arrow["flag"].to_pylist() == [True, None, None, False]
+    assert result_arrow["value"].to_pylist() == [b"a", None, None, b"c"]
+    assert result_arrow["rhs"].to_pylist() == [None, 20, None, 10]
+
+
 def benchmark_align():
     """Benchmark the align_tables function."""
     print("\nBenchmarking align_tables...")

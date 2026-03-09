@@ -39,6 +39,8 @@ cdef class FlatHashMap:
     cpdef size_t size(self)
     cpdef clear(self)
     cpdef vector[int64_t] get(self, uint64_t key)
+    cpdef size_t get_count(self, uint64_t key)
+    cpdef uint64_t get_many_count(self, uint64_t[::1] keys)
 
 cdef class FlatHashMapByteVector:
     cdef flat_hash_map[uint64_t, vector[uint8_t], IdentityHash] _map

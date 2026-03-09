@@ -569,7 +569,13 @@ cdef Int64Vector from_sequence(int64_t[::1] data):
     vec.ptr.type = DRAKEN_INT64
     vec.ptr.itemsize = 8
     vec.ptr.length = <size_t> data.shape[0]
-    vec.ptr.data = <void*> &data[0]
     vec.ptr.null_bitmap = NULL
+
+    if data.shape[0] > 0:
+        vec._arrow_data_buf = data.base if data.base is not None else data
+        vec.ptr.data = <void*> &data[0]
+    else:
+        vec._arrow_data_buf = None
+        vec.ptr.data = NULL
 
     return vec

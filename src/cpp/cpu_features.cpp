@@ -39,7 +39,7 @@
 #include <cpuid.h>
 #endif
 
-bool cpu_supports_avx2() {
+extern "C" bool cpu_supports_avx2() {
 #if defined(__x86_64__) || defined(__i386__)
 #if (defined(__GNUC__) || defined(__clang__))
     // Prefer compiler-provided detection when available
@@ -71,7 +71,7 @@ bool cpu_supports_avx2() {
 #endif
 }
 
-bool cpu_supports_neon() {
+extern "C" bool cpu_supports_neon() {
 #if defined(__arm__) || defined(__aarch64__)
     // On Linux, check HWCAP
     #if defined(__linux__)
