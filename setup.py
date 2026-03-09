@@ -161,6 +161,7 @@ include_dirs = [
     numpy.get_include(),
     "src/cpp", "src/c", 
     "third_party/mabel/draken",
+    "third_party/mabel/carchar",
     "third_party/abseil",
     "third_party/fastfloat",
     "third_party/fastfloat/fast_float",
@@ -724,6 +725,7 @@ extensions.extend([
                 "third_party/re2/util/rune.cc",
                 "src/cpp/simd_env.cpp",
                 "src/cpp/simd_search.cpp",
+                "src/cpp/simd_datepart.cpp",
                 "src/cpp/cpu_features.cpp",
                 "third_party/crypto/md5.cpp",
                 "third_party/crypto/sha1.cpp",
@@ -743,6 +745,7 @@ extensions.extend([
             "opteryx/compiled/joins/joins.pyx",
             "src/cpp/join_kernels.cpp",
             "src/cpp/intbuffer.cpp",
+            "src/cpp/cpu_features.cpp",
         ],
         include_dirs=include_dirs,
         language="c++",
@@ -787,6 +790,26 @@ extensions.append(
             "third_party/nanobind/src/nb_combined.cpp",
         ],
         include_dirs=include_dirs + [
+            "third_party/nanobind",
+            "third_party/nanobind/src",
+            "third_party/nanobind/ext/robin_map/include",
+        ],
+        extra_compile_args=CPP_FLAGS + ["-fno-strict-aliasing", "-DNB_COMPACT_ASSERTIONS"],
+        extra_link_args=LD_EXTRA,
+        language="c++",
+    )
+)
+
+extensions.append(
+    Extension(
+        "opteryx.nanobind.carchar_native",
+        sources=[
+            "src/cpp/carchar_native.cpp",
+            "src/cpp/cpu_features.cpp",
+            "third_party/nanobind/src/nb_combined.cpp",
+        ],
+        include_dirs=include_dirs + [
+            "third_party/mabel/carchar",
             "third_party/nanobind",
             "third_party/nanobind/src",
             "third_party/nanobind/ext/robin_map/include",

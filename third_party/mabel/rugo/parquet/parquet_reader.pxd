@@ -135,8 +135,8 @@ cdef extern from "decode.hpp":
     bint CanDecode(const uint8_t* data, size_t size)
     
     # New memory-based functions
-    DecodedColumn DecodeColumnFromChunk(const uint8_t* data, size_t size, const ColumnStats* col)
-    DecodedColumn DecodeColumnFromMemory(const uint8_t* data, size_t size, const string& column_name, const RowGroupStats& row_group, int row_group_index)
-    DecodedColumn DecodeColumnFromMemory(const uint8_t* data, size_t size, const string& column_name, const RowGroupStats& row_group, int row_group_index, int64_t* ext_int64, double* ext_float64, int32_t* ext_int32, float* ext_float32)
-    DecodedTable ReadParquet(const uint8_t* data, size_t size, const vector[string]& column_names)
-    DecodedTable ReadParquet(const uint8_t* data, size_t size)
+    DecodedColumn DecodeColumnFromChunk(const uint8_t* data, size_t size, const ColumnStats* col) nogil
+    DecodedColumn DecodeColumnFromMemory(const uint8_t* data, size_t size, const string& column_name, const RowGroupStats& row_group, int row_group_index) nogil
+    DecodedColumn DecodeColumnFromMemory(const uint8_t* data, size_t size, const string& column_name, const RowGroupStats& row_group, int row_group_index, int64_t* ext_int64, double* ext_float64, int32_t* ext_int32, float* ext_float32) nogil
+    DecodedTable ReadParquet(const uint8_t* data, size_t size, const vector[string]& column_names) nogil
+    DecodedTable ReadParquet(const uint8_t* data, size_t size) nogil

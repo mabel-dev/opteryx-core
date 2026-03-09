@@ -262,6 +262,27 @@ cdef void _concat_string_buffers(
     )
 
 
+cdef uint8_t* _allocate_valid_bitmap(Py_ssize_t total_rows) except NULL:
+    cdef Py_ssize_t null_bytes
+    cdef uint8_t* bitmap
+    cdef uint8_t trailing_mask
+
+    if total_rows <= 0:
+        return NULL
+
+    null_bytes = (total_rows + 7) // 8
+    bitmap = <uint8_t*> malloc(null_bytes)
+    if bitmap == NULL:
+        raise MemoryError()
+    memset(bitmap, 0xFF, null_bytes)
+
+    if (total_rows & 7) != 0:
+        trailing_mask = <uint8_t>((1 << (total_rows & 7)) - 1)
+        bitmap[null_bytes - 1] &= trailing_mask
+
+    return bitmap
+
+
 cdef class Morsel:
 
     cdef void _empty_inplace(self)
@@ -397,6 +418,313 @@ cdef class Morsel:
             self.ptr.columns[i] = <void*>vec
             self.ptr.column_types[i] = vec.dtype
             self.ptr.column_names[i] = <const char*>encoded_name
+
+        self._rebuild_name_to_index()
+        return self
+
+    @staticmethod
+    def combine(list morsels):
+        cdef Py_ssize_t i
+        cdef Py_ssize_t j
+        cdef Py_ssize_t n_morsels
+        cdef Py_ssize_t n_columns
+        cdef Py_ssize_t total_rows = 0
+        cdef Py_ssize_t row_offset
+        cdef Py_ssize_t byte_offset
+        cdef Py_ssize_t string_offset
+        cdef Py_ssize_t current_rows
+        cdef Py_ssize_t current_bytes
+        cdef Py_ssize_t total_string_bytes
+        cdef object morsel_obj
+        cdef Morsel morsel
+        cdef Morsel first
+        cdef Vector current_vec
+        cdef Vector new_vec
+        cdef list values
+        cdef uint8_t* null_bitmap
+        cdef Int64Vector out_i64
+        cdef Float64Vector out_f64
+        cdef BoolVector out_bool
+        cdef IntegerVector out_int
+        cdef Date32Vector out_date32
+        cdef TimeVector out_time
+        cdef TimestampVector out_ts
+        cdef IntervalVector out_interval
+        cdef StringVector out_str
+        cdef Int64Vector src_i64
+        cdef Float64Vector src_f64
+        cdef BoolVector src_bool
+        cdef IntegerVector src_int
+        cdef Date32Vector src_date32
+        cdef TimeVector src_time
+        cdef TimestampVector src_ts
+        cdef IntervalVector src_interval
+        cdef StringVector src_str
+
+        if morsels is None:
+            raise ValueError("morsels must not be None")
+
+        morsels = [m for m in morsels if m is not None and m.num_rows > 0]
+        n_morsels = len(morsels)
+        if n_morsels == 0:
+            raise ValueError("at least one non-empty morsel is required")
+
+        first = <Morsel> morsels[0]
+        if n_morsels == 1:
+            return first.copy()
+
+        n_columns = first.ptr.num_columns
+        for morsel_obj in morsels:
+            morsel = <Morsel> morsel_obj
+            if morsel.ptr.num_columns != n_columns:
+                raise ValueError(
+                    f"Cannot combine morsel with {morsel.ptr.num_columns} columns "
+                    f"into schema with {n_columns} columns"
+                )
+            for i in range(n_columns):
+                if first._encoded_names[i] != morsel._encoded_names[i]:
+                    raise ValueError(
+                        f"Cannot combine morsels with different schemas: "
+                        f"column {i} differs ({first._encoded_names[i]!r} != {morsel._encoded_names[i]!r})"
+                    )
+            total_rows += morsel.ptr.num_rows
+
+        cdef Morsel self = Morsel()
+        self._columns = [None] * n_columns
+        self._encoded_names = list(first._encoded_names)
+        self.ptr = <DrakenMorsel*> PyMem_Malloc(sizeof(DrakenMorsel))
+        self.ptr.num_columns = n_columns
+        self.ptr.num_rows = total_rows
+        self.ptr.columns = <void**> PyMem_Malloc(sizeof(void*) * n_columns)
+        self.ptr.column_names = <const char**> PyMem_Malloc(sizeof(const char*) * n_columns)
+        self.ptr.column_types = <DrakenType*> PyMem_Malloc(sizeof(DrakenType) * n_columns)
+
+        for i in range(n_columns):
+            self.ptr.column_names[i] = <const char*> self._encoded_names[i]
+            self.ptr.column_types[i] = first.ptr.column_types[i]
+            current_vec = <Vector> first.ptr.columns[i]
+
+            if isinstance(current_vec, Int64Vector):
+                out_i64 = Int64Vector(<size_t> total_rows)
+                row_offset = 0
+                byte_offset = 0
+                null_bitmap = NULL
+                for morsel_obj in morsels:
+                    morsel = <Morsel> morsel_obj
+                    src_i64 = <Int64Vector> morsel.ptr.columns[i]
+                    current_rows = morsel.ptr.num_rows
+                    current_bytes = current_rows * <Py_ssize_t> src_i64.ptr.itemsize
+                    if current_bytes > 0 and src_i64.ptr.data != NULL:
+                        memcpy(<char*> out_i64.ptr.data + byte_offset, src_i64.ptr.data, current_bytes)
+                    if src_i64.ptr.null_bitmap != NULL:
+                        if null_bitmap == NULL:
+                            null_bitmap = _allocate_valid_bitmap(total_rows)
+                        _copy_bits(src_i64.ptr.null_bitmap, 0, null_bitmap, row_offset, current_rows)
+                    row_offset += current_rows
+                    byte_offset += current_bytes
+                out_i64.ptr.null_bitmap = null_bitmap
+                new_vec = <Vector> out_i64
+
+            elif isinstance(current_vec, Float64Vector):
+                out_f64 = Float64Vector(<size_t> total_rows)
+                row_offset = 0
+                byte_offset = 0
+                null_bitmap = NULL
+                for morsel_obj in morsels:
+                    morsel = <Morsel> morsel_obj
+                    src_f64 = <Float64Vector> morsel.ptr.columns[i]
+                    current_rows = morsel.ptr.num_rows
+                    current_bytes = current_rows * <Py_ssize_t> src_f64.ptr.itemsize
+                    if current_bytes > 0 and src_f64.ptr.data != NULL:
+                        memcpy(<char*> out_f64.ptr.data + byte_offset, src_f64.ptr.data, current_bytes)
+                    if src_f64.ptr.null_bitmap != NULL:
+                        if null_bitmap == NULL:
+                            null_bitmap = _allocate_valid_bitmap(total_rows)
+                        _copy_bits(src_f64.ptr.null_bitmap, 0, null_bitmap, row_offset, current_rows)
+                    row_offset += current_rows
+                    byte_offset += current_bytes
+                out_f64.ptr.null_bitmap = null_bitmap
+                new_vec = <Vector> out_f64
+
+            elif isinstance(current_vec, BoolVector):
+                out_bool = BoolVector(<size_t> total_rows)
+                row_offset = 0
+                null_bitmap = NULL
+                for morsel_obj in morsels:
+                    morsel = <Morsel> morsel_obj
+                    src_bool = <BoolVector> morsel.ptr.columns[i]
+                    current_rows = morsel.ptr.num_rows
+                    if current_rows > 0 and src_bool.ptr.data != NULL:
+                        _copy_bits(<uint8_t*> src_bool.ptr.data, 0, <uint8_t*> out_bool.ptr.data, row_offset, current_rows)
+                    if src_bool.ptr.null_bitmap != NULL:
+                        if null_bitmap == NULL:
+                            null_bitmap = _allocate_valid_bitmap(total_rows)
+                        _copy_bits(src_bool.ptr.null_bitmap, 0, null_bitmap, row_offset, current_rows)
+                    row_offset += current_rows
+                out_bool.ptr.null_bitmap = null_bitmap
+                new_vec = <Vector> out_bool
+
+            elif isinstance(current_vec, IntegerVector):
+                out_int = IntegerVector((<IntegerVector> current_vec).ptr.type, <size_t> total_rows)
+                row_offset = 0
+                byte_offset = 0
+                null_bitmap = NULL
+                for morsel_obj in morsels:
+                    morsel = <Morsel> morsel_obj
+                    src_int = <IntegerVector> morsel.ptr.columns[i]
+                    if src_int.ptr.type != out_int.ptr.type:
+                        values = []
+                        for morsel_obj in morsels:
+                            values.extend((<Morsel> morsel_obj).column(first._encoded_names[i]).to_pylist())
+                        new_vec = <Vector> vector_from_sequence(values, self.ptr.column_types[i])
+                        break
+                    current_rows = morsel.ptr.num_rows
+                    current_bytes = current_rows * <Py_ssize_t> src_int.ptr.itemsize
+                    if current_bytes > 0 and src_int.ptr.data != NULL:
+                        memcpy(<char*> out_int.ptr.data + byte_offset, src_int.ptr.data, current_bytes)
+                    if src_int.ptr.null_bitmap != NULL:
+                        if null_bitmap == NULL:
+                            null_bitmap = _allocate_valid_bitmap(total_rows)
+                        _copy_bits(src_int.ptr.null_bitmap, 0, null_bitmap, row_offset, current_rows)
+                    row_offset += current_rows
+                    byte_offset += current_bytes
+                else:
+                    out_int.ptr.null_bitmap = null_bitmap
+                    new_vec = <Vector> out_int
+
+            elif isinstance(current_vec, Date32Vector):
+                out_date32 = Date32Vector(<size_t> total_rows)
+                row_offset = 0
+                byte_offset = 0
+                null_bitmap = NULL
+                for morsel_obj in morsels:
+                    morsel = <Morsel> morsel_obj
+                    src_date32 = <Date32Vector> morsel.ptr.columns[i]
+                    current_rows = morsel.ptr.num_rows
+                    current_bytes = current_rows * <Py_ssize_t> src_date32.ptr.itemsize
+                    if current_bytes > 0 and src_date32.ptr.data != NULL:
+                        memcpy(<char*> out_date32.ptr.data + byte_offset, src_date32.ptr.data, current_bytes)
+                    if src_date32.ptr.null_bitmap != NULL:
+                        if null_bitmap == NULL:
+                            null_bitmap = _allocate_valid_bitmap(total_rows)
+                        _copy_bits(src_date32.ptr.null_bitmap, 0, null_bitmap, row_offset, current_rows)
+                    row_offset += current_rows
+                    byte_offset += current_bytes
+                out_date32.ptr.null_bitmap = null_bitmap
+                new_vec = <Vector> out_date32
+
+            elif isinstance(current_vec, TimeVector):
+                out_time = TimeVector(<size_t> total_rows, (<TimeVector> current_vec).is_time64)
+                row_offset = 0
+                byte_offset = 0
+                null_bitmap = NULL
+                for morsel_obj in morsels:
+                    morsel = <Morsel> morsel_obj
+                    src_time = <TimeVector> morsel.ptr.columns[i]
+                    if src_time.is_time64 != out_time.is_time64:
+                        values = []
+                        for morsel_obj in morsels:
+                            values.extend((<Morsel> morsel_obj).column(first._encoded_names[i]).to_pylist())
+                        new_vec = <Vector> vector_from_sequence(values, self.ptr.column_types[i])
+                        break
+                    current_rows = morsel.ptr.num_rows
+                    current_bytes = current_rows * <Py_ssize_t> src_time.ptr.itemsize
+                    if current_bytes > 0 and src_time.ptr.data != NULL:
+                        memcpy(<char*> out_time.ptr.data + byte_offset, src_time.ptr.data, current_bytes)
+                    if src_time.ptr.null_bitmap != NULL:
+                        if null_bitmap == NULL:
+                            null_bitmap = _allocate_valid_bitmap(total_rows)
+                        _copy_bits(src_time.ptr.null_bitmap, 0, null_bitmap, row_offset, current_rows)
+                    row_offset += current_rows
+                    byte_offset += current_bytes
+                else:
+                    out_time.ptr.null_bitmap = null_bitmap
+                    new_vec = <Vector> out_time
+
+            elif isinstance(current_vec, TimestampVector):
+                out_ts = TimestampVector(<size_t> total_rows)
+                out_ts.timestamp_unit = (<TimestampVector> current_vec).timestamp_unit
+                out_ts.null_bit_offset = 0
+                row_offset = 0
+                byte_offset = 0
+                null_bitmap = NULL
+                for morsel_obj in morsels:
+                    morsel = <Morsel> morsel_obj
+                    src_ts = <TimestampVector> morsel.ptr.columns[i]
+                    current_rows = morsel.ptr.num_rows
+                    current_bytes = current_rows * <Py_ssize_t> src_ts.ptr.itemsize
+                    if current_bytes > 0 and src_ts.ptr.data != NULL:
+                        memcpy(<char*> out_ts.ptr.data + byte_offset, src_ts.ptr.data, current_bytes)
+                    if src_ts.ptr.null_bitmap != NULL:
+                        if null_bitmap == NULL:
+                            null_bitmap = _allocate_valid_bitmap(total_rows)
+                        _copy_bits(src_ts.ptr.null_bitmap, src_ts.null_bit_offset, null_bitmap, row_offset, current_rows)
+                    row_offset += current_rows
+                    byte_offset += current_bytes
+                out_ts.ptr.null_bitmap = null_bitmap
+                new_vec = <Vector> out_ts
+
+            elif isinstance(current_vec, IntervalVector):
+                out_interval = IntervalVector(<size_t> total_rows)
+                row_offset = 0
+                byte_offset = 0
+                null_bitmap = NULL
+                for morsel_obj in morsels:
+                    morsel = <Morsel> morsel_obj
+                    src_interval = <IntervalVector> morsel.ptr.columns[i]
+                    current_rows = morsel.ptr.num_rows
+                    current_bytes = current_rows * <Py_ssize_t> src_interval.ptr.itemsize
+                    if current_bytes > 0 and src_interval.ptr.data != NULL:
+                        memcpy(<char*> out_interval.ptr.data + byte_offset, src_interval.ptr.data, current_bytes)
+                    if src_interval.ptr.null_bitmap != NULL:
+                        if null_bitmap == NULL:
+                            null_bitmap = _allocate_valid_bitmap(total_rows)
+                        _copy_bits(src_interval.ptr.null_bitmap, 0, null_bitmap, row_offset, current_rows)
+                    row_offset += current_rows
+                    byte_offset += current_bytes
+                out_interval.ptr.null_bitmap = null_bitmap
+                new_vec = <Vector> out_interval
+
+            elif isinstance(current_vec, StringVector):
+                total_string_bytes = 0
+                for morsel_obj in morsels:
+                    morsel = <Morsel> morsel_obj
+                    src_str = <StringVector> morsel.ptr.columns[i]
+                    total_string_bytes += src_str.ptr.offsets[morsel.ptr.num_rows]
+                out_str = StringVector(<size_t> total_rows, <size_t> total_string_bytes)
+                row_offset = 0
+                string_offset = 0
+                null_bitmap = NULL
+                out_str.ptr.offsets[0] = 0
+                for morsel_obj in morsels:
+                    morsel = <Morsel> morsel_obj
+                    src_str = <StringVector> morsel.ptr.columns[i]
+                    current_rows = morsel.ptr.num_rows
+                    current_bytes = src_str.ptr.offsets[current_rows]
+                    if current_bytes > 0 and src_str.ptr.data != NULL:
+                        memcpy(out_str.ptr.data + string_offset, src_str.ptr.data, current_bytes)
+                    for j in range(1, current_rows + 1):
+                        out_str.ptr.offsets[row_offset + j] = <int32_t> (
+                            string_offset + src_str.ptr.offsets[j]
+                        )
+                    if src_str.ptr.null_bitmap != NULL:
+                        if null_bitmap == NULL:
+                            null_bitmap = _allocate_valid_bitmap(total_rows)
+                        _copy_bits(src_str.ptr.null_bitmap, 0, null_bitmap, row_offset, current_rows)
+                    row_offset += current_rows
+                    string_offset += current_bytes
+                out_str.ptr.null_bitmap = null_bitmap
+                new_vec = <Vector> out_str
+
+            else:
+                values = []
+                for morsel_obj in morsels:
+                    values.extend((<Morsel> morsel_obj).column(first._encoded_names[i]).to_pylist())
+                new_vec = <Vector> vector_from_sequence(values, self.ptr.column_types[i])
+
+            self._columns[i] = new_vec
+            self.ptr.columns[i] = <void*> new_vec
+            self.ptr.column_types[i] = new_vec.dtype
 
         self._rebuild_name_to_index()
         return self

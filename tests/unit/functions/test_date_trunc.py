@@ -3,7 +3,7 @@ import sys
 import numpy
 import pyarrow
 
-sys.path.insert(1, os.path.join(sys.path[0], "../.."))
+sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
 from datetime import datetime, timezone
 from opteryx.utils.dates import date_trunc

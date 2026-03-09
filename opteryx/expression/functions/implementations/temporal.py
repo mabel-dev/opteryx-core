@@ -66,9 +66,134 @@ def date_part(part, arr):
     Also the EXTRACT function - we extract a given part from an array of dates.
 
     Accepts any temporal input: Draken vectors, PyArrow arrays, or Python
-    scalars/sequences.  All input is normalised to a pyarrow.Array before the
-    component is extracted with a pyarrow.compute kernel — no numpy coercion.
+    scalars/sequences.
+
+    Fast path: Draken vectors → compiled vector_ops (Cython)
+    Slow path: PyArrow arrays → Arrow compute kernels (fallback)
     """
+    # Normalize part name early
+    part = (part[0] if not isinstance(part, str) else part).lower()  # [#325]
+
+    # Units that require temporal input normalization.
+    temporal_parts = {
+        "nanosecond",
+        "nanoseconds",
+        "microsecond",
+        "microseconds",
+        "millisecond",
+        "milliseconds",
+        "second",
+        "minute",
+        "hour",
+        "day",
+        "dayofweek",
+        "dow",
+        "week",
+        "isoweek",
+        "month",
+        "quarter",
+        "dayofyear",
+        "doy",
+        "year",
+        "isoyear",
+        "decade",
+        "century",
+        "epoch",
+        "julian",
+        "date",
+    }
+
+    # Handle NumPy arrays that are integer timestamps
+    if isinstance(arr, numpy.ndarray) and numpy.issubdtype(arr.dtype, numpy.integer):
+        # Convert int64 array to timestamp using the helper (detects precision)
+        arr = convert_int64_array_to_pyarrow_datetime(arr)
+        # Now continue with normal Draken vector flow - will check if TimestampVector below
+        vector_type = arr.__class__.__name__
+    else:
+        vector_type = arr.__class__.__name__
+
+    if vector_type == "TimestampVector":
+        from opteryx.compiled.vector_ops.function_definitions import vector_datepart_day
+        from opteryx.compiled.vector_ops.function_definitions import vector_datepart_dayofweek
+        from opteryx.compiled.vector_ops.function_definitions import vector_datepart_dayofyear
+        from opteryx.compiled.vector_ops.function_definitions import vector_datepart_hour
+        from opteryx.compiled.vector_ops.function_definitions import vector_datepart_minute
+        from opteryx.compiled.vector_ops.function_definitions import vector_datepart_month
+        from opteryx.compiled.vector_ops.function_definitions import vector_datepart_quarter
+        from opteryx.compiled.vector_ops.function_definitions import vector_datepart_second
+        from opteryx.compiled.vector_ops.function_definitions import vector_datepart_year
+
+        if part == "minute":
+            return vector_datepart_minute(arr).to_arrow()
+        elif part == "hour":
+            return vector_datepart_hour(arr).to_arrow()
+        elif part in ("second", "seconds"):
+            return vector_datepart_second(arr).to_arrow()
+        elif part == "year":
+            return vector_datepart_year(arr).to_arrow()
+        elif part == "month":
+            return vector_datepart_month(arr).to_arrow()
+        elif part == "day":
+            return vector_datepart_day(arr).to_arrow()
+        elif part in ("dayofweek", "dow"):
+            return vector_datepart_dayofweek(arr).to_arrow()
+        elif part in ("dayofyear", "doy"):
+            return vector_datepart_dayofyear(arr).to_arrow()
+        elif part == "quarter":
+            return vector_datepart_quarter(arr).to_arrow()
+        # Unsupported parts (week, isoweek, isoyear, epoch, julian, date, …)
+        # fall through to the Arrow slow-path below.
+
+    if vector_type == "Int64Vector":
+        from opteryx.compiled.vector_ops.function_definitions import vector_datepart_day_i64
+        from opteryx.compiled.vector_ops.function_definitions import vector_datepart_dayofweek_i64
+        from opteryx.compiled.vector_ops.function_definitions import vector_datepart_dayofyear_i64
+        from opteryx.compiled.vector_ops.function_definitions import vector_datepart_hour_i64
+        from opteryx.compiled.vector_ops.function_definitions import vector_datepart_minute_i64
+        from opteryx.compiled.vector_ops.function_definitions import vector_datepart_month_i64
+        from opteryx.compiled.vector_ops.function_definitions import vector_datepart_quarter_i64
+        from opteryx.compiled.vector_ops.function_definitions import vector_datepart_second_i64
+        from opteryx.compiled.vector_ops.function_definitions import vector_datepart_year_i64
+
+        if part == "minute":
+            return vector_datepart_minute_i64(arr).to_arrow()
+        elif part == "hour":
+            return vector_datepart_hour_i64(arr).to_arrow()
+        elif part in ("second", "seconds"):
+            return vector_datepart_second_i64(arr).to_arrow()
+        elif part == "year":
+            return vector_datepart_year_i64(arr).to_arrow()
+        elif part == "month":
+            return vector_datepart_month_i64(arr).to_arrow()
+        elif part == "day":
+            return vector_datepart_day_i64(arr).to_arrow()
+        elif part in ("dayofweek", "dow"):
+            return vector_datepart_dayofweek_i64(arr).to_arrow()
+        elif part in ("dayofyear", "doy"):
+            return vector_datepart_dayofyear_i64(arr).to_arrow()
+        elif part == "quarter":
+            return vector_datepart_quarter_i64(arr).to_arrow()
+        # Unsupported parts fall through to Arrow slow-path.
+
+    if vector_type == "DictionaryVector":
+        from opteryx.compiled.vector_ops.function_definitions import vector_datepart_hour_dict
+        from opteryx.compiled.vector_ops.function_definitions import vector_datepart_minute_dict
+        from opteryx.compiled.vector_ops.function_definitions import vector_datepart_second_dict
+
+        # Dictionary optimization: extract from V values, not N rows
+        try:
+            if part == "minute":
+                return vector_datepart_minute_dict(arr).to_arrow()
+            elif part == "hour":
+                return vector_datepart_hour_dict(arr).to_arrow()
+            elif part in ("second", "seconds"):
+                return vector_datepart_second_dict(arr).to_arrow()
+        except TypeError:
+            # Dictionary has unsupported value type - fall through to decode path
+            pass
+
+    # --- SLOW PATH: Arrow compute kernels (fallback) ---
+
     j2000_scalar = pyarrow.array(
         [datetime.datetime(2000, 1, 1, 12, 0, 0)], type=pyarrow.timestamp("us")
     )
@@ -116,11 +241,20 @@ def date_part(part, arr):
     if isinstance(arr, pyarrow.ChunkedArray):
         arr = arr.combine_chunks() if arr.num_chunks > 1 else arr.chunk(0)
 
+    # For temporal extraction units, normalize integer/dictionary inputs to timestamp.
+    if part in temporal_parts and isinstance(arr, pyarrow.Array):
+        if pyarrow.types.is_dictionary(arr.type):
+            arr = arr.dictionary_decode()
+        if pyarrow.types.is_integer(arr.type):
+            arr = convert_int64_array_to_pyarrow_datetime(arr)
+
     if not isinstance(arr, pyarrow.Array):
         # Numpy arrays or plain Python sequences: wrap in pyarrow (no datetime64 cast)
         arr = pyarrow.array(arr)
 
-    part = (part[0] if not isinstance(part, str) else part).lower()  # [#325]
+    if part in temporal_parts and pyarrow.types.is_integer(arr.type):
+        arr = convert_int64_array_to_pyarrow_datetime(arr)
+
     if part in extractors:
         return extractors[part](arr)
 

@@ -225,6 +225,15 @@ class TestBoolVectorOperations:
         
         assert list(result) == expected
 
+    def test_take_preserves_nulls(self):
+        """take() should preserve source nulls instead of dropping validity."""
+        import numpy as np
+
+        vec = Vector.from_arrow(pa.array([True, None, False, None], type=pa.bool_()))
+        result = vec.take(np.array([0, 1, 3], dtype=np.int32))
+
+        assert result.to_pylist() == [True, None, None]
+
 
 class TestBoolVectorComparisons:
     """Test BoolVector comparison operations."""
@@ -359,6 +368,5 @@ class TestBoolVectorMiscellaneous:
         
         indices = np.array([0, 1, 4], dtype=np.int32)
         result = vec.take(indices)
-        
-        # Current implementation: nulls become False
-        assert result.to_pylist() == [True, False, True]
+
+        assert result.to_pylist() == [True, None, True]
