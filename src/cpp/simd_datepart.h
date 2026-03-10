@@ -33,6 +33,21 @@ void simd_datepart_hour(const int64_t* src, int64_t* dst, size_t n, int unit_cod
 /** Extract second-of-minute (0-59) from a timestamp vector. */
 void simd_datepart_second(const int64_t* src, int64_t* dst, size_t n, int unit_code);
 
+/** Extract year from a timestamp vector (Howard Hinnant, int32 calendar arithmetic). */
+void simd_datepart_year(const int64_t* src, int64_t* dst, size_t n, int unit_code);
+
+/** Extract month-of-year (1-12) from a timestamp vector. */
+void simd_datepart_month(const int64_t* src, int64_t* dst, size_t n, int unit_code);
+
+/** Extract day-of-month (1-31) from a timestamp vector. */
+void simd_datepart_day(const int64_t* src, int64_t* dst, size_t n, int unit_code);
+
+/** Extract quarter (1-4) from a timestamp vector. */
+void simd_datepart_quarter(const int64_t* src, int64_t* dst, size_t n, int unit_code);
+
+/** Extract day-of-year (1-366) from a timestamp vector. */
+void simd_datepart_dayofyear(const int64_t* src, int64_t* dst, size_t n, int unit_code);
+
 #ifdef __cplusplus
 }
 #endif
