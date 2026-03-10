@@ -14,21 +14,21 @@ from __future__ import annotations
 
 import time
 
-import numpy
-import pyarrow
 from orso.types import OrsoTypes
 
 from opteryx import EMPTY
 from opteryx import EOS
 from opteryx.draken.morsels.morsel import Morsel
+from opteryx.draken.vectors.constant_vector import from_scalar as constant_from_scalar
 from opteryx.exceptions import UnsupportedSyntaxError
-from opteryx.managers.expression import NodeType
-from opteryx.managers.expression import evaluate_and_append
-from opteryx.managers.expression import get_all_nodes_of_type
+from opteryx.expression import NodeType
+from opteryx.expression import get_all_nodes_of_type
+from opteryx.expression.evaluator import evaluate_and_append_draken
 from opteryx.models import QueryProperties
 from opteryx.operators.aggregate_node import extract_evaluations
-from opteryx.operators.aggregate_node import project
-from opteryx.operators.group_state_store import ShuffleGroupByOperationV2
+from opteryx.operators.group_state_store import create_group_state_engine
+from opteryx.operators.group_state_store import normalize_aggregations
+from opteryx.operators.group_state_store import normalize_group_by_columns
 from opteryx.operators.shuffle import AggregationSpec
 
 from . import BasePlanNode
@@ -37,10 +37,40 @@ CHUNK_SIZE = 65536
 
 
 class DrakenAggregateAndGroupNode(BasePlanNode):
+    ENGINE_READING_KEYS = (
+        "feature_groupby_engine_carchar",
+        "feature_groupby_engine_constant",
+        "feature_groupby_engine_legacy",
+        "feature_groupby_engine_multi_key_fixed",
+        "feature_groupby_engine_multi_key_object",
+        "draken_dict_groupby_fastpath_hits",
+        "draken_dict_groupby_fastpath_fallbacks",
+        "draken_constant_groupby_fastpath_hits",
+        "draken_constant_groupby_fastpath_fallbacks",
+        "draken_constant_groupby_output_vector_hits",
+        "draken_constant_groupby_output_vector_fallbacks",
+        "groupby_key_store_bytes",
+        "groupby_key_store_limit_bytes",
+    )
     SUPPORTED_AGGREGATES = frozenset(
         {"COUNT", "SUM", "MIN", "MAX", "AVG", "COUNT_DISTINCT", "DISTINCT", "ONE", "ANY_VALUE"}
     )
-    FAST_PATH_AGGREGATES = frozenset({"COUNT", "SUM", "AVG", "MIN", "COUNT_DISTINCT", "DISTINCT"})
+    # MAX was previously omitted: the Draken kernel implemented it but
+    # the planner refused to use it in strict mode until we were confident
+    # the fast-finalize semantics were deterministic.  With the rewritten
+    # expression engine and proper handling of dictionary columns we can
+    # safely include it and avoid the Arrow fallback entirely.
+    FAST_PATH_AGGREGATES = frozenset(
+        {
+            "COUNT",
+            "SUM",
+            "AVG",
+            "MIN",
+            "MAX",  # added
+            "COUNT_DISTINCT",
+            "DISTINCT",
+        }
+    )
 
     def __init__(self, properties: QueryProperties, **parameters):
         super().__init__(properties=properties, **parameters)
@@ -70,22 +100,21 @@ class DrakenAggregateAndGroupNode(BasePlanNode):
         )
         self.group_by_columns = list({node.schema_column.identity for node in self.groups})
         self._aggregation_specs = self._build_aggregation_specs(self.aggregates)
+        self._normalized_group_by_columns = normalize_group_by_columns(self.group_by_columns)
+        self._normalized_aggregations = normalize_aggregations(self._aggregation_specs)
         required_columns = list(self.group_by_columns)
         required_columns.extend(
             spec.column for spec in self._aggregation_specs if spec.column not in (None, "*")
         )
         self._required_columns = list(dict.fromkeys(required_columns))
-        self._group_by = ShuffleGroupByOperationV2(
-            group_by_columns=self.group_by_columns,
-            aggregations=self._aggregation_specs,
+        self._group_by = create_group_state_engine(
+            group_by_columns=self._normalized_group_by_columns,
+            aggregations=self._normalized_aggregations,
         )
 
     @staticmethod
     def supports(aggregates, groups=None) -> bool:
         groups = groups or []
-
-        if not groups:
-            return False
 
         for aggregate in aggregates:
             if aggregate.value not in DrakenAggregateAndGroupNode.SUPPORTED_AGGREGATES:
@@ -98,13 +127,16 @@ class DrakenAggregateAndGroupNode(BasePlanNode):
                 # until their fast finalize semantics are fully deterministic.
                 return False
 
+        if not groups:
+            return True
+
         # Allow expressions in GROUP BY - the execute() method already handles
         # evaluation via evaluate_and_append(self.groups, arrow_table)
         return True
 
     @property
     def config(self):  # pragma: no cover
-        from opteryx.managers.expression import format_expression
+        from opteryx.expression import format_expression
 
         return f"AGGREGATE ({', '.join(format_expression(col) for col in self.aggregates)}) GROUP BY ({', '.join(format_expression(col) for col in self.groups)})"
 
@@ -153,27 +185,59 @@ class DrakenAggregateAndGroupNode(BasePlanNode):
             return "count_distinct"
         raise UnsupportedSyntaxError(f"Unsupported aggregate function for Draken group-by: {value}")
 
-    def execute(self, morsel: pyarrow.Table | Morsel, **kwargs):
+    def _engine_reading_snapshot(self):
+        return {key: self._group_by.readings.get(key, 0) for key in self.ENGINE_READING_KEYS}
+
+    def _accumulate_engine_reading_delta(self, snapshot):
+        for key in self.ENGINE_READING_KEYS:
+            current = self._group_by.readings.get(key, 0)
+            previous = snapshot.get(key, 0)
+            delta = current - previous
+            if delta:
+                self.readings[key] += delta
+
+    def execute(self, morsel, **kwargs):
         _ = kwargs
 
-        if self._needs_arrow_eval:
-            arrow_table = self.ensure_arrow_table(morsel)
-            if arrow_table != EOS:
-                arrow_table = project(arrow_table, list(self.all_identifiers))
-                if "*" not in arrow_table.column_names:
-                    arrow_table = arrow_table.append_column(
-                        "*", [numpy.ones(shape=arrow_table.num_rows, dtype=numpy.int8)]
-                    )
-                eval_start = time.monotonic_ns()
+        draken = self.ensure_draken_morsel(morsel)
+
+        def _prepare_draken_chunk(chunk):
+            if chunk == EOS:
+                return EOS
+            if self.all_identifiers:
+                chunk = chunk.select(self.all_identifiers)
+            if b"*" not in chunk.column_names and "*" not in chunk.column_names:
+                star_vector = constant_from_scalar(1, chunk.num_rows, dtype="int8")
+                chunk = Morsel.from_vectors(
+                    [*chunk.column_names, "*"],
+                    [
+                        *(
+                            chunk.column(name if isinstance(name, bytes) else name.encode())
+                            for name in chunk.column_names
+                        ),
+                        star_vector,
+                    ],
+                )
+
+            eval_start = time.monotonic_ns()
+            try:
                 if self.evaluatable_nodes:
-                    arrow_table = evaluate_and_append(self.evaluatable_nodes, arrow_table)
-                arrow_table = evaluate_and_append(self.groups, arrow_table)
+                    chunk = evaluate_and_append_draken(self.evaluatable_nodes, chunk)
+                chunk = evaluate_and_append_draken(self.groups, chunk)
+                self.readings["feature_groupby_draken_eval_native"] += 1
+                return chunk
+            except (NotImplementedError, TypeError, UnsupportedSyntaxError) as err:
+                raise UnsupportedSyntaxError(
+                    f"Draken grouped expression evaluation does not support this query shape: {err}"
+                ) from err
+            finally:
                 self.readings["time_group_by_evaluations"] += time.monotonic_ns() - eval_start
-            draken = self.ensure_draken_morsel(arrow_table)
-        else:
-            draken = self.ensure_draken_morsel(morsel)
+
+        if draken != EOS and self._needs_arrow_eval and isinstance(draken, Morsel):
+            draken = _prepare_draken_chunk(draken)
 
         if draken == EOS:
+            pre_engine_snapshot = self._engine_reading_snapshot()
             pre_backend_ns = self._group_by.readings.get("time_groupby_finalize_backend_ns", 0)
             pre_rows_to_vectors_ns = self._group_by.readings.get(
                 "time_groupby_finalize_rows_to_vectors_ns", 0
@@ -226,26 +290,33 @@ class DrakenAggregateAndGroupNode(BasePlanNode):
                 self._group_by.readings.get("groupby_finalize_fast_path_hits", 0)
                 - pre_fast_path_hits
             )
+            self._accumulate_engine_reading_delta(pre_engine_snapshot)
 
             yield EOS
             return
 
         ingest_start = time.monotonic_ns()
         if isinstance(draken, Morsel):
+            pre_engine_snapshot = self._engine_reading_snapshot()
             if self._required_columns:
                 draken = draken.select(self._required_columns)
             self._group_by.ingest(draken)
+            self._accumulate_engine_reading_delta(pre_engine_snapshot)
             self.readings["time_groupby_ingest"] += time.monotonic_ns() - ingest_start
             yield EMPTY
             return
 
+        pre_engine_snapshot = self._engine_reading_snapshot()
         for chunk in draken:
             if chunk is None or chunk is EOS or chunk.num_rows == 0:
                 continue
+            if self._needs_arrow_eval:
+                chunk = _prepare_draken_chunk(chunk)
             if self._required_columns:
                 chunk = chunk.select(self._required_columns)
             self._group_by.ingest(chunk)
 
+        self._accumulate_engine_reading_delta(pre_engine_snapshot)
         self.readings["time_groupby_ingest"] += time.monotonic_ns() - ingest_start
 
         yield EMPTY

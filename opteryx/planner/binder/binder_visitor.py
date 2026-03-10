@@ -18,8 +18,8 @@ from orso.types import OrsoTypes
 from opteryx.exceptions import AmbiguousDatasetError
 from opteryx.exceptions import InvalidFunctionParameterError
 from opteryx.exceptions import UnsupportedSyntaxError
-from opteryx.managers.expression import NodeType
-from opteryx.managers.expression import get_all_nodes_of_type
+from opteryx.expression import NodeType
+from opteryx.expression import get_all_nodes_of_type
 from opteryx.models import LogicalColumn
 from opteryx.models import Node
 from opteryx.planner.binder.binder import inner_binder
@@ -105,6 +105,8 @@ def get_mismatched_condition_column_types(
                 or node.right.node_type == NodeType.COMPARISON_OPERATOR
                 or node.left.node_type == NodeType.BINARY_OPERATOR
                 or node.right.node_type == NodeType.BINARY_OPERATOR
+                or node.left.node_type == NodeType.EXTRACTION_OPERATOR
+                or node.right.node_type == NodeType.EXTRACTION_OPERATOR
             ):
                 return None  # it's compound so don't make a decision here
             return {

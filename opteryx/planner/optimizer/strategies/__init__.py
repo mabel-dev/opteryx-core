@@ -1,4 +1,5 @@
 from .boolean_simplication import BooleanSimplificationStrategy
+from .cast_simplification import CastSimplificationStrategy
 from .constant_folding import ConstantFoldingStrategy
 from .correlated_filters import CorrelatedFiltersStrategy
 from .distinct_pushdown import DistinctPushdownStrategy
@@ -20,6 +21,7 @@ from .storage_cache_strategy import StorageCacheStrategy
 
 __all__ = [
     "BooleanSimplificationStrategy",
+    "CastSimplificationStrategy",
     "ConstantFoldingStrategy",
     "CorrelatedFiltersStrategy",
     "DistinctPushdownStrategy",

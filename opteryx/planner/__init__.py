@@ -48,8 +48,8 @@ import numpy
 from orso.schema import ConstantColumn
 from orso.types import OrsoTypes
 
-from opteryx.datatypes.intervals import normalize_interval_value
-from opteryx.managers.expression import NodeType
+from opteryx.expression import NodeType
+from opteryx.expression.intervals import normalize_interval_value
 from opteryx.models import Node
 
 

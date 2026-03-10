@@ -4,11 +4,12 @@ import pyarrow as pa
 
 sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 
-from opteryx.compiled.list_ops import list_allop_eq
+from opteryx.compiled.vector_ops import vector_allop_eq
+from opteryx.draken.interop.arrow import vector_from_arrow
 
 def _test_all_eq_comparison(literal, test_value, expected_result, _type=pa.string()):
-    array = pa.array([test_value], type=pa.list_(_type))
-    result = list(list_allop_eq(literal, array))
+    array = vector_from_arrow(pa.array([test_value], type=pa.list_(_type)))
+    result = vector_allop_eq(literal, array).to_pylist()
     assert result == [expected_result], f"Expected all({test_value}) == {literal} to be {expected_result}, got {result[0]}"
 
 def test_all_eq_basic():

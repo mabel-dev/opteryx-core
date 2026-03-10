@@ -22,7 +22,6 @@ _COLOR_BOOLEAN = "\033[38;2;255;184;188m"
 _COLOR_FUNCTION = "\033[38;2;80;250;123m"
 _COLOR_OPERATOR = "\033[38;2;189;147;249m"
 _COLOR_NUMBER = "\033[38;2;255;184;108m"
-_STRIKETHROUGH = "\033[9m"
 
 _PUNCTUATION_TOKENS = {"(", ")", ",", ";", "[", "]"}
 _BOOLEAN_LITERALS = {"TRUE", "FALSE", "NULL"}
@@ -121,15 +120,11 @@ _KEYWORDS = {
     "YESTERDAY",
 }
 try:  # pragma: no cover - best-effort enrichment
-    from opteryx.functions import DEPRECATED_FUNCTIONS as _DEPRECATED_LOOKUP
-    from opteryx.functions import FUNCTIONS as _FUNCTIONS_LOOKUP
-except Exception:  # pragma: no cover
-    _FUNCTIONS_LOOKUP = {}
-    _DEPRECATED_LOOKUP = {}
+    from opteryx.expression.functions import get_catalog as _get_catalog
 
-_FUNCTION_LIKE = {name.upper() for name in _FUNCTIONS_LOOKUP}
-_DEPRECATED_FUNCTION_NAMES = {name.upper() for name in _DEPRECATED_LOOKUP}
-_FUNCTION_LIKE.update(_DEPRECATED_FUNCTION_NAMES)
+    _FUNCTION_LIKE = {f.name for f in _get_catalog().list_functions()}
+except Exception:  # pragma: no cover
+    _FUNCTION_LIKE = set()
 
 
 def tokenize_string(string):
@@ -214,8 +209,6 @@ def format_sql(sql):  # pragma: no cover
             formatted_sql += f"{_COLOR_KEYWORD}{upper_word}{_RESET} "
         elif upper_word in _BOOLEAN_LITERALS:
             formatted_sql += f"{_COLOR_BOOLEAN}{upper_word}{_RESET} "
-        elif upper_word in _DEPRECATED_FUNCTION_NAMES:
-            formatted_sql += f"{_COLOR_FUNCTION}{_STRIKETHROUGH}{upper_word}{_RESET}"
         elif ((i + 1) < len(words) and words[i + 1] == "(") or upper_word in _FUNCTION_LIKE:
             formatted_sql += f"{_COLOR_FUNCTION}{upper_word}{_RESET}"
         elif upper_word in _OPERATOR_TOKENS:

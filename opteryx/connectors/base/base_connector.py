@@ -20,6 +20,7 @@ import pyarrow
 from orso.schema import RelationSchema
 
 from opteryx.connectors import TableType
+from opteryx.draken.morsels.morsel import Morsel
 from opteryx.exceptions import DatasetNotFoundError
 from opteryx.models import QueryTelemetry
 
@@ -189,7 +190,7 @@ class BaseTable:
         columns: Optional[list] = None,
         morsel_size: int = DEFAULT_MORSEL_SIZE,
         initial_chunk_size: int = INITIAL_CHUNK_SIZE,
-    ) -> pyarrow.Table:
+    ) -> Morsel:
         chunk = []
         self.chunk_size = initial_chunk_size  # we reset each time
         morsel = None
@@ -204,19 +205,20 @@ class BaseTable:
             chunk.append(record)
 
             if index == self.chunk_size - 1:
-                morsel = pyarrow.Table.from_pylist(chunk)
+                arrow_table = pyarrow.Table.from_pylist(chunk)
                 # Estimate the number of records to fill the morsel size
-                if morsel.nbytes > 0:
-                    self.chunk_size = int(morsel_size // (morsel.nbytes / self.chunk_size))
+                if arrow_table.nbytes > 0:
+                    self.chunk_size = int(morsel_size // (arrow_table.nbytes / self.chunk_size))
+                morsel = Morsel.from_arrow(arrow_table)
                 yield morsel
                 chunk = []
             elif (index > self.chunk_size - 1) and (index - self.chunk_size) % self.chunk_size == 0:
-                morsel = pyarrow.Table.from_pylist(chunk)
+                morsel = Morsel.from_arrow(pyarrow.Table.from_pylist(chunk))
                 yield morsel
                 chunk = []
 
         if chunk:
-            morsel = pyarrow.Table.from_pylist(chunk)
+            morsel = Morsel.from_arrow(pyarrow.Table.from_pylist(chunk))
             yield morsel
 
 
@@ -237,12 +239,12 @@ class DatasetReader:
         """
         return self
 
-    def __next__(self) -> pyarrow.Table:  # pragma: no cover
+    def __next__(self) -> Morsel:  # pragma: no cover
         """
         Read the next chunk or morsel from the dataset.
 
         Returns:
-            A pyarrow Table representing a chunk or morsel of the dataset.
+            A Morsel representing a chunk of the dataset.
             raises StopIteration if the dataset is exhausted.
         """
         raise NotImplementedError("Subclasses must implement __next__ method.")

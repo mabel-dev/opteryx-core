@@ -3,7 +3,7 @@
 # See the License at http://www.apache.org/licenses/LICENSE-2.0
 
 from opteryx.operators.draken_aggregate_and_group_node import DrakenAggregateAndGroupNode
-from opteryx.managers.expression import NodeType
+from opteryx.expression import NodeType
 
 
 class _Aggregate:

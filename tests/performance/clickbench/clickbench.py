@@ -4,6 +4,7 @@ import sys
 
 os.environ.pop("OPTERYX_DEBUG", None)
 os.environ["FEATURE_USE_DRAKEN_AGGREGATOR"] = "1"
+os.environ["FEATURE_USE_SERIAL_READER"] = "NONE"
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../../../orso"))
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
@@ -150,6 +151,7 @@ if __name__ == "__main__":  # pragma: no cover
 
     print(f"RUNNING CLICKBENCH BATTERY OF {len(STATEMENTS)} QUERIES\n")
     for index, (statement, err) in enumerate(STATEMENTS):
+        #statement = statement.replace("testdata.clickbench_tiny", "(SELECT * FROM scratch.hits LIMIT 10_000_000)")
         statement = statement.replace("testdata.clickbench_tiny", "scratch.hits")
         #statement = statement.replace("testdata.clickbench_tiny", "scratch.hits_single")
         printable = statement
@@ -170,6 +172,11 @@ if __name__ == "__main__":  # pragma: no cover
                     elapsed_ms = (time.monotonic_ns() - start) / 1e6
                     result = None
                     times.append(elapsed_ms)
+                except opteryx.exceptions.MissingSqlStatement:
+                    # Commented-out queries (e.g. Q33) are intentional skips.
+                    query_failed = True
+                    print(f"{query_num:<8} SKIP  (no SQL statement)")
+                    break
                 except Exception as e:
                     query_failed = True
                     print(f"{query_num:<8} ERROR: {str(e)[:60]}")

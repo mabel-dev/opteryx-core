@@ -26,8 +26,8 @@ def make_str_table(n, avg_len=20):
     return pa.table({'s': arr})
 
 
-def make_list_table(n, list_len=5):
-    data = [[i % 5 for i in range(list_len)] for _ in range(n)]
+def make_list_table(n, vector_len=5):
+    data = [[i % 5 for i in range(vector_len)] for _ in range(n)]
     arr = pa.array(data)
     return pa.table({'l': arr})
 
@@ -49,7 +49,7 @@ if __name__ == '__main__':
     print('Preparing tables...')
     t_int = make_int_table(N)
     t_str = make_str_table(N, avg_len=30)
-    t_list = make_list_table(N, list_len=3)
+    t_list = make_list_table(N, vector_len=3)
 
     print('Benchmarking int table...')
     best, mean = bench(t_int, ['a'])

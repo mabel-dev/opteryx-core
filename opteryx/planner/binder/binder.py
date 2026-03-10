@@ -22,10 +22,9 @@ from opteryx.exceptions import ColumnNotFoundError
 from opteryx.exceptions import IncompatibleTypesError
 from opteryx.exceptions import InvalidInternalStateError
 from opteryx.exceptions import UnexpectedDatasetReferenceError
-from opteryx.functions import DEPRECATED_FUNCTIONS
-from opteryx.functions import FUNCTIONS
+from opteryx.expression import NodeType
+from opteryx.expression.functions import get_catalog as _get_function_catalog
 from opteryx.functions import fixed_value_function
-from opteryx.managers.expression import NodeType
 from opteryx.models import Node
 from opteryx.planner.binder.binding_context import BindingContext
 from opteryx.planner.binder.operator_map import determine_type
@@ -217,11 +216,9 @@ def inner_binder(node: Node, context: BindingContext) -> Tuple[Node, Any]:
     (executing comparisons).
     """
     # Import relevant classes and functions
-    from orso.types import find_compatible_type
-
-    from opteryx.managers.expression import ExpressionColumn
-    from opteryx.managers.expression import format_expression
-    from opteryx.managers.expression import get_all_nodes_of_type
+    from opteryx.expression import ExpressionColumn
+    from opteryx.expression import format_expression
+    from opteryx.expression import get_all_nodes_of_type
 
     # Retrieve the node type for further processing.
     node_type = node.node_type
@@ -283,17 +280,6 @@ def inner_binder(node: Node, context: BindingContext) -> Tuple[Node, Any]:
 
     elif node_type != NodeType.SUBQUERY and not node.do_not_create_column:
         if node_type in (NodeType.FUNCTION, NodeType.AGGREGATOR):
-            if node.value in DEPRECATED_FUNCTIONS:
-                import warnings
-
-                replacement = DEPRECATED_FUNCTIONS[node.value]
-                if replacement is not None:
-                    message = f"Function '{node.value}' is deprecated and will be removed in a future version. Use '{DEPRECATED_FUNCTIONS[node.value]}' instead."
-                else:
-                    message = f"Function '{node.value}' is deprecated and will be removed in a future version."
-                context.telemetry.add_message(message)
-                warnings.warn(message, category=DeprecationWarning, stacklevel=2)
-
             # we need to add this new column to the schema
             aliases = [node.alias] if node.alias else []
             result_type = None
@@ -313,113 +299,54 @@ def inner_binder(node: Node, context: BindingContext) -> Tuple[Node, Any]:
                 node.type = result_type
                 node.value = fixed_function_result
             else:
-                _, result_type, _ = FUNCTIONS.get(node.value, (None, "VARIANT", None))
                 element_type = None  # for types with elements (ARRAYs)
                 precision = 38  # Maximum precision for Decimal128
                 scale = 21  # A reasonable scale that's less than precision
 
-                if node.value == "DECIMAL":
-                    result_type = OrsoTypes.DECIMAL
-                    precision = node.parameters[1].value if len(node.parameters) > 1 else precision
+                # DECIMAL carries precision/scale as parameters — extract before catalog lookup
+                if node.value == "DECIMAL" and len(node.parameters) > 1:
+                    precision = node.parameters[1].value
                     scale = node.parameters[2].value if len(node.parameters) > 2 else scale
 
-                # If we don't know the return type from the function name, we can usually
-                # work it out from the parameters - all of the aggs are worked out this way
-                # even COUNT which is always an integer.
-                if result_type == "VARIANT":
-                    # Some functions return a fixed type, so return that type
-                    if node.value == "COUNT":
-                        result_type = OrsoTypes.INTEGER
-                    elif node.value == "AVG":
-                        result_type = OrsoTypes.DOUBLE
-                    elif node.value in ("ARRAY", "TRY_ARRAY"):
-                        result_type, _, _, _, element_type = OrsoTypes.from_name(
-                            f"ARRAY<{node.parameters[1].value}>"
-                        )
-                    elif node.value == "ARRAY_AGG":
-                        result_type = OrsoTypes.ARRAY
-                        element_type = node.parameters[0].schema_column.type
-                    # Some functions return different types based on the input
-                    # we need to find the first non-null parameter
-                    elif node.value == "CASE":
-                        for param in node.parameters[1].parameters:
-                            if param.node_type in (
-                                NodeType.LITERAL,
-                                NodeType.IDENTIFIER,
-                                NodeType.FUNCTION,
-                            ) and param.schema_column.type not in (
-                                OrsoTypes.NULL,
-                                0,
-                                OrsoTypes._MISSING_TYPE,
-                            ):
-                                result_type = param.schema_column.type
-                                break
-                        # if we have a type, we should ensure all the parameters are the same type
-                        if result_type not in (OrsoTypes._MISSING_TYPE, 0):
-                            parameters = []
-                            for param in node.parameters[1].parameters:
-                                if param.node_type == NodeType.LITERAL and param.value is not None:
-                                    param.value = result_type.parse(param.value)
-                                    param.type = result_type
-                                    param.schema_column.type = result_type
-                                parameters.append(param)
-                            node.parameters[1].parameters = parameters
-                    elif node.value == "IIF":
-                        result_type = node.parameters[1].schema_column.type
-                    elif node.value in ("ABS", "MAX", "MIN", "NULLIF", "PASSTHRU", "SUM"):
-                        result_type = node.parameters[0].schema_column.type
-                    elif node.value in ("GREATEST", "LEAST", "SORT"):
-                        result_type = node.parameters[0].schema_column.element_type
-                    # Some functions support nulls different positions
-                    elif node.value in ("COALESCE", "IFNULL", "IFNOTNULL"):
-                        discovered_types = []
-                        for param in node.parameters:
-                            if param.node_type in (
-                                NodeType.LITERAL,
-                                NodeType.IDENTIFIER,
-                                NodeType.FUNCTION,
-                                NodeType.AGGREGATOR,
-                            ) and param.schema_column.type not in (
-                                OrsoTypes.NULL,
-                                0,
-                                OrsoTypes._MISSING_TYPE,
-                            ):
-                                discovered_types.append(param.schema_column.type)
-                        result_type = find_compatible_type(discovered_types)
-                        # if we have a type, we should ensure all the parameters are the same type
-                        if result_type not in (OrsoTypes._MISSING_TYPE, 0):
-                            parameters = []
-                            for param in node.parameters:
-                                if (
-                                    param.node_type == NodeType.LITERAL
-                                    and param.value is not None
-                                    and param.value != set()
-                                ):
-                                    param.value = result_type.parse(param.value)
-                                    param.type = result_type
-                                    param.schema_column.type = result_type
-                                parameters.append(param)
-                            node.parameters = parameters
-                    # some functions return different types based on fixed input
-                    elif node.value == "DATEPART":
-                        datepart = node.parameters[0].value.lower()
-                        if datepart in ("epoch", "juian"):
-                            result_type = OrsoTypes.DOUBLE
-                        elif datepart == "day":
-                            result_type = OrsoTypes.VARCHAR
-                        elif datepart == "date":
-                            result_type = OrsoTypes.DATE
-                        else:
-                            result_type = OrsoTypes.INTEGER
-                    # Some function we don't know the return type until run time
-                    elif node.value == "GET":
-                        result_type = 0
-                        if node.parameters[1].type == OrsoTypes.INTEGER:
-                            schema_column = node.parameters[0].schema_column
-                            if schema_column.type == OrsoTypes.ARRAY:
-                                result_type = schema_column.element_type
-                            elif schema_column.type in (OrsoTypes.VARCHAR, OrsoTypes.BLOB):
-                                result_type = schema_column.type
+                # Ask the catalog for the return type (catalog owns type reasoning)
+                _resolved = _get_function_catalog().resolve(node.value, list(node.parameters))
+                if _resolved is not None:
+                    result_type = _resolved.inferred_return_type
+                    element_type = _resolved.inferred_element_type
+                    node.function_ref = _resolved
+                else:
+                    result_type = OrsoTypes.NULL  # unknown function; type resolved at runtime
+
+                # Literal coercion: binder's job — mutate AST nodes to match the resolved type.
+                # This is NOT type inference; it's making literals consistent with the
+                # surrounding expression's type after the catalog has declared the return type.
+                if node.value == "CASE" and result_type not in (
+                    OrsoTypes._MISSING_TYPE,
+                    OrsoTypes.NULL,
+                    0,
+                ):
+                    for param in node.parameters[1].parameters:
+                        if param.node_type == NodeType.LITERAL and param.value is not None:
+                            param.value = result_type.parse(param.value)
+                            param.type = result_type
+                            param.schema_column.type = result_type
+                elif node.value in ("COALESCE", "IFNULL", "IFNOTNULL") and result_type not in (
+                    OrsoTypes._MISSING_TYPE,
+                    OrsoTypes.NULL,
+                    0,
+                ):
+                    parameters = []
+                    for param in node.parameters:
+                        if (
+                            param.node_type == NodeType.LITERAL
+                            and param.value is not None
+                            and param.value != set()
+                        ):
+                            param.value = result_type.parse(param.value)
+                            param.type = result_type
+                            param.schema_column.type = result_type
+                        parameters.append(param)
+                    node.parameters = parameters
 
                 schema_column = FunctionColumn(
                     name=column_name,
@@ -429,6 +356,55 @@ def inner_binder(node: Node, context: BindingContext) -> Tuple[Node, Any]:
                     precision=precision,
                     scale=scale,
                 )
+            schemas["$derived"].columns.append(schema_column)
+            node.derived_from = []
+            node.schema_column = schema_column
+            node.query_column = node.alias or column_name
+
+        elif node_type == NodeType.CAST:
+            # Handle CAST operations (CAST(expr AS type))
+            # The source expression is already bound via recursive traversal above
+            # node.value contains the target type name (e.g., "VARCHAR", "INTEGER", "DOUBLE", "BLOB")
+
+            # Define aliases for the schema column
+            aliases = [node.alias] if node.alias else []
+
+            # Map type name to OrsoType
+            target_type_name = node.value.upper()
+            result_type = OrsoTypes[target_type_name]
+
+            element_type = None
+            precision = 38
+            scale = 21
+
+            # Handle type-specific parameters
+            if target_type_name == "DECIMAL" and len(node.parameters) > 1:
+                # CAST(expr AS DECIMAL(precision, scale))
+                precision = (
+                    int(node.parameters[1].value)
+                    if node.parameters[1].node_type == NodeType.LITERAL
+                    else 38
+                )
+                scale = (
+                    int(node.parameters[2].value)
+                    if len(node.parameters) > 2 and node.parameters[2].node_type == NodeType.LITERAL
+                    else 21
+                )
+
+            if target_type_name == "ARRAY" and len(node.parameters) > 1:
+                # CAST(expr AS ARRAY(element_type)) - extract element type
+                # For now, use VARIANT as element_type; can be refined later
+                element_type = OrsoTypes.VARIANT
+
+            schema_column = FunctionColumn(
+                name=column_name,
+                type=result_type,
+                element_type=element_type,
+                aliases=aliases,
+                precision=precision,
+                scale=scale,
+            )
+            schema_column.identity = column_name
             schemas["$derived"].columns.append(schema_column)
             node.derived_from = []
             node.schema_column = schema_column

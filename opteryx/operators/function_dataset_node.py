@@ -17,7 +17,7 @@ from typing import Generator
 import pyarrow
 
 from opteryx.exceptions import SqlError
-from opteryx.managers.expression import NodeType
+from opteryx.expression import NodeType
 from opteryx.models import QueryProperties
 from opteryx.utils import series
 
@@ -91,7 +91,7 @@ class FunctionDatasetNode(ReaderNode):
 
     @property
     def config(self):  # pragma: no cover
-        from opteryx.managers.expression import format_expression
+        from opteryx.expression import format_expression
 
         if self.function == "FAKE":
             return f"FAKE ({', '.join(format_expression(arg) for arg in self.args)}{' AS ' + self.alias if self.alias else ''})"

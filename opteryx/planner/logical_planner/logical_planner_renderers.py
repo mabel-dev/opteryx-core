@@ -7,7 +7,7 @@
 from platform import node
 from typing import Callable
 
-from opteryx.managers.expression import format_expression
+from opteryx.expression import format_expression
 from opteryx.planner.logical_planner import LogicalPlanNode
 from opteryx.planner.logical_planner import LogicalPlanStepType
 

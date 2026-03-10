@@ -27,10 +27,10 @@ from orso.types import OrsoTypes
 
 from opteryx.connectors.capabilities import PredicatePushable
 from opteryx.exceptions import UnsupportedSyntaxError
-from opteryx.managers.expression import NodeType
-from opteryx.managers.expression import format_expression
-from opteryx.managers.expression import get_all_nodes_of_type
-from opteryx.managers.expression.formatter import ExpressionColumn
+from opteryx.expression import NodeType
+from opteryx.expression import format_expression
+from opteryx.expression import get_all_nodes_of_type
+from opteryx.expression.formatter import ExpressionColumn
 from opteryx.models import Node
 from opteryx.planner.binder.binder_visitor import extract_join_fields
 from opteryx.planner.logical_planner import LogicalPlan

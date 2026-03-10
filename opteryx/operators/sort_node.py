@@ -19,7 +19,7 @@ from pyarrow import concat_tables
 from opteryx import EOS
 from opteryx.exceptions import ColumnNotFoundError
 from opteryx.exceptions import UnsupportedSyntaxError
-from opteryx.managers.expression import NodeType
+from opteryx.expression import NodeType
 from opteryx.models import QueryProperties
 
 from . import BasePlanNode

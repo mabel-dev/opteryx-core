@@ -41,10 +41,12 @@ class HeapSortNode(BasePlanNode):
         {
             "BoolVector",
             "Date32Vector",
+            "Float64Vector",
             "Int8Vector",
             "Int16Vector",
             "Int32Vector",
             "Int64Vector",
+            "StringVector",
             "TimeVector",
             "TimestampVector",
             "UInt8Vector",
@@ -124,24 +126,15 @@ class HeapSortNode(BasePlanNode):
                 if self.table is None:
                     self.table = chunk
                 else:
-                    combined = self._concat_morsels(self.table, chunk)
-                    self.table = self._top_n(combined)
+                    self.table.append(chunk)
+                    self.table = self._top_n(self.table)
             else:
                 if self.table is None:
                     self.table = chunk
                 else:
-                    self.table = self._concat_morsels(self.table, chunk)
+                    self.table.append(chunk)
 
         yield None
-
-    def _concat_morsels(self, left: Morsel, right: Morsel) -> Morsel:
-        names = left.column_names
-        vectors = []
-        for name in names:
-            left_values = left.column(name).to_pylist()
-            right_values = right.column(name).to_pylist()
-            vectors.append(vector_from_sequence(left_values + right_values))
-        return Morsel.from_vectors(names, vectors)
 
     def _sorted_indices(self, morsel: Morsel) -> list[int]:
         if not self.mapped_order:

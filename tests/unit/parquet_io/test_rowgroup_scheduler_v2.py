@@ -464,3 +464,142 @@ def test_scheduler_v2_early_close_cancels_pending_work(monkeypatch):
 
     assert close_elapsed < 0.5
     assert started_after_close < total_planned_ranges
+
+
+def test_iter_row_groups_prefers_local_serial_reader_over_io_process_ring(monkeypatch):
+    import opteryx.config as cfg
+    import opteryx.parquet_io.io_process_ring as io_ring
+
+    rows = [{"__path__": "x.parquet", "__row_group__": 0, "c0": (1, 1)}]
+
+    def _fake_local(*args, **kwargs):
+        return iter(rows)
+
+    def _fail_io_ring(*args, **kwargs):
+        raise AssertionError("io_process_rowgroup_ring should be bypassed for local fast path")
+
+    monkeypatch.setattr(cfg.features, "use_serial_reader", frozenset({"LOCAL"}))
+    monkeypatch.setattr(cfg.features, "io_process_rowgroup_ring", True)
+    monkeypatch.setattr(reader, "_iter_row_groups_local_serial", _fake_local)
+    monkeypatch.setattr(io_ring, "iter_row_groups_io_process_v2", _fail_io_ring)
+
+    result = list(
+        reader.iter_row_groups(
+            filesystem=object(),
+            paths=["x.parquet"],
+            column_names=["c0"],
+            connector="LOCAL",
+        )
+    )
+
+    assert result == rows
+
+
+def test_iter_row_groups_uses_io_process_ring_when_serial_reader_disabled(monkeypatch):
+    import opteryx.config as cfg
+    import opteryx.parquet_io.io_process_ring as io_ring
+
+    rows = [{"__path__": "x.parquet", "__row_group__": 0, "c0": (1, 1)}]
+
+    def _fail_local(*args, **kwargs):
+        raise AssertionError("local serial reader should be bypassed when selector is empty")
+
+    def _fake_io_ring(*args, **kwargs):
+        return iter(rows)
+
+    monkeypatch.setattr(cfg.features, "use_serial_reader", frozenset())
+    monkeypatch.setattr(cfg.features, "io_process_rowgroup_ring", True)
+    monkeypatch.setattr(reader, "_iter_row_groups_local_serial", _fail_local)
+    monkeypatch.setattr(io_ring, "iter_row_groups_io_process_v2", _fake_io_ring)
+
+    result = list(
+        reader.iter_row_groups(
+            filesystem=object(),
+            paths=["x.parquet"],
+            column_names=["c0"],
+            connector="LOCAL",
+        )
+    )
+
+    assert result[0]["__parquet_scan_strategy__"] == "io_process_ring"
+
+
+def test_local_serial_fastpath_reads_columns_serially(monkeypatch):
+    paths = ["single.parquet"]
+    footers, base_by_path = _build_footers(paths, rowgroups=2, columns=7)
+    _patch_footer_helpers(monkeypatch, footers)
+
+    class _SerialFilesystem:
+        def __init__(self):
+            self.calls = []
+
+        def read_ranges(self, path, ranges):
+            self.calls.append((path, list(ranges)))
+            return [bytes([offset % 251]) * length for offset, length in ranges]
+
+    fs = _SerialFilesystem()
+    rows = list(
+        reader._iter_row_groups_local_serial(
+            fs,
+            paths,
+            ["c0", "c1", "c2"],
+            cache=InMemoryParquetCache(),
+            decoder=_fake_decoder,
+            connector="LOCAL",
+        )
+    )
+
+    expected_offsets = [
+        base_by_path["single.parquet"] + (rg_idx * 10_000) + (col_idx * 100)
+        for rg_idx in range(2)
+        for col_idx in range(3)
+    ]
+    actual_offsets = [ranges[0][0] for _, ranges in fs.calls]
+
+    assert len(rows) == 2
+    assert len(fs.calls) == 6
+    assert all(len(ranges) == 1 for _, ranges in fs.calls)
+    assert actual_offsets == expected_offsets
+    assert rows[0]["__range_request_count__"] == 3
+    assert rows[0]["__active_files_peak__"] == 1
+    assert rows[0]["__active_rowgroups_peak__"] == 1
+    assert rows[0]["__rowgroups_in_flight_cap__"] == 1
+    assert rows[0]["__ranges_in_flight_peak__"] == 1
+
+
+def test_local_serial_fastpath_combines_reads_when_projection_is_majority(monkeypatch):
+    paths = ["single.parquet"]
+    footers, base_by_path = _build_footers(paths, rowgroups=2, columns=4)
+    _patch_footer_helpers(monkeypatch, footers)
+
+    class _SerialFilesystem:
+        def __init__(self):
+            self.calls = []
+
+        def read_ranges(self, path, ranges):
+            self.calls.append((path, list(ranges)))
+            return [bytes([offset % 251]) * length for offset, length in ranges]
+
+    fs = _SerialFilesystem()
+    rows = list(
+        reader._iter_row_groups_local_serial(
+            fs,
+            paths,
+            ["c0", "c1", "c2"],
+            cache=InMemoryParquetCache(),
+            decoder=_fake_decoder,
+            connector="LOCAL",
+        )
+    )
+
+    expected_spans = [
+        [(base_by_path["single.parquet"] + (rg_idx * 10_000), 232)]
+        for rg_idx in range(2)
+    ]
+    actual_spans = [ranges for _, ranges in fs.calls]
+
+    assert len(rows) == 2
+    assert len(fs.calls) == 2
+    assert actual_spans == expected_spans
+    assert rows[0]["__range_request_count__"] == 1
+    assert rows[0]["__ranges_in_flight_peak__"] == 1

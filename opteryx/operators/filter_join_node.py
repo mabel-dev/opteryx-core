@@ -48,7 +48,7 @@ class FilterJoinNode(JoinNode):
 
     @property
     def config(self) -> str:  # pragma: no cover
-        from opteryx.managers.expression import format_expression
+        from opteryx.expression import format_expression
 
         if self.on:
             return f"{self.join_type.upper()} JOIN ({format_expression(self.on, True)})"

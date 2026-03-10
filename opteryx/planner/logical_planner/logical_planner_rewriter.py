@@ -10,7 +10,7 @@ Perform some plan rewriting at the logical planning stage.
   replace them with a single calculation.
 """
 
-from opteryx.managers.expression import NodeType
+from opteryx.expression import NodeType
 from opteryx.models import Node
 
 

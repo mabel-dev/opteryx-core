@@ -18,8 +18,8 @@ import pyarrow
 
 from opteryx import EOS
 from opteryx.compiled.aggregations.count_distinct import count_distinct
-from opteryx.managers.expression import NodeType
-from opteryx.managers.expression import evaluate_and_append
+from opteryx.expression import NodeType
+from opteryx.expression import evaluate_and_append
 from opteryx.models import QueryProperties
 from opteryx.operators.aggregate_node import extract_evaluations
 
@@ -47,6 +47,11 @@ class SimpleAggregateCollector:
         self.telemetry = telemetry
 
     def collect(self, values):
+        # PyArrow compute functions (sum, min, max) don't support dictionary-
+        # encoded arrays; cast to the value type first.
+        if pyarrow.types.is_dictionary(values.type):
+            values = pyarrow.compute.cast(values, values.type.value_type)
+
         if self.always_count and self.count_nulls:
             self.counter += pyarrow.compute.count(values).as_py()
         elif self.always_count:
@@ -116,7 +121,7 @@ class SimpleAggregateCollector:
         if self.aggregate_type == "COUNT" and self.duplicate_treatment == "Distinct":
             if self.current_value is None:
                 return 0
-            return self.current_value.items()
+            return self.current_value.size()
         if self.aggregate_type == "COUNT":
             return self.counter
         if self.aggregate_type == "HISTOGRAM":

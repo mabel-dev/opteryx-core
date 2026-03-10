@@ -12,7 +12,7 @@ from orso.types import OrsoTypes
 
 import opteryx
 import opteryx.virtual_datasets
-from opteryx.managers.expression import NodeType, evaluate
+from opteryx.expression import NodeType, evaluate
 from opteryx.models import Node, QueryTelemetry
 
 stats = QueryTelemetry()
@@ -338,6 +338,8 @@ def test_compound_expressions():
 
 
 def test_functions():
+    from opteryx.expression.functions import get_catalog
+
     planets = opteryx.virtual_datasets.planets.read()
 
     gravity_column = opteryx.virtual_datasets.planets.schema().find_column("gravity")
@@ -352,10 +354,10 @@ def test_functions():
     _round = Node(
         NodeType.FUNCTION,
         value="ROUND",
-        function=lambda x: [round(i) for i in x],
         parameters=[gravity_node],
         schema_column=FunctionColumn(name="func", type=0),
     )
+    _round.function_ref = get_catalog().resolve("ROUND", _round.parameters)
 
     rounded = evaluate(_round, planets)
     assert len(rounded) == 9

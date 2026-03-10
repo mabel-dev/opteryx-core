@@ -280,6 +280,40 @@ cdef class Int64Vector(Vector):
     cpdef BoolVector less_than_or_equals_vector(self, Int64Vector other):
         return self._compare_vector(other, 5)
 
+    cpdef BoolVector in_list(self, object value_set):
+        """Return mask: 1 if element is in value_set, else 0. Propagates NULLs."""
+        cdef DrakenFixedBuffer* ptr = self.ptr
+        cdef int64_t* data = <int64_t*> ptr.data
+        cdef uint8_t* src_null = ptr.null_bitmap
+        cdef Py_ssize_t i, n = ptr.length
+        cdef Py_ssize_t nbytes = (n + 7) >> 3
+        cdef BoolVector out = BoolVector(<size_t>n)
+        cdef uint8_t* dst = <uint8_t*> out.ptr.data
+        cdef uint8_t* out_null = NULL
+        cdef uint8_t mask
+
+        if not isinstance(value_set, (set, frozenset)):
+            value_set = set(value_set)
+
+        memset(dst, 0, nbytes)
+        if src_null != NULL and nbytes != 0:
+            out_null = <uint8_t*> malloc(nbytes)
+            if out_null == NULL:
+                raise MemoryError()
+            memcpy(out_null, src_null, nbytes)
+            if (n & 7) != 0:
+                mask = <uint8_t>((1 << (n & 7)) - 1)
+                out_null[nbytes - 1] &= mask
+            out.ptr.null_bitmap = out_null
+        else:
+            out.ptr.null_bitmap = NULL
+
+        for i in range(n):
+            if src_null == NULL or ((src_null[i >> 3] >> (i & 7)) & 1):
+                if data[i] in value_set:
+                    dst[i >> 3] |= (1 << (i & 7))
+        return out
+
     cpdef int64_t sum(self):
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef int64_t* data = <int64_t*> ptr.data
@@ -535,7 +569,13 @@ cdef Int64Vector from_sequence(int64_t[::1] data):
     vec.ptr.type = DRAKEN_INT64
     vec.ptr.itemsize = 8
     vec.ptr.length = <size_t> data.shape[0]
-    vec.ptr.data = <void*> &data[0]
     vec.ptr.null_bitmap = NULL
+
+    if data.shape[0] > 0:
+        vec._arrow_data_buf = data.base if data.base is not None else data
+        vec.ptr.data = <void*> &data[0]
+    else:
+        vec._arrow_data_buf = None
+        vec.ptr.data = NULL
 
     return vec

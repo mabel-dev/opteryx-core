@@ -5,7 +5,7 @@ import numpy
 sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 
 def test_if_not_null():
-    from opteryx.functions.other_functions import if_not_null
+    from opteryx.expression.functions.implementations.logical import if_not_null
 
     # All values are not null → use replacements
     act = if_not_null(numpy.array([1, 2]), numpy.array([9, 9])).tolist()
@@ -40,7 +40,7 @@ def test_if_not_null():
     assert act == [None, False, True], act
 
 def test_if_null():
-    from opteryx.functions.other_functions import if_null
+    from opteryx.expression.functions.implementations.logical import if_null
 
     # Both values not null → keep original
     act = if_null(numpy.array([1, 2]), numpy.array([9, 9])).tolist()

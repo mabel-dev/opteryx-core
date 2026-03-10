@@ -86,6 +86,115 @@ cdef inline uint64_t _short_string_hash(const uint8_t* ptr, size_t n) nogil:
     return mix_hash(h, last)
 
 
+# ---------------------------------------------------------------------------
+# Scalar-comparison helpers (nogil, used by StringVector kernels)
+# ---------------------------------------------------------------------------
+
+cdef inline uint8_t _sv_ascii_lower(uint8_t b) noexcept nogil:
+    if b >= 65 and b <= 90:
+        return b + 32
+    return b
+
+
+cdef inline bint _sv_byte_equals(uint8_t left, uint8_t right, bint ignore_case) noexcept nogil:
+    if ignore_case:
+        return _sv_ascii_lower(left) == _sv_ascii_lower(right)
+    return left == right
+
+
+cdef bint _sv_sql_like_match(
+    const uint8_t* text,
+    Py_ssize_t text_len,
+    const uint8_t* pattern,
+    Py_ssize_t pattern_len,
+    bint ignore_case,
+) noexcept nogil:
+    """SQL LIKE matcher supporting % and _ wildcards and backslash escaping."""
+    cdef Py_ssize_t ti = 0
+    cdef Py_ssize_t pi = 0
+    cdef Py_ssize_t last_pct = -1
+    cdef Py_ssize_t last_match = 0
+    cdef uint8_t pc
+
+    while ti < text_len:
+        if pi < pattern_len:
+            pc = pattern[pi]
+            if pc == 92 and (pi + 1) < pattern_len:  # backslash escape
+                if _sv_byte_equals(text[ti], pattern[pi + 1], ignore_case):
+                    ti += 1
+                    pi += 2
+                    continue
+            elif pc == 95:  # "_" wildcard
+                ti += 1
+                pi += 1
+                continue
+            elif pc == 37:  # "%" wildcard
+                last_pct = pi
+                pi += 1
+                last_match = ti
+                continue
+            elif _sv_byte_equals(text[ti], pc, ignore_case):
+                ti += 1
+                pi += 1
+                continue
+
+        if last_pct != -1:
+            last_match += 1
+            ti = last_match
+            pi = last_pct + 1
+            continue
+        return False
+
+    while pi < pattern_len and pattern[pi] == 37:
+        pi += 1
+
+    return pi == pattern_len
+
+
+cdef bint _sv_contains_cs(
+    const uint8_t* haystack,
+    Py_ssize_t hay_len,
+    const uint8_t* needle,
+    Py_ssize_t ndl_len,
+) noexcept nogil:
+    """Case-sensitive substring search."""
+    cdef Py_ssize_t i, j
+    if ndl_len == 0:
+        return True
+    if ndl_len > hay_len:
+        return False
+    for i in range(hay_len - ndl_len + 1):
+        if haystack[i] == needle[0]:
+            j = 1
+            while j < ndl_len and haystack[i + j] == needle[j]:
+                j += 1
+            if j == ndl_len:
+                return True
+    return False
+
+
+cdef bint _sv_contains_ci(
+    const uint8_t* haystack,
+    Py_ssize_t hay_len,
+    const uint8_t* needle_lower,
+    Py_ssize_t ndl_len,
+) noexcept nogil:
+    """Case-insensitive substring search; needle_lower must already be lowercased."""
+    cdef Py_ssize_t i, j
+    if ndl_len == 0:
+        return True
+    if ndl_len > hay_len:
+        return False
+    for i in range(hay_len - ndl_len + 1):
+        if _sv_ascii_lower(haystack[i]) == needle_lower[0]:
+            j = 1
+            while j < ndl_len and _sv_ascii_lower(haystack[i + j]) == needle_lower[j]:
+                j += 1
+            if j == ndl_len:
+                return True
+    return False
+
+
 cdef class StringVector(Vector):
 
     def __cinit__(self, size_t length=0, size_t bytes_cap=0, bint wrap=False):
@@ -286,7 +395,412 @@ cdef class StringVector(Vector):
                 dst[i >> 3] |= (1 << (i & 7))
 
         return out
-    
+
+    cpdef BoolVector not_equals(self, bytes value):
+        """Return mask: 1 if not equal to value, else 0. Propagates NULLs."""
+        cdef DrakenVarBuffer* ptr = self.ptr
+        cdef Py_ssize_t n = ptr.length
+        cdef Py_ssize_t nbytes = (n + 7) >> 3
+        cdef uint8_t* nb_ptr = ptr.null_bitmap
+        cdef BoolVector out = BoolVector(<size_t>n)
+        cdef uint8_t* dst = <uint8_t*> out.ptr.data
+        cdef uint8_t* out_null = NULL
+        cdef uint8_t mask
+        cdef char* val_ptr = PyBytes_AS_STRING(value)
+        cdef Py_ssize_t val_len = len(value)
+        cdef int32_t start, end, str_len
+        cdef Py_ssize_t i
+
+        memset(dst, 0, nbytes)
+        if nb_ptr != NULL and nbytes != 0:
+            out_null = <uint8_t*> malloc(nbytes)
+            if out_null == NULL:
+                raise MemoryError()
+            memcpy(out_null, nb_ptr, nbytes)
+            if (n & 7) != 0:
+                mask = <uint8_t>((1 << (n & 7)) - 1)
+                out_null[nbytes - 1] &= mask
+            out.ptr.null_bitmap = out_null
+        else:
+            out.ptr.null_bitmap = NULL
+
+        for i in range(n):
+            if nb_ptr != NULL and ((nb_ptr[i >> 3] >> (i & 7)) & 1) == 0:
+                continue
+            start = ptr.offsets[i]
+            end = ptr.offsets[i + 1]
+            str_len = end - start
+            if str_len != <int32_t>val_len:
+                dst[i >> 3] |= (1 << (i & 7))
+            elif memcmp(<char*>ptr.data + start, val_ptr, <size_t>str_len) != 0:
+                dst[i >> 3] |= (1 << (i & 7))
+
+        return out
+
+    cpdef BoolVector less_than(self, bytes value):
+        """Return mask: 1 if element < value (lexicographic bytes), else 0. Propagates NULLs."""
+        cdef DrakenVarBuffer* ptr = self.ptr
+        cdef Py_ssize_t n = ptr.length
+        cdef Py_ssize_t nbytes = (n + 7) >> 3
+        cdef uint8_t* nb_ptr = ptr.null_bitmap
+        cdef BoolVector out = BoolVector(<size_t>n)
+        cdef uint8_t* dst = <uint8_t*> out.ptr.data
+        cdef uint8_t* out_null = NULL
+        cdef uint8_t mask
+        cdef char* val_ptr = PyBytes_AS_STRING(value)
+        cdef Py_ssize_t val_len = len(value)
+        cdef int32_t start, end, str_len, min_len
+        cdef int cmp_res
+        cdef Py_ssize_t i
+
+        memset(dst, 0, nbytes)
+        if nb_ptr != NULL and nbytes != 0:
+            out_null = <uint8_t*> malloc(nbytes)
+            if out_null == NULL:
+                raise MemoryError()
+            memcpy(out_null, nb_ptr, nbytes)
+            if (n & 7) != 0:
+                mask = <uint8_t>((1 << (n & 7)) - 1)
+                out_null[nbytes - 1] &= mask
+            out.ptr.null_bitmap = out_null
+        else:
+            out.ptr.null_bitmap = NULL
+
+        for i in range(n):
+            if nb_ptr != NULL and ((nb_ptr[i >> 3] >> (i & 7)) & 1) == 0:
+                continue
+            start = ptr.offsets[i]
+            end = ptr.offsets[i + 1]
+            str_len = end - start
+            min_len = str_len if str_len < <int32_t>val_len else <int32_t>val_len
+            cmp_res = 0
+            if min_len > 0:
+                cmp_res = memcmp(<char*>ptr.data + start, val_ptr, <size_t>min_len)
+            if cmp_res < 0 or (cmp_res == 0 and str_len < <int32_t>val_len):
+                dst[i >> 3] |= (1 << (i & 7))
+
+        return out
+
+    cpdef BoolVector greater_than(self, bytes value):
+        """Return mask: 1 if element > value (lexicographic bytes), else 0. Propagates NULLs."""
+        cdef DrakenVarBuffer* ptr = self.ptr
+        cdef Py_ssize_t n = ptr.length
+        cdef Py_ssize_t nbytes = (n + 7) >> 3
+        cdef uint8_t* nb_ptr = ptr.null_bitmap
+        cdef BoolVector out = BoolVector(<size_t>n)
+        cdef uint8_t* dst = <uint8_t*> out.ptr.data
+        cdef uint8_t* out_null = NULL
+        cdef uint8_t mask
+        cdef char* val_ptr = PyBytes_AS_STRING(value)
+        cdef Py_ssize_t val_len = len(value)
+        cdef int32_t start, end, str_len, min_len
+        cdef int cmp_res
+        cdef Py_ssize_t i
+
+        memset(dst, 0, nbytes)
+        if nb_ptr != NULL and nbytes != 0:
+            out_null = <uint8_t*> malloc(nbytes)
+            if out_null == NULL:
+                raise MemoryError()
+            memcpy(out_null, nb_ptr, nbytes)
+            if (n & 7) != 0:
+                mask = <uint8_t>((1 << (n & 7)) - 1)
+                out_null[nbytes - 1] &= mask
+            out.ptr.null_bitmap = out_null
+        else:
+            out.ptr.null_bitmap = NULL
+
+        for i in range(n):
+            if nb_ptr != NULL and ((nb_ptr[i >> 3] >> (i & 7)) & 1) == 0:
+                continue
+            start = ptr.offsets[i]
+            end = ptr.offsets[i + 1]
+            str_len = end - start
+            min_len = str_len if str_len < <int32_t>val_len else <int32_t>val_len
+            cmp_res = 0
+            if min_len > 0:
+                cmp_res = memcmp(<char*>ptr.data + start, val_ptr, <size_t>min_len)
+            if cmp_res > 0 or (cmp_res == 0 and str_len > <int32_t>val_len):
+                dst[i >> 3] |= (1 << (i & 7))
+
+        return out
+
+    cpdef BoolVector less_than_or_equals(self, bytes value):
+        """Return mask: 1 if element <= value (lexicographic bytes), else 0. Propagates NULLs."""
+        cdef DrakenVarBuffer* ptr = self.ptr
+        cdef Py_ssize_t n = ptr.length
+        cdef Py_ssize_t nbytes = (n + 7) >> 3
+        cdef uint8_t* nb_ptr = ptr.null_bitmap
+        cdef BoolVector out = BoolVector(<size_t>n)
+        cdef uint8_t* dst = <uint8_t*> out.ptr.data
+        cdef uint8_t* out_null = NULL
+        cdef uint8_t mask
+        cdef char* val_ptr = PyBytes_AS_STRING(value)
+        cdef Py_ssize_t val_len = len(value)
+        cdef int32_t start, end, str_len, min_len
+        cdef int cmp_res
+        cdef Py_ssize_t i
+
+        memset(dst, 0, nbytes)
+        if nb_ptr != NULL and nbytes != 0:
+            out_null = <uint8_t*> malloc(nbytes)
+            if out_null == NULL:
+                raise MemoryError()
+            memcpy(out_null, nb_ptr, nbytes)
+            if (n & 7) != 0:
+                mask = <uint8_t>((1 << (n & 7)) - 1)
+                out_null[nbytes - 1] &= mask
+            out.ptr.null_bitmap = out_null
+        else:
+            out.ptr.null_bitmap = NULL
+
+        for i in range(n):
+            if nb_ptr != NULL and ((nb_ptr[i >> 3] >> (i & 7)) & 1) == 0:
+                continue
+            start = ptr.offsets[i]
+            end = ptr.offsets[i + 1]
+            str_len = end - start
+            min_len = str_len if str_len < <int32_t>val_len else <int32_t>val_len
+            cmp_res = 0
+            if min_len > 0:
+                cmp_res = memcmp(<char*>ptr.data + start, val_ptr, <size_t>min_len)
+            if cmp_res < 0 or (cmp_res == 0 and str_len <= <int32_t>val_len):
+                dst[i >> 3] |= (1 << (i & 7))
+
+        return out
+
+    cpdef BoolVector greater_than_or_equals(self, bytes value):
+        """Return mask: 1 if element >= value (lexicographic bytes), else 0. Propagates NULLs."""
+        cdef DrakenVarBuffer* ptr = self.ptr
+        cdef Py_ssize_t n = ptr.length
+        cdef Py_ssize_t nbytes = (n + 7) >> 3
+        cdef uint8_t* nb_ptr = ptr.null_bitmap
+        cdef BoolVector out = BoolVector(<size_t>n)
+        cdef uint8_t* dst = <uint8_t*> out.ptr.data
+        cdef uint8_t* out_null = NULL
+        cdef uint8_t mask
+        cdef char* val_ptr = PyBytes_AS_STRING(value)
+        cdef Py_ssize_t val_len = len(value)
+        cdef int32_t start, end, str_len, min_len
+        cdef int cmp_res
+        cdef Py_ssize_t i
+
+        memset(dst, 0, nbytes)
+        if nb_ptr != NULL and nbytes != 0:
+            out_null = <uint8_t*> malloc(nbytes)
+            if out_null == NULL:
+                raise MemoryError()
+            memcpy(out_null, nb_ptr, nbytes)
+            if (n & 7) != 0:
+                mask = <uint8_t>((1 << (n & 7)) - 1)
+                out_null[nbytes - 1] &= mask
+            out.ptr.null_bitmap = out_null
+        else:
+            out.ptr.null_bitmap = NULL
+
+        for i in range(n):
+            if nb_ptr != NULL and ((nb_ptr[i >> 3] >> (i & 7)) & 1) == 0:
+                continue
+            start = ptr.offsets[i]
+            end = ptr.offsets[i + 1]
+            str_len = end - start
+            min_len = str_len if str_len < <int32_t>val_len else <int32_t>val_len
+            cmp_res = 0
+            if min_len > 0:
+                cmp_res = memcmp(<char*>ptr.data + start, val_ptr, <size_t>min_len)
+            if cmp_res > 0 or (cmp_res == 0 and str_len >= <int32_t>val_len):
+                dst[i >> 3] |= (1 << (i & 7))
+
+        return out
+
+    cpdef BoolVector in_list(self, object value_set):
+        """
+        Return mask: 1 if element is a member of value_set, else 0. Propagates NULLs.
+        value_set must be a set or frozenset of bytes.
+        """
+        cdef DrakenVarBuffer* ptr = self.ptr
+        cdef Py_ssize_t n = ptr.length
+        cdef Py_ssize_t nbytes = (n + 7) >> 3
+        cdef uint8_t* nb_ptr = ptr.null_bitmap
+        cdef BoolVector out = BoolVector(<size_t>n)
+        cdef uint8_t* dst = <uint8_t*> out.ptr.data
+        cdef uint8_t* out_null = NULL
+        cdef uint8_t mask
+        cdef int32_t start, end, str_len
+        cdef Py_ssize_t i
+        cdef bytes cell_bytes
+
+        memset(dst, 0, nbytes)
+        if nb_ptr != NULL and nbytes != 0:
+            out_null = <uint8_t*> malloc(nbytes)
+            if out_null == NULL:
+                raise MemoryError()
+            memcpy(out_null, nb_ptr, nbytes)
+            if (n & 7) != 0:
+                mask = <uint8_t>((1 << (n & 7)) - 1)
+                out_null[nbytes - 1] &= mask
+            out.ptr.null_bitmap = out_null
+        else:
+            out.ptr.null_bitmap = NULL
+
+        for i in range(n):
+            if nb_ptr != NULL and ((nb_ptr[i >> 3] >> (i & 7)) & 1) == 0:
+                continue
+            start = ptr.offsets[i]
+            end = ptr.offsets[i + 1]
+            str_len = end - start
+            cell_bytes = PyBytes_FromStringAndSize(<char*>ptr.data + start, <Py_ssize_t>str_len)
+            if cell_bytes in value_set:
+                dst[i >> 3] |= (1 << (i & 7))
+
+        return out
+
+    cpdef BoolVector like(self, bytes pattern, bint ignore_case=False):
+        """Return mask: 1 if element matches SQL LIKE pattern, else 0. Propagates NULLs."""
+        cdef DrakenVarBuffer* ptr = self.ptr
+        cdef Py_ssize_t n = ptr.length
+        cdef Py_ssize_t nbytes = (n + 7) >> 3
+        cdef uint8_t* nb_ptr = ptr.null_bitmap
+        cdef BoolVector out = BoolVector(<size_t>n)
+        cdef uint8_t* dst = <uint8_t*> out.ptr.data
+        cdef uint8_t* out_null = NULL
+        cdef uint8_t mask
+        cdef char* pat_ptr = PyBytes_AS_STRING(pattern)
+        cdef Py_ssize_t pat_len = len(pattern)
+        cdef int32_t start, end, str_len
+        cdef Py_ssize_t i
+
+        memset(dst, 0, nbytes)
+        if nb_ptr != NULL and nbytes != 0:
+            out_null = <uint8_t*> malloc(nbytes)
+            if out_null == NULL:
+                raise MemoryError()
+            memcpy(out_null, nb_ptr, nbytes)
+            if (n & 7) != 0:
+                mask = <uint8_t>((1 << (n & 7)) - 1)
+                out_null[nbytes - 1] &= mask
+            out.ptr.null_bitmap = out_null
+        else:
+            out.ptr.null_bitmap = NULL
+
+        for i in range(n):
+            if nb_ptr != NULL and ((nb_ptr[i >> 3] >> (i & 7)) & 1) == 0:
+                continue
+            start = ptr.offsets[i]
+            end = ptr.offsets[i + 1]
+            str_len = end - start
+            if _sv_sql_like_match(
+                <const uint8_t*>ptr.data + start, <Py_ssize_t>str_len,
+                <const uint8_t*>pat_ptr, pat_len, ignore_case,
+            ):
+                dst[i >> 3] |= (1 << (i & 7))
+
+        return out
+
+    cpdef BoolVector rlike(self, bytes pattern):
+        """Return mask: 1 if element matches regex pattern, else 0. Propagates NULLs."""
+        import re
+        cdef DrakenVarBuffer* ptr = self.ptr
+        cdef Py_ssize_t n = ptr.length
+        cdef Py_ssize_t nbytes = (n + 7) >> 3
+        cdef uint8_t* nb_ptr = ptr.null_bitmap
+        cdef BoolVector out = BoolVector(<size_t>n)
+        cdef uint8_t* dst = <uint8_t*> out.ptr.data
+        cdef uint8_t* out_null = NULL
+        cdef uint8_t mask
+        cdef int32_t start, end, str_len
+        cdef Py_ssize_t i
+        cdef bytes cell_bytes
+
+        compiled = re.compile(pattern)
+
+        memset(dst, 0, nbytes)
+        if nb_ptr != NULL and nbytes != 0:
+            out_null = <uint8_t*> malloc(nbytes)
+            if out_null == NULL:
+                raise MemoryError()
+            memcpy(out_null, nb_ptr, nbytes)
+            if (n & 7) != 0:
+                mask = <uint8_t>((1 << (n & 7)) - 1)
+                out_null[nbytes - 1] &= mask
+            out.ptr.null_bitmap = out_null
+        else:
+            out.ptr.null_bitmap = NULL
+
+        for i in range(n):
+            if nb_ptr != NULL and ((nb_ptr[i >> 3] >> (i & 7)) & 1) == 0:
+                continue
+            start = ptr.offsets[i]
+            end = ptr.offsets[i + 1]
+            str_len = end - start
+            cell_bytes = PyBytes_FromStringAndSize(<char*>ptr.data + start, <Py_ssize_t>str_len)
+            if compiled.search(cell_bytes):
+                dst[i >> 3] |= (1 << (i & 7))
+
+        return out
+
+    cpdef BoolVector contains(self, bytes substr, bint ignore_case=False):
+        """Return mask: 1 if element contains substr, else 0. Propagates NULLs."""
+        cdef DrakenVarBuffer* ptr = self.ptr
+        cdef Py_ssize_t n = ptr.length
+        cdef Py_ssize_t nbytes = (n + 7) >> 3
+        cdef uint8_t* nb_ptr = ptr.null_bitmap
+        cdef BoolVector out = BoolVector(<size_t>n)
+        cdef uint8_t* dst = <uint8_t*> out.ptr.data
+        cdef uint8_t* out_null = NULL
+        cdef uint8_t mask
+        cdef char* ndl_ptr_char = PyBytes_AS_STRING(substr)
+        cdef Py_ssize_t ndl_len = len(substr)
+        cdef uint8_t* ndl_lower = NULL
+        cdef int32_t start, end, str_len
+        cdef Py_ssize_t i, j
+
+        memset(dst, 0, nbytes)
+        if nb_ptr != NULL and nbytes != 0:
+            out_null = <uint8_t*> malloc(nbytes)
+            if out_null == NULL:
+                raise MemoryError()
+            memcpy(out_null, nb_ptr, nbytes)
+            if (n & 7) != 0:
+                mask = <uint8_t>((1 << (n & 7)) - 1)
+                out_null[nbytes - 1] &= mask
+            out.ptr.null_bitmap = out_null
+        else:
+            out.ptr.null_bitmap = NULL
+
+        if ignore_case and ndl_len > 0:
+            ndl_lower = <uint8_t*>malloc(<size_t>ndl_len)
+            if ndl_lower == NULL:
+                raise MemoryError()
+            for j in range(ndl_len):
+                ndl_lower[j] = _sv_ascii_lower(<uint8_t>ndl_ptr_char[j])
+
+        try:
+            for i in range(n):
+                if nb_ptr != NULL and ((nb_ptr[i >> 3] >> (i & 7)) & 1) == 0:
+                    continue
+                start = ptr.offsets[i]
+                end = ptr.offsets[i + 1]
+                str_len = end - start
+                if ignore_case:
+                    if _sv_contains_ci(
+                        <const uint8_t*>ptr.data + start, <Py_ssize_t>str_len,
+                        ndl_lower if ndl_lower != NULL else <uint8_t*>ndl_ptr_char,
+                        ndl_len,
+                    ):
+                        dst[i >> 3] |= (1 << (i & 7))
+                else:
+                    if _sv_contains_cs(
+                        <const uint8_t*>ptr.data + start, <Py_ssize_t>str_len,
+                        <const uint8_t*>ndl_ptr_char, ndl_len,
+                    ):
+                        dst[i >> 3] |= (1 << (i & 7))
+        finally:
+            if ndl_lower != NULL:
+                free(ndl_lower)
+
+        return out
+
     cpdef list to_pylist(self):
         cdef DrakenVarBuffer* ptr = self.ptr
         cdef Py_ssize_t n = ptr.length
