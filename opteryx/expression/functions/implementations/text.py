@@ -25,13 +25,13 @@ from pyarrow import compute
 
 from opteryx.compiled.vector_ops import vector_initcap
 from opteryx.compiled.vector_ops import vector_length
-from opteryx.compiled.vector_ops import vector_string_length
 from opteryx.compiled.vector_ops import vector_md5
 from opteryx.compiled.vector_ops import vector_replace
 from opteryx.compiled.vector_ops import vector_sha1
 from opteryx.compiled.vector_ops import vector_sha256
 from opteryx.compiled.vector_ops import vector_sha512
 from opteryx.compiled.vector_ops import vector_soundex
+from opteryx.compiled.vector_ops import vector_string_length
 from opteryx.compiled.vector_ops import vector_string_slice_left
 from opteryx.compiled.vector_ops import vector_string_slice_right
 from opteryx.draken.vectors.string_vector import StringVector

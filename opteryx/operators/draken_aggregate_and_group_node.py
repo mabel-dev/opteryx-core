@@ -186,10 +186,7 @@ class DrakenAggregateAndGroupNode(BasePlanNode):
         raise UnsupportedSyntaxError(f"Unsupported aggregate function for Draken group-by: {value}")
 
     def _engine_reading_snapshot(self):
-        return {
-            key: self._group_by.readings.get(key, 0)
-            for key in self.ENGINE_READING_KEYS
-        }
+        return {key: self._group_by.readings.get(key, 0) for key in self.ENGINE_READING_KEYS}
 
     def _accumulate_engine_reading_delta(self, snapshot):
         for key in self.ENGINE_READING_KEYS:
@@ -214,7 +211,10 @@ class DrakenAggregateAndGroupNode(BasePlanNode):
                 chunk = Morsel.from_vectors(
                     [*chunk.column_names, "*"],
                     [
-                        *(chunk.column(name if isinstance(name, bytes) else name.encode()) for name in chunk.column_names),
+                        *(
+                            chunk.column(name if isinstance(name, bytes) else name.encode())
+                            for name in chunk.column_names
+                        ),
                         star_vector,
                     ],
                 )

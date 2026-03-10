@@ -10,10 +10,11 @@ from __future__ import annotations
 from array import array
 import time
 
+from cpython.bytes cimport PyBytes_FromStringAndSize
 from libc.stddef cimport size_t
 from libc.stdint cimport int8_t, int16_t, int32_t, int64_t, uint8_t, uint16_t, uint32_t, uint64_t
 from libc.stdlib cimport malloc, free
-from libc.string cimport memset
+from libc.string cimport memset, memcmp
 from libcpp.vector cimport vector
 
 from opteryx.draken.core.buffers cimport DrakenConstantBuffer
@@ -198,6 +199,9 @@ cdef class CarcharGroupStateEngine:
     cdef vector[vector[int64_t]] _multi_encoded_key_valid
     cdef vector[int64_t] _multi_group_key_kinds
     cdef list _object_state
+    cdef vector[uint8_t] _object_state_bytes
+    cdef vector[int32_t] _object_state_starts
+    cdef vector[int32_t] _object_state_lengths
     cdef list _distinct_sets
     cdef list _multi_value_columns
     cdef vector[int64_t] _multi_agg_modes
@@ -209,6 +213,9 @@ cdef class CarcharGroupStateEngine:
     cdef vector[double] _multi_avg_sums
     cdef vector[int64_t] _multi_avg_counts
     cdef list _multi_object_state
+    cdef vector[uint8_t] _multi_object_state_bytes
+    cdef vector[int32_t] _multi_object_state_starts
+    cdef vector[int32_t] _multi_object_state_lengths
     cdef list _multi_distinct_sets
     cdef vector[uint8_t] _key_payload_bytes
     cdef vector[int32_t] _key_payload_offsets
@@ -247,8 +254,12 @@ cdef class CarcharGroupStateEngine:
         self._constant_avg_sum = 0.0
         self._constant_avg_count = 0
         self._object_state = []
+        self._object_state_starts.clear()
+        self._object_state_lengths.clear()
         self._distinct_sets = []
         self._multi_object_state = []
+        self._multi_object_state_starts.clear()
+        self._multi_object_state_lengths.clear()
         self._encoded_key_offsets.push_back(0)
         self._key_payload_offsets.push_back(0)
         self._readings = {
@@ -326,8 +337,72 @@ cdef class CarcharGroupStateEngine:
     cdef inline bint _has_multi_agg(self) noexcept:
         return self._multi_agg_count > 0
 
+    cdef inline Py_ssize_t _state_count(self) noexcept:
+        if self._mode == MODE_CARCHAR and self._key_payload_offsets.size() > 0:
+            return <Py_ssize_t>(self._key_payload_offsets.size() - 1)
+        return <Py_ssize_t> self._group_key_values.size()
+
     cdef inline Py_ssize_t _multi_offset(self, int64_t state_index, Py_ssize_t agg_idx) noexcept:
         return <Py_ssize_t>state_index * self._multi_agg_count + agg_idx
+
+    cdef object _debug_key_payload_value(self, Py_ssize_t state_index):
+        cdef Py_ssize_t pos
+        cdef Py_ssize_t key_idx
+        cdef uint8_t valid_flag
+        cdef int64_t key_value
+        cdef Py_ssize_t data_len
+        cdef bytes raw
+        cdef list key_values
+        cdef list key_valids
+
+        if <Py_ssize_t> self._key_payload_offsets.size() < state_index + 2:
+            if self._multi_key_fixed_mode:
+                key_values = []
+                key_valids = []
+                for key_idx in range(len(self._group_by_columns)):
+                    key_values.append(self._multi_group_key_values[key_idx][state_index])
+                    key_valids.append(self._multi_group_key_valid[key_idx][state_index])
+                return tuple(key_values), tuple(key_valids)
+            return self._group_key_values[state_index], self._group_key_valid[state_index]
+
+        pos = self._key_payload_offsets[state_index]
+        if len(self._group_by_columns) > 1:
+            key_values = []
+            key_valids = []
+            for key_idx in range(len(self._group_by_columns)):
+                valid_flag = self._key_payload_bytes[pos]
+                pos += 1
+                key_valids.append(1 if valid_flag != 0 else 0)
+                if self._is_multi_fixed_kind(self._multi_group_key_kinds[key_idx]):
+                    key_value = self._payload_read_i64(&pos)
+                    key_values.append(key_value if valid_flag != 0 else None)
+                else:
+                    data_len = <Py_ssize_t> self._payload_read_vsize(&pos)
+                    if valid_flag == 0:
+                        key_values.append(None)
+                    else:
+                        raw = <bytes> PyBytes_FromStringAndSize(
+                            <const char*> &self._key_payload_bytes[pos],
+                            data_len,
+                        )
+                        key_values.append(raw.decode("utf-8"))
+                    pos += data_len
+            return tuple(key_values), tuple(key_valids)
+
+        valid_flag = self._key_payload_bytes[pos]
+        pos += 1
+        if self._is_multi_fixed_kind(self._single_key_kind):
+            key_value = self._payload_read_i64(&pos)
+            return (key_value if valid_flag != 0 else None), (1 if valid_flag != 0 else 0)
+
+        data_len = <Py_ssize_t> self._payload_read_vsize(&pos)
+        if valid_flag == 0:
+            return None, 0
+        raw = <bytes> PyBytes_FromStringAndSize(
+            <const char*> &self._key_payload_bytes[pos],
+            data_len,
+        )
+        return raw.decode("utf-8"), 1
 
     cdef inline bint _agg_output_is_float(self, Py_ssize_t agg_idx) noexcept:
         if self._multi_agg_count > 0:
@@ -347,6 +422,58 @@ cdef class CarcharGroupStateEngine:
                 and self._multi_agg_modes[agg_idx] in (AGG_MIN, AGG_MAX)
             )
         return self._value_kind == VALUE_OBJECT and self._agg_mode in (AGG_MIN, AGG_MAX)
+
+    cdef inline bint _is_stringlike_vector(self, object vec) noexcept:
+        cdef int64_t key_kind
+        if isinstance(vec, StringVector):
+            return True
+        if isinstance(vec, DictionaryVector):
+            key_kind = self._dictionary_key_kind(<DictionaryVector> vec)
+            return key_kind == KEY_MULTI_ENCODED_STRING
+        return False
+
+    cdef inline int _compare_bytes(
+        self,
+        const char* left_ptr,
+        Py_ssize_t left_len,
+        const uint8_t* right_ptr,
+        Py_ssize_t right_len,
+    ) noexcept:
+        cdef Py_ssize_t shared = left_len if left_len < right_len else right_len
+        cdef int cmp = 0
+        if shared > 0:
+            cmp = memcmp(left_ptr, <const char*> right_ptr, <size_t> shared)
+            if cmp != 0:
+                return cmp
+        if left_len < right_len:
+            return -1
+        if left_len > right_len:
+            return 1
+        return 0
+
+    cdef inline void _store_object_state_bytes(
+        self,
+        Py_ssize_t state_index,
+        const char* data_ptr,
+        Py_ssize_t data_len,
+    ) noexcept:
+        cdef Py_ssize_t idx
+        self._object_state_starts[state_index] = <int32_t> self._object_state_bytes.size()
+        self._object_state_lengths[state_index] = <int32_t> data_len
+        for idx in range(data_len):
+            self._object_state_bytes.push_back(<uint8_t> data_ptr[idx])
+
+    cdef inline void _store_multi_object_state_bytes(
+        self,
+        Py_ssize_t offset,
+        const char* data_ptr,
+        Py_ssize_t data_len,
+    ) noexcept:
+        cdef Py_ssize_t idx
+        self._multi_object_state_starts[offset] = <int32_t> self._multi_object_state_bytes.size()
+        self._multi_object_state_lengths[offset] = <int32_t> data_len
+        for idx in range(data_len):
+            self._multi_object_state_bytes.push_back(<uint8_t> data_ptr[idx])
 
     cdef inline uint8_t* _value_null_bitmap(self, object value_vector):
         if isinstance(value_vector, Int64Vector):
@@ -543,12 +670,13 @@ cdef class CarcharGroupStateEngine:
     cdef inline void _payload_push_u8(self, uint8_t value) noexcept:
         self._key_payload_bytes.push_back(value)
 
-    cdef inline void _payload_push_i32(self, int32_t value) noexcept:
-        cdef uint32_t encoded = <uint32_t> value
-        self._key_payload_bytes.push_back(<uint8_t>(encoded & 0xFF))
-        self._key_payload_bytes.push_back(<uint8_t>((encoded >> 8) & 0xFF))
-        self._key_payload_bytes.push_back(<uint8_t>((encoded >> 16) & 0xFF))
-        self._key_payload_bytes.push_back(<uint8_t>((encoded >> 24) & 0xFF))
+    cdef inline void _payload_push_vsize(self, uint64_t value) noexcept:
+        cdef uint8_t byte_value
+        while value >= 0x80:
+            byte_value = <uint8_t>((value & 0x7F) | 0x80)
+            self._key_payload_bytes.push_back(byte_value)
+            value >>= 7
+        self._key_payload_bytes.push_back(<uint8_t> value)
 
     cdef inline void _payload_push_i64(self, int64_t value) noexcept:
         cdef uint64_t encoded = <uint64_t> value
@@ -561,16 +689,22 @@ cdef class CarcharGroupStateEngine:
         self._key_payload_bytes.push_back(<uint8_t>((encoded >> 48) & 0xFF))
         self._key_payload_bytes.push_back(<uint8_t>((encoded >> 56) & 0xFF))
 
-    cdef inline int32_t _payload_read_i32(self, Py_ssize_t* position) noexcept:
+    cdef inline uint64_t _payload_read_vsize(self, Py_ssize_t* position) noexcept:
         cdef Py_ssize_t pos = position[0]
-        cdef uint32_t value = (
-            <uint32_t> self._key_payload_bytes[pos]
-            | (<uint32_t> self._key_payload_bytes[pos + 1] << 8)
-            | (<uint32_t> self._key_payload_bytes[pos + 2] << 16)
-            | (<uint32_t> self._key_payload_bytes[pos + 3] << 24)
-        )
-        position[0] = pos + 4
-        return <int32_t> value
+        cdef uint64_t value = 0
+        cdef uint64_t shift = 0
+        cdef uint8_t byte_value
+
+        while True:
+            byte_value = self._key_payload_bytes[pos]
+            pos += 1
+            value |= <uint64_t>(byte_value & 0x7F) << shift
+            if (byte_value & 0x80) == 0:
+                break
+            shift += 7
+
+        position[0] = pos
+        return value
 
     cdef inline int64_t _payload_read_i64(self, Py_ssize_t* position) noexcept:
         cdef Py_ssize_t pos = position[0]
@@ -602,9 +736,40 @@ cdef class CarcharGroupStateEngine:
         int64_t key_valid_flag,
     ) except *:
         self._payload_push_u8(1 if key_valid_flag != 0 else 0)
-        self._payload_push_i32(<int32_t> data_len if key_valid_flag != 0 else 0)
+        self._payload_push_vsize(<uint64_t> data_len if key_valid_flag != 0 else 0)
         if key_valid_flag != 0 and data_len > 0:
             self._append_payload_bytes(data_ptr, data_len)
+        self._seal_payload_record()
+
+    cdef inline void _append_single_fixed_payload_key(
+        self,
+        int64_t key_value,
+        int64_t key_valid_flag,
+    ) noexcept:
+        self._payload_push_u8(1 if key_valid_flag != 0 else 0)
+        self._payload_push_i64(key_value if key_valid_flag != 0 else 0)
+        self._seal_payload_record()
+
+    cdef inline void _append_multi_fixed_payload_key(
+        self,
+        list key_ptrs,
+        list key_nulls,
+        Py_ssize_t row_idx,
+    ) noexcept:
+        cdef Py_ssize_t key_idx
+        cdef DrakenFixedBuffer* key_ptr
+        cdef uint8_t* key_null_bitmap
+        cdef int64_t key_value
+        cdef int64_t key_valid_flag
+
+        for key_idx in range(len(key_ptrs)):
+            key_ptr = <DrakenFixedBuffer*> <size_t> key_ptrs[key_idx]
+            key_null_bitmap = <uint8_t*> <size_t> key_nulls[key_idx]
+            key_valid_flag = 1 if _bitmap_is_valid(key_null_bitmap, row_idx) else 0
+            key_value = _read_integer_value(key_ptr, row_idx) if key_valid_flag != 0 else 0
+            self._payload_push_u8(1 if key_valid_flag != 0 else 0)
+            self._payload_push_i64(key_value)
+
         self._seal_payload_record()
 
     cdef inline void _append_multi_payload_key(
@@ -653,7 +818,7 @@ cdef class CarcharGroupStateEngine:
 
             key_valid_flag = self._extract_stringlike_key(key_vector, row_idx, &data_ptr, &data_len)
             self._payload_push_u8(1 if key_valid_flag != 0 else 0)
-            self._payload_push_i32(<int32_t> data_len if key_valid_flag != 0 else 0)
+            self._payload_push_vsize(<uint64_t> data_len if key_valid_flag != 0 else 0)
             if key_valid_flag != 0 and data_len > 0:
                 self._append_payload_bytes(data_ptr, data_len)
 
@@ -927,6 +1092,7 @@ cdef class CarcharGroupStateEngine:
 
         if stringlike_key_vector:
             self._use_object_keys = True
+            self._single_key_kind = KEY_MULTI_ENCODED_STRING
 
             if len(self._aggregations) > 1 or isinstance(key_vector, DictionaryVector):
                 self._multi_value_columns = []
@@ -1223,6 +1389,91 @@ cdef class CarcharGroupStateEngine:
             self._mode = MODE_CARCHAR
             self._readings["feature_groupby_engine_carchar"] += 1
             return
+        elif isinstance(key_vector, DictionaryVector):
+            self._single_key_kind = key_kind
+            fn = self._aggregations[0][1]
+            column = self._aggregations[0][2]
+            if fn == "count":
+                if column is None:
+                    self._agg_mode = AGG_COUNT_STAR
+                    self._value_kind = VALUE_NONE
+                else:
+                    value_vector = morsel.column(column)
+                    if isinstance(
+                        value_vector,
+                        (Int64Vector, IntegerVector, Float64Vector, StringVector, DictionaryVector),
+                    ):
+                        self._agg_mode = AGG_COUNT_VALUE
+                        self._value_kind = VALUE_NONE
+                    else:
+                        self._init_legacy_backend()
+                        return
+            elif fn == "sum":
+                value_vector = morsel.column(column)
+                if isinstance(value_vector, Float64Vector):
+                    self._agg_mode = AGG_SUM
+                    self._value_kind = VALUE_FLOAT64
+                elif isinstance(value_vector, (Int64Vector, IntegerVector)):
+                    self._agg_mode = AGG_SUM
+                    self._value_kind = VALUE_INT64
+                else:
+                    self._init_legacy_backend()
+                    return
+            elif fn == "min":
+                value_vector = morsel.column(column)
+                if isinstance(value_vector, Float64Vector):
+                    self._agg_mode = AGG_MIN
+                    self._value_kind = VALUE_FLOAT64
+                elif isinstance(value_vector, (Int64Vector, IntegerVector)):
+                    self._agg_mode = AGG_MIN
+                    self._value_kind = VALUE_INT64
+                elif isinstance(value_vector, (StringVector, DictionaryVector)):
+                    self._agg_mode = AGG_MIN
+                    self._value_kind = VALUE_OBJECT
+                else:
+                    self._init_legacy_backend()
+                    return
+            elif fn == "max":
+                value_vector = morsel.column(column)
+                if isinstance(value_vector, Float64Vector):
+                    self._agg_mode = AGG_MAX
+                    self._value_kind = VALUE_FLOAT64
+                elif isinstance(value_vector, (Int64Vector, IntegerVector)):
+                    self._agg_mode = AGG_MAX
+                    self._value_kind = VALUE_INT64
+                elif isinstance(value_vector, (StringVector, DictionaryVector)):
+                    self._agg_mode = AGG_MAX
+                    self._value_kind = VALUE_OBJECT
+                else:
+                    self._init_legacy_backend()
+                    return
+            elif fn == "avg" or fn == "mean":
+                value_vector = morsel.column(column)
+                if isinstance(value_vector, (Int64Vector, IntegerVector, Float64Vector)):
+                    self._agg_mode = AGG_AVG
+                    self._value_kind = VALUE_FLOAT64
+                else:
+                    self._init_legacy_backend()
+                    return
+            elif fn == "count_distinct" or fn == "distinct":
+                value_vector = morsel.column(column)
+                if isinstance(
+                    value_vector,
+                    (Int64Vector, IntegerVector, Float64Vector, StringVector, DictionaryVector),
+                ):
+                    self._agg_mode = AGG_COUNT_DISTINCT
+                    self._value_kind = VALUE_NONE
+                else:
+                    self._init_legacy_backend()
+                    return
+            else:
+                self._init_legacy_backend()
+                return
+
+            self._index = new CarcharIndex(<size_t> max(16, morsel.num_rows * 2), 0.80)
+            self._mode = MODE_CARCHAR
+            self._readings["feature_groupby_engine_carchar"] += 1
+            return
 
             fn = self._aggregations[0][1]
             column = self._aggregations[0][2]
@@ -1320,6 +1571,12 @@ cdef class CarcharGroupStateEngine:
         self._multi_encoded_key_bytes.clear()
         self._multi_encoded_key_offsets.clear()
         self._multi_encoded_key_valid.clear()
+        self._object_state_bytes.clear()
+        self._object_state_starts.clear()
+        self._object_state_lengths.clear()
+        self._multi_object_state_bytes.clear()
+        self._multi_object_state_starts.clear()
+        self._multi_object_state_lengths.clear()
         self._key_payload_bytes.clear()
         self._key_payload_offsets.clear()
         self._key_payload_offsets.push_back(0)
@@ -1577,18 +1834,11 @@ cdef class CarcharGroupStateEngine:
         cdef Py_ssize_t key_idx
         if self._mode != MODE_CARCHAR or row_count <= 0:
             return
-        expected = self._group_key_values.size() + <size_t>row_count
+        expected = <size_t> self._state_count() + <size_t>row_count
         self._index.reserve(expected)
         self._group_key_values.reserve(expected)
         self._group_key_valid.reserve(expected)
-        if self._use_object_keys and not self._multi_key_object_mode:
-            self._key_payload_offsets.reserve(expected + 1)
-        if self._multi_key_fixed_mode:
-            for key_idx in range(self._multi_group_key_values.size()):
-                self._multi_group_key_values[key_idx].reserve(expected)
-                self._multi_group_key_valid[key_idx].reserve(expected)
-        if self._multi_key_object_mode:
-            self._key_payload_offsets.reserve(expected + 1)
+        self._key_payload_offsets.reserve(expected + 1)
         if self._multi_agg_count > 0:
             flat_expected = expected * <size_t> self._multi_agg_count
             self._multi_counts.reserve(flat_expected)
@@ -1615,11 +1865,12 @@ cdef class CarcharGroupStateEngine:
         if self._index.lookup_fast(row_hash, payload_ref):
             return payload_ref
 
-        payload_ref = <int64_t> self._group_key_values.size()
+        payload_ref = <int64_t> self._state_count()
         self._index.insert_new(row_hash, payload_ref)
-        self._group_key_values.push_back(key_value)
-        self._group_key_valid.push_back(key_valid_flag)
+        self._append_single_fixed_payload_key(key_value, key_valid_flag)
         self._object_state.append(None)
+        self._object_state_starts.push_back(0)
+        self._object_state_lengths.push_back(0)
         if self._agg_mode == AGG_COUNT_DISTINCT:
             self._distinct_sets.append(FlatHashSet())
         if self._multi_agg_count > 0:
@@ -1631,6 +1882,8 @@ cdef class CarcharGroupStateEngine:
                 self._multi_avg_sums.push_back(0.0)
                 self._multi_avg_counts.push_back(0)
                 self._multi_object_state.append(None)
+                self._multi_object_state_starts.push_back(0)
+                self._multi_object_state_lengths.push_back(0)
                 if self._multi_agg_modes[agg_idx] == AGG_COUNT_DISTINCT:
                     self._multi_distinct_sets.append(FlatHashSet())
                 else:
@@ -1643,7 +1896,7 @@ cdef class CarcharGroupStateEngine:
             self._avg_sums.push_back(0.0)
             self._avg_counts.push_back(0)
 
-        key_store_bytes = self._group_key_values.size() * (sizeof(int64_t) + sizeof(int64_t))
+        key_store_bytes = <size_t> self._key_payload_bytes.size()
         self._readings["groupby_key_store_bytes"] = key_store_bytes
         if (
             self._key_store_limit_bytes is not None
@@ -1668,20 +1921,13 @@ cdef class CarcharGroupStateEngine:
         if self._index.lookup_fast(row_hash, payload_ref):
             return payload_ref
 
-        payload_ref = <int64_t> self._group_key_values.size()
+        payload_ref = <int64_t> self._state_count()
         self._index.insert_new(row_hash, payload_ref)
-        self._group_key_values.push_back(0)
-        self._group_key_valid.push_back(1)
-
-        for key_idx in range(len(key_ptrs)):
-            key_ptr = <DrakenFixedBuffer*> <size_t> key_ptrs[key_idx]
-            key_null_bitmap = <uint8_t*> <size_t> key_nulls[key_idx]
-            key_valid_flag = 1 if _bitmap_is_valid(key_null_bitmap, row_idx) else 0
-            key_value = _read_integer_value(key_ptr, row_idx) if key_valid_flag != 0 else 0
-            self._multi_group_key_values[key_idx].push_back(key_value)
-            self._multi_group_key_valid[key_idx].push_back(key_valid_flag)
+        self._append_multi_fixed_payload_key(key_ptrs, key_nulls, row_idx)
 
         self._object_state.append(None)
+        self._object_state_starts.push_back(0)
+        self._object_state_lengths.push_back(0)
         if self._agg_mode == AGG_COUNT_DISTINCT:
             self._distinct_sets.append(FlatHashSet())
         if self._multi_agg_count > 0:
@@ -1693,6 +1939,8 @@ cdef class CarcharGroupStateEngine:
                 self._multi_avg_sums.push_back(0.0)
                 self._multi_avg_counts.push_back(0)
                 self._multi_object_state.append(None)
+                self._multi_object_state_starts.push_back(0)
+                self._multi_object_state_lengths.push_back(0)
                 if self._multi_agg_modes[agg_idx] == AGG_COUNT_DISTINCT:
                     self._multi_distinct_sets.append(FlatHashSet())
                 else:
@@ -1705,9 +1953,7 @@ cdef class CarcharGroupStateEngine:
             self._avg_sums.push_back(0.0)
             self._avg_counts.push_back(0)
 
-        key_store_bytes = <size_t> self._readings["groupby_key_store_bytes"] + (
-            <size_t> len(key_ptrs) * (sizeof(int64_t) + sizeof(int64_t))
-        )
+        key_store_bytes = <size_t> self._key_payload_bytes.size()
         self._readings["groupby_key_store_bytes"] = key_store_bytes
         if (
             self._key_store_limit_bytes is not None
@@ -1731,12 +1977,12 @@ cdef class CarcharGroupStateEngine:
         if self._index.lookup_fast(row_hash, payload_ref):
             return payload_ref
 
-        payload_ref = <int64_t> self._group_key_values.size()
+        payload_ref = <int64_t> self._state_count()
         self._index.insert_new(row_hash, payload_ref)
-        self._group_key_values.push_back(0)
-        self._group_key_valid.push_back(key_valid_flag)
         self._append_single_payload_key(data_ptr, data_len, key_valid_flag)
         self._object_state.append(None)
+        self._object_state_starts.push_back(0)
+        self._object_state_lengths.push_back(0)
         if self._agg_mode == AGG_COUNT_DISTINCT:
             self._distinct_sets.append(FlatHashSet())
         if self._multi_agg_count > 0:
@@ -1748,6 +1994,8 @@ cdef class CarcharGroupStateEngine:
                 self._multi_avg_sums.push_back(0.0)
                 self._multi_avg_counts.push_back(0)
                 self._multi_object_state.append(None)
+                self._multi_object_state_starts.push_back(0)
+                self._multi_object_state_lengths.push_back(0)
                 if self._multi_agg_modes[agg_idx] == AGG_COUNT_DISTINCT:
                     self._multi_distinct_sets.append(FlatHashSet())
                 else:
@@ -1780,15 +2028,15 @@ cdef class CarcharGroupStateEngine:
         if self._index.lookup_fast(row_hash, payload_ref):
             return payload_ref
 
-        payload_ref = <int64_t> self._group_key_values.size()
+        payload_ref = <int64_t> self._state_count()
         self._index.insert_new(row_hash, payload_ref)
-        self._group_key_values.push_back(0)
-        self._group_key_valid.push_back(1)
         self._append_multi_payload_key(key_vectors, row_idx)
         key_store_bytes = <size_t> self._key_payload_bytes.size()
         self._readings["groupby_key_store_bytes"] = key_store_bytes
 
         self._object_state.append(None)
+        self._object_state_starts.push_back(0)
+        self._object_state_lengths.push_back(0)
         if self._agg_mode == AGG_COUNT_DISTINCT:
             self._distinct_sets.append(FlatHashSet())
         if self._multi_agg_count > 0:
@@ -1800,6 +2048,8 @@ cdef class CarcharGroupStateEngine:
                 self._multi_avg_sums.push_back(0.0)
                 self._multi_avg_counts.push_back(0)
                 self._multi_object_state.append(None)
+                self._multi_object_state_starts.push_back(0)
+                self._multi_object_state_lengths.push_back(0)
                 if self._multi_agg_modes[agg_idx] == AGG_COUNT_DISTINCT:
                     self._multi_distinct_sets.append(FlatHashSet())
                 else:
@@ -1821,6 +2071,8 @@ cdef class CarcharGroupStateEngine:
         return payload_ref
 
     cdef list _build_multi_fixed_key_vectors(self, Py_ssize_t start, Py_ssize_t stop):
+        if <Py_ssize_t> self._key_payload_offsets.size() >= stop + 1:
+            return self._build_payload_multi_key_vectors(start, stop)
         cdef Py_ssize_t key_count = len(self._group_by_columns)
         cdef Py_ssize_t key_idx
         cdef Py_ssize_t row_idx
@@ -2000,6 +2252,36 @@ cdef class CarcharGroupStateEngine:
         cdef Py_ssize_t row_idx
         cdef int64_t state_index
         cdef object value_obj
+        cdef const char* data_ptr = NULL
+        cdef Py_ssize_t data_len = 0
+        cdef int64_t valid_flag
+        cdef int cmp
+
+        if self._is_stringlike_vector(value_vector):
+            for row_idx in range(row_count):
+                if not _bitmap_is_valid(value_nulls, row_idx):
+                    continue
+                valid_flag = self._extract_stringlike_key(value_vector, row_idx, &data_ptr, &data_len)
+                if valid_flag == 0:
+                    continue
+                state_index = state_indices[row_idx]
+                if self._seen[state_index] == 0:
+                    self._store_object_state_bytes(state_index, data_ptr, data_len)
+                    self._seen[state_index] = 1
+                    continue
+                cmp = self._compare_bytes(
+                    data_ptr,
+                    data_len,
+                    &self._object_state_bytes[self._object_state_starts[state_index]],
+                    self._object_state_lengths[state_index],
+                )
+                if (
+                    (self._agg_mode == AGG_MIN and cmp < 0)
+                    or (self._agg_mode == AGG_MAX and cmp > 0)
+                ):
+                    self._store_object_state_bytes(state_index, data_ptr, data_len)
+                self._seen[state_index] = 1
+            return
 
         for row_idx in range(row_count):
             if not _bitmap_is_valid(value_nulls, row_idx):
@@ -2030,6 +2312,36 @@ cdef class CarcharGroupStateEngine:
         cdef Py_ssize_t offset
         cdef object value_obj
         cdef int64_t agg_mode = self._multi_agg_modes[agg_idx]
+        cdef const char* data_ptr = NULL
+        cdef Py_ssize_t data_len = 0
+        cdef int64_t valid_flag
+        cdef int cmp
+
+        if self._is_stringlike_vector(value_vector):
+            for row_idx in range(row_count):
+                if not _bitmap_is_valid(value_nulls, row_idx):
+                    continue
+                valid_flag = self._extract_stringlike_key(value_vector, row_idx, &data_ptr, &data_len)
+                if valid_flag == 0:
+                    continue
+                offset = self._multi_offset(state_indices[row_idx], agg_idx)
+                if self._multi_seen[offset] == 0:
+                    self._store_multi_object_state_bytes(offset, data_ptr, data_len)
+                    self._multi_seen[offset] = 1
+                    continue
+                cmp = self._compare_bytes(
+                    data_ptr,
+                    data_len,
+                    &self._multi_object_state_bytes[self._multi_object_state_starts[offset]],
+                    self._multi_object_state_lengths[offset],
+                )
+                if (
+                    (agg_mode == AGG_MIN and cmp < 0)
+                    or (agg_mode == AGG_MAX and cmp > 0)
+                ):
+                    self._store_multi_object_state_bytes(offset, data_ptr, data_len)
+                self._multi_seen[offset] = 1
+            return
 
         for row_idx in range(row_count):
             if not _bitmap_is_valid(value_nulls, row_idx):
@@ -3834,11 +4146,68 @@ cdef class CarcharGroupStateEngine:
             column.decode("utf-8") for column in self._group_by_columns
         ]
 
+    cdef object _build_single_fixed_key_vector(self, Py_ssize_t start, Py_ssize_t stop):
+        cdef Py_ssize_t row_idx
+        cdef Py_ssize_t length = stop - start
+        cdef object key_vec
+        cdef Int64Vector key_vec_i64
+        cdef int64_t* key_data_i64 = NULL
+        cdef uint8_t* key_nulls = NULL
+        cdef bint needs_key_nulls = False
+        cdef int64_t key_kind = self._single_key_kind
+        cdef Py_ssize_t pos
+        cdef uint8_t valid_flag
+        cdef int64_t key_value
+
+        if <Py_ssize_t> self._key_payload_offsets.size() >= stop + 1:
+            for row_idx in range(start, stop):
+                pos = self._key_payload_offsets[row_idx]
+                valid_flag = self._key_payload_bytes[pos]
+                if valid_flag == 0:
+                    needs_key_nulls = True
+                    break
+        else:
+            if <Py_ssize_t> self._group_key_values.size() < stop:
+                raise RuntimeError("single-key fixed value store shorter than finalize range")
+            if <Py_ssize_t> self._group_key_valid.size() < stop:
+                raise RuntimeError("single-key fixed validity store shorter than finalize range")
+            for row_idx in range(start, stop):
+                if self._group_key_valid[row_idx] == 0:
+                    needs_key_nulls = True
+                    break
+
+        key_vec_i64 = Int64Vector(length)
+        key_vec = key_vec_i64
+        key_data_i64 = <int64_t*> key_vec_i64.ptr.data
+
+        if needs_key_nulls:
+            key_nulls = _alloc_valid_bitmap(length)
+            key_vec_i64.ptr.null_bitmap = key_nulls
+
+        for row_idx in range(length):
+            if <Py_ssize_t> self._key_payload_offsets.size() >= start + row_idx + 2:
+                pos = self._key_payload_offsets[start + row_idx]
+                valid_flag = self._key_payload_bytes[pos]
+                pos += 1
+                key_value = self._payload_read_i64(&pos)
+            else:
+                valid_flag = 1 if self._group_key_valid[start + row_idx] != 0 else 0
+                key_value = self._group_key_values[start + row_idx]
+            key_data_i64[row_idx] = key_value
+            if key_nulls != NULL and valid_flag != 0:
+                _bitmap_set_valid(key_nulls, row_idx)
+
+        return key_vec
+
     cdef list _build_object_key_vectors(self, Py_ssize_t start, Py_ssize_t stop):
         cdef list vectors
         cdef object built_vec
 
         if len(self._group_by_columns) == 1 and not self._multi_key_object_mode:
+            if self._key_payload_offsets.size() < <size_t>(stop + 1):
+                built_vec = self._build_single_fixed_key_vector(start, stop)
+                self._record_constant_groupby_vector(built_vec)
+                return [built_vec]
             built_vec = self._build_encoded_key_vector(start, stop)
             self._record_constant_groupby_vector(built_vec)
             return [built_vec]
@@ -3856,7 +4225,7 @@ cdef class CarcharGroupStateEngine:
         cdef Py_ssize_t pos
         cdef uint8_t valid_flag
         cdef int64_t key_value
-        cdef int32_t data_len
+        cdef Py_ssize_t data_len
         cdef int64_t key_kind
         cdef list vectors = [None] * key_count
         cdef list builders = [None] * key_count
@@ -3887,7 +4256,7 @@ cdef class CarcharGroupStateEngine:
                         needs_nulls[key_idx] = True
                     key_value = self._payload_read_i64(&pos)
                 else:
-                    data_len = self._payload_read_i32(&pos)
+                    data_len = <Py_ssize_t> self._payload_read_vsize(&pos)
                     if valid_flag == 0:
                         needs_nulls[key_idx] = True
                     else:
@@ -3956,7 +4325,7 @@ cdef class CarcharGroupStateEngine:
                     if fixed_null_ptrs[key_idx] != 0 and valid_flag != 0:
                         _bitmap_set_valid(<uint8_t*> <size_t> fixed_null_ptrs[key_idx], row_idx)
                 else:
-                    data_len = self._payload_read_i32(&pos)
+                    data_len = <Py_ssize_t> self._payload_read_vsize(&pos)
                     builder = builders[key_idx]
                     if valid_flag == 0:
                         builder.append_null()
@@ -3978,7 +4347,7 @@ cdef class CarcharGroupStateEngine:
         cdef Py_ssize_t total_bytes = 0
         cdef Py_ssize_t pos
         cdef uint8_t valid_flag
-        cdef int32_t data_len
+        cdef Py_ssize_t data_len
         cdef StringVectorBuilder builder
 
         if <Py_ssize_t> self._key_payload_offsets.size() < stop + 1:
@@ -3988,7 +4357,7 @@ cdef class CarcharGroupStateEngine:
             pos = self._key_payload_offsets[row_idx]
             valid_flag = self._key_payload_bytes[pos]
             pos += 1
-            data_len = self._payload_read_i32(&pos)
+            data_len = <Py_ssize_t> self._payload_read_vsize(&pos)
             if valid_flag != 0:
                 total_bytes += data_len
 
@@ -3997,7 +4366,7 @@ cdef class CarcharGroupStateEngine:
             pos = self._key_payload_offsets[row_idx]
             valid_flag = self._key_payload_bytes[pos]
             pos += 1
-            data_len = self._payload_read_i32(&pos)
+            data_len = <Py_ssize_t> self._payload_read_vsize(&pos)
             if valid_flag == 0:
                 builder.append_null()
                 continue
@@ -4047,6 +4416,10 @@ cdef class CarcharGroupStateEngine:
     cdef list _build_multi_fixed_key_vectors_for_column(
         self, Py_ssize_t key_idx, Py_ssize_t start, Py_ssize_t stop
     ):
+        cdef list built_vectors
+        if <Py_ssize_t> self._key_payload_offsets.size() >= stop + 1:
+            built_vectors = self._build_payload_multi_key_vectors(start, stop)
+            return [built_vectors[key_idx]]
         cdef Py_ssize_t row_idx
         cdef Py_ssize_t length = stop - start
         cdef object key_vec
@@ -4146,6 +4519,57 @@ cdef class CarcharGroupStateEngine:
                 builder.append(encoded)
         return builder.finish()
 
+    cdef object _build_object_state_vector(self, Py_ssize_t start, Py_ssize_t stop):
+        cdef Py_ssize_t row_idx
+        cdef Py_ssize_t length = stop - start
+        cdef Py_ssize_t total_bytes = 0
+        cdef Py_ssize_t state_index
+        cdef StringVectorBuilder builder
+
+        for row_idx in range(length):
+            state_index = start + row_idx
+            if self._seen[state_index] != 0:
+                total_bytes += self._object_state_lengths[state_index]
+
+        builder = StringVectorBuilder.with_counts(length, total_bytes)
+        for row_idx in range(length):
+            state_index = start + row_idx
+            if self._seen[state_index] == 0:
+                builder.append_null()
+            else:
+                builder.append_bytes(
+                    <const char*> &self._object_state_bytes[self._object_state_starts[state_index]],
+                    self._object_state_lengths[state_index],
+                )
+        return builder.finish()
+
+    cdef object _build_multi_object_state_vector(self, Py_ssize_t start, Py_ssize_t stop, Py_ssize_t agg_idx):
+        cdef Py_ssize_t row_idx
+        cdef Py_ssize_t length = stop - start
+        cdef Py_ssize_t total_bytes = 0
+        cdef Py_ssize_t state_index
+        cdef Py_ssize_t offset
+        cdef StringVectorBuilder builder
+
+        for row_idx in range(length):
+            state_index = start + row_idx
+            offset = self._multi_offset(state_index, agg_idx)
+            if self._multi_seen[offset] != 0:
+                total_bytes += self._multi_object_state_lengths[offset]
+
+        builder = StringVectorBuilder.with_counts(length, total_bytes)
+        for row_idx in range(length):
+            state_index = start + row_idx
+            offset = self._multi_offset(state_index, agg_idx)
+            if self._multi_seen[offset] == 0:
+                builder.append_null()
+            else:
+                builder.append_bytes(
+                    <const char*> &self._multi_object_state_bytes[self._multi_object_state_starts[offset]],
+                    self._multi_object_state_lengths[offset],
+                )
+        return builder.finish()
+
     cdef Morsel _empty_morsel(self):
         cdef list names = self._output_names()
         cdef list vectors
@@ -4186,25 +4610,19 @@ cdef class CarcharGroupStateEngine:
         cdef Py_ssize_t idx
         cdef Py_ssize_t agg_idx
         cdef Py_ssize_t offset
-        cdef Py_ssize_t key_idx
         cdef list out = []
-        cdef list key_values
-        cdef list key_valids
+        cdef object key_values
+        cdef object key_valids
         if self._mode != MODE_CARCHAR:
             return {"mode": self._mode, "rows": out}
         if self._multi_agg_count > 0:
-            for idx in range(<Py_ssize_t> self._group_key_values.size()):
-                key_values = []
-                key_valids = []
-                if self._multi_key_fixed_mode:
-                    for key_idx in range(len(self._group_by_columns)):
-                        key_values.append(self._multi_group_key_values[key_idx][idx])
-                        key_valids.append(self._multi_group_key_valid[key_idx][idx])
+            for idx in range(self._state_count()):
+                key_values, key_valids = self._debug_key_payload_value(idx)
                 out.append(
                     (
                         idx,
-                        tuple(key_values) if self._multi_key_fixed_mode else self._group_key_values[idx],
-                        tuple(key_valids) if self._multi_key_fixed_mode else self._group_key_valid[idx],
+                        key_values,
+                        key_valids,
                         [
                             (
                                 self._multi_agg_modes[agg_idx],
@@ -4219,27 +4637,14 @@ cdef class CarcharGroupStateEngine:
                         ],
                     )
                 )
-            return {
-                "mode": self._mode,
-                "rows": out,
-                "use_object_keys": self._use_object_keys,
-                "multi_key_object_mode": self._multi_key_object_mode,
-                "multi_key_fixed_mode": self._multi_key_fixed_mode,
-                "single_key_kind": self._single_key_kind,
-                "key_payload_offsets": list(self._key_payload_offsets),
-            }
-        for idx in range(<Py_ssize_t> self._group_key_values.size()):
-            key_values = []
-            key_valids = []
-            if self._multi_key_fixed_mode:
-                for key_idx in range(len(self._group_by_columns)):
-                    key_values.append(self._multi_group_key_values[key_idx][idx])
-                    key_valids.append(self._multi_group_key_valid[key_idx][idx])
+            return {"mode": self._mode, "rows": out}
+        for idx in range(self._state_count()):
+            key_values, key_valids = self._debug_key_payload_value(idx)
             out.append(
                 (
                     idx,
-                    tuple(key_values) if self._multi_key_fixed_mode else self._group_key_values[idx],
-                    tuple(key_valids) if self._multi_key_fixed_mode else self._group_key_valid[idx],
+                    key_values,
+                    key_valids,
                     self._counts[idx],
                     self._i64_state[idx],
                     self._f64_state[idx],
@@ -4248,15 +4653,7 @@ cdef class CarcharGroupStateEngine:
                     self._avg_counts[idx],
                 )
             )
-        return {
-            "mode": self._mode,
-            "rows": out,
-            "use_object_keys": self._use_object_keys,
-            "multi_key_object_mode": self._multi_key_object_mode,
-            "multi_key_fixed_mode": self._multi_key_fixed_mode,
-            "single_key_kind": self._single_key_kind,
-            "key_payload_offsets": list(self._key_payload_offsets),
-        }
+        return {"mode": self._mode, "rows": out}
 
     cdef Morsel _build_chunk_morsel(self, Py_ssize_t start, Py_ssize_t stop):
         cdef Py_ssize_t length = stop - start
@@ -4278,11 +4675,6 @@ cdef class CarcharGroupStateEngine:
         cdef list agg_objects
         cdef object agg_object_vec
 
-        for state_index in range(start, stop):
-            if self._group_key_valid[state_index] == 0:
-                needs_key_nulls = True
-                break
-
         if self._agg_mode in (AGG_SUM, AGG_MIN, AGG_MAX):
             for state_index in range(start, stop):
                 if self._seen[state_index] == 0:
@@ -4299,7 +4691,13 @@ cdef class CarcharGroupStateEngine:
         elif self._use_object_keys:
             key_vectors = self._build_object_key_vectors(start, stop)
             key_vec = key_vectors[0]
+        elif self._single_key_kind != KEY_MULTI_FIXED_INT or <Py_ssize_t> self._key_payload_offsets.size() >= stop + 1:
+            key_vec = self._build_single_fixed_key_vector(start, stop)
         else:
+            for state_index in range(start, stop):
+                if self._group_key_valid[state_index] == 0:
+                    needs_key_nulls = True
+                    break
             key_vec_i64 = Int64Vector(length)
             key_vec = key_vec_i64
             key_data = <int64_t*> key_vec_i64.ptr.data
@@ -4308,18 +4706,23 @@ cdef class CarcharGroupStateEngine:
                 key_vec_i64.ptr.null_bitmap = key_nulls
 
         if self._value_kind == VALUE_OBJECT and self._agg_mode in (AGG_MIN, AGG_MAX):
-            agg_objects = []
-            for i in range(length):
-                state_index = start + i
-                if key_data != NULL:
+            if key_data != NULL:
+                for i in range(length):
+                    state_index = start + i
                     key_data[i] = self._group_key_values[state_index]
                     if key_nulls != NULL and self._group_key_valid[state_index] != 0:
                         _bitmap_set_valid(key_nulls, i)
-                if self._seen[state_index] == 0:
-                    agg_objects.append(None)
-                else:
-                    agg_objects.append(self._object_state[state_index])
-            agg_object_vec = self._build_native_object_vector(agg_objects)
+            if self._object_state_lengths.size() == self._state_count():
+                agg_object_vec = self._build_object_state_vector(start, stop)
+            else:
+                agg_objects = []
+                for i in range(length):
+                    state_index = start + i
+                    if self._seen[state_index] == 0:
+                        agg_objects.append(None)
+                    else:
+                        agg_objects.append(self._object_state[state_index])
+                agg_object_vec = self._build_native_object_vector(agg_objects)
             if self._multi_key_fixed_mode:
                 return Morsel.from_vectors(names, [agg_object_vec, *key_vectors])
             if self._use_object_keys and self._multi_key_object_mode:
@@ -4435,24 +4838,25 @@ cdef class CarcharGroupStateEngine:
         if self._multi_key_fixed_mode:
             pass
         elif (
-            not self._use_object_keys
-            and
             not self._multi_key_object_mode
             and self._is_multi_fixed_kind(self._single_key_kind)
-            and self._encoded_key_valid.size() == 0
+            and (<Py_ssize_t> self._key_payload_offsets.size() >= stop + 1 or self._encoded_key_valid.size() == 0)
         ):
-            key_vec_i64 = Int64Vector(length)
-            key_vec = key_vec_i64
-            key_data = <int64_t*> key_vec_i64.ptr.data
-            if needs_key_nulls:
-                key_nulls = _alloc_valid_bitmap(length)
-                key_vec_i64.ptr.null_bitmap = key_nulls
+            if <Py_ssize_t> self._key_payload_offsets.size() >= stop + 1:
+                key_vec = self._build_single_fixed_key_vector(start, stop)
+            else:
+                key_vec_i64 = Int64Vector(length)
+                key_vec = key_vec_i64
+                key_data = <int64_t*> key_vec_i64.ptr.data
+                if needs_key_nulls:
+                    key_nulls = _alloc_valid_bitmap(length)
+                    key_vec_i64.ptr.null_bitmap = key_nulls
 
-            for i in range(length):
-                state_index = start + i
-                key_data[i] = self._group_key_values[state_index]
-                if key_nulls != NULL and self._group_key_valid[state_index] != 0:
-                    _bitmap_set_valid(key_nulls, i)
+                for i in range(length):
+                    state_index = start + i
+                    key_data[i] = self._group_key_values[state_index]
+                    if key_nulls != NULL and self._group_key_valid[state_index] != 0:
+                        _bitmap_set_valid(key_nulls, i)
         elif self._use_object_keys:
             key_vectors = self._build_object_key_vectors(start, stop)
             key_vec = key_vectors[0]
@@ -4487,15 +4891,18 @@ cdef class CarcharGroupStateEngine:
 
             agg_nulls = NULL
             if agg_value_kind == VALUE_OBJECT and agg_mode in (AGG_MIN, AGG_MAX):
-                agg_objects = []
-                for i in range(length):
-                    state_index = start + i
-                    offset = self._multi_offset(state_index, agg_idx)
-                    if self._multi_seen[offset] == 0:
-                        agg_objects.append(None)
-                    else:
-                        agg_objects.append(self._multi_object_state[offset])
-                agg_object_vec = self._build_native_object_vector(agg_objects)
+                if self._multi_object_state_lengths.size() == self._multi_counts.size():
+                    agg_object_vec = self._build_multi_object_state_vector(start, stop, agg_idx)
+                else:
+                    agg_objects = []
+                    for i in range(length):
+                        state_index = start + i
+                        offset = self._multi_offset(state_index, agg_idx)
+                        if self._multi_seen[offset] == 0:
+                            agg_objects.append(None)
+                        else:
+                            agg_objects.append(self._multi_object_state[offset])
+                    agg_object_vec = self._build_native_object_vector(agg_objects)
                 vectors.append(agg_object_vec)
                 continue
             if self._agg_output_is_float(agg_idx):
@@ -4553,12 +4960,14 @@ cdef class CarcharGroupStateEngine:
     cpdef object finalize_fast_columns(self):
         cdef Py_ssize_t n
         cdef Py_ssize_t idx
+        cdef Py_ssize_t pos
         cdef object keys
         cdef object values_q
         cdef object values_d
         cdef int64_t[::1] key_view
         cdef int64_t[::1] value_q_view
         cdef double[::1] value_d_view
+        cdef uint8_t valid_flag
 
         if self._mode == MODE_LEGACY:
             return self._legacy_backend.finalize_fast_columns()
@@ -4588,21 +4997,28 @@ cdef class CarcharGroupStateEngine:
         if self._use_object_keys or self._multi_key_object_mode:
             return None
 
-        n = <Py_ssize_t> self._group_key_values.size()
+        n = self._state_count()
         if n == 0:
             return array("q"), array("q")
 
         if self._value_kind == VALUE_OBJECT:
             return None
 
-        for idx in range(n):
-            if self._group_key_valid[idx] == 0:
-                return None
-
         keys = array("q", [0]) * n
         key_view = keys
-        for idx in range(n):
-            key_view[idx] = self._group_key_values[idx]
+        if <Py_ssize_t> self._key_payload_offsets.size() >= n + 1:
+            for idx in range(n):
+                pos = self._key_payload_offsets[idx]
+                valid_flag = self._key_payload_bytes[pos]
+                if valid_flag == 0:
+                    return None
+                pos += 1
+                key_view[idx] = self._payload_read_i64(&pos)
+        else:
+            for idx in range(n):
+                if self._group_key_valid[idx] == 0:
+                    return None
+                key_view[idx] = self._group_key_values[idx]
 
         if self._agg_mode in (AGG_COUNT_STAR, AGG_COUNT_VALUE, AGG_COUNT_DISTINCT):
             values_q = array("q", [0]) * n
@@ -4849,7 +5265,7 @@ cdef class CarcharGroupStateEngine:
                 yield morsel
             return
 
-        total = <Py_ssize_t> self._group_key_values.size()
+        total = self._state_count()
         self._readings["groupby_finalize_rows_count"] += total
         if total == 0:
             yield self._empty_morsel()

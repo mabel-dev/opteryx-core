@@ -5,8 +5,6 @@
 
 from __future__ import annotations
 
-import time
-
 from opteryx.draken.interop.arrow import vector_from_sequence
 from opteryx.draken.morsels.morsel import Morsel
 
@@ -47,9 +45,7 @@ def normalize_aggregations(aggregations: list[object]) -> list[tuple[str, str, b
 
 
 def create_group_state_engine(group_by_columns, aggregations):
-    from opteryx.compiled.aggregations.carchar_group_state_engine import (
-        CarcharGroupStateEngine,
-    )
+    from opteryx.compiled.aggregations.carchar_group_state_engine import CarcharGroupStateEngine
 
     return CarcharGroupStateEngine(group_by_columns, aggregations)
 

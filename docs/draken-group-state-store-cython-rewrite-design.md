@@ -147,6 +147,63 @@ Split the engine into:
 1. hot key index
 2. cold aggregate state
 
+## Current Layout Diagram
+
+```mermaid
+flowchart LR
+    A[Draken Morsel<br/>group key vectors<br/>aggregate value vectors]
+    B[Morsel.hash(group key columns)<br/>canonical uint64 hash per row]
+    C[CarcharIndex<br/>hash -> state_index]
+    D[Shared Payload Arena<br/>group key storage]
+    E[Aggregate State Arrays<br/>count/sum/min/max/avg/seen]
+    F[Distinct Side State<br/>FlatHashSet per group/agg when needed]
+    G[Finalize<br/>decode payload + read state arrays]
+    H[Draken Output Morsels]
+
+    A --> B
+    B --> C
+    C -->|lookup/insert| D
+    C -->|lookup/insert| E
+    C -->|lookup/insert| F
+    D --> G
+    E --> G
+    F --> G
+    G --> H
+```
+
+Current payload record format in the shared key arena:
+
+- fixed-width key part:
+  - `1 byte valid flag`
+  - `8 bytes normalized fixed-width value`
+- variable-length key part:
+  - `1 byte valid flag`
+  - `varint length`
+  - raw bytes
+
+This is intentional:
+
+- fixed-width primitives are stored directly; they do not need `zpp_bits`-style packing
+- variable-length values use compact varint lengths instead of the earlier fixed 4-byte prefix
+- Carchar remains unchanged and still stores only `hash -> state_index`
+- `state_index` points into this payload arena plus the aggregate state arrays
+
+The important boundary is:
+
+- Carchar does **not** store the full group key inline
+- Carchar stores `hash -> state_index`
+- `state_index` resolves into:
+  - the payload arena for key materialization
+  - aggregate state arrays
+  - distinct side state where required
+
+That is the same architectural pattern as the join work:
+
+- Carchar is the hot index
+- operator-specific arenas hold the real payload/state
+- Draken vectors feed the engine
+- finalize reconstructs Draken-native output from native state
+
 ### 1. Hot Key Index
 
 Use Carchar as the group key index:
@@ -372,6 +429,12 @@ Implemented:
 - multi-key fixed-width multi-aggregate compiled mode
 - multi-key fixed-width single-aggregate compiled mode
 - Carchar-backed `hash -> state_index`
+- shared native encoded key payload arena for:
+  - single-key string and string-dictionary groups
+  - mixed multi-key groups containing fixed-width and string-like keys
+  - pure fixed-width single-key groups
+  - pure fixed-width multi-key groups
+  - finalize-time reconstruction of supported key columns without Python key tuples
 - direct compiled chunked finalize for supported shapes
 - widened Draken-native expression preparation for grouped execution:
   - native non-temporal `BINARY_OPERATOR` handling inside the Draken evaluator boundary
@@ -393,14 +456,15 @@ Validated state:
 - dictionary-key grouped `COUNT(*)` is materially faster than materializing keys first
 - dictionary-key grouped `COUNT(DISTINCT)` is now materially faster than the materialized-key path with parity holding
 - focused multi-aggregate `COUNT(DISTINCT)` coverage is now on the compiled path and passing
+- ClickBench grouped query battery is green on the current Draken/Carchar grouped path
 
 ### What Is Not Done Yet
 
 Still missing from the original Phase-1 vision:
 
-- encoded `zpp_bits` key store
+- unified `zpp_bits` key store for all supported key kinds
 - broader exact distinct state strategies if the current hashed-value distinct mode becomes insufficient for some types
-- full replacement of the current object-backed multi-key side store with the planned encoded key store
+- full replacement of the remaining fixed-width key side stores with the planned unified encoded key store
 - broader typed finalize paths for object-heavy outputs without `vector_from_sequence(...)`
 - broader native grouped-expression coverage for any remaining unsupported query shapes
 
@@ -516,7 +580,7 @@ That is a useful lesson for later phases:
 - cheap high-certainty specializations should be taken early
 - they are not “premature optimization” if they remove obvious fallback costs
 
-### 6. The Encoded Key Store Is Still The Long-Term Design, But Not The First Step
+### 6. The Encoded Key Store Was The Right Direction, But It Landed In Stages
 
 The original design correctly identified an encoded key store as the long-term answer for:
 
@@ -524,7 +588,7 @@ The original design correctly identified an encoded key store as the long-term a
 - multi-key grouping
 - one general finalize path
 
-But the implementation showed that Phase 1 does not need to start there.
+The implementation showed that Phase 1 did not need to start there.
 
 For the early slices, typed key-state storage is a good temporary strategy because it lets us:
 
@@ -532,7 +596,19 @@ For the early slices, typed key-state storage is a good temporary strategy becau
 - validate compiled ingest/finalize
 - add kernels incrementally
 
-So the encoded key store should stay in the plan, but it should no longer block the next practical slices.
+That said, the engine has now crossed the next step:
+
+- supported string and mixed-key grouped paths use a shared encoded payload arena behind `state_index`
+- Carchar still maps `hash -> state_index`
+- the arena, not the index, is what changed
+
+So the remaining key-store work is narrower now:
+
+- remove the leftover placeholder fixed-width side columns that are still carried for compatibility/debug paths
+- replace the remaining transitional dual-store logic with the payload arena as the only key-store model
+
+The lesson is not "delay the encoded store indefinitely".
+The lesson is "land it where it removes real object pressure first".
 
 ### 7. `COUNT(DISTINCT)` Needs Its Own State Design
 
@@ -651,7 +727,7 @@ The next implementation order should be:
 1. compiled multi-key grouping for fixed-width keys
 2. broader native grouped-expression coverage for any remaining unsupported shapes
 3. broader string aggregate coverage for real ClickBench query mixes
-4. encoded key store for broader key coverage
+4. unify the remaining fixed-width key stores into the encoded key arena
 5. broader distinct-state strategies if needed beyond the current hashed-value path
 6. seal/locality work only after real grouped query profiling justifies it
 
@@ -663,7 +739,7 @@ This is a better order than the original plan because it prioritizes:
 - widening compiled coverage
 - removing actual fallback frequency
 
-before landing the more general but larger key-store redesign.
+before spending more time widening compatibility without reducing the remaining storage split.
 
 ## Implementation Plan
 
@@ -743,9 +819,9 @@ Objective:
 
 Status:
 
-- not started
-- still the right long-term design
-- no longer required before widening the current single-key compiled slices
+- partially implemented
+- active today for string-like and mixed-key grouped paths
+- still incomplete for pure fixed-width key shapes
 
 Work:
 
@@ -761,6 +837,7 @@ Success condition:
 
 - finalize can reconstruct output group key columns from the encoded store
 - no Python tuple keys are needed
+- fixed-width and string-like group keys share the same underlying payload arena
 
 ### Step 4: Implement Phase-1 Aggregate State Arrays
 

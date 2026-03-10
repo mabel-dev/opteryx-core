@@ -185,7 +185,9 @@ class DrakenInnerJoinNode(JoinNode):
                     if left_exprs and self.left_morsel.num_rows > 0:
                         old_cols = set(self.left_morsel.column_names)
                         try:
-                            self.left_morsel = evaluate_and_append_draken(left_exprs, self.left_morsel)
+                            self.left_morsel = evaluate_and_append_draken(
+                                left_exprs, self.left_morsel
+                            )
                         except (NotImplementedError, TypeError, UnsupportedSyntaxError) as err:
                             raise UnsupportedSyntaxError(
                                 f"Draken inner join expression evaluation does not support this query shape: {err}"
