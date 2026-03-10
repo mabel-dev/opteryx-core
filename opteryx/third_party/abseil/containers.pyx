@@ -111,6 +111,46 @@ cdef class FlatHashSet:
     cdef inline void reserve(self, int64_t capacity) noexcept nogil:
         self._set.reserve(capacity)
 
+    cpdef bint add(self, uint64_t value):
+        return self._set.insert(value).second
+
+    cpdef bint has(self, uint64_t value):
+        return self._set.contains(value)
+
+    cpdef void reserve_py(self, int64_t capacity):
+        self._set.reserve(capacity)
+
+    cpdef size_t add_many_count_new(self, uint64_t[::1] values):
+        cdef Py_ssize_t i
+        cdef size_t inserted = 0
+        self._set.reserve(values.shape[0])
+        for i in range(values.shape[0]):
+            if self._set.insert(values[i]).second:
+                inserted += 1
+        return inserted
+
+    cpdef size_t has_many_count(self, uint64_t[::1] values):
+        cdef Py_ssize_t i
+        cdef size_t hits = 0
+        for i in range(values.shape[0]):
+            if self._set.contains(values[i]):
+                hits += 1
+        return hits
+
+    cpdef size_t mark_new(self, uint64_t[::1] values, uint8_t[::1] out_mask):
+        cdef Py_ssize_t i
+        cdef size_t inserted = 0
+        if out_mask.shape[0] < values.shape[0]:
+            raise ValueError("out_mask must have at least len(values) entries")
+        self._set.reserve(values.shape[0])
+        for i in range(values.shape[0]):
+            if self._set.insert(values[i]).second:
+                out_mask[i] = 1
+                inserted += 1
+            else:
+                out_mask[i] = 0
+        return inserted
+
     cdef vector[int64_t] find_new_indices(self, uint64_t* hashes, Py_ssize_t length) noexcept nogil:
         cdef vector[int64_t] indices
         cdef Py_ssize_t i

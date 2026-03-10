@@ -13,7 +13,6 @@
 
 from libc.stdint cimport uint64_t
 
-from opteryx.third_party.abseil.containers cimport FlatHashSet
 cimport cython
 from libc.stdlib cimport malloc, free
 from libc.string cimport memset
@@ -21,10 +20,11 @@ from libc.string cimport memset
 from opteryx.draken.interop.arrow cimport vector_from_arrow
 from opteryx.draken.vectors.vector cimport Vector
 
+from opteryx.nanobind.carchar_native import CarcharSet
 import pyarrow
 
 
-cdef inline FlatHashSet _count_distinct(object column, FlatHashSet seen_hashes):
+cdef inline object _count_distinct(object column, object seen_hashes):
     """Fast distinct counter that hashes via Draken vectors when possible."""
 
     cdef list chunks
@@ -37,7 +37,7 @@ cdef inline FlatHashSet _count_distinct(object column, FlatHashSet seen_hashes):
     cdef Py_ssize_t max_rows = 0
 
     if seen_hashes is None:
-        seen_hashes = FlatHashSet()
+        seen_hashes = CarcharSet()
 
     # Get chunks efficiently
     if isinstance(column, pyarrow.ChunkedArray):
@@ -68,7 +68,7 @@ cdef inline FlatHashSet _count_distinct(object column, FlatHashSet seen_hashes):
             draken_vector = <Vector>vector_from_arrow(chunk)
             draken_vector.hash_into(hash_buffer)
 
-            seen_hashes.insert_many(data_ptr, row_count)
+            seen_hashes.insert_many(hash_buffer)
     finally:
         if data_ptr != NULL:
             free(data_ptr)
@@ -76,9 +76,9 @@ cdef inline FlatHashSet _count_distinct(object column, FlatHashSet seen_hashes):
     return seen_hashes
 
 
-cpdef FlatHashSet count_distinct(object column, FlatHashSet seen_hashes):
+cpdef object count_distinct(object column, object seen_hashes):
     return _count_distinct(column, seen_hashes)
 
 
-cpdef FlatHashSet count_distinct_draken(object column, FlatHashSet seen_hashes):
+cpdef object count_distinct_draken(object column, object seen_hashes):
     return _count_distinct(column, seen_hashes)

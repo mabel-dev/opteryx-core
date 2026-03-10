@@ -121,7 +121,7 @@ class SimpleAggregateCollector:
         if self.aggregate_type == "COUNT" and self.duplicate_treatment == "Distinct":
             if self.current_value is None:
                 return 0
-            return self.current_value.items()
+            return self.current_value.size()
         if self.aggregate_type == "COUNT":
             return self.counter
         if self.aggregate_type == "HISTOGRAM":

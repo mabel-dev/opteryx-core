@@ -188,7 +188,7 @@ def date_part(part, arr):
                 return vector_datepart_hour_dict(arr).to_arrow()
             elif part in ("second", "seconds"):
                 return vector_datepart_second_dict(arr).to_arrow()
-        except TypeError:
+        except (TypeError, AttributeError, NotImplementedError):
             # Dictionary has unsupported value type - fall through to decode path
             pass
 

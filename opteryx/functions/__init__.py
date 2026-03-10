@@ -249,17 +249,63 @@ def select_values(boolean_arrays, value_arrays):
     Returns:
     - np.ndarray: Result array with selected values or False where no condition is met.
     """
+    def _to_numpy_condition(values, target_length):
+        if hasattr(values, "to_numpy"):
+            arr = values.to_numpy(zero_copy_only=False)
+        elif hasattr(values, "to_pylist"):
+            arr = numpy.asarray(values.to_pylist(), dtype=object)
+        elif isinstance(values, (list, tuple, numpy.ndarray)):
+            arr = numpy.asarray(values)
+        else:
+            arr = numpy.full(target_length, bool(values), dtype=bool)
+
+        if arr.shape == ():
+            arr = numpy.full(target_length, bool(arr.item()), dtype=bool)
+        elif len(arr) == 1 and target_length != 1:
+            arr = numpy.full(target_length, bool(arr[0]), dtype=bool)
+        return arr.astype(bool, copy=False)
+
+    def _to_numpy_values(values, target_length):
+        if hasattr(values, "to_numpy"):
+            arr = values.to_numpy(zero_copy_only=False)
+        elif hasattr(values, "to_pylist"):
+            arr = numpy.asarray(values.to_pylist(), dtype=object)
+        elif isinstance(values, numpy.ndarray):
+            arr = values
+        elif isinstance(values, (list, tuple)):
+            arr = numpy.asarray(values, dtype=object)
+        else:
+            arr = numpy.full(target_length, values, dtype=object)
+
+        if arr.shape == ():
+            arr = numpy.full(target_length, arr.item(), dtype=object)
+        elif len(arr) == 1 and target_length != 1:
+            arr = numpy.full(target_length, arr[0], dtype=object)
+        return arr
+
     # Ensure the input lists are not empty and have the same length
     if not boolean_arrays or not value_arrays or len(boolean_arrays) != len(value_arrays):
         raise ValueError("Input lists must be non-empty and of the same length.")
 
+    first_condition = boolean_arrays[0]
+    if hasattr(first_condition, "__len__"):
+        target_length = len(first_condition)
+    elif hasattr(first_condition, "to_pylist"):
+        target_length = len(first_condition.to_pylist())
+    else:
+        target_length = 1
+
     # Initialize the result array with False, assuming no condition will be met
-    result = numpy.full(len(boolean_arrays[0]), None)
+    result = numpy.full(target_length, None, dtype=object)
 
     # Iterate over pairs of boolean and value arrays
     for condition, values in zip(reversed(boolean_arrays), reversed(value_arrays)):
         # Update the result array where the condition is True
-        numpy.putmask(result, condition, values)
+        numpy.putmask(
+            result,
+            _to_numpy_condition(condition, target_length),
+            _to_numpy_values(values, target_length),
+        )
 
     return result
 

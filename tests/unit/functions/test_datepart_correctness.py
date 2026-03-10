@@ -113,6 +113,19 @@ def test_datepart_date32_arrow_input():
         assert _as_pylist(actual) == expected, f"failed for part={part}"
 
 
+def test_datepart_dictionary_timestamp_falls_back_cleanly():
+    dictionary = pa.array(
+        [BASE_DT, BASE_DT + datetime.timedelta(hours=1)],
+        type=pa.timestamp("us"),
+    )
+    arr = pa.DictionaryArray.from_arrays(
+        pa.array([0, 1, 0, None], type=pa.int8()),
+        dictionary,
+    )
+    actual = date_part("minute", arr)
+    assert _as_pylist(actual) == [30, 30, 30, None]
+
+
 def test_datepart_numpy_int64_unix_seconds_input():
     """NumPy int64 Unix timestamps should be converted and extracted correctly."""
     unix_seconds = numpy.array([1705329045], dtype=numpy.int64)  # 2024-01-15 14:30:45 UTC

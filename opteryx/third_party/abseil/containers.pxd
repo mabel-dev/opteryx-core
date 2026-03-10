@@ -84,4 +84,10 @@ cdef class FlatHashSet:
     cdef Py_ssize_t find_new_indices_out(self, uint64_t* hashes, Py_ssize_t length, int64_t* out_indices) noexcept nogil
     cdef Py_ssize_t find_new_indices_out_32(self, uint64_t* hashes, Py_ssize_t length, int32_t* out_indices) noexcept nogil
 
+    cpdef bint add(self, uint64_t value)
+    cpdef bint has(self, uint64_t value)
+    cpdef void reserve_py(self, int64_t capacity)
+    cpdef size_t add_many_count_new(self, uint64_t[::1] values)
+    cpdef size_t has_many_count(self, uint64_t[::1] values)
+    cpdef size_t mark_new(self, uint64_t[::1] values, uint8_t[::1] out_mask)
     cpdef size_t items(self)

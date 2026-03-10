@@ -751,7 +751,33 @@ def _eval_binary_op_draken(node, morsel):
         if left_cls in _INTERVAL_TYPES and right_cls in _DATE_TYPES:
             return _date_interval_op_draken(right, left, op)
 
-    return None  # not handled — caller uses Arrow fallback
+    # Non-temporal binary ops are still evaluated inside the Draken-native
+    # evaluator boundary. We operate on vector/scalar operands directly and
+    # only convert the individual operands/results as needed, rather than
+    # bouncing the whole morsel through Arrow expression evaluation.
+    from opteryx.draken.interop.arrow import vector_from_arrow
+    from opteryx.draken.interop.arrow import vector_from_sequence
+    from opteryx.expression.binary_operators import BINARY_OPERATORS
+    from opteryx.expression.binary_operators import binary_operations
+
+    if op not in BINARY_OPERATORS:
+        return None
+
+    if hasattr(left, "to_arrow"):
+        left = left.to_arrow()
+    if hasattr(right, "to_arrow"):
+        right = right.to_arrow()
+
+    result = binary_operations(
+        left,
+        node.left.schema_column.type,
+        op,
+        right,
+        node.right.schema_column.type,
+    )
+    if isinstance(result, (_pa.Array, _pa.ChunkedArray)):
+        return vector_from_arrow(result)
+    return vector_from_sequence(result)
 
 
 # --- Expression tree walker helpers ---
@@ -790,6 +816,9 @@ def _eval_value(node, morsel):
 
     if node_type == NodeType.NESTED:
         return _eval_value(node.centre, morsel)
+
+    if node_type == NodeType.EXPRESSION_LIST:
+        return [_eval_value(parameter, morsel) for parameter in node.parameters]
 
     if node_type == NodeType.EXTRACTION_OPERATOR:
         left_vec = _eval_value(node.left, morsel)
@@ -960,19 +989,27 @@ def evaluate_draken(node, morsel):
 
 
 def evaluate_and_append_draken(nodes, morsel):
-    """Evaluate function nodes and append their results as new columns.
+    """Evaluate expressions and append their results as new columns.
 
-    Used to pre-evaluate FUNCTION expressions referenced in filter predicates
-    before the main predicate evaluation (matches evaluate_and_append behaviour
-    for the Arrow path).
+    Used to pre-evaluate expressions referenced by Draken-native operators
+    before the main execution step. Supports the same evaluatable node families
+    used by aggregate/group and filter planning:
+
+    - FUNCTION
+    - CAST
+    - BINARY_OPERATOR
+    - EXTRACTION_OPERATOR
+    - COMPARISON_OPERATOR
+    - LITERAL
 
     Args:
-        nodes:  Iterable of FUNCTION expression nodes (pre-extracted)
+        nodes:  Iterable of expression nodes
         morsel: Draken Morsel to evaluate against and extend
 
     Returns:
         New Morsel with appended columns for each evaluated node.
     """
+    from opteryx.expression import NodeType
     from opteryx.draken.interop.arrow import vector_from_sequence
     from opteryx.draken.morsels.morsel import Morsel
 
@@ -988,21 +1025,27 @@ def evaluate_and_append_draken(nodes, morsel):
         identity = node.schema_column.identity
         if identity in existing:
             continue
-        parameters = [_eval_value(param, morsel) for param in node.parameters]
-        if len(parameters) == 0:
-            parameters = [morsel.num_rows]
-        result = apply_bounded_function(node, *parameters)
+        if node.node_type == NodeType.FUNCTION:
+            parameters = [_eval_value(param, morsel) for param in node.parameters]
+            if len(parameters) == 0:
+                parameters = [morsel.num_rows]
+            result = apply_bounded_function(node, *parameters)
+        else:
+            result = _eval_value(node, morsel)
         if result.__class__.__name__ not in (
             "BoolVector",
             "Int64Vector",
+            "IntegerVector",
             "Float64Vector",
             "StringVector",
             "TimestampVector",
             "Date32Vector",
             "IntervalVector",
+            "TimeVector",
             "DictionaryVector",
             "ConstantVector",
             "ArrayVector",
+            "ArrowVector",
         ):
             import pyarrow as _pa
 

@@ -12,6 +12,7 @@ from opteryx.draken.vectors import string_vector as string_vector_module
 from libc.stddef cimport size_t
 from cpython.bytes cimport PyBytes_AsStringAndSize
 from libcpp.string cimport string
+from libcpp.unordered_map cimport unordered_map
 
 cdef extern from "re2/stringpiece.h" namespace "re2":
     cdef cppclass StringPiece:
@@ -27,6 +28,9 @@ cdef extern from "re2/re2.h" namespace "re2":
 
         @staticmethod
         int GlobalReplace(string* target, const RE2& re, const StringPiece& rewrite)
+
+# Module-level cache: pattern bytes → compiled RE2 pointer (never freed; process lifetime).
+cdef unordered_map[string, RE2*] _re2_cache
 
 cpdef object vector_regex_replace(object data, bytes pattern, bytes replacement):
     """Top-level wrapper for list regex replace using Draken C-level iterator.
@@ -70,35 +74,35 @@ cpdef object vector_regex_replace(object data, bytes pattern, bytes replacement)
     pattern_str = string(pattern_buf, <size_t>pattern_len)
     repl_str = string(repl_buf, <size_t>repl_len)
 
-    regex = new RE2(pattern_str)
+    # Look up compiled pattern in module-level cache; compile once on first use.
+    if _re2_cache.count(pattern_str) == 0:
+        regex = new RE2(pattern_str)
+        if not regex.ok():
+            del regex
+            raise ValueError("Invalid regular expression")
+        _re2_cache[pattern_str] = regex
+    regex = _re2_cache[pattern_str]
+
     repl_piece = StringPiece(repl_str)
 
-    if not regex.ok():
-        del regex
-        raise ValueError("Invalid regular expression")
+    # Create builder with estimated capacity
+    builder = string_vector_module.StringVectorBuilder.with_estimate(length, estimated_bytes_per_entry)
 
-    try:
-        # Create builder with estimated capacity
-        builder = string_vector_module.StringVectorBuilder.with_estimate(length, estimated_bytes_per_entry)
+    # Get C-level iterator
+    it = data.c_iter()
 
-        # Get C-level iterator
-        it = data.c_iter()
+    # Process all elements at C level
+    while it.next(&elem):
+        if elem.is_null:
+            builder.append_null()
+        else:
+            # Reuse string buffer - assign() may reuse capacity
+            value_str.assign(elem.ptr, <size_t>elem.length)
 
-        # Process all elements at C level
-        while it.next(&elem):
-            if elem.is_null:
-                builder.append_null()
-            else:
-                # Reuse string buffer - assign() may reuse capacity
-                value_str.assign(elem.ptr, <size_t>elem.length)
+            # RE2 performs in-place replacement
+            RE2.GlobalReplace(&value_str, regex[0], repl_piece)
 
-                # RE2 performs in-place replacement
-                RE2.GlobalReplace(&value_str, regex[0], repl_piece)
+            # Append directly from C++ string to Draken builder (zero-copy from builder's perspective)
+            builder.append_bytes(value_str.c_str(), value_str.size())
 
-                # Append directly from C++ string to Draken builder (zero-copy from builder's perspective)
-                builder.append_bytes(value_str.c_str(), value_str.size())
-
-        # Return as StringVector
-        return builder.finish()
-    finally:
-        del regex
+    return builder.finish()
