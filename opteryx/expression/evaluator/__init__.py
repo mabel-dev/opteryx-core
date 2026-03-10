@@ -1009,9 +1009,9 @@ def evaluate_and_append_draken(nodes, morsel):
     Returns:
         New Morsel with appended columns for each evaluated node.
     """
-    from opteryx.expression import NodeType
     from opteryx.draken.interop.arrow import vector_from_sequence
     from opteryx.draken.morsels.morsel import Morsel
+    from opteryx.expression import NodeType
 
     col_names = list(morsel.column_names)
     col_vecs = [morsel.column(n if isinstance(n, bytes) else n.encode()) for n in col_names]

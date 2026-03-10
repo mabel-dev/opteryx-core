@@ -249,6 +249,7 @@ def select_values(boolean_arrays, value_arrays):
     Returns:
     - np.ndarray: Result array with selected values or False where no condition is met.
     """
+
     def _to_numpy_condition(values, target_length):
         if hasattr(values, "to_numpy"):
             arr = values.to_numpy(zero_copy_only=False)
