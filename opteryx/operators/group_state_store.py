@@ -5,8 +5,6 @@
 
 from __future__ import annotations
 
-import time
-
 from opteryx.draken.interop.arrow import vector_from_sequence
 from opteryx.draken.morsels.morsel import Morsel
 
@@ -38,12 +36,18 @@ def _default_alias(column: str | bytes | None, function: str) -> str:
     return f"{column_name}_{fn}"
 
 
-def _create_backend(group_by_columns, aggregations):
-    from opteryx.compiled.aggregations.group_state_store import (
-        GroupStateStore as CompiledGroupStateStore,
-    )
+def normalize_group_by_columns(group_by_columns: list[str | bytes]) -> list[bytes]:
+    return [_normalize_column_name(column) for column in group_by_columns]
 
-    return CompiledGroupStateStore(group_by_columns, aggregations)
+
+def normalize_aggregations(aggregations: list[object]) -> list[tuple[str, str, bytes | None]]:
+    return [ShuffleGroupByOperationV2._normalize_aggregation(spec) for spec in aggregations]
+
+
+def create_group_state_engine(group_by_columns, aggregations):
+    from opteryx.compiled.aggregations.carchar_group_state_engine import CarcharGroupStateEngine
+
+    return CarcharGroupStateEngine(group_by_columns, aggregations)
 
 
 class ShuffleGroupByOperationV2:
@@ -58,23 +62,11 @@ class ShuffleGroupByOperationV2:
     ):
         if not aggregations:
             raise ValueError("at least one aggregation is required")
-        self.group_by_columns = [_normalize_column_name(column) for column in group_by_columns]
-        self.aggregations = [self._normalize_aggregation(spec) for spec in aggregations]
-        self._backend = _create_backend(self.group_by_columns, self.aggregations)
-        self.readings = {
-            "time_groupby_finalize_backend_ns": 0,
-            "time_groupby_finalize_rows_to_vectors_ns": 0,
-            "time_groupby_finalize_morsel_build_ns": 0,
-            "groupby_finalize_rows_count": 0,
-            "groupby_finalize_chunks_emitted": 0,
-            "groupby_finalize_fast_path_hits": 0,
-            "draken_dict_groupby_fastpath_hits": 0,
-            "draken_dict_groupby_fastpath_fallbacks": 0,
-            "draken_constant_groupby_fastpath_hits": 0,
-            "draken_constant_groupby_fastpath_fallbacks": 0,
-            "draken_constant_groupby_output_vector_hits": 0,
-            "draken_constant_groupby_output_vector_fallbacks": 0,
-        }
+        self.group_by_columns = normalize_group_by_columns(group_by_columns)
+        self.aggregations = normalize_aggregations(aggregations)
+        self._engine = create_group_state_engine(self.group_by_columns, self.aggregations)
+        self._backend = self._engine.backend
+        self.readings = self._engine.readings
 
     def _record_constant_groupby_vector(self, vec) -> None:
         if vec.__class__.__name__ == "ConstantVector":
@@ -109,23 +101,7 @@ class ShuffleGroupByOperationV2:
         return str(alias), function, column
 
     def ingest(self, morsel: Morsel) -> None:
-        pre_dict_hits = getattr(self._backend, "dict_groupby_fastpath_hits", 0)
-        pre_dict_fallbacks = getattr(self._backend, "dict_groupby_fastpath_fallbacks", 0)
-        pre_const_hits = getattr(self._backend, "constant_groupby_fastpath_hits", 0)
-        pre_const_fallbacks = getattr(self._backend, "constant_groupby_fastpath_fallbacks", 0)
-        self._backend.ingest(morsel)
-        self.readings["draken_dict_groupby_fastpath_hits"] += (
-            getattr(self._backend, "dict_groupby_fastpath_hits", 0) - pre_dict_hits
-        )
-        self.readings["draken_dict_groupby_fastpath_fallbacks"] += (
-            getattr(self._backend, "dict_groupby_fastpath_fallbacks", 0) - pre_dict_fallbacks
-        )
-        self.readings["draken_constant_groupby_fastpath_hits"] += (
-            getattr(self._backend, "constant_groupby_fastpath_hits", 0) - pre_const_hits
-        )
-        self.readings["draken_constant_groupby_fastpath_fallbacks"] += (
-            getattr(self._backend, "constant_groupby_fastpath_fallbacks", 0) - pre_const_fallbacks
-        )
+        self._engine.ingest(morsel)
 
     def ingest_many(self, morsels) -> None:
         for morsel in morsels:
@@ -162,129 +138,7 @@ class ShuffleGroupByOperationV2:
         return vectors
 
     def finalize(self) -> Morsel:
-        if self._is_fast_path_eligible():
-            backend_st = time.monotonic_ns()
-            fast_columns = self._backend.finalize_fast_columns()
-            self.readings["time_groupby_finalize_backend_ns"] += time.monotonic_ns() - backend_st
-            if fast_columns is not None:
-                keys, values = fast_columns
-                names = [self.aggregations[0][0], self.group_by_columns[0].decode("utf-8")]
-                build_st = time.monotonic_ns()
-                key_vec = vector_from_sequence(keys)
-                self._record_constant_groupby_vector(key_vec)
-                vectors = [vector_from_sequence(values), key_vec]
-                self.readings["time_groupby_finalize_rows_to_vectors_ns"] += (
-                    time.monotonic_ns() - build_st
-                )
-                morsel_st = time.monotonic_ns()
-                morsel = Morsel.from_vectors(names, vectors)
-                self.readings["time_groupby_finalize_morsel_build_ns"] += (
-                    time.monotonic_ns() - morsel_st
-                )
-                self.readings["groupby_finalize_fast_path_hits"] += 1
-                self.readings["groupby_finalize_rows_count"] += len(keys)
-                self.readings["groupby_finalize_chunks_emitted"] += 1
-                return morsel
-
-        backend_st = time.monotonic_ns()
-        rows = self._backend.finalize_rows()
-        self.readings["time_groupby_finalize_backend_ns"] += time.monotonic_ns() - backend_st
-        self.readings["groupby_finalize_rows_count"] += len(rows)
-
-        if not rows:
-            return self._empty_morsel()
-
-        names = self._output_names()
-        vector_st = time.monotonic_ns()
-        vectors = self._rows_to_vectors(rows, 0, len(rows))
-        self.readings["time_groupby_finalize_rows_to_vectors_ns"] += time.monotonic_ns() - vector_st
-        morsel_st = time.monotonic_ns()
-        morsel = Morsel.from_vectors(names, vectors)
-        self.readings["time_groupby_finalize_morsel_build_ns"] += time.monotonic_ns() - morsel_st
-        self.readings["groupby_finalize_chunks_emitted"] += 1
-        return morsel
+        return self._engine.finalize()
 
     def finalize_morsels(self, chunk_size: int = 65536):
-        if chunk_size <= 0:
-            raise ValueError("chunk_size must be positive")
-
-        if self._is_fast_path_eligible():
-            names = [self.aggregations[0][0], self.group_by_columns[0].decode("utf-8")]
-
-            if hasattr(self._backend, "finalize_fast_columns_chunked"):
-                backend_st = time.monotonic_ns()
-                fast_chunks = self._backend.finalize_fast_columns_chunked(chunk_size)
-                self.readings["time_groupby_finalize_backend_ns"] += (
-                    time.monotonic_ns() - backend_st
-                )
-                if fast_chunks is not None:
-                    self.readings["groupby_finalize_fast_path_hits"] += 1
-                    for keys, values in fast_chunks:
-                        self.readings["groupby_finalize_rows_count"] += len(keys)
-                        vector_st = time.monotonic_ns()
-                        key_vec = vector_from_sequence(keys)
-                        self._record_constant_groupby_vector(key_vec)
-                        vectors = [vector_from_sequence(values), key_vec]
-                        self.readings["time_groupby_finalize_rows_to_vectors_ns"] += (
-                            time.monotonic_ns() - vector_st
-                        )
-                        morsel_st = time.monotonic_ns()
-                        morsel = Morsel.from_vectors(names, vectors)
-                        self.readings["time_groupby_finalize_morsel_build_ns"] += (
-                            time.monotonic_ns() - morsel_st
-                        )
-                        self.readings["groupby_finalize_chunks_emitted"] += 1
-                        yield morsel
-                    return
-
-            backend_st = time.monotonic_ns()
-            fast_columns = self._backend.finalize_fast_columns()
-            self.readings["time_groupby_finalize_backend_ns"] += time.monotonic_ns() - backend_st
-            if fast_columns is not None:
-                keys, values = fast_columns
-                self.readings["groupby_finalize_fast_path_hits"] += 1
-                self.readings["groupby_finalize_rows_count"] += len(keys)
-                total = len(keys)
-                for start in range(0, total, chunk_size):
-                    stop = min(total, start + chunk_size)
-                    vector_st = time.monotonic_ns()
-                    key_vec = vector_from_sequence(keys[start:stop])
-                    self._record_constant_groupby_vector(key_vec)
-                    vectors = [vector_from_sequence(values[start:stop]), key_vec]
-                    self.readings["time_groupby_finalize_rows_to_vectors_ns"] += (
-                        time.monotonic_ns() - vector_st
-                    )
-                    morsel_st = time.monotonic_ns()
-                    morsel = Morsel.from_vectors(names, vectors)
-                    self.readings["time_groupby_finalize_morsel_build_ns"] += (
-                        time.monotonic_ns() - morsel_st
-                    )
-                    self.readings["groupby_finalize_chunks_emitted"] += 1
-                    yield morsel
-                return
-
-        backend_st = time.monotonic_ns()
-        rows = self._backend.finalize_rows()
-        self.readings["time_groupby_finalize_backend_ns"] += time.monotonic_ns() - backend_st
-        names = self._output_names()
-        self.readings["groupby_finalize_rows_count"] += len(rows)
-
-        if not rows:
-            yield self._empty_morsel()
-            return
-
-        total = len(rows)
-        for start in range(0, total, chunk_size):
-            stop = min(total, start + chunk_size)
-            vector_st = time.monotonic_ns()
-            vectors = self._rows_to_vectors(rows, start, stop)
-            self.readings["time_groupby_finalize_rows_to_vectors_ns"] += (
-                time.monotonic_ns() - vector_st
-            )
-            morsel_st = time.monotonic_ns()
-            morsel = Morsel.from_vectors(names, vectors)
-            self.readings["time_groupby_finalize_morsel_build_ns"] += (
-                time.monotonic_ns() - morsel_st
-            )
-            self.readings["groupby_finalize_chunks_emitted"] += 1
-            yield morsel
+        yield from self._engine.finalize_morsels(chunk_size)

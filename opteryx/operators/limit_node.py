@@ -11,9 +11,10 @@ This is a SQL Query Execution Plan Node.
 This Node performs the LIMIT and the OFFSET steps
 """
 
-import pyarrow
+from collections.abc import Iterable
 
 from opteryx import EOS
+from opteryx.draken.morsels.morsel import Morsel
 from opteryx.models import QueryProperties
 
 from . import BasePlanNode
@@ -36,31 +37,45 @@ class LimitNode(BasePlanNode):
     def config(self):  # pragma: no cover
         return str(self.limit) + " OFFSET " + str(self.offset)
 
-    def execute(self, morsel: pyarrow.Table, **kwargs) -> pyarrow.Table:
-        morsel = self.ensure_arrow_table(morsel)
+    def execute(self, morsel: Morsel, **kwargs) -> Morsel:
+        morsel = self.ensure_draken_morsel(morsel)
 
         if morsel == EOS:
             yield EOS
             return
 
-        if self.rows_left_to_skip > 0:
-            if self.rows_left_to_skip >= morsel.num_rows:
-                self.rows_left_to_skip -= morsel.num_rows
-                yield morsel.slice(offset=0, length=0)
-                return
+        # Handle both single Morsel and Iterable of Morsels (from streaming)
+        if isinstance(morsel, Morsel):
+            morsels = (morsel,)
+        elif isinstance(morsel, Iterable):
+            morsels = morsel
+        else:  # pragma: no cover
+            yield None
+            return
+
+        for chunk in morsels:
+            if chunk is EOS or chunk.num_rows == 0:
+                continue
+
+            if self.rows_left_to_skip > 0:
+                if self.rows_left_to_skip >= chunk.num_rows:
+                    self.rows_left_to_skip -= chunk.num_rows
+                    continue
+                else:
+                    chunk = chunk.slice(
+                        offset=self.rows_left_to_skip,
+                        length=chunk.num_rows - self.rows_left_to_skip,
+                    )
+                    self.rows_left_to_skip = 0
+
+            if self.remaining_rows <= 0:
+                continue
+
+            if chunk.num_rows < self.remaining_rows:
+                self.remaining_rows -= chunk.num_rows
+                yield chunk
             else:
-                morsel = morsel.slice(
-                    offset=self.rows_left_to_skip, length=morsel.num_rows - self.rows_left_to_skip
-                )
-                self.rows_left_to_skip = 0
-
-        if self.remaining_rows <= 0 or morsel.num_rows == 0:
-            yield morsel.slice(offset=0, length=0)
-
-        elif morsel.num_rows < self.remaining_rows:
-            self.remaining_rows -= morsel.num_rows
-            yield morsel
-        else:
-            rows_to_slice = self.remaining_rows
-            self.remaining_rows = 0
-            yield morsel.slice(offset=0, length=rows_to_slice)
+                rows_to_slice = self.remaining_rows
+                self.remaining_rows = 0
+                yield chunk.slice(offset=0, length=rows_to_slice)
+                break

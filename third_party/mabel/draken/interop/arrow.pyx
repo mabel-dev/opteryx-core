@@ -122,13 +122,29 @@ cpdef object vector_from_arrow(object array):
             return arrow_from_arrow(array)
     if pa_type.equals(pa.int64()):
         return int64_from_arrow(array)
-    if pa_type.equals(pa.int8()) or pa_type.equals(pa.int16()) or pa_type.equals(pa.int32()):
+    if (
+        pa_type.equals(pa.int8())
+        or pa_type.equals(pa.int16())
+        or pa_type.equals(pa.int32())
+        or pa_type.equals(pa.uint8())
+        or pa_type.equals(pa.uint16())
+        or pa_type.equals(pa.uint32())
+    ):
         return integer_from_arrow(array)
     if pa.types.is_interval(pa_type):
         return interval_from_arrow_interval(array)
     if pa.types.is_fixed_size_binary(pa_type) and pa_type.byte_width == 16:
         return interval_from_arrow_binary(array)
-    if pa_type.equals(pa.string()) or pa_type.equals(pa.binary()):
+    if (
+        pa_type.equals(pa.string())
+        or pa_type.equals(pa.binary())
+        or pa.types.is_large_string(pa_type)
+        or pa.types.is_large_binary(pa_type)
+    ):
+        if pa.types.is_large_string(pa_type):
+            array = array.cast(pa.string())
+        elif pa.types.is_large_binary(pa_type):
+            array = array.cast(pa.binary())
         return string_from_arrow(array)
     if pa_type.equals(pa.float64()):
         return float64_from_arrow(array)

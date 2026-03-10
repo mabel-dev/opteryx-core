@@ -157,7 +157,6 @@ STATEMENTS = [
         ("SELECT SUBSTRING('planet', 1, 3) as substring", 1, 1, None),
         ("SELECT LPAD(name, 10, '*') FROM $planets", 9, 1, None),
         ("SELECT RPAD(name, 10, '-') FROM $planets", 9, 1, None),
-        ("SELECT SEARCH(name, 'a') FROM $planets", 9, 1, None),
         ("SELECT CAST(id AS VARCHAR) FROM $planets", 9, 1, None),
         ("SELECT CAST(magnitude AS INTEGER) FROM testdata.satellites WHERE magnitude IS NOT NULL", 171, 1, None),
         ("SELECT CAST('2022-01-01' AS DATE)", 1, 1, None),

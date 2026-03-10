@@ -1,8 +1,3 @@
-"""
-slice left is fast but that speed is because the safety has been disabled. These tests
-help to ensure that slice left still does what it should safely and correctly.
-"""
-
 import os
 import sys
 
@@ -12,41 +7,55 @@ import pyarrow
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
 from opteryx.draken import Vector
-from opteryx.compiled import list_ops as compiled_list_ops
-from opteryx.functions import string_functions
+from opteryx.draken.interop.arrow import vector_from_arrow
+from opteryx.compiled import vector_ops as compiled_vector_ops
+from opteryx.expression.functions.implementations import text as string_functions
 
-list_initcap = getattr(compiled_list_ops, "list_initcap")
-list_regex_replace = getattr(compiled_list_ops, "list_regex_replace")
-list_replace = getattr(compiled_list_ops, "list_replace")
-list_string_slice_right = getattr(compiled_list_ops, "list_string_slice_right")
-list_string_slice_left = getattr(compiled_list_ops, "list_string_slice_left")
+vector_initcap = getattr(compiled_vector_ops, "vector_initcap")
+vector_regex_replace = getattr(compiled_vector_ops, "vector_regex_replace")
+vector_replace = getattr(compiled_vector_ops, "vector_replace")
+vector_string_slice_right = getattr(compiled_vector_ops, "vector_string_slice_right")
+vector_string_slice_left = getattr(compiled_vector_ops, "vector_string_slice_left")
+
+
+def _to_sv(lst):
+    """Convert a Python list to StringVector via PyArrow."""
+    return vector_from_arrow(pyarrow.array(lst, type=pyarrow.string()))
+
+
+def _sv_to_list(sv):
+    """Convert StringVector result back to Python list, decoding bytes to str."""
+    arr = sv.to_arrow()
+    if pyarrow.types.is_binary(arr.type):
+        arr = arr.cast(pyarrow.string())
+    return arr.to_pylist()
 
 
 def test_slice_left():
-    slicer = list_string_slice_left
+    slicer = lambda arr, n: _sv_to_list(vector_string_slice_left(_to_sv(arr), n))
 
     # fmt:off
-    assert slicer(numpy.array(["abcdef"]), 3).tolist() == ["abc"], slicer(numpy.array(["abcdef"]), 3)
-    assert slicer(numpy.array(["abcdef", "ghijklm"]), 3).tolist() == ["abc","ghi"], slicer(numpy.array(["abcdef", "ghijklm"]), 3)
-    assert slicer(numpy.array([]), 3).tolist() == [], slicer(numpy.array([]), 3)
-    assert slicer(numpy.array([None]), 3).tolist() == [None], slicer(numpy.array([None]), 3)
-    assert slicer(numpy.array([""]), 0).tolist() == [""], slicer(numpy.array([""]), 0)
-    assert slicer(numpy.array(["abc", "abcdefghijklmnopqrstuvwxyz"]), 5).tolist() == ["abc","abcde"], slicer(numpy.array(["abc", "abcdefghijklmnopqrstuvwxyz"]), 5)
-    assert slicer(numpy.array([None, "", "abcdef", "a"]), 2).tolist() == [None,"","ab","a"], slicer(numpy.array([None, "", "abcdef", "a"]), 2)[0]
+    assert slicer(["abcdef"], 3) == ["abc"]
+    assert slicer(["abcdef", "ghijklm"], 3) == ["abc", "ghi"]
+    assert slicer([], 3) == []
+    assert slicer([None], 3) == [None]
+    assert slicer([""], 0) == [""]
+    assert slicer(["abc", "abcdefghijklmnopqrstuvwxyz"], 5) == ["abc", "abcde"]
+    assert slicer([None, "", "abcdef", "a"], 2) == [None, "", "ab", "a"]
     # fmt:on
 
 
 def test_slice_right():
-    slicer = list_string_slice_right
+    slicer = lambda arr, n: _sv_to_list(vector_string_slice_right(_to_sv(arr), n))
 
     # fmt:off
-    assert slicer(numpy.array(["abcdef"]), 3).tolist() == ["def"], slicer(numpy.array(["abcdef"]), 3)
-    assert slicer(numpy.array(["abcdef", "ghijklm"]), 3).tolist() == ["def","klm"], slicer(numpy.array(["abcdef", "ghijklm"]), 3)
-    assert slicer(numpy.array([]), 3).tolist() == [], slicer(numpy.array([]), 3)
-    assert slicer(numpy.array([None]), 3).tolist() == [None], slicer(numpy.array([None]), 3)
-    assert slicer(numpy.array([""]), 0).tolist() == [""], slicer(numpy.array([""]), 0)
-    assert slicer(numpy.array(["abc", "abcdefghijklmnopqrstuvwxyz"]), 5).tolist() == ["abc","vwxyz"], slicer(numpy.array(["abc", "abcdefghijklmnopqrstuvwxyz"]), 5)
-    assert slicer(numpy.array([None, "", "abcdef", "a"]), 2).tolist() == [None, "","ef", "a"], slicer(numpy.array([None, "", "abcdef", "a"]), 2)[0]
+    assert slicer(["abcdef"], 3) == ["def"]
+    assert slicer(["abcdef", "ghijklm"], 3) == ["def", "klm"]
+    assert slicer([], 3) == []
+    assert slicer([None], 3) == [None]
+    assert slicer([""], 0) == [""]
+    assert slicer(["abc", "abcdefghijklmnopqrstuvwxyz"], 5) == ["abc", "vwxyz"]
+    assert slicer([None, "", "abcdef", "a"], 2) == [None, "", "ef", "a"]
     # fmt:on
 
 
@@ -64,38 +73,26 @@ def test_random_string():
 
 
 def test_compiled_replace():
-    data = numpy.array(["hello world", "banana", None], dtype=object)
-    search = numpy.array(["l"], dtype=object)
-    replace = numpy.array(["L"], dtype=object)
-
-    result = list_replace(data, search, replace).tolist()
-
+    data = _to_sv(["hello world", "banana", None])
+    result = _sv_to_list(vector_replace(data, b"l", b"L"))
     assert result == ["heLLo worLd", "banana", None]
 
 
 def test_compiled_replace_bytes():
-    data = numpy.array([b"abcabc", b"", None], dtype=object)
-    search = numpy.array([b"abc"], dtype=object)
-    replace = numpy.array([b"x"], dtype=object)
-
-    result = list_replace(data, search, replace).tolist()
-
-    assert result == [b"xx", b"", None]
+    data = vector_from_arrow(pyarrow.array([b"abcabc", b"", None], type=pyarrow.binary()))
+    result = _sv_to_list(vector_replace(data, b"abc", b"x"))
+    assert result == ["xx", "", None]
 
 
 def test_compiled_initcap():
-    data = numpy.array(["hello world", "AmiGoS", "o'connor", "3rd street", None], dtype=object)
-
-    result = list_initcap(data).tolist()
-
+    data = _to_sv(["hello world", "AmiGoS", "o'connor", "3rd street", None])
+    result = _sv_to_list(vector_initcap(data))
     assert result == ["Hello World", "Amigos", "O'Connor", "3rd Street", None]
 
 
 def test_compiled_initcap_bytes():
-    data = numpy.array([b"mixed CASE"], dtype=object)
-
-    result = list_initcap(data).tolist()
-
+    data = vector_from_arrow(pyarrow.array([b"mixed CASE"], type=pyarrow.binary()))
+    result = _sv_to_list(vector_initcap(data))
     assert result == ["Mixed Case"]
 
 
@@ -105,7 +102,7 @@ def test_re2_list_regex_replace_strings():
     pattern = rb"\d+"
     replacement = b""
 
-    result = list_regex_replace(data, pattern, replacement).to_pylist()
+    result = vector_regex_replace(data, pattern, replacement).to_pylist()
 
     assert result == [b"abc", b"xyz", None]
 
@@ -115,7 +112,7 @@ def test_re2_list_regex_replace_bytes():
     pattern = b"^https?"
     replacement = b""
 
-    result = list_regex_replace(data, pattern, replacement).to_pylist()
+    result = vector_regex_replace(data, pattern, replacement).to_pylist()
 
     assert result == [b"://a.example", b"://b.example"]
 
@@ -131,6 +128,20 @@ def test_regex_replace_python_wrapper_returns_arrow():
     assert isinstance(result, pyarrow.Array)
     # Result is binary (bytes) because Draken works with bytes
     assert result.to_pylist() == [b"Garth", b"Guropa"]
+
+
+def test_regex_replace_python_wrapper_dictionary_input():
+    data = pyarrow.DictionaryArray.from_arrays(
+        pyarrow.array([0, 1, 0, None], type=pyarrow.int8()),
+        pyarrow.array(["http://a.example", "https://b.example"], type=pyarrow.string()),
+    )
+    pattern = numpy.array([r"^https?".encode("utf8")], dtype=object)
+    replacement = numpy.array([b""], dtype=object)
+
+    result = string_functions.regex_replace(data, pattern, replacement)
+
+    assert isinstance(result, pyarrow.Array)
+    assert result.to_pylist() == [b"://a.example", b"://b.example", b"://a.example", None]
 
 
 def test_regex_replace_invalid_pattern_raises():

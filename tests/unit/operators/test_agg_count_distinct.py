@@ -11,15 +11,14 @@ import pyarrow as pa
 
 import opteryx
 import opteryx.compiled.aggregations.count_distinct as count_distinct_module  # type: ignore[attr-defined]
-import opteryx.third_party.abseil.containers as absl_containers  # type: ignore[attr-defined]
+from opteryx.nanobind.carchar_native import CarcharSet
 
 python_count_distinct = count_distinct_module.count_distinct
 count_distinct_draken = count_distinct_module.count_distinct_draken
-FlatHashSet = absl_containers.FlatHashSet
 
 
 def _distinct_size(func, column):
-    return func(column, FlatHashSet()).items()
+    return func(column, None).size()
 
 def test_count_distinct_parquet():
     cur = opteryx.query("SELECT COUNT(DISTINCT user_name) FROM testdata.flat.formats.parquet;")

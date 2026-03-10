@@ -12,8 +12,8 @@ from orso.types import OrsoTypes
 
 from opteryx.draken.interop.arrow import vector_from_sequence
 from opteryx.draken.morsels.morsel import Morsel
-from opteryx.managers.expression import NodeType
-from opteryx.managers.expression import evaluate_and_append
+from opteryx.expression import NodeType
+from opteryx.expression import evaluate_and_append
 from opteryx.models import Node
 from opteryx.models import QueryProperties
 from opteryx.operators.projection_node import ProjectionNode

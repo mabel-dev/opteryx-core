@@ -23,21 +23,28 @@ from orso.types import OrsoTypes
 
 from opteryx import functions
 from opteryx import operators
-from opteryx.datatypes.intervals import MICROSECONDS_PER_DAY
-from opteryx.datatypes.intervals import MICROSECONDS_PER_HOUR
-from opteryx.datatypes.intervals import MICROSECONDS_PER_MINUTE
-from opteryx.datatypes.intervals import MICROSECONDS_PER_SECOND
 from opteryx.exceptions import ArrayWithMixedTypesError
 from opteryx.exceptions import SqlError
 from opteryx.exceptions import UnsupportedSyntaxError
-from opteryx.managers.expression import NodeType
-from opteryx.managers.expression import format_expression
-from opteryx.managers.expression.binary_operators import BINARY_OPERATORS
-from opteryx.managers.expression.binary_operators import binary_operations
+from opteryx.expression import NodeType
+from opteryx.expression import format_expression
+from opteryx.expression.binary_operators import BINARY_OPERATORS
+from opteryx.expression.binary_operators import EXTRACTION_OPERATORS
+from opteryx.expression.binary_operators import binary_operations
+from opteryx.expression.intervals import MICROSECONDS_PER_DAY
+from opteryx.expression.intervals import MICROSECONDS_PER_HOUR
+from opteryx.expression.intervals import MICROSECONDS_PER_MINUTE
+from opteryx.expression.intervals import MICROSECONDS_PER_SECOND
 from opteryx.models import LogicalColumn
 from opteryx.models import Node
 from opteryx.utils import dates
 from opteryx.utils import suggest_alternative
+
+# Epoch constants for converting datetime literals to Draken-native integers.
+# DATE literals are stored as int (days since epoch, fits int32).
+# TIMESTAMP literals are stored as int (microseconds since epoch, int64).
+_EPOCH_DATE = datetime.date(1970, 1, 1)
+_EPOCH_DT = datetime.datetime(1970, 1, 1)
 
 
 def _evaluate_fixed_temporal_function(function_name: str):
@@ -87,21 +94,26 @@ def _as_binary_operand_array(value, value_type):
             raise UnsupportedSyntaxError(
                 "Unable to parse timestamp value in time-travel expression."
             )
-        return numpy.array([numpy.datetime64(timestamp, "us")])
+        return numpy.array([int((timestamp - _EPOCH_DT).total_seconds() * 1_000_000)])
     if value_type == OrsoTypes.DATE:
         dt = dates.parse_iso(value)
         if dt is None:
             raise UnsupportedSyntaxError("Unable to parse date value in time-travel expression.")
-        return numpy.array([numpy.datetime64(dt.date(), "D")])
+        return numpy.array([(dt.date() - _EPOCH_DATE).days])
     return numpy.array([value])
 
 
 def _as_function_parameter_array(value, value_type):
-    if value_type in (OrsoTypes.TIMESTAMP, OrsoTypes.DATE):
+    if value_type == OrsoTypes.TIMESTAMP:
         dt = dates.parse_iso(value)
         if dt is None:
             raise UnsupportedSyntaxError("Unable to parse temporal function argument.")
-        return numpy.array([numpy.datetime64(dt, "us")])
+        return numpy.array([int((dt - _EPOCH_DT).total_seconds() * 1_000_000)])
+    if value_type == OrsoTypes.DATE:
+        dt = dates.parse_iso(value)
+        if dt is None:
+            raise UnsupportedSyntaxError("Unable to parse temporal function argument.")
+        return numpy.array([(dt.date() - _EPOCH_DATE).days])
     return numpy.array([value])
 
 
@@ -139,6 +151,39 @@ def _interval_to_past_timestamp(interval_value):
     return dt - datetime.timedelta(microseconds=microseconds)
 
 
+def _apply_interval_scalar(base_value, base_type, interval_value, operator: str):
+    """Apply an INTERVAL to a DATE or TIMESTAMP scalar.
+
+    The expression engine relies on the generic ``binary_operations`` path
+    which converts dates to plain integers.  Unfortunately the interval
+    kernels expect a PyArrow temporal array and therefore return ``null``
+    when provided with a raw integer.  That bug manifests during
+    timetravel evaluation, e.g. ``CURRENT_DATE - INTERVAL '7' DAY``;
+    the arithmetic ends up producing ``None`` which is later treated as a
+    failure to resolve the expression.
+
+    To keep the timetravel evaluator simple we perform the arithmetic
+    ourselves using Python's ``datetime`` helpers.  This bypasses the
+    broken kernel and ensures the result is a sensible ``datetime``.
+    The returned value is always a ``datetime.datetime`` so that callers
+    can assume a timestamp-like object (even if the input was a plain
+    date).
+    """
+    # convert date-only values into datetimes at midnight
+    if isinstance(base_value, datetime.date) and not isinstance(base_value, datetime.datetime):
+        result = datetime.datetime.combine(base_value, datetime.time())
+    else:
+        result = base_value
+
+    sign = 1 if operator == "Plus" else -1
+    months, micros = interval_value
+    if months:
+        result = dates.add_months(result, sign * int(months))
+    if micros:
+        result = result + datetime.timedelta(microseconds=sign * int(micros))
+    return result
+
+
 def _evaluate_timetravel_expression(node, apply_interval_literal_to_now: bool = False):
     if node.node_type == NodeType.LITERAL:
         if node.type == OrsoTypes.INTERVAL and apply_interval_literal_to_now:
@@ -159,7 +204,14 @@ def _evaluate_timetravel_expression(node, apply_interval_literal_to_now: bool = 
             parameter_values.append(_as_function_parameter_array(value, value_type))
 
         try:
-            result = functions.apply_function(node.value, *parameter_values)
+            from opteryx.expression.functions import get_catalog as _get_catalog
+
+            _func_def = _get_catalog().get_definition(node.value)
+            if _func_def is None or not _func_def.overloads:
+                raise UnsupportedSyntaxError(f"Unknown function '{node.value}'.")
+            result = _func_def.overloads[0].kernel.callable_ref(*parameter_values)
+        except UnsupportedSyntaxError:
+            raise
         except Exception as err:
             raise UnsupportedSyntaxError(
                 f"Unable to evaluate time-travel function '{node.value}'."
@@ -168,9 +220,31 @@ def _evaluate_timetravel_expression(node, apply_interval_literal_to_now: bool = 
         scalar = _extract_single_scalar(result)
         return scalar, _type_from_value(scalar)
 
-    if node.node_type == NodeType.BINARY_OPERATOR:
+    if node.node_type in (NodeType.BINARY_OPERATOR, NodeType.EXTRACTION_OPERATOR):
         left_value, left_type = _evaluate_timetravel_expression(node.left)
         right_value, right_type = _evaluate_timetravel_expression(node.right)
+
+        # short‑circuit arithmetic when one side is a DATE/TIMESTAMP and the
+        # other is an INTERVAL.  The generic kernel path converts dates to
+        # plain integers which then causes ``IntervalVector.apply_to_temporal``
+        # to bail out and return null.  We can evaluate these cases directly
+        # using Python's datetime helpers.
+        if node.value in ("Plus", "Minus"):
+            if (
+                left_type in (OrsoTypes.DATE, OrsoTypes.TIMESTAMP)
+                and right_type == OrsoTypes.INTERVAL
+            ):
+                return _apply_interval_scalar(
+                    left_value, left_type, right_value, node.value
+                ), OrsoTypes.TIMESTAMP
+            if left_type == OrsoTypes.INTERVAL and right_type in (
+                OrsoTypes.DATE,
+                OrsoTypes.TIMESTAMP,
+            ):
+                # interval +/- date is effectively the same as date +/- interval
+                return _apply_interval_scalar(
+                    right_value, right_type, left_value, node.value
+                ), OrsoTypes.TIMESTAMP
 
         left = _as_binary_operand_array(left_value, left_type)
         right = _as_binary_operand_array(right_value, right_type)
@@ -188,16 +262,6 @@ def _evaluate_timetravel_expression(node, apply_interval_literal_to_now: bool = 
     raise UnsupportedSyntaxError("Time-travel expression must resolve to a scalar value.")
 
 
-def _coerce_to_datetime(value):
-    if isinstance(value, datetime.time):
-        today_utc = datetime.datetime.now(datetime.UTC).date()
-        return datetime.datetime.combine(today_utc, value)
-    parsed = dates.parse_iso(value)
-    if parsed is None:
-        return None
-    return parsed
-
-
 def _extract_version_expression(version_clause):
     if "ForSystemTimeAsOf" in version_clause:
         raise UnsupportedSyntaxError(
@@ -207,21 +271,23 @@ def _extract_version_expression(version_clause):
     if "TimestampAsOf" in version_clause:
         # Legacy/alternate parser shape:
         # {"TimestampAsOf": <expr>}
-        return version_clause["TimestampAsOf"], False
+        return version_clause["TimestampAsOf"]
 
     if "Function" in version_clause:
         function_wrapper = version_clause["Function"]
         function_branch = function_wrapper.get("Function", function_wrapper)
     else:
         raise UnsupportedSyntaxError(
-            "Unsupported table version syntax. Use `AT(...)`, `BEFORE(...)`, or `FOR SYSTEM_TIME AS OF ...`."
+            "Unsupported table version syntax. Use `TIMESTAMP AS OF <expression>`."
         )
 
     if "Function" in function_branch:
         function_branch = function_branch["Function"]
 
     if "name" not in function_branch:
-        raise UnsupportedSyntaxError("Invalid time-travel clause.")
+        raise UnsupportedSyntaxError(
+            "Invalid time-travel clause, use `TIMESTAMP AS OF <expression>`."
+        )
 
     function_name = function_branch["name"][0]["Identifier"]["value"].upper()
     if function_name != "AT":
@@ -231,7 +297,9 @@ def _extract_version_expression(version_clause):
 
     args = function_branch.get("args", {}).get("List", {}).get("args", [])
     if len(args) != 1:
-        raise UnsupportedSyntaxError(f"AT expects exactly 1 argument, got {len(args)}.")
+        raise UnsupportedSyntaxError(
+            f"Time-travel syntax expects exactly 1 argument, got {len(args)}."
+        )
 
     warnings.warn(
         "AT(TIMESTAMP => ...) is deprecated. Use `TIMESTAMP AS OF <expression>` instead.",
@@ -244,9 +312,9 @@ def _extract_version_expression(version_clause):
         named_arg = arg["Named"]
         if named_arg["name"]["value"].upper() != "TIMESTAMP":
             raise UnsupportedSyntaxError("Time-travel named argument must be TIMESTAMP => <expr>.")
-        return named_arg["arg"]["Expr"], False
+        return named_arg["arg"]["Expr"]
 
-    raise UnsupportedSyntaxError("AT syntax must be `AT(TIMESTAMP => <expression>)`.")
+    raise UnsupportedSyntaxError("Time-travel syntax must be `TIMESTAMP AS OF <expression>`.")
 
 
 def extract_timetravel_timestamp(version_clause) -> Optional[object]:
@@ -272,20 +340,16 @@ def extract_timetravel_timestamp(version_clause) -> Optional[object]:
     if version_clause is None:
         return None
 
-    expression_ast, is_before = _extract_version_expression(version_clause)
+    expression_ast = _extract_version_expression(version_clause)
     expression_node = build(expression_ast)
     value, _ = _evaluate_timetravel_expression(expression_node, apply_interval_literal_to_now=True)
-    parsed_timestamp = _coerce_to_datetime(value)
 
-    if parsed_timestamp is None:
+    if value is None:
         raise UnsupportedSyntaxError(
-            "Time-travel expression must evaluate to a timestamp-compatible scalar value."
+            "Time-travel expression must be `TIMESTAMP AS OF <expression>`."
         )
 
-    if is_before:
-        parsed_timestamp = parsed_timestamp - datetime.timedelta(microseconds=1)
-
-    return parsed_timestamp
+    return value
 
 
 def any_op(branch, alias: Optional[List[str]] = None, key=None):
@@ -379,6 +443,8 @@ def binary_op(branch, alias: Optional[List[str]] = None, key=None):
     operator_type = NodeType.COMPARISON_OPERATOR
     if operator in BINARY_OPERATORS:
         operator_type = NodeType.BINARY_OPERATOR
+    elif operator in EXTRACTION_OPERATORS:
+        operator_type = NodeType.EXTRACTION_OPERATOR
     if operator == "And":
         operator_type = NodeType.AND
     if operator == "Or":
@@ -438,12 +504,12 @@ def cast(branch, alias: Optional[List[str]] = None, key=None):
     """
     from opteryx.planner import build_literal_node
 
-    args = [build(branch["expr"])]
+    source_expr = build(branch["expr"])
     kind = branch["kind"]
     raw_data_type = branch["data_type"]
 
     # Extract the base data type from the AST structure
-    data_type = _extract_data_type(raw_data_type, branch, args, build_literal_node)
+    data_type = _extract_data_type(raw_data_type, branch, [source_expr], build_literal_node)
 
     # Validate and normalize the data type
     normalized_type = _normalize_cast_type(data_type)
@@ -453,14 +519,15 @@ def cast(branch, alias: Optional[List[str]] = None, key=None):
         normalized_type = "TRY_" + normalized_type
 
     # Handle literal value casting at compile time
-    if args[0].node_type == NodeType.LITERAL:
-        return _cast_literal_value(args[0], normalized_type, kind, alias)
+    if source_expr.node_type == NodeType.LITERAL:
+        return _cast_literal_value(source_expr, normalized_type, kind, alias)
 
-    # For non-literals, return a function node that will be evaluated at runtime
+    # For non-literals, return a CAST node that will be evaluated at runtime
+    # CAST nodes have the source in 'left', target type in 'value', and optional params in 'parameters'
     return Node(
-        NodeType.FUNCTION,
+        NodeType.CAST,
+        left=source_expr,
         value=normalized_type.upper(),
-        parameters=args,
         alias=alias,
     )
 
@@ -701,15 +768,6 @@ def function(branch, alias: Optional[List[str]] = None, key=None):
             filter_condition = build(filter_condition)
     else:  # pragma: no cover
         from opteryx.exceptions import FunctionNotFoundError
-        from opteryx.functions import DEPRECATED_FUNCTIONS
-
-        if func in DEPRECATED_FUNCTIONS:
-            alt = DEPRECATED_FUNCTIONS.get(func)
-            if alt:
-                raise UnsupportedSyntaxError(
-                    f"Function '{func}' has been deprecated, '{alt}' offers similar functionality."
-                )
-            raise UnsupportedSyntaxError(f"Function '{func}' has been deprecated.")
 
         likely_match = suggest_alternative(func, operators.aggregators() + functions.functions())
         if likely_match is None:
@@ -839,7 +897,7 @@ def json_access(branch, alias: Optional[List[str]] = None, key=None):
     if isinstance(key_value, str):
         key_value = f"'{key_value}'"
         return Node(
-            NodeType.BINARY_OPERATOR,
+            NodeType.EXTRACTION_OPERATOR,
             value="Arrow",
             left=identifier_node,
             right=key_node,
@@ -847,9 +905,10 @@ def json_access(branch, alias: Optional[List[str]] = None, key=None):
         )
 
     return Node(
-        NodeType.FUNCTION,
-        value="GET",
-        parameters=[identifier_node, key_node],
+        NodeType.EXTRACTION_OPERATOR,
+        value="MapAccess",
+        left=identifier_node,
+        right=key_node,
         alias=alias or f"{identifier_node.current_name}[{key_value}]",
     )
 
@@ -945,36 +1004,16 @@ def literal_string(branch, alias: Optional[List[str]] = None, key=None):
                 return Node(
                     NodeType.LITERAL,
                     type=OrsoTypes.DATE,
-                    value=numpy.datetime64(dte_value, "D"),
+                    value=(dte_value.date() - _EPOCH_DATE).days,
                     alias=alias,
                 )
             return Node(
                 NodeType.LITERAL,
                 type=OrsoTypes.TIMESTAMP,
-                value=numpy.datetime64(dte_value, "us"),
+                value=int((dte_value - _EPOCH_DT).total_seconds() * 1_000_000),
                 alias=alias,
             )
     return Node(NodeType.LITERAL, type=OrsoTypes.VARCHAR, value=branch, alias=alias)
-
-
-def map_access(branch, alias: Optional[List[str]] = None, key=None):
-    # Identifier[key] -> GET(Identifier, key)
-
-    identifier_node = build(branch["column"])
-    key_node = build(branch["keys"][0]["key"])
-    key_value = key_node.value
-    if isinstance(key_value, str):
-        key_value = f"'{key_value}'"
-
-    if key_node.node_type != NodeType.LITERAL:
-        raise UnsupportedSyntaxError("Subscript values must be literals")
-
-    return Node(
-        NodeType.FUNCTION,
-        value="GET",
-        parameters=[identifier_node, key_node],
-        alias=alias or f"{identifier_node.current_name}[{key_value}]",
-    )
 
 
 def match_against(branch, alias: Optional[List[str]] = None, key=None):
@@ -1119,8 +1158,11 @@ def typed_string(branch, alias: Optional[List[str]] = None, key=None):
     data_value = build(branch["value"]).value
 
     Datatype_Map: Dict[str, Tuple[str, Callable]] = {
-        "TIMESTAMP": (OrsoTypes.TIMESTAMP, lambda x: numpy.datetime64(x, "us")),
-        "DATE": (OrsoTypes.DATE, lambda x: numpy.datetime64(x, "D")),
+        "TIMESTAMP": (
+            OrsoTypes.TIMESTAMP,
+            lambda x: int((dates.parse_iso(x) - _EPOCH_DT).total_seconds() * 1_000_000),
+        ),
+        "DATE": (OrsoTypes.DATE, lambda x: (dates.parse_iso(x).date() - _EPOCH_DATE).days),
         "INTEGER": (OrsoTypes.INTEGER, numpy.int64),
         "DOUBLE": (OrsoTypes.DOUBLE, numpy.float64),
         "DECIMAL": (OrsoTypes.DECIMAL, decimal.Decimal),
@@ -1223,7 +1265,6 @@ BUILDERS = {
     "IsTrue": is_compare,
     "JsonAccess": json_access,
     "Like": pattern_match,
-    "MapAccess": map_access,
     "MatchAgainst": match_against,
     "Nested": nested,
     "Null": literal_null,

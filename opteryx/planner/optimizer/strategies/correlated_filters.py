@@ -17,7 +17,7 @@ and processed.
 from orso.tools import random_string
 from orso.types import OrsoTypes
 
-from opteryx.managers.expression import NodeType
+from opteryx.expression import NodeType
 from opteryx.models import Node
 from opteryx.planner import build_literal_node
 from opteryx.planner.logical_planner import LogicalPlan

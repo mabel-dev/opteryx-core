@@ -49,9 +49,9 @@ from typing import Dict
 from orso.schema import ConstantColumn
 from orso.types import OrsoTypes
 
-from opteryx.managers.expression import ExpressionColumn
-from opteryx.managers.expression import NodeType
-from opteryx.managers.expression import format_expression
+from opteryx.expression import ExpressionColumn
+from opteryx.expression import NodeType
+from opteryx.expression import format_expression
 from opteryx.models import Node
 from opteryx.models import QueryTelemetry
 from opteryx.planner.binder.operator_map import determine_type

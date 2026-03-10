@@ -30,8 +30,8 @@ from typing import Optional
 from typing import Set
 from typing import Tuple
 
-from opteryx.managers.expression import NodeType
-from opteryx.managers.expression import get_all_nodes_of_type
+from opteryx.expression import NodeType
+from opteryx.expression import get_all_nodes_of_type
 from opteryx.models import Node
 from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner import LogicalPlanNode

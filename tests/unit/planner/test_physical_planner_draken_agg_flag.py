@@ -59,6 +59,17 @@ class _DummyArrowAggregateAndGroupNode(_BaseDummyNode):
     pass
 
 
+class _DummyDrakenInnerJoinNode(_BaseDummyNode):
+    @staticmethod
+    def supports(**parameters):
+        _ = parameters
+        return True
+
+
+class _DummyArrowInnerJoinNode(_BaseDummyNode):
+    pass
+
+
 def test_physical_planner_uses_draken_aggregate_and_group_when_flag_enabled(monkeypatch):
     # group-by column details (type/nullable) are not inspected by our dummy
     # node, so this test still works for nullability coverage.
@@ -102,7 +113,7 @@ def test_supports_accepts_nullable_group_column():
     grouping column is nullable; null-key handling is implemented in the kernel."""
 
     from opteryx.operators.draken_aggregate_and_group_node import DrakenAggregateAndGroupNode
-    from opteryx.managers.expression import NodeType
+    from opteryx.expression import NodeType
     from orso.types import OrsoTypes
 
     class FieldParam:
@@ -122,6 +133,32 @@ def test_supports_accepts_nullable_group_column():
             nullable = True
             identity = b'key'
     # We don't need to patch anything; nullable keys should pass.
+    assert DrakenAggregateAndGroupNode.supports([Agg()], [Group()])
+
+
+def test_draken_supports_max_in_fast_path():
+    """The draken planner should accept ``MAX`` aggregates when grouping."""
+
+    from opteryx.operators.draken_aggregate_and_group_node import DrakenAggregateAndGroupNode
+    from opteryx.expression import NodeType
+
+    class FieldParam:
+        node_type = NodeType.WILDCARD
+
+    class Agg:
+        value = "MAX"
+        duplicate_treatment = None
+        parameters = [FieldParam()]
+        class schema_column:
+            identity = b'val'
+
+    class Group:
+        node_type = NodeType.IDENTIFIER
+        class schema_column:
+            identity = b'key'
+
+    # sanity check constant
+    assert "MAX" in DrakenAggregateAndGroupNode.FAST_PATH_AGGREGATES
     assert DrakenAggregateAndGroupNode.supports([Agg()], [Group()])
 
 
@@ -206,3 +243,71 @@ def test_physical_planner_uses_arrow_aggregate_and_group_when_flag_disabled(monk
         QueryProperties(query_id="test-qid", variables={}),
     )
     assert isinstance(plan[1], _DummyArrowAggregateAndGroupNode)
+
+
+def test_physical_planner_uses_draken_inner_join_when_flag_enabled(monkeypatch):
+    node = _LogicalNode(
+        LogicalPlanStepType.Join,
+        properties={
+            "type": "inner",
+            "left_columns": [],
+            "right_columns": [],
+            "left_relation_names": [],
+            "right_relation_names": [],
+        },
+    )
+
+    monkeypatch.setattr(physical_planner, "USE_DRAKEN_INNER_JOIN", True)
+    monkeypatch.setattr(
+        physical_planner.operators,
+        "DrakenInnerJoinNode",
+        _DummyDrakenInnerJoinNode,
+    )
+    monkeypatch.setattr(
+        physical_planner.operators,
+        "InnerJoinNode",
+        _DummyArrowInnerJoinNode,
+    )
+
+    plan = create_physical_plan(
+        _LogicalPlan(node),
+        QueryProperties(query_id="test-qid", variables={}),
+    )
+    assert isinstance(plan[1], _DummyDrakenInnerJoinNode)
+
+
+def test_physical_planner_errors_when_draken_inner_join_not_supported(monkeypatch):
+    class _UnsupportedDrakenInnerJoinNode(_DummyDrakenInnerJoinNode):
+        @staticmethod
+        def supports(**parameters):
+            _ = parameters
+            return False
+
+    node = _LogicalNode(
+        LogicalPlanStepType.Join,
+        properties={
+            "type": "inner",
+            "left_columns": [],
+            "right_columns": [],
+            "left_relation_names": [],
+            "right_relation_names": [],
+        },
+    )
+
+    monkeypatch.setattr(physical_planner, "USE_DRAKEN_INNER_JOIN", True)
+    monkeypatch.setattr(
+        physical_planner.operators,
+        "DrakenInnerJoinNode",
+        _UnsupportedDrakenInnerJoinNode,
+    )
+    monkeypatch.setattr(
+        physical_planner.operators,
+        "InnerJoinNode",
+        _DummyArrowInnerJoinNode,
+    )
+
+    with pytest.raises(UnsupportedSyntaxError):
+        create_physical_plan(
+            _LogicalPlan(node),
+            QueryProperties(query_id="test-qid", variables={}),
+        )

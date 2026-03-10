@@ -528,6 +528,111 @@ cdef class IntervalVector(Vector):
             if valid_bits != NULL:
                 free(valid_bits)
 
+    cdef BoolVector _compare_scalar(
+        self,
+        int64_t sc_months,
+        int64_t sc_microseconds,
+        int8_t operation,
+        bint reject_month_components,
+    ):
+        cdef DrakenFixedBuffer* ptr = self.ptr
+        cdef Py_ssize_t n = ptr.length
+        cdef IntervalValue* data = <IntervalValue*> ptr.data
+        cdef size_t nbytes = (n + 7) >> 3
+        cdef uint8_t* value_bits = <uint8_t*> malloc(nbytes if nbytes > 0 else 1)
+        cdef uint8_t* valid_bits = NULL
+        cdef Py_ssize_t i
+        cdef bint comparison
+
+        if value_bits == NULL:
+            raise MemoryError()
+        memset(value_bits, 0, nbytes)
+
+        if ptr.null_bitmap != NULL:
+            valid_bits = <uint8_t*> malloc(nbytes if nbytes > 0 else 1)
+            if valid_bits == NULL:
+                free(value_bits)
+                raise MemoryError()
+            memset(valid_bits, 0, nbytes)
+
+        try:
+            if reject_month_components and sc_months != 0:
+                raise ValueError("Cannot compare INTERVALs with MONTH or YEAR components.")
+
+            for i in range(n):
+                if not _is_valid(ptr, i):
+                    continue
+
+                if valid_bits != NULL:
+                    valid_bits[i >> 3] |= (1 << (i & 7))
+
+                if reject_month_components and data[i].months != 0:
+                    raise ValueError("Cannot compare INTERVALs with MONTH or YEAR components.")
+
+                if operation == INTERVAL_OP_EQ:
+                    comparison = data[i].microseconds == sc_microseconds
+                elif operation == INTERVAL_OP_NEQ:
+                    comparison = data[i].microseconds != sc_microseconds
+                elif operation == INTERVAL_OP_GT:
+                    comparison = data[i].microseconds > sc_microseconds
+                elif operation == INTERVAL_OP_GTE:
+                    comparison = data[i].microseconds >= sc_microseconds
+                elif operation == INTERVAL_OP_LT:
+                    comparison = data[i].microseconds < sc_microseconds
+                elif operation == INTERVAL_OP_LTE:
+                    comparison = data[i].microseconds <= sc_microseconds
+                else:
+                    raise ValueError(f"Unsupported interval comparison code: {operation}")
+
+                if comparison:
+                    value_bits[i >> 3] |= (1 << (i & 7))
+
+            return bool_vector_from_bits(
+                value_bits,
+                valid_bits if ptr.null_bitmap != NULL else NULL,
+                n,
+            )
+        finally:
+            free(value_bits)
+            if valid_bits != NULL:
+                free(valid_bits)
+
+    cpdef BoolVector equals(self, object literal):
+        """Return mask: 1 if element == literal, else 0. Propagates NULLs."""
+        cdef int64_t sc_months = literal[0]
+        cdef int64_t sc_microseconds = literal[1]
+        return self._compare_scalar(sc_months, sc_microseconds, INTERVAL_OP_EQ, False)
+
+    cpdef BoolVector not_equals(self, object literal):
+        """Return mask: 1 if element != literal, else 0. Propagates NULLs."""
+        cdef int64_t sc_months = literal[0]
+        cdef int64_t sc_microseconds = literal[1]
+        return self._compare_scalar(sc_months, sc_microseconds, INTERVAL_OP_NEQ, False)
+
+    cpdef BoolVector less_than(self, object literal):
+        """Return mask: 1 if element < literal, else 0. Propagates NULLs."""
+        cdef int64_t sc_months = literal[0]
+        cdef int64_t sc_microseconds = literal[1]
+        return self._compare_scalar(sc_months, sc_microseconds, INTERVAL_OP_LT, True)
+
+    cpdef BoolVector greater_than(self, object literal):
+        """Return mask: 1 if element > literal, else 0. Propagates NULLs."""
+        cdef int64_t sc_months = literal[0]
+        cdef int64_t sc_microseconds = literal[1]
+        return self._compare_scalar(sc_months, sc_microseconds, INTERVAL_OP_GT, True)
+
+    cpdef BoolVector less_than_or_equals(self, object literal):
+        """Return mask: 1 if element <= literal, else 0. Propagates NULLs."""
+        cdef int64_t sc_months = literal[0]
+        cdef int64_t sc_microseconds = literal[1]
+        return self._compare_scalar(sc_months, sc_microseconds, INTERVAL_OP_LTE, True)
+
+    cpdef BoolVector greater_than_or_equals(self, object literal):
+        """Return mask: 1 if element >= literal, else 0. Propagates NULLs."""
+        cdef int64_t sc_months = literal[0]
+        cdef int64_t sc_microseconds = literal[1]
+        return self._compare_scalar(sc_months, sc_microseconds, INTERVAL_OP_GTE, True)
+
     cpdef object apply_to_temporal(self, object values, int8_t signum=1):
         import pyarrow as pa
 

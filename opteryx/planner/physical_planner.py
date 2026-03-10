@@ -13,6 +13,7 @@ from opteryx.planner.logical_planner import LogicalPlanStepType
 
 ENABLE_NATIVE_AGGREGATOR: bool = features.enable_native_aggregator
 USE_DRAKEN_AGGREGATOR: bool = features.use_draken_aggregator
+USE_DRAKEN_INNER_JOIN: bool = features.use_draken_inner_join
 
 
 def _manifest_is_all_parquet(manifest) -> bool:
@@ -79,7 +80,15 @@ def create_physical_plan(logical_plan, query_properties) -> PhysicalPlan:
         elif node_type == LogicalPlanStepType.Join:
             if node_config.get("type") == "inner":
                 # INNER JOIN, NATURAL JOIN
-                node = operators.InnerJoinNode(query_properties, **node_config)
+                if USE_DRAKEN_INNER_JOIN:
+                    if operators.DrakenInnerJoinNode.supports(**node_config):
+                        node = operators.DrakenInnerJoinNode(query_properties, **node_config)
+                    else:
+                        raise UnsupportedSyntaxError(
+                            "Draken inner join does not support this query shape"
+                        )
+                else:
+                    node = operators.InnerJoinNode(query_properties, **node_config)
             elif node_config.get("type") == "nested loop":
                 # NESTED LOOP JOIN (INNER JOIN)
                 node = operators.NestedLoopJoinNode(query_properties, **node_config)

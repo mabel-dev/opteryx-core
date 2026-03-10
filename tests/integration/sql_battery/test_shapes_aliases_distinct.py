@@ -332,15 +332,6 @@ STATEMENTS = [
 
         ("SELECT TOUNT(*) FROM $planets", None, None, FunctionNotFoundError),
 
-        ("SELECT SEARCH(name, 'al'), name FROM testdata.satellites", 177, 2, None),
-        ("SELECT name FROM testdata.satellites WHERE SEARCH(name, 'al')", 18, 1, None),
-        ("SELECT SEARCH(missions, 'Apollo 11'), missions FROM testdata.astronauts", 357, 2, None),
-        ("SELECT name FROM testdata.astronauts WHERE SEARCH(missions, 'Apollo 11')", 3, 1, None),
-        ("SELECT name, SEARCH(birth_place, 'Italy') FROM testdata.astronauts", 357, 2, None),
-        ("SELECT name, birth_place FROM testdata.astronauts WHERE SEARCH(birth_place, 'Italy')", 1, 2, None),
-        ("SELECT name, birth_place FROM testdata.astronauts WHERE SEARCH(birth_place, 'Rome')", 1, 2, None),
-        ("SELECT SEARCH(testdata.satellites.name, 'a') FROM $planets LEFT JOIN testdata.satellites ON $planets.id = testdata.satellites.planetId", 179, 1, None),
-
         ("SELECT birth_date FROM testdata.astronauts WHERE EXTRACT(year FROM birth_date) < 1930;", 14, 1, None),
         ("SELECT EXTRACT(month FROM birth_date) FROM testdata.astronauts", 357, 1, None),
         ("SELECT EXTRACT(day FROM birth_date) FROM testdata.astronauts", 357, 1, None),
@@ -458,7 +449,6 @@ STATEMENTS = [
         ("SELECT GREATEST(ARRAY_AGG(gm)) as MASSES FROM testdata.satellites GROUP BY planetId", 7, 1, None),
         ("SELECT LEAST(ARRAY_AGG(name)) as NAMES FROM testdata.satellites GROUP BY planetId", 7, 1, None),
         ("SELECT LEAST(ARRAY_AGG(gm)) as MASSES FROM testdata.satellites GROUP BY planetId", 7, 1, None),
-        ("SELECT IIF(SEARCH(missions, 'Apollo 13'), 1, 0), SEARCH(missions, 'Apollo 13'), missions FROM testdata.astronauts", 357, 3, None),
         ("SELECT IIF(year > 1960, 1, 0), year FROM testdata.astronauts", 357, 2, None),
         ("SELECT SUM(IIF(year < 1970, 1, 0)), MAX(year) FROM testdata.astronauts", 1, 2, None),
         ("SELECT SUM(IIF(year < 1970, 1, 0)), year FROM testdata.astronauts GROUP BY year ORDER BY year ASC", 21, 2, None),
@@ -656,7 +646,7 @@ STATEMENTS = [
         ("SELECT * FROM $planets CROSS JOIN UNNEST(name) AS G", None, None, IncorrectTypeError),
 
         ("SELECT VARCHAR(birth_place) FROM testdata.astronauts", 357, 1, None),
-        ("SELECT name FROM testdata.astronauts WHERE GET(VARCHAR(birth_place), 'state') = birth_place['state']", 357, 1, None),
+        ("SELECT name FROM testdata.astronauts WHERE CAST(birth_place AS VARCHAR)['state'] = birth_place['state']", 357, 1, None),
 
         ("SELECT * FROM testdata.missions WHERE MATCH (Location) AGAINST ('Florida USA')", 911, 8, None),
         ("SELECT * FROM testdata.missions WHERE MATCH (Location) AGAINST ('Russia, Kapustin')", 112, 8, None),

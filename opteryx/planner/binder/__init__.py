@@ -149,7 +149,7 @@ def bind_logical_relations(plan: LogicalPlan, ctes: dict, telemetry) -> LogicalP
     Returns:
         LogicalPlan: The logical plan with the logical relations bound.
     """
-    from opteryx.managers.expression import NodeType
+    from opteryx.expression import NodeType
     from opteryx.models import Node
     from opteryx.planner.logical_planner import LogicalPlanStepType
     from opteryx.planner.views import get_view_plan

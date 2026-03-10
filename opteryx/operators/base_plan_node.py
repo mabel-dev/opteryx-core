@@ -18,8 +18,8 @@ from pyarrow import Table
 from opteryx import EMPTY
 from opteryx import EOS
 from opteryx.draken import Morsel
-from opteryx.managers.expression import NodeType
-from opteryx.managers.expression import get_all_nodes_of_type
+from opteryx.expression import NodeType
+from opteryx.expression import get_all_nodes_of_type
 from opteryx.tracing.event_recorder import record_event as _trace_record
 
 END = object()

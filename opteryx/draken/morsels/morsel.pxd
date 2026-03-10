@@ -9,6 +9,7 @@ cdef class Morsel:
     cdef dict _name_to_index
     
     cpdef Vector column(self, bytes name)
+    cpdef void append(self, Morsel other)
     cpdef uint64_t[::1] hash(self, object columns=*)
     cdef void _take_inplace(self, object indices)
     cdef void _filter_mask_inplace(self, object mask)

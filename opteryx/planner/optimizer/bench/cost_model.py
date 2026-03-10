@@ -5,9 +5,9 @@ import pyarrow
 from orso.types import OrsoTypes
 
 import opteryx
-from opteryx.managers.expression import NodeType
-from opteryx.managers.expression import evaluate
-from opteryx.managers.expression.ops import filter_operations
+from opteryx.expression import NodeType
+from opteryx.expression import evaluate
+from opteryx.expression.ops import filter_operations
 from opteryx.models import Node
 
 OPERATORS = [

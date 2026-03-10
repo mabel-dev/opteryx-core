@@ -18,6 +18,7 @@ cdef class DictionaryVector(Vector):
     cpdef DictionaryVector take(self, int32_t[::1] indices)
     cpdef list to_pylist(self)
     cpdef object null_bitmap(self)
+    cpdef BoolVector is_null_boolvector(self)
     cpdef BoolVector equals(self, object literal)
     cpdef BoolVector not_equals(self, object literal)
     cpdef BoolVector less_than(self, object literal)
@@ -27,6 +28,7 @@ cdef class DictionaryVector(Vector):
     cpdef BoolVector in_list(self, object literals)
     cpdef BoolVector like(self, object pattern, bint ignore_case=*)
     cpdef BoolVector rlike(self, object pattern)
+    cpdef BoolVector contains(self, object substr, bint ignore_case=*)
     cdef void hash_into(self, uint64_t[::1] out_buf, Py_ssize_t offset=*) except *
 
 

@@ -125,7 +125,7 @@ test-quick: check-python ## Run quick test (alias: t)
 	@$(PYTHON) tests/integration/sql_battery/run_shapes_battery.py
 
  b: check-python
-	@clear
+	@clear || true
 	@$(PYTHON) scratch/brace.py
 
 clickbench:

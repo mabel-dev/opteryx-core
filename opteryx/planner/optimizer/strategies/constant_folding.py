@@ -21,9 +21,9 @@ we've rewritten expressions at part of other optimizations which can be folded.
 
 from orso.types import OrsoTypes
 
-from opteryx.managers.expression import NodeType
-from opteryx.managers.expression import evaluate
-from opteryx.managers.expression import get_all_nodes_of_type
+from opteryx.expression import NodeType
+from opteryx.expression import evaluate
+from opteryx.expression import get_all_nodes_of_type
 from opteryx.models import Node
 from opteryx.models import QueryTelemetry
 from opteryx.planner import build_literal_node
@@ -78,7 +78,11 @@ def fold_constants(root: Node, telemetry: QueryTelemetry) -> Node:
         root.parameters = [fold_constants(p, telemetry) for p in root.parameters]
         return root
 
-    if root.node_type in {NodeType.COMPARISON_OPERATOR, NodeType.BINARY_OPERATOR}:
+    if root.node_type in {
+        NodeType.COMPARISON_OPERATOR,
+        NodeType.BINARY_OPERATOR,
+        NodeType.EXTRACTION_OPERATOR,
+    }:
         # if we have a binary expression, try to fold each side
         root.left = fold_constants(root.left, telemetry)
         root.right = fold_constants(root.right, telemetry)

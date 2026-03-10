@@ -10,7 +10,7 @@ Type: Heuristic
 Goal: Preposition for following actions
 """
 
-from opteryx.managers.expression import NodeType
+from opteryx.expression import NodeType
 from opteryx.models import Node
 from opteryx.models import QueryTelemetry
 from opteryx.planner.logical_planner import LogicalPlan
