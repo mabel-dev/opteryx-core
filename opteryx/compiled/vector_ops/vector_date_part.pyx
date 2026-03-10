@@ -40,9 +40,14 @@ from opteryx.draken.vectors.dictionary_vector cimport DictionaryVector
 # Runtime dispatch (NEON / AVX2 / scalar) is handled inside the C++ layer.
 # ---------------------------------------------------------------------------
 cdef extern from "simd_datepart.h":
-    void simd_datepart_minute(const int64_t* src, int64_t* dst, size_t n, int unit_code) noexcept nogil
-    void simd_datepart_hour  (const int64_t* src, int64_t* dst, size_t n, int unit_code) noexcept nogil
-    void simd_datepart_second(const int64_t* src, int64_t* dst, size_t n, int unit_code) noexcept nogil
+    void simd_datepart_minute   (const int64_t* src, int64_t* dst, size_t n, int unit_code) noexcept nogil
+    void simd_datepart_hour     (const int64_t* src, int64_t* dst, size_t n, int unit_code) noexcept nogil
+    void simd_datepart_second   (const int64_t* src, int64_t* dst, size_t n, int unit_code) noexcept nogil
+    void simd_datepart_year     (const int64_t* src, int64_t* dst, size_t n, int unit_code) noexcept nogil
+    void simd_datepart_month    (const int64_t* src, int64_t* dst, size_t n, int unit_code) noexcept nogil
+    void simd_datepart_day      (const int64_t* src, int64_t* dst, size_t n, int unit_code) noexcept nogil
+    void simd_datepart_quarter  (const int64_t* src, int64_t* dst, size_t n, int unit_code) noexcept nogil
+    void simd_datepart_dayofyear(const int64_t* src, int64_t* dst, size_t n, int unit_code) noexcept nogil
 
 # ---------------------------------------------------------------------------
 # Sub-second unit constants unique to this module
@@ -134,7 +139,7 @@ cdef inline int64_t _find_seconds_divisor_int64(
 # 1a. Sub-second parts: minute, hour, second  (pure modulo arithmetic)
 # ---------------------------------------------------------------------------
 
-cpdef Int64Vector vector_datepart_minute(TimestampVector timestamps):
+cpdef Int64Vector vector_datepart_minute(TimestampVector timestamps, Int64Vector out=None):
     """Extract minute (0–59) from TimestampVector via SIMD dispatch."""
     cdef str unit = timestamps.timestamp_unit
     cdef int64_t length = <int64_t>timestamps.ptr.length
@@ -155,18 +160,30 @@ cpdef Int64Vector vector_datepart_minute(TimestampVector timestamps):
     if length == 0:
         return int64_from_sequence(<int64_t[:0:1]>&empty_sentinel)
 
-    cdef array template = array('l')
-    cdef array output_array = clone(template, length, False)
-    cdef int64_t* output_ptr = <int64_t*>output_array.data.as_longs
+    cdef int64_t* output_ptr
+    cdef array template
+    cdef array output_array
+    cdef bint reuse_out = out is not None
+
+    if reuse_out:
+        if <int64_t>out.ptr.length != length:
+            raise ValueError(f"out length {out.ptr.length} != input length {length}")
+        output_ptr = <int64_t*>out.ptr.data
+    else:
+        template = array('l')
+        output_array = clone(template, length, False)
+        output_ptr = <int64_t*>output_array.data.as_longs
 
     simd_datepart_minute(data_ptr, output_ptr, <size_t>length, unit_code)
 
+    if reuse_out:
+        return out
     cdef Int64Vector result = int64_from_sequence(<int64_t[:length:1]>output_ptr)
     result._arrow_data_buf = output_array
     return result
 
 
-cpdef Int64Vector vector_datepart_hour(TimestampVector timestamps):
+cpdef Int64Vector vector_datepart_hour(TimestampVector timestamps, Int64Vector out=None):
     """Extract hour (0–23) from TimestampVector via SIMD dispatch."""
     cdef str unit = timestamps.timestamp_unit
     cdef int64_t length = <int64_t>timestamps.ptr.length
@@ -186,18 +203,30 @@ cpdef Int64Vector vector_datepart_hour(TimestampVector timestamps):
     if length == 0:
         return int64_from_sequence(<int64_t[:0:1]>&empty_sentinel)
 
-    cdef array template = array('l')
-    cdef array output_array = clone(template, length, False)
-    cdef int64_t* output_ptr = <int64_t*>output_array.data.as_longs
+    cdef int64_t* output_ptr
+    cdef array template
+    cdef array output_array
+    cdef bint reuse_out = out is not None
+
+    if reuse_out:
+        if <int64_t>out.ptr.length != length:
+            raise ValueError(f"out length {out.ptr.length} != input length {length}")
+        output_ptr = <int64_t*>out.ptr.data
+    else:
+        template = array('l')
+        output_array = clone(template, length, False)
+        output_ptr = <int64_t*>output_array.data.as_longs
 
     simd_datepart_hour(data_ptr, output_ptr, <size_t>length, unit_code)
 
+    if reuse_out:
+        return out
     cdef Int64Vector result = int64_from_sequence(<int64_t[:length:1]>output_ptr)
     result._arrow_data_buf = output_array
     return result
 
 
-cpdef Int64Vector vector_datepart_second(TimestampVector timestamps):
+cpdef Int64Vector vector_datepart_second(TimestampVector timestamps, Int64Vector out=None):
     """Extract second (0–59) from TimestampVector via SIMD dispatch."""
     cdef str unit = timestamps.timestamp_unit
     cdef int64_t length = <int64_t>timestamps.ptr.length
@@ -217,12 +246,24 @@ cpdef Int64Vector vector_datepart_second(TimestampVector timestamps):
     if length == 0:
         return int64_from_sequence(<int64_t[:0:1]>&empty_sentinel)
 
-    cdef array template = array('l')
-    cdef array output_array = clone(template, length, False)
-    cdef int64_t* output_ptr = <int64_t*>output_array.data.as_longs
+    cdef int64_t* output_ptr
+    cdef array template
+    cdef array output_array
+    cdef bint reuse_out = out is not None
+
+    if reuse_out:
+        if <int64_t>out.ptr.length != length:
+            raise ValueError(f"out length {out.ptr.length} != input length {length}")
+        output_ptr = <int64_t*>out.ptr.data
+    else:
+        template = array('l')
+        output_array = clone(template, length, False)
+        output_ptr = <int64_t*>output_array.data.as_longs
 
     simd_datepart_second(data_ptr, output_ptr, <size_t>length, unit_code)
 
+    if reuse_out:
+        return out
     cdef Int64Vector result = int64_from_sequence(<int64_t[:length:1]>output_ptr)
     result._arrow_data_buf = output_array
     return result
@@ -234,112 +275,118 @@ cpdef Int64Vector vector_datepart_second(TimestampVector timestamps):
 #     vector_date_trunc.pyx (included before this file in vector_ops.pyx).
 # ---------------------------------------------------------------------------
 
-cpdef Int64Vector vector_datepart_year(TimestampVector timestamps):
+cpdef Int64Vector vector_datepart_year(TimestampVector timestamps, Int64Vector out=None):
     """Extract year from TimestampVector."""
     cdef str unit = timestamps.timestamp_unit
     cdef int64_t length = <int64_t>timestamps.ptr.length
     cdef int64_t* data_ptr = <int64_t*>timestamps.ptr.data
     cdef int64_t empty_sentinel = 0
-
-    cdef int64_t sd  # seconds divisor
-    if unit == 'us':
-        sd = MICROSECONDS_PER_SECOND
-    elif unit == 'ms':
-        sd = MILLISECONDS_PER_SECOND
-    elif unit == 'ns':
-        sd = NANOSECONDS_PER_SECOND
-    else:
-        sd = 1
+    cdef int unit_code
+    if unit == 'us':   unit_code = 2
+    elif unit == 'ms': unit_code = 1
+    elif unit == 'ns': unit_code = 3
+    else:              unit_code = 0
 
     if length == 0:
         return int64_from_sequence(<int64_t[:0:1]>&empty_sentinel)
 
-    cdef array template = array('l')
-    cdef array output_array = clone(template, length, False)
-    cdef int64_t* output_ptr = <int64_t*>output_array.data.as_longs
-    cdef int64_t i, year, month, day, hour, minute, second
+    cdef int64_t* output_ptr
+    cdef array template
+    cdef array output_array
+    cdef bint reuse_out = out is not None
 
-    for i in range(length):
-        seconds_to_date_parts(data_ptr[i] // sd,
-                              &year, &month, &day, &hour, &minute, &second)
-        output_ptr[i] = year
+    if reuse_out:
+        if <int64_t>out.ptr.length != length:
+            raise ValueError(f"out length {out.ptr.length} != input length {length}")
+        output_ptr = <int64_t*>out.ptr.data
+    else:
+        template = array('l')
+        output_array = clone(template, length, False)
+        output_ptr = <int64_t*>output_array.data.as_longs
 
+    simd_datepart_year(data_ptr, output_ptr, <size_t>length, unit_code)
+    if reuse_out:
+        return out
     cdef Int64Vector result = int64_from_sequence(<int64_t[:length:1]>output_ptr)
     result._arrow_data_buf = output_array
     return result
 
 
-cpdef Int64Vector vector_datepart_month(TimestampVector timestamps):
+cpdef Int64Vector vector_datepart_month(TimestampVector timestamps, Int64Vector out=None):
     """Extract month (1–12) from TimestampVector."""
     cdef str unit = timestamps.timestamp_unit
     cdef int64_t length = <int64_t>timestamps.ptr.length
     cdef int64_t* data_ptr = <int64_t*>timestamps.ptr.data
     cdef int64_t empty_sentinel = 0
-
-    cdef int64_t sd
-    if unit == 'us':
-        sd = MICROSECONDS_PER_SECOND
-    elif unit == 'ms':
-        sd = MILLISECONDS_PER_SECOND
-    elif unit == 'ns':
-        sd = NANOSECONDS_PER_SECOND
-    else:
-        sd = 1
+    cdef int unit_code
+    if unit == 'us':   unit_code = 2
+    elif unit == 'ms': unit_code = 1
+    elif unit == 'ns': unit_code = 3
+    else:              unit_code = 0
 
     if length == 0:
         return int64_from_sequence(<int64_t[:0:1]>&empty_sentinel)
 
-    cdef array template = array('l')
-    cdef array output_array = clone(template, length, False)
-    cdef int64_t* output_ptr = <int64_t*>output_array.data.as_longs
-    cdef int64_t i, year, month, day, hour, minute, second
+    cdef int64_t* output_ptr
+    cdef array template
+    cdef array output_array
+    cdef bint reuse_out = out is not None
 
-    for i in range(length):
-        seconds_to_date_parts(data_ptr[i] // sd,
-                              &year, &month, &day, &hour, &minute, &second)
-        output_ptr[i] = month
+    if reuse_out:
+        if <int64_t>out.ptr.length != length:
+            raise ValueError(f"out length {out.ptr.length} != input length {length}")
+        output_ptr = <int64_t*>out.ptr.data
+    else:
+        template = array('l')
+        output_array = clone(template, length, False)
+        output_ptr = <int64_t*>output_array.data.as_longs
 
+    simd_datepart_month(data_ptr, output_ptr, <size_t>length, unit_code)
+    if reuse_out:
+        return out
     cdef Int64Vector result = int64_from_sequence(<int64_t[:length:1]>output_ptr)
     result._arrow_data_buf = output_array
     return result
 
 
-cpdef Int64Vector vector_datepart_day(TimestampVector timestamps):
+cpdef Int64Vector vector_datepart_day(TimestampVector timestamps, Int64Vector out=None):
     """Extract day-of-month (1–31) from TimestampVector."""
     cdef str unit = timestamps.timestamp_unit
     cdef int64_t length = <int64_t>timestamps.ptr.length
     cdef int64_t* data_ptr = <int64_t*>timestamps.ptr.data
     cdef int64_t empty_sentinel = 0
-
-    cdef int64_t sd
-    if unit == 'us':
-        sd = MICROSECONDS_PER_SECOND
-    elif unit == 'ms':
-        sd = MILLISECONDS_PER_SECOND
-    elif unit == 'ns':
-        sd = NANOSECONDS_PER_SECOND
-    else:
-        sd = 1
+    cdef int unit_code
+    if unit == 'us':   unit_code = 2
+    elif unit == 'ms': unit_code = 1
+    elif unit == 'ns': unit_code = 3
+    else:              unit_code = 0
 
     if length == 0:
         return int64_from_sequence(<int64_t[:0:1]>&empty_sentinel)
 
-    cdef array template = array('l')
-    cdef array output_array = clone(template, length, False)
-    cdef int64_t* output_ptr = <int64_t*>output_array.data.as_longs
-    cdef int64_t i, year, month, day, hour, minute, second
+    cdef int64_t* output_ptr
+    cdef array template
+    cdef array output_array
+    cdef bint reuse_out = out is not None
 
-    for i in range(length):
-        seconds_to_date_parts(data_ptr[i] // sd,
-                              &year, &month, &day, &hour, &minute, &second)
-        output_ptr[i] = day
+    if reuse_out:
+        if <int64_t>out.ptr.length != length:
+            raise ValueError(f"out length {out.ptr.length} != input length {length}")
+        output_ptr = <int64_t*>out.ptr.data
+    else:
+        template = array('l')
+        output_array = clone(template, length, False)
+        output_ptr = <int64_t*>output_array.data.as_longs
 
+    simd_datepart_day(data_ptr, output_ptr, <size_t>length, unit_code)
+    if reuse_out:
+        return out
     cdef Int64Vector result = int64_from_sequence(<int64_t[:length:1]>output_ptr)
     result._arrow_data_buf = output_array
     return result
 
 
-cpdef Int64Vector vector_datepart_dayofweek(TimestampVector timestamps):
+cpdef Int64Vector vector_datepart_dayofweek(TimestampVector timestamps, Int64Vector out=None):
     """Extract day-of-week (0=Monday … 6=Sunday) from TimestampVector.
 
     Uses pure integer arithmetic: days_since_epoch + EPOCH_WEEKDAY (=4, Thursday)
@@ -363,10 +410,20 @@ cpdef Int64Vector vector_datepart_dayofweek(TimestampVector timestamps):
     if length == 0:
         return int64_from_sequence(<int64_t[:0:1]>&empty_sentinel)
 
-    cdef array template = array('l')
-    cdef array output_array = clone(template, length, False)
-    cdef int64_t* output_ptr = <int64_t*>output_array.data.as_longs
+    cdef int64_t* output_ptr
+    cdef array template
+    cdef array output_array
+    cdef bint reuse_out = out is not None
     cdef int64_t i, d
+
+    if reuse_out:
+        if <int64_t>out.ptr.length != length:
+            raise ValueError(f"out length {out.ptr.length} != input length {length}")
+        output_ptr = <int64_t*>out.ptr.data
+    else:
+        template = array('l')
+        output_array = clone(template, length, False)
+        output_ptr = <int64_t*>output_array.data.as_longs
 
     for i in range(length):
         d = (data_ptr[i] // day_divisor + EPOCH_WEEKDAY) % 7
@@ -374,79 +431,82 @@ cpdef Int64Vector vector_datepart_dayofweek(TimestampVector timestamps):
             d += 7
         output_ptr[i] = d
 
+    if reuse_out:
+        return out
     cdef Int64Vector result = int64_from_sequence(<int64_t[:length:1]>output_ptr)
     result._arrow_data_buf = output_array
     return result
 
 
-cpdef Int64Vector vector_datepart_dayofyear(TimestampVector timestamps):
+cpdef Int64Vector vector_datepart_dayofyear(TimestampVector timestamps, Int64Vector out=None):
     """Extract day-of-year (1–366) from TimestampVector."""
     cdef str unit = timestamps.timestamp_unit
     cdef int64_t length = <int64_t>timestamps.ptr.length
     cdef int64_t* data_ptr = <int64_t*>timestamps.ptr.data
     cdef int64_t empty_sentinel = 0
-
-    cdef int64_t sd
-    if unit == 'us':
-        sd = MICROSECONDS_PER_SECOND
-    elif unit == 'ms':
-        sd = MILLISECONDS_PER_SECOND
-    elif unit == 'ns':
-        sd = NANOSECONDS_PER_SECOND
-    else:
-        sd = 1
+    cdef int unit_code
+    if unit == 'us':   unit_code = 2
+    elif unit == 'ms': unit_code = 1
+    elif unit == 'ns': unit_code = 3
+    else:              unit_code = 0
 
     if length == 0:
         return int64_from_sequence(<int64_t[:0:1]>&empty_sentinel)
 
-    cdef array template = array('l')
-    cdef array output_array = clone(template, length, False)
-    cdef int64_t* output_ptr = <int64_t*>output_array.data.as_longs
-    cdef int64_t i, year, month, day, hour, minute, second, doy
+    cdef int64_t* output_ptr
+    cdef array template
+    cdef array output_array
+    cdef bint reuse_out = out is not None
 
-    for i in range(length):
-        seconds_to_date_parts(data_ptr[i] // sd,
-                              &year, &month, &day, &hour, &minute, &second)
-        doy = CUMULATIVE_DAYS[month - 1] + day
-        if month > 2 and is_leap_year(year):
-            doy += 1
-        output_ptr[i] = doy
+    if reuse_out:
+        if <int64_t>out.ptr.length != length:
+            raise ValueError(f"out length {out.ptr.length} != input length {length}")
+        output_ptr = <int64_t*>out.ptr.data
+    else:
+        template = array('l')
+        output_array = clone(template, length, False)
+        output_ptr = <int64_t*>output_array.data.as_longs
 
+    simd_datepart_dayofyear(data_ptr, output_ptr, <size_t>length, unit_code)
+    if reuse_out:
+        return out
     cdef Int64Vector result = int64_from_sequence(<int64_t[:length:1]>output_ptr)
     result._arrow_data_buf = output_array
     return result
 
 
-cpdef Int64Vector vector_datepart_quarter(TimestampVector timestamps):
+cpdef Int64Vector vector_datepart_quarter(TimestampVector timestamps, Int64Vector out=None):
     """Extract quarter (1–4) from TimestampVector."""
     cdef str unit = timestamps.timestamp_unit
     cdef int64_t length = <int64_t>timestamps.ptr.length
     cdef int64_t* data_ptr = <int64_t*>timestamps.ptr.data
     cdef int64_t empty_sentinel = 0
-
-    cdef int64_t sd
-    if unit == 'us':
-        sd = MICROSECONDS_PER_SECOND
-    elif unit == 'ms':
-        sd = MILLISECONDS_PER_SECOND
-    elif unit == 'ns':
-        sd = NANOSECONDS_PER_SECOND
-    else:
-        sd = 1
+    cdef int unit_code
+    if unit == 'us':   unit_code = 2
+    elif unit == 'ms': unit_code = 1
+    elif unit == 'ns': unit_code = 3
+    else:              unit_code = 0
 
     if length == 0:
         return int64_from_sequence(<int64_t[:0:1]>&empty_sentinel)
 
-    cdef array template = array('l')
-    cdef array output_array = clone(template, length, False)
-    cdef int64_t* output_ptr = <int64_t*>output_array.data.as_longs
-    cdef int64_t i, year, month, day, hour, minute, second
+    cdef int64_t* output_ptr
+    cdef array template
+    cdef array output_array
+    cdef bint reuse_out = out is not None
 
-    for i in range(length):
-        seconds_to_date_parts(data_ptr[i] // sd,
-                              &year, &month, &day, &hour, &minute, &second)
-        output_ptr[i] = (month - 1) // 3 + 1
+    if reuse_out:
+        if <int64_t>out.ptr.length != length:
+            raise ValueError(f"out length {out.ptr.length} != input length {length}")
+        output_ptr = <int64_t*>out.ptr.data
+    else:
+        template = array('l')
+        output_array = clone(template, length, False)
+        output_ptr = <int64_t*>output_array.data.as_longs
 
+    simd_datepart_quarter(data_ptr, output_ptr, <size_t>length, unit_code)
+    if reuse_out:
+        return out
     cdef Int64Vector result = int64_from_sequence(<int64_t[:length:1]>output_ptr)
     result._arrow_data_buf = output_array
     return result
@@ -598,16 +658,15 @@ cpdef Int64Vector vector_datepart_year_i64(Int64Vector int64_vec):
         return int64_from_sequence(<int64_t[:0:1]>&empty_sentinel)
 
     cdef int64_t sd = _find_seconds_divisor_int64(data_ptr, length)
+    cdef int unit_code
+    if sd == 1:                          unit_code = 0
+    elif sd == MILLISECONDS_PER_SECOND:  unit_code = 1
+    elif sd == MICROSECONDS_PER_SECOND:  unit_code = 2
+    else:                                unit_code = 3
     cdef array template = array('l')
     cdef array output_array = clone(template, length, False)
     cdef int64_t* output_ptr = <int64_t*>output_array.data.as_longs
-    cdef int64_t i, year, month, day, hour, minute, second
-
-    for i in range(length):
-        seconds_to_date_parts(data_ptr[i] // sd,
-                              &year, &month, &day, &hour, &minute, &second)
-        output_ptr[i] = year
-
+    simd_datepart_year(data_ptr, output_ptr, <size_t>length, unit_code)
     cdef Int64Vector result = int64_from_sequence(<int64_t[:length:1]>output_ptr)
     result._arrow_data_buf = output_array
     return result
@@ -623,16 +682,15 @@ cpdef Int64Vector vector_datepart_month_i64(Int64Vector int64_vec):
         return int64_from_sequence(<int64_t[:0:1]>&empty_sentinel)
 
     cdef int64_t sd = _find_seconds_divisor_int64(data_ptr, length)
+    cdef int unit_code
+    if sd == 1:                          unit_code = 0
+    elif sd == MILLISECONDS_PER_SECOND:  unit_code = 1
+    elif sd == MICROSECONDS_PER_SECOND:  unit_code = 2
+    else:                                unit_code = 3
     cdef array template = array('l')
     cdef array output_array = clone(template, length, False)
     cdef int64_t* output_ptr = <int64_t*>output_array.data.as_longs
-    cdef int64_t i, year, month, day, hour, minute, second
-
-    for i in range(length):
-        seconds_to_date_parts(data_ptr[i] // sd,
-                              &year, &month, &day, &hour, &minute, &second)
-        output_ptr[i] = month
-
+    simd_datepart_month(data_ptr, output_ptr, <size_t>length, unit_code)
     cdef Int64Vector result = int64_from_sequence(<int64_t[:length:1]>output_ptr)
     result._arrow_data_buf = output_array
     return result
@@ -648,16 +706,15 @@ cpdef Int64Vector vector_datepart_day_i64(Int64Vector int64_vec):
         return int64_from_sequence(<int64_t[:0:1]>&empty_sentinel)
 
     cdef int64_t sd = _find_seconds_divisor_int64(data_ptr, length)
+    cdef int unit_code
+    if sd == 1:                          unit_code = 0
+    elif sd == MILLISECONDS_PER_SECOND:  unit_code = 1
+    elif sd == MICROSECONDS_PER_SECOND:  unit_code = 2
+    else:                                unit_code = 3
     cdef array template = array('l')
     cdef array output_array = clone(template, length, False)
     cdef int64_t* output_ptr = <int64_t*>output_array.data.as_longs
-    cdef int64_t i, year, month, day, hour, minute, second
-
-    for i in range(length):
-        seconds_to_date_parts(data_ptr[i] // sd,
-                              &year, &month, &day, &hour, &minute, &second)
-        output_ptr[i] = day
-
+    simd_datepart_day(data_ptr, output_ptr, <size_t>length, unit_code)
     cdef Int64Vector result = int64_from_sequence(<int64_t[:length:1]>output_ptr)
     result._arrow_data_buf = output_array
     return result
@@ -709,19 +766,15 @@ cpdef Int64Vector vector_datepart_dayofyear_i64(Int64Vector int64_vec):
         return int64_from_sequence(<int64_t[:0:1]>&empty_sentinel)
 
     cdef int64_t sd = _find_seconds_divisor_int64(data_ptr, length)
+    cdef int unit_code
+    if sd == 1:                          unit_code = 0
+    elif sd == MILLISECONDS_PER_SECOND:  unit_code = 1
+    elif sd == MICROSECONDS_PER_SECOND:  unit_code = 2
+    else:                                unit_code = 3
     cdef array template = array('l')
     cdef array output_array = clone(template, length, False)
     cdef int64_t* output_ptr = <int64_t*>output_array.data.as_longs
-    cdef int64_t i, year, month, day, hour, minute, second, doy
-
-    for i in range(length):
-        seconds_to_date_parts(data_ptr[i] // sd,
-                              &year, &month, &day, &hour, &minute, &second)
-        doy = CUMULATIVE_DAYS[month - 1] + day
-        if month > 2 and is_leap_year(year):
-            doy += 1
-        output_ptr[i] = doy
-
+    simd_datepart_dayofyear(data_ptr, output_ptr, <size_t>length, unit_code)
     cdef Int64Vector result = int64_from_sequence(<int64_t[:length:1]>output_ptr)
     result._arrow_data_buf = output_array
     return result
@@ -737,16 +790,15 @@ cpdef Int64Vector vector_datepart_quarter_i64(Int64Vector int64_vec):
         return int64_from_sequence(<int64_t[:0:1]>&empty_sentinel)
 
     cdef int64_t sd = _find_seconds_divisor_int64(data_ptr, length)
+    cdef int unit_code
+    if sd == 1:                          unit_code = 0
+    elif sd == MILLISECONDS_PER_SECOND:  unit_code = 1
+    elif sd == MICROSECONDS_PER_SECOND:  unit_code = 2
+    else:                                unit_code = 3
     cdef array template = array('l')
     cdef array output_array = clone(template, length, False)
     cdef int64_t* output_ptr = <int64_t*>output_array.data.as_longs
-    cdef int64_t i, year, month, day, hour, minute, second
-
-    for i in range(length):
-        seconds_to_date_parts(data_ptr[i] // sd,
-                              &year, &month, &day, &hour, &minute, &second)
-        output_ptr[i] = (month - 1) // 3 + 1
-
+    simd_datepart_quarter(data_ptr, output_ptr, <size_t>length, unit_code)
     cdef Int64Vector result = int64_from_sequence(<int64_t[:length:1]>output_ptr)
     result._arrow_data_buf = output_array
     return result
