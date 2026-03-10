@@ -53,6 +53,33 @@ def test_cpp_carchar_stats_are_populated():
     assert stats.lookup_count >= 1
 
 
+def test_cpp_carchar_set_correctness_matches_python_and_abseil():
+    absl_containers = pytest.importorskip("opteryx.third_party.abseil.containers")
+    FlatHashSet = absl_containers.FlatHashSet
+
+    cpp_set = cpp_carchar.CarcharSet(16, 0.80)
+    absl_set = FlatHashSet()
+    py_set = set()
+
+    values = [1, 2, 2, 3, 7, 7, 7, 11, 13, 13, 0, 2**32 + 9]
+
+    for value in values:
+        cpp_added = cpp_set.insert_or_ignore(value)
+        absl_added = bool(absl_set.add(value))
+        py_added = value not in py_set
+        py_set.add(value)
+
+        assert cpp_added == py_added
+        assert absl_added == py_added
+
+    assert cpp_set.size() == len(py_set)
+    assert absl_set.items() == len(py_set)
+
+    for value in [0, 1, 3, 7, 13, 2**32 + 9, 999999]:
+        assert cpp_set.contains(value) == (value in py_set)
+        assert bool(absl_set.has(value)) == (value in py_set)
+
+
 def test_cpp_partitioned_carchar_join_engine_matches_rows_and_counts():
     engine_cls = getattr(cpp_carchar, "CarcharJoinEngine", None)
     if engine_cls is None:

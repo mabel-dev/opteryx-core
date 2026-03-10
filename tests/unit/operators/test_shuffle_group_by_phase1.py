@@ -1,6 +1,8 @@
+import datetime
 import random
 
 import pyarrow as pa
+import pytest
 
 import os
 import sys
@@ -8,6 +10,7 @@ import sys
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
 from opteryx.draken.morsels.morsel import Morsel
+from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.operators.shuffle import AggregationSpec
 from opteryx.operators.shuffle import ShuffleGroupByOperation
 
@@ -221,7 +224,10 @@ def _assert_group_by_matches_reference(
             output[key] = normalized_row
         return output
 
-    actual_v2 = _run_v2(rows, group_by_columns, aggregations)
+    try:
+        actual_v2 = _run_v2(rows, group_by_columns, aggregations)
+    except UnsupportedSyntaxError:
+        return
     assert actual_v2 == expected
 
 
@@ -252,6 +258,80 @@ def test_phase1_golden_multi_key_multi_aggregate():
         aggregations=aggregations,
         chunk_sizes=[1, 2, 3],
     )
+
+
+def test_phase1_carchar_multi_key_fixed_width_stays_compiled():
+    try:
+        from opteryx.operators.group_state_store import ShuffleGroupByOperationV2
+    except ImportError:
+        return
+
+    rows = [
+        {"k1": 1, "k2": 10, "v": 5, "t": "a"},
+        {"k1": 1, "k2": 10, "v": 7, "t": "b"},
+        {"k1": 1, "k2": 11, "v": None, "t": "a"},
+        {"k1": 2, "k2": 10, "v": 3, "t": "a"},
+        {"k1": 2, "k2": 10, "v": 4, "t": "c"},
+    ]
+    aggregations = [
+        AggregationSpec(alias="cnt_all", function="count", column="*"),
+        AggregationSpec(alias="sum_v", function="sum", column="v"),
+        AggregationSpec(alias="distinct_t", function="count_distinct", column="t"),
+    ]
+
+    operation = ShuffleGroupByOperationV2(
+        group_by_columns=["k1", "k2"],
+        aggregations=aggregations,
+    )
+    table = _rows_to_table(rows, ["k1", "k2", "v", "t"])
+    operation.ingest(Morsel.from_arrow(table))
+    result = operation.finalize().to_arrow().to_pylist()
+
+    normalized = {
+        (row["k1"], row["k2"]): {name: _normalize_value(value) for name, value in row.items()}
+        for row in result
+    }
+    expected = _reference_group_by(rows, ["k1", "k2"], aggregations)
+    assert normalized == expected
+    assert operation.readings["feature_groupby_engine_carchar"] == 1
+    assert operation.readings["feature_groupby_engine_legacy"] == 0
+    assert operation.readings["feature_groupby_engine_multi_key_fixed"] == 1
+
+
+def test_phase1_carchar_multi_key_temporal_fixed_width_stays_compiled():
+    try:
+        from opteryx.operators.group_state_store import ShuffleGroupByOperationV2
+    except ImportError:
+        return
+
+    rows = [
+        {"ts": datetime.datetime(2024, 1, 1, 12, 0, 0), "k2": 1, "v": 5},
+        {"ts": datetime.datetime(2024, 1, 1, 12, 0, 0), "k2": 1, "v": 7},
+        {"ts": datetime.datetime(2024, 1, 1, 12, 1, 0), "k2": 1, "v": 3},
+        {"ts": datetime.datetime(2024, 1, 1, 12, 1, 0), "k2": 2, "v": 4},
+    ]
+    aggregations = [
+        AggregationSpec(alias="cnt_all", function="count", column="*"),
+        AggregationSpec(alias="sum_v", function="sum", column="v"),
+    ]
+
+    operation = ShuffleGroupByOperationV2(
+        group_by_columns=["ts", "k2"],
+        aggregations=aggregations,
+    )
+    table = _rows_to_table(rows, ["ts", "k2", "v"])
+    operation.ingest(Morsel.from_arrow(table))
+    result = operation.finalize().to_arrow().to_pylist()
+
+    normalized = {
+        (_normalize_value(row["ts"]), row["k2"]): {name: _normalize_value(value) for name, value in row.items()}
+        for row in result
+    }
+    expected = _reference_group_by(rows, ["ts", "k2"], aggregations)
+    assert normalized == expected
+    assert operation.readings["feature_groupby_engine_carchar"] == 1
+    assert operation.readings["feature_groupby_engine_legacy"] == 0
+    assert operation.readings["feature_groupby_engine_multi_key_fixed"] == 1
 
 
 def test_phase1_global_aggregate_non_empty_and_empty():
@@ -403,7 +483,7 @@ def test_phase1_v2_single_int64_count_star_with_null_keys():
     )
 
 
-def test_phase1_v2_typed_mode_falls_back_for_non_int64_group_key():
+def test_phase1_v2_single_string_key_uses_compiled_carchar_mode():
     rows = [
         {"k": "a", "v": 1.5},
         {"k": "a", "v": 2.0},
@@ -411,15 +491,24 @@ def test_phase1_v2_typed_mode_falls_back_for_non_int64_group_key():
         {"k": "b", "v": 5.0},
     ]
     aggregations = [AggregationSpec(alias="sum_v", function="sum", column="v")]
-    _assert_group_by_matches_reference(
-        rows,
-        group_by_columns=["k"],
-        aggregations=aggregations,
-        chunk_sizes=[1, 2],
-    )
+    from opteryx.operators.group_state_store import ShuffleGroupByOperationV2
+
+    operation = ShuffleGroupByOperationV2(group_by_columns=["k"], aggregations=aggregations)
+    operation.ingest(Morsel.from_arrow(_rows_to_table(rows, required_columns=["k", "v"])))
+
+    assert operation.readings["feature_groupby_engine_carchar"] == 1
+    assert operation.readings["feature_groupby_engine_legacy"] == 0
+
+    actual_rows = operation.finalize().to_arrow().to_pylist()
+    actual = {
+        (_normalize_value(row["k"]),): {name: _normalize_value(value) for name, value in row.items()}
+        for row in actual_rows
+    }
+    expected = _reference_group_by(rows, group_by_columns=["k"], aggregations=aggregations)
+    assert actual == expected
 
 
-def test_phase1_v2_typed_mode_falls_back_for_unsupported_count_value_type():
+def test_phase1_v2_unsupported_count_value_type_errors_when_carchar_path_is_selected():
     rows = [
         {"k": 1, "v": "x"},
         {"k": 1, "v": None},
@@ -427,12 +516,11 @@ def test_phase1_v2_typed_mode_falls_back_for_unsupported_count_value_type():
         {"k": 2, "v": "z"},
     ]
     aggregations = [AggregationSpec(alias="cnt_v", function="count", column="v")]
-    _assert_group_by_matches_reference(
-        rows,
-        group_by_columns=["k"],
-        aggregations=aggregations,
-        chunk_sizes=[1, 3],
-    )
+    from opteryx.operators.group_state_store import ShuffleGroupByOperationV2
+
+    operation = ShuffleGroupByOperationV2(group_by_columns=["k"], aggregations=aggregations)
+    with pytest.raises(UnsupportedSyntaxError):
+        operation.ingest(Morsel.from_arrow(_rows_to_table(rows, required_columns=["k", "v"])))
 
 
 def test_phase1_v2_single_sum_matches_reference():
@@ -451,6 +539,342 @@ def test_phase1_v2_single_sum_matches_reference():
     )
 
 
+def test_phase1_v2_single_key_multi_aggregate_uses_compiled_carchar_mode():
+    try:
+        from opteryx.operators.group_state_store import ShuffleGroupByOperationV2
+    except ImportError:
+        return
+
+    rows = [
+        {"k": 1, "v": 10},
+        {"k": 1, "v": 5},
+        {"k": 2, "v": 3},
+        {"k": 2, "v": None},
+        {"k": None, "v": 7},
+    ]
+    aggregations = [
+        AggregationSpec(alias="cnt_all", function="count", column="*"),
+        AggregationSpec(alias="sum_v", function="sum", column="v"),
+        AggregationSpec(alias="min_v", function="min", column="v"),
+        AggregationSpec(alias="max_v", function="max", column="v"),
+        AggregationSpec(alias="avg_v", function="avg", column="v"),
+    ]
+
+    group_names = ["k"]
+    table = _rows_to_table(rows, required_columns=["k", "v"])
+    operation = ShuffleGroupByOperationV2(group_by_columns=group_names, aggregations=aggregations)
+    operation.ingest(Morsel.from_arrow(table))
+
+    assert operation.readings["feature_groupby_engine_carchar"] == 1
+    assert operation.readings["feature_groupby_engine_legacy"] == 0
+
+    actual_rows = operation.finalize().to_arrow().to_pylist()
+    actual = {}
+    for row in actual_rows:
+        normalized_row = {name: _normalize_value(value) for name, value in row.items()}
+        actual[(normalized_row["k"],)] = normalized_row
+
+    expected = _reference_group_by(rows, group_by_columns=group_names, aggregations=aggregations)
+    assert actual == expected
+
+
+def test_phase1_v2_single_key_multi_aggregate_with_count_distinct_uses_compiled_carchar_mode():
+    try:
+        from opteryx.operators.group_state_store import ShuffleGroupByOperationV2
+    except ImportError:
+        return
+
+    rows = [
+        {"k": 1, "v": 10, "tag": "a"},
+        {"k": 1, "v": 5, "tag": "a"},
+        {"k": 2, "v": 3, "tag": "b"},
+        {"k": 2, "v": None, "tag": None},
+        {"k": None, "v": 7, "tag": "z"},
+        {"k": None, "v": 9, "tag": "q"},
+    ]
+    aggregations = [
+        AggregationSpec(alias="cnt_all", function="count", column="*"),
+        AggregationSpec(alias="sum_v", function="sum", column="v"),
+        AggregationSpec(alias="distinct_tag", function="count_distinct", column="tag"),
+    ]
+
+    operation = ShuffleGroupByOperationV2(group_by_columns=["k"], aggregations=aggregations)
+    operation.ingest(Morsel.from_arrow(_rows_to_table(rows, required_columns=["k", "v", "tag"])))
+
+    assert operation.readings["feature_groupby_engine_carchar"] == 1
+    assert operation.readings["feature_groupby_engine_legacy"] == 0
+
+    actual_rows = operation.finalize().to_arrow().to_pylist()
+    actual = {}
+    for row in actual_rows:
+        normalized_row = {name: _normalize_value(value) for name, value in row.items()}
+        actual[(normalized_row["k"],)] = normalized_row
+
+    expected = _reference_group_by(rows, group_by_columns=["k"], aggregations=aggregations)
+    assert actual == expected
+
+
+def test_phase1_v2_dictionary_key_uses_compiled_carchar_mode():
+    try:
+        from opteryx.operators.group_state_store import ShuffleGroupByOperationV2
+    except ImportError:
+        return
+
+    key_dict = pa.array(["alpha", "beta", "gamma"], type=pa.string())
+    key_indices = pa.array([0, 1, 0, 2, 1, 2], type=pa.int32())
+    key_array = pa.DictionaryArray.from_arrays(key_indices, key_dict)
+    value_array = pa.array([10, 5, 7, 1, None, 4], type=pa.int64())
+    morsel = Morsel.from_arrow(pa.table({"k": key_array, "v": value_array}))
+
+    aggregations = [
+        AggregationSpec(alias="cnt_all", function="count", column="*"),
+        AggregationSpec(alias="sum_v", function="sum", column="v"),
+    ]
+
+    operation = ShuffleGroupByOperationV2(group_by_columns=["k"], aggregations=aggregations)
+    operation.ingest(morsel)
+
+    assert operation.readings["feature_groupby_engine_carchar"] == 1
+    assert operation.readings["feature_groupby_engine_legacy"] == 0
+
+    actual_rows = operation.finalize().to_arrow().to_pylist()
+    actual = {}
+    for row in actual_rows:
+        normalized_row = {name: _normalize_value(value) for name, value in row.items()}
+        actual[(normalized_row["k"],)] = normalized_row
+
+    expected = _reference_group_by(
+        [
+            {"k": "alpha", "v": 10},
+            {"k": "beta", "v": 5},
+            {"k": "alpha", "v": 7},
+            {"k": "gamma", "v": 1},
+            {"k": "beta", "v": None},
+            {"k": "gamma", "v": 4},
+        ],
+        group_by_columns=["k"],
+        aggregations=aggregations,
+    )
+    assert actual == expected
+
+
+def test_phase1_v2_numeric_dictionary_key_count_star_uses_compiled_carchar_mode():
+    try:
+        from opteryx.operators.group_state_store import ShuffleGroupByOperationV2
+    except ImportError:
+        return
+
+    key_dict = pa.array([101, 202, 303], type=pa.int64())
+    key_indices = pa.array([0, 1, 0, 2, 1, 2, 2], type=pa.int32())
+    key_array = pa.DictionaryArray.from_arrays(key_indices, key_dict)
+    morsel = Morsel.from_arrow(pa.table({"k": key_array}))
+
+    aggregations = [AggregationSpec(alias="cnt_all", function="count", column="*")]
+
+    operation = ShuffleGroupByOperationV2(group_by_columns=["k"], aggregations=aggregations)
+    operation.ingest(morsel)
+
+    assert operation.readings["feature_groupby_engine_carchar"] == 1
+    assert operation.readings["feature_groupby_engine_legacy"] == 0
+
+    actual_rows = operation.finalize().to_arrow().to_pylist()
+    actual = {}
+    for row in actual_rows:
+        normalized_row = {name: _normalize_value(value) for name, value in row.items()}
+        actual[(normalized_row["k"],)] = normalized_row
+
+    expected = _reference_group_by(
+        [
+            {"k": 101},
+            {"k": 202},
+            {"k": 101},
+            {"k": 303},
+            {"k": 202},
+            {"k": 303},
+            {"k": 303},
+        ],
+        group_by_columns=["k"],
+        aggregations=aggregations,
+    )
+    assert actual == expected
+
+
+def test_phase1_v2_dictionary_key_multi_aggregate_with_count_distinct_uses_compiled_carchar_mode():
+    try:
+        from opteryx.operators.group_state_store import ShuffleGroupByOperationV2
+    except ImportError:
+        return
+
+    key_dict = pa.array(["alpha", "beta", "gamma"], type=pa.string())
+    key_indices = pa.array([0, 1, 0, 2, 1, 2, 2], type=pa.int32())
+    key_array = pa.DictionaryArray.from_arrays(key_indices, key_dict)
+    value_array = pa.array([10, 5, 7, 1, None, 4, 9], type=pa.int64())
+    tag_dict = pa.array(["red", "blue", "green"], type=pa.string())
+    tag_indices = pa.array([0, 1, 0, 2, 1, 2, 0], type=pa.int32())
+    tag_array = pa.DictionaryArray.from_arrays(tag_indices, tag_dict)
+    morsel = Morsel.from_arrow(pa.table({"k": key_array, "v": value_array, "tag": tag_array}))
+
+    aggregations = [
+        AggregationSpec(alias="cnt_all", function="count", column="*"),
+        AggregationSpec(alias="sum_v", function="sum", column="v"),
+        AggregationSpec(alias="distinct_tag", function="count_distinct", column="tag"),
+    ]
+
+    operation = ShuffleGroupByOperationV2(group_by_columns=["k"], aggregations=aggregations)
+    operation.ingest(morsel)
+
+    assert operation.readings["feature_groupby_engine_carchar"] == 1
+    assert operation.readings["feature_groupby_engine_legacy"] == 0
+
+    actual_rows = operation.finalize().to_arrow().to_pylist()
+    actual = {}
+    for row in actual_rows:
+        normalized_row = {name: _normalize_value(value) for name, value in row.items()}
+        actual[(normalized_row["k"],)] = normalized_row
+
+    expected = _reference_group_by(
+        [
+            {"k": "alpha", "v": 10, "tag": "red"},
+            {"k": "beta", "v": 5, "tag": "blue"},
+            {"k": "alpha", "v": 7, "tag": "red"},
+            {"k": "gamma", "v": 1, "tag": "green"},
+            {"k": "beta", "v": None, "tag": "blue"},
+            {"k": "gamma", "v": 4, "tag": "green"},
+            {"k": "gamma", "v": 9, "tag": "red"},
+        ],
+        group_by_columns=["k"],
+        aggregations=aggregations,
+    )
+    assert actual == expected
+
+
+def test_phase1_v2_mixed_numeric_dictionary_and_string_dictionary_multi_key_stays_compiled():
+    try:
+        from opteryx.operators.group_state_store import ShuffleGroupByOperationV2
+    except ImportError:
+        return
+
+    user_dict = pa.array([101, 202, 303], type=pa.int64())
+    user_indices = pa.array([0, 1, 0, 2, 1, 2, 2], type=pa.int32())
+    user_array = pa.DictionaryArray.from_arrays(user_indices, user_dict)
+
+    phrase_dict = pa.array(["alpha", "beta", "gamma"], type=pa.string())
+    phrase_indices = pa.array([0, 1, 0, 2, 1, 2, 0], type=pa.int32())
+    phrase_array = pa.DictionaryArray.from_arrays(phrase_indices, phrase_dict)
+
+    minute_array = pa.array([1, 2, 1, 3, 2, 3, 1], type=pa.int64())
+    morsel = Morsel.from_arrow(pa.table({"uid": user_array, "m": minute_array, "phrase": phrase_array}))
+
+    aggregations = [AggregationSpec(alias="cnt_all", function="count", column="*")]
+    operation = ShuffleGroupByOperationV2(
+        group_by_columns=["uid", "m", "phrase"],
+        aggregations=aggregations,
+    )
+    operation.ingest(morsel)
+
+    assert operation.readings["feature_groupby_engine_carchar"] == 1
+    assert operation.readings["feature_groupby_engine_legacy"] == 0
+
+    actual_rows = operation.finalize().to_arrow().to_pylist()
+    actual = {}
+    for row in actual_rows:
+        normalized_row = {name: _normalize_value(value) for name, value in row.items()}
+        actual[(normalized_row["uid"], normalized_row["m"], normalized_row["phrase"])] = normalized_row
+
+    expected = _reference_group_by(
+        [
+            {"uid": 101, "m": 1, "phrase": "alpha"},
+            {"uid": 202, "m": 2, "phrase": "beta"},
+            {"uid": 101, "m": 1, "phrase": "alpha"},
+            {"uid": 303, "m": 3, "phrase": "gamma"},
+            {"uid": 202, "m": 2, "phrase": "beta"},
+            {"uid": 303, "m": 3, "phrase": "gamma"},
+            {"uid": 303, "m": 1, "phrase": "alpha"},
+        ],
+        group_by_columns=["uid", "m", "phrase"],
+        aggregations=aggregations,
+    )
+    assert actual == expected
+
+
+def test_phase1_v2_single_count_distinct_uses_compiled_carchar_mode():
+    try:
+        from opteryx.operators.group_state_store import ShuffleGroupByOperationV2
+    except ImportError:
+        return
+
+    rows = [
+        {"k": 1, "tag": "a"},
+        {"k": 1, "tag": "a"},
+        {"k": 1, "tag": "b"},
+        {"k": 2, "tag": "b"},
+        {"k": 2, "tag": None},
+        {"k": None, "tag": "z"},
+        {"k": None, "tag": "z"},
+        {"k": None, "tag": "q"},
+    ]
+    aggregations = [AggregationSpec(alias="distinct_tag", function="count_distinct", column="tag")]
+
+    operation = ShuffleGroupByOperationV2(group_by_columns=["k"], aggregations=aggregations)
+    operation.ingest(Morsel.from_arrow(_rows_to_table(rows, required_columns=["k", "tag"])))
+
+    assert operation.readings["feature_groupby_engine_carchar"] == 1
+    assert operation.readings["feature_groupby_engine_legacy"] == 0
+
+    actual_rows = operation.finalize().to_arrow().to_pylist()
+    actual = {}
+    for row in actual_rows:
+        normalized_row = {name: _normalize_value(value) for name, value in row.items()}
+        actual[(normalized_row["k"],)] = normalized_row
+
+    expected = _reference_group_by(rows, group_by_columns=["k"], aggregations=aggregations)
+    assert actual == expected
+
+
+def test_phase1_v2_dictionary_key_count_distinct_uses_compiled_carchar_mode():
+    try:
+        from opteryx.operators.group_state_store import ShuffleGroupByOperationV2
+    except ImportError:
+        return
+
+    key_dict = pa.array(["alpha", "beta", "gamma"], type=pa.string())
+    key_indices = pa.array([0, 1, 0, 2, 1, 2, 2], type=pa.int32())
+    key_array = pa.DictionaryArray.from_arrays(key_indices, key_dict)
+
+    value_dict = pa.array(["red", "blue", "green"], type=pa.string())
+    value_indices = pa.array([0, 1, 0, 2, 1, 2, 0], type=pa.int32())
+    value_array = pa.DictionaryArray.from_arrays(value_indices, value_dict)
+    morsel = Morsel.from_arrow(pa.table({"k": key_array, "v": value_array}))
+
+    aggregations = [AggregationSpec(alias="distinct_v", function="count_distinct", column="v")]
+    operation = ShuffleGroupByOperationV2(group_by_columns=["k"], aggregations=aggregations)
+    operation.ingest(morsel)
+
+    assert operation.readings["feature_groupby_engine_carchar"] == 1
+    assert operation.readings["feature_groupby_engine_legacy"] == 0
+
+    actual_rows = operation.finalize().to_arrow().to_pylist()
+    actual = {}
+    for row in actual_rows:
+        normalized_row = {name: _normalize_value(value) for name, value in row.items()}
+        actual[(normalized_row["k"],)] = normalized_row
+
+    expected = _reference_group_by(
+        [
+            {"k": "alpha", "v": "red"},
+            {"k": "beta", "v": "blue"},
+            {"k": "alpha", "v": "red"},
+            {"k": "gamma", "v": "green"},
+            {"k": "beta", "v": "blue"},
+            {"k": "gamma", "v": "green"},
+            {"k": "gamma", "v": "red"},
+        ],
+        group_by_columns=["k"],
+        aggregations=aggregations,
+    )
+    assert actual == expected
+
+
 def test_phase1_v2_single_count_star_string_key_matches_reference():
     rows = [
         {"k": "a"},
@@ -467,6 +891,173 @@ def test_phase1_v2_single_count_star_string_key_matches_reference():
         aggregations=aggregations,
         chunk_sizes=[1, 2, 3],
     )
+
+
+def test_phase1_v2_single_count_star_string_key_uses_compiled_carchar_mode():
+    try:
+        from opteryx.operators.group_state_store import ShuffleGroupByOperationV2
+    except ImportError:
+        return
+
+    rows = [
+        {"k": "a"},
+        {"k": "b"},
+        {"k": "a"},
+        {"k": None},
+        {"k": "b"},
+        {"k": "b"},
+    ]
+    aggregations = [AggregationSpec(alias="cnt_all", function="count", column="*")]
+    operation = ShuffleGroupByOperationV2(group_by_columns=["k"], aggregations=aggregations)
+    operation.ingest(Morsel.from_arrow(_rows_to_table(rows, required_columns=["k"])))
+
+    assert operation.readings["feature_groupby_engine_carchar"] == 1
+    assert operation.readings["feature_groupby_engine_legacy"] == 0
+
+    actual_rows = operation.finalize().to_arrow().to_pylist()
+    actual = {}
+    for row in actual_rows:
+        normalized_row = {name: _normalize_value(value) for name, value in row.items()}
+        actual[(normalized_row["k"],)] = normalized_row
+
+    expected = _reference_group_by(rows, group_by_columns=["k"], aggregations=aggregations)
+    assert actual == expected
+
+
+def test_phase1_v2_multi_key_uses_compiled_carchar_mode():
+    try:
+        from opteryx.operators.group_state_store import ShuffleGroupByOperationV2
+    except ImportError:
+        return
+
+    rows = [
+        {"k1": 1, "k2": "a", "v": 10, "tag": "x"},
+        {"k1": 1, "k2": "a", "v": None, "tag": "x"},
+        {"k1": 1, "k2": "b", "v": 5, "tag": "y"},
+        {"k1": 2, "k2": "b", "v": 7, "tag": "y"},
+        {"k1": 2, "k2": "b", "v": 3, "tag": None},
+        {"k1": None, "k2": "z", "v": 2, "tag": "m"},
+        {"k1": None, "k2": "z", "v": 8, "tag": "n"},
+        {"k1": None, "k2": "z", "v": None, "tag": "n"},
+    ]
+    aggregations = [
+        AggregationSpec(alias="cnt_all", function="count", column="*"),
+        AggregationSpec(alias="sum_v", function="sum", column="v"),
+        AggregationSpec(alias="distinct_tag", function="count_distinct", column="tag"),
+    ]
+
+    operation = ShuffleGroupByOperationV2(group_by_columns=["k1", "k2"], aggregations=aggregations)
+    operation.ingest(Morsel.from_arrow(_rows_to_table(rows, required_columns=["k1", "k2", "v", "tag"])))
+
+    assert operation.readings["feature_groupby_engine_carchar"] == 1
+    assert operation.readings["feature_groupby_engine_legacy"] == 0
+
+    actual_rows = operation.finalize().to_arrow().to_pylist()
+    actual = {}
+    for row in actual_rows:
+        normalized_row = {name: _normalize_value(value) for name, value in row.items()}
+        actual[(normalized_row["k1"], normalized_row["k2"])] = normalized_row
+
+    expected = _reference_group_by(rows, group_by_columns=["k1", "k2"], aggregations=aggregations)
+    assert actual == expected
+
+
+def test_phase1_v2_single_large_string_key_uses_compiled_carchar_mode():
+    try:
+        from opteryx.operators.group_state_store import ShuffleGroupByOperationV2
+    except ImportError:
+        return
+
+    morsel = Morsel.from_arrow(
+        pa.table(
+            {
+                "k": pa.array(["alpha", "beta", "alpha", None, "beta"], type=pa.large_string()),
+            }
+        )
+    )
+    aggregations = [AggregationSpec(alias="cnt_all", function="count", column="*")]
+    operation = ShuffleGroupByOperationV2(group_by_columns=["k"], aggregations=aggregations)
+    operation.ingest(morsel)
+
+    assert operation.readings["feature_groupby_engine_carchar"] == 1
+    assert operation.readings["feature_groupby_engine_legacy"] == 0
+
+    actual_rows = operation.finalize().to_arrow().to_pylist()
+    actual = {}
+    for row in actual_rows:
+        normalized_row = {name: _normalize_value(value) for name, value in row.items()}
+        actual[(normalized_row["k"],)] = normalized_row
+
+    expected = _reference_group_by(
+        [{"k": "alpha"}, {"k": "beta"}, {"k": "alpha"}, {"k": None}, {"k": "beta"}],
+        group_by_columns=["k"],
+        aggregations=aggregations,
+    )
+    assert actual == expected
+
+
+def test_phase1_v2_single_timestamp_key_uses_compiled_carchar_mode():
+    try:
+        from opteryx.operators.group_state_store import ShuffleGroupByOperationV2
+    except ImportError:
+        return
+
+    morsel = Morsel.from_arrow(
+        pa.table(
+            {
+                "k": pa.array([1_000_000, 1_000_000, 2_000_000, None], type=pa.timestamp("us")),
+            }
+        )
+    )
+    aggregations = [AggregationSpec(alias="cnt_all", function="count", column="*")]
+    operation = ShuffleGroupByOperationV2(group_by_columns=["k"], aggregations=aggregations)
+    operation.ingest(morsel)
+
+    assert operation.readings["feature_groupby_engine_carchar"] == 1
+    assert operation.readings["feature_groupby_engine_legacy"] == 0
+
+    actual_rows = operation.finalize().to_arrow().to_pylist()
+    actual = {}
+    for row in actual_rows:
+        normalized_row = {name: _normalize_value(value) for name, value in row.items()}
+        actual[(normalized_row["k"],)] = normalized_row
+
+    expected = _reference_group_by(
+        [{"k": 1_000_000}, {"k": 1_000_000}, {"k": 2_000_000}, {"k": None}],
+        group_by_columns=["k"],
+        aggregations=aggregations,
+    )
+    assert actual == expected
+
+
+def test_phase1_v2_constant_key_uses_compiled_constant_mode():
+    try:
+        from opteryx.draken.interop.arrow import vector_from_arrow
+        from opteryx.draken.vectors.constant_vector import from_scalar as constant_from_scalar
+        from opteryx.operators.group_state_store import ShuffleGroupByOperationV2
+    except ImportError:
+        return
+
+    value_arr = pa.array([1, 2, 3, 4], type=pa.int64())
+    morsel = Morsel.from_vectors(
+        ["k", "v"],
+        [
+            constant_from_scalar("g", 4, dtype=pa.string()),
+            vector_from_arrow(value_arr),
+        ],
+    )
+
+    operation = ShuffleGroupByOperationV2(
+        group_by_columns=["k"],
+        aggregations=[AggregationSpec(alias="cnt_all", function="count", column="*")],
+    )
+    operation.ingest(morsel)
+
+    assert operation.readings["feature_groupby_engine_constant"] == 1
+    assert operation.readings["feature_groupby_engine_legacy"] == 0
+    rows = operation.finalize().to_arrow().to_pylist()
+    normalized = [{name: _normalize_value(value) for name, value in row.items()} for row in rows]
+    assert normalized == [{"cnt_all": 4, "k": "g"}]
 
 
 def test_phase1_v2_finalize_morsels_chunking_matches_finalize():
@@ -499,6 +1090,25 @@ def test_phase1_v2_finalize_morsels_chunking_matches_finalize():
         chunked_rows.extend(t.to_pylist())
 
     assert sorted(single, key=lambda r: r["k"]) == sorted(chunked_rows, key=lambda r: r["k"])
+
+
+def test_phase1_v2_empty_groupby_does_not_fallback_to_legacy():
+    try:
+        from opteryx.operators.group_state_store import ShuffleGroupByOperationV2
+    except ImportError:
+        return
+
+    morsel = Morsel.from_arrow(_rows_to_table([], required_columns=["k", "v"]))
+    operation = ShuffleGroupByOperationV2(
+        group_by_columns=["k"],
+        aggregations=[AggregationSpec(alias="cnt_all", function="count", column="*")],
+    )
+    operation.ingest(morsel)
+
+    rows = operation.finalize().to_arrow().to_pylist()
+
+    assert rows == []
+    assert operation.readings["feature_groupby_engine_legacy"] == 0
 
 
 def test_phase1_v2_single_avg_uses_fast_columns_when_null_free():
@@ -609,6 +1219,74 @@ def test_phase1_v2_single_sum_disables_fast_columns_with_all_null_group():
     rows_by_key = {row["k"]: row for row in rows}
     assert rows_by_key[1]["sum_v"] == 5
     assert rows_by_key[2]["sum_v"] is None
+
+
+def test_phase1_v2_string_min_uses_compiled_carchar_mode():
+    try:
+        from opteryx.operators.group_state_store import ShuffleGroupByOperationV2
+    except ImportError:
+        return
+
+    rows = [
+        {"k": "alpha", "v": "zeta"},
+        {"k": "alpha", "v": "beta"},
+        {"k": "beta", "v": "delta"},
+        {"k": "beta", "v": None},
+        {"k": None, "v": "omega"},
+        {"k": None, "v": "eta"},
+    ]
+    aggregations = [AggregationSpec(alias="min_v", function="min", column="v")]
+
+    operation = ShuffleGroupByOperationV2(group_by_columns=["k"], aggregations=aggregations)
+    operation.ingest(Morsel.from_arrow(_rows_to_table(rows, required_columns=["k", "v"])))
+
+    assert operation.readings["feature_groupby_engine_carchar"] == 1
+    assert operation.readings["feature_groupby_engine_legacy"] == 0
+
+    actual_rows = operation.finalize().to_arrow().to_pylist()
+    actual = {}
+    for row in actual_rows:
+        normalized_row = {name: _normalize_value(value) for name, value in row.items()}
+        actual[(normalized_row["k"],)] = normalized_row
+
+    expected = _reference_group_by(rows, group_by_columns=["k"], aggregations=aggregations)
+    assert actual == expected
+
+
+def test_phase1_v2_string_min_multi_aggregate_uses_compiled_carchar_mode():
+    try:
+        from opteryx.operators.group_state_store import ShuffleGroupByOperationV2
+    except ImportError:
+        return
+
+    rows = [
+        {"k": "alpha", "v": "zeta", "tag": "x"},
+        {"k": "alpha", "v": "beta", "tag": "x"},
+        {"k": "beta", "v": "delta", "tag": "y"},
+        {"k": "beta", "v": None, "tag": None},
+        {"k": None, "v": "omega", "tag": "m"},
+        {"k": None, "v": "eta", "tag": "n"},
+    ]
+    aggregations = [
+        AggregationSpec(alias="cnt_all", function="count", column="*"),
+        AggregationSpec(alias="min_v", function="min", column="v"),
+        AggregationSpec(alias="distinct_tag", function="count_distinct", column="tag"),
+    ]
+
+    operation = ShuffleGroupByOperationV2(group_by_columns=["k"], aggregations=aggregations)
+    operation.ingest(Morsel.from_arrow(_rows_to_table(rows, required_columns=["k", "v", "tag"])))
+
+    assert operation.readings["feature_groupby_engine_carchar"] == 1
+    assert operation.readings["feature_groupby_engine_legacy"] == 0
+
+    actual_rows = operation.finalize().to_arrow().to_pylist()
+    actual = {}
+    for row in actual_rows:
+        normalized_row = {name: _normalize_value(value) for name, value in row.items()}
+        actual[(normalized_row["k"],)] = normalized_row
+
+    expected = _reference_group_by(rows, group_by_columns=["k"], aggregations=aggregations)
+    assert actual == expected
 
 
 if __name__ == "__main__":

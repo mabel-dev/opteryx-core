@@ -26,9 +26,10 @@ from opteryx.compiled.joins import build_side_carchar_morsel_map
 from opteryx.compiled.joins import get_last_draken_inner_join_metrics
 from opteryx.compiled.joins import inner_join_carchar_morsel_aligned
 from opteryx.draken import Morsel
+from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.expression import NodeType
-from opteryx.expression import evaluate_and_append
 from opteryx.expression import get_all_nodes_of_type
+from opteryx.expression.evaluator import evaluate_and_append_draken
 from opteryx.models import QueryProperties
 
 from . import JoinNode
@@ -183,7 +184,12 @@ class DrakenInnerJoinNode(JoinNode):
                     left_exprs = self._collect_expression_nodes_for_side(self.left_relation_names)
                     if left_exprs and self.left_morsel.num_rows > 0:
                         old_cols = set(self.left_morsel.column_names)
-                        self.left_morsel = evaluate_and_append(left_exprs, self.left_morsel)
+                        try:
+                            self.left_morsel = evaluate_and_append_draken(left_exprs, self.left_morsel)
+                        except (NotImplementedError, TypeError, UnsupportedSyntaxError) as err:
+                            raise UnsupportedSyntaxError(
+                                f"Draken inner join expression evaluation does not support this query shape: {err}"
+                            ) from err
                         new_cols = set(self.left_morsel.column_names) - old_cols
                         if new_cols:
                             for col in new_cols:
@@ -269,7 +275,12 @@ class DrakenInnerJoinNode(JoinNode):
                     right_exprs = self._collect_expression_nodes_for_side(self.right_relation_names)
                     if right_exprs and right_chunk.num_rows > 0:
                         old_cols = set(right_chunk.column_names)
-                        right_chunk = evaluate_and_append(right_exprs, right_chunk)
+                        try:
+                            right_chunk = evaluate_and_append_draken(right_exprs, right_chunk)
+                        except (NotImplementedError, TypeError, UnsupportedSyntaxError) as err:
+                            raise UnsupportedSyntaxError(
+                                f"Draken inner join expression evaluation does not support this query shape: {err}"
+                            ) from err
                         new_cols = set(right_chunk.column_names) - old_cols
                         if new_cols:
                             for col in new_cols:

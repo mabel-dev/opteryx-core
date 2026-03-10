@@ -80,8 +80,13 @@ def create_physical_plan(logical_plan, query_properties) -> PhysicalPlan:
         elif node_type == LogicalPlanStepType.Join:
             if node_config.get("type") == "inner":
                 # INNER JOIN, NATURAL JOIN
-                if USE_DRAKEN_INNER_JOIN and operators.DrakenInnerJoinNode.supports(**node_config):
-                    node = operators.DrakenInnerJoinNode(query_properties, **node_config)
+                if USE_DRAKEN_INNER_JOIN:
+                    if operators.DrakenInnerJoinNode.supports(**node_config):
+                        node = operators.DrakenInnerJoinNode(query_properties, **node_config)
+                    else:
+                        raise UnsupportedSyntaxError(
+                            "Draken inner join does not support this query shape"
+                        )
                 else:
                     node = operators.InnerJoinNode(query_properties, **node_config)
             elif node_config.get("type") == "nested loop":

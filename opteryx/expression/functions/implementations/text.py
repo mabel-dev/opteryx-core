@@ -25,6 +25,7 @@ from pyarrow import compute
 
 from opteryx.compiled.vector_ops import vector_initcap
 from opteryx.compiled.vector_ops import vector_length
+from opteryx.compiled.vector_ops import vector_string_length
 from opteryx.compiled.vector_ops import vector_md5
 from opteryx.compiled.vector_ops import vector_replace
 from opteryx.compiled.vector_ops import vector_sha1
@@ -100,22 +101,7 @@ def vector_lengther(arr):
         # convert through Arrow and back to get a homogeneous StringVector
         sv = vector_from_arrow(sv.to_arrow().cast(pyarrow.string()))
 
-    # offsets memoryview of length n+1
-    offs = sv.lengths()
-    n = offs.shape[0] - 1
-    # compute byte lengths into pyarrow array directly
-    import numpy as _np
-    import pyarrow as _pa
-
-    # collect results respecting nulls
-    vals = []
-    nb = sv.null_bitmap()
-    for i in range(n):
-        if nb is not None and not ((nb[i >> 3] >> (i & 7)) & 1):
-            vals.append(None)
-        else:
-            vals.append(int(offs[i + 1] - offs[i]))
-    return _pa.array(vals, type=_pa.int64())
+    return vector_string_length(sv).to_arrow()
 
 
 def _initcap(arr):
@@ -513,6 +499,8 @@ def regex_replace(array, _pattern, _replacement):
 
     array_arrow = _as_arrow(array, "Input")
     data_vector = Vector.from_arrow(array_arrow)
+    if data_vector.__class__.__name__ == "DictionaryVector":
+        data_vector = Vector.from_arrow(data_vector.to_arrow().cast(pa.string()))
 
     pattern = as_bytes(_pattern[0])
     replacement = as_bytes(_replacement[0])

@@ -6,10 +6,15 @@
 
 #include <cstdint>
 
-#include "carchar.hpp"
+#include "carchar_common.hpp"
+#include "carchar_index.hpp"
+#include "carchar_join_engine.hpp"
+#include "carchar_join_index.hpp"
+#include "carchar_set.hpp"
 
 namespace nb = nanobind;
 using opteryx::carchar::CarcharIndex;
+using opteryx::carchar::CarcharSet;
 using opteryx::carchar::CarcharJoinIndex;
 using opteryx::carchar::CarcharJoinEngine;
 using opteryx::carchar::CarcharStats;
@@ -61,6 +66,53 @@ std::uint64_t sum_probe_counts_engine(CarcharJoinEngine& engine, nb::handle keys
     const auto* keys = static_cast<const std::uint64_t*>(keys_view.view.buf);
     const auto length = static_cast<std::size_t>(keys_view.view.len / sizeof(std::uint64_t));
     return engine.probe_row_count_sum(keys, length);
+}
+
+std::size_t set_insert_many(CarcharSet& set, nb::handle keys_obj) {
+    BufferView keys_view;
+    acquire_buffer(keys_obj, PyBUF_SIMPLE, keys_view, "keys object does not support buffer protocol");
+    if (keys_view.view.len % static_cast<Py_ssize_t>(sizeof(std::uint64_t)) != 0) {
+        throw nb::value_error("keys buffer must contain packed uint64 values");
+    }
+    const auto* keys = static_cast<const std::uint64_t*>(keys_view.view.buf);
+    const auto length = static_cast<std::size_t>(keys_view.view.len / sizeof(std::uint64_t));
+    return set.insert_many(keys, length);
+}
+
+std::size_t set_contains_many_count(const CarcharSet& set, nb::handle keys_obj) {
+    BufferView keys_view;
+    acquire_buffer(keys_obj, PyBUF_SIMPLE, keys_view, "keys object does not support buffer protocol");
+    if (keys_view.view.len % static_cast<Py_ssize_t>(sizeof(std::uint64_t)) != 0) {
+        throw nb::value_error("keys buffer must contain packed uint64 values");
+    }
+    const auto* keys = static_cast<const std::uint64_t*>(keys_view.view.buf);
+    const auto length = static_cast<std::size_t>(keys_view.view.len / sizeof(std::uint64_t));
+    return set.contains_many_count(keys, length);
+}
+
+std::size_t set_mark_new(CarcharSet& set, nb::handle keys_obj, nb::handle out_mask_obj) {
+    BufferView keys_view;
+    BufferView out_mask_view;
+    acquire_buffer(keys_obj, PyBUF_SIMPLE, keys_view, "keys object does not support buffer protocol");
+    acquire_buffer(
+        out_mask_obj,
+        PyBUF_WRITABLE,
+        out_mask_view,
+        "out_mask object must be a writable buffer"
+    );
+
+    if (keys_view.view.len % static_cast<Py_ssize_t>(sizeof(std::uint64_t)) != 0) {
+        throw nb::value_error("keys buffer must contain packed uint64 values");
+    }
+
+    const auto length = static_cast<std::size_t>(keys_view.view.len / sizeof(std::uint64_t));
+    if (out_mask_view.view.len < static_cast<Py_ssize_t>(length)) {
+        throw nb::value_error("out_mask buffer must have at least len(keys) bytes");
+    }
+
+    const auto* keys = static_cast<const std::uint64_t*>(keys_view.view.buf);
+    auto* out_mask = static_cast<std::uint8_t*>(out_mask_view.view.buf);
+    return set.mark_new(keys, out_mask, length);
 }
 
 std::pair<std::vector<std::int64_t>, std::vector<std::int64_t>> probe_join_indices_engine(
@@ -184,6 +236,19 @@ NB_MODULE(carchar_native, m) {
             "Return all occupied (key, payload_ref) items"
         )
         .def("stats", &CarcharIndex::stats);
+
+    nb::class_<CarcharSet>(m, "CarcharSet")
+        .def(nb::init<std::size_t, double>(), nb::arg("initial_capacity") = 16,
+             nb::arg("load_factor") = 0.80)
+        .def("reserve", &CarcharSet::reserve, nb::arg("expected_entries"))
+        .def("tighten", &CarcharSet::tighten)
+        .def("size", &CarcharSet::size)
+        .def("capacity", &CarcharSet::capacity)
+        .def("contains", &CarcharSet::contains, nb::arg("key"))
+        .def("insert_or_ignore", &CarcharSet::insert_or_ignore, nb::arg("key"))
+        .def("insert_many", &set_insert_many, nb::arg("keys"))
+        .def("contains_many_count", &set_contains_many_count, nb::arg("keys"))
+        .def("mark_new", &set_mark_new, nb::arg("keys"), nb::arg("out_mask"));
 
     nb::class_<CarcharJoinIndex>(m, "CarcharJoinIndex")
         .def(nb::init<std::size_t, double>(), nb::arg("initial_capacity") = 16,

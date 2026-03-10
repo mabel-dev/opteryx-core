@@ -9,7 +9,7 @@ sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 from opteryx.draken import Vector
 from opteryx.draken.interop.arrow import vector_from_arrow
 from opteryx.compiled import vector_ops as compiled_vector_ops
-from opteryx.functions import string_functions
+from opteryx.expression.functions.implementations import text as string_functions
 
 vector_initcap = getattr(compiled_vector_ops, "vector_initcap")
 vector_regex_replace = getattr(compiled_vector_ops, "vector_regex_replace")
@@ -128,6 +128,20 @@ def test_regex_replace_python_wrapper_returns_arrow():
     assert isinstance(result, pyarrow.Array)
     # Result is binary (bytes) because Draken works with bytes
     assert result.to_pylist() == [b"Garth", b"Guropa"]
+
+
+def test_regex_replace_python_wrapper_dictionary_input():
+    data = pyarrow.DictionaryArray.from_arrays(
+        pyarrow.array([0, 1, 0, None], type=pyarrow.int8()),
+        pyarrow.array(["http://a.example", "https://b.example"], type=pyarrow.string()),
+    )
+    pattern = numpy.array([r"^https?".encode("utf8")], dtype=object)
+    replacement = numpy.array([b""], dtype=object)
+
+    result = string_functions.regex_replace(data, pattern, replacement)
+
+    assert isinstance(result, pyarrow.Array)
+    assert result.to_pylist() == [b"://a.example", b"://b.example", b"://a.example", None]
 
 
 def test_regex_replace_invalid_pattern_raises():
