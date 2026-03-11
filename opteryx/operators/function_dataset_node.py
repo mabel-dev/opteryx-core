@@ -11,23 +11,100 @@ This is a SQL Query Execution Plan Node.
 This Node creates datasets based on function calls like VALUES and UNNEST.
 """
 
+import copy
+import datetime
 import time
+from numbers import Integral
 from typing import Generator
 
-import pyarrow
-
+from opteryx.draken.interop.arrow import vector_from_sequence
+from opteryx.draken.morsels.morsel import Morsel
 from opteryx.exceptions import SqlError
 from opteryx.expression import NodeType
 from opteryx.models import QueryProperties
 from opteryx.utils import series
+from orso.types import OrsoTypes
 
 from .read_node import ReaderNode
 
 
+_EPOCH_DATE = datetime.date(1970, 1, 1)
+_EPOCH_DT = datetime.datetime(1970, 1, 1)
+
+
+def _column_metadata(columns):
+    column_names = []
+    column_types = []
+
+    for column in columns:
+        column_names.append(column.schema_column.identity)
+        column_types.append(column.schema_column.type)
+
+    return column_names, column_types
+
+
+def _as_list(values):
+    if values is None:
+        return []
+    if hasattr(values, "to_pylist"):
+        return values.to_pylist()
+    if hasattr(values, "tolist"):
+        return values.tolist()
+    if isinstance(values, list):
+        return values
+    if isinstance(values, tuple):
+        return list(values)
+    return list(values)
+
+
+def _build_morsel_from_columns(column_names, column_types, column_values):
+    vectors = []
+    for index, _ in enumerate(column_names):
+        dtype = column_types[index] if index < len(column_types) else None
+        values = column_values[index] if index < len(column_values) else []
+        if dtype is None:
+            vectors.append(vector_from_sequence(values))
+        else:
+            vectors.append(vector_from_sequence(values, dtype=dtype))
+    return Morsel.from_vectors(column_names, vectors)
+
+
+def _build_morsel_from_rows(columns, rows):
+    column_names, column_types = _column_metadata(columns)
+    column_values = [[] for _ in column_names]
+
+    for row in rows:
+        for index in range(len(column_names)):
+            column_values[index].append(row[index] if index < len(row) else None)
+
+    return _build_morsel_from_columns(column_names, column_types, column_values)
+
+
+def _restore_temporal_series_args(args):
+    restored_args = []
+
+    for arg in args:
+        if arg.type == OrsoTypes.DATE and isinstance(arg.value, Integral):
+            restored = copy.copy(arg)
+            restored.value = _EPOCH_DATE + datetime.timedelta(days=int(arg.value))
+            restored_args.append(restored)
+            continue
+
+        if arg.type == OrsoTypes.TIMESTAMP and isinstance(arg.value, Integral):
+            restored = copy.copy(arg)
+            restored.value = _EPOCH_DT + datetime.timedelta(microseconds=int(arg.value))
+            restored_args.append(restored)
+            continue
+
+        restored_args.append(arg)
+
+    return restored_args
+
+
 def _generate_series(**kwargs):
-    value_array = series.generate_series(*kwargs["args"])
-    column_name = kwargs["columns"][0].schema_column.identity
-    return pyarrow.Table.from_arrays([value_array], [column_name])
+    column_names, column_types = _column_metadata(kwargs["columns"])
+    value_array = _as_list(series.generate_series(*_restore_temporal_series_args(kwargs["args"])))
+    return _build_morsel_from_columns(column_names, column_types, [value_array])
 
 
 def _unnest(**kwargs):
@@ -36,35 +113,43 @@ def _unnest(**kwargs):
         list_items = [kwargs["args"][0].centre.value]
     else:
         list_items = kwargs["args"][0].value
-    column_name = kwargs["columns"][0].schema_column.identity
 
-    return pyarrow.Table.from_arrays([list_items], [column_name])
+    column_names, column_types = _column_metadata(kwargs["columns"])
+    return _build_morsel_from_columns(column_names, column_types, [_as_list(list_items)])
 
 
 def _values(**parameters):
-    columns = [col.schema_column.identity for col in parameters["columns"]]
     values_array = parameters["values"]
-    return [{columns[i]: value.value for i, value in enumerate(values)} for values in values_array]
+    rows = [tuple(value.value for value in values) for values in values_array]
+    return _build_morsel_from_rows(parameters["columns"], rows)
 
 
 def _fake_data(**kwargs):
     from orso.faker import generate_fake_data
 
     rows = kwargs["rows"]
-    schema = kwargs["schema"]
+    schema = copy.deepcopy(kwargs["schema"])
     for column in schema.columns:
         column.name = column.identity
-    return generate_fake_data(schema, rows)
+    data = generate_fake_data(schema, rows)
+    return _build_morsel_from_rows(kwargs["columns"], data.fetchall())
 
 
 def _http(**kwargs):
     aliases = kwargs.get("schema")
     data = kwargs.get("data")
 
-    renames = [aliases.column(column).identity for column in data.column_names]
-    data = data.rename_columns(renames)
+    column_names = []
+    column_types = []
+    column_values = []
 
-    return data
+    for index, column_name in enumerate(data.column_names):
+        schema_column = aliases.column(column_name)
+        column_names.append(schema_column.identity)
+        column_types.append(schema_column.type)
+        column_values.append(_as_list(data.column(index)))
+
+    return _build_morsel_from_columns(column_names, column_types, column_values)
 
 
 DATASET_FUNCTIONS = {
@@ -115,7 +200,7 @@ class FunctionDatasetNode(ReaderNode):
     def execute(self, morsel, **kwargs) -> Generator:
         try:
             start_time = time.time_ns()
-            data = DATASET_FUNCTIONS[self.function](**self.parameters)  # type:ignore
+            result_morsel = DATASET_FUNCTIONS[self.function](**self.parameters)  # type:ignore
             self.readings["time_evaluate_dataset"] += time.time_ns() - start_time
         except TypeError as err:  # pragma: no cover
             if str(err).startswith("_unnest() takes 2"):
@@ -124,15 +209,8 @@ class FunctionDatasetNode(ReaderNode):
                 )
             raise err
 
-        if isinstance(data, list):
-            table = pyarrow.Table.from_pylist(data)
-        elif hasattr(data, "arrow"):
-            table = data.arrow()
-        else:
-            table = data
+        self.readings["columns_read"] += len(result_morsel.column_names)
+        self.readings["rows_read"] += result_morsel.num_rows
+        self.readings["bytes_processed"] += result_morsel.nbytes
 
-        self.readings["columns_read"] += len(table.column_names)
-        self.readings["rows_read"] += table.num_rows
-        self.readings["bytes_processed"] += table.nbytes
-
-        yield table
+        yield result_morsel

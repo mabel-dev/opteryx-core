@@ -397,6 +397,33 @@ cdef class ConstantVector(Vector):
             return PyBytes_FromStringAndSize(<const char*>s_ptr.data, s_ptr.length)
         raise TypeError("Unsupported constant value type")
 
+    cpdef object sum(self):
+        cdef Py_ssize_t valid_count = self.ptr.length - self.null_count
+        cdef object scalar
+        if valid_count == 0:
+            return None
+
+        scalar = self.scalar_value()
+        if self.ptr.value_type == DRAKEN_INT64:
+            return <int64_t> scalar * valid_count
+        if self.ptr.value_type == DRAKEN_FLOAT64:
+            return <double> scalar * valid_count
+        raise TypeError("ConstantVector.sum only supports numeric values")
+
+    cpdef object min(self):
+        if self.ptr.length == 0:
+            raise ValueError("Cannot compute min of empty column")
+        if self.null_count == self.ptr.length:
+            raise ValueError("Cannot compute min of all-null column")
+        return self.scalar_value()
+
+    cpdef object max(self):
+        if self.ptr.length == 0:
+            raise ValueError("Cannot compute max of empty column")
+        if self.null_count == self.ptr.length:
+            raise ValueError("Cannot compute max of all-null column")
+        return self.scalar_value()
+
     def __getitem__(self, Py_ssize_t i):
         if i < 0 or i >= <Py_ssize_t>self.ptr.length:
             raise IndexError("Index out of range")

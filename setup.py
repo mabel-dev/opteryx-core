@@ -650,6 +650,7 @@ extensions = [
         "opteryx.compiled.aggregations.carchar_group_state_engine",
         sources=[
             "opteryx/compiled/aggregations/carchar_group_state_engine.pyx",
+            "src/cpp/cpu_features.cpp",
         ],
         include_dirs=include_dirs,
         language="c++",

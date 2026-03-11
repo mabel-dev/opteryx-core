@@ -162,12 +162,12 @@ SELECT ST['prod'] FROM (SELECT '{"prod": 73}' AS ST FROM $planets) AS SB;
 # Function calls which are actually resolved by the binder
 
 SELECT VERSION();
-SELECT NOW();
+SELECT CURRENT_TIMESTAMP();
 SELECT CURRENT_TIME;
 SELECT CURRENT_TIMESTAMP;
 SELECT UTC_TIMESTAMP()
 SELECT CURRENT_DATE;
-SELECT TODAY();
+SELECT CURRENT_DATE();
 SELECT YESTERDAY();
 SELECT CONNECTION_ID();
 SELECT E();
@@ -175,7 +175,7 @@ SELECT PI();
 SELECT PHI();
 SELECT USER();
 SELECT DATABASE();
-SELECT NOW() - birth_date, NOW(), birth_date FROM testdata.astronauts;
+SELECT CURRENT_TIMESTAMP() - birth_date, CURRENT_TIMESTAMP(), birth_date FROM testdata.astronauts;
 SELECT E() * PI() * PHI();
 
 SELECT ['a', 'b', 'c'] @> ['g', 'h', 'a']

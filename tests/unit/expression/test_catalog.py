@@ -209,7 +209,7 @@ class TestFunctionCatalog:
         # Arithmetic functions
         assert catalog.get_definition("ROUND") is not None
         assert catalog.get_definition("ABS") is not None
-        assert catalog.get_definition("CEIL") is not None
+        assert catalog.get_definition("CEILING") is not None
         assert catalog.get_definition("FLOOR") is not None
 
         # Logical functions

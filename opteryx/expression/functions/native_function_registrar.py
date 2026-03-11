@@ -171,7 +171,10 @@ def _builtin_arithmetic_functions() -> list[FunctionDefinition]:
             overloads=(
                 FunctionOverload(
                     id="ROUND_1",
-                    parameters=(ParameterSpec(name="num", type_family="numeric"),),
+                    parameters=(
+                        ParameterSpec(name="num", type_family="numeric"),
+                        ParameterSpec(name="precision", type_family="integer", variadic=True, optional=True),
+                    ),
                     return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.DOUBLE),
                     kernel=KernelSpec(
                         id="default",
@@ -204,7 +207,7 @@ def _builtin_arithmetic_functions() -> list[FunctionDefinition]:
             ),
         ),
         FunctionDefinition(
-            name="CEIL",
+            name="CEILING",
             aliases=(),
             category="arithmetic",
             volatility="immutable",
@@ -214,8 +217,11 @@ def _builtin_arithmetic_functions() -> list[FunctionDefinition]:
             documentation="Returns smallest integer greater than or equal to input.",
             overloads=(
                 FunctionOverload(
-                    id="CEIL_1",
-                    parameters=(ParameterSpec(name="num", type_family="numeric"),),
+                    id="CEILING_1",
+                    parameters=(
+                        ParameterSpec(name="num", type_family="numeric"),
+                        ParameterSpec(name="scale", type_family="integer", variadic=True, optional=True),
+                    ),
                     return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.DOUBLE),
                     kernel=KernelSpec(
                         id="default",
@@ -237,7 +243,10 @@ def _builtin_arithmetic_functions() -> list[FunctionDefinition]:
             overloads=(
                 FunctionOverload(
                     id="FLOOR_1",
-                    parameters=(ParameterSpec(name="num", type_family="numeric"),),
+                    parameters=(
+                        ParameterSpec(name="num", type_family="numeric"),
+                        ParameterSpec(name="scale", type_family="integer", variadic=True, optional=True),
+                    ),
                     return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.DOUBLE),
                     kernel=KernelSpec(
                         id="default",
@@ -569,14 +578,12 @@ def _builtin_constant_functions() -> list[FunctionDefinition]:
         )
 
     return [
-        _make("CURRENT_DATE", OrsoTypes.DATE, aliases=("TODAY",), summary="Current date."),
-        _make("YESTERDAY", OrsoTypes.DATE, summary="Yesterday's date."),
-        _make("CURRENT_TIME", OrsoTypes.TIME, summary="Current time."),
+        _make("CURRENT_DATE", OrsoTypes.DATE, summary="Current date (SQL-92)."),
+        _make("CURRENT_TIME", OrsoTypes.TIME, summary="Current time (SQL-92)."),
         _make(
-            "NOW",
+            "CURRENT_TIMESTAMP",
             OrsoTypes.TIMESTAMP,
-            aliases=("UTC_TIMESTAMP", "CURRENT_TIMESTAMP"),
-            summary="Current timestamp.",
+            summary="Current timestamp (SQL-92).",
         ),
         _make("VERSION", OrsoTypes.VARCHAR, summary="Database version string."),
         _make("CONNECTION_ID", OrsoTypes.INTEGER, summary="Current connection identifier."),
@@ -1291,15 +1298,16 @@ def _builtin_arithmetic_extended_functions() -> list[FunctionDefinition]:
         _make(
             "SIGN", compute.sign, OrsoTypes.INTEGER, (_num,), summary="Sign of number (-1, 0, 1)."
         ),
-        _make("TRUNC", compute.trunc, OrsoTypes.INTEGER, (_num,), summary="Truncate to integer."),
+        _make("TRUNCATE", number_functions.trunc, OrsoTypes.DOUBLE, 
+              (_num, ParameterSpec(name="scale", type_family="integer", variadic=True, optional=True)), 
+              summary="Truncate towards zero."),
         _make(
             "POWER",
             number_functions.safe_power,
             OrsoTypes.DOUBLE,
             (_num, ParameterSpec(name="exp", type_family="numeric")),
-            aliases=("POW",),
             cost=5.0,
-            summary="Raise base to exponent.",
+            summary="Raise base to exponent (SQL-92).",
         ),
         _make("LN", compute.ln, OrsoTypes.DOUBLE, (_num,), summary="Natural logarithm."),
         _make("LOG10", compute.log10, OrsoTypes.DOUBLE, (_num,), summary="Base-10 logarithm."),

@@ -85,6 +85,7 @@ Performance Considerations:
 from .base_plan_node import BasePlanNode, JoinNode  # isort: skip
 
 from .aggregate_and_group_node import AggregateAndGroupNode  # Group is always followed by aggregate
+from .draken_aggregate_node import DrakenAggregateNode
 from .draken_aggregate_and_group_node import DrakenAggregateAndGroupNode
 from .aggregate_node import AGGREGATORS
 from .aggregate_node import AggregateNode  # aggregate data
@@ -132,6 +133,7 @@ __all__ = [
     "BasePlanNode",
     "JoinNode",
     "AggregateAndGroupNode",
+    "DrakenAggregateNode",
     "DrakenAggregateAndGroupNode",
     "AGGREGATORS",
     "AggregateNode",

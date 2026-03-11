@@ -653,7 +653,7 @@ def _cast_literal_value(literal_node, target_type: str, kind: str, alias):
 def ceiling(value, alias: Optional[List[str]] = None, key=None):
     data_value = build(value["expr"])
     scale = build(value["field"]["Scale"]) if "Scale" in value["field"] else literal_number([0])
-    return Node(NodeType.FUNCTION, value="CEIL", parameters=[data_value, scale], alias=alias)
+    return Node(NodeType.FUNCTION, value="CEILING", parameters=[data_value, scale], alias=alias)
 
 
 def compound_identifier(branch, alias: Optional[List[str]] = None, key=None):

@@ -64,12 +64,11 @@ class TestInt64Aggregations:
         assert vec.min() == 1
     
     def test_min_with_nulls(self):
-        """Test min with null values - nulls treated as 0."""
+        """Test min with null values - nulls should be ignored."""
         arr = pa.array([5, None, 8, 1, None], type=pa.int64())
         vec = Vector.from_arrow(arr)
         
-        # Current implementation: nulls are treated as 0
-        assert vec.min() == 0
+        assert vec.min() == 1
     
     def test_min_negative_values(self):
         """Test min with negative values."""
@@ -181,8 +180,7 @@ class TestFloat64Aggregations:
         arr = pa.array([5.5, None, 1.1, None, 9.9], type=pa.float64())
         vec = Vector.from_arrow(arr)
         
-        # Current implementation: nulls are treated as 0.0
-        assert vec.min() == pytest.approx(0.0)
+        assert vec.min() == pytest.approx(1.1)
     
     def test_min_negative_values(self):
         """Test min with negative values."""
@@ -227,6 +225,34 @@ class TestFloat64Aggregations:
         
         with pytest.raises(ValueError, match="empty"):
             vec.max()
+
+
+class TestConstantAggregations:
+    """Test aggregation helpers on ConstantVector."""
+
+    def test_constant_numeric_sum(self):
+        vec = Vector.from_arrow(pa.array([3, 3, None, 3], type=pa.int64()))
+        assert vec.sum() == 9
+
+    def test_constant_numeric_min_max(self):
+        vec = Vector.from_arrow(pa.array([2.5, 2.5, None], type=pa.float64()))
+        assert vec.min() == pytest.approx(2.5)
+        assert vec.max() == pytest.approx(2.5)
+
+    def test_constant_string_min_max(self):
+        vec = Vector.from_arrow(pa.array(["alpha", "alpha", None], type=pa.string()))
+        assert vec.min() == b"alpha"
+        assert vec.max() == b"alpha"
+
+    def test_constant_sum_rejects_non_numeric(self):
+        vec = Vector.from_arrow(pa.array(["alpha", "alpha"], type=pa.string()))
+        with pytest.raises(TypeError, match="numeric"):
+            vec.sum()
+
+    def test_constant_min_all_null_raises(self):
+        vec = Vector.from_arrow(pa.array([None, None], type=pa.int64()))
+        with pytest.raises(ValueError, match="all-null"):
+            vec.min()
 
 
 class TestDate32Aggregations:
