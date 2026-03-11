@@ -4964,7 +4964,7 @@ cdef class CarcharGroupStateEngine:
             vectors.extend(key_vectors)
         else:
             vectors.append(key_vec)
-        
+
         # Defensive check: ensure names and vectors match
         if len(names) != len(vectors):
             raise ValueError(
@@ -4973,7 +4973,7 @@ cdef class CarcharGroupStateEngine:
                 f"Aggregates: {self._multi_agg_count}, "
                 f"Group columns: {len(self._group_by_columns)}"
             )
-        
+
         return Morsel.from_vectors(names, vectors)
 
     cpdef object finalize_fast_columns(self):

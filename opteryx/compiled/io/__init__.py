@@ -7,14 +7,14 @@ from .csv_rows import morsel_to_csv_strings
 from .disk_reader import list_directory
 from .disk_reader import list_files
 from .disk_reader import list_files_info
-from .json_rows import morsel_to_json_rows
-from .json_rows import morsel_to_json_strings
 from .disk_reader import read_file
 from .disk_reader import read_file_mmap_slice
 from .disk_reader import read_file_slice
 from .disk_reader import read_file_slice_to_bytes
 from .disk_reader import read_file_to_bytes
 from .disk_reader import unmap_memory
+from .json_rows import morsel_to_json_rows
+from .json_rows import morsel_to_json_strings
 
 __all__ = [
     "read_file",

@@ -173,7 +173,9 @@ def _builtin_arithmetic_functions() -> list[FunctionDefinition]:
                     id="ROUND_1",
                     parameters=(
                         ParameterSpec(name="num", type_family="numeric"),
-                        ParameterSpec(name="precision", type_family="integer", variadic=True, optional=True),
+                        ParameterSpec(
+                            name="precision", type_family="integer", variadic=True, optional=True
+                        ),
                     ),
                     return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.DOUBLE),
                     kernel=KernelSpec(
@@ -220,7 +222,9 @@ def _builtin_arithmetic_functions() -> list[FunctionDefinition]:
                     id="CEILING_1",
                     parameters=(
                         ParameterSpec(name="num", type_family="numeric"),
-                        ParameterSpec(name="scale", type_family="integer", variadic=True, optional=True),
+                        ParameterSpec(
+                            name="scale", type_family="integer", variadic=True, optional=True
+                        ),
                     ),
                     return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.DOUBLE),
                     kernel=KernelSpec(
@@ -245,7 +249,9 @@ def _builtin_arithmetic_functions() -> list[FunctionDefinition]:
                     id="FLOOR_1",
                     parameters=(
                         ParameterSpec(name="num", type_family="numeric"),
-                        ParameterSpec(name="scale", type_family="integer", variadic=True, optional=True),
+                        ParameterSpec(
+                            name="scale", type_family="integer", variadic=True, optional=True
+                        ),
                     ),
                     return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.DOUBLE),
                     kernel=KernelSpec(
@@ -1298,9 +1304,16 @@ def _builtin_arithmetic_extended_functions() -> list[FunctionDefinition]:
         _make(
             "SIGN", compute.sign, OrsoTypes.INTEGER, (_num,), summary="Sign of number (-1, 0, 1)."
         ),
-        _make("TRUNCATE", number_functions.trunc, OrsoTypes.DOUBLE, 
-              (_num, ParameterSpec(name="scale", type_family="integer", variadic=True, optional=True)), 
-              summary="Truncate towards zero."),
+        _make(
+            "TRUNCATE",
+            number_functions.trunc,
+            OrsoTypes.DOUBLE,
+            (
+                _num,
+                ParameterSpec(name="scale", type_family="integer", variadic=True, optional=True),
+            ),
+            summary="Truncate towards zero.",
+        ),
         _make(
             "POWER",
             number_functions.safe_power,

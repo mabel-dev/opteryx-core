@@ -48,15 +48,17 @@ def create_group_state_engine(group_by_columns, aggregations):
     # Use legacy backend for multi-aggregate queries (carchar multi-agg has segfault)
     if len(aggregations) > 1:
         from opteryx.compiled.aggregations.group_state_store import GroupStateStore
+
         return GroupStateStore(group_by_columns, aggregations)
-    
+
     # Use legacy backend for aggregations on complex expressions
     # (carchar can't handle expressions like (event ->> 'key')::TYPE)
     # aggregations are tuples of (alias, function, column)
     if any(agg[2] is None for agg in aggregations):
         from opteryx.compiled.aggregations.group_state_store import GroupStateStore
+
         return GroupStateStore(group_by_columns, aggregations)
-    
+
     from opteryx.compiled.aggregations.carchar_group_state_engine import CarcharGroupStateEngine
 
     return CarcharGroupStateEngine(group_by_columns, aggregations)

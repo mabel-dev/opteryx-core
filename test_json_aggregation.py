@@ -1,7 +1,7 @@
-import opteryx
-import tempfile
 import os
-import json
+import tempfile
+
+import opteryx
 
 # Create test data
 test_data = """{"event": {"bytes_processed": 100}}

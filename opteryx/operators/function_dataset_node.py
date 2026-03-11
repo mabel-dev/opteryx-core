@@ -17,16 +17,16 @@ import time
 from numbers import Integral
 from typing import Generator
 
+from orso.types import OrsoTypes
+
 from opteryx.draken.interop.arrow import vector_from_sequence
 from opteryx.draken.morsels.morsel import Morsel
 from opteryx.exceptions import SqlError
 from opteryx.expression import NodeType
 from opteryx.models import QueryProperties
 from opteryx.utils import series
-from orso.types import OrsoTypes
 
 from .read_node import ReaderNode
-
 
 _EPOCH_DATE = datetime.date(1970, 1, 1)
 _EPOCH_DT = datetime.datetime(1970, 1, 1)
