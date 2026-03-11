@@ -36,7 +36,21 @@ def create_physical_plan(logical_plan, query_properties) -> PhysicalPlan:
 
         # fmt: off
         if node_type == LogicalPlanStepType.Aggregate:
-            if all(agg.value in operators.SimpleAggregateNode.SIMPLE_AGGREGATES for agg in node_config["aggregates"]):
+            if USE_DRAKEN_AGGREGATOR:
+                if operators.DrakenAggregateNode.supports(node_config["aggregates"]):
+                    node = operators.DrakenAggregateNode(
+                        query_properties,
+                        **{
+                            k: v
+                            for k, v in node_config.items()
+                            if k in ("aggregates", "all_relations")
+                        },
+                    )
+                else:
+                    raise UnsupportedSyntaxError(
+                        "Draken aggregator does not support this query shape"
+                    )
+            elif all(agg.value in operators.SimpleAggregateNode.SIMPLE_AGGREGATES for agg in node_config["aggregates"]):
                 node = operators.SimpleAggregateNode(query_properties, **{k:v for k,v in node_config.items() if k in ("aggregates", "all_relations")})
             else:
                 node = operators.AggregateNode(query_properties, **{k:v for k,v in node_config.items() if k in ("aggregates", "all_relations")})

@@ -51,11 +51,26 @@ class _DummyDrakenAggregateAndGroupNode(_BaseDummyNode):
         return True
 
 
+class _DummyDrakenAggregateNode(_BaseDummyNode):
+    @staticmethod
+    def supports(aggregates, groups=None):
+        _ = aggregates, groups
+        return True
+
+
 class _DummySimpleAggregateAndGroupNode(_BaseDummyNode):
     SIMPLE_AGGREGATES = {"COUNT"}
 
 
 class _DummyArrowAggregateAndGroupNode(_BaseDummyNode):
+    pass
+
+
+class _DummySimpleAggregateNode(_BaseDummyNode):
+    SIMPLE_AGGREGATES = {"COUNT"}
+
+
+class _DummyArrowAggregateNode(_BaseDummyNode):
     pass
 
 
@@ -106,6 +121,40 @@ def test_physical_planner_uses_draken_aggregate_and_group_when_flag_enabled(monk
         QueryProperties(query_id="test-qid", variables={}),
     )
     assert isinstance(plan[1], _DummyDrakenAggregateAndGroupNode)
+
+
+def test_physical_planner_uses_draken_aggregate_when_flag_enabled(monkeypatch):
+    node = _LogicalNode(
+        LogicalPlanStepType.Aggregate,
+        properties={
+            "aggregates": [_Aggregate("COUNT_DISTINCT")],
+            "all_relations": [],
+        },
+    )
+
+    monkeypatch.setattr(physical_planner, "USE_DRAKEN_AGGREGATOR", True)
+    monkeypatch.setattr(physical_planner, "ENABLE_NATIVE_AGGREGATOR", True)
+    monkeypatch.setattr(
+        physical_planner.operators,
+        "DrakenAggregateNode",
+        _DummyDrakenAggregateNode,
+    )
+    monkeypatch.setattr(
+        physical_planner.operators,
+        "SimpleAggregateNode",
+        _DummySimpleAggregateNode,
+    )
+    monkeypatch.setattr(
+        physical_planner.operators,
+        "AggregateNode",
+        _DummyArrowAggregateNode,
+    )
+
+    plan = create_physical_plan(
+        _LogicalPlan(node),
+        QueryProperties(query_id="test-qid", variables={}),
+    )
+    assert isinstance(plan[1], _DummyDrakenAggregateNode)
 
 
 def test_supports_accepts_nullable_group_column():
@@ -209,6 +258,45 @@ def test_physical_planner_errors_when_draken_not_supported(monkeypatch):
         )
 
 
+def test_physical_planner_errors_for_aggregate_when_draken_not_supported(monkeypatch):
+    class _UnsupportedDrakenNode(_DummyDrakenAggregateNode):
+        @staticmethod
+        def supports(aggregates, groups=None):
+            _ = aggregates, groups
+            return False
+
+    node = _LogicalNode(
+        LogicalPlanStepType.Aggregate,
+        properties={
+            "aggregates": [_Aggregate("HISTOGRAM")],
+            "all_relations": [],
+        },
+    )
+
+    monkeypatch.setattr(physical_planner, "USE_DRAKEN_AGGREGATOR", True)
+    monkeypatch.setattr(
+        physical_planner.operators,
+        "DrakenAggregateNode",
+        _UnsupportedDrakenNode,
+    )
+    monkeypatch.setattr(
+        physical_planner.operators,
+        "SimpleAggregateNode",
+        _DummySimpleAggregateNode,
+    )
+    monkeypatch.setattr(
+        physical_planner.operators,
+        "AggregateNode",
+        _DummyArrowAggregateNode,
+    )
+
+    with pytest.raises(UnsupportedSyntaxError):
+        create_physical_plan(
+            _LogicalPlan(node),
+            QueryProperties(query_id="test-qid", variables={}),
+        )
+
+
 def test_physical_planner_uses_arrow_aggregate_and_group_when_flag_disabled(monkeypatch):
     node = _LogicalNode(
         LogicalPlanStepType.AggregateAndGroup,
@@ -243,6 +331,40 @@ def test_physical_planner_uses_arrow_aggregate_and_group_when_flag_disabled(monk
         QueryProperties(query_id="test-qid", variables={}),
     )
     assert isinstance(plan[1], _DummyArrowAggregateAndGroupNode)
+
+
+def test_physical_planner_uses_simple_aggregate_when_draken_flag_disabled(monkeypatch):
+    node = _LogicalNode(
+        LogicalPlanStepType.Aggregate,
+        properties={
+            "aggregates": [_Aggregate("COUNT")],
+            "all_relations": [],
+        },
+    )
+
+    monkeypatch.setattr(physical_planner, "USE_DRAKEN_AGGREGATOR", False)
+    monkeypatch.setattr(physical_planner, "ENABLE_NATIVE_AGGREGATOR", False)
+    monkeypatch.setattr(
+        physical_planner.operators,
+        "DrakenAggregateNode",
+        _DummyDrakenAggregateNode,
+    )
+    monkeypatch.setattr(
+        physical_planner.operators,
+        "SimpleAggregateNode",
+        _DummySimpleAggregateNode,
+    )
+    monkeypatch.setattr(
+        physical_planner.operators,
+        "AggregateNode",
+        _DummyArrowAggregateNode,
+    )
+
+    plan = create_physical_plan(
+        _LogicalPlan(node),
+        QueryProperties(query_id="test-qid", variables={}),
+    )
+    assert isinstance(plan[1], _DummySimpleAggregateNode)
 
 
 def test_physical_planner_uses_draken_inner_join_when_flag_enabled(monkeypatch):

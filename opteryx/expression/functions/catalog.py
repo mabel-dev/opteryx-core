@@ -93,7 +93,7 @@ class FunctionDefinition:
     """Definition of a single logical function with all overloads and metadata."""
 
     name: str
-    aliases: Tuple[str, ...]  # e.g., ("CEILING", "CEIL")
+    aliases: Tuple[str, ...]  # e.g., ("UPPER", "UPPERCASE")
     category: str  # "string", "numeric", "temporal", "aggregate", etc.
     volatility: Literal["immutable", "stable", "volatile"]
     deterministic: bool  # if false, cannot be constant-folded

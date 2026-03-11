@@ -300,10 +300,31 @@ cdef class Float64Vector(Vector):
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef double* data = <double*> ptr.data
         cdef Py_ssize_t i, n = ptr.length
+        cdef uint8_t byte, bit
+        cdef bint found = False
         if n == 0:
             raise ValueError("Cannot compute min of empty column")
-        cdef double m = data[0]
-        for i in range(1, n):
+
+        cdef double m = 0.0
+        for i in range(n):
+            if ptr.null_bitmap != NULL:
+                byte = ptr.null_bitmap[i >> 3]
+                bit = (byte >> (i & 7)) & 1
+                if not bit:
+                    continue
+            m = data[i]
+            found = True
+            break
+
+        if not found:
+            raise ValueError("Cannot compute min of all-null column")
+
+        for i in range(i + 1, n):
+            if ptr.null_bitmap != NULL:
+                byte = ptr.null_bitmap[i >> 3]
+                bit = (byte >> (i & 7)) & 1
+                if not bit:
+                    continue
             if data[i] < m:
                 m = data[i]
         return m
@@ -312,10 +333,31 @@ cdef class Float64Vector(Vector):
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef double* data = <double*> ptr.data
         cdef Py_ssize_t i, n = ptr.length
+        cdef uint8_t byte, bit
+        cdef bint found = False
         if n == 0:
             raise ValueError("Cannot compute max of empty column")
-        cdef double m = data[0]
-        for i in range(1, n):
+
+        cdef double m = 0.0
+        for i in range(n):
+            if ptr.null_bitmap != NULL:
+                byte = ptr.null_bitmap[i >> 3]
+                bit = (byte >> (i & 7)) & 1
+                if not bit:
+                    continue
+            m = data[i]
+            found = True
+            break
+
+        if not found:
+            raise ValueError("Cannot compute max of all-null column")
+
+        for i in range(i + 1, n):
+            if ptr.null_bitmap != NULL:
+                byte = ptr.null_bitmap[i >> 3]
+                bit = (byte >> (i & 7)) & 1
+                if not bit:
+                    continue
             if data[i] > m:
                 m = data[i]
         return m

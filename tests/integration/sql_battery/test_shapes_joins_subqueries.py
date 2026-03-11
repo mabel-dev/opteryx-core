@@ -142,13 +142,13 @@ STATEMENTS = [
         ("SELECT planetId, MIN(magnitude) FROM testdata.satellites GROUP BY planetId HAVING MIN(magnitude) < 5", 2, 2, None),
         ("SELECT ABS(-5) as abs_value", 1, 1, None),
         ("SELECT ROUND(3.14159, 2) as rounded_value", 1, 1, None),
-        ("SELECT CEIL(3.14159) as ceil_value", 1, 1, None),
+        ("SELECT CEILING(3.14159) as ceiling_value", 1, 1, None),
         ("SELECT FLOOR(3.14159) as floor_value", 1, 1, None),
-        ("SELECT CEIL(3.14159, 2) as ceil_value", 1, 1, None),
+        ("SELECT CEILING(3.14159, 2) as ceiling_value", 1, 1, None),
         ("SELECT FLOOR(3.14159, 2) as floor_value", 1, 1, None),
-        ("SELECT CEIL(3.14159, 0) as ceil_value", 1, 1, None),
+        ("SELECT CEILING(3.14159, 0) as ceiling_value", 1, 1, None),
         ("SELECT FLOOR(3.14159, 0) as floor_value", 1, 1, None),
-        ("SELECT CEIL(3.14159, -1) as ceil_value", 1, 1, None),
+        ("SELECT CEILING(3.14159, -1) as ceiling_value", 1, 1, None),
         ("SELECT FLOOR(3.14159, -1) as floor_value", 1, 1, None),
         ("SELECT UPPER(name) FROM $planets", 9, 1, None),
         ("SELECT LOWER(name) FROM testdata.astronauts WHERE UPPER(name) LIKE 'A%'", 11, 1, None),
@@ -181,29 +181,29 @@ STATEMENTS = [
         ("SELECT ASCII('A') as ascii_value", 1, 1, None),
         ("SELECT CHAR(65) as char_value", 1, 1, None),
 
-        ("SELECT CEIL(id) FROM $planets", 9, 1, None),  # ints
+        ("SELECT CEILING(id) FROM $planets", 9, 1, None),  # ints
         ("SELECT FLOOR(id) FROM $planets", 9, 1, None),
-        ("SELECT CEIL(id, 2) FROM $planets", 9, 1, None),
+        ("SELECT CEILING(id, 2) FROM $planets", 9, 1, None),
         ("SELECT FLOOR(id, 2) FROM $planets", 9, 1, None),
-        ("SELECT CEIL(id, 0) FROM $planets", 9, 1, None),
+        ("SELECT CEILING(id, 0) FROM $planets", 9, 1, None),
         ("SELECT FLOOR(id, 0) FROM $planets", 9, 1, None),
-        ("SELECT CEIL(gravity) FROM $planets", 9, 1, None),  # decimal
+        ("SELECT CEILING(gravity) FROM $planets", 9, 1, None),  # decimal
         ("SELECT FLOOR(gravity) FROM $planets", 9, 1, None),
-        ("SELECT CEIL(gravity, 2) FROM $planets", 9, 1, None),
+        ("SELECT CEILING(gravity, 2) FROM $planets", 9, 1, None),
         ("SELECT FLOOR(gravity, 2) FROM $planets", 9, 1, None),
-        ("SELECT CEIL(gravity, 0) FROM $planets", 9, 1, None),
+        ("SELECT CEILING(gravity, 0) FROM $planets", 9, 1, None),
         ("SELECT FLOOR(gravity, 0) FROM $planets", 9, 1, None),
-        ("SELECT CEIL(mass) FROM $planets", 9, 1, None),  # double
+        ("SELECT CEILING(mass) FROM $planets", 9, 1, None),  # double
         ("SELECT FLOOR(mass) FROM $planets", 9, 1, None),
-        ("SELECT CEIL(mass, 2) FROM $planets", 9, 1, None),
+        ("SELECT CEILING(mass, 2) FROM $planets", 9, 1, None),
         ("SELECT FLOOR(mass, 2) FROM $planets", 9, 1, None),
-        ("SELECT CEIL(mass, 0) FROM $planets", 9, 1, None),
+        ("SELECT CEILING(mass, 0) FROM $planets", 9, 1, None),
         ("SELECT FLOOR(mass, 0) FROM $planets", 9, 1, None),
-        ("SELECT CEIL(surface_pressure) FROM $planets", 9, 1, None),  # with nulls
+        ("SELECT CEILING(surface_pressure) FROM $planets", 9, 1, None),  # with nulls
         ("SELECT FLOOR(surface_pressure) FROM $planets", 9, 1, None),
-        ("SELECT CEIL(surface_pressure, 2) FROM $planets", 9, 1, None),
+        ("SELECT CEILING(surface_pressure, 2) FROM $planets", 9, 1, None),
         ("SELECT FLOOR(surface_pressure, 2) FROM $planets", 9, 1, None),
-        ("SELECT CEIL(surface_pressure, 0) FROM $planets", 9, 1, None),
+        ("SELECT CEILING(surface_pressure, 0) FROM $planets", 9, 1, None),
         ("SELECT FLOOR(surface_pressure, 0) FROM $planets", 9, 1, None),
 
         # Edge Case with Empty Joins

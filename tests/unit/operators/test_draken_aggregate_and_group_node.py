@@ -3,6 +3,7 @@
 # See the License at http://www.apache.org/licenses/LICENSE-2.0
 
 from opteryx.operators.draken_aggregate_and_group_node import DrakenAggregateAndGroupNode
+from opteryx.operators.draken_aggregate_node import DrakenAggregateNode
 from opteryx.expression import NodeType
 
 
@@ -29,3 +30,7 @@ def test_draken_groupby_supports_count_distinct():
 
 def test_draken_groupby_supports_count_distinct_value():
     assert DrakenAggregateAndGroupNode.supports([_Aggregate("COUNT_DISTINCT")])
+
+
+def test_draken_aggregate_supports_count_distinct_value():
+    assert DrakenAggregateNode.supports([_Aggregate("COUNT_DISTINCT")])

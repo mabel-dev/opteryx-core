@@ -6,7 +6,7 @@
 """Arithmetic function kernels.
 
 Includes:
-- Rounding: ROUND, FLOOR, CEIL, TRUNC
+- Rounding: ROUND, FLOOR, CEILING, TRUNCATE
 - Magnitude: ABS, SIGN, SQRT
 - Exponentiation & logarithms: POWER, LN, LOG10, LOG2, LOG
 - Random: RANDOM, NORMAL, RANDOM_STRING
@@ -108,3 +108,22 @@ def floor(values, scales=None) -> List:
     else:
         scale_factor = 10 ** (-scale)
         return numpy.floor(values / scale_factor) * scale_factor
+
+
+def trunc(values, scales=None) -> List:
+    """Performs a 'trunc' (truncate towards zero) with a scale factor."""
+    if scales is None:
+        scale = 0
+    elif len(scales) == 0:
+        return []
+    else:
+        scale = scales[0]
+    if scale == 0:
+        return numpy.trunc(values)
+
+    if scale > 0:
+        scale_factor = 10**scale
+        return numpy.trunc(values * scale_factor) / scale_factor
+    else:
+        scale_factor = 10 ** (-scale)
+        return numpy.trunc(values / scale_factor) * scale_factor

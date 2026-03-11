@@ -48,15 +48,31 @@
             ]
         }
     ],
-    "CEIL": [
+    "CEILING": [
         {
-            "label": "CEIL(value)",
+            "label": "CEILING(value)",
             "documentation": "Return the smallest integer value not less than `value`.",
             "parameters": [
                 {
                     "label": "value",
                     "type": "number",
-                    "documentation": "Numeric expression to ceil"
+                    "documentation": "Numeric expression to round up to the nearest integer"
+                }
+            ]
+        },
+        {
+            "label": "CEILING(value, scale)",
+            "documentation": "Rounds up a numeric value to the specified scale",
+            "parameters": [
+                {
+                    "label": "value",
+                    "type": "number",
+                    "documentation": "Numeric expression to round up"
+                },
+                {
+                    "label": "scale",
+                    "type": "integer",
+                    "documentation": "Number of decimal places"
                 }
             ]
         }

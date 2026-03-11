@@ -4,6 +4,7 @@ import sys
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
 import opteryx
+import opteryx.planner.physical_planner as physical_planner
 
 
 def _get_read_operation(telemetry: dict) -> dict:
@@ -28,3 +29,33 @@ def test_count_star_with_filter_reads_only_predicate_columns():
     finally:
         session.close()
 
+
+def test_draken_global_aggregate_does_not_route_through_groupby_runtime_fallback(monkeypatch):
+    monkeypatch.setattr(physical_planner, "USE_DRAKEN_AGGREGATOR", True)
+
+    session = opteryx.session()
+    try:
+        count_result = session.execute_to_arrow(
+            "SELECT COUNT(*) FROM testdata.satellites WHERE planetId <> 0"
+        )
+        assert count_result.to_pydict()["COUNT(*)"][0] == 177
+
+        multi_result = session.execute_to_arrow(
+            "SELECT SUM(planetId), COUNT(*), AVG(planetId) FROM testdata.satellites WHERE planetId <> 0"
+        )
+        assert multi_result.to_pydict()["COUNT(*)"][0] == 177
+    finally:
+        session.close()
+
+
+def test_draken_global_count_distinct_uses_native_carchar_set(monkeypatch):
+    monkeypatch.setattr(physical_planner, "USE_DRAKEN_AGGREGATOR", True)
+
+    session = opteryx.session()
+    try:
+        result = session.execute_to_arrow(
+            "SELECT COUNT(DISTINCT val) FROM (VALUES (1), (1), (NULL), (NULL)) AS test(val)"
+        )
+        assert result.to_pydict()["COUNT(DISTINCT val)"][0] == 2
+    finally:
+        session.close()
