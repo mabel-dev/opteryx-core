@@ -812,6 +812,32 @@ extensions.append(
 
 extensions.append(
     Extension(
+        "opteryx.compiled.io.csv_rows",
+        sources=[
+            "opteryx/compiled/io/csv_rows.pyx",
+        ],
+        include_dirs=include_dirs,
+        extra_compile_args=CPP_FLAGS,
+        extra_link_args=LD_EXTRA,
+        language="c++",
+    )
+)
+
+extensions.append(
+    Extension(
+        "opteryx.compiled.io.json_rows",
+        sources=[
+            "opteryx/compiled/io/json_rows.pyx",
+        ],
+        include_dirs=include_dirs,
+        extra_compile_args=CPP_FLAGS,
+        extra_link_args=LD_EXTRA,
+        language="c++",
+    )
+)
+
+extensions.append(
+    Extension(
         "opteryx.nanobind.carchar_native",
         sources=[
             "src/cpp/carchar_native.cpp",
