@@ -103,8 +103,12 @@ class DrakenAggregateAndGroupNode(BasePlanNode):
         self._normalized_group_by_columns = normalize_group_by_columns(self.group_by_columns)
         self._normalized_aggregations = normalize_aggregations(self._aggregation_specs)
         required_columns = list(self.group_by_columns)
+        # Use actual identifiers (base column names) instead of full expressions
+        # This handles cases like SUM((event ->> 'bytes_processed')::INTEGER) where
+        # we need to select just the 'event' column, not the full expression
         required_columns.extend(
-            spec.column for spec in self._aggregation_specs if spec.column not in (None, "*")
+            identifier for identifier in self.all_identifiers 
+            if identifier not in required_columns
         )
         self._required_columns = list(dict.fromkeys(required_columns))
         self._group_by = create_group_state_engine(
@@ -150,11 +154,15 @@ class DrakenAggregateAndGroupNode(BasePlanNode):
             for aggregator in get_all_nodes_of_type(root, select_nodes=(NodeType.AGGREGATOR,)):
                 fn = self._normalize_aggregate_function(aggregator)
                 field_node = aggregator.parameters[0]
-                column = (
-                    "*"
-                    if field_node.node_type == NodeType.WILDCARD
-                    else field_node.schema_column.identity
-                )
+                # For wildcard and identifiers, use the column directly
+                # For complex expressions, use the schema identity (which will be evaluated
+                # and added as a column to the morsel before aggregation)
+                if field_node.node_type == NodeType.WILDCARD:
+                    column = "*"
+                else:
+                    # This includes both simple identifiers and complex expressions
+                    # Both are available as columns after evaluation via evaluate_and_append_draken
+                    column = field_node.schema_column.identity
                 specs.append(
                     AggregationSpec(
                         alias=aggregator.schema_column.identity,

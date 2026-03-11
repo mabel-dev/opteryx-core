@@ -253,6 +253,25 @@ cdef class GroupStateStore:
     def constant_groupby_fastpath_fallbacks(self):
         return self._constant_groupby_fastpath_fallbacks
 
+    @property
+    def readings(self):
+        """Return telemetry dict compatible with CarcharGroupStateEngine"""
+        return {
+            "feature_groupby_engine_carchar": 0,
+            "feature_groupby_engine_constant": 0,
+            "feature_groupby_engine_legacy": 1,  # GroupStateStore is the legacy backend
+            "feature_groupby_engine_multi_key_fixed": 0,
+            "feature_groupby_engine_multi_key_object": 0,
+            "draken_dict_groupby_fastpath_hits": self._dict_groupby_fastpath_hits,
+            "draken_dict_groupby_fastpath_fallbacks": self._dict_groupby_fastpath_fallbacks,
+            "draken_constant_groupby_fastpath_hits": self._constant_groupby_fastpath_hits,
+            "draken_constant_groupby_fastpath_fallbacks": self._constant_groupby_fastpath_fallbacks,
+            "draken_constant_groupby_output_vector_hits": 0,
+            "draken_constant_groupby_output_vector_fallbacks": 0,
+            "groupby_key_store_bytes": 0,
+            "groupby_key_store_limit_bytes": 0,
+        }
+
     cpdef void ingest(self, Morsel morsel):
         cdef Py_ssize_t row_count
         cdef Py_ssize_t row_idx
@@ -1444,6 +1463,64 @@ cdef class GroupStateStore:
             produced += this_chunk
 
         return chunks
+
+    def finalize_morsels(self, Py_ssize_t chunk_size=65536):
+        """Generate Morsels from finalized rows for compatibility with CarcharGroupStateEngine"""
+        from opteryx.draken.morsels.morsel import Morsel
+        from opteryx.draken.interop.arrow import vector_from_sequence
+        
+        rows = self.finalize_rows()
+        if not rows:
+            # Empty result - return empty morsel with proper structure
+            # Names: aggregation aliases + group by column names
+            names = list(self._agg_aliases) if self._agg_aliases else []
+            names.extend([col.decode('utf-8') if isinstance(col, bytes) else str(col) for col in self._group_by_columns])
+            yield Morsel.from_vectors(names, [vector_from_sequence([]) for _ in names])
+            return
+        
+        # Group rows into chunks and yield as Morsels
+        for chunk_start in range(0, len(rows), chunk_size):
+            chunk_end = min(chunk_start + chunk_size, len(rows))
+            chunk_rows = rows[chunk_start:chunk_end]
+            
+            if not chunk_rows:
+                continue
+            
+            # Extract number of aggregations and groups from first row
+            # Row format is (key_tuple, [agg_value1, agg_value2, ...])
+            first_row = chunk_rows[0]
+            key_tuple = first_row[0]
+            agg_values = first_row[1]
+            
+            agg_count = len(agg_values) if agg_values else 0 
+            key_count = len(key_tuple) if key_tuple else 0
+            total_cols = agg_count + key_count
+            
+            # Build columns
+            columns = [[] for _ in range(total_cols)]
+            
+            for row in chunk_rows:
+                key_tuple = row[0]
+                agg_values = row[1]
+                
+                # Add aggregation values first
+                for agg_idx, agg_val in enumerate(agg_values):
+                    columns[agg_idx].append(agg_val)
+                
+                # Add key values
+                for key_idx, key_val in enumerate(key_tuple):
+                    columns[agg_count + key_idx].append(key_val)
+            
+            # Build vectors
+            vectors = [vector_from_sequence(col) for col in columns]
+            
+            # Generate names (aggregation aliases + group by column names)
+            names = []
+            names.extend(self._agg_aliases if self._agg_aliases else [])
+            names.extend([col.decode('utf-8') if isinstance(col, bytes) else str(col) for col in self._group_by_columns])
+            
+            morsel = Morsel.from_vectors(names, vectors)
+            yield morsel
 
     cpdef object fast_finalize_unavailable_reason(self):
         cdef flat_hash_map[uint64_t, int64_t].iterator rows_it

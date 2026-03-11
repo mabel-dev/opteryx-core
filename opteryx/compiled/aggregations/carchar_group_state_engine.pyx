@@ -1194,10 +1194,9 @@ cdef class CarcharGroupStateEngine:
                         self._init_legacy_backend()
                         return
 
-                self._multi_agg_count = len(self._aggregations)
-                self._index = new CarcharIndex(<size_t> max(16, morsel.num_rows * 2), 0.80)
-                self._mode = MODE_CARCHAR
-                self._readings["feature_groupby_engine_carchar"] += 1
+                # WORKAROUND: Multi-agg carchar path has a segfault bug
+                # Force legacy backend for multi-aggregate queries
+                self._init_legacy_backend()
                 return
 
             fn = self._aggregations[0][1]
@@ -1847,6 +1846,8 @@ cdef class CarcharGroupStateEngine:
             self._multi_seen.reserve(flat_expected)
             self._multi_avg_sums.reserve(flat_expected)
             self._multi_avg_counts.reserve(flat_expected)
+            self._multi_object_state_starts.reserve(flat_expected)
+            self._multi_object_state_lengths.reserve(flat_expected)
             return
         self._counts.reserve(expected)
         self._i64_state.reserve(expected)
@@ -2811,6 +2812,8 @@ cdef class CarcharGroupStateEngine:
                 if agg_mode == AGG_COUNT_STAR:
                     for row_idx in range(row_count):
                         offset = self._multi_offset(state_indices[row_idx], agg_idx)
+                        if offset >= <Py_ssize_t> self._multi_counts.size() or offset < 0:
+                            raise RuntimeError(f"[int64_multi] offset out of bounds: {offset}, size={self._multi_counts.size()}, row={row_idx}, state={state_indices[row_idx]}, agg={agg_idx}, total_agg={self._multi_agg_count}")
                         self._multi_counts[offset] = self._multi_counts[offset] + 1
                     continue
                 if agg_mode == AGG_COUNT_DISTINCT:
@@ -2826,6 +2829,8 @@ cdef class CarcharGroupStateEngine:
                         if not _bitmap_is_valid(value_nulls, row_idx):
                             continue
                         offset = self._multi_offset(state_indices[row_idx], agg_idx)
+                        if offset >= <Py_ssize_t> self._multi_f64_state.size() or offset < 0:
+                            raise RuntimeError(f"[int64_multi float] offset out of bounds: {offset}, size={self._multi_f64_state.size()}")
                         if agg_mode == AGG_COUNT_VALUE:
                             self._multi_counts[offset] = self._multi_counts[offset] + 1
                         elif agg_mode == AGG_SUM:
@@ -2852,6 +2857,8 @@ cdef class CarcharGroupStateEngine:
                         if not _bitmap_is_valid(value_nulls, row_idx):
                             continue
                         offset = self._multi_offset(state_indices[row_idx], agg_idx)
+                        if offset >= <Py_ssize_t> self._multi_i64_state.size() or offset < 0:
+                            raise RuntimeError(f"[int64_multi int] offset out of bounds: {offset}, size={self._multi_i64_state.size()}")
                         if agg_mode == AGG_COUNT_VALUE:
                             self._multi_counts[offset] = self._multi_counts[offset] + 1
                         elif agg_mode == AGG_SUM:
@@ -2876,6 +2883,8 @@ cdef class CarcharGroupStateEngine:
                     if not _bitmap_is_valid(value_nulls, row_idx):
                         continue
                     offset = self._multi_offset(state_indices[row_idx], agg_idx)
+                    if offset >= <Py_ssize_t> self._multi_i64_state.size() or offset < 0:
+                        raise RuntimeError(f"[int64_multi integer] offset out of bounds: {offset}, size={self._multi_i64_state.size()}")
                     if agg_mode == AGG_COUNT_VALUE:
                         self._multi_counts[offset] = self._multi_counts[offset] + 1
                     else:
