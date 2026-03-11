@@ -157,6 +157,7 @@ def extract_evaluations(aggregates):
             NodeType.BINARY_OPERATOR,
             NodeType.EXTRACTION_OPERATOR,
             NodeType.COMPARISON_OPERATOR,
+            NodeType.CAST,
             NodeType.LITERAL,
         ),
     )

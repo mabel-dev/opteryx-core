@@ -1468,7 +1468,7 @@ cdef class GroupStateStore:
         """Generate Morsels from finalized rows for compatibility with CarcharGroupStateEngine"""
         from opteryx.draken.morsels.morsel import Morsel
         from opteryx.draken.interop.arrow import vector_from_sequence
-        
+
         rows = self.finalize_rows()
         if not rows:
             # Empty result - return empty morsel with proper structure
@@ -1477,48 +1477,48 @@ cdef class GroupStateStore:
             names.extend([col.decode('utf-8') if isinstance(col, bytes) else str(col) for col in self._group_by_columns])
             yield Morsel.from_vectors(names, [vector_from_sequence([]) for _ in names])
             return
-        
+
         # Group rows into chunks and yield as Morsels
         for chunk_start in range(0, len(rows), chunk_size):
             chunk_end = min(chunk_start + chunk_size, len(rows))
             chunk_rows = rows[chunk_start:chunk_end]
-            
+
             if not chunk_rows:
                 continue
-            
+
             # Extract number of aggregations and groups from first row
             # Row format is (key_tuple, [agg_value1, agg_value2, ...])
             first_row = chunk_rows[0]
             key_tuple = first_row[0]
             agg_values = first_row[1]
-            
-            agg_count = len(agg_values) if agg_values else 0 
+
+            agg_count = len(agg_values) if agg_values else 0
             key_count = len(key_tuple) if key_tuple else 0
             total_cols = agg_count + key_count
-            
+
             # Build columns
             columns = [[] for _ in range(total_cols)]
-            
+
             for row in chunk_rows:
                 key_tuple = row[0]
                 agg_values = row[1]
-                
+
                 # Add aggregation values first
                 for agg_idx, agg_val in enumerate(agg_values):
                     columns[agg_idx].append(agg_val)
-                
+
                 # Add key values
                 for key_idx, key_val in enumerate(key_tuple):
                     columns[agg_count + key_idx].append(key_val)
-            
+
             # Build vectors
             vectors = [vector_from_sequence(col) for col in columns]
-            
+
             # Generate names (aggregation aliases + group by column names)
             names = []
             names.extend(self._agg_aliases if self._agg_aliases else [])
             names.extend([col.decode('utf-8') if isinstance(col, bytes) else str(col) for col in self._group_by_columns])
-            
+
             morsel = Morsel.from_vectors(names, vectors)
             yield morsel
 

@@ -144,7 +144,9 @@ class _DrakenAggregateCollector:
             return
 
         if self.aggregate_type == "AVG":
-            self._sum = (literal * row_count) if self._sum is None else self._sum + (literal * row_count)
+            self._sum = (
+                (literal * row_count) if self._sum is None else self._sum + (literal * row_count)
+            )
             self._count += row_count
             return
 
@@ -228,7 +230,9 @@ class _DrakenAggregateCollector:
         if self.aggregate_type == "MAX":
             return self._max
 
-        raise ValueError(f"Unsupported aggregate type for Draken global aggregate: {self.aggregate_type}")
+        raise ValueError(
+            f"Unsupported aggregate type for Draken global aggregate: {self.aggregate_type}"
+        )
 
 
 class DrakenAggregateNode(BasePlanNode):
@@ -237,7 +241,9 @@ class DrakenAggregateNode(BasePlanNode):
 
         self.aggregates = list(parameters.get("aggregates", []))
         self.evaluatable_nodes = [
-            node for node in extract_evaluations(self.aggregates) if node.node_type != NodeType.LITERAL
+            node
+            for node in extract_evaluations(self.aggregates)
+            if node.node_type != NodeType.LITERAL
         ]
 
         all_identifiers = [

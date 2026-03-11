@@ -107,9 +107,21 @@ class DrakenAggregateAndGroupNode(BasePlanNode):
         # This handles cases like SUM((event ->> 'bytes_processed')::INTEGER) where
         # we need to select just the 'event' column, not the full expression
         required_columns.extend(
-            identifier for identifier in self.all_identifiers 
-            if identifier not in required_columns
+            identifier for identifier in self.all_identifiers if identifier not in required_columns
         )
+        # Also include evaluated expression identities so they don't get dropped by select()
+        # Skip literals as they don't represent actual columns
+        for node in self.evaluatable_nodes:
+            if node.node_type != NodeType.LITERAL:
+                identity = node.schema_column.identity
+                if identity not in required_columns:
+                    required_columns.append(identity)
+        # Include group expression identities (for complex GROUP BY expressions)
+        for node in self.groups:
+            if node.node_type != NodeType.IDENTIFIER:
+                identity = node.schema_column.identity
+                if identity not in required_columns:
+                    required_columns.append(identity)
         self._required_columns = list(dict.fromkeys(required_columns))
         self._group_by = create_group_state_engine(
             group_by_columns=self._normalized_group_by_columns,
@@ -154,14 +166,16 @@ class DrakenAggregateAndGroupNode(BasePlanNode):
             for aggregator in get_all_nodes_of_type(root, select_nodes=(NodeType.AGGREGATOR,)):
                 fn = self._normalize_aggregate_function(aggregator)
                 field_node = aggregator.parameters[0]
-                # For wildcard and identifiers, use the column directly
+                # For simple identifiers, use the column name directly
                 # For complex expressions, use the schema identity (which will be evaluated
                 # and added as a column to the morsel before aggregation)
                 if field_node.node_type == NodeType.WILDCARD:
                     column = "*"
+                elif field_node.node_type == NodeType.IDENTIFIER:
+                    column = field_node.schema_column.identity
                 else:
-                    # This includes both simple identifiers and complex expressions
-                    # Both are available as columns after evaluation via evaluate_and_append_draken
+                    # Complex expression (e.g., cast, binary op, function call)
+                    # The expression will be evaluated and added as a column with this identity
                     column = field_node.schema_column.identity
                 specs.append(
                     AggregationSpec(
@@ -306,6 +320,8 @@ class DrakenAggregateAndGroupNode(BasePlanNode):
         ingest_start = time.monotonic_ns()
         if isinstance(draken, Morsel):
             pre_engine_snapshot = self._engine_reading_snapshot()
+            if self._needs_arrow_eval:
+                draken = _prepare_draken_chunk(draken)
             if self._required_columns:
                 draken = draken.select(self._required_columns)
             self._group_by.ingest(draken)
