@@ -14,11 +14,11 @@ strip = true
 lto = true
 
 [dependencies]
-pythonize = "0.27"
+pythonize = "0.28"
 serde = "1.0.171"
 
 [dependencies.pyo3]
-version = "0.27"
+version = "0.28"
 features = ["extension-module"]
 
 [dependencies.sqlparser]
