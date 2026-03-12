@@ -120,9 +120,9 @@ _KEYWORDS = {
     "YESTERDAY",
 }
 try:  # pragma: no cover - best-effort enrichment
-    from opteryx.expression.functions import get_catalog as _get_catalog
+    from opteryx import functions as _functions
 
-    _FUNCTION_LIKE = {f.name for f in _get_catalog().list_functions()}
+    _FUNCTION_LIKE = set(_functions.functions())
 except Exception:  # pragma: no cover
     _FUNCTION_LIKE = set()
 

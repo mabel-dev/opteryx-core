@@ -1191,8 +1191,7 @@ cdef ArrayVector _make_array_vector(
     free(null_bitmap)
 
     # Tell to_arrow() to cast the binary child to UTF-8 strings.
-    import pyarrow as _pa
-    arr_vec._child_arrow_type = _pa.utf8()
+    arr_vec._child_decode_utf8 = True
 
     return arr_vec
 

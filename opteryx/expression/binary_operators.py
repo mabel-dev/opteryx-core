@@ -167,6 +167,11 @@ def _ip_containment(left: List[Optional[str]], right: List[str]) -> List[Optiona
     def _normalize_ip(v):
         if v is None:
             return None
+        # PyArrow scalar wrappers (BinaryScalar, StringScalar, etc.) — unwrap first
+        if hasattr(v, "as_py"):
+            v = v.as_py()
+            if v is None:
+                return None
         # memoryview -> bytes
         if isinstance(v, memoryview):
             try:

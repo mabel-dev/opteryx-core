@@ -1,14 +1,25 @@
 import os
 import sys
+import types
 from functools import cmp_to_key
 
 import pyarrow as pa
+import pytest
+from orso.schema import ConstantColumn
+from orso.schema import FlatColumn
+from orso.schema import FunctionColumn
+from orso.types import OrsoTypes
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
+from opteryx import EOS
 from opteryx.draken.morsels.morsel import Morsel
+from opteryx.expression import NodeType
+from opteryx.expression.functions import get_catalog
+from opteryx.models import Node
 from opteryx.models.query_properties import QueryProperties
 from opteryx.operators.heap_sort_node import HeapSortNode
+from opteryx.operators.sort_node import SortNode
 
 
 def _make_heap_sort(limit=2, direction="ASC"):
@@ -21,6 +32,48 @@ def _top_n_rows(morsel, mapped_order, limit):
     node = HeapSortNode(QueryProperties("heap-sort-test", {}), order_by=[], limit=limit)
     node.mapped_order = mapped_order
     return node._top_n(morsel).to_arrow().to_pylist()
+
+
+def _run_sort(table, order_by):
+    node = SortNode(QueryProperties("sort-test", {}), order_by=order_by)
+    list(node.execute(table))
+    outputs = [chunk for chunk in node.execute(EOS) if chunk is not EOS]
+    assert len(outputs) == 1
+    return outputs[0]
+
+
+def _identifier(name, value_type=OrsoTypes.ARRAY, element_type=None):
+    column = FlatColumn(name=name, type=value_type, element_type=element_type)
+    column.identity = name
+    return Node(NodeType.IDENTIFIER, schema_column=column)
+
+
+def _literal_array(value):
+    return Node(
+        NodeType.LITERAL,
+        type=OrsoTypes.ARRAY,
+        value=value,
+        schema_column=ConstantColumn(
+            name="query_vector",
+            type=OrsoTypes.ARRAY,
+            value=value,
+            element_type=OrsoTypes.DOUBLE,
+        ),
+    )
+
+
+def _vector_order_node(function_name, source_name="embedding", query_vector=None):
+    query_vector = query_vector or [1.0, 0.0]
+    schema_column = FunctionColumn(name=function_name.lower(), type=OrsoTypes.DOUBLE)
+    schema_column.identity = function_name.lower()
+    node = Node(
+        NodeType.FUNCTION,
+        value=function_name,
+        parameters=[_identifier(source_name, element_type=OrsoTypes.DOUBLE), _literal_array(query_vector)],
+        schema_column=schema_column,
+    )
+    node.function_ref = get_catalog().resolve(function_name, node.parameters)
+    return node
 
 
 def _expected_top_n_rows(rows, mapped_order, limit):
@@ -56,6 +109,10 @@ def _normalize_rows(rows):
             }
         )
     return normalized
+
+
+def _decode_strings(values):
+    return [value.decode("utf-8") if isinstance(value, bytes) else value for value in values]
 
 
 def test_dictionary_integer_vector_is_exact_compressible():
@@ -172,3 +229,132 @@ def test_top_n_multi_key_integer_dictionary_matches_materialized_order():
 
     assert _normalize_rows(asc_dict) == _normalize_rows(asc_expected)
     assert _normalize_rows(desc_dict) == _normalize_rows(desc_expected)
+
+
+def test_top_n_vector_similarity_uses_native_scoring_path():
+    pytest.importorskip("opteryx.nanobind.vector_search")
+
+    morsel = Morsel.from_arrow(
+        pa.table(
+            {
+                "label": pa.array(["match", "diagonal", "orthogonal"], type=pa.string()),
+                "embedding": pa.array(
+                    [[1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+                    type=pa.list_(pa.float32()),
+                ),
+            }
+        )
+    )
+
+    node = HeapSortNode(
+        QueryProperties("heap-sort-test", {}),
+        order_by=[(_vector_order_node("COSINE_SIMILARITY"), "DESC")],
+        limit=2,
+        vector_topk_candidate=True,
+    )
+
+    out = node._top_n(morsel).to_arrow()
+
+    assert _decode_strings(out["label"].to_pylist()) == ["match", "diagonal"]
+
+
+def test_top_n_vector_distance_uses_native_scoring_path():
+    pytest.importorskip("opteryx.nanobind.vector_search")
+
+    morsel = Morsel.from_arrow(
+        pa.table(
+            {
+                "label": pa.array(["match", "diagonal", "orthogonal"], type=pa.string()),
+                "embedding": pa.array(
+                    [[1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+                    type=pa.list_(pa.float32()),
+                ),
+            }
+        )
+    )
+
+    node = HeapSortNode(
+        QueryProperties("heap-sort-test", {}),
+        order_by=[(_vector_order_node("COSINE_DISTANCE"), "ASC")],
+        limit=2,
+    )
+
+    out = node._top_n(morsel).to_arrow()
+
+    assert _decode_strings(out["label"].to_pylist()) == ["match", "diagonal"]
+
+
+def test_sort_node_evaluates_functional_vector_order_by():
+    table = pa.table(
+        {
+            "label": pa.array(["match", "diagonal", "orthogonal"], type=pa.string()),
+            "embedding": pa.array(
+                [[1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+                type=pa.list_(pa.float32()),
+            ),
+        }
+    )
+
+    out = _run_sort(
+        table,
+        [(_vector_order_node("COSINE_DISTANCE"), "ascending")],
+    )
+
+    assert out["label"].to_pylist() == ["match", "diagonal", "orthogonal"]
+
+
+def test_top_n_vector_similarity_can_route_through_usearch(monkeypatch):
+    import opteryx.nanobind as nanobind_pkg
+
+    calls = {"created": 0, "add_batch": 0, "search": 0}
+
+    class FakeIndex:
+        def __init__(self, dimensions, capacity=0, metric="cos", expansion_add=0, expansion_search=0):
+            calls["created"] += 1
+            assert dimensions == 2
+            assert metric == "cos"
+
+        def add_batch(self, row_ids, vectors):
+            calls["add_batch"] += 1
+            assert row_ids.tolist() == [0, 1, 2]
+            assert vectors.shape == (3, 2)
+
+        def search(self, query_vector, k, exact=False):
+            calls["search"] += 1
+            assert query_vector.tolist() == pytest.approx([1.0, 0.0], abs=1e-6)
+            assert k == 2
+            assert exact is False
+            return [0, 1], [0.0, 0.29289323]
+
+    monkeypatch.setattr(HeapSortNode, "_USEARCH_ENABLED", True)
+    monkeypatch.setattr(HeapSortNode, "_USEARCH_MIN_ROWS", 1)
+    monkeypatch.setattr(
+        nanobind_pkg,
+        "usearch_native",
+        types.SimpleNamespace(UsearchIndex=FakeIndex),
+        raising=False,
+    )
+
+    morsel = Morsel.from_arrow(
+        pa.table(
+            {
+                "label": pa.array(["match", "diagonal", "orthogonal"], type=pa.string()),
+                "embedding": pa.array(
+                    [[1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+                    type=pa.list_(pa.float32()),
+                ),
+            }
+        )
+    )
+
+    node = HeapSortNode(
+        QueryProperties("heap-sort-test", {}),
+        order_by=[(_vector_order_node("COSINE_SIMILARITY"), "DESC")],
+        limit=2,
+        vector_topk_candidate=True,
+    )
+
+    out = node._top_n(morsel).to_arrow()
+
+    assert calls == {"created": 1, "add_batch": 1, "search": 1}
+    assert _decode_strings(out["label"].to_pylist()) == ["match", "diagonal"]

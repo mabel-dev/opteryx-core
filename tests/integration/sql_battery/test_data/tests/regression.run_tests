@@ -100,10 +100,10 @@ SELECT SUM(14) FROM $planets;
 SELECT COUNT(14) FROM $planets;
 
 # [711]
-SELECT DATE_TRUNC('YEAR', current_date);
-SELECT DATE_TRUNC('MONTH', current_date);
-SELECT DATE_TRUNC('year', current_date);
-SELECT DATE_TRUNC('month', current_date);
+SELECT TRUNC(current_date, 'YEAR');
+SELECT TRUNC(current_date, 'MONTH');
+SELECT TRUNC(current_date, 'year');
+SELECT TRUNC(current_date, 'month');
 
 # -> (Arrow) Tests
 SELECT * FROM testdata.astronauts WHERE birth_place -> 'state' = 'CA';

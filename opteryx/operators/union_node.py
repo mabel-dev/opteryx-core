@@ -9,8 +9,6 @@ Union Node
 This is a SQL Query Execution Plan Node.
 """
 
-from pyarrow import Table
-
 from opteryx import EOS
 from opteryx.models import QueryProperties
 
@@ -33,7 +31,7 @@ class UnionNode(BasePlanNode):
     def config(self):  # pragma: no cover
         return ""
 
-    def execute(self, morsel: Table, **kwargs) -> Table:
+    def execute(self, morsel, **kwargs):
         """
         Union needs to ensure the column names are the same and that
         coercible types are coerced.

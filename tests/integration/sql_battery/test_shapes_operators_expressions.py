@@ -419,7 +419,7 @@ STATEMENTS = [
         ("SELECT name, id*2 AS double_id FROM $planets ORDER BY double_id", 9, 2, None),
         ("SELECT name, id*2 FROM $planets ORDER BY id*2", 9, 2, None),
         ("SELECT name FROM (SELECT * FROM $planets) AS sub ORDER BY name", 9, 1, None),
-        ("SELECT name FROM $planets ORDER BY LENGTH(name)", 9, 1, UnsupportedSyntaxError),
+        ("SELECT name FROM $planets ORDER BY LENGTH(name)", 9, 1, None),
         ("SELECT name FROM $planets ORDER BY id + 1", 9, 1, None),
         ("SELECT 1 AS const, name FROM $planets ORDER BY const", 9, 2, None),
         ("SELECT 1 AS const, name FROM $planets ORDER BY name", 9, 2, None),

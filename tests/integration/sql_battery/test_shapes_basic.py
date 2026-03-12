@@ -77,7 +77,7 @@ STATEMENTS = [
         ("SELECT * FROM $planets TIMESTAMP AS OF INTERVAL '1' DAY", 9, 20, None),
         ("SELECT * FROM $planets TIMESTAMP AS OF '2024-12-15 00:00:00'", 9, 20, None),
         ("SELECT * FROM $planets TIMESTAMP AS OF CURRENT_DATE - INTERVAL '7' DAY", 9, 20, None),
-        ("SELECT * FROM $planets TIMESTAMP AS OF DATE_TRUNC('month', CURRENT_DATE)", 9, 20, None),
+        ("SELECT * FROM $planets TIMESTAMP AS OF TRUNC(CURRENT_DATE, 'month')", 9, 20, None),
         ("SELECT * FROM $planets AT(TIMESTAMP => '2024-12-15 00:00:00')", 9, 20, None),
 
         # Time-travel syntax (unsupported)
@@ -107,6 +107,8 @@ STATEMENTS = [
         ("SELECT * FROM $planets ORDER BY name ASC", 9, 20, None),
         ("SELECT * FROM $planets ORDER BY id, name", 9, 20, None),
         ("SELECT * FROM $planets ORDER BY id DESC, name ASC", 9, 20, None),
+        ("SELECT * FROM $planets ORDER BY LENGTH(name)", 9, 20, None),
+        ("SELECT * FROM $planets ORDER BY LENGTH(name) LIMIT 2", 2, 20, None),
 
         # DISTINCT variations
         ("SELECT DISTINCT id FROM $planets", 9, 1, None),

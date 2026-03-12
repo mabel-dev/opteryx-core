@@ -1,6 +1,9 @@
 """Tests for the function catalog."""
 
+from types import SimpleNamespace
+
 import pytest
+from orso.types import OrsoTypes
 
 from opteryx.expression.functions import (
     BindingContext,
@@ -225,9 +228,11 @@ class TestFunctionCatalog:
         """Builtin functions with aliases are resolvable."""
         catalog = get_catalog()
 
-        # TITLECASE is an alias for TITLE
+        # TITLE and TITLECASE are aliases for INITCAP
+        initcap_def = catalog.get_definition("INITCAP")
         title_def = catalog.get_definition("TITLE")
         titlecase_def = catalog.get_definition("TITLECASE")
+        assert initcap_def is title_def
         assert title_def is titlecase_def
 
     def test_builtin_function_kernels(self):
@@ -257,6 +262,11 @@ class TestResolve:
     def _make_context(self):
         return BindingContext(schema={}, bound_args={})
 
+    @staticmethod
+    def _make_node(type_, *, element_type=None):
+        schema_column = SimpleNamespace(type=type_, element_type=element_type)
+        return SimpleNamespace(type=type_, element_type=element_type, schema_column=schema_column)
+
     def test_resolve_returns_none_for_unknown_function(self):
         """resolve() returns None for unregistered function name."""
         catalog = self._make_catalog()
@@ -269,7 +279,6 @@ class TestResolve:
             FunctionDefinition, FunctionOverload, KernelSpec,
             LifecycleSpec, ParameterSpec, ReturnSpec, ResolvedFunction,
         )
-        from orso.types import OrsoTypes
 
         catalog = self._make_catalog()
         catalog.register(FunctionDefinition(
@@ -305,7 +314,6 @@ class TestResolve:
             FunctionDefinition, FunctionOverload, KernelSpec,
             LifecycleSpec, ParameterSpec, ReturnSpec,
         )
-        from orso.types import OrsoTypes
 
         catalog = self._make_catalog()
         catalog.register(FunctionDefinition(
@@ -337,7 +345,6 @@ class TestResolve:
             FunctionDefinition, FunctionOverload, KernelSpec,
             LifecycleSpec, ParameterSpec, ReturnSpec,
         )
-        from orso.types import OrsoTypes
 
         catalog = self._make_catalog()
         catalog.register(FunctionDefinition(
@@ -371,7 +378,6 @@ class TestResolve:
             FunctionDefinition, FunctionOverload, KernelSpec,
             LifecycleSpec, ParameterSpec, ReturnSpec,
         )
-        from orso.types import OrsoTypes
 
         catalog = self._make_catalog()
         catalog.register(FunctionDefinition(
@@ -405,7 +411,6 @@ class TestResolve:
             FunctionDefinition, FunctionOverload, KernelSpec,
             LifecycleSpec, ParameterSpec, ReturnSpec,
         )
-        from orso.types import OrsoTypes
 
         catalog = self._make_catalog()
         catalog.register(FunctionDefinition(
@@ -439,7 +444,6 @@ class TestResolve:
             FunctionDefinition, FunctionOverload, KernelSpec,
             LifecycleSpec, ParameterSpec, ReturnSpec,
         )
-        from orso.types import OrsoTypes
 
         sentinel_type = OrsoTypes.TIMESTAMP
 
@@ -474,9 +478,88 @@ class TestResolve:
         from opteryx.expression.functions import get_catalog
         catalog = get_catalog()
 
-        # DATEPART is hand-crafted with a 2-arg overload; test with 2 args.
-        for name, argc in (("TRIM", 1), ("LEVENSHTEIN", 2), ("SHA256", 1), ("DATEPART", 2), ("COSINE_SIMILARITY", 2)):
+        # EXTRACT is hand-crafted with a 2-arg overload; test with 2 args.
+        for name, argc in (
+            ("TRIM", 1),
+            ("LEVENSHTEIN", 2),
+            ("SHA256", 1),
+            ("EXTRACT", 2),
+        ):
             assert catalog.get_definition(name) is not None, f"{name} should be in catalog"
             result = catalog.resolve(name, [object()] * argc, BindingContext(schema={}, bound_args={}))
             assert result is not None, f"resolve('{name}') should return a match"
 
+        assert catalog.get_definition("TRUNC") is not None
+
+        assert catalog.get_definition("DATEPART") is None
+        assert catalog.get_definition("DATE_PART") is None
+        assert catalog.get_definition("DATE_TRUNC") is None
+        assert catalog.get_definition("DATETRUNC") is None
+
+    def test_resolve_cosine_similarity_prefers_numeric_vector_overload(self):
+        catalog = get_catalog()
+
+        result = catalog.resolve(
+            "COSINE_SIMILARITY",
+            [
+                self._make_node(OrsoTypes.ARRAY, element_type=OrsoTypes.DOUBLE),
+                self._make_node(OrsoTypes.ARRAY, element_type=OrsoTypes.DOUBLE),
+            ],
+            self._make_context(),
+        )
+
+        assert result is not None
+        assert result.selected_overload.id == "COSINE_SIMILARITY_VECTOR"
+
+    def test_resolve_cosine_similarity_prefers_text_overload(self):
+        catalog = get_catalog()
+
+        result = catalog.resolve(
+            "COSINE_SIMILARITY",
+            [
+                self._make_node(OrsoTypes.VARCHAR),
+                self._make_node(OrsoTypes.VARCHAR),
+            ],
+            self._make_context(),
+        )
+
+        assert result is not None
+        assert result.selected_overload.id == "COSINE_SIMILARITY_TEXT"
+
+    def test_resolve_cosine_distance_prefers_numeric_vector_overload(self):
+        catalog = get_catalog()
+
+        result = catalog.resolve(
+            "COSINE_DISTANCE",
+            [
+                self._make_node(OrsoTypes.ARRAY, element_type=OrsoTypes.DOUBLE),
+                self._make_node(OrsoTypes.ARRAY, element_type=OrsoTypes.DOUBLE),
+            ],
+            self._make_context(),
+        )
+
+        assert result is not None
+        assert result.selected_overload.id == "COSINE_DISTANCE_VECTOR"
+
+    def test_resolve_trunc_selects_numeric_and_temporal_overloads(self):
+        from opteryx.expression.functions import get_catalog
+
+        catalog = get_catalog()
+
+        numeric = catalog.resolve(
+            "TRUNC",
+            [self._make_node(OrsoTypes.DOUBLE), self._make_node(OrsoTypes.INTEGER)],
+            self._make_context(),
+        )
+        assert numeric is not None
+        assert numeric.selected_overload.id == "TRUNC_numeric"
+        assert numeric.inferred_return_type == OrsoTypes.DOUBLE
+
+        temporal = catalog.resolve(
+            "TRUNC",
+            [self._make_node(OrsoTypes.TIMESTAMP), self._make_node(OrsoTypes.VARCHAR)],
+            self._make_context(),
+        )
+        assert temporal is not None
+        assert temporal.selected_overload.id == "TRUNC_temporal"
+        assert temporal.inferred_return_type == OrsoTypes.TIMESTAMP

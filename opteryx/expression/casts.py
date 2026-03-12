@@ -53,7 +53,9 @@ def cast(_type):
         args = [a[0] for a in args]
         kwargs = {}
 
-        caster = OrsoTypes[_type].parse
+        # VARBINARY is not a canonical OrsoType — map to BLOB
+        _resolved_type = "BLOB" if _type == "VARBINARY" else _type
+        caster = OrsoTypes[_resolved_type].parse
 
         if _type == "DECIMAL":
             # DECIMAL requires special handling for precision and scale

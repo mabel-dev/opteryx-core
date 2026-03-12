@@ -147,6 +147,21 @@ def _builtin_text_functions() -> list[FunctionDefinition]:
                         cost_us_per_million=6.0,
                     ),
                 ),
+                FunctionOverload(
+                    id="SUBSTRING_2",
+                    parameters=(
+                        ParameterSpec(name="str", type_family="string"),
+                        ParameterSpec(name="start", type_family="integer"),
+                        ParameterSpec(name="length", type_family="integer"),
+                    ),
+                    return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.VARCHAR),
+                    kernel=KernelSpec(
+                        id="default",
+                        callable_ref=string_functions.substring,
+                        null_policy="passthrough",
+                        cost_us_per_million=6.0,
+                    ),
+                ),
             ),
         ),
     ]
@@ -210,7 +225,7 @@ def _builtin_arithmetic_functions() -> list[FunctionDefinition]:
         ),
         FunctionDefinition(
             name="CEILING",
-            aliases=(),
+            aliases=("CEIL",),
             category="arithmetic",
             volatility="immutable",
             deterministic=True,
@@ -499,7 +514,7 @@ def _builtin_logical_functions() -> list[FunctionDefinition]:
             ),
         ),
         FunctionDefinition(
-            name="PASSTHRU",
+            name="_PASSTHRU",
             aliases=(),
             category="logical",
             volatility="immutable",
@@ -509,7 +524,7 @@ def _builtin_logical_functions() -> list[FunctionDefinition]:
             documentation="Returns the input value unchanged. Used for testing and compatibility.",
             overloads=(
                 FunctionOverload(
-                    id="PASSTHRU_1",
+                    id="_PASSTHRU_1",
                     parameters=(ParameterSpec(name="value", type_family="any"),),
                     return_spec=ReturnSpec(mode="same_as_arg", arg_index=0),
                     kernel=KernelSpec(
@@ -521,7 +536,7 @@ def _builtin_logical_functions() -> list[FunctionDefinition]:
             ),
         ),
         FunctionDefinition(
-            name="CASE",
+            name="_CASE",
             aliases=(),
             category="logical",
             volatility="immutable",
@@ -531,7 +546,7 @@ def _builtin_logical_functions() -> list[FunctionDefinition]:
             documentation="Returns a value based on conditional expressions.",
             overloads=(
                 FunctionOverload(
-                    id="CASE_variadic",
+                    id="_CASE_variadic",
                     parameters=_variadic_any,
                     return_spec=ReturnSpec(mode="resolver", resolver=_case_return_type),
                     kernel=KernelSpec(
@@ -589,8 +604,10 @@ def _builtin_constant_functions() -> list[FunctionDefinition]:
         _make(
             "CURRENT_TIMESTAMP",
             OrsoTypes.TIMESTAMP,
+            aliases=("NOW",),
             summary="Current timestamp (SQL-92).",
         ),
+        _make("UTC_TIMESTAMP", OrsoTypes.TIMESTAMP, summary="Current UTC timestamp."),
         _make("VERSION", OrsoTypes.VARCHAR, summary="Database version string."),
         _make("CONNECTION_ID", OrsoTypes.INTEGER, summary="Current connection identifier."),
         _make("DATABASE", OrsoTypes.VARCHAR, summary="Current database name."),
@@ -602,7 +619,7 @@ def _builtin_constant_functions() -> list[FunctionDefinition]:
 
 
 def _datepart_return_type(arg_nodes) -> OrsoTypes:
-    """DATEPART return type depends on the part name literal."""
+    """EXTRACT return type depends on the part name literal."""
     part_val = getattr(arg_nodes[0], "value", None) if arg_nodes else None
     if part_val is None:
         return OrsoTypes.INTEGER
@@ -620,7 +637,7 @@ def _builtin_temporal_extra_functions() -> list[FunctionDefinition]:
 
     return [
         FunctionDefinition(
-            name="DATEPART",
+            name="EXTRACT",
             aliases=(),
             category="temporal",
             volatility="immutable",
@@ -630,7 +647,7 @@ def _builtin_temporal_extra_functions() -> list[FunctionDefinition]:
             documentation="Extracts a named part (year, month, day, epoch, etc.) from a date or timestamp.",
             overloads=(
                 FunctionOverload(
-                    id="DATEPART_2",
+                    id="EXTRACT_2",
                     parameters=(
                         ParameterSpec(name="part", type_family="string", constant_only=True),
                         ParameterSpec(name="date", type_family="temporal"),
@@ -744,7 +761,7 @@ def _builtin_utility_functions() -> list[FunctionDefinition]:
             ),
         ),
         FunctionDefinition(
-            name="ARRAY",
+            name="_ARRAY",
             aliases=(),
             category="utility",
             volatility="immutable",
@@ -754,7 +771,7 @@ def _builtin_utility_functions() -> list[FunctionDefinition]:
             documentation="Constructs an array of the specified element type.",
             overloads=(
                 FunctionOverload(
-                    id="ARRAY_2",
+                    id="_ARRAY_2",
                     parameters=(
                         ParameterSpec(name="expr", type_family="any"),
                         ParameterSpec(name="type_name", type_family="string", constant_only=True),
@@ -769,7 +786,7 @@ def _builtin_utility_functions() -> list[FunctionDefinition]:
             ),
         ),
         FunctionDefinition(
-            name="TRY_ARRAY",
+            name="_TRY_ARRAY",
             aliases=(),
             category="utility",
             volatility="immutable",
@@ -779,7 +796,7 @@ def _builtin_utility_functions() -> list[FunctionDefinition]:
             documentation="Like ARRAY but returns null on type conversion failure.",
             overloads=(
                 FunctionOverload(
-                    id="TRY_ARRAY_2",
+                    id="_TRY_ARRAY_2",
                     parameters=(
                         ParameterSpec(name="expr", type_family="any"),
                         ParameterSpec(name="type_name", type_family="string", constant_only=True),
@@ -886,18 +903,11 @@ def _builtin_text_extended_functions() -> list[FunctionDefinition]:
             "SOUNDEX", _soundex, OrsoTypes.VARCHAR, (_s,), summary="Return Soundex phonetic code."
         ),
         _make(
-            "TITLE",
-            compute.utf8_title,
-            OrsoTypes.VARCHAR,
-            (_s,),
-            aliases=("TITLECASE",),
-            summary="Convert string to title case.",
-        ),
-        _make(
             "INITCAP",
             _initcap,
             OrsoTypes.VARCHAR,
             (_s,),
+            aliases=("TITLE", "TITLECASE"),
             summary="Capitalise first letter of each word.",
         ),
         _make(
@@ -992,7 +1002,7 @@ def _builtin_text_extended_functions() -> list[FunctionDefinition]:
             summary="Split string into array.",
         ),
         _make(
-            "MATCH_AGAINST",
+            "_MATCH_AGAINST",
             string_functions.match_against,
             OrsoTypes.BOOLEAN,
             (
@@ -1026,7 +1036,7 @@ def _builtin_text_extended_functions() -> list[FunctionDefinition]:
             summary="Replace regex matches.",
         ),
         _make(
-            "GET_STRING",
+            "_GET_STRING",
             _get_string,
             OrsoTypes.VARCHAR,
             (
@@ -1108,13 +1118,39 @@ def _builtin_hash_encoding_functions() -> list[FunctionDefinition]:
             "SHA384", _sha384_kernel, OrsoTypes.BLOB, (_any,), cost=14.0, summary="SHA-384 hash."
         ),
         _make("SHA512", _sha512, OrsoTypes.BLOB, (_any,), cost=14.0, summary="SHA-512 hash."),
-        _make(
-            "RANDOM",
-            number_functions.random_number,
-            OrsoTypes.DOUBLE,
-            (_n,),
+        FunctionDefinition(
+            name="RANDOM",
+            aliases=("RAND",),
+            category="hash_encoding",
             volatility="volatile",
+            deterministic=False,
+            lifecycle=LifecycleSpec(status="active"),
             summary="Generate random numbers.",
+            documentation="Returns uniform random float(s) in [0, 1).",
+            overloads=(
+                FunctionOverload(
+                    id="RANDOM_default",
+                    parameters=(_n,),
+                    return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.DOUBLE),
+                    kernel=KernelSpec(
+                        id="default",
+                        callable_ref=number_functions.random_number,
+                        null_policy="strict",
+                        cost_us_per_million=10.0,
+                    ),
+                ),
+                FunctionOverload(
+                    id="RANDOM_0",
+                    parameters=(),
+                    return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.DOUBLE),
+                    kernel=KernelSpec(
+                        id="zero_arg",
+                        callable_ref=number_functions.random_number,
+                        null_policy="strict",
+                        cost_us_per_million=10.0,
+                    ),
+                ),
+            ),
         ),
         _make(
             "NORMAL",
@@ -1163,8 +1199,12 @@ def _builtin_array_misc_functions() -> list[FunctionDefinition]:
     from opteryx.expression.functions.implementations.logical import if_null as _of_if_null
     from opteryx.expression.functions.implementations.logical import null_if as _of_null_if
     from opteryx.expression.functions.implementations.utility import (
+        cosine_distance as _of_cosine_distance,
+    )
+    from opteryx.expression.functions.implementations.utility import (
         cosine_similarity as _of_cosine_similarity,
     )
+    from opteryx.expression.functions.implementations.utility import embed as _of_embed
     from opteryx.expression.functions.implementations.utility import humanize as _of_humanize
     from opteryx.expression.functions.implementations.utility import (
         jsonb_object_keys as _of_jsonb_object_keys,
@@ -1175,7 +1215,9 @@ def _builtin_array_misc_functions() -> list[FunctionDefinition]:
         array_contains = staticmethod(_of_array_contains)
         if_null = staticmethod(_of_if_null)
         null_if = staticmethod(_of_null_if)
+        cosine_distance = staticmethod(_of_cosine_distance)
         cosine_similarity = staticmethod(_of_cosine_similarity)
+        embed = staticmethod(_of_embed)
         humanize = staticmethod(_of_humanize)
         jsonb_object_keys = staticmethod(_of_jsonb_object_keys)
 
@@ -1213,6 +1255,9 @@ def _builtin_array_misc_functions() -> list[FunctionDefinition]:
     _arr = ParameterSpec(name="arr", type_family="array")
     _item = ParameterSpec(name="item", type_family="any")
     _set = ParameterSpec(name="items", type_family="array")
+
+    def _embed_return_type(_arg_nodes):
+        return (OrsoTypes.ARRAY, OrsoTypes.DOUBLE)
 
     return [
         _make(
@@ -1254,13 +1299,108 @@ def _builtin_array_misc_functions() -> list[FunctionDefinition]:
             cost=10.0,
             summary="Format number in human-readable form.",
         ),
-        _make(
+        FunctionDefinition(
+            "EMBED",
+            aliases=(),
+            category="array",
+            volatility="immutable",
+            deterministic=True,
+            lifecycle=LifecycleSpec(status="active"),
+            summary="Convert text to an embedding vector.",
+            documentation="Embeds text using the configured engine embedding provider.",
+            overloads=(
+                FunctionOverload(
+                    id="EMBED_TEXT",
+                    parameters=(ParameterSpec(name="text", type_family="string"),),
+                    return_spec=ReturnSpec(mode="resolver", resolver=_embed_return_type),
+                    kernel=KernelSpec(
+                        id="default",
+                        callable_ref=other_functions.embed,
+                        null_policy="strict",
+                        cost_us_per_million=120.0,
+                    ),
+                ),
+            ),
+        ),
+        FunctionDefinition(
             "COSINE_SIMILARITY",
-            other_functions.cosine_similarity,
-            OrsoTypes.DOUBLE,
-            (_arr, ParameterSpec(name="vec", type_family="array")),
-            cost=30.0,
+            aliases=(),
+            category="array",
+            volatility="immutable",
+            deterministic=True,
+            lifecycle=LifecycleSpec(status="active"),
             summary="Cosine similarity between two vectors.",
+            documentation="Cosine similarity over numeric vectors or lexical text inputs.",
+            overloads=(
+                FunctionOverload(
+                    id="COSINE_SIMILARITY_VECTOR",
+                    parameters=(
+                        ParameterSpec(name="arr", type_family="numeric_vector"),
+                        ParameterSpec(name="vec", type_family="numeric_vector"),
+                    ),
+                    return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.DOUBLE),
+                    kernel=KernelSpec(
+                        id="default",
+                        callable_ref=other_functions.cosine_similarity,
+                        null_policy="strict",
+                        cost_us_per_million=30.0,
+                    ),
+                ),
+                FunctionOverload(
+                    id="COSINE_SIMILARITY_TEXT",
+                    parameters=(
+                        ParameterSpec(name="arr", type_family="string"),
+                        ParameterSpec(name="vec", type_family="string"),
+                    ),
+                    return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.DOUBLE),
+                    kernel=KernelSpec(
+                        id="default",
+                        callable_ref=other_functions.cosine_similarity,
+                        null_policy="strict",
+                        cost_us_per_million=30.0,
+                    ),
+                ),
+            ),
+        ),
+        FunctionDefinition(
+            "COSINE_DISTANCE",
+            aliases=(),
+            category="array",
+            volatility="immutable",
+            deterministic=True,
+            lifecycle=LifecycleSpec(status="active"),
+            summary="Cosine distance between two vectors.",
+            documentation="Cosine distance over numeric vectors or lexical text inputs.",
+            overloads=(
+                FunctionOverload(
+                    id="COSINE_DISTANCE_VECTOR",
+                    parameters=(
+                        ParameterSpec(name="arr", type_family="numeric_vector"),
+                        ParameterSpec(name="vec", type_family="numeric_vector"),
+                    ),
+                    return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.DOUBLE),
+                    kernel=KernelSpec(
+                        id="default",
+                        callable_ref=other_functions.cosine_distance,
+                        null_policy="strict",
+                        cost_us_per_million=30.0,
+                    ),
+                ),
+                FunctionOverload(
+                    id="COSINE_DISTANCE_TEXT",
+                    parameters=(
+                        ParameterSpec(name="arr", type_family="string"),
+                        ParameterSpec(name="vec", type_family="string"),
+                    ),
+                    return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.DOUBLE),
+                    kernel=KernelSpec(
+                        id="default",
+                        callable_ref=other_functions.cosine_distance,
+                        null_policy="strict",
+                        cost_us_per_million=30.0,
+                    ),
+                ),
+            ),
         ),
     ]
 
@@ -1270,6 +1410,7 @@ def _builtin_arithmetic_extended_functions() -> list[FunctionDefinition]:
     from pyarrow import compute
 
     from opteryx.expression.functions.implementations import arithmetic as number_functions
+    from opteryx.expression.functions.implementations import temporal as date_functions
 
     def _make(
         name, callable_ref, ret, params, aliases=(), cost=2.0, null_policy="strict", summary=""
@@ -1299,20 +1440,52 @@ def _builtin_arithmetic_extended_functions() -> list[FunctionDefinition]:
         )
 
     _num = ParameterSpec(name="num", type_family="numeric")
+    _temporal_value = ParameterSpec(name="value", type_family="any")
+    _temporal_unit = ParameterSpec(name="unit", type_family="string", constant_only=True)
 
     return [
         _make(
             "SIGN", compute.sign, OrsoTypes.INTEGER, (_num,), summary="Sign of number (-1, 0, 1)."
         ),
-        _make(
-            "TRUNCATE",
-            number_functions.trunc,
-            OrsoTypes.DOUBLE,
-            (
-                _num,
-                ParameterSpec(name="scale", type_family="integer", variadic=True, optional=True),
+        FunctionDefinition(
+            name="TRUNC",
+            aliases=("TRUNCATE",),
+            category="arithmetic",
+            volatility="immutable",
+            deterministic=True,
+            lifecycle=LifecycleSpec(status="active"),
+            summary="Truncate a numeric or temporal value.",
+            documentation="Truncates numeric values toward zero or temporal values to the start of a unit.",
+            overloads=(
+                FunctionOverload(
+                    id="TRUNC_numeric",
+                    parameters=(
+                        _num,
+                        ParameterSpec(
+                            name="scale", type_family="integer", variadic=True, optional=True
+                        ),
+                    ),
+                    return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.DOUBLE),
+                    kernel=KernelSpec(
+                        id="numeric",
+                        callable_ref=number_functions.trunc,
+                        cost_us_per_million=2.0,
+                    ),
+                ),
+                FunctionOverload(
+                    id="TRUNC_temporal",
+                    parameters=(
+                        _temporal_value,
+                        _temporal_unit,
+                    ),
+                    return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.TIMESTAMP),
+                    kernel=KernelSpec(
+                        id="temporal",
+                        callable_ref=date_functions.trunc_temporal,
+                        cost_us_per_million=4.0,
+                    ),
+                ),
             ),
-            summary="Truncate towards zero.",
         ),
         _make(
             "POWER",
@@ -1338,7 +1511,6 @@ def _builtin_arithmetic_extended_functions() -> list[FunctionDefinition]:
 def _builtin_temporal_functions() -> list[FunctionDefinition]:
     """Full temporal function set."""
     from opteryx.expression.functions.implementations import temporal as date_functions
-    from opteryx.utils.dates import date_trunc
 
     def _make(
         name, callable_ref, ret, params, aliases=(), cost=4.0, null_policy="strict", summary=""
@@ -1371,14 +1543,6 @@ def _builtin_temporal_functions() -> list[FunctionDefinition]:
     _date = ParameterSpec(name="date", type_family="temporal")
 
     return [
-        _make(
-            "DATE_TRUNC",
-            date_trunc,
-            OrsoTypes.TIMESTAMP,
-            (_part, _date),
-            aliases=("DATETRUNC",),
-            summary="Truncate date/timestamp to specified granularity.",
-        ),
         _make(
             "TIME_BUCKET",
             date_functions.date_floor,

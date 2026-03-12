@@ -205,11 +205,16 @@ def _evaluate_timetravel_expression(node, apply_interval_literal_to_now: bool = 
 
         try:
             from opteryx.expression.functions import get_catalog as _get_catalog
+            from opteryx.expression.functions.catalog import BindingContext
 
-            _func_def = _get_catalog().get_definition(node.value)
+            _catalog = _get_catalog()
+            _func_def = _catalog.get_definition(node.value)
             if _func_def is None or not _func_def.overloads:
                 raise UnsupportedSyntaxError(f"Unknown function '{node.value}'.")
-            result = _func_def.overloads[0].kernel.callable_ref(*parameter_values)
+            resolved = _catalog.resolve(node.value, node.parameters, BindingContext(schema={}, bound_args={}))
+            if resolved is None:
+                raise UnsupportedSyntaxError(f"Unknown function '{node.value}'.")
+            result = resolved.selected_overload.kernel.callable_ref(*parameter_values)
         except UnsupportedSyntaxError:
             raise
         except Exception as err:
@@ -325,7 +330,7 @@ def extract_timetravel_timestamp(version_clause) -> Optional[object]:
         TIMESTAMP AS OF INTERVAL '1' DAY -- interpreted as current time minus 1 day
         TIMESTAMP AS OF '2024-12-15 00:00:00'
         TIMESTAMP AS OF CURRENT_DATE - INTERVAL '7' DAY
-        TIMESTAMP AS OF DATE_TRUNC('month', CURRENT_DATE)
+        TIMESTAMP AS OF TRUNC(CURRENT_DATE, 'month')
         AT(TIMESTAMP => '2024-12-15 00:00:00') -- legacy/alternate syntax
 
     Args:
@@ -491,7 +496,7 @@ def case_when(value, alias: Optional[List[str]] = None, key=None):
 
     return Node(
         NodeType.FUNCTION,
-        value="CASE",
+        value="_CASE",
         parameters=[conditions_node, results_node],
         alias=alias,
     )
@@ -709,7 +714,7 @@ def extract(branch, alias: Optional[List[str]] = None, key=None):
 
     return Node(
         NodeType.FUNCTION,
-        value="DATEPART",
+        value="EXTRACT",
         parameters=[datepart, identifier],
         alias=alias,
     )
@@ -750,6 +755,11 @@ def function(branch, alias: Optional[List[str]] = None, key=None):
         null_treatment = branch["args"].get("null_treatment")
         filter_condition = branch.get("filter")
 
+    if func == "MATCH_AGAINST" or func.startswith("_"):
+        raise UnsupportedSyntaxError(
+            f"`{func}` is internal. Use documented SQL syntax instead."
+        )
+
     if functions.is_function(func):
         node_type = NodeType.FUNCTION
         if filter_condition is not None:
@@ -768,6 +778,18 @@ def function(branch, alias: Optional[List[str]] = None, key=None):
             filter_condition = build(filter_condition)
     else:  # pragma: no cover
         from opteryx.exceptions import FunctionNotFoundError
+
+        # Rewrite type-names used as cast functions: VARCHAR(x) → CAST(x AS VARCHAR)
+        _TYPE_CAST_NAMES = frozenset(
+            ("VARCHAR", "INTEGER", "DOUBLE", "TIMESTAMP", "DATE", "BOOLEAN", "BLOB", "VARBINARY", "FLOAT")
+        )
+        if func in _TYPE_CAST_NAMES and len(args) == 1:
+            return Node(
+                NodeType.CAST,
+                left=args[0],
+                value=func,
+                alias=alias,
+            )
 
         likely_match = suggest_alternative(func, operators.aggregators() + functions.functions())
         if likely_match is None:
@@ -1022,7 +1044,7 @@ def match_against(branch, alias: Optional[List[str]] = None, key=None):
 
     return Node(
         NodeType.FUNCTION,
-        value="MATCH_AGAINST",
+        value="_MATCH_AGAINST",
         parameters=[columns[0], match_to],
         alias=alias or f"MATCH ({columns[0].value}) AGAINST ({match_to.value})",
     )

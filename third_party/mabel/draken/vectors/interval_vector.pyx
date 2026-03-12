@@ -37,6 +37,7 @@ from libc.string cimport memset
 
 from opteryx.draken.core.buffers cimport DrakenFixedBuffer
 from opteryx.draken.core.buffers cimport DRAKEN_INTERVAL
+from opteryx.draken.core.buffers cimport DRAKEN_TIMESTAMP64
 from opteryx.draken.core.fixed_vector cimport alloc_fixed_buffer
 from opteryx.draken.core.fixed_vector cimport buf_dtype
 from opteryx.draken.core.fixed_vector cimport buf_itemsize
@@ -44,6 +45,7 @@ from opteryx.draken.core.fixed_vector cimport buf_length
 from opteryx.draken.core.fixed_vector cimport free_fixed_buffer
 from opteryx.draken.vectors.bool_vector cimport BoolVector
 from opteryx.draken.vectors.bool_vector cimport bool_vector_from_bits
+from opteryx.draken.vectors.timestamp_vector cimport TimestampVector
 from opteryx.draken.vectors.vector cimport MIX_HASH_CONSTANT, NULL_HASH, Vector, mix_hash, simd_mix_hash
 
 DEF INTERVAL_HASH_CHUNK = 512
@@ -634,11 +636,7 @@ cdef class IntervalVector(Vector):
         return self._compare_scalar(sc_months, sc_microseconds, INTERVAL_OP_GTE, True)
 
     cpdef object apply_to_temporal(self, object values, int8_t signum=1):
-        import pyarrow as pa
-
         cdef list temporal_values = []
-        cdef list rows = []
-        cdef object value
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef IntervalValue* intervals = <IntervalValue*> ptr.data
         cdef Py_ssize_t interval_len = ptr.length
@@ -679,7 +677,16 @@ cdef class IntervalVector(Vector):
 
         row_len = len(temporal_values)
         out_len = _resolve_broadcast_length(row_len, interval_len)
-        rows = [None] * out_len
+
+        # Preallocate TimestampVector — write results directly into the C buffer.
+        cdef TimestampVector result = TimestampVector(out_len)
+        cdef int64_t* out_data = <int64_t*> result.ptr.data
+        cdef Py_ssize_t null_bytes = (out_len + 7) >> 3
+        cdef uint8_t* out_null = <uint8_t*> malloc(null_bytes)
+        if out_null == NULL:
+            raise MemoryError()
+        memset(out_null, 0, null_bytes)  # all null initially; set bits below
+        result.ptr.null_bitmap = out_null
 
         for i in range(out_len):
             value_index = _broadcast_index(i, row_len)
@@ -713,9 +720,10 @@ cdef class IntervalVector(Vector):
                 epoch_days = _days_from_civil(year, month, day)
 
             result_microseconds = epoch_days * MICROSECONDS_PER_DAY + day_microseconds
-            rows[i] = result_microseconds
+            out_data[i] = result_microseconds
+            out_null[i >> 3] |= (<uint8_t>1 << (i & 7))  # mark valid
 
-        return pa.array(rows, type=pa.timestamp("us"))
+        return result
 
     cpdef IntervalVector take(self, int32_t[::1] indices):
         cdef Py_ssize_t n = indices.shape[0]

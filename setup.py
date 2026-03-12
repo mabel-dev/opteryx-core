@@ -432,6 +432,7 @@ extensions = [
     make_draken_extension("vectors.bool_vector", "vectors/bool_vector.pyx"),
     make_draken_extension("vectors.float64_vector", "vectors/float64_vector.pyx"),
     make_draken_extension("vectors.array_vector", "vectors/array_vector.pyx"),
+    make_draken_extension("vectors.vector_vector", "vectors/vector_vector.pyx"),
     make_draken_extension("vectors.time_vector", "vectors/time_vector.pyx"),
     make_draken_extension("vectors.interval_vector", "vectors/interval_vector.pyx"),
     make_draken_extension("vectors.constant_vector", "vectors/constant_vector.pyx"),
@@ -855,6 +856,88 @@ extensions.append(
         language="c++",
     )
 )
+
+extensions.append(
+    Extension(
+        "opteryx.nanobind.vector_search",
+        sources=[
+            "src/cpp/vector_search_native.cpp",
+            "third_party/nanobind/src/nb_combined.cpp",
+        ],
+        include_dirs=include_dirs + [
+            "third_party/nanobind",
+            "third_party/nanobind/src",
+            "third_party/nanobind/ext/robin_map/include",
+        ],
+        extra_compile_args=CPP_FLAGS + ["-fno-strict-aliasing", "-DNB_COMPACT_ASSERTIONS"],
+        extra_link_args=LD_EXTRA,
+        language="c++",
+    )
+)
+
+extensions.append(
+    Extension(
+        "opteryx.nanobind.usearch_native",
+        sources=[
+            "src/cpp/usearch_native.cpp",
+            "third_party/nanobind/src/nb_combined.cpp",
+        ],
+        include_dirs=include_dirs + [
+            "third_party/usearch/include",
+            "third_party/usearch/fp16/include",
+            "third_party/usearch/simsimd/include",
+            "third_party/nanobind",
+            "third_party/nanobind/src",
+            "third_party/nanobind/ext/robin_map/include",
+        ],
+        extra_compile_args=CPP_FLAGS + [
+            "-fno-strict-aliasing",
+            "-DNB_COMPACT_ASSERTIONS",
+            "-DUSEARCH_USE_SIMSIMD=1",
+        ],
+        extra_link_args=LD_EXTRA,
+        language="c++",
+    )
+)
+
+def _select_onnxruntime_sdk():
+    if is_mac() and arch == "aarch64":
+        root = "third_party/onnxruntime/onnxruntime-osx-arm64-1.22.0"
+        rpath = "@loader_path/../../third_party/onnxruntime/onnxruntime-osx-arm64-1.22.0/lib"
+        return root, rpath
+    if is_linux() and arch == "x86_64":
+        root = "third_party/onnxruntime/onnxruntime-linux-x64-1.22.0"
+        rpath = r"$ORIGIN/../../third_party/onnxruntime/onnxruntime-linux-x64-1.22.0/lib"
+        return root, rpath
+    return None, None
+
+
+_ort_root, _ort_rpath = _select_onnxruntime_sdk()
+_ort_include = os.path.join(_ort_root, "include") if _ort_root else None
+_ort_lib = os.path.join(_ort_root, "lib") if _ort_root else None
+if _ort_include and _ort_lib and os.path.exists(_ort_include) and os.path.exists(_ort_lib):
+    extensions.append(
+        Extension(
+            "opteryx.nanobind.minilm_native",
+            sources=[
+                "src/cpp/minilm_native.cpp",
+                "third_party/nanobind/src/nb_combined.cpp",
+            ],
+            include_dirs=include_dirs + [
+                _ort_include,
+                "third_party/nanobind",
+                "third_party/nanobind/src",
+                "third_party/nanobind/ext/robin_map/include",
+            ],
+            extra_compile_args=CPP_FLAGS + ["-fno-strict-aliasing", "-DNB_COMPACT_ASSERTIONS"],
+            extra_link_args=LD_EXTRA + [
+                f"-L{_ort_lib}",
+                "-lonnxruntime",
+                f"-Wl,-rpath,{_ort_rpath}",
+            ],
+            language="c++",
+        )
+    )
 
 # Setup configuration
 setup(

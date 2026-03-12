@@ -33,6 +33,11 @@ def if_null(values, replacements):
     """
     from opteryx.expression.unary_operations import _is_null
 
+    # Broadcast scalar replacement to a 1-element numpy array so the length
+    # checks below work uniformly regardless of caller.
+    if not hasattr(replacements, "__len__") and not hasattr(replacements, "to_numpy"):
+        replacements = numpy.array([replacements])
+
     is_null_mask = _is_null(values)
 
     if hasattr(replacements, "to_numpy"):

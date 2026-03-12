@@ -42,6 +42,7 @@ from opteryx.draken.vectors.interval_vector cimport (
     from_arrow_binary as interval_from_arrow_binary,
 )
 from opteryx.draken.vectors.array_vector cimport from_arrow as array_from_arrow
+from opteryx.draken.vectors.vector_vector cimport from_arrow as vector_from_arrow_vector
 from opteryx.draken.vectors.dictionary_vector cimport from_arrow as dictionary_from_arrow
 
 from opteryx.draken.vectors.arrow_vector import from_arrow as arrow_from_arrow
@@ -99,6 +100,13 @@ cdef void expose_draken_fixed_as_arrow(
 
 cpdef object vector_from_arrow(object array):
     import pyarrow as pa
+    import pyarrow.compute as pc
+    cdef object lengths
+    cdef object raw_lengths
+    cdef object length_value
+    cdef object fixed_array
+    cdef bint uniform_lengths
+    cdef object dimension = None
     
     # Handle chunked arrays: single chunk is OK, multiple chunks not supported
     if hasattr(array, "num_chunks"):
@@ -156,7 +164,29 @@ cpdef object vector_from_arrow(object array):
         return timestamp_from_arrow(array)
     if pa.types.is_time32(pa_type) or pa.types.is_time64(pa_type):
         return time_from_arrow(array)
+    if pa.types.is_fixed_size_list(pa_type):
+        if pa.types.is_integer(pa_type.value_type) or pa.types.is_floating(pa_type.value_type):
+            return vector_from_arrow_vector(array)
+        return arrow_from_arrow(array)
     if pa.types.is_list(pa_type) or pa.types.is_large_list(pa_type):
+        if pa.types.is_integer(pa_type.value_type) or pa.types.is_floating(pa_type.value_type):
+            raw_lengths = pc.list_value_length(array).to_pylist()
+            uniform_lengths = True
+            for length_value in raw_lengths:
+                if length_value is None:
+                    continue
+                if dimension is None:
+                    dimension = length_value
+                    continue
+                if length_value != dimension:
+                    uniform_lengths = False
+                    break
+            if uniform_lengths and dimension is not None and dimension > 0:
+                try:
+                    fixed_array = array.cast(pa.list_(pa_type.value_type, dimension))
+                    return vector_from_arrow_vector(fixed_array)
+                except Exception:
+                    pass
         return array_from_arrow(array)
     if isinstance(pa_type, pa.StructType):
         return string_from_arrow_struct(array)
@@ -193,21 +223,21 @@ cpdef object vector_from_sequence(object data, object dtype=None):
         # Try int64 memoryview
         int64_view = data
         return int64_from_sequence(int64_view)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, BufferError):
         pass
     
     try:
         # Try float64 memoryview
         float64_view = data
         return float64_from_sequence(float64_view)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, BufferError):
         pass
     
     try:
         # Try bool/uint8 memoryview
         bool_view = data
         return bool_from_sequence(bool_view)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, BufferError):
         pass
     
     # Constant path for Python sequences (avoid materializing full repeated payloads).
@@ -263,7 +293,7 @@ cpdef DrakenType arrow_type_to_draken(object dtype):
         ):
             return DrakenType.DRAKEN_DICTIONARY
         return DrakenType.DRAKEN_NON_NATIVE
-    elif pa.types.is_list(dtype) or pa.types.is_large_list(dtype):
+    elif pa.types.is_list(dtype) or pa.types.is_large_list(dtype) or pa.types.is_fixed_size_list(dtype):
         return DrakenType.DRAKEN_ARRAY
     elif pa.types.is_fixed_size_binary(dtype) and dtype.byte_width == 16:
         return DrakenType.DRAKEN_INTERVAL

@@ -9,8 +9,6 @@ from collections import defaultdict
 from collections.abc import Iterable
 from typing import Any
 
-import pyarrow
-
 from opteryx import EOS
 from opteryx.compiled.structures.shuffle_partition import row_indexes_by_bin_flat
 from opteryx.draken.morsels.morsel import Morsel
@@ -302,7 +300,7 @@ class ShuffleNode(BasePlanNode):
                 yield morsel
         self.readings["shuffle_chunks_out"] += emitted
 
-    def execute(self, morsel: pyarrow.Table, **kwargs):
+    def execute(self, morsel, **kwargs):
         morsel = self.ensure_draken_morsel(morsel)
         _ = kwargs
 

@@ -100,6 +100,17 @@ class DrakenAggregateAndGroupNode(BasePlanNode):
         )
         self.group_by_columns = list({node.schema_column.identity for node in self.groups})
         self._aggregation_specs = self._build_aggregation_specs(self.aggregates)
+        
+        # Handle GROUP BY without aggregates by adding implicit COUNT(*)
+        # This allows the group state engine to work correctly
+        if not self._aggregation_specs and self.group_by_columns:
+            # Add implicit COUNT(*) aggregate for GROUP BY with no explicit aggregates
+            self._aggregation_specs = [AggregationSpec(alias="count", function="count", column=None)]
+            # Mark that we added an implicit aggregate so we can remove it from output later
+            self._implicit_count_added = True
+        else:
+            self._implicit_count_added = False
+        
         self._normalized_group_by_columns = normalize_group_by_columns(self.group_by_columns)
         self._normalized_aggregations = normalize_aggregations(self._aggregation_specs)
         required_columns = list(self.group_by_columns)
@@ -167,10 +178,14 @@ class DrakenAggregateAndGroupNode(BasePlanNode):
                 fn = self._normalize_aggregate_function(aggregator)
                 field_node = aggregator.parameters[0]
                 # For simple identifiers, use the column name directly
+                # For literals (constants), use None to indicate constant aggregation
                 # For complex expressions, use the schema identity (which will be evaluated
                 # and added as a column to the morsel before aggregation)
                 if field_node.node_type == NodeType.WILDCARD:
                     column = "*"
+                elif field_node.node_type == NodeType.LITERAL:
+                    # Constants like min('a') don't reference a column
+                    column = None
                 elif field_node.node_type == NodeType.IDENTIFIER:
                     column = field_node.schema_column.identity
                 else:
@@ -275,6 +290,10 @@ class DrakenAggregateAndGroupNode(BasePlanNode):
             emitted = 0
             for result in self._group_by.finalize_morsels(chunk_size=CHUNK_SIZE):
                 emitted += 1
+                # If we added an implicit COUNT(*) for GROUP BY with no aggregates,
+                # remove it from the output (it's the first column)
+                if self._implicit_count_added:
+                    result = result.select(result.column_names[1:])
                 yield result
             finalize_total_ns = time.monotonic_ns() - st
             self.readings["time_groupby_finalize"] += finalize_total_ns

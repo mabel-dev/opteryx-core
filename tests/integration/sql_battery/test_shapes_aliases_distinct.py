@@ -319,9 +319,9 @@ STATEMENTS = [
         ("SELECT p.* FROM $planets AS s INNER JOIN $planets AS p USING (id, name)", 9, 20, None),
         ("SELECT id, name FROM $planets AS s INNER JOIN $planets AS p USING (id, name)", 9, 2, None),
 
-        ("SELECT DATE_TRUNC('month', birth_date) FROM testdata.astronauts", 357, 1, None),
-        ("SELECT DISTINCT * FROM (SELECT DATE_TRUNC('year', birth_date) AS BIRTH_YEAR FROM testdata.astronauts) AS SQ", 54, 1, None),
-        ("SELECT DISTINCT * FROM (SELECT DATE_TRUNC('month', birth_date) AS BIRTH_YEAR_MONTH FROM testdata.astronauts) AS SQ", 247, 1, None),
+        ("SELECT TRUNC(birth_date, 'month') FROM testdata.astronauts", 357, 1, None),
+        ("SELECT DISTINCT * FROM (SELECT TRUNC(birth_date, 'year') AS BIRTH_YEAR FROM testdata.astronauts) AS SQ", 54, 1, None),
+        ("SELECT DISTINCT * FROM (SELECT TRUNC(birth_date, 'month') AS BIRTH_YEAR_MONTH FROM testdata.astronauts) AS SQ", 247, 1, None),
         ("SELECT time_bucket(birth_date, 10, 'year') AS decade, count(*) from testdata.astronauts GROUP BY time_bucket(birth_date, 10, 'year')", 6, 2, None),
         ("SELECT time_bucket(birth_date, 6, 'month') AS half, count(*) from testdata.astronauts GROUP BY time_bucket(birth_date, 6, 'month')", 97, 2, None),
     

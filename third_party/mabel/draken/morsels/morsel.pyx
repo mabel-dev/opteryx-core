@@ -64,7 +64,6 @@ from opteryx.draken.vectors.time_vector cimport TimeVector
 from opteryx.draken.vectors.timestamp_vector cimport TimestampVector
 from opteryx.draken.interop.arrow cimport vector_from_arrow
 from opteryx.draken.interop.arrow cimport vector_from_sequence
-import pyarrow as pa
 
 # Python helper: int subclass for DrakenType enum debugging
 cdef class DrakenTypeInt(int):
@@ -963,13 +962,10 @@ cdef class Morsel:
                         py_indices = [<int>(start + j) for j in range(ln)]
                         new_vec = vec.take(py_indices)
                     except Exception:
-                        # Last resort: convert via Arrow slice (preserves data correctly)
-                        import pyarrow as pa
-                        arrow_array = vec.to_arrow()
-                        sliced_arrow = arrow_array.slice(start, ln)
-                        if isinstance(sliced_arrow, pa.ChunkedArray):
-                            sliced_arrow = sliced_arrow.combine_chunks()
-                        new_vec = vector_from_arrow(sliced_arrow)
+                        raise NotImplementedError(
+                            f"{type(vec).__name__} does not implement take(); "
+                            "add a native take() method to this vector type"
+                        )
 
                 result._columns[i] = new_vec
                 result._encoded_names[i] = self._encoded_names[i]
@@ -1225,6 +1221,7 @@ cdef class Morsel:
 
         # Arrow boolean arrays/chunked arrays
         try:
+            import pyarrow as pa
             if hasattr(mask, "type") and pa.types.is_boolean(mask.type):
                 return True
         except Exception:
@@ -1556,6 +1553,7 @@ cdef class Morsel:
 
     cdef object _empty_arrow_array_for_type(self, DrakenType dtype, Vector src_vec):
         """Return a zero-length Arrow array for the requested Draken type."""
+        import pyarrow as pa
         cdef object arrow_type = self._arrow_type_for_draken(dtype, src_vec)
         if arrow_type is None:
             return None
@@ -1563,6 +1561,7 @@ cdef class Morsel:
 
     cdef object _arrow_type_for_draken(self, DrakenType dtype, Vector src_vec):
         """Map Draken types to PyArrow DataTypes for empty vector creation."""
+        import pyarrow as pa
         cdef DrakenType child_dtype_val
         cdef int child_dtype_int
         cdef object child_type

@@ -2,6 +2,7 @@
 Convert rugo parquet metadata schemas to orso RelationSchema format.
 """
 
+import re
 from typing import Any
 from typing import Dict
 from typing import Iterable
@@ -11,6 +12,28 @@ from typing import Optional
 from orso.schema import FlatColumn
 from orso.schema import RelationSchema
 from orso.types import OrsoTypes
+
+
+def _normalize_orso_type_aliases(type_name: str) -> str:
+    aliases = {
+        "float": "double",
+        "float32": "double",
+        "float64": "double",
+        "int8": "integer",
+        "int16": "integer",
+        "int32": "integer",
+        "int64": "integer",
+        "bool": "boolean",
+        "byte_array": "blob",
+        "fixed_len_byte_array": "blob",
+        "utf8": "varchar",
+        "string": "varchar",
+    }
+
+    normalized = type_name.lower()
+    for source, target in aliases.items():
+        normalized = re.sub(rf"(?<![a-z0-9_]){re.escape(source)}(?![a-z0-9_])", target, normalized)
+    return normalized
 
 
 def _map_parquet_type_to_orso(
@@ -55,7 +78,10 @@ def _map_parquet_type_to_orso(
             return OrsoTypes.BLOB
 
         if logical_lower.startswith(("array", "decimal")):
-            _type, _length, _precision, _scale, _element_type = OrsoTypes.from_name(logical_lower)
+            normalized_logical = _normalize_orso_type_aliases(logical_lower)
+            _type, _length, _precision, _scale, _element_type = OrsoTypes.from_name(
+                normalized_logical
+            )
             _type._length = _length
             _type._precision = _precision
             _type._scale = _scale

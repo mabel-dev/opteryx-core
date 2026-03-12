@@ -11,15 +11,15 @@ This is a SQL Query Execution Plan Node.
 This node orders a dataset
 """
 
-import numpy
 from orso.types import OrsoTypes
 from pyarrow import Table
 from pyarrow import concat_tables
+import pyarrow as pa
 
 from opteryx import EOS
 from opteryx.exceptions import ColumnNotFoundError
-from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.expression import NodeType
+from opteryx.expression import evaluate_and_append
 from opteryx.models import QueryProperties
 
 from . import BasePlanNode
@@ -57,23 +57,10 @@ class SortNode(BasePlanNode):
         table = concat_tables(self.morsels, promote_options="permissive")
 
         mapped_order = []
+        evaluations = []
 
         for column, direction in self.order_by:
-            if column.node_type == NodeType.FUNCTION:
-                # ORDER BY RAND() shuffles the results
-                # we create a random list, sort that then take the rows from the
-                # table in that order - this is faster than ordering the data
-                if column.value in ("RANDOM", "RAND"):
-                    new_order = numpy.argsort(numpy.random.uniform(size=table.num_rows))
-                    table = table.take(new_order)
-                    yield table
-                    return
-
-                raise UnsupportedSyntaxError(
-                    "`ORDER BY` only supports `RAND()` as a functional sort order."
-                )
-
-            elif column.node_type == NodeType.LITERAL and column.type == OrsoTypes.INTEGER:
+            if column.node_type == NodeType.LITERAL and column.type == OrsoTypes.INTEGER:
                 # we have an index rather than a column name, it's a natural
                 # number but the list of column names is zero-based, so we
                 # subtract one
@@ -85,6 +72,8 @@ class SortNode(BasePlanNode):
                     )
                 )
             else:
+                if column.node_type != NodeType.IDENTIFIER:
+                    evaluations.append(column)
                 try:
                     mapped_order.append(
                         (
@@ -96,6 +85,16 @@ class SortNode(BasePlanNode):
                     raise ColumnNotFoundError(
                         f"`ORDER BY` must reference columns as they appear in the `SELECT` clause. {cnfe}"
                     )
+
+        if evaluations:
+            table = evaluate_and_append(evaluations, table)
+
+        # Arrow cannot sort dictionary-encoded columns; decode any that appear in sort order
+        for col_name, _ in mapped_order:
+            col_idx = table.schema.get_field_index(col_name)
+            if col_idx >= 0 and pa.types.is_dictionary(table.schema.field(col_name).type):
+                decoded = table.column(col_name).cast(table.schema.field(col_name).type.value_type)
+                table = table.set_column(col_idx, col_name, decoded)
 
         table = table.sort_by(mapped_order)
 

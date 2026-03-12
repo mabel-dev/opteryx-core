@@ -496,17 +496,32 @@ class BinderVisitor:
         if node.function == "VALUES":
             relation_name = node.alias or f"$values-{random_string()}"
             types = {}
+            element_types = {}
             if len(node.values) > 0:
                 for i, column in enumerate(node.columns):
                     if len(node.values[0]) >= i:
                         value = node.values[0][i]
                         types[column] = value.type
+                        if value.type == OrsoTypes.ARRAY:
+                            element_type = getattr(value, "element_type", None)
+                            if element_type in (None, OrsoTypes._MISSING_TYPE):
+                                schema_column = getattr(value, "schema_column", None)
+                                element_type = (
+                                    getattr(schema_column, "element_type", None)
+                                    if schema_column is not None
+                                    else None
+                                )
+                            element_types[column] = element_type
             columns = [
                 LogicalColumn(
                     node_type=NodeType.IDENTIFIER,
                     source_column=column,
                     source=relation_name,
-                    schema_column=FlatColumn(name=column, type=types.get(column, OrsoTypes.NULL)),
+                    schema_column=FlatColumn(
+                        name=column,
+                        type=types.get(column, OrsoTypes.NULL),
+                        element_type=element_types.get(column),
+                    ),
                 )
                 for column in node.columns
             ]
@@ -1299,6 +1314,7 @@ class BinderVisitor:
             if node.unnest_column.schema_column.type not in (
                 0,
                 OrsoTypes.ARRAY,
+                OrsoTypes.NULL,
             ):
                 from opteryx.exceptions import IncorrectTypeError
 

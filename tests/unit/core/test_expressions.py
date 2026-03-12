@@ -52,6 +52,7 @@ def test_literals(node_type, value_type, value):
     if value_type != OrsoTypes.ARRAY:
         assert values.dtype == value_type.numpy_dtype, values
     else:
+        assert values.shape == (1,), values.shape
         assert type(values[0]) == numpy.ndarray, values[0]
 #    assert len(values) == planets.num_rows, f"{len(values)} != {planets.num_rows}"
 

@@ -320,7 +320,7 @@ def inner_binder(node: Node, context: BindingContext) -> Tuple[Node, Any]:
                 # Literal coercion: binder's job — mutate AST nodes to match the resolved type.
                 # This is NOT type inference; it's making literals consistent with the
                 # surrounding expression's type after the catalog has declared the return type.
-                if node.value == "CASE" and result_type not in (
+                if node.value == "_CASE" and result_type not in (
                     OrsoTypes._MISSING_TYPE,
                     OrsoTypes.NULL,
                     0,
@@ -371,6 +371,9 @@ def inner_binder(node: Node, context: BindingContext) -> Tuple[Node, Any]:
 
             # Map type name to OrsoType
             target_type_name = node.value.upper()
+            # VARBINARY is not a canonical OrsoType — map to BLOB
+            if target_type_name == "VARBINARY":
+                target_type_name = "BLOB"
             result_type = OrsoTypes[target_type_name]
 
             element_type = None
@@ -391,7 +394,7 @@ def inner_binder(node: Node, context: BindingContext) -> Tuple[Node, Any]:
                     else 21
                 )
 
-            if target_type_name == "ARRAY" and len(node.parameters) > 1:
+            if target_type_name == "ARRAY" and node.parameters is not None and len(node.parameters) > 1:
                 # CAST(expr AS ARRAY(element_type)) - extract element type
                 # For now, use VARIANT as element_type; can be refined later
                 element_type = OrsoTypes.VARIANT
@@ -416,17 +419,30 @@ def inner_binder(node: Node, context: BindingContext) -> Tuple[Node, Any]:
                 "AllOp",
             )
         ):
-            # IMPROVE: check types here
             if node.right.node_type == NodeType.LITERAL:
-                import pyarrow
-
-                try:
-                    node.right.value = pyarrow.array(node.right.value)
-
-                except pyarrow.ArrowTypeError as e:
-                    raise IncompatibleTypesError(
-                        message=f"Cannot construct ARRAY from incompatible types."
-                    ) from e
+                if not isinstance(node.right.value, list):
+                    try:
+                        node.right.value = list(node.right.value)
+                    except TypeError as e:
+                        raise IncompatibleTypesError(
+                            message=f"Cannot construct ARRAY from incompatible types."
+                        ) from e
+                # LIKE/ILIKE patterns must all be strings
+                if node.value in (
+                    "AnyOpLike",
+                    "AnyOpNotLike",
+                    "AnyOpILike",
+                    "AnyOpNotILike",
+                    "AllOpLike",
+                    "AllOpNotLike",
+                    "AllOpILike",
+                    "AllOpNotILike",
+                ):
+                    for pat in node.right.value:
+                        if pat is not None and not isinstance(pat, (str, bytes)):
+                            raise IncompatibleTypesError(
+                                message=f"LIKE patterns must be strings, got {type(pat).__name__}."
+                            )
             schema_column = ExpressionColumn(name=column_name, type=OrsoTypes.BOOLEAN)
             node.schema_column = schema_column
             schemas["$derived"].columns.append(schema_column)

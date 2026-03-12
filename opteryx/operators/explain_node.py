@@ -11,8 +11,6 @@ This is a SQL Query Execution Plan Node.
 This writes out a query plan
 """
 
-from pyarrow import Table
-
 from opteryx.models import QueryProperties
 
 from . import BasePlanNode
@@ -35,6 +33,6 @@ class ExplainNode(BasePlanNode):
     def config(self):
         return ""
 
-    def execute(self, morsel: Table, **kwargs) -> Table:
+    def execute(self, morsel, **kwargs):
         if self._query_plan:
             yield self._query_plan.explain(self.analyze)

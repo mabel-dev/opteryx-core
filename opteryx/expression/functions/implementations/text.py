@@ -10,7 +10,7 @@ Includes:
 - String analysis: LENGTH, SOUNDEX
 - String manipulation: LEFT, RIGHT, CONCAT, CONCAT_WS, SUBSTRING, POSITION, TRIM, LTRIM, RTRIM,
                        LPAD, RPAD, LEVENSHTEIN, SPLIT, REPLACE, REGEXP_REPLACE
-- String matching: MATCH_AGAINST
+- String matching: internal MATCH/AGAINST support
 - Character conversion: CHAR, ASCII
 - Hash/encoding: MD5, SHA1, SHA256, SHA512, SHA224, SHA384, BASE64, BASE85, HEX
 """
@@ -23,6 +23,7 @@ import pyarrow
 import pyarrow as pa
 from pyarrow import compute
 
+from opteryx.embeddings import embed_text_values
 from opteryx.compiled.vector_ops import vector_initcap
 from opteryx.compiled.vector_ops import vector_length
 from opteryx.compiled.vector_ops import vector_md5
@@ -106,7 +107,10 @@ def vector_lengther(arr):
 
 def _initcap(arr):
     from opteryx.draken.interop.arrow import vector_from_arrow
+    from opteryx.draken.vectors.string_vector import StringVector
 
+    if isinstance(arr, StringVector):
+        return vector_initcap(arr).to_arrow()
     if isinstance(arr, numpy.ndarray):
         arr = pyarrow.array(arr)
     return vector_initcap(vector_from_arrow(arr)).to_arrow()
@@ -114,7 +118,10 @@ def _initcap(arr):
 
 def _soundex(arr):
     from opteryx.draken.interop.arrow import vector_from_arrow
+    from opteryx.draken.vectors.string_vector import StringVector
 
+    if isinstance(arr, StringVector):
+        return vector_soundex(arr).to_arrow()
     if isinstance(arr, numpy.ndarray):
         arr = pyarrow.array(arr)
     return vector_soundex(vector_from_arrow(arr)).to_arrow()
@@ -122,7 +129,10 @@ def _soundex(arr):
 
 def _md5(arr):
     from opteryx.draken.interop.arrow import vector_from_arrow
+    from opteryx.draken.vectors.string_vector import StringVector
 
+    if isinstance(arr, StringVector):
+        return vector_md5(arr).to_arrow()
     if isinstance(arr, numpy.ndarray):
         arr = pyarrow.array(arr)
     return vector_md5(vector_from_arrow(arr)).to_arrow()
@@ -130,7 +140,10 @@ def _md5(arr):
 
 def _sha1(arr):
     from opteryx.draken.interop.arrow import vector_from_arrow
+    from opteryx.draken.vectors.string_vector import StringVector
 
+    if isinstance(arr, StringVector):
+        return vector_sha1(arr).to_arrow()
     if isinstance(arr, numpy.ndarray):
         arr = pyarrow.array(arr)
     return vector_sha1(vector_from_arrow(arr)).to_arrow()
@@ -138,7 +151,10 @@ def _sha1(arr):
 
 def _sha256(arr):
     from opteryx.draken.interop.arrow import vector_from_arrow
+    from opteryx.draken.vectors.string_vector import StringVector
 
+    if isinstance(arr, StringVector):
+        return vector_sha256(arr).to_arrow()
     if isinstance(arr, numpy.ndarray):
         arr = pyarrow.array(arr)
     return vector_sha256(vector_from_arrow(arr)).to_arrow()
@@ -146,7 +162,10 @@ def _sha256(arr):
 
 def _sha512(arr):
     from opteryx.draken.interop.arrow import vector_from_arrow
+    from opteryx.draken.vectors.string_vector import StringVector
 
+    if isinstance(arr, StringVector):
+        return vector_sha512(arr).to_arrow()
     if isinstance(arr, numpy.ndarray):
         arr = pyarrow.array(arr)
     return vector_sha512(vector_from_arrow(arr)).to_arrow()
@@ -154,10 +173,14 @@ def _sha512(arr):
 
 def _replace(data, search, replace_val):
     from opteryx.draken.interop.arrow import vector_from_arrow
+    from opteryx.draken.vectors.string_vector import StringVector
 
-    if isinstance(data, numpy.ndarray):
-        data = pyarrow.array(data)
-    data_vec = vector_from_arrow(data)
+    if isinstance(data, StringVector):
+        data_vec = data
+    else:
+        if isinstance(data, numpy.ndarray):
+            data = pyarrow.array(data)
+        data_vec = vector_from_arrow(data)
     if isinstance(search, numpy.ndarray):
         search = search[0]
     if isinstance(replace_val, numpy.ndarray):
@@ -171,27 +194,35 @@ def _replace(data, search, replace_val):
 
 def _string_slice_left(arr, length):
     from opteryx.draken.interop.arrow import vector_from_arrow
+    from opteryx.draken.vectors.string_vector import StringVector
 
-    if isinstance(arr, numpy.ndarray):
-        arr = pyarrow.array(arr)
     if isinstance(length, numpy.ndarray):
         length = int(length[0])
+    if isinstance(arr, StringVector):
+        return vector_string_slice_left(arr, length).to_arrow()
+    if isinstance(arr, numpy.ndarray):
+        arr = pyarrow.array(arr)
     return vector_string_slice_left(vector_from_arrow(arr), length).to_arrow()
 
 
 def _string_slice_right(arr, length):
     from opteryx.draken.interop.arrow import vector_from_arrow
+    from opteryx.draken.vectors.string_vector import StringVector
 
-    if isinstance(arr, numpy.ndarray):
-        arr = pyarrow.array(arr)
     if isinstance(length, numpy.ndarray):
         length = int(length[0])
+    if isinstance(arr, StringVector):
+        return vector_string_slice_right(arr, length).to_arrow()
+    if isinstance(arr, numpy.ndarray):
+        arr = pyarrow.array(arr)
     return vector_string_slice_right(vector_from_arrow(arr), length).to_arrow()
 
 
 # ---------------------------------------------------------------------------
 # Pure-Python / PyArrow kernels (migrated from opteryx/functions/string_functions.py)
 # ---------------------------------------------------------------------------
+
+_MATCH_AGAINST_MIN_SCORE = 0.6
 
 
 def split(arr, delimiter=",", limit=None):
@@ -337,16 +368,26 @@ def ends_w(arr, test, ignore_case=[False]):
 
 
 def substring(
-    arr: List[str], from_pos: List[int], count: List[Union[int, float]]
+    arr: List[str], from_pos, count=None
 ) -> List[List[str]]:
     """
     Extracts substrings from each string in the 'arr' list.
     """
+    import itertools
+
     if len(arr) == 0:
         return [[]]
 
     if hasattr(arr, "to_numpy"):
         arr = arr.to_numpy(zero_copy_only=False)
+
+    # Broadcast scalar from_pos / count to per-row iterables
+    if not hasattr(from_pos, "__iter__") or isinstance(from_pos, (str, bytes)):
+        from_pos = itertools.repeat(from_pos)
+    if count is None:
+        count = itertools.repeat(None)
+    elif not hasattr(count, "__iter__") or isinstance(count, (str, bytes)):
+        count = itertools.repeat(count)
 
     def _inner(val, _from, _for):
         if _from is None:
@@ -438,30 +479,70 @@ def right_pad(arr, width, fill):
 
 def match_against(arr, val):
     """
-    Matches each string in `arr` against the tokenized and normalized version of `val[0]`.
+    Semantic text match using cosine similarity over embedded text.
     """
-    from opteryx.compiled.functions.vectors import tokenize_and_remove_punctuation
-    from opteryx.virtual_datasets.stop_words import STOP_WORDS
+    if isinstance(val, (str, bytes)):
+        literal = val
+    else:
+        if len(val) == 0:
+            return []
+        literal = val[0]
 
-    if len(val) == 0:
+    if literal is None:
         return []
-    literal = val[0]
     if isinstance(literal, bytes):
         literal = literal.decode("utf8", errors="ignore")
-    tokenized_literal = tokenize_and_remove_punctuation(str(literal), STOP_WORDS)
-
-    if len(tokenized_literal) == 0:
-        return [False] * len(arr)
 
     def _to_text(value):
         if value is None:
-            return ""
+            return None
         if isinstance(value, bytes):
             return value.decode("utf8", errors="ignore")
         return str(value)
 
-    tokenized_strings = (tokenize_and_remove_punctuation(_to_text(s), STOP_WORDS) for s in arr)
-    return [tokenized_literal.issubset(tok) for tok in tokenized_strings]
+    query_text = str(literal).strip()
+    if not query_text:
+        return [False] * len(arr)
+
+    texts = [_to_text(value) for value in arr]
+    result = [False] * len(texts)
+    active_positions = []
+    active_texts = []
+    for index, text in enumerate(texts):
+        if text is None:
+            continue
+        text = text.strip()
+        if not text:
+            continue
+        active_positions.append(index)
+        active_texts.append(text)
+
+    if not active_texts:
+        return result
+
+    embedded = embed_text_values([query_text, *active_texts])
+    query_vector = numpy.asarray(embedded[0], dtype=numpy.float32)
+    row_vectors = numpy.asarray(embedded[1:], dtype=numpy.float32)
+
+    try:
+        from opteryx.nanobind import vector_search
+
+        scores = numpy.asarray(vector_search.score_cosine(query_vector, row_vectors), dtype=numpy.float32)
+    except (ImportError, ValueError):
+        scores = numpy.zeros(len(active_texts), dtype=numpy.float32)
+        query_norm = numpy.linalg.norm(query_vector)
+        if query_norm != 0.0:
+            row_norms = numpy.linalg.norm(row_vectors, axis=1)
+            valid_mask = row_norms != 0.0
+            if numpy.any(valid_mask):
+                scores[valid_mask] = (
+                    numpy.dot(row_vectors[valid_mask], query_vector) / (row_norms[valid_mask] * query_norm)
+                )
+
+    scores = numpy.where(numpy.isfinite(scores), scores, 0.0)
+    for index, score in zip(active_positions, scores.tolist(), strict=True):
+        result[index] = score >= _MATCH_AGAINST_MIN_SCORE
+    return result
 
 
 def regex_replace(array, _pattern, _replacement):

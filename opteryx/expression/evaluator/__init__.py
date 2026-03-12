@@ -18,6 +18,33 @@ import pyarrow.compute as compute
 
 from opteryx.exceptions import FunctionExecutionError
 
+_DRAKEN_VECTOR_NAMES = frozenset({
+    "StringVector", "Int64Vector", "IntegerVector", "Float64Vector",
+    "TimestampVector", "Date32Vector", "TimeVector", "BoolVector",
+    "DictionaryVector", "ConstantVector", "ArrayVector", "ArrowVector",
+    "IntervalVector",
+})
+
+
+def _coerce_param_for_kernel(p, pa):
+    """Convert a Draken vector to a PyArrow array for kernel dispatch.
+
+    Python wrapper functions in implementations/ already accept StringVector.
+    PyArrow compute functions (compute.sqrt, compute.utf8_reverse, …) do not.
+    Converting all Draken vectors to Arrow is safe for both cases.
+    """
+    if p.__class__.__name__ not in _DRAKEN_VECTOR_NAMES:
+        return p
+    arr = p.to_arrow()
+    # Decode dictionary-encoded arrays before any other type checks
+    if pa.types.is_dictionary(arr.type):
+        arr = arr.cast(arr.type.value_type)
+    # StringVector (and binary-valued dicts) store UTF-8 bytes as Arrow binary;
+    # cast to utf8 for string kernels like utf8_reverse, utf8_title, etc.
+    if pa.types.is_binary(arr.type) or pa.types.is_large_binary(arr.type):
+        arr = arr.cast(pa.utf8())
+    return arr
+
 
 def apply_bounded_function(node, *parameters) -> Any:
     """Apply a bound FUNCTION node to its already-evaluated parameters.
@@ -65,6 +92,15 @@ def apply_bounded_function(node, *parameters) -> Any:
             valid_positions = ~null_positions
             parameters = [arr.compress(valid_positions) for arr in parameters]
             compressed = True
+
+    # Convert Draken vectors to Arrow arrays when the numpy-compress path
+    # was not taken.  PyArrow compute functions (compute.sqrt, compute.utf8_reverse,
+    # etc.) registered directly as callable_ref do not accept Draken objects.
+    # Python wrapper functions (e.g. _initcap, _replace) already handle both
+    # StringVector and Arrow arrays, so this conversion is safe for all callers.
+    if not compressed:
+        import pyarrow as _pa_abf
+        parameters = tuple(_coerce_param_for_kernel(p, _pa_abf) for p in parameters)
 
     try:
         result = kernel.callable_ref(*parameters)
@@ -229,6 +265,12 @@ def _is_null_as_boolvector(vec):
 
 
 def _string_compare(op: str, vec, right):
+    from opteryx.draken.vectors.bool_vector import BoolVector
+    
+    # SQL NULL semantics: comparing anything with NULL returns NULL (treated as FALSE in WHERE)
+    if right is None:
+        return BoolVector(len(vec))
+    
     if isinstance(right, (list, tuple, set, frozenset)):
         value_set = _coerce_str_set(right)
     elif right.__class__.__name__ == "StringVector":
@@ -262,6 +304,12 @@ def _string_compare(op: str, vec, right):
 
 
 def _int64_compare(op: str, vec, right):
+    from opteryx.draken.vectors.bool_vector import BoolVector
+    
+    # SQL NULL semantics: comparing anything with NULL returns NULL (treated as FALSE in WHERE)
+    if right is None:
+        return BoolVector(len(vec))
+    
     if isinstance(right, (list, tuple, set, frozenset)):
         value_set = frozenset(int(v) for v in right)
     elif right.__class__.__name__ == "Int64Vector":
@@ -276,6 +324,12 @@ def _int64_compare(op: str, vec, right):
         if fn is None:
             raise NotImplementedError(f"Int64Vector vector-vector: unsupported op {op!r}")
         return fn(right)
+    elif right.__class__.__name__ == "Float64Vector":
+        # Promote Int64Vector to Float64Vector for mixed-precision comparison
+        import pyarrow as pa
+        from opteryx.draken.interop.arrow import vector_from_arrow
+        float_vec = vector_from_arrow(vec.to_arrow().cast(pa.float64()))
+        return _float64_compare(op, float_vec, right)
     else:
         value = int(right)
 
@@ -295,6 +349,12 @@ def _int64_compare(op: str, vec, right):
 
 
 def _float64_compare(op: str, vec, right):
+    from opteryx.draken.vectors.bool_vector import BoolVector
+    
+    # SQL NULL semantics: comparing anything with NULL returns NULL (treated as FALSE in WHERE)
+    if right is None:
+        return BoolVector(len(vec))
+    
     if isinstance(right, (list, tuple, set, frozenset)):
         value_set = _coerce_float_set(right)
     elif right.__class__.__name__ == "Float64Vector":
@@ -328,20 +388,31 @@ def _float64_compare(op: str, vec, right):
 
 
 def _timestamp_compare(op: str, vec, right):
+    from opteryx.draken.vectors.bool_vector import BoolVector
+    
+    # SQL NULL semantics: comparing anything with NULL returns NULL (treated as FALSE in WHERE)
+    if right is None:
+        return BoolVector(len(vec))
+    
     if isinstance(right, (list, tuple, set, frozenset)):
         value_set = _coerce_timestamp_set(right)
     elif right.__class__.__name__ == "TimestampVector":
-        _VEC_OPS = {
-            "Eq": vec.equals_vector,
-            "Lt": vec.less_than_vector,
-            "Gt": vec.greater_than_vector,
-            "LtEq": vec.less_than_or_equals_vector,
-            "GtEq": vec.greater_than_or_equals_vector,
+        # TimestampVector has no vector-vs-vector compare methods; use Arrow compute.
+        import pyarrow as _pa
+        import pyarrow.compute as _pac
+
+        _ARROW_OPS = {
+            "Eq": _pac.equal, "NotEq": _pac.not_equal,
+            "Lt": _pac.less, "Gt": _pac.greater,
+            "LtEq": _pac.less_equal, "GtEq": _pac.greater_equal,
         }
-        fn = _VEC_OPS.get(op)
+        fn = _ARROW_OPS.get(op)
         if fn is None:
             raise NotImplementedError(f"TimestampVector vector-vector: unsupported op {op!r}")
-        return fn(right)
+        from opteryx.draken.interop.arrow import vector_from_arrow as _vfa
+        from opteryx.draken.vectors.bool_vector import BoolVector
+        result_arr = fn(vec.to_arrow(), right.to_arrow())
+        return BoolVector.from_arrow(result_arr)
     elif right.__class__.__name__ == "Date32Vector":
         # Cross-type: upcast the Date32Vector to Timestamp and delegate.
         import pyarrow as _pa
@@ -369,6 +440,12 @@ def _timestamp_compare(op: str, vec, right):
 
 
 def _date32_compare(op: str, vec, right):
+    from opteryx.draken.vectors.bool_vector import BoolVector
+    
+    # SQL NULL semantics: comparing anything with NULL returns NULL (treated as FALSE in WHERE)
+    if right is None:
+        return BoolVector(len(vec))
+    
     if isinstance(right, (list, tuple, set, frozenset)):
         value_set = _coerce_date32_set(right)
     elif right.__class__.__name__ == "Date32Vector":
@@ -410,6 +487,12 @@ def _date32_compare(op: str, vec, right):
 
 
 def _interval_compare(op: str, vec, right):
+    from opteryx.draken.vectors.bool_vector import BoolVector
+    
+    # SQL NULL semantics: comparing anything with NULL returns NULL (treated as FALSE in WHERE)
+    if right is None:
+        return BoolVector(len(vec))
+    
     literal = _coerce_interval(right)
     if op == "Eq":
         return vec.equals(literal)
@@ -425,6 +508,12 @@ def _interval_compare(op: str, vec, right):
 
 
 def _dict_compare(op: str, vec, right):
+    from opteryx.draken.vectors.bool_vector import BoolVector
+    
+    # SQL NULL semantics: comparing anything with NULL returns NULL (treated as FALSE in WHERE)
+    if right is None:
+        return BoolVector(len(vec))
+    
     # keep scalar as-is for non-list ops
     value_list = list(right) if isinstance(right, (list, tuple, set, frozenset)) else right
 
@@ -455,7 +544,12 @@ def _dict_compare(op: str, vec, right):
 
 def _constant_compare(op: str, vec, right):
     from opteryx.expression.ops import _coerce_in_list_values
-
+    from opteryx.draken.vectors.bool_vector import BoolVector
+    
+    # SQL NULL semantics: comparing anything with NULL returns NULL (treated as FALSE in WHERE)
+    if right is None:
+        return BoolVector(len(vec))
+    
     if isinstance(right, (list, tuple, set, frozenset)):
         right = _coerce_in_list_values(right)
 
@@ -501,6 +595,33 @@ def _arrow_vector_compare(op: str, vec, right):
     arr = vec.to_arrow() if not isinstance(vec._arr, pa.Array) else vec._arr
     bool_arr = getattr(pc, pc_op)(arr, right)
     return BoolVector.from_arrow(bool_arr)
+
+
+def _ensure_array_vector(val):
+    """Ensure val is an ArrayVector, converting from ArrowVector if needed."""
+    if val.__class__.__name__ == "ArrowVector":
+        from opteryx.draken.interop.arrow import vector_from_arrow
+        return vector_from_arrow(val.to_arrow())
+    return val
+
+
+def _string_anyop_like(vec, patterns, ignore_case: bool):
+    """LIKE ANY / ILIKE ANY for a StringVector: OR of per-pattern results."""
+    pat_list = patterns if isinstance(patterns, (list, tuple)) else [patterns]
+    result = None
+    for p in pat_list:
+        if p is None:
+            continue
+        pat_bytes = p if isinstance(p, bytes) else str(p).encode()
+        mask = vec.like(pat_bytes, ignore_case)
+        if result is None:
+            result = mask
+        else:
+            result = result.or_vector(mask)
+    if result is None:
+        from opteryx.draken.vectors.bool_vector import BoolVector
+        return BoolVector(len(vec))
+    return result
 
 
 def draken_compare(op: str, left, right):
@@ -563,23 +684,35 @@ def draken_compare(op: str, left, right):
         items = {v.encode() if isinstance(v, str) else v for v in items}
         return vector_contains_all(left, items)
 
-    # --- AnyOp LIKE: left is the literal pattern, right is the ArrayVector column ---
+    # --- AnyOp LIKE: left is the column (ArrayVector or StringVector), right is pattern list ---
     if op == "AnyOpLike":
         from opteryx.compiled.vector_ops import vector_anyop_like
+        from opteryx.draken.vectors.string_vector import StringVector
 
-        return vector_anyop_like(left, right)
+        if isinstance(left, StringVector):
+            return _string_anyop_like(left, right, ignore_case=False)
+        return vector_anyop_like(right, _ensure_array_vector(left))
     if op == "AnyOpNotLike":
         from opteryx.compiled.vector_ops import vector_anyop_like
+        from opteryx.draken.vectors.string_vector import StringVector
 
-        return vector_anyop_like(left, right).not_vector()
+        if isinstance(left, StringVector):
+            return _string_anyop_like(left, right, ignore_case=False).not_vector()
+        return vector_anyop_like(right, _ensure_array_vector(left)).not_vector()
     if op == "AnyOpILike":
         from opteryx.compiled.vector_ops import vector_anyop_ilike
+        from opteryx.draken.vectors.string_vector import StringVector
 
-        return vector_anyop_ilike(left, right)
+        if isinstance(left, StringVector):
+            return _string_anyop_like(left, right, ignore_case=True)
+        return vector_anyop_ilike(right, _ensure_array_vector(left))
     if op == "AnyOpNotILike":
         from opteryx.compiled.vector_ops import vector_anyop_ilike
+        from opteryx.draken.vectors.string_vector import StringVector
 
-        return vector_anyop_ilike(left, right).not_vector()
+        if isinstance(left, StringVector):
+            return _string_anyop_like(left, right, ignore_case=True).not_vector()
+        return vector_anyop_ilike(right, _ensure_array_vector(left)).not_vector()
 
     # --- AtQuestion: left is StringVector (JSON docs), right is the literal path ---
     if op == "AtQuestion":
@@ -629,6 +762,19 @@ def draken_compare(op: str, left, right):
         _FLIP_OPS = {"Gt": "Lt", "Lt": "Gt", "GtEq": "LtEq", "LtEq": "GtEq"}
         op = _FLIP_OPS.get(op, op)
         left, right = right, left
+    elif isinstance(left, numpy.generic) and hasattr(right, "null_count"):
+        # numpy scalar (numpy.int64, numpy.datetime64, etc.) on left, vector on right
+        _FLIP_OPS = {"Gt": "Lt", "Lt": "Gt", "GtEq": "LtEq", "LtEq": "GtEq"}
+        op = _FLIP_OPS.get(op, op)
+        left, right = right, left
+
+    # SQL three-valued logic: comparing anything with NULL always yields NULL
+    # (treated as FALSE in WHERE).  This must be checked AFTER the scalar/vector
+    # flip so that "null = col" is also caught.  Crucially it must apply before
+    # we could ever negate the result (NOT(NULL) = NULL, not TRUE).
+    if right is None and not isinstance(left, (str, int, float, bytes, bool, type(None))):
+        from opteryx.draken.vectors.bool_vector import BoolVector
+        return BoolVector(len(left))
 
     cls = left.__class__.__name__
 
@@ -712,7 +858,6 @@ def _date_minus_date_draken(left_vec, right_vec):
 
 def _date_interval_op_draken(left_vec, right_vec, op):
     """Add/subtract an IntervalVector to/from a date/timestamp vector → TimestampVector."""
-    from opteryx.draken.interop.arrow import vector_from_arrow
     from opteryx.expression.intervals import _as_interval_vector
 
     signum = 1 if op == "Plus" else -1
@@ -722,8 +867,7 @@ def _date_interval_op_draken(left_vec, right_vec, op):
     else:
         date_vec, interval_vec = right_vec, _as_interval_vector(left_vec)
 
-    result_arr = interval_vec.apply_to_temporal(date_vec.to_arrow(), signum)
-    return vector_from_arrow(result_arr)
+    return interval_vec.apply_to_temporal(date_vec, signum)
 
 
 def _eval_binary_op_draken(node, morsel):
@@ -967,7 +1111,7 @@ def evaluate_draken(node, morsel):
         return _unary_draken(node.value, node.centre, morsel)
 
     if node_type == NodeType.FUNCTION:
-        if node.value == "PASSTHRU":
+        if node.value == "_PASSTHRU":
             # The optimizer creates unbound PASSTHRU wrappers post-binding
             # (e.g. collapsing LIKE OR LIKE → RLIKE wrapped in PASSTHRU).
             # PASSTHRU is identity: just evaluate the inner predicate.
@@ -977,11 +1121,48 @@ def evaluate_draken(node, morsel):
             parameters = [morsel.num_rows]
         result = apply_bounded_function(node, *parameters)
         # Function results must be BoolVector for predicate use
+        if isinstance(result, list):
+            result = numpy.array(result, dtype=object)
+        if isinstance(result, numpy.ndarray):
+            if result.ndim != 1:
+                raise TypeError(
+                    f"evaluate_draken: FUNCTION node returned ndarray with rank {result.ndim}, expected 1-dimensional boolean results"
+                )
+            if result.dtype.kind in ("b", "O", "f", "i", "u"):
+                import pyarrow as pa
+
+                from opteryx.draken.vectors.bool_vector import BoolVector
+
+                try:
+                    result = BoolVector.from_arrow(pa.array(result, type=pa.bool_()))
+                except (pa.ArrowInvalid, pa.ArrowTypeError, ValueError, TypeError):
+                    pass
+        elif isinstance(result, _pa.Array) and _pa.types.is_boolean(result.type):
+            from opteryx.draken.vectors.bool_vector import BoolVector
+
+            result = BoolVector.from_arrow(result)
         if result.__class__.__name__ != "BoolVector":
             raise TypeError(
                 f"evaluate_draken: FUNCTION node returned {result.__class__.__name__!r}, expected BoolVector"
             )
         return result
+
+    if node_type == NodeType.BINARY_OPERATOR:
+        # BINARY_OPERATOR in a predicate context (e.g. address | '54.0.0.0/8' for IP/CIDR).
+        # Evaluate via _eval_value (which handles Arrow fallback) and coerce to BoolVector.
+        from opteryx.draken.vectors.bool_vector import BoolVector
+
+        result = _eval_value(node, morsel)
+        if result.__class__.__name__ == "BoolVector":
+            return result
+        if isinstance(result, _pa.Array) and _pa.types.is_boolean(result.type):
+            return BoolVector.from_arrow(result)
+        # numpy bool array
+        if isinstance(result, numpy.ndarray) and result.dtype.kind == "b":
+            return BoolVector.from_arrow(_pa.array(result, type=_pa.bool_()))
+        raise TypeError(
+            f"evaluate_draken: BINARY_OPERATOR '{node.value!r}' returned non-boolean {result.__class__.__name__!r}"
+        )
 
     raise NotImplementedError(
         f"evaluate_draken: unsupported node type {node_type!r} (value={node.value!r})"
@@ -1018,7 +1199,7 @@ def evaluate_and_append_draken(nodes, morsel):
     existing = {n.decode() if isinstance(n, bytes) else n for n in col_names}
 
     for node in nodes:
-        if node.value == "PASSTHRU":
+        if node.value == "_PASSTHRU":
             # PASSTHRU is an optimizer-created predicate wrapper, not a column
             # producer. evaluate_draken handles it inline; skip pre-evaluation.
             continue

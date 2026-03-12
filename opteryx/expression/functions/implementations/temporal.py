@@ -6,7 +6,7 @@
 """Temporal function kernels.
 
 Includes:
-- Date/time functions: DATE_TRUNC, TIME_BUCKET, DATEDIFF, TIMEDIFF, DATEPART, DATE_FORMAT
+- Date/time functions: TRUNC, TIME_BUCKET, DATEDIFF, TIMEDIFF, EXTRACT, DATE_FORMAT
 - Current time: CURRENT_TIME, CURRENT_TIMESTAMP, UTC_TIMESTAMP, NOW, CURRENT_DATE, TODAY, YESTERDAY
 - Component extraction: YEAR, MONTH, DAY, WEEK, HOUR, MINUTE, SECOND, QUARTER
 - Unix epoch conversion: FROM_UNIXTIME, UNIXTIME
@@ -257,6 +257,18 @@ def date_part(part, arr):
 
     if part in extractors:
         return extractors[part](arr)
+
+
+def trunc_temporal(arr, part):
+    """
+    Truncate a temporal value to the start of the specified unit.
+
+    SQL surface form is TRUNC(value, unit), but the underlying utility uses
+    the opposite argument order.
+    """
+    from opteryx.utils.dates import date_trunc
+
+    return date_trunc(part, arr)
 
     from opteryx.utils import suggest_alternative
 
