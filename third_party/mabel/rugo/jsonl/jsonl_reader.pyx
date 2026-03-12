@@ -9,23 +9,22 @@
 # cython: infer_types=True
 
 from libc.stdint cimport uint8_t, int64_t
+from libc.stdlib cimport malloc, free
+from libc.string cimport memset
+from libc.stddef cimport size_t
 from libcpp.string cimport string
 from libcpp.vector cimport vector
 from cpython.buffer cimport PyBUF_CONTIG_RO, PyObject_GetBuffer, PyBuffer_Release, Py_buffer
-import json
-from cpython.ref cimport PyObject, Py_INCREF, Py_DECREF
-from cpython.exc cimport PyErr_Occurred
-from cpython.list cimport PyList_Append
-from cpython.exc cimport PyErr_Clear
-from cpython.bytes cimport PyBytes_FromStringAndSize
+from cpython.ref cimport PyObject
+from cpython.exc cimport PyErr_Occurred, PyErr_Clear
 
-# Import draken and pyarrow for creating vectors
-try:
-    import opteryx.draken as draken
-    import pyarrow as pa
-    DRAKEN_AVAILABLE = True
-except ImportError:
-    DRAKEN_AVAILABLE = False
+from opteryx.draken.vectors.int64_vector cimport Int64Vector
+from opteryx.draken.vectors.float64_vector cimport Float64Vector
+from opteryx.draken.vectors.bool_vector cimport BoolVector
+from opteryx.draken.vectors.string_vector cimport StringVector, StringVectorBuilder
+from opteryx.draken.vectors.array_vector cimport ArrayVector, from_sequence as array_from_sequence
+
+
 
 # Internal fast array parser (no runtime deps). Parses a JSON array encoded
 # in UTF-8 bytes into Python lists. Objects found inside arrays are returned
@@ -301,6 +300,144 @@ def get_jsonl_schema(data, sample_size=25):
     return result
 
 
+def _has_string_leaf(x):
+    if isinstance(x, list):
+        for y in x:
+            if _has_string_leaf(y):
+                return True
+        return False
+    return isinstance(x, str)
+
+
+def _convert_str_leaves_to_bytes(obj):
+    if isinstance(obj, list):
+        for idx in range(len(obj)):
+            v = obj[idx]
+            if isinstance(v, str):
+                obj[idx] = v.encode('utf-8')
+            elif isinstance(v, list):
+                _convert_str_leaves_to_bytes(v)
+
+
+cdef Int64Vector _build_int64_vector(JsonlColumn* col, size_t n):
+    cdef Int64Vector vec = Int64Vector(n)
+    cdef int64_t* dst = <int64_t*> vec.ptr.data
+    cdef uint8_t* nulls = NULL
+    cdef size_t j, null_bytes
+    for j in range(n):
+        if col.null_mask[j]:
+            if nulls == NULL:
+                null_bytes = (n + 7) >> 3
+                nulls = <uint8_t*> malloc(null_bytes)
+                if nulls == NULL:
+                    raise MemoryError()
+                memset(nulls, 0xFF, null_bytes)
+                vec.ptr.null_bitmap = nulls
+            nulls[j >> 3] &= ~(<uint8_t>1 << (j & 7))
+        else:
+            dst[j] = col.int_values[j]
+    return vec
+
+
+cdef Float64Vector _build_float64_vector(JsonlColumn* col, size_t n):
+    cdef Float64Vector vec = Float64Vector(n)
+    cdef double* dst = <double*> vec.ptr.data
+    cdef uint8_t* nulls = NULL
+    cdef size_t j, null_bytes
+    for j in range(n):
+        if col.null_mask[j]:
+            if nulls == NULL:
+                null_bytes = (n + 7) >> 3
+                nulls = <uint8_t*> malloc(null_bytes)
+                if nulls == NULL:
+                    raise MemoryError()
+                memset(nulls, 0xFF, null_bytes)
+                vec.ptr.null_bitmap = nulls
+            nulls[j >> 3] &= ~(<uint8_t>1 << (j & 7))
+        else:
+            dst[j] = col.double_values[j]
+    return vec
+
+
+cdef BoolVector _build_bool_vector(JsonlColumn* col, size_t n):
+    cdef BoolVector vec = BoolVector(n)
+    cdef uint8_t* dst = <uint8_t*> vec.ptr.data
+    cdef uint8_t* nulls = NULL
+    cdef size_t j, null_bytes
+    cdef size_t data_bytes = (n + 7) >> 3
+    if dst != NULL and data_bytes > 0:
+        memset(dst, 0, data_bytes)
+    for j in range(n):
+        if col.null_mask[j]:
+            if nulls == NULL:
+                null_bytes = data_bytes
+                nulls = <uint8_t*> malloc(null_bytes)
+                if nulls == NULL:
+                    raise MemoryError()
+                memset(nulls, 0xFF, null_bytes)
+                vec.ptr.null_bitmap = nulls
+            nulls[j >> 3] &= ~(<uint8_t>1 << (j & 7))
+        elif col.boolean_values[j]:
+            dst[j >> 3] |= (<uint8_t>1 << (j & 7))
+    return vec
+
+
+cdef StringVector _build_string_vector(JsonlColumn* col, size_t n):
+    cdef StringVectorBuilder builder = StringVectorBuilder.with_estimate(n, 16)
+    cdef size_t j
+    for j in range(n):
+        if col.null_mask[j]:
+            builder.append_null()
+        else:
+            raw = col.string_values[j]
+            builder.append_bytes(<const char*>raw.data(), <Py_ssize_t>raw.size())
+    return builder.finish()
+
+
+cdef ArrayVector _build_array_vector(
+        JsonlColumn* col, size_t n, object col_type,
+        bint parse_objects):
+    cdef size_t j
+    cdef PyObject* o_ptr
+    o = None
+    elem_type = None
+    if col_type.startswith('array<') and col_type.endswith('>'):
+        elem_type = col_type[6:-1]
+    py_list = []
+    for j in range(n):
+        if col.null_mask[j]:
+            py_list.append(None)
+            continue
+        raw = col.string_values[j]
+        if raw.size() == 0:
+            py_list.append([])
+            continue
+        o_ptr = ParseJsonSliceToPyObject(
+            <const uint8_t*>raw.data(), raw.size(), parse_objects)
+        if o_ptr != NULL:
+            o = <object>o_ptr
+            if isinstance(o, list):
+                if elem_type == 'bytes':
+                    _convert_str_leaves_to_bytes(o)
+                elif elem_type is None and _has_string_leaf(o):
+                    _convert_str_leaves_to_bytes(o)
+            py_list.append(o)
+        else:
+            if PyErr_Occurred():
+                PyErr_Clear()
+            try:
+                parsed = _parse_array_from_bytes(raw)
+                if isinstance(parsed, list):
+                    if elem_type == 'bytes':
+                        _convert_str_leaves_to_bytes(parsed)
+                    elif elem_type is None and _has_string_leaf(parsed):
+                        _convert_str_leaves_to_bytes(parsed)
+                py_list.append(parsed)
+            except Exception:
+                py_list.append(raw.decode('utf-8'))
+    return array_from_sequence(py_list)
+
+
 def read_jsonl(data, columns=None, parse_arrays=True, parse_objects=True):
     """
     Reads a JSONL (JSON Lines) dataset and returns its contents in a columnar format.
@@ -357,265 +494,34 @@ def read_jsonl(data, columns=None, parse_arrays=True, parse_objects=True):
     cdef size_t i
     for i in range(table.column_names.size()):
         py_column_names.append(table.column_names[i].decode('utf-8'))
-    py_columns = []
-    # Python-level temporary for simdjson results
-    o = None
-    cdef PyObject* o_ptr
+    cdef size_t n = table.num_rows
     cdef JsonlColumn* col
+    draken_columns = []
     for i in range(table.columns.size()):
         col = &table.columns[i]
         if not col.success:
-            py_columns.append(None)
+            draken_columns.append(None)
             continue
         col_type = col.type.decode('utf-8')
         if col_type == 'int64':
-            py_list = []
-            for j in range(col.int_values.size()):
-                if col.null_mask[j]:
-                    py_list.append(None)
-                else:
-                    py_list.append(col.int_values[j])
-            py_columns.append(py_list)
+            draken_columns.append(_build_int64_vector(col, n))
         elif col_type == 'double':
-            py_list = []
-            for j in range(col.double_values.size()):
-                if col.null_mask[j]:
-                    py_list.append(None)
-                else:
-                    py_list.append(col.double_values[j])
-            py_columns.append(py_list)
-        elif col_type == 'string' or col_type == 'bytes':
-            # Bytes columns: return as bytes (binary data), do NOT parse as JSON
-            # The schema has already determined this is a bytes/string column, not array/object
-            py_list = []
-            for j in range(col.string_values.size()):
-                if col.null_mask[j]:
-                    py_list.append(None)
-                    continue
-
-                raw = col.string_values[j]
-                if raw.size() == 0:
-                    py_list.append(b'')
-                    continue
-
-                # Always return as bytes, never parse as JSON
-                py_obj = <object>PyBytes_FromStringAndSize(<const char*>raw.data(), <Py_ssize_t>raw.size())
-                if py_obj is not None:
-                    py_list.append(py_obj)
-                else:
-                    py_list.append(b'')
-            py_columns.append(py_list)
-        elif col_type.startswith('array'):
-            # Array columns: may be annotated as array<elemtype>
-            # Determine element type if provided (e.g. array<bytes>)
-            elem_type = None
-            if col_type.startswith('array<') and col_type.endswith('>'):
-                elem_type = col_type[6:-1]
-
-            def _convert_strings_to_bytes_inplace(obj):
-                # Recursively convert str elements in lists to bytes when elem_type == 'bytes'
-                # obj is a Python object returned from the parser
-                if isinstance(obj, list):
-                    for idx in range(len(obj)):
-                        v = obj[idx]
-                        if isinstance(v, str):
-                            obj[idx] = v.encode('utf-8')
-                        elif isinstance(v, list):
-                            _convert_strings_to_bytes_inplace(v)
-                        # leave dicts/bytes as-is
-
-            py_list = []
-            for j in range(col.string_values.size()):
-                if col.null_mask[j]:
-                    py_list.append(None)
-                    continue
-
-                raw = col.string_values[j]
-                if raw.size() == 0:
-                    py_list.append([])
-                    continue
-
-                if parse_arrays:
-                    # Parse the JSON array into Python list
-                    o_ptr = ParseJsonSliceToPyObject(<const uint8_t*>raw.data(), raw.size(), parse_objects)
-                    if o_ptr != NULL:
-                        o = <object>o_ptr
-                        # If element type is bytes, or unspecified but the parsed
-                        # array contains string elements (likely binary-as-JSON
-                        # strings), convert those strings to bytes.
-                        if isinstance(o, list):
-                            if elem_type == 'bytes':
-                                _convert_strings_to_bytes_inplace(o)
-                            elif elem_type is None:
-                                # Heuristic: if at least one leaf element is str,
-                                # convert all string leaves to bytes
-                                def _has_string_leaf(x):
-                                    if isinstance(x, list):
-                                        for y in x:
-                                            if _has_string_leaf(y):
-                                                return True
-                                        return False
-                                    return isinstance(x, str)
-                                if _has_string_leaf(o):
-                                    _convert_strings_to_bytes_inplace(o)
-                        py_list.append(o)
-                    else:
-                        if PyErr_Occurred():
-                            PyErr_Clear()
-                        try:
-                            parsed = _parse_array_from_bytes(raw)
-                            if isinstance(parsed, list):
-                                if elem_type == 'bytes':
-                                    _convert_strings_to_bytes_inplace(parsed)
-                                elif elem_type is None:
-                                    def _has_string_leaf(x):
-                                        if isinstance(x, list):
-                                            for y in x:
-                                                if _has_string_leaf(y):
-                                                    return True
-                                            return False
-                                        return isinstance(x, str)
-                                    if _has_string_leaf(parsed):
-                                        _convert_strings_to_bytes_inplace(parsed)
-                            py_list.append(parsed)
-                        except Exception:
-                            # Fallback to raw string
-                            py_list.append(raw.decode('utf-8'))
-                else:
-                    # Return as string without parsing
-                    py_list.append(raw.decode('utf-8'))
-            py_columns.append(py_list)
-        elif col_type == 'object':
-            # Object columns: return as JSONB (bytes), may contain objects, arrays, or mixed
-            # Check each value and handle appropriately
-            py_list = []
-            for j in range(col.string_values.size()):
-                if col.null_mask[j]:
-                    py_list.append(None)
-                    continue
-
-                raw = col.string_values[j]
-                if raw.size() == 0:
-                    py_list.append(b'{}')
-                    continue
-
-                # Check what type of JSON value this is
-                first = raw[0]
-                
-                if first == 91:  # ord('[')
-                    # This is an array in a mixed column
-                    if parse_arrays:
-                        # Parse as array into Python list
-                        o_ptr = ParseJsonSliceToPyObject(<const uint8_t*>raw.data(), raw.size(), parse_objects)
-                        if o_ptr != NULL:
-                            o = <object>o_ptr
-                            py_list.append(o)
-                        else:
-                            if PyErr_Occurred():
-                                PyErr_Clear()
-                            try:
-                                parsed = _parse_array_from_bytes(raw)
-                                py_list.append(parsed)
-                            except Exception:
-                                py_list.append(raw.decode('utf-8'))
-                    else:
-                        # Arrays not requested, return as string
-                        py_list.append(raw.decode('utf-8'))
-                        
-                elif first == 123:  # ord('{')
-                    # This is an object - always return as JSONB (bytes)
-                    py_obj = <object>PyBytes_FromStringAndSize(<const char*>raw.data(), <Py_ssize_t>raw.size())
-                    if py_obj is not None:
-                        py_list.append(py_obj)
-                    else:
-                        py_list.append(b'{}')
-                else:
-                    # Unexpected - fallback to bytes
-                    py_obj = <object>PyBytes_FromStringAndSize(<const char*>raw.data(), <Py_ssize_t>raw.size())
-                    if py_obj is not None:
-                        py_list.append(py_obj)
-                    else:
-                        py_list.append(b'')
-            py_columns.append(py_list)
+            draken_columns.append(_build_float64_vector(col, n))
+        elif col_type == 'string' or col_type == 'bytes' or col_type == 'object':
+            draken_columns.append(_build_string_vector(col, n))
         elif col_type == 'boolean':
-            py_list = []
-            for j in range(col.boolean_values.size()):
-                if col.null_mask[j]:
-                    py_list.append(None)
-                else:
-                    py_list.append(bool(col.boolean_values[j]))
-            py_columns.append(py_list)
+            draken_columns.append(_build_bool_vector(col, n))
+        elif col_type.startswith('array'):
+            if parse_arrays:
+                draken_columns.append(_build_array_vector(col, n, col_type, parse_objects))
+            else:
+                draken_columns.append(_build_string_vector(col, n))
         else:
-            py_columns.append(None)
-    
-    # Convert Python lists to draken vectors
-    if DRAKEN_AVAILABLE:
-        draken_columns = []
-        for i in range(len(py_columns)):
-            if py_columns[i] is None:
-                draken_columns.append(None)
-                continue
-            
-            # Get the column type to determine appropriate Arrow type
-            col_type = table.columns[i].type.decode('utf-8')
-            
-            # Convert Python list to PyArrow array, then to draken vector
-            try:
-                if col_type == 'int64':
-                    arrow_array = pa.array(py_columns[i], type=pa.int64())
-                elif col_type == 'double':
-                    arrow_array = pa.array(py_columns[i], type=pa.float64())
-                elif col_type == 'boolean':
-                    arrow_array = pa.array(py_columns[i], type=pa.bool_())
-                elif col_type == 'string' or col_type == 'bytes':
-                    # String/bytes columns are stored as binary in draken.
-                    # This preserves the original UTF-8 bytes without decoding,
-                    # since draken's StringVector expects binary data.
-                    arrow_array = pa.array(py_columns[i], type=pa.binary())
-                elif col_type == 'object':
-                    # Object columns are stored as binary (JSONB)
-                    arrow_array = pa.array(py_columns[i], type=pa.binary())
-                elif col_type.startswith('array'):
-                    # Array columns can be converted to draken ArrayVector if typed
-                    try:
-                        if col_type == 'array<int64>':
-                            arrow_array = pa.array(py_columns[i], type=pa.list_(pa.int64()))
-                        elif col_type == 'array<double>':
-                            arrow_array = pa.array(py_columns[i], type=pa.list_(pa.float64()))
-                        elif col_type == 'array<bytes>':
-                            arrow_array = pa.array(py_columns[i], type=pa.list_(pa.binary()))
-                        else:
-                            # Generic array type - keep as Python list
-                            # (contains mixed types or nested structures)
-                            draken_columns.append(py_columns[i])
-                            continue
-                    except Exception:
-                        # If conversion fails, keep as Python list
-                        draken_columns.append(py_columns[i])
-                        continue
-                else:
-                    # Unknown type, keep as Python list
-                    draken_columns.append(py_columns[i])
-                    continue
-                
-                # Convert Arrow array to draken vector
-                draken_vec = draken.Vector.from_arrow(arrow_array)
-                draken_columns.append(draken_vec)
-            except Exception:
-                # If conversion fails, keep as Python list
-                draken_columns.append(py_columns[i])
-        
-        return {
-            'success': True,
-            'column_names': py_column_names,
-            'num_rows': table.num_rows,
-            'columns': draken_columns
-        }
-    else:
-        # Draken not available, return Python lists as before
-        return {
-            'success': True,
-            'column_names': py_column_names,
-            'num_rows': table.num_rows,
-            'columns': py_columns
-        }
+            draken_columns.append(None)
+
+    return {
+        'success': True,
+        'column_names': py_column_names,
+        'num_rows': table.num_rows,
+        'columns': draken_columns
+    }

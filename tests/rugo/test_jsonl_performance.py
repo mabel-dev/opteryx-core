@@ -40,7 +40,7 @@ def test_rugo_performance():
     """Test rugo JSON lines reader performance."""
     print("\n=== Rugo JSON Lines Reader Performance ===\n")
     
-    for num_rows in [1000, 10000, 100000]:
+    for num_rows in [1_000, 10_000, 100_000, 1_000_000]:
         print(f"Testing with {num_rows:,} rows...")
         data = generate_test_data(num_rows)
         
@@ -77,7 +77,7 @@ def test_pyarrow_performance():
     
     print("\n=== PyArrow JSON Reader Performance ===\n")
     
-    for num_rows in [1000, 10000, 100000]:
+    for num_rows in [1000, 10000, 100000, 1000000]:
         print(f"Testing with {num_rows:,} rows...")
         data = generate_test_data(num_rows)
         
@@ -112,9 +112,9 @@ def test_comparison():
         print("\nPyArrow not available, skipping comparison")
         return
     
-    print("\n=== Direct Comparison (100K rows) ===\n")
+    print("\n=== Direct Comparison (1m rows) ===\n")
     
-    num_rows = 100000
+    num_rows = 1_000_000
     data = generate_test_data(num_rows)
     
     # Rugo performance

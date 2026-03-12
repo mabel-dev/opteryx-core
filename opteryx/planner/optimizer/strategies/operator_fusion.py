@@ -22,15 +22,44 @@ JOINs, this is sometimes as part of the join condition, but we also push SELECTI
 into joins.
 """
 
+from orso.types import OrsoTypes
+
+from opteryx.expression import NodeType
 from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner import LogicalPlanNode
 from opteryx.planner.logical_planner import LogicalPlanStepType
+from opteryx.vector_types import node_is_numeric_vector
+from opteryx.vector_types import node_is_vector_query_expression
 
 from .optimization_strategy import OptimizationStrategy
 from .optimization_strategy import OptimizerContext
 
 
 class OperatorFusionStrategy(OptimizationStrategy):
+    @staticmethod
+    def _is_vector_topk_candidate(order_by) -> bool:
+        if len(order_by) != 1:
+            return False
+
+        expression, direction = order_by[0]
+        if expression.node_type != NodeType.FUNCTION:
+            return False
+        if expression.value not in ("COSINE_SIMILARITY", "COSINE_DISTANCE"):
+            return False
+        if len(expression.parameters) != 2:
+            return False
+        if expression.parameters[0].node_type != NodeType.IDENTIFIER:
+            return False
+        if not node_is_numeric_vector(expression.parameters[0]):
+            return False
+        if not node_is_vector_query_expression(expression.parameters[1]):
+            return False
+
+        descending = direction == "descending"
+        return (expression.value == "COSINE_DISTANCE" and not descending) or (
+            expression.value == "COSINE_SIMILARITY" and descending
+        )
+
     def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:
         if not context.optimized_plan:
             context.optimized_plan = context.pre_optimized_tree.copy()  # type: ignore
@@ -44,9 +73,12 @@ class OperatorFusionStrategy(OptimizationStrategy):
                     new_node = LogicalPlanNode(node_type=LogicalPlanStepType.HeapSort)
                     new_node.limit = next_node.limit
                     new_node.order_by = node.order_by
+                    new_node.vector_topk_candidate = self._is_vector_topk_candidate(node.order_by)
                     context.optimized_plan[next_node_id] = new_node
                     context.optimized_plan.remove_node(context.node_id, heal=True)
                     self.telemetry.optimization_fuse_operators_heap_sort += 1
+                    if new_node.vector_topk_candidate:
+                        self.telemetry.optimization_fuse_operators_vector_heap_sort += 1
 
         return context
 

@@ -56,7 +56,7 @@ def _build_passthru_node(root, value, telemetry) -> Node:
         return value
 
     node = Node(node_type=NodeType.FUNCTION)
-    node.value = "PASSTHRU"
+    node.value = "_PASSTHRU"
     node.parameters = [value]
     node.schema_column = root.schema_column
     node.query_column = root.query_column

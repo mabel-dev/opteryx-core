@@ -49,9 +49,9 @@ def test_predicate_compaction_in_nested_subquery():
 
 
 def test_date_trunc_filter_rewrite_and_equivalence():
-    # DATE_TRUNC('year', Lauched_at) = '1970-01-01' should be rewritten to
+    # TRUNC(Lauched_at, 'year') = '1970-01-01' should be rewritten to
     # Lauched_at >= '1970-01-01' AND Lauched_at < '1971-01-01'
-    sql_trunc = "SELECT * FROM testdata.missions WHERE DATE_TRUNC('year', Lauched_at) = '1970-01-01'"
+    sql_trunc = "SELECT * FROM testdata.missions WHERE TRUNC(Lauched_at, 'year') = '1970-01-01'"
     sql_range = "SELECT * FROM testdata.missions WHERE Lauched_at >= '1970-01-01' AND Lauched_at < '1971-01-01'"
 
     res_trunc = opteryx.query(sql_trunc)

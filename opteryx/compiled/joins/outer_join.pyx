@@ -12,7 +12,7 @@ from libc.stdlib cimport malloc, free
 from opteryx.compiled.structures.hash_table cimport HashTable
 from opteryx.compiled.table_ops.hash_ops cimport compute_row_hashes
 from opteryx.compiled.table_ops.null_avoidant_ops cimport non_null_row_indices
-from opteryx.utils.arrow import align_tables
+from opteryx.utils.arrow import align_tables as _align_tables_arrow
 
 import numpy
 cimport numpy
@@ -113,4 +113,4 @@ def right_join(
 
         free(chunk_hashes)
 
-        yield align_tables(left_relation, right_chunk, left_indexes, right_indexes)
+        yield _align_tables_arrow(left_relation, right_chunk, left_indexes, right_indexes)

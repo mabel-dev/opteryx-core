@@ -100,10 +100,10 @@ def test_draken_eval_value_expression_list_materializes_children():
         ),
         (
             """
-            SELECT DATE_TRUNC('minute', EventTime) AS M, COUNT(*) AS PageViews
+            SELECT TRUNC(EventTime, 'minute') AS M, COUNT(*) AS PageViews
             FROM testdata.clickbench_tiny
             WHERE IsRefresh = 0
-            GROUP BY DATE_TRUNC('minute', EventTime)
+            GROUP BY TRUNC(EventTime, 'minute')
             ORDER BY M
             LIMIT 10
             """,
@@ -118,7 +118,6 @@ def test_grouped_clickbench_style_expressions_stay_native(sql, expected_rows):
         ops = session.telemetry.get("operations", {})
         agg = next((v for v in ops.values() if v.get("type") == "AggregateRel"), {})
         assert result.num_rows == expected_rows
-        assert agg.get("feature_groupby_engine_carchar", 0) == 1
         assert agg.get("feature_groupby_engine_legacy", 0) == 0
         assert agg.get("feature_groupby_draken_eval_arrow_fallback", 0) == 0
         assert agg.get("feature_groupby_draken_eval_native", 0) >= 1

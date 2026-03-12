@@ -182,7 +182,9 @@ def _date_plus_interval(left, left_type, right, right_type, operator):
         left, right = right, left
 
     interval_vector = _as_interval_vector(right)
-    return interval_vector.apply_to_temporal(left, signum)
+    result = interval_vector.apply_to_temporal(left, signum)
+    # Convert back to Arrow for the legacy Arrow evaluator path (ops.py context).
+    return result.to_arrow()
 
 
 def _interval_interval_op(left, left_type, right, right_type, operator):

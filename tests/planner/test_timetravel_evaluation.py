@@ -55,10 +55,10 @@ def test_current_date_minus_interval_evaluates_to_timestamp():
     assert datetime.timedelta(days=6, seconds=-10) < diff < datetime.timedelta(days=8)
 
 
-def test_date_trunc_month_on_current_date():
-    """DATE_TRUNC should be handled correctly during time-travel evaluation."""
+def test_trunc_month_on_current_date():
+    """TRUNC should be handled correctly during time-travel evaluation."""
 
-    version = _parse_version("SELECT * FROM $planets TIMESTAMP AS OF DATE_TRUNC('month', CURRENT_DATE)")
+    version = _parse_version("SELECT * FROM $planets TIMESTAMP AS OF TRUNC(CURRENT_DATE, 'month')")
     ts = extract_timetravel_timestamp(version)
     assert isinstance(ts, datetime.datetime)
 

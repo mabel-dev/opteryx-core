@@ -27,13 +27,19 @@ from opteryx import EOS
 from opteryx.draken.interop.arrow import vector_from_sequence
 from opteryx.draken.morsels.morsel import Morsel
 from opteryx.exceptions import ColumnNotFoundError
+from opteryx.expression import NodeType
+from opteryx.expression import evaluate_and_append
 from opteryx.models import QueryProperties
+from opteryx.vector_types import node_is_numeric_vector
+from opteryx.vector_types import node_is_vector_query_expression
 
 from . import BasePlanNode
 
 
 class HeapSortNode(BasePlanNode):
     _NULL_COMPRESSED = numpy.iinfo(numpy.int64).min
+    _USEARCH_ENABLED = False
+    _USEARCH_MIN_ROWS = 2048
     # Dictionary child type ids from third_party/mabel/draken/core/buffers.h.
     # We only treat exact integer/boolean dictionary keys as exact-compressible.
     _EXACT_DICTIONARY_CHILD_TYPES = frozenset({1, 2, 3, 4, 50})
@@ -69,6 +75,7 @@ class HeapSortNode(BasePlanNode):
         super().__init__(properties=properties, **parameters)
         self.order_by = parameters.get("order_by", [])
         self.limit = parameters.get("limit", -1)
+        self.vector_topk_candidate = parameters.get("vector_topk_candidate", False)
 
         self.mapped_order = []
         for column, direction in self.order_by:
@@ -90,6 +97,29 @@ class HeapSortNode(BasePlanNode):
     @property
     def name(self):  # pragma: no cover
         return "Heap Sort"
+
+    @staticmethod
+    def _is_descending(direction) -> bool:
+        if isinstance(direction, bool):
+            return not direction
+        return str(direction).upper().startswith("DESC")
+
+    @staticmethod
+    def _coerce_numeric_vector(value) -> numpy.ndarray | None:
+        try:
+            vector = numpy.asarray(value, dtype=numpy.float32)
+        except (TypeError, ValueError):
+            return None
+        if vector.ndim != 1:
+            return None
+        return vector
+
+    @staticmethod
+    def _is_nearest_neighbor_order(function_name: str, direction) -> bool:
+        descending = HeapSortNode._is_descending(direction)
+        return (function_name == "COSINE_DISTANCE" and not descending) or (
+            function_name == "COSINE_SIMILARITY" and descending
+        )
 
     def execute(self, morsel: pyarrow.Table, **kwargs):
         morsel = self.ensure_draken_morsel(morsel)
@@ -143,7 +173,7 @@ class HeapSortNode(BasePlanNode):
         indices = list(range(morsel.num_rows))
         for column_name, direction in reversed(self.mapped_order):
             values = morsel.column(column_name.encode()).to_pylist()
-            reverse = direction.upper().startswith("DESC")
+            reverse = self._is_descending(direction)
 
             non_null = [i for i in indices if values[i] is not None]
             nulls = [i for i in indices if values[i] is None]
@@ -156,17 +186,15 @@ class HeapSortNode(BasePlanNode):
             return morsel.empty()
 
         names = morsel.column_names
+        py_materialize_types = {"StringVector", "ArrayVector", "VectorVector"}
         if len(row_indices) <= 4096:
             selection = numpy.asarray(row_indices, dtype=numpy.int32)
             vectors = []
             for name in names:
                 vector = morsel.column(name)
-                if vector.__class__.__name__ == "StringVector":
-                    values = []
-                    for row_index in row_indices:
-                        single = vector.take(numpy.asarray([row_index], dtype=numpy.int32))
-                        values.append(single.to_pylist()[0])
-                    vectors.append(vector_from_sequence(values))
+                if vector.__class__.__name__ in py_materialize_types:
+                    values = vector.to_pylist()
+                    vectors.append(vector_from_sequence([values[row_index] for row_index in row_indices]))
                 else:
                     vectors.append(vector.take(selection))
             return Morsel.from_vectors(names, vectors)
@@ -175,15 +203,43 @@ class HeapSortNode(BasePlanNode):
         vectors = []
         for name in names:
             vec = morsel.column(name)
-            vectors.append(vec.take(selection))
+            if vec.__class__.__name__ in py_materialize_types:
+                values = vec.to_pylist()
+                vectors.append(vector_from_sequence([values[row_index] for row_index in row_indices]))
+            else:
+                vectors.append(vec.take(selection))
         return Morsel.from_vectors(names, vectors)
 
     def _sort_morsel(self, morsel: Morsel) -> Morsel:
         return self._materialize_rows(morsel, self._sorted_indices(morsel))
 
+    def _ensure_order_expressions_evaluated(self, morsel: Morsel) -> Morsel:
+        existing_columns = {
+            name.decode("utf-8") if isinstance(name, bytes) else name for name in morsel.column_names
+        }
+        evaluations = []
+        for column, _ in self.order_by:
+            if column.node_type == NodeType.IDENTIFIER:
+                continue
+            identity = getattr(column.schema_column, "identity", None)
+            if identity in existing_columns:
+                continue
+            evaluations.append(column)
+
+        if not evaluations:
+            return morsel
+
+        return evaluate_and_append(evaluations, morsel)
+
     def _top_n(self, morsel: Morsel) -> Morsel:
         if self.limit is None or self.limit <= 0:
             return morsel
+
+        vector_ranked = self._vector_top_n(morsel)
+        if vector_ranked is not None:
+            return vector_ranked
+
+        morsel = self._ensure_order_expressions_evaluated(morsel)
 
         k = min(self.limit, morsel.num_rows)
         if k == 0:
@@ -201,7 +257,7 @@ class HeapSortNode(BasePlanNode):
 
         key_vectors = [morsel.column(column.encode()) for column, _ in self.mapped_order]
         key_values = [vec.to_pylist() for vec in key_vectors]
-        directions = [direction.upper().startswith("DESC") for _, direction in self.mapped_order]
+        directions = [self._is_descending(direction) for _, direction in self.mapped_order]
 
         def compare_rows(left_index: int, right_index: int) -> int:
             for values, descending in zip(key_values, directions):
@@ -247,7 +303,7 @@ class HeapSortNode(BasePlanNode):
         return self._materialize_rows(morsel, top_indices)
 
     def _uniform_direction(self) -> bool | None:
-        directions = [direction.upper().startswith("DESC") for _, direction in self.mapped_order]
+        directions = [self._is_descending(direction) for _, direction in self.mapped_order]
         if all(directions):
             return True
         if not any(directions):
@@ -256,7 +312,7 @@ class HeapSortNode(BasePlanNode):
 
     def _top_n_single_key(self, morsel: Morsel, k: int) -> Morsel:
         column_name, direction = self.mapped_order[0]
-        descending = direction.upper().startswith("DESC")
+        descending = self._is_descending(direction)
         vector = morsel.column(column_name.encode())
 
         fast_path = self._top_n_single_key_compressed(morsel, vector, descending, k)
@@ -374,3 +430,127 @@ class HeapSortNode(BasePlanNode):
                 selected.extend(null_indices[:needed].tolist())
 
         return self._materialize_rows(morsel, selected)
+
+    def _vector_top_n(self, morsel: Morsel) -> Morsel | None:
+        if self.limit is None or self.limit <= 0 or len(self.order_by) != 1:
+            return None
+
+        order_expression, direction = self.order_by[0]
+        if order_expression.node_type != NodeType.FUNCTION:
+            return None
+        if order_expression.value not in ("COSINE_SIMILARITY", "COSINE_DISTANCE"):
+            return None
+        if len(order_expression.parameters) != 2:
+            return None
+
+        source_node, query_node = order_expression.parameters
+        if source_node.node_type != NodeType.IDENTIFIER:
+            return None
+        if not node_is_numeric_vector(source_node) or not node_is_vector_query_expression(query_node):
+            return None
+
+        query_vector = self._resolve_query_vector(query_node)
+        if query_vector is None or query_vector.size == 0:
+            return None
+
+        source_identity = getattr(source_node.schema_column, "identity", None)
+        if not source_identity:
+            return None
+
+        try:
+            source_values = morsel.column(source_identity.encode()).to_pylist()
+        except Exception:
+            return None
+
+        dense_rows: list[numpy.ndarray] = []
+        source_indices: list[int] = []
+        for row_index, value in enumerate(source_values):
+            row_vector = self._coerce_numeric_vector(value)
+            if row_vector is None:
+                continue
+            if row_vector.shape[0] != query_vector.shape[0]:
+                continue
+            dense_rows.append(row_vector)
+            source_indices.append(row_index)
+
+        if not dense_rows:
+            return None
+
+        dense_vectors = numpy.vstack(dense_rows).astype(numpy.float32, copy=False)
+        self.readings["vector_topk_candidate_rows"] += dense_vectors.shape[0]
+        take_count = min(self.limit, dense_vectors.shape[0])
+        if take_count == 0:
+            return morsel.empty()
+
+        if (
+            self._USEARCH_ENABLED
+            and
+            self.vector_topk_candidate
+            and
+            dense_vectors.shape[0] >= self._USEARCH_MIN_ROWS
+            and self._is_nearest_neighbor_order(order_expression.value, direction)
+        ):
+            try:
+                from opteryx.nanobind import usearch_native
+
+                index = usearch_native.UsearchIndex(
+                    dimensions=query_vector.shape[0],
+                    capacity=dense_vectors.shape[0],
+                    metric="cos",
+                    expansion_add=16,
+                    expansion_search=16,
+                )
+                self.readings["feature_vector_topk_usearch"] += 1
+                self.readings["vector_topk_usearch_rows_indexed"] += dense_vectors.shape[0]
+                index.add_batch(
+                    numpy.asarray(source_indices, dtype=numpy.int64),
+                    numpy.ascontiguousarray(dense_vectors, dtype=numpy.float32),
+                )
+                found_ids, _ = index.search(
+                    numpy.ascontiguousarray(query_vector, dtype=numpy.float32),
+                    take_count,
+                )
+                if found_ids:
+                    return self._materialize_rows(morsel, [int(row_id) for row_id in found_ids])
+            except Exception:
+                self.readings["feature_vector_topk_usearch_fallbacks"] += 1
+                pass
+
+        try:
+            from opteryx.nanobind import vector_search
+
+            scores = numpy.asarray(
+                vector_search.score_cosine(query_vector, dense_vectors), dtype=numpy.float32
+            )
+        except Exception:
+            return None
+
+        self.readings["feature_vector_topk_exact"] += 1
+        scores = numpy.nan_to_num(scores, nan=0.0, posinf=0.0, neginf=0.0)
+        if order_expression.value == "COSINE_DISTANCE":
+            scores = 1.0 - numpy.clip(scores, -1.0, 1.0)
+
+        descending = self._is_descending(direction)
+        ranked_dense_indices = numpy.argsort(scores, kind="mergesort")
+        if descending:
+            ranked_dense_indices = ranked_dense_indices[::-1]
+
+        top_indices = [int(source_indices[int(index)]) for index in ranked_dense_indices[:take_count]]
+        return self._materialize_rows(morsel, top_indices)
+
+    def _resolve_query_vector(self, query_node) -> numpy.ndarray | None:
+        if query_node.node_type == NodeType.LITERAL:
+            return self._coerce_numeric_vector(query_node.value)
+        if (
+            query_node.node_type == NodeType.FUNCTION
+            and query_node.value == "EMBED"
+            and len(query_node.parameters) == 1
+            and query_node.parameters[0].node_type == NodeType.LITERAL
+        ):
+            from opteryx.expression.functions.implementations.utility import embed
+
+            embedded = embed(numpy.asarray([query_node.parameters[0].value], dtype=object))
+            if not embedded:
+                return None
+            return self._coerce_numeric_vector(embedded[0])
+        return None

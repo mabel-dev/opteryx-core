@@ -92,6 +92,8 @@ from opteryx.__version__ import __author__
 from opteryx.__version__ import __build__
 from opteryx.__version__ import __version__
 from opteryx.__version__ import __lib__
+from opteryx.embeddings import clear_embedding_provider
+from opteryx.embeddings import register_embedding_provider
 
 
 def session(
@@ -173,9 +175,11 @@ except Exception:
 
 __all__ = [
     "analyze_query",
+    "clear_embedding_provider",
     "session",
     "Session",
     "register_workspace",
+    "register_embedding_provider",
     "set_default_connector",
     "__author__",
     "__build__",

@@ -78,7 +78,7 @@ STATEMENTS = [
     ("SELECT DISTINCT server FROM (SELECT server, risk_score FROM testdata.split WHERE risk_score > 7) s", 981, 1, None),
     ("SELECT DISTINCT SUBSTR(server, 5, 3) FROM testdata.split", 3, 1, None),
     ("SELECT DISTINCT CAST(times_found AS VARCHAR) FROM testdata.split", 11, 1, None),
-    ("SELECT DISTINCT DATE_TRUNC('day', first_found) FROM testdata.split", 1097, 1, None),
+    ("SELECT DISTINCT TRUNC(first_found, 'day') FROM testdata.split", 1097, 1, None),
     ("SELECT DISTINCT server FROM testdata.split WHERE times_found BETWEEN 1 AND 3", 998, 1, None),
     ("SELECT DISTINCT cves[1] FROM testdata.split WHERE risk_score > 9", 961, 1, None),
     ("SELECT DISTINCT CONCAT(server, '-', CAST(times_found AS VARCHAR)) FROM (SELECT * FROM testdata.split WHERE times_found = 0) s", 577, 1, None),
@@ -203,4 +203,3 @@ if __name__ == "__main__":  # pragma: no cover
         sys.exit(1)
     else:
         sys.exit(0)
-

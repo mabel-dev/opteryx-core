@@ -41,6 +41,10 @@ class TestOrsoConverter:
         assert _map_parquet_type_to_orso("int64", "TIMESTAMP_MILLIS") == OrsoTypes.TIMESTAMP
         assert _map_parquet_type_to_orso("byte_array", "JSON") == OrsoTypes.JSONB
         assert _map_parquet_type_to_orso("int32", "DECIMAL(10,2)") == OrsoTypes.DECIMAL
+        assert _map_parquet_type_to_orso("group", "ARRAY<FLOAT64>") == OrsoTypes.ARRAY
+        assert (
+            _map_parquet_type_to_orso("group", "ARRAY<FLOAT64>")._element_type == OrsoTypes.DOUBLE
+        )
     
     def test_converter_with_planets_data(self):
         """Test converting planets.parquet metadata to orso schema."""

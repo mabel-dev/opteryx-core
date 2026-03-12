@@ -111,8 +111,12 @@ def test_interval_vector_temporal_apply_proleptic_year_support():
 
     applied = vec.apply_to_temporal(values, 1)
 
-    assert applied.type == pa.timestamp("us")
-    assert applied.cast(pa.int64()).to_pylist() == [-64_145_606_400_000_000]
+    # apply_to_temporal now returns a TimestampVector (microseconds since epoch).
+    raw = applied.to_pylist()
+    assert raw[0] is not None
+    # Expected: -64_145_606_400_000_000 microseconds; verify via to_arrow conversion.
+    arrow_result = applied.to_arrow()
+    assert arrow_result.cast(pa.int64()).to_pylist() == [-64_145_606_400_000_000]
 
 
 @pytest.mark.skipif(MONTH_INTERVAL_TYPE is None, reason="PyArrow build lacks month interval type")

@@ -50,7 +50,7 @@ def sql_like_to_regex(pattern: str, full_match: bool = True, case_sensitive: boo
             regex_pattern = regex_pattern[:-3]
 
     if not case_sensitive:
-        regex_pattern = f"(?i)({regex_pattern})"
+        regex_pattern = f"(?i:{regex_pattern})"
     return regex_pattern
 
 

@@ -11,6 +11,8 @@ from typing import Optional
 from typing import Tuple
 
 from orso.types import OrsoTypes
+from opteryx.vector_types import is_numeric_vector_type
+from opteryx.vector_types import resolve_node_type
 
 Node = Any  # AST node type (duck-typed; no import to avoid circular deps)
 
@@ -218,6 +220,38 @@ class FunctionCatalog:
         # TODO Phase 2+: use resolved arg types from context for precise scoring.
         _INF = float("inf")
 
+        def _is_numeric_type(type_: Optional[OrsoTypes]) -> bool:
+            return isinstance(type_, OrsoTypes) and type_.is_numeric()
+
+        def _score_parameter(node, type_family: str) -> float:
+            if type_family == "any":
+                return 2.0
+
+            node_type, element_type = resolve_node_type(node)
+            if node_type is None:
+                return 2.0
+
+            if type_family == "array":
+                return 0.0 if node_type == OrsoTypes.ARRAY else _INF
+            if type_family == "numeric":
+                return 0.0 if _is_numeric_type(node_type) else _INF
+            if type_family == "integer":
+                if node_type == OrsoTypes.INTEGER:
+                    return 0.0
+                return 1.0 if _is_numeric_type(node_type) else _INF
+            if type_family == "boolean":
+                return 0.0 if node_type == OrsoTypes.BOOLEAN else _INF
+            if type_family == "string":
+                if node_type == OrsoTypes.VARCHAR:
+                    return 0.0
+                return 1.0 if node_type == OrsoTypes.BLOB else _INF
+            if type_family == "temporal":
+                return 0.0 if isinstance(node_type, OrsoTypes) and node_type.is_temporal() else _INF
+            if type_family == "numeric_vector":
+                return 0.0 if is_numeric_vector_type(node_type, element_type) else _INF
+
+            return 1.0
+
         def _score_overload(overload: FunctionOverload) -> float:
             params = overload.parameters
             if not params:
@@ -228,13 +262,10 @@ class FunctionCatalog:
             for node in arg_nodes:
                 if current_param is None:
                     return _INF  # too many args for non-variadic
-                node_type = getattr(node, "type", None)
-                if node_type is None or current_param.type_family == "any":
-                    total += 2.0
-                elif node_type == current_param.type_family:
-                    total += 0.0  # exact match
-                else:
-                    total += 1.0  # family/coercion match
+                param_score = _score_parameter(node, current_param.type_family)
+                if param_score == _INF:
+                    return _INF
+                total += param_score
                 if not current_param.variadic:
                     current_param = next(param_iter, None)
             return total

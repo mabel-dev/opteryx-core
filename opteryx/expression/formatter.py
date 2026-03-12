@@ -72,7 +72,7 @@ def format_expression(root, qualify: bool = False):
     # INTERAL IDENTIFIERS
     if node_type & INTERNAL_TYPE == INTERNAL_TYPE:
         if node_type in (NodeType.FUNCTION, NodeType.AGGREGATOR):
-            if root.value == "CASE":
+            if root.value in ("CASE", "_CASE"):
                 con = [format_expression(a, qualify) for a in root.parameters[0].parameters]
                 vals = [format_expression(a, qualify) for a in root.parameters[1].parameters]
                 return "CASE " + "".join([f"WHEN {c} THEN {v} " for c, v in zip(con, vals)]) + "END"

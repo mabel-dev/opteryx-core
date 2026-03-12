@@ -36,7 +36,7 @@ from opteryx.draken.core.buffers cimport (
     DRAKEN_STRING,
 )
 from opteryx.draken.vectors.string_vector cimport StringVector
-from opteryx.draken.interop.arrow cimport arrow_type_to_draken, vector_from_arrow
+from opteryx.draken.interop.arrow cimport arrow_type_to_draken, vector_from_arrow, vector_from_sequence
 from opteryx.draken.vectors.vector cimport (
     MIX_HASH_CONSTANT,
     NULL_HASH,
@@ -131,6 +131,13 @@ cdef class ArrayVector(Vector):
         import pyarrow as pa
 
         child_arrow = (<Vector> self._child).to_arrow()
+
+        # When a native decoder signals UTF-8 children, cast binary -> utf8.
+        if self._child_decode_utf8 and child_arrow.type == pa.binary():
+            try:
+                child_arrow = child_arrow.cast(pa.utf8())
+            except Exception:
+                pass
 
         # When we originated from an Arrow array we know the desired child type;
         # e.g. string children should stay UTF8 lists instead of degrading to binary.
@@ -459,23 +466,94 @@ cdef ArrayVector from_arrow(object array):
 cdef ArrayVector from_sequence(object data):
     """
     Create ArrayVector from a Python sequence of lists.
-    
+
     Args:
-        data: Python sequence where each element is a list (or None for null arrays)
-    
+        data: Python sequence where each element is a list (or None for null rows)
+
     Returns:
         ArrayVector with nested list structure
-    
+
     Example:
         >>> vec = from_sequence([[1, 2, 3], [4, 5], None, [6]])
         >>> vec.to_arrow()  # Converts to PyArrow ListArray
     """
-    # Simple approach: Convert to PyArrow first, then use from_arrow
-    # This avoids complex memory management while still providing the convenience method
-    import pyarrow as pa
-    
-    arrow_array = pa.array(data)
-    return from_arrow(arrow_array)
+    cdef Py_ssize_t n = len(data)
+    cdef Py_ssize_t i
+    cdef Py_ssize_t offset = 0
+    cdef Py_ssize_t nb
+    cdef object row
+    cdef bint has_nulls = False
+
+    # Single pass: check for nulls and determine total flat length.
+    for i in range(n):
+        if data[i] is None:
+            has_nulls = True
+        else:
+            offset += len(data[i])
+    cdef Py_ssize_t total_flat = offset
+
+    # Allocate offsets array.
+    cdef int32_t* offsets_buf = <int32_t*> malloc((n + 1) * sizeof(int32_t))
+    if offsets_buf == NULL:
+        raise MemoryError()
+
+    # Allocate null bitmap if needed (Arrow convention: 1=valid, 0=null).
+    cdef uint8_t* null_bm = NULL
+    if has_nulls:
+        nb = (n + 7) >> 3
+        null_bm = <uint8_t*> malloc(nb)
+        if null_bm == NULL:
+            free(offsets_buf)
+            raise MemoryError()
+        memset(null_bm, 0xFF, nb)
+
+    # Second pass: populate offsets, null bitmap, and flat items list.
+    flat_items = []
+    offset = 0
+    for i in range(n):
+        offsets_buf[i] = <int32_t> offset
+        row = data[i]
+        if row is None:
+            if null_bm != NULL:
+                null_bm[i >> 3] &= ~(<uint8_t>(1 << (i & 7)))
+        else:
+            flat_items.extend(row)
+            offset += len(row)
+    offsets_buf[n] = <int32_t> offset
+
+    # Build the child vector via the interop layer (handles all element types).
+    cdef object child_vec = vector_from_sequence(flat_items)
+
+    # Assemble ArrayVector directly — same layout as array_vector_from_parts
+    # but accepts any Vector child, not just StringVector.
+    cdef ArrayVector vec = ArrayVector.__new__(ArrayVector)
+    cdef DrakenArrayBuffer* buf = _alloc_array_buffer()
+
+    cdef int32_t* offs_copy = <int32_t*> malloc((n + 1) * sizeof(int32_t))
+    if offs_copy == NULL:
+        free(offsets_buf)
+        if null_bm != NULL:
+            free(null_bm)
+        raise MemoryError()
+    memcpy(offs_copy, offsets_buf, (n + 1) * sizeof(int32_t))
+    free(offsets_buf)
+
+    buf.offsets = offs_copy
+    buf.length = <size_t> n
+    buf.value_type = child_vec.dtype if total_flat > 0 else DRAKEN_STRING
+    buf.values = <void*> <object> child_vec
+
+    if null_bm != NULL:
+        buf.null_bitmap = null_bm
+        vec.owns_null_bitmap = True
+    else:
+        buf.null_bitmap = NULL
+        vec.owns_null_bitmap = False
+
+    vec.ptr = buf
+    vec._child = child_vec
+    vec.owns_offsets = True
+    return vec
 
 
 cdef ArrayVector array_vector_from_parts(

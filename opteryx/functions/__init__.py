@@ -140,18 +140,6 @@ def fixed_value_function(function, context):
     if function == "UNIXTIME":
         # We should only ever get here if the function is called without parameters
         return OrsoTypes.INTEGER, context.execution_context.connected_at.timestamp()
-    if function == "YEAR":
-        return OrsoTypes.INTEGER, context.execution_context.connected_at.year
-    if function == "MONTH":
-        return OrsoTypes.INTEGER, context.execution_context.connected_at.month
-    if function == "DAY":
-        return OrsoTypes.INTEGER, context.execution_context.connected_at.day
-    if function == "HOUR":
-        return OrsoTypes.INTEGER, context.execution_context.connected_at.hour
-    if function == "MINUTE":
-        return OrsoTypes.INTEGER, context.execution_context.connected_at.minute
-    if function == "SECOND":
-        return OrsoTypes.INTEGER, context.execution_context.connected_at.second
     return None, None
 
 
@@ -322,7 +310,10 @@ def is_function(name: str) -> bool:
     """
     from opteryx.expression.functions import get_catalog
 
-    return get_catalog().get_definition(name.upper()) is not None
+    upper_name = name.upper()
+    if upper_name.startswith("_"):
+        return False
+    return get_catalog().get_definition(upper_name) is not None
 
 
 def functions() -> list[str]:
@@ -331,4 +322,4 @@ def functions() -> list[str]:
     """
     from opteryx.expression.functions import get_catalog
 
-    return [f.name for f in get_catalog().list_functions()]
+    return [f.name for f in get_catalog().list_functions() if not f.name.startswith("_")]

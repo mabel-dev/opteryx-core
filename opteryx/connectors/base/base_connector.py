@@ -16,7 +16,6 @@ from typing import Iterable
 from typing import Optional
 from typing import Tuple
 
-import pyarrow
 from orso.schema import RelationSchema
 
 from opteryx.connectors import TableType

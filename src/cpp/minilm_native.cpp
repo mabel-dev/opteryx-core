@@ -1,0 +1,413 @@
+#include <Python.h>
+
+#include <nanobind/nanobind.h>
+#include <nanobind/stl/string.h>
+#include <nanobind/stl/vector.h>
+
+#include <onnxruntime_cxx_api.h>
+
+#include <algorithm>
+#include <cctype>
+#include <cmath>
+#include <cstdint>
+#include <fstream>
+#include <memory>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <unordered_map>
+#include <utility>
+#include <vector>
+
+namespace nb = nanobind;
+
+namespace {
+
+Ort::Env& ort_env() {
+    static Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "opteryx_minilm");
+    return env;
+}
+
+bool is_whitespace(unsigned char ch) {
+    return std::isspace(ch) != 0;
+}
+
+bool is_control(unsigned char ch) {
+    return ch < 32 && ch != '\t' && ch != '\n' && ch != '\r';
+}
+
+bool is_punctuation(unsigned char ch) {
+    return std::ispunct(ch) != 0;
+}
+
+std::string normalize_text(std::string_view text) {
+    std::string out;
+    out.reserve(text.size());
+    for (unsigned char ch : text) {
+        if (is_control(ch)) {
+            continue;
+        }
+        if (is_whitespace(ch)) {
+            out.push_back(' ');
+            continue;
+        }
+        out.push_back(static_cast<char>(std::tolower(ch)));
+    }
+    return out;
+}
+
+std::vector<std::string> basic_tokenize(std::string_view text) {
+    std::vector<std::string> tokens;
+    std::string current;
+    current.reserve(32);
+
+    for (unsigned char ch : text) {
+        if (is_whitespace(ch)) {
+            if (!current.empty()) {
+                tokens.push_back(current);
+                current.clear();
+            }
+            continue;
+        }
+
+        if (is_punctuation(ch)) {
+            if (!current.empty()) {
+                tokens.push_back(current);
+                current.clear();
+            }
+            tokens.emplace_back(1, static_cast<char>(ch));
+            continue;
+        }
+
+        current.push_back(static_cast<char>(ch));
+    }
+
+    if (!current.empty()) {
+        tokens.push_back(current);
+    }
+
+    return tokens;
+}
+
+class MiniLMEmbedder {
+  public:
+    MiniLMEmbedder(std::string model_path, std::string vocab_path, std::size_t max_length = 256)
+        : allocator_(), max_length_(max_length) {
+        if (max_length_ < 3) {
+            throw nb::value_error("max_length must be at least 3");
+        }
+
+        load_vocab(vocab_path);
+
+        Ort::SessionOptions session_options;
+        session_options.SetIntraOpNumThreads(1);
+        session_options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
+        session_ = std::make_unique<Ort::Session>(ort_env(), model_path.c_str(), session_options);
+
+        load_input_names();
+        load_output_name();
+    }
+
+    std::vector<float> embed_text(std::string const& text) const {
+        auto batch = embed_texts(std::vector<std::string>{text});
+        return batch.empty() ? std::vector<float>{} : std::move(batch.front());
+    }
+
+    std::vector<std::vector<float>> embed_texts(std::vector<std::string> const& texts) const {
+        if (texts.empty()) {
+            return {};
+        }
+
+        const std::size_t batch_size = texts.size();
+        std::vector<std::vector<std::int64_t>> encoded_rows;
+        encoded_rows.reserve(batch_size);
+        std::size_t sequence_length = 0;
+
+        for (std::size_t row = 0; row < batch_size; ++row) {
+            auto encoded = encode(texts[row]);
+            sequence_length = std::max(sequence_length, encoded.size());
+            encoded_rows.push_back(std::move(encoded));
+        }
+
+        if (sequence_length == 0) {
+            sequence_length = 2;
+        }
+
+        std::vector<std::int64_t> input_ids(batch_size * sequence_length, pad_id_);
+        std::vector<std::int64_t> attention_mask(batch_size * sequence_length, 0);
+        std::vector<std::int64_t> token_type_ids(batch_size * sequence_length, 0);
+
+        for (std::size_t row = 0; row < batch_size; ++row) {
+            auto const& encoded = encoded_rows[row];
+            for (std::size_t col = 0; col < encoded.size(); ++col) {
+                input_ids[row * sequence_length + col] = encoded[col];
+                attention_mask[row * sequence_length + col] = 1;
+            }
+        }
+
+        std::array<std::int64_t, 2> input_shape {
+            static_cast<std::int64_t>(batch_size),
+            static_cast<std::int64_t>(sequence_length),
+        };
+
+        Ort::MemoryInfo memory_info = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+        Ort::Value input_ids_tensor = Ort::Value::CreateTensor<std::int64_t>(
+            memory_info, input_ids.data(), input_ids.size(), input_shape.data(), input_shape.size()
+        );
+        Ort::Value attention_mask_tensor = Ort::Value::CreateTensor<std::int64_t>(
+            memory_info, attention_mask.data(), attention_mask.size(), input_shape.data(), input_shape.size()
+        );
+        Ort::Value token_type_ids_tensor = Ort::Value::CreateTensor<std::int64_t>(
+            memory_info, token_type_ids.data(), token_type_ids.size(), input_shape.data(), input_shape.size()
+        );
+
+        std::array<Ort::Value, 3> input_tensors {
+            std::move(input_ids_tensor),
+            std::move(attention_mask_tensor),
+            std::move(token_type_ids_tensor),
+        };
+
+        auto output_tensors = session_->Run(
+            Ort::RunOptions{nullptr},
+            input_name_ptrs_.data(),
+            input_tensors.data(),
+            input_tensors.size(),
+            output_name_ptrs_.data(),
+            output_name_ptrs_.size()
+        );
+
+        if (output_tensors.empty() || !output_tensors[0].IsTensor()) {
+            throw std::runtime_error("MiniLM inference did not return a tensor output");
+        }
+
+        Ort::Value& output = output_tensors[0];
+        auto output_info = output.GetTensorTypeAndShapeInfo();
+        auto output_shape = output_info.GetShape();
+        if (output_shape.size() != 3) {
+            throw std::runtime_error("MiniLM output tensor has unexpected rank");
+        }
+
+        const std::size_t output_batch = static_cast<std::size_t>(output_shape[0]);
+        const std::size_t output_seq = static_cast<std::size_t>(output_shape[1]);
+        const std::size_t hidden_size = static_cast<std::size_t>(output_shape[2]);
+        if (output_batch != batch_size || output_seq != sequence_length) {
+            throw std::runtime_error("MiniLM output tensor shape does not match input shape");
+        }
+
+        const float* output_data = output.GetTensorData<float>();
+        std::vector<std::vector<float>> embeddings(batch_size, std::vector<float>(hidden_size, 0.0f));
+
+        for (std::size_t row = 0; row < batch_size; ++row) {
+            float token_count = 0.0f;
+            for (std::size_t col = 0; col < sequence_length; ++col) {
+                if (attention_mask[row * sequence_length + col] == 0) {
+                    continue;
+                }
+
+                const std::size_t offset = (row * sequence_length + col) * hidden_size;
+                for (std::size_t dim = 0; dim < hidden_size; ++dim) {
+                    embeddings[row][dim] += output_data[offset + dim];
+                }
+                token_count += 1.0f;
+            }
+
+            if (token_count == 0.0f) {
+                continue;
+            }
+
+            float norm = 0.0f;
+            for (float& value : embeddings[row]) {
+                value /= token_count;
+                norm += value * value;
+            }
+
+            norm = std::sqrt(norm);
+            if (norm > 0.0f) {
+                for (float& value : embeddings[row]) {
+                    value /= norm;
+                }
+            }
+        }
+
+        return embeddings;
+    }
+
+    std::size_t dimensions() const {
+        return hidden_size_hint_;
+    }
+
+  private:
+    void load_vocab(std::string const& vocab_path) {
+        std::ifstream vocab_file(vocab_path);
+        if (!vocab_file) {
+            throw std::runtime_error("Unable to open MiniLM vocab.txt");
+        }
+
+        std::string line;
+        std::int64_t token_id = 0;
+        while (std::getline(vocab_file, line)) {
+            if (!line.empty() && line.back() == '\r') {
+                line.pop_back();
+            }
+            vocab_.emplace(line, token_id);
+            ++token_id;
+        }
+
+        pad_id_ = require_token_id("[PAD]");
+        unk_id_ = require_token_id("[UNK]");
+        cls_id_ = require_token_id("[CLS]");
+        sep_id_ = require_token_id("[SEP]");
+    }
+
+    void load_input_names() {
+        const std::size_t input_count = session_->GetInputCount();
+        input_names_.resize(input_count);
+        input_name_ptrs_.resize(input_count);
+
+        for (std::size_t index = 0; index < input_count; ++index) {
+            auto name = session_->GetInputNameAllocated(index, allocator_);
+            input_names_[index] = name.get();
+        }
+
+        auto set_name = [&](std::size_t slot, char const* expected) {
+            auto found = std::find(input_names_.begin(), input_names_.end(), expected);
+            if (found == input_names_.end()) {
+                throw std::runtime_error(std::string("Missing MiniLM input: ") + expected);
+            }
+            input_name_ptrs_[slot] = found->c_str();
+        };
+
+        if (input_count < 2) {
+            throw std::runtime_error("MiniLM model has too few inputs");
+        }
+
+        set_name(0, "input_ids");
+        set_name(1, "attention_mask");
+        if (input_count >= 3) {
+            set_name(2, "token_type_ids");
+            input_name_ptrs_.resize(3);
+        } else {
+            input_name_ptrs_.resize(2);
+        }
+    }
+
+    void load_output_name() {
+        if (session_->GetOutputCount() == 0) {
+            throw std::runtime_error("MiniLM model has no outputs");
+        }
+        auto output_name = session_->GetOutputNameAllocated(0, allocator_);
+        output_name_ = output_name.get();
+        output_name_ptrs_.push_back(output_name_.c_str());
+
+        try {
+            auto output_info = session_->GetOutputTypeInfo(0).GetTensorTypeAndShapeInfo().GetShape();
+            if (output_info.size() == 3 && output_info[2] > 0) {
+                hidden_size_hint_ = static_cast<std::size_t>(output_info[2]);
+            }
+        } catch (...) {
+            hidden_size_hint_ = 384;
+        }
+    }
+
+    std::int64_t require_token_id(char const* token) const {
+        auto found = vocab_.find(token);
+        if (found == vocab_.end()) {
+            throw std::runtime_error(std::string("Missing required token in vocab: ") + token);
+        }
+        return found->second;
+    }
+
+    std::vector<std::int64_t> encode(std::string const& text) const {
+        std::vector<std::int64_t> token_ids;
+        token_ids.reserve(max_length_);
+        token_ids.push_back(cls_id_);
+
+        auto basic_tokens = basic_tokenize(normalize_text(text));
+        const std::size_t max_pieces = max_length_ - 1;
+        for (std::string const& token : basic_tokens) {
+            auto pieces = wordpiece(token);
+            for (std::int64_t piece : pieces) {
+                if (token_ids.size() >= max_pieces) {
+                    break;
+                }
+                token_ids.push_back(piece);
+            }
+            if (token_ids.size() >= max_pieces) {
+                break;
+            }
+        }
+
+        token_ids.push_back(sep_id_);
+        return token_ids;
+    }
+
+    std::vector<std::int64_t> wordpiece(std::string const& token) const {
+        if (token.empty()) {
+            return {};
+        }
+        if (token.size() > 100) {
+            return {unk_id_};
+        }
+
+        auto direct = vocab_.find(token);
+        if (direct != vocab_.end()) {
+            return {direct->second};
+        }
+
+        std::vector<std::int64_t> pieces;
+        std::size_t start = 0;
+        while (start < token.size()) {
+            std::int64_t best_id = -1;
+            std::size_t best_end = start;
+
+            for (std::size_t end = token.size(); end > start; --end) {
+                std::string candidate;
+                if (start == 0) {
+                    candidate = token.substr(start, end - start);
+                } else {
+                    candidate = "##" + token.substr(start, end - start);
+                }
+
+                auto found = vocab_.find(candidate);
+                if (found != vocab_.end()) {
+                    best_id = found->second;
+                    best_end = end;
+                    break;
+                }
+            }
+
+            if (best_id < 0) {
+                return {unk_id_};
+            }
+
+            pieces.push_back(best_id);
+            start = best_end;
+        }
+
+        return pieces;
+    }
+
+    Ort::AllocatorWithDefaultOptions allocator_;
+    std::unique_ptr<Ort::Session> session_;
+    std::unordered_map<std::string, std::int64_t> vocab_;
+    std::size_t max_length_;
+    std::size_t hidden_size_hint_ = 384;
+    std::int64_t pad_id_ = 0;
+    std::int64_t unk_id_ = 100;
+    std::int64_t cls_id_ = 101;
+    std::int64_t sep_id_ = 102;
+    std::vector<std::string> input_names_;
+    std::vector<char const*> input_name_ptrs_;
+    std::string output_name_;
+    std::vector<char const*> output_name_ptrs_;
+};
+
+}  // namespace
+
+NB_MODULE(minilm_native, m) {
+    nb::class_<MiniLMEmbedder>(m, "MiniLMEmbedder")
+        .def(nb::init<std::string, std::string, std::size_t>(), nb::arg("model_path"), nb::arg("vocab_path"), nb::arg("max_length") = 256)
+        .def("embed_text", &MiniLMEmbedder::embed_text, nb::arg("text"))
+        .def("embed_texts", &MiniLMEmbedder::embed_texts, nb::arg("texts"))
+        .def_prop_ro("dimensions", &MiniLMEmbedder::dimensions);
+}

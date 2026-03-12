@@ -320,22 +320,22 @@ def rewrite_ored_eq_to_inlist(predicate, telemetry):
 
 def rewrite_date_trunc_to_range(predicate, telemetry: QueryTelemetry):
     """
-    Rewrite DATE_TRUNC comparisons to range comparisons for better pushdown eligibility.
+    Rewrite temporal TRUNC comparisons to range comparisons for better pushdown eligibility.
 
     Examples:
-    DATE_TRUNC('year', col) = '1970-01-01'  → col >= '1970-01-01' AND col < '1971-01-01'
-    DATE_TRUNC('month', col) <= '2021-02-01' → col < '2021-03-01'
-    DATE_TRUNC('day', col) > '2021-01-15'    → col >= '2021-01-16'
+    TRUNC(col, 'year') = '1970-01-01'  → col >= '1970-01-01' AND col < '1971-01-01'
+    TRUNC(col, 'month') <= '2021-02-01' → col < '2021-03-01'
+    TRUNC(col, 'day') > '2021-01-15'    → col >= '2021-01-16'
     """
 
-    # Extract the DATE_TRUNC function and the comparison value
+    # Extract the TRUNC function and the comparison value
     # Determine which side is the function and which is the literal
-    if predicate.left.node_type == NodeType.FUNCTION and predicate.left.value == "DATE_TRUNC":
+    if predicate.left.node_type == NodeType.FUNCTION and predicate.left.value == "TRUNC":
         func_node = predicate.left
         literal_node = predicate.right
         operator = predicate.value
         is_left_func = True
-    elif predicate.right.node_type == NodeType.FUNCTION and predicate.right.value == "DATE_TRUNC":
+    elif predicate.right.node_type == NodeType.FUNCTION and predicate.right.value == "TRUNC":
         func_node = predicate.right
         literal_node = predicate.left
         operator = predicate.value
@@ -357,8 +357,8 @@ def rewrite_date_trunc_to_range(predicate, telemetry: QueryTelemetry):
     if len(func_node.parameters) != 2:
         return predicate
 
-    unit_node = func_node.parameters[0]
-    column_node = func_node.parameters[1]
+    column_node = func_node.parameters[0]
+    unit_node = func_node.parameters[1]
 
     # Unit must be a literal string
     if unit_node.node_type != NodeType.LITERAL or not isinstance(unit_node.value, str):
@@ -523,12 +523,12 @@ def _rewrite_predicate(predicate, telemetry: QueryTelemetry):
         # after rewrites, some filters aren't actually predicates
         return predicate
 
-    # Rewrite DATE_TRUNC comparisons to range comparisons
+    # Rewrite temporal TRUNC comparisons to range comparisons
     if predicate.node_type == NodeType.COMPARISON_OPERATOR:
         if (
-            predicate.left.node_type == NodeType.FUNCTION and predicate.left.value == "DATE_TRUNC"
+            predicate.left.node_type == NodeType.FUNCTION and predicate.left.value == "TRUNC"
         ) or (
-            predicate.right.node_type == NodeType.FUNCTION and predicate.right.value == "DATE_TRUNC"
+            predicate.right.node_type == NodeType.FUNCTION and predicate.right.value == "TRUNC"
         ):
             predicate = rewrite_date_trunc_to_range(predicate, telemetry)
             # After rewrite, return early if it's no longer a comparison (e.g., became a literal or AND node)
@@ -608,7 +608,7 @@ def _rewrite_predicate(predicate, telemetry: QueryTelemetry):
 
 
 def _rewrite_function(function, telemetry: QueryTelemetry):
-    if function.value == "CASE":
+    if function.value == "_CASE":
         # CASE WHEN x IS NULL THEN y ELSE x END → IFNULL(x, y)
         if len(function.parameters) == 2 and function.parameters[0].parameters[0].value == "IsNull":
             compare_column = function.parameters[0].parameters[0].centre

@@ -222,7 +222,12 @@ def _inner_evaluate(root: Node, table: Table):
         literal_type = root.type
         if literal_type == OrsoTypes.ARRAY:
             # creating ARRAY columns is expensive, so we don't create one full length
-            return numpy.array([root.value], dtype=object)
+            array_literal = numpy.empty(1, dtype=object)
+            if isinstance(root.value, (list, tuple)):
+                array_literal[0] = numpy.asarray(root.value, dtype=object)
+            else:
+                array_literal[0] = root.value
+            return array_literal
         if literal_type == OrsoTypes.VARCHAR:
             return numpy.array([root.value] * table.num_rows, dtype=numpy.str_)
         if literal_type == OrsoTypes.BLOB:
@@ -291,6 +296,10 @@ def _inner_evaluate(root: Node, table: Table):
     # INTERAL IDENTIFIERS
     if node_type & INTERNAL_TYPE == INTERNAL_TYPE:  # type:ignore
         if node_type == NodeType.FUNCTION:
+            if root.value == "_PASSTHRU":
+                # PASSTHRU is an optimizer-created identity wrapper (no function_ref).
+                # Just evaluate the inner parameter and return it.
+                return _inner_evaluate(root.parameters[0], table)
             parameters = [_inner_evaluate(param, table) for param in root.parameters]
             # zero parameter functions get the number of rows as the parameter
             if len(parameters) == 0:

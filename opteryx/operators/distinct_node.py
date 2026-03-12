@@ -11,8 +11,6 @@ This is a SQL Query Execution Plan Node.
 This Node eliminates duplicate records.
 """
 
-from pyarrow import Table
-
 from opteryx import EOS
 from opteryx.draken import Morsel
 from opteryx.models import QueryProperties
@@ -40,16 +38,28 @@ class DistinctNode(BasePlanNode):
     def name(self):  # pragma: no cover
         return "Distinction"
 
-    def execute(self, morsel: Table, **kwargs) -> Table:
+    def execute(self, morsel, **kwargs):
         from opteryx.compiled.table_ops.distinct import distinct
 
         if morsel == EOS:
             yield EOS
             return
 
-        morsel = [morsel] if isinstance(morsel, Morsel) else Morsel.iter_from_arrow(morsel)
+        if not isinstance(morsel, Morsel):
+            # e.g. Arrow Table produced by UnionNode — convert to Morsel
+            converted = self.ensure_draken_morsel(morsel)
+            if converted is EOS:
+                yield EOS
+                return
+            # iter_from_arrow returns a generator; process each chunk
+            import pyarrow
+            if isinstance(converted, pyarrow.Table):
+                converted = Morsel.iter_from_arrow(converted)
+            for sub_morsel in (converted if hasattr(converted, '__iter__') else [converted]):
+                yield from self.execute(sub_morsel, **kwargs)
+            return
 
-        for chunk in morsel:
+        for chunk in [morsel]:
             # Use Draken-based distinct with column names as bytes
             unique_indexes, self.hash_set = distinct(
                 chunk, columns=self._distinct_on, seen_hashes=self.hash_set
