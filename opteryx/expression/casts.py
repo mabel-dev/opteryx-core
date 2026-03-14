@@ -5,6 +5,7 @@ These kernels are the source of truth for cast behavior and are used by both the
 function system and the new cast evaluation path.
 """
 
+import datetime
 import inspect
 
 import numpy
@@ -28,6 +29,127 @@ def _unwrap_vector_value(value):
     return value
 
 
+def _normalize_scalar(value):
+    if hasattr(value, "as_py"):
+        value = value.as_py()
+    if isinstance(value, numpy.ndarray):
+        if value.ndim == 0:
+            value = value.item()
+        else:
+            value = value.tolist()
+    if isinstance(value, numpy.generic):
+        value = value.item()
+    return value
+
+
+def _is_nullish(value):
+    if value is None:
+        return True
+    return isinstance(value, (float, numpy.floating)) and numpy.isnan(value)
+
+
+def parse_timestamp_value(value):
+    """
+    Cast a single scalar-like value to a Python datetime.
+
+    This extends the Orso TIMESTAMP parser with support for:
+    - raw epoch integers/floats in s/ms/us/ns
+    - numpy datetime64
+    - Python date values
+    - UTF-8 bytes
+    """
+    value = _normalize_scalar(value)
+
+    if value is None:
+        return None
+
+    if isinstance(value, datetime.datetime):
+        return value
+
+    if isinstance(value, datetime.date):
+        return datetime.datetime(value.year, value.month, value.day)
+
+    if isinstance(value, numpy.datetime64):
+        micros = int(value.astype("datetime64[us]").astype(numpy.int64))
+        return datetime.datetime.fromtimestamp(micros / 1_000_000, tz=datetime.timezone.utc).replace(
+            tzinfo=None
+        )
+
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        value = bytes(value).decode("utf-8")
+
+    if isinstance(value, str):
+        return OrsoTypes.TIMESTAMP.parse(value)
+
+    if isinstance(value, (int, float, numpy.integer, numpy.floating)):
+        numeric = float(value)
+        magnitude = abs(numeric)
+
+        # Small integers are interpreted as epoch seconds. Larger magnitudes
+        # are inferred as ms/us/ns epoch values.
+        if magnitude >= 1e18:
+            seconds = numeric / 1_000_000_000
+        elif magnitude >= 1e15:
+            seconds = numeric / 1_000_000
+        elif magnitude >= 1e12:
+            seconds = numeric / 1_000
+        else:
+            seconds = numeric
+
+        return datetime.datetime.fromtimestamp(seconds, tz=datetime.timezone.utc).replace(
+            tzinfo=None
+        )
+
+    return OrsoTypes.TIMESTAMP.parse(value)
+
+
+def _parse_array_value(value, element_type, safe_cast=False):
+    value = _unwrap_vector_value(value)
+
+    if _is_nullish(value):
+        return None
+
+    if isinstance(value, pyarrow.Array):
+        value = value.to_pylist()
+    if isinstance(value, numpy.ndarray):
+        if value.ndim == 0:
+            value = value.item()
+        else:
+            value = value.tolist()
+    if isinstance(value, numpy.generic):
+        value = value.item()
+
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        value = bytes(value).decode("utf-8", errors="ignore")
+
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            if safe_cast:
+                return safe(OrsoTypes.ARRAY.parse, value, element_type=element_type)
+            return OrsoTypes.ARRAY.parse(value, element_type=element_type)
+        value = [value]
+    elif isinstance(value, (list, tuple, set, frozenset)):
+        value = list(value)
+    else:
+        value = [value]
+
+    parser = OrsoTypes[element_type].parse
+    result = []
+    for element in value:
+        element = _unwrap_vector_value(element)
+        if _is_nullish(element):
+            continue
+        if safe_cast:
+            converted = safe(parser, element)
+            if converted is None:
+                return None
+        else:
+            converted = parser(element)
+        result.append(converted)
+    return result
+
+
 def try_cast(_type):
     """Cast a column to a specified type, returning None for failed conversions.
 
@@ -45,6 +167,10 @@ def try_cast(_type):
 
         kwargs = {param.name: arg for param, arg in zip(params, args)}
 
+        if _type == "TIMESTAMP":
+            return [safe(parse_timestamp_value, i) for i in arr]
+        if _type == "ARRAY":
+            return [_parse_array_value(i, args[0], safe_cast=True) for i in arr]
         if _type == "VECTOR":
             return [safe(caster, _unwrap_vector_value(i), **kwargs) for i in arr]
         return [safe(caster, i, **kwargs) for i in arr]
@@ -82,6 +208,10 @@ def cast(_type):
             # ARRAY can take a single argument for the element type
             kwargs["element_type"] = args[0]
 
+        if _type == "TIMESTAMP":
+            return [parse_timestamp_value(i) for i in arr]
+        if _type == "ARRAY":
+            return [_parse_array_value(i, args[0], safe_cast=False) for i in arr]
         if _type == "VECTOR":
             return [caster(_unwrap_vector_value(i), **kwargs) for i in arr]
         return [caster(i, **kwargs) for i in arr]

@@ -31,6 +31,7 @@ _DRAKEN_VECTOR_NAMES = frozenset(
         "DictionaryVector",
         "ConstantVector",
         "ArrayVector",
+        "VectorVector",
         "ArrowVector",
         "IntervalVector",
     }
@@ -177,6 +178,12 @@ def _coerce_float_set(values) -> frozenset:
 
 
 def _coerce_date32(value) -> int:
+    if value.__class__.__name__ == "ConstantVector":
+        value = value.scalar_value()
+    if hasattr(value, "as_py"):
+        value = value.as_py()
+    if isinstance(value, numpy.generic):
+        value = value.item()
     if isinstance(value, datetime.datetime):
         return (value.date() - _EPOCH_DATE).days
     if isinstance(value, datetime.date):
@@ -189,12 +196,27 @@ def _coerce_date32_set(values) -> frozenset:
 
 
 def _coerce_timestamp(value) -> int:
+    if value.__class__.__name__ == "ConstantVector":
+        value = value.scalar_value()
+    if hasattr(value, "as_py"):
+        value = value.as_py()
+    if isinstance(value, numpy.generic):
+        value = value.item()
+    if isinstance(value, (bytes, bytearray, memoryview, str)):
+        from opteryx.expression.casts import parse_timestamp_value
+
+        value = parse_timestamp_value(value)
     if isinstance(value, numpy.datetime64):
         return int(value.astype("datetime64[us]").astype(numpy.int64))
     if isinstance(value, datetime.datetime):
         return int(value.timestamp() * 1_000_000)
     if isinstance(value, datetime.date):
         return int(datetime.datetime(value.year, value.month, value.day).timestamp() * 1_000_000)
+    if value.__class__.__name__ == "ArrowVector":
+        scalar = value._arr[0].as_py()
+        if scalar is None:
+            return None
+        return _coerce_timestamp(scalar)
     return int(value)
 
 
@@ -206,6 +228,37 @@ def _coerce_interval(value) -> tuple:
     if isinstance(value, (tuple, list)) and len(value) == 2:
         return (int(value[0]), int(value[1]))
     raise TypeError(f"Cannot coerce {type(value)!r} to interval literal")
+
+
+def _coerce_temporal_scalar_for_arrow(value, target_type):
+    from orso.types import OrsoTypes
+
+    from opteryx.expression.casts import parse_timestamp_value
+
+    if hasattr(value, "as_py"):
+        value = value.as_py()
+    if isinstance(value, numpy.generic):
+        value = value.item()
+
+    if target_type == OrsoTypes.DATE:
+        if isinstance(value, datetime.datetime):
+            return value.date()
+        if isinstance(value, datetime.date):
+            return value
+        if isinstance(value, (int, numpy.integer)):
+            return _EPOCH_DATE + datetime.timedelta(days=int(value))
+        return parse_timestamp_value(value).date()
+
+    if target_type == OrsoTypes.TIMESTAMP:
+        if isinstance(value, (int, numpy.integer)):
+            ivalue = int(value)
+            if abs(ivalue) < 100_000_000_000 and ivalue % 1_000_000 == 0:
+                return datetime.datetime(1970, 1, 1) + datetime.timedelta(
+                    days=ivalue // 1_000_000
+                )
+        return parse_timestamp_value(value)
+
+    return value
 
 
 # --- IS NULL helper ---
@@ -444,6 +497,8 @@ def _timestamp_compare(op: str, vec, right):
         return _timestamp_compare(op, vec, ts_right)
     else:
         value = _coerce_timestamp(right)
+        if value is None:
+            return BoolVector(len(vec))
 
     if op == "Eq":
         return vec.equals(value)
@@ -529,14 +584,63 @@ def _interval_compare(op: str, vec, right):
 
 
 def _dict_compare(op: str, vec, right):
+    import pyarrow as pa
+    import pyarrow.compute as pc
+
     from opteryx.draken.vectors.bool_vector import BoolVector
 
     # SQL NULL semantics: comparing anything with NULL returns NULL (treated as FALSE in WHERE)
     if right is None:
         return BoolVector(len(vec))
 
+    if right.__class__.__name__ == "ConstantVector":
+        right = right.scalar_value()
+    elif right.__class__.__name__ == "ArrowVector":
+        arr = right.to_arrow()
+        right = arr[0].as_py() if len(arr) == 1 else arr
+
+    if isinstance(right, numpy.generic):
+        right = right.item()
+
     # keep scalar as-is for non-list ops
     value_list = list(right) if isinstance(right, (list, tuple, set, frozenset)) else right
+
+    if isinstance(right, (datetime.datetime, datetime.date, numpy.datetime64)):
+        arr = vec.to_arrow()
+        if pa.types.is_dictionary(arr.type):
+            arr = arr.dictionary_decode()
+
+        if pa.types.is_date32(arr.type):
+            if isinstance(right, datetime.datetime):
+                arr = arr.cast(pa.timestamp("us"))
+                scalar = pa.scalar(right, type=pa.timestamp("us"))
+            else:
+                day_value = right
+                if isinstance(day_value, numpy.datetime64):
+                    day_value = day_value.astype("datetime64[D]").astype(datetime.date)
+                if isinstance(day_value, datetime.datetime):
+                    day_value = day_value.date()
+                scalar = pa.scalar(day_value, type=pa.date32())
+        else:
+            if isinstance(right, datetime.date) and not isinstance(right, datetime.datetime):
+                right = datetime.datetime(right.year, right.month, right.day)
+            if isinstance(right, numpy.datetime64):
+                right = right.astype("datetime64[us]").astype(datetime.datetime)
+            arr = arr if pa.types.is_timestamp(arr.type) else arr.cast(pa.timestamp("us"))
+            scalar = pa.scalar(right, type=pa.timestamp("us"))
+
+        _ARROW_OPS = {
+            "Eq": pc.equal,
+            "NotEq": pc.not_equal,
+            "Lt": pc.less,
+            "Gt": pc.greater,
+            "LtEq": pc.less_equal,
+            "GtEq": pc.greater_equal,
+        }
+        fn = _ARROW_OPS.get(op)
+        if fn is None:
+            raise NotImplementedError(f"DictionaryVector temporal compare: unsupported op {op!r}")
+        return BoolVector.from_arrow(fn(arr, scalar))
 
     if op == "Eq":
         return vec.equals(right)
@@ -776,7 +880,7 @@ def draken_compare(op: str, left, right):
     # and invert the directional operator so semantics remain correct.
     # e.g. 'Earth' = g.name  →  g.name = 'Earth' (Eq is symmetric, no flip needed)
     # e.g. 5 > g.id          →  g.id < 5           (Gt → Lt)
-    if isinstance(left, (str, int, float, bytes, bool, type(None))) and hasattr(
+    if isinstance(left, (str, int, float, bytes, bool, tuple, list, type(None))) and hasattr(
         right, "null_count"
     ):
         _FLIP_OPS = {"Gt": "Lt", "Lt": "Gt", "GtEq": "LtEq", "LtEq": "GtEq"}
@@ -931,6 +1035,31 @@ def _eval_binary_op_draken(node, morsel):
     left = _eval_value(node.left, morsel)
     right = _eval_value(node.right, morsel)
 
+    from orso.types import OrsoTypes
+
+    if not hasattr(left, "null_count") and node.left.schema_column.type in (
+        OrsoTypes.DATE,
+        OrsoTypes.TIMESTAMP,
+    ):
+        from opteryx.draken.interop.arrow import vector_from_arrow
+
+        arrow_type = (
+            _pa.date32() if node.left.schema_column.type == OrsoTypes.DATE else _pa.timestamp("us")
+        )
+        scalar = _coerce_temporal_scalar_for_arrow(left, node.left.schema_column.type)
+        left = vector_from_arrow(_pa.array([scalar] * morsel.num_rows, type=arrow_type))
+    if not hasattr(right, "null_count") and node.right.schema_column.type in (
+        OrsoTypes.DATE,
+        OrsoTypes.TIMESTAMP,
+    ):
+        from opteryx.draken.interop.arrow import vector_from_arrow
+
+        arrow_type = (
+            _pa.date32() if node.right.schema_column.type == OrsoTypes.DATE else _pa.timestamp("us")
+        )
+        scalar = _coerce_temporal_scalar_for_arrow(right, node.right.schema_column.type)
+        right = vector_from_arrow(_pa.array([scalar] * morsel.num_rows, type=arrow_type))
+
     left_cls = left.__class__.__name__
     right_cls = right.__class__.__name__
 
@@ -1021,10 +1150,15 @@ def _eval_value(node, morsel):
         op = node.value  # "Arrow", "LongArrow", or "MapAccess"
 
         if op == "MapAccess":
-            from opteryx.compiled.vector_ops import vector_get_element
+            from opteryx.draken.interop.arrow import vector_from_arrow
             from opteryx.draken.interop.arrow import vector_from_sequence
+            from opteryx.expression.binary_operators import MapAccessOp
 
-            return vector_from_sequence(vector_get_element(left_vec, int(right_val)))
+            source = left_vec.to_arrow() if hasattr(left_vec, "to_arrow") else left_vec
+            result = MapAccessOp(source, [right_val])
+            if isinstance(result, _pa.Array):
+                return vector_from_arrow(result)
+            return vector_from_sequence(result)
 
         if op in ("Arrow", "LongArrow"):
             from opteryx.draken.interop.arrow import vector_from_arrow
@@ -1058,6 +1192,13 @@ def _eval_value(node, morsel):
         result = _inner_evaluate(node, arrow_table)
         if isinstance(result, (_pa.Array, _pa.ChunkedArray)):
             return vector_from_arrow(result)
+        if not hasattr(result, "__iter__") or isinstance(result, (str, bytes, numpy.generic)):
+            from opteryx.draken.vectors.constant_vector import from_scalar as _const_scalar
+
+            vec = _const_scalar(result, morsel.num_rows)
+            if vec is not None:
+                return vec
+            return vector_from_arrow(_pa.array([result] * morsel.num_rows))
         return vector_from_sequence(result)
 
     # Predicate sub-expressions (AND/OR/NOT/COMPARISON_OPERATOR inside a value
@@ -1156,6 +1297,55 @@ def evaluate_draken(node, morsel):
     if node_type == NodeType.COMPARISON_OPERATOR:
         left = _eval_value(node.left, morsel)
         right = _eval_value(node.right, morsel)
+        if not hasattr(left, "null_count") and not hasattr(right, "null_count"):
+            import pyarrow as pa
+
+            from opteryx.draken.vectors.bool_vector import BoolVector
+            from opteryx.draken.interop.arrow import vector_from_arrow
+            from opteryx.expression.ops import filter_operations
+
+            from orso.types import OrsoTypes
+
+            temporal_types = {OrsoTypes.DATE, OrsoTypes.TIMESTAMP}
+            if (
+                node.left.schema_column.type in temporal_types
+                or node.right.schema_column.type in temporal_types
+            ):
+                left_arrow_type = (
+                    pa.date32()
+                    if node.left.schema_column.type == OrsoTypes.DATE
+                    else pa.timestamp("us")
+                    if node.left.schema_column.type == OrsoTypes.TIMESTAMP
+                    else None
+                )
+                right_arrow_type = (
+                    pa.date32()
+                    if node.right.schema_column.type == OrsoTypes.DATE
+                    else pa.timestamp("us")
+                    if node.right.schema_column.type == OrsoTypes.TIMESTAMP
+                    else None
+                )
+                if left_arrow_type is not None:
+                    scalar = _coerce_temporal_scalar_for_arrow(left, node.left.schema_column.type)
+                    left = vector_from_arrow(
+                        pa.array([scalar] * morsel.num_rows, type=left_arrow_type)
+                    )
+                if right_arrow_type is not None:
+                    scalar = _coerce_temporal_scalar_for_arrow(right, node.right.schema_column.type)
+                    right = vector_from_arrow(
+                        pa.array([scalar] * morsel.num_rows, type=right_arrow_type)
+                    )
+                return draken_compare(node.value, left, right)
+
+            scalar_result = filter_operations(
+                pa.array([left]),
+                node.left.schema_column.type,
+                node.value,
+                pa.array([right]),
+                node.right.schema_column.type,
+            )[0].as_py()
+            scalar_result = False if scalar_result is None else bool(scalar_result)
+            return BoolVector.from_arrow(pa.array([scalar_result] * morsel.num_rows, type=pa.bool_()))
         return draken_compare(node.value, left, right)
 
     if node_type == NodeType.UNARY_OPERATOR:

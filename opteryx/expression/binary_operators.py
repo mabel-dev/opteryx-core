@@ -256,6 +256,10 @@ def binary_operations(
                 return arr.combine_chunks() if arr.num_chunks > 1 else arr.chunk(0)
             if isinstance(arr, pyarrow.Array):
                 return arr
+            if isinstance(arr, (numpy.datetime64,)):
+                return pyarrow.array([arr])
+            if hasattr(arr, "isoformat") or hasattr(arr, "year"):
+                return pyarrow.array([arr])
             # numpy object array (datetime.date values from _inner_evaluate)
             return pyarrow.array(arr)
 
@@ -274,6 +278,10 @@ def binary_operations(
         return _ip_containment(left, right)
 
     elif operator == "StringConcat":
+        if hasattr(left, "type") and pyarrow.types.is_binary(left.type):
+            left = left.cast(pyarrow.large_utf8())
+        if hasattr(right, "type") and pyarrow.types.is_binary(right.type):
+            right = right.cast(pyarrow.large_utf8())
         return compute.binary_join_element_wise(left, right, "")
 
     return operation(left, right)

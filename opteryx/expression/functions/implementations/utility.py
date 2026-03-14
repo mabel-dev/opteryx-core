@@ -45,6 +45,34 @@ def _as_python_value(value):
     return value
 
 
+def _normalize_array_row(value):
+    value = _as_python_value(value)
+    if value is None:
+        return None
+    if isinstance(value, numpy.ndarray):
+        if value.ndim == 0:
+            return [value.item()]
+        return value.tolist()
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return list(value)
+    return [value]
+
+
+def _normalize_membership_values(value):
+    value = _as_python_value(value)
+    if value is None:
+        return []
+    if isinstance(value, numpy.ndarray):
+        if value.ndim == 0:
+            return [value.item()]
+        value = value.tolist()
+    if isinstance(value, (list, tuple, set, frozenset)):
+        if len(value) == 1 and isinstance(next(iter(value)), (list, tuple, set, frozenset, numpy.ndarray)):
+            return _normalize_array_row(next(iter(value))) or []
+        return list(value)
+    return [value]
+
+
 def _coerce_numeric_vector(value):
     value = _as_python_value(value)
     if value is None:
@@ -379,6 +407,33 @@ def humanize(arr):
         arr = arr.tolist()
 
     return [humanize_number(value) for value in arr]
+
+
+def array_contains(arr, val):
+    needle = _as_python_value(val)
+    rows = _sequence_rows(arr)
+    return pyarrow.array(
+        [False if row is None else needle in set(_normalize_array_row(row) or []) for row in rows],
+        type=pyarrow.bool_(),
+    )
+
+
+def array_contains_any(arr, val):
+    needles = frozenset(_normalize_membership_values(val))
+    rows = _sequence_rows(arr)
+    return pyarrow.array(
+        [False if row is None else bool(set(_normalize_array_row(row) or []).intersection(needles)) for row in rows],
+        type=pyarrow.bool_(),
+    )
+
+
+def array_contains_all(arr, val):
+    needles = frozenset(_normalize_membership_values(val))
+    rows = _sequence_rows(arr)
+    return pyarrow.array(
+        [False if row is None else needles.issubset(set(_normalize_array_row(row) or [])) for row in rows],
+        type=pyarrow.bool_(),
+    )
 
 
 def array_cast(array, element_type):

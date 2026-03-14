@@ -229,6 +229,67 @@ def filter_operations(left_arr, left_type, operator, right_arr, right_type):
     if _has_constant_candidate(left_arr):
         return _inner_filter_operations(left_arr, operator, right_arr)
 
+    def _to_temporal_array(values, source_type, target_type):
+        from opteryx.expression.casts import parse_timestamp_value
+        from opteryx.expression.functions.implementations.temporal import (
+            convert_int64_array_to_pyarrow_datetime,
+        )
+
+        if isinstance(values, pyarrow.ChunkedArray):
+            arr = values.combine_chunks() if values.num_chunks > 1 else values.chunk(0)
+        elif isinstance(values, pyarrow.Array):
+            arr = values
+        elif isinstance(values, numpy.ndarray):
+            arr = pyarrow.array(values.tolist())
+        else:
+            arr = pyarrow.array(values)
+
+        if target_type == OrsoTypes.TIMESTAMP:
+            if pyarrow.types.is_timestamp(arr.type):
+                return arr if arr.type == pyarrow.timestamp("us") else arr.cast(pyarrow.timestamp("us"))
+            if pyarrow.types.is_date32(arr.type):
+                return arr.cast(pyarrow.timestamp("us"))
+            if pyarrow.types.is_integer(arr.type):
+                if source_type == OrsoTypes.DATE:
+                    date_arr = pyarrow.array(
+                        [v.as_py() if hasattr(v, "as_py") else v for v in arr],
+                        type=pyarrow.date32(),
+                    )
+                    return date_arr.cast(pyarrow.timestamp("us"))
+                if source_type == OrsoTypes.TIMESTAMP:
+                    import datetime as _dt
+
+                    raw_values = [v.as_py() if hasattr(v, "as_py") else v for v in arr]
+                    if raw_values and all(v is None or (abs(int(v)) < 100_000_000_000 and int(v) % 1_000_000 == 0) for v in raw_values):
+                        return pyarrow.array(
+                            [
+                                None
+                                if v is None
+                                else _dt.datetime(1970, 1, 1) + _dt.timedelta(days=int(v) // 1_000_000)
+                                for v in raw_values
+                            ],
+                            type=pyarrow.timestamp("us"),
+                        )
+                return convert_int64_array_to_pyarrow_datetime(arr)
+            return pyarrow.array(
+                [parse_timestamp_value(v.as_py() if hasattr(v, "as_py") else v) for v in arr],
+                type=pyarrow.timestamp("us"),
+            )
+
+        if target_type == OrsoTypes.DATE:
+            if pyarrow.types.is_date32(arr.type):
+                return arr
+            if pyarrow.types.is_timestamp(arr.type):
+                return arr.cast(pyarrow.date32())
+            if pyarrow.types.is_integer(arr.type):
+                return pyarrow.array(
+                    [v.as_py() if hasattr(v, "as_py") else v for v in arr],
+                    type=pyarrow.date32(),
+                )
+            return pyarrow.array(arr, type=pyarrow.date32())
+
+        return arr
+
     # INTEGERS and DECIMALS don't play nicely so we cast the INTS to DOUBLES
     if left_type == OrsoTypes.DECIMAL and right_type == OrsoTypes.INTEGER:
         right_arr = compute.cast(right_arr, pyarrow.float64())
@@ -282,16 +343,19 @@ def filter_operations(left_arr, left_type, operator, right_arr, right_type):
     if (
         OrsoTypes.TIMESTAMP in (left_type, right_type) or OrsoTypes.DATE in (left_type, right_type)
     ) and OrsoTypes.INTEGER in (left_type, right_type):
-        from opteryx.expression.functions.implementations.temporal import (
-            convert_int64_array_to_pyarrow_datetime,
-        )
-
         if left_type == OrsoTypes.INTEGER:
-            left_arr = convert_int64_array_to_pyarrow_datetime(left_arr)
-            left_type = OrsoTypes.TIMESTAMP
+            target_type = OrsoTypes.DATE if right_type == OrsoTypes.DATE else OrsoTypes.TIMESTAMP
+            left_arr = _to_temporal_array(left_arr, left_type, target_type)
+            left_type = target_type
         if right_type == OrsoTypes.INTEGER:
-            right_arr = convert_int64_array_to_pyarrow_datetime(right_arr)
-            right_type = OrsoTypes.TIMESTAMP
+            target_type = OrsoTypes.DATE if left_type == OrsoTypes.DATE else OrsoTypes.TIMESTAMP
+            right_arr = _to_temporal_array(right_arr, right_type, target_type)
+            right_type = target_type
+
+    if {left_type, right_type} == {OrsoTypes.DATE, OrsoTypes.TIMESTAMP}:
+        left_arr = _to_temporal_array(left_arr, left_type, OrsoTypes.TIMESTAMP)
+        right_arr = _to_temporal_array(right_arr, right_type, OrsoTypes.TIMESTAMP)
+        left_type = right_type = OrsoTypes.TIMESTAMP
 
     if OrsoTypes.INTERVAL in (left_type, right_type):
         from opteryx.expression.intervals import INTERVAL_KERNELS
