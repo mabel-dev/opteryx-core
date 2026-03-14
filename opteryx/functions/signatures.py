@@ -95,10 +95,7 @@ _DOCUMENTATION_CATEGORIES = OrderedDict(
                 "SIGN",
                 "SQRT",
                 "POWER",
-                "LN",
                 "LOG",
-                "LOG10",
-                "LOG2",
                 "E",
                 "PI",
                 "PHI",
@@ -604,6 +601,29 @@ def _parameter_documentation(function_name: str, parameter: ParameterSpec) -> st
     return documentation
 
 
+def _lifecycle_export(function: FunctionDefinition) -> dict[str, Any]:
+    lifecycle = function.lifecycle
+    return {
+        "status": lifecycle.status,
+        "introduced": lifecycle.introduced,
+        "deprecated_in": lifecycle.deprecated_in,
+        "remove_after": lifecycle.remove_after,
+        "replacement": lifecycle.replacement,
+    }
+
+
+def _arity_export(overload: FunctionOverload) -> dict[str, Any]:
+    parameters = overload.parameters
+    minimum = sum(1 for parameter in parameters if not parameter.optional and not parameter.variadic)
+    variadic = any(parameter.variadic for parameter in parameters)
+    maximum: int | None = None if variadic else len(parameters)
+    return {
+        "minimum": minimum,
+        "maximum": maximum,
+        "variadic": variadic,
+    }
+
+
 def _signature_label(name: str, overload: FunctionOverload) -> str:
     if name in ("CURRENT_DATE", "CURRENT_TIME", "CURRENT_TIMESTAMP"):
         return name
@@ -811,6 +831,7 @@ def _export_overload(
     category_label = _documentation_category(function, display_name, overload)
 
     exported = {
+        "id": overload.id,
         "label": _signature_label(display_name, overload),
         "category": category_label,
         "documentation": _function_documentation(display_name, function, category_label, overload),
@@ -826,11 +847,21 @@ def _export_overload(
             "type": return_type,
             "documentation": return_documentation,
         },
+        "arity": _arity_export(overload),
+        "execution": {
+            "kernel_id": overload.kernel.id,
+            "null_policy": overload.kernel.null_policy,
+            "cost_us_per_million": overload.kernel.cost_us_per_million,
+        },
         "parameters": [
             {
                 "label": parameter.name,
                 "type": _parameter_export_type_label(function, overload, parameter),
                 "documentation": _parameter_documentation(function.name, parameter),
+                "optional": parameter.optional,
+                "variadic": parameter.variadic,
+                "constant_only": parameter.constant_only,
+                "null_handling": parameter.null_handling,
             }
             for parameter in overload.parameters
         ],
@@ -878,7 +909,14 @@ def export_function_signatures(
             ]
 
         exported[public_name] = {
+            "catalog_name": function.name,
             "aliases": aliases,
+            "summary": _normalise_sentence(function.summary or function.documentation or public_name),
+            "volatility": function.volatility,
+            "deterministic": function.deterministic,
+            "foldable": function.foldable,
+            "pushdown_safe": function.pushdown_safe,
+            "lifecycle": _lifecycle_export(function),
             "overloads": [
                 _export_overload(
                     display_name=public_name,

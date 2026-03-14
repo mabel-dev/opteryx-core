@@ -512,13 +512,6 @@ extensions = [
         extra_compile_args=C_FLAGS,
     ),
     Extension(
-        name="opteryx.compiled.functions.vectors",
-        sources=["opteryx/compiled/functions/vectors.pyx"],
-        include_dirs=include_dirs,
-        language="c++",
-        extra_compile_args=CPP_FLAGS,
-    ),
-    Extension(
         "opteryx.compiled.simd_probe",
         sources=[
             "opteryx/compiled/simd_probe.pyx",

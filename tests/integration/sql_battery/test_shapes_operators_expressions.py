@@ -526,8 +526,8 @@ STATEMENTS = [
         ("SELECT DISTINCT key FROM (SELECT jsonb_object_keys(dict) as keys FROM testdata.flat.struct) AS set CROSS JOIN UNNEST(keys) AS key", 5, 1, None),
 
         ("SELECT birth_date FROM testdata.astronauts", 357, 1, None),
-        ("SELECT YEAR(birth_date) FROM testdata.astronauts", 357, 1, None),
-        ("SELECT YEAR(birth_date) FROM testdata.astronauts WHERE YEAR(birth_date) < 1930", 14, 1, None),
+        ("SELECT EXTRACT(YEAR FROM birth_date) FROM testdata.astronauts", 357, 1, None),
+        ("SELECT EXTRACT(YEAR FROM birth_date) FROM testdata.astronauts WHERE EXTRACT(YEAR FROM birth_date) < 1930", 14, 1, None),
 
         ("SELECT RANDOM() FROM $planets", 9, 1, None),
         ("SELECT CURRENT_TIMESTAMP() FROM $planets", 9, 1, None),
@@ -538,9 +538,9 @@ STATEMENTS = [
         ("SELECT CURRENT_TIME()", 1, 1, None),
         ("SELECT CURRENT_TIMESTAMP", 1, 1, None),
         ("SELECT CURRENT_TIMESTAMP()", 1, 1, None),
-        ("SELECT YEAR(birth_date), COUNT(*) FROM testdata.astronauts GROUP BY YEAR(birth_date)", 54, 2, None),
-        ("SELECT MONTH(birth_date), COUNT(*) FROM testdata.astronauts GROUP BY MONTH(birth_date)", 12, 2, None),
-        ("SELECT YEAR(), MONTH(), DAY(), HOUR(), MINUTE(), SECOND() FROM $planets", 9, 6, None),
+        ("SELECT EXTRACT(YEAR FROM birth_date), COUNT(*) FROM testdata.astronauts GROUP BY EXTRACT(YEAR FROM birth_date)", 54, 2, None),
+        ("SELECT EXTRACT(MONTH FROM birth_date), COUNT(*) FROM testdata.astronauts GROUP BY EXTRACT(MONTH FROM birth_date)", 12, 2, None),
+        ("SELECT EXTRACT(YEAR FROM CURRENT_TIMESTAMP), EXTRACT(MONTH FROM CURRENT_TIMESTAMP), EXTRACT(DAY FROM CURRENT_TIMESTAMP), EXTRACT(HOUR FROM CURRENT_TIMESTAMP), EXTRACT(MINUTE FROM CURRENT_TIMESTAMP), EXTRACT(SECOND FROM CURRENT_TIMESTAMP) FROM $planets", 9, 6, None),
 
         ("SELECT DATE_FORMAT(birth_date, '%d-%Y') FROM testdata.astronauts", 357, 1, None),
         ("SELECT DATE_FORMAT(birth_date, 'dddd') FROM testdata.astronauts", 357, 1, None),
@@ -568,9 +568,9 @@ STATEMENTS = [
         ("SELECT SHA512('hello')", 1, 1, None),
         ("SELECT UPPER('upper'), LOWER('LOWER')", 1, 2, None),
         ("SELECT POWER(2, 10)", 1, 1, None),
-        ("SELECT LN(10)", 1, 1, None),
-        ("SELECT LOG10(10)", 1, 1, None),
-        ("SELECT LOG2(10)", 1, 1, None),
+        ("SELECT LOG(10, E())", 1, 1, None),
+        ("SELECT LOG(10, 10)", 1, 1, None),
+        ("SELECT LOG(10, 2)", 1, 1, None),
         ("SELECT LOG(10, 4)", 1, 1, None),
 
         ("SELECT HASH(name), name from testdata.astronauts", 357, 2, None),

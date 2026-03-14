@@ -7,6 +7,39 @@ from orso.types import OrsoTypes
 
 from opteryx.expression.intervals import MICROSECONDS_PER_SECOND
 
+BINARY_OPERATOR_TOKENS = {
+    "StringConcat": "||",
+    "Plus": "+",
+    "Minus": "-",
+    "Multiply": "*",
+    "Divide": "/",
+    "MyIntegerDivide": "div",
+    "Modulo": "%",
+    "BitwiseOr": "|",
+    "BitwiseAnd": "&",
+    "BitwiseXor": "^",
+    "ShiftLeft": "<<",
+    "ShiftRight": ">>",
+}
+
+EXTRACTION_OPERATOR_TOKENS = {
+    "Arrow": "->",
+    "LongArrow": "->>",
+}
+
+COMPARISON_OPERATOR_TOKENS = {
+    "Eq": "=",
+    "Lt": "<",
+    "Gt": ">",
+    "NotEq": "!=",
+    "BitwiseOr": "|",
+    "LtEq": "<=",
+    "GtEq": ">=",
+    "AtQuestion": "@?",
+    "AtArrow": "@>",
+    "ArrayContainsAll": "@>>",
+}
+
 
 @dataclass(init=False)
 class ExpressionColumn(FlatColumn):
@@ -98,48 +131,18 @@ def format_expression(root, qualify: bool = False):
                 return f"{root.value[0]}.*"
             return "*"
         if node_type == NodeType.BINARY_OPERATOR:
-            _map = {
-                "StringConcat": "||",
-                "Plus": "+",
-                "Minus": "-",
-                "Multiply": "*",
-                "Divide": "/",
-                "MyIntegerDivide": "div",
-                "Modulo": "%",
-                "BitwiseOr": "|",
-                "BitwiseAnd": "&",
-                "BitwiseXor": "^",
-                "ShiftLeft": "<<",
-                "ShiftRight": ">>",
-            }
-            return f"{format_expression(root.left, qualify)} {_map.get(root.value, root.value).upper()} {format_expression(root.right, qualify)}"
+            return f"{format_expression(root.left, qualify)} {BINARY_OPERATOR_TOKENS.get(root.value, root.value).upper()} {format_expression(root.right, qualify)}"
         if node_type == NodeType.EXTRACTION_OPERATOR:
             if root.value == "MapAccess":
                 return (
                     f"{format_expression(root.left, qualify)}"
                     f"[{format_expression(root.right, qualify)}]"
                 )
-            _map = {
-                "Arrow": "->",
-                "LongArrow": "->>",
-            }
-            return f"{format_expression(root.left, qualify)} {_map.get(root.value, root.value).upper()} {format_expression(root.right, qualify)}"
+            return f"{format_expression(root.left, qualify)} {EXTRACTION_OPERATOR_TOKENS.get(root.value, root.value).upper()} {format_expression(root.right, qualify)}"
         if node_type == NodeType.EXPRESSION_LIST:
             return f"<EXPRESSIONS {random_string(4)}>"
     if node_type == NodeType.COMPARISON_OPERATOR:
-        _map = {
-            "Eq": "=",
-            "Lt": "<",
-            "Gt": ">",
-            "NotEq": "!=",
-            "BitwiseOr": "|",
-            "LtEq": "<=",
-            "GtEq": ">=",
-            "AtQuestion": "@?",
-            "AtArrow": "@>",
-            "ArrayContainsAll": "@>>",
-        }
-        return f"{format_expression(root.left, qualify)} {_map.get(root.value, root.value).upper()} {format_expression(root.right, qualify)}"
+        return f"{format_expression(root.left, qualify)} {COMPARISON_OPERATOR_TOKENS.get(root.value, root.value).upper()} {format_expression(root.right, qualify)}"
     if node_type == NodeType.UNARY_OPERATOR:
         _map = {"IsNull": "%s IS NULL", "IsNotNull": "%s IS NOT NULL"}
         return _map.get(root.value, root.value + "(%s)").replace(

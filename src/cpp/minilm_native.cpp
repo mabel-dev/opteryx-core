@@ -7,6 +7,7 @@
 #include <onnxruntime_cxx_api.h>
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cmath>
 #include <cstdint>
@@ -232,6 +233,117 @@ class MiniLMEmbedder {
         return embeddings;
     }
 
+    nb::tuple score_string_vector(
+        std::string const& query,
+        nb::object data_buffer_obj,
+        nb::object offsets_buffer_obj,
+        nb::object null_buffer_obj,
+        std::size_t row_count
+    ) const {
+        struct BufferGuard {
+            Py_buffer view{};
+            bool acquired = false;
+
+            ~BufferGuard() {
+                if (acquired) {
+                    PyBuffer_Release(&view);
+                }
+            }
+        };
+
+        BufferGuard data_guard;
+        BufferGuard offsets_guard;
+        BufferGuard null_guard;
+
+        if (PyObject_GetBuffer(data_buffer_obj.ptr(), &data_guard.view, PyBUF_SIMPLE) != 0) {
+            throw nb::python_error();
+        }
+        data_guard.acquired = true;
+
+        if (PyObject_GetBuffer(offsets_buffer_obj.ptr(), &offsets_guard.view, PyBUF_SIMPLE) != 0) {
+            throw nb::python_error();
+        }
+        offsets_guard.acquired = true;
+
+        if (PyObject_GetBuffer(null_buffer_obj.ptr(), &null_guard.view, PyBUF_SIMPLE) != 0) {
+            throw nb::python_error();
+        }
+        null_guard.acquired = true;
+
+        if (offsets_guard.view.len < static_cast<Py_ssize_t>((row_count + 1) * sizeof(std::int32_t))) {
+            throw nb::value_error("StringVector offsets buffer is shorter than expected");
+        }
+
+        const char* data = static_cast<const char*>(data_guard.view.buf);
+        const auto* offsets = static_cast<const std::int32_t*>(offsets_guard.view.buf);
+        const auto* nulls =
+            null_guard.view.len >= static_cast<Py_ssize_t>((row_count + 7) >> 3)
+                ? static_cast<const std::uint8_t*>(null_guard.view.buf)
+                : nullptr;
+
+        std::vector<std::int64_t> positions;
+        std::vector<std::string> texts;
+        positions.reserve(row_count);
+        texts.reserve(row_count);
+
+        for (std::size_t row = 0; row < row_count; ++row) {
+            if (nulls != nullptr && ((nulls[row >> 3] >> (row & 7)) & 1U) == 0U) {
+                continue;
+            }
+
+            const auto start = offsets[row];
+            const auto end = offsets[row + 1];
+            if (end < start) {
+                throw nb::value_error("StringVector offsets are not monotonic");
+            }
+
+            const char* value_ptr = data + start;
+            std::size_t value_len = static_cast<std::size_t>(end - start);
+
+            while (value_len > 0 && is_whitespace(static_cast<unsigned char>(*value_ptr))) {
+                ++value_ptr;
+                --value_len;
+            }
+            while (
+                value_len > 0
+                && is_whitespace(static_cast<unsigned char>(value_ptr[value_len - 1]))
+            ) {
+                --value_len;
+            }
+            if (value_len == 0) {
+                continue;
+            }
+
+            positions.push_back(static_cast<std::int64_t>(row));
+            texts.emplace_back(value_ptr, value_len);
+        }
+
+        if (texts.empty()) {
+            return nb::make_tuple(std::move(positions), std::vector<float>{});
+        }
+
+        std::vector<std::string> batch;
+        batch.reserve(texts.size() + 1);
+        batch.push_back(query);
+        batch.insert(batch.end(), texts.begin(), texts.end());
+
+        auto embeddings = embed_texts(batch);
+        auto const& query_embedding = embeddings.front();
+        std::vector<float> scores;
+        scores.reserve(texts.size());
+
+        for (std::size_t row = 1; row < embeddings.size(); ++row) {
+            auto const& embedding = embeddings[row];
+            float score = 0.0f;
+            for (std::size_t dim = 0; dim < query_embedding.size(); ++dim) {
+                score += query_embedding[dim] * embedding[dim];
+            }
+            scores.push_back(score);
+        }
+
+        return nb::make_tuple(std::move(positions), std::move(scores));
+    }
+
     std::size_t dimensions() const {
         return hidden_size_hint_;
     }
@@ -409,5 +521,14 @@ NB_MODULE(minilm_native, m) {
         .def(nb::init<std::string, std::string, std::size_t>(), nb::arg("model_path"), nb::arg("vocab_path"), nb::arg("max_length") = 256)
         .def("embed_text", &MiniLMEmbedder::embed_text, nb::arg("text"))
         .def("embed_texts", &MiniLMEmbedder::embed_texts, nb::arg("texts"))
+        .def(
+            "score_string_vector",
+            &MiniLMEmbedder::score_string_vector,
+            nb::arg("query"),
+            nb::arg("data_buffer"),
+            nb::arg("offsets_buffer"),
+            nb::arg("null_buffer"),
+            nb::arg("row_count")
+        )
         .def_prop_ro("dimensions", &MiniLMEmbedder::dimensions);
 }

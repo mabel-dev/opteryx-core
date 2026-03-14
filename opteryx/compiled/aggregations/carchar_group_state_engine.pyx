@@ -1094,7 +1094,7 @@ cdef class CarcharGroupStateEngine:
             self._use_object_keys = True
             self._single_key_kind = KEY_MULTI_ENCODED_STRING
 
-            if len(self._aggregations) > 1 or isinstance(key_vector, DictionaryVector):
+            if len(self._aggregations) > 1:
                 self._multi_value_columns = []
                 self._multi_distinct_sets = []
                 self._multi_agg_modes.clear()
@@ -1209,9 +1209,16 @@ cdef class CarcharGroupStateEngine:
                     value_vector = morsel.column(column)
                     if isinstance(
                         value_vector,
-                        (Int64Vector, IntegerVector, Float64Vector, StringVector, DictionaryVector),
+                        (Int64Vector, IntegerVector, Float64Vector, StringVector, DictionaryVector, TimestampVector),
                     ):
                         self._agg_mode = AGG_COUNT_VALUE
+                        self._value_kind = VALUE_NONE
+                    elif isinstance(value_vector, ConstantVector):
+                        # Non-null constant value: COUNT('a') == COUNT(*) for each group
+                        if (<ConstantVector> value_vector).null_count != 0:
+                            self._init_legacy_backend()
+                            return
+                        self._agg_mode = AGG_COUNT_STAR
                         self._value_kind = VALUE_NONE
                     else:
                         self._init_legacy_backend()
@@ -1238,6 +1245,15 @@ cdef class CarcharGroupStateEngine:
                 elif isinstance(value_vector, (StringVector, DictionaryVector)):
                     self._agg_mode = AGG_MIN
                     self._value_kind = VALUE_OBJECT
+                elif isinstance(value_vector, TimestampVector):
+                    self._agg_mode = AGG_MIN
+                    self._value_kind = VALUE_INT64
+                elif isinstance(value_vector, ConstantVector):
+                    if (<ConstantVector> value_vector).null_count != 0:
+                        self._init_legacy_backend()
+                        return
+                    self._agg_mode = AGG_MIN
+                    self._value_kind = VALUE_OBJECT
                 else:
                     self._init_legacy_backend()
                     return
@@ -1250,6 +1266,15 @@ cdef class CarcharGroupStateEngine:
                     self._agg_mode = AGG_MAX
                     self._value_kind = VALUE_INT64
                 elif isinstance(value_vector, (StringVector, DictionaryVector)):
+                    self._agg_mode = AGG_MAX
+                    self._value_kind = VALUE_OBJECT
+                elif isinstance(value_vector, TimestampVector):
+                    self._agg_mode = AGG_MAX
+                    self._value_kind = VALUE_INT64
+                elif isinstance(value_vector, ConstantVector):
+                    if (<ConstantVector> value_vector).null_count != 0:
+                        self._init_legacy_backend()
+                        return
                     self._agg_mode = AGG_MAX
                     self._value_kind = VALUE_OBJECT
                 else:
@@ -2257,6 +2282,29 @@ cdef class CarcharGroupStateEngine:
         cdef Py_ssize_t data_len = 0
         cdef int64_t valid_flag
         cdef int cmp
+        cdef bytes const_bytes_obj
+
+        if isinstance(value_vector, ConstantVector):
+            # All rows have the same constant value; initialise unseen states only.
+            if (<ConstantVector> value_vector).null_count != 0:
+                return  # null constant: no states updated
+            value_obj = value_vector[0]
+            if value_obj is None:
+                return
+            if isinstance(value_obj, bytes):
+                const_bytes_obj = <bytes> value_obj
+            elif isinstance(value_obj, str):
+                const_bytes_obj = (<str> value_obj).encode('utf-8')
+            else:
+                const_bytes_obj = str(value_obj).encode('utf-8')
+            data_ptr = <const char*> const_bytes_obj
+            data_len = len(const_bytes_obj)
+            for row_idx in range(row_count):
+                state_index = state_indices[row_idx]
+                if self._seen[state_index] == 0:
+                    self._store_object_state_bytes(state_index, data_ptr, data_len)
+                    self._seen[state_index] = 1
+            return
 
         if self._is_stringlike_vector(value_vector):
             for row_idx in range(row_count):
@@ -2317,6 +2365,28 @@ cdef class CarcharGroupStateEngine:
         cdef Py_ssize_t data_len = 0
         cdef int64_t valid_flag
         cdef int cmp
+        cdef bytes const_bytes_obj
+
+        if isinstance(value_vector, ConstantVector):
+            if (<ConstantVector> value_vector).null_count != 0:
+                return
+            value_obj = value_vector[0]
+            if value_obj is None:
+                return
+            if isinstance(value_obj, bytes):
+                const_bytes_obj = <bytes> value_obj
+            elif isinstance(value_obj, str):
+                const_bytes_obj = (<str> value_obj).encode('utf-8')
+            else:
+                const_bytes_obj = str(value_obj).encode('utf-8')
+            data_ptr = <const char*> const_bytes_obj
+            data_len = len(const_bytes_obj)
+            for row_idx in range(row_count):
+                offset = self._multi_offset(state_indices[row_idx], agg_idx)
+                if self._multi_seen[offset] == 0:
+                    self._store_multi_object_state_bytes(offset, data_ptr, data_len)
+                    self._multi_seen[offset] = 1
+            return
 
         if self._is_stringlike_vector(value_vector):
             for row_idx in range(row_count):
@@ -2405,7 +2475,21 @@ cdef class CarcharGroupStateEngine:
 
         value_vector = morsel.column(self._value_column)
         if self._value_kind == VALUE_OBJECT and self._agg_mode in (AGG_MIN, AGG_MAX):
-            self._init_legacy_backend()
+            state_indices = <int64_t*> malloc(row_count * sizeof(int64_t))
+            if state_indices == NULL and row_count > 0:
+                raise MemoryError()
+            try:
+                for row_idx in range(row_count):
+                    key_valid = _bitmap_is_valid(key_nulls, row_idx)
+                    key_valid_flag = 1 if key_valid else 0
+                    key_value = _read_integer_value(key_ptr, row_idx) if key_valid else 0
+                    state_indices[row_idx] = self._find_or_insert_state(
+                        row_hashes[row_idx], key_value, key_valid_flag
+                    )
+                self._ingest_object_minmax_for_states(morsel, state_indices, row_count)
+            finally:
+                if state_indices != NULL:
+                    free(state_indices)
             return
 
         if isinstance(value_vector, Float64Vector):
@@ -2464,6 +2548,29 @@ cdef class CarcharGroupStateEngine:
                     elif self._agg_mode == AGG_AVG:
                         self._avg_sums[state_index] = self._avg_sums[state_index] + value_i64_data[row_idx]
                         self._avg_counts[state_index] = self._avg_counts[state_index] + 1
+            return
+
+        if isinstance(value_vector, TimestampVector):
+            value_ptr = (<TimestampVector> value_vector).ptr
+            value_i64_data = <int64_t*> value_ptr.data
+            value_nulls = <uint8_t*> value_ptr.null_bitmap
+            for row_idx in range(row_count):
+                key_valid = _bitmap_is_valid(key_nulls, row_idx)
+                key_valid_flag = 1 if key_valid else 0
+                key_value = _read_integer_value(key_ptr, row_idx) if key_valid else 0
+                state_index = self._find_or_insert_state(row_hashes[row_idx], key_value, key_valid_flag)
+                if self._agg_mode == AGG_COUNT_VALUE:
+                    if _bitmap_is_valid(value_nulls, row_idx):
+                        self._counts[state_index] = self._counts[state_index] + 1
+                elif _bitmap_is_valid(value_nulls, row_idx):
+                    if self._agg_mode == AGG_MIN:
+                        if self._seen[state_index] == 0 or value_i64_data[row_idx] < self._i64_state[state_index]:
+                            self._i64_state[state_index] = value_i64_data[row_idx]
+                        self._seen[state_index] = 1
+                    elif self._agg_mode == AGG_MAX:
+                        if self._seen[state_index] == 0 or value_i64_data[row_idx] > self._i64_state[state_index]:
+                            self._i64_state[state_index] = value_i64_data[row_idx]
+                        self._seen[state_index] = 1
             return
 
         value_ptr = (<IntegerVector> value_vector).ptr
@@ -2613,6 +2720,29 @@ cdef class CarcharGroupStateEngine:
                     elif self._agg_mode == AGG_AVG:
                         self._avg_sums[state_index] = self._avg_sums[state_index] + value_i64_data[row_idx]
                         self._avg_counts[state_index] = self._avg_counts[state_index] + 1
+            return
+
+        if isinstance(value_vector, TimestampVector):
+            value_ptr = (<TimestampVector> value_vector).ptr
+            value_i64_data = <int64_t*> value_ptr.data
+            value_nulls = <uint8_t*> value_ptr.null_bitmap
+            for row_idx in range(row_count):
+                key_valid = _bitmap_is_valid(key_nulls, row_idx)
+                key_valid_flag = 1 if key_valid else 0
+                key_value = key_data[row_idx] if key_valid else 0
+                state_index = self._find_or_insert_state(row_hashes[row_idx], key_value, key_valid_flag)
+                if self._agg_mode == AGG_COUNT_VALUE:
+                    if _bitmap_is_valid(value_nulls, row_idx):
+                        self._counts[state_index] = self._counts[state_index] + 1
+                elif _bitmap_is_valid(value_nulls, row_idx):
+                    if self._agg_mode == AGG_MIN:
+                        if self._seen[state_index] == 0 or value_i64_data[row_idx] < self._i64_state[state_index]:
+                            self._i64_state[state_index] = value_i64_data[row_idx]
+                        self._seen[state_index] = 1
+                    elif self._agg_mode == AGG_MAX:
+                        if self._seen[state_index] == 0 or value_i64_data[row_idx] > self._i64_state[state_index]:
+                            self._i64_state[state_index] = value_i64_data[row_idx]
+                        self._seen[state_index] = 1
             return
 
         value_ptr = (<IntegerVector> value_vector).ptr
@@ -3760,6 +3890,26 @@ cdef class CarcharGroupStateEngine:
                         elif self._agg_mode == AGG_AVG:
                             self._avg_sums[state_index] = self._avg_sums[state_index] + value_i64_data[row_idx]
                             self._avg_counts[state_index] = self._avg_counts[state_index] + 1
+                return
+
+            if isinstance(value_vector, TimestampVector):
+                value_ptr = (<TimestampVector> value_vector).ptr
+                value_i64_data = <int64_t*> value_ptr.data
+                value_nulls = <uint8_t*> value_ptr.null_bitmap
+                for row_idx in range(row_count):
+                    state_index = state_indices[row_idx]
+                    if self._agg_mode == AGG_COUNT_VALUE:
+                        if _bitmap_is_valid(value_nulls, row_idx):
+                            self._counts[state_index] = self._counts[state_index] + 1
+                    elif _bitmap_is_valid(value_nulls, row_idx):
+                        if self._agg_mode == AGG_MIN:
+                            if self._seen[state_index] == 0 or value_i64_data[row_idx] < self._i64_state[state_index]:
+                                self._i64_state[state_index] = value_i64_data[row_idx]
+                            self._seen[state_index] = 1
+                        elif self._agg_mode == AGG_MAX:
+                            if self._seen[state_index] == 0 or value_i64_data[row_idx] > self._i64_state[state_index]:
+                                self._i64_state[state_index] = value_i64_data[row_idx]
+                            self._seen[state_index] = 1
                 return
 
             value_ptr = (<IntegerVector> value_vector).ptr

@@ -482,13 +482,18 @@ class HeapSortNode(BasePlanNode):
         if take_count == 0:
             return morsel.empty()
 
+        query_vector = numpy.ascontiguousarray(query_vector, dtype=numpy.float32)
+        dense_vectors = numpy.ascontiguousarray(dense_vectors, dtype=numpy.float32)
+        row_ids = numpy.asarray(source_indices, dtype=numpy.int64)
+        nearest_neighbor_order = self._is_nearest_neighbor_order(order_expression.value, direction)
+
         if (
             self._USEARCH_ENABLED
             and
             self.vector_topk_candidate
             and
             dense_vectors.shape[0] >= self._USEARCH_MIN_ROWS
-            and self._is_nearest_neighbor_order(order_expression.value, direction)
+            and nearest_neighbor_order
         ):
             try:
                 from opteryx.nanobind import usearch_native
@@ -503,11 +508,11 @@ class HeapSortNode(BasePlanNode):
                 self.readings["feature_vector_topk_usearch"] += 1
                 self.readings["vector_topk_usearch_rows_indexed"] += dense_vectors.shape[0]
                 index.add_batch(
-                    numpy.asarray(source_indices, dtype=numpy.int64),
-                    numpy.ascontiguousarray(dense_vectors, dtype=numpy.float32),
+                    row_ids,
+                    dense_vectors,
                 )
                 found_ids, _ = index.search(
-                    numpy.ascontiguousarray(query_vector, dtype=numpy.float32),
+                    query_vector,
                     take_count,
                 )
                 if found_ids:
@@ -519,9 +524,19 @@ class HeapSortNode(BasePlanNode):
         try:
             from opteryx.nanobind import vector_search
 
-            scores = numpy.asarray(
-                vector_search.score_cosine(query_vector, dense_vectors), dtype=numpy.float32
-            )
+            if nearest_neighbor_order:
+                found_ids, _ = vector_search.exact_search_cosine(
+                    query_vector,
+                    row_ids,
+                    dense_vectors,
+                    take_count,
+                )
+                self.readings["feature_vector_topk_exact"] += 1
+                if found_ids:
+                    return self._materialize_rows(morsel, [int(row_id) for row_id in found_ids])
+                return morsel.empty()
+
+            scores = numpy.asarray(vector_search.score_cosine(query_vector, dense_vectors), dtype=numpy.float32)
         except Exception:
             return None
 
@@ -531,9 +546,19 @@ class HeapSortNode(BasePlanNode):
             scores = 1.0 - numpy.clip(scores, -1.0, 1.0)
 
         descending = self._is_descending(direction)
-        ranked_dense_indices = numpy.argsort(scores, kind="mergesort")
+        if take_count < scores.shape[0]:
+            if descending:
+                candidate_indices = numpy.argpartition(-scores, take_count - 1)[:take_count]
+            else:
+                candidate_indices = numpy.argpartition(scores, take_count - 1)[:take_count]
+        else:
+            candidate_indices = numpy.arange(scores.shape[0], dtype=numpy.int64)
+
         if descending:
-            ranked_dense_indices = ranked_dense_indices[::-1]
+            order = numpy.lexsort((row_ids[candidate_indices], -scores[candidate_indices]))
+        else:
+            order = numpy.lexsort((row_ids[candidate_indices], scores[candidate_indices]))
+        ranked_dense_indices = candidate_indices[order]
 
         top_indices = [int(source_indices[int(index)]) for index in ranked_dense_indices[:take_count]]
         return self._materialize_rows(morsel, top_indices)
@@ -547,10 +572,10 @@ class HeapSortNode(BasePlanNode):
             and len(query_node.parameters) == 1
             and query_node.parameters[0].node_type == NodeType.LITERAL
         ):
-            from opteryx.expression.functions.implementations.utility import embed
+            from opteryx.embeddings import embed_text_matrix
 
-            embedded = embed(numpy.asarray([query_node.parameters[0].value], dtype=object))
-            if not embedded:
+            embedded = embed_text_matrix([query_node.parameters[0].value])
+            if embedded.size == 0:
                 return None
             return self._coerce_numeric_vector(embedded[0])
         return None

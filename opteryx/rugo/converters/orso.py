@@ -13,25 +13,85 @@ from orso.schema import FlatColumn
 from orso.schema import RelationSchema
 from orso.types import OrsoTypes
 
+ORSO_TYPE_ALIASES = {
+    "float": "double",
+    "float32": "double",
+    "float64": "double",
+    "int8": "integer",
+    "int16": "integer",
+    "int32": "integer",
+    "int64": "integer",
+    "bool": "boolean",
+    "byte_array": "blob",
+    "fixed_len_byte_array": "blob",
+    "utf8": "varchar",
+    "string": "varchar",
+}
+
+PARQUET_LOGICAL_TYPE_MAP = {
+    "string": OrsoTypes.VARCHAR,
+    "utf8": OrsoTypes.VARCHAR,
+    "varchar": OrsoTypes.VARCHAR,
+    "date": OrsoTypes.DATE,
+    "date32[day]": OrsoTypes.DATE,
+    "json": OrsoTypes.JSONB,
+    "jsonb": OrsoTypes.JSONB,
+    "struct": OrsoTypes.JSONB,
+    "boolean": OrsoTypes.BOOLEAN,
+    "binary": OrsoTypes.BLOB,
+    "byte_array": OrsoTypes.BLOB,
+    "fixed_len_byte_array": OrsoTypes.BLOB,
+}
+
+PARQUET_LOGICAL_COMPLEX_PREFIXES = {
+    "array": OrsoTypes.ARRAY,
+    "decimal": OrsoTypes.DECIMAL,
+    "time": OrsoTypes.TIME,
+    "timestamp": OrsoTypes.TIMESTAMP,
+}
+
+PARQUET_PHYSICAL_TYPE_MAP = {
+    "int8": OrsoTypes.INTEGER,
+    "int16": OrsoTypes.INTEGER,
+    "int32": OrsoTypes.INTEGER,
+    "int64": OrsoTypes.INTEGER,
+    "float": OrsoTypes.DOUBLE,
+    "float32": OrsoTypes.DOUBLE,
+    "float64": OrsoTypes.DOUBLE,
+    "double": OrsoTypes.DOUBLE,
+    "byte_array": OrsoTypes.BLOB,
+    "fixed_len_byte_array": OrsoTypes.BLOB,
+    "boolean": OrsoTypes.BOOLEAN,
+}
+
+JSONL_TYPE_MAP = {
+    "int64": OrsoTypes.INTEGER,
+    "double": OrsoTypes.DOUBLE,
+    "bytes": OrsoTypes.BLOB,
+    "boolean": OrsoTypes.BOOLEAN,
+    "null": OrsoTypes.BLOB,  # Default null to varchar
+    "object": OrsoTypes.JSONB,
+}
+
+JSONL_ARRAY_INNER_TYPE_ALIASES = {
+    "int64": "integer",
+    "int32": "integer",
+    "int16": "integer",
+    "int8": "integer",
+    "integer": "integer",
+    "double": "double",
+    "float": "double",
+    "bytes": "blob",
+    "string": "blob",
+    "varchar": "blob",
+    "boolean": "boolean",
+    "object": "jsonb",
+}
+
 
 def _normalize_orso_type_aliases(type_name: str) -> str:
-    aliases = {
-        "float": "double",
-        "float32": "double",
-        "float64": "double",
-        "int8": "integer",
-        "int16": "integer",
-        "int32": "integer",
-        "int64": "integer",
-        "bool": "boolean",
-        "byte_array": "blob",
-        "fixed_len_byte_array": "blob",
-        "utf8": "varchar",
-        "string": "varchar",
-    }
-
     normalized = type_name.lower()
-    for source, target in aliases.items():
+    for source, target in ORSO_TYPE_ALIASES.items():
         normalized = re.sub(rf"(?<![a-z0-9_]){re.escape(source)}(?![a-z0-9_])", target, normalized)
     return normalized
 
@@ -53,29 +113,13 @@ def _map_parquet_type_to_orso(
     if logical_type:
         logical_lower = logical_type.lower()
 
-        # String types
-        if logical_lower in ("string", "utf8", "varchar"):
-            return OrsoTypes.VARCHAR
+        if logical_lower in PARQUET_LOGICAL_TYPE_MAP:
+            return PARQUET_LOGICAL_TYPE_MAP[logical_lower]
 
-        # Date/time types
-        if logical_lower in ("date", "date32[day]"):
-            return OrsoTypes.DATE
         if logical_lower.startswith("time") and not logical_lower.startswith("timestamp"):
-            return OrsoTypes.TIME
+            return PARQUET_LOGICAL_COMPLEX_PREFIXES["time"]
         if logical_lower.startswith("timestamp") or "timestamp" in logical_lower:
-            return OrsoTypes.TIMESTAMP
-
-        # JSON types
-        if logical_lower in ("json", "jsonb", "struct"):
-            return OrsoTypes.JSONB
-
-        # Boolean types
-        if logical_lower == "boolean":
-            return OrsoTypes.BOOLEAN
-
-        # Binary types
-        if logical_lower in ("binary", "byte_array", "fixed_len_byte_array"):
-            return OrsoTypes.BLOB
+            return PARQUET_LOGICAL_COMPLEX_PREFIXES["timestamp"]
 
         if logical_lower.startswith(("array", "decimal")):
             normalized_logical = _normalize_orso_type_aliases(logical_lower)
@@ -92,21 +136,8 @@ def _map_parquet_type_to_orso(
     # Fall back to physical type mapping
     physical_lower = parquet_type.lower() if parquet_type else ""
 
-    # Integer types
-    if physical_lower in ("int8", "int16", "int32", "int64"):
-        return OrsoTypes.INTEGER
-
-    # Floating point types
-    if physical_lower in ("float", "float32", "float64", "double"):
-        return OrsoTypes.DOUBLE
-
-    # Binary/string types
-    if physical_lower in ("byte_array", "fixed_len_byte_array"):
-        return OrsoTypes.BLOB
-
-    # Boolean type
-    if physical_lower == "boolean":
-        return OrsoTypes.BOOLEAN
+    if physical_lower in PARQUET_PHYSICAL_TYPE_MAP:
+        return PARQUET_PHYSICAL_TYPE_MAP[physical_lower]
 
     # Default to VARCHAR for unknown types
     return OrsoTypes.VARCHAR
@@ -260,22 +291,10 @@ def _map_jsonl_type_to_orso(jsonl_type: str) -> str:
     Returns:
         Orso type string
     """
-    type_map = {
-        "int64": OrsoTypes.INTEGER,
-        "double": OrsoTypes.DOUBLE,
-        "bytes": OrsoTypes.BLOB,
-        "boolean": OrsoTypes.BOOLEAN,
-        "null": OrsoTypes.BLOB,  # Default null to varchar
-    }
-
     jt = jsonl_type.lower()
     # Direct simple types
-    if jt in type_map:
-        return type_map[jt]
-
-    # object -> map to JSONB
-    if jt == "object":
-        return OrsoTypes.JSONB
+    if jt in JSONL_TYPE_MAP:
+        return JSONL_TYPE_MAP[jt]
 
     # array or array<elem> -> use OrsoTypes.from_name to parse element type
     if jt.startswith("array"):
@@ -283,21 +302,7 @@ def _map_jsonl_type_to_orso(jsonl_type: str) -> str:
         # supports forms like 'array<int64>' produced by get_jsonl_schema
         if jt.startswith("array<") and jt.endswith(">"):
             inner = jt[jt.find("<") + 1 : -1].strip()
-            inner_map = {
-                "int64": "integer",
-                "int32": "integer",
-                "int16": "integer",
-                "int8": "integer",
-                "integer": "integer",
-                "double": "double",
-                "float": "double",
-                "bytes": "blob",
-                "string": "blob",
-                "varchar": "blob",
-                "boolean": "boolean",
-                "object": "jsonb",
-            }
-            normalized_inner = inner_map.get(inner.lower(), inner.lower())
+            normalized_inner = JSONL_ARRAY_INNER_TYPE_ALIASES.get(inner.lower(), inner.lower())
             normalized = f"array<{normalized_inner}>"
         else:
             normalized = jt

@@ -15,6 +15,11 @@ sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
 import opteryx
 from opteryx.connectors import DiskConnector
+from opteryx.draken.vectors.dictionary_vector import DictionaryVector
+from opteryx.draken.vectors.string_vector import StringVector
+from opteryx.embeddings import create_hybrid_embedding_provider
+from opteryx.embeddings import create_static_embedding_provider
+from opteryx.embeddings import embed_text_matrix
 from opteryx.embeddings import embed_text_values
 from opteryx.exceptions import FunctionExecutionError
 from opteryx.exceptions import UnsupportedSyntaxError
@@ -86,6 +91,149 @@ def test_cosine_similarity_numeric_pairwise_scores():
     assert scores == pytest.approx([1.0, 0.70710677, 0.0], rel=1e-6, abs=1e-6)
 
 
+def test_cosine_similarity_numeric_pairwise_ignores_invalid_rows():
+    left = numpy.array([[1.0, 0.0], None, [1.0, 1.0, 1.0], [0.0, 1.0]], dtype=object)
+    right = numpy.array([[1.0, 0.0], [1.0, 0.0], [1.0, 1.0], None], dtype=object)
+
+    scores = cosine_similarity(left, right)
+
+    assert scores == pytest.approx([1.0, 0.0, 0.0, 0.0], rel=1e-6, abs=1e-6)
+
+
+def test_cosine_similarity_text_uses_embedding_provider():
+    class FakeEmbeddingProvider:
+        def embed_texts(self, texts: list[str]):
+            vectors = {
+                "planet mars": [1.0, 0.0],
+                "mars is rocky": [0.9, 0.1],
+                "venus is hot": [0.0, 1.0],
+            }
+            return [vectors[text] for text in texts]
+
+    opteryx.register_embedding_provider(FakeEmbeddingProvider())
+    try:
+        rows = numpy.array(["mars is rocky", "venus is hot", "   ", None], dtype=object)
+        query = numpy.array(["planet mars"], dtype=object)
+
+        scores = cosine_similarity(rows, query)
+
+        assert scores[0] == pytest.approx(0.9938837, rel=1e-6, abs=1e-6)
+        assert scores[1] == pytest.approx(0.0, rel=1e-6, abs=1e-6)
+        assert scores[2:] == pytest.approx([0.0, 0.0], rel=1e-6, abs=1e-6)
+    finally:
+        opteryx.clear_embedding_provider()
+
+
+def test_cosine_similarity_text_prefers_provider_scorer():
+    calls = {"score": 0, "batch": 0}
+
+    class FakeEmbeddingProvider:
+        prefer_score_string_vector = True
+
+        def score_string_vector(self, query_text: str, values):
+            calls["score"] += 1
+            assert query_text == "planet mars"
+            assert isinstance(values, StringVector)
+            return [0, 1], [0.9, 0.1]
+
+        def embed_texts(self, texts: list[str]):
+            calls["batch"] += 1
+            raise AssertionError("provider scorer should be preferred")
+
+    opteryx.register_embedding_provider(FakeEmbeddingProvider())
+    try:
+        rows = pyarrow.array(["mars is rocky", "venus is hot", None], type=pyarrow.binary())
+        query = numpy.array(["planet mars"], dtype=object)
+
+        scores = cosine_similarity(rows, query)
+
+        assert scores == pytest.approx([0.9, 0.1, 0.0], rel=1e-6, abs=1e-6)
+        assert calls["score"] == 1
+        assert calls["batch"] == 0
+    finally:
+        opteryx.clear_embedding_provider()
+
+
+def test_static_embedding_provider_is_deterministic_and_normalized():
+    provider = create_static_embedding_provider(dimensions=64)
+
+    first = provider.embed_text("Fish and chips for dinner")
+    second = provider.embed_text("Fish and chips for dinner")
+    third = provider.embed_text("Launch vehicle telemetry")
+
+    assert first.dtype == numpy.float32
+    assert first.shape == (64,)
+    assert numpy.allclose(first, second)
+    assert numpy.linalg.norm(first) == pytest.approx(1.0, rel=1e-5, abs=1e-5)
+    assert numpy.dot(first, second) > numpy.dot(first, third)
+
+
+def test_use_static_embedding_provider_supports_text_cosine_similarity():
+    opteryx.use_static_embedding_provider(dimensions=64)
+    try:
+        rows = numpy.array(
+            ["fish and chips for dinner", "launch telemetry", "fish supper tonight"],
+            dtype=object,
+        )
+        query = numpy.array(["I would like fish and chips for dinner"], dtype=object)
+
+        scores = cosine_similarity(rows, query)
+
+        assert scores[0] > scores[1]
+        assert scores[0] > 0.0
+        assert scores[2] > scores[1]
+    finally:
+        opteryx.clear_embedding_provider()
+
+
+def test_hybrid_provider_shortlists_lexical_matches_before_rerank():
+    if not _default_minilm_available():
+        pytest.skip("native MiniLM provider is not available in this environment")
+
+    provider = create_hybrid_embedding_provider(static_dimensions=64, rerank_k=2)
+    seen = {"texts": None}
+
+    class FakeReranker:
+        def embed_text(self, text: str):
+            raise AssertionError("single-text rerank path should not be used")
+
+        def embed_texts(self, texts: list[str]):
+            seen["texts"] = texts
+            vectors = []
+            for text in texts:
+                normalized = text.lower()
+                if normalized == "fish and chips for dinner":
+                    vectors.append([1.0, 0.0])
+                elif "fish" in normalized or "chips" in normalized or "dinner" in normalized:
+                    vectors.append([0.9, 0.1])
+                else:
+                    vectors.append([0.0, 1.0])
+            return vectors
+
+    provider._reranker = FakeReranker()
+    rows = StringVector.from_arrow(
+        pyarrow.array(
+            [
+                "launch telemetry update",
+                "fish and chips by the harbor",
+                "dinner reservation and fish special",
+                "orbital mechanics lecture",
+            ],
+            type=pyarrow.string(),
+        )
+    )
+
+    positions, scores = provider.score_string_vector("fish and chips for dinner", rows)
+
+    assert seen["texts"] is not None
+    assert seen["texts"][0] == "fish and chips for dinner"
+    assert "fish and chips by the harbor" in seen["texts"][1:]
+    assert "dinner reservation and fish special" in seen["texts"][1:]
+    score_map = dict(zip(positions.tolist(), scores.tolist(), strict=True))
+    assert score_map[1] > score_map[0]
+    assert score_map[2] > score_map[3]
+
+
 def test_cosine_distance_returns_one_minus_similarity():
     rows = numpy.array([[1.0, 0.0], [0.0, 1.0]], dtype=object)
     query = numpy.array([[1.0, 0.0]], dtype=object)
@@ -117,8 +265,79 @@ def test_match_against_accepts_scalar_literal_in_draken_style_call_shape():
         )
 
         matches = match_against(rows, "cape canaveral florida")
+        matches = matches.to_pylist() if hasattr(matches, "to_pylist") else matches
 
         assert matches == [True, False]
+    finally:
+        opteryx.clear_embedding_provider()
+
+
+def test_match_against_string_vector_uses_batched_embeddings():
+    calls = {"score": 0, "batch": 0}
+
+    class FakeEmbeddingProvider:
+        def score_string_vector(self, query_text: str, values):
+            calls["score"] += 1
+            raise AssertionError("string-vector scorer should not bypass embedding cache")
+
+        def embed_texts(self, texts: list[str]):
+            calls["batch"] += 1
+            assert texts == ["planet mars", "mars is rocky", "venus is hot"]
+            vectors = {
+                "planet mars": [1.0, 0.0],
+                "mars is rocky": [0.95, 0.05],
+                "venus is hot": [0.0, 1.0],
+            }
+            return [vectors[text] for text in texts]
+
+    opteryx.register_embedding_provider(FakeEmbeddingProvider())
+    try:
+        rows = StringVector.from_arrow(
+            pyarrow.array(["mars is rocky", None, "venus is hot", "   "], type=pyarrow.string())
+        )
+
+        matches = match_against(rows, "planet mars")
+        matches = matches.to_pylist() if hasattr(matches, "to_pylist") else matches
+
+        assert matches == [True, False, False, False]
+        assert calls["score"] == 0
+        assert calls["batch"] == 1
+    finally:
+        opteryx.clear_embedding_provider()
+
+
+def test_match_against_scores_dictionary_values_once():
+    calls = {"score": 0, "batch": 0}
+
+    class FakeEmbeddingProvider:
+        def score_string_vector(self, query_text: str, values):
+            calls["score"] += 1
+            raise AssertionError("dictionary fast path should not use the uncached scorer")
+
+        def embed_texts(self, texts: list[str]):
+            calls["batch"] += 1
+            assert texts == ["planet mars", "mars is rocky", "venus is hot"]
+            vectors = {
+                "planet mars": [1.0, 0.0],
+                "mars is rocky": [0.95, 0.05],
+                "venus is hot": [0.0, 1.0],
+            }
+            return [vectors[text] for text in texts]
+
+    opteryx.register_embedding_provider(FakeEmbeddingProvider())
+    try:
+        rows = pyarrow.array(
+            ["mars is rocky", "venus is hot", "mars is rocky", None],
+            type=pyarrow.dictionary(pyarrow.int32(), pyarrow.string()),
+        )
+        vector = DictionaryVector.from_arrow(rows)
+
+        matches = match_against(vector, "planet mars")
+        matches = matches.to_pylist() if hasattr(matches, "to_pylist") else matches
+
+        assert matches == [True, False, True, False]
+        assert calls["score"] == 0
+        assert calls["batch"] == 1
     finally:
         opteryx.clear_embedding_provider()
 
@@ -245,6 +464,39 @@ def test_embed_text_values_reuses_cached_results_across_calls():
 
         assert first == [[4.0, 1.0], [5.0, 1.0]]
         assert second == [[5.0, 1.0], [4.0, 1.0], [4.0, 1.0]]
+        assert calls["single"] == 2
+    finally:
+        opteryx.clear_embedding_provider()
+
+
+def test_embed_text_matrix_reuses_cached_results_and_returns_float32():
+    calls = {"single": 0}
+
+    class FakeEmbeddingProvider:
+        def embed_text(self, text: str):
+            calls["single"] += 1
+            return [float(len(text)), 1.0, 2.0]
+
+    opteryx.register_embedding_provider(FakeEmbeddingProvider())
+    try:
+        first = embed_text_matrix(["mars", "venus"])
+        second = embed_text_matrix(["venus", "mars", "mars"])
+
+        assert first.dtype == numpy.float32
+        assert second.dtype == numpy.float32
+        assert first == pytest.approx(
+            numpy.asarray([[4.0, 1.0, 2.0], [5.0, 1.0, 2.0]], dtype=numpy.float32),
+            rel=1e-6,
+            abs=1e-6,
+        )
+        assert second == pytest.approx(
+            numpy.asarray(
+                [[5.0, 1.0, 2.0], [4.0, 1.0, 2.0], [4.0, 1.0, 2.0]],
+                dtype=numpy.float32,
+            ),
+            rel=1e-6,
+            abs=1e-6,
+        )
         assert calls["single"] == 2
     finally:
         opteryx.clear_embedding_provider()

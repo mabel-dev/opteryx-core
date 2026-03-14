@@ -780,14 +780,23 @@ def function(branch, alias: Optional[List[str]] = None, key=None):
         from opteryx.exceptions import FunctionNotFoundError
 
         # Rewrite type-names used as cast functions: VARCHAR(x) → CAST(x AS VARCHAR)
-        _TYPE_CAST_NAMES = frozenset(
-            ("VARCHAR", "INTEGER", "DOUBLE", "TIMESTAMP", "DATE", "BOOLEAN", "BLOB", "VARBINARY", "FLOAT")
-        )
+        _TYPE_CAST_NAMES = {
+            "VARCHAR": "VARCHAR",
+            "INT": "INTEGER",
+            "INTEGER": "INTEGER",
+            "DOUBLE": "DOUBLE",
+            "TIMESTAMP": "TIMESTAMP",
+            "DATE": "DATE",
+            "BOOLEAN": "BOOLEAN",
+            "BLOB": "BLOB",
+            "VARBINARY": "VARBINARY",
+            "FLOAT": "FLOAT",
+        }
         if func in _TYPE_CAST_NAMES and len(args) == 1:
             return Node(
                 NodeType.CAST,
                 left=args[0],
-                value=func,
+                value=_TYPE_CAST_NAMES[func],
                 alias=alias,
             )
 
