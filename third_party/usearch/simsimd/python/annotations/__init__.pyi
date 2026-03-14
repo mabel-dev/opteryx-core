@@ -1,4 +1,8 @@
-from typing import Any, Union, Literal, Optional, TypeAlias
+from typing import Any
+from typing import Literal
+from typing import Optional
+from typing import TypeAlias
+from typing import Union
 
 # A lot of annotation features a depend on the Python version:
 # - `typing.TypeAlias` Type aliases are supported from Python 3.10 to 3.11

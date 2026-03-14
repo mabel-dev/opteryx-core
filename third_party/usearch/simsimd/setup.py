@@ -2,14 +2,16 @@
 from __future__ import annotations
 
 import os
-import sys
 import platform
+import sys
 import tempfile
+from distutils import ccompiler
+from distutils import sysconfig
+from distutils.errors import CompileError
 from pathlib import Path
 
-from setuptools import setup, Extension
-from distutils import ccompiler, sysconfig
-from distutils.errors import CompileError
+from setuptools import Extension
+from setuptools import setup
 
 __lib_name__ = "simsimd"
 __version__ = Path("VERSION").read_text().strip()

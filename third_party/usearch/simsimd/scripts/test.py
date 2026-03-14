@@ -38,17 +38,17 @@ Or run the script directly:
     python test.py
 
 """
-import os
-import math
-import time
-import platform
 import collections
-from typing import Dict, List
+import math
+import os
+import platform
+import time
+from typing import Dict
+from typing import List
 
-import tabulate
 import pytest
 import simsimd as simd
-
+import tabulate
 
 # NumPy is available on most platforms and is required for most tests.
 # When using PyPy on some platforms NumPy has internal issues, that will
@@ -1436,8 +1436,8 @@ def test_gil_free_threading():
     else:
         pytest.skip("Python < 3.13t, skipping GIL-related tests")
 
-    import multiprocessing
     import concurrent.futures
+    import multiprocessing
 
     num_threads = multiprocessing.cpu_count()
     vectors_a = np.random.rand(32 * 1024 * num_threads, 1024).astype(np.float32)

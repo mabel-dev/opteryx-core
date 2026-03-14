@@ -10,8 +10,6 @@ import numpy
 cimport numpy
 numpy.import_array()
 
-import opteryx.config
-
 from libc.stdint cimport int64_t, uint64_t
 from libc.stddef cimport size_t
 from libcpp.vector cimport vector

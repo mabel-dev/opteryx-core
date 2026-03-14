@@ -122,7 +122,8 @@ def export_type_catalog() -> OrderedDict[str, dict[str, Any]]:
             entry["ingestion_mappings"]["parquet_logical_patterns"] = ["array<...>"]
             entry["ingestion_mappings"]["jsonl_patterns"] = ["array<...>"]
             entry["element_type_aliases"] = sorted(
-                set(JSONL_ARRAY_INNER_TYPE_ALIASES.values()) | {"integer", "double", "blob", "boolean", "jsonb"}
+                set(JSONL_ARRAY_INNER_TYPE_ALIASES.values())
+                | {"integer", "double", "blob", "boolean", "jsonb"}
             )
         elif type_name == OrsoTypes.DECIMAL:
             entry["ingestion_mappings"]["parquet_logical_patterns"] = ["decimal(...)"]

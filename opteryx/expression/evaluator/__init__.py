@@ -18,12 +18,23 @@ import pyarrow.compute as compute
 
 from opteryx.exceptions import FunctionExecutionError
 
-_DRAKEN_VECTOR_NAMES = frozenset({
-    "StringVector", "Int64Vector", "IntegerVector", "Float64Vector",
-    "TimestampVector", "Date32Vector", "TimeVector", "BoolVector",
-    "DictionaryVector", "ConstantVector", "ArrayVector", "ArrowVector",
-    "IntervalVector",
-})
+_DRAKEN_VECTOR_NAMES = frozenset(
+    {
+        "StringVector",
+        "Int64Vector",
+        "IntegerVector",
+        "Float64Vector",
+        "TimestampVector",
+        "Date32Vector",
+        "TimeVector",
+        "BoolVector",
+        "DictionaryVector",
+        "ConstantVector",
+        "ArrayVector",
+        "ArrowVector",
+        "IntervalVector",
+    }
+)
 
 
 def _coerce_param_for_kernel(p, pa):
@@ -100,6 +111,7 @@ def apply_bounded_function(node, *parameters) -> Any:
     # StringVector and Arrow arrays, so this conversion is safe for all callers.
     if not compressed:
         import pyarrow as _pa_abf
+
         parameters = tuple(_coerce_param_for_kernel(p, _pa_abf) for p in parameters)
 
     try:
@@ -266,11 +278,11 @@ def _is_null_as_boolvector(vec):
 
 def _string_compare(op: str, vec, right):
     from opteryx.draken.vectors.bool_vector import BoolVector
-    
+
     # SQL NULL semantics: comparing anything with NULL returns NULL (treated as FALSE in WHERE)
     if right is None:
         return BoolVector(len(vec))
-    
+
     if isinstance(right, (list, tuple, set, frozenset)):
         value_set = _coerce_str_set(right)
     elif right.__class__.__name__ == "StringVector":
@@ -305,11 +317,11 @@ def _string_compare(op: str, vec, right):
 
 def _int64_compare(op: str, vec, right):
     from opteryx.draken.vectors.bool_vector import BoolVector
-    
+
     # SQL NULL semantics: comparing anything with NULL returns NULL (treated as FALSE in WHERE)
     if right is None:
         return BoolVector(len(vec))
-    
+
     if isinstance(right, (list, tuple, set, frozenset)):
         value_set = frozenset(int(v) for v in right)
     elif right.__class__.__name__ == "Int64Vector":
@@ -327,7 +339,9 @@ def _int64_compare(op: str, vec, right):
     elif right.__class__.__name__ == "Float64Vector":
         # Promote Int64Vector to Float64Vector for mixed-precision comparison
         import pyarrow as pa
+
         from opteryx.draken.interop.arrow import vector_from_arrow
+
         float_vec = vector_from_arrow(vec.to_arrow().cast(pa.float64()))
         return _float64_compare(op, float_vec, right)
     else:
@@ -350,11 +364,11 @@ def _int64_compare(op: str, vec, right):
 
 def _float64_compare(op: str, vec, right):
     from opteryx.draken.vectors.bool_vector import BoolVector
-    
+
     # SQL NULL semantics: comparing anything with NULL returns NULL (treated as FALSE in WHERE)
     if right is None:
         return BoolVector(len(vec))
-    
+
     if isinstance(right, (list, tuple, set, frozenset)):
         value_set = _coerce_float_set(right)
     elif right.__class__.__name__ == "Float64Vector":
@@ -389,11 +403,11 @@ def _float64_compare(op: str, vec, right):
 
 def _timestamp_compare(op: str, vec, right):
     from opteryx.draken.vectors.bool_vector import BoolVector
-    
+
     # SQL NULL semantics: comparing anything with NULL returns NULL (treated as FALSE in WHERE)
     if right is None:
         return BoolVector(len(vec))
-    
+
     if isinstance(right, (list, tuple, set, frozenset)):
         value_set = _coerce_timestamp_set(right)
     elif right.__class__.__name__ == "TimestampVector":
@@ -402,15 +416,19 @@ def _timestamp_compare(op: str, vec, right):
         import pyarrow.compute as _pac
 
         _ARROW_OPS = {
-            "Eq": _pac.equal, "NotEq": _pac.not_equal,
-            "Lt": _pac.less, "Gt": _pac.greater,
-            "LtEq": _pac.less_equal, "GtEq": _pac.greater_equal,
+            "Eq": _pac.equal,
+            "NotEq": _pac.not_equal,
+            "Lt": _pac.less,
+            "Gt": _pac.greater,
+            "LtEq": _pac.less_equal,
+            "GtEq": _pac.greater_equal,
         }
         fn = _ARROW_OPS.get(op)
         if fn is None:
             raise NotImplementedError(f"TimestampVector vector-vector: unsupported op {op!r}")
         from opteryx.draken.interop.arrow import vector_from_arrow as _vfa
         from opteryx.draken.vectors.bool_vector import BoolVector
+
         result_arr = fn(vec.to_arrow(), right.to_arrow())
         return BoolVector.from_arrow(result_arr)
     elif right.__class__.__name__ == "Date32Vector":
@@ -441,11 +459,11 @@ def _timestamp_compare(op: str, vec, right):
 
 def _date32_compare(op: str, vec, right):
     from opteryx.draken.vectors.bool_vector import BoolVector
-    
+
     # SQL NULL semantics: comparing anything with NULL returns NULL (treated as FALSE in WHERE)
     if right is None:
         return BoolVector(len(vec))
-    
+
     if isinstance(right, (list, tuple, set, frozenset)):
         value_set = _coerce_date32_set(right)
     elif right.__class__.__name__ == "Date32Vector":
@@ -488,11 +506,11 @@ def _date32_compare(op: str, vec, right):
 
 def _interval_compare(op: str, vec, right):
     from opteryx.draken.vectors.bool_vector import BoolVector
-    
+
     # SQL NULL semantics: comparing anything with NULL returns NULL (treated as FALSE in WHERE)
     if right is None:
         return BoolVector(len(vec))
-    
+
     literal = _coerce_interval(right)
     if op == "Eq":
         return vec.equals(literal)
@@ -509,11 +527,11 @@ def _interval_compare(op: str, vec, right):
 
 def _dict_compare(op: str, vec, right):
     from opteryx.draken.vectors.bool_vector import BoolVector
-    
+
     # SQL NULL semantics: comparing anything with NULL returns NULL (treated as FALSE in WHERE)
     if right is None:
         return BoolVector(len(vec))
-    
+
     # keep scalar as-is for non-list ops
     value_list = list(right) if isinstance(right, (list, tuple, set, frozenset)) else right
 
@@ -543,13 +561,13 @@ def _dict_compare(op: str, vec, right):
 
 
 def _constant_compare(op: str, vec, right):
-    from opteryx.expression.ops import _coerce_in_list_values
     from opteryx.draken.vectors.bool_vector import BoolVector
-    
+    from opteryx.expression.ops import _coerce_in_list_values
+
     # SQL NULL semantics: comparing anything with NULL returns NULL (treated as FALSE in WHERE)
     if right is None:
         return BoolVector(len(vec))
-    
+
     if isinstance(right, (list, tuple, set, frozenset)):
         right = _coerce_in_list_values(right)
 
@@ -601,6 +619,7 @@ def _ensure_array_vector(val):
     """Ensure val is an ArrayVector, converting from ArrowVector if needed."""
     if val.__class__.__name__ == "ArrowVector":
         from opteryx.draken.interop.arrow import vector_from_arrow
+
         return vector_from_arrow(val.to_arrow())
     return val
 
@@ -614,12 +633,10 @@ def _string_anyop_like(vec, patterns, ignore_case: bool):
             continue
         pat_bytes = p if isinstance(p, bytes) else str(p).encode()
         mask = vec.like(pat_bytes, ignore_case)
-        if result is None:
-            result = mask
-        else:
-            result = result.or_vector(mask)
+        result = mask if result is None else result.or_vector(mask)
     if result is None:
         from opteryx.draken.vectors.bool_vector import BoolVector
+
         return BoolVector(len(vec))
     return result
 
@@ -774,6 +791,7 @@ def draken_compare(op: str, left, right):
     # we could ever negate the result (NOT(NULL) = NULL, not TRUE).
     if right is None and not isinstance(left, (str, int, float, bytes, bool, type(None))):
         from opteryx.draken.vectors.bool_vector import BoolVector
+
         return BoolVector(len(left))
 
     cls = left.__class__.__name__
@@ -1238,12 +1256,10 @@ def evaluate_and_append_draken(nodes, morsel):
                 # Scalar result (numpy scalar, Python int/float/str/datetime, etc.) —
                 # broadcast to a ConstantVector of the morsel's length.
                 from opteryx.draken.vectors.constant_vector import from_scalar as _const_scalar
+
                 vec = _const_scalar(result, morsel.num_rows)
-                if vec is None:
-                    # from_scalar doesn't handle this type — fall back via PyArrow broadcast
-                    result = _vfa(_pa.array([result] * morsel.num_rows))
-                else:
-                    result = vec
+                # from_scalar doesn't handle this type — fall back via PyArrow broadcast
+                result = _vfa(_pa.array([result] * morsel.num_rows)) if vec is None else vec
             else:
                 result = vector_from_sequence(result)
         col_names.append(identity)

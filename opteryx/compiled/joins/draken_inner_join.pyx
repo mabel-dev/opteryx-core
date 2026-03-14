@@ -12,7 +12,7 @@ from cpython.mem cimport PyMem_Malloc, PyMem_Free
 
 from libc.math cimport isnan
 from libc.stddef cimport size_t
-from libc.stdint cimport int8_t, int32_t, int64_t, uint32_t, uint64_t
+from libc.stdint cimport int32_t, int64_t, uint32_t, uint64_t
 from libcpp.utility cimport pair
 from libcpp.vector cimport vector
 
@@ -100,14 +100,14 @@ cdef inline bint _row_valid_from_null_mask(object null_mask, Py_ssize_t row_inde
     return null_mask[row_index] == 0
 
 
-cdef inline bint _float_row_valid(Float64Vector vector, object null_mask, Py_ssize_t row_index):
+cdef inline bint _float_row_valid(Float64Vector float_vector, object null_mask, Py_ssize_t row_index):
     if null_mask is not None and null_mask[row_index] != 0:
         return False
-    return not isnan((<double*> vector.ptr.data)[row_index])
+    return not isnan((<double*> float_vector.ptr.data)[row_index])
 
 
-cdef inline bint _row_valid_generic(object vector, Py_ssize_t row_index):
-    cdef object value = vector[row_index]
+cdef inline bint _row_valid_generic(object row_values, Py_ssize_t row_index):
+    cdef object value = row_values[row_index]
     if value is None:
         return False
     if isinstance(value, float) and value != value:
@@ -129,8 +129,6 @@ cdef inline void _append_valid_rows_and_hashes(
     cdef list kinds = []
     cdef object column_name
     cdef object vector_obj
-    cdef object null_mask_obj
-    cdef object string_view_obj
     cdef Py_ssize_t row_index
     cdef Py_ssize_t column_index
     cdef int kind

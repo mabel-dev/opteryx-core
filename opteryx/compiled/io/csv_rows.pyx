@@ -8,7 +8,6 @@
 
 from cpython.bytes cimport PyBytes_AsStringAndSize
 from cpython.bytes cimport PyBytes_AS_STRING
-from cpython.bytes cimport PyBytes_FromStringAndSize
 from libc.math cimport isinf
 from libc.math cimport isnan
 from libc.stdio cimport snprintf

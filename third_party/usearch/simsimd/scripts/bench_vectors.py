@@ -13,12 +13,18 @@ It can operate in 2 modes:
 It also provides necessary primitives for performance visualizations and
 other benchmarking scripts, like `bench_vectors_live.py`.
 """
+import argparse
 import os
 import time
-import argparse
-from typing import List, Generator, Union
 from dataclasses import dataclass
+from typing import Generator
+from typing import List
+from typing import Union
 
+# NumPy and SimSIMD are obligatory for benchmarking
+import numpy as np
+import simsimd as simd
+import tabulate
 
 #! Before all else, ensure that we use only one thread for each library
 os.environ["OMP_NUM_THREADS"] = "1"  # OpenMP
@@ -27,10 +33,6 @@ os.environ["NUMEXPR_NUM_THREADS"] = "1"  # NumExpr
 os.environ["VECLIB_MAXIMUM_THREADS"] = "1"  # Accelerate
 os.environ["OPENBLAS_NUM_THREADS"] = "1"  # OpenBLAS
 
-# NumPy and SimSIMD are obligatory for benchmarking
-import numpy as np
-import simsimd as simd
-import tabulate
 
 # Set to ignore all floating-point errors
 np.seterr(all="ignore")

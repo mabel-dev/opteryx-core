@@ -12,21 +12,17 @@ applied to `float64` input data. The "x" axis represents the growth in the numbe
 dimensions of the input vectors, while the "y" axis represents the speedup factor
 of every kernel against the baseline.
 """
-import os
 import argparse
+import os
 from typing import List
 
 import numpy as np
-
 import perfplot
-
-from bench_vectors import (
-    metric_families,
-    dtype_names,
-    Kernel,
-    yield_kernels,
-    random_matrix,
-)
+from bench_vectors import Kernel
+from bench_vectors import dtype_names
+from bench_vectors import metric_families
+from bench_vectors import random_matrix
+from bench_vectors import yield_kernels
 
 
 def ndim_argument(value):

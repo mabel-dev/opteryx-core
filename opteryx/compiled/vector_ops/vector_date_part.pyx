@@ -27,7 +27,7 @@ Phase 4 (Future):
 - OpenMP parallel extraction for >10 M row vectors
 """
 
-from libc.stdint cimport int64_t, int32_t, uint8_t, uint16_t, uint32_t
+from libc.stdint cimport int64_t
 from libc.stddef cimport size_t
 from cpython.array cimport array, clone
 
@@ -49,34 +49,54 @@ cdef extern from "simd_datepart.h":
     void simd_datepart_quarter  (const int64_t* src, int64_t* dst, size_t n, int unit_code) noexcept nogil
     void simd_datepart_dayofyear(const int64_t* src, int64_t* dst, size_t n, int unit_code) noexcept nogil
 
+
+cdef inline int _timestamp_unit_code(str unit):
+    if unit == 'us':
+        return 2
+    if unit == 'ms':
+        return 1
+    if unit == 'ns':
+        return 3
+    return 0
+
 # ---------------------------------------------------------------------------
 # Sub-second unit constants unique to this module
 # (SECONDS_PER_* and EPOCH_WEEKDAY come from vector_date_trunc.pyx)
 # ---------------------------------------------------------------------------
-cdef const int64_t MICROSECONDS_PER_SECOND  = 1_000_000
-cdef const int64_t MICROSECONDS_PER_MINUTE  = 60_000_000
-cdef const int64_t MICROSECONDS_PER_HOUR    = 3_600_000_000
-cdef const int64_t MICROSECONDS_PER_DAY     = 86_400_000_000
+cdef const int64_t MICROSECONDS_PER_SECOND = 1_000_000
+cdef const int64_t MICROSECONDS_PER_MINUTE = 60_000_000
+cdef const int64_t MICROSECONDS_PER_HOUR = 3_600_000_000
+cdef const int64_t MICROSECONDS_PER_DAY = 86_400_000_000
 
-cdef const int64_t MILLISECONDS_PER_SECOND  = 1_000
-cdef const int64_t MILLISECONDS_PER_MINUTE  = 60_000
-cdef const int64_t MILLISECONDS_PER_HOUR    = 3_600_000
-cdef const int64_t MILLISECONDS_PER_DAY     = 86_400_000
+cdef const int64_t MILLISECONDS_PER_SECOND = 1_000
+cdef const int64_t MILLISECONDS_PER_MINUTE = 60_000
+cdef const int64_t MILLISECONDS_PER_HOUR = 3_600_000
+cdef const int64_t MILLISECONDS_PER_DAY = 86_400_000
 
-cdef const int64_t NANOSECONDS_PER_SECOND   = 1_000_000_000
-cdef const int64_t NANOSECONDS_PER_MINUTE   = 60_000_000_000
-cdef const int64_t NANOSECONDS_PER_HOUR     = 3_600_000_000_000
-cdef const int64_t NANOSECONDS_PER_DAY      = 86_400_000_000_000
+cdef const int64_t NANOSECONDS_PER_SECOND = 1_000_000_000
+cdef const int64_t NANOSECONDS_PER_MINUTE = 60_000_000_000
+cdef const int64_t NANOSECONDS_PER_HOUR = 3_600_000_000_000
+cdef const int64_t NANOSECONDS_PER_DAY = 86_400_000_000_000
 
 # Typed bounds used in _detect_seconds_divisor (all values fit in int64_t).
 # Written with explicit <int64_t> casts so they remain C numeric constants
 # inside noexcept nogil contexts.
-cdef const int64_t _SEC_UPPER  = <int64_t>10000000000        # 10^10
+cdef const int64_t _SEC_UPPER = <int64_t>10000000000  # 10^10
 cdef const int64_t _MSEC_LOWER = <int64_t>1000000000000      # 10^12
 cdef const int64_t _MSEC_UPPER = <int64_t>10000000000000     # 10^13
 cdef const int64_t _USEC_LOWER = <int64_t>1000000000000000   # 10^15
 cdef const int64_t _USEC_UPPER = <int64_t>10000000000000000  # 10^16
 cdef const int64_t _NSEC_LOWER = <int64_t>1000000000000000000  # 10^18
+
+
+cdef inline int _seconds_divisor_unit_code(int64_t seconds_divisor) noexcept nogil:
+    if seconds_divisor == 1:
+        return 0
+    if seconds_divisor == MILLISECONDS_PER_SECOND:
+        return 1
+    if seconds_divisor == MICROSECONDS_PER_SECOND:
+        return 2
+    return 3
 
 
 # ---------------------------------------------------------------------------
@@ -281,11 +301,7 @@ cpdef Int64Vector vector_datepart_year(TimestampVector timestamps, Int64Vector o
     cdef int64_t length = <int64_t>timestamps.ptr.length
     cdef int64_t* data_ptr = <int64_t*>timestamps.ptr.data
     cdef int64_t empty_sentinel = 0
-    cdef int unit_code
-    if unit == 'us':   unit_code = 2
-    elif unit == 'ms': unit_code = 1
-    elif unit == 'ns': unit_code = 3
-    else:              unit_code = 0
+    cdef int unit_code = _timestamp_unit_code(unit)
 
     if length == 0:
         return int64_from_sequence(<int64_t[:0:1]>&empty_sentinel)
@@ -318,11 +334,7 @@ cpdef Int64Vector vector_datepart_month(TimestampVector timestamps, Int64Vector 
     cdef int64_t length = <int64_t>timestamps.ptr.length
     cdef int64_t* data_ptr = <int64_t*>timestamps.ptr.data
     cdef int64_t empty_sentinel = 0
-    cdef int unit_code
-    if unit == 'us':   unit_code = 2
-    elif unit == 'ms': unit_code = 1
-    elif unit == 'ns': unit_code = 3
-    else:              unit_code = 0
+    cdef int unit_code = _timestamp_unit_code(unit)
 
     if length == 0:
         return int64_from_sequence(<int64_t[:0:1]>&empty_sentinel)
@@ -355,11 +367,7 @@ cpdef Int64Vector vector_datepart_day(TimestampVector timestamps, Int64Vector ou
     cdef int64_t length = <int64_t>timestamps.ptr.length
     cdef int64_t* data_ptr = <int64_t*>timestamps.ptr.data
     cdef int64_t empty_sentinel = 0
-    cdef int unit_code
-    if unit == 'us':   unit_code = 2
-    elif unit == 'ms': unit_code = 1
-    elif unit == 'ns': unit_code = 3
-    else:              unit_code = 0
+    cdef int unit_code = _timestamp_unit_code(unit)
 
     if length == 0:
         return int64_from_sequence(<int64_t[:0:1]>&empty_sentinel)
@@ -444,11 +452,7 @@ cpdef Int64Vector vector_datepart_dayofyear(TimestampVector timestamps, Int64Vec
     cdef int64_t length = <int64_t>timestamps.ptr.length
     cdef int64_t* data_ptr = <int64_t*>timestamps.ptr.data
     cdef int64_t empty_sentinel = 0
-    cdef int unit_code
-    if unit == 'us':   unit_code = 2
-    elif unit == 'ms': unit_code = 1
-    elif unit == 'ns': unit_code = 3
-    else:              unit_code = 0
+    cdef int unit_code = _timestamp_unit_code(unit)
 
     if length == 0:
         return int64_from_sequence(<int64_t[:0:1]>&empty_sentinel)
@@ -481,11 +485,7 @@ cpdef Int64Vector vector_datepart_quarter(TimestampVector timestamps, Int64Vecto
     cdef int64_t length = <int64_t>timestamps.ptr.length
     cdef int64_t* data_ptr = <int64_t*>timestamps.ptr.data
     cdef int64_t empty_sentinel = 0
-    cdef int unit_code
-    if unit == 'us':   unit_code = 2
-    elif unit == 'ms': unit_code = 1
-    elif unit == 'ns': unit_code = 3
-    else:              unit_code = 0
+    cdef int unit_code = _timestamp_unit_code(unit)
 
     if length == 0:
         return int64_from_sequence(<int64_t[:0:1]>&empty_sentinel)
@@ -547,7 +547,7 @@ cpdef Int64Vector vector_datepart_minute_i64(Int64Vector int64_vec):
     cdef int64_t i = 0
 
     while i + 3 < length:
-        output_ptr[i]     = (data_ptr[i]     // divisor) % 60
+        output_ptr[i] = (data_ptr[i] // divisor) % 60
         output_ptr[i + 1] = (data_ptr[i + 1] // divisor) % 60
         output_ptr[i + 2] = (data_ptr[i + 2] // divisor) % 60
         output_ptr[i + 3] = (data_ptr[i + 3] // divisor) % 60
@@ -588,7 +588,7 @@ cpdef Int64Vector vector_datepart_hour_i64(Int64Vector int64_vec):
     cdef int64_t i = 0
 
     while i + 3 < length:
-        output_ptr[i]     = (data_ptr[i]     // divisor) % 24
+        output_ptr[i] = (data_ptr[i] // divisor) % 24
         output_ptr[i + 1] = (data_ptr[i + 1] // divisor) % 24
         output_ptr[i + 2] = (data_ptr[i + 2] // divisor) % 24
         output_ptr[i + 3] = (data_ptr[i + 3] // divisor) % 24
@@ -620,7 +620,7 @@ cpdef Int64Vector vector_datepart_second_i64(Int64Vector int64_vec):
 
     if sd == 1:
         while i + 3 < length:
-            output_ptr[i]     = data_ptr[i]     % 60
+            output_ptr[i] = data_ptr[i] % 60
             output_ptr[i + 1] = data_ptr[i + 1] % 60
             output_ptr[i + 2] = data_ptr[i + 2] % 60
             output_ptr[i + 3] = data_ptr[i + 3] % 60
@@ -630,7 +630,7 @@ cpdef Int64Vector vector_datepart_second_i64(Int64Vector int64_vec):
             i += 1
     else:
         while i + 3 < length:
-            output_ptr[i]     = (data_ptr[i]     // sd) % 60
+            output_ptr[i] = (data_ptr[i] // sd) % 60
             output_ptr[i + 1] = (data_ptr[i + 1] // sd) % 60
             output_ptr[i + 2] = (data_ptr[i + 2] // sd) % 60
             output_ptr[i + 3] = (data_ptr[i + 3] // sd) % 60
@@ -658,11 +658,7 @@ cpdef Int64Vector vector_datepart_year_i64(Int64Vector int64_vec):
         return int64_from_sequence(<int64_t[:0:1]>&empty_sentinel)
 
     cdef int64_t sd = _find_seconds_divisor_int64(data_ptr, length)
-    cdef int unit_code
-    if sd == 1:                          unit_code = 0
-    elif sd == MILLISECONDS_PER_SECOND:  unit_code = 1
-    elif sd == MICROSECONDS_PER_SECOND:  unit_code = 2
-    else:                                unit_code = 3
+    cdef int unit_code = _seconds_divisor_unit_code(sd)
     cdef array template = array('l')
     cdef array output_array = clone(template, length, False)
     cdef int64_t* output_ptr = <int64_t*>output_array.data.as_longs
@@ -682,11 +678,7 @@ cpdef Int64Vector vector_datepart_month_i64(Int64Vector int64_vec):
         return int64_from_sequence(<int64_t[:0:1]>&empty_sentinel)
 
     cdef int64_t sd = _find_seconds_divisor_int64(data_ptr, length)
-    cdef int unit_code
-    if sd == 1:                          unit_code = 0
-    elif sd == MILLISECONDS_PER_SECOND:  unit_code = 1
-    elif sd == MICROSECONDS_PER_SECOND:  unit_code = 2
-    else:                                unit_code = 3
+    cdef int unit_code = _seconds_divisor_unit_code(sd)
     cdef array template = array('l')
     cdef array output_array = clone(template, length, False)
     cdef int64_t* output_ptr = <int64_t*>output_array.data.as_longs
@@ -706,11 +698,7 @@ cpdef Int64Vector vector_datepart_day_i64(Int64Vector int64_vec):
         return int64_from_sequence(<int64_t[:0:1]>&empty_sentinel)
 
     cdef int64_t sd = _find_seconds_divisor_int64(data_ptr, length)
-    cdef int unit_code
-    if sd == 1:                          unit_code = 0
-    elif sd == MILLISECONDS_PER_SECOND:  unit_code = 1
-    elif sd == MICROSECONDS_PER_SECOND:  unit_code = 2
-    else:                                unit_code = 3
+    cdef int unit_code = _seconds_divisor_unit_code(sd)
     cdef array template = array('l')
     cdef array output_array = clone(template, length, False)
     cdef int64_t* output_ptr = <int64_t*>output_array.data.as_longs
@@ -766,11 +754,7 @@ cpdef Int64Vector vector_datepart_dayofyear_i64(Int64Vector int64_vec):
         return int64_from_sequence(<int64_t[:0:1]>&empty_sentinel)
 
     cdef int64_t sd = _find_seconds_divisor_int64(data_ptr, length)
-    cdef int unit_code
-    if sd == 1:                          unit_code = 0
-    elif sd == MILLISECONDS_PER_SECOND:  unit_code = 1
-    elif sd == MICROSECONDS_PER_SECOND:  unit_code = 2
-    else:                                unit_code = 3
+    cdef int unit_code = _seconds_divisor_unit_code(sd)
     cdef array template = array('l')
     cdef array output_array = clone(template, length, False)
     cdef int64_t* output_ptr = <int64_t*>output_array.data.as_longs
@@ -790,11 +774,7 @@ cpdef Int64Vector vector_datepart_quarter_i64(Int64Vector int64_vec):
         return int64_from_sequence(<int64_t[:0:1]>&empty_sentinel)
 
     cdef int64_t sd = _find_seconds_divisor_int64(data_ptr, length)
-    cdef int unit_code
-    if sd == 1:                          unit_code = 0
-    elif sd == MILLISECONDS_PER_SECOND:  unit_code = 1
-    elif sd == MICROSECONDS_PER_SECOND:  unit_code = 2
-    else:                                unit_code = 3
+    cdef int unit_code = _seconds_divisor_unit_code(sd)
     cdef array template = array('l')
     cdef array output_array = clone(template, length, False)
     cdef int64_t* output_ptr = <int64_t*>output_array.data.as_longs

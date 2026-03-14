@@ -11,10 +11,10 @@ This is a SQL Query Execution Plan Node.
 This node orders a dataset
 """
 
+import pyarrow as pa
 from orso.types import OrsoTypes
 from pyarrow import Table
 from pyarrow import concat_tables
-import pyarrow as pa
 
 from opteryx import EOS
 from opteryx.exceptions import ColumnNotFoundError

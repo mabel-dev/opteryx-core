@@ -100,17 +100,19 @@ class DrakenAggregateAndGroupNode(BasePlanNode):
         )
         self.group_by_columns = list({node.schema_column.identity for node in self.groups})
         self._aggregation_specs = self._build_aggregation_specs(self.aggregates)
-        
+
         # Handle GROUP BY without aggregates by adding implicit COUNT(*)
         # This allows the group state engine to work correctly
         if not self._aggregation_specs and self.group_by_columns:
             # Add implicit COUNT(*) aggregate for GROUP BY with no explicit aggregates
-            self._aggregation_specs = [AggregationSpec(alias="count", function="count", column=None)]
+            self._aggregation_specs = [
+                AggregationSpec(alias="count", function="count", column=None)
+            ]
             # Mark that we added an implicit aggregate so we can remove it from output later
             self._implicit_count_added = True
         else:
             self._implicit_count_added = False
-        
+
         self._normalized_group_by_columns = normalize_group_by_columns(self.group_by_columns)
         self._normalized_aggregations = normalize_aggregations(self._aggregation_specs)
         required_columns = list(self.group_by_columns)

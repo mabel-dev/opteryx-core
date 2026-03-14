@@ -10,11 +10,11 @@ from typing import Any
 
 from orso.types import OrsoTypes
 
-from opteryx.expression.operator_catalog import OPERATOR_DEFINITIONS
-from opteryx.expression.operator_catalog import OperatorSignatureDefinition
 from opteryx.expression.formatter import BINARY_OPERATOR_TOKENS
 from opteryx.expression.formatter import COMPARISON_OPERATOR_TOKENS
 from opteryx.expression.formatter import EXTRACTION_OPERATOR_TOKENS
+from opteryx.expression.operator_catalog import OPERATOR_DEFINITIONS
+from opteryx.expression.operator_catalog import OperatorSignatureDefinition
 from opteryx.planner.binder.operator_map import OPERATOR_MAP
 
 
@@ -94,8 +94,12 @@ def export_operator_catalog() -> OrderedDict[str, dict[str, Any]]:
             ),
         )
         left_types = sorted({item["left_type"] for item in ordered_signatures if item["left_type"]})
-        right_types = sorted({item["right_type"] for item in ordered_signatures if item["right_type"]})
-        result_types = sorted({item["result_type"] for item in ordered_signatures if item["result_type"]})
+        right_types = sorted(
+            {item["right_type"] for item in ordered_signatures if item["right_type"]}
+        )
+        result_types = sorted(
+            {item["result_type"] for item in ordered_signatures if item["result_type"]}
+        )
         raw_result_types = {item["result_type"] for item in ordered_signatures}
         metadata = OPERATOR_DEFINITIONS.get(operator)
 
@@ -107,7 +111,9 @@ def export_operator_catalog() -> OrderedDict[str, dict[str, Any]]:
             "summary": metadata.summary if metadata else operator,
             "documentation": metadata.documentation if metadata else operator,
             "signature_count": len(ordered_signatures),
-            "has_dynamic_result": any(item["result_type_is_dynamic"] for item in ordered_signatures),
+            "has_dynamic_result": any(
+                item["result_type_is_dynamic"] for item in ordered_signatures
+            ),
             "left_types": left_types,
             "right_types": right_types,
             "result_types": result_types,

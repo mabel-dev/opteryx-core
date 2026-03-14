@@ -78,7 +78,7 @@ lint: check-python ## Run all linting tools
 	$(call print_blue,"Running Ruff checks...")
 	@$(PYTHON) -m ruff check --fix --exit-zero
 	$(call print_blue,"Cleaning unused imports...")
-	@$(PYTHON) -m pycln .
+	@$(PYTHON) -m pycln . --extend-exclude 'third_party/usearch/fp16'
 	$(call print_blue,"Sorting imports...")
 	@$(PYTHON) -m isort .
 	$(call print_blue,"Formatting code...")

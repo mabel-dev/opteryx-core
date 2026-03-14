@@ -33,6 +33,7 @@ from typing import Tuple
 from typing import Union
 from uuid import uuid4
 
+import pyarrow
 from orso import DataFrame
 from orso import converters
 from orso.schema import FlatColumn
@@ -57,7 +58,6 @@ from opteryx.models import QueryTelemetry
 from opteryx.tracing import record_event
 from opteryx.utils import sql
 
-import pyarrow
 
 class Session(DataFrame):
     """Session acts as the canonical execution object and replaces Cursor.

@@ -1,8 +1,7 @@
+import fp16.avx
+import fp16.avx2
 from peachpy import *
 from peachpy.x86_64 import *
-
-import fp16.avx, fp16.avx2
-
 
 arg_fp16 = Argument(ptr(const_uint16_t), name="fp16")
 arg_fp32 = Argument(ptr(uint32_t), name="fp32")

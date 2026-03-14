@@ -248,4 +248,3 @@ OPERATOR_DEFINITIONS = {
         category="comparison",
     ),
 }
-

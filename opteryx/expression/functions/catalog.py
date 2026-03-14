@@ -11,6 +11,7 @@ from typing import Optional
 from typing import Tuple
 
 from orso.types import OrsoTypes
+
 from opteryx.vector_types import is_numeric_vector_type
 from opteryx.vector_types import resolve_node_type
 

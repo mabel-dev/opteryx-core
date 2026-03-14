@@ -2,6 +2,7 @@
 
 
 import confu
+
 parser = confu.standard_parser("FP16 configuration script")
 parser.add_argument("--compare", dest="compare", action="store_true",
     help="Enable performance comparison with other half-precision implementations")
