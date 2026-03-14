@@ -376,5 +376,25 @@
             ],
             "jsonl": []
         }
+    },
+    "vector": {
+        "canonical_name": "VECTOR",
+        "aliases": [],
+        "accepted_spellings": [
+            "vector"
+        ],
+        "family": "vector",
+        "flags": {
+            "numeric": false,
+            "temporal": false,
+            "collection": true,
+            "parameterized": false
+        },
+        "parameterized_forms": [],
+        "ingestion_mappings": {
+            "parquet_physical": [],
+            "parquet_logical": [],
+            "jsonl": []
+        }
     }
 }

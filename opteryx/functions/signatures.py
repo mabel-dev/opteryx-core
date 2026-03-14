@@ -35,6 +35,7 @@ _ORSO_TYPE_LABELS = {
     OrsoTypes.NULL: "null",
     OrsoTypes.TIME: "time",
     OrsoTypes.TIMESTAMP: "timestamp",
+    OrsoTypes.VECTOR: "vector",
     OrsoTypes.VARCHAR: "varchar",
 }
 
@@ -398,8 +399,8 @@ _RETURN_OVERRIDES = {
         "Returns `double` for parts such as `epoch` and `julian`, `date` for `date`, and `integer` for most other parts.",
     ),
     "EMBED": (
-        "array<double>",
-        "Returns an embedding vector represented as an array of doubles.",
+        "vector",
+        "Returns an embedding vector.",
     ),
     "GREATEST": (
         "element type of `arr`",
@@ -438,7 +439,7 @@ _FUNCTION_NOTES = {
     "CURRENT_TIME": "Canonical SQL-92 form is `CURRENT_TIME`. Opteryx also accepts `CURRENT_TIME()`.",
     "CURRENT_TIMESTAMP": "Canonical SQL-92 form is `CURRENT_TIMESTAMP`. Opteryx also accepts `CURRENT_TIMESTAMP()`.",
     "EXTRACT": "Canonical SQL-92 form is `EXTRACT(part FROM date)`. Return type depends on `part`: `epoch` and `julian` produce `double`, `date` produces `date`, and most other parts produce `integer`.",
-    "EMBED": "This function depends on the configured embedding provider and returns a numeric vector as `array<double>`.",
+    "EMBED": "This function depends on the configured embedding provider and returns a numeric `vector`.",
     "FLOOR": "When `scale` is provided, positive values affect digits to the right of the decimal point and negative values affect tens, hundreds, and larger positions.",
     "_MATCH_AGAINST": "Canonical form is `MATCH(str) AGAINST(pattern)`. Opteryx normalizes this syntax to an internal helper.",
     "NORMAL": "This function is volatile. The integer argument controls how many values are generated, not a seed.",

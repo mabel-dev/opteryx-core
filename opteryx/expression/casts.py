@@ -20,6 +20,14 @@ def safe(func, value, **kwargs):
         return None
 
 
+def _unwrap_vector_value(value):
+    if hasattr(value, "as_py"):
+        value = value.as_py()
+    if isinstance(value, numpy.ndarray):
+        value = value.tolist()
+    return value
+
+
 def try_cast(_type):
     """Cast a column to a specified type, returning None for failed conversions.
 
@@ -37,6 +45,8 @@ def try_cast(_type):
 
         kwargs = {param.name: arg for param, arg in zip(params, args)}
 
+        if _type == "VECTOR":
+            return [safe(caster, _unwrap_vector_value(i), **kwargs) for i in arr]
         return [safe(caster, i, **kwargs) for i in arr]
 
     return _inner
@@ -72,6 +82,8 @@ def cast(_type):
             # ARRAY can take a single argument for the element type
             kwargs["element_type"] = args[0]
 
+        if _type == "VECTOR":
+            return [caster(_unwrap_vector_value(i), **kwargs) for i in arr]
         return [caster(i, **kwargs) for i in arr]
 
     return _inner

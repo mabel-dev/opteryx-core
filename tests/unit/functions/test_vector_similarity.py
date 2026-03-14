@@ -810,7 +810,7 @@ def test_vector_order_by_limit_can_scan_parquet_backed_vector_column():
                 SELECT label
                 FROM testdata.{dataset_name}
                 WHERE label != 'excluded'
-                ORDER BY COSINE_DISTANCE(embedding, (1.0, 0.0))
+                ORDER BY COSINE_DISTANCE(CAST(embedding AS VECTOR), (1.0, 0.0))
                 LIMIT 2
                 """
             )

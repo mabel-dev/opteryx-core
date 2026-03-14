@@ -43,7 +43,7 @@ def _run_sort(table, order_by):
     return outputs[0]
 
 
-def _identifier(name, value_type=OrsoTypes.ARRAY, element_type=None):
+def _identifier(name, value_type=OrsoTypes.VECTOR, element_type=None):
     column = FlatColumn(name=name, type=value_type, element_type=element_type)
     column.identity = name
     return Node(NodeType.IDENTIFIER, schema_column=column)
@@ -52,11 +52,11 @@ def _identifier(name, value_type=OrsoTypes.ARRAY, element_type=None):
 def _literal_array(value):
     return Node(
         NodeType.LITERAL,
-        type=OrsoTypes.ARRAY,
+        type=OrsoTypes.VECTOR,
         value=value,
         schema_column=ConstantColumn(
             name="query_vector",
-            type=OrsoTypes.ARRAY,
+            type=OrsoTypes.VECTOR,
             value=value,
             element_type=OrsoTypes.DOUBLE,
         ),

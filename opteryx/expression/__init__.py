@@ -85,6 +85,15 @@ class NodeType(int, Enum):
     EXTRACTION_OPERATOR = 46  # 0010 1110 - value extraction: ->, ->>, []
 
 
+def _arrow_type_for_schema_column(schema_column):
+    if schema_column is None:
+        return None
+    if getattr(schema_column, "type", None) == OrsoTypes.VECTOR:
+        return pyarrow.list_(pyarrow.float64())
+    arrow_field = getattr(schema_column, "arrow_field", None)
+    return getattr(arrow_field, "type", None)
+
+
 LOGICAL_OPERATIONS: Dict[NodeType, Callable] = {
     NodeType.AND: pyarrow.compute.and_,
     NodeType.OR: pyarrow.compute.or_,
@@ -220,8 +229,8 @@ def _inner_evaluate(root: Node, table: Table):
     if node_type == NodeType.LITERAL:
         # if it's a literal value, return it once for every value in the table
         literal_type = root.type
-        if literal_type == OrsoTypes.ARRAY:
-            # creating ARRAY columns is expensive, so we don't create one full length
+        if literal_type in (OrsoTypes.ARRAY, OrsoTypes.VECTOR):
+            # creating ARRAY/VECTOR columns is expensive, so we don't create one full length
             array_literal = numpy.empty(1, dtype=object)
             if isinstance(root.value, (list, tuple)):
                 array_literal[0] = numpy.asarray(root.value, dtype=object)
@@ -492,8 +501,7 @@ def _evaluate_and_append_arrow(expressions, table: Table):
         if statement.node_type == NodeType.LITERAL:
             from opteryx.draken.vectors.constant_vector import from_scalar as constant_from_scalar
 
-            target_type = getattr(statement.schema_column, "arrow_field", None)
-            target_type = getattr(target_type, "type", None)
+            target_type = _arrow_type_for_schema_column(statement.schema_column)
             literal_vec = constant_from_scalar(statement.value, table.num_rows, dtype=target_type)
             if literal_vec is not None:
                 new_column = literal_vec.to_arrow()
@@ -503,7 +511,7 @@ def _evaluate_and_append_arrow(expressions, table: Table):
                 new_column = evaluate_statement(statement, table)
             else:
                 # we make all unknown fields to object type
-                new_column = pyarrow.array([], type=statement.schema_column.arrow_field.type)
+                new_column = pyarrow.array([], type=_arrow_type_for_schema_column(statement.schema_column))
 
         # if we know the intended type of the result column, cast it
         field = statement.schema_column.identity
@@ -514,7 +522,7 @@ def _evaluate_and_append_arrow(expressions, table: Table):
         ):
             field = pyarrow.field(
                 name=identity,
-                type=statement.schema_column.arrow_field.type,
+                type=_arrow_type_for_schema_column(statement.schema_column),
             )
             try:
                 if isinstance(new_column, (pyarrow.Array, pyarrow.ChunkedArray)):
@@ -577,8 +585,7 @@ def _evaluate_and_append_morsel(expressions, morsel):
             continue
 
         if statement.node_type == NodeType.LITERAL:
-            target_type = getattr(statement.schema_column, "arrow_field", None)
-            target_type = getattr(target_type, "type", None)
+            target_type = _arrow_type_for_schema_column(statement.schema_column)
             literal_vec = constant_from_scalar(statement.value, morsel.num_rows, dtype=target_type)
             if literal_vec is not None:
                 names.append(identity)

@@ -1543,10 +1543,10 @@
                     "COSINE_SIMILARITY",
                     "COSINE_DISTANCE"
                 ],
-                "return_type": "array<double>",
+                "return_type": "vector",
                 "returns": {
-                    "type": "array<double>",
-                    "documentation": "Returns an embedding vector represented as an array of doubles."
+                    "type": "vector",
+                    "documentation": "Returns an embedding vector."
                 },
                 "arity": {
                     "minimum": 1,
@@ -1569,7 +1569,7 @@
                         "null_handling": "strict"
                     }
                 ],
-                "notes": "This function depends on the configured embedding provider and returns a numeric vector as `array<double>`."
+                "notes": "This function depends on the configured embedding provider and returns a numeric `vector`."
             }
         ]
     },

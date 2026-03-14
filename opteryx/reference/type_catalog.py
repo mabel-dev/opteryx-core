@@ -34,6 +34,8 @@ def _type_id(type_name: OrsoTypes | None) -> str | None:
 def _type_family(type_name: OrsoTypes) -> str:
     if type_name in {OrsoTypes.INTEGER, OrsoTypes.DOUBLE, OrsoTypes.DECIMAL}:
         return "numeric"
+    if type_name == OrsoTypes.VECTOR:
+        return "vector"
     if type_name in {OrsoTypes.DATE, OrsoTypes.TIME, OrsoTypes.TIMESTAMP}:
         return "temporal"
     if type_name in {OrsoTypes.ARRAY, OrsoTypes.STRUCT, OrsoTypes.JSONB}:
@@ -56,7 +58,8 @@ def _type_flags(type_name: OrsoTypes) -> dict[str, bool]:
     return {
         "numeric": bool(type_name.is_numeric()) and type_name != OrsoTypes.BOOLEAN,
         "temporal": bool(type_name.is_temporal()),
-        "collection": type_name in {OrsoTypes.ARRAY, OrsoTypes.STRUCT, OrsoTypes.JSONB},
+        "collection": type_name
+        in {OrsoTypes.ARRAY, OrsoTypes.STRUCT, OrsoTypes.JSONB, OrsoTypes.VECTOR},
         "parameterized": bool(parameterized_forms),
     }
 
