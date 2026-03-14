@@ -18,16 +18,37 @@ def test_function_signatures_json_matches_catalog_export():
 def test_function_signatures_export_includes_enriched_metadata():
     signatures = export_function_signatures()
 
+    round_function = signatures["ROUND"]
+    assert round_function["catalog_name"] == "ROUND"
+    assert round_function["summary"] == "Round to nearest integer."
+    assert round_function["volatility"] == "immutable"
+    assert round_function["deterministic"] is True
+    assert round_function["foldable"] is False
+    assert round_function["pushdown_safe"] is False
+    assert round_function["lifecycle"]["status"] == "active"
+    assert round_function["lifecycle"]["replacement"] is None
+
     round_signature = signatures["ROUND"]["overloads"][0]
+    assert round_signature["id"] == "ROUND_1"
     assert round_signature["category"] == "Numeric Functions"
     assert round_signature["return_type"] == "double"
     assert round_signature["returns"]["type"] == "double"
     assert round_signature["returns"]["documentation"] != round_signature["documentation"]
     assert "half-to-even" in round_signature["notes"]
+    assert round_signature["arity"] == {"minimum": 1, "maximum": None, "variadic": True}
+    assert round_signature["execution"]["kernel_id"] == "default"
+    assert round_signature["execution"]["null_policy"] == "strict"
+    assert round_signature["execution"]["cost_us_per_million"] == 2.0
     assert "It is listed under" not in round_signature["documentation"]
     assert "For the same inputs" not in round_signature["documentation"]
     assert "Numeric value to round." in round_signature["parameters"][0]["documentation"]
+    assert round_signature["parameters"][0]["optional"] is False
+    assert round_signature["parameters"][0]["variadic"] is False
+    assert round_signature["parameters"][0]["constant_only"] is False
+    assert round_signature["parameters"][0]["null_handling"] == "strict"
     assert "CEILING" in round_signature["related_functions"]
+    assert round_signature["parameters"][1]["optional"] is True
+    assert round_signature["parameters"][1]["variadic"] is True
 
     datepart_signature = signatures["EXTRACT"]["overloads"][0]
     assert datepart_signature["label"] == "EXTRACT(part FROM date)"
@@ -68,9 +89,13 @@ def test_function_signatures_export_includes_enriched_metadata():
     assert "CURRENT_TIMESTAMP()" in signatures["CURRENT_TIMESTAMP"]["overloads"][0]["notes"]
 
     assert "MATCH" in signatures
+    assert signatures["MATCH"]["catalog_name"] == "_MATCH_AGAINST"
     match_signature = signatures["MATCH"]["overloads"][0]
     assert match_signature["label"] == "MATCH(str) AGAINST(pattern)"
     assert "Canonical form is `MATCH(str) AGAINST(pattern)`" in match_signature["notes"]
+
+    concat_signature = signatures["CONCAT"]["overloads"][0]
+    assert concat_signature["execution"]["null_policy"] == "passthrough"
 
     assert signatures["INITCAP"]["aliases"] == ["TITLE", "TITLECASE"]
     assert "TITLE" not in signatures

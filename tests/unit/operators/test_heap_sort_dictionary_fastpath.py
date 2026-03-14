@@ -3,6 +3,7 @@ import sys
 import types
 from functools import cmp_to_key
 
+import numpy
 import pyarrow as pa
 import pytest
 from orso.schema import ConstantColumn
@@ -258,6 +259,58 @@ def test_top_n_vector_similarity_uses_native_scoring_path():
     assert _decode_strings(out["label"].to_pylist()) == ["match", "diagonal"]
 
 
+def test_top_n_vector_similarity_prefers_exact_native_topk(monkeypatch):
+    import opteryx.nanobind as nanobind_pkg
+
+    calls = {"exact": 0, "score": 0}
+
+    def _exact_search_cosine(query_vector, row_ids, vectors, k):
+        calls["exact"] += 1
+        assert query_vector.tolist() == pytest.approx([1.0, 0.0], abs=1e-6)
+        assert row_ids.tolist() == [0, 1, 2]
+        assert vectors.shape == (3, 2)
+        assert k == 2
+        return [0, 1], [1.0, 0.70710677]
+
+    def _score_cosine(query_vector, vectors):
+        calls["score"] += 1
+        raise AssertionError("nearest-neighbor top-k should use exact_search_cosine")
+
+    monkeypatch.setattr(
+        nanobind_pkg,
+        "vector_search",
+        types.SimpleNamespace(
+            exact_search_cosine=_exact_search_cosine,
+            score_cosine=_score_cosine,
+        ),
+        raising=False,
+    )
+
+    morsel = Morsel.from_arrow(
+        pa.table(
+            {
+                "label": pa.array(["match", "diagonal", "orthogonal"], type=pa.string()),
+                "embedding": pa.array(
+                    [[1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+                    type=pa.list_(pa.float32()),
+                ),
+            }
+        )
+    )
+
+    node = HeapSortNode(
+        QueryProperties("heap-sort-test", {}),
+        order_by=[(_vector_order_node("COSINE_SIMILARITY"), "DESC")],
+        limit=2,
+        vector_topk_candidate=True,
+    )
+
+    out = node._top_n(morsel).to_arrow()
+
+    assert _decode_strings(out["label"].to_pylist()) == ["match", "diagonal"]
+    assert calls == {"exact": 1, "score": 0}
+
+
 def test_top_n_vector_distance_uses_native_scoring_path():
     pytest.importorskip("opteryx.nanobind.vector_search")
 
@@ -282,6 +335,46 @@ def test_top_n_vector_distance_uses_native_scoring_path():
     out = node._top_n(morsel).to_arrow()
 
     assert _decode_strings(out["label"].to_pylist()) == ["match", "diagonal"]
+
+
+def test_top_n_vector_similarity_partial_selection_handles_non_nearest_order(monkeypatch):
+    import opteryx.nanobind as nanobind_pkg
+
+    calls = {"score": 0}
+
+    def _score_cosine(query_vector, vectors):
+        calls["score"] += 1
+        return numpy.asarray([1.0, 0.70710677, 0.0], dtype=numpy.float32)
+
+    monkeypatch.setattr(
+        nanobind_pkg,
+        "vector_search",
+        types.SimpleNamespace(score_cosine=_score_cosine),
+        raising=False,
+    )
+
+    morsel = Morsel.from_arrow(
+        pa.table(
+            {
+                "label": pa.array(["match", "diagonal", "orthogonal"], type=pa.string()),
+                "embedding": pa.array(
+                    [[1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+                    type=pa.list_(pa.float32()),
+                ),
+            }
+        )
+    )
+
+    node = HeapSortNode(
+        QueryProperties("heap-sort-test", {}),
+        order_by=[(_vector_order_node("COSINE_SIMILARITY"), "ASC")],
+        limit=2,
+    )
+
+    out = node._top_n(morsel).to_arrow()
+
+    assert _decode_strings(out["label"].to_pylist()) == ["orthogonal", "diagonal"]
+    assert calls["score"] == 1
 
 
 def test_sort_node_evaluates_functional_vector_order_by():

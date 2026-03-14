@@ -8,7 +8,7 @@
 Includes:
 - Rounding: ROUND, FLOOR, CEILING, TRUNCATE
 - Magnitude: ABS, SIGN, SQRT
-- Exponentiation & logarithms: POWER, LN, LOG10, LOG2, LOG
+- Exponentiation & logarithms: POWER, LOG
 - Random: RANDOM, NORMAL, RANDOM_STRING
 
 Note: Binary arithmetic operators (Plus, Minus, Multiply, Divide, Modulo) are handled as
@@ -70,6 +70,12 @@ def safe_power(base_array, exponent_array):
         result = compute.power(base_array.astype(numpy.float64), exponent_array)
 
     return result
+
+
+def log(values, bases):
+    from opteryx.compiled.vector_ops import vector_log
+
+    return vector_log(values, bases)
 
 
 def ceiling(values, scales=None) -> List:

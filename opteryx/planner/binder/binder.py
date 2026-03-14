@@ -371,6 +371,9 @@ def inner_binder(node: Node, context: BindingContext) -> Tuple[Node, Any]:
 
             # Map type name to OrsoType
             target_type_name = node.value.upper()
+            # Strip TRY_ prefix for safe casts — the prefix is kept in node.value for the evaluator
+            if target_type_name.startswith("TRY_"):
+                target_type_name = target_type_name[4:]
             # VARBINARY is not a canonical OrsoType — map to BLOB
             if target_type_name == "VARBINARY":
                 target_type_name = "BLOB"

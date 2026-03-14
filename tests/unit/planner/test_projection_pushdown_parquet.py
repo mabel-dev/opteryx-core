@@ -77,7 +77,7 @@ STATEMENTS = [
     ("SELECT DISTINCT Mission FROM (SELECT Company, Mission, LENGTH(Location) AS LL FROM testdata.missions) AS launches;", 1),
 
     # Testing functions on the projected columns
-    ("SELECT LOG2(LL) FROM (SELECT Company, Mission, LENGTH(Location) AS LL FROM testdata.missions) AS launches;", 1),
+    ("SELECT LOG(LL, 2) FROM (SELECT Company, Mission, LENGTH(Location) AS LL FROM testdata.missions) AS launches;", 1),
     ("SELECT LENGTH(Company) > LL FROM (SELECT Company, Mission, LENGTH(Location) AS LL FROM testdata.missions) AS launches;", 2),
     ("SELECT LENGTH(Mission) FROM (SELECT Company, Mission, LENGTH(Location) AS LL FROM testdata.missions) AS launches;", 1),
 

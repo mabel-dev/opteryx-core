@@ -663,6 +663,48 @@ Once the expression engine is the live execution path and `managers/expression/_
 - Generate `function_signatures.json` from catalog metadata.
 - Export catalog metadata for IDE plugins and external validators.
 
+#### Phase 6 Backlog
+
+Immediate follow-on work once Phase 6 starts:
+
+- Re-add `SHOW FUNCTIONS`, backed by the catalog rather than a hand-maintained list.
+- Add `DESCRIBE FUNCTION <name>` / equivalent introspection surface using the same export path.
+- Extend the exported JSON beyond today's signature-help fields to include lifecycle, volatility,
+  determinism, null policy, foldability, pushdown safety, kernel ids, and cost estimates.
+- Use catalog metadata to scaffold tests:
+  - alias resolution tests
+  - arity validation tests
+  - return-type inference tests
+  - export consistency tests
+- Add a benchmark-driven script to populate and refresh `cost_us_per_million` values rather than
+  editing them by hand.
+
+#### Broader Documentation Artifact Opportunities
+
+The same "generate reference artifacts from code" approach should not stop at scalar functions.
+Useful next targets:
+
+- **Data types**
+  - Generate a machine-readable type catalog from `OrsoTypes` plus local normalization/conversion
+    rules.
+  - Export canonical names, aliases, families, temporal/numeric flags, array element support,
+    literal syntax notes, and connector-facing type mappings.
+- **Aggregates**
+  - Generate an aggregate catalog from aggregate registrations and planner/runtime support tables.
+  - Export aggregate names, aliases, DISTINCT support, wildcard support, null-handling semantics,
+    group-by-only restrictions, partial/final aggregation support, and fallback/Draken support.
+- **Operators**
+  - Generate an operator catalog from operator maps and expression kernels.
+  - Export operator symbol/name, operand type matrix, result types, precedence/associativity,
+    pushdown safety, and special syntax notes (`->`, `->>`, `ANY`, `IN`, subscript access).
+- **Type casting**
+  - Generate cast reference data from `NodeType.CAST`, `casts.py`, and target type definitions.
+  - Export source→target compatibility, `CAST` vs `TRY_CAST` behavior, optional precision/scale/length
+    arguments, null/error semantics, and examples of lossy vs lossless conversions.
+
+These do not all need one shared schema, but they should follow the same design principle:
+runtime metadata is the source of truth; exported documentation/reference artifacts are generated.
+
 ---
 
 ## Module Structure
@@ -905,6 +947,5 @@ class TestMYFUNCCatalog:
 4. **CAST integration**: Should CAST remain as first-class construct or be unified into function catalog as special overloads? (Current decision: remains separate as NodeType.CAST. Reasoning: CAST is special—no null-propagation options, side-effect free, deterministic return type, benefits from dedicated handling.)
 
 5. **External tooling**: Should we generate OpenAPI/protobuf schemas from the catalog for SQL IDE plugins and external validators? (Suggested: Phase 6+; plan for it now with schema versioning.)
-
 
 

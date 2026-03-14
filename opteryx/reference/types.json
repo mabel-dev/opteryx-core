@@ -1,0 +1,380 @@
+{
+    "array": {
+        "canonical_name": "ARRAY",
+        "aliases": [],
+        "accepted_spellings": [
+            "array"
+        ],
+        "family": "nested",
+        "flags": {
+            "numeric": false,
+            "temporal": false,
+            "collection": true,
+            "parameterized": true
+        },
+        "parameterized_forms": [
+            "ARRAY<INTEGER>"
+        ],
+        "ingestion_mappings": {
+            "parquet_physical": [],
+            "parquet_logical": [],
+            "jsonl": [],
+            "parquet_logical_patterns": [
+                "array<...>"
+            ],
+            "jsonl_patterns": [
+                "array<...>"
+            ]
+        },
+        "element_type_aliases": [
+            "blob",
+            "boolean",
+            "double",
+            "integer",
+            "jsonb"
+        ]
+    },
+    "blob": {
+        "canonical_name": "BLOB",
+        "aliases": [
+            "byte_array",
+            "fixed_len_byte_array"
+        ],
+        "accepted_spellings": [
+            "blob",
+            "byte_array",
+            "fixed_len_byte_array"
+        ],
+        "family": "binary",
+        "flags": {
+            "numeric": false,
+            "temporal": false,
+            "collection": false,
+            "parameterized": false
+        },
+        "parameterized_forms": [],
+        "ingestion_mappings": {
+            "parquet_physical": [
+                "byte_array",
+                "fixed_len_byte_array"
+            ],
+            "parquet_logical": [
+                "binary",
+                "byte_array",
+                "fixed_len_byte_array"
+            ],
+            "jsonl": [
+                "bytes",
+                "null"
+            ]
+        }
+    },
+    "boolean": {
+        "canonical_name": "BOOLEAN",
+        "aliases": [
+            "bool"
+        ],
+        "accepted_spellings": [
+            "bool",
+            "boolean"
+        ],
+        "family": "boolean",
+        "flags": {
+            "numeric": false,
+            "temporal": false,
+            "collection": false,
+            "parameterized": false
+        },
+        "parameterized_forms": [],
+        "ingestion_mappings": {
+            "parquet_physical": [
+                "boolean"
+            ],
+            "parquet_logical": [
+                "boolean"
+            ],
+            "jsonl": [
+                "boolean"
+            ]
+        }
+    },
+    "date": {
+        "canonical_name": "DATE",
+        "aliases": [],
+        "accepted_spellings": [
+            "date"
+        ],
+        "family": "temporal",
+        "flags": {
+            "numeric": false,
+            "temporal": true,
+            "collection": false,
+            "parameterized": false
+        },
+        "parameterized_forms": [],
+        "ingestion_mappings": {
+            "parquet_physical": [],
+            "parquet_logical": [
+                "date",
+                "date32[day]"
+            ],
+            "jsonl": []
+        }
+    },
+    "decimal": {
+        "canonical_name": "DECIMAL",
+        "aliases": [],
+        "accepted_spellings": [
+            "decimal"
+        ],
+        "family": "numeric",
+        "flags": {
+            "numeric": true,
+            "temporal": false,
+            "collection": false,
+            "parameterized": true
+        },
+        "parameterized_forms": [
+            "DECIMAL(10,2)"
+        ],
+        "ingestion_mappings": {
+            "parquet_physical": [],
+            "parquet_logical": [],
+            "jsonl": [],
+            "parquet_logical_patterns": [
+                "decimal(...)"
+            ]
+        }
+    },
+    "double": {
+        "canonical_name": "DOUBLE",
+        "aliases": [
+            "float",
+            "float32",
+            "float64"
+        ],
+        "accepted_spellings": [
+            "double",
+            "float",
+            "float32",
+            "float64"
+        ],
+        "family": "numeric",
+        "flags": {
+            "numeric": true,
+            "temporal": false,
+            "collection": false,
+            "parameterized": false
+        },
+        "parameterized_forms": [],
+        "ingestion_mappings": {
+            "parquet_physical": [
+                "double",
+                "float",
+                "float32",
+                "float64"
+            ],
+            "parquet_logical": [],
+            "jsonl": [
+                "double"
+            ]
+        }
+    },
+    "integer": {
+        "canonical_name": "INTEGER",
+        "aliases": [
+            "int16",
+            "int32",
+            "int64",
+            "int8"
+        ],
+        "accepted_spellings": [
+            "int16",
+            "int32",
+            "int64",
+            "int8",
+            "integer"
+        ],
+        "family": "numeric",
+        "flags": {
+            "numeric": true,
+            "temporal": false,
+            "collection": false,
+            "parameterized": false
+        },
+        "parameterized_forms": [],
+        "ingestion_mappings": {
+            "parquet_physical": [
+                "int16",
+                "int32",
+                "int64",
+                "int8"
+            ],
+            "parquet_logical": [],
+            "jsonl": [
+                "int64"
+            ]
+        }
+    },
+    "interval": {
+        "canonical_name": "INTERVAL",
+        "aliases": [],
+        "accepted_spellings": [
+            "interval"
+        ],
+        "family": "interval",
+        "flags": {
+            "numeric": false,
+            "temporal": false,
+            "collection": false,
+            "parameterized": false
+        },
+        "parameterized_forms": [],
+        "ingestion_mappings": {
+            "parquet_physical": [],
+            "parquet_logical": [],
+            "jsonl": []
+        }
+    },
+    "jsonb": {
+        "canonical_name": "JSONB",
+        "aliases": [],
+        "accepted_spellings": [
+            "jsonb"
+        ],
+        "family": "nested",
+        "flags": {
+            "numeric": false,
+            "temporal": false,
+            "collection": true,
+            "parameterized": false
+        },
+        "parameterized_forms": [],
+        "ingestion_mappings": {
+            "parquet_physical": [],
+            "parquet_logical": [
+                "json",
+                "jsonb",
+                "struct"
+            ],
+            "jsonl": [
+                "object"
+            ]
+        }
+    },
+    "null": {
+        "canonical_name": "NULL",
+        "aliases": [],
+        "accepted_spellings": [
+            "null"
+        ],
+        "family": "null",
+        "flags": {
+            "numeric": false,
+            "temporal": false,
+            "collection": false,
+            "parameterized": false
+        },
+        "parameterized_forms": [],
+        "ingestion_mappings": {
+            "parquet_physical": [],
+            "parquet_logical": [],
+            "jsonl": []
+        }
+    },
+    "struct": {
+        "canonical_name": "STRUCT",
+        "aliases": [],
+        "accepted_spellings": [
+            "struct"
+        ],
+        "family": "nested",
+        "flags": {
+            "numeric": false,
+            "temporal": false,
+            "collection": true,
+            "parameterized": false
+        },
+        "parameterized_forms": [],
+        "ingestion_mappings": {
+            "parquet_physical": [],
+            "parquet_logical": [],
+            "jsonl": []
+        }
+    },
+    "time": {
+        "canonical_name": "TIME",
+        "aliases": [],
+        "accepted_spellings": [
+            "time"
+        ],
+        "family": "temporal",
+        "flags": {
+            "numeric": false,
+            "temporal": true,
+            "collection": false,
+            "parameterized": false
+        },
+        "parameterized_forms": [],
+        "ingestion_mappings": {
+            "parquet_physical": [],
+            "parquet_logical": [],
+            "jsonl": [],
+            "parquet_logical_patterns": [
+                "time..."
+            ]
+        }
+    },
+    "timestamp": {
+        "canonical_name": "TIMESTAMP",
+        "aliases": [],
+        "accepted_spellings": [
+            "timestamp"
+        ],
+        "family": "temporal",
+        "flags": {
+            "numeric": false,
+            "temporal": true,
+            "collection": false,
+            "parameterized": false
+        },
+        "parameterized_forms": [],
+        "ingestion_mappings": {
+            "parquet_physical": [],
+            "parquet_logical": [],
+            "jsonl": [],
+            "parquet_logical_patterns": [
+                "timestamp..."
+            ]
+        }
+    },
+    "varchar": {
+        "canonical_name": "VARCHAR",
+        "aliases": [
+            "string",
+            "utf8"
+        ],
+        "accepted_spellings": [
+            "string",
+            "utf8",
+            "varchar"
+        ],
+        "family": "text",
+        "flags": {
+            "numeric": false,
+            "temporal": false,
+            "collection": false,
+            "parameterized": false
+        },
+        "parameterized_forms": [],
+        "ingestion_mappings": {
+            "parquet_physical": [],
+            "parquet_logical": [
+                "string",
+                "utf8",
+                "varchar"
+            ],
+            "jsonl": []
+        }
+    }
+}

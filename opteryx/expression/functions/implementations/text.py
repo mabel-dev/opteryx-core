@@ -16,14 +16,14 @@ Includes:
 """
 
 from typing import List
-from typing import Union
 
 import numpy
 import pyarrow
 import pyarrow as pa
 from pyarrow import compute
 
-from opteryx.embeddings import embed_text_values
+from opteryx.embeddings import get_embedding_provider
+from opteryx.compiled.vector_ops import vector_match_against
 from opteryx.compiled.vector_ops import vector_initcap
 from opteryx.compiled.vector_ops import vector_length
 from opteryx.compiled.vector_ops import vector_md5
@@ -31,10 +31,12 @@ from opteryx.compiled.vector_ops import vector_replace
 from opteryx.compiled.vector_ops import vector_sha1
 from opteryx.compiled.vector_ops import vector_sha256
 from opteryx.compiled.vector_ops import vector_sha512
+from opteryx.compiled.vector_ops import vector_reverse
 from opteryx.compiled.vector_ops import vector_soundex
 from opteryx.compiled.vector_ops import vector_string_length
 from opteryx.compiled.vector_ops import vector_string_slice_left
 from opteryx.compiled.vector_ops import vector_string_slice_right
+from opteryx.draken.vectors.dictionary_vector import DictionaryVector
 from opteryx.draken.vectors.string_vector import StringVector
 from opteryx.draken.vectors.string_vector import lowercase as string_vector_lowercase
 from opteryx.draken.vectors.string_vector import uppercase as string_vector_uppercase
@@ -114,6 +116,17 @@ def _initcap(arr):
     if isinstance(arr, numpy.ndarray):
         arr = pyarrow.array(arr)
     return vector_initcap(vector_from_arrow(arr)).to_arrow()
+
+
+def _reverse(arr):
+    from opteryx.draken.interop.arrow import vector_from_arrow
+    from opteryx.draken.vectors.string_vector import StringVector
+
+    if isinstance(arr, StringVector):
+        return vector_reverse(arr).to_arrow()
+    if isinstance(arr, numpy.ndarray):
+        arr = pyarrow.array(arr)
+    return vector_reverse(vector_from_arrow(arr)).to_arrow()
 
 
 def _soundex(arr):
@@ -223,6 +236,25 @@ def _string_slice_right(arr, length):
 # ---------------------------------------------------------------------------
 
 _MATCH_AGAINST_MIN_SCORE = 0.6
+
+
+def _as_match_vector(arr):
+    from opteryx.draken.interop.arrow import vector_from_arrow
+
+    if isinstance(arr, (StringVector, DictionaryVector)):
+        return arr
+
+    if hasattr(arr, "to_arrow"):
+        arr = arr.to_arrow()
+    elif isinstance(arr, numpy.ndarray) or isinstance(arr, (list, tuple)):
+        arr = pyarrow.array(arr)
+    elif not isinstance(arr, pyarrow.Array):
+        return None
+
+    vec = vector_from_arrow(arr)
+    if isinstance(vec, (StringVector, DictionaryVector)):
+        return vec
+    return None
 
 
 def split(arr, delimiter=",", limit=None):
@@ -493,56 +525,22 @@ def match_against(arr, val):
     if isinstance(literal, bytes):
         literal = literal.decode("utf8", errors="ignore")
 
-    def _to_text(value):
-        if value is None:
-            return None
-        if isinstance(value, bytes):
-            return value.decode("utf8", errors="ignore")
-        return str(value)
-
     query_text = str(literal).strip()
+    match_vector = _as_match_vector(arr)
+    if match_vector is None:
+        return []
     if not query_text:
-        return [False] * len(arr)
+        return pyarrow.array([False] * len(match_vector), type=pyarrow.bool_())
 
-    texts = [_to_text(value) for value in arr]
-    result = [False] * len(texts)
-    active_positions = []
-    active_texts = []
-    for index, text in enumerate(texts):
-        if text is None:
-            continue
-        text = text.strip()
-        if not text:
-            continue
-        active_positions.append(index)
-        active_texts.append(text)
-
-    if not active_texts:
-        return result
-
-    embedded = embed_text_values([query_text, *active_texts])
-    query_vector = numpy.asarray(embedded[0], dtype=numpy.float32)
-    row_vectors = numpy.asarray(embedded[1:], dtype=numpy.float32)
-
-    try:
-        from opteryx.nanobind import vector_search
-
-        scores = numpy.asarray(vector_search.score_cosine(query_vector, row_vectors), dtype=numpy.float32)
-    except (ImportError, ValueError):
-        scores = numpy.zeros(len(active_texts), dtype=numpy.float32)
-        query_norm = numpy.linalg.norm(query_vector)
-        if query_norm != 0.0:
-            row_norms = numpy.linalg.norm(row_vectors, axis=1)
-            valid_mask = row_norms != 0.0
-            if numpy.any(valid_mask):
-                scores[valid_mask] = (
-                    numpy.dot(row_vectors[valid_mask], query_vector) / (row_norms[valid_mask] * query_norm)
-                )
-
-    scores = numpy.where(numpy.isfinite(scores), scores, 0.0)
-    for index, score in zip(active_positions, scores.tolist(), strict=True):
-        result[index] = score >= _MATCH_AGAINST_MIN_SCORE
-    return result
+    provider = get_embedding_provider()
+    if provider is None:
+        return pyarrow.array([False] * len(match_vector), type=pyarrow.bool_())
+    return vector_match_against(
+        match_vector,
+        provider,
+        query_text,
+        _MATCH_AGAINST_MIN_SCORE,
+    ).to_arrow()
 
 
 def regex_replace(array, _pattern, _replacement):

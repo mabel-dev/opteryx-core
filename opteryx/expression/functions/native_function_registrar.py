@@ -822,6 +822,7 @@ def _builtin_text_extended_functions() -> list[FunctionDefinition]:
     from opteryx.functions import _initcap
     from opteryx.functions import _iterate_double_parameter_swapped
     from opteryx.functions import _replace
+    from opteryx.functions import _reverse
     from opteryx.functions import _soundex
     from opteryx.functions import _string_slice_left
     from opteryx.functions import _string_slice_right
@@ -897,7 +898,7 @@ def _builtin_text_extended_functions() -> list[FunctionDefinition]:
             summary="Return rightmost N characters.",
         ),
         _make(
-            "REVERSE", compute.utf8_reverse, OrsoTypes.VARCHAR, (_s,), summary="Reverse a string."
+            "REVERSE", _reverse, OrsoTypes.VARCHAR, (_s,), summary="Reverse a string."
         ),
         _make(
             "SOUNDEX", _soundex, OrsoTypes.VARCHAR, (_s,), summary="Return Soundex phonetic code."
@@ -1330,7 +1331,7 @@ def _builtin_array_misc_functions() -> list[FunctionDefinition]:
             deterministic=True,
             lifecycle=LifecycleSpec(status="active"),
             summary="Cosine similarity between two vectors.",
-            documentation="Cosine similarity over numeric vectors or lexical text inputs.",
+            documentation="Cosine similarity over numeric vectors or semantic text inputs.",
             overloads=(
                 FunctionOverload(
                     id="COSINE_SIMILARITY_VECTOR",
@@ -1370,7 +1371,7 @@ def _builtin_array_misc_functions() -> list[FunctionDefinition]:
             deterministic=True,
             lifecycle=LifecycleSpec(status="active"),
             summary="Cosine distance between two vectors.",
-            documentation="Cosine distance over numeric vectors or lexical text inputs.",
+            documentation="Cosine distance over numeric vectors or semantic text inputs.",
             overloads=(
                 FunctionOverload(
                     id="COSINE_DISTANCE_VECTOR",
@@ -1495,12 +1496,9 @@ def _builtin_arithmetic_extended_functions() -> list[FunctionDefinition]:
             cost=5.0,
             summary="Raise base to exponent (SQL-92).",
         ),
-        _make("LN", compute.ln, OrsoTypes.DOUBLE, (_num,), summary="Natural logarithm."),
-        _make("LOG10", compute.log10, OrsoTypes.DOUBLE, (_num,), summary="Base-10 logarithm."),
-        _make("LOG2", compute.log2, OrsoTypes.DOUBLE, (_num,), summary="Base-2 logarithm."),
         _make(
             "LOG",
-            compute.logb,
+            number_functions.log,
             OrsoTypes.DOUBLE,
             (_num, ParameterSpec(name="base", type_family="numeric")),
             summary="Logarithm with arbitrary base.",

@@ -19,7 +19,9 @@ Includes:
 import numpy
 import pyarrow
 
+from opteryx.embeddings import embed_text_matrix
 from opteryx.embeddings import embed_text_values
+from opteryx.embeddings import get_embedding_provider
 from opteryx.third_party.tktech import csimdjson as simdjson
 
 
@@ -73,104 +75,208 @@ def _coerce_text_scalar(value):
     return str(value)
 
 
+def _as_text_vector(values):
+    from opteryx.draken.interop.arrow import vector_from_arrow
+    from opteryx.draken.vectors.string_vector import StringVector
+
+    if isinstance(values, StringVector):
+        return values
+    if hasattr(values, "to_arrow"):
+        values = values.to_arrow()
+    elif isinstance(values, numpy.ndarray) or isinstance(values, (list, tuple)):
+        values = pyarrow.array(values)
+    elif not isinstance(values, pyarrow.Array):
+        return None
+
+    vector = vector_from_arrow(values)
+    return vector if isinstance(vector, StringVector) else None
+
+
+def _coerce_numeric_matrix(rows, width=None):
+    dense_rows = []
+    valid_positions = []
+
+    for index, row in enumerate(rows):
+        vector = _coerce_numeric_vector(row)
+        if vector is None or vector.size == 0:
+            continue
+        if width is None:
+            width = vector.size
+        if vector.size != width:
+            continue
+        dense_rows.append(vector)
+        valid_positions.append(index)
+
+    if width is None:
+        width = 0
+
+    if not dense_rows:
+        return numpy.empty((0, width), dtype=numpy.float32), numpy.empty(0, dtype=numpy.int64)
+
+    return (
+        numpy.vstack(dense_rows).astype(numpy.float32, copy=False),
+        numpy.asarray(valid_positions, dtype=numpy.int64),
+    )
+
+
+def _coerce_aligned_numeric_matrices(left_rows, right_rows):
+    left_dense_rows = []
+    right_dense_rows = []
+    valid_positions = []
+    width = None
+
+    for index, (left_row, right_row) in enumerate(zip(left_rows, right_rows, strict=True)):
+        left_vector = _coerce_numeric_vector(left_row)
+        right_vector = _coerce_numeric_vector(right_row)
+        if left_vector is None or right_vector is None:
+            continue
+        if left_vector.size == 0 or right_vector.size == 0 or left_vector.size != right_vector.size:
+            continue
+        if width is None:
+            width = left_vector.size
+        if left_vector.size != width or right_vector.size != width:
+            continue
+        left_dense_rows.append(left_vector)
+        right_dense_rows.append(right_vector)
+        valid_positions.append(index)
+
+    if width is None:
+        width = 0
+
+    if not valid_positions:
+        empty = numpy.empty((0, width), dtype=numpy.float32)
+        return empty, empty.copy(), numpy.empty(0, dtype=numpy.int64)
+
+    return (
+        numpy.vstack(left_dense_rows).astype(numpy.float32, copy=False),
+        numpy.vstack(right_dense_rows).astype(numpy.float32, copy=False),
+        numpy.asarray(valid_positions, dtype=numpy.int64),
+    )
+
+
 def _score_numeric_vectors(left_rows, right_rows):
     if len(right_rows) == 0:
         return []
 
     query_vector = _coerce_numeric_vector(right_rows[0])
     if len(right_rows) == 1 and query_vector is not None and query_vector.size > 0:
-        dense_vectors = numpy.zeros((len(left_rows), query_vector.size), dtype=numpy.float32)
-        for index, row in enumerate(left_rows):
-            vector = _coerce_numeric_vector(row)
-            if vector is None or vector.size != query_vector.size:
-                continue
-            dense_vectors[index, :] = vector
+        dense_vectors, valid_positions = _coerce_numeric_matrix(left_rows, query_vector.size)
+        scores = numpy.zeros(len(left_rows), dtype=numpy.float32)
+        if dense_vectors.shape[0] == 0:
+            return scores.tolist()
 
         try:
             from opteryx.nanobind import vector_search
 
-            scores = numpy.asarray(vector_search.score_cosine(query_vector, dense_vectors), dtype=numpy.float32)
+            valid_scores = numpy.asarray(
+                vector_search.score_cosine(query_vector, dense_vectors), dtype=numpy.float32
+            )
         except (ImportError, ValueError):
-            scores = numpy.zeros(len(left_rows), dtype=numpy.float32)
             query_norm = numpy.linalg.norm(query_vector)
             if query_norm == 0.0:
                 return scores.tolist()
 
-            for index, row in enumerate(dense_vectors):
-                row_norm = numpy.linalg.norm(row)
-                if row_norm == 0.0:
-                    continue
-                scores[index] = numpy.dot(row, query_vector) / (row_norm * query_norm)
+            valid_scores = numpy.zeros(dense_vectors.shape[0], dtype=numpy.float32)
+            row_norms = numpy.linalg.norm(dense_vectors, axis=1)
+            valid_mask = row_norms != 0.0
+            if numpy.any(valid_mask):
+                valid_scores[valid_mask] = (
+                    dense_vectors[valid_mask] @ query_vector
+                ) / (row_norms[valid_mask] * query_norm)
 
-        scores = numpy.where(numpy.isfinite(scores), scores, 0.0)
+        valid_scores = numpy.where(numpy.isfinite(valid_scores), valid_scores, 0.0)
+        scores[valid_positions] = valid_scores
         return scores.tolist()
 
     if len(right_rows) != len(left_rows):
         return [0.0] * len(left_rows)
 
+    left_vectors, right_vectors, valid_positions = _coerce_aligned_numeric_matrices(left_rows, right_rows)
     scores = numpy.zeros(len(left_rows), dtype=numpy.float32)
-    for index, (left_row, right_row) in enumerate(zip(left_rows, right_rows, strict=True)):
-        left_vector = _coerce_numeric_vector(left_row)
-        right_vector = _coerce_numeric_vector(right_row)
-        if left_vector is None or right_vector is None or left_vector.size != right_vector.size:
-            continue
-        left_norm = numpy.linalg.norm(left_vector)
-        right_norm = numpy.linalg.norm(right_vector)
-        if left_norm == 0.0 or right_norm == 0.0:
-            continue
-        scores[index] = numpy.dot(left_vector, right_vector) / (left_norm * right_norm)
+    if valid_positions.size == 0:
+        return scores.tolist()
+
+    left_norms = numpy.linalg.norm(left_vectors, axis=1)
+    right_norms = numpy.linalg.norm(right_vectors, axis=1)
+    valid_mask = (left_norms != 0.0) & (right_norms != 0.0)
+    if numpy.any(valid_mask):
+        numerators = numpy.einsum("ij,ij->i", left_vectors[valid_mask], right_vectors[valid_mask])
+        scores[valid_positions[valid_mask]] = numerators / (
+            left_norms[valid_mask] * right_norms[valid_mask]
+        )
     return scores.tolist()
 
 
 def _cosine_similarity_text(arr, val):
-    from opteryx.compiled.functions.vectors import tokenize_and_remove_punctuation
-    from opteryx.compiled.functions.vectors import vectorize
-    from opteryx.virtual_datasets.stop_words import STOP_WORDS
-
-    def _cosine_similarity(
-        vec1: numpy.ndarray, vec2: numpy.ndarray, vec2_norm: numpy.float32
-    ) -> float:
-        vec1 = vec1.astype(numpy.float32)
-        vec1_norm = numpy.linalg.norm(vec1)
-        product = vec1_norm * vec2_norm
-        if product == 0:
-            return 0
-        return numpy.dot(vec1, vec2) / product
-
     if len(val) == 0:
         return []
-    literal = val[0]
-    if isinstance(literal, bytes):
-        literal = literal.decode("utf8", errors="ignore")
-    tokenized_literal = tokenize_and_remove_punctuation(str(literal), STOP_WORDS)
-    if len(tokenized_literal) == 0:
+
+    literal = _coerce_text_scalar(val[0])
+    if literal is None:
+        return [0.0] * len(arr)
+    query_text = literal.strip()
+    if not query_text:
         return [0.0] * len(arr)
 
-    def _to_text(value):
-        if value is None:
-            return ""
-        if isinstance(value, bytes):
-            return value.decode("utf8", errors="ignore")
-        return str(value)
+    provider = get_embedding_provider()
+    if provider is not None and getattr(provider, "prefer_score_string_vector", False):
+        text_vector = _as_text_vector(arr)
+        scorer = getattr(provider, "score_string_vector", None)
+        if text_vector is not None and scorer is not None:
+            positions, scores = scorer(query_text, text_vector)
+            positions = numpy.asarray(positions, dtype=numpy.int64)
+            scores = numpy.asarray(scores, dtype=numpy.float32)
+            result = numpy.zeros(len(arr), dtype=numpy.float32)
+            if positions.ndim == 1 and scores.ndim == 1 and positions.shape[0] == scores.shape[0]:
+                valid = (positions >= 0) & (positions < len(arr))
+                result[positions[valid]] = numpy.where(
+                    numpy.isfinite(scores[valid]), scores[valid], 0.0
+                )
+            return result.tolist()
 
-    tokenized_strings = [tokenize_and_remove_punctuation(_to_text(s), STOP_WORDS) for s in arr] + [
-        tokenized_literal
-    ]
-    vectors = [vectorize(tokens) for tokens in tokenized_strings]
-    comparison_vector = vectors[-1].astype(numpy.float32)
-    comparison_vector_norm = numpy.linalg.norm(comparison_vector)
+    result = [0.0] * len(arr)
+    active_positions = []
+    active_texts = []
+    for index, value in enumerate(arr):
+        text = _coerce_text_scalar(value)
+        if text is None:
+            continue
+        text = text.strip()
+        if not text:
+            continue
+        active_positions.append(index)
+        active_texts.append(text)
 
-    if comparison_vector_norm == 0.0:
-        return [0.0] * len(val)
+    if not active_texts:
+        return result
 
-    return [
-        _cosine_similarity(vector, comparison_vector, comparison_vector_norm)
-        for vector in vectors[:-1]
-    ]
+    embedded = embed_text_matrix([query_text, *active_texts])
+    query_vector = embedded[0]
+    row_vectors = embedded[1:]
+
+    try:
+        from opteryx.nanobind import vector_search
+
+        scores = numpy.asarray(vector_search.score_cosine(query_vector, row_vectors), dtype=numpy.float32)
+    except (ImportError, ValueError):
+        scores = numpy.zeros(len(active_texts), dtype=numpy.float32)
+        query_norm = numpy.linalg.norm(query_vector)
+        if query_norm != 0.0:
+            row_norms = numpy.linalg.norm(row_vectors, axis=1)
+            valid_mask = row_norms != 0.0
+            if numpy.any(valid_mask):
+                scores[valid_mask] = (
+                    numpy.dot(row_vectors[valid_mask], query_vector) / (row_norms[valid_mask] * query_norm)
+                )
+
+    scores = numpy.where(numpy.isfinite(scores), scores, 0.0)
+    for index, score in zip(active_positions, scores.tolist(), strict=True):
+        result[index] = score
+    return result
 
 
 def cosine_similarity(arr, val):
-    """Cosine similarity over numeric vectors or the legacy lexical text path."""
+    """Cosine similarity over numeric vectors or semantic text embeddings."""
     left_rows = _sequence_rows(arr)
     right_rows = _sequence_rows(val)
 

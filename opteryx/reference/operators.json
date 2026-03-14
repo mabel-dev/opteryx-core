@@ -1,0 +1,2785 @@
+{
+    "And": {
+        "internal_name": "And",
+        "display_name": "AND",
+        "token": "AND",
+        "category": "logical",
+        "summary": "Logical conjunction.",
+        "documentation": "Returns true only when both boolean operands evaluate to true.",
+        "signature_count": 1,
+        "has_dynamic_result": false,
+        "left_types": [
+            "boolean"
+        ],
+        "right_types": [
+            "boolean"
+        ],
+        "result_types": [
+            "boolean"
+        ],
+        "signatures": [
+            {
+                "left_type": "boolean",
+                "right_type": "boolean",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            }
+        ]
+    },
+    "ArrayContainsAll": {
+        "internal_name": "ArrayContainsAll",
+        "display_name": "@>>",
+        "token": "@>>",
+        "category": "comparison",
+        "summary": "Array contains-all operator.",
+        "documentation": "Returns true when the left array contains all values from the right array.",
+        "signature_count": 1,
+        "has_dynamic_result": false,
+        "left_types": [
+            "array"
+        ],
+        "right_types": [
+            "array"
+        ],
+        "result_types": [
+            "boolean"
+        ],
+        "signatures": [
+            {
+                "left_type": "array",
+                "right_type": "array",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            }
+        ]
+    },
+    "Arrow": {
+        "internal_name": "Arrow",
+        "display_name": "->",
+        "token": "->",
+        "category": "extraction",
+        "summary": "JSON extraction operator.",
+        "documentation": "Returns the selected JSON value from a document or JSON-like value.",
+        "signature_count": 8,
+        "has_dynamic_result": true,
+        "left_types": [
+            "blob",
+            "jsonb",
+            "struct",
+            "varchar"
+        ],
+        "right_types": [
+            "blob",
+            "varchar"
+        ],
+        "result_types": [],
+        "signatures": [
+            {
+                "left_type": "blob",
+                "right_type": "blob",
+                "result_type": null,
+                "result_type_is_dynamic": true,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "blob",
+                "right_type": "varchar",
+                "result_type": null,
+                "result_type_is_dynamic": true,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "jsonb",
+                "right_type": "blob",
+                "result_type": null,
+                "result_type_is_dynamic": true,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "jsonb",
+                "right_type": "varchar",
+                "result_type": null,
+                "result_type_is_dynamic": true,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "struct",
+                "right_type": "blob",
+                "result_type": null,
+                "result_type_is_dynamic": true,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "struct",
+                "right_type": "varchar",
+                "result_type": null,
+                "result_type_is_dynamic": true,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "blob",
+                "result_type": null,
+                "result_type_is_dynamic": true,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "varchar",
+                "result_type": null,
+                "result_type_is_dynamic": true,
+                "cost_estimate": 100.0
+            }
+        ],
+        "notes": "The result type is dynamic because the selected JSON value may be scalar, object, array, or null."
+    },
+    "AtArrow": {
+        "internal_name": "AtArrow",
+        "display_name": "@>",
+        "token": "@>",
+        "category": "comparison",
+        "summary": "Array containment operator.",
+        "documentation": "Returns true when the left array contains any of the values provided by the right array.",
+        "signature_count": 1,
+        "has_dynamic_result": false,
+        "left_types": [
+            "array"
+        ],
+        "right_types": [
+            "array"
+        ],
+        "result_types": [
+            "boolean"
+        ],
+        "signatures": [
+            {
+                "left_type": "array",
+                "right_type": "array",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            }
+        ]
+    },
+    "AtQuestion": {
+        "internal_name": "AtQuestion",
+        "display_name": "@?",
+        "token": "@?",
+        "category": "comparison",
+        "summary": "JSON path existence operator.",
+        "documentation": "Returns true when the supplied JSON path expression matches within the left document.",
+        "signature_count": 8,
+        "has_dynamic_result": false,
+        "left_types": [
+            "blob",
+            "jsonb",
+            "struct",
+            "varchar"
+        ],
+        "right_types": [
+            "blob",
+            "varchar"
+        ],
+        "result_types": [
+            "boolean"
+        ],
+        "signatures": [
+            {
+                "left_type": "blob",
+                "right_type": "blob",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "blob",
+                "right_type": "varchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "jsonb",
+                "right_type": "blob",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "jsonb",
+                "right_type": "varchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "struct",
+                "right_type": "blob",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "struct",
+                "right_type": "varchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "blob",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "varchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            }
+        ]
+    },
+    "BitwiseAnd": {
+        "internal_name": "BitwiseAnd",
+        "display_name": "&",
+        "token": "&",
+        "category": "binary",
+        "summary": "Bitwise AND operator.",
+        "documentation": "Combines integer operands using a bitwise AND operation.",
+        "signature_count": 1,
+        "has_dynamic_result": false,
+        "left_types": [
+            "integer"
+        ],
+        "right_types": [
+            "integer"
+        ],
+        "result_types": [
+            "integer"
+        ],
+        "signatures": [
+            {
+                "left_type": "integer",
+                "right_type": "integer",
+                "result_type": "integer",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            }
+        ]
+    },
+    "BitwiseOr": {
+        "internal_name": "BitwiseOr",
+        "display_name": "|",
+        "token": "|",
+        "category": "binary",
+        "summary": "Bitwise OR operator.",
+        "documentation": "Combines integer operands using a bitwise OR operation.",
+        "signature_count": 4,
+        "has_dynamic_result": false,
+        "left_types": [
+            "blob",
+            "integer",
+            "varchar"
+        ],
+        "right_types": [
+            "blob",
+            "integer",
+            "varchar"
+        ],
+        "result_types": [
+            "boolean",
+            "integer"
+        ],
+        "signatures": [
+            {
+                "left_type": "blob",
+                "right_type": "varchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "integer",
+                "right_type": "integer",
+                "result_type": "integer",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "blob",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "varchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            }
+        ],
+        "notes": "The same token may also appear in non-bitwise contexts depending on operand types."
+    },
+    "BitwiseXor": {
+        "internal_name": "BitwiseXor",
+        "display_name": "^",
+        "token": "^",
+        "category": "binary",
+        "summary": "Bitwise XOR operator.",
+        "documentation": "Combines integer operands using a bitwise exclusive OR operation.",
+        "signature_count": 1,
+        "has_dynamic_result": false,
+        "left_types": [
+            "integer"
+        ],
+        "right_types": [
+            "integer"
+        ],
+        "result_types": [
+            "integer"
+        ],
+        "signatures": [
+            {
+                "left_type": "integer",
+                "right_type": "integer",
+                "result_type": "integer",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            }
+        ]
+    },
+    "Divide": {
+        "internal_name": "Divide",
+        "display_name": "/",
+        "token": "/",
+        "category": "binary",
+        "summary": "Division operator.",
+        "documentation": "Returns the quotient of two numeric operands.",
+        "signature_count": 7,
+        "has_dynamic_result": false,
+        "left_types": [
+            "decimal",
+            "double",
+            "integer"
+        ],
+        "right_types": [
+            "decimal",
+            "double",
+            "integer"
+        ],
+        "result_types": [
+            "decimal",
+            "double"
+        ],
+        "signatures": [
+            {
+                "left_type": "decimal",
+                "right_type": "decimal",
+                "result_type": "decimal",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "decimal",
+                "right_type": "integer",
+                "result_type": "decimal",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "double",
+                "right_type": "double",
+                "result_type": "double",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "double",
+                "right_type": "integer",
+                "result_type": "double",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "integer",
+                "right_type": "decimal",
+                "result_type": "double",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "integer",
+                "right_type": "double",
+                "result_type": "double",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "integer",
+                "right_type": "integer",
+                "result_type": "double",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            }
+        ]
+    },
+    "Eq": {
+        "internal_name": "Eq",
+        "display_name": "=",
+        "token": "=",
+        "category": "comparison",
+        "summary": "Equality comparison.",
+        "documentation": "Returns true when both operands compare equal.",
+        "signature_count": 23,
+        "has_dynamic_result": false,
+        "left_types": [
+            "blob",
+            "boolean",
+            "date",
+            "decimal",
+            "double",
+            "integer",
+            "interval",
+            "timestamp",
+            "varchar"
+        ],
+        "right_types": [
+            "blob",
+            "boolean",
+            "date",
+            "decimal",
+            "double",
+            "integer",
+            "interval",
+            "timestamp",
+            "varchar"
+        ],
+        "result_types": [
+            "boolean"
+        ],
+        "signatures": [
+            {
+                "left_type": "blob",
+                "right_type": "blob",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "blob",
+                "right_type": "varchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "boolean",
+                "right_type": "boolean",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "date",
+                "right_type": "date",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "date",
+                "right_type": "integer",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "date",
+                "right_type": "timestamp",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "decimal",
+                "right_type": "decimal",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "decimal",
+                "right_type": "double",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "decimal",
+                "right_type": "integer",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "double",
+                "right_type": "decimal",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "double",
+                "right_type": "double",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "double",
+                "right_type": "integer",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "integer",
+                "right_type": "date",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "integer",
+                "right_type": "decimal",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "integer",
+                "right_type": "double",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "integer",
+                "right_type": "integer",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "integer",
+                "right_type": "timestamp",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "interval",
+                "right_type": "interval",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "timestamp",
+                "right_type": "date",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "timestamp",
+                "right_type": "integer",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "timestamp",
+                "right_type": "timestamp",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "blob",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "varchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            }
+        ]
+    },
+    "Gt": {
+        "internal_name": "Gt",
+        "display_name": ">",
+        "token": ">",
+        "category": "comparison",
+        "summary": "Greater-than comparison.",
+        "documentation": "Returns true when the left operand is greater than the right operand.",
+        "signature_count": 22,
+        "has_dynamic_result": false,
+        "left_types": [
+            "blob",
+            "date",
+            "decimal",
+            "double",
+            "integer",
+            "interval",
+            "timestamp",
+            "varchar"
+        ],
+        "right_types": [
+            "blob",
+            "date",
+            "decimal",
+            "double",
+            "integer",
+            "interval",
+            "timestamp",
+            "varchar"
+        ],
+        "result_types": [
+            "boolean"
+        ],
+        "signatures": [
+            {
+                "left_type": "blob",
+                "right_type": "blob",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "blob",
+                "right_type": "varchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "date",
+                "right_type": "date",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "date",
+                "right_type": "integer",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "date",
+                "right_type": "timestamp",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "decimal",
+                "right_type": "decimal",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "decimal",
+                "right_type": "double",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "decimal",
+                "right_type": "integer",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "double",
+                "right_type": "decimal",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "double",
+                "right_type": "double",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "double",
+                "right_type": "integer",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "integer",
+                "right_type": "date",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "integer",
+                "right_type": "decimal",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "integer",
+                "right_type": "double",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "integer",
+                "right_type": "integer",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "integer",
+                "right_type": "timestamp",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "interval",
+                "right_type": "interval",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "timestamp",
+                "right_type": "date",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "timestamp",
+                "right_type": "integer",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "timestamp",
+                "right_type": "timestamp",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "blob",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "varchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            }
+        ]
+    },
+    "GtEq": {
+        "internal_name": "GtEq",
+        "display_name": ">=",
+        "token": ">=",
+        "category": "comparison",
+        "summary": "Greater-than-or-equal comparison.",
+        "documentation": "Returns true when the left operand is greater than or equal to the right operand.",
+        "signature_count": 22,
+        "has_dynamic_result": false,
+        "left_types": [
+            "blob",
+            "date",
+            "decimal",
+            "double",
+            "integer",
+            "interval",
+            "timestamp",
+            "varchar"
+        ],
+        "right_types": [
+            "blob",
+            "date",
+            "decimal",
+            "double",
+            "integer",
+            "interval",
+            "timestamp",
+            "varchar"
+        ],
+        "result_types": [
+            "boolean"
+        ],
+        "signatures": [
+            {
+                "left_type": "blob",
+                "right_type": "blob",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "blob",
+                "right_type": "varchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "date",
+                "right_type": "date",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "date",
+                "right_type": "integer",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "date",
+                "right_type": "timestamp",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "decimal",
+                "right_type": "decimal",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "decimal",
+                "right_type": "double",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "decimal",
+                "right_type": "integer",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "double",
+                "right_type": "decimal",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "double",
+                "right_type": "double",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "double",
+                "right_type": "integer",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "integer",
+                "right_type": "date",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "integer",
+                "right_type": "decimal",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "integer",
+                "right_type": "double",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "integer",
+                "right_type": "integer",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "integer",
+                "right_type": "timestamp",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "interval",
+                "right_type": "interval",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "timestamp",
+                "right_type": "date",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "timestamp",
+                "right_type": "integer",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "timestamp",
+                "right_type": "timestamp",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "blob",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "varchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            }
+        ]
+    },
+    "ILike": {
+        "internal_name": "ILike",
+        "display_name": "ILIKE",
+        "token": "ILIKE",
+        "category": "comparison",
+        "summary": "Case-insensitive pattern match comparison.",
+        "documentation": "Returns true when the left string matches the SQL ILIKE pattern on the right without case sensitivity.",
+        "signature_count": 4,
+        "has_dynamic_result": false,
+        "left_types": [
+            "blob",
+            "varchar"
+        ],
+        "right_types": [
+            "blob",
+            "varchar"
+        ],
+        "result_types": [
+            "boolean"
+        ],
+        "signatures": [
+            {
+                "left_type": "blob",
+                "right_type": "blob",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "blob",
+                "right_type": "varchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "blob",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "varchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            }
+        ]
+    },
+    "InList": {
+        "internal_name": "InList",
+        "display_name": "IN",
+        "token": "IN",
+        "category": "comparison",
+        "summary": "Membership comparison.",
+        "documentation": "Returns true when the left operand matches any element in the right-hand list or array.",
+        "signature_count": 8,
+        "has_dynamic_result": false,
+        "left_types": [
+            "blob",
+            "boolean",
+            "date",
+            "decimal",
+            "double",
+            "integer",
+            "timestamp",
+            "varchar"
+        ],
+        "right_types": [
+            "array"
+        ],
+        "result_types": [
+            "boolean"
+        ],
+        "signatures": [
+            {
+                "left_type": "blob",
+                "right_type": "array",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "boolean",
+                "right_type": "array",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "date",
+                "right_type": "array",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "decimal",
+                "right_type": "array",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "double",
+                "right_type": "array",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "integer",
+                "right_type": "array",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "timestamp",
+                "right_type": "array",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "array",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            }
+        ]
+    },
+    "Like": {
+        "internal_name": "Like",
+        "display_name": "LIKE",
+        "token": "LIKE",
+        "category": "comparison",
+        "summary": "Pattern match comparison.",
+        "documentation": "Returns true when the left string matches the SQL LIKE pattern on the right.",
+        "signature_count": 4,
+        "has_dynamic_result": false,
+        "left_types": [
+            "blob",
+            "varchar"
+        ],
+        "right_types": [
+            "blob",
+            "varchar"
+        ],
+        "result_types": [
+            "boolean"
+        ],
+        "signatures": [
+            {
+                "left_type": "blob",
+                "right_type": "blob",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "blob",
+                "right_type": "varchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "blob",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "varchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            }
+        ]
+    },
+    "LongArrow": {
+        "internal_name": "LongArrow",
+        "display_name": "->>",
+        "token": "->>",
+        "category": "extraction",
+        "summary": "JSON text extraction operator.",
+        "documentation": "Returns the selected JSON value encoded as a blob or text-like binary value.",
+        "signature_count": 8,
+        "has_dynamic_result": false,
+        "left_types": [
+            "blob",
+            "jsonb",
+            "struct",
+            "varchar"
+        ],
+        "right_types": [
+            "blob",
+            "varchar"
+        ],
+        "result_types": [
+            "blob"
+        ],
+        "signatures": [
+            {
+                "left_type": "blob",
+                "right_type": "blob",
+                "result_type": "blob",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "blob",
+                "right_type": "varchar",
+                "result_type": "blob",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "jsonb",
+                "right_type": "blob",
+                "result_type": "blob",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "jsonb",
+                "right_type": "varchar",
+                "result_type": "blob",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "struct",
+                "right_type": "blob",
+                "result_type": "blob",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "struct",
+                "right_type": "varchar",
+                "result_type": "blob",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "blob",
+                "result_type": "blob",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "varchar",
+                "result_type": "blob",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            }
+        ]
+    },
+    "Lt": {
+        "internal_name": "Lt",
+        "display_name": "<",
+        "token": "<",
+        "category": "comparison",
+        "summary": "Less-than comparison.",
+        "documentation": "Returns true when the left operand is less than the right operand.",
+        "signature_count": 22,
+        "has_dynamic_result": false,
+        "left_types": [
+            "blob",
+            "date",
+            "decimal",
+            "double",
+            "integer",
+            "interval",
+            "timestamp",
+            "varchar"
+        ],
+        "right_types": [
+            "blob",
+            "date",
+            "decimal",
+            "double",
+            "integer",
+            "interval",
+            "timestamp",
+            "varchar"
+        ],
+        "result_types": [
+            "boolean"
+        ],
+        "signatures": [
+            {
+                "left_type": "blob",
+                "right_type": "blob",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "blob",
+                "right_type": "varchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "date",
+                "right_type": "date",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "date",
+                "right_type": "integer",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "date",
+                "right_type": "timestamp",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "decimal",
+                "right_type": "decimal",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "decimal",
+                "right_type": "double",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "decimal",
+                "right_type": "integer",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "double",
+                "right_type": "decimal",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "double",
+                "right_type": "double",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "double",
+                "right_type": "integer",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "integer",
+                "right_type": "date",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "integer",
+                "right_type": "decimal",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "integer",
+                "right_type": "double",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "integer",
+                "right_type": "integer",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "integer",
+                "right_type": "timestamp",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "interval",
+                "right_type": "interval",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "timestamp",
+                "right_type": "date",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "timestamp",
+                "right_type": "integer",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "timestamp",
+                "right_type": "timestamp",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "blob",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "varchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            }
+        ]
+    },
+    "LtEq": {
+        "internal_name": "LtEq",
+        "display_name": "<=",
+        "token": "<=",
+        "category": "comparison",
+        "summary": "Less-than-or-equal comparison.",
+        "documentation": "Returns true when the left operand is less than or equal to the right operand.",
+        "signature_count": 22,
+        "has_dynamic_result": false,
+        "left_types": [
+            "blob",
+            "date",
+            "decimal",
+            "double",
+            "integer",
+            "interval",
+            "timestamp",
+            "varchar"
+        ],
+        "right_types": [
+            "blob",
+            "date",
+            "decimal",
+            "double",
+            "integer",
+            "interval",
+            "timestamp",
+            "varchar"
+        ],
+        "result_types": [
+            "boolean"
+        ],
+        "signatures": [
+            {
+                "left_type": "blob",
+                "right_type": "blob",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "blob",
+                "right_type": "varchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "date",
+                "right_type": "date",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "date",
+                "right_type": "integer",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "date",
+                "right_type": "timestamp",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "decimal",
+                "right_type": "decimal",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "decimal",
+                "right_type": "double",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "decimal",
+                "right_type": "integer",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "double",
+                "right_type": "decimal",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "double",
+                "right_type": "double",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "double",
+                "right_type": "integer",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "integer",
+                "right_type": "date",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "integer",
+                "right_type": "decimal",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "integer",
+                "right_type": "double",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "integer",
+                "right_type": "integer",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "integer",
+                "right_type": "timestamp",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "interval",
+                "right_type": "interval",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "timestamp",
+                "right_type": "date",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "timestamp",
+                "right_type": "integer",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "timestamp",
+                "right_type": "timestamp",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "blob",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "varchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            }
+        ]
+    },
+    "MapAccess": {
+        "internal_name": "MapAccess",
+        "display_name": "[]",
+        "token": "[]",
+        "category": "extraction",
+        "summary": "Subscript access operator.",
+        "documentation": "Returns the element at the requested index from an array, string, or blob-like value.",
+        "signature_count": 3,
+        "has_dynamic_result": true,
+        "left_types": [
+            "array",
+            "blob",
+            "varchar"
+        ],
+        "right_types": [
+            "integer"
+        ],
+        "result_types": [
+            "blob",
+            "varchar"
+        ],
+        "signatures": [
+            {
+                "left_type": "array",
+                "right_type": "integer",
+                "result_type": null,
+                "result_type_is_dynamic": true,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "blob",
+                "right_type": "integer",
+                "result_type": "blob",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "integer",
+                "result_type": "varchar",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            }
+        ],
+        "notes": "For arrays the result type depends on the array element type, so the exported result type may be dynamic."
+    },
+    "Minus": {
+        "internal_name": "Minus",
+        "display_name": "-",
+        "token": "-",
+        "category": "binary",
+        "summary": "Subtraction operator.",
+        "documentation": "Returns the difference between two numeric, date, timestamp, or interval-compatible operands.",
+        "signature_count": 20,
+        "has_dynamic_result": false,
+        "left_types": [
+            "date",
+            "decimal",
+            "double",
+            "integer",
+            "interval",
+            "timestamp"
+        ],
+        "right_types": [
+            "date",
+            "decimal",
+            "double",
+            "integer",
+            "interval",
+            "timestamp"
+        ],
+        "result_types": [
+            "decimal",
+            "double",
+            "integer",
+            "interval",
+            "timestamp"
+        ],
+        "signatures": [
+            {
+                "left_type": "date",
+                "right_type": "date",
+                "result_type": "interval",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "date",
+                "right_type": "integer",
+                "result_type": "interval",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "date",
+                "right_type": "interval",
+                "result_type": "timestamp",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "date",
+                "right_type": "timestamp",
+                "result_type": "interval",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "decimal",
+                "right_type": "decimal",
+                "result_type": "integer",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "decimal",
+                "right_type": "integer",
+                "result_type": "decimal",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "double",
+                "right_type": "double",
+                "result_type": "double",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "double",
+                "right_type": "integer",
+                "result_type": "double",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "integer",
+                "right_type": "date",
+                "result_type": "interval",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "integer",
+                "right_type": "decimal",
+                "result_type": "double",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "integer",
+                "right_type": "double",
+                "result_type": "double",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "integer",
+                "right_type": "integer",
+                "result_type": "integer",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "integer",
+                "right_type": "timestamp",
+                "result_type": "interval",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "interval",
+                "right_type": "date",
+                "result_type": "timestamp",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "interval",
+                "right_type": "interval",
+                "result_type": "interval",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "interval",
+                "right_type": "timestamp",
+                "result_type": "timestamp",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "timestamp",
+                "right_type": "date",
+                "result_type": "interval",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "timestamp",
+                "right_type": "integer",
+                "result_type": "interval",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "timestamp",
+                "right_type": "interval",
+                "result_type": "timestamp",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "timestamp",
+                "right_type": "timestamp",
+                "result_type": "interval",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            }
+        ]
+    },
+    "Modulo": {
+        "internal_name": "Modulo",
+        "display_name": "%",
+        "token": "%",
+        "category": "binary",
+        "summary": "Modulo operator.",
+        "documentation": "Returns the remainder after division of the left numeric operand by the right numeric operand.",
+        "signature_count": 2,
+        "has_dynamic_result": false,
+        "left_types": [
+            "double",
+            "integer"
+        ],
+        "right_types": [
+            "integer"
+        ],
+        "result_types": [
+            "double",
+            "integer"
+        ],
+        "signatures": [
+            {
+                "left_type": "double",
+                "right_type": "integer",
+                "result_type": "double",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "integer",
+                "right_type": "integer",
+                "result_type": "integer",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            }
+        ]
+    },
+    "Multiply": {
+        "internal_name": "Multiply",
+        "display_name": "*",
+        "token": "*",
+        "category": "binary",
+        "summary": "Multiplication operator.",
+        "documentation": "Returns the product of two numeric operands.",
+        "signature_count": 7,
+        "has_dynamic_result": false,
+        "left_types": [
+            "decimal",
+            "double",
+            "integer"
+        ],
+        "right_types": [
+            "decimal",
+            "double",
+            "integer"
+        ],
+        "result_types": [
+            "decimal",
+            "double",
+            "integer"
+        ],
+        "signatures": [
+            {
+                "left_type": "decimal",
+                "right_type": "decimal",
+                "result_type": "decimal",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "decimal",
+                "right_type": "integer",
+                "result_type": "decimal",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "double",
+                "right_type": "double",
+                "result_type": "double",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "double",
+                "right_type": "integer",
+                "result_type": "double",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "integer",
+                "right_type": "decimal",
+                "result_type": "double",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "integer",
+                "right_type": "double",
+                "result_type": "double",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "integer",
+                "right_type": "integer",
+                "result_type": "integer",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            }
+        ]
+    },
+    "MyIntegerDivide": {
+        "internal_name": "MyIntegerDivide",
+        "display_name": "DIV",
+        "token": "DIV",
+        "category": "binary",
+        "summary": "Integer division operator.",
+        "documentation": "Divides two integers and truncates the result toward zero.",
+        "signature_count": 1,
+        "has_dynamic_result": false,
+        "left_types": [
+            "integer"
+        ],
+        "right_types": [
+            "integer"
+        ],
+        "result_types": [
+            "integer"
+        ],
+        "signatures": [
+            {
+                "left_type": "integer",
+                "right_type": "integer",
+                "result_type": "integer",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            }
+        ]
+    },
+    "NotEq": {
+        "internal_name": "NotEq",
+        "display_name": "!=",
+        "token": "!=",
+        "category": "comparison",
+        "summary": "Inequality comparison.",
+        "documentation": "Returns true when the operands do not compare equal.",
+        "signature_count": 23,
+        "has_dynamic_result": false,
+        "left_types": [
+            "blob",
+            "boolean",
+            "date",
+            "decimal",
+            "double",
+            "integer",
+            "interval",
+            "timestamp",
+            "varchar"
+        ],
+        "right_types": [
+            "blob",
+            "boolean",
+            "date",
+            "decimal",
+            "double",
+            "integer",
+            "interval",
+            "timestamp",
+            "varchar"
+        ],
+        "result_types": [
+            "boolean"
+        ],
+        "signatures": [
+            {
+                "left_type": "blob",
+                "right_type": "blob",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "blob",
+                "right_type": "varchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "boolean",
+                "right_type": "boolean",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "date",
+                "right_type": "date",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "date",
+                "right_type": "integer",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "date",
+                "right_type": "timestamp",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "decimal",
+                "right_type": "decimal",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "decimal",
+                "right_type": "double",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "decimal",
+                "right_type": "integer",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "double",
+                "right_type": "decimal",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "double",
+                "right_type": "double",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "double",
+                "right_type": "integer",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "integer",
+                "right_type": "date",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "integer",
+                "right_type": "decimal",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "integer",
+                "right_type": "double",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "integer",
+                "right_type": "integer",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "integer",
+                "right_type": "timestamp",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "interval",
+                "right_type": "interval",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "timestamp",
+                "right_type": "date",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "timestamp",
+                "right_type": "integer",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "timestamp",
+                "right_type": "timestamp",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "blob",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "varchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            }
+        ]
+    },
+    "NotILike": {
+        "internal_name": "NotILike",
+        "display_name": "NOT ILIKE",
+        "token": "NOT ILIKE",
+        "category": "comparison",
+        "summary": "Negated case-insensitive pattern match comparison.",
+        "documentation": "Returns true when the left string does not match the SQL ILIKE pattern on the right.",
+        "signature_count": 4,
+        "has_dynamic_result": false,
+        "left_types": [
+            "blob",
+            "varchar"
+        ],
+        "right_types": [
+            "blob",
+            "varchar"
+        ],
+        "result_types": [
+            "boolean"
+        ],
+        "signatures": [
+            {
+                "left_type": "blob",
+                "right_type": "blob",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "blob",
+                "right_type": "varchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "blob",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "varchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            }
+        ]
+    },
+    "NotInList": {
+        "internal_name": "NotInList",
+        "display_name": "NOT IN",
+        "token": "NOT IN",
+        "category": "comparison",
+        "summary": "Negated membership comparison.",
+        "documentation": "Returns true when the left operand does not match any element in the right-hand list or array.",
+        "signature_count": 8,
+        "has_dynamic_result": false,
+        "left_types": [
+            "blob",
+            "boolean",
+            "date",
+            "decimal",
+            "double",
+            "integer",
+            "timestamp",
+            "varchar"
+        ],
+        "right_types": [
+            "array"
+        ],
+        "result_types": [
+            "boolean"
+        ],
+        "signatures": [
+            {
+                "left_type": "blob",
+                "right_type": "array",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "boolean",
+                "right_type": "array",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "date",
+                "right_type": "array",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "decimal",
+                "right_type": "array",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "double",
+                "right_type": "array",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "integer",
+                "right_type": "array",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "timestamp",
+                "right_type": "array",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "array",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            }
+        ]
+    },
+    "NotLike": {
+        "internal_name": "NotLike",
+        "display_name": "NOT LIKE",
+        "token": "NOT LIKE",
+        "category": "comparison",
+        "summary": "Negated pattern match comparison.",
+        "documentation": "Returns true when the left string does not match the SQL LIKE pattern on the right.",
+        "signature_count": 4,
+        "has_dynamic_result": false,
+        "left_types": [
+            "blob",
+            "varchar"
+        ],
+        "right_types": [
+            "blob",
+            "varchar"
+        ],
+        "result_types": [
+            "boolean"
+        ],
+        "signatures": [
+            {
+                "left_type": "blob",
+                "right_type": "blob",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "blob",
+                "right_type": "varchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "blob",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "varchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            }
+        ]
+    },
+    "NotRLike": {
+        "internal_name": "NotRLike",
+        "display_name": "NOT RLIKE",
+        "token": "NOT RLIKE",
+        "category": "comparison",
+        "summary": "Negated regular expression match comparison.",
+        "documentation": "Returns true when the left string does not match the regular expression on the right.",
+        "signature_count": 4,
+        "has_dynamic_result": false,
+        "left_types": [
+            "blob",
+            "varchar"
+        ],
+        "right_types": [
+            "blob",
+            "varchar"
+        ],
+        "result_types": [
+            "boolean"
+        ],
+        "signatures": [
+            {
+                "left_type": "blob",
+                "right_type": "blob",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "blob",
+                "right_type": "varchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "blob",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "varchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            }
+        ]
+    },
+    "Or": {
+        "internal_name": "Or",
+        "display_name": "OR",
+        "token": "OR",
+        "category": "logical",
+        "summary": "Logical disjunction.",
+        "documentation": "Returns true when either boolean operand evaluates to true.",
+        "signature_count": 1,
+        "has_dynamic_result": false,
+        "left_types": [
+            "boolean"
+        ],
+        "right_types": [
+            "boolean"
+        ],
+        "result_types": [
+            "boolean"
+        ],
+        "signatures": [
+            {
+                "left_type": "boolean",
+                "right_type": "boolean",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            }
+        ]
+    },
+    "Plus": {
+        "internal_name": "Plus",
+        "display_name": "+",
+        "token": "+",
+        "category": "binary",
+        "summary": "Addition operator.",
+        "documentation": "Returns the sum of two numeric or interval-compatible operands.",
+        "signature_count": 12,
+        "has_dynamic_result": false,
+        "left_types": [
+            "date",
+            "decimal",
+            "double",
+            "integer",
+            "interval",
+            "timestamp"
+        ],
+        "right_types": [
+            "date",
+            "decimal",
+            "double",
+            "integer",
+            "interval",
+            "timestamp"
+        ],
+        "result_types": [
+            "decimal",
+            "double",
+            "integer",
+            "interval",
+            "timestamp"
+        ],
+        "signatures": [
+            {
+                "left_type": "date",
+                "right_type": "interval",
+                "result_type": "timestamp",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "decimal",
+                "right_type": "decimal",
+                "result_type": "integer",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "decimal",
+                "right_type": "integer",
+                "result_type": "decimal",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "double",
+                "right_type": "double",
+                "result_type": "double",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "double",
+                "right_type": "integer",
+                "result_type": "double",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "integer",
+                "right_type": "decimal",
+                "result_type": "double",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "integer",
+                "right_type": "double",
+                "result_type": "double",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "integer",
+                "right_type": "integer",
+                "result_type": "integer",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "interval",
+                "right_type": "date",
+                "result_type": "timestamp",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "interval",
+                "right_type": "interval",
+                "result_type": "interval",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "interval",
+                "right_type": "timestamp",
+                "result_type": "timestamp",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "timestamp",
+                "right_type": "interval",
+                "result_type": "timestamp",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            }
+        ]
+    },
+    "RLike": {
+        "internal_name": "RLike",
+        "display_name": "RLIKE",
+        "token": "RLIKE",
+        "category": "comparison",
+        "summary": "Regular expression match comparison.",
+        "documentation": "Returns true when the left string matches the regular expression on the right.",
+        "signature_count": 4,
+        "has_dynamic_result": false,
+        "left_types": [
+            "blob",
+            "varchar"
+        ],
+        "right_types": [
+            "blob",
+            "varchar"
+        ],
+        "result_types": [
+            "boolean"
+        ],
+        "signatures": [
+            {
+                "left_type": "blob",
+                "right_type": "blob",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "blob",
+                "right_type": "varchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "blob",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "varchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            }
+        ]
+    },
+    "ShiftLeft": {
+        "internal_name": "ShiftLeft",
+        "display_name": "<<",
+        "token": "<<",
+        "category": "binary",
+        "summary": "Left shift operator.",
+        "documentation": "Shifts the bits of the left integer operand left by the number of positions in the right operand.",
+        "signature_count": 1,
+        "has_dynamic_result": false,
+        "left_types": [
+            "integer"
+        ],
+        "right_types": [
+            "integer"
+        ],
+        "result_types": [
+            "integer"
+        ],
+        "signatures": [
+            {
+                "left_type": "integer",
+                "right_type": "integer",
+                "result_type": "integer",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            }
+        ]
+    },
+    "ShiftRight": {
+        "internal_name": "ShiftRight",
+        "display_name": ">>",
+        "token": ">>",
+        "category": "binary",
+        "summary": "Right shift operator.",
+        "documentation": "Shifts the bits of the left integer operand right by the number of positions in the right operand.",
+        "signature_count": 1,
+        "has_dynamic_result": false,
+        "left_types": [
+            "integer"
+        ],
+        "right_types": [
+            "integer"
+        ],
+        "result_types": [
+            "integer"
+        ],
+        "signatures": [
+            {
+                "left_type": "integer",
+                "right_type": "integer",
+                "result_type": "integer",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            }
+        ]
+    },
+    "StringConcat": {
+        "internal_name": "StringConcat",
+        "display_name": "||",
+        "token": "||",
+        "category": "binary",
+        "summary": "String concatenation operator.",
+        "documentation": "Concatenates the left and right string or blob operands.",
+        "signature_count": 4,
+        "has_dynamic_result": false,
+        "left_types": [
+            "blob",
+            "varchar"
+        ],
+        "right_types": [
+            "blob",
+            "varchar"
+        ],
+        "result_types": [
+            "blob",
+            "varchar"
+        ],
+        "signatures": [
+            {
+                "left_type": "blob",
+                "right_type": "blob",
+                "result_type": "blob",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "blob",
+                "right_type": "varchar",
+                "result_type": "blob",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "blob",
+                "result_type": "blob",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "varchar",
+                "result_type": "varchar",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            }
+        ]
+    },
+    "Xor": {
+        "internal_name": "Xor",
+        "display_name": "XOR",
+        "token": "XOR",
+        "category": "logical",
+        "summary": "Logical exclusive OR.",
+        "documentation": "Returns true when exactly one boolean operand evaluates to true.",
+        "signature_count": 1,
+        "has_dynamic_result": false,
+        "left_types": [
+            "boolean"
+        ],
+        "right_types": [
+            "boolean"
+        ],
+        "result_types": [
+            "boolean"
+        ],
+        "signatures": [
+            {
+                "left_type": "boolean",
+                "right_type": "boolean",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            }
+        ]
+    }
+}

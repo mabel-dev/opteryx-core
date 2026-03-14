@@ -392,11 +392,11 @@ STATEMENTS = [
         ("SELECT id, (COUNT(*) + COUNT(*) + COUNT(*)) AS c FROM $planets GROUP BY id", 9, 2, None),
         ("SELECT id, (COUNT(*) * 2) + COUNT(*) AS c FROM $planets GROUP BY id", 9, 2, None),
         ("SELECT id, COUNT(*) AS c, c + c AS doubled FROM $planets GROUP BY id", 9, 3, None),
-        ("SELECT id, COUNT(*) / LN(COUNT(*)) AS c FROM $planets GROUP BY id", 9, 2, None),
+        ("SELECT id, COUNT(*) / LOG(COUNT(*), E()) AS c FROM $planets GROUP BY id", 9, 2, None),
         ("SELECT (COUNT(*) + COUNT(*)) AS c FROM $planets", 1, 1, None),
         ("SELECT (COUNT(*) + COUNT(*) + COUNT(*)) AS c FROM $planets", 1, 1, None),
         ("SELECT (COUNT(*) * 2) + COUNT(*) AS c FROM $planets", 1, 1, None),
-        ("SELECT COUNT(*) / LN(COUNT(*)) AS c FROM $planets", 1, 1, None),
+        ("SELECT COUNT(*) / LOG(COUNT(*), E()) AS c FROM $planets", 1, 1, None),
         # 2786
         ("SELECT * EXCEPT(id) FROM $planets ORDER BY name", 9, 19, None),
         ("SELECT * EXCEPT(id, density) FROM $planets ORDER BY name", 9, 18, None),

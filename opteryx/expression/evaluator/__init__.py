@@ -1234,6 +1234,16 @@ def evaluate_and_append_draken(nodes, morsel):
 
             if isinstance(result, (_pa.Array, _pa.ChunkedArray)):
                 result = _vfa(result)
+            elif not hasattr(result, "__iter__") or isinstance(result, (str, bytes)):
+                # Scalar result (numpy scalar, Python int/float/str/datetime, etc.) —
+                # broadcast to a ConstantVector of the morsel's length.
+                from opteryx.draken.vectors.constant_vector import from_scalar as _const_scalar
+                vec = _const_scalar(result, morsel.num_rows)
+                if vec is None:
+                    # from_scalar doesn't handle this type — fall back via PyArrow broadcast
+                    result = _vfa(_pa.array([result] * morsel.num_rows))
+                else:
+                    result = vec
             else:
                 result = vector_from_sequence(result)
         col_names.append(identity)

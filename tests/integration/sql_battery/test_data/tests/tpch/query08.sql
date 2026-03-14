@@ -7,7 +7,7 @@ select
 from
     (
         select
-            year(o_orderdate) as o_year,
+            EXTRACT(YEAR FROM o_orderdate) as o_year,
             l_extendedprice * (1 - l_discount) as volume,
             n2.n_name as nation
         from

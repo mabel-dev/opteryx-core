@@ -121,12 +121,10 @@ class DrakenAggregateAndGroupNode(BasePlanNode):
             identifier for identifier in self.all_identifiers if identifier not in required_columns
         )
         # Also include evaluated expression identities so they don't get dropped by select()
-        # Skip literals as they don't represent actual columns
         for node in self.evaluatable_nodes:
-            if node.node_type != NodeType.LITERAL:
-                identity = node.schema_column.identity
-                if identity not in required_columns:
-                    required_columns.append(identity)
+            identity = node.schema_column.identity
+            if identity not in required_columns:
+                required_columns.append(identity)
         # Include group expression identities (for complex GROUP BY expressions)
         for node in self.groups:
             if node.node_type != NodeType.IDENTIFIER:
@@ -184,8 +182,10 @@ class DrakenAggregateAndGroupNode(BasePlanNode):
                 if field_node.node_type == NodeType.WILDCARD:
                     column = "*"
                 elif field_node.node_type == NodeType.LITERAL:
-                    # Constants like min('a') don't reference a column
-                    column = None
+                    # Constants like min('a'): the literal will be broadcast to a
+                    # ConstantVector column by evaluate_and_append_draken, so use
+                    # its schema identity as the column name.
+                    column = field_node.schema_column.identity
                 elif field_node.node_type == NodeType.IDENTIFIER:
                     column = field_node.schema_column.identity
                 else:

@@ -46,6 +46,7 @@ from opteryx.expression.casts import try_cast
 from opteryx.expression.functions.implementations.text import _initcap
 from opteryx.expression.functions.implementations.text import _md5
 from opteryx.expression.functions.implementations.text import _replace
+from opteryx.expression.functions.implementations.text import _reverse
 from opteryx.expression.functions.implementations.text import _sha1
 from opteryx.expression.functions.implementations.text import _sha256
 from opteryx.expression.functions.implementations.text import _sha512

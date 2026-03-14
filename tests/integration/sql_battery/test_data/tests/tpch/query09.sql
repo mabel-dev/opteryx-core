@@ -6,7 +6,7 @@ from
     (
         select
             n_name as nation,
-            year(o_orderdate) as o_year,
+            EXTRACT(YEAR FROM o_orderdate) as o_year,
             l_extendedprice * (1 - l_discount) - ps_supplycost * l_quantity as amount
         from
             testdata.tpch_tiny.part,
