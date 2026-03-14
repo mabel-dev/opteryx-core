@@ -1377,11 +1377,17 @@ def _builtin_array_misc_functions() -> list[FunctionDefinition]:
     """Array membership tests and miscellaneous column-level functions."""
     from opteryx.compiled.vector_ops import vector_contains_all
     from opteryx.compiled.vector_ops import vector_contains_any
-    from opteryx.expression.functions.implementations.logical import (
-        array_contains as _of_array_contains,
-    )
     from opteryx.expression.functions.implementations.logical import if_null as _of_if_null
     from opteryx.expression.functions.implementations.logical import null_if as _of_null_if
+    from opteryx.expression.functions.implementations.utility import (
+        array_contains as _of_array_contains,
+    )
+    from opteryx.expression.functions.implementations.utility import (
+        array_contains_all as _of_array_contains_all,
+    )
+    from opteryx.expression.functions.implementations.utility import (
+        array_contains_any as _of_array_contains_any,
+    )
     from opteryx.expression.functions.implementations.utility import (
         cosine_distance as _of_cosine_distance,
     )
@@ -1393,10 +1399,10 @@ def _builtin_array_misc_functions() -> list[FunctionDefinition]:
     from opteryx.expression.functions.implementations.utility import (
         jsonb_object_keys as _of_jsonb_object_keys,
     )
-    from opteryx.functions import _iterate_double_parameter as _idouble
-
     class other_functions:
         array_contains = staticmethod(_of_array_contains)
+        array_contains_all = staticmethod(_of_array_contains_all)
+        array_contains_any = staticmethod(_of_array_contains_any)
         if_null = staticmethod(_of_if_null)
         null_if = staticmethod(_of_null_if)
         cosine_distance = staticmethod(_of_cosine_distance)
@@ -1404,10 +1410,6 @@ def _builtin_array_misc_functions() -> list[FunctionDefinition]:
         embed = staticmethod(_of_embed)
         humanize = staticmethod(_of_humanize)
         jsonb_object_keys = staticmethod(_of_jsonb_object_keys)
-
-    _array_contains_kernel = _idouble(other_functions.array_contains)
-    _array_contains_any_kernel = lambda x, y: vector_contains_any(x, set(y[0]))
-    _array_contains_all_kernel = lambda x, y: vector_contains_all(x, set(y[0]))
 
     def _make(
         name, callable_ref, ret, params, aliases=(), cost=8.0, null_policy="strict", summary=""
@@ -1446,14 +1448,15 @@ def _builtin_array_misc_functions() -> list[FunctionDefinition]:
     return [
         _make(
             "ARRAY_CONTAINS",
-            _array_contains_kernel,
+            other_functions.array_contains,
             OrsoTypes.BOOLEAN,
             (_arr, _item),
+            null_policy="passthrough",
             summary="Test if array contains item.",
         ),
         _make(
             "ARRAY_CONTAINS_ANY",
-            _array_contains_any_kernel,
+            other_functions.array_contains_any,
             OrsoTypes.BOOLEAN,
             (_arr, _set),
             null_policy="passthrough",
@@ -1461,7 +1464,7 @@ def _builtin_array_misc_functions() -> list[FunctionDefinition]:
         ),
         _make(
             "ARRAY_CONTAINS_ALL",
-            _array_contains_all_kernel,
+            other_functions.array_contains_all,
             OrsoTypes.BOOLEAN,
             (_arr, _set),
             null_policy="passthrough",

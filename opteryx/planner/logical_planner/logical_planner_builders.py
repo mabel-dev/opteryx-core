@@ -510,8 +510,10 @@ def cast(branch, alias: Optional[List[str]] = None, key=None):
     kind = branch["kind"]
     raw_data_type = branch["data_type"]
 
+    cast_parameters = []
+
     # Extract the base data type from the AST structure
-    data_type = _extract_data_type(raw_data_type, branch, [source_expr], build_literal_node)
+    data_type = _extract_data_type(raw_data_type, branch, cast_parameters, build_literal_node)
 
     # Validate and normalize the data type
     normalized_type = _normalize_cast_type(data_type)
@@ -530,6 +532,7 @@ def cast(branch, alias: Optional[List[str]] = None, key=None):
         NodeType.CAST,
         left=source_expr,
         value=normalized_type.upper(),
+        parameters=cast_parameters,
         alias=alias,
     )
 
@@ -631,12 +634,22 @@ def _cast_literal_value(literal_node, target_type: str, kind: str, alias):
     # Special case: VARBINARY maps to BLOB in Orso types
     if base_type == "VARBINARY":
         orso_type = OrsoTypes.BLOB
+    elif base_type == "DATE" and literal_node.type in (OrsoTypes.INTEGER, OrsoTypes.DATE):
+        value = (_EPOCH_DATE + datetime.timedelta(days=int(literal_node.value)))
+        return Node(NodeType.LITERAL, type=OrsoTypes.DATE, value=value, alias=alias)
     # Special case: INTEGER to TIMESTAMP conversion using PyArrow
-    elif base_type == "TIMESTAMP" and literal_node.type == OrsoTypes.INTEGER:
+    elif base_type == "TIMESTAMP" and literal_node.type in (OrsoTypes.INTEGER, OrsoTypes.DATE):
         import pyarrow
         import pyarrow.compute as compute
 
-        value = compute.cast([literal_node.value], pyarrow.timestamp("us"))[0].as_py()
+        int_value = int(literal_node.value)
+        # DATE-style literals are first parsed as day-count integers before the
+        # explicit TIMESTAMP type decoration is applied. Those values should be
+        # interpreted as days since epoch, not as raw epoch integers.
+        if literal_node.type == OrsoTypes.DATE or abs(int_value) < 100_000:
+            value = (_EPOCH_DT + datetime.timedelta(days=int_value)).replace(tzinfo=None)
+        else:
+            value = compute.cast([literal_node.value], pyarrow.timestamp("us"))[0].as_py()
         return Node(NodeType.LITERAL, type=OrsoTypes.TIMESTAMP, value=value, alias=alias)
     else:
         orso_type = OrsoTypes.from_name(base_type)[0]

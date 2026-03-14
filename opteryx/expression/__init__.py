@@ -11,6 +11,7 @@ It is defined as an expression tree of binary and unary operators, and functions
 Expressions are evaluated against an entire morsel at a time.
 """
 
+import datetime
 from enum import Enum
 from typing import Callable
 from typing import Dict
@@ -243,6 +244,19 @@ def _inner_evaluate(root: Node, table: Table):
             return numpy.array([root.value] * table.num_rows, dtype=numpy.bytes_)
         if literal_type == OrsoTypes.INTERVAL:
             return pyarrow.array([root.value] * table.num_rows)
+        if literal_type == OrsoTypes.DATE and isinstance(root.value, (int, numpy.integer)):
+            value = numpy.datetime64(
+                datetime.date(1970, 1, 1) + datetime.timedelta(days=int(root.value)), "D"
+            )
+            return numpy.full(shape=table.num_rows, fill_value=value, dtype="datetime64[D]")
+        if literal_type == OrsoTypes.TIMESTAMP and isinstance(root.value, (int, numpy.integer)):
+            ivalue = int(root.value)
+            if abs(ivalue) < 100_000_000_000 and ivalue % 1_000_000 == 0:
+                dt = datetime.datetime(1970, 1, 1) + datetime.timedelta(days=ivalue // 1_000_000)
+                value = numpy.datetime64(dt, "us")
+            else:
+                value = numpy.datetime64(ivalue, "us")
+            return numpy.full(shape=table.num_rows, fill_value=value, dtype="datetime64[us]")
         if isinstance(literal_type, OrsoTypes):
             literal_type = literal_type.numpy_dtype
         return numpy.full(
@@ -357,6 +371,52 @@ def _inner_evaluate(root: Node, table: Table):
                 raise ColumnReferencedBeforeEvaluationError(column=root.schema_column.name)
             return table[root.schema_column.identity].to_numpy(zero_copy_only=False)
         if node_type == NodeType.COMPARISON_OPERATOR:
+            if (
+                root.left.node_type == NodeType.LITERAL
+                and root.right.node_type == NodeType.LITERAL
+                and root.left.type in (OrsoTypes.DATE, OrsoTypes.TIMESTAMP)
+                and root.right.type in (OrsoTypes.DATE, OrsoTypes.TIMESTAMP)
+            ):
+                def _literal_temporal_value(node):
+                    value = node.value
+                    if node.type == OrsoTypes.DATE:
+                        if isinstance(value, (int, numpy.integer)):
+                            return datetime.datetime(1970, 1, 1) + datetime.timedelta(days=int(value))
+                        if isinstance(value, datetime.datetime):
+                            return value.replace(hour=0, minute=0, second=0, microsecond=0)
+                        if isinstance(value, datetime.date):
+                            return datetime.datetime(value.year, value.month, value.day)
+                    if node.type == OrsoTypes.TIMESTAMP:
+                        if isinstance(value, (int, numpy.integer)):
+                            ivalue = int(value)
+                            if abs(ivalue) < 100_000_000_000 and ivalue % 1_000_000 == 0:
+                                return datetime.datetime(1970, 1, 1) + datetime.timedelta(
+                                    days=ivalue // 1_000_000
+                                )
+                            return datetime.datetime(1970, 1, 1) + datetime.timedelta(
+                                microseconds=ivalue
+                            )
+                        if isinstance(value, numpy.datetime64):
+                            micros = int(value.astype("datetime64[us]").astype(numpy.int64))
+                            return datetime.datetime(1970, 1, 1) + datetime.timedelta(
+                                microseconds=micros
+                            )
+                        if isinstance(value, datetime.date) and not isinstance(value, datetime.datetime):
+                            return datetime.datetime(value.year, value.month, value.day)
+                    return value
+
+                left_value = _literal_temporal_value(root.left)
+                right_value = _literal_temporal_value(root.right)
+                _cmp = {
+                    "Eq": left_value == right_value,
+                    "NotEq": left_value != right_value,
+                    "Lt": left_value < right_value,
+                    "Gt": left_value > right_value,
+                    "LtEq": left_value <= right_value,
+                    "GtEq": left_value >= right_value,
+                }[root.value]
+                return numpy.full(table.num_rows, _cmp, dtype=numpy.bool_)
+
             right = None
             left = None
 

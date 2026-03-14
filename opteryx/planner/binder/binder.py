@@ -400,11 +400,14 @@ def inner_binder(node: Node, context: BindingContext) -> Tuple[Node, Any]:
             if (
                 target_type_name == "ARRAY"
                 and node.parameters is not None
-                and len(node.parameters) > 1
+                and len(node.parameters) > 0
             ):
-                # CAST(expr AS ARRAY(element_type)) - extract element type
-                # For now, use VARIANT as element_type; can be refined later
-                element_type = OrsoTypes.VARIANT
+                # CAST(expr AS ARRAY(element_type)) - extract the element type
+                element_param = node.parameters[0]
+                if element_param.node_type == NodeType.LITERAL and element_param.value is not None:
+                    element_type = OrsoTypes[str(element_param.value).upper()]
+                else:
+                    element_type = OrsoTypes.VARIANT
 
             schema_column = FunctionColumn(
                 name=column_name,

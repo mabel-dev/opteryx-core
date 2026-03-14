@@ -81,11 +81,19 @@ def vector_lengther(arr):
     from opteryx.draken.interop.arrow import vector_from_arrow
     from opteryx.draken.vectors.string_vector import StringVector
 
+    if arr.__class__.__name__ in ("ArrayVector", "VectorVector"):
+        return vector_length(arr).to_arrow()
+
     # normalise to Arrow array then to Draken vector
-    if isinstance(arr, numpy.ndarray):
+    if isinstance(arr, pyarrow.ChunkedArray):
+        arr = arr.combine_chunks()
+    elif isinstance(arr, numpy.ndarray):
         arr = pyarrow.array(arr.tolist())
     elif not isinstance(arr, pyarrow.Array):
         arr = pyarrow.array(arr)
+
+    if pyarrow.types.is_list(arr.type) or pyarrow.types.is_large_list(arr.type):
+        return vector_length(vector_from_arrow(arr)).to_arrow()
 
     sv: StringVector
     sv = arr if isinstance(arr, StringVector) else vector_from_arrow(arr)
