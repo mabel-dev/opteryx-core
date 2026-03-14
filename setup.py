@@ -619,6 +619,15 @@ extensions = [
         extra_compile_args=CPP_FLAGS,
     ),
     Extension(
+        "opteryx.compiled.aggregations.array_agg",
+        sources=[
+            "opteryx/compiled/aggregations/array_agg.pyx",
+        ],
+        include_dirs=include_dirs,
+        language="c++",
+        extra_compile_args=CPP_FLAGS,
+    ),
+    Extension(
         "opteryx.compiled.aggregations.aggregate_kernels",
         sources=[
             "opteryx/compiled/aggregations/aggregate_kernels.pyx",

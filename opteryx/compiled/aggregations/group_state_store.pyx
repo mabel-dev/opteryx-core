@@ -13,6 +13,7 @@ from opteryx.draken.vectors.constant_vector cimport ConstantVector
 from opteryx.compiled.aggregations.aggregate_kernels cimport AGG_AVG
 from opteryx.compiled.aggregations.aggregate_kernels cimport AGG_APPROX_COUNT_DISTINCT
 from opteryx.compiled.aggregations.aggregate_kernels cimport AGG_APPROX_PERCENTILE
+from opteryx.compiled.aggregations.aggregate_kernels cimport AGG_ARRAY_AGG
 from opteryx.compiled.aggregations.aggregate_kernels cimport AGG_COUNT
 from opteryx.compiled.aggregations.aggregate_kernels cimport AGG_COUNT_DISTINCT
 from opteryx.compiled.aggregations.aggregate_kernels cimport AGG_COUNT_STAR
@@ -181,6 +182,8 @@ cdef class GroupStateStore:
                 self._agg_function_codes.append(AGG_APPROX_COUNT_DISTINCT)
             elif function == "approx_percentile":
                 self._agg_function_codes.append(AGG_APPROX_PERCENTILE)
+            elif function == "array_agg":
+                self._agg_function_codes.append(AGG_ARRAY_AGG)
             elif function == "hash_one":
                 self._agg_function_codes.append(AGG_HASH_ONE)
             else:

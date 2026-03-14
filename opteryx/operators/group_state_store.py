@@ -18,6 +18,7 @@ _SUPPORTED_FUNCTIONS = {
     "count_distinct",
     "approx_count_distinct",
     "approx_percentile",
+    "array_agg",
     "distinct",
     "hash_one",
 }
@@ -53,7 +54,10 @@ def create_group_state_engine(group_by_columns, aggregations):
 
         return GroupStateStore(group_by_columns, aggregations)
 
-    if any(agg[1] in ("approx_count_distinct", "approx_percentile") for agg in aggregations):
+    if any(
+        agg[1] in ("approx_count_distinct", "approx_percentile", "array_agg")
+        for agg in aggregations
+    ):
         from opteryx.compiled.aggregations.group_state_store import GroupStateStore
 
         return GroupStateStore(group_by_columns, aggregations)

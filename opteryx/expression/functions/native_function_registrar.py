@@ -23,20 +23,20 @@ from opteryx.expression.functions import ReturnSpec
 def _builtin_text_functions() -> list[FunctionDefinition]:
     """Text/string manipulation functions."""
     # Import existing implementations
+    from opteryx.compiled.vector_ops import vector_concat_array as _vector_concat_cython
+    from opteryx.compiled.vector_ops import vector_concat_ws_array as _vector_concat_ws_cython
     from opteryx.expression.functions.implementations import text as string_functions
     from opteryx.expression.functions.implementations.text import to_lower
     from opteryx.expression.functions.implementations.text import to_upper
     from opteryx.expression.functions.implementations.text import vector_lengther
 
-    from opteryx.compiled.vector_ops import vector_concat_array as _vector_concat_cython
-    from opteryx.compiled.vector_ops import vector_concat_ws_array as _vector_concat_ws_cython
-
     def _concat_kernel(arr):
         """CONCAT(array_col): join all string elements of each row, no separator."""
         import numpy as _np
         import pyarrow as _pa
-        from opteryx.draken.vectors.array_vector import ArrayVector as _AV
+
         from opteryx.draken.interop.arrow import vector_from_arrow as _vfa
+        from opteryx.draken.vectors.array_vector import ArrayVector as _AV
 
         if isinstance(arr, _AV):
             return _vector_concat_cython(arr).to_arrow()
@@ -51,8 +51,11 @@ def _builtin_text_functions() -> list[FunctionDefinition]:
                     result.append(None)
                 else:
                     parts = [
-                        v.encode("utf-8") if isinstance(v, str) else (v if isinstance(v, bytes) else b"")
-                        for v in row if v is not None
+                        v.encode("utf-8")
+                        if isinstance(v, str)
+                        else (v if isinstance(v, bytes) else b"")
+                        for v in row
+                        if v is not None
                     ]
                     result.append(b"".join(parts))
             return _pa.array(result, type=_pa.large_binary())
@@ -62,8 +65,9 @@ def _builtin_text_functions() -> list[FunctionDefinition]:
         """CONCAT_WS(sep, array_col): join elements with separator."""
         import numpy as _np
         import pyarrow as _pa
-        from opteryx.draken.vectors.array_vector import ArrayVector as _AV
+
         from opteryx.draken.interop.arrow import vector_from_arrow as _vfa
+        from opteryx.draken.vectors.array_vector import ArrayVector as _AV
 
         if hasattr(sep, "as_py"):
             sep = sep.as_py()
@@ -89,8 +93,11 @@ def _builtin_text_functions() -> list[FunctionDefinition]:
                     result.append(None)
                 else:
                     parts = [
-                        v.encode("utf-8") if isinstance(v, str) else (v if isinstance(v, bytes) else b"")
-                        for v in row if v is not None
+                        v.encode("utf-8")
+                        if isinstance(v, str)
+                        else (v if isinstance(v, bytes) else b"")
+                        for v in row
+                        if v is not None
                     ]
                     result.append(sep.join(parts))
             return _pa.array(result, type=_pa.large_binary())
@@ -885,6 +892,7 @@ def _builtin_text_extended_functions() -> list[FunctionDefinition]:
     """Remaining string/text functions not in the core text group."""
     from pyarrow import compute
 
+    from opteryx.compiled.vector_ops import vector_concat_ws_array as _vector_concat_ws_cython
     from opteryx.expression.functions.implementations import text as string_functions
     from opteryx.functions import _get_string
     from opteryx.functions import _initcap
@@ -895,14 +903,13 @@ def _builtin_text_extended_functions() -> list[FunctionDefinition]:
     from opteryx.functions import _string_slice_left
     from opteryx.functions import _string_slice_right
 
-    from opteryx.compiled.vector_ops import vector_concat_ws_array as _vector_concat_ws_cython
-
     def _concat_ws_kernel(sep, arr):
         """CONCAT_WS(sep, array_col): join elements with separator."""
         import numpy as _np
         import pyarrow as _pa
-        from opteryx.draken.vectors.array_vector import ArrayVector as _AV
+
         from opteryx.draken.interop.arrow import vector_from_arrow as _vfa
+        from opteryx.draken.vectors.array_vector import ArrayVector as _AV
 
         # Normalise separator to bytes
         if hasattr(sep, "as_py"):
@@ -929,8 +936,11 @@ def _builtin_text_extended_functions() -> list[FunctionDefinition]:
                     result.append(None)
                 else:
                     parts = [
-                        v.encode("utf-8") if isinstance(v, str) else (v if isinstance(v, bytes) else b"")
-                        for v in row if v is not None
+                        v.encode("utf-8")
+                        if isinstance(v, str)
+                        else (v if isinstance(v, bytes) else b"")
+                        for v in row
+                        if v is not None
                     ]
                     result.append(sep.join(parts))
             return _pa.array(result, type=_pa.large_binary())
@@ -944,8 +954,9 @@ def _builtin_text_extended_functions() -> list[FunctionDefinition]:
         relative to SQL order (needle first, haystack second)."""
         import numpy as _np
         import pyarrow as _pa
-        from opteryx.draken.vectors.string_vector import StringVector as _SV
+
         from opteryx.draken.interop.arrow import vector_from_arrow as _vfa
+        from opteryx.draken.vectors.string_vector import StringVector as _SV
 
         # Normalise haystack to StringVector
         if not isinstance(haystack_vec, _SV):
@@ -976,7 +987,6 @@ def _builtin_text_extended_functions() -> list[FunctionDefinition]:
         # else: already StringVector or bytes
 
         return _vector_position_cython(haystack_vec, needle_arr).to_arrow()
-
 
     def _make(
         name,

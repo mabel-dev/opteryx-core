@@ -8,10 +8,19 @@ from opteryx.expression import NodeType
 
 
 class _Aggregate:
-    def __init__(self, value: str, duplicate_treatment=None, parameters=None):
+    def __init__(
+        self,
+        value: str,
+        duplicate_treatment=None,
+        parameters=None,
+        order=None,
+        limit=None,
+    ):
         self.value = value
         self.duplicate_treatment = duplicate_treatment
         self.parameters = parameters or [_Wildcard()]
+        self.order = order
+        self.limit = limit
 
 
 class _Wildcard:
@@ -55,3 +64,11 @@ def test_draken_groupby_supports_approx_count_distinct():
 
 def test_draken_aggregate_supports_approx_count_distinct():
     assert DrakenAggregateNode.supports([_Aggregate("APPROX_COUNT_DISTINCT")])
+
+
+def test_draken_groupby_supports_array_agg():
+    assert DrakenAggregateAndGroupNode.supports([_Aggregate("ARRAY_AGG")], groups=[_Wildcard()])
+
+
+def test_draken_aggregate_does_not_support_array_agg_without_group_by():
+    assert not DrakenAggregateNode.supports([_Aggregate("ARRAY_AGG")])

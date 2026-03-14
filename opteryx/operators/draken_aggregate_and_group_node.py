@@ -57,6 +57,7 @@ class DrakenAggregateAndGroupNode(BasePlanNode):
         {
             "APPROX_COUNT_DISTINCT",
             "APPROX_PERCENTILE",
+            "ARRAY_AGG",
             "COUNT",
             "SUM",
             "MIN",
@@ -81,6 +82,7 @@ class DrakenAggregateAndGroupNode(BasePlanNode):
             "COUNT_DISTINCT",
             "APPROX_COUNT_DISTINCT",
             "APPROX_PERCENTILE",
+            "ARRAY_AGG",
             "ANY_VALUE",
         }
     )
@@ -155,12 +157,17 @@ class DrakenAggregateAndGroupNode(BasePlanNode):
     @staticmethod
     def supports(aggregates, groups=None) -> bool:
         groups = groups or []
+        requires_group_by = False
 
         for aggregate in aggregates:
             if aggregate.value not in DrakenAggregateAndGroupNode.SUPPORTED_AGGREGATES:
                 return False
             if not aggregate.parameters:
                 return False
+            if aggregate.value == "ARRAY_AGG":
+                requires_group_by = True
+                if len(aggregate.parameters) != 1:
+                    return False
             if aggregate.value == "APPROX_COUNT_DISTINCT":
                 if len(aggregate.parameters) != 1:
                     return False
@@ -174,6 +181,9 @@ class DrakenAggregateAndGroupNode(BasePlanNode):
                 # MAX/ONE/ANY_VALUE kernels are not admitted in strict mode
                 # until their fast finalize semantics are fully deterministic.
                 return False
+
+        if requires_group_by and not groups:
+            return False
 
         if not groups:
             return True
@@ -201,6 +211,8 @@ class DrakenAggregateAndGroupNode(BasePlanNode):
                 options = None
                 if fn == "approx_percentile":
                     options = self._extract_percentile_option(aggregator)
+                elif fn == "array_agg":
+                    options = self._extract_array_agg_options(aggregator)
                 # For simple identifiers, use the column name directly
                 # For literals (constants), use None to indicate constant aggregation
                 # For complex expressions, use the schema identity (which will be evaluated
@@ -263,11 +275,35 @@ class DrakenAggregateAndGroupNode(BasePlanNode):
             return "approx_count_distinct"
         if value == "APPROX_PERCENTILE":
             return "approx_percentile"
+        if value == "ARRAY_AGG":
+            return "array_agg"
         if value == "ANY_VALUE":
             return "hash_one"
         if value == "COUNT_DISTINCT":
             return "count_distinct"
         raise UnsupportedSyntaxError(f"Unsupported aggregate function for Draken group-by: {value}")
+
+    @staticmethod
+    def _extract_array_agg_options(aggregator) -> dict:
+        ordered = bool(aggregator.order)
+        descending = False
+        if aggregator.order:
+            if len(aggregator.order) != 1:
+                raise InvalidFunctionParameterError(
+                    "ARRAY_AGG can only ORDER BY the aggregated column"
+                )
+            descending = not bool(aggregator.order[0][1])
+
+        limit = None if aggregator.limit is None else int(aggregator.limit)
+        if limit is not None and limit < 0:
+            raise InvalidFunctionParameterError("ARRAY_AGG LIMIT must be zero or greater")
+
+        return {
+            "distinct": aggregator.duplicate_treatment == "Distinct",
+            "ordered": ordered,
+            "descending": descending,
+            "limit": limit,
+        }
 
     def _engine_reading_snapshot(self):
         return {key: self._group_by.readings.get(key, 0) for key in self.ENGINE_READING_KEYS}
