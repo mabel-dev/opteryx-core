@@ -9,6 +9,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+from opteryx.compiled.aggregations.array_agg import ArrayAggState
 from opteryx.draken.interop.arrow import vector_from_sequence
 from opteryx.draken.morsels.morsel import Morsel
 
@@ -25,6 +26,7 @@ _SUPPORTED_FUNCTIONS = frozenset(
         "count_distinct",
         "approx_count_distinct",
         "approx_percentile",
+        "array_agg",
         "distinct",
         "hash_one",
     }
@@ -127,6 +129,8 @@ class ShuffleGroupByOperation:
             from opteryx.compiled.aggregations.approximate_median import ApproximatePercentileState
 
             return ApproximatePercentileState(0.5 if options is None else float(options))
+        if function == "array_agg":
+            return ArrayAggState(options)
         if function == "hash_one":
             return _UNSET
         raise ValueError(f"unsupported aggregation function '{function}'")
@@ -171,6 +175,9 @@ class ShuffleGroupByOperation:
             if value is not None:
                 state.add_value(value)
             return state
+        if function == "array_agg":
+            state.add_value(value)
+            return state
         if function == "hash_one":
             if state is _UNSET and value is not None:
                 return value
@@ -190,6 +197,8 @@ class ShuffleGroupByOperation:
             return state.estimate()
         if function == "approx_percentile":
             return state.quantile()
+        if function == "array_agg":
+            return state.finalize()
         if function == "hash_one":
             return None if state is _UNSET else state
         raise ValueError(f"unsupported aggregation function '{function}'")

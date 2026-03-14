@@ -18,8 +18,8 @@ import pyarrow
 
 from opteryx import EOS
 from opteryx.compiled.aggregations.approximate_count import approximate_count
-from opteryx.compiled.aggregations.count_distinct import count_distinct
 from opteryx.compiled.aggregations.approximate_median import approximate_percentile
+from opteryx.compiled.aggregations.count_distinct import count_distinct
 from opteryx.exceptions import InvalidFunctionParameterError
 from opteryx.expression import NodeType
 from opteryx.expression import evaluate_and_append
@@ -102,7 +102,9 @@ class SimpleAggregateCollector:
             elif self.aggregate_type == "APPROX_COUNT_DISTINCT":
                 self.current_value = approximate_count(values, self.current_value)
             elif self.aggregate_type == "APPROX_PERCENTILE":
-                self.current_value = approximate_percentile(values, self.current_value, self.percentile)
+                self.current_value = approximate_percentile(
+                    values, self.current_value, self.percentile
+                )
             elif self.aggregate_type != "COUNT":
                 raise ValueError(f"Unsupported aggregate type: {self.aggregate_type}")
 
@@ -120,7 +122,9 @@ class SimpleAggregateCollector:
                 self.current_value = ApproximateCountState()
                 self.current_value.add_repeated_value(literal, count)
             elif self.aggregate_type == "APPROX_PERCENTILE":
-                from opteryx.compiled.aggregations.approximate_median import ApproximatePercentileState
+                from opteryx.compiled.aggregations.approximate_median import (
+                    ApproximatePercentileState,
+                )
 
                 self.current_value = ApproximatePercentileState(self.percentile)
                 self.current_value.add_repeated_value(literal, count)
@@ -133,9 +137,10 @@ class SimpleAggregateCollector:
                 self.current_value = min(self.current_value, literal)
             elif self.aggregate_type == "MAX":
                 self.current_value = max(self.current_value, literal)
-            elif self.aggregate_type == "APPROX_COUNT_DISTINCT":
-                self.current_value.add_repeated_value(literal, count)
-            elif self.aggregate_type == "APPROX_PERCENTILE":
+            elif (
+                self.aggregate_type == "APPROX_COUNT_DISTINCT"
+                or self.aggregate_type == "APPROX_PERCENTILE"
+            ):
                 self.current_value.add_repeated_value(literal, count)
             elif self.aggregate_type != "COUNT":
                 raise ValueError(f"Unsupported aggregate type: {self.aggregate_type}")

@@ -7,6 +7,7 @@
 
 from opteryx.compiled.aggregations.approximate_count import ApproximateCountState
 from opteryx.compiled.aggregations.approximate_median import ApproximatePercentileState
+from opteryx.compiled.aggregations.array_agg import ArrayAggState
 
 cdef int AGG_COUNT_STAR = 1
 cdef int AGG_COUNT = 2
@@ -18,6 +19,7 @@ cdef int AGG_COUNT_DISTINCT = 7
 cdef int AGG_HASH_ONE = 8
 cdef int AGG_APPROX_COUNT_DISTINCT = 9
 cdef int AGG_APPROX_PERCENTILE = 10
+cdef int AGG_ARRAY_AGG = 11
 
 cdef object _UNSET = object()
 
@@ -39,6 +41,8 @@ cdef inline object new_state(int function_code, object options):
         if options is None:
             options = 0.5
         return ApproximatePercentileState(float(options))
+    if function_code == AGG_ARRAY_AGG:
+        return ArrayAggState(options)
     raise ValueError(f"unsupported aggregation code '{function_code}'")
 
 
@@ -96,6 +100,10 @@ cdef inline object update_state(int function_code, object state, object value):
             state.add_value(value)
         return state
 
+    if function_code == AGG_ARRAY_AGG:
+        state.add_value(value)
+        return state
+
     raise ValueError(f"unsupported aggregation code '{function_code}'")
 
 
@@ -114,4 +122,6 @@ cdef inline object finalize_state(int function_code, object state):
         return state.estimate()
     if function_code == AGG_APPROX_PERCENTILE:
         return state.quantile()
+    if function_code == AGG_ARRAY_AGG:
+        return state.finalize()
     raise ValueError(f"unsupported aggregation code '{function_code}'")

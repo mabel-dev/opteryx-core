@@ -4,7 +4,7 @@
 - **Goal**: Return to correctness baseline before performance tuning
 - **Minimum Bar**: `make t` and `make clickbench` must pass
 - **Secondary**: `make test` (full suite)
-- **Last Updated**: 2026-03-14 (session 4)
+- **Last Updated**: 2026-03-14 (session 5)
 
 > [!Note]
 > The goal is not fix at the cost of architectural principles - we do not fix through poor programming practices or changes which violate the design goals of the system.
@@ -13,7 +13,7 @@
 
 ## Test Results Summary
 
-### Current Test Status (2026-03-14 session 4)
+### Current Test Status (2026-03-14 session 5)
 ```
 make t (SQL Battery Tests):
 - test_shapes_basic.py:                  ✅ PASSING
@@ -24,15 +24,31 @@ make t (SQL Battery Tests):
 - test_shapes_joins_subqueries.py:       ❌ FAILED
 - test_shapes_edge_cases.py:             ❌ FAILED
 
-Total: 12 failures across 5 files (down from 168)
+Total: 119 failures across 5 files
 
-Remaining failures:
-  10  UnsupportedSyntaxError: ARRAY_AGG not supported (issues 1a/1d/1f)
-   2  UnsupportedSyntaxError: APPROX_PERCENTILE not supported (issue 1c)
+Breakdown by error type:
+  38  AssertionError (wrong row counts)
+   7  ValueError: Invalid timestamp
+   7  TypeError: int() arg ... not 'ArrowVector' (_coerce_timestamp)
+   6  TypeError: TimestampVector passed to pyarrow compute
+   4  UnsupportedSyntaxError: Draken aggregator (ARRAY_AGG remnants)
+   4  ValueError: Buffer has wrong number of dimensions
+   4  IndexError: invalid index to scalar variable
+   3  ArrowNotImplementedError: binary_join_element_wise (binary+string)
+   3  UnsupportedSyntaxError: Carchar engine runtime fallback
+   3  FunctionExecutionError: LENGTH got ArrayVector not StringVector
+   3  FunctionExecutionError: IFNULL 'str' has no dtype
+   3  TypeError: LENGTH got ArrayVector not StringVector
+   3  TypeError: ArrayVector got pyarrow.lib.ListArray
+   3  AttributeError: 'str' has no dtype
+   2  (and ~20 more low-count error types)
 
 make clickbench:
 - 42/42 queries passing ✅
 ```
+
+> [!Note]
+> Session 5 update: `ARRAY_AGG` is now implemented in the Draken grouped aggregate path. The failure counts in the session 4 snapshot above are historical and should not be read as current `ARRAY_AGG` status.
 
 ---
 
@@ -110,6 +126,23 @@ make clickbench:
 - `opteryx/operators/draken_aggregate_and_group_node.py` — removed from both frozensets; dispatch `value in ("DISTINCT", "COUNT_DISTINCT")` → `value == "COUNT_DISTINCT"`
 - `opteryx/operators/aggregate_node.py` — removed `"DISTINCT": "distinct"` entry (was marked `# fated`)
 
+### ARRAY_AGG in Draken grouped aggregation
+**Files Modified**:
+- `opteryx/operators/draken_aggregate_and_group_node.py`
+- `opteryx/operators/group_state_store.py`
+- `opteryx/operators/shuffle/group_by.py`
+- `opteryx/compiled/aggregations/array_agg.pyx`
+- `opteryx/compiled/aggregations/aggregate_kernels.pyx`
+- `opteryx/compiled/aggregations/group_state_store.pyx`
+- `setup.py`
+- `tests/unit/operators/test_array_agg.py`
+- `tests/unit/operators/test_draken_aggregate_and_group_node.py`
+
+- Added `ARRAY_AGG` to the Draken grouped planner support set.
+- Implemented grouped `ARRAY_AGG` state with `DISTINCT`, `LIMIT`, and same-expression `ORDER BY`.
+- Routed `ARRAY_AGG` queries through the compiled grouped state store backend used by Draken for non-scalar aggregate shapes.
+- Verified with targeted unit coverage and the existing `ARRAY_AGG` SQL battery slice.
+
 ### STARTS_WITH / ENDS_WITH removed
 **Decision**: Not SQL-92 standard; removed entirely rather than maintaining broken rewrite path.
 **Files Modified**:
@@ -120,13 +153,13 @@ make clickbench:
 - `tests/integration/sql_battery/test_shapes_aliases_distinct.py` — 4 tests → `UnsupportedSyntaxError`
 - `tests/unit/planner/test_optimizations_invoked.py` — 2 rows removed
 
-> **Note on session 3 error inventory**: The session 3 breakdown listed ~18 distinct error categories (IIF arity, IFNULL scalar, TRIM on binary, TimestampVector in pyarrow compute, etc.). All of those disappeared when `ANY_VALUE`/`ARRAY_AGG` were fixed — without touching any of that code. They were not independent bugs; they were secondary errors thrown by queries whose *primary* failure was an unsupported aggregate. pytest reported the error at the point it was thrown, not the root cause. The session 3 issue list overcounted distinct problems by ~16 categories.
+> **Note on session 3 error inventory**: The session 3 breakdown listed ~18 distinct error categories. These were initially (incorrectly) dismissed as cascades from unsupported aggregates. They are real independent bugs — confirmed by running `make t` with 119 failures after ARRAY_AGG and ANY_VALUE were fixed.
 
 ---
 
 ## 🔴 Open Issues
 
-### 1a. ARRAY_AGG not in supported aggregates — ~20 failures
+### 1a. ARRAY_AGG not in supported aggregates — ✅ COMPLETED (session 5)
 **Error**: `UnsupportedSyntaxError: Draken aggregator does not support this query shape`
 **Gate**: `aggregate.value not in SUPPORTED_AGGREGATES` — `ARRAY_AGG` is absent from the frozenset in `DrakenAggregateAndGroupNode`
 **Location**: `opteryx/operators/draken_aggregate_and_group_node.py` — `SUPPORTED_AGGREGATES` + `supports()`
@@ -138,7 +171,7 @@ SELECT ARRAY_AGG(DISTINCT name) FROM testdata.satellites GROUP BY planetId
 SELECT ARRAY_AGG(name ORDER BY name DESC LIMIT 2) FROM testdata.satellites GROUP BY planetId
 SELECT ARRAY_AGG(DISTINCT LEFT(name, 1)) FROM testdata.satellites GROUP BY planetId
 ```
-**Fix needed**: Implement `ARRAY_AGG` in the Draken group-state engine and add to `SUPPORTED_AGGREGATES` + `FAST_PATH_AGGREGATES`.
+**Resolution**: Implemented in session 5. This note is retained as historical root cause context.
 
 ---
 
@@ -214,16 +247,130 @@ SELECT LEAST(ARRAY_AGG(name)) AS NAMES FROM testdata.satellites GROUP BY planetI
 
 ---
 
+### 2. AssertionError — wrong row counts — 38 failures
+**Error**: `AssertionError` (query returns wrong number of rows)
+**Root Cause**: Mixed — GROUP BY / HAVING / JOIN evaluation correctness bugs.
+
+---
+
+### 3. ArrowVector in `_coerce_timestamp` — 7 failures
+**Error**: `TypeError: int() argument must be a string, a bytes-like object or a real number, not 'ArrowVector'`
+**Root Cause**: Date arithmetic produces an `ArrowVector`; `_coerce_timestamp` falls through to bare `int(value)`.
+**Fix**: Add `isinstance(value, ArrowVector)` case in `_coerce_timestamp` in `opteryx/expression/evaluator/__init__.py`.
+
+---
+
+### 4. Invalid timestamp (microsecond epoch integer) — 7 failures
+**Error**: `ValueError: Invalid timestamp` / `SqlError: Error casting '1577836800000000' to TIMESTAMP`
+**Root Cause**: orso's `parse_timestamp` rejects raw microsecond-epoch integers.
+**Fix**: In `opteryx/expression/casts.py` — detect µs-epoch integers (value > ~1e12) and divide by 1e6.
+
+---
+
+### 5. TimestampVector passed to pyarrow compute — 6 failures
+**Error**: `TypeError: Got unexpected argument type <class 'TimestampVector'> for compute function`
+**Root Cause**: `_arrow_vector_compare()` passes a draken `TimestampVector` directly to `pyarrow.compute.*`.
+**Fix**: Call `.to_arrow()` before the compute call in `opteryx/expression/evaluator/__init__.py`.
+
+---
+
+### 6. `Buffer has wrong number of dimensions (expected 1, got 0)` — 4 failures
+**Error**: `ValueError: Buffer has wrong number of dimensions (expected 1, got 0)`
+**Root Cause**: A scalar (0-dimensional array) reaches a place expecting a 1D buffer.
+
+---
+
+### 7. `IndexError: invalid index to scalar variable` — 4 failures
+**Error**: `FunctionExecutionError: invalid index to scalar variable` in ROUND / TIME_BUCKET
+**Root Cause**: Function receives a 0-d numpy scalar from the aggregation pipeline and tries to index it.
+
+---
+
+### 8. CONCAT with binary-typed column — 3 failures
+**Error**: `ArrowNotImplementedError: Function 'binary_join_element_wise' has no kernel matching input types (binary, string, string)`
+**Root Cause**: `CONCAT()` receives a binary-typed column alongside strings.
+**Fix**: Cast binary inputs to utf8 before calling the kernel.
+
+---
+
+### 9. Carchar group-state engine — 3 failures
+**Error**: `UnsupportedSyntaxError: Carchar group-state engine does not support runtime fallback`
+**Root Cause**: `DictionaryVector` inputs hitting Carchar (SUM on a dict-encoded column). Planner should route to legacy.
+
+---
+
+### 10. IFNULL / IFNOTNULL with scalar string — 3 + 2 failures
+**Error**: `FunctionExecutionError: 'str' object has no attribute 'dtype'` in IFNULL; `function_ref is None` in IFNOTNULL
+**Root Cause**: IFNULL receives a raw Python `str` scalar; IFNOTNULL not properly bound at evaluation time.
+
+---
+
+### 11. ArrayVector / ListArray type mismatch — 3 + 2 failures
+**Error**: `TypeError: Argument 'vec' has incorrect type (expected ArrayVector, got pyarrow.lib.ListArray)` in ARRAY_CONTAINS_ALL, LENGTH
+**Root Cause**: Arrow→Draken conversion not happening for list-typed columns in some code paths.
+
+---
+
+### 12. `AttributeError: 'str' has no dtype` — 3 failures
+Same class as issue 10 — a Python `str` scalar reaches code that calls `.dtype` on it.
+
+---
+
+### 13. IIF arity — 2 failures
+**Error**: `FunctionExecutionError: select_values() takes 2 positional arguments but 3 were given`
+**Root Cause**: IIF dispatches to `select_values()` with 3 arguments; function signature expects 2.
+
+---
+
+### 14. DictionaryVector in arithmetic / timestamp coerce — 4 failures
+**Error**: `TypeError: must be real number, not DictionaryVector` / `TypeError: int() argument ... not 'DictionaryVector'`
+**Root Cause**: Dict-encoded columns reach arithmetic operators and `_coerce_timestamp` without being decoded first.
+
+---
+
+### 15. TRIM / LTRIM on binary-typed columns — 2 failures
+**Error**: `ArrowNotImplementedError: Function 'utf8_trim' / 'utf8_ltrim' has no kernel matching input types (binary)`
+**Root Cause**: TRIM/LTRIM call pyarrow utf8 kernels on binary (large_binary) typed columns.
+
+---
+
+### 16. Date / timestamp vs integer comparison — 4 failures
+**Error**: `ArrowNotImplementedError: less/greater (date64[ms], int64)`
+**Root Cause**: Direct comparison of date/timestamp columns against raw integer values — missing coercion step.
+
+---
+
+### 17. LENGTH got ArrayVector not StringVector — 3 failures
+**Error**: `FunctionExecutionError: Argument 'vec' has incorrect type (expected StringVector, got ArrayVector)`
+**Root Cause**: LENGTH called on a list-typed column, which produces an ArrayVector, not a StringVector.
+
+---
+
 ## Priority Order
 
 | # | Issue | Count | Effort |
 |---|-------|-------|--------|
-| 1a | ARRAY_AGG not in supported aggregates | ~10 | Large (engine impl) |
-| 1d | Subquery with unsupported GROUP BY (cascades from 1a) | free when 1a done | Free |
-| 1f | Aggregate-only node (CONCAT/GREATEST/LEAST of ARRAY_AGG) | free when 1a done | Free |
-| 1c | APPROX_PERCENTILE not supported | 2 | Medium |
-| 1e | Aggregate without parameters | investigate | Small |
+| 2 | AssertionError / wrong row counts | 38 | Investigate |
+| 3 | ArrowVector in `_coerce_timestamp` | 7 | Small |
+| 4 | Invalid timestamp (µs epoch integer) | 7 | Small |
+| 5 | TimestampVector to pyarrow compute | 6 | Small |
+| 8 | CONCAT with binary column | 3 | Small |
+| 13 | IIF arity | 2 | Small |
+| 14 | DictionaryVector in arithmetic | 4 | Small |
+| 6 | Buffer 0-dimensional | 4 | Investigate |
+| 7 | IndexError in ROUND/TIME_BUCKET | 4 | Small |
+| 9 | Carchar + DictionaryVector routing | 3 | Small |
+| 10/12 | IFNULL/IFNOTNULL scalar str | 5 | Small |
+| 11 | ArrayVector/ListArray mismatch | 5 | Small |
+| 15 | TRIM/LTRIM on binary | 2 | Small |
+| 16 | Date vs integer comparison | 4 | Small |
+| 17 | LENGTH got ArrayVector | 3 | Small |
+| 1a | ARRAY_AGG | ✅ done (session 5) | — |
 | 1b | ANY_VALUE | ✅ done (session 4) | — |
+| 1c | APPROX_PERCENTILE not supported | 2 | Medium |
+| 1d | Subquery cascades from 1a | free | Free |
+| 1e | Aggregate without parameters | investigate | Small |
+| 1f | Aggregate-only node | free | Free |
 
 ---
 
