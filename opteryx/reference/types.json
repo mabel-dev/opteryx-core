@@ -12,6 +12,11 @@
             "collection": true,
             "parameterized": true
         },
+        "metadata": {
+            "description": "Array of values of a single type.",
+            "example": "[1, 2, 3]",
+            "notes": "Element type is specified as ARRAY<INTEGER>, ARRAY<VARCHAR>, etc."
+        },
         "parameterized_forms": [
             "ARRAY<INTEGER>"
         ],
@@ -52,6 +57,13 @@
             "collection": false,
             "parameterized": false
         },
+        "metadata": {
+            "description": "Binary large object (bytes).",
+            "min": 0,
+            "max": null,
+            "example": "b'\\x01\\x02'",
+            "notes": "By default, length is unbounded unless specified (e.g. BLOB[1024])."
+        },
         "parameterized_forms": [],
         "ingestion_mappings": {
             "parquet_physical": [
@@ -85,6 +97,13 @@
             "collection": false,
             "parameterized": false
         },
+        "metadata": {
+            "description": "Boolean value representing true or false.",
+            "min": false,
+            "max": true,
+            "example": "TRUE",
+            "notes": "Accepted values include TRUE/FALSE, 1/0, YES/NO, ON/OFF (case-insensitive)."
+        },
         "parameterized_forms": [],
         "ingestion_mappings": {
             "parquet_physical": [
@@ -111,6 +130,13 @@
             "collection": false,
             "parameterized": false
         },
+        "metadata": {
+            "description": "Calendar date (YYYY-MM-DD).",
+            "min": "0001-01-01",
+            "max": "9999-12-31",
+            "example": "2023-04-18",
+            "notes": "Parsed from ISO date strings and timestamps."
+        },
         "parameterized_forms": [],
         "ingestion_mappings": {
             "parquet_physical": [],
@@ -133,6 +159,13 @@
             "temporal": false,
             "collection": false,
             "parameterized": true
+        },
+        "metadata": {
+            "description": "Fixed-point decimal number with configurable precision and scale.",
+            "example": "123.45",
+            "notes": "If precision/scale are not defined, defaults to precision=38 and scale=21.",
+            "min": "-99999999999999999.999999999999999999999",
+            "max": "99999999999999999.999999999999999999999"
         },
         "parameterized_forms": [
             "DECIMAL(10,2)"
@@ -165,6 +198,13 @@
             "temporal": false,
             "collection": false,
             "parameterized": false
+        },
+        "metadata": {
+            "description": "Double-precision floating point number.",
+            "min": -1.7976931348623157e+308,
+            "max": 1.7976931348623157e+308,
+            "example": "123.45",
+            "notes": "Supports scientific notation (e.g. 1.23e5)."
         },
         "parameterized_forms": [],
         "ingestion_mappings": {
@@ -202,6 +242,13 @@
             "collection": false,
             "parameterized": false
         },
+        "metadata": {
+            "description": "Signed 64-bit integer.",
+            "min": -9223372036854775808,
+            "max": 9223372036854775807,
+            "example": "42",
+            "notes": "Parsed from strings, floats, and booleans."
+        },
         "parameterized_forms": [],
         "ingestion_mappings": {
             "parquet_physical": [
@@ -229,6 +276,11 @@
             "collection": false,
             "parameterized": false
         },
+        "metadata": {
+            "description": "Time interval/duration.",
+            "example": "1 day 02:03:04",
+            "notes": "Represented as a Python timedelta."
+        },
         "parameterized_forms": [],
         "ingestion_mappings": {
             "parquet_physical": [],
@@ -248,6 +300,11 @@
             "temporal": false,
             "collection": true,
             "parameterized": false
+        },
+        "metadata": {
+            "description": "JSON binary data.",
+            "example": "{'key': 'value'}",
+            "notes": "Stored as a binary JSON blob."
         },
         "parameterized_forms": [],
         "ingestion_mappings": {
@@ -275,25 +332,10 @@
             "collection": false,
             "parameterized": false
         },
-        "parameterized_forms": [],
-        "ingestion_mappings": {
-            "parquet_physical": [],
-            "parquet_logical": [],
-            "jsonl": []
-        }
-    },
-    "struct": {
-        "canonical_name": "STRUCT",
-        "aliases": [],
-        "accepted_spellings": [
-            "struct"
-        ],
-        "family": "nested",
-        "flags": {
-            "numeric": false,
-            "temporal": false,
-            "collection": true,
-            "parameterized": false
+        "metadata": {
+            "description": "Null value.",
+            "example": "NULL",
+            "notes": "Represents absence of a value."
         },
         "parameterized_forms": [],
         "ingestion_mappings": {
@@ -314,6 +356,13 @@
             "temporal": true,
             "collection": false,
             "parameterized": false
+        },
+        "metadata": {
+            "description": "Time of day (HH:MM:SS).",
+            "min": "00:00:00",
+            "max": "23:59:59.999999",
+            "example": "12:34:56",
+            "notes": "Parsed from ISO time strings."
         },
         "parameterized_forms": [],
         "ingestion_mappings": {
@@ -337,6 +386,13 @@
             "temporal": true,
             "collection": false,
             "parameterized": false
+        },
+        "metadata": {
+            "description": "Timestamp including date and time.",
+            "min": "0001-01-01 00:00:00",
+            "max": "9999-12-31 23:59:59.999999",
+            "example": "2023-04-18T12:34:56",
+            "notes": "Parsed from ISO 8601 strings and unix timestamps."
         },
         "parameterized_forms": [],
         "ingestion_mappings": {
@@ -366,6 +422,13 @@
             "collection": false,
             "parameterized": false
         },
+        "metadata": {
+            "description": "Variable-length string.",
+            "min": 0,
+            "max": null,
+            "example": "hello",
+            "notes": "By default, length is unbounded unless specified (e.g. VARCHAR[255])."
+        },
         "parameterized_forms": [],
         "ingestion_mappings": {
             "parquet_physical": [],
@@ -389,6 +452,11 @@
             "temporal": false,
             "collection": true,
             "parameterized": false
+        },
+        "metadata": {
+            "description": "Fixed-length numeric vector.",
+            "example": "[0.1, 0.2, 0.3]",
+            "notes": "Length can be specified as VECTOR[<size>]."
         },
         "parameterized_forms": [],
         "ingestion_mappings": {

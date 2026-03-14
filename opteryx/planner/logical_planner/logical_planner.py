@@ -213,9 +213,11 @@ def extract_simple_filter(filters, identifier: str = "Name"):
 
 
 def _is_vector_order_expression(node: Node) -> bool:
-    source_identifier = _get_vector_order_source_identifier(node.parameters[0]) if (
-        node.node_type == NodeType.FUNCTION and len(node.parameters) == 2
-    ) else None
+    source_identifier = (
+        _get_vector_order_source_identifier(node.parameters[0])
+        if (node.node_type == NodeType.FUNCTION and len(node.parameters) == 2)
+        else None
+    )
     return (
         node.node_type == NodeType.FUNCTION
         and node.value in ("COSINE_SIMILARITY", "COSINE_DISTANCE")
@@ -409,7 +411,10 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
         and _projection[0].value is None
     ):
         for column in _projection:
-            if column.node_type == NodeType.LITERAL and column.type in (OrsoTypes.ARRAY, OrsoTypes.VECTOR):
+            if column.node_type == NodeType.LITERAL and column.type in (
+                OrsoTypes.ARRAY,
+                OrsoTypes.VECTOR,
+            ):
                 if ast_branch["Select"].get("distinct"):
                     raise UnsupportedSyntaxError(
                         "Values cannot be parenthesised in the SELECT clause. Did you mean DISTINCT ON(cols) cols FROM ?"

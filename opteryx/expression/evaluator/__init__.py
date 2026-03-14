@@ -836,16 +836,22 @@ def draken_compare(op: str, left, right):
         elif op == "InList":
             import pyarrow as _pa
             import pyarrow.compute as _pac
+
             from opteryx.draken.vectors.bool_vector import BoolVector as _BoolVec
+
             bool_set = {bool(v) for v in right if v is not None}
             result_arr = _pac.is_in(left.to_arrow(), _pa.array(list(bool_set), type=_pa.bool_()))
             result = _BoolVec.from_arrow(result_arr)
         else:
             import pyarrow.compute as _pac
+
             from opteryx.draken.vectors.bool_vector import BoolVector as _BoolVec
+
             _BOOL_ARROW_OPS = {
-                "Lt": _pac.less, "Gt": _pac.greater,
-                "LtEq": _pac.less_equal, "GtEq": _pac.greater_equal,
+                "Lt": _pac.less,
+                "Gt": _pac.greater,
+                "LtEq": _pac.less_equal,
+                "GtEq": _pac.greater_equal,
             }
             fn = _BOOL_ARROW_OPS.get(op)
             if fn is None:

@@ -29,36 +29,51 @@ def test_operator_catalog_json_matches_export():
 
 def test_type_catalog_includes_runtime_metadata():
     catalog = export_type_catalog()
+    assert "struct" not in catalog
 
     integer_type = catalog["integer"]
     assert integer_type["canonical_name"] == "INTEGER"
     assert integer_type["family"] == "numeric"
     assert integer_type["flags"]["numeric"] is True
     assert integer_type["flags"]["temporal"] is False
+    assert integer_type["metadata"]["description"] == "Signed 64-bit integer."
+    assert integer_type["metadata"]["example"] == "42"
+    assert integer_type["metadata"]["min"] == -9223372036854775808
+    assert integer_type["metadata"]["max"] == 9223372036854775807
     assert "int64" in integer_type["aliases"]
     assert "int32" in integer_type["ingestion_mappings"]["parquet_physical"]
     assert "int64" in integer_type["ingestion_mappings"]["jsonl"]
 
     decimal_type = catalog["decimal"]
+    assert decimal_type["metadata"]["description"].startswith("Fixed-point decimal number")
+    assert decimal_type["metadata"]["example"] == "123.45"
     assert decimal_type["parameterized_forms"] == ["DECIMAL(10,2)"]
     assert "decimal(...)" in decimal_type["ingestion_mappings"]["parquet_logical_patterns"]
 
     array_type = catalog["array"]
     assert array_type["family"] == "nested"
     assert array_type["flags"]["collection"] is True
+    assert array_type["metadata"]["description"] == "Array of values of a single type."
     assert array_type["parameterized_forms"] == ["ARRAY<INTEGER>"]
     assert "array<...>" in array_type["ingestion_mappings"]["jsonl_patterns"]
     assert "integer" in array_type["element_type_aliases"]
+
+    vector_type = catalog["vector"]
+    assert vector_type["family"] == "vector"
+    assert vector_type["metadata"]["description"] == "Fixed-length numeric vector."
+    assert vector_type["metadata"]["example"] == "[0.1, 0.2, 0.3]"
 
 
 def test_operator_catalog_includes_binder_matrix_metadata():
     catalog = export_operator_catalog()
 
     eq_operator = catalog["Eq"]
-    assert eq_operator["display_name"] == "="
-    assert eq_operator["token"] == "="
+    assert eq_operator["ast_symbol"] == "Eq"
+    assert eq_operator["friendly_name"] == "Equals"
+    assert eq_operator["sql_symbol"] == "="
+    assert eq_operator["node_kind"] == "comparison"
     assert eq_operator["category"] == "comparison"
-    assert eq_operator["summary"] == "Equality comparison."
+    assert eq_operator["description"] == "Equality comparison."
     assert eq_operator["documentation"] == "Returns true when both operands compare equal."
     assert eq_operator["signature_count"] == 23
     assert eq_operator["result_types"] == ["boolean"]
@@ -71,7 +86,10 @@ def test_operator_catalog_includes_binder_matrix_metadata():
     } in eq_operator["signatures"]
 
     concat_operator = catalog["StringConcat"]
-    assert concat_operator["display_name"] == "||"
+    assert concat_operator["ast_symbol"] == "StringConcat"
+    assert concat_operator["friendly_name"] == "Concatenation"
+    assert concat_operator["sql_symbol"] == "||"
+    assert concat_operator["node_kind"] == "binary"
     assert concat_operator["category"] == "binary"
     assert {
         "left_type": "varchar",
@@ -82,7 +100,9 @@ def test_operator_catalog_includes_binder_matrix_metadata():
     } in concat_operator["signatures"]
 
     map_access = catalog["MapAccess"]
-    assert map_access["display_name"] == "[]"
+    assert map_access["friendly_name"] == "Subscript access"
+    assert map_access["sql_symbol"] == "[]"
+    assert map_access["node_kind"] == "extraction"
     assert map_access["category"] == "extraction"
     assert map_access["has_dynamic_result"] is True
     assert "dynamic" in map_access["notes"]
@@ -95,10 +115,12 @@ def test_operator_catalog_includes_binder_matrix_metadata():
     } in map_access["signatures"]
 
     xor_operator = catalog["Xor"]
-    assert xor_operator["display_name"] == "XOR"
-    assert xor_operator["token"] == "XOR"
+    assert xor_operator["ast_symbol"] == "Xor"
+    assert xor_operator["friendly_name"] == "Logical XOR"
+    assert xor_operator["sql_symbol"] == "XOR"
+    assert xor_operator["node_kind"] == "logical"
     assert xor_operator["category"] == "logical"
-    assert xor_operator["summary"] == "Logical exclusive OR."
+    assert xor_operator["description"] == "Logical exclusive OR."
     assert xor_operator["signature_count"] == 1
     assert xor_operator["result_types"] == ["boolean"]
     assert {

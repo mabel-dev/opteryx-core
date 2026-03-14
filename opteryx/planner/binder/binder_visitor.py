@@ -1045,7 +1045,9 @@ class BinderVisitor:
         # update the columns attribute, preserving order
         bound_columns = {c.schema_column.identity: c for c in columns}
         node.columns = [bound_columns[c.schema_column.identity] for c in node.columns]
-        node.order_by_columns = [bound_columns[c.schema_column.identity] for c in node.order_by_columns]
+        node.order_by_columns = [
+            bound_columns[c.schema_column.identity] for c in node.order_by_columns
+        ]
 
         return node, context
 
@@ -1367,7 +1369,10 @@ class BinderVisitor:
 
             # this is the column that is being created
             element_type = OrsoTypes.VARCHAR
-            if node.unnest_column.schema_column and node.unnest_column.schema_column.type == OrsoTypes.VECTOR:
+            if (
+                node.unnest_column.schema_column
+                and node.unnest_column.schema_column.type == OrsoTypes.VECTOR
+            ):
                 element_type = OrsoTypes.DOUBLE
             elif node.unnest_column.schema_column and node.unnest_column.schema_column.element_type:
                 element_type = node.unnest_column.schema_column.element_type

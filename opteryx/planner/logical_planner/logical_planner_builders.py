@@ -28,13 +28,12 @@ from opteryx.exceptions import SqlError
 from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.expression import NodeType
 from opteryx.expression import format_expression
-from opteryx.expression.binary_operators import BINARY_OPERATORS
-from opteryx.expression.binary_operators import EXTRACTION_OPERATORS
 from opteryx.expression.binary_operators import binary_operations
 from opteryx.expression.intervals import MICROSECONDS_PER_DAY
 from opteryx.expression.intervals import MICROSECONDS_PER_HOUR
 from opteryx.expression.intervals import MICROSECONDS_PER_MINUTE
 from opteryx.expression.intervals import MICROSECONDS_PER_SECOND
+from opteryx.expression.operator_catalog import get_operator_node_type
 from opteryx.models import LogicalColumn
 from opteryx.models import Node
 from opteryx.utils import dates
@@ -451,17 +450,9 @@ def binary_op(branch, alias: Optional[List[str]] = None, key=None):
     if operator in ("PGRegexNotMatch", "NotSimilarTo"):
         operator = "NotRLike"
 
-    operator_type = NodeType.COMPARISON_OPERATOR
-    if operator in BINARY_OPERATORS:
-        operator_type = NodeType.BINARY_OPERATOR
-    elif operator in EXTRACTION_OPERATORS:
-        operator_type = NodeType.EXTRACTION_OPERATOR
-    if operator == "And":
-        operator_type = NodeType.AND
-    if operator == "Or":
-        operator_type = NodeType.OR
-    if operator == "Xor":
-        operator_type = NodeType.XOR
+    operator_type = get_operator_node_type(operator)
+    if operator_type is None:
+        raise UnsupportedSyntaxError(f"Unsupported operator '{operator}'.")
 
     return Node(
         operator_type,
