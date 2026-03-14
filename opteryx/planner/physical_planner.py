@@ -126,7 +126,12 @@ def create_physical_plan(logical_plan, query_properties) -> PhysicalPlan:
         elif node_type == LogicalPlanStepType.Order:
             node = operators.SortNode(query_properties, **{k:v for k,v in node_config.items() if k in ("order_by", "all_relations")})
         elif node_type == LogicalPlanStepType.Project:
-            node = operators.ProjectionNode(query_properties, projection=logical_node.columns, **{k:v for k,v in node_config.items() if k in ("projection", "all_relations")})
+            node = operators.ProjectionNode(
+                query_properties,
+                projection=logical_node.columns,
+                order_by_columns=getattr(logical_node, "order_by_columns", []),
+                **{k: v for k, v in node_config.items() if k in ("projection", "all_relations")},
+            )
         elif node_type == LogicalPlanStepType.Scan:
             connector = node_config.get("connector")
             if connector == "__null__":

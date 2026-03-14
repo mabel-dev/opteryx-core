@@ -502,8 +502,8 @@ class TestResolve:
         result = catalog.resolve(
             "COSINE_SIMILARITY",
             [
-                self._make_node(OrsoTypes.ARRAY, element_type=OrsoTypes.DOUBLE),
-                self._make_node(OrsoTypes.ARRAY, element_type=OrsoTypes.DOUBLE),
+                self._make_node(OrsoTypes.VECTOR, element_type=OrsoTypes.DOUBLE),
+                self._make_node(OrsoTypes.VECTOR, element_type=OrsoTypes.DOUBLE),
             ],
             self._make_context(),
         )
@@ -532,8 +532,8 @@ class TestResolve:
         result = catalog.resolve(
             "COSINE_DISTANCE",
             [
-                self._make_node(OrsoTypes.ARRAY, element_type=OrsoTypes.DOUBLE),
-                self._make_node(OrsoTypes.ARRAY, element_type=OrsoTypes.DOUBLE),
+                self._make_node(OrsoTypes.VECTOR, element_type=OrsoTypes.DOUBLE),
+                self._make_node(OrsoTypes.VECTOR, element_type=OrsoTypes.DOUBLE),
             ],
             self._make_context(),
         )

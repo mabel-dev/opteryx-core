@@ -1256,7 +1256,7 @@ def _builtin_array_misc_functions() -> list[FunctionDefinition]:
     _set = ParameterSpec(name="items", type_family="array")
 
     def _embed_return_type(_arg_nodes):
-        return (OrsoTypes.ARRAY, OrsoTypes.DOUBLE)
+        return OrsoTypes.VECTOR
 
     return [
         _make(

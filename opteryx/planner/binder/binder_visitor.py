@@ -525,7 +525,7 @@ class BinderVisitor:
                     if len(node.values[0]) >= i:
                         value = node.values[0][i]
                         types[column] = value.type
-                        if value.type == OrsoTypes.ARRAY:
+                        if value.type in (OrsoTypes.ARRAY, OrsoTypes.VECTOR):
                             element_type = getattr(value, "element_type", None)
                             if element_type in (None, OrsoTypes._MISSING_TYPE):
                                 schema_column = getattr(value, "schema_column", None)
@@ -894,9 +894,10 @@ class BinderVisitor:
 
     def visit_project(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
         columns = []
+        projected_column_count = 0
 
         # Handle wildcards, including qualified wildcards.
-        for column in list(node.columns) + list(node.order_by_columns):
+        for column in list(node.columns):
             if column.node_type != NodeType.WILDCARD:
                 columns.append(column)
             elif column.value is None:
@@ -973,12 +974,25 @@ class BinderVisitor:
                         name=name, columns=[col.schema_column for col in columns]
                     )
 
+        projected_column_count = len(columns)
+
+        for column in list(node.order_by_columns):
+            if column.node_type != NodeType.WILDCARD:
+                columns.append(column)
+                continue
+            raise UnsupportedSyntaxError("ORDER BY does not support wildcard projections.")
+
         # Bind the local columns to physical columns
         node.columns, group_contexts = zip(*(inner_binder(col, context) for col in columns))
+        bound_columns = list(node.columns)
+        node.columns = list(bound_columns[:projected_column_count])
+        node.order_by_columns = list(bound_columns[projected_column_count:])
         context.schemas = merge_schemas(*[ctx.schemas for ctx in group_contexts])
 
         # Check for duplicates
-        all_top_level_identities = [c.schema_column.identity for c in node.columns]
+        all_top_level_identities = [
+            c.schema_column.identity for c in list(node.columns) + list(node.order_by_columns)
+        ]
         if len(set(all_top_level_identities)) != len(all_top_level_identities):
             from collections import Counter
 
@@ -1004,7 +1018,11 @@ class BinderVisitor:
                 for column in schema_columns:
                     # for each column in the schema, try to find the node's columns
                     node_column = next(
-                        (n for n in node.columns if n.schema_column.identity == column.identity),
+                        (
+                            n
+                            for n in list(node.columns) + list(node.order_by_columns)
+                            if n.schema_column.identity == column.identity
+                        ),
                         None,
                     )
                     # update the column reference with any AS aliases
@@ -1013,7 +1031,7 @@ class BinderVisitor:
                         column.aliases.append(node_column.alias)
                 # update the schema with columns we have references to, removing redundant columns
                 schema.columns = schema_columns
-                for column in node.columns:
+                for column in list(node.columns) + list(node.order_by_columns):
                     if column.schema_column.identity in [i.identity for i in schema_columns]:
                         columns.append(column)
 
@@ -1027,6 +1045,7 @@ class BinderVisitor:
         # update the columns attribute, preserving order
         bound_columns = {c.schema_column.identity: c for c in columns}
         node.columns = [bound_columns[c.schema_column.identity] for c in node.columns]
+        node.order_by_columns = [bound_columns[c.schema_column.identity] for c in node.order_by_columns]
 
         return node, context
 
@@ -1337,17 +1356,20 @@ class BinderVisitor:
             if node.unnest_column.schema_column.type not in (
                 0,
                 OrsoTypes.ARRAY,
+                OrsoTypes.VECTOR,
                 OrsoTypes.NULL,
             ):
                 from opteryx.exceptions import IncorrectTypeError
 
                 raise IncorrectTypeError(
-                    f"CROSS JOIN UNNEST requires an ARRAY type column, not {node.unnest_column.schema_column.type}."
+                    f"CROSS JOIN UNNEST requires an ARRAY or VECTOR type column, not {node.unnest_column.schema_column.type}."
                 )
 
             # this is the column that is being created
             element_type = OrsoTypes.VARCHAR
-            if node.unnest_column.schema_column and node.unnest_column.schema_column.element_type:
+            if node.unnest_column.schema_column and node.unnest_column.schema_column.type == OrsoTypes.VECTOR:
+                element_type = OrsoTypes.DOUBLE
+            elif node.unnest_column.schema_column and node.unnest_column.schema_column.element_type:
                 element_type = node.unnest_column.schema_column.element_type
 
             schema_column = FlatColumn(name=node.unnest_alias, type=element_type)

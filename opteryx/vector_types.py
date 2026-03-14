@@ -47,8 +47,9 @@ def resolve_node_type(node) -> tuple[Optional[OrsoTypes], Optional[OrsoTypes]]:
 def is_numeric_vector_type(
     value_type: Optional[OrsoTypes], element_type: Optional[OrsoTypes]
 ) -> bool:
-    """True when the type pair represents a numeric array usable as a vector."""
-    return value_type == OrsoTypes.ARRAY and element_type in NUMERIC_VECTOR_ELEMENT_TYPES
+    """True when the type pair represents a VECTOR."""
+    del element_type
+    return value_type == OrsoTypes.VECTOR
 
 
 def node_is_numeric_vector(node) -> bool:
@@ -62,6 +63,8 @@ def node_is_literal_numeric_vector(node) -> bool:
 
     if node is None or node.node_type != NodeType.LITERAL:
         return False
+    if getattr(node, "type", None) == OrsoTypes.VECTOR:
+        return True
     value = getattr(node, "value", None)
     if not isinstance(value, (list, tuple, numpy.ndarray)):
         return False
@@ -97,3 +100,21 @@ def node_is_vector_query_expression(node) -> bool:
         or node_is_literal_numeric_vector(node)
         or node_is_constant_embed_call(node)
     )
+
+
+def get_vector_source_identifier(node):
+    """Return the identifier behind a vector source expression, if any."""
+    from opteryx.expression import NodeType
+
+    if node is None:
+        return None
+    if node.node_type == NodeType.IDENTIFIER and node_is_numeric_vector(node):
+        return node
+    if (
+        node.node_type == NodeType.CAST
+        and getattr(node, "value", None) in {"VECTOR", "TRY_VECTOR"}
+        and getattr(node, "left", None) is not None
+        and node.left.node_type == NodeType.IDENTIFIER
+    ):
+        return node.left
+    return None

@@ -53,6 +53,20 @@ from opteryx.expression.intervals import normalize_interval_value
 from opteryx.models import Node
 
 
+def _infer_collection_literal(value: Any) -> tuple[OrsoTypes, Optional[OrsoTypes]]:
+    if not isinstance(value, (list, tuple)) or not value:
+        return OrsoTypes.ARRAY, None
+
+    element_types = {build_literal_node(item).type for item in value if item is not None}
+    if len(element_types) != 1:
+        return OrsoTypes.ARRAY, None
+
+    element_type = element_types.pop()
+    if element_type in (OrsoTypes.INTEGER, OrsoTypes.DOUBLE, OrsoTypes.DECIMAL):
+        return OrsoTypes.VECTOR, OrsoTypes.DOUBLE
+    return OrsoTypes.ARRAY, element_type
+
+
 def build_literal_node(
     value: Any, root: Optional[Node] = None, suggested_type: Optional[OrsoTypes] = None
 ):
@@ -75,6 +89,11 @@ def build_literal_node(
         root.right = None
         return root
 
+    collection_type = None
+    element_type = None
+    if suggested_type in (OrsoTypes._MISSING_TYPE, 0, None):
+        collection_type, element_type = _infer_collection_literal(value)
+
     # Define a mapping of types to OrsoTypes
     type_mapping = {
         bool: OrsoTypes.BOOLEAN,
@@ -92,8 +111,8 @@ def build_literal_node(
         datetime.time: OrsoTypes.TIME,
         datetime.date: OrsoTypes.DATE,
         decimal.Decimal: OrsoTypes.DECIMAL,
-        list: OrsoTypes.ARRAY,
-        tuple: OrsoTypes.ARRAY,
+        list: collection_type or OrsoTypes.ARRAY,
+        tuple: collection_type or OrsoTypes.ARRAY,
     }
 
     value_type = type(value)
@@ -108,9 +127,11 @@ def build_literal_node(
             if suggested_type not in (OrsoTypes._MISSING_TYPE, 0, None)
             else type_mapping[value_type]
         )
+        root.element_type = element_type
         root.left = None
         root.right = None
         root.schema_column.type = root.type
+        root.schema_column.element_type = element_type
 
     # DEBUG:log (f"Unable to create literal node for {value}, of type {value_type}")
     return root

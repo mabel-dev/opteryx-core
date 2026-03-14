@@ -28,6 +28,7 @@ from opteryx.expression import NodeType
 from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner import LogicalPlanNode
 from opteryx.planner.logical_planner import LogicalPlanStepType
+from opteryx.vector_types import get_vector_source_identifier
 from opteryx.vector_types import node_is_numeric_vector
 from opteryx.vector_types import node_is_vector_query_expression
 
@@ -48,7 +49,7 @@ class OperatorFusionStrategy(OptimizationStrategy):
             return False
         if len(expression.parameters) != 2:
             return False
-        if expression.parameters[0].node_type != NodeType.IDENTIFIER:
+        if get_vector_source_identifier(expression.parameters[0]) is None:
             return False
         if not node_is_numeric_vector(expression.parameters[0]):
             return False

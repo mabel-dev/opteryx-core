@@ -1658,18 +1658,20 @@
         "category": "extraction",
         "summary": "Subscript access operator.",
         "documentation": "Returns the element at the requested index from an array, string, or blob-like value.",
-        "signature_count": 3,
+        "signature_count": 4,
         "has_dynamic_result": true,
         "left_types": [
             "array",
             "blob",
-            "varchar"
+            "varchar",
+            "vector"
         ],
         "right_types": [
             "integer"
         ],
         "result_types": [
             "blob",
+            "double",
             "varchar"
         ],
         "signatures": [
@@ -1691,6 +1693,13 @@
                 "left_type": "varchar",
                 "right_type": "integer",
                 "result_type": "varchar",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "vector",
+                "right_type": "integer",
+                "result_type": "double",
                 "result_type_is_dynamic": false,
                 "cost_estimate": 100.0
             }

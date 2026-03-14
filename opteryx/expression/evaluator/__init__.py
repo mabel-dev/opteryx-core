@@ -84,6 +84,7 @@ def apply_bounded_function(node, *parameters) -> Any:
         and len(parameters) > 0
         and not isinstance(parameters[0], int)
         and all(isinstance(arr, numpy.ndarray) for arr in parameters)
+        and all(arr.ndim == 1 for arr in parameters)
     ):
         morsel_size = len(parameters[0])
         null_positions = numpy.zeros(morsel_size, dtype=numpy.bool_)
@@ -188,6 +189,8 @@ def _coerce_date32_set(values) -> frozenset:
 
 
 def _coerce_timestamp(value) -> int:
+    if isinstance(value, numpy.datetime64):
+        return int(value.astype("datetime64[us]").astype(numpy.int64))
     if isinstance(value, datetime.datetime):
         return int(value.timestamp() * 1_000_000)
     if isinstance(value, datetime.date):
@@ -825,6 +828,30 @@ def draken_compare(op: str, left, right):
         result = _constant_compare(op, left, right)
     elif cls == "ArrowVector":
         result = _arrow_vector_compare(op, left, right)
+    elif cls == "BoolVector":
+        if op == "Eq":
+            result = left.equals(bool(right))
+        elif op == "NotEq":
+            result = left.not_equals(bool(right))
+        elif op == "InList":
+            import pyarrow as _pa
+            import pyarrow.compute as _pac
+            from opteryx.draken.vectors.bool_vector import BoolVector as _BoolVec
+            bool_set = {bool(v) for v in right if v is not None}
+            result_arr = _pac.is_in(left.to_arrow(), _pa.array(list(bool_set), type=_pa.bool_()))
+            result = _BoolVec.from_arrow(result_arr)
+        else:
+            import pyarrow.compute as _pac
+            from opteryx.draken.vectors.bool_vector import BoolVector as _BoolVec
+            _BOOL_ARROW_OPS = {
+                "Lt": _pac.less, "Gt": _pac.greater,
+                "LtEq": _pac.less_equal, "GtEq": _pac.greater_equal,
+            }
+            fn = _BOOL_ARROW_OPS.get(op)
+            if fn is None:
+                raise NotImplementedError(f"BoolVector: unsupported op {op!r}")
+            result_arr = fn(left.to_arrow(), bool(right))
+            result = _BoolVec.from_arrow(result_arr)
     else:
         raise NotImplementedError(f"draken_compare: unsupported vector type {cls!r}")
 

@@ -30,7 +30,7 @@ def _simple_collector(schema):
             type_label += f"[{column.length}]"
         if column.scale is not None and column.precision is not None:
             type_label += f"({column.precision},{column.scale})"
-        if column.element_type is not None:
+        if column.element_type is not None and str(column.type) == "ARRAY":
             type_label += f"<{column.element_type}>"
 
         new_row = {

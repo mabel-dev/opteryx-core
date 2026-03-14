@@ -104,14 +104,23 @@ def null_if(col1, col2):
     """
     Returns null if col1 equals col2, otherwise returns col1.
     """
+    # Convert draken vectors to numpy arrays
+    if hasattr(col1, "to_arrow") and not isinstance(col1, pyarrow.Array):
+        col1 = col1.to_arrow().to_pylist()
+    if hasattr(col2, "to_arrow") and not isinstance(col2, pyarrow.Array):
+        col2 = col2.to_arrow().to_pylist()
     if isinstance(col1, pyarrow.Array):
         col1 = col1.to_numpy(False)
     if isinstance(col1, list):
-        col1 = col1.array(col1)
+        col1 = numpy.array(col1, dtype=object)
     if isinstance(col2, pyarrow.Array):
         col2 = col2.to_numpy(False)
     if isinstance(col2, list):
-        col2 = col2.array(col2)
+        col2 = numpy.array(col2, dtype=object)
+    # Handle scalar col2 directly (e.g. numpy.int64 scalar from constant folding)
+    if numpy.isscalar(col2):
+        mask = col1 == col2
+        return numpy.where(mask, None, col1)
 
     from orso.types import PYTHON_TO_ORSO_MAP
     from orso.types import OrsoTypes

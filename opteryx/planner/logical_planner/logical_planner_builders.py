@@ -384,10 +384,14 @@ def array(branch, alias: Optional[List[str]] = None, key=None):
     if len(element_type) > 1:
         raise ArrayWithMixedTypesError("Literal ARRAY has values with mixed types.")
     element_type = element_type.pop() if len(element_type) == 1 else OrsoTypes.VARCHAR
+    literal_type = OrsoTypes.ARRAY
+    if element_type in (OrsoTypes.INTEGER, OrsoTypes.DOUBLE, OrsoTypes.DECIMAL):
+        literal_type = OrsoTypes.VECTOR
+        element_type = OrsoTypes.DOUBLE
 
     return Node(
         node_type=NodeType.LITERAL,
-        type=OrsoTypes.ARRAY,
+        type=literal_type,
         element_type=element_type,
         value=value_list,
     )
@@ -595,6 +599,7 @@ def _normalize_cast_type(data_type: str) -> str:
         "struct": "STRUCT",
         "blob": "BLOB",
         "array": "ARRAY",
+        "vector": "VECTOR",
     }
 
     # Check type mappings
@@ -1160,12 +1165,16 @@ def tuple_literal(branch, alias: Optional[List[str]] = None, key=None):
     element_type = None
     if len(node_types) == 1:
         element_type = node_types.pop()
+    literal_type = OrsoTypes.ARRAY
+    if element_type in (OrsoTypes.INTEGER, OrsoTypes.DOUBLE, OrsoTypes.DECIMAL):
+        literal_type = OrsoTypes.VECTOR
+        element_type = OrsoTypes.DOUBLE
 
     if values and isinstance(values[0], dict):
         values = [build(val["Identifier"]).value for val in values]
     return Node(
         NodeType.LITERAL,
-        type=OrsoTypes.ARRAY,
+        type=literal_type,
         element_type=element_type,
         value=tuple(values),
         alias=alias,

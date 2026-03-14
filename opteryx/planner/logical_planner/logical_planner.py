@@ -31,6 +31,7 @@ from opteryx.planner.logical_planner import logical_planner_builders
 from opteryx.planner.logical_planner.logical_planner_rewriter import decompose_aggregates
 from opteryx.third_party.travers import Graph
 from opteryx.utils import dnf
+from opteryx.vector_types import get_vector_source_identifier
 from opteryx.vector_types import node_is_vector_query_expression
 
 
@@ -212,13 +213,32 @@ def extract_simple_filter(filters, identifier: str = "Name"):
 
 
 def _is_vector_order_expression(node: Node) -> bool:
+    source_identifier = _get_vector_order_source_identifier(node.parameters[0]) if (
+        node.node_type == NodeType.FUNCTION and len(node.parameters) == 2
+    ) else None
     return (
         node.node_type == NodeType.FUNCTION
         and node.value in ("COSINE_SIMILARITY", "COSINE_DISTANCE")
         and len(node.parameters) == 2
-        and node.parameters[0].node_type == NodeType.IDENTIFIER
+        and source_identifier is not None
         and node_is_vector_query_expression(node.parameters[1])
     )
+
+
+def _get_vector_order_source_identifier(node: Node):
+    source_identifier = get_vector_source_identifier(node)
+    if source_identifier is not None:
+        return source_identifier
+    if node.node_type == NodeType.IDENTIFIER:
+        return node
+    if (
+        node.node_type == NodeType.CAST
+        and getattr(node, "value", None) in {"VECTOR", "TRY_VECTOR"}
+        and getattr(node, "left", None) is not None
+        and node.left.node_type == NodeType.IDENTIFIER
+    ):
+        return node.left
+    return None
 
 
 def _table_name(branch):
@@ -389,7 +409,7 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
         and _projection[0].value is None
     ):
         for column in _projection:
-            if column.node_type == NodeType.LITERAL and column.type == OrsoTypes.ARRAY:
+            if column.node_type == NodeType.LITERAL and column.type in (OrsoTypes.ARRAY, OrsoTypes.VECTOR):
                 if ast_branch["Select"].get("distinct"):
                     raise UnsupportedSyntaxError(
                         "Values cannot be parenthesised in the SELECT clause. Did you mean DISTINCT ON(cols) cols FROM ?"
@@ -445,20 +465,26 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
                         if (ord_col.source or "").lower() != (proj_col.value[0] or "").lower()
                     ]
 
-            existing_projection_identities = {
-                getattr(col.schema_column, "identity", None)
-                for col in list(_projection) + list(_order_by_columns_not_in_projection)
-                if getattr(col, "schema_column", None) is not None
-            }
             for ord_col in _order_by_columns:
                 if not _is_vector_order_expression(ord_col):
                     continue
-                source_column = ord_col.parameters[0]
+                _order_by_columns_not_in_projection = [
+                    candidate
+                    for candidate in _order_by_columns_not_in_projection
+                    if candidate is not ord_col
+                ]
+                source_column = _get_vector_order_source_identifier(ord_col.parameters[0])
+                if source_column is None:
+                    continue
                 source_identity = getattr(source_column.schema_column, "identity", None)
+                existing_projection_identities = {
+                    getattr(col.schema_column, "identity", None)
+                    for col in list(_projection) + list(_order_by_columns_not_in_projection)
+                    if getattr(col, "schema_column", None) is not None
+                }
                 if source_identity in existing_projection_identities:
                     continue
                 _order_by_columns_not_in_projection.append(source_column)
-                existing_projection_identities.add(source_identity)
 
         project_step = LogicalPlanNode(node_type=LogicalPlanStepType.Project)
         project_step.columns = _projection

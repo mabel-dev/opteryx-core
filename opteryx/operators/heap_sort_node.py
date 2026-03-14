@@ -30,6 +30,7 @@ from opteryx.exceptions import ColumnNotFoundError
 from opteryx.expression import NodeType
 from opteryx.expression import evaluate_and_append
 from opteryx.models import QueryProperties
+from opteryx.vector_types import get_vector_source_identifier
 from opteryx.vector_types import node_is_numeric_vector
 from opteryx.vector_types import node_is_vector_query_expression
 
@@ -449,7 +450,8 @@ class HeapSortNode(BasePlanNode):
             return None
 
         source_node, query_node = order_expression.parameters
-        if source_node.node_type != NodeType.IDENTIFIER:
+        source_identifier = get_vector_source_identifier(source_node)
+        if source_identifier is None:
             return None
         if not node_is_numeric_vector(source_node) or not node_is_vector_query_expression(
             query_node
@@ -460,13 +462,21 @@ class HeapSortNode(BasePlanNode):
         if query_vector is None or query_vector.size == 0:
             return None
 
-        source_identity = getattr(source_node.schema_column, "identity", None)
-        if not source_identity:
-            return None
-
-        try:
-            source_values = morsel.column(source_identity.encode()).to_pylist()
-        except Exception:
+        source_keys = [
+            getattr(source_identifier.schema_column, "identity", None),
+            getattr(source_identifier, "source_column", None),
+            getattr(source_identifier.schema_column, "name", None),
+        ]
+        source_values = None
+        for source_key in source_keys:
+            if not source_key:
+                continue
+            try:
+                source_values = morsel.column(source_key.encode()).to_pylist()
+                break
+            except Exception:
+                continue
+        if source_values is None:
             return None
 
         dense_rows: list[numpy.ndarray] = []

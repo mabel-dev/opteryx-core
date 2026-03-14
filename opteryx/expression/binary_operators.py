@@ -194,7 +194,8 @@ def _ip_containment(left: List[Optional[str]], right: List[str]) -> List[Optiona
         from opteryx.draken.interop.arrow import vector_from_arrow as _vector_from_arrow
 
         arr = _pyarrow.array(normalized_left, type=_pyarrow.string())
-        return vector_ip_in_cidr(_vector_from_arrow(arr), str(right[0]))
+        cidr_str = right if isinstance(right, str) else str(right[0])
+        return vector_ip_in_cidr(_vector_from_arrow(arr), cidr_str)
     except (IndexError, AttributeError, ValueError, TypeError) as err:
         from opteryx.exceptions import IncorrectTypeError
 
