@@ -897,9 +897,7 @@ def _builtin_text_extended_functions() -> list[FunctionDefinition]:
             (_s, _n),
             summary="Return rightmost N characters.",
         ),
-        _make(
-            "REVERSE", _reverse, OrsoTypes.VARCHAR, (_s,), summary="Reverse a string."
-        ),
+        _make("REVERSE", _reverse, OrsoTypes.VARCHAR, (_s,), summary="Reverse a string."),
         _make(
             "SOUNDEX", _soundex, OrsoTypes.VARCHAR, (_s,), summary="Return Soundex phonetic code."
         ),

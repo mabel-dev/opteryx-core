@@ -487,6 +487,29 @@ class BinderVisitor:
         node.columns = get_all_nodes_of_type(node.condition, (NodeType.IDENTIFIER,))
         node.relations = node.condition.relations or {}
 
+        # Verify the predicate evaluates to a boolean — non-boolean expressions (e.g.
+        # bitwise arithmetic) are not valid WHERE conditions without an explicit comparison.
+        _condition_sc = getattr(node.condition, "schema_column", None)
+        _condition_type = (
+            _condition_sc.type
+            if _condition_sc is not None
+            else getattr(node.condition, "type", None)
+        )
+        if _condition_type not in (
+            None,
+            0,
+            OrsoTypes.BOOLEAN,
+            OrsoTypes.NULL,
+            OrsoTypes._MISSING_TYPE,
+        ):
+            from opteryx.expression import format_expression
+
+            expr = format_expression(node.condition)
+            raise UnsupportedSyntaxError(
+                f"WHERE condition `{expr}` returns {_condition_type} instead of BOOLEAN. "
+                f"To filter on this value, compare it explicitly (e.g. `{expr} != 0`)."
+            )
+
         return node, original_context
 
     def visit_function_dataset(

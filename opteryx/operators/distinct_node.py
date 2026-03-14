@@ -53,9 +53,10 @@ class DistinctNode(BasePlanNode):
                 return
             # iter_from_arrow returns a generator; process each chunk
             import pyarrow
+
             if isinstance(converted, pyarrow.Table):
                 converted = Morsel.iter_from_arrow(converted)
-            for sub_morsel in (converted if hasattr(converted, '__iter__') else [converted]):
+            for sub_morsel in converted if hasattr(converted, "__iter__") else [converted]:
                 yield from self.execute(sub_morsel, **kwargs)
             return
 

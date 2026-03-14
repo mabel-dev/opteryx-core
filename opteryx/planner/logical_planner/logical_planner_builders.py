@@ -211,7 +211,9 @@ def _evaluate_timetravel_expression(node, apply_interval_literal_to_now: bool = 
             _func_def = _catalog.get_definition(node.value)
             if _func_def is None or not _func_def.overloads:
                 raise UnsupportedSyntaxError(f"Unknown function '{node.value}'.")
-            resolved = _catalog.resolve(node.value, node.parameters, BindingContext(schema={}, bound_args={}))
+            resolved = _catalog.resolve(
+                node.value, node.parameters, BindingContext(schema={}, bound_args={})
+            )
             if resolved is None:
                 raise UnsupportedSyntaxError(f"Unknown function '{node.value}'.")
             result = resolved.selected_overload.kernel.callable_ref(*parameter_values)
@@ -756,9 +758,7 @@ def function(branch, alias: Optional[List[str]] = None, key=None):
         filter_condition = branch.get("filter")
 
     if func == "MATCH_AGAINST" or func.startswith("_"):
-        raise UnsupportedSyntaxError(
-            f"`{func}` is internal. Use documented SQL syntax instead."
-        )
+        raise UnsupportedSyntaxError(f"`{func}` is internal. Use documented SQL syntax instead.")
 
     if functions.is_function(func):
         node_type = NodeType.FUNCTION

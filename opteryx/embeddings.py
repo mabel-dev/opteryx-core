@@ -88,7 +88,7 @@ class _StaticHashEmbeddingProvider:
         self._char_ngram_min = char_ngram_min
         self._char_ngram_max = max(char_ngram_min, char_ngram_max)
         self._feature_cache = OrderedDict()
-        self._projection_scale = numpy.float32(2 ** -0.5)
+        self._projection_scale = numpy.float32(2**-0.5)
 
     @property
     def dimensions(self) -> int:
@@ -118,8 +118,14 @@ class _StaticHashEmbeddingProvider:
         first = hash_bytes(feature)
         second = hash_bytes(b"\x01" + feature)
         projections = (
-            (first % self._dimensions, self._projection_scale if ((first >> 63) & 1) == 0 else -self._projection_scale),
-            (second % self._dimensions, self._projection_scale if ((second >> 63) & 1) == 0 else -self._projection_scale),
+            (
+                first % self._dimensions,
+                self._projection_scale if ((first >> 63) & 1) == 0 else -self._projection_scale,
+            ),
+            (
+                second % self._dimensions,
+                self._projection_scale if ((second >> 63) & 1) == 0 else -self._projection_scale,
+            ),
         )
         self._feature_cache[feature] = projections
         self._feature_cache.move_to_end(feature)
@@ -166,7 +172,9 @@ class _StaticHashEmbeddingProvider:
     def embed_texts(self, texts: list[str]) -> numpy.ndarray:
         if not texts:
             return numpy.empty((0, self._dimensions), dtype=numpy.float32)
-        return numpy.vstack([self.embed_text(text) for text in texts]).astype(numpy.float32, copy=False)
+        return numpy.vstack([self.embed_text(text) for text in texts]).astype(
+            numpy.float32, copy=False
+        )
 
     def _extract_active_texts(self, values):
         if hasattr(values, "to_arrow"):
@@ -259,9 +267,7 @@ class _HybridEmbeddingProvider:
                 token_counts[token] = token_counts.get(token, 0) + 1
                 token_positions.setdefault(token, []).append(position)
 
-            doc_bigrams = {
-                f"{tokens[i]} {tokens[i + 1]}" for i in range(len(tokens) - 1)
-            }
+            doc_bigrams = {f"{tokens[i]} {tokens[i + 1]}" for i in range(len(tokens) - 1)}
             for term in query_term_set:
                 if term in token_counts:
                     document_frequency[term] += 1
@@ -276,15 +282,11 @@ class _HybridEmbeddingProvider:
         k1 = numpy.float32(1.5)
         b = numpy.float32(0.75)
         term_idf = {
-            term: numpy.float32(
-                max(0.05, numpy.log1p((doc_count - df + 0.5) / (df + 0.5)))
-            )
+            term: numpy.float32(max(0.05, numpy.log1p((doc_count - df + 0.5) / (df + 0.5))))
             for term, df in document_frequency.items()
         }
         bigram_idf = {
-            bigram: numpy.float32(
-                max(0.05, numpy.log1p((doc_count - df + 0.5) / (df + 0.5)))
-            )
+            bigram: numpy.float32(max(0.05, numpy.log1p((doc_count - df + 0.5) / (df + 0.5))))
             for bigram, df in bigram_frequency.items()
         }
 
@@ -381,9 +383,9 @@ class _HybridEmbeddingProvider:
                 row_norms = numpy.linalg.norm(row_vectors, axis=1)
                 valid_mask = row_norms != 0.0
                 if numpy.any(valid_mask):
-                    rerank_scores[valid_mask] = (
-                        row_vectors[valid_mask] @ query_vector
-                    ) / (row_norms[valid_mask] * query_norm)
+                    rerank_scores[valid_mask] = (row_vectors[valid_mask] @ query_vector) / (
+                        row_norms[valid_mask] * query_norm
+                    )
 
         final_scores = lexical_scores * numpy.float32(0.15)
         final_scores[candidate_indices] = rerank_scores
@@ -397,7 +399,9 @@ class _MiniLMNativeEmbeddingProvider:
     def __init__(self):
         from opteryx.nanobind import minilm_native
 
-        model_dir = Path(__file__).resolve().parent.parent / "third_party" / "models" / "all-MiniLM-L6-v2"
+        model_dir = (
+            Path(__file__).resolve().parent.parent / "third_party" / "models" / "all-MiniLM-L6-v2"
+        )
         model_path = model_dir / "model.onnx"
         vocab_path = model_dir / "vocab.txt"
         self._embedder = minilm_native.MiniLMEmbedder(str(model_path), str(vocab_path), 256)
@@ -443,7 +447,9 @@ def _load_default_embedding_provider():
         _default_embedding_provider = _HybridEmbeddingProvider()
         return _default_embedding_provider
 
-    model_dir = Path(__file__).resolve().parent.parent / "third_party" / "models" / "all-MiniLM-L6-v2"
+    model_dir = (
+        Path(__file__).resolve().parent.parent / "third_party" / "models" / "all-MiniLM-L6-v2"
+    )
     if not (model_dir / "model.onnx").exists() or not (model_dir / "vocab.txt").exists():
         return None
 

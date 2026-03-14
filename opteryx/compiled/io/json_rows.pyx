@@ -31,7 +31,6 @@ from opteryx.draken.core.buffers cimport DRAKEN_INT64
 from opteryx.draken.core.buffers cimport DRAKEN_STRING
 from opteryx.draken.core.buffers cimport DrakenConstantStringPayload
 from opteryx.draken.core.buffers cimport DrakenFixedBuffer
-from opteryx.draken.core.buffers cimport DrakenVarBuffer
 from opteryx.draken.morsels.morsel cimport Morsel
 from opteryx.draken.vectors.bool_vector cimport BoolVector
 from opteryx.draken.vectors.constant_vector cimport ConstantVector
@@ -297,7 +296,6 @@ cdef Py_ssize_t _estimate_value_bytes(
     Py_ssize_t num_rows,
 ) except -1:
     cdef StringVector string_vec
-    cdef _StringVectorView string_view
     cdef ConstantVector const_vec
     cdef DrakenConstantStringPayload* payload
     cdef Py_ssize_t total_bytes
@@ -312,7 +310,6 @@ cdef Py_ssize_t _estimate_value_bytes(
         string_vec = <StringVector>vec_obj
         if num_rows <= 0:
             return 8
-        string_view = <_StringVectorView>aux_obj
         total_bytes = string_vec.ptr.offsets[string_vec.ptr.length]
         total_bytes = total_bytes // num_rows if num_rows > 0 else 0
         if encoder == ENC_RAW_STRING:

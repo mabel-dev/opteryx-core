@@ -525,9 +525,7 @@ def _rewrite_predicate(predicate, telemetry: QueryTelemetry):
 
     # Rewrite temporal TRUNC comparisons to range comparisons
     if predicate.node_type == NodeType.COMPARISON_OPERATOR:
-        if (
-            predicate.left.node_type == NodeType.FUNCTION and predicate.left.value == "TRUNC"
-        ) or (
+        if (predicate.left.node_type == NodeType.FUNCTION and predicate.left.value == "TRUNC") or (
             predicate.right.node_type == NodeType.FUNCTION and predicate.right.value == "TRUNC"
         ):
             predicate = rewrite_date_trunc_to_range(predicate, telemetry)

@@ -397,7 +397,11 @@ def inner_binder(node: Node, context: BindingContext) -> Tuple[Node, Any]:
                     else 21
                 )
 
-            if target_type_name == "ARRAY" and node.parameters is not None and len(node.parameters) > 1:
+            if (
+                target_type_name == "ARRAY"
+                and node.parameters is not None
+                and len(node.parameters) > 1
+            ):
                 # CAST(expr AS ARRAY(element_type)) - extract element type
                 # For now, use VARIANT as element_type; can be refined later
                 element_type = OrsoTypes.VARIANT

@@ -83,7 +83,7 @@ def _as_text_vector(values):
         return values
     if hasattr(values, "to_arrow"):
         values = values.to_arrow()
-    elif isinstance(values, numpy.ndarray) or isinstance(values, (list, tuple)):
+    elif isinstance(values, (numpy.ndarray, list, tuple)):
         values = pyarrow.array(values)
     elif not isinstance(values, pyarrow.Array):
         return None
@@ -180,9 +180,9 @@ def _score_numeric_vectors(left_rows, right_rows):
             row_norms = numpy.linalg.norm(dense_vectors, axis=1)
             valid_mask = row_norms != 0.0
             if numpy.any(valid_mask):
-                valid_scores[valid_mask] = (
-                    dense_vectors[valid_mask] @ query_vector
-                ) / (row_norms[valid_mask] * query_norm)
+                valid_scores[valid_mask] = (dense_vectors[valid_mask] @ query_vector) / (
+                    row_norms[valid_mask] * query_norm
+                )
 
         valid_scores = numpy.where(numpy.isfinite(valid_scores), valid_scores, 0.0)
         scores[valid_positions] = valid_scores
@@ -191,7 +191,9 @@ def _score_numeric_vectors(left_rows, right_rows):
     if len(right_rows) != len(left_rows):
         return [0.0] * len(left_rows)
 
-    left_vectors, right_vectors, valid_positions = _coerce_aligned_numeric_matrices(left_rows, right_rows)
+    left_vectors, right_vectors, valid_positions = _coerce_aligned_numeric_matrices(
+        left_rows, right_rows
+    )
     scores = numpy.zeros(len(left_rows), dtype=numpy.float32)
     if valid_positions.size == 0:
         return scores.tolist()
@@ -257,7 +259,9 @@ def _cosine_similarity_text(arr, val):
     try:
         from opteryx.nanobind import vector_search
 
-        scores = numpy.asarray(vector_search.score_cosine(query_vector, row_vectors), dtype=numpy.float32)
+        scores = numpy.asarray(
+            vector_search.score_cosine(query_vector, row_vectors), dtype=numpy.float32
+        )
     except (ImportError, ValueError):
         scores = numpy.zeros(len(active_texts), dtype=numpy.float32)
         query_norm = numpy.linalg.norm(query_vector)
@@ -265,8 +269,8 @@ def _cosine_similarity_text(arr, val):
             row_norms = numpy.linalg.norm(row_vectors, axis=1)
             valid_mask = row_norms != 0.0
             if numpy.any(valid_mask):
-                scores[valid_mask] = (
-                    numpy.dot(row_vectors[valid_mask], query_vector) / (row_norms[valid_mask] * query_norm)
+                scores[valid_mask] = numpy.dot(row_vectors[valid_mask], query_vector) / (
+                    row_norms[valid_mask] * query_norm
                 )
 
     scores = numpy.where(numpy.isfinite(scores), scores, 0.0)
@@ -285,7 +289,10 @@ def cosine_similarity(arr, val):
 
     sample_left = next((row for row in left_rows if row is not None), None)
     sample_right = next((row for row in right_rows if row is not None), None)
-    if _coerce_numeric_vector(sample_left) is not None and _coerce_numeric_vector(sample_right) is not None:
+    if (
+        _coerce_numeric_vector(sample_left) is not None
+        and _coerce_numeric_vector(sample_right) is not None
+    ):
         return _score_numeric_vectors(left_rows, right_rows)
 
     return _cosine_similarity_text(arr, val)

@@ -40,8 +40,6 @@ cpdef Int64Vector vector_string_length(StringVector vec):
 
     return int64_from_sequence(rview)
 
-
-
 cpdef StringVector vector_string_slice_left(StringVector vec, object length):
     """
     Slice each string from the left (beginning) up to 'length' bytes.

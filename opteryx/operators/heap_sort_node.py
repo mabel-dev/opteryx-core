@@ -194,7 +194,9 @@ class HeapSortNode(BasePlanNode):
                 vector = morsel.column(name)
                 if vector.__class__.__name__ in py_materialize_types:
                     values = vector.to_pylist()
-                    vectors.append(vector_from_sequence([values[row_index] for row_index in row_indices]))
+                    vectors.append(
+                        vector_from_sequence([values[row_index] for row_index in row_indices])
+                    )
                 else:
                     vectors.append(vector.take(selection))
             return Morsel.from_vectors(names, vectors)
@@ -205,7 +207,9 @@ class HeapSortNode(BasePlanNode):
             vec = morsel.column(name)
             if vec.__class__.__name__ in py_materialize_types:
                 values = vec.to_pylist()
-                vectors.append(vector_from_sequence([values[row_index] for row_index in row_indices]))
+                vectors.append(
+                    vector_from_sequence([values[row_index] for row_index in row_indices])
+                )
             else:
                 vectors.append(vec.take(selection))
         return Morsel.from_vectors(names, vectors)
@@ -215,7 +219,8 @@ class HeapSortNode(BasePlanNode):
 
     def _ensure_order_expressions_evaluated(self, morsel: Morsel) -> Morsel:
         existing_columns = {
-            name.decode("utf-8") if isinstance(name, bytes) else name for name in morsel.column_names
+            name.decode("utf-8") if isinstance(name, bytes) else name
+            for name in morsel.column_names
         }
         evaluations = []
         for column, _ in self.order_by:
@@ -446,7 +451,9 @@ class HeapSortNode(BasePlanNode):
         source_node, query_node = order_expression.parameters
         if source_node.node_type != NodeType.IDENTIFIER:
             return None
-        if not node_is_numeric_vector(source_node) or not node_is_vector_query_expression(query_node):
+        if not node_is_numeric_vector(source_node) or not node_is_vector_query_expression(
+            query_node
+        ):
             return None
 
         query_vector = self._resolve_query_vector(query_node)
@@ -489,10 +496,8 @@ class HeapSortNode(BasePlanNode):
 
         if (
             self._USEARCH_ENABLED
-            and
-            self.vector_topk_candidate
-            and
-            dense_vectors.shape[0] >= self._USEARCH_MIN_ROWS
+            and self.vector_topk_candidate
+            and dense_vectors.shape[0] >= self._USEARCH_MIN_ROWS
             and nearest_neighbor_order
         ):
             try:
@@ -536,7 +541,9 @@ class HeapSortNode(BasePlanNode):
                     return self._materialize_rows(morsel, [int(row_id) for row_id in found_ids])
                 return morsel.empty()
 
-            scores = numpy.asarray(vector_search.score_cosine(query_vector, dense_vectors), dtype=numpy.float32)
+            scores = numpy.asarray(
+                vector_search.score_cosine(query_vector, dense_vectors), dtype=numpy.float32
+            )
         except Exception:
             return None
 
@@ -560,7 +567,9 @@ class HeapSortNode(BasePlanNode):
             order = numpy.lexsort((row_ids[candidate_indices], scores[candidate_indices]))
         ranked_dense_indices = candidate_indices[order]
 
-        top_indices = [int(source_indices[int(index)]) for index in ranked_dense_indices[:take_count]]
+        top_indices = [
+            int(source_indices[int(index)]) for index in ranked_dense_indices[:take_count]
+        ]
         return self._materialize_rows(morsel, top_indices)
 
     def _resolve_query_vector(self, query_node) -> numpy.ndarray | None:

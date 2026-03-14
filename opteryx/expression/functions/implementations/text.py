@@ -22,16 +22,15 @@ import pyarrow
 import pyarrow as pa
 from pyarrow import compute
 
-from opteryx.embeddings import get_embedding_provider
-from opteryx.compiled.vector_ops import vector_match_against
 from opteryx.compiled.vector_ops import vector_initcap
 from opteryx.compiled.vector_ops import vector_length
+from opteryx.compiled.vector_ops import vector_match_against
 from opteryx.compiled.vector_ops import vector_md5
 from opteryx.compiled.vector_ops import vector_replace
+from opteryx.compiled.vector_ops import vector_reverse
 from opteryx.compiled.vector_ops import vector_sha1
 from opteryx.compiled.vector_ops import vector_sha256
 from opteryx.compiled.vector_ops import vector_sha512
-from opteryx.compiled.vector_ops import vector_reverse
 from opteryx.compiled.vector_ops import vector_soundex
 from opteryx.compiled.vector_ops import vector_string_length
 from opteryx.compiled.vector_ops import vector_string_slice_left
@@ -40,6 +39,7 @@ from opteryx.draken.vectors.dictionary_vector import DictionaryVector
 from opteryx.draken.vectors.string_vector import StringVector
 from opteryx.draken.vectors.string_vector import lowercase as string_vector_lowercase
 from opteryx.draken.vectors.string_vector import uppercase as string_vector_uppercase
+from opteryx.embeddings import get_embedding_provider
 from opteryx.exceptions import InvalidFunctionParameterError
 
 # ---------------------------------------------------------------------------
@@ -88,10 +88,7 @@ def vector_lengther(arr):
         arr = pyarrow.array(arr)
 
     sv: StringVector
-    if isinstance(arr, StringVector):
-        sv = arr
-    else:
-        sv = vector_from_arrow(arr)
+    sv = arr if isinstance(arr, StringVector) else vector_from_arrow(arr)
 
     # ``vector_from_arrow`` can yield a DictionaryVector when the input is
     # dictionary-encoded.  The later logic assumes a real StringVector so we
@@ -246,7 +243,7 @@ def _as_match_vector(arr):
 
     if hasattr(arr, "to_arrow"):
         arr = arr.to_arrow()
-    elif isinstance(arr, numpy.ndarray) or isinstance(arr, (list, tuple)):
+    elif isinstance(arr, (numpy.ndarray, list, tuple)):
         arr = pyarrow.array(arr)
     elif not isinstance(arr, pyarrow.Array):
         return None
@@ -399,9 +396,7 @@ def ends_w(arr, test, ignore_case=[False]):
     return compute.ends_with(arr, test[0], ignore_case=ignore_case[0])
 
 
-def substring(
-    arr: List[str], from_pos, count=None
-) -> List[List[str]]:
+def substring(arr: List[str], from_pos, count=None) -> List[List[str]]:
     """
     Extracts substrings from each string in the 'arr' list.
     """

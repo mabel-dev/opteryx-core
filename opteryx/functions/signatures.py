@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from orso.types import OrsoTypes
+
 from opteryx.expression.functions import FunctionDefinition
 from opteryx.expression.functions import FunctionOverload
 from opteryx.expression.functions import ParameterSpec
@@ -531,7 +532,9 @@ def _documentation_category(
     for category_name, function_names in _DOCUMENTATION_CATEGORIES.items():
         if display_name in function_names or function.name in function_names:
             return category_name
-    return _FALLBACK_CATEGORY_LABELS.get(function.category, function.category.replace("_", " ").title())
+    return _FALLBACK_CATEGORY_LABELS.get(
+        function.category, function.category.replace("_", " ").title()
+    )
 
 
 def _parameter_signature_label(parameter: ParameterSpec) -> str:
@@ -614,7 +617,9 @@ def _lifecycle_export(function: FunctionDefinition) -> dict[str, Any]:
 
 def _arity_export(overload: FunctionOverload) -> dict[str, Any]:
     parameters = overload.parameters
-    minimum = sum(1 for parameter in parameters if not parameter.optional and not parameter.variadic)
+    minimum = sum(
+        1 for parameter in parameters if not parameter.optional and not parameter.variadic
+    )
     variadic = any(parameter.variadic for parameter in parameters)
     maximum: int | None = None if variadic else len(parameters)
     return {
@@ -662,7 +667,10 @@ def _return_metadata(function: FunctionDefinition, overload: FunctionOverload) -
     if return_spec.mode == "fixed":
         type_label = _orso_type_label(return_spec.fixed_type)
         if type_label == "boolean":
-            return type_label, "Returns `true` or `false` based on whether the function's condition is satisfied."
+            return (
+                type_label,
+                "Returns `true` or `false` based on whether the function's condition is satisfied.",
+            )
         return type_label, f"Returns the computed result as `{type_label}`."
 
     if return_spec.mode == "same_as_arg":
@@ -779,9 +787,9 @@ def _function_documentation(
             return target
 
     if base.startswith("Returns "):
-        return f"Computes {base[len('Returns '):].lower()}"
+        return f"Computes {base[len('Returns ') :].lower()}"
     if base.startswith("Return "):
-        return f"Computes {base[len('Return '):].lower()}"
+        return f"Computes {base[len('Return ') :].lower()}"
 
     return base
 
@@ -896,7 +904,11 @@ def export_function_signatures(
     for function in functions:
         public_name = _PUBLIC_SYNTAX_EXPORTS.get(function.name, function.name)
 
-        if not include_internal and function.name.startswith("_") and function.name not in _PUBLIC_SYNTAX_EXPORTS:
+        if (
+            not include_internal
+            and function.name.startswith("_")
+            and function.name not in _PUBLIC_SYNTAX_EXPORTS
+        ):
             continue
         if public_name in _HIDDEN_FUNCTIONS:
             continue
@@ -905,13 +917,16 @@ def export_function_signatures(
             aliases = [
                 alias
                 for alias in function.aliases
-                if (include_internal or not alias.startswith("_")) and alias not in _HIDDEN_FUNCTIONS
+                if (include_internal or not alias.startswith("_"))
+                and alias not in _HIDDEN_FUNCTIONS
             ]
 
         exported[public_name] = {
             "catalog_name": function.name,
             "aliases": aliases,
-            "summary": _normalise_sentence(function.summary or function.documentation or public_name),
+            "summary": _normalise_sentence(
+                function.summary or function.documentation or public_name
+            ),
             "volatility": function.volatility,
             "deterministic": function.deterministic,
             "foldable": function.foldable,
