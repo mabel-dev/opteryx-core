@@ -28,6 +28,74 @@ def _builtin_text_functions() -> list[FunctionDefinition]:
     from opteryx.expression.functions.implementations.text import to_upper
     from opteryx.expression.functions.implementations.text import vector_lengther
 
+    from opteryx.compiled.vector_ops import vector_concat_array as _vector_concat_cython
+    from opteryx.compiled.vector_ops import vector_concat_ws_array as _vector_concat_ws_cython
+
+    def _concat_kernel(arr):
+        """CONCAT(array_col): join all string elements of each row, no separator."""
+        import numpy as _np
+        import pyarrow as _pa
+        from opteryx.draken.vectors.array_vector import ArrayVector as _AV
+        from opteryx.draken.interop.arrow import vector_from_arrow as _vfa
+
+        if isinstance(arr, _AV):
+            return _vector_concat_cython(arr).to_arrow()
+        if isinstance(arr, _pa.ChunkedArray):
+            arr = arr.combine_chunks()
+        if isinstance(arr, _pa.ListArray):
+            return _vector_concat_cython(_vfa(arr)).to_arrow()
+        if isinstance(arr, _np.ndarray):
+            result = []
+            for row in arr:
+                if row is None:
+                    result.append(None)
+                else:
+                    parts = [
+                        v.encode("utf-8") if isinstance(v, str) else (v if isinstance(v, bytes) else b"")
+                        for v in row if v is not None
+                    ]
+                    result.append(b"".join(parts))
+            return _pa.array(result, type=_pa.large_binary())
+        raise TypeError(f"CONCAT: unsupported input type {type(arr)}")
+
+    def _concat_ws_kernel(sep, arr):
+        """CONCAT_WS(sep, array_col): join elements with separator."""
+        import numpy as _np
+        import pyarrow as _pa
+        from opteryx.draken.vectors.array_vector import ArrayVector as _AV
+        from opteryx.draken.interop.arrow import vector_from_arrow as _vfa
+
+        if hasattr(sep, "as_py"):
+            sep = sep.as_py()
+        if isinstance(sep, (_pa.Array, _pa.ChunkedArray)):
+            sep = sep[0].as_py()
+        if isinstance(sep, _np.ndarray) and len(sep) > 0:
+            sep = sep[0]
+        if sep is None:
+            return None
+        if isinstance(sep, str):
+            sep = sep.encode("utf-8")
+
+        if isinstance(arr, _AV):
+            return _vector_concat_ws_cython(sep, arr).to_arrow()
+        if isinstance(arr, _pa.ChunkedArray):
+            arr = arr.combine_chunks()
+        if isinstance(arr, _pa.ListArray):
+            return _vector_concat_ws_cython(sep, _vfa(arr)).to_arrow()
+        if isinstance(arr, _np.ndarray):
+            result = []
+            for row in arr:
+                if row is None:
+                    result.append(None)
+                else:
+                    parts = [
+                        v.encode("utf-8") if isinstance(v, str) else (v if isinstance(v, bytes) else b"")
+                        for v in row if v is not None
+                    ]
+                    result.append(sep.join(parts))
+            return _pa.array(result, type=_pa.large_binary())
+        raise TypeError(f"CONCAT_WS: unsupported input type {type(arr)}")
+
     return [
         FunctionDefinition(
             name="UPPER",
@@ -116,7 +184,7 @@ def _builtin_text_functions() -> list[FunctionDefinition]:
                     return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.VARCHAR),
                     kernel=KernelSpec(
                         id="default",
-                        callable_ref=string_functions.concat,
+                        callable_ref=_concat_kernel,
                         null_policy="passthrough",
                         cost_us_per_million=8.0,
                     ),
@@ -827,7 +895,88 @@ def _builtin_text_extended_functions() -> list[FunctionDefinition]:
     from opteryx.functions import _string_slice_left
     from opteryx.functions import _string_slice_right
 
-    _position_kernel = _iterate_double_parameter_swapped(string_functions.position)
+    from opteryx.compiled.vector_ops import vector_concat_ws_array as _vector_concat_ws_cython
+
+    def _concat_ws_kernel(sep, arr):
+        """CONCAT_WS(sep, array_col): join elements with separator."""
+        import numpy as _np
+        import pyarrow as _pa
+        from opteryx.draken.vectors.array_vector import ArrayVector as _AV
+        from opteryx.draken.interop.arrow import vector_from_arrow as _vfa
+
+        # Normalise separator to bytes
+        if hasattr(sep, "as_py"):
+            sep = sep.as_py()
+        if isinstance(sep, (_pa.Array, _pa.ChunkedArray)):
+            sep = sep[0].as_py()
+        if isinstance(sep, _np.ndarray) and len(sep) > 0:
+            sep = sep[0]
+        if sep is None:
+            return None
+        if isinstance(sep, str):
+            sep = sep.encode("utf-8")
+
+        if isinstance(arr, _AV):
+            return _vector_concat_ws_cython(sep, arr).to_arrow()
+        if isinstance(arr, _pa.ChunkedArray):
+            arr = arr.combine_chunks()
+        if isinstance(arr, _pa.ListArray):
+            return _vector_concat_ws_cython(sep, _vfa(arr)).to_arrow()
+        if isinstance(arr, _np.ndarray):
+            result = []
+            for row in arr:
+                if row is None:
+                    result.append(None)
+                else:
+                    parts = [
+                        v.encode("utf-8") if isinstance(v, str) else (v if isinstance(v, bytes) else b"")
+                        for v in row if v is not None
+                    ]
+                    result.append(sep.join(parts))
+            return _pa.array(result, type=_pa.large_binary())
+        raise TypeError(f"CONCAT_WS: unsupported input type {type(arr)}")
+
+    from opteryx.compiled.vector_ops import vector_position as _vector_position_cython
+
+    def _position_kernel(needle_arr, haystack_vec):
+        """POSITION('needle' IN haystack) — needle_arr is the literal column,
+        haystack_vec is the string column. The planner passes them swapped
+        relative to SQL order (needle first, haystack second)."""
+        import numpy as _np
+        import pyarrow as _pa
+        from opteryx.draken.vectors.string_vector import StringVector as _SV
+        from opteryx.draken.interop.arrow import vector_from_arrow as _vfa
+
+        # Normalise haystack to StringVector
+        if not isinstance(haystack_vec, _SV):
+            if isinstance(haystack_vec, _pa.ChunkedArray):
+                haystack_vec = _vfa(haystack_vec.combine_chunks())
+            elif isinstance(haystack_vec, _pa.Array):
+                haystack_vec = _vfa(haystack_vec)
+            elif hasattr(haystack_vec, "to_arrow"):
+                haystack_vec = _vfa(haystack_vec.to_arrow())
+            elif isinstance(haystack_vec, _np.ndarray):
+                haystack_vec = _vfa(_pa.array(haystack_vec.tolist(), type=_pa.large_utf8()))
+            else:
+                raise TypeError(f"POSITION: unsupported haystack type {type(haystack_vec)}")
+
+        # Normalise needle: may be StringVector, pyarrow scalar/array, numpy, or Python str/bytes
+        if hasattr(needle_arr, "as_py"):
+            needle_arr = needle_arr.as_py()
+        if isinstance(needle_arr, str):
+            needle_arr = needle_arr.encode("utf-8")
+        elif isinstance(needle_arr, _np.ndarray):
+            needle_arr = _vfa(_pa.array(needle_arr.tolist(), type=_pa.large_utf8()))
+        elif isinstance(needle_arr, _pa.ChunkedArray):
+            needle_arr = _vfa(needle_arr.combine_chunks())
+        elif isinstance(needle_arr, _pa.Array):
+            needle_arr = _vfa(needle_arr)
+        elif hasattr(needle_arr, "to_arrow"):
+            needle_arr = _vfa(needle_arr.to_arrow())
+        # else: already StringVector or bytes
+
+        return _vector_position_cython(haystack_vec, needle_arr).to_arrow()
+
 
     def _make(
         name,
@@ -911,7 +1060,7 @@ def _builtin_text_extended_functions() -> list[FunctionDefinition]:
         ),
         _make(
             "CONCAT_WS",
-            string_functions.concat_ws,
+            _concat_ws_kernel,
             OrsoTypes.VARCHAR,
             (
                 ParameterSpec(name="sep", type_family="string"),
@@ -1151,13 +1300,39 @@ def _builtin_hash_encoding_functions() -> list[FunctionDefinition]:
                 ),
             ),
         ),
-        _make(
-            "NORMAL",
-            number_functions.random_normal,
-            OrsoTypes.DOUBLE,
-            (_n,),
+        FunctionDefinition(
+            name="NORMAL",
+            aliases=(),
+            category="hash_encoding",
             volatility="volatile",
+            deterministic=False,
+            lifecycle=LifecycleSpec(status="active"),
             summary="Generate normally-distributed random numbers.",
+            documentation="Returns normally-distributed random float(s).",
+            overloads=(
+                FunctionOverload(
+                    id="NORMAL_default",
+                    parameters=(_n,),
+                    return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.DOUBLE),
+                    kernel=KernelSpec(
+                        id="default",
+                        callable_ref=number_functions.random_normal,
+                        null_policy="strict",
+                        cost_us_per_million=10.0,
+                    ),
+                ),
+                FunctionOverload(
+                    id="NORMAL_0",
+                    parameters=(),
+                    return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.DOUBLE),
+                    kernel=KernelSpec(
+                        id="zero_arg",
+                        callable_ref=number_functions.random_normal,
+                        null_policy="strict",
+                        cost_us_per_million=10.0,
+                    ),
+                ),
+            ),
         ),
         _make(
             "RANDOM_STRING",

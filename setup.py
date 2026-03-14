@@ -169,6 +169,7 @@ include_dirs = [
     "third_party/tktech/simdjson",
     "third_party/re2",
     "third_party/cyan4973",
+    "third_party/tdigest-c/src",
     "third_party/ulfjack/ryu",
     "third_party/alantsd",
     "third_party/nanobind",
@@ -592,6 +593,26 @@ extensions = [
         "opteryx.compiled.aggregations.count_distinct",
         sources=[
             "opteryx/compiled/aggregations/count_distinct.pyx",
+        ],
+        include_dirs=include_dirs,
+        language="c++",
+        extra_compile_args=CPP_FLAGS,
+    ),
+    Extension(
+        "opteryx.compiled.aggregations.approximate_count",
+        sources=[
+            "opteryx/compiled/aggregations/approximate_count.pyx",
+            "src/cpp/hllpp.cpp",
+        ],
+        include_dirs=include_dirs,
+        language="c++",
+        extra_compile_args=CPP_FLAGS,
+    ),
+    Extension(
+        "opteryx.compiled.aggregations.approximate_median",
+        sources=[
+            "opteryx/compiled/aggregations/approximate_median.pyx",
+            "third_party/tdigest-c/src/tdigest_cpp.cpp",
         ],
         include_dirs=include_dirs,
         language="c++",

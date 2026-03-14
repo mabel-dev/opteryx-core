@@ -17,7 +17,7 @@ This is a design doc only.
 ## Goals
 
 1. Build a single Draken-native grouped aggregation pipeline that supports:
-- `COUNT`, `SUM`, `MIN`, `MAX`, `AVG`, `COUNT(DISTINCT)`, `ANY_VALUE`/`ONE`
+- `COUNT`, `SUM`, `MIN`, `MAX`, `AVG`, `COUNT(DISTINCT)`, `ANY_VALUE`
 2. Eliminate NumPy/Arrow from grouped aggregation execution.
 3. Support large cardinality with deterministic spill-to-disk.
 4. Preserve current SQL semantics.

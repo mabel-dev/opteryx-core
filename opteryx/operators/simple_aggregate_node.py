@@ -17,7 +17,10 @@ We avoid doing some work by not creating entire columns of data where possible.
 import pyarrow
 
 from opteryx import EOS
+from opteryx.compiled.aggregations.approximate_count import approximate_count
 from opteryx.compiled.aggregations.count_distinct import count_distinct
+from opteryx.compiled.aggregations.approximate_median import approximate_percentile
+from opteryx.exceptions import InvalidFunctionParameterError
 from opteryx.expression import NodeType
 from opteryx.expression import evaluate_and_append
 from opteryx.models import QueryProperties
@@ -34,6 +37,7 @@ class SimpleAggregateCollector:
         *,
         count_nulls=False,
         duplicate_treatment="IGNORE",
+        percentile=None,
         telemetry=None,
     ):
         self.aggregate_type = aggregate_type
@@ -44,6 +48,7 @@ class SimpleAggregateCollector:
         self.schema_column = schema_column
         self.column_type = schema_column.type
         self.always_count = aggregate_type in ("COUNT", "AVG")
+        self.percentile = percentile
         self.telemetry = telemetry
 
     def collect(self, values):
@@ -66,6 +71,10 @@ class SimpleAggregateCollector:
                 self.current_value = pyarrow.compute.max(values).as_py()
             elif self.aggregate_type == "COUNT" and self.duplicate_treatment == "Distinct":
                 self.current_value = count_distinct(values, None)
+            elif self.aggregate_type == "APPROX_COUNT_DISTINCT":
+                self.current_value = approximate_count(values, None)
+            elif self.aggregate_type == "APPROX_PERCENTILE":
+                self.current_value = approximate_percentile(values, None, self.percentile)
             elif self.aggregate_type == "HISTOGRAM":
                 from opteryx.third_party.maki_nage.distogram import Distogram
 
@@ -90,6 +99,10 @@ class SimpleAggregateCollector:
                 self.current_value.bulkload(values.to_numpy(False))
             elif self.aggregate_type == "COUNT" and self.duplicate_treatment == "Distinct":
                 self.current_value = count_distinct(values, self.current_value)
+            elif self.aggregate_type == "APPROX_COUNT_DISTINCT":
+                self.current_value = approximate_count(values, self.current_value)
+            elif self.aggregate_type == "APPROX_PERCENTILE":
+                self.current_value = approximate_percentile(values, self.current_value, self.percentile)
             elif self.aggregate_type != "COUNT":
                 raise ValueError(f"Unsupported aggregate type: {self.aggregate_type}")
 
@@ -101,6 +114,16 @@ class SimpleAggregateCollector:
                 self.current_value = literal * count
             elif self.aggregate_type == "MIN" or self.aggregate_type == "MAX":
                 self.current_value = literal
+            elif self.aggregate_type == "APPROX_COUNT_DISTINCT":
+                from opteryx.compiled.aggregations.approximate_count import ApproximateCountState
+
+                self.current_value = ApproximateCountState()
+                self.current_value.add_repeated_value(literal, count)
+            elif self.aggregate_type == "APPROX_PERCENTILE":
+                from opteryx.compiled.aggregations.approximate_median import ApproximatePercentileState
+
+                self.current_value = ApproximatePercentileState(self.percentile)
+                self.current_value.add_repeated_value(literal, count)
             elif self.aggregate_type != "COUNT":
                 raise ValueError(f"Unsupported aggregate type: {self.aggregate_type}")
         else:
@@ -110,6 +133,10 @@ class SimpleAggregateCollector:
                 self.current_value = min(self.current_value, literal)
             elif self.aggregate_type == "MAX":
                 self.current_value = max(self.current_value, literal)
+            elif self.aggregate_type == "APPROX_COUNT_DISTINCT":
+                self.current_value.add_repeated_value(literal, count)
+            elif self.aggregate_type == "APPROX_PERCENTILE":
+                self.current_value.add_repeated_value(literal, count)
             elif self.aggregate_type != "COUNT":
                 raise ValueError(f"Unsupported aggregate type: {self.aggregate_type}")
 
@@ -122,6 +149,10 @@ class SimpleAggregateCollector:
             if self.current_value is None:
                 return 0
             return self.current_value.size()
+        if self.aggregate_type == "APPROX_COUNT_DISTINCT":
+            return 0 if self.current_value is None else self.current_value.estimate()
+        if self.aggregate_type == "APPROX_PERCENTILE":
+            return None if self.current_value is None else self.current_value.quantile()
         if self.aggregate_type == "COUNT":
             return self.counter
         if self.aggregate_type == "HISTOGRAM":
@@ -132,7 +163,17 @@ class SimpleAggregateCollector:
 
 
 class SimpleAggregateNode(BasePlanNode):
-    SIMPLE_AGGREGATES = {"AVG", "COUNT", "COUNT_DISTINCT", "HISTOGRAM", "MAX", "MIN", "SUM"}
+    SIMPLE_AGGREGATES = {
+        "APPROX_COUNT_DISTINCT",
+        "APPROX_PERCENTILE",
+        "AVG",
+        "COUNT",
+        "COUNT_DISTINCT",
+        "HISTOGRAM",
+        "MAX",
+        "MIN",
+        "SUM",
+    }
 
     def __init__(self, properties: QueryProperties, **parameters):
         BasePlanNode.__init__(self, properties=properties, **parameters)
@@ -147,13 +188,33 @@ class SimpleAggregateNode(BasePlanNode):
         for aggregate in self.aggregates:
             aggregate_type = aggregate.value
             final_column_id = aggregate.schema_column.identity
+            percentile = self._extract_percentile(aggregate)
 
             self.accumulator[final_column_id] = SimpleAggregateCollector(
                 aggregate_type,
                 aggregate.parameters[0].schema_column,
                 duplicate_treatment=aggregate.duplicate_treatment,
+                percentile=percentile,
                 telemetry=self.telemetry,
             )
+
+    @staticmethod
+    def _extract_percentile(aggregate):
+        if aggregate.value != "APPROX_PERCENTILE":
+            return None
+        if len(aggregate.parameters) != 2:
+            raise InvalidFunctionParameterError("APPROX_PERCENTILE expects two arguments")
+        percentile_node = aggregate.parameters[1]
+        if percentile_node.node_type != NodeType.LITERAL:
+            raise InvalidFunctionParameterError(
+                "APPROX_PERCENTILE percentile argument must be a literal"
+            )
+        percentile = float(percentile_node.value)
+        if percentile < 0.0 or percentile > 1.0:
+            raise InvalidFunctionParameterError(
+                "APPROX_PERCENTILE percentile must be between 0.0 and 1.0"
+            )
+        return percentile
 
     @property
     def config(self):  # pragma: no cover

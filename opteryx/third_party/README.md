@@ -26,6 +26,7 @@ The third-party code is organized into two locations:
 - **fastfloat** - Fast float parsing
 - **fuzzy** - Soundex phonetic algorithm
 - **tktech** - SimdJSON fast JSON parsing
+- **tdigest-c** - t-digest quantile sketch
 - **ulfjack** - Ryu floating point to string conversion
 
 ### Pure Python Libraries

@@ -29,17 +29,16 @@ COUNT_STAR: str = "COUNT(*)"
 AGGREGATORS = {
     "ALL": "all",
     "ANY": "any",
-    "APPROXIMATE_MEDIAN": "approximate_median",
+    "APPROX_COUNT_DISTINCT": "approx_count_distinct",
+    "APPROX_PERCENTILE": "approx_percentile",
     "ARRAY_AGG": "hash_list",
     "COUNT": "count",  # counts only non nulls
     "COUNT_DISTINCT": "count_distinct",
-    "DISTINCT": "distinct",  # fated
     "HISTOGRAM": "histogram",  # not supported everywhere
     "MAX": "max",
     "AVG": "mean",
     "MIN": "min",
     "MIN_MAX": "min_max",
-    "ONE": "hash_one",
     "ANY_VALUE": "hash_one",
     "PRODUCT": "product",
     "STDDEV": "stddev",
