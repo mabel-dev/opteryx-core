@@ -124,8 +124,6 @@ _DOCUMENTATION_CATEGORIES = OrderedDict(
                 "REPLACE",
                 "REGEXP_REPLACE",
                 "SPLIT",
-                "STARTS_WITH",
-                "ENDS_WITH",
                 "POSITION",
                 "LPAD",
                 "RPAD",

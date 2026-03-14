@@ -35,10 +35,8 @@ CONCAT(x, y, z)                             → x || y || z (CONCAT to operators
 CONCAT_WS(x, y, z)                          → y || x || z (CONCAT_WS to operators)
 x = 'a' OR x = 'b' OR x = 'c'               → x IN ('a', 'b', 'c') (for ORed Equals conditions)
 a = ANY(z) OR b = ANY(z) OR c = ANY(z)      → (a, b, c) @> z
-ENDS_WITH(x, pattern)                       → x LIKE '%pattern'
-STARTS_WITH(x, pattern)                     → x LIKE 'pattern%'
 
-#### IN THE PREDICATE ORDERING STRATEGY∂
+#### IN THE PREDICATE ORDERING STRATEGY
 a = ANY(z) AND b = ANY(z) AND c = ANY(z)    → z @>> (a, b, c)
 """
 
@@ -683,38 +681,6 @@ def _rewrite_function(function, telemetry: QueryTelemetry):
                 schema_column=ExpressionColumn(name="", type=OrsoTypes.VARCHAR),
             )
             left_node = this_node
-        this_node.alias = function.alias
-        this_node.schema_column = function.schema_column
-        function = this_node
-
-    # STARTS_WITH → x LIKE 'pattern%'
-    if function.value == "STARTS_WITH":
-        telemetry.optimization_predicate_rewriter_starts_with_to_like += 1
-        left_node = function.parameters[0]
-        function.parameters[1].value = function.parameters[1].value + "%"
-        this_node = Node(
-            node_type=NodeType.COMPARISON_OPERATOR,
-            value="Like",
-            left=left_node,
-            right=function.parameters[1],
-            schema_column=ExpressionColumn(name="", type=OrsoTypes.BOOLEAN),
-        )
-        this_node.alias = function.alias
-        this_node.schema_column = function.schema_column
-        function = this_node
-
-    # ENDS_WITH → x LIKE '%pattern'
-    if function.value == "ENDS_WITH":
-        telemetry.optimization_predicate_rewriter_ends_with_to_like += 1
-        left_node = function.parameters[0]
-        function.parameters[1].value = "%" + function.parameters[1].value
-        this_node = Node(
-            node_type=NodeType.COMPARISON_OPERATOR,
-            value="Like",
-            left=left_node,
-            right=function.parameters[1],
-            schema_column=ExpressionColumn(name="", type=OrsoTypes.BOOLEAN),
-        )
         this_node.alias = function.alias
         this_node.schema_column = function.schema_column
         function = this_node

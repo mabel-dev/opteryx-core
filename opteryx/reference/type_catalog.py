@@ -24,6 +24,8 @@ _TYPE_PARAMETER_PROBES = OrderedDict(
     ]
 )
 
+_LEGACY_UNSUPPORTED_TYPES = frozenset({OrsoTypes.STRUCT})
+
 
 def _type_id(type_name: OrsoTypes | None) -> str | None:
     if type_name is None or type_name == OrsoTypes._MISSING_TYPE:
@@ -73,6 +75,13 @@ def _parameterized_forms(type_name: OrsoTypes) -> list[str]:
     return supported_forms
 
 
+def _type_metadata(type_name: OrsoTypes) -> dict[str, Any]:
+    metadata = getattr(type_name, "metadata", None)
+    if not metadata:
+        return {}
+    return dict(metadata)
+
+
 def _alias_groups() -> dict[str, list[str]]:
     grouped: defaultdict[str, set[str]] = defaultdict(set)
     for alias, target in ORSO_TYPE_ALIASES.items():
@@ -99,7 +108,7 @@ def export_type_catalog() -> OrderedDict[str, dict[str, Any]]:
 
     exported: dict[str, dict[str, Any]] = {}
     for type_name in sorted(OrsoTypes, key=lambda item: item.name):
-        if type_name == OrsoTypes._MISSING_TYPE:
+        if type_name in _LEGACY_UNSUPPORTED_TYPES or type_name == OrsoTypes._MISSING_TYPE:
             continue
 
         type_id = _type_id(type_name)
@@ -113,6 +122,7 @@ def export_type_catalog() -> OrderedDict[str, dict[str, Any]]:
             "accepted_spellings": sorted({type_id, *aliases}),
             "family": _type_family(type_name),
             "flags": _type_flags(type_name),
+            "metadata": _type_metadata(type_name),
             "parameterized_forms": _parameterized_forms(type_name),
             "ingestion_mappings": {
                 "parquet_physical": parquet_physical.get(type_id, []),

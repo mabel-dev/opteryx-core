@@ -388,14 +388,6 @@ def concat_ws(separator, vector_values):
     return result
 
 
-def starts_w(arr, test, ignore_case=[False]):
-    return compute.starts_with(arr, test[0], ignore_case=ignore_case[0])
-
-
-def ends_w(arr, test, ignore_case=[False]):
-    return compute.ends_with(arr, test[0], ignore_case=ignore_case[0])
-
-
 def substring(arr: List[str], from_pos, count=None) -> List[List[str]]:
     """
     Extracts substrings from each string in the 'arr' list.

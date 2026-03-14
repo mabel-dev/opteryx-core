@@ -7,7 +7,9 @@ from typing import Tuple
 from orso.types import OrsoTypes
 
 from opteryx.exceptions import IncorrectTypeError
+from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.expression import NodeType
+from opteryx.expression.operator_catalog import is_known_operator
 from opteryx.utils.sql import convert_camel_to_sql_case
 
 
@@ -296,6 +298,17 @@ OPERATOR_MAP: Dict[Tuple[OrsoTypes, OrsoTypes, str], OperatorMapType] = {
 }
 # fmt:on
 
+for _, _, _operator_name in OPERATOR_MAP:
+    if not is_known_operator(_operator_name):
+        raise UnsupportedSyntaxError(f"Operator map contains unknown operator '{_operator_name}'.")
+
+
+def _is_internal_operator(operator: str) -> bool:
+    return operator.startswith(("AnyOp", "AllOp")) or operator in {
+        "InSubQuery",
+        "NotInSubQuery",
+    }
+
 
 def determine_type(node) -> OrsoTypes:
     # initial version, needs to be improved
@@ -344,6 +357,8 @@ def determine_type(node) -> OrsoTypes:
         right_type = node.right.schema_column.type
 
     operator = node.value
+    if not is_known_operator(operator) and not _is_internal_operator(operator):
+        raise UnsupportedSyntaxError(f"Unsupported operator '{operator}'.")
 
     if left_type in (0, OrsoTypes._MISSING_TYPE, OrsoTypes.NULL):
         return OrsoTypes._MISSING_TYPE
@@ -359,7 +374,11 @@ def determine_type(node) -> OrsoTypes:
             f"Unable to perform `{format_expression(node)}` because the values are not acceptable types for this operation. {left_type} and {right_type} were provided, you may need to cast one or both values to acceptable types."
         )
 
-    if operator == "MapAccess" and left_type in (OrsoTypes.ARRAY, OrsoTypes.VECTOR) and right_type == OrsoTypes.INTEGER:
+    if (
+        operator == "MapAccess"
+        and left_type in (OrsoTypes.ARRAY, OrsoTypes.VECTOR)
+        and right_type == OrsoTypes.INTEGER
+    ):
         # ARRAY<T>[INTEGER] resolves to T when we know the element type.
         element_type = None
         if node.left.schema_column is not None:

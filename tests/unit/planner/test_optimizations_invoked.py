@@ -29,8 +29,6 @@ STATEMENTS = [
         ("SELECT CASE WHEN surface_pressure IS NULL THEN -100.00 ELSE surface_pressure END FROM $planets", "optimization_predicate_rewriter_case_to_ifnull"),
         ("SELECT * FROM testdata.satellites INNER JOIN $planets ON planetId = $planets.id", "optimization_inner_join_smallest_table_left"),
         ("SELECT name FROM testdata.astronauts WHERE 'MIT' = ANY(alma_mater) OR 'Stanford' = ANY(alma_mater) OR 'Harvard' = ANY(alma_mater)", "optimization_predicate_rewriter_anyeq_to_contains"),
-        ("SELECT COUNT(*) FROM $planets WHERE STARTS_WITH(name, 'M')", "optimization_predicate_rewriter_starts_with_to_like"),
-        ("SELECT COUNT(*) FROM $planets WHERE ENDS_WITH(name, 's')", "optimization_predicate_rewriter_ends_with_to_like"),
         ("SELECT name FROM testdata.astronauts WHERE 'Apollo 13' = ANY(missions) AND 'Gemini 8' = ANY(missions)", "optimization_predicate_rewriter_anyeq_to_contains_all"),
         # New boolean simplification tests
         ("SELECT * FROM $planets WHERE id > 5 AND name = 'Earth' AND id < 10", "optimization_boolean_rewrite_and_flatten"),  # AND chain flattening

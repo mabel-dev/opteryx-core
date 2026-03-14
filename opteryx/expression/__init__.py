@@ -511,7 +511,9 @@ def _evaluate_and_append_arrow(expressions, table: Table):
                 new_column = evaluate_statement(statement, table)
             else:
                 # we make all unknown fields to object type
-                new_column = pyarrow.array([], type=_arrow_type_for_schema_column(statement.schema_column))
+                new_column = pyarrow.array(
+                    [], type=_arrow_type_for_schema_column(statement.schema_column)
+                )
 
         # if we know the intended type of the result column, cast it
         field = statement.schema_column.identity
