@@ -15,7 +15,19 @@ from opteryx.draken.morsels.morsel import Morsel
 _UNSET = object()
 
 _SUPPORTED_FUNCTIONS = frozenset(
-    {"count", "sum", "min", "max", "mean", "avg", "count_distinct", "distinct", "hash_one"}
+    {
+        "count",
+        "sum",
+        "min",
+        "max",
+        "mean",
+        "avg",
+        "count_distinct",
+        "approx_count_distinct",
+        "approx_percentile",
+        "distinct",
+        "hash_one",
+    }
 )
 
 
@@ -24,6 +36,7 @@ class AggregationSpec:
     alias: str
     function: str
     column: str | bytes | None = None
+    options: Any | None = None
 
 
 def _normalize_column_name(column: str | bytes) -> bytes:
@@ -71,7 +84,12 @@ class ShuffleGroupByOperation:
             column = _normalize_column_name(column)
 
         alias = spec.alias or _default_alias(column, function)
-        return AggregationSpec(alias=str(alias), function=function, column=column)
+        return AggregationSpec(
+            alias=str(alias),
+            function=function,
+            column=column,
+            options=getattr(spec, "options", None),
+        )
 
     @classmethod
     def from_legacy_aggregate_functions(
@@ -92,7 +110,7 @@ class ShuffleGroupByOperation:
             )
         return cls(group_by_columns=group_by_columns, aggregations=specs)
 
-    def _new_state(self, function: str):
+    def _new_state(self, function: str, options: Any = None):
         if function == "count":
             return 0
         if function in ("sum", "min", "max"):
@@ -101,6 +119,14 @@ class ShuffleGroupByOperation:
             return [0, 0]
         if function in ("count_distinct", "distinct"):
             return set()
+        if function == "approx_count_distinct":
+            from opteryx.compiled.aggregations.approximate_count import ApproximateCountState
+
+            return ApproximateCountState()
+        if function == "approx_percentile":
+            from opteryx.compiled.aggregations.approximate_median import ApproximatePercentileState
+
+            return ApproximatePercentileState(0.5 if options is None else float(options))
         if function == "hash_one":
             return _UNSET
         raise ValueError(f"unsupported aggregation function '{function}'")
@@ -137,6 +163,14 @@ class ShuffleGroupByOperation:
                 return state
             state.add(value)
             return state
+        if function == "approx_count_distinct":
+            if value is not None:
+                state.add_value(value)
+            return state
+        if function == "approx_percentile":
+            if value is not None:
+                state.add_value(value)
+            return state
         if function == "hash_one":
             if state is _UNSET and value is not None:
                 return value
@@ -152,6 +186,10 @@ class ShuffleGroupByOperation:
             return None if state[1] == 0 else state[0] / state[1]
         if function in ("count_distinct", "distinct"):
             return len(state)
+        if function == "approx_count_distinct":
+            return state.estimate()
+        if function == "approx_percentile":
+            return state.quantile()
         if function == "hash_one":
             return None if state is _UNSET else state
         raise ValueError(f"unsupported aggregation function '{function}'")
@@ -178,7 +216,8 @@ class ShuffleGroupByOperation:
             states = self._states.get(key)
             if states is None:
                 states = [
-                    self._new_state(aggregation.function) for aggregation in self.aggregations
+                    self._new_state(aggregation.function, aggregation.options)
+                    for aggregation in self.aggregations
                 ]
                 self._states[key] = states
             self.timings_ns["group"] += time.perf_counter_ns() - group_start

@@ -5,6 +5,9 @@
 # cython: cdivision=True
 # cython: infer_types=True
 
+from opteryx.compiled.aggregations.approximate_count import ApproximateCountState
+from opteryx.compiled.aggregations.approximate_median import ApproximatePercentileState
+
 cdef int AGG_COUNT_STAR = 1
 cdef int AGG_COUNT = 2
 cdef int AGG_SUM = 3
@@ -13,11 +16,13 @@ cdef int AGG_MAX = 5
 cdef int AGG_AVG = 6
 cdef int AGG_COUNT_DISTINCT = 7
 cdef int AGG_HASH_ONE = 8
+cdef int AGG_APPROX_COUNT_DISTINCT = 9
+cdef int AGG_APPROX_PERCENTILE = 10
 
 cdef object _UNSET = object()
 
 
-cdef inline object new_state(int function_code):
+cdef inline object new_state(int function_code, object options):
     if function_code == AGG_COUNT_STAR or function_code == AGG_COUNT:
         return 0
     if function_code == AGG_SUM or function_code == AGG_MIN or function_code == AGG_MAX:
@@ -28,6 +33,12 @@ cdef inline object new_state(int function_code):
         return set()
     if function_code == AGG_HASH_ONE:
         return _UNSET
+    if function_code == AGG_APPROX_COUNT_DISTINCT:
+        return ApproximateCountState()
+    if function_code == AGG_APPROX_PERCENTILE:
+        if options is None:
+            options = 0.5
+        return ApproximatePercentileState(float(options))
     raise ValueError(f"unsupported aggregation code '{function_code}'")
 
 
@@ -75,6 +86,16 @@ cdef inline object update_state(int function_code, object state, object value):
             return value
         return state
 
+    if function_code == AGG_APPROX_COUNT_DISTINCT:
+        if value is not None:
+            state.add_value(value)
+        return state
+
+    if function_code == AGG_APPROX_PERCENTILE:
+        if value is not None:
+            state.add_value(value)
+        return state
+
     raise ValueError(f"unsupported aggregation code '{function_code}'")
 
 
@@ -89,4 +110,8 @@ cdef inline object finalize_state(int function_code, object state):
         return len(state)
     if function_code == AGG_HASH_ONE:
         return None if state is _UNSET else state
+    if function_code == AGG_APPROX_COUNT_DISTINCT:
+        return state.estimate()
+    if function_code == AGG_APPROX_PERCENTILE:
+        return state.quantile()
     raise ValueError(f"unsupported aggregation code '{function_code}'")

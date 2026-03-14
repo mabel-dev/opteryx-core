@@ -71,6 +71,7 @@ cdef int AGG_MIN = 4
 cdef int AGG_MAX = 5
 cdef int AGG_AVG = 6
 cdef int AGG_COUNT_DISTINCT = 7
+cdef int AGG_HASH_ONE = 8
 
 cdef int VALUE_NONE = 0
 cdef int VALUE_INT64 = 1
@@ -418,9 +419,9 @@ cdef class CarcharGroupStateEngine:
         if self._multi_agg_count > 0:
             return (
                 self._multi_value_kinds[agg_idx] == VALUE_OBJECT
-                and self._multi_agg_modes[agg_idx] in (AGG_MIN, AGG_MAX)
+                and self._multi_agg_modes[agg_idx] in (AGG_MIN, AGG_MAX, AGG_HASH_ONE)
             )
-        return self._value_kind == VALUE_OBJECT and self._agg_mode in (AGG_MIN, AGG_MAX)
+        return self._value_kind == VALUE_OBJECT and self._agg_mode in (AGG_MIN, AGG_MAX, AGG_HASH_ONE)
 
     cdef inline bint _is_stringlike_vector(self, object vec) noexcept:
         cdef int64_t key_kind
@@ -1071,6 +1072,10 @@ cdef class CarcharGroupStateEngine:
                 else:
                     self._init_legacy_backend()
                     return
+            elif fn == "hash_one":
+                self._agg_mode = AGG_HASH_ONE
+                self._value_kind = VALUE_OBJECT
+                self._use_object_keys = True
             else:
                 self._init_legacy_backend()
                 return
@@ -1298,6 +1303,9 @@ cdef class CarcharGroupStateEngine:
                 else:
                     self._init_legacy_backend()
                     return
+            elif fn == "hash_one":
+                self._agg_mode = AGG_HASH_ONE
+                self._value_kind = VALUE_OBJECT
             else:
                 self._init_legacy_backend()
                 return
@@ -1489,6 +1497,9 @@ cdef class CarcharGroupStateEngine:
                 else:
                     self._init_legacy_backend()
                     return
+            elif fn == "hash_one":
+                self._agg_mode = AGG_HASH_ONE
+                self._value_kind = VALUE_OBJECT
             else:
                 self._init_legacy_backend()
                 return
@@ -1818,6 +1829,9 @@ cdef class CarcharGroupStateEngine:
             else:
                 self._init_legacy_backend()
                 return
+        elif fn == "hash_one":
+            self._agg_mode = AGG_HASH_ONE
+            self._value_kind = VALUE_OBJECT
         else:
             self._init_legacy_backend()
             return
@@ -2340,6 +2354,10 @@ cdef class CarcharGroupStateEngine:
                 if self._seen[state_index] == 0 or value_obj > self._object_state[state_index]:
                     self._object_state[state_index] = value_obj
                 self._seen[state_index] = 1
+            elif self._agg_mode == AGG_HASH_ONE:
+                if self._seen[state_index] == 0:
+                    self._object_state[state_index] = value_obj
+                self._seen[state_index] = 1
 
     cdef void _ingest_object_minmax_multi_for_states(
         self,
@@ -2467,7 +2485,7 @@ cdef class CarcharGroupStateEngine:
             return
 
         value_vector = morsel.column(self._value_column)
-        if self._value_kind == VALUE_OBJECT and self._agg_mode in (AGG_MIN, AGG_MAX):
+        if self._value_kind == VALUE_OBJECT and self._agg_mode in (AGG_MIN, AGG_MAX, AGG_HASH_ONE):
             state_indices = <int64_t*> malloc(row_count * sizeof(int64_t))
             if state_indices == NULL and row_count > 0:
                 raise MemoryError()
@@ -2639,7 +2657,7 @@ cdef class CarcharGroupStateEngine:
             return
 
         value_vector = morsel.column(self._value_column)
-        if self._value_kind == VALUE_OBJECT and self._agg_mode in (AGG_MIN, AGG_MAX):
+        if self._value_kind == VALUE_OBJECT and self._agg_mode in (AGG_MIN, AGG_MAX, AGG_HASH_ONE):
             value_nulls = self._value_null_bitmap(value_vector)
             for row_idx in range(row_count):
                 if not _bitmap_is_valid(value_nulls, row_idx):
@@ -2653,6 +2671,10 @@ cdef class CarcharGroupStateEngine:
                     self._constant_seen = 1
                 elif self._agg_mode == AGG_MAX:
                     if self._constant_seen == 0 or value_obj > self._constant_object_state:
+                        self._constant_object_state = value_obj
+                    self._constant_seen = 1
+                elif self._agg_mode == AGG_HASH_ONE:
+                    if self._constant_seen == 0:
                         self._constant_object_state = value_obj
                     self._constant_seen = 1
             return
@@ -3362,7 +3384,7 @@ cdef class CarcharGroupStateEngine:
             return
 
         value_vector = morsel.column(self._value_column)
-        if self._value_kind == VALUE_OBJECT and self._agg_mode in (AGG_MIN, AGG_MAX):
+        if self._value_kind == VALUE_OBJECT and self._agg_mode in (AGG_MIN, AGG_MAX, AGG_HASH_ONE):
             state_indices = <int64_t*> malloc(row_count * sizeof(int64_t))
             if state_indices == NULL and row_count > 0:
                 raise MemoryError()
@@ -3663,7 +3685,7 @@ cdef class CarcharGroupStateEngine:
                 self._ingest_count_distinct_for_states(morsel, state_indices, row_count)
                 return
 
-            if self._value_kind == VALUE_OBJECT and self._agg_mode in (AGG_MIN, AGG_MAX):
+            if self._value_kind == VALUE_OBJECT and self._agg_mode in (AGG_MIN, AGG_MAX, AGG_HASH_ONE):
                 self._ingest_object_minmax_for_states(morsel, state_indices, row_count)
                 return
 
@@ -3823,7 +3845,7 @@ cdef class CarcharGroupStateEngine:
                 self._ingest_count_distinct_for_states(morsel, state_indices, row_count)
                 return
 
-            if self._value_kind == VALUE_OBJECT and self._agg_mode in (AGG_MIN, AGG_MAX):
+            if self._value_kind == VALUE_OBJECT and self._agg_mode in (AGG_MIN, AGG_MAX, AGG_HASH_ONE):
                 self._ingest_object_minmax_for_states(morsel, state_indices, row_count)
                 return
 
@@ -4819,7 +4841,7 @@ cdef class CarcharGroupStateEngine:
         cdef list agg_objects
         cdef object agg_object_vec
 
-        if self._agg_mode in (AGG_SUM, AGG_MIN, AGG_MAX):
+        if self._agg_mode in (AGG_SUM, AGG_MIN, AGG_MAX, AGG_HASH_ONE):
             for state_index in range(start, stop):
                 if self._seen[state_index] == 0:
                     needs_agg_nulls = True
@@ -4849,7 +4871,7 @@ cdef class CarcharGroupStateEngine:
                 key_nulls = _alloc_valid_bitmap(length)
                 key_vec_i64.ptr.null_bitmap = key_nulls
 
-        if self._value_kind == VALUE_OBJECT and self._agg_mode in (AGG_MIN, AGG_MAX):
+        if self._value_kind == VALUE_OBJECT and self._agg_mode in (AGG_MIN, AGG_MAX, AGG_HASH_ONE):
             if key_data != NULL:
                 for i in range(length):
                     state_index = start + i
@@ -5284,7 +5306,7 @@ cdef class CarcharGroupStateEngine:
             self._readings["groupby_finalize_rows_count"] += 1
             if self._agg_mode == AGG_COUNT_STAR or self._agg_mode == AGG_COUNT_VALUE:
                 agg_value = self._constant_count
-            elif self._value_kind == VALUE_OBJECT and self._agg_mode in (AGG_MIN, AGG_MAX):
+            elif self._value_kind == VALUE_OBJECT and self._agg_mode in (AGG_MIN, AGG_MAX, AGG_HASH_ONE):
                 if self._constant_seen == 0:
                     agg_value = None
                 else:

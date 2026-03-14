@@ -16,6 +16,8 @@ _SUPPORTED_FUNCTIONS = {
     "mean",
     "avg",
     "count_distinct",
+    "approx_count_distinct",
+    "approx_percentile",
     "distinct",
     "hash_one",
 }
@@ -40,7 +42,7 @@ def normalize_group_by_columns(group_by_columns: list[str | bytes]) -> list[byte
     return [_normalize_column_name(column) for column in group_by_columns]
 
 
-def normalize_aggregations(aggregations: list[object]) -> list[tuple[str, str, bytes | None]]:
+def normalize_aggregations(aggregations: list[object]) -> list[tuple]:
     return [ShuffleGroupByOperationV2._normalize_aggregation(spec) for spec in aggregations]
 
 
@@ -51,9 +53,14 @@ def create_group_state_engine(group_by_columns, aggregations):
 
         return GroupStateStore(group_by_columns, aggregations)
 
+    if any(agg[1] in ("approx_count_distinct", "approx_percentile") for agg in aggregations):
+        from opteryx.compiled.aggregations.group_state_store import GroupStateStore
+
+        return GroupStateStore(group_by_columns, aggregations)
+
     # Use legacy backend for aggregations on complex expressions
     # (carchar can't handle expressions like (event ->> 'key')::TYPE)
-    # aggregations are tuples of (alias, function, column)
+    # aggregations are tuples of (alias, function, column[, options])
     if any(agg[2] is None for agg in aggregations):
         from opteryx.compiled.aggregations.group_state_store import GroupStateStore
 
@@ -97,7 +104,7 @@ class ShuffleGroupByOperationV2:
         )
 
     @staticmethod
-    def _normalize_aggregation(spec: object) -> tuple[str, str, bytes | None]:
+    def _normalize_aggregation(spec: object) -> tuple:
         if not all(hasattr(spec, attr) for attr in ("alias", "function", "column")):
             raise TypeError("aggregations must expose alias/function/column")
 
@@ -112,7 +119,10 @@ class ShuffleGroupByOperationV2:
             column = _normalize_column_name(column)
 
         alias = spec.alias or _default_alias(column, function)
-        return str(alias), function, column
+        options = getattr(spec, "options", None)
+        if options is None:
+            return str(alias), function, column
+        return str(alias), function, column, options
 
     def ingest(self, morsel: Morsel) -> None:
         self._engine.ingest(morsel)
@@ -122,7 +132,7 @@ class ShuffleGroupByOperationV2:
             self.ingest(morsel)
 
     def _output_names(self):
-        return [alias for alias, _function, _column in self.aggregations] + [
+        return [aggregation[0] for aggregation in self.aggregations] + [
             column.decode("utf-8") for column in self.group_by_columns
         ]
 

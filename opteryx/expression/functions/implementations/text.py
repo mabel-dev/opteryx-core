@@ -360,34 +360,6 @@ def get_hex_decode(item):
     return base64.b16decode(item).decode("UTF8")
 
 
-def concat(vector_values):
-    """concatenate a list of strings"""
-    result: List = []
-    for row in vector_values:
-        if row is None:
-            result.append(None)
-        else:
-            row = row.astype(dtype=numpy.str_)
-            result.append("".join(row))
-    return result
-
-
-def concat_ws(separator, vector_values):
-    """concatenate a list of strings with a separator"""
-    result: List = []
-    if len(separator) > 0:
-        separator = separator[0]
-        if separator is None:
-            return None
-    for row in vector_values:
-        if row is None:
-            result.append(None)
-        else:
-            row = row.astype(dtype=numpy.str_)
-            result.append(separator.join(row))
-    return result
-
-
 def substring(arr: List[str], from_pos, count=None) -> List[List[str]]:
     """
     Extracts substrings from each string in the 'arr' list.

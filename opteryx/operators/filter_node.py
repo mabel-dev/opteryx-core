@@ -50,7 +50,7 @@ class FilterNode(BasePlanNode):
             return
 
         if not isinstance(morsel, Morsel):
-            morsel = Morsel.from_arrow(morsel)
+            morsel = Morsel.from_arrow(morsel.combine_chunks())
 
         if self.function_evaluations:
             morsel = evaluate_and_append_draken(self.function_evaluations, morsel)

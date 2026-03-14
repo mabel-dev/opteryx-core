@@ -3056,6 +3056,30 @@
                     }
                 ],
                 "notes": "This function is volatile. The integer argument controls how many values are generated, not a seed."
+            },
+            {
+                "id": "NORMAL_0",
+                "label": "NORMAL()",
+                "category": "Utility Functions",
+                "documentation": "Returns a single normally-distributed random float.",
+                "related_functions": [],
+                "return_type": "double",
+                "returns": {
+                    "type": "double",
+                    "documentation": "Returns the computed result as `double`."
+                },
+                "arity": {
+                    "minimum": 0,
+                    "maximum": 0,
+                    "variadic": false
+                },
+                "execution": {
+                    "kernel_id": "zero_arg",
+                    "null_policy": "strict",
+                    "cost_us_per_million": 10.0
+                },
+                "parameters": [],
+                "notes": "This function is volatile. Use NORMAL(n) to generate n values."
             }
         ]
     },

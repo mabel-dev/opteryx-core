@@ -11,6 +11,8 @@ from opteryx.draken.core.buffers cimport DrakenConstantBuffer
 from opteryx.draken.vectors.dictionary_vector cimport DictionaryVector
 from opteryx.draken.vectors.constant_vector cimport ConstantVector
 from opteryx.compiled.aggregations.aggregate_kernels cimport AGG_AVG
+from opteryx.compiled.aggregations.aggregate_kernels cimport AGG_APPROX_COUNT_DISTINCT
+from opteryx.compiled.aggregations.aggregate_kernels cimport AGG_APPROX_PERCENTILE
 from opteryx.compiled.aggregations.aggregate_kernels cimport AGG_COUNT
 from opteryx.compiled.aggregations.aggregate_kernels cimport AGG_COUNT_DISTINCT
 from opteryx.compiled.aggregations.aggregate_kernels cimport AGG_COUNT_STAR
@@ -94,6 +96,7 @@ cdef class GroupStateStore:
     cdef list _agg_aliases
     cdef list _agg_function_codes
     cdef list _agg_columns
+    cdef list _agg_options
     cdef dict _states
     cdef dict _hash_keys
     cdef Py_ssize_t _rows_seen
@@ -126,11 +129,13 @@ cdef class GroupStateStore:
         cdef object aggregation
         cdef str function
         cdef object column
+        cdef object option
 
         self._group_by_columns = group_by_columns
         self._agg_aliases = []
         self._agg_function_codes = []
         self._agg_columns = []
+        self._agg_options = []
         self._states = {}
         self._hash_keys = {}
         self._rows_seen = 0
@@ -153,8 +158,10 @@ cdef class GroupStateStore:
         for aggregation in aggregations:
             function = aggregation[1]
             column = aggregation[2]
+            option = aggregation[3] if len(aggregation) > 3 else None
             self._agg_aliases.append(aggregation[0])
             self._agg_columns.append(column)
+            self._agg_options.append(option)
             if function == "count":
                 if column is None:
                     self._agg_function_codes.append(AGG_COUNT_STAR)
@@ -170,6 +177,10 @@ cdef class GroupStateStore:
                 self._agg_function_codes.append(AGG_AVG)
             elif function == "count_distinct" or function == "distinct":
                 self._agg_function_codes.append(AGG_COUNT_DISTINCT)
+            elif function == "approx_count_distinct":
+                self._agg_function_codes.append(AGG_APPROX_COUNT_DISTINCT)
+            elif function == "approx_percentile":
+                self._agg_function_codes.append(AGG_APPROX_PERCENTILE)
             elif function == "hash_one":
                 self._agg_function_codes.append(AGG_HASH_ONE)
             else:
@@ -285,6 +296,7 @@ cdef class GroupStateStore:
         cdef list value_vectors
         cdef list agg_function_codes
         cdef list agg_columns
+        cdef list agg_options
         cdef object key_vector0
         cdef object key
         cdef object state
@@ -360,6 +372,7 @@ cdef class GroupStateStore:
             self._specialized_kernel = None
 
         single_mode = self._single_mode
+        agg_options = self._agg_options
 
         key_vectors = []
         for column in self._group_by_columns:
@@ -962,7 +975,7 @@ cdef class GroupStateStore:
                 else:
                     # Defensive: should not be reachable because __cinit__ controls single_mode.
                     if state is _MISSING:
-                        state = new_state(single_mode)
+                        state = new_state(single_mode, agg_options[0])
                     self._states[key] = update_state(single_mode, state, value)
             return
 
@@ -1005,7 +1018,7 @@ cdef class GroupStateStore:
                         self._hash_keys[key] = tuple(key_parts)
                 states = []
                 for agg_idx in range(agg_count):
-                    states.append(new_state(agg_function_codes[agg_idx]))
+                    states.append(new_state(agg_function_codes[agg_idx], agg_options[agg_idx]))
                 self._states[key] = states
 
             for agg_idx in range(agg_count):
@@ -1144,9 +1157,12 @@ cdef class GroupStateStore:
             if self._group_by_columns:
                 return []
             if single_mode == MODE_GENERAL:
-                self._states[()] = [new_state(function_code) for function_code in self._agg_function_codes]
+                self._states[()] = [
+                    new_state(self._agg_function_codes[idx], self._agg_options[idx])
+                    for idx in range(len(self._agg_function_codes))
+                ]
             else:
-                self._states[()] = new_state(single_mode)
+                self._states[()] = new_state(single_mode, self._agg_options[0])
 
         rows = []
         key_count = len(self._group_by_columns)

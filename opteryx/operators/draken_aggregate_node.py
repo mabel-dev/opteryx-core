@@ -16,8 +16,13 @@ from __future__ import annotations
 import time
 
 from opteryx import EOS
+from opteryx.compiled.aggregations.approximate_count import ApproximateCountState
+from opteryx.compiled.aggregations.approximate_count import approximate_count_draken
+from opteryx.compiled.aggregations.approximate_median import ApproximatePercentileState
+from opteryx.compiled.aggregations.approximate_median import approximate_percentile_draken
 from opteryx.draken.interop.arrow import vector_from_sequence
 from opteryx.draken.morsels.morsel import Morsel
+from opteryx.exceptions import InvalidFunctionParameterError
 from opteryx.expression import NodeType
 from opteryx.expression import get_all_nodes_of_type
 from opteryx.expression.evaluator import evaluate_and_append_draken
@@ -103,12 +108,33 @@ class _DrakenAggregateCollector:
         self.duplicate_treatment = getattr(aggregate, "duplicate_treatment", None)
         self.output_name = aggregate.schema_column.identity
         self.parameter = aggregate.parameters[0]
+        self.percentile = self._extract_percentile(aggregate)
 
         self._count = 0
         self._sum = None
         self._min = None
         self._max = None
         self._distinct_hashes = None
+        self._approx_count = None
+        self._approx_percentile = None
+
+    @staticmethod
+    def _extract_percentile(aggregate):
+        if aggregate.value != "APPROX_PERCENTILE":
+            return None
+        if len(aggregate.parameters) != 2:
+            raise InvalidFunctionParameterError("APPROX_PERCENTILE expects two arguments")
+        percentile_node = aggregate.parameters[1]
+        if percentile_node.node_type != NodeType.LITERAL:
+            raise InvalidFunctionParameterError(
+                "APPROX_PERCENTILE percentile argument must be a literal"
+            )
+        percentile = float(percentile_node.value)
+        if percentile < 0.0 or percentile > 1.0:
+            raise InvalidFunctionParameterError(
+                "APPROX_PERCENTILE percentile must be between 0.0 and 1.0"
+            )
+        return percentile
 
     def _update_min(self, value):
         if value is None:
@@ -158,6 +184,18 @@ class _DrakenAggregateCollector:
             self._update_max(literal)
             return
 
+        if self.aggregate_type == "APPROX_COUNT_DISTINCT":
+            if self._approx_count is None:
+                self._approx_count = ApproximateCountState()
+            self._approx_count.add_repeated_value(literal, row_count)
+            return
+
+        if self.aggregate_type == "APPROX_PERCENTILE":
+            if self._approx_percentile is None:
+                self._approx_percentile = ApproximatePercentileState(self.percentile)
+            self._approx_percentile.add_repeated_value(literal, row_count)
+            return
+
     def _collect_vector(self, vector):
         valid_count = len(vector) - _vector_null_count(vector)
 
@@ -195,6 +233,16 @@ class _DrakenAggregateCollector:
             self._update_max(_vector_max(vector))
             return
 
+        if self.aggregate_type == "APPROX_COUNT_DISTINCT":
+            self._approx_count = approximate_count_draken(vector, self._approx_count)
+            return
+
+        if self.aggregate_type == "APPROX_PERCENTILE":
+            self._approx_percentile = approximate_percentile_draken(
+                vector, self._approx_percentile, self.percentile
+            )
+            return
+
     def collect(self, morsel: Morsel):
         if self.parameter.node_type == NodeType.WILDCARD:
             self._count += morsel.num_rows
@@ -215,6 +263,12 @@ class _DrakenAggregateCollector:
 
         if self.aggregate_type == "COUNT_DISTINCT" or self.aggregate_type == "DISTINCT":
             return 0 if self._distinct_hashes is None else self._distinct_hashes.size()
+
+        if self.aggregate_type == "APPROX_COUNT_DISTINCT":
+            return 0 if self._approx_count is None else self._approx_count.estimate()
+
+        if self.aggregate_type == "APPROX_PERCENTILE":
+            return None if self._approx_percentile is None else self._approx_percentile.quantile()
 
         if self.aggregate_type == "SUM":
             return self._sum

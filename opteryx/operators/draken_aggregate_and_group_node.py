@@ -20,6 +20,7 @@ from opteryx import EMPTY
 from opteryx import EOS
 from opteryx.draken.morsels.morsel import Morsel
 from opteryx.draken.vectors.constant_vector import from_scalar as constant_from_scalar
+from opteryx.exceptions import InvalidFunctionParameterError
 from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.expression import NodeType
 from opteryx.expression import get_all_nodes_of_type
@@ -53,7 +54,17 @@ class DrakenAggregateAndGroupNode(BasePlanNode):
         "groupby_key_store_limit_bytes",
     )
     SUPPORTED_AGGREGATES = frozenset(
-        {"COUNT", "SUM", "MIN", "MAX", "AVG", "COUNT_DISTINCT", "DISTINCT", "ONE", "ANY_VALUE"}
+        {
+            "APPROX_COUNT_DISTINCT",
+            "APPROX_PERCENTILE",
+            "COUNT",
+            "SUM",
+            "MIN",
+            "MAX",
+            "AVG",
+            "COUNT_DISTINCT",
+            "ANY_VALUE",
+        }
     )
     # MAX was previously omitted: the Draken kernel implemented it but
     # the planner refused to use it in strict mode until we were confident
@@ -66,9 +77,11 @@ class DrakenAggregateAndGroupNode(BasePlanNode):
             "SUM",
             "AVG",
             "MIN",
-            "MAX",  # added
+            "MAX",
             "COUNT_DISTINCT",
-            "DISTINCT",
+            "APPROX_COUNT_DISTINCT",
+            "APPROX_PERCENTILE",
+            "ANY_VALUE",
         }
     )
 
@@ -148,6 +161,14 @@ class DrakenAggregateAndGroupNode(BasePlanNode):
                 return False
             if not aggregate.parameters:
                 return False
+            if aggregate.value == "APPROX_COUNT_DISTINCT":
+                if len(aggregate.parameters) != 1:
+                    return False
+            if aggregate.value == "APPROX_PERCENTILE":
+                if len(aggregate.parameters) != 2:
+                    return False
+                if aggregate.parameters[1].node_type != NodeType.LITERAL:
+                    return False
 
             if aggregate.value not in DrakenAggregateAndGroupNode.FAST_PATH_AGGREGATES:
                 # MAX/ONE/ANY_VALUE kernels are not admitted in strict mode
@@ -177,6 +198,9 @@ class DrakenAggregateAndGroupNode(BasePlanNode):
             for aggregator in get_all_nodes_of_type(root, select_nodes=(NodeType.AGGREGATOR,)):
                 fn = self._normalize_aggregate_function(aggregator)
                 field_node = aggregator.parameters[0]
+                options = None
+                if fn == "approx_percentile":
+                    options = self._extract_percentile_option(aggregator)
                 # For simple identifiers, use the column name directly
                 # For literals (constants), use None to indicate constant aggregation
                 # For complex expressions, use the schema identity (which will be evaluated
@@ -199,9 +223,26 @@ class DrakenAggregateAndGroupNode(BasePlanNode):
                         alias=aggregator.schema_column.identity,
                         function=fn,
                         column=column,
+                        options=options,
                     )
                 )
         return specs
+
+    @staticmethod
+    def _extract_percentile_option(aggregator) -> float:
+        if len(aggregator.parameters) != 2:
+            raise InvalidFunctionParameterError("APPROX_PERCENTILE expects two arguments")
+        percentile_node = aggregator.parameters[1]
+        if percentile_node.node_type != NodeType.LITERAL:
+            raise InvalidFunctionParameterError(
+                "APPROX_PERCENTILE percentile argument must be a literal"
+            )
+        percentile = float(percentile_node.value)
+        if percentile < 0.0 or percentile > 1.0:
+            raise InvalidFunctionParameterError(
+                "APPROX_PERCENTILE percentile must be between 0.0 and 1.0"
+            )
+        return percentile
 
     @staticmethod
     def _normalize_aggregate_function(aggregator) -> str:
@@ -218,9 +259,13 @@ class DrakenAggregateAndGroupNode(BasePlanNode):
             return "max"
         if value == "AVG":
             return "avg"
-        if value in ("ONE", "ANY_VALUE"):
+        if value == "APPROX_COUNT_DISTINCT":
+            return "approx_count_distinct"
+        if value == "APPROX_PERCENTILE":
+            return "approx_percentile"
+        if value == "ANY_VALUE":
             return "hash_one"
-        if value in ("DISTINCT", "COUNT_DISTINCT"):
+        if value == "COUNT_DISTINCT":
             return "count_distinct"
         raise UnsupportedSyntaxError(f"Unsupported aggregate function for Draken group-by: {value}")
 

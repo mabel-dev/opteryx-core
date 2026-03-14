@@ -7,7 +7,7 @@
 # cython: boundscheck=False
 
 from libc.stddef cimport size_t
-from libc.stdint cimport uint8_t, int64_t
+from libc.stdint cimport uint8_t, uint16_t, uint32_t, int64_t
 from libc.string cimport memset
 
 import numpy
