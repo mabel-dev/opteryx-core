@@ -624,6 +624,8 @@ def _normalize_cast_type(data_type: str) -> str:
 
 def _cast_literal_value(literal_node, target_type: str, kind: str, alias):
     """Cast a literal value at compile time."""
+    from opteryx.expression.casts import parse_timestamp_value
+
     # NULL values remain NULL regardless of target type
     if literal_node.type == OrsoTypes.NULL:
         return Node(NodeType.LITERAL, type=OrsoTypes.NULL, alias=alias)
@@ -638,18 +640,15 @@ def _cast_literal_value(literal_node, target_type: str, kind: str, alias):
         value = (_EPOCH_DATE + datetime.timedelta(days=int(literal_node.value)))
         return Node(NodeType.LITERAL, type=OrsoTypes.DATE, value=value, alias=alias)
     # Special case: INTEGER to TIMESTAMP conversion using PyArrow
-    elif base_type == "TIMESTAMP" and literal_node.type in (OrsoTypes.INTEGER, OrsoTypes.DATE):
-        import pyarrow
-        import pyarrow.compute as compute
-
+    elif base_type == "TIMESTAMP" and (
+        literal_node.type in (OrsoTypes.INTEGER, OrsoTypes.DATE)
+        or isinstance(literal_node.value, (int, numpy.integer))
+    ):
         int_value = int(literal_node.value)
-        # DATE-style literals are first parsed as day-count integers before the
-        # explicit TIMESTAMP type decoration is applied. Those values should be
-        # interpreted as days since epoch, not as raw epoch integers.
         if literal_node.type == OrsoTypes.DATE or abs(int_value) < 100_000:
             value = (_EPOCH_DT + datetime.timedelta(days=int_value)).replace(tzinfo=None)
         else:
-            value = compute.cast([literal_node.value], pyarrow.timestamp("us"))[0].as_py()
+            value = parse_timestamp_value(int_value)
         return Node(NodeType.LITERAL, type=OrsoTypes.TIMESTAMP, value=value, alias=alias)
     else:
         orso_type = OrsoTypes.from_name(base_type)[0]
@@ -1199,14 +1198,34 @@ def typed_string(branch, alias: Optional[List[str]] = None, key=None):
         data_type = type_key
     data_type = data_type.upper()
 
-    data_value = build(branch["value"]).value
+    data_node = build(branch["value"])
+    data_value = data_node.value
+
+    if data_type == "TIMESTAMP":
+        if data_node.type == OrsoTypes.DATE and isinstance(data_value, (int, numpy.integer)):
+            data_value = (_EPOCH_DT + datetime.timedelta(days=int(data_value))).replace(tzinfo=None)
+        elif data_node.type == OrsoTypes.TIMESTAMP and isinstance(data_value, (int, numpy.integer)):
+            data_value = (_EPOCH_DT + datetime.timedelta(microseconds=int(data_value))).replace(
+                tzinfo=None
+            )
+        elif isinstance(data_value, datetime.date) and not isinstance(data_value, datetime.datetime):
+            data_value = datetime.datetime(data_value.year, data_value.month, data_value.day)
+        elif isinstance(data_value, str):
+            data_value = dates.parse_iso(data_value).replace(tzinfo=None)
+        return Node(NodeType.LITERAL, type=OrsoTypes.TIMESTAMP, value=data_value, alias=alias)
+
+    if data_type == "DATE":
+        if data_node.type == OrsoTypes.DATE and isinstance(data_value, (int, numpy.integer)):
+            data_value = _EPOCH_DATE + datetime.timedelta(days=int(data_value))
+        elif data_node.type == OrsoTypes.TIMESTAMP and isinstance(data_value, (int, numpy.integer)):
+            data_value = (_EPOCH_DT + datetime.timedelta(microseconds=int(data_value))).date()
+        elif isinstance(data_value, datetime.datetime):
+            data_value = data_value.date()
+        elif isinstance(data_value, str):
+            data_value = dates.parse_iso(data_value).date()
+        return Node(NodeType.LITERAL, type=OrsoTypes.DATE, value=data_value, alias=alias)
 
     Datatype_Map: Dict[str, Tuple[str, Callable]] = {
-        "TIMESTAMP": (
-            OrsoTypes.TIMESTAMP,
-            lambda x: int((dates.parse_iso(x) - _EPOCH_DT).total_seconds() * 1_000_000),
-        ),
-        "DATE": (OrsoTypes.DATE, lambda x: (dates.parse_iso(x).date() - _EPOCH_DATE).days),
         "INTEGER": (OrsoTypes.INTEGER, numpy.int64),
         "DOUBLE": (OrsoTypes.DOUBLE, numpy.float64),
         "DECIMAL": (OrsoTypes.DECIMAL, decimal.Decimal),

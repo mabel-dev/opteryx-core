@@ -249,6 +249,9 @@ def _inner_evaluate(root: Node, table: Table):
                 datetime.date(1970, 1, 1) + datetime.timedelta(days=int(root.value)), "D"
             )
             return numpy.full(shape=table.num_rows, fill_value=value, dtype="datetime64[D]")
+        if literal_type == OrsoTypes.DATE and isinstance(root.value, datetime.date):
+            value = numpy.datetime64(root.value, "D")
+            return numpy.full(shape=table.num_rows, fill_value=value, dtype="datetime64[D]")
         if literal_type == OrsoTypes.TIMESTAMP and isinstance(root.value, (int, numpy.integer)):
             ivalue = int(root.value)
             if abs(ivalue) < 100_000_000_000 and ivalue % 1_000_000 == 0:
@@ -256,6 +259,14 @@ def _inner_evaluate(root: Node, table: Table):
                 value = numpy.datetime64(dt, "us")
             else:
                 value = numpy.datetime64(ivalue, "us")
+            return numpy.full(shape=table.num_rows, fill_value=value, dtype="datetime64[us]")
+        if literal_type == OrsoTypes.TIMESTAMP and isinstance(root.value, datetime.datetime):
+            value = numpy.datetime64(root.value, "us")
+            return numpy.full(shape=table.num_rows, fill_value=value, dtype="datetime64[us]")
+        if literal_type == OrsoTypes.TIMESTAMP and isinstance(root.value, datetime.date):
+            value = numpy.datetime64(
+                datetime.datetime(root.value.year, root.value.month, root.value.day), "us"
+            )
             return numpy.full(shape=table.num_rows, fill_value=value, dtype="datetime64[us]")
         if isinstance(literal_type, OrsoTypes):
             literal_type = literal_type.numpy_dtype
@@ -558,7 +569,10 @@ def _evaluate_and_append_arrow(expressions, table: Table):
             continue
 
         new_column = None
-        if statement.node_type == NodeType.LITERAL:
+        if statement.node_type == NodeType.LITERAL and statement.type not in (
+            OrsoTypes.DATE,
+            OrsoTypes.TIMESTAMP,
+        ):
             from opteryx.draken.vectors.constant_vector import from_scalar as constant_from_scalar
 
             target_type = _arrow_type_for_schema_column(statement.schema_column)
@@ -590,15 +604,29 @@ def _evaluate_and_append_arrow(expressions, table: Table):
                 if isinstance(new_column, (pyarrow.Array, pyarrow.ChunkedArray)):
                     new_column = new_column.cast(field.type)
                 else:
-                    # Use Draken's vector_from_sequence for efficient array construction
-                    from opteryx.draken.interop.arrow import vector_from_sequence
+                    temporal_numpy = (
+                        isinstance(new_column, numpy.ndarray)
+                        and numpy.issubdtype(new_column.dtype, numpy.datetime64)
+                    )
+                    temporal_python = isinstance(
+                        new_column, (list, tuple)
+                    ) and any(
+                        isinstance(value, (datetime.date, datetime.datetime))
+                        for value in new_column
+                        if value is not None
+                    )
+                    if temporal_numpy or temporal_python:
+                        new_column = pyarrow.array(new_column)
+                    else:
+                        # Use Draken's vector_from_sequence for efficient array construction
+                        from opteryx.draken.interop.arrow import vector_from_sequence
 
-                    # Convert numpy arrays to lists to avoid dimension issues
-                    if hasattr(new_column, "tolist"):
-                        new_column = new_column.tolist()
+                        # Convert numpy arrays to lists to avoid dimension issues
+                        if hasattr(new_column, "tolist"):
+                            new_column = new_column.tolist()
 
-                    vec = vector_from_sequence(new_column)
-                    new_column = vec.to_arrow()
+                        vec = vector_from_sequence(new_column)
+                        new_column = vec.to_arrow()
                     # Cast to the expected type if needed
                     if new_column.type != field.type:
                         try:
@@ -646,7 +674,10 @@ def _evaluate_and_append_morsel(expressions, morsel):
         if not should_evaluate(statement):
             continue
 
-        if statement.node_type == NodeType.LITERAL:
+        if statement.node_type == NodeType.LITERAL and statement.type not in (
+            OrsoTypes.DATE,
+            OrsoTypes.TIMESTAMP,
+        ):
             target_type = _arrow_type_for_schema_column(statement.schema_column)
             literal_vec = constant_from_scalar(statement.value, morsel.num_rows, dtype=target_type)
             if literal_vec is not None:

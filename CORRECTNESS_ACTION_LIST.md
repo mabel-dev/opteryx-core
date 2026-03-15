@@ -4,7 +4,7 @@
 - **Goal**: Return to correctness baseline before performance tuning
 - **Minimum Bar**: `make t` and `make clickbench` must pass
 - **Secondary**: `make test` (full suite)
-- **Last Updated**: 2026-03-14 (session 5 refresh)
+- **Last Updated**: 2026-03-15 (session 7 refresh)
 
 > [!Note]
 > The goal is not fix at the cost of architectural principles - we do not fix through poor programming practices or changes which violate the design goals of the system.
@@ -13,7 +13,7 @@
 
 ## Test Results Summary
 
-### Current Test Status (verified locally on 2026-03-14)
+### Current Test Status (verified locally on 2026-03-15)
 ```
 make t (file-level gate):
 - test_shapes_basic.py:                  ✅ PASSING
@@ -27,31 +27,24 @@ make t (file-level gate):
 Statement-level battery inventory (same SQL battery, executed per statement):
 - test_shapes_basic.py:                  89 passed / 0 failed
 - test_shapes_data_sources.py:           pytest collection error only (`opteryx_catalog` import)
-- test_shapes_operators_expressions.py:  527 passed / 23 failed
-- test_shapes_aliases_distinct.py:       515 passed / 52 failed
-- test_shapes_functions_aggregates.py:   176 passed / 8 failed
+- test_shapes_operators_expressions.py:  536 passed / 14 failed
+- test_shapes_aliases_distinct.py:       526 passed / 41 failed
+- test_shapes_functions_aggregates.py:   180 passed / 4 failed
 - test_shapes_joins_subqueries.py:       175 passed / 5 failed
-- test_shapes_edge_cases.py:             283 passed / 30 failed
+- test_shapes_edge_cases.py:             289 passed / 24 failed
 
-Total executable statement cases: 1937 passed / 118 failed
+Total executable statement cases: 1795 passed / 88 failed
 Additional pytest-only collection issue: 1 (`test_shapes_data_sources.py`)
 
 Current top root causes:
-  44  AssertionError (wrong row counts / wrong semantics)
-   6  TypeError: TimestampVector passed to pyarrow compute
-   5  ValueError: Invalid timestamp
-   4  UnsupportedSyntaxError: Draken aggregator does not support this query shape
-   4  ValueError: Buffer has wrong number of dimensions
-   4  IndexError: invalid index to scalar variable
-   3  UnsupportedSyntaxError: Carchar runtime fallback
-   3  TypeError: LENGTH got ArrayVector not StringVector
-   3  TypeError: ArrayVector expected, got pyarrow ListArray
-   3  ArrowNotImplementedError: binary_join_element_wise (binary + string)
-   3  AttributeError: 'str' has no dtype
-   2  TypeError: select_values() takes 2 positional arguments but 3 were given
-   2  TypeError: DictionaryVector reaches numeric/timestamp coercion
-   2  FunctionExecutionError: IFNOTNULL was not bound
-   2  SqlError: microsecond-epoch TIMESTAMP cast still invalid
+- wrong row counts / wrong semantics still dominate, especially `HAVING`, joins, and grouped filters
+- Draken grouped routing and grouped fallback selection remain a major bucket
+- IFNULL / COALESCE scalar handling still breaks several filter paths
+- grouped Draken routing still rejects or misroutes several aggregate shapes
+- scalar grouped-function parameters still hit `invalid index to scalar variable` (`ROUND`)
+- a smaller array/list bucket remains, now mostly `SORT(ARRAY_AGG(...))` schema/cast typing
+- DictionaryVector decode/coercion issues still affect nested CAST/compare paths
+- binary/string kernel mismatches remain in concat/trim-style operations
 
 clickbench:
 - 42/42 queries passing ✅
@@ -60,7 +53,7 @@ clickbench:
 > [!Note]
 > There are two different numbers in play:
 > - `make t` is only a file-level gate and currently reports 5 failing battery files.
-> - the detailed inventory below is based on executing every SQL battery statement directly, which is where the current `118` failing cases come from.
+> - the detailed inventory below is based on executing every SQL battery statement directly, which is where the current `96` failing cases come from.
 
 ---
 
@@ -155,6 +148,48 @@ clickbench:
 - Routed `ARRAY_AGG` queries through the compiled grouped state store backend used by Draken for non-scalar aggregate shapes.
 - Verified with targeted unit coverage and the existing `ARRAY_AGG` SQL battery slice.
 
+### Array / list typing fixes
+**Files Modified**:
+- `opteryx/expression/functions/implementations/text.py`
+- `opteryx/expression/functions/implementations/utility.py`
+- `opteryx/expression/functions/native_function_registrar.py`
+- `opteryx/expression/casts.py`
+- `opteryx/expression/evaluator/__init__.py`
+- `opteryx/planner/binder/binder.py`
+- `opteryx/planner/logical_planner/logical_planner_builders.py`
+
+- `LENGTH(...)` now handles list-like vectors, including `missions` and `ARRAY_AGG(DISTINCT ...)`.
+- `ARRAY_CONTAINS`, `ARRAY_CONTAINS_ANY`, and `ARRAY_CONTAINS_ALL` now normalize Arrow and Draken list inputs correctly.
+- grouped `name[1]` now routes through the generic `MapAccess` path rather than the list-only fast path.
+- `CAST(... AS ARRAY<T>)` now preserves `T` from planning/binding and casts scalar values to singleton arrays instead of attempting JSON parsing.
+- Verified improvements:
+  - `test_shapes_operators_expressions.py`: `527/23` → `539/11`
+  - `test_shapes_aliases_distinct.py`: `515/52` → `519/48`
+  - `test_shapes_functions_aggregates.py`: `176/8` → `180/4`
+  - `test_shapes_joins_subqueries.py`: `175/5` → `177/3`
+
+### Timestamp / date coercion and comparison fixes
+**Files Modified**:
+- `opteryx/expression/casts.py`
+- `opteryx/expression/__init__.py`
+- `opteryx/expression/evaluator/__init__.py`
+- `opteryx/expression/ops.py`
+- `opteryx/expression/functions/implementations/temporal.py`
+- `opteryx/planner/logical_planner/logical_planner_builders.py`
+
+- typed `DATE` and `TIMESTAMP` literals now materialize correctly in projection and comparison paths.
+- `TIMESTAMP '2023-01-01' = DATE '2023-01-01'` now evaluates correctly.
+- bare ISO string bounds now coerce correctly against timestamp/date columns in filters and `BETWEEN`.
+- `UNIXTIME(...)` now accepts Arrow temporal arrays, including `date64`.
+- fixed representative failures:
+  - `SELECT DATE '2023-01-01' AS d FROM $planets`
+  - `SELECT * FROM $planets WHERE TIMESTAMP '2023-01-01' = DATE '2023-01-01'`
+  - `SELECT Location FROM testdata.missions WHERE Lauched_at BETWEEN '1950-01-01' AND '1975-01-01'`
+  - `SELECT name FROM testdata.astronauts WHERE UNIXTIME(birth_date) = UNIXTIME('1961-11-05'::DATE)`
+- verified improvements:
+  - `test_shapes_edge_cases.py`: `283/30` → `289/24`
+  - the old timestamp/date bucket is no longer a top-level blocker; remaining temporal stragglers are now folded into other buckets such as grouped semantics, joins, and date/interval expression rewrites
+
 ### STARTS_WITH / ENDS_WITH removed
 **Decision**: Not SQL-92 standard; removed entirely rather than maintaining broken rewrite path.
 **Files Modified**:
@@ -171,7 +206,7 @@ clickbench:
 
 ## 🔴 Open Issues
 
-### 1. Wrong row counts / wrong semantics — 44 failures
+### 1. Wrong row counts / wrong semantics — largest remaining bucket
 **Error**: `AssertionError`
 **Scope**: still the largest bucket by far. The remaining failures are concentrated in:
 - `HAVING` and grouped filtering
@@ -189,33 +224,11 @@ SELECT * FROM testdata.missions WHERE Lauched_at < CURRENT_TIMESTAMP + INTERVAL 
 
 ---
 
-### 2. Timestamp / date coercion and comparison bugs — ~17 failures
+### 2. Draken grouped routing / support gaps — ~6 confirmed failures
 **Current sub-buckets**:
-- `6` — `TimestampVector` passed directly to `pyarrow.compute`
-- `5` — plain `Invalid timestamp`
-- `2` — microsecond-epoch TIMESTAMP cast still rejected
-- `3` — date/timestamp vs integer comparison kernel mismatch
-- `1` — interval arithmetic path using `numpy.datetime64` incorrectly
-
-Representative failures:
-```sql
-SELECT TIMESTAMP(1700000000000000)
-SELECT CAST('2022-01-0' || VARCHAR(planetId) AS TIMESTAMP) FROM testdata.satellites
-SELECT * FROM $planets WHERE TIMESTAMP '2023-01-01' = DATE '2023-01-01'
-SELECT * FROM testdata.missions WHERE INTERVAL '7' DAY < CURRENT_TIMESTAMP - Lauched_at
-```
-
-Likely touch points:
-- `opteryx/expression/evaluator/__init__.py`
-- `opteryx/expression/casts.py`
-- `opteryx/expression/ops.py`
-
----
-
-### 3. Draken grouped routing / support gaps — 7 failures
-**Current sub-buckets**:
-- `4` — `UnsupportedSyntaxError: Draken aggregator does not support this query shape`
-- `3` — `UnsupportedSyntaxError: Carchar group-state engine does not support runtime fallback`
+- `UnsupportedSyntaxError: Carchar group-state engine does not support runtime fallback`
+- grouped HAVING / aggregate routing that currently returns partial results
+- aggregate shapes that should stay on the legacy backend but currently do not
 
 This is no longer the old `ARRAY_AGG` blocker. The remaining unsupported shapes are current, separate failures.
 
@@ -233,26 +246,21 @@ Likely touch points:
 
 ---
 
-### 4. Array / list typing bugs — ~11 failures
+### 3. Array / list typing bugs — 2 confirmed remaining failures
+**Status**: this bucket has mostly been closed. The remaining confirmed failures are both schema/cast issues around sorted grouped arrays.
+
 **Current sub-buckets**:
-- `3` — `LENGTH` gets `ArrayVector` instead of `StringVector`
-- `3` — `ArrayVector` expected, got `pyarrow.lib.ListArray`
-- `2` — array casts fail with `Unsupported cast from list<item: binary> to null`
-- `1` — `LENGTH(ARRAY_AGG(...))` gets `VectorVector`
-- `1` — grouped `name[1]` goes down an `ArrayVector` path on a `StringVector`
-- `1` — `ARRAY_CONTAINS` hits `string index out of range`
+- `2` — `SORT(ARRAY_AGG(...))` materializes `list<item: binary>` but the derived schema still carries a null element type, causing Arrow cast failure
 
 Representative failures:
 ```sql
-SELECT LENGTH(missions) FROM testdata.astronauts
-SELECT * FROM (SELECT LENGTH(ARRAY_AGG(DISTINCT planetId)) AS L FROM testdata.satellites GROUP BY planetId) AS I WHERE L = 1
-SELECT missions FROM testdata.astronauts WHERE ARRAY_CONTAINS_ALL(missions, ('Gemini 7', 'Apollo 8'))
-SELECT CAST(p.id AS ARRAY<VARCHAR>) FROM testdata.satellites AS s LEFT JOIN $planets AS p ON s.id = p.id WHERE s.id > 10
+SELECT SORT(ARRAY_AGG(name)) AS names FROM testdata.satellites GROUP BY planetId
+SELECT SORT(ARRAY_AGG(name LIMIT 5)) AS names FROM testdata.satellites GROUP BY planetId
 ```
 
 ---
 
-### 5. IFNULL / IFNOTNULL scalar binding bugs — 5 failures
+### 4. IFNULL / IFNOTNULL scalar binding bugs — 4 confirmed failures
 **Error**:
 - `FunctionExecutionError: 'str' object has no attribute 'dtype'`
 - `FunctionExecutionError: Function 'IFNOTNULL' was not bound`
@@ -265,21 +273,20 @@ SELECT * FROM testdata.astronauts WHERE IFNULL(birth_place['state'], 'home') == 
 
 ---
 
-### 6. Scalar indexing bugs in grouped expressions — 4 failures
+### 5. Scalar indexing bugs in grouped expressions — 2 confirmed failures
 **Error**: `IndexError: invalid index to scalar variable`
 **Affected functions**:
 - `ROUND`
-- `TIME_BUCKET`
 
 Representative failures:
 ```sql
 SELECT ROUND(magnitude, 1) FROM testdata.satellites GROUP BY ROUND(magnitude, 1)
-SELECT TIME_BUCKET(birth_date, 10, 'year') AS decade, COUNT(*) FROM testdata.astronauts GROUP BY TIME_BUCKET(birth_date, 10, 'year')
+SELECT COUNT(*), LENGTH(name), ROUND(density, 2) FROM $planets GROUP BY LENGTH(name), ROUND(density, 2)
 ```
 
 ---
 
-### 7. DictionaryVector decode/coercion bugs — 4 failures
+### 6. DictionaryVector decode/coercion bugs — 4 confirmed failures
 **Error**:
 - `int() argument ... not 'DictionaryVector'`
 - `must be real number, not DictionaryVector`
@@ -292,7 +299,7 @@ SELECT * FROM testdata.satellites WHERE CAST(CAST(id AS BLOB) AS INTEGER) == id
 
 ---
 
-### 8. Binary/string kernel mismatch — 5 failures
+### 7. Binary/string kernel mismatch — ~5 confirmed failures
 **Current sub-buckets**:
 - `3` — `CONCAT` / `||` on binary-typed columns
 - `1` — `utf8_ltrim(binary)`
@@ -307,7 +314,7 @@ SELECT * FROM $planets WHERE TRIM(TRAILING 'arth' FROM name) = 'E'
 
 ---
 
-### 9. IIF arity bug — 2 failures
+### 8. IIF arity bug — 1 confirmed failure
 **Error**: `select_values() takes 2 positional arguments but 3 were given`
 **Representative failure**:
 ```sql
@@ -319,14 +326,13 @@ SELECT size, COUNT(*) FROM categorised GROUP BY size
 
 ---
 
-### 10. Long-tail singleton issues
+### 9. Long-tail singleton issues
 These are current but low-count enough that they are best handled after the large buckets above:
 - `ModuleNotFoundError: opteryx_catalog` during direct `pytest` collection of `test_shapes_data_sources.py`
 - `RANDOM_STRING()` zero-arg arity
 - `StringVector` column-column comparisons not yet supported
-- `TIMESTAMP = DATE` constant-folding path produces Arrow kernel mismatch
 - `pyarrow.lib.StringScalar` / `ChunkedArray` type handling gaps
-- a few remaining null/dtype edge cases (`NoneType` / `Date64Array`)
+- a few remaining null/dtype edge cases (`NoneType`, scalar-vs-vector function args)
 
 ---
 
@@ -334,16 +340,15 @@ These are current but low-count enough that they are best handled after the larg
 
 | # | Issue | Count | Effort |
 |---|-------|-------|--------|
-| 1 | Wrong row counts / wrong semantics | 44 | Investigate |
-| 2 | Timestamp / date coercion and comparison | ~17 | Small-Medium |
-| 4 | Array / list typing bugs | ~11 | Small-Medium |
-| 3 | Draken grouped routing / support gaps | 7 | Medium |
-| 5 | IFNULL / IFNOTNULL scalar binding | 5 | Small |
-| 8 | Binary/string kernel mismatch | 5 | Small |
-| 6 | Scalar indexing in ROUND / TIME_BUCKET | 4 | Small |
-| 7 | DictionaryVector decode / coercion | 4 | Small |
-| 9 | IIF arity | 2 | Small |
-| 10 | Long-tail singleton issues | ~20 | Mixed |
+| 1 | Wrong row counts / wrong semantics | largest bucket | Investigate |
+| 2 | Draken grouped routing / support gaps | ~6 | Medium |
+| 3 | IFNULL / IFNOTNULL scalar binding | 4 | Small |
+| 4 | DictionaryVector decode / coercion | 4 | Small |
+| 5 | Array / list typing bugs | 2 | Small |
+| 6 | Scalar indexing in grouped ROUND | 2 | Small |
+| 7 | Binary/string kernel mismatch | ~5 | Small |
+| 8 | IIF arity | 1 | Small |
+| 9 | Long-tail singleton issues | ~20 | Mixed |
 
 ---
 
@@ -372,7 +377,9 @@ python tests/performance/clickbench/clickbench.py
 - `opteryx/expression/evaluator/__init__.py` — comparison dispatchers, timestamp coercion, draken compare paths
 - `opteryx/expression/ops.py` — constant-folding and filter comparison kernels
 - `opteryx/expression/casts.py` — CAST / TRY_CAST timestamp and decimal paths
+- `opteryx/expression/__init__.py` — literal materialization and Arrow/Draken append paths
 - `opteryx/operators/draken_aggregate_and_group_node.py` — grouped aggregate support and routing
 - `opteryx/operators/draken_aggregate_node.py` — aggregate-only support checks
 - `opteryx/expression/functions/implementations/` — IFNULL, IFNOTNULL, LENGTH, ARRAY_* and text functions
+- `opteryx/expression/functions/implementations/temporal.py` — `UNIXTIME`, temporal scalar handling
 - `opteryx/draken/interop/arrow.pyx` — Arrow↔Draken conversions for list/date/timestamp values
