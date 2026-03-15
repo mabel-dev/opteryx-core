@@ -10,13 +10,9 @@ a function and a reference to it in the dictionary.
 """
 
 import datetime
-import decimal
 import warnings
-from typing import Callable
-from typing import Dict
 from typing import List
 from typing import Optional
-from typing import Tuple
 
 import numpy
 from orso.types import OrsoTypes
@@ -1188,7 +1184,6 @@ def typed_string(branch, alias: Optional[List[str]] = None, key=None):
     data_type = branch["data_type"]
 
     if isinstance(data_type, dict):
-        # timestamps have the timezone as a value
         type_key = next(iter(data_type))
         if type_key == "Timestamp" and data_type[type_key] not in (
             (None, "None"),
@@ -1198,45 +1193,10 @@ def typed_string(branch, alias: Optional[List[str]] = None, key=None):
         data_type = type_key
     data_type = data_type.upper()
 
-    data_node = build(branch["value"])
-    data_value = data_node.value
-
-    if data_type == "TIMESTAMP":
-        if data_node.type == OrsoTypes.DATE and isinstance(data_value, (int, numpy.integer)):
-            data_value = (_EPOCH_DT + datetime.timedelta(days=int(data_value))).replace(tzinfo=None)
-        elif data_node.type == OrsoTypes.TIMESTAMP and isinstance(data_value, (int, numpy.integer)):
-            data_value = (_EPOCH_DT + datetime.timedelta(microseconds=int(data_value))).replace(
-                tzinfo=None
-            )
-        elif isinstance(data_value, datetime.date) and not isinstance(data_value, datetime.datetime):
-            data_value = datetime.datetime(data_value.year, data_value.month, data_value.day)
-        elif isinstance(data_value, str):
-            data_value = dates.parse_iso(data_value).replace(tzinfo=None)
-        return Node(NodeType.LITERAL, type=OrsoTypes.TIMESTAMP, value=data_value, alias=alias)
-
-    if data_type == "DATE":
-        if data_node.type == OrsoTypes.DATE and isinstance(data_value, (int, numpy.integer)):
-            data_value = _EPOCH_DATE + datetime.timedelta(days=int(data_value))
-        elif data_node.type == OrsoTypes.TIMESTAMP and isinstance(data_value, (int, numpy.integer)):
-            data_value = (_EPOCH_DT + datetime.timedelta(microseconds=int(data_value))).date()
-        elif isinstance(data_value, datetime.datetime):
-            data_value = data_value.date()
-        elif isinstance(data_value, str):
-            data_value = dates.parse_iso(data_value).date()
-        return Node(NodeType.LITERAL, type=OrsoTypes.DATE, value=data_value, alias=alias)
-
-    Datatype_Map: Dict[str, Tuple[str, Callable]] = {
-        "INTEGER": (OrsoTypes.INTEGER, numpy.int64),
-        "DOUBLE": (OrsoTypes.DOUBLE, numpy.float64),
-        "DECIMAL": (OrsoTypes.DECIMAL, decimal.Decimal),
-        "BOOLEAN": (OrsoTypes.BOOLEAN, bool),
-    }
-
-    mapper = Datatype_Map.get(data_type)
-    if mapper is None:
-        raise UnsupportedSyntaxError(f"Cannot Type String type {data_type}")
-
-    return Node(NodeType.LITERAL, type=mapper[0], value=mapper[1](data_value), alias=alias)
+    raise UnsupportedSyntaxError(
+        f"Type-prefixed string literals are no longer supported for {data_type}. "
+        f"Use CAST(... AS {data_type}) instead. Only INTERVAL retains prefix literal syntax."
+    )
 
 
 def unary_op(branch, alias: Optional[List[str]] = None, key=None):
