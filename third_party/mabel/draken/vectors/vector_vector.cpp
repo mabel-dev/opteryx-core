@@ -19,7 +19,7 @@
             "-static-libstdc++"
         ],
         "include_dirs": [
-            "/Users/justin/.pyenv/versions/3.13.5/lib/python3.13/site-packages/numpy/_core/include",
+            "/private/var/folders/hq/5406wlms0mq3mw1362k748cw0000gn/T/pip-build-env-45din3b1/overlay/lib/python3.13/site-packages/numpy/_core/include",
             "src/cpp",
             "src/c",
             "third_party/mabel/draken",
@@ -31,6 +31,7 @@
             "third_party/tktech/simdjson",
             "third_party/re2",
             "third_party/cyan4973",
+            "third_party/tdigest-c/src",
             "third_party/ulfjack/ryu",
             "third_party/alantsd",
             "third_party/nanobind",
