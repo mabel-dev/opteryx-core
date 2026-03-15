@@ -17,6 +17,8 @@ from opteryx.models import QueryProperties
 
 from . import BasePlanNode
 
+_DATA_FORMAT = "arrow"
+
 
 class ShowCreateNode(BasePlanNode):
     def __init__(self, properties: QueryProperties, **parameters):

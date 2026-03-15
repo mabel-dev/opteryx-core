@@ -31,6 +31,9 @@ from opteryx.utils.arrow import align_tables
 
 from . import JoinNode
 
+_DATA_FORMAT = "arrow"
+
+
 CHUNK_SIZE: int = 50_000
 
 

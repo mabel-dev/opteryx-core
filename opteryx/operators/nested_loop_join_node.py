@@ -33,6 +33,8 @@ from opteryx.utils.arrow import align_tables
 
 from . import JoinNode
 
+_DATA_FORMAT = "arrow"
+
 
 class NestedLoopJoinNode(JoinNode):
     join_type = "nested_loop"

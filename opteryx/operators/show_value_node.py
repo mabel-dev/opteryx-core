@@ -19,6 +19,8 @@ from opteryx.models import QueryProperties
 
 from . import ReaderNode
 
+_DATA_FORMAT = "arrow"
+
 
 class ShowValueNode(ReaderNode):
     def __init__(self, properties: QueryProperties, **parameters):

@@ -246,7 +246,11 @@ def filter_operations(left_arr, left_type, operator, right_arr, right_type):
 
         if target_type == OrsoTypes.TIMESTAMP:
             if pyarrow.types.is_timestamp(arr.type):
-                return arr if arr.type == pyarrow.timestamp("us") else arr.cast(pyarrow.timestamp("us"))
+                return (
+                    arr
+                    if arr.type == pyarrow.timestamp("us")
+                    else arr.cast(pyarrow.timestamp("us"))
+                )
             if pyarrow.types.is_date32(arr.type):
                 return arr.cast(pyarrow.timestamp("us"))
             if pyarrow.types.is_integer(arr.type):
@@ -260,12 +264,16 @@ def filter_operations(left_arr, left_type, operator, right_arr, right_type):
                     import datetime as _dt
 
                     raw_values = [v.as_py() if hasattr(v, "as_py") else v for v in arr]
-                    if raw_values and all(v is None or (abs(int(v)) < 100_000_000_000 and int(v) % 1_000_000 == 0) for v in raw_values):
+                    if raw_values and all(
+                        v is None or (abs(int(v)) < 100_000_000_000 and int(v) % 1_000_000 == 0)
+                        for v in raw_values
+                    ):
                         return pyarrow.array(
                             [
                                 None
                                 if v is None
-                                else _dt.datetime(1970, 1, 1) + _dt.timedelta(days=int(v) // 1_000_000)
+                                else _dt.datetime(1970, 1, 1)
+                                + _dt.timedelta(days=int(v) // 1_000_000)
                                 for v in raw_values
                             ],
                             type=pyarrow.timestamp("us"),

@@ -27,6 +27,8 @@ from opteryx.models import QueryProperties
 
 from . import BasePlanNode
 
+_DATA_FORMAT = "draken"
+
 
 class ExitNode(BasePlanNode):
     is_not_explained = True

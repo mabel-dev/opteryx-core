@@ -10,8 +10,8 @@ This node is deliberately narrower than the legacy Arrow-first inner join:
 - it uses the compiled Carchar join state directly
 - it aligns output with Draken align_tables
 
-Unsupported shapes fall back to the legacy InnerJoinNode in the physical
-planner rather than adding more Arrow conversions here.
+Unsupported shapes fail in the physical planner rather than adding more
+Arrow conversions here.
 """
 
 from __future__ import annotations
@@ -33,6 +33,8 @@ from opteryx.expression.evaluator import evaluate_and_append_draken
 from opteryx.models import QueryProperties
 
 from . import JoinNode
+
+_DATA_FORMAT = "draken"
 
 
 class DrakenInnerJoinNode(JoinNode):

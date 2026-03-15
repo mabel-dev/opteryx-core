@@ -13,33 +13,50 @@ from orso.schema import FlatColumn
 from orso.schema import RelationSchema
 from orso.types import OrsoTypes
 
+from opteryx.draken.interop.arrow import vector_from_sequence
+from opteryx.draken.morsels.morsel import Morsel
+
 __all__ = ("read", "schema")
 
 
 def read(at_date=None, variables=None):
-    import pyarrow
-
     if not variables:
-        return pyarrow.Table.from_pylist([])
+        # Empty result with expected schema
+        vectors = [
+            vector_from_sequence([], dtype=OrsoTypes.VARCHAR),
+            vector_from_sequence([], dtype=OrsoTypes.VARCHAR),
+            vector_from_sequence([], dtype=OrsoTypes.VARCHAR),
+            vector_from_sequence([], dtype=OrsoTypes.VARCHAR),
+            vector_from_sequence([], dtype=OrsoTypes.VARCHAR),
+        ]
+        return Morsel.from_vectors(["name", "value", "type", "owner", "visibility"], vectors)
 
     variables = variables or {}
 
-    buffer = []
+    names = []
+    values = []
+    types = []
+    owners = []
+    visibilities = []
+
     for variable in variables:
         variable_type, variable_value, variable_owner, variable_visibility = variables.details(
             variable
         )
-        buffer.append(
-            {
-                "name": variable,
-                "value": str(variable_value),
-                "type": variable_type,
-                "owner": variable_owner.name,
-                "visibility": variable_visibility.name,
-            }
-        )
+        names.append(variable)
+        values.append(str(variable_value))
+        types.append(variable_type)
+        owners.append(variable_owner.name)
+        visibilities.append(variable_visibility.name)
 
-    return pyarrow.Table.from_pylist(buffer)
+    vectors = [
+        vector_from_sequence(names, dtype=OrsoTypes.VARCHAR),
+        vector_from_sequence(values, dtype=OrsoTypes.VARCHAR),
+        vector_from_sequence(types, dtype=OrsoTypes.VARCHAR),
+        vector_from_sequence(owners, dtype=OrsoTypes.VARCHAR),
+        vector_from_sequence(visibilities, dtype=OrsoTypes.VARCHAR),
+    ]
+    return Morsel.from_vectors(["name", "value", "type", "owner", "visibility"], vectors)
 
 
 def schema():

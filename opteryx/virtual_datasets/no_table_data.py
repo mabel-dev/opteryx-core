@@ -12,24 +12,24 @@ This is used to prepresent no table.
 It actually is a table, with one row and one column.
 """
 
-import pyarrow
 from orso.schema import FlatColumn
 from orso.schema import RelationSchema
 from orso.tools import single_item_cache
 from orso.types import OrsoTypes
 
+from opteryx.draken.interop.arrow import vector_from_sequence
+from opteryx.draken.morsels.morsel import Morsel
+
 __all__ = ("read", "schema")
 
 
 @single_item_cache
-def read(at_date=None, variables=None) -> pyarrow.Table:
-    # Create a PyArrow table with one column and one row
+def read(at_date=None, variables=None) -> Morsel:
+    # Create a Morsel containing one column and one row.
     _ = variables
 
-    arrow_schema = pyarrow.schema([pyarrow.field("$column", pyarrow.int64())])
-    return pyarrow.Table.from_arrays(
-        [pyarrow.array([0], type=pyarrow.int64())], schema=arrow_schema
-    )
+    vectors = [vector_from_sequence([0], dtype=OrsoTypes.INTEGER)]
+    return Morsel.from_vectors(["$column"], vectors)
 
 
 def schema():

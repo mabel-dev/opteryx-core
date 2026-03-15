@@ -24,6 +24,9 @@ from opteryx.models import QueryProperties
 
 from . import BasePlanNode
 
+_DATA_FORMAT = "arrow"
+
+
 CHUNK_SIZE = 65536
 
 

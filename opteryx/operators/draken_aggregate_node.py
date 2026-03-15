@@ -28,10 +28,12 @@ from opteryx.expression import get_all_nodes_of_type
 from opteryx.expression.evaluator import evaluate_and_append_draken
 from opteryx.models import QueryProperties
 from opteryx.nanobind.carchar_native import CarcharSet
-from opteryx.operators.aggregate_node import extract_evaluations
+from opteryx.operators.aggregate_helpers import extract_evaluations
 
 from . import BasePlanNode
 from .draken_aggregate_and_group_node import DrakenAggregateAndGroupNode
+
+_DATA_FORMAT = "draken"
 
 
 def _column_bytes(identity):

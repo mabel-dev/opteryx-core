@@ -26,6 +26,8 @@ from opteryx.third_party.abseil.containers import FlatHashSet
 
 from . import JoinNode
 
+_DATA_FORMAT = "arrow"
+
 
 class FilterJoinNode(JoinNode):
     def __init__(self, properties: QueryProperties, **parameters):

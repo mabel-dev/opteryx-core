@@ -63,7 +63,6 @@ STATEMENTS = [
         ("SELECT * FROM $no_table", 1, 1, None),
         ("SELECT * FROM $variables", 38, 5, None),
         ("SELECT * FROM testdata.missions", 4630, 8, None),
-        ("SELECT * FROM $stop_words", 305, 1, None),
         (b"SELECT * FROM testdata.satellites", 177, 8, None),
         ("SELECT * FROM testdata.missions", 4630, 8, None),
         ("SELECT * FROM testdata.satellites", 177, 8, None),

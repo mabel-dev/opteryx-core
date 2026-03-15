@@ -54,6 +54,8 @@ from .read_node import ReaderNode
 from .read_node import normalize_morsel
 from .read_node import struct_to_jsonb
 
+_DATA_FORMAT = "arrow,draken"
+
 
 class ParquetReadNode(ReaderNode):
     """Read node backed by column-chunk range reads via ``parquet_io``.

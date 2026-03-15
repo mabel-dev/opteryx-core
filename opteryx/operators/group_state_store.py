@@ -8,6 +8,9 @@ from __future__ import annotations
 from opteryx.draken.interop.arrow import vector_from_sequence
 from opteryx.draken.morsels.morsel import Morsel
 
+_DATA_FORMAT = "draken"
+
+
 _SUPPORTED_FUNCTIONS = {
     "count",
     "sum",

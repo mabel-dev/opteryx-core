@@ -133,8 +133,6 @@ def render_function_dataset(node: LogicalPlanNode) -> str:
         return f"VALUES (({', '.join(c.value for c in node.columns)}) x {len(node.values)} AS {node.alias})"
     if node.function == "UNNEST":
         return f"UNNEST ({', '.join(format_expression(arg) for arg in node.args)}{alias})"
-    if node.function == "HTTP":
-        return f"HTTP ({node.url}) AS {node.alias}"
     return node.function
 
 

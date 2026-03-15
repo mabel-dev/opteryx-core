@@ -24,6 +24,9 @@ from opteryx import EOS
 
 from . import BasePlanNode
 
+_DATA_FORMAT = "arrow"
+
+
 logger = logging.getLogger(__name__)
 
 

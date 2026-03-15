@@ -1,21 +1,16 @@
-✅ **FIXED**: SQL-92 function naming compliance - removed non-standard functions
-- Arithmetic: CEILING, FLOOR, ROUND, TRUNCATE, POWER (SQL-92 standard only)
-- Temporal: CURRENT_DATE(), CURRENT_TIME(), CURRENT_TIMESTAMP() (SQL-92 standard only)
-- Removed non-standard extensions: NOW, TODAY, YESTERDAY, POW
-- All 33 CEILING/FLOOR/ROUND tests pass ✓
-- CURRENT_TIMESTAMP() and CURRENT_DATE() tests pass ✓
-
-SQL-92 Compliance Achieved:
-- Only SQL-92 standard named functions registered
-- No non-standard aliases pretending to be standards
-- Clean, standards-focused function catalog
 
 -----
 
-✅ **FIXED**: Production error with undefined symbol `cpu_supports_avx2`
-- Root cause: `carchar_group_state_engine` extension included carchar_simd.hpp (which references cpu_supports_avx2) but didn't link cpu_features.cpp
-- Fix: Added `src/cpp/cpu_features.cpp` to the extension sources in setup.py
-- carchar_native and simd_probe extensions already had the correct configuration
+**ARCHITECTURE CHANGE**: Legacy aggregate planner path removed
+- Physical planner no longer falls back to `SimpleAggregateNode`, `SimpleAggregateAndGroupNode`, `AggregateNode`, or `AggregateAndGroupNode`
+- Aggregate / GROUP BY planning is now Draken-only; unsupported shapes fail fast with `UnsupportedSyntaxError`
+- The legacy aggregate operator files have now been deleted; only shared helper metadata remains in `aggregate_helpers.py`
+- Inner join planning is now also Draken-only; `InnerJoinNode` and its feature flag have been removed
+- This intentionally exposes currently hidden correctness gaps instead of masking them behind alternate execution paths
+- Newly visible buckets from the quick battery rerun:
+  - grouped aggregate shapes rejected by `DrakenAggregateAndGroupNode.supports(...)`
+  - grouped `ROUND(...)` / grouped `CASE` execution failures
+  - `HAVING` / grouped alias semantics returning wrong rows or wrong error types
 
 -----
 
@@ -46,17 +41,7 @@ SQL-92 Compliance Achieved:
 
 ----
 
-This query:
-~~~sql
-SELECT billing_account, CEILING(CEILING((SUM((event ->> 'bytes_processed')::INTEGER) / 1_000_000_000)) * 0.001, 2) AS processing_cost_gbp, SUM((event ->> 'bytes_processed')::INTEGER) / 1_000_000_000 AS gigabyte_processed, DATE_TRUNC('DAY', TIMESTAMP) AS billing_date FROM opteryx.ops.billing WHERE billing_event = 'DATA_PROCESSED_BYTES' GROUP BY ALL
-~~~
-
-throws this error:
-> KeyError: "Column '(event ->> 'bytes_processed')::INTEGER' not found"
-
-----
-
-Introduce a vector index
+Unary Ops aren't in a catalog
 
 ----
 

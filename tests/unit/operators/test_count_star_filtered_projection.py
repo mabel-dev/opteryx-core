@@ -4,7 +4,6 @@ import sys
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
 import opteryx
-import opteryx.planner.physical_planner as physical_planner
 
 
 def _get_read_operation(telemetry: dict) -> dict:
@@ -30,9 +29,7 @@ def test_count_star_with_filter_reads_only_predicate_columns():
         session.close()
 
 
-def test_draken_global_aggregate_does_not_route_through_groupby_runtime_fallback(monkeypatch):
-    monkeypatch.setattr(physical_planner, "USE_DRAKEN_AGGREGATOR", True)
-
+def test_draken_global_aggregate_does_not_route_through_groupby_runtime_fallback():
     session = opteryx.session()
     try:
         count_result = session.execute_to_arrow(
@@ -48,9 +45,7 @@ def test_draken_global_aggregate_does_not_route_through_groupby_runtime_fallback
         session.close()
 
 
-def test_draken_global_count_distinct_uses_native_carchar_set(monkeypatch):
-    monkeypatch.setattr(physical_planner, "USE_DRAKEN_AGGREGATOR", True)
-
+def test_draken_global_count_distinct_uses_native_carchar_set():
     session = opteryx.session()
     try:
         result = session.execute_to_arrow(

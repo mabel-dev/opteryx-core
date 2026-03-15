@@ -28,6 +28,7 @@ from opteryx.utils import series
 
 from .read_node import ReaderNode
 
+_DATA_FORMAT = "draken"
 _EPOCH_DATE = datetime.date(1970, 1, 1)
 _EPOCH_DT = datetime.datetime(1970, 1, 1)
 
@@ -135,29 +136,11 @@ def _fake_data(**kwargs):
     return _build_morsel_from_rows(kwargs["columns"], data.fetchall())
 
 
-def _http(**kwargs):
-    aliases = kwargs.get("schema")
-    data = kwargs.get("data")
-
-    column_names = []
-    column_types = []
-    column_values = []
-
-    for index, column_name in enumerate(data.column_names):
-        schema_column = aliases.column(column_name)
-        column_names.append(schema_column.identity)
-        column_types.append(schema_column.type)
-        column_values.append(_as_list(data.column(index)))
-
-    return _build_morsel_from_columns(column_names, column_types, column_values)
-
-
 DATASET_FUNCTIONS = {
     "FAKE": _fake_data,
     "GENERATE_SERIES": _generate_series,
     "UNNEST": _unnest,
     "VALUES": _values,
-    "HTTP": _http,
 }
 
 
@@ -186,8 +169,6 @@ class FunctionDatasetNode(ReaderNode):
             return f"VALUES (({', '.join([str(c) for c in self.columns])}) x {self.parameters.get('values', 0)} AS {self.alias})"
         if self.function == "UNNEST":
             return f"UNNEST ({', '.join(format_expression(arg) for arg in self.args)}{' AS ' + self.parameters.get('unnest_target', '')})"
-        if self.function == "HTTP":
-            return f"HTTP ({self.url}) AS {self.alias}"
 
     @property
     def name(self):  # pragma: no cover

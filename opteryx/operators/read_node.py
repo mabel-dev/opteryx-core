@@ -29,6 +29,8 @@ from opteryx.utils.json_compat import dumps as json_dumps
 
 from . import BasePlanNode
 
+_DATA_FORMAT = "arrow,draken"
+
 
 def struct_to_jsonb(table: pyarrow.Table) -> pyarrow.Table:
     """

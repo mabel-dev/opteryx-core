@@ -22,6 +22,7 @@ from opteryx.expression import NodeType
 from opteryx.expression import get_all_nodes_of_type
 from opteryx.tracing.event_recorder import record_event as _trace_record
 
+_DATA_FORMAT = "arrow,draken"
 END = object()
 
 

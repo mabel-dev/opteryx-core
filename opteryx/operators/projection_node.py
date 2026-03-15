@@ -22,6 +22,8 @@ from opteryx.models import QueryProperties
 
 from . import BasePlanNode
 
+_DATA_FORMAT = "draken"
+
 
 class ProjectionNode(BasePlanNode):
     is_stateless = True

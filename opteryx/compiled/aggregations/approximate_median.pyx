@@ -6,8 +6,6 @@
 # cython: wraparound=False
 # cython: boundscheck=False
 
-from libc.stddef cimport size_t
-
 import pyarrow
 
 

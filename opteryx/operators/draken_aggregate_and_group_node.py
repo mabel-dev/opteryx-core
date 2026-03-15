@@ -26,13 +26,16 @@ from opteryx.expression import NodeType
 from opteryx.expression import get_all_nodes_of_type
 from opteryx.expression.evaluator import evaluate_and_append_draken
 from opteryx.models import QueryProperties
-from opteryx.operators.aggregate_node import extract_evaluations
+from opteryx.operators.aggregate_helpers import extract_evaluations
 from opteryx.operators.group_state_store import create_group_state_engine
 from opteryx.operators.group_state_store import normalize_aggregations
 from opteryx.operators.group_state_store import normalize_group_by_columns
 from opteryx.operators.shuffle import AggregationSpec
 
 from . import BasePlanNode
+
+_DATA_FORMAT = "draken"
+
 
 CHUNK_SIZE = 65536
 

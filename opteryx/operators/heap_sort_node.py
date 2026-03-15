@@ -36,6 +36,8 @@ from opteryx.vector_types import node_is_vector_query_expression
 
 from . import BasePlanNode
 
+_DATA_FORMAT = "arrow,draken"
+
 
 class HeapSortNode(BasePlanNode):
     _NULL_COMPRESSED = numpy.iinfo(numpy.int64).min

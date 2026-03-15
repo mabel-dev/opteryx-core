@@ -60,7 +60,7 @@ cdef class ApproximateCountState:
 
     cpdef void add_hashes(self, object hashes):
         cdef uint64_t[::1] view
-        cdef Py_ssize_t i, n
+        cdef Py_ssize_t n
         if hashes is None:
             return
         try:
