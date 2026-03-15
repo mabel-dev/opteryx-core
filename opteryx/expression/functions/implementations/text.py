@@ -461,6 +461,9 @@ def to_char(arr) -> List[str]:
 
 
 def to_ascii(arr) -> List[int]:
+    # Arrow engine passes pyarrow Arrays; coerce them to Python strings.
+    if hasattr(arr, "to_pylist"):
+        arr = arr.to_pylist()
     return [ord(a) for a in arr]
 
 

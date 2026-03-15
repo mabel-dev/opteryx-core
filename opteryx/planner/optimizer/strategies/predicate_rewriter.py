@@ -604,6 +604,21 @@ def _rewrite_predicate(predicate, telemetry: QueryTelemetry):
 
 
 def _rewrite_function(function, telemetry: QueryTelemetry):
+    def _rebind_function_ref():
+        # Rebind the function reference when the function name or parameters have been rewritten.
+        # The binder runs before the optimizer, so we must update node.function_ref here.
+        try:
+            from opteryx.expression.functions import get_catalog
+
+            resolved = get_catalog().resolve(function.value, list(function.parameters))
+            if resolved is not None:
+                function.function_ref = resolved
+                if getattr(function, "schema_column", None) is not None and resolved.inferred_return_type:
+                    function.schema_column.type = resolved.inferred_return_type
+        except Exception:
+            # Best-effort: if rebinding fails, leave original binding intact.
+            pass
+
     if function.value == "_CASE":
         # CASE WHEN x IS NULL THEN y ELSE x END → IFNULL(x, y)
         if len(function.parameters) == 2 and function.parameters[0].parameters[0].value == "IsNull":
@@ -615,6 +630,7 @@ def _rewrite_function(function, telemetry: QueryTelemetry):
                 telemetry.optimization_predicate_rewriter_case_to_ifnull += 1
                 function.value = "IFNULL"
                 function.parameters = [compare_column, value_if_null]
+                _rebind_function_ref()
                 return function
         # CASE WHEN x THEN y ELSE z END → IIF(x, y, z)
         if (
@@ -631,12 +647,14 @@ def _rewrite_function(function, telemetry: QueryTelemetry):
 
             function.value = "IIF"
             function.parameters = [compare_column, value_if_true, value_if_false]
+            _rebind_function_ref()
             return function
     # COALESCE(x, y) → IFNULL(x, y)
     if function.value == "COALESCE":
         if len(function.parameters) == 2:
             telemetry.optimization_predicate_rewriter_coalesce_to_ifnull += 1
             function.value = "IFNULL"
+            _rebind_function_ref()
             return function
     # SUBSTRING(x, 1, n) → LEFT(x, n)
     if function.value == "SUBSTRING" and function.parameters[1].value == 1:

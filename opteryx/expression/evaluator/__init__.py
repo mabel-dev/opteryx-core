@@ -59,15 +59,70 @@ def _coerce_param_for_kernel(p, pa):
 
 
 def _coerce_param_for_draken(p):
-    """Coerce a PyArrow array into a Draken Vector when possible.
+    """Coerce inputs into native Draken vectors for draken kernels.
 
-    This is used for draken engines that expect native Draken Vectors but may be
-    invoked with PyArrow arrays from the higher-level evaluator layers.
+    Draken kernels should only receive Draken vectors (including ConstantVector).
+    This function mirrors the intent of KernelSpec.engine="draken" by
+    coercing scalars and lists into vector form before the kernel is invoked.
+
+    This avoids letting non-Draken values (lists, numpy scalars, pyarrow scalars)
+    reach the kernel and trigger type errors.
     """
+    # Fast path: already a Draken vector.
+    if p.__class__.__name__ in _DRAKEN_VECTOR_NAMES:
+        return p
+
+    # Arrow arrays → Draken vectors (existing behavior)
     if isinstance(p, (_pa.Array, _pa.ChunkedArray)):
         from opteryx.draken.interop.arrow import vector_from_arrow
 
         return vector_from_arrow(p)
+
+    # PyArrow scalar → primitive → constant vector
+    if hasattr(p, "as_py") and not isinstance(p, (bytes, str)):
+        try:
+            p = p.as_py()
+        except Exception:
+            pass
+
+    # Numpy scalars / arrays
+    try:
+        import numpy as np
+
+        if isinstance(p, np.generic):
+            p = p.item()
+        elif isinstance(p, np.ndarray):
+            if p.ndim == 0:
+                p = p.item()
+            else:
+                p = p.tolist()
+    except Exception:
+        pass
+
+    # Lists/tuples → vector_from_sequence
+    if isinstance(p, (list, tuple)):
+        from opteryx.draken.interop.arrow import vector_from_sequence
+
+        try:
+            return vector_from_sequence(p)
+        except Exception as e:
+            raise FunctionExecutionError(
+                message=(
+                    "Failed to coerce list/tuple to Draken vector for draken kernel. "
+                    f"Inner error: {e}"
+                ),
+                function=None,
+            )
+
+    # Scalars → ConstantVector (length 1, broadcastable)
+    from opteryx.draken.vectors.constant_vector import from_scalar as _const_scalar
+
+    if isinstance(p, (bool, int, float, str, bytes, type(None))):
+        vec = _const_scalar(p, 1)
+        if vec is not None:
+            return vec
+
+    # Fall back to returning as-is, so downstream type errors are visible.
     return p
 
 
@@ -141,28 +196,43 @@ def apply_bounded_function(node, *parameters) -> Any:
             parameters = [arr.compress(valid_positions) for arr in parameters]
             compressed = True
 
-    # Convert inputs based on engine when the numpy-compress path was not taken.
-    # `bypass` null policy means the kernel is responsible for all null handling.
-    if not compressed and null_policy != "bypass":
-        if engine == "arrow":
-            import pyarrow as _pa_abf
+    # Convert inputs based on engine. In the draken path we must ensure the
+    # kernel always sees Draken vectors (including ConstantVector) so it can
+    # execute at native speed without handling Python types.
+    if engine == "arrow":
+        # Arrow kernels expect arrow arrays, so coerce any known Draken vectors.
+        import pyarrow as _pa_abf
 
-            parameters = tuple(_coerce_param_for_kernel(p, _pa_abf) for p in parameters)
-        elif engine == "draken":
-            # Draken kernels expect native Draken Vectors. Convert Arrow inputs
-            # into Draken Vectors when necessary.
-            parameters = tuple(_coerce_param_for_draken(p) for p in parameters)
-        elif engine == "python":
-            # No conversion needed — kernel expects native Python objects.
-            pass
-        else:
-            raise FunctionExecutionError(
-                message=(
-                    f"Unknown kernel engine '{engine}' for function '{node.value}'. "
-                    "Expected one of: 'arrow', 'draken', 'python'."
-                ),
-                function=node.value,
-            )
+        parameters = tuple(_coerce_param_for_kernel(p, _pa_abf) for p in parameters)
+    elif engine == "draken":
+        # Draken kernels expect native Draken vectors. Convert everything we can.
+        parameters = tuple(_coerce_param_for_draken(p) for p in parameters)
+        # ArrowVector is a fallback wrapper for types without native Draken support
+        # (e.g. decimal128, float32). Detect these before the kernel call so we can
+        # report the SQL type name rather than an opaque Cython crash.
+        for p in parameters:
+            if p.__class__.__name__ == "ArrowVector":
+                arr = getattr(p, "_arr", None)
+                type_name = str(arr.type) if arr is not None else "unknown"
+                raise FunctionExecutionError(
+                    message=(
+                        f"Function '{node.value}' does not natively support column type "
+                        f"'{type_name}'. Consider casting the column: "
+                        f"CAST(column AS DOUBLE)."
+                    ),
+                    function=node.value,
+                )
+    elif engine == "python":
+        # No conversion needed — kernel expects native Python objects.
+        pass
+    else:
+        raise FunctionExecutionError(
+            message=(
+                f"Unknown kernel engine '{engine}' for function '{node.value}'. "
+                "Expected one of: 'arrow', 'draken', 'python'."
+            ),
+            function=node.value,
+        )
 
     try:
         result = kernel.callable_ref(*parameters)

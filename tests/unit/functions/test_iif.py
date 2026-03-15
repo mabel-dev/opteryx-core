@@ -14,11 +14,14 @@ from opteryx.draken.vectors.string_vector import StringVector
 from opteryx.draken.vectors.vector import Vector
 
 
+from opteryx.draken.vectors.constant_vector import from_scalar
+
+
 def test_vector_iif_treats_null_condition_as_false():
     result = vector_iif(
-        pyarrow.array([True, False, None], type=pyarrow.bool_()),
-        pyarrow.array([1, 1, 1], type=pyarrow.int64()),
-        pyarrow.array([2, 2, 2], type=pyarrow.int64()),
+        Vector.from_arrow(pyarrow.array([True, False, None], type=pyarrow.bool_())),
+        Vector.from_arrow(pyarrow.array([1, 1, 1], type=pyarrow.int64())),
+        Vector.from_arrow(pyarrow.array([2, 2, 2], type=pyarrow.int64())),
     )
 
     assert result.to_pylist() == [1, 2, 2]
@@ -26,9 +29,9 @@ def test_vector_iif_treats_null_condition_as_false():
 
 def test_vector_iif_broadcasts_scalar_branch_values():
     result = vector_iif(
-        pyarrow.array([True, False, True], type=pyarrow.bool_()),
-        "yes",
-        "no",
+        Vector.from_arrow(pyarrow.array([True, False, True], type=pyarrow.bool_())),
+        from_scalar(b"yes", 3),
+        from_scalar(b"no", 3),
     )
 
     assert result.to_pylist() == [b"yes", b"no", b"yes"]

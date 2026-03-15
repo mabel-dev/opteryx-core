@@ -43,6 +43,22 @@ from opteryx.draken.vectors.vector cimport Vector
 
 
 cdef int BRANCH_UNSUPPORTED = 0
+
+
+cdef int _infer_value_type(object value) noexcept:
+    # A simplified version of the logic in ConstantVector._infer_value_type.
+    # Used to help normalize scalar inputs for IIF.
+    if value is None:
+        return -1
+    if isinstance(value, bool):
+        return DRAKEN_BOOL
+    if isinstance(value, int):
+        return DRAKEN_INT64
+    if isinstance(value, float):
+        return DRAKEN_FLOAT64
+    if isinstance(value, (bytes, str)):
+        return DRAKEN_STRING
+    return -1
 cdef int BRANCH_VECTOR = 1
 cdef int BRANCH_CONSTANT = 2
 cdef int BRANCH_SCALAR = 3
@@ -89,14 +105,19 @@ def _normalize_value(value):
             except Exception:
                 pass
 
+        # Prefer Draken-native conversion if possible (works for strings, ints, etc.)
+        try:
+            from opteryx.draken.interop.arrow import vector_from_arrow
+
+            return vector_from_arrow(value)
+        except Exception:
+            pass
+
         if hasattr(value, "to_pylist"):
             try:
-                return Vector.from_arrow(value)
+                return value.to_pylist()
             except Exception:
-                try:
-                    return value.to_pylist()
-                except Exception:
-                    pass
+                pass
 
         if hasattr(value, "as_py"):
             try:
@@ -111,12 +132,32 @@ def _normalize_value(value):
             pass
 
     if _is_numpy_array_like(value):
-        if value.shape == ():
-            return value.item()
-        return value.tolist()
+        # Treat scalar arrays as scalars to make constant-folding compatible
+        # with functions (e.g. IIF) that expect fixed-width vectors.
+        if value.shape == () or value.shape == (1,):
+            value = value.item()
+        else:
+            return value.tolist()
 
-    if isinstance(value, tuple):
-        return list(value)
+    # Scalars are supported via ConstantVector so that scalar expressions
+    # (e.g. IIF(1=1, 1, 0)) can be handled by the Draken kernel.
+    if value is None or isinstance(value, (bool, int, float, bytes, str)):
+        value_type = _infer_value_type(value)
+        if value_type != -1:
+            return ConstantVector(1, value_type, value)
+
+    # Normalize Python sequences into Draken vectors so the Draken IIF kernel
+    # can operate on them directly.
+    from opteryx.draken.interop.arrow import vector_from_sequence
+
+    if isinstance(value, (tuple, list)):
+        if len(value) == 1:
+            return _normalize_value(value[0])
+        try:
+            return vector_from_sequence(value)
+        except Exception:
+            # fallback to list (will error later with a helpful message)
+            return list(value)
 
     return value
 
@@ -169,6 +210,7 @@ cdef inline Py_ssize_t _row_index(Py_ssize_t source_length, Py_ssize_t index) no
 
 
 cdef inline int _fixed_vector_type(object value) noexcept:
+    cdef int vt
     if isinstance(value, Int64Vector):
         return DRAKEN_INT64
     if isinstance(value, Float64Vector):
@@ -181,6 +223,13 @@ cdef inline int _fixed_vector_type(object value) noexcept:
         return (<TimeVector>value).ptr.type
     if isinstance(value, TimestampVector):
         return DRAKEN_TIMESTAMP64
+    if isinstance(value, ConstantVector):
+        # ConstantVector supports fixed-width types (int, float, bool) and string.
+        # String values should be handled by the string path, not the fixed-width path.
+        vt = (<ConstantVector>value).ptr.value_type
+        if vt == DRAKEN_STRING:
+            return -1
+        return vt
     return -1
 
 
@@ -695,15 +744,13 @@ cdef object _select_string(object condition, object when_true, object when_false
     return builder.finish()
 
 
-cpdef Vector vector_iif(object condition, object when_true, object when_false):
+cpdef Vector vector_iif(Vector condition, Vector when_true, Vector when_false):
     """Return row-wise selected values using SQL IIF semantics.
 
-    Null conditions take the false branch, matching CASE WHEN semantics.
+    This function assumes it is handed Draken vectors (including
+    ConstantVector). Callers are responsible for coercing scalars/lists into
+    Draken vectors before dispatching here.
     """
-
-    condition = _normalize_value(condition)
-    when_true = _normalize_value(when_true)
-    when_false = _normalize_value(when_false)
 
     length = _infer_length(condition, when_true, when_false)
     _validate_length(condition, length)
@@ -727,5 +774,6 @@ cpdef Vector vector_iif(object condition, object when_true, object when_false):
         return <Vector>_select_string(condition, when_true, when_false, length)
 
     raise TypeError(
-        "vector_iif only supports Draken fixed-width, boolean, and string vector families"
+        f"vector_iif only supports Draken fixed-width, boolean, and string vector families; "
+        f"got condition={type(condition).__name__}, when_true={type(when_true).__name__}, when_false={type(when_false).__name__}"
     )

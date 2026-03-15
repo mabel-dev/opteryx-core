@@ -21,10 +21,30 @@ import numpy
 from pyarrow import compute
 
 
-def round(*args):
-    if len(args) == 1:
-        return compute.round(args[0])
-    return compute.round(args[0], args[1])  # [#325]
+def round1(values):
+    """ROUND(values)"""
+    from opteryx.compiled.vector_ops import vector_round, vector_round_constant
+    from opteryx.draken.vectors.constant_vector import ConstantVector
+
+    if isinstance(values, ConstantVector):
+        return vector_round_constant(values, 0)
+    return vector_round(values)
+
+
+def round2(values, digits):
+    """ROUND(values, digits)"""
+    from opteryx.compiled.vector_ops import vector_round_digits, vector_round_constant
+    from opteryx.draken.vectors.constant_vector import ConstantVector
+
+    if isinstance(digits, ConstantVector):
+        d = int(digits.scalar_value()) if digits.scalar_value() is not None else 0
+    else:
+        d = int(digits)
+
+    if isinstance(values, ConstantVector):
+        return vector_round_constant(values, d)
+
+    return vector_round_digits(values, d)
 
 
 def random_number(size):

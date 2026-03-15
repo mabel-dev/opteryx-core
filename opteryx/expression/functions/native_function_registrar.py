@@ -273,15 +273,26 @@ def _builtin_arithmetic_functions() -> list[FunctionDefinition]:
                     id="ROUND_1",
                     parameters=(
                         ParameterSpec(name="num", type_family="numeric"),
-                        ParameterSpec(
-                            name="precision", type_family="integer", variadic=True, optional=True
-                        ),
                     ),
                     return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.DOUBLE),
                     kernel=KernelSpec(
-                        engine="arrow",
+                        engine="draken",
                         id="default",
-                        callable_ref=number_functions.round,
+                        callable_ref=number_functions.round1,
+                        cost_us_per_million=2.0,
+                    ),
+                ),
+                FunctionOverload(
+                    id="ROUND_2",
+                    parameters=(
+                        ParameterSpec(name="num", type_family="numeric"),
+                        ParameterSpec(name="precision", type_family="integer"),
+                    ),
+                    return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.DOUBLE),
+                    kernel=KernelSpec(
+                        engine="draken",
+                        id="default",
+                        callable_ref=number_functions.round2,
                         cost_us_per_million=2.0,
                     ),
                 ),
