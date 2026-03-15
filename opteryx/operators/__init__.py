@@ -20,7 +20,7 @@ Data Sources:
 - FunctionDatasetNode: Generates data from function calls
 
 Joins:
-- InnerJoinNode: Standard inner joins
+- DrakenInnerJoinNode: Standard inner joins
 - OuterJoinNode: Left, right, and full outer joins
 - CrossJoinNode: Cartesian product joins
 - NestedLoopJoinNode: Nested loop algorithm for joins
@@ -34,10 +34,8 @@ Filtering and Selection:
 - DistinctNode: Removes duplicate rows
 
 Aggregation:
-- AggregateNode: Standard aggregation (SUM, COUNT, etc.)
-- AggregateAndGroupNode: GROUP BY with aggregation
-- SimpleAggregateNode: Single-group aggregation optimization
-- SimpleAggregateAndGroupNode: Optimized single-group with GROUP BY
+- DrakenAggregateNode: Global aggregation
+- DrakenAggregateAndGroupNode: GROUP BY with aggregation
 
 Sorting and Limiting:
 - SortNode: ORDER BY implementation using TimSort
@@ -84,15 +82,11 @@ Performance Considerations:
 
 from .base_plan_node import BasePlanNode, JoinNode  # isort: skip
 
-from .aggregate_and_group_node import AggregateAndGroupNode  # Group is always followed by aggregate
+from .aggregate_helpers import AGGREGATORS
 from .draken_aggregate_node import DrakenAggregateNode
 from .draken_aggregate_and_group_node import DrakenAggregateAndGroupNode
-from .aggregate_node import AGGREGATORS
-from .aggregate_node import AggregateNode  # aggregate data
 from .null_reader_node import NullReaderNode  # empty table for contradictory predicates
 from .parquet_read_node import ParquetReadNode
-from .simple_aggregate_node import SimpleAggregateNode  # aggregate data
-from .simple_aggregate_and_group_node import SimpleAggregateAndGroupNode  # aggregate data
 
 # from .build_statistics_node import BuildStatisticsNode  # Analyze Tables
 from .cross_join_node import CrossJoinNode  # CROSS JOIN
@@ -107,7 +101,6 @@ from .heap_sort_node import HeapSortNode  # Heap
 
 # from .information_schema_node import InformationSchemaNode  # information_schema
 from .draken_inner_join_node import DrakenInnerJoinNode
-from .inner_join_node import InnerJoinNode
 from .nested_loop_join_node import NestedLoopJoinNode
 from .non_equi_join_node import NonEquiJoinNode
 
@@ -132,15 +125,11 @@ from .union_node import UnionNode
 __all__ = [
     "BasePlanNode",
     "JoinNode",
-    "AggregateAndGroupNode",
     "DrakenAggregateNode",
     "DrakenAggregateAndGroupNode",
     "AGGREGATORS",
-    "AggregateNode",
     "NullReaderNode",
     "ParquetReadNode",
-    "SimpleAggregateNode",
-    "SimpleAggregateAndGroupNode",
     "CrossJoinNode",
     "UnnestJoinNode",
     "DistinctNode",
@@ -151,7 +140,6 @@ __all__ = [
     "FunctionDatasetNode",
     "HeapSortNode",
     "DrakenInnerJoinNode",
-    "InnerJoinNode",
     "NestedLoopJoinNode",
     "NonEquiJoinNode",
     "LimitNode",

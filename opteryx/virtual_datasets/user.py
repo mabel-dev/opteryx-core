@@ -13,14 +13,14 @@ from orso.schema import FlatColumn
 from orso.schema import RelationSchema
 from orso.types import OrsoTypes
 
+from opteryx.draken.interop.arrow import vector_from_sequence
+from opteryx.draken.morsels.morsel import Morsel
 from opteryx.exceptions import VariableNotFoundError
 
 __all__ = ("read", "schema")
 
 
 def read(at_date=None, variables=None):
-    import pyarrow
-
     variables = variables or {}
 
     if isinstance(variables, dict):
@@ -36,12 +36,15 @@ def read(at_date=None, variables=None):
     if hasattr(memberships, "to_pylist"):
         memberships = memberships.to_pylist()
 
-    buffer = []
+    # Build Draken vectors directly (no Arrow intermediary)
+    memberships_list = list(memberships)
+    vectors = [
+        vector_from_sequence(["membership"] * len(memberships_list), dtype=OrsoTypes.VARCHAR),
+        vector_from_sequence([str(value) for value in memberships_list], dtype=OrsoTypes.VARCHAR),
+        vector_from_sequence(["VARCHAR"] * len(memberships_list), dtype=OrsoTypes.VARCHAR),
+    ]
 
-    for value in memberships:
-        buffer.append({"attribute": "membership", "value": str(value), "type": "VARCHAR"})
-
-    return pyarrow.Table.from_pylist(buffer)
+    return Morsel.from_vectors(["attribute", "value", "type"], vectors)
 
 
 def schema():

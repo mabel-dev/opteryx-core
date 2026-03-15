@@ -60,14 +60,54 @@ class ReturnSpec:
     resolver: Optional[Callable[[list], Any]] = None
 
 
+_UNSET = object()
+
+
 @dataclass(frozen=True)
 class KernelSpec:
     """Specification for a function kernel implementation."""
 
     id: str  # kernel identifier, e.g., "integer_integer" or "polymorphic"
     callable_ref: Callable
-    null_policy: Literal["strict", "passthrough", "custom"] = "strict"
+    engine: Literal["arrow", "draken", "numpy", "python"] | object = _UNSET
+    null_policy: Literal[
+        "compress",
+        "passthru",
+        "bypass",
+        "strict",
+        "passthrough",
+        "custom",
+    ] = "compress"
     cost_us_per_million: float = 0.0  # measured cost per million rows
+
+    def __post_init__(self):
+        if self.engine is _UNSET:
+            raise ValueError(
+                "KernelSpec.engine is required and must be one of "
+                "('arrow','draken','numpy','python')."
+            )
+
+        if self.null_policy not in (
+            "compress",
+            "passthru",
+            "bypass",
+            "strict",
+            "passthrough",
+            "custom",
+        ):
+            raise ValueError(
+                "KernelSpec.null_policy must be one of "
+                "('compress','passthru','bypass','strict','passthrough','custom')."
+            )
+
+        # Normalize legacy null policy names to canonical ones.
+        normalized = {
+            "strict": "compress",
+            "passthrough": "passthru",
+            "custom": "bypass",
+        }
+        if self.null_policy in normalized:
+            object.__setattr__(self, "null_policy", normalized[self.null_policy])
 
 
 @dataclass(frozen=True)

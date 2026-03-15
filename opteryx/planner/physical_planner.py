@@ -5,15 +5,10 @@
 
 
 from opteryx import operators
-from opteryx.config import features
 from opteryx.exceptions import InvalidInternalStateError
 from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.models import PhysicalPlan
 from opteryx.planner.logical_planner import LogicalPlanStepType
-
-ENABLE_NATIVE_AGGREGATOR: bool = features.enable_native_aggregator
-USE_DRAKEN_AGGREGATOR: bool = features.use_draken_aggregator
-USE_DRAKEN_INNER_JOIN: bool = features.use_draken_inner_join
 
 
 def _manifest_is_all_parquet(manifest) -> bool:
@@ -36,49 +31,35 @@ def create_physical_plan(logical_plan, query_properties) -> PhysicalPlan:
 
         # fmt: off
         if node_type == LogicalPlanStepType.Aggregate:
-            if USE_DRAKEN_AGGREGATOR:
-                if operators.DrakenAggregateNode.supports(node_config["aggregates"]):
-                    node = operators.DrakenAggregateNode(
-                        query_properties,
-                        **{
-                            k: v
-                            for k, v in node_config.items()
-                            if k in ("aggregates", "all_relations")
-                        },
-                    )
-                else:
-                    raise UnsupportedSyntaxError(
-                        "Draken aggregator does not support this query shape"
-                    )
-            elif all(agg.value in operators.SimpleAggregateNode.SIMPLE_AGGREGATES for agg in node_config["aggregates"]):
-                node = operators.SimpleAggregateNode(query_properties, **{k:v for k,v in node_config.items() if k in ("aggregates", "all_relations")})
+            if operators.DrakenAggregateNode.supports(node_config["aggregates"]):
+                node = operators.DrakenAggregateNode(
+                    query_properties,
+                    **{
+                        k: v
+                        for k, v in node_config.items()
+                        if k in ("aggregates", "all_relations")
+                    },
+                )
             else:
-                node = operators.AggregateNode(query_properties, **{k:v for k,v in node_config.items() if k in ("aggregates", "all_relations")})
+                raise UnsupportedSyntaxError(
+                    "Draken aggregator does not support this query shape"
+                )
         elif node_type == LogicalPlanStepType.AggregateAndGroup:
-            if USE_DRAKEN_AGGREGATOR:
-                # Strict mode: when the flag is on we refuse to plan any Python
-                # aggregate operator.  The supports() guard must return True or
-                # we treat the query as unsupported rather than falling back.
-                if operators.DrakenAggregateAndGroupNode.supports(
-                    node_config["aggregates"], node_config.get("groups")
-                ):
-                    node = operators.DrakenAggregateAndGroupNode(
-                        query_properties,
-                        **{
-                            k: v
-                            for k, v in node_config.items()
-                            if k in ("aggregates", "groups", "projection", "all_relations")
-                        },
-                    )
-                else:
-                    # Fail coherently so callers can detect unsupported shapes
-                    raise UnsupportedSyntaxError(
-                        "Draken aggregator does not support this query shape"
-                    )
-            elif ENABLE_NATIVE_AGGREGATOR and all(agg.value in operators.SimpleAggregateAndGroupNode.SIMPLE_AGGREGATES and agg.duplicate_treatment != "Distinct"  for agg in node_config["aggregates"]):
-                node = operators.SimpleAggregateAndGroupNode(query_properties, **{k:v for k,v in node_config.items() if k in ("aggregates", "groups", "projection", "all_relations")})
+            if operators.DrakenAggregateAndGroupNode.supports(
+                node_config["aggregates"], node_config.get("groups")
+            ):
+                node = operators.DrakenAggregateAndGroupNode(
+                    query_properties,
+                    **{
+                        k: v
+                        for k, v in node_config.items()
+                        if k in ("aggregates", "groups", "projection", "all_relations")
+                    },
+                )
             else:
-                node = operators.AggregateAndGroupNode(query_properties, **{k:v for k,v in node_config.items() if k in ("aggregates", "groups", "projection", "all_relations")})
+                raise UnsupportedSyntaxError(
+                    "Draken aggregator does not support this query shape"
+                )
         elif node_type == LogicalPlanStepType.Distinct:
             node = operators.DistinctNode(query_properties, **node_config)
         elif node_type == LogicalPlanStepType.Exit:
@@ -94,15 +75,12 @@ def create_physical_plan(logical_plan, query_properties) -> PhysicalPlan:
         elif node_type == LogicalPlanStepType.Join:
             if node_config.get("type") == "inner":
                 # INNER JOIN, NATURAL JOIN
-                if USE_DRAKEN_INNER_JOIN:
-                    if operators.DrakenInnerJoinNode.supports(**node_config):
-                        node = operators.DrakenInnerJoinNode(query_properties, **node_config)
-                    else:
-                        raise UnsupportedSyntaxError(
-                            "Draken inner join does not support this query shape"
-                        )
+                if operators.DrakenInnerJoinNode.supports(**node_config):
+                    node = operators.DrakenInnerJoinNode(query_properties, **node_config)
                 else:
-                    node = operators.InnerJoinNode(query_properties, **node_config)
+                    raise UnsupportedSyntaxError(
+                        "Draken inner join does not support this query shape"
+                    )
             elif node_config.get("type") == "nested loop":
                 # NESTED LOOP JOIN (INNER JOIN)
                 node = operators.NestedLoopJoinNode(query_properties, **node_config)

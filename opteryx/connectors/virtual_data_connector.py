@@ -22,7 +22,6 @@ from opteryx.connectors.base.base_connector import BaseConnector
 from opteryx.connectors.base.base_connector import BaseTable
 from opteryx.draken.morsels.morsel import Morsel
 from opteryx.exceptions import DatasetNotFoundError
-from opteryx.utils import arrow
 
 WELL_KNOWN_DATASETS = {
     "$planets": ("opteryx.virtual_datasets.planet_data", True),
@@ -30,7 +29,6 @@ WELL_KNOWN_DATASETS = {
     "$derived": ("opteryx.virtual_datasets.derived_data", False),
     "$no_table": ("opteryx.virtual_datasets.no_table_data", False),
     "$telemetry": ("opteryx.virtual_datasets.telemetry", True),
-    "$stop_words": ("opteryx.virtual_datasets.stop_words", True),
     "$user": ("opteryx.virtual_datasets.user", True),
 }
 
@@ -49,9 +47,7 @@ def _load_provider(name: str) -> Tuple[object, bool]:
 
 
 def suggest(dataset):
-    """
-    Provide suggestions to the user if they gave a table that doesn't exist.
-    """
+    """Provide suggestions to the user if they gave a table that doesn't exist."""
     from opteryx.utils import suggest_alternative
 
     known_datasets = (name for name, suggestable in WELL_KNOWN_DATASETS.items() if suggestable)
@@ -60,6 +56,43 @@ def suggest(dataset):
         return (
             f"The requested dataset, '{dataset}', could not be found. Did you mean '{suggestion}'?"
         )
+
+
+def _project_morsel(morsel: Morsel, columns: list) -> Morsel:
+    """Project and rename columns on a Morsel.
+
+    This mirrors the behavior of arrow.post_read_projector() but operates on
+    Draken Morsels directly.
+    """
+    if not columns:
+        return morsel
+
+    # Determine which columns are present in the morsel and should be kept.
+    selected_actual = []
+    selected_canonical = []
+
+    for projection_column in columns:
+        canonical = projection_column.schema_column.name
+        for alias in projection_column.schema_column.all_names:
+            alias_bytes = alias.encode("utf-8") if isinstance(alias, str) else alias
+            if alias_bytes in morsel.column_names:
+                selected_actual.append(alias_bytes)
+                selected_canonical.append(canonical)
+                break
+
+    if not selected_actual:
+        return morsel
+
+    out = morsel.copy(columns=selected_actual)
+
+    if any(
+        actual.decode("utf-8") != canonical
+        for actual, canonical in zip(selected_actual, selected_canonical)
+    ):
+        vectors = [out.column(actual) for actual in selected_actual]
+        out = Morsel.from_vectors(selected_canonical, vectors)
+
+    return out
 
 
 class VirtualDataConnector(BaseConnector):
@@ -121,8 +154,7 @@ class VirtualDataTable(BaseTable):
         return data_provider.schema()
 
     def read_dataset(self, columns: list = None, **kwargs):
-        """
-        Read the virtual dataset and yield chunks.
+        """Read the virtual dataset and yield morsels.
 
         Args:
             columns: List of columns to read
@@ -131,14 +163,20 @@ class VirtualDataTable(BaseTable):
         Yields:
             Morsel chunks
         """
+
         data_provider, _ = _load_provider(self.dataset)
         if data_provider is None:
             suggestion = suggest(self.dataset.lower())
             raise DatasetNotFoundError(
                 suggestion=suggestion, dataset=self.dataset, connector=self.__type__
             )
-        table = data_provider.read(at_date=kwargs.get("at_date"), variables=self.variables)
-        yield Morsel.from_arrow(arrow.post_read_projector(table, columns))
+
+        morsel = data_provider.read(at_date=kwargs.get("at_date"), variables=self.variables)
+        if not isinstance(morsel, Morsel):
+            # Backwards compatibility: allow providers that still return Arrow
+            morsel = Morsel.from_arrow(morsel)
+
+        yield _project_morsel(morsel, columns)
 
 
 class SampleDatasetReader:
@@ -165,13 +203,12 @@ class SampleDatasetReader:
         self.variables = variables
         self.config = config
 
-    def __next__(self) -> "pyarrow.Table":
-        """
-        Read the next chunk or morsel from the dataset.
+    def __next__(self) -> Morsel:
+        """Read the next chunk or morsel from the dataset.
 
         Returns:
-            A pyarrow Table representing a chunk or morsel of the dataset.
-            raises StopIteration if the dataset is exhausted.
+            A Morsel representing a chunk of the dataset.
+            Raises StopIteration if the dataset is exhausted.
         """
         if self.exhausted:
             raise StopIteration("Dataset has been read.")
@@ -184,5 +221,12 @@ class SampleDatasetReader:
             raise DatasetNotFoundError(
                 suggestion=suggestion, dataset=self.dataset_name, connector="SAMPLE"
             )
-        table = data_provider.read(self.date, self.variables)
-        return arrow.post_read_projector(table, self.columns)
+
+        morsel = data_provider.read(self.date, self.variables)
+        if not isinstance(morsel, Morsel):
+            morsel = Morsel.from_arrow(morsel)
+
+        if self.columns:
+            morsel = _project_morsel(morsel, self.columns)
+
+        return morsel

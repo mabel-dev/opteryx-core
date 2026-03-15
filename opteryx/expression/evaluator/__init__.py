@@ -58,19 +58,45 @@ def _coerce_param_for_kernel(p, pa):
     return arr
 
 
+def _coerce_param_for_draken(p):
+    """Coerce a PyArrow array into a Draken Vector when possible.
+
+    This is used for draken engines that expect native Draken Vectors but may be
+    invoked with PyArrow arrays from the higher-level evaluator layers.
+    """
+    if isinstance(p, (_pa.Array, _pa.ChunkedArray)):
+        from opteryx.draken.interop.arrow import vector_from_arrow
+
+        return vector_from_arrow(p)
+    return p
+
+
+def _normalize_null_policy(null_policy: str) -> str:
+    """Normalize old null_policy labels to their new semantic equivalents."""
+    if null_policy == "strict":
+        return "compress"
+    if null_policy == "custom":
+        return "bypass"
+    if null_policy == "passthrough":
+        return "passthru"
+    return null_policy
+
+
 def apply_bounded_function(node, *parameters) -> Any:
     """Apply a bound FUNCTION node to its already-evaluated parameters.
 
     Uses node.function_ref (set by binder) for kernel dispatch and null policy.
 
     Null policy (kernel.null_policy):
-        "strict"      — strip null rows before calling the kernel and fill them back after.
+        "compress"    — strip null rows before calling the kernel and fill them back after.
                         Fast path for functions that return NULL on any NULL input.
-        "passthrough" — pass all rows including nulls; the kernel handles nulls itself.
-                        Required for COALESCE, CASE, IIF, IFNULL, CONCAT, SUBSTRING, etc.
-        "custom"      — reserved for kernels with bespoke null handling logic (not yet used).
+        "passthru"    — pass all rows including nulls; the kernel handles nulls itself.
+                        Required for COALESCE, CASE, IFNULL, CONCAT, SUBSTRING, etc.
+        "bypass"      — do not perform any null-special handling; the kernel is
+                        responsible for all null handling.
+        (legacy values "strict" and "custom" are still accepted and mapped.)
     """
-    func_ref = getattr(node, "function_ref", None)
+    func_ref = node.function_ref
     if func_ref is None:
         raise FunctionExecutionError(
             message=f"Function '{node.value}' was not bound — function_ref is None.",
@@ -78,10 +104,19 @@ def apply_bounded_function(node, *parameters) -> Any:
         )
 
     kernel = func_ref.selected_overload.kernel
+    engine = kernel.engine
+
+    if engine is None:
+        raise FunctionExecutionError(
+            message=("KernelSpec.engine is required; please specify one of: 'arrow', 'draken'."),
+            function=node.value,
+        )
+
+    null_policy = _normalize_null_policy(kernel.null_policy)
 
     compressed = False
     if (
-        kernel.null_policy == "strict"
+        null_policy == "compress"
         and len(parameters) > 0
         and not isinstance(parameters[0], int)
         and all(isinstance(arr, numpy.ndarray) for arr in parameters)
@@ -106,15 +141,28 @@ def apply_bounded_function(node, *parameters) -> Any:
             parameters = [arr.compress(valid_positions) for arr in parameters]
             compressed = True
 
-    # Convert Draken vectors to Arrow arrays when the numpy-compress path
-    # was not taken.  PyArrow compute functions (compute.sqrt, compute.utf8_reverse,
-    # etc.) registered directly as callable_ref do not accept Draken objects.
-    # Python wrapper functions (e.g. _initcap, _replace) already handle both
-    # StringVector and Arrow arrays, so this conversion is safe for all callers.
-    if not compressed:
-        import pyarrow as _pa_abf
+    # Convert inputs based on engine when the numpy-compress path was not taken.
+    # `bypass` null policy means the kernel is responsible for all null handling.
+    if not compressed and null_policy != "bypass":
+        if engine == "arrow":
+            import pyarrow as _pa_abf
 
-        parameters = tuple(_coerce_param_for_kernel(p, _pa_abf) for p in parameters)
+            parameters = tuple(_coerce_param_for_kernel(p, _pa_abf) for p in parameters)
+        elif engine == "draken":
+            # Draken kernels expect native Draken Vectors. Convert Arrow inputs
+            # into Draken Vectors when necessary.
+            parameters = tuple(_coerce_param_for_draken(p) for p in parameters)
+        elif engine == "python":
+            # No conversion needed — kernel expects native Python objects.
+            pass
+        else:
+            raise FunctionExecutionError(
+                message=(
+                    f"Unknown kernel engine '{engine}' for function '{node.value}'. "
+                    "Expected one of: 'arrow', 'draken', 'python'."
+                ),
+                function=node.value,
+            )
 
     try:
         result = kernel.callable_ref(*parameters)
@@ -253,9 +301,7 @@ def _coerce_temporal_scalar_for_arrow(value, target_type):
         if isinstance(value, (int, numpy.integer)):
             ivalue = int(value)
             if abs(ivalue) < 100_000_000_000 and ivalue % 1_000_000 == 0:
-                return datetime.datetime(1970, 1, 1) + datetime.timedelta(
-                    days=ivalue // 1_000_000
-                )
+                return datetime.datetime(1970, 1, 1) + datetime.timedelta(days=ivalue // 1_000_000)
         return parse_timestamp_value(value)
 
     return value
@@ -729,11 +775,7 @@ def _arrow_vector_compare(op: str, vec, right):
     ):
         from orso.types import OrsoTypes
 
-        target_type = (
-            OrsoTypes.TIMESTAMP
-            if pa.types.is_timestamp(arr.type)
-            else OrsoTypes.DATE
-        )
+        target_type = OrsoTypes.TIMESTAMP if pa.types.is_timestamp(arr.type) else OrsoTypes.DATE
         scalar_value = _coerce_temporal_scalar_for_arrow(right, target_type)
         if pa.types.is_date32(arr.type) or pa.types.is_date64(arr.type):
             if isinstance(scalar_value, datetime.datetime):
@@ -1347,7 +1389,9 @@ def evaluate_draken(node, morsel):
                 node.right.schema_column.type,
             )[0].as_py()
             scalar_result = False if scalar_result is None else bool(scalar_result)
-            return BoolVector.from_arrow(pa.array([scalar_result] * morsel.num_rows, type=pa.bool_()))
+            return BoolVector.from_arrow(
+                pa.array([scalar_result] * morsel.num_rows, type=pa.bool_())
+            )
         return draken_compare(node.value, left, right)
 
     if node_type == NodeType.UNARY_OPERATOR:

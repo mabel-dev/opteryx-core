@@ -633,7 +633,7 @@ def _cast_literal_value(literal_node, target_type: str, kind: str, alias):
     if base_type == "VARBINARY":
         orso_type = OrsoTypes.BLOB
     elif base_type == "DATE" and literal_node.type in (OrsoTypes.INTEGER, OrsoTypes.DATE):
-        value = (_EPOCH_DATE + datetime.timedelta(days=int(literal_node.value)))
+        value = _EPOCH_DATE + datetime.timedelta(days=int(literal_node.value))
         return Node(NodeType.LITERAL, type=OrsoTypes.DATE, value=value, alias=alias)
     # Special case: INTEGER to TIMESTAMP conversion using PyArrow
     elif base_type == "TIMESTAMP" and (

@@ -2,9 +2,14 @@ import json
 from pathlib import Path
 
 from opteryx.functions.signatures import export_function_signatures
+from opteryx.expression.functions import catalog as function_catalog_module
 
 
 def test_function_signatures_json_matches_catalog_export():
+    # Ensure the catalog is in its default state; previous tests may have
+    # registered additional functions.
+    function_catalog_module._CATALOG = None
+
     signatures_path = (
         Path(__file__).resolve().parents[3] / "opteryx/functions/function_signatures.json"
     )
@@ -16,6 +21,9 @@ def test_function_signatures_json_matches_catalog_export():
 
 
 def test_function_signatures_export_includes_enriched_metadata():
+    # Ensure the catalog is in its default state; previous tests may have registered additional functions.
+    function_catalog_module._CATALOG = None
+
     signatures = export_function_signatures()
 
     round_function = signatures["ROUND"]
@@ -37,7 +45,7 @@ def test_function_signatures_export_includes_enriched_metadata():
     assert "half-to-even" in round_signature["notes"]
     assert round_signature["arity"] == {"minimum": 1, "maximum": None, "variadic": True}
     assert round_signature["execution"]["kernel_id"] == "default"
-    assert round_signature["execution"]["null_policy"] == "strict"
+    assert round_signature["execution"]["null_policy"] == "compress"
     assert round_signature["execution"]["cost_us_per_million"] == 2.0
     assert "It is listed under" not in round_signature["documentation"]
     assert "For the same inputs" not in round_signature["documentation"]
@@ -95,7 +103,7 @@ def test_function_signatures_export_includes_enriched_metadata():
     assert "Canonical form is `MATCH(str) AGAINST(pattern)`" in match_signature["notes"]
 
     concat_signature = signatures["CONCAT"]["overloads"][0]
-    assert concat_signature["execution"]["null_policy"] == "passthrough"
+    assert concat_signature["execution"]["null_policy"] == "passthru"
 
     assert signatures["INITCAP"]["aliases"] == ["TITLE", "TITLECASE"]
     assert "TITLE" not in signatures

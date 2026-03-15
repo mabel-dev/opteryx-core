@@ -28,6 +28,9 @@ from opteryx.third_party.abseil.containers import FlatHashSet
 
 from . import BasePlanNode
 
+_DATA_FORMAT = "arrow"
+
+
 INTERNAL_BATCH_SIZE: int = 10000  # config
 MAX_JOIN_SIZE: int = 1000  # config
 MORSEL_SIZE_BYTES: int = 16 * 1024 * 1024

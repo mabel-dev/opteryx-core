@@ -71,9 +71,9 @@ def parse_timestamp_value(value):
 
     if isinstance(value, numpy.datetime64):
         micros = int(value.astype("datetime64[us]").astype(numpy.int64))
-        return datetime.datetime.fromtimestamp(micros / 1_000_000, tz=datetime.timezone.utc).replace(
-            tzinfo=None
-        )
+        return datetime.datetime.fromtimestamp(
+            micros / 1_000_000, tz=datetime.timezone.utc
+        ).replace(tzinfo=None)
 
     if isinstance(value, (bytes, bytearray, memoryview)):
         value = bytes(value).decode("utf-8")

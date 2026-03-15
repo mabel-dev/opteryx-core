@@ -67,7 +67,9 @@ def _normalize_membership_values(value):
             return [value.item()]
         value = value.tolist()
     if isinstance(value, (list, tuple, set, frozenset)):
-        if len(value) == 1 and isinstance(next(iter(value)), (list, tuple, set, frozenset, numpy.ndarray)):
+        if len(value) == 1 and isinstance(
+            next(iter(value)), (list, tuple, set, frozenset, numpy.ndarray)
+        ):
             return _normalize_array_row(next(iter(value))) or []
         return list(value)
     return [value]
@@ -422,7 +424,12 @@ def array_contains_any(arr, val):
     needles = frozenset(_normalize_membership_values(val))
     rows = _sequence_rows(arr)
     return pyarrow.array(
-        [False if row is None else bool(set(_normalize_array_row(row) or []).intersection(needles)) for row in rows],
+        [
+            False
+            if row is None
+            else bool(set(_normalize_array_row(row) or []).intersection(needles))
+            for row in rows
+        ],
         type=pyarrow.bool_(),
     )
 
@@ -431,7 +438,10 @@ def array_contains_all(arr, val):
     needles = frozenset(_normalize_membership_values(val))
     rows = _sequence_rows(arr)
     return pyarrow.array(
-        [False if row is None else needles.issubset(set(_normalize_array_row(row) or [])) for row in rows],
+        [
+            False if row is None else needles.issubset(set(_normalize_array_row(row) or []))
+            for row in rows
+        ],
         type=pyarrow.bool_(),
     )
 

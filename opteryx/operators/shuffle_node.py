@@ -20,6 +20,8 @@ from opteryx.operators.shuffle.partitioning import select_num_bins_from_rows
 
 from . import BasePlanNode
 
+_DATA_FORMAT = "draken"
+
 
 class ShuffleNode(BasePlanNode):
     def __init__(self, properties: QueryProperties, **parameters):

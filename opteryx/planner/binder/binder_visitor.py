@@ -612,7 +612,6 @@ class BinderVisitor:
                 column.origin = [node.relation_name]
             node.columns = columns
             node.schema = schema
-        elif node.function == "HTTP":
             node.relation_name = node.alias
             node.url = node.args[0].value
 

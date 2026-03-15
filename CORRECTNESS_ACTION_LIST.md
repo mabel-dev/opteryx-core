@@ -4,7 +4,7 @@
 - **Goal**: Return to correctness baseline before performance tuning
 - **Minimum Bar**: `make t` and `make clickbench` must pass
 - **Secondary**: `make test` (full suite)
-- **Last Updated**: 2026-03-15 (session 7 refresh)
+- **Last Updated**: 2026-03-15 (session 8 refresh)
 
 > [!Note]
 > The goal is not fix at the cost of architectural principles - we do not fix through poor programming practices or changes which violate the design goals of the system.
@@ -51,13 +51,87 @@ clickbench:
 ```
 
 > [!Note]
+> Session 8 added planner-level rejection for non-`INTERVAL` typed prefix literals and refreshed the affected SQL battery fixtures. The broad battery counts above have not been rerun since that deprecation-only change; only targeted verification was performed for that work.
+
+> [!Note]
+> Session 9 removed physical-planner fallback to the legacy aggregate/group operators. Aggregate planning is now Draken-only: unsupported aggregate shapes fail fast with `UnsupportedSyntaxError` instead of silently routing through Python/Arrow implementations. The broad battery counts above predate that architectural cutover; a quick statement-level battery rerun confirmed newly exposed grouped failures in `HAVING`, grouped `ROUND`/`CASE`, and unsupported grouped aggregate shapes.
+
+> [!Note]
+> Session 9 also removed physical-planner fallback to the legacy inner join operator. Inner join planning is now Draken-only: unsupported join shapes fail fast with `UnsupportedSyntaxError` instead of routing through the Arrow join implementation.
+
+> [!Note]
 > There are two different numbers in play:
 > - `make t` is only a file-level gate and currently reports 5 failing battery files.
-> - the detailed inventory below is based on executing every SQL battery statement directly, which is where the current `96` failing cases come from.
+> - the detailed inventory below is based on executing every SQL battery statement directly, which is where the current `88` failing cases come from.
 
 ---
 
 ## ✅ Completed Work
+
+### Legacy aggregate planner path removed
+**Files Modified**:
+- `opteryx/planner/physical_planner.py`
+- `opteryx/operators/aggregate_helpers.py`
+- `opteryx/operators/__init__.py`
+- `opteryx/operators/draken_aggregate_node.py`
+- `opteryx/operators/draken_aggregate_and_group_node.py`
+- `opteryx/config.py`
+- `tests/unit/planner/test_physical_planner_draken_agg_flag.py`
+- `tests/unit/operators/test_count_star_filtered_projection.py`
+- deleted:
+  - `opteryx/operators/aggregate_node.py`
+  - `opteryx/operators/aggregate_and_group_node.py`
+  - `opteryx/operators/simple_aggregate_node.py`
+  - `opteryx/operators/simple_aggregate_and_group_node.py`
+  - `tests/unit/operators/test_groupby_partial.py`
+
+- Physical planning for `Aggregate` and `AggregateAndGroup` is now single-path: Draken support is required.
+- Removed planner fallback to `SimpleAggregateNode`, `SimpleAggregateAndGroupNode`, `AggregateNode`, and `AggregateAndGroupNode`.
+- Deleted the legacy aggregate operator implementations entirely; the shared aggregate name map and expression pre-evaluation helper now live in `aggregate_helpers.py`.
+- Unsupported aggregate/grouped shapes now raise `UnsupportedSyntaxError("Draken aggregator does not support this query shape")` during planning.
+- targeted verification completed:
+  - `pytest tests/unit/planner/test_physical_planner_draken_agg_flag.py`
+  - `pytest tests/unit/operators/test_count_star_filtered_projection.py`
+  - `pytest tests/unit/operators/test_draken_aggregate_and_group_node.py`
+  - `python tests/integration/sql_battery/run_shapes_battery.py` (used to surface newly exposed failures; broad inventory above not yet recomputed from a clean rerun)
+
+### Legacy inner join planner path removed
+**Files Modified**:
+- `opteryx/planner/physical_planner.py`
+- `opteryx/operators/__init__.py`
+- `opteryx/operators/draken_inner_join_node.py`
+- `opteryx/config.py`
+- `tests/unit/planner/test_physical_planner_draken_agg_flag.py`
+- deleted:
+  - `opteryx/operators/inner_join_node.py`
+
+- Physical planning for `inner` joins is now single-path: Draken support is required.
+- Removed planner fallback to `InnerJoinNode`.
+- Unsupported inner join shapes now raise `UnsupportedSyntaxError("Draken inner join does not support this query shape")` during planning.
+- targeted verification completed:
+  - `pytest tests/unit/planner/test_physical_planner_draken_agg_flag.py`
+
+### Non-`INTERVAL` typed prefix literals removed
+**Files Modified**:
+- `opteryx/planner/logical_planner/logical_planner_builders.py`
+- `tests/unit/core/test_interval_types.py`
+- `tests/integration/sql_battery/test_shapes_aliases_distinct.py`
+- `tests/integration/sql_battery/test_shapes_edge_cases.py`
+- `tests/integration/sql_battery/test_shapes_operators_expressions.py`
+- `tests/integration/sql_battery/test_battery_sql92.py`
+- `tests/integration/sql_battery/test_data/tests/documentation.run_tests`
+- `tests/integration/sql_battery/test_data/tests/feature_tests.run_tests`
+- `tests/integration/sql_battery/test_data/tests/regression.run_tests`
+- `tests/integration/sql_battery/test_data/tests/tpch_data.run_tests`
+- `tests/integration/sql_battery/test_data/tests/types.run_tests`
+
+- `DATE '...'`, `TIMESTAMP '...'`, `INTEGER '...'`, `DOUBLE '...'`, `DECIMAL '...'`, and `BOOLEAN '...'` now raise `UnsupportedSyntaxError` at planning time.
+- `INTERVAL '...'` remains supported.
+- SQL battery fixtures were migrated away from prefix literal syntax using existing supported forms (`CAST(...)`, `DATE(...)`, `TIMESTAMP(...)`, or `EXTRACT(...)`) depending on which path currently executes correctly.
+- targeted verification completed:
+  - `pytest tests/unit/core/test_interval_types.py`
+  - representative session queries covering the rewritten battery patterns
+  - full battery totals above were not recomputed after this change
 
 ### Segmentation Faults — GROUP BY without Aggregates
 **Files Modified**: `opteryx/operators/draken_aggregate_and_group_node.py`
@@ -213,6 +287,7 @@ clickbench:
 - join semantics / null-side filtering
 - date and interval predicates
 - expression rewrites that change null behavior
+- now-visible grouped Draken gaps after legacy planner removal (unsupported grouped shapes, grouped scalar expressions, and grouped alias/HAVING handling)
 
 Representative failures:
 ```sql

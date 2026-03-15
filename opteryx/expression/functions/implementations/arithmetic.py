@@ -24,7 +24,7 @@ from pyarrow import compute
 def round(*args):
     if len(args) == 1:
         return compute.round(args[0])
-    return compute.round(args[0], args[1][0])  # [#325]
+    return compute.round(args[0], args[1])  # [#325]
 
 
 def random_number(size):

@@ -6,8 +6,12 @@ with the actual kernel callables that live in implementations/.
 
 The implementations themselves are in:
     opteryx/expression/functions/implementations/
-        arithmetic.py, text.py, temporal.py, logical.py,
-        hash_encoding.py, utility.py
+        arithmetic.py
+        text.py
+        temporal.py
+        logical.py
+        hash_encoding.py
+        utility.py
 """
 
 from orso.types import OrsoTypes
@@ -119,6 +123,7 @@ def _builtin_text_functions() -> list[FunctionDefinition]:
                     parameters=(ParameterSpec(name="str", type_family="string"),),
                     return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.VARCHAR),
                     kernel=KernelSpec(
+                        engine="arrow",
                         id="default",
                         callable_ref=to_upper,
                         cost_us_per_million=5.0,
@@ -141,6 +146,7 @@ def _builtin_text_functions() -> list[FunctionDefinition]:
                     parameters=(ParameterSpec(name="str", type_family="string"),),
                     return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.VARCHAR),
                     kernel=KernelSpec(
+                        engine="arrow",
                         id="default",
                         callable_ref=to_lower,
                         cost_us_per_million=5.0,
@@ -163,6 +169,7 @@ def _builtin_text_functions() -> list[FunctionDefinition]:
                     parameters=(ParameterSpec(name="str", type_family="string"),),
                     return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.INTEGER),
                     kernel=KernelSpec(
+                        engine="arrow",
                         id="default",
                         callable_ref=vector_lengther,
                         cost_us_per_million=3.0,
@@ -190,9 +197,10 @@ def _builtin_text_functions() -> list[FunctionDefinition]:
                     ),
                     return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.VARCHAR),
                     kernel=KernelSpec(
+                        engine="draken",
                         id="default",
                         callable_ref=_concat_kernel,
-                        null_policy="passthrough",
+                        null_policy="passthru",
                         cost_us_per_million=8.0,
                     ),
                 ),
@@ -216,9 +224,10 @@ def _builtin_text_functions() -> list[FunctionDefinition]:
                     ),
                     return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.VARCHAR),
                     kernel=KernelSpec(
+                        engine="arrow",
                         id="default",
                         callable_ref=string_functions.substring,
-                        null_policy="passthrough",
+                        null_policy="passthru",
                         cost_us_per_million=6.0,
                     ),
                 ),
@@ -231,9 +240,10 @@ def _builtin_text_functions() -> list[FunctionDefinition]:
                     ),
                     return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.VARCHAR),
                     kernel=KernelSpec(
+                        engine="arrow",
                         id="default",
                         callable_ref=string_functions.substring,
-                        null_policy="passthrough",
+                        null_policy="passthru",
                         cost_us_per_million=6.0,
                     ),
                 ),
@@ -269,6 +279,7 @@ def _builtin_arithmetic_functions() -> list[FunctionDefinition]:
                     ),
                     return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.DOUBLE),
                     kernel=KernelSpec(
+                        engine="arrow",
                         id="default",
                         callable_ref=number_functions.round,
                         cost_us_per_million=2.0,
@@ -291,6 +302,7 @@ def _builtin_arithmetic_functions() -> list[FunctionDefinition]:
                     parameters=(ParameterSpec(name="num", type_family="numeric"),),
                     return_spec=ReturnSpec(mode="same_as_arg", arg_index=0),
                     kernel=KernelSpec(
+                        engine="arrow",
                         id="default",
                         callable_ref=compute.abs,
                         cost_us_per_million=1.0,
@@ -318,6 +330,7 @@ def _builtin_arithmetic_functions() -> list[FunctionDefinition]:
                     ),
                     return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.DOUBLE),
                     kernel=KernelSpec(
+                        engine="arrow",
                         id="default",
                         callable_ref=number_functions.ceiling,
                         cost_us_per_million=2.0,
@@ -345,6 +358,7 @@ def _builtin_arithmetic_functions() -> list[FunctionDefinition]:
                     ),
                     return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.DOUBLE),
                     kernel=KernelSpec(
+                        engine="arrow",
                         id="default",
                         callable_ref=number_functions.floor,
                         cost_us_per_million=2.0,
@@ -367,6 +381,7 @@ def _builtin_arithmetic_functions() -> list[FunctionDefinition]:
                     parameters=(ParameterSpec(name="num", type_family="numeric"),),
                     return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.DOUBLE),
                     kernel=KernelSpec(
+                        engine="arrow",
                         id="default",
                         callable_ref=compute.sqrt,
                         cost_us_per_million=3.0,
@@ -426,22 +441,21 @@ def _case_return_type(arg_nodes) -> OrsoTypes:
 
 def _builtin_logical_functions() -> list[FunctionDefinition]:
     """Logical and control flow functions."""
-    import numpy
-
+    # fmt: off
+    from opteryx.compiled.vector_ops import vector_iif as _vector_iif
     from opteryx.expression.functions.implementations.logical import (
-        array_contains as _lf_array_contains,
-    )
+        array_contains as _lf_array_contains,)
     from opteryx.expression.functions.implementations.logical import if_null as _lf_if_null
     from opteryx.expression.functions.implementations.logical import null_if as _lf_null_if
     from opteryx.expression.functions.implementations.utility import (
-        cosine_similarity as _lf_cosine_similarity,
-    )
+        cosine_similarity as _lf_cosine_similarity,)
     from opteryx.expression.functions.implementations.utility import humanize as _lf_humanize
     from opteryx.expression.functions.implementations.utility import (
-        jsonb_object_keys as _lf_jsonb_object_keys,
-    )
+        jsonb_object_keys as _lf_jsonb_object_keys,)
     from opteryx.functions import _coalesce
     from opteryx.functions import select_values
+
+    # fmt: on
 
     class other_functions:
         array_contains = staticmethod(_lf_array_contains)
@@ -452,7 +466,7 @@ def _builtin_logical_functions() -> list[FunctionDefinition]:
         jsonb_object_keys = staticmethod(_lf_jsonb_object_keys)
 
     _coalesce_kernel = _coalesce
-    _iif_kernel = numpy.where
+    _iif_kernel = _vector_iif
     _case_kernel = select_values
 
     _variadic_any = (
@@ -476,9 +490,10 @@ def _builtin_logical_functions() -> list[FunctionDefinition]:
                     parameters=_variadic_any,
                     return_spec=ReturnSpec(mode="resolver", resolver=_coalesce_return_type),
                     kernel=KernelSpec(
+                        engine="arrow",
                         id="default",
                         callable_ref=_coalesce_kernel,
-                        null_policy="passthrough",
+                        null_policy="passthru",
                         cost_us_per_million=5.0,
                     ),
                 ),
@@ -502,9 +517,10 @@ def _builtin_logical_functions() -> list[FunctionDefinition]:
                     ),
                     return_spec=ReturnSpec(mode="resolver", resolver=_coalesce_return_type),
                     kernel=KernelSpec(
+                        engine="arrow",
                         id="default",
                         callable_ref=other_functions.if_null,
-                        null_policy="passthrough",
+                        null_policy="passthru",
                         cost_us_per_million=4.0,
                     ),
                 ),
@@ -528,9 +544,10 @@ def _builtin_logical_functions() -> list[FunctionDefinition]:
                     ),
                     return_spec=ReturnSpec(mode="resolver", resolver=_coalesce_return_type),
                     kernel=KernelSpec(
+                        engine="arrow",
                         id="default",
                         callable_ref=other_functions.if_null,  # same kernel, different semantics handled by evaluator
-                        null_policy="passthrough",
+                        null_policy="passthru",
                         cost_us_per_million=4.0,
                     ),
                 ),
@@ -554,6 +571,7 @@ def _builtin_logical_functions() -> list[FunctionDefinition]:
                     ),
                     return_spec=ReturnSpec(mode="same_as_arg", arg_index=0),
                     kernel=KernelSpec(
+                        engine="arrow",
                         id="default",
                         callable_ref=other_functions.null_if,
                         cost_us_per_million=3.0,
@@ -580,9 +598,10 @@ def _builtin_logical_functions() -> list[FunctionDefinition]:
                     ),
                     return_spec=ReturnSpec(mode="same_as_arg", arg_index=1),
                     kernel=KernelSpec(
+                        engine="draken",
                         id="default",
                         callable_ref=_iif_kernel,
-                        null_policy="passthrough",
+                        null_policy="bypass",
                         cost_us_per_million=2.0,
                     ),
                 ),
@@ -603,6 +622,7 @@ def _builtin_logical_functions() -> list[FunctionDefinition]:
                     parameters=(ParameterSpec(name="value", type_family="any"),),
                     return_spec=ReturnSpec(mode="same_as_arg", arg_index=0),
                     kernel=KernelSpec(
+                        engine="arrow",
                         id="default",
                         callable_ref=lambda x: x,
                         cost_us_per_million=0.1,
@@ -625,9 +645,10 @@ def _builtin_logical_functions() -> list[FunctionDefinition]:
                     parameters=_variadic_any,
                     return_spec=ReturnSpec(mode="resolver", resolver=_case_return_type),
                     kernel=KernelSpec(
+                        engine="arrow",
                         id="default",
                         callable_ref=_case_kernel,
-                        null_policy="passthrough",
+                        null_policy="passthru",
                         cost_us_per_million=3.0,
                     ),
                 ),
@@ -637,7 +658,8 @@ def _builtin_logical_functions() -> list[FunctionDefinition]:
 
 
 def _builtin_aggregate_functions() -> list[FunctionDefinition]:
-    # Aggregates are dispatched by draken via AGGREGATORS in aggregate_node.py,
+    # Aggregates are dispatched by the physical aggregate operators via
+    # opteryx.operators.aggregate_helpers.AGGREGATORS,
     # not by the function catalog. Returning an empty list keeps callers intact
     # while ensuring aggregates are NOT visible to is_function() checks.
     return []
@@ -668,7 +690,9 @@ def _builtin_constant_functions() -> list[FunctionDefinition]:
                     id=f"{name}_0",
                     parameters=(),
                     return_spec=ReturnSpec(mode="fixed", fixed_type=return_type),
-                    kernel=KernelSpec(id="constant", callable_ref=_noop, cost_us_per_million=0.1),
+                    kernel=KernelSpec(
+                        engine="arrow", id="constant", callable_ref=_noop, cost_us_per_million=0.1
+                    ),
                 ),
             ),
         )
@@ -729,6 +753,7 @@ def _builtin_temporal_extra_functions() -> list[FunctionDefinition]:
                     ),
                     return_spec=ReturnSpec(mode="resolver", resolver=_datepart_return_type),
                     kernel=KernelSpec(
+                        engine="arrow",
                         id="default",
                         callable_ref=date_functions.date_part,
                         cost_us_per_million=4.0,
@@ -784,6 +809,7 @@ def _builtin_utility_functions() -> list[FunctionDefinition]:
                     parameters=(ParameterSpec(name="arr", type_family="array"),),
                     return_spec=ReturnSpec(mode="resolver", resolver=_element_type_return),
                     kernel=KernelSpec(
+                        engine="arrow",
                         id="default",
                         callable_ref=_greatest_kernel,
                         cost_us_per_million=3.0,
@@ -806,6 +832,7 @@ def _builtin_utility_functions() -> list[FunctionDefinition]:
                     parameters=(ParameterSpec(name="arr", type_family="array"),),
                     return_spec=ReturnSpec(mode="resolver", resolver=_element_type_return),
                     kernel=KernelSpec(
+                        engine="arrow",
                         id="default",
                         callable_ref=_least_kernel,
                         cost_us_per_million=3.0,
@@ -828,6 +855,7 @@ def _builtin_utility_functions() -> list[FunctionDefinition]:
                     parameters=(ParameterSpec(name="arr", type_family="array"),),
                     return_spec=ReturnSpec(mode="same_as_arg", arg_index=0),
                     kernel=KernelSpec(
+                        engine="arrow",
                         id="default",
                         callable_ref=_sort_kernel,
                         cost_us_per_million=5.0,
@@ -853,6 +881,7 @@ def _builtin_utility_functions() -> list[FunctionDefinition]:
                     ),
                     return_spec=ReturnSpec(mode="resolver", resolver=_array_literal_return_type),
                     kernel=KernelSpec(
+                        engine="arrow",
                         id="default",
                         callable_ref=lambda *a: None,  # constructed inline by evaluator
                         cost_us_per_million=2.0,
@@ -878,6 +907,7 @@ def _builtin_utility_functions() -> list[FunctionDefinition]:
                     ),
                     return_spec=ReturnSpec(mode="resolver", resolver=_array_literal_return_type),
                     kernel=KernelSpec(
+                        engine="arrow",
                         id="default",
                         callable_ref=lambda *a: None,
                         cost_us_per_million=2.0,
@@ -995,7 +1025,8 @@ def _builtin_text_extended_functions() -> list[FunctionDefinition]:
         params,
         aliases=(),
         cost=5.0,
-        null_policy="strict",
+        null_policy="compress",
+        engine="arrow",
         summary="",
         doc="",
     ):
@@ -1014,6 +1045,7 @@ def _builtin_text_extended_functions() -> list[FunctionDefinition]:
                     parameters=params,
                     return_spec=ReturnSpec(mode="fixed", fixed_type=ret),
                     kernel=KernelSpec(
+                        engine=engine,
                         id="default",
                         callable_ref=callable_ref,
                         null_policy=null_policy,
@@ -1077,8 +1109,9 @@ def _builtin_text_extended_functions() -> list[FunctionDefinition]:
                 ParameterSpec(name="str1", type_family="string"),
                 ParameterSpec(name="more", type_family="string", variadic=True, optional=True),
             ),
+            engine="draken",
             summary="Concatenate with separator.",
-            null_policy="passthrough",
+            null_policy="passthru",
         ),
         _make(
             "POSITION",
@@ -1088,6 +1121,7 @@ def _builtin_text_extended_functions() -> list[FunctionDefinition]:
                 ParameterSpec(name="needle", type_family="string"),
                 ParameterSpec(name="haystack", type_family="string"),
             ),
+            engine="draken",
             summary="Find position of substring.",
         ),
         _make(
@@ -1095,7 +1129,7 @@ def _builtin_text_extended_functions() -> list[FunctionDefinition]:
             string_functions.trim,
             OrsoTypes.VARCHAR,
             (_s, ParameterSpec(name="chars", type_family="string", optional=True)),
-            null_policy="passthrough",
+            null_policy="passthru",
             summary="Trim leading and trailing characters.",
         ),
         _make(
@@ -1103,7 +1137,7 @@ def _builtin_text_extended_functions() -> list[FunctionDefinition]:
             string_functions.ltrim,
             OrsoTypes.VARCHAR,
             (_s, ParameterSpec(name="chars", type_family="string", optional=True)),
-            null_policy="passthrough",
+            null_policy="passthru",
             summary="Trim leading characters.",
         ),
         _make(
@@ -1111,7 +1145,7 @@ def _builtin_text_extended_functions() -> list[FunctionDefinition]:
             string_functions.rtrim,
             OrsoTypes.VARCHAR,
             (_s, ParameterSpec(name="chars", type_family="string", optional=True)),
-            null_policy="passthrough",
+            null_policy="passthru",
             summary="Trim trailing characters.",
         ),
         _make(
@@ -1156,7 +1190,7 @@ def _builtin_text_extended_functions() -> list[FunctionDefinition]:
                 ParameterSpec(name="delimiter", type_family="string", optional=True),
                 ParameterSpec(name="limit", type_family="integer", optional=True),
             ),
-            null_policy="passthrough",
+            null_policy="passthru",
             summary="Split string into array.",
         ),
         _make(
@@ -1233,7 +1267,7 @@ def _builtin_hash_encoding_functions() -> list[FunctionDefinition]:
         aliases=(),
         cost=10.0,
         volatility="immutable",
-        null_policy="strict",
+        null_policy="compress",
         summary="",
     ):
         return FunctionDefinition(
@@ -1251,6 +1285,7 @@ def _builtin_hash_encoding_functions() -> list[FunctionDefinition]:
                     parameters=params,
                     return_spec=ReturnSpec(mode="fixed", fixed_type=ret),
                     kernel=KernelSpec(
+                        engine="arrow",
                         id="default",
                         callable_ref=callable_ref,
                         null_policy=null_policy,
@@ -1291,9 +1326,10 @@ def _builtin_hash_encoding_functions() -> list[FunctionDefinition]:
                     parameters=(_n,),
                     return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.DOUBLE),
                     kernel=KernelSpec(
+                        engine="arrow",
                         id="default",
                         callable_ref=number_functions.random_number,
-                        null_policy="strict",
+                        null_policy="compress",
                         cost_us_per_million=10.0,
                     ),
                 ),
@@ -1302,9 +1338,10 @@ def _builtin_hash_encoding_functions() -> list[FunctionDefinition]:
                     parameters=(),
                     return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.DOUBLE),
                     kernel=KernelSpec(
+                        engine="arrow",
                         id="zero_arg",
                         callable_ref=number_functions.random_number,
-                        null_policy="strict",
+                        null_policy="compress",
                         cost_us_per_million=10.0,
                     ),
                 ),
@@ -1325,9 +1362,10 @@ def _builtin_hash_encoding_functions() -> list[FunctionDefinition]:
                     parameters=(_n,),
                     return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.DOUBLE),
                     kernel=KernelSpec(
+                        engine="arrow",
                         id="default",
                         callable_ref=number_functions.random_normal,
-                        null_policy="strict",
+                        null_policy="compress",
                         cost_us_per_million=10.0,
                     ),
                 ),
@@ -1336,9 +1374,10 @@ def _builtin_hash_encoding_functions() -> list[FunctionDefinition]:
                     parameters=(),
                     return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.DOUBLE),
                     kernel=KernelSpec(
+                        engine="arrow",
                         id="zero_arg",
                         callable_ref=number_functions.random_normal,
-                        null_policy="strict",
+                        null_policy="compress",
                         cost_us_per_million=10.0,
                     ),
                 ),
@@ -1399,6 +1438,7 @@ def _builtin_array_misc_functions() -> list[FunctionDefinition]:
     from opteryx.expression.functions.implementations.utility import (
         jsonb_object_keys as _of_jsonb_object_keys,
     )
+
     class other_functions:
         array_contains = staticmethod(_of_array_contains)
         array_contains_all = staticmethod(_of_array_contains_all)
@@ -1412,7 +1452,7 @@ def _builtin_array_misc_functions() -> list[FunctionDefinition]:
         jsonb_object_keys = staticmethod(_of_jsonb_object_keys)
 
     def _make(
-        name, callable_ref, ret, params, aliases=(), cost=8.0, null_policy="strict", summary=""
+        name, callable_ref, ret, params, aliases=(), cost=8.0, null_policy="compress", summary=""
     ):
         return FunctionDefinition(
             name=name,
@@ -1429,6 +1469,7 @@ def _builtin_array_misc_functions() -> list[FunctionDefinition]:
                     parameters=params,
                     return_spec=ReturnSpec(mode="fixed", fixed_type=ret),
                     kernel=KernelSpec(
+                        engine="arrow",
                         id="default",
                         callable_ref=callable_ref,
                         null_policy=null_policy,
@@ -1451,7 +1492,7 @@ def _builtin_array_misc_functions() -> list[FunctionDefinition]:
             other_functions.array_contains,
             OrsoTypes.BOOLEAN,
             (_arr, _item),
-            null_policy="passthrough",
+            null_policy="passthru",
             summary="Test if array contains item.",
         ),
         _make(
@@ -1459,7 +1500,7 @@ def _builtin_array_misc_functions() -> list[FunctionDefinition]:
             other_functions.array_contains_any,
             OrsoTypes.BOOLEAN,
             (_arr, _set),
-            null_policy="passthrough",
+            null_policy="passthru",
             summary="Test if array contains any item from set.",
         ),
         _make(
@@ -1467,7 +1508,7 @@ def _builtin_array_misc_functions() -> list[FunctionDefinition]:
             other_functions.array_contains_all,
             OrsoTypes.BOOLEAN,
             (_arr, _set),
-            null_policy="passthrough",
+            null_policy="passthru",
             summary="Test if array contains all items from set.",
         ),
         _make(
@@ -1501,9 +1542,10 @@ def _builtin_array_misc_functions() -> list[FunctionDefinition]:
                     parameters=(ParameterSpec(name="text", type_family="string"),),
                     return_spec=ReturnSpec(mode="resolver", resolver=_embed_return_type),
                     kernel=KernelSpec(
+                        engine="arrow",
                         id="default",
                         callable_ref=other_functions.embed,
-                        null_policy="strict",
+                        null_policy="compress",
                         cost_us_per_million=120.0,
                     ),
                 ),
@@ -1527,9 +1569,10 @@ def _builtin_array_misc_functions() -> list[FunctionDefinition]:
                     ),
                     return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.DOUBLE),
                     kernel=KernelSpec(
+                        engine="arrow",
                         id="default",
                         callable_ref=other_functions.cosine_similarity,
-                        null_policy="strict",
+                        null_policy="compress",
                         cost_us_per_million=30.0,
                     ),
                 ),
@@ -1541,9 +1584,10 @@ def _builtin_array_misc_functions() -> list[FunctionDefinition]:
                     ),
                     return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.DOUBLE),
                     kernel=KernelSpec(
+                        engine="arrow",
                         id="default",
                         callable_ref=other_functions.cosine_similarity,
-                        null_policy="strict",
+                        null_policy="compress",
                         cost_us_per_million=30.0,
                     ),
                 ),
@@ -1567,9 +1611,10 @@ def _builtin_array_misc_functions() -> list[FunctionDefinition]:
                     ),
                     return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.DOUBLE),
                     kernel=KernelSpec(
+                        engine="arrow",
                         id="default",
                         callable_ref=other_functions.cosine_distance,
-                        null_policy="strict",
+                        null_policy="compress",
                         cost_us_per_million=30.0,
                     ),
                 ),
@@ -1581,9 +1626,10 @@ def _builtin_array_misc_functions() -> list[FunctionDefinition]:
                     ),
                     return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.DOUBLE),
                     kernel=KernelSpec(
+                        engine="arrow",
                         id="default",
                         callable_ref=other_functions.cosine_distance,
-                        null_policy="strict",
+                        null_policy="compress",
                         cost_us_per_million=30.0,
                     ),
                 ),
@@ -1600,7 +1646,7 @@ def _builtin_arithmetic_extended_functions() -> list[FunctionDefinition]:
     from opteryx.expression.functions.implementations import temporal as date_functions
 
     def _make(
-        name, callable_ref, ret, params, aliases=(), cost=2.0, null_policy="strict", summary=""
+        name, callable_ref, ret, params, aliases=(), cost=2.0, null_policy="compress", summary=""
     ):
         return FunctionDefinition(
             name=name,
@@ -1617,6 +1663,7 @@ def _builtin_arithmetic_extended_functions() -> list[FunctionDefinition]:
                     parameters=params,
                     return_spec=ReturnSpec(mode="fixed", fixed_type=ret),
                     kernel=KernelSpec(
+                        engine="arrow",
                         id="default",
                         callable_ref=callable_ref,
                         null_policy=null_policy,
@@ -1654,6 +1701,7 @@ def _builtin_arithmetic_extended_functions() -> list[FunctionDefinition]:
                     ),
                     return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.DOUBLE),
                     kernel=KernelSpec(
+                        engine="arrow",
                         id="numeric",
                         callable_ref=number_functions.trunc,
                         cost_us_per_million=2.0,
@@ -1667,6 +1715,7 @@ def _builtin_arithmetic_extended_functions() -> list[FunctionDefinition]:
                     ),
                     return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.TIMESTAMP),
                     kernel=KernelSpec(
+                        engine="arrow",
                         id="temporal",
                         callable_ref=date_functions.trunc_temporal,
                         cost_us_per_million=4.0,
@@ -1697,7 +1746,7 @@ def _builtin_temporal_functions() -> list[FunctionDefinition]:
     from opteryx.expression.functions.implementations import temporal as date_functions
 
     def _make(
-        name, callable_ref, ret, params, aliases=(), cost=4.0, null_policy="strict", summary=""
+        name, callable_ref, ret, params, aliases=(), cost=4.0, null_policy="compress", summary=""
     ):
         return FunctionDefinition(
             name=name,
@@ -1714,6 +1763,7 @@ def _builtin_temporal_functions() -> list[FunctionDefinition]:
                     parameters=params,
                     return_spec=ReturnSpec(mode="fixed", fixed_type=ret),
                     kernel=KernelSpec(
+                        engine="arrow",
                         id="default",
                         callable_ref=callable_ref,
                         null_policy=null_policy,

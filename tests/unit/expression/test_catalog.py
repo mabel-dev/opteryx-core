@@ -45,7 +45,7 @@ class TestFunctionCatalog:
                     id="TEST_FUNC_1",
                     parameters=(ParameterSpec(name="x", type_family="numeric"),),
                     return_spec=ReturnSpec(mode="fixed", fixed_type=int),
-                    kernel=KernelSpec(
+                    kernel=KernelSpec(engine="arrow", 
                         id="default",
                         callable_ref=lambda x: x,
                         cost_us_per_million=1.0,
@@ -75,7 +75,7 @@ class TestFunctionCatalog:
                     id="CANONICAL_1",
                     parameters=(),
                     return_spec=ReturnSpec(mode="fixed", fixed_type=int),
-                    kernel=KernelSpec(
+                    kernel=KernelSpec(engine="arrow", 
                         id="default",
                         callable_ref=lambda: 42,
                         cost_us_per_million=0.0,
@@ -112,7 +112,7 @@ class TestFunctionCatalog:
                     id="DOUBLE_TEST_1",
                     parameters=(ParameterSpec(name="x", type_family="numeric"),),
                     return_spec=ReturnSpec(mode="fixed", fixed_type=int),
-                    kernel=KernelSpec(
+                    kernel=KernelSpec(engine="arrow", 
                         id="default",
                         callable_ref=my_kernel,
                         cost_us_per_million=2.0,
@@ -144,7 +144,7 @@ class TestFunctionCatalog:
                     id="EXPENSIVE_1",
                     parameters=(),
                     return_spec=ReturnSpec(mode="fixed", fixed_type=int),
-                    kernel=KernelSpec(
+                    kernel=KernelSpec(engine="arrow", 
                         id="default",
                         callable_ref=lambda: 0,
                         cost_us_per_million=999.99,
@@ -295,7 +295,7 @@ class TestResolve:
                     id="MY_UPPER_1",
                     parameters=(ParameterSpec(name="s", type_family="string"),),
                     return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.VARCHAR),
-                    kernel=KernelSpec(id="default", callable_ref=str.upper, cost_us_per_million=1.0),
+                    kernel=KernelSpec(engine="arrow", id="default", callable_ref=str.upper, cost_us_per_million=1.0),
                 ),
             ),
         ))
@@ -330,7 +330,7 @@ class TestResolve:
                     id="CANONICAL_FN_1",
                     parameters=(ParameterSpec(name="x", type_family="any"),),
                     return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.INTEGER),
-                    kernel=KernelSpec(id="default", callable_ref=lambda x: x, cost_us_per_million=1.0),
+                    kernel=KernelSpec(engine="arrow", id="default", callable_ref=lambda x: x, cost_us_per_million=1.0),
                 ),
             ),
         ))
@@ -364,7 +364,7 @@ class TestResolve:
                         ParameterSpec(name="b", type_family="any"),
                     ),
                     return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.INTEGER),
-                    kernel=KernelSpec(id="default", callable_ref=lambda a, b: a, cost_us_per_million=1.0),
+                    kernel=KernelSpec(engine="arrow", id="default", callable_ref=lambda a, b: a, cost_us_per_million=1.0),
                 ),
             ),
         ))
@@ -394,7 +394,7 @@ class TestResolve:
                     id="VARIADIC_FN_1",
                     parameters=(ParameterSpec(name="args", type_family="any", variadic=True),),
                     return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.VARCHAR),
-                    kernel=KernelSpec(id="default", callable_ref=lambda *a: a, cost_us_per_million=1.0),
+                    kernel=KernelSpec(engine="arrow", id="default", callable_ref=lambda *a: a, cost_us_per_million=1.0),
                 ),
             ),
         ))
@@ -427,7 +427,7 @@ class TestResolve:
                     id="PASSTHRU_FN_1",
                     parameters=(ParameterSpec(name="x", type_family="any"),),
                     return_spec=ReturnSpec(mode="same_as_arg", arg_index=0),
-                    kernel=KernelSpec(id="default", callable_ref=lambda x: x, cost_us_per_million=0.0),
+                    kernel=KernelSpec(engine="arrow", id="default", callable_ref=lambda x: x, cost_us_per_million=0.0),
                 ),
             ),
         ))
@@ -465,7 +465,7 @@ class TestResolve:
                     id="RESOLVER_FN_1",
                     parameters=(ParameterSpec(name="x", type_family="any"),),
                     return_spec=ReturnSpec(mode="resolver", resolver=my_resolver),
-                    kernel=KernelSpec(id="default", callable_ref=lambda x: x, cost_us_per_million=0.0),
+                    kernel=KernelSpec(engine="arrow", id="default", callable_ref=lambda x: x, cost_us_per_million=0.0),
                 ),
             ),
         ))

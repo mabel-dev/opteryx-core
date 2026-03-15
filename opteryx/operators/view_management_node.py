@@ -18,6 +18,8 @@ from opteryx.models import QueryProperties
 
 from . import BasePlanNode
 
+_DATA_FORMAT = "arrow,draken"
+
 
 class ViewManagementNode(BasePlanNode):
     def __init__(self, properties: QueryProperties, **parameters):

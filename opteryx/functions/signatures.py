@@ -858,6 +858,7 @@ def _export_overload(
         "arity": _arity_export(overload),
         "execution": {
             "kernel_id": overload.kernel.id,
+            "engine": overload.kernel.engine,
             "null_policy": overload.kernel.null_policy,
             "cost_us_per_million": overload.kernel.cost_us_per_million,
         },

@@ -32,6 +32,9 @@ from opteryx.models import QueryProperties
 
 from . import JoinNode
 
+_DATA_FORMAT = "arrow,draken"
+
+
 # from opteryx.utils.arrow import align_tables
 
 

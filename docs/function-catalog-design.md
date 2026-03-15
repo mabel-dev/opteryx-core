@@ -55,8 +55,21 @@ Since `get_catalog()` returns a global singleton and tests register functions in
 **6. `GET` is not a catalog function — subscript access is a binary operator**  
 `GET(arr, 0)` and `arr[0]` / `struct->'key'` are handled by the planner as `NodeType.BINARY_OPERATOR` (`MapAccess` and `Arrow` operators), not as function catalog entries. `GET` is in `DEPRECATED_FUNCTIONS` with `None` as replacement (removed in 0.28.0). Do not add a GET entry to `native_function_registrar.py`; the subscript path bypasses the function catalog entirely.
 
-**7. `null_policy` belongs on `KernelSpec`, not on `FunctionDefinition`**  
-Null handling is a property of the kernel implementation, not of the logical function. A future overload of CONCAT might handle nulls differently than the current one. Annotate `null_policy` on each `KernelSpec` individually. The evaluator reads `node.function_ref.selected_overload.kernel.null_policy` — this is the correct access path.
+**7. `engine` and `null_policy` belong on `KernelSpec`, not on `FunctionDefinition`**  
+Input coercion and null handling are properties of the kernel implementation, not of the logical function. Different kernels (or overloads) may expect different input representations and different null handling behavior. Annotate both `engine` and `null_policy` on each `KernelSpec` individually. The evaluator reads `node.function_ref.selected_overload.kernel.engine` and `node.function_ref.selected_overload.kernel.null_policy` — these are the correct access paths.
+
+`engine` controls how inputs are coerced before the kernel is called:
+- `arrow`  — convert Draken vectors/objects into PyArrow arrays
+- `draken` — keep Draken vectors and run in the Draken native path
+- `numpy`  — convert inputs to NumPy arrays
+- `python` — do not coerce (kernel handles Python values directly)
+
+`null_policy` controls how nulls are handled:
+- `compress` — remove null rows before calling the kernel, then reinsert nulls afterward
+- `passthru` — pass nulls through to the kernel (kernel must handle them)
+- `bypass` — do no null-special handling; kernel must handle everything
+
+Legacy names are still accepted and automatically normalized (e.g., `strict` → `compress`, `passthrough` → `passthru`, `custom` → `bypass`).
 
 **8. The evaluator fallback path must stay until `managers/expression` is removed**  
 `apply_bounded_function` falls back to legacy `apply_function` when `node.function_ref` is `None`. This covers any FUNCTION node that was not bound (e.g., nodes produced by legacy code paths or tests that skip the binder). The fallback can only be removed once `managers/expression/__init__.py` is deleted and the new evaluator is the sole execution path.
@@ -149,8 +162,15 @@ class ReturnSpec:
 class KernelSpec:
     id: str  # kernel identifier, e.g., "integer_integer" or "polymorphic"
     callable_ref: Callable
-    null_policy: Literal["strict", "passthrough", "custom"] = "strict"
+    engine: Literal["arrow", "draken", "numpy", "python"]
+    null_policy: Literal["compress", "passthru", "bypass", "strict", "passthrough", "custom"] = "compress"
     cost_us_per_million: float = 0.0  # measured cost per million rows
+
+    # ``engine`` drives runtime coercion of inputs. Missing engine is an error.
+    # ``null_policy`` only determines how null inputs are handled:
+    # - ``compress``: strip nulls before calling the kernel, then reinsert
+    # - ``passthru``: pass nulls through to kernel
+    # - ``bypass``: do not do any null-special handling (kernel must manage nulls)
 
 @dataclass(frozen=True)
 class LifecycleSpec:
@@ -517,8 +537,9 @@ CATALOG.register(
                 return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.VARCHAR),
                 kernel=KernelSpec(
                     id="default",
+                    engine="arrow",
                     callable_ref=lambda x: x.str.upper(),
-                    null_policy="strict",
+                    null_policy="compress",
                     cost_us_per_million=10.0,  # microseconds per million rows
                 ),
             ),
@@ -547,8 +568,9 @@ CATALOG.register(
                 return_spec=ReturnSpec(mode="resolver", resolver=resolve_numeric_result),
                 kernel=KernelSpec(
                     id="polymorphic",
+                    engine="arrow",
                     callable_ref=add_numeric_polymorphic,  # handles int/float/decimal dispatching
-                    null_policy="strict",
+                    null_policy="compress",
                     cost_us_per_million=3.0,
                 ),
             ),
@@ -562,8 +584,9 @@ CATALOG.register(
                 return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.INT),
                 kernel=KernelSpec(
                     id="integer_integer",
+                    engine="arrow",
                     callable_ref=add_int_int_typed,  # zero-dispatch integer-only
-                    null_policy="strict",
+                    null_policy="compress",
                     cost_us_per_million=1.0,
                 ),
             ),

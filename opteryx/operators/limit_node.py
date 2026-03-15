@@ -19,6 +19,8 @@ from opteryx.models import QueryProperties
 
 from . import BasePlanNode
 
+_DATA_FORMAT = "draken"
+
 
 class LimitNode(BasePlanNode):
     def __init__(self, properties: QueryProperties, **parameters):

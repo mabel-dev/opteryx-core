@@ -388,11 +388,14 @@ def _inner_evaluate(root: Node, table: Table):
                 and root.left.type in (OrsoTypes.DATE, OrsoTypes.TIMESTAMP)
                 and root.right.type in (OrsoTypes.DATE, OrsoTypes.TIMESTAMP)
             ):
+
                 def _literal_temporal_value(node):
                     value = node.value
                     if node.type == OrsoTypes.DATE:
                         if isinstance(value, (int, numpy.integer)):
-                            return datetime.datetime(1970, 1, 1) + datetime.timedelta(days=int(value))
+                            return datetime.datetime(1970, 1, 1) + datetime.timedelta(
+                                days=int(value)
+                            )
                         if isinstance(value, datetime.datetime):
                             return value.replace(hour=0, minute=0, second=0, microsecond=0)
                         if isinstance(value, datetime.date):
@@ -412,7 +415,9 @@ def _inner_evaluate(root: Node, table: Table):
                             return datetime.datetime(1970, 1, 1) + datetime.timedelta(
                                 microseconds=micros
                             )
-                        if isinstance(value, datetime.date) and not isinstance(value, datetime.datetime):
+                        if isinstance(value, datetime.date) and not isinstance(
+                            value, datetime.datetime
+                        ):
                             return datetime.datetime(value.year, value.month, value.day)
                     return value
 
@@ -604,13 +609,10 @@ def _evaluate_and_append_arrow(expressions, table: Table):
                 if isinstance(new_column, (pyarrow.Array, pyarrow.ChunkedArray)):
                     new_column = new_column.cast(field.type)
                 else:
-                    temporal_numpy = (
-                        isinstance(new_column, numpy.ndarray)
-                        and numpy.issubdtype(new_column.dtype, numpy.datetime64)
+                    temporal_numpy = isinstance(new_column, numpy.ndarray) and numpy.issubdtype(
+                        new_column.dtype, numpy.datetime64
                     )
-                    temporal_python = isinstance(
-                        new_column, (list, tuple)
-                    ) and any(
+                    temporal_python = isinstance(new_column, (list, tuple)) and any(
                         isinstance(value, (datetime.date, datetime.datetime))
                         for value in new_column
                         if value is not None

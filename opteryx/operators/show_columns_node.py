@@ -17,6 +17,8 @@ from opteryx.models import QueryProperties
 
 from . import BasePlanNode
 
+_DATA_FORMAT = "arrow"
+
 
 def _simple_collector(schema):
     """
