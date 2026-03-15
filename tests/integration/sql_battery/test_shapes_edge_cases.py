@@ -177,14 +177,14 @@ STATEMENTS = [
         # Columns in CAST statements appear to not be bound correctly
         ("SELECT SUM(CASE WHEN gm > 10 THEN 1 ELSE 0 END) AS gm_big_count FROM testdata.satellites", 1, 1, None),
         # 1370, issues coercing DATE and TIMESTAMPS
-        ("SELECT * FROM $planets WHERE TIMESTAMP '2023-01-01' = DATE '2023-01-01'", 9, 20, None),
+        ("SELECT * FROM $planets WHERE TIMESTAMP('2023-01-01') = DATE('2023-01-01')", 9, 20, None),
         ("SELECT * FROM $planets WHERE 1 = 1.0", 9, 20, None),
-        ("SELECT * FROM $planets WHERE DATE '2023-01-01' + INTERVAL '1' MONTH is not null", 9, 20, None),
-        ("SELECT * FROM $planets WHERE TIMESTAMP '2023-01-01' + INTERVAL '1' MONTH is not null", 9, 20, None),
-        ("SELECT DATE '2023-01-01' + INTERVAL '1' MONTH FROM $planets", 9, 1, None),
-        ("SELECT TIMESTAMP '2023-01-01' + INTERVAL '1' MONTH FROM $planets", 9, 1, None),
-        ("SELECT * FROM $planets WHERE DATE '2023-01-01' + INTERVAL '1' MONTH < current_timestamp", 9, 20, None),
-        ("SELECT * FROM $planets WHERE TIMESTAMP '2023-01-01' + INTERVAL '1' MONTH < current_timestamp", 9, 20, None),
+        ("SELECT * FROM $planets WHERE DATE('2023-01-01') + INTERVAL '1' MONTH is not null", 9, 20, None),
+        ("SELECT * FROM $planets WHERE TIMESTAMP('2023-01-01') + INTERVAL '1' MONTH is not null", 9, 20, None),
+        ("SELECT DATE('2023-01-01') + INTERVAL '1' MONTH FROM $planets", 9, 1, None),
+        ("SELECT TIMESTAMP('2023-01-01') + INTERVAL '1' MONTH FROM $planets", 9, 1, None),
+        ("SELECT * FROM $planets WHERE DATE('2023-01-01') + INTERVAL '1' MONTH < current_timestamp", 9, 20, None),
+        ("SELECT * FROM $planets WHERE TIMESTAMP('2023-01-01') + INTERVAL '1' MONTH < current_timestamp", 9, 20, None),
         # 1380
         ("SELECT * FROM $planets INNER JOIN (SELECT * FROM UNNEST((1, 2, 3)) AS id) AS PID USING(id)", 3, 20, None),
         ("SELECT * FROM $planets INNER JOIN (SELECT * FROM UNNEST((1, 2, 3)) AS id) AS S USING(id)", 3, 20, None),

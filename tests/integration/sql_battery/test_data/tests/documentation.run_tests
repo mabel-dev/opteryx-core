@@ -33,7 +33,7 @@ SELECT * FROM FAKE(3, (NAME, INTEGER, VARCHAR)) AS temp(user, age, password);
 SET @id = 3; SELECT name FROM $planets WHERE id = @id;
 
 # type strings
-SELECT TIMESTAMP '2022-01-01';
+SELECT CAST('2022-01-01' AS TIMESTAMP);
 
 # types
 SELECT INTERVAL '1' YEAR;

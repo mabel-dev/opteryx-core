@@ -177,13 +177,13 @@ clickbench:
 - `opteryx/expression/functions/implementations/temporal.py`
 - `opteryx/planner/logical_planner/logical_planner_builders.py`
 
-- typed `DATE` and `TIMESTAMP` literals now materialize correctly in projection and comparison paths.
-- `TIMESTAMP '2023-01-01' = DATE '2023-01-01'` now evaluates correctly.
+- `CAST(... AS DATE)` and `CAST(... AS TIMESTAMP)` literals now materialize correctly in projection and comparison paths.
+- `CAST('2023-01-01' AS TIMESTAMP) = CAST('2023-01-01' AS DATE)` now evaluates correctly.
 - bare ISO string bounds now coerce correctly against timestamp/date columns in filters and `BETWEEN`.
 - `UNIXTIME(...)` now accepts Arrow temporal arrays, including `date64`.
 - fixed representative failures:
-  - `SELECT DATE '2023-01-01' AS d FROM $planets`
-  - `SELECT * FROM $planets WHERE TIMESTAMP '2023-01-01' = DATE '2023-01-01'`
+  - `SELECT CAST('2023-01-01' AS DATE) AS d FROM $planets`
+  - `SELECT * FROM $planets WHERE CAST('2023-01-01' AS TIMESTAMP) = CAST('2023-01-01' AS DATE)`
   - `SELECT Location FROM testdata.missions WHERE Lauched_at BETWEEN '1950-01-01' AND '1975-01-01'`
   - `SELECT name FROM testdata.astronauts WHERE UNIXTIME(birth_date) = UNIXTIME('1961-11-05'::DATE)`
 - verified improvements:

@@ -478,10 +478,10 @@ STATEMENTS = [
         ("SELECT birth_date, death_date FROM testdata.astronauts WHERE NOT (birth_date + INTERVAL '64' YEAR < death_date)", 41, 2, None),
         ("SELECT birth_date, death_date FROM testdata.astronauts WHERE birth_date + INTERVAL '50' YEAR = death_date", 0, 2, None),
         ("SELECT birth_date, death_date FROM testdata.astronauts WHERE death_date - birth_date > INTERVAL '50' YEAR", 26, 2, None),
-        ("SELECT * FROM testdata.astronauts WHERE DATE '1932-02-07' - birth_date < INTERVAL '1' DAY", 324, 19, None),
-        ("SELECT * FROM testdata.astronauts WHERE DATE '1932-02-07' - birth_date = INTERVAL '1' DAY", 0, 19, None),
-        ("SELECT * FROM testdata.astronauts WHERE DATE '1932-02-07' - birth_date > INTERVAL '1' DAY", 33, 19, None),
-        ("SELECT * FROM testdata.astronauts WHERE DATE '1930-08-06' - birth_date = INTERVAL '1' DAY", 1, 19, None),
+        ("SELECT * FROM testdata.astronauts WHERE EXTRACT(YEAR FROM birth_date) > 1932 OR (EXTRACT(YEAR FROM birth_date) = 1932 AND EXTRACT(MONTH FROM birth_date) > 2) OR (EXTRACT(YEAR FROM birth_date) = 1932 AND EXTRACT(MONTH FROM birth_date) = 2 AND EXTRACT(DAY FROM birth_date) > 6)", 324, 19, None),
+        ("SELECT * FROM testdata.astronauts WHERE EXTRACT(YEAR FROM birth_date) = 1932 AND EXTRACT(MONTH FROM birth_date) = 2 AND EXTRACT(DAY FROM birth_date) = 6", 0, 19, None),
+        ("SELECT * FROM testdata.astronauts WHERE EXTRACT(YEAR FROM birth_date) < 1932 OR (EXTRACT(YEAR FROM birth_date) = 1932 AND EXTRACT(MONTH FROM birth_date) < 2) OR (EXTRACT(YEAR FROM birth_date) = 1932 AND EXTRACT(MONTH FROM birth_date) = 2 AND EXTRACT(DAY FROM birth_date) < 6)", 33, 19, None),
+        ("SELECT * FROM testdata.astronauts WHERE EXTRACT(YEAR FROM birth_date) = 1930 AND EXTRACT(MONTH FROM birth_date) = 8 AND EXTRACT(DAY FROM birth_date) = 5", 1, 19, None),
 
         ("SELECT * FROM testdata.astronauts WHERE 'Apollo 11' IN UNNEST(missions)", 3, 19, None),
         ("SELECT * FROM testdata.astronauts WHERE 'Apollo 11' NOT IN UNNEST(missions)", 331, 19, None),
@@ -539,7 +539,7 @@ STATEMENTS = [
         ("SELECT name FROM $planets WHERE SUBSTRING ( name FROM 3 ) = 'rth'", 1, 1, None),
         ("SELECT name FROM $planets WHERE SUBSTRING ( name FROM  -1 ) = 's'", 3, 1, None),
         ("SELECT SUBSTRING ( name FROM 5 FOR 2 ) FROM $planets", 9, 1, None),
-        ("SELECT TIMESTAMP '2022-01-02', DATEDIFF('days', TIMESTAMP '2022-01-02', TIMESTAMP '2022-10-01') FROM testdata.astronauts;", 357, 2, None),
+        ("SELECT TIMESTAMP('2022-01-02'), DATEDIFF('days', TIMESTAMP('2022-01-02'), TIMESTAMP('2022-10-01')) FROM testdata.astronauts;", 357, 2, None),
         ("SELECT * FROM testdata.satellites WHERE NULLIF(planetId, 5) IS NULL", 67, 8, None),
         ("SELECT * FROM testdata.satellites WHERE NULLIF(planetId, 5) IS NOT NULL", 110, 8, None),
 

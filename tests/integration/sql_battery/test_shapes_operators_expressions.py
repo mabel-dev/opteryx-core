@@ -648,7 +648,7 @@ STATEMENTS = [
         # Complex GROUP BY with Multiple Expressions
         ("SELECT COUNT(*), LENGTH(name), ROUND(density, 2) FROM $planets GROUP BY LENGTH(name), ROUND(density, 2)", 9, 3, None),
         # Testing Intervals with Arithmetic Expressions
-        ("SELECT * FROM $planets WHERE TIMESTAMP '2024-10-01' + INTERVAL '2' DAY > current_timestamp", 0, 20, None),
+        ("SELECT * FROM $planets WHERE TIMESTAMP('2024-10-01') + INTERVAL '2' DAY > current_timestamp", 0, 20, None),
 ]
 # fmt:on
 
