@@ -718,6 +718,30 @@ def _arrow_vector_compare(op: str, vec, right):
     if pc_op is None:
         raise NotImplementedError(f"ArrowVector: unsupported op {op!r}")
     arr = vec.to_arrow() if not isinstance(vec._arr, pa.Array) else vec._arr
+    if hasattr(right, "to_arrow"):
+        right = right.to_arrow()
+        if isinstance(right, pa.ChunkedArray):
+            right = right.combine_chunks() if right.num_chunks > 1 else right.chunk(0)
+    if not isinstance(right, (pa.Array, pa.ChunkedArray)) and (
+        pa.types.is_date32(arr.type)
+        or pa.types.is_date64(arr.type)
+        or pa.types.is_timestamp(arr.type)
+    ):
+        from orso.types import OrsoTypes
+
+        target_type = (
+            OrsoTypes.TIMESTAMP
+            if pa.types.is_timestamp(arr.type)
+            else OrsoTypes.DATE
+        )
+        scalar_value = _coerce_temporal_scalar_for_arrow(right, target_type)
+        if pa.types.is_date32(arr.type) or pa.types.is_date64(arr.type):
+            if isinstance(scalar_value, datetime.datetime):
+                scalar_value = scalar_value.date()
+            scalar = pa.scalar(scalar_value, type=arr.type)
+        else:
+            scalar = pa.scalar(scalar_value, type=arr.type)
+        right = scalar
     bool_arr = getattr(pc, pc_op)(arr, right)
     return BoolVector.from_arrow(bool_arr)
 
@@ -1297,45 +1321,23 @@ def evaluate_draken(node, morsel):
     if node_type == NodeType.COMPARISON_OPERATOR:
         left = _eval_value(node.left, morsel)
         right = _eval_value(node.right, morsel)
+        from orso.types import OrsoTypes
+
+        temporal_types = {OrsoTypes.DATE, OrsoTypes.TIMESTAMP}
+        if (
+            node.left.schema_column.type in temporal_types
+            or node.right.schema_column.type in temporal_types
+        ):
+            if not hasattr(left, "null_count") and node.left.schema_column.type in temporal_types:
+                left = _coerce_temporal_scalar_for_arrow(left, node.left.schema_column.type)
+            if not hasattr(right, "null_count") and node.right.schema_column.type in temporal_types:
+                right = _coerce_temporal_scalar_for_arrow(right, node.right.schema_column.type)
+
         if not hasattr(left, "null_count") and not hasattr(right, "null_count"):
             import pyarrow as pa
 
             from opteryx.draken.vectors.bool_vector import BoolVector
-            from opteryx.draken.interop.arrow import vector_from_arrow
             from opteryx.expression.ops import filter_operations
-
-            from orso.types import OrsoTypes
-
-            temporal_types = {OrsoTypes.DATE, OrsoTypes.TIMESTAMP}
-            if (
-                node.left.schema_column.type in temporal_types
-                or node.right.schema_column.type in temporal_types
-            ):
-                left_arrow_type = (
-                    pa.date32()
-                    if node.left.schema_column.type == OrsoTypes.DATE
-                    else pa.timestamp("us")
-                    if node.left.schema_column.type == OrsoTypes.TIMESTAMP
-                    else None
-                )
-                right_arrow_type = (
-                    pa.date32()
-                    if node.right.schema_column.type == OrsoTypes.DATE
-                    else pa.timestamp("us")
-                    if node.right.schema_column.type == OrsoTypes.TIMESTAMP
-                    else None
-                )
-                if left_arrow_type is not None:
-                    scalar = _coerce_temporal_scalar_for_arrow(left, node.left.schema_column.type)
-                    left = vector_from_arrow(
-                        pa.array([scalar] * morsel.num_rows, type=left_arrow_type)
-                    )
-                if right_arrow_type is not None:
-                    scalar = _coerce_temporal_scalar_for_arrow(right, node.right.schema_column.type)
-                    right = vector_from_arrow(
-                        pa.array([scalar] * morsel.num_rows, type=right_arrow_type)
-                    )
-                return draken_compare(node.value, left, right)
 
             scalar_result = filter_operations(
                 pa.array([left]),

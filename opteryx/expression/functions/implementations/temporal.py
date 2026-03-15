@@ -345,7 +345,15 @@ def date_format(dates, pattern):  # [#325]
 
 
 def date_floor(dates, magnitude, units):  # [#325]
-    return compute.floor_temporal(dates, magnitude[0], units[0])
+    if hasattr(magnitude, "as_py"):
+        magnitude = magnitude.as_py()
+    elif isinstance(magnitude, numpy.ndarray):
+        magnitude = magnitude[0]
+    if hasattr(units, "as_py"):
+        units = units.as_py()
+    elif isinstance(units, numpy.ndarray):
+        units = units[0]
+    return compute.floor_temporal(dates, int(magnitude), units)
 
 
 def from_unixtimestamp(values):
@@ -360,27 +368,45 @@ def unixtime(array):
     Convert a NumPy or Arrow array of timestamps or ISO8601 strings to Unix time
     (seconds since epoch). NaNs or nulls are converted to numpy.nan.
     """
+    if hasattr(array, "to_arrow"):
+        array = array.to_arrow()
+
     if isinstance(array, pyarrow.ChunkedArray):
         if array.num_chunks == 0:
             return numpy.array([], dtype=numpy.int64)
         chunks = [unixtime(chunk) for chunk in array.chunks]
         return numpy.concatenate(chunks)
 
+    if isinstance(array, pyarrow.Array):
+        if (
+            pyarrow.types.is_date32(array.type)
+            or pyarrow.types.is_date64(array.type)
+            or pyarrow.types.is_timestamp(array.type)
+        ):
+            return (
+                array.cast(pyarrow.timestamp("s"))
+                .cast(pyarrow.int64())
+                .to_numpy(zero_copy_only=False)
+            )
+        array = array.to_numpy(zero_copy_only=False)
+
+    if not isinstance(array, numpy.ndarray):
+        array = numpy.asarray(array)
+
     if numpy.issubdtype(array.dtype, numpy.datetime64):
         return array.astype("datetime64[s]").astype(numpy.int64)
 
-    elif array.dtype.kind in {"U", "S", "O"}:
+    if array.dtype.kind in {"U", "S", "O"}:
 
         def to_epoch(s):
             if s is None or s != s:
-                return numpy.datetime64("NaT")
+                return numpy.nan
             try:
                 dt = numpy.datetime64(s, "s")
-                return dt.astype(numpy.int64)
+                return float(dt.astype(numpy.int64))
             except Exception:
-                return numpy.datetime64("NaT")
+                return numpy.nan
 
-        return numpy.vectorize(to_epoch)(array)
+        return numpy.vectorize(to_epoch, otypes=[numpy.float64])(array)
 
-    else:
-        raise TypeError(f"Unsupported array type: {array.dtype}")
+    raise TypeError(f"Unsupported array type: {array.dtype}")
