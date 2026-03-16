@@ -92,10 +92,7 @@ def _coerce_param_for_draken(p):
         if isinstance(p, np.generic):
             p = p.item()
         elif isinstance(p, np.ndarray):
-            if p.ndim == 0:
-                p = p.item()
-            else:
-                p = p.tolist()
+            p = p.item() if p.ndim == 0 else p.tolist()
     except Exception:
         pass
 
@@ -207,21 +204,6 @@ def apply_bounded_function(node, *parameters) -> Any:
     elif engine == "draken":
         # Draken kernels expect native Draken vectors. Convert everything we can.
         parameters = tuple(_coerce_param_for_draken(p) for p in parameters)
-        # ArrowVector is a fallback wrapper for types without native Draken support
-        # (e.g. decimal128, float32). Detect these before the kernel call so we can
-        # report the SQL type name rather than an opaque Cython crash.
-        for p in parameters:
-            if p.__class__.__name__ == "ArrowVector":
-                arr = getattr(p, "_arr", None)
-                type_name = str(arr.type) if arr is not None else "unknown"
-                raise FunctionExecutionError(
-                    message=(
-                        f"Function '{node.value}' does not natively support column type "
-                        f"'{type_name}'. Consider casting the column: "
-                        f"CAST(column AS DOUBLE)."
-                    ),
-                    function=node.value,
-                )
     elif engine == "python":
         # No conversion needed — kernel expects native Python objects.
         pass
@@ -1016,13 +998,14 @@ def draken_compare(op: str, left, right):
     # and invert the directional operator so semantics remain correct.
     # e.g. 'Earth' = g.name  →  g.name = 'Earth' (Eq is symmetric, no flip needed)
     # e.g. 5 > g.id          →  g.id < 5           (Gt → Lt)
-    if isinstance(left, (str, int, float, bytes, bool, tuple, list, type(None))) and hasattr(
-        right, "null_count"
-    ):
+    if isinstance(
+        left,
+        (str, int, float, bytes, bool, tuple, list, type(None), datetime.date, datetime.datetime),
+    ) and hasattr(right, "null_count"):
         _FLIP_OPS = {"Gt": "Lt", "Lt": "Gt", "GtEq": "LtEq", "LtEq": "GtEq"}
         op = _FLIP_OPS.get(op, op)
         left, right = right, left
-    elif isinstance(left, numpy.generic) and hasattr(right, "null_count"):
+    elif isinstance(left, (numpy.generic, numpy.datetime64)) and hasattr(right, "null_count"):
         # numpy scalar (numpy.int64, numpy.datetime64, etc.) on left, vector on right
         _FLIP_OPS = {"Gt": "Lt", "Lt": "Gt", "GtEq": "LtEq", "LtEq": "GtEq"}
         op = _FLIP_OPS.get(op, op)

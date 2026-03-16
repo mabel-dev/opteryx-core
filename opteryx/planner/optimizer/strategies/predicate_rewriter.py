@@ -613,7 +613,10 @@ def _rewrite_function(function, telemetry: QueryTelemetry):
             resolved = get_catalog().resolve(function.value, list(function.parameters))
             if resolved is not None:
                 function.function_ref = resolved
-                if getattr(function, "schema_column", None) is not None and resolved.inferred_return_type:
+                if (
+                    getattr(function, "schema_column", None) is not None
+                    and resolved.inferred_return_type
+                ):
                     function.schema_column.type = resolved.inferred_return_type
         except Exception:
             # Best-effort: if rebinding fails, leave original binding intact.

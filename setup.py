@@ -935,10 +935,36 @@ def _select_onnxruntime_sdk():
     return None, None
 
 
+def _find_onnxruntime_library_path(lib_dir: str) -> str | None:
+    """Return a full path to the ONNX Runtime shared library if available."""
+
+    candidates = [
+        "libonnxruntime.dylib",
+        "libonnxruntime.1.22.0.dylib",
+        "libonnxruntime.so",
+        "libonnxruntime.so.1",
+        "libonnxruntime.so.1.22.0",
+    ]
+    for candidate in candidates:
+        path = os.path.join(lib_dir, candidate)
+        if os.path.exists(path):
+            return path
+    return None
+
+
 _ort_root, _ort_rpath = _select_onnxruntime_sdk()
 _ort_include = os.path.join(_ort_root, "include") if _ort_root else None
 _ort_lib = os.path.join(_ort_root, "lib") if _ort_root else None
 if _ort_include and _ort_lib and os.path.exists(_ort_include) and os.path.exists(_ort_lib):
+    ort_lib_path = _find_onnxruntime_library_path(_ort_lib)
+    extra_link = []
+    if ort_lib_path:
+        # Use direct library path so the linker finds the versioned shared lib.
+        extra_link.append(ort_lib_path)
+    else:
+        # Fallback to search by linker name.
+        extra_link.append("-lonnxruntime")
+
     extensions.append(
         Extension(
             "opteryx.nanobind.minilm_native",
@@ -955,7 +981,7 @@ if _ort_include and _ort_lib and os.path.exists(_ort_include) and os.path.exists
             extra_compile_args=CPP_FLAGS + ["-fno-strict-aliasing", "-DNB_COMPACT_ASSERTIONS"],
             extra_link_args=LD_EXTRA + [
                 f"-L{_ort_lib}",
-                "-lonnxruntime",
+            ] + extra_link + [
                 f"-Wl,-rpath,{_ort_rpath}",
             ],
             language="c++",

@@ -149,7 +149,10 @@ def main():
         print("[", end="")
         for i in range(args.cycles):
             start = time.monotonic_ns()
-            result = opteryx.query_to_arrow(sql)
+            sess = opteryx.session()
+            for _ in sess.execute_to_morsels(sql):
+                pass
+            sess.close()
             print(
                 f"{(time.monotonic_ns() - start) / 1e9:.3f}",
                 flush=True,
