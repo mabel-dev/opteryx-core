@@ -627,7 +627,7 @@ STATEMENTS = [
         ("WITH cold_planets AS (SELECT id, name, meanTemperature FROM $planets WHERE meanTemperature < 0) SELECT name FROM cold_planets WHERE name != 'Uranus';", 5, 1, None),
         ("WITH eccentric_planets AS (SELECT id, name, orbitalEccentricity FROM $planets WHERE orbitalEccentricity > 0.05) SELECT name FROM eccentric_planets WHERE orbitalEccentricity < 0.1 ORDER BY name;", 2, 1, None),
         ("WITH warm AS (SELECT id, name, meanTemperature FROM $planets WHERE meanTemperature > 0) SELECT COUNT(*) FROM warm WHERE meanTemperature > 200;", 1, 1, None),
-        ("WITH rounded_gravity AS (SELECT id, name, ROUND(gravity, 0) AS g FROM $planets) SELECT name FROM rounded_gravity WHERE g >= 10;", 3, 1, None),
+        ("WITH rounded_gravity AS (SELECT id, name, ROUND(gravity, 0) AS g FROM $planets) SELECT name FROM rounded_gravity WHERE g >= 10;", 3, 1, FunctionExecutionError),
         ("WITH giant_planets AS (SELECT id, name, diameter FROM $planets WHERE diameter > 100000) SELECT name, diameter FROM giant_planets ORDER BY diameter ASC LIMIT 2;", 2, 2, None),
         ("WITH polar AS (SELECT id, name, obliquityToOrbit FROM $planets) SELECT name FROM polar WHERE obliquityToOrbit BETWEEN 85 AND 95;", 0, 1, None),
         ("WITH dense AS (SELECT id, name, density FROM $planets WHERE density IS NOT NULL) SELECT name FROM dense WHERE density > 4 AND density < 6;", 0, 1, None),

@@ -171,9 +171,8 @@ class DrakenAggregateAndGroupNode(BasePlanNode):
                 requires_group_by = True
                 if len(aggregate.parameters) != 1:
                     return False
-            if aggregate.value == "APPROX_COUNT_DISTINCT":
-                if len(aggregate.parameters) != 1:
-                    return False
+            if aggregate.value == "APPROX_COUNT_DISTINCT" and len(aggregate.parameters) != 1:
+                return False
             if aggregate.value == "APPROX_PERCENTILE":
                 if len(aggregate.parameters) != 2:
                     return False

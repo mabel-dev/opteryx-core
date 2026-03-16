@@ -33,10 +33,7 @@ def _normalize_scalar(value):
     if hasattr(value, "as_py"):
         value = value.as_py()
     if isinstance(value, numpy.ndarray):
-        if value.ndim == 0:
-            value = value.item()
-        else:
-            value = value.tolist()
+        value = value.item() if value.ndim == 0 else value.tolist()
     if isinstance(value, numpy.generic):
         value = value.item()
     return value
@@ -112,10 +109,7 @@ def _parse_array_value(value, element_type, safe_cast=False):
     if isinstance(value, pyarrow.Array):
         value = value.to_pylist()
     if isinstance(value, numpy.ndarray):
-        if value.ndim == 0:
-            value = value.item()
-        else:
-            value = value.tolist()
+        value = value.item() if value.ndim == 0 else value.tolist()
     if isinstance(value, numpy.generic):
         value = value.item()
 

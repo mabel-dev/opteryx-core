@@ -679,7 +679,7 @@ class Session(DataFrame):
             self._telemetry.time_executing += elapsed - self._telemetry.time_planning
             return
 
-        # Iterator/generator of Draken morsels or Arrow tables
+        # Handle Draken morsels or iterables of morsels/tables
         from opteryx.draken.morsels.morsel import Morsel
 
         items = result_data
@@ -722,7 +722,6 @@ class Session(DataFrame):
                     promote_options="permissive",
                 )
                 combined = combined.rename_columns(column_names)
-                combined = combined.combine_chunks()
             else:
                 combined = pyarrow.Table.from_batches(slices).combine_chunks()
             batches = combined.to_batches(max_chunksize=target_rows)
@@ -798,6 +797,131 @@ class Session(DataFrame):
         if last_item is not None:
             self._executed = True
 
+        elapsed = time.time_ns() - start
+        self._telemetry.time_executing += elapsed - self._telemetry.time_planning
+        return
+
+    def execute_to_morsels(
+        self,
+        operation: str,
+        params: Optional[Iterable] = None,
+        max_size: int = 10_000,
+        visibility_filters: Optional[Dict[str, Any]] = None,
+    ):
+        """Execute a SQL operation and stream Draken Morsels.
+
+        This method merges adjacent morsels and splits large morsels such that each
+        yielded morsel contains at most ``max_size`` rows.
+
+        This is a *Draken-native* API: it avoids converting morsels to Arrow (or
+        any other intermediate format) except when absolutely required.
+        """
+        from opteryx.draken.morsels.morsel import Morsel
+        from opteryx.draken.vectors.constant_vector import ConstantVector
+
+        _DRAKEN_TO_ORSO = {
+            1: OrsoTypes.INTEGER,  # INT8
+            2: OrsoTypes.INTEGER,  # INT16
+            3: OrsoTypes.INTEGER,  # INT32
+            4: OrsoTypes.INTEGER,  # INT64
+            20: OrsoTypes.DOUBLE,  # FLOAT32
+            21: OrsoTypes.DOUBLE,  # FLOAT64
+            30: OrsoTypes.DATE,  # DATE32
+            40: OrsoTypes.TIMESTAMP,  # TIMESTAMP64
+            43: OrsoTypes.INTERVAL,  # INTERVAL
+            50: OrsoTypes.BOOLEAN,  # BOOL
+            60: OrsoTypes.VARCHAR,  # STRING
+            61: OrsoTypes.VARCHAR,  # DICTIONARY
+            80: OrsoTypes.ARRAY,  # ARRAY
+        }
+
+        def _schema_from_morsel(morsel: Morsel):
+            columns = []
+            for name, dtype in zip(morsel.column_names, morsel.column_types):
+                dtype_int = int(dtype)
+                if dtype_int == 62:  # DRAKEN_CONSTANT — resolve underlying type
+                    try:
+                        dtype_int = int(morsel.column(name).value_type)
+                    except Exception:
+                        dtype_int = 60  # fallback to STRING
+                orso_type = _DRAKEN_TO_ORSO.get(dtype_int, OrsoTypes.VARCHAR)
+                col_name = name.decode("utf-8") if isinstance(name, bytes) else name
+                columns.append(FlatColumn(name=col_name, type=orso_type))
+            return RelationSchema(name="table", columns=columns)
+
+        self._ensure_open()
+        start = time.time_ns()
+        results = self._execute_statements(operation, params, visibility_filters)
+        if results is None:
+            self._telemetry.time_executing += time.time_ns() - start
+            return
+        result_data, self._result_type = results
+
+        def _yield_morsel(morsel: Morsel):
+            if not getattr(self._schema, "columns", None):
+                self._schema = _schema_from_morsel(morsel)
+                self._description = self._schema_to_description(self._schema)
+                self._query_status = QueryStatus.SQL_SUCCESS
+            yield morsel
+
+        def _flush_buffer(buffered):
+            if not buffered:
+                return
+            if len(buffered) == 1:
+                yield from _yield_morsel(buffered[0])
+            else:
+                yield from _yield_morsel(Morsel.combine(buffered))
+
+        def _split_morsel(morsel: Morsel):
+            # Split a large morsel into <= max_size pieces using slice().
+            offset = 0
+            total = morsel.num_rows
+            while offset < total:
+                chunk = morsel.slice(offset, min(max_size, total - offset))
+                yield chunk
+                offset += chunk.num_rows
+
+        pending = []
+        pending_rows = 0
+
+        for item in result_data if hasattr(result_data, "__iter__") else [result_data]:
+            if item is None or item is EOS:
+                continue
+
+            if isinstance(item, Morsel):
+                morsels = [item]
+            elif isinstance(item, pyarrow.Table):
+                # Fallback for non-Draken sources: convert to morsels
+                morsels = list(Morsel.from_arrow(item).slice(0, item.num_rows) for _ in [None])
+            else:
+                # Assume Arrow batch-like
+                morsels = [Morsel.from_arrow(item.to_table())]
+
+            for morsel in morsels:
+                for chunk in _split_morsel(morsel):
+                    if chunk.num_rows == 0:
+                        continue
+                    if pending_rows + chunk.num_rows <= max_size:
+                        pending.append(chunk)
+                        pending_rows += chunk.num_rows
+                    else:
+                        # Fill up the current buffer, flush, then start new buffer
+                        if pending:
+                            yield from _flush_buffer(pending)
+                            pending = []
+                            pending_rows = 0
+                        # If chunk itself is larger than max_size, split it further
+                        if chunk.num_rows > max_size:
+                            for sub in _split_morsel(chunk):
+                                yield from _flush_buffer([sub])
+                        else:
+                            pending.append(chunk)
+                            pending_rows = chunk.num_rows
+
+        if pending:
+            yield from _flush_buffer(pending)
+
+        self._executed = True
         elapsed = time.time_ns() - start
         self._telemetry.time_executing += elapsed - self._telemetry.time_planning
 

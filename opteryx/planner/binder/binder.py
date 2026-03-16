@@ -309,7 +309,10 @@ def inner_binder(node: Node, context: BindingContext) -> Tuple[Node, Any]:
                     scale = node.parameters[2].value if len(node.parameters) > 2 else scale
 
                 # Ask the catalog for the return type (catalog owns type reasoning)
-                _resolved = _get_function_catalog().resolve(node.value, list(node.parameters))
+                try:
+                    _resolved = _get_function_catalog().resolve(node.value, list(node.parameters))
+                except TypeError as _type_err:
+                    raise IncompatibleTypesError(message=str(_type_err)) from _type_err
                 if _resolved is not None:
                     result_type = _resolved.inferred_return_type
                     element_type = _resolved.inferred_element_type

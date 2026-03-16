@@ -284,6 +284,8 @@ cdef Py_ssize_t _write_value(int encoder, object vec_obj, object aux_obj, Py_ssi
     cdef ConstantVector const_vec
     cdef const char* ptr
     cdef Py_ssize_t length
+    cdef Py_ssize_t offset
+    cdef Py_ssize_t next_offset
     cdef DrakenConstantStringPayload* payload
 
     if encoder == ENC_INT64:
@@ -304,8 +306,11 @@ cdef Py_ssize_t _write_value(int encoder, object vec_obj, object aux_obj, Py_ssi
         return 5
     if encoder == ENC_STRING:
         string_view = <_StringVectorView>aux_obj
-        ptr = <const char*>string_view.value_ptr(row_index)
-        length = string_view.value_len(row_index)
+        # Bypass bounds checks for speed; caller guarantees row_index in range
+        offset = string_view._offsets[row_index]
+        next_offset = string_view._offsets[row_index + 1]
+        ptr = <const char*>(string_view._data + offset)
+        length = next_offset - offset
         return _write_csv_field(dst, ptr, length, separator)
     if encoder == ENC_CONST_INT:
         const_vec = <ConstantVector>vec_obj
@@ -343,6 +348,7 @@ cpdef StringVector morsel_to_csv_rows(
     cdef list vectors = []
     cdef list aux_objects = []
     cdef int* encoders = NULL
+    cdef const uint8_t** null_bitmaps = NULL
     cdef char* scratch = NULL
     cdef Py_ssize_t scratch_capacity = 0
     cdef Py_ssize_t estimated_row_bytes = max(1, num_cols)
@@ -358,12 +364,18 @@ cpdef StringVector morsel_to_csv_rows(
     cdef _StringVectorView string_view
     cdef ConstantVector const_vec
     cdef DrakenConstantStringPayload* payload
+    cdef Py_ssize_t offset
+    cdef Py_ssize_t next_offset
     cdef char* header_ptr = NULL
     cdef Py_ssize_t header_len = 0
 
     try:
         encoders = <int*>malloc(sizeof(int) * max(num_cols, 1))
         if encoders == NULL:
+            raise MemoryError()
+
+        null_bitmaps = <const uint8_t**>malloc(sizeof(const uint8_t*) * max(num_cols, 1))
+        if null_bitmaps == NULL:
             raise MemoryError()
 
         for col_index in range(num_cols):
@@ -373,18 +385,23 @@ cpdef StringVector morsel_to_csv_rows(
             if isinstance(vec_obj, Int64Vector):
                 encoder = ENC_INT64
                 aux_obj = None
+                null_bitmaps[col_index] = (<Int64Vector>vec_obj).ptr.null_bitmap
             elif isinstance(vec_obj, IntegerVector):
                 encoder = ENC_INTEGER
                 aux_obj = None
+                null_bitmaps[col_index] = (<IntegerVector>vec_obj).ptr.null_bitmap
             elif isinstance(vec_obj, Float64Vector):
                 encoder = ENC_FLOAT64
                 aux_obj = None
+                null_bitmaps[col_index] = (<Float64Vector>vec_obj).ptr.null_bitmap
             elif isinstance(vec_obj, BoolVector):
                 encoder = ENC_BOOL
                 aux_obj = None
+                null_bitmaps[col_index] = (<BoolVector>vec_obj).ptr.null_bitmap
             elif isinstance(vec_obj, StringVector):
                 encoder = ENC_STRING
                 aux_obj = vec_obj.view()
+                null_bitmaps[col_index] = NULL
             elif isinstance(vec_obj, ConstantVector):
                 encoder = _constant_encoder(<ConstantVector>vec_obj)
                 if encoder == 0:
@@ -392,6 +409,7 @@ cpdef StringVector morsel_to_csv_rows(
                         f"csv serialization does not support ConstantVector value type for column {col_name!r}"
                     )
                 aux_obj = None
+                null_bitmaps[col_index] = (<ConstantVector>vec_obj).ptr.null_bitmap
             elif isinstance(vec_obj, DictionaryVector):
                 raise NotImplementedError(
                     f"csv serialization does not yet support DictionaryVector for column {col_name!r}"
@@ -444,15 +462,23 @@ cpdef StringVector morsel_to_csv_rows(
                     scratch[pos] = sep
                     pos += 1
 
-                if _value_is_null_cached(encoder, vec_obj, aux_obj, row_index):
-                    continue
+                if encoder == ENC_STRING:
+                    string_view = <_StringVectorView>aux_obj
+                    if string_view._nulls != NULL and not _is_valid(string_view._nulls, row_index):
+                        continue
+                else:
+                    if null_bitmaps[col_index] != NULL and not _is_valid(null_bitmaps[col_index], row_index):
+                        continue
 
                 reserve_needed = pos + 32
                 if encoder == ENC_STRING:
                     string_view = <_StringVectorView>aux_obj
+                    # Bypass bounds checks for speed; caller guarantees row_index in range
+                    offset = string_view._offsets[row_index]
+                    next_offset = string_view._offsets[row_index + 1]
                     reserve_needed = pos + _estimate_csv_field_bytes(
-                        <char*>string_view.value_ptr(row_index),
-                        string_view.value_len(row_index),
+                        <char*>string_view._data + offset,
+                        next_offset - offset,
                     ) + 1
                 elif encoder == ENC_CONST_STRING:
                     const_vec = <ConstantVector>vec_obj
@@ -469,6 +495,8 @@ cpdef StringVector morsel_to_csv_rows(
             free(scratch)
         if encoders != NULL:
             free(encoders)
+        if null_bitmaps != NULL:
+            free(<void*>null_bitmaps)
 
 
 cpdef list morsel_to_csv_strings(

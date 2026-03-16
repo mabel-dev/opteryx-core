@@ -23,7 +23,8 @@ from pyarrow import compute
 
 def round1(values):
     """ROUND(values)"""
-    from opteryx.compiled.vector_ops import vector_round, vector_round_constant
+    from opteryx.compiled.vector_ops import vector_round
+    from opteryx.compiled.vector_ops import vector_round_constant
     from opteryx.draken.vectors.constant_vector import ConstantVector
 
     if isinstance(values, ConstantVector):
@@ -33,7 +34,8 @@ def round1(values):
 
 def round2(values, digits):
     """ROUND(values, digits)"""
-    from opteryx.compiled.vector_ops import vector_round_digits, vector_round_constant
+    from opteryx.compiled.vector_ops import vector_round_constant
+    from opteryx.compiled.vector_ops import vector_round_digits
     from opteryx.draken.vectors.constant_vector import ConstantVector
 
     if isinstance(digits, ConstantVector):

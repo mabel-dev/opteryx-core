@@ -74,11 +74,10 @@ def test_sql_battery(statement:str, exception: Optional[Exception]):
 
     session = None
     try:
-        # query to arrow is the fastest way to query
+        # execute_to_morsels avoids Arrow conversion overhead
         session = opteryx.session()
-        result = session.execute_to_arrow(statement)
-        result.shape
-        result = None
+        for _ in session.execute_to_morsels(statement):
+            pass
         assert (
             exception is None
         ), f"Exception {exception} not raised but expected\n{format_sql(statement)}"
@@ -136,8 +135,8 @@ if __name__ == "__main__":  # pragma: no cover
         warm_session = None
         try:
             warm_session = opteryx.session()
-            warm_result = warm_session.execute_to_arrow("SELECT COUNT(*) FROM scratch.hits;")
-            warm_result = None
+            for _ in warm_session.execute_to_morsels("SELECT COUNT(*) FROM scratch.hits;"):
+                pass
             cold_time_ms = (time.monotonic_ns() - start) / 1e6
             print(f"Cold start: {cold_time_ms:.2f}ms\n")
         except Exception as e:
@@ -168,9 +167,9 @@ if __name__ == "__main__":  # pragma: no cover
                 try:
                     start = time.monotonic_ns()
                     session = opteryx.session()
-                    result = session.execute_to_arrow(statement)
+                    for _ in session.execute_to_morsels(statement):
+                        pass
                     elapsed_ms = (time.monotonic_ns() - start) / 1e6
-                    result = None
                     times.append(elapsed_ms)
                 except opteryx.exceptions.MissingSqlStatement:
                     # Commented-out queries (e.g. Q33) are intentional skips.

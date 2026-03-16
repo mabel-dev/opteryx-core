@@ -271,9 +271,7 @@ def _builtin_arithmetic_functions() -> list[FunctionDefinition]:
             overloads=(
                 FunctionOverload(
                     id="ROUND_1",
-                    parameters=(
-                        ParameterSpec(name="num", type_family="numeric"),
-                    ),
+                    parameters=(ParameterSpec(name="num", type_family="numeric"),),
                     return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.DOUBLE),
                     kernel=KernelSpec(
                         engine="draken",
