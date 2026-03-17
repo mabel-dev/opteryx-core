@@ -50,6 +50,30 @@ from opteryx.draken.vectors.bool_vector cimport BoolVector
 
 cdef class Int64Vector(Vector):
 
+    @classmethod
+    def from_dict(cls, codes, dictionary, row_validity=None):
+        from array import array as pyarray
+
+        cdef int32_t[::1] codes_view
+        cdef int64_t[::1] dictionary_view
+        cdef uint8_t[::1] validity_view
+
+        if not isinstance(codes, memoryview):
+            codes = pyarray("i", codes)
+        if not isinstance(dictionary, memoryview):
+            dictionary = pyarray("q", dictionary)
+
+        codes_view = codes
+        dictionary_view = dictionary
+
+        if row_validity is None:
+            return from_dict(codes_view, dictionary_view)
+
+        if not isinstance(row_validity, memoryview):
+            row_validity = bytearray(1 if valid else 0 for valid in row_validity)
+        validity_view = row_validity
+        return from_dict_nullable(codes_view, dictionary_view, validity_view)
+
     def __cinit__(self, size_t length=0, bint wrap=False):
         """
         length>0, wrap=False  -> allocate new owned buffer
@@ -499,6 +523,14 @@ cdef class Int64Vector(Vector):
 
 
 cdef Int64Vector from_arrow(object array):
+    import pyarrow as pa
+
+    if pa.types.is_dictionary(array.type):
+        raise TypeError(
+            "Int64Vector.from_arrow expects a dense int64 Arrow array; "
+            "use Int64Vector.from_dict for dictionary input"
+        )
+
     cdef Int64Vector vec = Int64Vector(0, True)   # wrap=True: no alloc
     vec.ptr = <DrakenFixedBuffer*> malloc(sizeof(DrakenFixedBuffer))
     if vec.ptr == NULL:
@@ -552,6 +584,66 @@ cdef Int64Vector from_arrow(object array):
             vec._arrow_null_buf = new_bitmap_bytes
     else:
         vec.ptr.null_bitmap = NULL
+
+    return vec
+
+
+cdef Int64Vector from_dict(const int32_t[::1] codes, const int64_t[::1] dictionary):
+    cdef Py_ssize_t row_count = codes.shape[0]
+    cdef Py_ssize_t dict_size = dictionary.shape[0]
+    cdef Int64Vector vec = Int64Vector(<size_t>row_count)
+    cdef int64_t* dst = <int64_t*>vec.ptr.data
+    cdef Py_ssize_t i
+    cdef Py_ssize_t code
+
+    if dict_size == 0:
+        raise ValueError("Int64Vector.from_dict requires a non-empty dictionary")
+
+    vec.ptr.null_bitmap = NULL
+    for i in range(row_count):
+        code = <Py_ssize_t>codes[i]
+        if code < 0 or code >= dict_size:
+            raise ValueError(f"dictionary index out of bounds at row {i}: {code}")
+        dst[i] = dictionary[code]
+
+    return vec
+
+
+cdef Int64Vector from_dict_nullable(
+    const int32_t[::1] codes,
+    const int64_t[::1] dictionary,
+    const uint8_t[::1] row_validity,
+):
+    cdef Py_ssize_t row_count = codes.shape[0]
+    cdef Py_ssize_t dict_size = dictionary.shape[0]
+    cdef Int64Vector vec = Int64Vector(<size_t>row_count)
+    cdef int64_t* dst = <int64_t*>vec.ptr.data
+    cdef Py_ssize_t i
+    cdef Py_ssize_t code
+    cdef Py_ssize_t nb_bytes
+    cdef uint8_t* nb
+
+    if dict_size == 0:
+        raise ValueError("Int64Vector.from_dict requires a non-empty dictionary")
+    if row_validity.shape[0] != row_count:
+        raise ValueError("row_validity length must match codes length")
+
+    nb_bytes = (row_count + 7) >> 3
+    nb = <uint8_t*>malloc(nb_bytes)
+    if nb == NULL:
+        raise MemoryError()
+    memset(nb, 0, nb_bytes)
+    vec.ptr.null_bitmap = nb
+
+    for i in range(row_count):
+        if row_validity[i] != 0:
+            code = <Py_ssize_t>codes[i]
+            if code < 0 or code >= dict_size:
+                raise ValueError(f"dictionary index out of bounds at row {i}: {code}")
+            dst[i] = dictionary[code]
+            nb[i >> 3] |= <uint8_t>(1 << (i & 7))
+        else:
+            dst[i] = 0
 
     return vec
 

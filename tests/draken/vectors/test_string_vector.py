@@ -1,6 +1,7 @@
 from array import array
 import ctypes
 
+import pyarrow as pa
 import pytest
 
 from opteryx.draken.vectors import string_vector as string_vector_module
@@ -176,6 +177,27 @@ def test_string_vector_view_null_handling():
         view.is_null(-1)
     with pytest.raises(IndexError):
         view.is_null(3)
+
+
+def test_string_vector_from_dict_decodes_dictionary_input():
+    vec = string_vector_module.StringVector.from_dict(
+        [0, 1, 0, 0],
+        [b"alpha", b"beta"],
+        [True, True, True, False],
+    )
+
+    assert vec.__class__.__name__ == "StringVector"
+    assert vec.to_pylist() == [b"alpha", b"beta", b"alpha", None]
+    assert vec.to_arrow().to_pylist() == [b"alpha", b"beta", b"alpha", None]
+
+
+def test_string_vector_from_arrow_rejects_dictionary_input():
+    dictionary = pa.array(["alpha", "beta"], type=pa.string())
+    indices = pa.array([0, 1, 0, None], type=pa.int8())
+    arr = pa.DictionaryArray.from_arrays(indices, dictionary)
+
+    with pytest.raises(TypeError, match="from_dict"):
+        string_vector_module.StringVector.from_arrow(arr)
 
 
 def test_string_vector_view_bounds_checking():

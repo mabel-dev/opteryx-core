@@ -43,6 +43,40 @@ DEF TIME32_HASH_CHUNK = 1024
 
 cdef class TimeVector(Vector):
 
+    @classmethod
+    def from_dict(cls, codes, dictionary, row_validity=None, is_time64=False):
+        from array import array as pyarray
+
+        cdef int32_t[::1] codes_view
+        cdef int32_t[::1] dictionary32_view
+        cdef int64_t[::1] dictionary64_view
+        cdef uint8_t[::1] validity_view
+
+        if not isinstance(codes, memoryview):
+            codes = pyarray("i", codes)
+        codes_view = codes
+
+        if is_time64:
+            if not isinstance(dictionary, memoryview):
+                dictionary = pyarray("q", dictionary)
+            dictionary64_view = dictionary
+            if row_validity is None:
+                return from_dict64(codes_view, dictionary64_view)
+            if not isinstance(row_validity, memoryview):
+                row_validity = bytearray(1 if valid else 0 for valid in row_validity)
+            validity_view = row_validity
+            return from_dict64_nullable(codes_view, dictionary64_view, validity_view)
+
+        if not isinstance(dictionary, memoryview):
+            dictionary = pyarray("i", dictionary)
+        dictionary32_view = dictionary
+        if row_validity is None:
+            return from_dict(codes_view, dictionary32_view)
+        if not isinstance(row_validity, memoryview):
+            row_validity = bytearray(1 if valid else 0 for valid in row_validity)
+        validity_view = row_validity
+        return from_dict_nullable(codes_view, dictionary32_view, validity_view)
+
     def __cinit__(self, size_t length=0, bint is_time64=False, bint wrap=False):
         """
         length>0, wrap=False  -> allocate new owned buffer
@@ -374,6 +408,12 @@ cdef class TimeVector(Vector):
 
 cdef TimeVector from_arrow(object array):
     import pyarrow as pa
+
+    if pa.types.is_dictionary(array.type):
+        raise TypeError(
+            "TimeVector.from_arrow expects a dense time32/time64 Arrow array; "
+            "use TimeVector.from_dict for dictionary input"
+        )
     
     cdef bint is_time64 = pa.types.is_time64(array.type)
     cdef TimeVector vec = TimeVector(0, is_time64, True)   # wrap=True: no alloc
@@ -433,5 +473,121 @@ cdef TimeVector from_arrow(object array):
             vec._arrow_null_buf = new_bitmap # Keep alive
     else:
         vec.ptr.null_bitmap = NULL
+
+    return vec
+
+
+cdef TimeVector from_dict(const int32_t[::1] codes, const int32_t[::1] dictionary):
+    cdef Py_ssize_t row_count = codes.shape[0]
+    cdef Py_ssize_t dict_size = dictionary.shape[0]
+    cdef TimeVector vec = TimeVector(<size_t>row_count, False)
+    cdef Py_ssize_t i
+    cdef Py_ssize_t code
+
+    if dict_size == 0:
+        raise ValueError("TimeVector.from_dict requires a non-empty dictionary")
+
+    vec.ptr.null_bitmap = NULL
+    for i in range(row_count):
+        code = <Py_ssize_t>codes[i]
+        if code < 0 or code >= dict_size:
+            raise ValueError(f"dictionary index out of bounds at row {i}: {code}")
+        (<int32_t*>vec.ptr.data)[i] = dictionary[code]
+
+    return vec
+
+
+cdef TimeVector from_dict_nullable(
+    const int32_t[::1] codes,
+    const int32_t[::1] dictionary,
+    const uint8_t[::1] row_validity,
+):
+    cdef Py_ssize_t row_count = codes.shape[0]
+    cdef Py_ssize_t dict_size = dictionary.shape[0]
+    cdef TimeVector vec = TimeVector(<size_t>row_count, False)
+    cdef Py_ssize_t i
+    cdef Py_ssize_t code
+    cdef Py_ssize_t nb_bytes
+    cdef uint8_t* nb
+
+    if dict_size == 0:
+        raise ValueError("TimeVector.from_dict requires a non-empty dictionary")
+    if row_validity.shape[0] != row_count:
+        raise ValueError("row_validity length must match codes length")
+
+    nb_bytes = (row_count + 7) >> 3
+    nb = <uint8_t*>malloc(nb_bytes)
+    if nb == NULL:
+        raise MemoryError()
+    memset(nb, 0, nb_bytes)
+    vec.ptr.null_bitmap = nb
+
+    for i in range(row_count):
+        if row_validity[i] != 0:
+            code = <Py_ssize_t>codes[i]
+            if code < 0 or code >= dict_size:
+                raise ValueError(f"dictionary index out of bounds at row {i}: {code}")
+            (<int32_t*>vec.ptr.data)[i] = dictionary[code]
+            nb[i >> 3] |= <uint8_t>(1 << (i & 7))
+        else:
+            (<int32_t*>vec.ptr.data)[i] = 0
+
+    return vec
+
+
+cdef TimeVector from_dict64(const int32_t[::1] codes, const int64_t[::1] dictionary):
+    cdef Py_ssize_t row_count = codes.shape[0]
+    cdef Py_ssize_t dict_size = dictionary.shape[0]
+    cdef TimeVector vec = TimeVector(<size_t>row_count, True)
+    cdef Py_ssize_t i
+    cdef Py_ssize_t code
+
+    if dict_size == 0:
+        raise ValueError("TimeVector.from_dict requires a non-empty dictionary")
+
+    vec.ptr.null_bitmap = NULL
+    for i in range(row_count):
+        code = <Py_ssize_t>codes[i]
+        if code < 0 or code >= dict_size:
+            raise ValueError(f"dictionary index out of bounds at row {i}: {code}")
+        (<int64_t*>vec.ptr.data)[i] = dictionary[code]
+
+    return vec
+
+
+cdef TimeVector from_dict64_nullable(
+    const int32_t[::1] codes,
+    const int64_t[::1] dictionary,
+    const uint8_t[::1] row_validity,
+):
+    cdef Py_ssize_t row_count = codes.shape[0]
+    cdef Py_ssize_t dict_size = dictionary.shape[0]
+    cdef TimeVector vec = TimeVector(<size_t>row_count, True)
+    cdef Py_ssize_t i
+    cdef Py_ssize_t code
+    cdef Py_ssize_t nb_bytes
+    cdef uint8_t* nb
+
+    if dict_size == 0:
+        raise ValueError("TimeVector.from_dict requires a non-empty dictionary")
+    if row_validity.shape[0] != row_count:
+        raise ValueError("row_validity length must match codes length")
+
+    nb_bytes = (row_count + 7) >> 3
+    nb = <uint8_t*>malloc(nb_bytes)
+    if nb == NULL:
+        raise MemoryError()
+    memset(nb, 0, nb_bytes)
+    vec.ptr.null_bitmap = nb
+
+    for i in range(row_count):
+        if row_validity[i] != 0:
+            code = <Py_ssize_t>codes[i]
+            if code < 0 or code >= dict_size:
+                raise ValueError(f"dictionary index out of bounds at row {i}: {code}")
+            (<int64_t*>vec.ptr.data)[i] = dictionary[code]
+            nb[i >> 3] |= <uint8_t>(1 << (i & 7))
+        else:
+            (<int64_t*>vec.ptr.data)[i] = 0
 
     return vec

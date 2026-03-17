@@ -22,6 +22,12 @@ import pyarrow as pa
 import pyarrow.compute as pc
 
 from opteryx.draken import Vector
+from opteryx.draken.vectors.date32_vector import Date32Vector
+from opteryx.draken.vectors.float64_vector import Float64Vector
+from opteryx.draken.vectors.int64_vector import Int64Vector
+from opteryx.draken.vectors.integer_vector import IntegerVector
+from opteryx.draken.vectors.time_vector import TimeVector
+from opteryx.draken.vectors.timestamp_vector import TimestampVector
 
 
 def test_date32_vector():
@@ -209,6 +215,100 @@ def test_array_nested_types():
     float_list = pa.array([[1.1, 2.2], [3.3], None, [4.4]], type=pa.list_(pa.float64()))
     vec = Vector.from_arrow(float_list)
     assert vec.to_pylist() == [[1.1, 2.2], [3.3], None, [4.4]]
+
+
+def test_typed_temporal_constructors_decode_dictionary_input():
+    date_arr = pa.DictionaryArray.from_arrays(
+        pa.array([0, 1, 0, None], type=pa.int8()),
+        pa.array([18000, 18500], type=pa.date32()),
+    )
+    ts_arr = pa.DictionaryArray.from_arrays(
+        pa.array([0, 1, 0, None], type=pa.int8()),
+        pa.array([1000000, 2000000], type=pa.timestamp('us')),
+    )
+    time_arr = pa.DictionaryArray.from_arrays(
+        pa.array([0, 1, 0, None], type=pa.int8()),
+        pa.array([3600, 7200], type=pa.time32('s')),
+    )
+
+    date_vec = Date32Vector.from_arrow(date_arr)
+    ts_vec = TimestampVector.from_arrow(ts_arr)
+    time_vec = TimeVector.from_arrow(time_arr)
+
+    assert date_vec.__class__.__name__ == "Date32Vector"
+    assert ts_vec.__class__.__name__ == "TimestampVector"
+    assert time_vec.__class__.__name__ == "TimeVector"
+    assert date_vec.to_pylist() == [18000, 18500, 18000, None]
+    assert ts_vec.to_pylist() == [1000000, 2000000, 1000000, None]
+    assert time_vec.to_pylist() == [3600, 7200, 3600, None]
+
+
+def test_typed_numeric_constructors_use_from_dict_for_dictionary_input():
+    int64_arr = pa.DictionaryArray.from_arrays(
+        pa.array([0, 1, 0, None], type=pa.int8()),
+        pa.array([10, 20], type=pa.int64()),
+    )
+    int32_arr = pa.DictionaryArray.from_arrays(
+        pa.array([0, 1, 0, None], type=pa.int8()),
+        pa.array([1, 2], type=pa.int32()),
+    )
+    float64_arr = pa.DictionaryArray.from_arrays(
+        pa.array([0, 1, 0, None], type=pa.int8()),
+        pa.array([1.5, 2.5], type=pa.float64()),
+    )
+
+    with pytest.raises(TypeError, match="from_dict"):
+        Int64Vector.from_arrow(int64_arr)
+    with pytest.raises(TypeError, match="from_dict"):
+        IntegerVector.from_arrow(int32_arr)
+    with pytest.raises(TypeError, match="from_dict"):
+        Float64Vector.from_arrow(float64_arr)
+
+    int64_vec = Int64Vector.from_dict([0, 1, 0, 0], [10, 20], [True, True, True, False])
+    int32_vec = IntegerVector.from_dict([0, 1, 0, 0], [1, 2], [True, True, True, False])
+    float64_vec = Float64Vector.from_dict([0, 1, 0, 0], [1.5, 2.5], [True, True, True, False])
+
+    assert int64_vec.__class__.__name__ == "Int64Vector"
+    assert int32_vec.__class__.__name__ == "IntegerVector"
+    assert float64_vec.__class__.__name__ == "Float64Vector"
+    assert int64_vec.to_pylist() == [10, 20, 10, None]
+    assert int32_vec.to_pylist() == [1, 2, 1, None]
+    assert float64_vec.to_pylist() == [1.5, 2.5, 1.5, None]
+
+
+def test_typed_temporal_constructors_use_from_dict_for_dictionary_input():
+    date_arr = pa.DictionaryArray.from_arrays(
+        pa.array([0, 1, 0, None], type=pa.int8()),
+        pa.array([18000, 18500], type=pa.date32()),
+    )
+    timestamp_arr = pa.DictionaryArray.from_arrays(
+        pa.array([0, 1, 0, None], type=pa.int8()),
+        pa.array([1_000_000, 2_000_000], type=pa.timestamp("us")),
+    )
+    time_arr = pa.DictionaryArray.from_arrays(
+        pa.array([0, 1, 0, None], type=pa.int8()),
+        pa.array([3600, 7200], type=pa.time32("s")),
+    )
+
+    with pytest.raises(TypeError, match="from_dict"):
+        Date32Vector.from_arrow(date_arr)
+    with pytest.raises(TypeError, match="from_dict"):
+        TimestampVector.from_arrow(timestamp_arr)
+    with pytest.raises(TypeError, match="from_dict"):
+        TimeVector.from_arrow(time_arr)
+
+    date_vec = Date32Vector.from_dict([0, 1, 0, 0], [18000, 18500], [True, True, True, False])
+    timestamp_vec = TimestampVector.from_dict(
+        [0, 1, 0, 0],
+        [1_000_000, 2_000_000],
+        [True, True, True, False],
+        "us",
+    )
+    time_vec = TimeVector.from_dict([0, 1, 0, 0], [3600, 7200], [True, True, True, False])
+
+    assert date_vec.to_pylist() == [18000, 18500, 18000, None]
+    assert timestamp_vec.to_pylist() == [1000000, 2000000, 1000000, None]
+    assert time_vec.to_pylist() == [3600, 7200, 3600, None]
 
 
 if __name__ == "__main__":

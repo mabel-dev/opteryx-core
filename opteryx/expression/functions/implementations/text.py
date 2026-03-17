@@ -48,23 +48,13 @@ from opteryx.exceptions import InvalidFunctionParameterError
 
 def to_lower(arr):
     """Fast lowercase using buffer-level SIMD operations."""
-    if hasattr(arr, "to_arrow"):
-        # Draken vector (StringVector, dictionary-encoded vectors, etc.)
-        arr = arr.to_arrow()
-    elif isinstance(arr, numpy.ndarray):
-        arr = pyarrow.array(arr)
-    vec = StringVector.from_arrow(arr)
+    vec = _as_string_vector(arr)
     return string_vector_lowercase(vec).to_arrow()
 
 
 def to_upper(arr):
     """Fast uppercase using buffer-level SIMD operations."""
-    if hasattr(arr, "to_arrow"):
-        # Draken vector (StringVector, dictionary-encoded vectors, etc.)
-        arr = arr.to_arrow()
-    elif isinstance(arr, numpy.ndarray):
-        arr = pyarrow.array(arr)
-    vec = StringVector.from_arrow(arr)
+    vec = _as_string_vector(arr)
     return string_vector_uppercase(vec).to_arrow()
 
 
@@ -77,125 +67,88 @@ def vector_lengther(arr):
     vector conversion step.
     """
 
-    from opteryx.draken.interop.arrow import vector_from_arrow
     from opteryx.draken.vectors.string_vector import StringVector
 
     if arr.__class__.__name__ in ("ArrayVector", "VectorVector"):
         return vector_length(arr).to_arrow()
 
-    # normalise to Arrow array then to Draken vector
-    if isinstance(arr, pyarrow.ChunkedArray):
-        arr = arr.combine_chunks()
-    elif isinstance(arr, numpy.ndarray):
-        arr = pyarrow.array(arr.tolist())
-    elif not isinstance(arr, pyarrow.Array):
-        arr = pyarrow.array(arr)
+    arrow_arr = _as_arrow_string_array(arr)
 
-    if pyarrow.types.is_list(arr.type) or pyarrow.types.is_large_list(arr.type):
-        return vector_length(vector_from_arrow(arr)).to_arrow()
+    if pyarrow.types.is_list(arrow_arr.type) or pyarrow.types.is_large_list(arrow_arr.type):
+        from opteryx.draken.interop.arrow import vector_from_arrow
+
+        return vector_length(vector_from_arrow(arrow_arr)).to_arrow()
 
     sv: StringVector
-    sv = arr if isinstance(arr, StringVector) else vector_from_arrow(arr)
-
-    # ``vector_from_arrow`` can yield a dictionary-encoded vector when the input
-    # is dictionary-encoded. The later logic assumes a real StringVector so we
-    # eagerly convert any dictionary result back into strings via an Arrow cast.
-    # This keeps the implementation simple and avoids duplicating the length
-    # logic for dictionary-backed storage.
-    if not isinstance(sv, StringVector) and _is_dictionary_encoded(sv):
-        # convert through Arrow and back to get a homogeneous StringVector
-        sv = vector_from_arrow(sv.to_arrow().cast(pyarrow.string()))
-
-    return vector_string_length(sv).to_arrow()
+    sv = _as_string_vector(arr)
+    result = vector_string_length(sv).to_arrow()
+    if arrow_arr.null_count:
+        return compute.if_else(
+            compute.is_null(arrow_arr), pyarrow.scalar(None, type=result.type), result
+        )
+    return result
 
 
 def _initcap(arr):
-    from opteryx.draken.interop.arrow import vector_from_arrow
     from opteryx.draken.vectors.string_vector import StringVector
 
     if isinstance(arr, StringVector):
         return vector_initcap(arr).to_arrow()
-    if isinstance(arr, numpy.ndarray):
-        arr = pyarrow.array(arr)
-    return vector_initcap(vector_from_arrow(arr)).to_arrow()
+    return vector_initcap(_as_string_vector(arr)).to_arrow()
 
 
 def _reverse(arr):
-    from opteryx.draken.interop.arrow import vector_from_arrow
     from opteryx.draken.vectors.string_vector import StringVector
 
     if isinstance(arr, StringVector):
         return vector_reverse(arr).to_arrow()
-    if isinstance(arr, numpy.ndarray):
-        arr = pyarrow.array(arr)
-    return vector_reverse(vector_from_arrow(arr)).to_arrow()
+    return vector_reverse(_as_string_vector(arr)).to_arrow()
 
 
 def _soundex(arr):
-    from opteryx.draken.interop.arrow import vector_from_arrow
     from opteryx.draken.vectors.string_vector import StringVector
 
     if isinstance(arr, StringVector):
         return vector_soundex(arr).to_arrow()
-    if isinstance(arr, numpy.ndarray):
-        arr = pyarrow.array(arr)
-    return vector_soundex(vector_from_arrow(arr)).to_arrow()
+    return vector_soundex(_as_string_vector(arr)).to_arrow()
 
 
 def _md5(arr):
-    from opteryx.draken.interop.arrow import vector_from_arrow
     from opteryx.draken.vectors.string_vector import StringVector
 
     if isinstance(arr, StringVector):
         return vector_md5(arr).to_arrow()
-    if isinstance(arr, numpy.ndarray):
-        arr = pyarrow.array(arr)
-    return vector_md5(vector_from_arrow(arr)).to_arrow()
+    return vector_md5(_as_string_vector(arr)).to_arrow()
 
 
 def _sha1(arr):
-    from opteryx.draken.interop.arrow import vector_from_arrow
     from opteryx.draken.vectors.string_vector import StringVector
 
     if isinstance(arr, StringVector):
         return vector_sha1(arr).to_arrow()
-    if isinstance(arr, numpy.ndarray):
-        arr = pyarrow.array(arr)
-    return vector_sha1(vector_from_arrow(arr)).to_arrow()
+    return vector_sha1(_as_string_vector(arr)).to_arrow()
 
 
 def _sha256(arr):
-    from opteryx.draken.interop.arrow import vector_from_arrow
     from opteryx.draken.vectors.string_vector import StringVector
 
     if isinstance(arr, StringVector):
         return vector_sha256(arr).to_arrow()
-    if isinstance(arr, numpy.ndarray):
-        arr = pyarrow.array(arr)
-    return vector_sha256(vector_from_arrow(arr)).to_arrow()
+    return vector_sha256(_as_string_vector(arr)).to_arrow()
 
 
 def _sha512(arr):
-    from opteryx.draken.interop.arrow import vector_from_arrow
     from opteryx.draken.vectors.string_vector import StringVector
 
     if isinstance(arr, StringVector):
         return vector_sha512(arr).to_arrow()
-    if isinstance(arr, numpy.ndarray):
-        arr = pyarrow.array(arr)
-    return vector_sha512(vector_from_arrow(arr)).to_arrow()
+    return vector_sha512(_as_string_vector(arr)).to_arrow()
 
 
 def _replace(data, search, replace_val):
-    from opteryx.draken.interop.arrow import vector_from_arrow
     from opteryx.draken.vectors.string_vector import StringVector
 
-    if isinstance(data, StringVector):
-        data_vec = data
-    else:
-        if isinstance(data, numpy.ndarray):
-            data = pyarrow.array(data)
-        data_vec = vector_from_arrow(data)
+    data_vec = data if isinstance(data, StringVector) else _as_string_vector(data)
     if isinstance(search, numpy.ndarray):
         search = search[0]
     if isinstance(replace_val, numpy.ndarray):
@@ -208,29 +161,23 @@ def _replace(data, search, replace_val):
 
 
 def _string_slice_left(arr, length):
-    from opteryx.draken.interop.arrow import vector_from_arrow
     from opteryx.draken.vectors.string_vector import StringVector
 
     if isinstance(length, numpy.ndarray):
         length = int(length[0])
     if isinstance(arr, StringVector):
         return vector_string_slice_left(arr, length).to_arrow()
-    if isinstance(arr, numpy.ndarray):
-        arr = pyarrow.array(arr)
-    return vector_string_slice_left(vector_from_arrow(arr), length).to_arrow()
+    return vector_string_slice_left(_as_string_vector(arr), length).to_arrow()
 
 
 def _string_slice_right(arr, length):
-    from opteryx.draken.interop.arrow import vector_from_arrow
     from opteryx.draken.vectors.string_vector import StringVector
 
     if isinstance(length, numpy.ndarray):
         length = int(length[0])
     if isinstance(arr, StringVector):
         return vector_string_slice_right(arr, length).to_arrow()
-    if isinstance(arr, numpy.ndarray):
-        arr = pyarrow.array(arr)
-    return vector_string_slice_right(vector_from_arrow(arr), length).to_arrow()
+    return vector_string_slice_right(_as_string_vector(arr), length).to_arrow()
 
 
 # ---------------------------------------------------------------------------
@@ -238,6 +185,28 @@ def _string_slice_right(arr, length):
 # ---------------------------------------------------------------------------
 
 _MATCH_AGAINST_MIN_SCORE = 0.6
+
+
+def _as_arrow_string_array(value):
+    if isinstance(value, pyarrow.ChunkedArray):
+        return value.combine_chunks()
+    if isinstance(value, pyarrow.Array):
+        return value
+    if hasattr(value, "to_arrow"):
+        return _as_arrow_string_array(value.to_arrow())
+    if isinstance(value, numpy.ndarray):
+        return pyarrow.array(value.tolist())
+    return pyarrow.array(value)
+
+
+def _as_string_vector(value) -> StringVector:
+    if isinstance(value, StringVector):
+        return value
+
+    arrow_arr = _as_arrow_string_array(value)
+    if pyarrow.types.is_dictionary(arrow_arr.type):
+        return StringVector.from_arrow(arrow_arr.dictionary_decode())
+    return StringVector.from_arrow(arrow_arr)
 
 
 def _is_dictionary_encoded(value) -> bool:
@@ -291,11 +260,8 @@ def split(arr, delimiter=",", limit=None):
 
     if len(delimiter) == 1 and limit is None:
         from opteryx.compiled.vector_ops import vector_split
-        from opteryx.draken.interop.arrow import vector_from_arrow
 
-        if not isinstance(arr, pyarrow.Array):
-            arr = pyarrow.array(arr, type=pyarrow.string())
-        return vector_split(vector_from_arrow(arr), ord(delimiter))
+        return vector_split(_as_string_vector(arr), ord(delimiter))
 
     delimiter = delimiter[0] if isinstance(delimiter, list) else delimiter
     if limit is not None:
@@ -452,7 +418,6 @@ def rtrim(*args):
 
 def levenshtein(a, b):
     from opteryx.compiled.vector_ops import vector_levenshtein
-    from opteryx.draken.interop.arrow import vector_from_arrow
 
     if hasattr(a, "to_numpy"):
         a = a.to_numpy(zero_copy_only=False)
@@ -472,7 +437,7 @@ def levenshtein(a, b):
             b = b.astype(object)
         b = pyarrow.array(b)
 
-    return vector_levenshtein(vector_from_arrow(a), vector_from_arrow(b)).to_arrow()
+    return vector_levenshtein(_as_string_vector(a), _as_string_vector(b)).to_arrow()
 
 
 def to_char(arr) -> List[str]:
@@ -537,7 +502,6 @@ def regex_replace(array, _pattern, _replacement):
     Regex replacement using the vendored RE2 engine exposed via vector_ops.
     """
     from opteryx.compiled import vector_ops as compiled_vector_ops
-    from opteryx.draken import Vector
 
     vector_regex_replace = getattr(compiled_vector_ops, "vector_regex_replace")
 
@@ -566,9 +530,7 @@ def regex_replace(array, _pattern, _replacement):
         return str(value).encode("utf-8")
 
     array_arrow = _as_arrow(array, "Input")
-    data_vector = Vector.from_arrow(array_arrow)
-    if _is_dictionary_encoded(data_vector):
-        data_vector = Vector.from_arrow(data_vector.to_arrow().cast(pa.string()))
+    data_vector = _as_string_vector(array_arrow)
 
     pattern = as_bytes(_pattern[0])
     replacement = as_bytes(_replacement[0])

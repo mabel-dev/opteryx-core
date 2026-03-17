@@ -40,3 +40,14 @@ cdef class TimestampVector(Vector):
     cdef void hash_into(self, uint64_t[::1] out_buf, Py_ssize_t offset=*) except *
 
 cdef TimestampVector from_arrow(object array)
+cdef TimestampVector from_dict(
+    const int32_t[::1] codes,
+    const int64_t[::1] dictionary,
+    str timestamp_unit,
+)
+cdef TimestampVector from_dict_nullable(
+    const int32_t[::1] codes,
+    const int64_t[::1] dictionary,
+    const uint8_t[::1] row_validity,
+    str timestamp_unit,
+)
