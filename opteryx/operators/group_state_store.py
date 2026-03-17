@@ -10,6 +10,10 @@ from opteryx.draken.morsels.morsel import Morsel
 
 _DATA_FORMAT = "draken"
 
+# DictionaryVector.dictionary_value_type is exposed at Python level, but the
+# Draken enum constants are not. These ids correspond to float32/float64.
+_DICT_FLOAT_VALUE_TYPE_IDS = frozenset((20, 21))
+
 
 _SUPPORTED_FUNCTIONS = {
     "count",
@@ -50,13 +54,22 @@ def normalize_aggregations(aggregations: list[object]) -> list[tuple]:
     return [ShuffleGroupByOperationV2._normalize_aggregation(spec) for spec in aggregations]
 
 
+def _is_dictionary_vector(vec: object) -> bool:
+    return vec.__class__.__name__ == "DictionaryVector"
+
+
+def _is_dictionary_float_vector(vec: object) -> bool:
+    return (
+        _is_dictionary_vector(vec)
+        and getattr(vec, "dictionary_value_type", None) in _DICT_FLOAT_VALUE_TYPE_IDS
+    )
+
+
+def _is_unsupported_count_distinct_vector(vec: object) -> bool:
+    return vec.__class__.__name__ == "Float64Vector" or _is_dictionary_float_vector(vec)
+
+
 def create_group_state_engine(group_by_columns, aggregations):
-    # Use GroupStateStore for multi-aggregate queries (carchar multi-agg has segfault)
-    if len(aggregations) > 1:
-        from opteryx.compiled.aggregations.group_state_store import GroupStateStore
-
-        return GroupStateStore(group_by_columns, aggregations)
-
     if any(
         agg[1] in ("approx_count_distinct", "approx_percentile", "array_agg")
         for agg in aggregations
@@ -95,6 +108,7 @@ class ShuffleGroupByOperationV2:
         self._engine = create_group_state_engine(self.group_by_columns, self.aggregations)
         self._backend = getattr(self._engine, "backend", self._engine)
         self.readings = self._engine.readings
+        self._planned_dict_fastpath_fallbacks = 0
 
     def _record_constant_groupby_vector(self, vec) -> None:
         if vec.__class__.__name__ == "ConstantVector":
@@ -132,7 +146,46 @@ class ShuffleGroupByOperationV2:
         return str(alias), function, column, options
 
     def ingest(self, morsel: Morsel) -> None:
+        reroute_reason = self._group_state_store_reason_for_morsel(morsel)
+        if reroute_reason is not None:
+            from opteryx.compiled.aggregations.group_state_store import GroupStateStore
+
+            self._engine = GroupStateStore(self.group_by_columns, self.aggregations)
+            self._backend = self._engine
+            self.readings = self._engine.readings
+            if reroute_reason == "count-distinct-dense-float-value":
+                self._planned_dict_fastpath_fallbacks += 1
         self._engine.ingest(morsel)
+        self.readings = self._engine.readings
+        if (
+            self._planned_dict_fastpath_fallbacks
+            and self.readings["draken_dict_groupby_fastpath_fallbacks"] == 0
+        ):
+            self.readings["draken_dict_groupby_fastpath_fallbacks"] += (
+                self._planned_dict_fastpath_fallbacks
+            )
+
+    def _group_state_store_reason_for_morsel(self, morsel: Morsel) -> str | None:
+        if self._engine.__class__.__name__ != "CarcharGroupStateEngine":
+            return None
+        if self.readings["feature_groupby_engine_carchar"] != 0:
+            return None
+        if morsel is None or morsel.num_rows == 0:
+            return None
+
+        for group_column in self.group_by_columns:
+            if _is_dictionary_float_vector(morsel.column(group_column)):
+                return "dict-float-key"
+
+        for _, function, column, *_ in self.aggregations:
+            if function in ("count_distinct", "distinct") and column is not None:
+                value_vector = morsel.column(column)
+                if value_vector.__class__.__name__ == "Float64Vector":
+                    return "count-distinct-dense-float-value"
+                if _is_dictionary_float_vector(value_vector):
+                    return "count-distinct-dict-float-value"
+
+        return None
 
     def ingest_many(self, morsels) -> None:
         for morsel in morsels:

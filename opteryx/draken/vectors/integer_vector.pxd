@@ -1,4 +1,4 @@
-from libc.stdint cimport uint64_t, uint8_t
+from libc.stdint cimport int8_t, int32_t, int64_t, uint64_t, uint8_t
 
 from opteryx.draken.core.buffers cimport DrakenFixedBuffer, DrakenType
 from opteryx.draken.vectors.vector cimport Vector
@@ -16,3 +16,9 @@ cdef class IntegerVector(Vector):
     cdef void hash_into(self, uint64_t[::1] out_buf, Py_ssize_t offset=*) except *
 
 cdef IntegerVector from_arrow(object array)
+cdef IntegerVector from_dict(const int32_t[::1] codes, const int64_t[::1] dictionary)
+cdef IntegerVector from_dict_nullable(
+    const int32_t[::1] codes,
+    const int64_t[::1] dictionary,
+    const uint8_t[::1] row_validity,
+)

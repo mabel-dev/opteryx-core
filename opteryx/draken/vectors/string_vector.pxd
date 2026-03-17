@@ -111,6 +111,12 @@ cdef class StringVectorBuilder:
 
 
 cdef StringVector from_arrow(object array)
+cdef StringVector from_dict(const int32_t[::1] codes, list dictionary)
+cdef StringVector from_dict_nullable(
+    const int32_t[::1] codes,
+    list dictionary,
+    const uint8_t[::1] row_validity,
+)
 cdef StringVector from_arrow_struct(object array)
 
 cpdef StringVector uppercase(StringVector input)

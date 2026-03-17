@@ -40,6 +40,30 @@ DEF INTEGER_HASH_CHUNK = 1024
 cdef class IntegerVector(Vector):
     """Fixed-width signed integer vector supporting int8, int16, and int32 widths."""
 
+    @classmethod
+    def from_dict(cls, codes, dictionary, row_validity=None):
+        from array import array as pyarray
+
+        cdef int32_t[::1] codes_view
+        cdef int64_t[::1] dictionary_view
+        cdef uint8_t[::1] validity_view
+
+        if not isinstance(codes, memoryview):
+            codes = pyarray("i", codes)
+        if not isinstance(dictionary, memoryview):
+            dictionary = pyarray("q", dictionary)
+
+        codes_view = codes
+        dictionary_view = dictionary
+
+        if row_validity is None:
+            return from_dict(codes_view, dictionary_view)
+
+        if not isinstance(row_validity, memoryview):
+            row_validity = bytearray(1 if valid else 0 for valid in row_validity)
+        validity_view = row_validity
+        return from_dict_nullable(codes_view, dictionary_view, validity_view)
+
     def __cinit__(self, DrakenType dtype=DRAKEN_INT32, size_t length=0, bint wrap=False):
         cdef size_t itemsize
         if wrap:
@@ -246,6 +270,12 @@ cdef IntegerVector from_arrow(object array):
     """Zero-copy wrap of a PyArrow int8/int16/int32 array as an IntegerVector."""
     import pyarrow as pa
 
+    if pa.types.is_dictionary(array.type):
+        raise TypeError(
+            "IntegerVector.from_arrow expects a dense 8/16/32-bit Arrow integer array; "
+            "use IntegerVector.from_dict for dictionary input"
+        )
+
     cdef DrakenType dtype
     cdef size_t itemsize
     cdef IntegerVector vec
@@ -302,5 +332,119 @@ cdef IntegerVector from_arrow(object array):
             vec._arrow_null_buf = new_bitmap_bytes
     else:
         vec.ptr.null_bitmap = NULL
+
+    return vec
+
+
+cdef IntegerVector from_dict(const int32_t[::1] codes, const int64_t[::1] dictionary):
+    cdef Py_ssize_t row_count = codes.shape[0]
+    cdef Py_ssize_t dict_size = dictionary.shape[0]
+    cdef Py_ssize_t i
+    cdef Py_ssize_t code
+    cdef int64_t value
+    cdef int64_t min_value
+    cdef int64_t max_value
+    cdef DrakenType dtype = DRAKEN_INT32
+    cdef IntegerVector vec
+
+    if dict_size == 0:
+        raise ValueError("IntegerVector.from_dict requires a non-empty dictionary")
+
+    min_value = dictionary[0]
+    max_value = min_value
+    for i in range(1, dict_size):
+        value = dictionary[i]
+        if value < min_value:
+            min_value = value
+        if value > max_value:
+            max_value = value
+
+    if min_value >= -128 and max_value <= 127:
+        dtype = DRAKEN_INT8
+    elif min_value >= -32768 and max_value <= 32767:
+        dtype = DRAKEN_INT16
+
+    vec = IntegerVector(dtype, <size_t>row_count)
+
+    vec.ptr.null_bitmap = NULL
+    for i in range(row_count):
+        code = <Py_ssize_t>codes[i]
+        if code < 0 or code >= dict_size:
+            raise ValueError(f"dictionary index out of bounds at row {i}: {code}")
+        value = dictionary[code]
+        if vec.ptr.itemsize == 1:
+            (<int8_t*>vec.ptr.data)[i] = <int8_t>value
+        elif vec.ptr.itemsize == 2:
+            (<int16_t*>vec.ptr.data)[i] = <int16_t>value
+        else:
+            (<int32_t*>vec.ptr.data)[i] = <int32_t>value
+
+    return vec
+
+
+cdef IntegerVector from_dict_nullable(
+    const int32_t[::1] codes,
+    const int64_t[::1] dictionary,
+    const uint8_t[::1] row_validity,
+):
+    cdef Py_ssize_t row_count = codes.shape[0]
+    cdef Py_ssize_t dict_size = dictionary.shape[0]
+    cdef Py_ssize_t i
+    cdef Py_ssize_t code
+    cdef int64_t value
+    cdef int64_t min_value
+    cdef int64_t max_value
+    cdef DrakenType dtype = DRAKEN_INT32
+    cdef IntegerVector vec
+    cdef Py_ssize_t nb_bytes
+    cdef uint8_t* nb
+
+    if dict_size == 0:
+        raise ValueError("IntegerVector.from_dict requires a non-empty dictionary")
+    if row_validity.shape[0] != row_count:
+        raise ValueError("row_validity length must match codes length")
+
+    min_value = dictionary[0]
+    max_value = min_value
+    for i in range(1, dict_size):
+        value = dictionary[i]
+        if value < min_value:
+            min_value = value
+        if value > max_value:
+            max_value = value
+
+    if min_value >= -128 and max_value <= 127:
+        dtype = DRAKEN_INT8
+    elif min_value >= -32768 and max_value <= 32767:
+        dtype = DRAKEN_INT16
+
+    vec = IntegerVector(dtype, <size_t>row_count)
+    nb_bytes = (row_count + 7) >> 3
+    nb = <uint8_t*>malloc(nb_bytes)
+    if nb == NULL:
+        raise MemoryError()
+    memset(nb, 0, nb_bytes)
+    vec.ptr.null_bitmap = nb
+
+    for i in range(row_count):
+        if row_validity[i] != 0:
+            code = <Py_ssize_t>codes[i]
+            if code < 0 or code >= dict_size:
+                raise ValueError(f"dictionary index out of bounds at row {i}: {code}")
+            value = dictionary[code]
+            if vec.ptr.itemsize == 1:
+                (<int8_t*>vec.ptr.data)[i] = <int8_t>value
+            elif vec.ptr.itemsize == 2:
+                (<int16_t*>vec.ptr.data)[i] = <int16_t>value
+            else:
+                (<int32_t*>vec.ptr.data)[i] = <int32_t>value
+            nb[i >> 3] |= <uint8_t>(1 << (i & 7))
+        else:
+            if vec.ptr.itemsize == 1:
+                (<int8_t*>vec.ptr.data)[i] = 0
+            elif vec.ptr.itemsize == 2:
+                (<int16_t*>vec.ptr.data)[i] = 0
+            else:
+                (<int32_t*>vec.ptr.data)[i] = 0
 
     return vec

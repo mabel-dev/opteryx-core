@@ -608,10 +608,16 @@ cdef class CarcharGroupStateEngine:
         )
 
     cdef inline bint _supports_count_distinct_value(self, object value_vector) noexcept:
-        return (
-            isinstance(value_vector, (Int64Vector, IntegerVector, Float64Vector, StringVector))
-            or _vector_value_dict_accessor(value_vector) != NULL
-        )
+        cdef DictAccessor* dict_accessor = _vector_value_dict_accessor(value_vector)
+
+        if isinstance(value_vector, (Int64Vector, IntegerVector, StringVector)):
+            return True
+        if dict_accessor != NULL:
+            return not (
+                dict_accessor.value_type == DRAKEN_FLOAT32
+                or dict_accessor.value_type == DRAKEN_FLOAT64
+            )
+        return False
 
     cdef inline int64_t _read_dictionary_fixed_key(
         self,
@@ -1271,10 +1277,15 @@ cdef class CarcharGroupStateEngine:
                             self._multi_value_columns.append(None)
                         else:
                             value_vector = morsel.column(column)
+                            dict_accessor = _vector_value_dict_accessor(value_vector)
                             if isinstance(
                                 value_vector,
                                 (Int64Vector, IntegerVector, Float64Vector, StringVector),
                             ):
+                                self._multi_agg_modes.push_back(AGG_COUNT_VALUE)
+                                self._multi_value_kinds.push_back(VALUE_NONE)
+                                self._multi_value_columns.append(column)
+                            elif dict_accessor != NULL and dict_accessor.dict_values != NULL:
                                 self._multi_agg_modes.push_back(AGG_COUNT_VALUE)
                                 self._multi_value_kinds.push_back(VALUE_NONE)
                                 self._multi_value_columns.append(column)
@@ -1283,6 +1294,7 @@ cdef class CarcharGroupStateEngine:
                                 return
                     elif fn == "sum":
                         value_vector = morsel.column(column)
+                        dict_accessor = _vector_value_dict_accessor(value_vector)
                         if isinstance(value_vector, Float64Vector):
                             self._multi_agg_modes.push_back(AGG_SUM)
                             self._multi_value_kinds.push_back(VALUE_FLOAT64)
@@ -1290,12 +1302,20 @@ cdef class CarcharGroupStateEngine:
                         elif isinstance(value_vector, (Int64Vector, IntegerVector)):
                             self._multi_agg_modes.push_back(AGG_SUM)
                             self._multi_value_kinds.push_back(VALUE_INT64)
+                            self._multi_value_columns.append(column)
+                        elif dict_accessor != NULL and dict_accessor.dict_values != NULL:
+                            self._multi_agg_modes.push_back(AGG_SUM)
+                            self._multi_value_kinds.push_back(_dict_accessor_value_kind(dict_accessor))
+                            if self._multi_value_kinds[self._multi_value_kinds.size() - 1] == VALUE_OBJECT:
+                                self._init_legacy_backend()
+                                return
                             self._multi_value_columns.append(column)
                         else:
                             self._init_legacy_backend()
                             return
                     elif fn == "min":
                         value_vector = morsel.column(column)
+                        dict_accessor = _vector_value_dict_accessor(value_vector)
                         if isinstance(value_vector, Float64Vector):
                             self._multi_agg_modes.push_back(AGG_MIN)
                             self._multi_value_kinds.push_back(VALUE_FLOAT64)
@@ -1307,12 +1327,17 @@ cdef class CarcharGroupStateEngine:
                         elif self._is_stringlike_vector(value_vector):
                             self._multi_agg_modes.push_back(AGG_MIN)
                             self._multi_value_kinds.push_back(VALUE_OBJECT)
+                            self._multi_value_columns.append(column)
+                        elif dict_accessor != NULL and dict_accessor.dict_values != NULL:
+                            self._multi_agg_modes.push_back(AGG_MIN)
+                            self._multi_value_kinds.push_back(_dict_accessor_value_kind(dict_accessor))
                             self._multi_value_columns.append(column)
                         else:
                             self._init_legacy_backend()
                             return
                     elif fn == "max":
                         value_vector = morsel.column(column)
+                        dict_accessor = _vector_value_dict_accessor(value_vector)
                         if isinstance(value_vector, Float64Vector):
                             self._multi_agg_modes.push_back(AGG_MAX)
                             self._multi_value_kinds.push_back(VALUE_FLOAT64)
@@ -1325,14 +1350,26 @@ cdef class CarcharGroupStateEngine:
                             self._multi_agg_modes.push_back(AGG_MAX)
                             self._multi_value_kinds.push_back(VALUE_OBJECT)
                             self._multi_value_columns.append(column)
+                        elif dict_accessor != NULL and dict_accessor.dict_values != NULL:
+                            self._multi_agg_modes.push_back(AGG_MAX)
+                            self._multi_value_kinds.push_back(_dict_accessor_value_kind(dict_accessor))
+                            self._multi_value_columns.append(column)
                         else:
                             self._init_legacy_backend()
                             return
                     elif fn == "avg" or fn == "mean":
                         value_vector = morsel.column(column)
+                        dict_accessor = _vector_value_dict_accessor(value_vector)
                         if isinstance(value_vector, (Int64Vector, IntegerVector, Float64Vector)):
                             self._multi_agg_modes.push_back(AGG_AVG)
                             self._multi_value_kinds.push_back(VALUE_FLOAT64)
+                            self._multi_value_columns.append(column)
+                        elif dict_accessor != NULL and dict_accessor.dict_values != NULL:
+                            self._multi_agg_modes.push_back(AGG_AVG)
+                            self._multi_value_kinds.push_back(_dict_accessor_value_kind(dict_accessor))
+                            if self._multi_value_kinds[self._multi_value_kinds.size() - 1] == VALUE_OBJECT:
+                                self._init_legacy_backend()
+                                return
                             self._multi_value_columns.append(column)
                         else:
                             self._init_legacy_backend()
@@ -1350,9 +1387,10 @@ cdef class CarcharGroupStateEngine:
                         self._init_legacy_backend()
                         return
 
-                # WORKAROUND: Multi-agg carchar path has a segfault bug
-                # Force GroupStateStore backend for multi-aggregate queries
-                self._init_legacy_backend()
+                self._multi_agg_count = len(self._aggregations)
+                self._index = new CarcharIndex(<size_t> max(16, morsel.num_rows * 2), 0.80)
+                self._mode = MODE_CARCHAR
+                self._readings["feature_groupby_engine_carchar"] += 1
                 return
 
             fn = self._aggregations[0][1]
@@ -1578,9 +1616,17 @@ cdef class CarcharGroupStateEngine:
                         return
                 elif fn == "avg" or fn == "mean":
                     value_vector = morsel.column(column)
+                    dict_accessor = _vector_value_dict_accessor(value_vector)
                     if isinstance(value_vector, (Int64Vector, IntegerVector, Float64Vector)):
                         self._multi_agg_modes.push_back(AGG_AVG)
                         self._multi_value_kinds.push_back(VALUE_FLOAT64)
+                        self._multi_value_columns.append(column)
+                    elif dict_accessor != NULL:
+                        self._multi_agg_modes.push_back(AGG_AVG)
+                        self._multi_value_kinds.push_back(_dict_accessor_value_kind(dict_accessor))
+                        if self._multi_value_kinds[self._multi_value_kinds.size() - 1] == VALUE_OBJECT:
+                            self._init_legacy_backend()
+                            return
                         self._multi_value_columns.append(column)
                     else:
                         self._init_legacy_backend()
@@ -3133,6 +3179,56 @@ cdef class CarcharGroupStateEngine:
                             self._multi_avg_counts[offset] = self._multi_avg_counts[offset] + 1
                     continue
 
+                value_dict_accessor = _vector_value_dict_accessor(value_vector)
+                if value_dict_accessor != NULL:
+                    value_nulls = value_dict_accessor.row_nulls
+                    if self._multi_value_kinds[agg_idx] == VALUE_DICT_FLOAT64:
+                        for row_idx in range(row_count):
+                            if not _bitmap_is_valid(value_nulls, row_idx):
+                                continue
+                            offset = self._multi_offset(state_indices[row_idx], agg_idx)
+                            val_decoded_f64 = _dict_accessor_read_float_value(value_dict_accessor, row_idx)
+                            if agg_mode == AGG_COUNT_VALUE:
+                                self._multi_counts[offset] = self._multi_counts[offset] + 1
+                            elif agg_mode == AGG_SUM:
+                                self._multi_f64_state[offset] = self._multi_f64_state[offset] + val_decoded_f64
+                                self._multi_seen[offset] = 1
+                            elif agg_mode == AGG_MIN:
+                                if self._multi_seen[offset] == 0 or val_decoded_f64 < self._multi_f64_state[offset]:
+                                    self._multi_f64_state[offset] = val_decoded_f64
+                                self._multi_seen[offset] = 1
+                            elif agg_mode == AGG_MAX:
+                                if self._multi_seen[offset] == 0 or val_decoded_f64 > self._multi_f64_state[offset]:
+                                    self._multi_f64_state[offset] = val_decoded_f64
+                                self._multi_seen[offset] = 1
+                            elif agg_mode == AGG_AVG:
+                                self._multi_avg_sums[offset] = self._multi_avg_sums[offset] + val_decoded_f64
+                                self._multi_avg_counts[offset] = self._multi_avg_counts[offset] + 1
+                        continue
+                    elif self._multi_value_kinds[agg_idx] == VALUE_DICT_INT64:
+                        for row_idx in range(row_count):
+                            if not _bitmap_is_valid(value_nulls, row_idx):
+                                continue
+                            offset = self._multi_offset(state_indices[row_idx], agg_idx)
+                            val_decoded_i64 = _dict_accessor_read_int_value(value_dict_accessor, row_idx)
+                            if agg_mode == AGG_COUNT_VALUE:
+                                self._multi_counts[offset] = self._multi_counts[offset] + 1
+                            elif agg_mode == AGG_SUM:
+                                self._multi_i64_state[offset] = self._multi_i64_state[offset] + val_decoded_i64
+                                self._multi_seen[offset] = 1
+                            elif agg_mode == AGG_MIN:
+                                if self._multi_seen[offset] == 0 or val_decoded_i64 < self._multi_i64_state[offset]:
+                                    self._multi_i64_state[offset] = val_decoded_i64
+                                self._multi_seen[offset] = 1
+                            elif agg_mode == AGG_MAX:
+                                if self._multi_seen[offset] == 0 or val_decoded_i64 > self._multi_i64_state[offset]:
+                                    self._multi_i64_state[offset] = val_decoded_i64
+                                self._multi_seen[offset] = 1
+                            elif agg_mode == AGG_AVG:
+                                self._multi_avg_sums[offset] = self._multi_avg_sums[offset] + val_decoded_i64
+                                self._multi_avg_counts[offset] = self._multi_avg_counts[offset] + 1
+                        continue
+
                 value_ptr = (<IntegerVector> value_vector).ptr
                 value_nulls = <uint8_t*> value_ptr.null_bitmap
                 for row_idx in range(row_count):
@@ -3619,6 +3715,9 @@ cdef class CarcharGroupStateEngine:
         cdef int64_t* value_i64_data
         cdef double* value_f64_data
         cdef uint8_t* value_nulls
+        cdef DictAccessor* value_dict_accessor = NULL
+        cdef double val_decoded_f64
+        cdef int64_t val_decoded_i64
         cdef int64_t value_i64
         cdef const char* key_data_ptr = NULL
         cdef Py_ssize_t key_data_len = 0
@@ -3717,6 +3816,56 @@ cdef class CarcharGroupStateEngine:
                             self._multi_avg_sums[offset] = self._multi_avg_sums[offset] + value_i64_data[row_idx]
                             self._multi_avg_counts[offset] = self._multi_avg_counts[offset] + 1
                     continue
+
+                value_dict_accessor = _vector_value_dict_accessor(value_vector)
+                if value_dict_accessor != NULL:
+                    value_nulls = value_dict_accessor.row_nulls
+                    if self._multi_value_kinds[agg_idx] == VALUE_DICT_FLOAT64:
+                        for row_idx in range(row_count):
+                            if not _bitmap_is_valid(value_nulls, row_idx):
+                                continue
+                            offset = self._multi_offset(state_indices[row_idx], agg_idx)
+                            val_decoded_f64 = _dict_accessor_read_float_value(value_dict_accessor, row_idx)
+                            if agg_mode == AGG_COUNT_VALUE:
+                                self._multi_counts[offset] = self._multi_counts[offset] + 1
+                            elif agg_mode == AGG_SUM:
+                                self._multi_f64_state[offset] = self._multi_f64_state[offset] + val_decoded_f64
+                                self._multi_seen[offset] = 1
+                            elif agg_mode == AGG_MIN:
+                                if self._multi_seen[offset] == 0 or val_decoded_f64 < self._multi_f64_state[offset]:
+                                    self._multi_f64_state[offset] = val_decoded_f64
+                                self._multi_seen[offset] = 1
+                            elif agg_mode == AGG_MAX:
+                                if self._multi_seen[offset] == 0 or val_decoded_f64 > self._multi_f64_state[offset]:
+                                    self._multi_f64_state[offset] = val_decoded_f64
+                                self._multi_seen[offset] = 1
+                            elif agg_mode == AGG_AVG:
+                                self._multi_avg_sums[offset] = self._multi_avg_sums[offset] + val_decoded_f64
+                                self._multi_avg_counts[offset] = self._multi_avg_counts[offset] + 1
+                        continue
+                    elif self._multi_value_kinds[agg_idx] == VALUE_DICT_INT64:
+                        for row_idx in range(row_count):
+                            if not _bitmap_is_valid(value_nulls, row_idx):
+                                continue
+                            offset = self._multi_offset(state_indices[row_idx], agg_idx)
+                            val_decoded_i64 = _dict_accessor_read_int_value(value_dict_accessor, row_idx)
+                            if agg_mode == AGG_COUNT_VALUE:
+                                self._multi_counts[offset] = self._multi_counts[offset] + 1
+                            elif agg_mode == AGG_SUM:
+                                self._multi_i64_state[offset] = self._multi_i64_state[offset] + val_decoded_i64
+                                self._multi_seen[offset] = 1
+                            elif agg_mode == AGG_MIN:
+                                if self._multi_seen[offset] == 0 or val_decoded_i64 < self._multi_i64_state[offset]:
+                                    self._multi_i64_state[offset] = val_decoded_i64
+                                self._multi_seen[offset] = 1
+                            elif agg_mode == AGG_MAX:
+                                if self._multi_seen[offset] == 0 or val_decoded_i64 > self._multi_i64_state[offset]:
+                                    self._multi_i64_state[offset] = val_decoded_i64
+                                self._multi_seen[offset] = 1
+                            elif agg_mode == AGG_AVG:
+                                self._multi_avg_sums[offset] = self._multi_avg_sums[offset] + val_decoded_i64
+                                self._multi_avg_counts[offset] = self._multi_avg_counts[offset] + 1
+                        continue
 
                 value_ptr = (<IntegerVector> value_vector).ptr
                 value_nulls = <uint8_t*> value_ptr.null_bitmap
@@ -4417,7 +4566,9 @@ cdef class CarcharGroupStateEngine:
         cdef object pre_const_hits
         cdef object pre_const_fallbacks
         cdef object key_vector
+        cdef object group_column
         cdef DictAccessor* key_dict_accessor = NULL
+        cdef bint saw_dict_group_key = False
 
         self._maybe_init_carchar_mode(morsel)
 
@@ -4449,6 +4600,14 @@ cdef class CarcharGroupStateEngine:
 
         if morsel is None or morsel.num_rows == 0:
             return
+
+        for group_column in self._group_by_columns:
+            if _vector_dict_accessor(morsel.column(group_column)) != NULL:
+                saw_dict_group_key = True
+                break
+
+        if saw_dict_group_key:
+            self._readings["draken_dict_groupby_fastpath_hits"] += 1
 
         self._reserve_for_rows(morsel.num_rows)
         key_vector = None

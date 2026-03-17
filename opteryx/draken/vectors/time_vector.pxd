@@ -26,3 +26,15 @@ cdef class TimeVector(Vector):
     cdef void hash_into(self, uint64_t[::1] out_buf, Py_ssize_t offset=*) except *
 
 cdef TimeVector from_arrow(object array)
+cdef TimeVector from_dict(const int32_t[::1] codes, const int32_t[::1] dictionary)
+cdef TimeVector from_dict_nullable(
+    const int32_t[::1] codes,
+    const int32_t[::1] dictionary,
+    const uint8_t[::1] row_validity,
+)
+cdef TimeVector from_dict64(const int32_t[::1] codes, const int64_t[::1] dictionary)
+cdef TimeVector from_dict64_nullable(
+    const int32_t[::1] codes,
+    const int64_t[::1] dictionary,
+    const uint8_t[::1] row_validity,
+)

@@ -197,6 +197,27 @@ cdef bint _sv_contains_ci(
 
 cdef class StringVector(Vector):
 
+    @classmethod
+    def from_dict(cls, codes, dictionary, row_validity=None):
+        from array import array as pyarray
+
+        cdef int32_t[::1] codes_view
+        cdef uint8_t[::1] validity_view
+
+        if not isinstance(codes, memoryview):
+            codes = pyarray("i", codes)
+        if not isinstance(dictionary, list):
+            dictionary = list(dictionary)
+
+        codes_view = codes
+        if row_validity is None:
+            return from_dict(codes_view, dictionary)
+
+        if not isinstance(row_validity, memoryview):
+            row_validity = bytearray(1 if valid else 0 for valid in row_validity)
+        validity_view = row_validity
+        return from_dict_nullable(codes_view, dictionary, validity_view)
+
     def __cinit__(self, size_t length=0, size_t bytes_cap=0, bint wrap=False):
         """
         length>0, wrap=False  -> allocate new owned buffer
@@ -1426,6 +1447,19 @@ cdef StringVector from_arrow(object array):
     Wrap an Arrow StringArray without copying.
     Keeps references to Arrow buffers to prevent GC from freeing memory.
     """
+    import pyarrow as pa
+
+    if pa.types.is_dictionary(array.type):
+        raise TypeError(
+            "StringVector.from_arrow expects a dense string/binary Arrow array; "
+            "use StringVector.from_dict for dictionary input"
+        )
+
+    if pa.types.is_large_string(array.type):
+        array = array.cast(pa.string())
+    elif pa.types.is_large_binary(array.type):
+        array = array.cast(pa.binary())
+
     cdef StringVector vec = StringVector(0, 0, True)
     vec.ptr = <DrakenVarBuffer*> malloc(sizeof(DrakenVarBuffer))
     if vec.ptr == NULL:
@@ -1479,6 +1513,69 @@ cdef StringVector from_arrow(object array):
 
     vec.ptr.type = DRAKEN_STRING
     return vec
+
+
+cdef StringVector from_dict(const int32_t[::1] codes, list dictionary):
+    cdef Py_ssize_t row_count = codes.shape[0]
+    cdef Py_ssize_t dict_size = len(dictionary)
+    cdef Py_ssize_t i
+    cdef Py_ssize_t code
+    cdef object value
+    cdef bytes encoded
+    cdef StringVectorBuilder builder
+
+    if dict_size == 0:
+        raise ValueError("StringVector.from_dict requires a non-empty dictionary")
+
+    builder = StringVectorBuilder.with_counts(row_count, 0)
+    for i in range(row_count):
+        code = <Py_ssize_t>codes[i]
+        if code < 0 or code >= dict_size:
+            raise ValueError(f"dictionary index out of bounds at row {i}: {code}")
+        value = dictionary[code]
+        if isinstance(value, str):
+            encoded = (<str>value).encode("utf-8")
+        else:
+            encoded = <bytes>value
+        builder.append(encoded)
+
+    return builder.finish()
+
+
+cdef StringVector from_dict_nullable(
+    const int32_t[::1] codes,
+    list dictionary,
+    const uint8_t[::1] row_validity,
+):
+    cdef Py_ssize_t row_count = codes.shape[0]
+    cdef Py_ssize_t dict_size = len(dictionary)
+    cdef Py_ssize_t i
+    cdef Py_ssize_t code
+    cdef object value
+    cdef bytes encoded
+    cdef StringVectorBuilder builder
+
+    if dict_size == 0:
+        raise ValueError("StringVector.from_dict requires a non-empty dictionary")
+    if row_validity.shape[0] != row_count:
+        raise ValueError("row_validity length must match codes length")
+
+    builder = StringVectorBuilder.with_counts(row_count, 0)
+    for i in range(row_count):
+        if row_validity[i] != 0:
+            code = <Py_ssize_t>codes[i]
+            if code < 0 or code >= dict_size:
+                raise ValueError(f"dictionary index out of bounds at row {i}: {code}")
+            value = dictionary[code]
+            if isinstance(value, str):
+                encoded = (<str>value).encode("utf-8")
+            else:
+                encoded = <bytes>value
+            builder.append(encoded)
+        else:
+            builder.append_null()
+
+    return builder.finish()
 
 cdef void copy_bitmap_shifted(uint8_t* src, uint8_t* dst, Py_ssize_t offset, Py_ssize_t length) noexcept nogil:
     cdef Py_ssize_t i

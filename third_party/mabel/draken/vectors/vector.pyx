@@ -33,7 +33,22 @@ cdef class Vector:
 
     @classmethod
     def from_arrow(cls, arrow_array):
-        return vector_from_arrow(arrow_array)
+        import pyarrow as pa
+
+        if cls is not Vector and pa.types.is_dictionary(arrow_array.type):
+            if hasattr(cls, "from_dict"):
+                raise TypeError(
+                    f"{cls.__name__}.from_arrow expects a non-dictionary Arrow array; "
+                    f"use {cls.__name__}.from_dict instead"
+                )
+
+        vector = vector_from_arrow(arrow_array)
+        if cls is Vector or isinstance(vector, cls):
+            return vector
+
+        raise TypeError(
+            f"{cls.__name__}.from_arrow cannot wrap Arrow type {arrow_array.type} as {cls.__name__}"
+        )
 
     cpdef object null_bitmap(self):
         """Return the null bitmap for this vector, or ``None`` when the vector has no nulls."""
