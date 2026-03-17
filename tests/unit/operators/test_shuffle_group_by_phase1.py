@@ -294,7 +294,7 @@ def test_phase1_carchar_multi_key_fixed_width_stays_compiled():
     expected = _reference_group_by(rows, ["k1", "k2"], aggregations)
     assert normalized == expected
     assert operation.readings["feature_groupby_engine_carchar"] == 1
-    assert operation.readings["feature_groupby_engine_legacy"] == 0
+    assert operation.readings["feature_groupby_engine_group_state_store"] == 0
     assert operation.readings["feature_groupby_engine_multi_key_fixed"] == 1
 
 
@@ -330,7 +330,7 @@ def test_phase1_carchar_multi_key_temporal_fixed_width_stays_compiled():
     expected = _reference_group_by(rows, ["ts", "k2"], aggregations)
     assert normalized == expected
     assert operation.readings["feature_groupby_engine_carchar"] == 1
-    assert operation.readings["feature_groupby_engine_legacy"] == 0
+    assert operation.readings["feature_groupby_engine_group_state_store"] == 0
     assert operation.readings["feature_groupby_engine_multi_key_fixed"] == 1
 
 
@@ -497,7 +497,7 @@ def test_phase1_v2_single_string_key_uses_compiled_carchar_mode():
     operation.ingest(Morsel.from_arrow(_rows_to_table(rows, required_columns=["k", "v"])))
 
     assert operation.readings["feature_groupby_engine_carchar"] == 1
-    assert operation.readings["feature_groupby_engine_legacy"] == 0
+    assert operation.readings["feature_groupby_engine_group_state_store"] == 0
 
     actual_rows = operation.finalize().to_arrow().to_pylist()
     actual = {
@@ -566,7 +566,7 @@ def test_phase1_v2_single_key_multi_aggregate_uses_compiled_carchar_mode():
     operation.ingest(Morsel.from_arrow(table))
 
     assert operation.readings["feature_groupby_engine_carchar"] == 1
-    assert operation.readings["feature_groupby_engine_legacy"] == 0
+    assert operation.readings["feature_groupby_engine_group_state_store"] == 0
 
     actual_rows = operation.finalize().to_arrow().to_pylist()
     actual = {}
@@ -602,7 +602,7 @@ def test_phase1_v2_single_key_multi_aggregate_with_count_distinct_uses_compiled_
     operation.ingest(Morsel.from_arrow(_rows_to_table(rows, required_columns=["k", "v", "tag"])))
 
     assert operation.readings["feature_groupby_engine_carchar"] == 1
-    assert operation.readings["feature_groupby_engine_legacy"] == 0
+    assert operation.readings["feature_groupby_engine_group_state_store"] == 0
 
     actual_rows = operation.finalize().to_arrow().to_pylist()
     actual = {}
@@ -635,7 +635,7 @@ def test_phase1_v2_dictionary_key_uses_compiled_carchar_mode():
     operation.ingest(morsel)
 
     assert operation.readings["feature_groupby_engine_carchar"] == 1
-    assert operation.readings["feature_groupby_engine_legacy"] == 0
+    assert operation.readings["feature_groupby_engine_group_state_store"] == 0
 
     actual_rows = operation.finalize().to_arrow().to_pylist()
     actual = {}
@@ -675,7 +675,7 @@ def test_phase1_v2_numeric_dictionary_key_count_star_uses_compiled_carchar_mode(
     operation.ingest(morsel)
 
     assert operation.readings["feature_groupby_engine_carchar"] == 1
-    assert operation.readings["feature_groupby_engine_legacy"] == 0
+    assert operation.readings["feature_groupby_engine_group_state_store"] == 0
 
     actual_rows = operation.finalize().to_arrow().to_pylist()
     actual = {}
@@ -724,7 +724,7 @@ def test_phase1_v2_dictionary_key_multi_aggregate_with_count_distinct_uses_compi
     operation.ingest(morsel)
 
     assert operation.readings["feature_groupby_engine_carchar"] == 1
-    assert operation.readings["feature_groupby_engine_legacy"] == 0
+    assert operation.readings["feature_groupby_engine_group_state_store"] == 0
 
     actual_rows = operation.finalize().to_arrow().to_pylist()
     actual = {}
@@ -773,7 +773,7 @@ def test_phase1_v2_mixed_numeric_dictionary_and_string_dictionary_multi_key_stay
     operation.ingest(morsel)
 
     assert operation.readings["feature_groupby_engine_carchar"] == 1
-    assert operation.readings["feature_groupby_engine_legacy"] == 0
+    assert operation.readings["feature_groupby_engine_group_state_store"] == 0
 
     actual_rows = operation.finalize().to_arrow().to_pylist()
     actual = {}
@@ -819,7 +819,7 @@ def test_phase1_v2_single_count_distinct_uses_compiled_carchar_mode():
     operation.ingest(Morsel.from_arrow(_rows_to_table(rows, required_columns=["k", "tag"])))
 
     assert operation.readings["feature_groupby_engine_carchar"] == 1
-    assert operation.readings["feature_groupby_engine_legacy"] == 0
+    assert operation.readings["feature_groupby_engine_group_state_store"] == 0
 
     actual_rows = operation.finalize().to_arrow().to_pylist()
     actual = {}
@@ -851,7 +851,7 @@ def test_phase1_v2_dictionary_key_count_distinct_uses_compiled_carchar_mode():
     operation.ingest(morsel)
 
     assert operation.readings["feature_groupby_engine_carchar"] == 1
-    assert operation.readings["feature_groupby_engine_legacy"] == 0
+    assert operation.readings["feature_groupby_engine_group_state_store"] == 0
 
     actual_rows = operation.finalize().to_arrow().to_pylist()
     actual = {}
@@ -912,7 +912,7 @@ def test_phase1_v2_single_count_star_string_key_uses_compiled_carchar_mode():
     operation.ingest(Morsel.from_arrow(_rows_to_table(rows, required_columns=["k"])))
 
     assert operation.readings["feature_groupby_engine_carchar"] == 1
-    assert operation.readings["feature_groupby_engine_legacy"] == 0
+    assert operation.readings["feature_groupby_engine_group_state_store"] == 0
 
     actual_rows = operation.finalize().to_arrow().to_pylist()
     actual = {}
@@ -950,7 +950,7 @@ def test_phase1_v2_multi_key_uses_compiled_carchar_mode():
     operation.ingest(Morsel.from_arrow(_rows_to_table(rows, required_columns=["k1", "k2", "v", "tag"])))
 
     assert operation.readings["feature_groupby_engine_carchar"] == 1
-    assert operation.readings["feature_groupby_engine_legacy"] == 0
+    assert operation.readings["feature_groupby_engine_group_state_store"] == 0
 
     actual_rows = operation.finalize().to_arrow().to_pylist()
     actual = {}
@@ -980,7 +980,7 @@ def test_phase1_v2_single_large_string_key_uses_compiled_carchar_mode():
     operation.ingest(morsel)
 
     assert operation.readings["feature_groupby_engine_carchar"] == 1
-    assert operation.readings["feature_groupby_engine_legacy"] == 0
+    assert operation.readings["feature_groupby_engine_group_state_store"] == 0
 
     actual_rows = operation.finalize().to_arrow().to_pylist()
     actual = {}
@@ -1014,7 +1014,7 @@ def test_phase1_v2_single_timestamp_key_uses_compiled_carchar_mode():
     operation.ingest(morsel)
 
     assert operation.readings["feature_groupby_engine_carchar"] == 1
-    assert operation.readings["feature_groupby_engine_legacy"] == 0
+    assert operation.readings["feature_groupby_engine_group_state_store"] == 0
 
     actual_rows = operation.finalize().to_arrow().to_pylist()
     actual = {}
@@ -1054,7 +1054,7 @@ def test_phase1_v2_constant_key_uses_compiled_constant_mode():
     operation.ingest(morsel)
 
     assert operation.readings["feature_groupby_engine_constant"] == 1
-    assert operation.readings["feature_groupby_engine_legacy"] == 0
+    assert operation.readings["feature_groupby_engine_group_state_store"] == 0
     rows = operation.finalize().to_arrow().to_pylist()
     normalized = [{name: _normalize_value(value) for name, value in row.items()} for row in rows]
     assert normalized == [{"cnt_all": 4, "k": "g"}]
@@ -1108,7 +1108,7 @@ def test_phase1_v2_empty_groupby_does_not_fallback_to_legacy():
     rows = operation.finalize().to_arrow().to_pylist()
 
     assert rows == []
-    assert operation.readings["feature_groupby_engine_legacy"] == 0
+    assert operation.readings["feature_groupby_engine_group_state_store"] == 0
 
 
 def test_phase1_v2_single_avg_uses_fast_columns_when_null_free():
@@ -1241,7 +1241,7 @@ def test_phase1_v2_string_min_uses_compiled_carchar_mode():
     operation.ingest(Morsel.from_arrow(_rows_to_table(rows, required_columns=["k", "v"])))
 
     assert operation.readings["feature_groupby_engine_carchar"] == 1
-    assert operation.readings["feature_groupby_engine_legacy"] == 0
+    assert operation.readings["feature_groupby_engine_group_state_store"] == 0
 
     actual_rows = operation.finalize().to_arrow().to_pylist()
     actual = {}
@@ -1277,7 +1277,7 @@ def test_phase1_v2_string_min_multi_aggregate_uses_compiled_carchar_mode():
     operation.ingest(Morsel.from_arrow(_rows_to_table(rows, required_columns=["k", "v", "tag"])))
 
     assert operation.readings["feature_groupby_engine_carchar"] == 1
-    assert operation.readings["feature_groupby_engine_legacy"] == 0
+    assert operation.readings["feature_groupby_engine_group_state_store"] == 0
 
     actual_rows = operation.finalize().to_arrow().to_pylist()
     actual = {}

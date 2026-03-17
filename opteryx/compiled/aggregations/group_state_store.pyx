@@ -273,7 +273,7 @@ cdef class GroupStateStore:
         return {
             "feature_groupby_engine_carchar": 0,
             "feature_groupby_engine_constant": 0,
-            "feature_groupby_engine_legacy": 1,  # GroupStateStore is the legacy backend
+            "feature_groupby_engine_group_state_store": 1,
             "feature_groupby_engine_multi_key_fixed": 0,
             "feature_groupby_engine_multi_key_object": 0,
             "draken_dict_groupby_fastpath_hits": self._dict_groupby_fastpath_hits,

@@ -209,6 +209,16 @@ cdef class StringVector(Vector):
             self.ptr = alloc_var_buffer(DRAKEN_STRING, length, bytes_cap)
             self.owns_data = True
 
+    cdef void* dense_ptr(self) noexcept:
+        if self.ptr == NULL:
+            return NULL
+        return self.ptr.data
+
+    cdef uint8_t* null_bitmap_ptr(self) noexcept:
+        if self.ptr == NULL:
+            return NULL
+        return self.ptr.null_bitmap
+
     @property
     def length(self):
         """Number of values currently stored in the vector."""

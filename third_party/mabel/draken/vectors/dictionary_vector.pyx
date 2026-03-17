@@ -30,6 +30,7 @@ from opteryx.draken.core.buffers cimport (
     DRAKEN_DICTIONARY,
     DRAKEN_FLOAT32,
     DRAKEN_FLOAT64,
+    DictAccessor,
     DRAKEN_INT16,
     DRAKEN_INT32,
     DRAKEN_INT64,
@@ -251,6 +252,12 @@ cdef class DictionaryVector(Vector):
             self.owns_data = False
             self.owns_dictionary_values = False
             self._dict_owner_ref = None
+            self._accessor.codes = NULL
+            self._accessor.code_width = 0
+            self._accessor.row_nulls = NULL
+            self._accessor.length = 0
+            self._accessor.dict_values = NULL
+            self._accessor.value_type = DRAKEN_STRING
             return
 
         self.ptr = <DrakenDictionaryBuffer*>malloc(sizeof(DrakenDictionaryBuffer))
@@ -292,6 +299,12 @@ cdef class DictionaryVector(Vector):
         self.owns_data = True
         self.owns_dictionary_values = True
         self._dict_owner_ref = None
+        self._accessor.codes = NULL
+        self._accessor.code_width = 0
+        self._accessor.row_nulls = NULL
+        self._accessor.length = 0
+        self._accessor.dict_values = NULL
+        self._accessor.value_type = DRAKEN_STRING
 
     def __dealloc__(self):
         if self.ptr == NULL:
@@ -316,6 +329,28 @@ cdef class DictionaryVector(Vector):
     @property
     def dtype(self):
         return DRAKEN_DICTIONARY
+
+    cdef DictAccessor* dict_accessor(self) noexcept:
+        if self.ptr == NULL:
+            return NULL
+        self._accessor.codes = self.ptr.codes
+        self._accessor.code_width = self.ptr.code_width
+        self._accessor.row_nulls = self.ptr.null_bitmap
+        self._accessor.length = self.ptr.length
+        self._accessor.dict_values = self.ptr.dictionary_values
+        if self.ptr.dictionary_values != NULL:
+            self._accessor.value_type = self.ptr.dictionary_values.type
+        else:
+            self._accessor.value_type = DRAKEN_STRING
+        return &self._accessor
+
+    cdef void* dense_ptr(self) noexcept:
+        return NULL
+
+    cdef uint8_t* null_bitmap_ptr(self) noexcept:
+        if self.ptr == NULL:
+            return NULL
+        return self.ptr.null_bitmap
 
     @property
     def code_width(self):

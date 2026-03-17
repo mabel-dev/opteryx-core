@@ -73,3 +73,15 @@ cdef extern from "core/buffers.h":
         void** columns
         size_t num_columns
         size_t num_rows
+
+# Lightweight view struct returned by DictionaryVector.dict_accessor().
+# All fields are shortcuts into the underlying DrakenDictionaryBuffer so
+# callers never need raw ptr arithmetic.  Phase 1 — no C struct changes yet;
+# dict_values remains DrakenVarBuffer* for both string and numeric backing.
+cdef struct DictAccessor:
+    uint8_t*         codes       # raw code array (code_width bytes per code index)
+    uint8_t          code_width  # 1, 2, or 4 bytes per code
+    uint8_t*         row_nulls   # row-level null bitmap (NULL means all rows valid)
+    size_t           length      # number of rows
+    DrakenVarBuffer* dict_values # backing dictionary buffer
+    DrakenType       value_type  # element type of the dictionary entries

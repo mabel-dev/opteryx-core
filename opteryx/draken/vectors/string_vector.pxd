@@ -21,6 +21,9 @@ cdef class StringVector(Vector):
     cdef DrakenVarBuffer* ptr
     cdef bint owns_data
 
+    cdef void* dense_ptr(self) noexcept
+    cdef uint8_t* null_bitmap_ptr(self) noexcept
+
     cpdef BoolVector equals(self, bytes value)
     cpdef BoolVector not_equals(self, bytes value)
     cpdef BoolVector less_than(self, bytes value)

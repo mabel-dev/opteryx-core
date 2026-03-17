@@ -1,7 +1,7 @@
 from libc.stdint cimport int32_t
 from libc.stdint cimport int64_t
 from libc.stdint cimport int8_t
-from libc.stdint cimport uint64_t
+from libc.stdint cimport uint64_t, uint8_t
 
 from opteryx.draken.core.buffers cimport DrakenFixedBuffer
 from opteryx.draken.vectors.vector cimport Vector
@@ -12,6 +12,9 @@ cdef class TimeVector(Vector):
     cdef DrakenFixedBuffer* ptr
     cdef bint owns_data
     cdef bint is_time64  # True if time64, False if time32
+
+    cdef void* dense_ptr(self) noexcept
+    cdef uint8_t* null_bitmap_ptr(self) noexcept
 
     cpdef TimeVector take(self, int32_t[::1] indices)
 

@@ -23,13 +23,13 @@ from libc.math cimport round as c_round
 from libc.math cimport pow as c_pow
 from libc.stdint cimport uint8_t, uint16_t, uint32_t, int64_t, int32_t, int16_t, int8_t
 from libc.stdlib cimport malloc
-from libc.string cimport memset, memcpy
+from libc.string cimport memcpy
 
 from opteryx.draken.vectors.float64_vector cimport Float64Vector
 from opteryx.draken.vectors.int64_vector cimport Int64Vector
 from opteryx.draken.vectors.constant_vector cimport from_scalar, ConstantVector
 from opteryx.draken.vectors.dictionary_vector cimport DictionaryVector
-from opteryx.draken.core.buffers cimport DrakenDictionaryBuffer, DrakenVarBuffer, DrakenType
+from opteryx.draken.core.buffers cimport DrakenDictionaryBuffer, DrakenVarBuffer
 from opteryx.draken.core.buffers cimport DRAKEN_FLOAT64, DRAKEN_FLOAT32, DRAKEN_INT64, DRAKEN_INT32, DRAKEN_INT16, DRAKEN_INT8
 
 

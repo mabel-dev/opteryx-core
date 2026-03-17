@@ -35,7 +35,6 @@ from opteryx.compiled.vector_ops import vector_soundex
 from opteryx.compiled.vector_ops import vector_string_length
 from opteryx.compiled.vector_ops import vector_string_slice_left
 from opteryx.compiled.vector_ops import vector_string_slice_right
-from opteryx.draken.vectors.dictionary_vector import DictionaryVector
 from opteryx.draken.vectors.string_vector import StringVector
 from opteryx.draken.vectors.string_vector import lowercase as string_vector_lowercase
 from opteryx.draken.vectors.string_vector import uppercase as string_vector_uppercase
@@ -50,7 +49,7 @@ from opteryx.exceptions import InvalidFunctionParameterError
 def to_lower(arr):
     """Fast lowercase using buffer-level SIMD operations."""
     if hasattr(arr, "to_arrow"):
-        # Draken vector (StringVector, DictionaryVector, etc.)
+        # Draken vector (StringVector, dictionary-encoded vectors, etc.)
         arr = arr.to_arrow()
     elif isinstance(arr, numpy.ndarray):
         arr = pyarrow.array(arr)
@@ -61,7 +60,7 @@ def to_lower(arr):
 def to_upper(arr):
     """Fast uppercase using buffer-level SIMD operations."""
     if hasattr(arr, "to_arrow"):
-        # Draken vector (StringVector, DictionaryVector, etc.)
+        # Draken vector (StringVector, dictionary-encoded vectors, etc.)
         arr = arr.to_arrow()
     elif isinstance(arr, numpy.ndarray):
         arr = pyarrow.array(arr)
@@ -98,14 +97,12 @@ def vector_lengther(arr):
     sv: StringVector
     sv = arr if isinstance(arr, StringVector) else vector_from_arrow(arr)
 
-    # ``vector_from_arrow`` can yield a DictionaryVector when the input is
-    # dictionary-encoded.  The later logic assumes a real StringVector so we
-    # eagerly convert any dictionary result back into strings via an Arrow
-    # cast.  This keeps the implementation simple and avoids duplicating the
-    # length logic for dictionaries.
-    from opteryx.draken.vectors.dictionary_vector import DictionaryVector
-
-    if not isinstance(sv, StringVector) and isinstance(sv, DictionaryVector):
+    # ``vector_from_arrow`` can yield a dictionary-encoded vector when the input
+    # is dictionary-encoded. The later logic assumes a real StringVector so we
+    # eagerly convert any dictionary result back into strings via an Arrow cast.
+    # This keeps the implementation simple and avoids duplicating the length
+    # logic for dictionary-backed storage.
+    if not isinstance(sv, StringVector) and _is_dictionary_encoded(sv):
         # convert through Arrow and back to get a homogeneous StringVector
         sv = vector_from_arrow(sv.to_arrow().cast(pyarrow.string()))
 
@@ -243,10 +240,32 @@ def _string_slice_right(arr, length):
 _MATCH_AGAINST_MIN_SCORE = 0.6
 
 
+def _is_dictionary_encoded(value) -> bool:
+    if isinstance(value, (pyarrow.Array, pyarrow.ChunkedArray)):
+        return pyarrow.types.is_dictionary(value.type)
+
+    to_arrow = getattr(value, "to_arrow", None)
+    if to_arrow is None:
+        return False
+
+    try:
+        arrow_arr = to_arrow()
+    except Exception:
+        return False
+
+    return isinstance(
+        arrow_arr, (pyarrow.Array, pyarrow.ChunkedArray)
+    ) and pyarrow.types.is_dictionary(arrow_arr.type)
+
+
+def _is_string_fastpath_vector(value) -> bool:
+    return isinstance(value, StringVector) or _is_dictionary_encoded(value)
+
+
 def _as_match_vector(arr):
     from opteryx.draken.interop.arrow import vector_from_arrow
 
-    if isinstance(arr, (StringVector, DictionaryVector)):
+    if _is_string_fastpath_vector(arr):
         return arr
 
     if hasattr(arr, "to_arrow"):
@@ -257,7 +276,7 @@ def _as_match_vector(arr):
         return None
 
     vec = vector_from_arrow(arr)
-    if isinstance(vec, (StringVector, DictionaryVector)):
+    if _is_string_fastpath_vector(vec):
         return vec
     return None
 
@@ -548,7 +567,7 @@ def regex_replace(array, _pattern, _replacement):
 
     array_arrow = _as_arrow(array, "Input")
     data_vector = Vector.from_arrow(array_arrow)
-    if data_vector.__class__.__name__ == "DictionaryVector":
+    if _is_dictionary_encoded(data_vector):
         data_vector = Vector.from_arrow(data_vector.to_arrow().cast(pa.string()))
 
     pattern = as_bytes(_pattern[0])

@@ -51,7 +51,7 @@ def normalize_aggregations(aggregations: list[object]) -> list[tuple]:
 
 
 def create_group_state_engine(group_by_columns, aggregations):
-    # Use legacy backend for multi-aggregate queries (carchar multi-agg has segfault)
+    # Use GroupStateStore for multi-aggregate queries (carchar multi-agg has segfault)
     if len(aggregations) > 1:
         from opteryx.compiled.aggregations.group_state_store import GroupStateStore
 
@@ -65,10 +65,10 @@ def create_group_state_engine(group_by_columns, aggregations):
 
         return GroupStateStore(group_by_columns, aggregations)
 
-    # Use legacy backend for aggregations on complex expressions
-    # (carchar can't handle expressions like (event ->> 'key')::TYPE)
-    # aggregations are tuples of (alias, function, column[, options])
-    if any(agg[2] is None for agg in aggregations):
+    # Route only unsupported no-column aggregations to GroupStateStore.
+    # COUNT(*) is represented as column=None and is supported natively.
+    # Aggregations are tuples of (alias, function, column[, options]).
+    if any(agg[2] is None and agg[1] != "count" for agg in aggregations):
         from opteryx.compiled.aggregations.group_state_store import GroupStateStore
 
         return GroupStateStore(group_by_columns, aggregations)
@@ -93,7 +93,7 @@ class ShuffleGroupByOperationV2:
         self.group_by_columns = normalize_group_by_columns(group_by_columns)
         self.aggregations = normalize_aggregations(aggregations)
         self._engine = create_group_state_engine(self.group_by_columns, self.aggregations)
-        self._backend = self._engine.backend
+        self._backend = getattr(self._engine, "backend", self._engine)
         self.readings = self._engine.readings
 
     def _record_constant_groupby_vector(self, vec) -> None:
@@ -168,8 +168,39 @@ class ShuffleGroupByOperationV2:
             vectors.append(key_vec)
         return vectors
 
+    def _finalize_rows(self):
+        if hasattr(self._engine, "finalize_rows"):
+            return self._engine.finalize_rows()
+        if hasattr(self._engine, "finalize"):
+            finalized = self._engine.finalize()
+            if finalized is not None:
+                return finalized
+        raise AttributeError("group-by engine does not expose a finalize API")
+
     def finalize(self) -> Morsel:
-        return self._engine.finalize()
+        if hasattr(self._engine, "finalize"):
+            return self._engine.finalize()
+
+        rows = self._finalize_rows()
+        if not rows:
+            return self._empty_morsel()
+
+        return Morsel.from_vectors(self._output_names(), self._rows_to_vectors(rows, 0, len(rows)))
 
     def finalize_morsels(self, chunk_size: int = 65536):
-        yield from self._engine.finalize_morsels(chunk_size)
+        if hasattr(self._engine, "finalize_morsels"):
+            yield from self._engine.finalize_morsels(chunk_size)
+            return
+
+        rows = self._finalize_rows()
+        if not rows:
+            yield self._empty_morsel()
+            return
+
+        total = len(rows)
+        start = 0
+        names = self._output_names()
+        while start < total:
+            stop = min(start + chunk_size, total)
+            yield Morsel.from_vectors(names, self._rows_to_vectors(rows, start, stop))
+            start = stop

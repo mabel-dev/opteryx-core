@@ -1,7 +1,7 @@
 # cython: language_level=3
 
-from libc.stdint cimport int32_t, uint64_t
-from opteryx.draken.core.buffers cimport DrakenDictionaryBuffer
+from libc.stdint cimport int32_t, uint64_t, uint8_t
+from opteryx.draken.core.buffers cimport DictAccessor, DrakenDictionaryBuffer
 from opteryx.draken.vectors.bool_vector cimport BoolVector
 from opteryx.draken.vectors.vector cimport Vector
 
@@ -11,9 +11,14 @@ cdef class DictionaryVector(Vector):
     cdef bint owns_data
     cdef bint owns_dictionary_values
     cdef object _dict_owner_ref
+    cdef DictAccessor _accessor
     cdef BoolVector _equals_numeric(self, object literal, bint invert)
     cdef BoolVector _compare_numeric(self, object literal, int op)
     cdef BoolVector _in_list_numeric(self, object literals)
+
+    cdef DictAccessor* dict_accessor(self) noexcept
+    cdef void* dense_ptr(self) noexcept
+    cdef uint8_t* null_bitmap_ptr(self) noexcept
 
     cpdef DictionaryVector take(self, int32_t[::1] indices)
     cpdef list to_pylist(self)

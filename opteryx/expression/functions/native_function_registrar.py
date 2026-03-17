@@ -768,6 +768,20 @@ def _builtin_temporal_extra_functions() -> list[FunctionDefinition]:
                         cost_us_per_million=4.0,
                     ),
                 ),
+                FunctionOverload(
+                    id="EXTRACT_INT",
+                    parameters=(
+                        ParameterSpec(name="part", type_family="string", constant_only=True),
+                        ParameterSpec(name="date", type_family="integer"),
+                    ),
+                    return_spec=ReturnSpec(mode="resolver", resolver=_datepart_return_type),
+                    kernel=KernelSpec(
+                        engine="arrow",
+                        id="default",
+                        callable_ref=date_functions.date_part,
+                        cost_us_per_million=4.0,
+                    ),
+                ),
             ),
         ),
     ]

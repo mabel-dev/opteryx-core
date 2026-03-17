@@ -2,8 +2,14 @@
 
 This document describes the **DRKM** (Draken Morsel) container format used by
 `opteryx.draken.storage.morsel_io` for serializing and deserializing
-`Morsel` objects.  The format is versioned and forward‑compatible; the
-current implementation in `DRKM v1` is defined below.
+`Morsel` objects.  Its primary purpose is to support the high‑throughput,
+Draken‑native spill/replay scenario that motivated the original design, but
+nothing in the layout inherently forbids other applications; consumers are
+welcome to reuse DRKM files for alternative workloads provided they respect
+the byte‑level definition.  Wherever opinions were required (codec defaults,
+block sizing, etc.) they are chosen to favour the spill use case.
+The format is versioned and forward‑compatible; the current implementation
+in `DRKM v1` is defined below.
 
 ---
 
@@ -19,6 +25,11 @@ A DRKM file consists of four major sections stored sequentially:
    validates the file.
 
 All multi‑byte integers are encoded little‑endian.
+
+*Constants such as `HEADER_SIZE`, `COLUMN_ENTRY_SIZE`, `BLOCK_HEADER_SIZE` and
+`FOOTER_SIZE` are fixed by the field layout; readers/writers can simply import
+those values from `morsel_io.pyx` to avoid hard‑coding numbers.*
+
 
 ---
 
@@ -53,7 +64,11 @@ block_start            | u32     | first block id for this column
 block_end              | u32     | one‑past‑last block id
 
 Entries are concatenated; names themselves immediately follow the directory
-in the on‑disk layout.
+in the on‑disk layout.  In other words the column directory block is
+`column_count * COLUMN_ENTRY_SIZE + sum(name_len)` bytes long; a reader may
+compute offsets for later blocks by scanning this area.
+
+*Column names are stored as raw UTF‑8 bytes; no terminating NUL is included.*
 
 ---
 
@@ -78,9 +93,14 @@ comp_len         | u32     | compressed byte length
 checksum32       | u32     | xxhash32 of uncompressed payload
 padding          | 1 byte  | unused
 
-Following the header are exactly `comp_len` bytes of payload.  When read the
-payload is decompressed (if compressed) and placed directly into Draken
-vector buffers.
+Following the header are exactly `comp_len` bytes of payload.  In the
+uncompressed case (`codec` == 0) the `raw_len` value must equal `comp_len`.
+When read the payload is decompressed (if compressed) and placed directly
+into Draken vector buffers.
+
+*Readers processing an in‑memory buffer (bytes/bytearray/memoryview) should
+behave identically to file‑based readers; the format does not depend on
+seekability.*
 
 ### Segment kinds
 
@@ -105,7 +125,15 @@ block_count      | u32     | repeat of header block_count
 footer_magic     | 4‑byte  | ASCII `DRKF`
 
 The footer is located at the end of the file; readers seek backwards from the
-end to locate it and then load the directory to discover block metadata.
+end to locate it and then load the directory to discover block metadata.  In
+memory‑buffer readers, simply treat the payload length as the `file size` and
+index from there.
+
+*When writing, the footer should be appended after all data blocks have been
+flushed.  The `dir_offset` value in the footer is therefore the file position
+immediately after the header+
+directory+name bytes; computing it before writing the first block is
+convenient.*
 
 ---
 
@@ -137,6 +165,28 @@ Offsets and values are stored separately to allow independent compression.
 ## Future extensions
 
 * version bump and header flag field for new features
+
+---
+
+## Implementation notes
+
+* `schema_fingerprint` is intended to be computed by the caller (e.g. hash of
+  column types/ordering).  Readers do not interpret its value, only expose it
+  in metadata.
+* The `flags` bytes in header/column entries/blocks are currently unused and
+  must be written as zero; readers should ignore them.
+* All padding bytes (header padding, block header trailing padding) MUST be
+  zeroed for forward compatibility.
+* Segment kinds and codec ids correspond to the constants defined in
+  `morsel_io.pyx`; matching values exactly is necessary for cross‑language
+  compatibility.
+* If corruption is detected (magic/version mismatch, checksum failure, wrong
+  lengths, unexpected EOF), implementations should raise or return an error
+  appropriate to their language/runtime.  The Python code uses
+  `DrakenMorselCorruptionError`.
+
+These notes are not normative but may help porting the format to another
+language or building tooling around DRKM files.
 * encryption / AEAD envelope per file
 * selective column/block read (using directory offsets)
 * additional metadata in footer (min/max, statistics)

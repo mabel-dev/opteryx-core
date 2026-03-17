@@ -1668,12 +1668,29 @@ struct __pyx_array_obj;
 struct __pyx_MemviewEnum_obj;
 struct __pyx_memoryview_obj;
 struct __pyx_memoryviewslice_obj;
+struct __pyx_t_7opteryx_6draken_4core_7buffers_DictAccessor;
+
+/* "opteryx/draken/core/buffers.pxd":81
+ * # callers never need raw ptr arithmetic.  Phase 1  no C struct changes yet;
+ * # dict_values remains DrakenVarBuffer* for both string and numeric backing.
+ * cdef struct DictAccessor:             # <<<<<<<<<<<<<<
+ *     uint8_t*         codes       # raw code array (code_width bytes per code index)
+ *     uint8_t          code_width  # 1, 2, or 4 bytes per code
+*/
+struct __pyx_t_7opteryx_6draken_4core_7buffers_DictAccessor {
+  uint8_t *codes;
+  uint8_t code_width;
+  uint8_t *row_nulls;
+  size_t length;
+  DrakenVarBuffer *dict_values;
+  DrakenType value_type;
+};
 struct __pyx_opt_args_7opteryx_6draken_7vectors_6vector_6Vector_hash_into;
 struct __pyx_opt_args_7opteryx_6draken_7vectors_6vector_6Vector_compress_into;
 
-/* "opteryx/draken/vectors/vector.pxd":28
- *     cdef bint here
- *     cpdef object null_bitmap(self)
+/* "opteryx/draken/vectors/vector.pxd":33
+ *     cdef void* dense_ptr(self) noexcept
+ *     cdef uint8_t* null_bitmap_ptr(self) noexcept
  *     cdef void hash_into(self, uint64_t[::1] out_buf, Py_ssize_t offset=*) except *             # <<<<<<<<<<<<<<
  *     cpdef uint64_t[::1] hash(self)
  * 
@@ -1683,7 +1700,7 @@ struct __pyx_opt_args_7opteryx_6draken_7vectors_6vector_6Vector_hash_into {
   Py_ssize_t offset;
 };
 
-/* "opteryx/draken/vectors/vector.pxd":34
+/* "opteryx/draken/vectors/vector.pxd":39
  *     # same semantics as `to_int` in relation_statistics. Implementations
  *     # should write into an int64 buffer provided by the caller.
  *     cdef void compress_into(self, int64_t[::1] out_buf, Py_ssize_t offset=*) except *             # <<<<<<<<<<<<<<
@@ -1696,7 +1713,7 @@ struct __pyx_opt_args_7opteryx_6draken_7vectors_6vector_6Vector_compress_into {
 };
 struct __pyx_opt_args_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_hash_into;
 
-/* "opteryx/draken/vectors/integer_vector.pxd":13
+/* "opteryx/draken/vectors/integer_vector.pxd":16
  * 
  *     cpdef list to_pylist(self)
  *     cdef void hash_into(self, uint64_t[::1] out_buf, Py_ssize_t offset=*) except *             # <<<<<<<<<<<<<<
@@ -1708,7 +1725,7 @@ struct __pyx_opt_args_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector
   Py_ssize_t offset;
 };
 
-/* "opteryx/draken/vectors/vector.pxd":25
+/* "opteryx/draken/vectors/vector.pxd":27
  *     return mixed ^ (mixed >> 32)
  * 
  * cdef class Vector:             # <<<<<<<<<<<<<<
@@ -1815,7 +1832,7 @@ struct __pyx_memoryviewslice_obj {
 
 
 
-/* "opteryx/draken/vectors/vector.pxd":25
+/* "opteryx/draken/vectors/vector.pxd":27
  *     return mixed ^ (mixed >> 32)
  * 
  * cdef class Vector:             # <<<<<<<<<<<<<<
@@ -1825,6 +1842,9 @@ struct __pyx_memoryviewslice_obj {
 
 struct __pyx_vtabstruct_7opteryx_6draken_7vectors_6vector_Vector {
   PyObject *(*null_bitmap)(struct __pyx_obj_7opteryx_6draken_7vectors_6vector_Vector *, int __pyx_skip_dispatch);
+  struct __pyx_t_7opteryx_6draken_4core_7buffers_DictAccessor *(*dict_accessor)(struct __pyx_obj_7opteryx_6draken_7vectors_6vector_Vector *);
+  void *(*dense_ptr)(struct __pyx_obj_7opteryx_6draken_7vectors_6vector_Vector *);
+  uint8_t *(*null_bitmap_ptr)(struct __pyx_obj_7opteryx_6draken_7vectors_6vector_Vector *);
   void (*hash_into)(struct __pyx_obj_7opteryx_6draken_7vectors_6vector_Vector *, __Pyx_memviewslice, struct __pyx_opt_args_7opteryx_6draken_7vectors_6vector_6Vector_hash_into *__pyx_optional_args);
   __Pyx_memviewslice (*hash)(struct __pyx_obj_7opteryx_6draken_7vectors_6vector_Vector *, int __pyx_skip_dispatch);
   void (*compress_into)(struct __pyx_obj_7opteryx_6draken_7vectors_6vector_Vector *, __Pyx_memviewslice, struct __pyx_opt_args_7opteryx_6draken_7vectors_6vector_6Vector_compress_into *__pyx_optional_args);
@@ -3085,6 +3105,8 @@ static PyObject *__pyx_memoryview__get_base(struct __pyx_memoryview_obj *__pyx_v
 static PyObject *__pyx_memoryviewslice_convert_item_to_object(struct __pyx_memoryviewslice_obj *__pyx_v_self, char *__pyx_v_itemp); /* proto*/
 static PyObject *__pyx_memoryviewslice_assign_item_from_object(struct __pyx_memoryviewslice_obj *__pyx_v_self, char *__pyx_v_itemp, PyObject *__pyx_v_value); /* proto*/
 static PyObject *__pyx_memoryviewslice__get_base(struct __pyx_memoryviewslice_obj *__pyx_v_self); /* proto*/
+static void *__pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_dense_ptr(struct __pyx_obj_7opteryx_6draken_7vectors_14integer_vector_IntegerVector *__pyx_v_self); /* proto*/
+static uint8_t *__pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_null_bitmap_ptr(struct __pyx_obj_7opteryx_6draken_7vectors_14integer_vector_IntegerVector *__pyx_v_self); /* proto*/
 static PyObject *__pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_to_pylist(struct __pyx_obj_7opteryx_6draken_7vectors_14integer_vector_IntegerVector *__pyx_v_self, int __pyx_skip_dispatch); /* proto*/
 static void __pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_hash_into(struct __pyx_obj_7opteryx_6draken_7vectors_14integer_vector_IntegerVector *__pyx_v_self, __Pyx_memviewslice __pyx_v_out_buf, struct __pyx_opt_args_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_hash_into *__pyx_optional_args); /* proto*/
 
@@ -16831,7 +16853,7 @@ static PyObject *__pyx_unpickle_Enum__set_state(struct __pyx_MemviewEnum_obj *__
   return __pyx_r;
 }
 
-/* "opteryx/draken/vectors/vector.pxd":20
+/* "opteryx/draken/vectors/vector.pxd":22
  *     void simd_mix_hash(uint64_t* dest, const uint64_t* values, size_t count) nogil
  * 
  * cdef inline uint64_t mix_hash(uint64_t current, uint64_t value) nogil:             # <<<<<<<<<<<<<<
@@ -16843,7 +16865,7 @@ static CYTHON_INLINE uint64_t __pyx_f_7opteryx_6draken_7vectors_6vector_mix_hash
   uint64_t __pyx_v_mixed;
   uint64_t __pyx_r;
 
-  /* "opteryx/draken/vectors/vector.pxd":21
+  /* "opteryx/draken/vectors/vector.pxd":23
  * 
  * cdef inline uint64_t mix_hash(uint64_t current, uint64_t value) nogil:
  *     cdef uint64_t mixed = current ^ value             # <<<<<<<<<<<<<<
@@ -16852,7 +16874,7 @@ static CYTHON_INLINE uint64_t __pyx_f_7opteryx_6draken_7vectors_6vector_mix_hash
 */
   __pyx_v_mixed = (__pyx_v_current ^ __pyx_v_value);
 
-  /* "opteryx/draken/vectors/vector.pxd":22
+  /* "opteryx/draken/vectors/vector.pxd":24
  * cdef inline uint64_t mix_hash(uint64_t current, uint64_t value) nogil:
  *     cdef uint64_t mixed = current ^ value
  *     mixed = mixed * MIX_HASH_CONSTANT + 1             # <<<<<<<<<<<<<<
@@ -16861,7 +16883,7 @@ static CYTHON_INLINE uint64_t __pyx_f_7opteryx_6draken_7vectors_6vector_mix_hash
 */
   __pyx_v_mixed = ((__pyx_v_mixed * __pyx_v_7opteryx_6draken_7vectors_6vector_MIX_HASH_CONSTANT) + 1);
 
-  /* "opteryx/draken/vectors/vector.pxd":23
+  /* "opteryx/draken/vectors/vector.pxd":25
  *     cdef uint64_t mixed = current ^ value
  *     mixed = mixed * MIX_HASH_CONSTANT + 1
  *     return mixed ^ (mixed >> 32)             # <<<<<<<<<<<<<<
@@ -16871,7 +16893,7 @@ static CYTHON_INLINE uint64_t __pyx_f_7opteryx_6draken_7vectors_6vector_mix_hash
   __pyx_r = (__pyx_v_mixed ^ (__pyx_v_mixed >> 32));
   goto __pyx_L0;
 
-  /* "opteryx/draken/vectors/vector.pxd":20
+  /* "opteryx/draken/vectors/vector.pxd":22
  *     void simd_mix_hash(uint64_t* dest, const uint64_t* values, size_t count) nogil
  * 
  * cdef inline uint64_t mix_hash(uint64_t current, uint64_t value) nogil:             # <<<<<<<<<<<<<<
@@ -17607,7 +17629,7 @@ static void __pyx_pf_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_
  *             free_fixed_buffer(self.ptr, True)
  *             self.ptr = NULL             # <<<<<<<<<<<<<<
  * 
- *     @property
+ *     cdef void* dense_ptr(self) noexcept:
 */
     __pyx_v_self->ptr = NULL;
 
@@ -17637,6 +17659,134 @@ static void __pyx_pf_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_
 
 /* "third_party/mabel/draken/vectors/integer_vector.pyx":63
  *             self.ptr = NULL
+ * 
+ *     cdef void* dense_ptr(self) noexcept:             # <<<<<<<<<<<<<<
+ *         if self.ptr == NULL:
+ *             return NULL
+*/
+
+static void *__pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_dense_ptr(struct __pyx_obj_7opteryx_6draken_7vectors_14integer_vector_IntegerVector *__pyx_v_self) {
+  void *__pyx_r;
+  int __pyx_t_1;
+
+  /* "third_party/mabel/draken/vectors/integer_vector.pyx":64
+ * 
+ *     cdef void* dense_ptr(self) noexcept:
+ *         if self.ptr == NULL:             # <<<<<<<<<<<<<<
+ *             return NULL
+ *         return self.ptr.data
+*/
+  __pyx_t_1 = (__pyx_v_self->ptr == NULL);
+  if (__pyx_t_1) {
+
+    /* "third_party/mabel/draken/vectors/integer_vector.pyx":65
+ *     cdef void* dense_ptr(self) noexcept:
+ *         if self.ptr == NULL:
+ *             return NULL             # <<<<<<<<<<<<<<
+ *         return self.ptr.data
+ * 
+*/
+    __pyx_r = NULL;
+    goto __pyx_L0;
+
+    /* "third_party/mabel/draken/vectors/integer_vector.pyx":64
+ * 
+ *     cdef void* dense_ptr(self) noexcept:
+ *         if self.ptr == NULL:             # <<<<<<<<<<<<<<
+ *             return NULL
+ *         return self.ptr.data
+*/
+  }
+
+  /* "third_party/mabel/draken/vectors/integer_vector.pyx":66
+ *         if self.ptr == NULL:
+ *             return NULL
+ *         return self.ptr.data             # <<<<<<<<<<<<<<
+ * 
+ *     cdef uint8_t* null_bitmap_ptr(self) noexcept:
+*/
+  __pyx_r = __pyx_v_self->ptr->data;
+  goto __pyx_L0;
+
+  /* "third_party/mabel/draken/vectors/integer_vector.pyx":63
+ *             self.ptr = NULL
+ * 
+ *     cdef void* dense_ptr(self) noexcept:             # <<<<<<<<<<<<<<
+ *         if self.ptr == NULL:
+ *             return NULL
+*/
+
+  /* function exit code */
+  __pyx_L0:;
+  return __pyx_r;
+}
+
+/* "third_party/mabel/draken/vectors/integer_vector.pyx":68
+ *         return self.ptr.data
+ * 
+ *     cdef uint8_t* null_bitmap_ptr(self) noexcept:             # <<<<<<<<<<<<<<
+ *         if self.ptr == NULL:
+ *             return NULL
+*/
+
+static uint8_t *__pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_null_bitmap_ptr(struct __pyx_obj_7opteryx_6draken_7vectors_14integer_vector_IntegerVector *__pyx_v_self) {
+  uint8_t *__pyx_r;
+  int __pyx_t_1;
+
+  /* "third_party/mabel/draken/vectors/integer_vector.pyx":69
+ * 
+ *     cdef uint8_t* null_bitmap_ptr(self) noexcept:
+ *         if self.ptr == NULL:             # <<<<<<<<<<<<<<
+ *             return NULL
+ *         return self.ptr.null_bitmap
+*/
+  __pyx_t_1 = (__pyx_v_self->ptr == NULL);
+  if (__pyx_t_1) {
+
+    /* "third_party/mabel/draken/vectors/integer_vector.pyx":70
+ *     cdef uint8_t* null_bitmap_ptr(self) noexcept:
+ *         if self.ptr == NULL:
+ *             return NULL             # <<<<<<<<<<<<<<
+ *         return self.ptr.null_bitmap
+ * 
+*/
+    __pyx_r = NULL;
+    goto __pyx_L0;
+
+    /* "third_party/mabel/draken/vectors/integer_vector.pyx":69
+ * 
+ *     cdef uint8_t* null_bitmap_ptr(self) noexcept:
+ *         if self.ptr == NULL:             # <<<<<<<<<<<<<<
+ *             return NULL
+ *         return self.ptr.null_bitmap
+*/
+  }
+
+  /* "third_party/mabel/draken/vectors/integer_vector.pyx":71
+ *         if self.ptr == NULL:
+ *             return NULL
+ *         return self.ptr.null_bitmap             # <<<<<<<<<<<<<<
+ * 
+ *     @property
+*/
+  __pyx_r = __pyx_v_self->ptr->null_bitmap;
+  goto __pyx_L0;
+
+  /* "third_party/mabel/draken/vectors/integer_vector.pyx":68
+ *         return self.ptr.data
+ * 
+ *     cdef uint8_t* null_bitmap_ptr(self) noexcept:             # <<<<<<<<<<<<<<
+ *         if self.ptr == NULL:
+ *             return NULL
+*/
+
+  /* function exit code */
+  __pyx_L0:;
+  return __pyx_r;
+}
+
+/* "third_party/mabel/draken/vectors/integer_vector.pyx":73
+ *         return self.ptr.null_bitmap
  * 
  *     @property             # <<<<<<<<<<<<<<
  *     def length(self):
@@ -17668,7 +17818,7 @@ static PyObject *__pyx_pf_7opteryx_6draken_7vectors_14integer_vector_13IntegerVe
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("__get__", 0);
 
-  /* "third_party/mabel/draken/vectors/integer_vector.pyx":65
+  /* "third_party/mabel/draken/vectors/integer_vector.pyx":75
  *     @property
  *     def length(self):
  *         return buf_length(self.ptr)             # <<<<<<<<<<<<<<
@@ -17676,15 +17826,15 @@ static PyObject *__pyx_pf_7opteryx_6draken_7vectors_14integer_vector_13IntegerVe
  *     def __len__(self):
 */
   __Pyx_XDECREF(__pyx_r);
-  __pyx_t_1 = __pyx_f_7opteryx_6draken_4core_12fixed_vector_buf_length(__pyx_v_self->ptr); if (unlikely(__pyx_t_1 == ((size_t)-1L) && PyErr_Occurred())) __PYX_ERR(0, 65, __pyx_L1_error)
-  __pyx_t_2 = __Pyx_PyLong_FromSize_t(__pyx_t_1); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 65, __pyx_L1_error)
+  __pyx_t_1 = __pyx_f_7opteryx_6draken_4core_12fixed_vector_buf_length(__pyx_v_self->ptr); if (unlikely(__pyx_t_1 == ((size_t)-1L) && PyErr_Occurred())) __PYX_ERR(0, 75, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_PyLong_FromSize_t(__pyx_t_1); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 75, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
   __pyx_r = __pyx_t_2;
   __pyx_t_2 = 0;
   goto __pyx_L0;
 
-  /* "third_party/mabel/draken/vectors/integer_vector.pyx":63
- *             self.ptr = NULL
+  /* "third_party/mabel/draken/vectors/integer_vector.pyx":73
+ *         return self.ptr.null_bitmap
  * 
  *     @property             # <<<<<<<<<<<<<<
  *     def length(self):
@@ -17702,7 +17852,7 @@ static PyObject *__pyx_pf_7opteryx_6draken_7vectors_14integer_vector_13IntegerVe
   return __pyx_r;
 }
 
-/* "third_party/mabel/draken/vectors/integer_vector.pyx":67
+/* "third_party/mabel/draken/vectors/integer_vector.pyx":77
  *         return buf_length(self.ptr)
  * 
  *     def __len__(self):             # <<<<<<<<<<<<<<
@@ -17732,18 +17882,18 @@ static Py_ssize_t __pyx_pf_7opteryx_6draken_7vectors_14integer_vector_13IntegerV
   const char *__pyx_filename = NULL;
   int __pyx_clineno = 0;
 
-  /* "third_party/mabel/draken/vectors/integer_vector.pyx":68
+  /* "third_party/mabel/draken/vectors/integer_vector.pyx":78
  * 
  *     def __len__(self):
  *         return buf_length(self.ptr)             # <<<<<<<<<<<<<<
  * 
  *     @property
 */
-  __pyx_t_1 = __pyx_f_7opteryx_6draken_4core_12fixed_vector_buf_length(__pyx_v_self->ptr); if (unlikely(__pyx_t_1 == ((size_t)-1L) && PyErr_Occurred())) __PYX_ERR(0, 68, __pyx_L1_error)
+  __pyx_t_1 = __pyx_f_7opteryx_6draken_4core_12fixed_vector_buf_length(__pyx_v_self->ptr); if (unlikely(__pyx_t_1 == ((size_t)-1L) && PyErr_Occurred())) __PYX_ERR(0, 78, __pyx_L1_error)
   __pyx_r = __pyx_t_1;
   goto __pyx_L0;
 
-  /* "third_party/mabel/draken/vectors/integer_vector.pyx":67
+  /* "third_party/mabel/draken/vectors/integer_vector.pyx":77
  *         return buf_length(self.ptr)
  * 
  *     def __len__(self):             # <<<<<<<<<<<<<<
@@ -17759,7 +17909,7 @@ static Py_ssize_t __pyx_pf_7opteryx_6draken_7vectors_14integer_vector_13IntegerV
   return __pyx_r;
 }
 
-/* "third_party/mabel/draken/vectors/integer_vector.pyx":70
+/* "third_party/mabel/draken/vectors/integer_vector.pyx":80
  *         return buf_length(self.ptr)
  * 
  *     @property             # <<<<<<<<<<<<<<
@@ -17792,7 +17942,7 @@ static PyObject *__pyx_pf_7opteryx_6draken_7vectors_14integer_vector_13IntegerVe
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("__get__", 0);
 
-  /* "third_party/mabel/draken/vectors/integer_vector.pyx":72
+  /* "third_party/mabel/draken/vectors/integer_vector.pyx":82
  *     @property
  *     def itemsize(self):
  *         return buf_itemsize(self.ptr)             # <<<<<<<<<<<<<<
@@ -17800,14 +17950,14 @@ static PyObject *__pyx_pf_7opteryx_6draken_7vectors_14integer_vector_13IntegerVe
  *     @property
 */
   __Pyx_XDECREF(__pyx_r);
-  __pyx_t_1 = __pyx_f_7opteryx_6draken_4core_12fixed_vector_buf_itemsize(__pyx_v_self->ptr); if (unlikely(__pyx_t_1 == ((size_t)-1L) && PyErr_Occurred())) __PYX_ERR(0, 72, __pyx_L1_error)
-  __pyx_t_2 = __Pyx_PyLong_FromSize_t(__pyx_t_1); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 72, __pyx_L1_error)
+  __pyx_t_1 = __pyx_f_7opteryx_6draken_4core_12fixed_vector_buf_itemsize(__pyx_v_self->ptr); if (unlikely(__pyx_t_1 == ((size_t)-1L) && PyErr_Occurred())) __PYX_ERR(0, 82, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_PyLong_FromSize_t(__pyx_t_1); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 82, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
   __pyx_r = __pyx_t_2;
   __pyx_t_2 = 0;
   goto __pyx_L0;
 
-  /* "third_party/mabel/draken/vectors/integer_vector.pyx":70
+  /* "third_party/mabel/draken/vectors/integer_vector.pyx":80
  *         return buf_length(self.ptr)
  * 
  *     @property             # <<<<<<<<<<<<<<
@@ -17826,7 +17976,7 @@ static PyObject *__pyx_pf_7opteryx_6draken_7vectors_14integer_vector_13IntegerVe
   return __pyx_r;
 }
 
-/* "third_party/mabel/draken/vectors/integer_vector.pyx":74
+/* "third_party/mabel/draken/vectors/integer_vector.pyx":84
  *         return buf_itemsize(self.ptr)
  * 
  *     @property             # <<<<<<<<<<<<<<
@@ -17859,7 +18009,7 @@ static PyObject *__pyx_pf_7opteryx_6draken_7vectors_14integer_vector_13IntegerVe
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("__get__", 0);
 
-  /* "third_party/mabel/draken/vectors/integer_vector.pyx":76
+  /* "third_party/mabel/draken/vectors/integer_vector.pyx":86
  *     @property
  *     def dtype(self):
  *         return buf_dtype(self.ptr)             # <<<<<<<<<<<<<<
@@ -17867,14 +18017,14 @@ static PyObject *__pyx_pf_7opteryx_6draken_7vectors_14integer_vector_13IntegerVe
  *     def __getitem__(self, Py_ssize_t i):
 */
   __Pyx_XDECREF(__pyx_r);
-  __pyx_t_1 = __pyx_f_7opteryx_6draken_4core_12fixed_vector_buf_dtype(__pyx_v_self->ptr); if (unlikely(__pyx_t_1 == ((int)-1) && PyErr_Occurred())) __PYX_ERR(0, 76, __pyx_L1_error)
-  __pyx_t_2 = __Pyx_PyLong_From_int(__pyx_t_1); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 76, __pyx_L1_error)
+  __pyx_t_1 = __pyx_f_7opteryx_6draken_4core_12fixed_vector_buf_dtype(__pyx_v_self->ptr); if (unlikely(__pyx_t_1 == ((int)-1) && PyErr_Occurred())) __PYX_ERR(0, 86, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_PyLong_From_int(__pyx_t_1); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 86, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
   __pyx_r = __pyx_t_2;
   __pyx_t_2 = 0;
   goto __pyx_L0;
 
-  /* "third_party/mabel/draken/vectors/integer_vector.pyx":74
+  /* "third_party/mabel/draken/vectors/integer_vector.pyx":84
  *         return buf_itemsize(self.ptr)
  * 
  *     @property             # <<<<<<<<<<<<<<
@@ -17893,7 +18043,7 @@ static PyObject *__pyx_pf_7opteryx_6draken_7vectors_14integer_vector_13IntegerVe
   return __pyx_r;
 }
 
-/* "third_party/mabel/draken/vectors/integer_vector.pyx":78
+/* "third_party/mabel/draken/vectors/integer_vector.pyx":88
  *         return buf_dtype(self.ptr)
  * 
  *     def __getitem__(self, Py_ssize_t i):             # <<<<<<<<<<<<<<
@@ -17914,7 +18064,7 @@ static PyObject *__pyx_pw_7opteryx_6draken_7vectors_14integer_vector_13IntegerVe
   __Pyx_RefNannySetupContext("__getitem__ (wrapper)", 0);
   __pyx_kwvalues = __Pyx_KwValues_VARARGS(__pyx_args, __pyx_nargs);
   assert(__pyx_arg_i); {
-    __pyx_v_i = __Pyx_PyIndex_AsSsize_t(__pyx_arg_i); if (unlikely((__pyx_v_i == (Py_ssize_t)-1) && PyErr_Occurred())) __PYX_ERR(0, 78, __pyx_L3_error)
+    __pyx_v_i = __Pyx_PyIndex_AsSsize_t(__pyx_arg_i); if (unlikely((__pyx_v_i == (Py_ssize_t)-1) && PyErr_Occurred())) __PYX_ERR(0, 88, __pyx_L3_error)
   }
   goto __pyx_L4_argument_unpacking_done;
   __pyx_L3_error:;
@@ -17944,7 +18094,7 @@ static PyObject *__pyx_pf_7opteryx_6draken_7vectors_14integer_vector_13IntegerVe
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("__getitem__", 0);
 
-  /* "third_party/mabel/draken/vectors/integer_vector.pyx":79
+  /* "third_party/mabel/draken/vectors/integer_vector.pyx":89
  * 
  *     def __getitem__(self, Py_ssize_t i):
  *         cdef DrakenFixedBuffer* ptr = self.ptr             # <<<<<<<<<<<<<<
@@ -17954,7 +18104,7 @@ static PyObject *__pyx_pf_7opteryx_6draken_7vectors_14integer_vector_13IntegerVe
   __pyx_t_1 = __pyx_v_self->ptr;
   __pyx_v_ptr = __pyx_t_1;
 
-  /* "third_party/mabel/draken/vectors/integer_vector.pyx":80
+  /* "third_party/mabel/draken/vectors/integer_vector.pyx":90
  *     def __getitem__(self, Py_ssize_t i):
  *         cdef DrakenFixedBuffer* ptr = self.ptr
  *         if i < 0 or i >= <Py_ssize_t>ptr.length:             # <<<<<<<<<<<<<<
@@ -17972,7 +18122,7 @@ static PyObject *__pyx_pf_7opteryx_6draken_7vectors_14integer_vector_13IntegerVe
   __pyx_L4_bool_binop_done:;
   if (unlikely(__pyx_t_2)) {
 
-    /* "third_party/mabel/draken/vectors/integer_vector.pyx":81
+    /* "third_party/mabel/draken/vectors/integer_vector.pyx":91
  *         cdef DrakenFixedBuffer* ptr = self.ptr
  *         if i < 0 or i >= <Py_ssize_t>ptr.length:
  *             raise IndexError("Index out of bounds")             # <<<<<<<<<<<<<<
@@ -17985,14 +18135,14 @@ static PyObject *__pyx_pf_7opteryx_6draken_7vectors_14integer_vector_13IntegerVe
       PyObject *__pyx_callargs[2] = {__pyx_t_5, __pyx_mstate_global->__pyx_kp_u_Index_out_of_bounds};
       __pyx_t_4 = __Pyx_PyObject_FastCall((PyObject*)(((PyTypeObject*)PyExc_IndexError)), __pyx_callargs+__pyx_t_6, (2-__pyx_t_6) | (__pyx_t_6*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
       __Pyx_XDECREF(__pyx_t_5); __pyx_t_5 = 0;
-      if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 81, __pyx_L1_error)
+      if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 91, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_4);
     }
     __Pyx_Raise(__pyx_t_4, 0, 0, 0);
     __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
-    __PYX_ERR(0, 81, __pyx_L1_error)
+    __PYX_ERR(0, 91, __pyx_L1_error)
 
-    /* "third_party/mabel/draken/vectors/integer_vector.pyx":80
+    /* "third_party/mabel/draken/vectors/integer_vector.pyx":90
  *     def __getitem__(self, Py_ssize_t i):
  *         cdef DrakenFixedBuffer* ptr = self.ptr
  *         if i < 0 or i >= <Py_ssize_t>ptr.length:             # <<<<<<<<<<<<<<
@@ -18001,7 +18151,7 @@ static PyObject *__pyx_pf_7opteryx_6draken_7vectors_14integer_vector_13IntegerVe
 */
   }
 
-  /* "third_party/mabel/draken/vectors/integer_vector.pyx":82
+  /* "third_party/mabel/draken/vectors/integer_vector.pyx":92
  *         if i < 0 or i >= <Py_ssize_t>ptr.length:
  *             raise IndexError("Index out of bounds")
  *         if ptr.null_bitmap != NULL:             # <<<<<<<<<<<<<<
@@ -18011,7 +18161,7 @@ static PyObject *__pyx_pf_7opteryx_6draken_7vectors_14integer_vector_13IntegerVe
   __pyx_t_2 = (__pyx_v_ptr->null_bitmap != NULL);
   if (__pyx_t_2) {
 
-    /* "third_party/mabel/draken/vectors/integer_vector.pyx":83
+    /* "third_party/mabel/draken/vectors/integer_vector.pyx":93
  *             raise IndexError("Index out of bounds")
  *         if ptr.null_bitmap != NULL:
  *             if not ((ptr.null_bitmap[i >> 3] >> (i & 7)) & 1):             # <<<<<<<<<<<<<<
@@ -18021,7 +18171,7 @@ static PyObject *__pyx_pf_7opteryx_6draken_7vectors_14integer_vector_13IntegerVe
     __pyx_t_2 = (!((((__pyx_v_ptr->null_bitmap[(__pyx_v_i >> 3)]) >> (__pyx_v_i & 7)) & 1) != 0));
     if (__pyx_t_2) {
 
-      /* "third_party/mabel/draken/vectors/integer_vector.pyx":84
+      /* "third_party/mabel/draken/vectors/integer_vector.pyx":94
  *         if ptr.null_bitmap != NULL:
  *             if not ((ptr.null_bitmap[i >> 3] >> (i & 7)) & 1):
  *                 return None             # <<<<<<<<<<<<<<
@@ -18032,7 +18182,7 @@ static PyObject *__pyx_pf_7opteryx_6draken_7vectors_14integer_vector_13IntegerVe
       __pyx_r = Py_None; __Pyx_INCREF(Py_None);
       goto __pyx_L0;
 
-      /* "third_party/mabel/draken/vectors/integer_vector.pyx":83
+      /* "third_party/mabel/draken/vectors/integer_vector.pyx":93
  *             raise IndexError("Index out of bounds")
  *         if ptr.null_bitmap != NULL:
  *             if not ((ptr.null_bitmap[i >> 3] >> (i & 7)) & 1):             # <<<<<<<<<<<<<<
@@ -18041,7 +18191,7 @@ static PyObject *__pyx_pf_7opteryx_6draken_7vectors_14integer_vector_13IntegerVe
 */
     }
 
-    /* "third_party/mabel/draken/vectors/integer_vector.pyx":82
+    /* "third_party/mabel/draken/vectors/integer_vector.pyx":92
  *         if i < 0 or i >= <Py_ssize_t>ptr.length:
  *             raise IndexError("Index out of bounds")
  *         if ptr.null_bitmap != NULL:             # <<<<<<<<<<<<<<
@@ -18050,7 +18200,7 @@ static PyObject *__pyx_pf_7opteryx_6draken_7vectors_14integer_vector_13IntegerVe
 */
   }
 
-  /* "third_party/mabel/draken/vectors/integer_vector.pyx":85
+  /* "third_party/mabel/draken/vectors/integer_vector.pyx":95
  *             if not ((ptr.null_bitmap[i >> 3] >> (i & 7)) & 1):
  *                 return None
  *         if ptr.itemsize == 1:             # <<<<<<<<<<<<<<
@@ -18060,7 +18210,7 @@ static PyObject *__pyx_pf_7opteryx_6draken_7vectors_14integer_vector_13IntegerVe
   switch (__pyx_v_ptr->itemsize) {
     case 1:
 
-    /* "third_party/mabel/draken/vectors/integer_vector.pyx":86
+    /* "third_party/mabel/draken/vectors/integer_vector.pyx":96
  *                 return None
  *         if ptr.itemsize == 1:
  *             return (<int8_t*>ptr.data)[i]             # <<<<<<<<<<<<<<
@@ -18068,13 +18218,13 @@ static PyObject *__pyx_pf_7opteryx_6draken_7vectors_14integer_vector_13IntegerVe
  *             return (<int16_t*>ptr.data)[i]
 */
     __Pyx_XDECREF(__pyx_r);
-    __pyx_t_4 = __Pyx_PyLong_From_int8_t((((int8_t *)__pyx_v_ptr->data)[__pyx_v_i])); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 86, __pyx_L1_error)
+    __pyx_t_4 = __Pyx_PyLong_From_int8_t((((int8_t *)__pyx_v_ptr->data)[__pyx_v_i])); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 96, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_4);
     __pyx_r = __pyx_t_4;
     __pyx_t_4 = 0;
     goto __pyx_L0;
 
-    /* "third_party/mabel/draken/vectors/integer_vector.pyx":85
+    /* "third_party/mabel/draken/vectors/integer_vector.pyx":95
  *             if not ((ptr.null_bitmap[i >> 3] >> (i & 7)) & 1):
  *                 return None
  *         if ptr.itemsize == 1:             # <<<<<<<<<<<<<<
@@ -18084,7 +18234,7 @@ static PyObject *__pyx_pf_7opteryx_6draken_7vectors_14integer_vector_13IntegerVe
     break;
     case 2:
 
-    /* "third_party/mabel/draken/vectors/integer_vector.pyx":88
+    /* "third_party/mabel/draken/vectors/integer_vector.pyx":98
  *             return (<int8_t*>ptr.data)[i]
  *         elif ptr.itemsize == 2:
  *             return (<int16_t*>ptr.data)[i]             # <<<<<<<<<<<<<<
@@ -18092,13 +18242,13 @@ static PyObject *__pyx_pf_7opteryx_6draken_7vectors_14integer_vector_13IntegerVe
  *             return (<int32_t*>ptr.data)[i]
 */
     __Pyx_XDECREF(__pyx_r);
-    __pyx_t_4 = __Pyx_PyLong_From_int16_t((((int16_t *)__pyx_v_ptr->data)[__pyx_v_i])); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 88, __pyx_L1_error)
+    __pyx_t_4 = __Pyx_PyLong_From_int16_t((((int16_t *)__pyx_v_ptr->data)[__pyx_v_i])); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 98, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_4);
     __pyx_r = __pyx_t_4;
     __pyx_t_4 = 0;
     goto __pyx_L0;
 
-    /* "third_party/mabel/draken/vectors/integer_vector.pyx":87
+    /* "third_party/mabel/draken/vectors/integer_vector.pyx":97
  *         if ptr.itemsize == 1:
  *             return (<int8_t*>ptr.data)[i]
  *         elif ptr.itemsize == 2:             # <<<<<<<<<<<<<<
@@ -18108,7 +18258,7 @@ static PyObject *__pyx_pf_7opteryx_6draken_7vectors_14integer_vector_13IntegerVe
     break;
     default:
 
-    /* "third_party/mabel/draken/vectors/integer_vector.pyx":90
+    /* "third_party/mabel/draken/vectors/integer_vector.pyx":100
  *             return (<int16_t*>ptr.data)[i]
  *         else:
  *             return (<int32_t*>ptr.data)[i]             # <<<<<<<<<<<<<<
@@ -18116,7 +18266,7 @@ static PyObject *__pyx_pf_7opteryx_6draken_7vectors_14integer_vector_13IntegerVe
  *     def to_arrow(self):
 */
     __Pyx_XDECREF(__pyx_r);
-    __pyx_t_4 = __Pyx_PyLong_From_int32_t((((int32_t *)__pyx_v_ptr->data)[__pyx_v_i])); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 90, __pyx_L1_error)
+    __pyx_t_4 = __Pyx_PyLong_From_int32_t((((int32_t *)__pyx_v_ptr->data)[__pyx_v_i])); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 100, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_4);
     __pyx_r = __pyx_t_4;
     __pyx_t_4 = 0;
@@ -18124,7 +18274,7 @@ static PyObject *__pyx_pf_7opteryx_6draken_7vectors_14integer_vector_13IntegerVe
     break;
   }
 
-  /* "third_party/mabel/draken/vectors/integer_vector.pyx":78
+  /* "third_party/mabel/draken/vectors/integer_vector.pyx":88
  *         return buf_dtype(self.ptr)
  * 
  *     def __getitem__(self, Py_ssize_t i):             # <<<<<<<<<<<<<<
@@ -18144,7 +18294,7 @@ static PyObject *__pyx_pf_7opteryx_6draken_7vectors_14integer_vector_13IntegerVe
   return __pyx_r;
 }
 
-/* "third_party/mabel/draken/vectors/integer_vector.pyx":92
+/* "third_party/mabel/draken/vectors/integer_vector.pyx":102
  *             return (<int32_t*>ptr.data)[i]
  * 
  *     def to_arrow(self):             # <<<<<<<<<<<<<<
@@ -18217,31 +18367,31 @@ static PyObject *__pyx_pf_7opteryx_6draken_7vectors_14integer_vector_13IntegerVe
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("to_arrow", 0);
 
-  /* "third_party/mabel/draken/vectors/integer_vector.pyx":93
+  /* "third_party/mabel/draken/vectors/integer_vector.pyx":103
  * 
  *     def to_arrow(self):
  *         import pyarrow as pa             # <<<<<<<<<<<<<<
  *         cdef size_t nbytes = buf_length(self.ptr) * buf_itemsize(self.ptr)
  *         cdef intptr_t addr = <intptr_t>self.ptr.data
 */
-  __pyx_t_2 = __Pyx_Import(__pyx_mstate_global->__pyx_n_u_pyarrow, 0, 0, NULL, 0); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 93, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_Import(__pyx_mstate_global->__pyx_n_u_pyarrow, 0, 0, NULL, 0); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 103, __pyx_L1_error)
   __pyx_t_1 = __pyx_t_2;
   __Pyx_GOTREF(__pyx_t_1);
   __pyx_v_pa = __pyx_t_1;
   __pyx_t_1 = 0;
 
-  /* "third_party/mabel/draken/vectors/integer_vector.pyx":94
+  /* "third_party/mabel/draken/vectors/integer_vector.pyx":104
  *     def to_arrow(self):
  *         import pyarrow as pa
  *         cdef size_t nbytes = buf_length(self.ptr) * buf_itemsize(self.ptr)             # <<<<<<<<<<<<<<
  *         cdef intptr_t addr = <intptr_t>self.ptr.data
  *         data_buf = pa.foreign_buffer(addr, nbytes, base=self)
 */
-  __pyx_t_3 = __pyx_f_7opteryx_6draken_4core_12fixed_vector_buf_length(__pyx_v_self->ptr); if (unlikely(__pyx_t_3 == ((size_t)-1L) && PyErr_Occurred())) __PYX_ERR(0, 94, __pyx_L1_error)
-  __pyx_t_4 = __pyx_f_7opteryx_6draken_4core_12fixed_vector_buf_itemsize(__pyx_v_self->ptr); if (unlikely(__pyx_t_4 == ((size_t)-1L) && PyErr_Occurred())) __PYX_ERR(0, 94, __pyx_L1_error)
+  __pyx_t_3 = __pyx_f_7opteryx_6draken_4core_12fixed_vector_buf_length(__pyx_v_self->ptr); if (unlikely(__pyx_t_3 == ((size_t)-1L) && PyErr_Occurred())) __PYX_ERR(0, 104, __pyx_L1_error)
+  __pyx_t_4 = __pyx_f_7opteryx_6draken_4core_12fixed_vector_buf_itemsize(__pyx_v_self->ptr); if (unlikely(__pyx_t_4 == ((size_t)-1L) && PyErr_Occurred())) __PYX_ERR(0, 104, __pyx_L1_error)
   __pyx_v_nbytes = (__pyx_t_3 * __pyx_t_4);
 
-  /* "third_party/mabel/draken/vectors/integer_vector.pyx":95
+  /* "third_party/mabel/draken/vectors/integer_vector.pyx":105
  *         import pyarrow as pa
  *         cdef size_t nbytes = buf_length(self.ptr) * buf_itemsize(self.ptr)
  *         cdef intptr_t addr = <intptr_t>self.ptr.data             # <<<<<<<<<<<<<<
@@ -18250,7 +18400,7 @@ static PyObject *__pyx_pf_7opteryx_6draken_7vectors_14integer_vector_13IntegerVe
 */
   __pyx_v_addr = ((intptr_t)__pyx_v_self->ptr->data);
 
-  /* "third_party/mabel/draken/vectors/integer_vector.pyx":96
+  /* "third_party/mabel/draken/vectors/integer_vector.pyx":106
  *         cdef size_t nbytes = buf_length(self.ptr) * buf_itemsize(self.ptr)
  *         cdef intptr_t addr = <intptr_t>self.ptr.data
  *         data_buf = pa.foreign_buffer(addr, nbytes, base=self)             # <<<<<<<<<<<<<<
@@ -18259,46 +18409,46 @@ static PyObject *__pyx_pf_7opteryx_6draken_7vectors_14integer_vector_13IntegerVe
 */
   __pyx_t_5 = __pyx_v_pa;
   __Pyx_INCREF(__pyx_t_5);
-  __pyx_t_6 = PyLong_FromSsize_t(__pyx_v_addr); if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 96, __pyx_L1_error)
+  __pyx_t_6 = PyLong_FromSsize_t(__pyx_v_addr); if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 106, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_6);
-  __pyx_t_7 = __Pyx_PyLong_FromSize_t(__pyx_v_nbytes); if (unlikely(!__pyx_t_7)) __PYX_ERR(0, 96, __pyx_L1_error)
+  __pyx_t_7 = __Pyx_PyLong_FromSize_t(__pyx_v_nbytes); if (unlikely(!__pyx_t_7)) __PYX_ERR(0, 106, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_7);
   __pyx_t_4 = 0;
   {
     PyObject *__pyx_callargs[3 + ((CYTHON_VECTORCALL) ? 1 : 0)] = {__pyx_t_5, __pyx_t_6, __pyx_t_7};
-    __pyx_t_8 = __Pyx_MakeVectorcallBuilderKwds(1); if (unlikely(!__pyx_t_8)) __PYX_ERR(0, 96, __pyx_L1_error)
+    __pyx_t_8 = __Pyx_MakeVectorcallBuilderKwds(1); if (unlikely(!__pyx_t_8)) __PYX_ERR(0, 106, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_8);
-    if (__Pyx_VectorcallBuilder_AddArg(__pyx_mstate_global->__pyx_n_u_base, ((PyObject *)__pyx_v_self), __pyx_t_8, __pyx_callargs+3, 0) < (0)) __PYX_ERR(0, 96, __pyx_L1_error)
+    if (__Pyx_VectorcallBuilder_AddArg(__pyx_mstate_global->__pyx_n_u_base, ((PyObject *)__pyx_v_self), __pyx_t_8, __pyx_callargs+3, 0) < (0)) __PYX_ERR(0, 106, __pyx_L1_error)
     __pyx_t_1 = __Pyx_Object_VectorcallMethod_CallFromBuilder((PyObject*)__pyx_mstate_global->__pyx_n_u_foreign_buffer, __pyx_callargs+__pyx_t_4, (3-__pyx_t_4) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET), __pyx_t_8);
     __Pyx_XDECREF(__pyx_t_5); __pyx_t_5 = 0;
     __Pyx_DECREF(__pyx_t_6); __pyx_t_6 = 0;
     __Pyx_DECREF(__pyx_t_7); __pyx_t_7 = 0;
     __Pyx_DECREF(__pyx_t_8); __pyx_t_8 = 0;
-    if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 96, __pyx_L1_error)
+    if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 106, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_1);
   }
   __pyx_v_data_buf = __pyx_t_1;
   __pyx_t_1 = 0;
 
-  /* "third_party/mabel/draken/vectors/integer_vector.pyx":97
+  /* "third_party/mabel/draken/vectors/integer_vector.pyx":107
  *         cdef intptr_t addr = <intptr_t>self.ptr.data
  *         data_buf = pa.foreign_buffer(addr, nbytes, base=self)
  *         buffers = [None, data_buf]             # <<<<<<<<<<<<<<
  *         if self.ptr.null_bitmap != NULL:
  *             buffers[0] = pa.foreign_buffer(
 */
-  __pyx_t_1 = PyList_New(2); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 97, __pyx_L1_error)
+  __pyx_t_1 = PyList_New(2); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 107, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
   __Pyx_INCREF(Py_None);
   __Pyx_GIVEREF(Py_None);
-  if (__Pyx_PyList_SET_ITEM(__pyx_t_1, 0, Py_None) != (0)) __PYX_ERR(0, 97, __pyx_L1_error);
+  if (__Pyx_PyList_SET_ITEM(__pyx_t_1, 0, Py_None) != (0)) __PYX_ERR(0, 107, __pyx_L1_error);
   __Pyx_INCREF(__pyx_v_data_buf);
   __Pyx_GIVEREF(__pyx_v_data_buf);
-  if (__Pyx_PyList_SET_ITEM(__pyx_t_1, 1, __pyx_v_data_buf) != (0)) __PYX_ERR(0, 97, __pyx_L1_error);
+  if (__Pyx_PyList_SET_ITEM(__pyx_t_1, 1, __pyx_v_data_buf) != (0)) __PYX_ERR(0, 107, __pyx_L1_error);
   __pyx_v_buffers = ((PyObject*)__pyx_t_1);
   __pyx_t_1 = 0;
 
-  /* "third_party/mabel/draken/vectors/integer_vector.pyx":98
+  /* "third_party/mabel/draken/vectors/integer_vector.pyx":108
  *         data_buf = pa.foreign_buffer(addr, nbytes, base=self)
  *         buffers = [None, data_buf]
  *         if self.ptr.null_bitmap != NULL:             # <<<<<<<<<<<<<<
@@ -18308,7 +18458,7 @@ static PyObject *__pyx_pf_7opteryx_6draken_7vectors_14integer_vector_13IntegerVe
   __pyx_t_9 = (__pyx_v_self->ptr->null_bitmap != NULL);
   if (__pyx_t_9) {
 
-    /* "third_party/mabel/draken/vectors/integer_vector.pyx":99
+    /* "third_party/mabel/draken/vectors/integer_vector.pyx":109
  *         buffers = [None, data_buf]
  *         if self.ptr.null_bitmap != NULL:
  *             buffers[0] = pa.foreign_buffer(             # <<<<<<<<<<<<<<
@@ -18318,27 +18468,27 @@ static PyObject *__pyx_pf_7opteryx_6draken_7vectors_14integer_vector_13IntegerVe
     __pyx_t_8 = __pyx_v_pa;
     __Pyx_INCREF(__pyx_t_8);
 
-    /* "third_party/mabel/draken/vectors/integer_vector.pyx":100
+    /* "third_party/mabel/draken/vectors/integer_vector.pyx":110
  *         if self.ptr.null_bitmap != NULL:
  *             buffers[0] = pa.foreign_buffer(
  *                 <intptr_t>self.ptr.null_bitmap,             # <<<<<<<<<<<<<<
  *                 (self.ptr.length + 7) // 8,
  *                 base=self,
 */
-    __pyx_t_7 = PyLong_FromSsize_t(((intptr_t)__pyx_v_self->ptr->null_bitmap)); if (unlikely(!__pyx_t_7)) __PYX_ERR(0, 100, __pyx_L1_error)
+    __pyx_t_7 = PyLong_FromSsize_t(((intptr_t)__pyx_v_self->ptr->null_bitmap)); if (unlikely(!__pyx_t_7)) __PYX_ERR(0, 110, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_7);
 
-    /* "third_party/mabel/draken/vectors/integer_vector.pyx":101
+    /* "third_party/mabel/draken/vectors/integer_vector.pyx":111
  *             buffers[0] = pa.foreign_buffer(
  *                 <intptr_t>self.ptr.null_bitmap,
  *                 (self.ptr.length + 7) // 8,             # <<<<<<<<<<<<<<
  *                 base=self,
  *             )
 */
-    __pyx_t_6 = __Pyx_PyLong_FromSize_t(((__pyx_v_self->ptr->length + 7) / 8)); if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 101, __pyx_L1_error)
+    __pyx_t_6 = __Pyx_PyLong_FromSize_t(((__pyx_v_self->ptr->length + 7) / 8)); if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 111, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_6);
 
-    /* "third_party/mabel/draken/vectors/integer_vector.pyx":102
+    /* "third_party/mabel/draken/vectors/integer_vector.pyx":112
  *                 <intptr_t>self.ptr.null_bitmap,
  *                 (self.ptr.length + 7) // 8,
  *                 base=self,             # <<<<<<<<<<<<<<
@@ -18348,29 +18498,29 @@ static PyObject *__pyx_pf_7opteryx_6draken_7vectors_14integer_vector_13IntegerVe
     __pyx_t_4 = 0;
     {
       PyObject *__pyx_callargs[3 + ((CYTHON_VECTORCALL) ? 1 : 0)] = {__pyx_t_8, __pyx_t_7, __pyx_t_6};
-      __pyx_t_5 = __Pyx_MakeVectorcallBuilderKwds(1); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 99, __pyx_L1_error)
+      __pyx_t_5 = __Pyx_MakeVectorcallBuilderKwds(1); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 109, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_5);
-      if (__Pyx_VectorcallBuilder_AddArg(__pyx_mstate_global->__pyx_n_u_base, ((PyObject *)__pyx_v_self), __pyx_t_5, __pyx_callargs+3, 0) < (0)) __PYX_ERR(0, 99, __pyx_L1_error)
+      if (__Pyx_VectorcallBuilder_AddArg(__pyx_mstate_global->__pyx_n_u_base, ((PyObject *)__pyx_v_self), __pyx_t_5, __pyx_callargs+3, 0) < (0)) __PYX_ERR(0, 109, __pyx_L1_error)
       __pyx_t_1 = __Pyx_Object_VectorcallMethod_CallFromBuilder((PyObject*)__pyx_mstate_global->__pyx_n_u_foreign_buffer, __pyx_callargs+__pyx_t_4, (3-__pyx_t_4) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET), __pyx_t_5);
       __Pyx_XDECREF(__pyx_t_8); __pyx_t_8 = 0;
       __Pyx_DECREF(__pyx_t_7); __pyx_t_7 = 0;
       __Pyx_DECREF(__pyx_t_6); __pyx_t_6 = 0;
       __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
-      if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 99, __pyx_L1_error)
+      if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 109, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_1);
     }
 
-    /* "third_party/mabel/draken/vectors/integer_vector.pyx":99
+    /* "third_party/mabel/draken/vectors/integer_vector.pyx":109
  *         buffers = [None, data_buf]
  *         if self.ptr.null_bitmap != NULL:
  *             buffers[0] = pa.foreign_buffer(             # <<<<<<<<<<<<<<
  *                 <intptr_t>self.ptr.null_bitmap,
  *                 (self.ptr.length + 7) // 8,
 */
-    if (unlikely((__Pyx_SetItemInt(__pyx_v_buffers, 0, __pyx_t_1, long, 1, __Pyx_PyLong_From_long, 1, 0, 0, 1, __Pyx_ReferenceSharing_OwnStrongReference) < 0))) __PYX_ERR(0, 99, __pyx_L1_error)
+    if (unlikely((__Pyx_SetItemInt(__pyx_v_buffers, 0, __pyx_t_1, long, 1, __Pyx_PyLong_From_long, 1, 0, 0, 1, __Pyx_ReferenceSharing_OwnStrongReference) < 0))) __PYX_ERR(0, 109, __pyx_L1_error)
     __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
 
-    /* "third_party/mabel/draken/vectors/integer_vector.pyx":98
+    /* "third_party/mabel/draken/vectors/integer_vector.pyx":108
  *         data_buf = pa.foreign_buffer(addr, nbytes, base=self)
  *         buffers = [None, data_buf]
  *         if self.ptr.null_bitmap != NULL:             # <<<<<<<<<<<<<<
@@ -18379,7 +18529,7 @@ static PyObject *__pyx_pf_7opteryx_6draken_7vectors_14integer_vector_13IntegerVe
 */
   }
 
-  /* "third_party/mabel/draken/vectors/integer_vector.pyx":104
+  /* "third_party/mabel/draken/vectors/integer_vector.pyx":114
  *                 base=self,
  *             )
  *         if self.ptr.type == DRAKEN_INT8:             # <<<<<<<<<<<<<<
@@ -18389,7 +18539,7 @@ static PyObject *__pyx_pf_7opteryx_6draken_7vectors_14integer_vector_13IntegerVe
   switch (__pyx_v_self->ptr->type) {
     case DRAKEN_INT8:
 
-    /* "third_party/mabel/draken/vectors/integer_vector.pyx":105
+    /* "third_party/mabel/draken/vectors/integer_vector.pyx":115
  *             )
  *         if self.ptr.type == DRAKEN_INT8:
  *             pa_type = pa.int8()             # <<<<<<<<<<<<<<
@@ -18403,13 +18553,13 @@ static PyObject *__pyx_pf_7opteryx_6draken_7vectors_14integer_vector_13IntegerVe
       PyObject *__pyx_callargs[2] = {__pyx_t_5, NULL};
       __pyx_t_1 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_int8, __pyx_callargs+__pyx_t_4, (1-__pyx_t_4) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
       __Pyx_XDECREF(__pyx_t_5); __pyx_t_5 = 0;
-      if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 105, __pyx_L1_error)
+      if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 115, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_1);
     }
     __pyx_v_pa_type = __pyx_t_1;
     __pyx_t_1 = 0;
 
-    /* "third_party/mabel/draken/vectors/integer_vector.pyx":104
+    /* "third_party/mabel/draken/vectors/integer_vector.pyx":114
  *                 base=self,
  *             )
  *         if self.ptr.type == DRAKEN_INT8:             # <<<<<<<<<<<<<<
@@ -18419,7 +18569,7 @@ static PyObject *__pyx_pf_7opteryx_6draken_7vectors_14integer_vector_13IntegerVe
     break;
     case DRAKEN_INT16:
 
-    /* "third_party/mabel/draken/vectors/integer_vector.pyx":107
+    /* "third_party/mabel/draken/vectors/integer_vector.pyx":117
  *             pa_type = pa.int8()
  *         elif self.ptr.type == DRAKEN_INT16:
  *             pa_type = pa.int16()             # <<<<<<<<<<<<<<
@@ -18433,13 +18583,13 @@ static PyObject *__pyx_pf_7opteryx_6draken_7vectors_14integer_vector_13IntegerVe
       PyObject *__pyx_callargs[2] = {__pyx_t_5, NULL};
       __pyx_t_1 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_int16, __pyx_callargs+__pyx_t_4, (1-__pyx_t_4) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
       __Pyx_XDECREF(__pyx_t_5); __pyx_t_5 = 0;
-      if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 107, __pyx_L1_error)
+      if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 117, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_1);
     }
     __pyx_v_pa_type = __pyx_t_1;
     __pyx_t_1 = 0;
 
-    /* "third_party/mabel/draken/vectors/integer_vector.pyx":106
+    /* "third_party/mabel/draken/vectors/integer_vector.pyx":116
  *         if self.ptr.type == DRAKEN_INT8:
  *             pa_type = pa.int8()
  *         elif self.ptr.type == DRAKEN_INT16:             # <<<<<<<<<<<<<<
@@ -18449,7 +18599,7 @@ static PyObject *__pyx_pf_7opteryx_6draken_7vectors_14integer_vector_13IntegerVe
     break;
     default:
 
-    /* "third_party/mabel/draken/vectors/integer_vector.pyx":109
+    /* "third_party/mabel/draken/vectors/integer_vector.pyx":119
  *             pa_type = pa.int16()
  *         else:
  *             pa_type = pa.int32()             # <<<<<<<<<<<<<<
@@ -18463,7 +18613,7 @@ static PyObject *__pyx_pf_7opteryx_6draken_7vectors_14integer_vector_13IntegerVe
       PyObject *__pyx_callargs[2] = {__pyx_t_5, NULL};
       __pyx_t_1 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_int32, __pyx_callargs+__pyx_t_4, (1-__pyx_t_4) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
       __Pyx_XDECREF(__pyx_t_5); __pyx_t_5 = 0;
-      if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 109, __pyx_L1_error)
+      if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 119, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_1);
     }
     __pyx_v_pa_type = __pyx_t_1;
@@ -18471,7 +18621,7 @@ static PyObject *__pyx_pf_7opteryx_6draken_7vectors_14integer_vector_13IntegerVe
     break;
   }
 
-  /* "third_party/mabel/draken/vectors/integer_vector.pyx":110
+  /* "third_party/mabel/draken/vectors/integer_vector.pyx":120
  *         else:
  *             pa_type = pa.int32()
  *         return pa.Array.from_buffers(pa_type, buf_length(self.ptr), buffers)             # <<<<<<<<<<<<<<
@@ -18479,12 +18629,12 @@ static PyObject *__pyx_pf_7opteryx_6draken_7vectors_14integer_vector_13IntegerVe
  *     cpdef list to_pylist(self):
 */
   __Pyx_XDECREF(__pyx_r);
-  __pyx_t_6 = __Pyx_PyObject_GetAttrStr(__pyx_v_pa, __pyx_mstate_global->__pyx_n_u_Array); if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 110, __pyx_L1_error)
+  __pyx_t_6 = __Pyx_PyObject_GetAttrStr(__pyx_v_pa, __pyx_mstate_global->__pyx_n_u_Array); if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 120, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_6);
   __pyx_t_5 = __pyx_t_6;
   __Pyx_INCREF(__pyx_t_5);
-  __pyx_t_4 = __pyx_f_7opteryx_6draken_4core_12fixed_vector_buf_length(__pyx_v_self->ptr); if (unlikely(__pyx_t_4 == ((size_t)-1L) && PyErr_Occurred())) __PYX_ERR(0, 110, __pyx_L1_error)
-  __pyx_t_7 = __Pyx_PyLong_FromSize_t(__pyx_t_4); if (unlikely(!__pyx_t_7)) __PYX_ERR(0, 110, __pyx_L1_error)
+  __pyx_t_4 = __pyx_f_7opteryx_6draken_4core_12fixed_vector_buf_length(__pyx_v_self->ptr); if (unlikely(__pyx_t_4 == ((size_t)-1L) && PyErr_Occurred())) __PYX_ERR(0, 120, __pyx_L1_error)
+  __pyx_t_7 = __Pyx_PyLong_FromSize_t(__pyx_t_4); if (unlikely(!__pyx_t_7)) __PYX_ERR(0, 120, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_7);
   __pyx_t_4 = 0;
   {
@@ -18493,14 +18643,14 @@ static PyObject *__pyx_pf_7opteryx_6draken_7vectors_14integer_vector_13IntegerVe
     __Pyx_XDECREF(__pyx_t_5); __pyx_t_5 = 0;
     __Pyx_DECREF(__pyx_t_7); __pyx_t_7 = 0;
     __Pyx_DECREF(__pyx_t_6); __pyx_t_6 = 0;
-    if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 110, __pyx_L1_error)
+    if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 120, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_1);
   }
   __pyx_r = __pyx_t_1;
   __pyx_t_1 = 0;
   goto __pyx_L0;
 
-  /* "third_party/mabel/draken/vectors/integer_vector.pyx":92
+  /* "third_party/mabel/draken/vectors/integer_vector.pyx":102
  *             return (<int32_t*>ptr.data)[i]
  * 
  *     def to_arrow(self):             # <<<<<<<<<<<<<<
@@ -18527,7 +18677,7 @@ static PyObject *__pyx_pf_7opteryx_6draken_7vectors_14integer_vector_13IntegerVe
   return __pyx_r;
 }
 
-/* "third_party/mabel/draken/vectors/integer_vector.pyx":112
+/* "third_party/mabel/draken/vectors/integer_vector.pyx":122
  *         return pa.Array.from_buffers(pa_type, buf_length(self.ptr), buffers)
  * 
  *     cpdef list to_pylist(self):             # <<<<<<<<<<<<<<
@@ -18584,7 +18734,7 @@ static PyObject *__pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVec
     if (unlikely(!__Pyx_object_dict_version_matches(((PyObject *)__pyx_v_self), __pyx_tp_dict_version, __pyx_obj_dict_version))) {
       PY_UINT64_T __pyx_typedict_guard = __Pyx_get_tp_dict_version(((PyObject *)__pyx_v_self));
       #endif
-      __pyx_t_1 = __Pyx_PyObject_GetAttrStr(((PyObject *)__pyx_v_self), __pyx_mstate_global->__pyx_n_u_to_pylist); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 112, __pyx_L1_error)
+      __pyx_t_1 = __Pyx_PyObject_GetAttrStr(((PyObject *)__pyx_v_self), __pyx_mstate_global->__pyx_n_u_to_pylist); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 122, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_1);
       if (!__Pyx_IsSameCFunction(__pyx_t_1, (void(*)(void)) __pyx_pw_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_11to_pylist)) {
         __Pyx_XDECREF(__pyx_r);
@@ -18608,10 +18758,10 @@ static PyObject *__pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVec
           __pyx_t_2 = __Pyx_PyObject_FastCall((PyObject*)__pyx_t_4, __pyx_callargs+__pyx_t_5, (1-__pyx_t_5) | (__pyx_t_5*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
           __Pyx_XDECREF(__pyx_t_3); __pyx_t_3 = 0;
           __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
-          if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 112, __pyx_L1_error)
+          if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 122, __pyx_L1_error)
           __Pyx_GOTREF(__pyx_t_2);
         }
-        if (!(likely(PyList_CheckExact(__pyx_t_2))||((__pyx_t_2) == Py_None) || __Pyx_RaiseUnexpectedTypeError("list", __pyx_t_2))) __PYX_ERR(0, 112, __pyx_L1_error)
+        if (!(likely(PyList_CheckExact(__pyx_t_2))||((__pyx_t_2) == Py_None) || __Pyx_RaiseUnexpectedTypeError("list", __pyx_t_2))) __PYX_ERR(0, 122, __pyx_L1_error)
         __pyx_r = ((PyObject*)__pyx_t_2);
         __pyx_t_2 = 0;
         __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
@@ -18630,7 +18780,7 @@ static PyObject *__pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVec
     #endif
   }
 
-  /* "third_party/mabel/draken/vectors/integer_vector.pyx":113
+  /* "third_party/mabel/draken/vectors/integer_vector.pyx":123
  * 
  *     cpdef list to_pylist(self):
  *         cdef DrakenFixedBuffer* ptr = self.ptr             # <<<<<<<<<<<<<<
@@ -18640,7 +18790,7 @@ static PyObject *__pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVec
   __pyx_t_6 = __pyx_v_self->ptr;
   __pyx_v_ptr = __pyx_t_6;
 
-  /* "third_party/mabel/draken/vectors/integer_vector.pyx":114
+  /* "third_party/mabel/draken/vectors/integer_vector.pyx":124
  *     cpdef list to_pylist(self):
  *         cdef DrakenFixedBuffer* ptr = self.ptr
  *         cdef Py_ssize_t i, n = ptr.length             # <<<<<<<<<<<<<<
@@ -18650,19 +18800,19 @@ static PyObject *__pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVec
   __pyx_t_5 = __pyx_v_ptr->length;
   __pyx_v_n = __pyx_t_5;
 
-  /* "third_party/mabel/draken/vectors/integer_vector.pyx":119
+  /* "third_party/mabel/draken/vectors/integer_vector.pyx":129
  *         cdef int16_t* d16
  *         cdef int32_t* d32
  *         cdef list out = []             # <<<<<<<<<<<<<<
  *         if ptr.itemsize == 1:
  *             d8 = <int8_t*>ptr.data
 */
-  __pyx_t_1 = PyList_New(0); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 119, __pyx_L1_error)
+  __pyx_t_1 = PyList_New(0); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 129, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
   __pyx_v_out = ((PyObject*)__pyx_t_1);
   __pyx_t_1 = 0;
 
-  /* "third_party/mabel/draken/vectors/integer_vector.pyx":120
+  /* "third_party/mabel/draken/vectors/integer_vector.pyx":130
  *         cdef int32_t* d32
  *         cdef list out = []
  *         if ptr.itemsize == 1:             # <<<<<<<<<<<<<<
@@ -18672,7 +18822,7 @@ static PyObject *__pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVec
   switch (__pyx_v_ptr->itemsize) {
     case 1:
 
-    /* "third_party/mabel/draken/vectors/integer_vector.pyx":121
+    /* "third_party/mabel/draken/vectors/integer_vector.pyx":131
  *         cdef list out = []
  *         if ptr.itemsize == 1:
  *             d8 = <int8_t*>ptr.data             # <<<<<<<<<<<<<<
@@ -18681,7 +18831,7 @@ static PyObject *__pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVec
 */
     __pyx_v_d8 = ((int8_t *)__pyx_v_ptr->data);
 
-    /* "third_party/mabel/draken/vectors/integer_vector.pyx":122
+    /* "third_party/mabel/draken/vectors/integer_vector.pyx":132
  *         if ptr.itemsize == 1:
  *             d8 = <int8_t*>ptr.data
  *             if ptr.null_bitmap == NULL:             # <<<<<<<<<<<<<<
@@ -18691,7 +18841,7 @@ static PyObject *__pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVec
     __pyx_t_7 = (__pyx_v_ptr->null_bitmap == NULL);
     if (__pyx_t_7) {
 
-      /* "third_party/mabel/draken/vectors/integer_vector.pyx":123
+      /* "third_party/mabel/draken/vectors/integer_vector.pyx":133
  *             d8 = <int8_t*>ptr.data
  *             if ptr.null_bitmap == NULL:
  *                 for i in range(n):             # <<<<<<<<<<<<<<
@@ -18703,20 +18853,20 @@ static PyObject *__pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVec
       for (__pyx_t_10 = 0; __pyx_t_10 < __pyx_t_9; __pyx_t_10+=1) {
         __pyx_v_i = __pyx_t_10;
 
-        /* "third_party/mabel/draken/vectors/integer_vector.pyx":124
+        /* "third_party/mabel/draken/vectors/integer_vector.pyx":134
  *             if ptr.null_bitmap == NULL:
  *                 for i in range(n):
  *                     out.append(d8[i])             # <<<<<<<<<<<<<<
  *             else:
  *                 for i in range(n):
 */
-        __pyx_t_1 = __Pyx_PyLong_From_int8_t((__pyx_v_d8[__pyx_v_i])); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 124, __pyx_L1_error)
+        __pyx_t_1 = __Pyx_PyLong_From_int8_t((__pyx_v_d8[__pyx_v_i])); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 134, __pyx_L1_error)
         __Pyx_GOTREF(__pyx_t_1);
-        __pyx_t_11 = __Pyx_PyList_Append(__pyx_v_out, __pyx_t_1); if (unlikely(__pyx_t_11 == ((int)-1))) __PYX_ERR(0, 124, __pyx_L1_error)
+        __pyx_t_11 = __Pyx_PyList_Append(__pyx_v_out, __pyx_t_1); if (unlikely(__pyx_t_11 == ((int)-1))) __PYX_ERR(0, 134, __pyx_L1_error)
         __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
       }
 
-      /* "third_party/mabel/draken/vectors/integer_vector.pyx":122
+      /* "third_party/mabel/draken/vectors/integer_vector.pyx":132
  *         if ptr.itemsize == 1:
  *             d8 = <int8_t*>ptr.data
  *             if ptr.null_bitmap == NULL:             # <<<<<<<<<<<<<<
@@ -18726,7 +18876,7 @@ static PyObject *__pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVec
       goto __pyx_L3;
     }
 
-    /* "third_party/mabel/draken/vectors/integer_vector.pyx":126
+    /* "third_party/mabel/draken/vectors/integer_vector.pyx":136
  *                     out.append(d8[i])
  *             else:
  *                 for i in range(n):             # <<<<<<<<<<<<<<
@@ -18739,7 +18889,7 @@ static PyObject *__pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVec
       for (__pyx_t_10 = 0; __pyx_t_10 < __pyx_t_9; __pyx_t_10+=1) {
         __pyx_v_i = __pyx_t_10;
 
-        /* "third_party/mabel/draken/vectors/integer_vector.pyx":127
+        /* "third_party/mabel/draken/vectors/integer_vector.pyx":137
  *             else:
  *                 for i in range(n):
  *                     byte = ptr.null_bitmap[i >> 3]             # <<<<<<<<<<<<<<
@@ -18748,7 +18898,7 @@ static PyObject *__pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVec
 */
         __pyx_v_byte = (__pyx_v_ptr->null_bitmap[(__pyx_v_i >> 3)]);
 
-        /* "third_party/mabel/draken/vectors/integer_vector.pyx":128
+        /* "third_party/mabel/draken/vectors/integer_vector.pyx":138
  *                 for i in range(n):
  *                     byte = ptr.null_bitmap[i >> 3]
  *                     out.append(d8[i] if (byte >> (i & 7)) & 1 else None)             # <<<<<<<<<<<<<<
@@ -18757,7 +18907,7 @@ static PyObject *__pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVec
 */
         __pyx_t_7 = (((__pyx_v_byte >> (__pyx_v_i & 7)) & 1) != 0);
         if (__pyx_t_7) {
-          __pyx_t_2 = __Pyx_PyLong_From_int8_t((__pyx_v_d8[__pyx_v_i])); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 128, __pyx_L1_error)
+          __pyx_t_2 = __Pyx_PyLong_From_int8_t((__pyx_v_d8[__pyx_v_i])); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 138, __pyx_L1_error)
           __Pyx_GOTREF(__pyx_t_2);
           __pyx_t_1 = __pyx_t_2;
           __pyx_t_2 = 0;
@@ -18765,13 +18915,13 @@ static PyObject *__pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVec
           __Pyx_INCREF(Py_None);
           __pyx_t_1 = Py_None;
         }
-        __pyx_t_11 = __Pyx_PyList_Append(__pyx_v_out, __pyx_t_1); if (unlikely(__pyx_t_11 == ((int)-1))) __PYX_ERR(0, 128, __pyx_L1_error)
+        __pyx_t_11 = __Pyx_PyList_Append(__pyx_v_out, __pyx_t_1); if (unlikely(__pyx_t_11 == ((int)-1))) __PYX_ERR(0, 138, __pyx_L1_error)
         __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
       }
     }
     __pyx_L3:;
 
-    /* "third_party/mabel/draken/vectors/integer_vector.pyx":120
+    /* "third_party/mabel/draken/vectors/integer_vector.pyx":130
  *         cdef int32_t* d32
  *         cdef list out = []
  *         if ptr.itemsize == 1:             # <<<<<<<<<<<<<<
@@ -18781,7 +18931,7 @@ static PyObject *__pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVec
     break;
     case 2:
 
-    /* "third_party/mabel/draken/vectors/integer_vector.pyx":130
+    /* "third_party/mabel/draken/vectors/integer_vector.pyx":140
  *                     out.append(d8[i] if (byte >> (i & 7)) & 1 else None)
  *         elif ptr.itemsize == 2:
  *             d16 = <int16_t*>ptr.data             # <<<<<<<<<<<<<<
@@ -18790,7 +18940,7 @@ static PyObject *__pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVec
 */
     __pyx_v_d16 = ((int16_t *)__pyx_v_ptr->data);
 
-    /* "third_party/mabel/draken/vectors/integer_vector.pyx":131
+    /* "third_party/mabel/draken/vectors/integer_vector.pyx":141
  *         elif ptr.itemsize == 2:
  *             d16 = <int16_t*>ptr.data
  *             if ptr.null_bitmap == NULL:             # <<<<<<<<<<<<<<
@@ -18800,7 +18950,7 @@ static PyObject *__pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVec
     __pyx_t_7 = (__pyx_v_ptr->null_bitmap == NULL);
     if (__pyx_t_7) {
 
-      /* "third_party/mabel/draken/vectors/integer_vector.pyx":132
+      /* "third_party/mabel/draken/vectors/integer_vector.pyx":142
  *             d16 = <int16_t*>ptr.data
  *             if ptr.null_bitmap == NULL:
  *                 for i in range(n):             # <<<<<<<<<<<<<<
@@ -18812,20 +18962,20 @@ static PyObject *__pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVec
       for (__pyx_t_10 = 0; __pyx_t_10 < __pyx_t_9; __pyx_t_10+=1) {
         __pyx_v_i = __pyx_t_10;
 
-        /* "third_party/mabel/draken/vectors/integer_vector.pyx":133
+        /* "third_party/mabel/draken/vectors/integer_vector.pyx":143
  *             if ptr.null_bitmap == NULL:
  *                 for i in range(n):
  *                     out.append(d16[i])             # <<<<<<<<<<<<<<
  *             else:
  *                 for i in range(n):
 */
-        __pyx_t_1 = __Pyx_PyLong_From_int16_t((__pyx_v_d16[__pyx_v_i])); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 133, __pyx_L1_error)
+        __pyx_t_1 = __Pyx_PyLong_From_int16_t((__pyx_v_d16[__pyx_v_i])); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 143, __pyx_L1_error)
         __Pyx_GOTREF(__pyx_t_1);
-        __pyx_t_11 = __Pyx_PyList_Append(__pyx_v_out, __pyx_t_1); if (unlikely(__pyx_t_11 == ((int)-1))) __PYX_ERR(0, 133, __pyx_L1_error)
+        __pyx_t_11 = __Pyx_PyList_Append(__pyx_v_out, __pyx_t_1); if (unlikely(__pyx_t_11 == ((int)-1))) __PYX_ERR(0, 143, __pyx_L1_error)
         __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
       }
 
-      /* "third_party/mabel/draken/vectors/integer_vector.pyx":131
+      /* "third_party/mabel/draken/vectors/integer_vector.pyx":141
  *         elif ptr.itemsize == 2:
  *             d16 = <int16_t*>ptr.data
  *             if ptr.null_bitmap == NULL:             # <<<<<<<<<<<<<<
@@ -18835,7 +18985,7 @@ static PyObject *__pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVec
       goto __pyx_L8;
     }
 
-    /* "third_party/mabel/draken/vectors/integer_vector.pyx":135
+    /* "third_party/mabel/draken/vectors/integer_vector.pyx":145
  *                     out.append(d16[i])
  *             else:
  *                 for i in range(n):             # <<<<<<<<<<<<<<
@@ -18848,7 +18998,7 @@ static PyObject *__pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVec
       for (__pyx_t_10 = 0; __pyx_t_10 < __pyx_t_9; __pyx_t_10+=1) {
         __pyx_v_i = __pyx_t_10;
 
-        /* "third_party/mabel/draken/vectors/integer_vector.pyx":136
+        /* "third_party/mabel/draken/vectors/integer_vector.pyx":146
  *             else:
  *                 for i in range(n):
  *                     byte = ptr.null_bitmap[i >> 3]             # <<<<<<<<<<<<<<
@@ -18857,7 +19007,7 @@ static PyObject *__pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVec
 */
         __pyx_v_byte = (__pyx_v_ptr->null_bitmap[(__pyx_v_i >> 3)]);
 
-        /* "third_party/mabel/draken/vectors/integer_vector.pyx":137
+        /* "third_party/mabel/draken/vectors/integer_vector.pyx":147
  *                 for i in range(n):
  *                     byte = ptr.null_bitmap[i >> 3]
  *                     out.append(d16[i] if (byte >> (i & 7)) & 1 else None)             # <<<<<<<<<<<<<<
@@ -18866,7 +19016,7 @@ static PyObject *__pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVec
 */
         __pyx_t_7 = (((__pyx_v_byte >> (__pyx_v_i & 7)) & 1) != 0);
         if (__pyx_t_7) {
-          __pyx_t_2 = __Pyx_PyLong_From_int16_t((__pyx_v_d16[__pyx_v_i])); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 137, __pyx_L1_error)
+          __pyx_t_2 = __Pyx_PyLong_From_int16_t((__pyx_v_d16[__pyx_v_i])); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 147, __pyx_L1_error)
           __Pyx_GOTREF(__pyx_t_2);
           __pyx_t_1 = __pyx_t_2;
           __pyx_t_2 = 0;
@@ -18874,13 +19024,13 @@ static PyObject *__pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVec
           __Pyx_INCREF(Py_None);
           __pyx_t_1 = Py_None;
         }
-        __pyx_t_11 = __Pyx_PyList_Append(__pyx_v_out, __pyx_t_1); if (unlikely(__pyx_t_11 == ((int)-1))) __PYX_ERR(0, 137, __pyx_L1_error)
+        __pyx_t_11 = __Pyx_PyList_Append(__pyx_v_out, __pyx_t_1); if (unlikely(__pyx_t_11 == ((int)-1))) __PYX_ERR(0, 147, __pyx_L1_error)
         __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
       }
     }
     __pyx_L8:;
 
-    /* "third_party/mabel/draken/vectors/integer_vector.pyx":129
+    /* "third_party/mabel/draken/vectors/integer_vector.pyx":139
  *                     byte = ptr.null_bitmap[i >> 3]
  *                     out.append(d8[i] if (byte >> (i & 7)) & 1 else None)
  *         elif ptr.itemsize == 2:             # <<<<<<<<<<<<<<
@@ -18890,7 +19040,7 @@ static PyObject *__pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVec
     break;
     default:
 
-    /* "third_party/mabel/draken/vectors/integer_vector.pyx":139
+    /* "third_party/mabel/draken/vectors/integer_vector.pyx":149
  *                     out.append(d16[i] if (byte >> (i & 7)) & 1 else None)
  *         else:
  *             d32 = <int32_t*>ptr.data             # <<<<<<<<<<<<<<
@@ -18899,7 +19049,7 @@ static PyObject *__pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVec
 */
     __pyx_v_d32 = ((int32_t *)__pyx_v_ptr->data);
 
-    /* "third_party/mabel/draken/vectors/integer_vector.pyx":140
+    /* "third_party/mabel/draken/vectors/integer_vector.pyx":150
  *         else:
  *             d32 = <int32_t*>ptr.data
  *             if ptr.null_bitmap == NULL:             # <<<<<<<<<<<<<<
@@ -18909,7 +19059,7 @@ static PyObject *__pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVec
     __pyx_t_7 = (__pyx_v_ptr->null_bitmap == NULL);
     if (__pyx_t_7) {
 
-      /* "third_party/mabel/draken/vectors/integer_vector.pyx":141
+      /* "third_party/mabel/draken/vectors/integer_vector.pyx":151
  *             d32 = <int32_t*>ptr.data
  *             if ptr.null_bitmap == NULL:
  *                 for i in range(n):             # <<<<<<<<<<<<<<
@@ -18921,20 +19071,20 @@ static PyObject *__pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVec
       for (__pyx_t_10 = 0; __pyx_t_10 < __pyx_t_9; __pyx_t_10+=1) {
         __pyx_v_i = __pyx_t_10;
 
-        /* "third_party/mabel/draken/vectors/integer_vector.pyx":142
+        /* "third_party/mabel/draken/vectors/integer_vector.pyx":152
  *             if ptr.null_bitmap == NULL:
  *                 for i in range(n):
  *                     out.append(d32[i])             # <<<<<<<<<<<<<<
  *             else:
  *                 for i in range(n):
 */
-        __pyx_t_1 = __Pyx_PyLong_From_int32_t((__pyx_v_d32[__pyx_v_i])); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 142, __pyx_L1_error)
+        __pyx_t_1 = __Pyx_PyLong_From_int32_t((__pyx_v_d32[__pyx_v_i])); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 152, __pyx_L1_error)
         __Pyx_GOTREF(__pyx_t_1);
-        __pyx_t_11 = __Pyx_PyList_Append(__pyx_v_out, __pyx_t_1); if (unlikely(__pyx_t_11 == ((int)-1))) __PYX_ERR(0, 142, __pyx_L1_error)
+        __pyx_t_11 = __Pyx_PyList_Append(__pyx_v_out, __pyx_t_1); if (unlikely(__pyx_t_11 == ((int)-1))) __PYX_ERR(0, 152, __pyx_L1_error)
         __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
       }
 
-      /* "third_party/mabel/draken/vectors/integer_vector.pyx":140
+      /* "third_party/mabel/draken/vectors/integer_vector.pyx":150
  *         else:
  *             d32 = <int32_t*>ptr.data
  *             if ptr.null_bitmap == NULL:             # <<<<<<<<<<<<<<
@@ -18944,7 +19094,7 @@ static PyObject *__pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVec
       goto __pyx_L13;
     }
 
-    /* "third_party/mabel/draken/vectors/integer_vector.pyx":144
+    /* "third_party/mabel/draken/vectors/integer_vector.pyx":154
  *                     out.append(d32[i])
  *             else:
  *                 for i in range(n):             # <<<<<<<<<<<<<<
@@ -18957,7 +19107,7 @@ static PyObject *__pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVec
       for (__pyx_t_10 = 0; __pyx_t_10 < __pyx_t_9; __pyx_t_10+=1) {
         __pyx_v_i = __pyx_t_10;
 
-        /* "third_party/mabel/draken/vectors/integer_vector.pyx":145
+        /* "third_party/mabel/draken/vectors/integer_vector.pyx":155
  *             else:
  *                 for i in range(n):
  *                     byte = ptr.null_bitmap[i >> 3]             # <<<<<<<<<<<<<<
@@ -18966,7 +19116,7 @@ static PyObject *__pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVec
 */
         __pyx_v_byte = (__pyx_v_ptr->null_bitmap[(__pyx_v_i >> 3)]);
 
-        /* "third_party/mabel/draken/vectors/integer_vector.pyx":146
+        /* "third_party/mabel/draken/vectors/integer_vector.pyx":156
  *                 for i in range(n):
  *                     byte = ptr.null_bitmap[i >> 3]
  *                     out.append(d32[i] if (byte >> (i & 7)) & 1 else None)             # <<<<<<<<<<<<<<
@@ -18975,7 +19125,7 @@ static PyObject *__pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVec
 */
         __pyx_t_7 = (((__pyx_v_byte >> (__pyx_v_i & 7)) & 1) != 0);
         if (__pyx_t_7) {
-          __pyx_t_2 = __Pyx_PyLong_From_int32_t((__pyx_v_d32[__pyx_v_i])); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 146, __pyx_L1_error)
+          __pyx_t_2 = __Pyx_PyLong_From_int32_t((__pyx_v_d32[__pyx_v_i])); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 156, __pyx_L1_error)
           __Pyx_GOTREF(__pyx_t_2);
           __pyx_t_1 = __pyx_t_2;
           __pyx_t_2 = 0;
@@ -18983,7 +19133,7 @@ static PyObject *__pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVec
           __Pyx_INCREF(Py_None);
           __pyx_t_1 = Py_None;
         }
-        __pyx_t_11 = __Pyx_PyList_Append(__pyx_v_out, __pyx_t_1); if (unlikely(__pyx_t_11 == ((int)-1))) __PYX_ERR(0, 146, __pyx_L1_error)
+        __pyx_t_11 = __Pyx_PyList_Append(__pyx_v_out, __pyx_t_1); if (unlikely(__pyx_t_11 == ((int)-1))) __PYX_ERR(0, 156, __pyx_L1_error)
         __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
       }
     }
@@ -18991,7 +19141,7 @@ static PyObject *__pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVec
     break;
   }
 
-  /* "third_party/mabel/draken/vectors/integer_vector.pyx":147
+  /* "third_party/mabel/draken/vectors/integer_vector.pyx":157
  *                     byte = ptr.null_bitmap[i >> 3]
  *                     out.append(d32[i] if (byte >> (i & 7)) & 1 else None)
  *         return out             # <<<<<<<<<<<<<<
@@ -19003,7 +19153,7 @@ static PyObject *__pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVec
   __pyx_r = __pyx_v_out;
   goto __pyx_L0;
 
-  /* "third_party/mabel/draken/vectors/integer_vector.pyx":112
+  /* "third_party/mabel/draken/vectors/integer_vector.pyx":122
  *         return pa.Array.from_buffers(pa_type, buf_length(self.ptr), buffers)
  * 
  *     cpdef list to_pylist(self):             # <<<<<<<<<<<<<<
@@ -19077,7 +19227,7 @@ static PyObject *__pyx_pf_7opteryx_6draken_7vectors_14integer_vector_13IntegerVe
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("to_pylist", 0);
   __Pyx_XDECREF(__pyx_r);
-  __pyx_t_1 = __pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_to_pylist(__pyx_v_self, 1); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 112, __pyx_L1_error)
+  __pyx_t_1 = __pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_to_pylist(__pyx_v_self, 1); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 122, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
   __pyx_r = __pyx_t_1;
   __pyx_t_1 = 0;
@@ -19094,7 +19244,7 @@ static PyObject *__pyx_pf_7opteryx_6draken_7vectors_14integer_vector_13IntegerVe
   return __pyx_r;
 }
 
-/* "third_party/mabel/draken/vectors/integer_vector.pyx":149
+/* "third_party/mabel/draken/vectors/integer_vector.pyx":159
  *         return out
  * 
  *     cdef void hash_into(             # <<<<<<<<<<<<<<
@@ -19142,7 +19292,7 @@ static void __pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_h
     }
   }
 
-  /* "third_party/mabel/draken/vectors/integer_vector.pyx":154
+  /* "third_party/mabel/draken/vectors/integer_vector.pyx":164
  *         Py_ssize_t offset=0,
  *     ) except *:
  *         cdef DrakenFixedBuffer* ptr = self.ptr             # <<<<<<<<<<<<<<
@@ -19152,7 +19302,7 @@ static void __pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_h
   __pyx_t_1 = __pyx_v_self->ptr;
   __pyx_v_ptr = __pyx_t_1;
 
-  /* "third_party/mabel/draken/vectors/integer_vector.pyx":155
+  /* "third_party/mabel/draken/vectors/integer_vector.pyx":165
  *     ) except *:
  *         cdef DrakenFixedBuffer* ptr = self.ptr
  *         cdef Py_ssize_t n = ptr.length             # <<<<<<<<<<<<<<
@@ -19162,7 +19312,7 @@ static void __pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_h
   __pyx_t_2 = __pyx_v_ptr->length;
   __pyx_v_n = __pyx_t_2;
 
-  /* "third_party/mabel/draken/vectors/integer_vector.pyx":156
+  /* "third_party/mabel/draken/vectors/integer_vector.pyx":166
  *         cdef DrakenFixedBuffer* ptr = self.ptr
  *         cdef Py_ssize_t n = ptr.length
  *         cdef uint8_t* null_bitmap = ptr.null_bitmap             # <<<<<<<<<<<<<<
@@ -19172,7 +19322,7 @@ static void __pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_h
   __pyx_t_3 = __pyx_v_ptr->null_bitmap;
   __pyx_v_null_bitmap = __pyx_t_3;
 
-  /* "third_party/mabel/draken/vectors/integer_vector.pyx":157
+  /* "third_party/mabel/draken/vectors/integer_vector.pyx":167
  *         cdef Py_ssize_t n = ptr.length
  *         cdef uint8_t* null_bitmap = ptr.null_bitmap
  *         cdef bint has_nulls = null_bitmap != NULL             # <<<<<<<<<<<<<<
@@ -19181,7 +19331,7 @@ static void __pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_h
 */
   __pyx_v_has_nulls = (__pyx_v_null_bitmap != NULL);
 
-  /* "third_party/mabel/draken/vectors/integer_vector.pyx":166
+  /* "third_party/mabel/draken/vectors/integer_vector.pyx":176
  *         cdef int32_t* d32
  *         cdef uint64_t[INTEGER_HASH_CHUNK] scratch
  *         cdef uint64_t* scratch_ptr = <uint64_t*> scratch             # <<<<<<<<<<<<<<
@@ -19190,7 +19340,7 @@ static void __pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_h
 */
   __pyx_v_scratch_ptr = ((uint64_t *)__pyx_v_scratch);
 
-  /* "third_party/mabel/draken/vectors/integer_vector.pyx":168
+  /* "third_party/mabel/draken/vectors/integer_vector.pyx":178
  *         cdef uint64_t* scratch_ptr = <uint64_t*> scratch
  * 
  *         if n == 0:             # <<<<<<<<<<<<<<
@@ -19200,7 +19350,7 @@ static void __pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_h
   __pyx_t_4 = (__pyx_v_n == 0);
   if (__pyx_t_4) {
 
-    /* "third_party/mabel/draken/vectors/integer_vector.pyx":169
+    /* "third_party/mabel/draken/vectors/integer_vector.pyx":179
  * 
  *         if n == 0:
  *             return             # <<<<<<<<<<<<<<
@@ -19209,7 +19359,7 @@ static void __pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_h
 */
     goto __pyx_L0;
 
-    /* "third_party/mabel/draken/vectors/integer_vector.pyx":168
+    /* "third_party/mabel/draken/vectors/integer_vector.pyx":178
  *         cdef uint64_t* scratch_ptr = <uint64_t*> scratch
  * 
  *         if n == 0:             # <<<<<<<<<<<<<<
@@ -19218,7 +19368,7 @@ static void __pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_h
 */
   }
 
-  /* "third_party/mabel/draken/vectors/integer_vector.pyx":170
+  /* "third_party/mabel/draken/vectors/integer_vector.pyx":180
  *         if n == 0:
  *             return
  *         if offset < 0 or offset + n > out_buf.shape[0]:             # <<<<<<<<<<<<<<
@@ -19236,7 +19386,7 @@ static void __pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_h
   __pyx_L5_bool_binop_done:;
   if (unlikely(__pyx_t_4)) {
 
-    /* "third_party/mabel/draken/vectors/integer_vector.pyx":171
+    /* "third_party/mabel/draken/vectors/integer_vector.pyx":181
  *             return
  *         if offset < 0 or offset + n > out_buf.shape[0]:
  *             raise ValueError("IntegerVector.hash_into: output buffer too small")             # <<<<<<<<<<<<<<
@@ -19249,14 +19399,14 @@ static void __pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_h
       PyObject *__pyx_callargs[2] = {__pyx_t_7, __pyx_mstate_global->__pyx_kp_u_IntegerVector_hash_into_output_b};
       __pyx_t_6 = __Pyx_PyObject_FastCall((PyObject*)(((PyTypeObject*)PyExc_ValueError)), __pyx_callargs+__pyx_t_2, (2-__pyx_t_2) | (__pyx_t_2*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
       __Pyx_XDECREF(__pyx_t_7); __pyx_t_7 = 0;
-      if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 171, __pyx_L1_error)
+      if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 181, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_6);
     }
     __Pyx_Raise(__pyx_t_6, 0, 0, 0);
     __Pyx_DECREF(__pyx_t_6); __pyx_t_6 = 0;
-    __PYX_ERR(0, 171, __pyx_L1_error)
+    __PYX_ERR(0, 181, __pyx_L1_error)
 
-    /* "third_party/mabel/draken/vectors/integer_vector.pyx":170
+    /* "third_party/mabel/draken/vectors/integer_vector.pyx":180
  *         if n == 0:
  *             return
  *         if offset < 0 or offset + n > out_buf.shape[0]:             # <<<<<<<<<<<<<<
@@ -19265,7 +19415,7 @@ static void __pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_h
 */
   }
 
-  /* "third_party/mabel/draken/vectors/integer_vector.pyx":173
+  /* "third_party/mabel/draken/vectors/integer_vector.pyx":183
  *             raise ValueError("IntegerVector.hash_into: output buffer too small")
  * 
  *         dst = &out_buf[0] + offset             # <<<<<<<<<<<<<<
@@ -19275,7 +19425,7 @@ static void __pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_h
   __pyx_t_8 = 0;
   __pyx_v_dst = ((&(*((uint64_t *) ( /* dim=0 */ ((char *) (((uint64_t *) __pyx_v_out_buf.data) + __pyx_t_8)) )))) + __pyx_v_offset);
 
-  /* "third_party/mabel/draken/vectors/integer_vector.pyx":175
+  /* "third_party/mabel/draken/vectors/integer_vector.pyx":185
  *         dst = &out_buf[0] + offset
  * 
  *         if ptr.itemsize == 1:             # <<<<<<<<<<<<<<
@@ -19285,7 +19435,7 @@ static void __pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_h
   switch (__pyx_v_ptr->itemsize) {
     case 1:
 
-    /* "third_party/mabel/draken/vectors/integer_vector.pyx":176
+    /* "third_party/mabel/draken/vectors/integer_vector.pyx":186
  * 
  *         if ptr.itemsize == 1:
  *             d8 = <int8_t*>ptr.data             # <<<<<<<<<<<<<<
@@ -19294,7 +19444,7 @@ static void __pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_h
 */
     __pyx_v_d8 = ((int8_t *)__pyx_v_ptr->data);
 
-    /* "third_party/mabel/draken/vectors/integer_vector.pyx":177
+    /* "third_party/mabel/draken/vectors/integer_vector.pyx":187
  *         if ptr.itemsize == 1:
  *             d8 = <int8_t*>ptr.data
  *             if not has_nulls:             # <<<<<<<<<<<<<<
@@ -19304,7 +19454,7 @@ static void __pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_h
     __pyx_t_4 = (!__pyx_v_has_nulls);
     if (__pyx_t_4) {
 
-      /* "third_party/mabel/draken/vectors/integer_vector.pyx":178
+      /* "third_party/mabel/draken/vectors/integer_vector.pyx":188
  *             d8 = <int8_t*>ptr.data
  *             if not has_nulls:
  *                 i = 0             # <<<<<<<<<<<<<<
@@ -19313,7 +19463,7 @@ static void __pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_h
 */
       __pyx_v_i = 0;
 
-      /* "third_party/mabel/draken/vectors/integer_vector.pyx":179
+      /* "third_party/mabel/draken/vectors/integer_vector.pyx":189
  *             if not has_nulls:
  *                 i = 0
  *                 while i < n:             # <<<<<<<<<<<<<<
@@ -19324,7 +19474,7 @@ static void __pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_h
         __pyx_t_4 = (__pyx_v_i < __pyx_v_n);
         if (!__pyx_t_4) break;
 
-        /* "third_party/mabel/draken/vectors/integer_vector.pyx":180
+        /* "third_party/mabel/draken/vectors/integer_vector.pyx":190
  *                 i = 0
  *                 while i < n:
  *                     block = n - i             # <<<<<<<<<<<<<<
@@ -19333,7 +19483,7 @@ static void __pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_h
 */
         __pyx_v_block = (__pyx_v_n - __pyx_v_i);
 
-        /* "third_party/mabel/draken/vectors/integer_vector.pyx":181
+        /* "third_party/mabel/draken/vectors/integer_vector.pyx":191
  *                 while i < n:
  *                     block = n - i
  *                     if block > INTEGER_HASH_CHUNK:             # <<<<<<<<<<<<<<
@@ -19343,7 +19493,7 @@ static void __pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_h
         __pyx_t_4 = (__pyx_v_block > 0x400);
         if (__pyx_t_4) {
 
-          /* "third_party/mabel/draken/vectors/integer_vector.pyx":182
+          /* "third_party/mabel/draken/vectors/integer_vector.pyx":192
  *                     block = n - i
  *                     if block > INTEGER_HASH_CHUNK:
  *                         block = INTEGER_HASH_CHUNK             # <<<<<<<<<<<<<<
@@ -19352,7 +19502,7 @@ static void __pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_h
 */
           __pyx_v_block = 0x400;
 
-          /* "third_party/mabel/draken/vectors/integer_vector.pyx":181
+          /* "third_party/mabel/draken/vectors/integer_vector.pyx":191
  *                 while i < n:
  *                     block = n - i
  *                     if block > INTEGER_HASH_CHUNK:             # <<<<<<<<<<<<<<
@@ -19361,7 +19511,7 @@ static void __pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_h
 */
         }
 
-        /* "third_party/mabel/draken/vectors/integer_vector.pyx":183
+        /* "third_party/mabel/draken/vectors/integer_vector.pyx":193
  *                     if block > INTEGER_HASH_CHUNK:
  *                         block = INTEGER_HASH_CHUNK
  *                     for j in range(block):             # <<<<<<<<<<<<<<
@@ -19373,7 +19523,7 @@ static void __pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_h
         for (__pyx_t_11 = 0; __pyx_t_11 < __pyx_t_10; __pyx_t_11+=1) {
           __pyx_v_j = __pyx_t_11;
 
-          /* "third_party/mabel/draken/vectors/integer_vector.pyx":184
+          /* "third_party/mabel/draken/vectors/integer_vector.pyx":194
  *                         block = INTEGER_HASH_CHUNK
  *                     for j in range(block):
  *                         scratch[j] = <uint64_t>(<int64_t>d8[i + j])             # <<<<<<<<<<<<<<
@@ -19383,7 +19533,7 @@ static void __pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_h
           (__pyx_v_scratch[__pyx_v_j]) = ((uint64_t)((int64_t)(__pyx_v_d8[(__pyx_v_i + __pyx_v_j)])));
         }
 
-        /* "third_party/mabel/draken/vectors/integer_vector.pyx":185
+        /* "third_party/mabel/draken/vectors/integer_vector.pyx":195
  *                     for j in range(block):
  *                         scratch[j] = <uint64_t>(<int64_t>d8[i + j])
  *                     simd_mix_hash(dst + i, scratch_ptr, <size_t>block)             # <<<<<<<<<<<<<<
@@ -19392,7 +19542,7 @@ static void __pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_h
 */
         simd_mix_hash((__pyx_v_dst + __pyx_v_i), __pyx_v_scratch_ptr, ((size_t)__pyx_v_block));
 
-        /* "third_party/mabel/draken/vectors/integer_vector.pyx":186
+        /* "third_party/mabel/draken/vectors/integer_vector.pyx":196
  *                         scratch[j] = <uint64_t>(<int64_t>d8[i + j])
  *                     simd_mix_hash(dst + i, scratch_ptr, <size_t>block)
  *                     i += block             # <<<<<<<<<<<<<<
@@ -19402,7 +19552,7 @@ static void __pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_h
         __pyx_v_i = (__pyx_v_i + __pyx_v_block);
       }
 
-      /* "third_party/mabel/draken/vectors/integer_vector.pyx":177
+      /* "third_party/mabel/draken/vectors/integer_vector.pyx":187
  *         if ptr.itemsize == 1:
  *             d8 = <int8_t*>ptr.data
  *             if not has_nulls:             # <<<<<<<<<<<<<<
@@ -19412,7 +19562,7 @@ static void __pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_h
       goto __pyx_L7;
     }
 
-    /* "third_party/mabel/draken/vectors/integer_vector.pyx":188
+    /* "third_party/mabel/draken/vectors/integer_vector.pyx":198
  *                     i += block
  *             else:
  *                 for i in range(n):             # <<<<<<<<<<<<<<
@@ -19425,7 +19575,7 @@ static void __pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_h
       for (__pyx_t_11 = 0; __pyx_t_11 < __pyx_t_10; __pyx_t_11+=1) {
         __pyx_v_i = __pyx_t_11;
 
-        /* "third_party/mabel/draken/vectors/integer_vector.pyx":189
+        /* "third_party/mabel/draken/vectors/integer_vector.pyx":199
  *             else:
  *                 for i in range(n):
  *                     byte = null_bitmap[i >> 3]             # <<<<<<<<<<<<<<
@@ -19434,7 +19584,7 @@ static void __pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_h
 */
         __pyx_v_byte = (__pyx_v_null_bitmap[(__pyx_v_i >> 3)]);
 
-        /* "third_party/mabel/draken/vectors/integer_vector.pyx":190
+        /* "third_party/mabel/draken/vectors/integer_vector.pyx":200
  *                 for i in range(n):
  *                     byte = null_bitmap[i >> 3]
  *                     value = <uint64_t>(<int64_t>d8[i]) if (byte >> (i & 7)) & 1 else NULL_HASH             # <<<<<<<<<<<<<<
@@ -19449,20 +19599,20 @@ static void __pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_h
         }
         __pyx_v_value = __pyx_t_12;
 
-        /* "third_party/mabel/draken/vectors/integer_vector.pyx":191
+        /* "third_party/mabel/draken/vectors/integer_vector.pyx":201
  *                     byte = null_bitmap[i >> 3]
  *                     value = <uint64_t>(<int64_t>d8[i]) if (byte >> (i & 7)) & 1 else NULL_HASH
  *                     dst[i] = mix_hash(dst[i], value)             # <<<<<<<<<<<<<<
  *         elif ptr.itemsize == 2:
  *             d16 = <int16_t*>ptr.data
 */
-        __pyx_t_12 = __pyx_f_7opteryx_6draken_7vectors_6vector_mix_hash((__pyx_v_dst[__pyx_v_i]), __pyx_v_value); if (unlikely(__pyx_t_12 == ((uint64_t)-1LL) && PyErr_Occurred())) __PYX_ERR(0, 191, __pyx_L1_error)
+        __pyx_t_12 = __pyx_f_7opteryx_6draken_7vectors_6vector_mix_hash((__pyx_v_dst[__pyx_v_i]), __pyx_v_value); if (unlikely(__pyx_t_12 == ((uint64_t)-1LL) && PyErr_Occurred())) __PYX_ERR(0, 201, __pyx_L1_error)
         (__pyx_v_dst[__pyx_v_i]) = __pyx_t_12;
       }
     }
     __pyx_L7:;
 
-    /* "third_party/mabel/draken/vectors/integer_vector.pyx":175
+    /* "third_party/mabel/draken/vectors/integer_vector.pyx":185
  *         dst = &out_buf[0] + offset
  * 
  *         if ptr.itemsize == 1:             # <<<<<<<<<<<<<<
@@ -19472,7 +19622,7 @@ static void __pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_h
     break;
     case 2:
 
-    /* "third_party/mabel/draken/vectors/integer_vector.pyx":193
+    /* "third_party/mabel/draken/vectors/integer_vector.pyx":203
  *                     dst[i] = mix_hash(dst[i], value)
  *         elif ptr.itemsize == 2:
  *             d16 = <int16_t*>ptr.data             # <<<<<<<<<<<<<<
@@ -19481,7 +19631,7 @@ static void __pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_h
 */
     __pyx_v_d16 = ((int16_t *)__pyx_v_ptr->data);
 
-    /* "third_party/mabel/draken/vectors/integer_vector.pyx":194
+    /* "third_party/mabel/draken/vectors/integer_vector.pyx":204
  *         elif ptr.itemsize == 2:
  *             d16 = <int16_t*>ptr.data
  *             if not has_nulls:             # <<<<<<<<<<<<<<
@@ -19491,7 +19641,7 @@ static void __pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_h
     __pyx_t_4 = (!__pyx_v_has_nulls);
     if (__pyx_t_4) {
 
-      /* "third_party/mabel/draken/vectors/integer_vector.pyx":195
+      /* "third_party/mabel/draken/vectors/integer_vector.pyx":205
  *             d16 = <int16_t*>ptr.data
  *             if not has_nulls:
  *                 i = 0             # <<<<<<<<<<<<<<
@@ -19500,7 +19650,7 @@ static void __pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_h
 */
       __pyx_v_i = 0;
 
-      /* "third_party/mabel/draken/vectors/integer_vector.pyx":196
+      /* "third_party/mabel/draken/vectors/integer_vector.pyx":206
  *             if not has_nulls:
  *                 i = 0
  *                 while i < n:             # <<<<<<<<<<<<<<
@@ -19511,7 +19661,7 @@ static void __pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_h
         __pyx_t_4 = (__pyx_v_i < __pyx_v_n);
         if (!__pyx_t_4) break;
 
-        /* "third_party/mabel/draken/vectors/integer_vector.pyx":197
+        /* "third_party/mabel/draken/vectors/integer_vector.pyx":207
  *                 i = 0
  *                 while i < n:
  *                     block = n - i             # <<<<<<<<<<<<<<
@@ -19520,7 +19670,7 @@ static void __pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_h
 */
         __pyx_v_block = (__pyx_v_n - __pyx_v_i);
 
-        /* "third_party/mabel/draken/vectors/integer_vector.pyx":198
+        /* "third_party/mabel/draken/vectors/integer_vector.pyx":208
  *                 while i < n:
  *                     block = n - i
  *                     if block > INTEGER_HASH_CHUNK:             # <<<<<<<<<<<<<<
@@ -19530,7 +19680,7 @@ static void __pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_h
         __pyx_t_4 = (__pyx_v_block > 0x400);
         if (__pyx_t_4) {
 
-          /* "third_party/mabel/draken/vectors/integer_vector.pyx":199
+          /* "third_party/mabel/draken/vectors/integer_vector.pyx":209
  *                     block = n - i
  *                     if block > INTEGER_HASH_CHUNK:
  *                         block = INTEGER_HASH_CHUNK             # <<<<<<<<<<<<<<
@@ -19539,7 +19689,7 @@ static void __pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_h
 */
           __pyx_v_block = 0x400;
 
-          /* "third_party/mabel/draken/vectors/integer_vector.pyx":198
+          /* "third_party/mabel/draken/vectors/integer_vector.pyx":208
  *                 while i < n:
  *                     block = n - i
  *                     if block > INTEGER_HASH_CHUNK:             # <<<<<<<<<<<<<<
@@ -19548,7 +19698,7 @@ static void __pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_h
 */
         }
 
-        /* "third_party/mabel/draken/vectors/integer_vector.pyx":200
+        /* "third_party/mabel/draken/vectors/integer_vector.pyx":210
  *                     if block > INTEGER_HASH_CHUNK:
  *                         block = INTEGER_HASH_CHUNK
  *                     for j in range(block):             # <<<<<<<<<<<<<<
@@ -19560,7 +19710,7 @@ static void __pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_h
         for (__pyx_t_11 = 0; __pyx_t_11 < __pyx_t_10; __pyx_t_11+=1) {
           __pyx_v_j = __pyx_t_11;
 
-          /* "third_party/mabel/draken/vectors/integer_vector.pyx":201
+          /* "third_party/mabel/draken/vectors/integer_vector.pyx":211
  *                         block = INTEGER_HASH_CHUNK
  *                     for j in range(block):
  *                         scratch[j] = <uint64_t>(<int64_t>d16[i + j])             # <<<<<<<<<<<<<<
@@ -19570,7 +19720,7 @@ static void __pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_h
           (__pyx_v_scratch[__pyx_v_j]) = ((uint64_t)((int64_t)(__pyx_v_d16[(__pyx_v_i + __pyx_v_j)])));
         }
 
-        /* "third_party/mabel/draken/vectors/integer_vector.pyx":202
+        /* "third_party/mabel/draken/vectors/integer_vector.pyx":212
  *                     for j in range(block):
  *                         scratch[j] = <uint64_t>(<int64_t>d16[i + j])
  *                     simd_mix_hash(dst + i, scratch_ptr, <size_t>block)             # <<<<<<<<<<<<<<
@@ -19579,7 +19729,7 @@ static void __pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_h
 */
         simd_mix_hash((__pyx_v_dst + __pyx_v_i), __pyx_v_scratch_ptr, ((size_t)__pyx_v_block));
 
-        /* "third_party/mabel/draken/vectors/integer_vector.pyx":203
+        /* "third_party/mabel/draken/vectors/integer_vector.pyx":213
  *                         scratch[j] = <uint64_t>(<int64_t>d16[i + j])
  *                     simd_mix_hash(dst + i, scratch_ptr, <size_t>block)
  *                     i += block             # <<<<<<<<<<<<<<
@@ -19589,7 +19739,7 @@ static void __pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_h
         __pyx_v_i = (__pyx_v_i + __pyx_v_block);
       }
 
-      /* "third_party/mabel/draken/vectors/integer_vector.pyx":194
+      /* "third_party/mabel/draken/vectors/integer_vector.pyx":204
  *         elif ptr.itemsize == 2:
  *             d16 = <int16_t*>ptr.data
  *             if not has_nulls:             # <<<<<<<<<<<<<<
@@ -19599,7 +19749,7 @@ static void __pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_h
       goto __pyx_L15;
     }
 
-    /* "third_party/mabel/draken/vectors/integer_vector.pyx":205
+    /* "third_party/mabel/draken/vectors/integer_vector.pyx":215
  *                     i += block
  *             else:
  *                 for i in range(n):             # <<<<<<<<<<<<<<
@@ -19612,7 +19762,7 @@ static void __pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_h
       for (__pyx_t_11 = 0; __pyx_t_11 < __pyx_t_10; __pyx_t_11+=1) {
         __pyx_v_i = __pyx_t_11;
 
-        /* "third_party/mabel/draken/vectors/integer_vector.pyx":206
+        /* "third_party/mabel/draken/vectors/integer_vector.pyx":216
  *             else:
  *                 for i in range(n):
  *                     byte = null_bitmap[i >> 3]             # <<<<<<<<<<<<<<
@@ -19621,7 +19771,7 @@ static void __pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_h
 */
         __pyx_v_byte = (__pyx_v_null_bitmap[(__pyx_v_i >> 3)]);
 
-        /* "third_party/mabel/draken/vectors/integer_vector.pyx":207
+        /* "third_party/mabel/draken/vectors/integer_vector.pyx":217
  *                 for i in range(n):
  *                     byte = null_bitmap[i >> 3]
  *                     value = <uint64_t>(<int64_t>d16[i]) if (byte >> (i & 7)) & 1 else NULL_HASH             # <<<<<<<<<<<<<<
@@ -19636,20 +19786,20 @@ static void __pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_h
         }
         __pyx_v_value = __pyx_t_12;
 
-        /* "third_party/mabel/draken/vectors/integer_vector.pyx":208
+        /* "third_party/mabel/draken/vectors/integer_vector.pyx":218
  *                     byte = null_bitmap[i >> 3]
  *                     value = <uint64_t>(<int64_t>d16[i]) if (byte >> (i & 7)) & 1 else NULL_HASH
  *                     dst[i] = mix_hash(dst[i], value)             # <<<<<<<<<<<<<<
  *         else:  # itemsize == 4
  *             d32 = <int32_t*>ptr.data
 */
-        __pyx_t_12 = __pyx_f_7opteryx_6draken_7vectors_6vector_mix_hash((__pyx_v_dst[__pyx_v_i]), __pyx_v_value); if (unlikely(__pyx_t_12 == ((uint64_t)-1LL) && PyErr_Occurred())) __PYX_ERR(0, 208, __pyx_L1_error)
+        __pyx_t_12 = __pyx_f_7opteryx_6draken_7vectors_6vector_mix_hash((__pyx_v_dst[__pyx_v_i]), __pyx_v_value); if (unlikely(__pyx_t_12 == ((uint64_t)-1LL) && PyErr_Occurred())) __PYX_ERR(0, 218, __pyx_L1_error)
         (__pyx_v_dst[__pyx_v_i]) = __pyx_t_12;
       }
     }
     __pyx_L15:;
 
-    /* "third_party/mabel/draken/vectors/integer_vector.pyx":192
+    /* "third_party/mabel/draken/vectors/integer_vector.pyx":202
  *                     value = <uint64_t>(<int64_t>d8[i]) if (byte >> (i & 7)) & 1 else NULL_HASH
  *                     dst[i] = mix_hash(dst[i], value)
  *         elif ptr.itemsize == 2:             # <<<<<<<<<<<<<<
@@ -19659,7 +19809,7 @@ static void __pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_h
     break;
     default:
 
-    /* "third_party/mabel/draken/vectors/integer_vector.pyx":210
+    /* "third_party/mabel/draken/vectors/integer_vector.pyx":220
  *                     dst[i] = mix_hash(dst[i], value)
  *         else:  # itemsize == 4
  *             d32 = <int32_t*>ptr.data             # <<<<<<<<<<<<<<
@@ -19668,7 +19818,7 @@ static void __pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_h
 */
     __pyx_v_d32 = ((int32_t *)__pyx_v_ptr->data);
 
-    /* "third_party/mabel/draken/vectors/integer_vector.pyx":211
+    /* "third_party/mabel/draken/vectors/integer_vector.pyx":221
  *         else:  # itemsize == 4
  *             d32 = <int32_t*>ptr.data
  *             if not has_nulls:             # <<<<<<<<<<<<<<
@@ -19678,7 +19828,7 @@ static void __pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_h
     __pyx_t_4 = (!__pyx_v_has_nulls);
     if (__pyx_t_4) {
 
-      /* "third_party/mabel/draken/vectors/integer_vector.pyx":212
+      /* "third_party/mabel/draken/vectors/integer_vector.pyx":222
  *             d32 = <int32_t*>ptr.data
  *             if not has_nulls:
  *                 i = 0             # <<<<<<<<<<<<<<
@@ -19687,7 +19837,7 @@ static void __pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_h
 */
       __pyx_v_i = 0;
 
-      /* "third_party/mabel/draken/vectors/integer_vector.pyx":213
+      /* "third_party/mabel/draken/vectors/integer_vector.pyx":223
  *             if not has_nulls:
  *                 i = 0
  *                 while i < n:             # <<<<<<<<<<<<<<
@@ -19698,7 +19848,7 @@ static void __pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_h
         __pyx_t_4 = (__pyx_v_i < __pyx_v_n);
         if (!__pyx_t_4) break;
 
-        /* "third_party/mabel/draken/vectors/integer_vector.pyx":214
+        /* "third_party/mabel/draken/vectors/integer_vector.pyx":224
  *                 i = 0
  *                 while i < n:
  *                     block = n - i             # <<<<<<<<<<<<<<
@@ -19707,7 +19857,7 @@ static void __pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_h
 */
         __pyx_v_block = (__pyx_v_n - __pyx_v_i);
 
-        /* "third_party/mabel/draken/vectors/integer_vector.pyx":215
+        /* "third_party/mabel/draken/vectors/integer_vector.pyx":225
  *                 while i < n:
  *                     block = n - i
  *                     if block > INTEGER_HASH_CHUNK:             # <<<<<<<<<<<<<<
@@ -19717,7 +19867,7 @@ static void __pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_h
         __pyx_t_4 = (__pyx_v_block > 0x400);
         if (__pyx_t_4) {
 
-          /* "third_party/mabel/draken/vectors/integer_vector.pyx":216
+          /* "third_party/mabel/draken/vectors/integer_vector.pyx":226
  *                     block = n - i
  *                     if block > INTEGER_HASH_CHUNK:
  *                         block = INTEGER_HASH_CHUNK             # <<<<<<<<<<<<<<
@@ -19726,7 +19876,7 @@ static void __pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_h
 */
           __pyx_v_block = 0x400;
 
-          /* "third_party/mabel/draken/vectors/integer_vector.pyx":215
+          /* "third_party/mabel/draken/vectors/integer_vector.pyx":225
  *                 while i < n:
  *                     block = n - i
  *                     if block > INTEGER_HASH_CHUNK:             # <<<<<<<<<<<<<<
@@ -19735,7 +19885,7 @@ static void __pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_h
 */
         }
 
-        /* "third_party/mabel/draken/vectors/integer_vector.pyx":217
+        /* "third_party/mabel/draken/vectors/integer_vector.pyx":227
  *                     if block > INTEGER_HASH_CHUNK:
  *                         block = INTEGER_HASH_CHUNK
  *                     for j in range(block):             # <<<<<<<<<<<<<<
@@ -19747,7 +19897,7 @@ static void __pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_h
         for (__pyx_t_11 = 0; __pyx_t_11 < __pyx_t_10; __pyx_t_11+=1) {
           __pyx_v_j = __pyx_t_11;
 
-          /* "third_party/mabel/draken/vectors/integer_vector.pyx":218
+          /* "third_party/mabel/draken/vectors/integer_vector.pyx":228
  *                         block = INTEGER_HASH_CHUNK
  *                     for j in range(block):
  *                         scratch[j] = <uint64_t>(<int64_t>d32[i + j])             # <<<<<<<<<<<<<<
@@ -19757,7 +19907,7 @@ static void __pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_h
           (__pyx_v_scratch[__pyx_v_j]) = ((uint64_t)((int64_t)(__pyx_v_d32[(__pyx_v_i + __pyx_v_j)])));
         }
 
-        /* "third_party/mabel/draken/vectors/integer_vector.pyx":219
+        /* "third_party/mabel/draken/vectors/integer_vector.pyx":229
  *                     for j in range(block):
  *                         scratch[j] = <uint64_t>(<int64_t>d32[i + j])
  *                     simd_mix_hash(dst + i, scratch_ptr, <size_t>block)             # <<<<<<<<<<<<<<
@@ -19766,7 +19916,7 @@ static void __pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_h
 */
         simd_mix_hash((__pyx_v_dst + __pyx_v_i), __pyx_v_scratch_ptr, ((size_t)__pyx_v_block));
 
-        /* "third_party/mabel/draken/vectors/integer_vector.pyx":220
+        /* "third_party/mabel/draken/vectors/integer_vector.pyx":230
  *                         scratch[j] = <uint64_t>(<int64_t>d32[i + j])
  *                     simd_mix_hash(dst + i, scratch_ptr, <size_t>block)
  *                     i += block             # <<<<<<<<<<<<<<
@@ -19776,7 +19926,7 @@ static void __pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_h
         __pyx_v_i = (__pyx_v_i + __pyx_v_block);
       }
 
-      /* "third_party/mabel/draken/vectors/integer_vector.pyx":211
+      /* "third_party/mabel/draken/vectors/integer_vector.pyx":221
  *         else:  # itemsize == 4
  *             d32 = <int32_t*>ptr.data
  *             if not has_nulls:             # <<<<<<<<<<<<<<
@@ -19786,7 +19936,7 @@ static void __pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_h
       goto __pyx_L23;
     }
 
-    /* "third_party/mabel/draken/vectors/integer_vector.pyx":222
+    /* "third_party/mabel/draken/vectors/integer_vector.pyx":232
  *                     i += block
  *             else:
  *                 for i in range(n):             # <<<<<<<<<<<<<<
@@ -19799,7 +19949,7 @@ static void __pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_h
       for (__pyx_t_11 = 0; __pyx_t_11 < __pyx_t_10; __pyx_t_11+=1) {
         __pyx_v_i = __pyx_t_11;
 
-        /* "third_party/mabel/draken/vectors/integer_vector.pyx":223
+        /* "third_party/mabel/draken/vectors/integer_vector.pyx":233
  *             else:
  *                 for i in range(n):
  *                     byte = null_bitmap[i >> 3]             # <<<<<<<<<<<<<<
@@ -19808,7 +19958,7 @@ static void __pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_h
 */
         __pyx_v_byte = (__pyx_v_null_bitmap[(__pyx_v_i >> 3)]);
 
-        /* "third_party/mabel/draken/vectors/integer_vector.pyx":224
+        /* "third_party/mabel/draken/vectors/integer_vector.pyx":234
  *                 for i in range(n):
  *                     byte = null_bitmap[i >> 3]
  *                     value = <uint64_t>(<int64_t>d32[i]) if (byte >> (i & 7)) & 1 else NULL_HASH             # <<<<<<<<<<<<<<
@@ -19823,14 +19973,14 @@ static void __pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_h
         }
         __pyx_v_value = __pyx_t_12;
 
-        /* "third_party/mabel/draken/vectors/integer_vector.pyx":225
+        /* "third_party/mabel/draken/vectors/integer_vector.pyx":235
  *                     byte = null_bitmap[i >> 3]
  *                     value = <uint64_t>(<int64_t>d32[i]) if (byte >> (i & 7)) & 1 else NULL_HASH
  *                     dst[i] = mix_hash(dst[i], value)             # <<<<<<<<<<<<<<
  * 
  *     def __str__(self):
 */
-        __pyx_t_12 = __pyx_f_7opteryx_6draken_7vectors_6vector_mix_hash((__pyx_v_dst[__pyx_v_i]), __pyx_v_value); if (unlikely(__pyx_t_12 == ((uint64_t)-1LL) && PyErr_Occurred())) __PYX_ERR(0, 225, __pyx_L1_error)
+        __pyx_t_12 = __pyx_f_7opteryx_6draken_7vectors_6vector_mix_hash((__pyx_v_dst[__pyx_v_i]), __pyx_v_value); if (unlikely(__pyx_t_12 == ((uint64_t)-1LL) && PyErr_Occurred())) __PYX_ERR(0, 235, __pyx_L1_error)
         (__pyx_v_dst[__pyx_v_i]) = __pyx_t_12;
       }
     }
@@ -19838,7 +19988,7 @@ static void __pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_h
     break;
   }
 
-  /* "third_party/mabel/draken/vectors/integer_vector.pyx":149
+  /* "third_party/mabel/draken/vectors/integer_vector.pyx":159
  *         return out
  * 
  *     cdef void hash_into(             # <<<<<<<<<<<<<<
@@ -19856,7 +20006,7 @@ static void __pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_h
   __Pyx_RefNannyFinishContext();
 }
 
-/* "third_party/mabel/draken/vectors/integer_vector.pyx":227
+/* "third_party/mabel/draken/vectors/integer_vector.pyx":237
  *                     dst[i] = mix_hash(dst[i], value)
  * 
  *     def __str__(self):             # <<<<<<<<<<<<<<
@@ -19902,19 +20052,19 @@ static PyObject *__pyx_pf_7opteryx_6draken_7vectors_14integer_vector_13IntegerVe
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("__str__", 0);
 
-  /* "third_party/mabel/draken/vectors/integer_vector.pyx":228
+  /* "third_party/mabel/draken/vectors/integer_vector.pyx":238
  * 
  *     def __str__(self):
  *         cdef list vals = []             # <<<<<<<<<<<<<<
  *         cdef Py_ssize_t i, k = min(<Py_ssize_t>buf_length(self.ptr), 10)
  *         for i in range(k):
 */
-  __pyx_t_1 = PyList_New(0); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 228, __pyx_L1_error)
+  __pyx_t_1 = PyList_New(0); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 238, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
   __pyx_v_vals = ((PyObject*)__pyx_t_1);
   __pyx_t_1 = 0;
 
-  /* "third_party/mabel/draken/vectors/integer_vector.pyx":229
+  /* "third_party/mabel/draken/vectors/integer_vector.pyx":239
  *     def __str__(self):
  *         cdef list vals = []
  *         cdef Py_ssize_t i, k = min(<Py_ssize_t>buf_length(self.ptr), 10)             # <<<<<<<<<<<<<<
@@ -19922,7 +20072,7 @@ static PyObject *__pyx_pf_7opteryx_6draken_7vectors_14integer_vector_13IntegerVe
  *             vals.append(self[i])
 */
   __pyx_t_2 = 10;
-  __pyx_t_3 = __pyx_f_7opteryx_6draken_4core_12fixed_vector_buf_length(__pyx_v_self->ptr); if (unlikely(__pyx_t_3 == ((size_t)-1L) && PyErr_Occurred())) __PYX_ERR(0, 229, __pyx_L1_error)
+  __pyx_t_3 = __pyx_f_7opteryx_6draken_4core_12fixed_vector_buf_length(__pyx_v_self->ptr); if (unlikely(__pyx_t_3 == ((size_t)-1L) && PyErr_Occurred())) __PYX_ERR(0, 239, __pyx_L1_error)
   __pyx_t_4 = ((Py_ssize_t)__pyx_t_3);
   __pyx_t_6 = (__pyx_t_2 < __pyx_t_4);
   if (__pyx_t_6) {
@@ -19932,7 +20082,7 @@ static PyObject *__pyx_pf_7opteryx_6draken_7vectors_14integer_vector_13IntegerVe
   }
   __pyx_v_k = __pyx_t_5;
 
-  /* "third_party/mabel/draken/vectors/integer_vector.pyx":230
+  /* "third_party/mabel/draken/vectors/integer_vector.pyx":240
  *         cdef list vals = []
  *         cdef Py_ssize_t i, k = min(<Py_ssize_t>buf_length(self.ptr), 10)
  *         for i in range(k):             # <<<<<<<<<<<<<<
@@ -19944,20 +20094,20 @@ static PyObject *__pyx_pf_7opteryx_6draken_7vectors_14integer_vector_13IntegerVe
   for (__pyx_t_7 = 0; __pyx_t_7 < __pyx_t_4; __pyx_t_7+=1) {
     __pyx_v_i = __pyx_t_7;
 
-    /* "third_party/mabel/draken/vectors/integer_vector.pyx":231
+    /* "third_party/mabel/draken/vectors/integer_vector.pyx":241
  *         cdef Py_ssize_t i, k = min(<Py_ssize_t>buf_length(self.ptr), 10)
  *         for i in range(k):
  *             vals.append(self[i])             # <<<<<<<<<<<<<<
  *         return f"<IntegerVector itemsize={buf_itemsize(self.ptr)} len={buf_length(self.ptr)} values={vals}>"
  * 
 */
-    __pyx_t_1 = __Pyx_GetItemInt(((PyObject *)__pyx_v_self), __pyx_v_i, Py_ssize_t, 1, PyLong_FromSsize_t, 0, 0, 0, 1, __Pyx_ReferenceSharing_FunctionArgument); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 231, __pyx_L1_error)
+    __pyx_t_1 = __Pyx_GetItemInt(((PyObject *)__pyx_v_self), __pyx_v_i, Py_ssize_t, 1, PyLong_FromSsize_t, 0, 0, 0, 1, __Pyx_ReferenceSharing_FunctionArgument); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 241, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_1);
-    __pyx_t_8 = __Pyx_PyList_Append(__pyx_v_vals, __pyx_t_1); if (unlikely(__pyx_t_8 == ((int)-1))) __PYX_ERR(0, 231, __pyx_L1_error)
+    __pyx_t_8 = __Pyx_PyList_Append(__pyx_v_vals, __pyx_t_1); if (unlikely(__pyx_t_8 == ((int)-1))) __PYX_ERR(0, 241, __pyx_L1_error)
     __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
   }
 
-  /* "third_party/mabel/draken/vectors/integer_vector.pyx":232
+  /* "third_party/mabel/draken/vectors/integer_vector.pyx":242
  *         for i in range(k):
  *             vals.append(self[i])
  *         return f"<IntegerVector itemsize={buf_itemsize(self.ptr)} len={buf_length(self.ptr)} values={vals}>"             # <<<<<<<<<<<<<<
@@ -19965,13 +20115,13 @@ static PyObject *__pyx_pf_7opteryx_6draken_7vectors_14integer_vector_13IntegerVe
  * 
 */
   __Pyx_XDECREF(__pyx_r);
-  __pyx_t_3 = __pyx_f_7opteryx_6draken_4core_12fixed_vector_buf_itemsize(__pyx_v_self->ptr); if (unlikely(__pyx_t_3 == ((size_t)-1L) && PyErr_Occurred())) __PYX_ERR(0, 232, __pyx_L1_error)
-  __pyx_t_1 = __Pyx_PyUnicode_From_size_t(__pyx_t_3, 0, ' ', 'd'); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 232, __pyx_L1_error)
+  __pyx_t_3 = __pyx_f_7opteryx_6draken_4core_12fixed_vector_buf_itemsize(__pyx_v_self->ptr); if (unlikely(__pyx_t_3 == ((size_t)-1L) && PyErr_Occurred())) __PYX_ERR(0, 242, __pyx_L1_error)
+  __pyx_t_1 = __Pyx_PyUnicode_From_size_t(__pyx_t_3, 0, ' ', 'd'); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 242, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
-  __pyx_t_3 = __pyx_f_7opteryx_6draken_4core_12fixed_vector_buf_length(__pyx_v_self->ptr); if (unlikely(__pyx_t_3 == ((size_t)-1L) && PyErr_Occurred())) __PYX_ERR(0, 232, __pyx_L1_error)
-  __pyx_t_9 = __Pyx_PyUnicode_From_size_t(__pyx_t_3, 0, ' ', 'd'); if (unlikely(!__pyx_t_9)) __PYX_ERR(0, 232, __pyx_L1_error)
+  __pyx_t_3 = __pyx_f_7opteryx_6draken_4core_12fixed_vector_buf_length(__pyx_v_self->ptr); if (unlikely(__pyx_t_3 == ((size_t)-1L) && PyErr_Occurred())) __PYX_ERR(0, 242, __pyx_L1_error)
+  __pyx_t_9 = __Pyx_PyUnicode_From_size_t(__pyx_t_3, 0, ' ', 'd'); if (unlikely(!__pyx_t_9)) __PYX_ERR(0, 242, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_9);
-  __pyx_t_10 = __Pyx_PyObject_FormatSimple(__pyx_v_vals, __pyx_mstate_global->__pyx_empty_unicode); if (unlikely(!__pyx_t_10)) __PYX_ERR(0, 232, __pyx_L1_error)
+  __pyx_t_10 = __Pyx_PyObject_FormatSimple(__pyx_v_vals, __pyx_mstate_global->__pyx_empty_unicode); if (unlikely(!__pyx_t_10)) __PYX_ERR(0, 242, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_10);
   __pyx_t_11[0] = __pyx_mstate_global->__pyx_kp_u_IntegerVector_itemsize;
   __pyx_t_11[1] = __pyx_t_1;
@@ -19981,7 +20131,7 @@ static PyObject *__pyx_pf_7opteryx_6draken_7vectors_14integer_vector_13IntegerVe
   __pyx_t_11[5] = __pyx_t_10;
   __pyx_t_11[6] = __pyx_mstate_global->__pyx_kp_u__3;
   __pyx_t_12 = __Pyx_PyUnicode_Join(__pyx_t_11, 7, 24 + __Pyx_PyUnicode_GET_LENGTH(__pyx_t_1) + 5 + __Pyx_PyUnicode_GET_LENGTH(__pyx_t_9) + 8 + __Pyx_PyUnicode_GET_LENGTH(__pyx_t_10) + 1, 127 | __Pyx_PyUnicode_MAX_CHAR_VALUE(__pyx_t_10));
-  if (unlikely(!__pyx_t_12)) __PYX_ERR(0, 232, __pyx_L1_error)
+  if (unlikely(!__pyx_t_12)) __PYX_ERR(0, 242, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_12);
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
   __Pyx_DECREF(__pyx_t_9); __pyx_t_9 = 0;
@@ -19990,7 +20140,7 @@ static PyObject *__pyx_pf_7opteryx_6draken_7vectors_14integer_vector_13IntegerVe
   __pyx_t_12 = 0;
   goto __pyx_L0;
 
-  /* "third_party/mabel/draken/vectors/integer_vector.pyx":227
+  /* "third_party/mabel/draken/vectors/integer_vector.pyx":237
  *                     dst[i] = mix_hash(dst[i], value)
  * 
  *     def __str__(self):             # <<<<<<<<<<<<<<
@@ -20217,7 +20367,7 @@ static PyObject *__pyx_pf_7opteryx_6draken_7vectors_14integer_vector_13IntegerVe
   return __pyx_r;
 }
 
-/* "third_party/mabel/draken/vectors/integer_vector.pyx":235
+/* "third_party/mabel/draken/vectors/integer_vector.pyx":245
  * 
  * 
  * cdef IntegerVector from_arrow(object array):             # <<<<<<<<<<<<<<
@@ -20259,32 +20409,32 @@ static struct __pyx_obj_7opteryx_6draken_7vectors_14integer_vector_IntegerVector
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("from_arrow", 0);
 
-  /* "third_party/mabel/draken/vectors/integer_vector.pyx":237
+  /* "third_party/mabel/draken/vectors/integer_vector.pyx":247
  * cdef IntegerVector from_arrow(object array):
  *     """Zero-copy wrap of a PyArrow int8/int16/int32 array as an IntegerVector."""
  *     import pyarrow as pa             # <<<<<<<<<<<<<<
  * 
  *     cdef DrakenType dtype
 */
-  __pyx_t_2 = __Pyx_Import(__pyx_mstate_global->__pyx_n_u_pyarrow, 0, 0, NULL, 0); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 237, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_Import(__pyx_mstate_global->__pyx_n_u_pyarrow, 0, 0, NULL, 0); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 247, __pyx_L1_error)
   __pyx_t_1 = __pyx_t_2;
   __Pyx_GOTREF(__pyx_t_1);
   __pyx_v_pa = __pyx_t_1;
   __pyx_t_1 = 0;
 
-  /* "third_party/mabel/draken/vectors/integer_vector.pyx":249
+  /* "third_party/mabel/draken/vectors/integer_vector.pyx":259
  *     cdef uint8_t* src_bitmap
  * 
  *     pa_type = array.type             # <<<<<<<<<<<<<<
  *     if pa_type.equals(pa.int8()):
  *         dtype = DRAKEN_INT8
 */
-  __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_array, __pyx_mstate_global->__pyx_n_u_type); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 249, __pyx_L1_error)
+  __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_array, __pyx_mstate_global->__pyx_n_u_type); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 259, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
   __pyx_v_pa_type = __pyx_t_1;
   __pyx_t_1 = 0;
 
-  /* "third_party/mabel/draken/vectors/integer_vector.pyx":250
+  /* "third_party/mabel/draken/vectors/integer_vector.pyx":260
  * 
  *     pa_type = array.type
  *     if pa_type.equals(pa.int8()):             # <<<<<<<<<<<<<<
@@ -20300,7 +20450,7 @@ static struct __pyx_obj_7opteryx_6draken_7vectors_14integer_vector_IntegerVector
     PyObject *__pyx_callargs[2] = {__pyx_t_5, NULL};
     __pyx_t_4 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_int8, __pyx_callargs+__pyx_t_6, (1-__pyx_t_6) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
     __Pyx_XDECREF(__pyx_t_5); __pyx_t_5 = 0;
-    if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 250, __pyx_L1_error)
+    if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 260, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_4);
   }
   __pyx_t_6 = 0;
@@ -20309,14 +20459,14 @@ static struct __pyx_obj_7opteryx_6draken_7vectors_14integer_vector_IntegerVector
     __pyx_t_1 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_equals, __pyx_callargs+__pyx_t_6, (2-__pyx_t_6) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
     __Pyx_XDECREF(__pyx_t_3); __pyx_t_3 = 0;
     __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
-    if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 250, __pyx_L1_error)
+    if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 260, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_1);
   }
-  __pyx_t_7 = __Pyx_PyObject_IsTrue(__pyx_t_1); if (unlikely((__pyx_t_7 < 0))) __PYX_ERR(0, 250, __pyx_L1_error)
+  __pyx_t_7 = __Pyx_PyObject_IsTrue(__pyx_t_1); if (unlikely((__pyx_t_7 < 0))) __PYX_ERR(0, 260, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
   if (__pyx_t_7) {
 
-    /* "third_party/mabel/draken/vectors/integer_vector.pyx":251
+    /* "third_party/mabel/draken/vectors/integer_vector.pyx":261
  *     pa_type = array.type
  *     if pa_type.equals(pa.int8()):
  *         dtype = DRAKEN_INT8             # <<<<<<<<<<<<<<
@@ -20325,7 +20475,7 @@ static struct __pyx_obj_7opteryx_6draken_7vectors_14integer_vector_IntegerVector
 */
     __pyx_v_dtype = DRAKEN_INT8;
 
-    /* "third_party/mabel/draken/vectors/integer_vector.pyx":252
+    /* "third_party/mabel/draken/vectors/integer_vector.pyx":262
  *     if pa_type.equals(pa.int8()):
  *         dtype = DRAKEN_INT8
  *         itemsize = 1             # <<<<<<<<<<<<<<
@@ -20334,7 +20484,7 @@ static struct __pyx_obj_7opteryx_6draken_7vectors_14integer_vector_IntegerVector
 */
     __pyx_v_itemsize = 1;
 
-    /* "third_party/mabel/draken/vectors/integer_vector.pyx":250
+    /* "third_party/mabel/draken/vectors/integer_vector.pyx":260
  * 
  *     pa_type = array.type
  *     if pa_type.equals(pa.int8()):             # <<<<<<<<<<<<<<
@@ -20344,7 +20494,7 @@ static struct __pyx_obj_7opteryx_6draken_7vectors_14integer_vector_IntegerVector
     goto __pyx_L3;
   }
 
-  /* "third_party/mabel/draken/vectors/integer_vector.pyx":253
+  /* "third_party/mabel/draken/vectors/integer_vector.pyx":263
  *         dtype = DRAKEN_INT8
  *         itemsize = 1
  *     elif pa_type.equals(pa.int16()):             # <<<<<<<<<<<<<<
@@ -20360,7 +20510,7 @@ static struct __pyx_obj_7opteryx_6draken_7vectors_14integer_vector_IntegerVector
     PyObject *__pyx_callargs[2] = {__pyx_t_5, NULL};
     __pyx_t_3 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_int16, __pyx_callargs+__pyx_t_6, (1-__pyx_t_6) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
     __Pyx_XDECREF(__pyx_t_5); __pyx_t_5 = 0;
-    if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 253, __pyx_L1_error)
+    if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 263, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_3);
   }
   __pyx_t_6 = 0;
@@ -20369,14 +20519,14 @@ static struct __pyx_obj_7opteryx_6draken_7vectors_14integer_vector_IntegerVector
     __pyx_t_1 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_equals, __pyx_callargs+__pyx_t_6, (2-__pyx_t_6) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
     __Pyx_XDECREF(__pyx_t_4); __pyx_t_4 = 0;
     __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
-    if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 253, __pyx_L1_error)
+    if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 263, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_1);
   }
-  __pyx_t_7 = __Pyx_PyObject_IsTrue(__pyx_t_1); if (unlikely((__pyx_t_7 < 0))) __PYX_ERR(0, 253, __pyx_L1_error)
+  __pyx_t_7 = __Pyx_PyObject_IsTrue(__pyx_t_1); if (unlikely((__pyx_t_7 < 0))) __PYX_ERR(0, 263, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
   if (__pyx_t_7) {
 
-    /* "third_party/mabel/draken/vectors/integer_vector.pyx":254
+    /* "third_party/mabel/draken/vectors/integer_vector.pyx":264
  *         itemsize = 1
  *     elif pa_type.equals(pa.int16()):
  *         dtype = DRAKEN_INT16             # <<<<<<<<<<<<<<
@@ -20385,7 +20535,7 @@ static struct __pyx_obj_7opteryx_6draken_7vectors_14integer_vector_IntegerVector
 */
     __pyx_v_dtype = DRAKEN_INT16;
 
-    /* "third_party/mabel/draken/vectors/integer_vector.pyx":255
+    /* "third_party/mabel/draken/vectors/integer_vector.pyx":265
  *     elif pa_type.equals(pa.int16()):
  *         dtype = DRAKEN_INT16
  *         itemsize = 2             # <<<<<<<<<<<<<<
@@ -20394,7 +20544,7 @@ static struct __pyx_obj_7opteryx_6draken_7vectors_14integer_vector_IntegerVector
 */
     __pyx_v_itemsize = 2;
 
-    /* "third_party/mabel/draken/vectors/integer_vector.pyx":253
+    /* "third_party/mabel/draken/vectors/integer_vector.pyx":263
  *         dtype = DRAKEN_INT8
  *         itemsize = 1
  *     elif pa_type.equals(pa.int16()):             # <<<<<<<<<<<<<<
@@ -20404,7 +20554,7 @@ static struct __pyx_obj_7opteryx_6draken_7vectors_14integer_vector_IntegerVector
     goto __pyx_L3;
   }
 
-  /* "third_party/mabel/draken/vectors/integer_vector.pyx":257
+  /* "third_party/mabel/draken/vectors/integer_vector.pyx":267
  *         itemsize = 2
  *     else:
  *         dtype = DRAKEN_INT32             # <<<<<<<<<<<<<<
@@ -20414,7 +20564,7 @@ static struct __pyx_obj_7opteryx_6draken_7vectors_14integer_vector_IntegerVector
   /*else*/ {
     __pyx_v_dtype = DRAKEN_INT32;
 
-    /* "third_party/mabel/draken/vectors/integer_vector.pyx":258
+    /* "third_party/mabel/draken/vectors/integer_vector.pyx":268
  *     else:
  *         dtype = DRAKEN_INT32
  *         itemsize = 4             # <<<<<<<<<<<<<<
@@ -20425,7 +20575,7 @@ static struct __pyx_obj_7opteryx_6draken_7vectors_14integer_vector_IntegerVector
   }
   __pyx_L3:;
 
-  /* "third_party/mabel/draken/vectors/integer_vector.pyx":260
+  /* "third_party/mabel/draken/vectors/integer_vector.pyx":270
  *         itemsize = 4
  * 
  *     vec = IntegerVector(dtype, 0, True)             # <<<<<<<<<<<<<<
@@ -20433,7 +20583,7 @@ static struct __pyx_obj_7opteryx_6draken_7vectors_14integer_vector_IntegerVector
  *     if vec.ptr == NULL:
 */
   __pyx_t_3 = NULL;
-  __pyx_t_4 = __Pyx_PyLong_From_DrakenType(__pyx_v_dtype); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 260, __pyx_L1_error)
+  __pyx_t_4 = __Pyx_PyLong_From_DrakenType(__pyx_v_dtype); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 270, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_4);
   __pyx_t_6 = 1;
   {
@@ -20441,13 +20591,13 @@ static struct __pyx_obj_7opteryx_6draken_7vectors_14integer_vector_IntegerVector
     __pyx_t_1 = __Pyx_PyObject_FastCall((PyObject*)__pyx_mstate_global->__pyx_ptype_7opteryx_6draken_7vectors_14integer_vector_IntegerVector, __pyx_callargs+__pyx_t_6, (4-__pyx_t_6) | (__pyx_t_6*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
     __Pyx_XDECREF(__pyx_t_3); __pyx_t_3 = 0;
     __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
-    if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 260, __pyx_L1_error)
+    if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 270, __pyx_L1_error)
     __Pyx_GOTREF((PyObject *)__pyx_t_1);
   }
   __pyx_v_vec = ((struct __pyx_obj_7opteryx_6draken_7vectors_14integer_vector_IntegerVector *)__pyx_t_1);
   __pyx_t_1 = 0;
 
-  /* "third_party/mabel/draken/vectors/integer_vector.pyx":261
+  /* "third_party/mabel/draken/vectors/integer_vector.pyx":271
  * 
  *     vec = IntegerVector(dtype, 0, True)
  *     vec.ptr = <DrakenFixedBuffer*>malloc(sizeof(DrakenFixedBuffer))             # <<<<<<<<<<<<<<
@@ -20456,7 +20606,7 @@ static struct __pyx_obj_7opteryx_6draken_7vectors_14integer_vector_IntegerVector
 */
   __pyx_v_vec->ptr = ((DrakenFixedBuffer *)malloc((sizeof(DrakenFixedBuffer))));
 
-  /* "third_party/mabel/draken/vectors/integer_vector.pyx":262
+  /* "third_party/mabel/draken/vectors/integer_vector.pyx":272
  *     vec = IntegerVector(dtype, 0, True)
  *     vec.ptr = <DrakenFixedBuffer*>malloc(sizeof(DrakenFixedBuffer))
  *     if vec.ptr == NULL:             # <<<<<<<<<<<<<<
@@ -20466,16 +20616,16 @@ static struct __pyx_obj_7opteryx_6draken_7vectors_14integer_vector_IntegerVector
   __pyx_t_7 = (__pyx_v_vec->ptr == NULL);
   if (unlikely(__pyx_t_7)) {
 
-    /* "third_party/mabel/draken/vectors/integer_vector.pyx":263
+    /* "third_party/mabel/draken/vectors/integer_vector.pyx":273
  *     vec.ptr = <DrakenFixedBuffer*>malloc(sizeof(DrakenFixedBuffer))
  *     if vec.ptr == NULL:
  *         raise MemoryError()             # <<<<<<<<<<<<<<
  *     vec.owns_data = False
  * 
 */
-    PyErr_NoMemory(); __PYX_ERR(0, 263, __pyx_L1_error)
+    PyErr_NoMemory(); __PYX_ERR(0, 273, __pyx_L1_error)
 
-    /* "third_party/mabel/draken/vectors/integer_vector.pyx":262
+    /* "third_party/mabel/draken/vectors/integer_vector.pyx":272
  *     vec = IntegerVector(dtype, 0, True)
  *     vec.ptr = <DrakenFixedBuffer*>malloc(sizeof(DrakenFixedBuffer))
  *     if vec.ptr == NULL:             # <<<<<<<<<<<<<<
@@ -20484,7 +20634,7 @@ static struct __pyx_obj_7opteryx_6draken_7vectors_14integer_vector_IntegerVector
 */
   }
 
-  /* "third_party/mabel/draken/vectors/integer_vector.pyx":264
+  /* "third_party/mabel/draken/vectors/integer_vector.pyx":274
  *     if vec.ptr == NULL:
  *         raise MemoryError()
  *     vec.owns_data = False             # <<<<<<<<<<<<<<
@@ -20493,7 +20643,7 @@ static struct __pyx_obj_7opteryx_6draken_7vectors_14integer_vector_IntegerVector
 */
   __pyx_v_vec->owns_data = 0;
 
-  /* "third_party/mabel/draken/vectors/integer_vector.pyx":266
+  /* "third_party/mabel/draken/vectors/integer_vector.pyx":276
  *     vec.owns_data = False
  * 
  *     bufs = array.buffers()             # <<<<<<<<<<<<<<
@@ -20507,20 +20657,20 @@ static struct __pyx_obj_7opteryx_6draken_7vectors_14integer_vector_IntegerVector
     PyObject *__pyx_callargs[2] = {__pyx_t_4, NULL};
     __pyx_t_1 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_buffers, __pyx_callargs+__pyx_t_6, (1-__pyx_t_6) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
     __Pyx_XDECREF(__pyx_t_4); __pyx_t_4 = 0;
-    if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 266, __pyx_L1_error)
+    if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 276, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_1);
   }
   __pyx_v_bufs = __pyx_t_1;
   __pyx_t_1 = 0;
 
-  /* "third_party/mabel/draken/vectors/integer_vector.pyx":267
+  /* "third_party/mabel/draken/vectors/integer_vector.pyx":277
  * 
  *     bufs = array.buffers()
  *     vec._arrow_null_buf = bufs[0]             # <<<<<<<<<<<<<<
  *     vec._arrow_data_buf = bufs[1]
  * 
 */
-  __pyx_t_1 = __Pyx_GetItemInt(__pyx_v_bufs, 0, long, 1, __Pyx_PyLong_From_long, 0, 0, 0, 1, __Pyx_ReferenceSharing_OwnStrongReference); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 267, __pyx_L1_error)
+  __pyx_t_1 = __Pyx_GetItemInt(__pyx_v_bufs, 0, long, 1, __Pyx_PyLong_From_long, 0, 0, 0, 1, __Pyx_ReferenceSharing_OwnStrongReference); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 277, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
   __Pyx_GIVEREF(__pyx_t_1);
   __Pyx_GOTREF(__pyx_v_vec->_arrow_null_buf);
@@ -20528,14 +20678,14 @@ static struct __pyx_obj_7opteryx_6draken_7vectors_14integer_vector_IntegerVector
   __pyx_v_vec->_arrow_null_buf = __pyx_t_1;
   __pyx_t_1 = 0;
 
-  /* "third_party/mabel/draken/vectors/integer_vector.pyx":268
+  /* "third_party/mabel/draken/vectors/integer_vector.pyx":278
  *     bufs = array.buffers()
  *     vec._arrow_null_buf = bufs[0]
  *     vec._arrow_data_buf = bufs[1]             # <<<<<<<<<<<<<<
  * 
  *     base_ptr = <intptr_t>bufs[1].address
 */
-  __pyx_t_1 = __Pyx_GetItemInt(__pyx_v_bufs, 1, long, 1, __Pyx_PyLong_From_long, 0, 0, 0, 1, __Pyx_ReferenceSharing_OwnStrongReference); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 268, __pyx_L1_error)
+  __pyx_t_1 = __Pyx_GetItemInt(__pyx_v_bufs, 1, long, 1, __Pyx_PyLong_From_long, 0, 0, 0, 1, __Pyx_ReferenceSharing_OwnStrongReference); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 278, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
   __Pyx_GIVEREF(__pyx_t_1);
   __Pyx_GOTREF(__pyx_v_vec->_arrow_data_buf);
@@ -20543,36 +20693,36 @@ static struct __pyx_obj_7opteryx_6draken_7vectors_14integer_vector_IntegerVector
   __pyx_v_vec->_arrow_data_buf = __pyx_t_1;
   __pyx_t_1 = 0;
 
-  /* "third_party/mabel/draken/vectors/integer_vector.pyx":270
+  /* "third_party/mabel/draken/vectors/integer_vector.pyx":280
  *     vec._arrow_data_buf = bufs[1]
  * 
  *     base_ptr = <intptr_t>bufs[1].address             # <<<<<<<<<<<<<<
  *     arr_offset = array.offset
  * 
 */
-  __pyx_t_1 = __Pyx_GetItemInt(__pyx_v_bufs, 1, long, 1, __Pyx_PyLong_From_long, 0, 0, 0, 1, __Pyx_ReferenceSharing_OwnStrongReference); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 270, __pyx_L1_error)
+  __pyx_t_1 = __Pyx_GetItemInt(__pyx_v_bufs, 1, long, 1, __Pyx_PyLong_From_long, 0, 0, 0, 1, __Pyx_ReferenceSharing_OwnStrongReference); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 280, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
-  __pyx_t_4 = __Pyx_PyObject_GetAttrStr(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_address); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 270, __pyx_L1_error)
+  __pyx_t_4 = __Pyx_PyObject_GetAttrStr(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_address); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 280, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_4);
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
-  __pyx_t_8 = PyLong_AsSsize_t(__pyx_t_4); if (unlikely((__pyx_t_8 == ((intptr_t)-1)) && PyErr_Occurred())) __PYX_ERR(0, 270, __pyx_L1_error)
+  __pyx_t_8 = PyLong_AsSsize_t(__pyx_t_4); if (unlikely((__pyx_t_8 == ((intptr_t)-1)) && PyErr_Occurred())) __PYX_ERR(0, 280, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
   __pyx_v_base_ptr = ((intptr_t)__pyx_t_8);
 
-  /* "third_party/mabel/draken/vectors/integer_vector.pyx":271
+  /* "third_party/mabel/draken/vectors/integer_vector.pyx":281
  * 
  *     base_ptr = <intptr_t>bufs[1].address
  *     arr_offset = array.offset             # <<<<<<<<<<<<<<
  * 
  *     vec.ptr.type = dtype
 */
-  __pyx_t_4 = __Pyx_PyObject_GetAttrStr(__pyx_v_array, __pyx_mstate_global->__pyx_n_u_offset); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 271, __pyx_L1_error)
+  __pyx_t_4 = __Pyx_PyObject_GetAttrStr(__pyx_v_array, __pyx_mstate_global->__pyx_n_u_offset); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 281, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_4);
-  __pyx_t_9 = __Pyx_PyIndex_AsSsize_t(__pyx_t_4); if (unlikely((__pyx_t_9 == (Py_ssize_t)-1) && PyErr_Occurred())) __PYX_ERR(0, 271, __pyx_L1_error)
+  __pyx_t_9 = __Pyx_PyIndex_AsSsize_t(__pyx_t_4); if (unlikely((__pyx_t_9 == (Py_ssize_t)-1) && PyErr_Occurred())) __PYX_ERR(0, 281, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
   __pyx_v_arr_offset = __pyx_t_9;
 
-  /* "third_party/mabel/draken/vectors/integer_vector.pyx":273
+  /* "third_party/mabel/draken/vectors/integer_vector.pyx":283
  *     arr_offset = array.offset
  * 
  *     vec.ptr.type = dtype             # <<<<<<<<<<<<<<
@@ -20581,7 +20731,7 @@ static struct __pyx_obj_7opteryx_6draken_7vectors_14integer_vector_IntegerVector
 */
   __pyx_v_vec->ptr->type = __pyx_v_dtype;
 
-  /* "third_party/mabel/draken/vectors/integer_vector.pyx":274
+  /* "third_party/mabel/draken/vectors/integer_vector.pyx":284
  * 
  *     vec.ptr.type = dtype
  *     vec.ptr.itemsize = itemsize             # <<<<<<<<<<<<<<
@@ -20590,17 +20740,17 @@ static struct __pyx_obj_7opteryx_6draken_7vectors_14integer_vector_IntegerVector
 */
   __pyx_v_vec->ptr->itemsize = __pyx_v_itemsize;
 
-  /* "third_party/mabel/draken/vectors/integer_vector.pyx":275
+  /* "third_party/mabel/draken/vectors/integer_vector.pyx":285
  *     vec.ptr.type = dtype
  *     vec.ptr.itemsize = itemsize
  *     vec.ptr.length = <size_t>len(array)             # <<<<<<<<<<<<<<
  *     vec.ptr.data = <void*>(base_ptr + arr_offset * <Py_ssize_t>itemsize)
  * 
 */
-  __pyx_t_9 = PyObject_Length(__pyx_v_array); if (unlikely(__pyx_t_9 == ((Py_ssize_t)-1))) __PYX_ERR(0, 275, __pyx_L1_error)
+  __pyx_t_9 = PyObject_Length(__pyx_v_array); if (unlikely(__pyx_t_9 == ((Py_ssize_t)-1))) __PYX_ERR(0, 285, __pyx_L1_error)
   __pyx_v_vec->ptr->length = ((size_t)__pyx_t_9);
 
-  /* "third_party/mabel/draken/vectors/integer_vector.pyx":276
+  /* "third_party/mabel/draken/vectors/integer_vector.pyx":286
  *     vec.ptr.itemsize = itemsize
  *     vec.ptr.length = <size_t>len(array)
  *     vec.ptr.data = <void*>(base_ptr + arr_offset * <Py_ssize_t>itemsize)             # <<<<<<<<<<<<<<
@@ -20609,36 +20759,36 @@ static struct __pyx_obj_7opteryx_6draken_7vectors_14integer_vector_IntegerVector
 */
   __pyx_v_vec->ptr->data = ((void *)(__pyx_v_base_ptr + (__pyx_v_arr_offset * ((Py_ssize_t)__pyx_v_itemsize))));
 
-  /* "third_party/mabel/draken/vectors/integer_vector.pyx":278
+  /* "third_party/mabel/draken/vectors/integer_vector.pyx":288
  *     vec.ptr.data = <void*>(base_ptr + arr_offset * <Py_ssize_t>itemsize)
  * 
  *     if bufs[0] is not None:             # <<<<<<<<<<<<<<
  *         nb_addr = bufs[0].address
  *         if arr_offset % 8 == 0:
 */
-  __pyx_t_4 = __Pyx_GetItemInt(__pyx_v_bufs, 0, long, 1, __Pyx_PyLong_From_long, 0, 0, 0, 1, __Pyx_ReferenceSharing_OwnStrongReference); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 278, __pyx_L1_error)
+  __pyx_t_4 = __Pyx_GetItemInt(__pyx_v_bufs, 0, long, 1, __Pyx_PyLong_From_long, 0, 0, 0, 1, __Pyx_ReferenceSharing_OwnStrongReference); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 288, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_4);
   __pyx_t_7 = (__pyx_t_4 != Py_None);
   __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
   if (__pyx_t_7) {
 
-    /* "third_party/mabel/draken/vectors/integer_vector.pyx":279
+    /* "third_party/mabel/draken/vectors/integer_vector.pyx":289
  * 
  *     if bufs[0] is not None:
  *         nb_addr = bufs[0].address             # <<<<<<<<<<<<<<
  *         if arr_offset % 8 == 0:
  *             vec.ptr.null_bitmap = (<uint8_t*>nb_addr) + (arr_offset >> 3)
 */
-    __pyx_t_4 = __Pyx_GetItemInt(__pyx_v_bufs, 0, long, 1, __Pyx_PyLong_From_long, 0, 0, 0, 1, __Pyx_ReferenceSharing_OwnStrongReference); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 279, __pyx_L1_error)
+    __pyx_t_4 = __Pyx_GetItemInt(__pyx_v_bufs, 0, long, 1, __Pyx_PyLong_From_long, 0, 0, 0, 1, __Pyx_ReferenceSharing_OwnStrongReference); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 289, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_4);
-    __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_t_4, __pyx_mstate_global->__pyx_n_u_address); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 279, __pyx_L1_error)
+    __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_t_4, __pyx_mstate_global->__pyx_n_u_address); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 289, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_1);
     __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
-    __pyx_t_8 = PyLong_AsSsize_t(__pyx_t_1); if (unlikely((__pyx_t_8 == ((intptr_t)-1)) && PyErr_Occurred())) __PYX_ERR(0, 279, __pyx_L1_error)
+    __pyx_t_8 = PyLong_AsSsize_t(__pyx_t_1); if (unlikely((__pyx_t_8 == ((intptr_t)-1)) && PyErr_Occurred())) __PYX_ERR(0, 289, __pyx_L1_error)
     __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
     __pyx_v_nb_addr = __pyx_t_8;
 
-    /* "third_party/mabel/draken/vectors/integer_vector.pyx":280
+    /* "third_party/mabel/draken/vectors/integer_vector.pyx":290
  *     if bufs[0] is not None:
  *         nb_addr = bufs[0].address
  *         if arr_offset % 8 == 0:             # <<<<<<<<<<<<<<
@@ -20648,7 +20798,7 @@ static struct __pyx_obj_7opteryx_6draken_7vectors_14integer_vector_IntegerVector
     __pyx_t_7 = ((__pyx_v_arr_offset % 8) == 0);
     if (__pyx_t_7) {
 
-      /* "third_party/mabel/draken/vectors/integer_vector.pyx":281
+      /* "third_party/mabel/draken/vectors/integer_vector.pyx":291
  *         nb_addr = bufs[0].address
  *         if arr_offset % 8 == 0:
  *             vec.ptr.null_bitmap = (<uint8_t*>nb_addr) + (arr_offset >> 3)             # <<<<<<<<<<<<<<
@@ -20657,7 +20807,7 @@ static struct __pyx_obj_7opteryx_6draken_7vectors_14integer_vector_IntegerVector
 */
       __pyx_v_vec->ptr->null_bitmap = (((uint8_t *)__pyx_v_nb_addr) + (__pyx_v_arr_offset >> 3));
 
-      /* "third_party/mabel/draken/vectors/integer_vector.pyx":280
+      /* "third_party/mabel/draken/vectors/integer_vector.pyx":290
  *     if bufs[0] is not None:
  *         nb_addr = bufs[0].address
  *         if arr_offset % 8 == 0:             # <<<<<<<<<<<<<<
@@ -20667,7 +20817,7 @@ static struct __pyx_obj_7opteryx_6draken_7vectors_14integer_vector_IntegerVector
       goto __pyx_L6;
     }
 
-    /* "third_party/mabel/draken/vectors/integer_vector.pyx":283
+    /* "third_party/mabel/draken/vectors/integer_vector.pyx":293
  *             vec.ptr.null_bitmap = (<uint8_t*>nb_addr) + (arr_offset >> 3)
  *         else:
  *             nb_size = (len(array) + 7) // 8             # <<<<<<<<<<<<<<
@@ -20675,22 +20825,22 @@ static struct __pyx_obj_7opteryx_6draken_7vectors_14integer_vector_IntegerVector
  *             dst_bitmap = <uint8_t*>PyBytes_AS_STRING(new_bitmap_bytes)
 */
     /*else*/ {
-      __pyx_t_9 = PyObject_Length(__pyx_v_array); if (unlikely(__pyx_t_9 == ((Py_ssize_t)-1))) __PYX_ERR(0, 283, __pyx_L1_error)
+      __pyx_t_9 = PyObject_Length(__pyx_v_array); if (unlikely(__pyx_t_9 == ((Py_ssize_t)-1))) __PYX_ERR(0, 293, __pyx_L1_error)
       __pyx_v_nb_size = ((__pyx_t_9 + 7) / 8);
 
-      /* "third_party/mabel/draken/vectors/integer_vector.pyx":284
+      /* "third_party/mabel/draken/vectors/integer_vector.pyx":294
  *         else:
  *             nb_size = (len(array) + 7) // 8
  *             new_bitmap_bytes = PyBytes_FromStringAndSize(NULL, nb_size)             # <<<<<<<<<<<<<<
  *             dst_bitmap = <uint8_t*>PyBytes_AS_STRING(new_bitmap_bytes)
  *             memset(dst_bitmap, 0, nb_size)
 */
-      __pyx_t_1 = PyBytes_FromStringAndSize(NULL, __pyx_v_nb_size); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 284, __pyx_L1_error)
+      __pyx_t_1 = PyBytes_FromStringAndSize(NULL, __pyx_v_nb_size); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 294, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_1);
       __pyx_v_new_bitmap_bytes = __pyx_t_1;
       __pyx_t_1 = 0;
 
-      /* "third_party/mabel/draken/vectors/integer_vector.pyx":285
+      /* "third_party/mabel/draken/vectors/integer_vector.pyx":295
  *             nb_size = (len(array) + 7) // 8
  *             new_bitmap_bytes = PyBytes_FromStringAndSize(NULL, nb_size)
  *             dst_bitmap = <uint8_t*>PyBytes_AS_STRING(new_bitmap_bytes)             # <<<<<<<<<<<<<<
@@ -20699,7 +20849,7 @@ static struct __pyx_obj_7opteryx_6draken_7vectors_14integer_vector_IntegerVector
 */
       __pyx_v_dst_bitmap = ((uint8_t *)PyBytes_AS_STRING(__pyx_v_new_bitmap_bytes));
 
-      /* "third_party/mabel/draken/vectors/integer_vector.pyx":286
+      /* "third_party/mabel/draken/vectors/integer_vector.pyx":296
  *             new_bitmap_bytes = PyBytes_FromStringAndSize(NULL, nb_size)
  *             dst_bitmap = <uint8_t*>PyBytes_AS_STRING(new_bitmap_bytes)
  *             memset(dst_bitmap, 0, nb_size)             # <<<<<<<<<<<<<<
@@ -20708,7 +20858,7 @@ static struct __pyx_obj_7opteryx_6draken_7vectors_14integer_vector_IntegerVector
 */
       (void)(memset(__pyx_v_dst_bitmap, 0, __pyx_v_nb_size));
 
-      /* "third_party/mabel/draken/vectors/integer_vector.pyx":287
+      /* "third_party/mabel/draken/vectors/integer_vector.pyx":297
  *             dst_bitmap = <uint8_t*>PyBytes_AS_STRING(new_bitmap_bytes)
  *             memset(dst_bitmap, 0, nb_size)
  *             src_bitmap = <uint8_t*>nb_addr             # <<<<<<<<<<<<<<
@@ -20717,19 +20867,19 @@ static struct __pyx_obj_7opteryx_6draken_7vectors_14integer_vector_IntegerVector
 */
       __pyx_v_src_bitmap = ((uint8_t *)__pyx_v_nb_addr);
 
-      /* "third_party/mabel/draken/vectors/integer_vector.pyx":288
+      /* "third_party/mabel/draken/vectors/integer_vector.pyx":298
  *             memset(dst_bitmap, 0, nb_size)
  *             src_bitmap = <uint8_t*>nb_addr
  *             for j in range(len(array)):             # <<<<<<<<<<<<<<
  *                 if (src_bitmap[(arr_offset + j) >> 3] >> ((arr_offset + j) & 7)) & 1:
  *                     dst_bitmap[j >> 3] |= (1 << (j & 7))
 */
-      __pyx_t_9 = PyObject_Length(__pyx_v_array); if (unlikely(__pyx_t_9 == ((Py_ssize_t)-1))) __PYX_ERR(0, 288, __pyx_L1_error)
+      __pyx_t_9 = PyObject_Length(__pyx_v_array); if (unlikely(__pyx_t_9 == ((Py_ssize_t)-1))) __PYX_ERR(0, 298, __pyx_L1_error)
       __pyx_t_10 = __pyx_t_9;
       for (__pyx_t_11 = 0; __pyx_t_11 < __pyx_t_10; __pyx_t_11+=1) {
         __pyx_v_j = __pyx_t_11;
 
-        /* "third_party/mabel/draken/vectors/integer_vector.pyx":289
+        /* "third_party/mabel/draken/vectors/integer_vector.pyx":299
  *             src_bitmap = <uint8_t*>nb_addr
  *             for j in range(len(array)):
  *                 if (src_bitmap[(arr_offset + j) >> 3] >> ((arr_offset + j) & 7)) & 1:             # <<<<<<<<<<<<<<
@@ -20739,7 +20889,7 @@ static struct __pyx_obj_7opteryx_6draken_7vectors_14integer_vector_IntegerVector
         __pyx_t_7 = ((((__pyx_v_src_bitmap[((__pyx_v_arr_offset + __pyx_v_j) >> 3)]) >> ((__pyx_v_arr_offset + __pyx_v_j) & 7)) & 1) != 0);
         if (__pyx_t_7) {
 
-          /* "third_party/mabel/draken/vectors/integer_vector.pyx":290
+          /* "third_party/mabel/draken/vectors/integer_vector.pyx":300
  *             for j in range(len(array)):
  *                 if (src_bitmap[(arr_offset + j) >> 3] >> ((arr_offset + j) & 7)) & 1:
  *                     dst_bitmap[j >> 3] |= (1 << (j & 7))             # <<<<<<<<<<<<<<
@@ -20749,7 +20899,7 @@ static struct __pyx_obj_7opteryx_6draken_7vectors_14integer_vector_IntegerVector
           __pyx_t_12 = (__pyx_v_j >> 3);
           (__pyx_v_dst_bitmap[__pyx_t_12]) = ((__pyx_v_dst_bitmap[__pyx_t_12]) | (1 << (__pyx_v_j & 7)));
 
-          /* "third_party/mabel/draken/vectors/integer_vector.pyx":289
+          /* "third_party/mabel/draken/vectors/integer_vector.pyx":299
  *             src_bitmap = <uint8_t*>nb_addr
  *             for j in range(len(array)):
  *                 if (src_bitmap[(arr_offset + j) >> 3] >> ((arr_offset + j) & 7)) & 1:             # <<<<<<<<<<<<<<
@@ -20759,7 +20909,7 @@ static struct __pyx_obj_7opteryx_6draken_7vectors_14integer_vector_IntegerVector
         }
       }
 
-      /* "third_party/mabel/draken/vectors/integer_vector.pyx":291
+      /* "third_party/mabel/draken/vectors/integer_vector.pyx":301
  *                 if (src_bitmap[(arr_offset + j) >> 3] >> ((arr_offset + j) & 7)) & 1:
  *                     dst_bitmap[j >> 3] |= (1 << (j & 7))
  *             vec.ptr.null_bitmap = dst_bitmap             # <<<<<<<<<<<<<<
@@ -20768,7 +20918,7 @@ static struct __pyx_obj_7opteryx_6draken_7vectors_14integer_vector_IntegerVector
 */
       __pyx_v_vec->ptr->null_bitmap = __pyx_v_dst_bitmap;
 
-      /* "third_party/mabel/draken/vectors/integer_vector.pyx":292
+      /* "third_party/mabel/draken/vectors/integer_vector.pyx":302
  *                     dst_bitmap[j >> 3] |= (1 << (j & 7))
  *             vec.ptr.null_bitmap = dst_bitmap
  *             vec._arrow_null_buf = new_bitmap_bytes             # <<<<<<<<<<<<<<
@@ -20783,7 +20933,7 @@ static struct __pyx_obj_7opteryx_6draken_7vectors_14integer_vector_IntegerVector
     }
     __pyx_L6:;
 
-    /* "third_party/mabel/draken/vectors/integer_vector.pyx":278
+    /* "third_party/mabel/draken/vectors/integer_vector.pyx":288
  *     vec.ptr.data = <void*>(base_ptr + arr_offset * <Py_ssize_t>itemsize)
  * 
  *     if bufs[0] is not None:             # <<<<<<<<<<<<<<
@@ -20793,7 +20943,7 @@ static struct __pyx_obj_7opteryx_6draken_7vectors_14integer_vector_IntegerVector
     goto __pyx_L5;
   }
 
-  /* "third_party/mabel/draken/vectors/integer_vector.pyx":294
+  /* "third_party/mabel/draken/vectors/integer_vector.pyx":304
  *             vec._arrow_null_buf = new_bitmap_bytes
  *     else:
  *         vec.ptr.null_bitmap = NULL             # <<<<<<<<<<<<<<
@@ -20805,7 +20955,7 @@ static struct __pyx_obj_7opteryx_6draken_7vectors_14integer_vector_IntegerVector
   }
   __pyx_L5:;
 
-  /* "third_party/mabel/draken/vectors/integer_vector.pyx":296
+  /* "third_party/mabel/draken/vectors/integer_vector.pyx":306
  *         vec.ptr.null_bitmap = NULL
  * 
  *     return vec             # <<<<<<<<<<<<<<
@@ -20815,7 +20965,7 @@ static struct __pyx_obj_7opteryx_6draken_7vectors_14integer_vector_IntegerVector
   __pyx_r = __pyx_v_vec;
   goto __pyx_L0;
 
-  /* "third_party/mabel/draken/vectors/integer_vector.pyx":235
+  /* "third_party/mabel/draken/vectors/integer_vector.pyx":245
  * 
  * 
  * cdef IntegerVector from_arrow(object array):             # <<<<<<<<<<<<<<
@@ -22036,6 +22186,8 @@ static int __Pyx_modinit_type_init_code(__pyx_mstatetype *__pyx_mstate) {
   __pyx_vtabptr_7opteryx_6draken_7vectors_6vector_Vector = (struct __pyx_vtabstruct_7opteryx_6draken_7vectors_6vector_Vector*)__Pyx_GetVtable(__pyx_mstate->__pyx_ptype_7opteryx_6draken_7vectors_6vector_Vector); if (unlikely(!__pyx_vtabptr_7opteryx_6draken_7vectors_6vector_Vector)) __PYX_ERR(0, 1, __pyx_L1_error)
   __pyx_vtabptr_7opteryx_6draken_7vectors_14integer_vector_IntegerVector = &__pyx_vtable_7opteryx_6draken_7vectors_14integer_vector_IntegerVector;
   __pyx_vtable_7opteryx_6draken_7vectors_14integer_vector_IntegerVector.__pyx_base = *__pyx_vtabptr_7opteryx_6draken_7vectors_6vector_Vector;
+  __pyx_vtable_7opteryx_6draken_7vectors_14integer_vector_IntegerVector.__pyx_base.dense_ptr = (void *(*)(struct __pyx_obj_7opteryx_6draken_7vectors_6vector_Vector *))__pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_dense_ptr;
+  __pyx_vtable_7opteryx_6draken_7vectors_14integer_vector_IntegerVector.__pyx_base.null_bitmap_ptr = (uint8_t *(*)(struct __pyx_obj_7opteryx_6draken_7vectors_6vector_Vector *))__pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_null_bitmap_ptr;
   __pyx_vtable_7opteryx_6draken_7vectors_14integer_vector_IntegerVector.__pyx_base.hash_into = (void (*)(struct __pyx_obj_7opteryx_6draken_7vectors_6vector_Vector *, __Pyx_memviewslice, struct __pyx_opt_args_7opteryx_6draken_7vectors_6vector_6Vector_hash_into *__pyx_optional_args))__pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_hash_into;
   __pyx_vtable_7opteryx_6draken_7vectors_14integer_vector_IntegerVector.to_pylist = (PyObject *(*)(struct __pyx_obj_7opteryx_6draken_7vectors_14integer_vector_IntegerVector *, int __pyx_skip_dispatch))__pyx_f_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_to_pylist;
   #if CYTHON_USE_TYPE_SPECS
@@ -23049,34 +23201,34 @@ __Pyx_RefNannySetupContext("PyInit_integer_vector", 0);
 */
   __pyx_mstate_global->__pyx_k__6 = DRAKEN_INT32;
 
-  /* "third_party/mabel/draken/vectors/integer_vector.pyx":92
+  /* "third_party/mabel/draken/vectors/integer_vector.pyx":102
  *             return (<int32_t*>ptr.data)[i]
  * 
  *     def to_arrow(self):             # <<<<<<<<<<<<<<
  *         import pyarrow as pa
  *         cdef size_t nbytes = buf_length(self.ptr) * buf_itemsize(self.ptr)
 */
-  __pyx_t_4 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_9to_arrow, __Pyx_CYFUNCTION_CCLASS, __pyx_mstate_global->__pyx_n_u_IntegerVector_to_arrow, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_draken_vectors_integer_v, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[0])); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 92, __pyx_L1_error)
+  __pyx_t_4 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_9to_arrow, __Pyx_CYFUNCTION_CCLASS, __pyx_mstate_global->__pyx_n_u_IntegerVector_to_arrow, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_draken_vectors_integer_v, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[0])); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 102, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_4);
   #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030E0000
   PyUnstable_Object_EnableDeferredRefcount(__pyx_t_4);
   #endif
-  if (__Pyx_SetItemOnTypeDict(__pyx_mstate_global->__pyx_ptype_7opteryx_6draken_7vectors_14integer_vector_IntegerVector, __pyx_mstate_global->__pyx_n_u_to_arrow, __pyx_t_4) < (0)) __PYX_ERR(0, 92, __pyx_L1_error)
+  if (__Pyx_SetItemOnTypeDict(__pyx_mstate_global->__pyx_ptype_7opteryx_6draken_7vectors_14integer_vector_IntegerVector, __pyx_mstate_global->__pyx_n_u_to_arrow, __pyx_t_4) < (0)) __PYX_ERR(0, 102, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
 
-  /* "third_party/mabel/draken/vectors/integer_vector.pyx":112
+  /* "third_party/mabel/draken/vectors/integer_vector.pyx":122
  *         return pa.Array.from_buffers(pa_type, buf_length(self.ptr), buffers)
  * 
  *     cpdef list to_pylist(self):             # <<<<<<<<<<<<<<
  *         cdef DrakenFixedBuffer* ptr = self.ptr
  *         cdef Py_ssize_t i, n = ptr.length
 */
-  __pyx_t_4 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_11to_pylist, __Pyx_CYFUNCTION_CCLASS, __pyx_mstate_global->__pyx_n_u_IntegerVector_to_pylist, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_draken_vectors_integer_v, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[1])); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 112, __pyx_L1_error)
+  __pyx_t_4 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_6draken_7vectors_14integer_vector_13IntegerVector_11to_pylist, __Pyx_CYFUNCTION_CCLASS, __pyx_mstate_global->__pyx_n_u_IntegerVector_to_pylist, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_draken_vectors_integer_v, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[1])); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 122, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_4);
   #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030E0000
   PyUnstable_Object_EnableDeferredRefcount(__pyx_t_4);
   #endif
-  if (__Pyx_SetItemOnTypeDict(__pyx_mstate_global->__pyx_ptype_7opteryx_6draken_7vectors_14integer_vector_IntegerVector, __pyx_mstate_global->__pyx_n_u_to_pylist, __pyx_t_4) < (0)) __PYX_ERR(0, 112, __pyx_L1_error)
+  if (__Pyx_SetItemOnTypeDict(__pyx_mstate_global->__pyx_ptype_7opteryx_6draken_7vectors_14integer_vector_IntegerVector, __pyx_mstate_global->__pyx_n_u_to_pylist, __pyx_t_4) < (0)) __PYX_ERR(0, 122, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
 
   /* "(tree fragment)":1
@@ -23376,12 +23528,12 @@ static int __Pyx_CreateCodeObjects(__pyx_mstatetype *__pyx_mstate) {
   PyObject* tuple_dedup_map = PyDict_New();
   if (unlikely(!tuple_dedup_map)) return -1;
   {
-    const __Pyx_PyCode_New_function_description descr = {1, 0, 0, 7, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 92};
+    const __Pyx_PyCode_New_function_description descr = {1, 0, 0, 7, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 102};
     PyObject* const varnames[] = {__pyx_mstate->__pyx_n_u_self, __pyx_mstate->__pyx_n_u_pa, __pyx_mstate->__pyx_n_u_nbytes, __pyx_mstate->__pyx_n_u_addr, __pyx_mstate->__pyx_n_u_data_buf, __pyx_mstate->__pyx_n_u_buffers, __pyx_mstate->__pyx_n_u_pa_type};
     __pyx_mstate_global->__pyx_codeobj_tab[0] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_third_party_mabel_draken_vectors, __pyx_mstate->__pyx_n_u_to_arrow, __pyx_mstate->__pyx_kp_b_iso88591_A_Zq_F_L_Q_Zt4q_2_AV85_6_4t_1_1E, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[0])) goto bad;
   }
   {
-    const __Pyx_PyCode_New_function_description descr = {1, 0, 0, 1, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 112};
+    const __Pyx_PyCode_New_function_description descr = {1, 0, 0, 1, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 122};
     PyObject* const varnames[] = {__pyx_mstate->__pyx_n_u_self};
     __pyx_mstate_global->__pyx_codeobj_tab[1] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_third_party_mabel_draken_vectors, __pyx_mstate->__pyx_n_u_to_pylist, __pyx_mstate->__pyx_kp_b_iso88591_A_d_s_3j_1_Q_s_s_E_aq_war_E_aq_3, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[1])) goto bad;
   }

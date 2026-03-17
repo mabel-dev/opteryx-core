@@ -42,8 +42,6 @@ _DICT_NUMERIC_FASTPATH_OPS = frozenset(("Lt", "Gt", "LtEq", "GtEq"))
 _CONSTANT_FASTPATH_OPS = frozenset(
     ("Eq", "NotEq", "InList", "NotInList", "Lt", "Gt", "LtEq", "GtEq")
 )
-# Dictionary child type ids from third_party/mabel/draken/core/buffers.h.
-_DICT_NUMERIC_CHILD_TYPES = frozenset((1, 2, 3, 4, 20, 21, 50))
 
 # Operators where null compression isn't safe
 skip_compression_ops = {
@@ -127,13 +125,55 @@ def _constant_fastpath(arr, operator, value):
     return None
 
 
+def _dictionary_arrow_type(arr):
+    if isinstance(arr, (pyarrow.Array, pyarrow.ChunkedArray)):
+        return arr.type if pyarrow.types.is_dictionary(arr.type) else None
+
+    to_arrow = getattr(arr, "to_arrow", None)
+    if to_arrow is None:
+        return None
+
+    try:
+        arrow_arr = to_arrow()
+    except Exception:
+        return None
+
+    if isinstance(arrow_arr, (pyarrow.Array, pyarrow.ChunkedArray)) and pyarrow.types.is_dictionary(
+        arrow_arr.type
+    ):
+        return arrow_arr.type
+
+    return None
+
+
+def _has_dictionary_fastpath_ops(arr):
+    return all(
+        hasattr(arr, method)
+        for method in (
+            "equals",
+            "not_equals",
+            "in_list",
+            "like",
+            "rlike",
+            "less_than",
+            "greater_than",
+            "less_than_or_equals",
+            "greater_than_or_equals",
+        )
+    )
+
+
 def _dictionary_vector(arr):
-    if arr.__class__.__name__ == "DictionaryVector":
+    if _dictionary_arrow_type(arr) is None:
+        return None
+
+    if _has_dictionary_fastpath_ops(arr):
         return arr
 
+    if hasattr(arr, "to_arrow") and not isinstance(arr, (pyarrow.Array, pyarrow.ChunkedArray)):
+        arr = arr.to_arrow()
+
     if isinstance(arr, pyarrow.ChunkedArray):
-        if not pyarrow.types.is_dictionary(arr.type):
-            return None
         if arr.num_chunks != 1:
             raise NotImplementedError(
                 "Dictionary motor path does not support multi-chunk dictionary arrays."
@@ -144,9 +184,11 @@ def _dictionary_vector(arr):
         from opteryx.draken.interop.arrow import vector_from_arrow
 
         vec = vector_from_arrow(arr)
-        if vec.__class__.__name__ == "DictionaryVector":
+        if _has_dictionary_fastpath_ops(vec):
             return vec
-        raise TypeError("Dictionary fastpath expected DictionaryVector conversion result.")
+        raise TypeError(
+            "Dictionary fastpath expected a dictionary-capable vector conversion result."
+        )
 
     return None
 
@@ -205,15 +247,25 @@ def _dictionary_supports_numeric_fastpath(arr):
     vec = _dictionary_vector(arr)
     if vec is None:
         return False
-    return getattr(vec, "dictionary_value_type", None) in _DICT_NUMERIC_CHILD_TYPES
+
+    arrow_type = _dictionary_arrow_type(vec)
+    if arrow_type is None:
+        return False
+
+    value_type = arrow_type.value_type
+    return (
+        pyarrow.types.is_integer(value_type)
+        or pyarrow.types.is_floating(value_type)
+        or pyarrow.types.is_boolean(value_type)
+        or pyarrow.types.is_date32(value_type)
+        or pyarrow.types.is_timestamp(value_type)
+        or pyarrow.types.is_time32(value_type)
+        or pyarrow.types.is_time64(value_type)
+    )
 
 
 def _has_dictionary_candidate(arr):
-    if isinstance(arr, pyarrow.ChunkedArray) and pyarrow.types.is_dictionary(arr.type):
-        return True
-    if isinstance(arr, pyarrow.DictionaryArray):
-        return True
-    return arr.__class__.__name__ == "DictionaryVector"
+    return _dictionary_arrow_type(arr) is not None
 
 
 def filter_operations(left_arr, left_type, operator, right_arr, right_type):
