@@ -118,7 +118,7 @@ def test_grouped_clickbench_style_expressions_stay_native(sql, expected_rows):
         ops = session.telemetry.get("operations", {})
         agg = next((v for v in ops.values() if v.get("type") == "AggregateRel"), {})
         assert result.num_rows == expected_rows
-        assert agg.get("feature_groupby_engine_legacy", 0) == 0
+        assert agg.get("feature_groupby_engine_group_state_store", 0) == 0
         assert agg.get("feature_groupby_draken_eval_arrow_fallback", 0) == 0
         assert agg.get("feature_groupby_draken_eval_native", 0) >= 1
     finally:

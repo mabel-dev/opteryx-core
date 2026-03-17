@@ -306,13 +306,20 @@ OPERATOR_DEFINITIONS = {
         friendly_name="Integer division",
     ),
     "BitwiseOr": OperatorDefinition(
-        summary="Bitwise OR operator.",
-        documentation="Combines integer operands using a bitwise OR operation.",
+        summary="Bitwise OR and IP containment operator.",
+        documentation=(
+            "Combines integer operands using a bitwise OR operation. "
+            "When used with address and CIDR-compatible operands, the same `|` token "
+            "acts as an IP containment predicate and returns a boolean result."
+        ),
         token="|",
         category="bitwise",
         node_kind="binary",
         friendly_name="Bitwise OR",
-        notes="The same token may also appear in non-bitwise contexts depending on operand types.",
+        notes=(
+            "This operator is overloaded by operand type: integer inputs perform bitwise OR, "
+            "while address/CIDR-style inputs use `|` for containment checks."
+        ),
     ),
     "BitwiseAnd": OperatorDefinition(
         summary="Bitwise AND operator.",
@@ -378,7 +385,7 @@ OPERATOR_DEFINITIONS = {
         category="extraction",
         node_kind="extraction",
         friendly_name="Subscript access",
-        notes="For arrays the result type depends on the array element type, so the exported result type may be dynamic.",
+        notes="Subcript access is zero-based, the first element is at index 0. For arrays the result type depends on the array element type, so the exported result type may be dynamic.",
     ),
     "AtQuestion": OperatorDefinition(
         summary="JSON path existence operator.",

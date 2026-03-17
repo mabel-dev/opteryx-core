@@ -2,8 +2,8 @@
 Reads every .parquet file in testdata/parquet_tests/ through the rugo decoder
 and reports pass / fail / skip for two test categories:
 
-  1. METADATA  -- reads file metadata via read_metadata()
-  2. DATA      -- reads all columns via read_parquet()
+  1. METADATA  -- reads file metadata via read_metadata_from_bytes()
+  2. DATA      -- reads all columns via read_parquet(), which returns a Morsel
                   (skipped when can_decode_from_memory() returns False)
 
 Failures are non-fatal: the full suite runs regardless of individual errors.
@@ -39,20 +39,6 @@ def record(category, filename, status, detail=""):
         line += f"\n         {detail}"
     print(line)
     results.append((category, filename, status, detail))
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Helpers
-# ──────────────────────────────────────────────────────────────────────────────
-
-def _count_values(result) -> int:
-    """Return total number of decoded values across all row-groups/columns."""
-    total = 0
-    for rg in result.get("row_groups", []):
-        for col in rg:
-            if col is not None:
-                total += len(col)
-    return total
 
 
 # ──────────────────────────────────────────────────────────────────────────────

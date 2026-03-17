@@ -43,9 +43,6 @@ class HeapSortNode(BasePlanNode):
     _NULL_COMPRESSED = numpy.iinfo(numpy.int64).min
     _USEARCH_ENABLED = False
     _USEARCH_MIN_ROWS = 2048
-    # Dictionary child type ids from third_party/mabel/draken/core/buffers.h.
-    # We only treat exact integer/boolean dictionary keys as exact-compressible.
-    _EXACT_DICTIONARY_CHILD_TYPES = frozenset({1, 2, 3, 4, 50})
     _EXACT_COMPRESS_VECTOR_TYPES = frozenset(
         {
             "BoolVector",
@@ -70,9 +67,23 @@ class HeapSortNode(BasePlanNode):
         vector_type = vector.__class__.__name__
         if vector_type in cls._EXACT_COMPRESS_VECTOR_TYPES:
             return True
-        if vector_type != "DictionaryVector":
+
+        to_arrow = getattr(vector, "to_arrow", None)
+        if to_arrow is None:
             return False
-        return getattr(vector, "dictionary_value_type", None) in cls._EXACT_DICTIONARY_CHILD_TYPES
+
+        try:
+            arrow_arr = to_arrow()
+        except Exception:
+            return False
+
+        if not isinstance(arrow_arr, (pyarrow.Array, pyarrow.ChunkedArray)):
+            return False
+        if not pyarrow.types.is_dictionary(arrow_arr.type):
+            return False
+
+        value_type = arrow_arr.type.value_type
+        return pyarrow.types.is_integer(value_type) or pyarrow.types.is_boolean(value_type)
 
     def __init__(self, properties: QueryProperties, **parameters):
         super().__init__(properties=properties, **parameters)

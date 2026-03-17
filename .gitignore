@@ -245,6 +245,8 @@ tools/test_gharchive.py
 tools/load_gharchive.py
 tools/load_gh_messages.py
 opteryx/iops/ring_atomic.c
-third_party/mabel/draken/storage/morsel_io.cpp
+third_party/mabel/draken/storage/morsel_io.c*
 opteryx/third_party/lz4/lz4.c
-third_party/mabel/draken/vectors/constant_vector.cpp
+third_party/mabel/draken/vectors/constant_vector.c*
+third_party/mabel/draken/vectors/integer_vector.c*
+third_party/mabel/draken/vectors/vector_vector.c*

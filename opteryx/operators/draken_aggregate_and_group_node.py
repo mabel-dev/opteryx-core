@@ -44,7 +44,7 @@ class DrakenAggregateAndGroupNode(BasePlanNode):
     ENGINE_READING_KEYS = (
         "feature_groupby_engine_carchar",
         "feature_groupby_engine_constant",
-        "feature_groupby_engine_legacy",
+        "feature_groupby_engine_group_state_store",
         "feature_groupby_engine_multi_key_fixed",
         "feature_groupby_engine_multi_key_object",
         "draken_dict_groupby_fastpath_hits",
@@ -322,6 +322,49 @@ class DrakenAggregateAndGroupNode(BasePlanNode):
         _ = kwargs
 
         draken = self.ensure_draken_morsel(morsel)
+
+        def _decode_dict_value_columns(chunk):
+            """Decode dictionary-encoded value columns used in SUM/AVG/MIN/MAX to their
+            underlying numeric type so Carchar routes them correctly."""
+            import pyarrow as pa
+
+            from opteryx.draken.interop.arrow import vector_from_arrow
+            from opteryx.draken.morsels.morsel import Morsel
+
+            needs_rebuild = False
+            decoded_columns = {}
+            for spec in self._normalized_aggregations:
+                fn = spec[1] if len(spec) > 1 else None
+                if fn not in ("sum", "avg", "mean", "min", "max"):
+                    continue
+                col = spec[2] if len(spec) > 2 else None
+                if col is None:
+                    continue
+                col_key = col if isinstance(col, bytes) else col.encode()
+                if col_key in decoded_columns:
+                    continue
+                try:
+                    vec = chunk.column(col_key)
+                except KeyError:
+                    continue
+                if not hasattr(vec, "to_arrow"):
+                    continue
+                arrow_arr = vec.to_arrow()
+                if not pa.types.is_dictionary(arrow_arr.type):
+                    continue
+                decoded_columns[col_key] = vector_from_arrow(arrow_arr.dictionary_decode())
+                needs_rebuild = True
+            if not needs_rebuild:
+                return chunk
+            names = list(chunk.column_names)
+            vectors = []
+            for name in names:
+                key = name if isinstance(name, bytes) else name.encode()
+                if key in decoded_columns:
+                    vectors.append(decoded_columns[key])
+                else:
+                    vectors.append(chunk.column(key))
+            return Morsel.from_vectors(names, vectors)
 
         def _prepare_draken_chunk(chunk):
             if chunk == EOS:

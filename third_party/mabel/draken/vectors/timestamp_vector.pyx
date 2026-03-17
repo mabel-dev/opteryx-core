@@ -101,6 +101,16 @@ cdef class TimestampVector(Vector):
             free_fixed_buffer(self.ptr, True)
             self.ptr = NULL
 
+    cdef void* dense_ptr(self) noexcept:
+        if self.ptr == NULL:
+            return NULL
+        return self.ptr.data
+
+    cdef uint8_t* null_bitmap_ptr(self) noexcept:
+        if self.ptr == NULL:
+            return NULL
+        return self.ptr.null_bitmap
+
     # Python-friendly properties (backed by C getters for kernels)
     @property
     def length(self):

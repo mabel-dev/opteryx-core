@@ -607,6 +607,36 @@ cdef Float64Vector _make_float64_from_float32_vector(
     return vec
 
 
+cdef Int64Vector _make_int32_as_int64_vector(
+        parquet_reader.DecodedColumn& decoded_col,
+        int32_t num_rows):
+    """Build an Int64Vector from a DecodedColumn with int32 values (upcasts int32→int64)."""
+    cdef Int64Vector vec = Int64Vector(num_rows)
+    cdef int64_t* dst = <int64_t*> vec.ptr.data
+    cdef Py_ssize_t i, val_idx = 0
+    cdef Py_ssize_t nb_bytes
+    cdef uint8_t* nb
+
+    if decoded_col.valid_bits.size() > 0:
+        for i in range(num_rows):
+            if (decoded_col.valid_bits[i >> 3] >> (i & 7)) & 1:
+                dst[i] = <int64_t> decoded_col.int32_values[val_idx]
+                val_idx += 1
+            else:
+                dst[i] = 0
+        nb_bytes = (num_rows + 7) >> 3
+        nb = <uint8_t*> malloc(nb_bytes)
+        if nb == NULL:
+            raise MemoryError()
+        memcpy(nb, decoded_col.valid_bits.data(), nb_bytes)
+        vec.ptr.null_bitmap = nb
+    else:
+        for i in range(num_rows):
+            dst[i] = <int64_t> decoded_col.int32_values[i]
+
+    return vec
+
+
 cdef Float64Vector _make_float64_vector(
         parquet_reader.DecodedColumn& decoded_col,
         int32_t num_rows):
@@ -1213,7 +1243,6 @@ def read_parquet(data, column_names=None):
     cdef size_t size
     cdef vector[string] cpp_column_names
 
-    # Convert input data to memory view
     if isinstance(data, (bytes, bytearray)):
         mem_view = memoryview(data).cast('B')
     elif isinstance(data, memoryview):
@@ -1223,7 +1252,6 @@ def read_parquet(data, column_names=None):
 
     size = mem_view.shape[0]
 
-    # Call the appropriate C++ function based on whether columns are specified
     cdef parquet_reader.DecodedTable result
 
     cdef double _t0, _t1

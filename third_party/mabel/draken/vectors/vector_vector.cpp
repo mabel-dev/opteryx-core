@@ -1676,12 +1676,29 @@ struct __pyx_array_obj;
 struct __pyx_MemviewEnum_obj;
 struct __pyx_memoryview_obj;
 struct __pyx_memoryviewslice_obj;
+struct __pyx_t_7opteryx_6draken_4core_7buffers_DictAccessor;
+
+/* "opteryx/draken/core/buffers.pxd":81
+ * # callers never need raw ptr arithmetic.  Phase 1  no C struct changes yet;
+ * # dict_values remains DrakenVarBuffer* for both string and numeric backing.
+ * cdef struct DictAccessor:             # <<<<<<<<<<<<<<
+ *     uint8_t*         codes       # raw code array (code_width bytes per code index)
+ *     uint8_t          code_width  # 1, 2, or 4 bytes per code
+*/
+struct __pyx_t_7opteryx_6draken_4core_7buffers_DictAccessor {
+  uint8_t *codes;
+  uint8_t code_width;
+  uint8_t *row_nulls;
+  size_t length;
+  DrakenVarBuffer *dict_values;
+  DrakenType value_type;
+};
 struct __pyx_opt_args_7opteryx_6draken_7vectors_6vector_6Vector_hash_into;
 struct __pyx_opt_args_7opteryx_6draken_7vectors_6vector_6Vector_compress_into;
 
-/* "opteryx/draken/vectors/vector.pxd":28
- *     cdef bint here
- *     cpdef object null_bitmap(self)
+/* "opteryx/draken/vectors/vector.pxd":33
+ *     cdef void* dense_ptr(self) noexcept
+ *     cdef uint8_t* null_bitmap_ptr(self) noexcept
  *     cdef void hash_into(self, uint64_t[::1] out_buf, Py_ssize_t offset=*) except *             # <<<<<<<<<<<<<<
  *     cpdef uint64_t[::1] hash(self)
  * 
@@ -1691,7 +1708,7 @@ struct __pyx_opt_args_7opteryx_6draken_7vectors_6vector_6Vector_hash_into {
   Py_ssize_t offset;
 };
 
-/* "opteryx/draken/vectors/vector.pxd":34
+/* "opteryx/draken/vectors/vector.pxd":39
  *     # same semantics as `to_int` in relation_statistics. Implementations
  *     # should write into an int64 buffer provided by the caller.
  *     cdef void compress_into(self, int64_t[::1] out_buf, Py_ssize_t offset=*) except *             # <<<<<<<<<<<<<<
@@ -1733,7 +1750,7 @@ struct __pyx_t_7opteryx_6draken_7vectors_13string_vector_StringElement {
   int is_null;
 };
 
-/* "opteryx/draken/vectors/string_vector.pxd":31
+/* "opteryx/draken/vectors/string_vector.pxd":34
  *     cpdef BoolVector greater_than_or_equals(self, bytes value)
  *     cpdef BoolVector in_list(self, object value_set)
  *     cpdef BoolVector like(self, bytes pattern, bint ignore_case=*)             # <<<<<<<<<<<<<<
@@ -1745,7 +1762,7 @@ struct __pyx_opt_args_7opteryx_6draken_7vectors_13string_vector_12StringVector_l
   int ignore_case;
 };
 
-/* "opteryx/draken/vectors/string_vector.pxd":33
+/* "opteryx/draken/vectors/string_vector.pxd":36
  *     cpdef BoolVector like(self, bytes pattern, bint ignore_case=*)
  *     cpdef BoolVector rlike(self, bytes pattern)
  *     cpdef BoolVector contains(self, bytes substr, bint ignore_case=*)             # <<<<<<<<<<<<<<
@@ -1757,7 +1774,7 @@ struct __pyx_opt_args_7opteryx_6draken_7vectors_13string_vector_12StringVector_c
   int ignore_case;
 };
 
-/* "opteryx/draken/vectors/string_vector.pxd":34
+/* "opteryx/draken/vectors/string_vector.pxd":37
  *     cpdef BoolVector rlike(self, bytes pattern)
  *     cpdef BoolVector contains(self, bytes substr, bint ignore_case=*)
  *     cdef void hash_into(self, uint64_t[::1] out_buf, Py_ssize_t offset=*) except *             # <<<<<<<<<<<<<<
@@ -1794,7 +1811,7 @@ struct __pyx_opt_args_7opteryx_6draken_7interop_5arrow_vector_from_sequence {
   PyObject *dtype;
 };
 
-/* "opteryx/draken/vectors/vector.pxd":25
+/* "opteryx/draken/vectors/vector.pxd":27
  *     return mixed ^ (mixed >> 32)
  * 
  * cdef class Vector:             # <<<<<<<<<<<<<<
@@ -1841,7 +1858,7 @@ struct __pyx_obj_7opteryx_6draken_7vectors_13string_vector_StringVector {
 };
 
 
-/* "opteryx/draken/vectors/string_vector.pxd":45
+/* "opteryx/draken/vectors/string_vector.pxd":48
  * 
  * 
  * cdef class _StringVectorCIterator:             # <<<<<<<<<<<<<<
@@ -1861,7 +1878,7 @@ struct __pyx_obj_7opteryx_6draken_7vectors_13string_vector__StringVectorCIterato
 };
 
 
-/* "opteryx/draken/vectors/string_vector.pxd":62
+/* "opteryx/draken/vectors/string_vector.pxd":65
  * 
  * 
  * cdef class _StringVectorView:             # <<<<<<<<<<<<<<
@@ -1878,7 +1895,7 @@ struct __pyx_obj_7opteryx_6draken_7vectors_13string_vector__StringVectorView {
 };
 
 
-/* "opteryx/draken/vectors/string_vector.pxd":73
+/* "opteryx/draken/vectors/string_vector.pxd":76
  * 
  * 
  * cdef class StringVectorBuilder:             # <<<<<<<<<<<<<<
@@ -2016,7 +2033,7 @@ struct __pyx_memoryviewslice_obj {
 
 
 
-/* "opteryx/draken/vectors/vector.pxd":25
+/* "opteryx/draken/vectors/vector.pxd":27
  *     return mixed ^ (mixed >> 32)
  * 
  * cdef class Vector:             # <<<<<<<<<<<<<<
@@ -2026,6 +2043,9 @@ struct __pyx_memoryviewslice_obj {
 
 struct __pyx_vtabstruct_7opteryx_6draken_7vectors_6vector_Vector {
   PyObject *(*null_bitmap)(struct __pyx_obj_7opteryx_6draken_7vectors_6vector_Vector *, int __pyx_skip_dispatch);
+  struct __pyx_t_7opteryx_6draken_4core_7buffers_DictAccessor *(*dict_accessor)(struct __pyx_obj_7opteryx_6draken_7vectors_6vector_Vector *);
+  void *(*dense_ptr)(struct __pyx_obj_7opteryx_6draken_7vectors_6vector_Vector *);
+  uint8_t *(*null_bitmap_ptr)(struct __pyx_obj_7opteryx_6draken_7vectors_6vector_Vector *);
   void (*hash_into)(struct __pyx_obj_7opteryx_6draken_7vectors_6vector_Vector *, __Pyx_memviewslice, struct __pyx_opt_args_7opteryx_6draken_7vectors_6vector_6Vector_hash_into *__pyx_optional_args);
   __Pyx_memviewslice (*hash)(struct __pyx_obj_7opteryx_6draken_7vectors_6vector_Vector *, int __pyx_skip_dispatch);
   void (*compress_into)(struct __pyx_obj_7opteryx_6draken_7vectors_6vector_Vector *, __Pyx_memviewslice, struct __pyx_opt_args_7opteryx_6draken_7vectors_6vector_6Vector_compress_into *__pyx_optional_args);
@@ -2089,7 +2109,7 @@ struct __pyx_vtabstruct_7opteryx_6draken_7vectors_13string_vector_StringVector {
 static struct __pyx_vtabstruct_7opteryx_6draken_7vectors_13string_vector_StringVector *__pyx_vtabptr_7opteryx_6draken_7vectors_13string_vector_StringVector;
 
 
-/* "opteryx/draken/vectors/string_vector.pxd":45
+/* "opteryx/draken/vectors/string_vector.pxd":48
  * 
  * 
  * cdef class _StringVectorCIterator:             # <<<<<<<<<<<<<<
@@ -2106,7 +2126,7 @@ struct __pyx_vtabstruct_7opteryx_6draken_7vectors_13string_vector__StringVectorC
 static struct __pyx_vtabstruct_7opteryx_6draken_7vectors_13string_vector__StringVectorCIterator *__pyx_vtabptr_7opteryx_6draken_7vectors_13string_vector__StringVectorCIterator;
 
 
-/* "opteryx/draken/vectors/string_vector.pxd":62
+/* "opteryx/draken/vectors/string_vector.pxd":65
  * 
  * 
  * cdef class _StringVectorView:             # <<<<<<<<<<<<<<
@@ -2122,7 +2142,7 @@ struct __pyx_vtabstruct_7opteryx_6draken_7vectors_13string_vector__StringVectorV
 static struct __pyx_vtabstruct_7opteryx_6draken_7vectors_13string_vector__StringVectorView *__pyx_vtabptr_7opteryx_6draken_7vectors_13string_vector__StringVectorView;
 
 
-/* "opteryx/draken/vectors/string_vector.pxd":73
+/* "opteryx/draken/vectors/string_vector.pxd":76
  * 
  * 
  * cdef class StringVectorBuilder:             # <<<<<<<<<<<<<<
@@ -17168,7 +17188,7 @@ static PyObject *__pyx_unpickle_Enum__set_state(struct __pyx_MemviewEnum_obj *__
   return __pyx_r;
 }
 
-/* "opteryx/draken/vectors/vector.pxd":20
+/* "opteryx/draken/vectors/vector.pxd":22
  *     void simd_mix_hash(uint64_t* dest, const uint64_t* values, size_t count) nogil
  * 
  * cdef inline uint64_t mix_hash(uint64_t current, uint64_t value) nogil:             # <<<<<<<<<<<<<<
@@ -17180,7 +17200,7 @@ static CYTHON_INLINE uint64_t __pyx_f_7opteryx_6draken_7vectors_6vector_mix_hash
   uint64_t __pyx_v_mixed;
   uint64_t __pyx_r;
 
-  /* "opteryx/draken/vectors/vector.pxd":21
+  /* "opteryx/draken/vectors/vector.pxd":23
  * 
  * cdef inline uint64_t mix_hash(uint64_t current, uint64_t value) nogil:
  *     cdef uint64_t mixed = current ^ value             # <<<<<<<<<<<<<<
@@ -17189,7 +17209,7 @@ static CYTHON_INLINE uint64_t __pyx_f_7opteryx_6draken_7vectors_6vector_mix_hash
 */
   __pyx_v_mixed = (__pyx_v_current ^ __pyx_v_value);
 
-  /* "opteryx/draken/vectors/vector.pxd":22
+  /* "opteryx/draken/vectors/vector.pxd":24
  * cdef inline uint64_t mix_hash(uint64_t current, uint64_t value) nogil:
  *     cdef uint64_t mixed = current ^ value
  *     mixed = mixed * MIX_HASH_CONSTANT + 1             # <<<<<<<<<<<<<<
@@ -17198,7 +17218,7 @@ static CYTHON_INLINE uint64_t __pyx_f_7opteryx_6draken_7vectors_6vector_mix_hash
 */
   __pyx_v_mixed = ((__pyx_v_mixed * __pyx_v_7opteryx_6draken_7vectors_6vector_MIX_HASH_CONSTANT) + 1);
 
-  /* "opteryx/draken/vectors/vector.pxd":23
+  /* "opteryx/draken/vectors/vector.pxd":25
  *     cdef uint64_t mixed = current ^ value
  *     mixed = mixed * MIX_HASH_CONSTANT + 1
  *     return mixed ^ (mixed >> 32)             # <<<<<<<<<<<<<<
@@ -17208,7 +17228,7 @@ static CYTHON_INLINE uint64_t __pyx_f_7opteryx_6draken_7vectors_6vector_mix_hash
   __pyx_r = (__pyx_v_mixed ^ (__pyx_v_mixed >> 32));
   goto __pyx_L0;
 
-  /* "opteryx/draken/vectors/vector.pxd":20
+  /* "opteryx/draken/vectors/vector.pxd":22
  *     void simd_mix_hash(uint64_t* dest, const uint64_t* values, size_t count) nogil
  * 
  * cdef inline uint64_t mix_hash(uint64_t current, uint64_t value) nogil:             # <<<<<<<<<<<<<<
@@ -21343,7 +21363,7 @@ static int __Pyx_modinit_type_import_code(__pyx_mstatetype *__pyx_mstate) {
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("__Pyx_modinit_type_import_code", 0);
   /*--- Type import code ---*/
-  __pyx_t_1 = PyImport_ImportModule("opteryx.draken.vectors.vector"); if (unlikely(!__pyx_t_1)) __PYX_ERR(2, 25, __pyx_L1_error)
+  __pyx_t_1 = PyImport_ImportModule("opteryx.draken.vectors.vector"); if (unlikely(!__pyx_t_1)) __PYX_ERR(2, 27, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
   __pyx_mstate->__pyx_ptype_7opteryx_6draken_7vectors_6vector_Vector = __Pyx_ImportType_3_2_4(__pyx_t_1, "opteryx.draken.vectors.vector", "Vector",
   #if defined(PYPY_VERSION_NUM) && PYPY_VERSION_NUM < 0x050B0000
@@ -21353,8 +21373,8 @@ static int __Pyx_modinit_type_import_code(__pyx_mstatetype *__pyx_mstate) {
   #else
   sizeof(struct __pyx_obj_7opteryx_6draken_7vectors_6vector_Vector), __PYX_GET_STRUCT_ALIGNMENT_3_2_4(struct __pyx_obj_7opteryx_6draken_7vectors_6vector_Vector),
   #endif
-  __Pyx_ImportType_CheckSize_Warn_3_2_4); if (!__pyx_mstate->__pyx_ptype_7opteryx_6draken_7vectors_6vector_Vector) __PYX_ERR(2, 25, __pyx_L1_error)
-  __pyx_vtabptr_7opteryx_6draken_7vectors_6vector_Vector = (struct __pyx_vtabstruct_7opteryx_6draken_7vectors_6vector_Vector*)__Pyx_GetVtable(__pyx_mstate->__pyx_ptype_7opteryx_6draken_7vectors_6vector_Vector); if (unlikely(!__pyx_vtabptr_7opteryx_6draken_7vectors_6vector_Vector)) __PYX_ERR(2, 25, __pyx_L1_error)
+  __Pyx_ImportType_CheckSize_Warn_3_2_4); if (!__pyx_mstate->__pyx_ptype_7opteryx_6draken_7vectors_6vector_Vector) __PYX_ERR(2, 27, __pyx_L1_error)
+  __pyx_vtabptr_7opteryx_6draken_7vectors_6vector_Vector = (struct __pyx_vtabstruct_7opteryx_6draken_7vectors_6vector_Vector*)__Pyx_GetVtable(__pyx_mstate->__pyx_ptype_7opteryx_6draken_7vectors_6vector_Vector); if (unlikely(!__pyx_vtabptr_7opteryx_6draken_7vectors_6vector_Vector)) __PYX_ERR(2, 27, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
   __pyx_t_1 = PyImport_ImportModule("opteryx.draken.vectors.bool_vector"); if (unlikely(!__pyx_t_1)) __PYX_ERR(3, 9, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
@@ -21389,8 +21409,8 @@ static int __Pyx_modinit_type_import_code(__pyx_mstatetype *__pyx_mstate) {
   #else
   sizeof(struct __pyx_obj_7opteryx_6draken_7vectors_13string_vector__StringVectorCIterator), __PYX_GET_STRUCT_ALIGNMENT_3_2_4(struct __pyx_obj_7opteryx_6draken_7vectors_13string_vector__StringVectorCIterator),
   #endif
-  __Pyx_ImportType_CheckSize_Warn_3_2_4); if (!__pyx_mstate->__pyx_ptype_7opteryx_6draken_7vectors_13string_vector__StringVectorCIterator) __PYX_ERR(4, 45, __pyx_L1_error)
-  __pyx_vtabptr_7opteryx_6draken_7vectors_13string_vector__StringVectorCIterator = (struct __pyx_vtabstruct_7opteryx_6draken_7vectors_13string_vector__StringVectorCIterator*)__Pyx_GetVtable(__pyx_mstate->__pyx_ptype_7opteryx_6draken_7vectors_13string_vector__StringVectorCIterator); if (unlikely(!__pyx_vtabptr_7opteryx_6draken_7vectors_13string_vector__StringVectorCIterator)) __PYX_ERR(4, 45, __pyx_L1_error)
+  __Pyx_ImportType_CheckSize_Warn_3_2_4); if (!__pyx_mstate->__pyx_ptype_7opteryx_6draken_7vectors_13string_vector__StringVectorCIterator) __PYX_ERR(4, 48, __pyx_L1_error)
+  __pyx_vtabptr_7opteryx_6draken_7vectors_13string_vector__StringVectorCIterator = (struct __pyx_vtabstruct_7opteryx_6draken_7vectors_13string_vector__StringVectorCIterator*)__Pyx_GetVtable(__pyx_mstate->__pyx_ptype_7opteryx_6draken_7vectors_13string_vector__StringVectorCIterator); if (unlikely(!__pyx_vtabptr_7opteryx_6draken_7vectors_13string_vector__StringVectorCIterator)) __PYX_ERR(4, 48, __pyx_L1_error)
   __pyx_mstate->__pyx_ptype_7opteryx_6draken_7vectors_13string_vector__StringVectorView = __Pyx_ImportType_3_2_4(__pyx_t_1, "opteryx.draken.vectors.string_vector", "_StringVectorView",
   #if defined(PYPY_VERSION_NUM) && PYPY_VERSION_NUM < 0x050B0000
   sizeof(struct __pyx_obj_7opteryx_6draken_7vectors_13string_vector__StringVectorView), __PYX_GET_STRUCT_ALIGNMENT_3_2_4(struct __pyx_obj_7opteryx_6draken_7vectors_13string_vector__StringVectorView),
@@ -21399,8 +21419,8 @@ static int __Pyx_modinit_type_import_code(__pyx_mstatetype *__pyx_mstate) {
   #else
   sizeof(struct __pyx_obj_7opteryx_6draken_7vectors_13string_vector__StringVectorView), __PYX_GET_STRUCT_ALIGNMENT_3_2_4(struct __pyx_obj_7opteryx_6draken_7vectors_13string_vector__StringVectorView),
   #endif
-  __Pyx_ImportType_CheckSize_Warn_3_2_4); if (!__pyx_mstate->__pyx_ptype_7opteryx_6draken_7vectors_13string_vector__StringVectorView) __PYX_ERR(4, 62, __pyx_L1_error)
-  __pyx_vtabptr_7opteryx_6draken_7vectors_13string_vector__StringVectorView = (struct __pyx_vtabstruct_7opteryx_6draken_7vectors_13string_vector__StringVectorView*)__Pyx_GetVtable(__pyx_mstate->__pyx_ptype_7opteryx_6draken_7vectors_13string_vector__StringVectorView); if (unlikely(!__pyx_vtabptr_7opteryx_6draken_7vectors_13string_vector__StringVectorView)) __PYX_ERR(4, 62, __pyx_L1_error)
+  __Pyx_ImportType_CheckSize_Warn_3_2_4); if (!__pyx_mstate->__pyx_ptype_7opteryx_6draken_7vectors_13string_vector__StringVectorView) __PYX_ERR(4, 65, __pyx_L1_error)
+  __pyx_vtabptr_7opteryx_6draken_7vectors_13string_vector__StringVectorView = (struct __pyx_vtabstruct_7opteryx_6draken_7vectors_13string_vector__StringVectorView*)__Pyx_GetVtable(__pyx_mstate->__pyx_ptype_7opteryx_6draken_7vectors_13string_vector__StringVectorView); if (unlikely(!__pyx_vtabptr_7opteryx_6draken_7vectors_13string_vector__StringVectorView)) __PYX_ERR(4, 65, __pyx_L1_error)
   __pyx_mstate->__pyx_ptype_7opteryx_6draken_7vectors_13string_vector_StringVectorBuilder = __Pyx_ImportType_3_2_4(__pyx_t_1, "opteryx.draken.vectors.string_vector", "StringVectorBuilder",
   #if defined(PYPY_VERSION_NUM) && PYPY_VERSION_NUM < 0x050B0000
   sizeof(struct __pyx_obj_7opteryx_6draken_7vectors_13string_vector_StringVectorBuilder), __PYX_GET_STRUCT_ALIGNMENT_3_2_4(struct __pyx_obj_7opteryx_6draken_7vectors_13string_vector_StringVectorBuilder),
@@ -21409,8 +21429,8 @@ static int __Pyx_modinit_type_import_code(__pyx_mstatetype *__pyx_mstate) {
   #else
   sizeof(struct __pyx_obj_7opteryx_6draken_7vectors_13string_vector_StringVectorBuilder), __PYX_GET_STRUCT_ALIGNMENT_3_2_4(struct __pyx_obj_7opteryx_6draken_7vectors_13string_vector_StringVectorBuilder),
   #endif
-  __Pyx_ImportType_CheckSize_Warn_3_2_4); if (!__pyx_mstate->__pyx_ptype_7opteryx_6draken_7vectors_13string_vector_StringVectorBuilder) __PYX_ERR(4, 73, __pyx_L1_error)
-  __pyx_vtabptr_7opteryx_6draken_7vectors_13string_vector_StringVectorBuilder = (struct __pyx_vtabstruct_7opteryx_6draken_7vectors_13string_vector_StringVectorBuilder*)__Pyx_GetVtable(__pyx_mstate->__pyx_ptype_7opteryx_6draken_7vectors_13string_vector_StringVectorBuilder); if (unlikely(!__pyx_vtabptr_7opteryx_6draken_7vectors_13string_vector_StringVectorBuilder)) __PYX_ERR(4, 73, __pyx_L1_error)
+  __Pyx_ImportType_CheckSize_Warn_3_2_4); if (!__pyx_mstate->__pyx_ptype_7opteryx_6draken_7vectors_13string_vector_StringVectorBuilder) __PYX_ERR(4, 76, __pyx_L1_error)
+  __pyx_vtabptr_7opteryx_6draken_7vectors_13string_vector_StringVectorBuilder = (struct __pyx_vtabstruct_7opteryx_6draken_7vectors_13string_vector_StringVectorBuilder*)__Pyx_GetVtable(__pyx_mstate->__pyx_ptype_7opteryx_6draken_7vectors_13string_vector_StringVectorBuilder); if (unlikely(!__pyx_vtabptr_7opteryx_6draken_7vectors_13string_vector_StringVectorBuilder)) __PYX_ERR(4, 76, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
   __pyx_t_1 = PyImport_ImportModule(__Pyx_BUILTIN_MODULE_NAME); if (unlikely(!__pyx_t_1)) __PYX_ERR(5, 9, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);

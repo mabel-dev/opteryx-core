@@ -18,11 +18,13 @@ from libc.string cimport memset, memcmp
 from libcpp.vector cimport vector
 
 from opteryx.draken.core.buffers cimport DrakenConstantBuffer
+from opteryx.draken.core.buffers cimport DictAccessor
 from opteryx.draken.core.buffers cimport DrakenDictionaryBuffer
 from opteryx.draken.core.buffers cimport DrakenFixedBuffer
 from opteryx.draken.core.buffers cimport DrakenVarBuffer
 from opteryx.draken.core.buffers cimport DRAKEN_BOOL
 from opteryx.draken.core.buffers cimport DRAKEN_DATE32
+from opteryx.draken.core.buffers cimport DRAKEN_FLOAT32
 from opteryx.draken.core.buffers cimport DRAKEN_FLOAT64
 from opteryx.draken.core.buffers cimport DRAKEN_INT8
 from opteryx.draken.core.buffers cimport DRAKEN_INT16
@@ -36,7 +38,6 @@ from opteryx.draken.interop.arrow import vector_from_sequence
 from opteryx.draken.morsels.morsel cimport Morsel
 from opteryx.draken.morsels.morsel import Morsel
 from opteryx.draken.vectors.constant_vector cimport ConstantVector
-from opteryx.draken.vectors.dictionary_vector cimport DictionaryVector
 from opteryx.draken.vectors.float64_vector cimport Float64Vector
 from opteryx.draken.vectors.int64_vector cimport Int64Vector
 from opteryx.draken.vectors.integer_vector cimport IntegerVector
@@ -45,6 +46,7 @@ from opteryx.draken.vectors.string_vector cimport StringVector
 from opteryx.draken.vectors.string_vector cimport StringVectorBuilder
 from opteryx.draken.vectors.time_vector cimport TimeVector
 from opteryx.draken.vectors.timestamp_vector cimport TimestampVector
+from opteryx.draken.vectors.vector cimport Vector
 from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.third_party.abseil.containers cimport FlatHashSet
 
@@ -77,6 +79,8 @@ cdef int VALUE_NONE = 0
 cdef int VALUE_INT64 = 1
 cdef int VALUE_FLOAT64 = 2
 cdef int VALUE_OBJECT = 3
+cdef int VALUE_DICT_INT64 = 4
+cdef int VALUE_DICT_FLOAT64 = 5
 
 cdef int KEY_MULTI_FIXED_INT = 1
 cdef int KEY_MULTI_FIXED_DATE32 = 2
@@ -84,6 +88,14 @@ cdef int KEY_MULTI_FIXED_TIME32 = 3
 cdef int KEY_MULTI_FIXED_TIME64 = 4
 cdef int KEY_MULTI_FIXED_TIMESTAMP64 = 5
 cdef int KEY_MULTI_ENCODED_STRING = 6
+
+
+cdef inline uint32_t _dict_read_code(const DrakenDictionaryBuffer* ptr, Py_ssize_t i) noexcept nogil:
+    if ptr.code_width == 1:
+        return (<uint8_t*>ptr.codes)[i]
+    if ptr.code_width == 2:
+        return (<uint16_t*>ptr.codes)[i]
+    return (<uint32_t*>ptr.codes)[i]
 
 
 cdef inline bint _bitmap_is_valid(uint8_t* bitmap, Py_ssize_t index) noexcept:
@@ -134,6 +146,95 @@ cdef inline int64_t _dictionary_type_to_key_kind(int dict_type) noexcept:
     if dict_type == DRAKEN_STRING:
         return KEY_MULTI_ENCODED_STRING
     return 0
+
+
+cdef inline DictAccessor* _vector_dict_accessor(object vec) noexcept:
+    if isinstance(vec, Vector):
+        return (<Vector> vec).dict_accessor()
+    return NULL
+
+
+cdef inline uint8_t* _vector_null_bitmap(object vec) noexcept:
+    if isinstance(vec, Vector):
+        return (<Vector> vec).null_bitmap_ptr()
+    return NULL
+
+
+cdef inline uint32_t _dict_accessor_read_code(const DictAccessor* ptr, Py_ssize_t i) noexcept nogil:
+    if ptr.code_width == 1:
+        return (<uint8_t*>ptr.codes)[i]
+    if ptr.code_width == 2:
+        return (<uint16_t*>ptr.codes)[i]
+    return (<uint32_t*>ptr.codes)[i]
+
+
+cdef inline int64_t _dict_accessor_key_kind(const DictAccessor* dict_accessor) noexcept:
+    if dict_accessor == NULL or dict_accessor.dict_values == NULL:
+        return 0
+    return _dictionary_type_to_key_kind(dict_accessor.value_type)
+
+
+cdef inline DictAccessor* _vector_value_dict_accessor(object vec) noexcept:
+    cdef DictAccessor* dict_accessor = _vector_dict_accessor(vec)
+    if dict_accessor == NULL or dict_accessor.dict_values == NULL:
+        return NULL
+    return dict_accessor
+
+
+cdef inline int _dict_accessor_value_kind(const DictAccessor* dict_accessor) noexcept:
+    if dict_accessor == NULL or dict_accessor.dict_values == NULL:
+        return VALUE_NONE
+    if dict_accessor.value_type == DRAKEN_STRING:
+        return VALUE_OBJECT
+    if dict_accessor.value_type == DRAKEN_FLOAT64 or dict_accessor.value_type == DRAKEN_FLOAT32:
+        return VALUE_DICT_FLOAT64
+    return VALUE_DICT_INT64
+
+
+cdef inline double _dict_accessor_read_float_value(
+    const DictAccessor* dict_accessor,
+    Py_ssize_t row_idx,
+) except *:
+    cdef uint32_t code
+
+    code = _dict_accessor_read_code(dict_accessor, row_idx)
+    if code >= dict_accessor.dict_values.length:
+        raise IndexError("Dictionary code out of range")
+    if dict_accessor.value_type == DRAKEN_FLOAT32:
+        return (<float*>dict_accessor.dict_values.data)[code]
+    return (<double*>dict_accessor.dict_values.data)[code]
+
+
+cdef inline int64_t _dict_accessor_read_int_value(
+    const DictAccessor* dict_accessor,
+    Py_ssize_t row_idx,
+) except *:
+    cdef uint32_t code
+
+    code = _dict_accessor_read_code(dict_accessor, row_idx)
+    if code >= dict_accessor.dict_values.length:
+        raise IndexError("Dictionary code out of range")
+    if dict_accessor.value_type == DRAKEN_INT8:
+        return (<int8_t*>dict_accessor.dict_values.data)[code]
+    if dict_accessor.value_type == DRAKEN_INT16:
+        return (<int16_t*>dict_accessor.dict_values.data)[code]
+    if (
+        dict_accessor.value_type == DRAKEN_INT32
+        or dict_accessor.value_type == DRAKEN_DATE32
+        or dict_accessor.value_type == DRAKEN_TIME32
+    ):
+        return (<int32_t*>dict_accessor.dict_values.data)[code]
+    if (
+        dict_accessor.value_type == DRAKEN_INT64
+        or dict_accessor.value_type == DRAKEN_TIME64
+        or dict_accessor.value_type == DRAKEN_TIMESTAMP64
+    ):
+        return (<int64_t*>dict_accessor.dict_values.data)[code]
+    if dict_accessor.value_type == DRAKEN_BOOL:
+        return 1 if (<uint8_t*>dict_accessor.dict_values.data)[code] != 0 else 0
+    raise UnsupportedSyntaxError(
+        "Carchar group-state engine only supports fixed-width and string dictionary values."
+    )
 
 
 cdef inline uint8_t* _alloc_valid_bitmap(Py_ssize_t length) except NULL:
@@ -279,7 +380,7 @@ cdef class CarcharGroupStateEngine:
             "groupby_key_store_bytes": 0,
             "feature_groupby_engine_carchar": 0,
             "feature_groupby_engine_constant": 0,
-            "feature_groupby_engine_legacy": 0,
+            "feature_groupby_engine_group_state_store": 0,
             "feature_groupby_engine_multi_key_fixed": 0,
             "feature_groupby_engine_multi_key_object": 0,
         }
@@ -331,7 +432,7 @@ cdef class CarcharGroupStateEngine:
 
     cdef void _init_legacy_backend(self):
         raise UnsupportedSyntaxError(
-            "Carchar group-state engine does not support runtime fallback; choose the legacy backend explicitly in planning."
+            "Carchar group-state engine does not support runtime fallback; choose GroupStateStore explicitly in planning."
         )
 
     cdef inline bint _has_multi_agg(self) noexcept:
@@ -409,11 +510,11 @@ cdef class CarcharGroupStateEngine:
             return (
                 self._multi_agg_modes[agg_idx] == AGG_AVG
                 or (
-                    self._multi_value_kinds[agg_idx] == VALUE_FLOAT64
+                    self._multi_value_kinds[agg_idx] in (VALUE_FLOAT64, VALUE_DICT_FLOAT64)
                     and self._multi_agg_modes[agg_idx] in (AGG_SUM, AGG_MIN, AGG_MAX)
                 )
             )
-        return self._agg_mode == AGG_AVG or self._value_kind == VALUE_FLOAT64
+        return self._agg_mode == AGG_AVG or self._value_kind in (VALUE_FLOAT64, VALUE_DICT_FLOAT64)
 
     cdef inline bint _agg_output_is_object(self, Py_ssize_t agg_idx) noexcept:
         if self._multi_agg_count > 0:
@@ -424,12 +525,12 @@ cdef class CarcharGroupStateEngine:
         return self._value_kind == VALUE_OBJECT and self._agg_mode in (AGG_MIN, AGG_MAX, AGG_HASH_ONE)
 
     cdef inline bint _is_stringlike_vector(self, object vec) noexcept:
-        cdef int64_t key_kind
+        cdef DictAccessor* dict_accessor = NULL
         if isinstance(vec, StringVector):
             return True
-        if isinstance(vec, DictionaryVector):
-            key_kind = self._dictionary_key_kind(<DictionaryVector> vec)
-            return key_kind == KEY_MULTI_ENCODED_STRING
+        dict_accessor = _vector_dict_accessor(vec)
+        if dict_accessor != NULL:
+            return _dict_accessor_key_kind(dict_accessor) == KEY_MULTI_ENCODED_STRING
         return False
 
     cdef inline int _compare_bytes(
@@ -476,17 +577,7 @@ cdef class CarcharGroupStateEngine:
             self._multi_object_state_bytes.push_back(<uint8_t> data_ptr[idx])
 
     cdef inline uint8_t* _value_null_bitmap(self, object value_vector):
-        if isinstance(value_vector, Int64Vector):
-            return <uint8_t*> (<Int64Vector> value_vector).ptr.null_bitmap
-        if isinstance(value_vector, IntegerVector):
-            return <uint8_t*> (<IntegerVector> value_vector).ptr.null_bitmap
-        if isinstance(value_vector, Float64Vector):
-            return <uint8_t*> (<Float64Vector> value_vector).ptr.null_bitmap
-        if isinstance(value_vector, StringVector):
-            return <uint8_t*> (<StringVector> value_vector).ptr.null_bitmap
-        if isinstance(value_vector, DictionaryVector):
-            return <uint8_t*> (<DictionaryVector> value_vector).ptr.null_bitmap
-        return NULL
+        return _vector_null_bitmap(value_vector)
 
     cdef inline void _init_multi_fixed_key_columns(self, Py_ssize_t key_count):
         cdef Py_ssize_t idx
@@ -516,39 +607,31 @@ cdef class CarcharGroupStateEngine:
             or key_kind == KEY_MULTI_FIXED_TIMESTAMP64
         )
 
-    cdef inline int64_t _dictionary_key_kind(self, DictionaryVector key_vector) noexcept:
-        cdef DrakenDictionaryBuffer* dict_ptr = key_vector.ptr
-        cdef DrakenVarBuffer* dict_values = NULL
-
-        if dict_ptr == NULL:
-            return 0
-        dict_values = dict_ptr.dictionary_values
-        if dict_values == NULL:
-            return 0
-        return _dictionary_type_to_key_kind(dict_values.type)
+    cdef inline bint _supports_count_distinct_value(self, object value_vector) noexcept:
+        return (
+            isinstance(value_vector, (Int64Vector, IntegerVector, Float64Vector, StringVector))
+            or _vector_value_dict_accessor(value_vector) != NULL
+        )
 
     cdef inline int64_t _read_dictionary_fixed_key(
         self,
-        DictionaryVector key_vector,
+        object key_vector,
         Py_ssize_t row_idx,
         int64_t* key_valid_flag,
     ) except *:
-        cdef DrakenDictionaryBuffer* dict_ptr = key_vector.ptr
+        cdef DictAccessor* dict_accessor = _vector_dict_accessor(key_vector)
         cdef DrakenVarBuffer* dict_values = NULL
         cdef uint8_t* nulls = NULL
         cdef uint32_t code = 0
 
         key_valid_flag[0] = 0
-        if dict_ptr == NULL:
+        if dict_accessor == NULL or dict_accessor.dict_values == NULL:
             return 0
-        if not _bitmap_is_valid(<uint8_t*>dict_ptr.null_bitmap, row_idx):
-            return 0
-
-        dict_values = dict_ptr.dictionary_values
-        if dict_values == NULL:
+        if not _bitmap_is_valid(dict_accessor.row_nulls, row_idx):
             return 0
 
-        code = _read_dictionary_code(dict_ptr, row_idx)
+        dict_values = dict_accessor.dict_values
+        code = _dict_accessor_read_code(dict_accessor, row_idx)
         if code >= dict_values.length:
             raise IndexError("Dictionary code out of range")
 
@@ -557,19 +640,23 @@ cdef class CarcharGroupStateEngine:
             return 0
 
         key_valid_flag[0] = 1
-        if dict_values.type == DRAKEN_INT8:
+        if dict_accessor.value_type == DRAKEN_INT8:
             return (<int8_t*>dict_values.data)[code]
-        if dict_values.type == DRAKEN_INT16:
+        if dict_accessor.value_type == DRAKEN_INT16:
             return (<int16_t*>dict_values.data)[code]
-        if dict_values.type == DRAKEN_INT32 or dict_values.type == DRAKEN_DATE32 or dict_values.type == DRAKEN_TIME32:
+        if (
+            dict_accessor.value_type == DRAKEN_INT32
+            or dict_accessor.value_type == DRAKEN_DATE32
+            or dict_accessor.value_type == DRAKEN_TIME32
+        ):
             return (<int32_t*>dict_values.data)[code]
         if (
-            dict_values.type == DRAKEN_INT64
-            or dict_values.type == DRAKEN_TIME64
-            or dict_values.type == DRAKEN_TIMESTAMP64
+            dict_accessor.value_type == DRAKEN_INT64
+            or dict_accessor.value_type == DRAKEN_TIME64
+            or dict_accessor.value_type == DRAKEN_TIMESTAMP64
         ):
             return (<int64_t*>dict_values.data)[code]
-        if dict_values.type == DRAKEN_BOOL:
+        if dict_accessor.value_type == DRAKEN_BOOL:
             return 1 if (<uint8_t*>dict_values.data)[code] != 0 else 0
 
         raise UnsupportedSyntaxError(
@@ -619,7 +706,7 @@ cdef class CarcharGroupStateEngine:
         Py_ssize_t* data_len,
     ) except *:
         cdef DrakenVarBuffer* str_ptr
-        cdef DrakenDictionaryBuffer* dict_ptr
+        cdef DictAccessor* dict_accessor = NULL
         cdef DrakenVarBuffer* dict_values
         cdef uint8_t* nulls
         cdef uint32_t code
@@ -639,19 +726,19 @@ cdef class CarcharGroupStateEngine:
             data_len[0] = stop - start
             return 1
 
-        if isinstance(key_vector, DictionaryVector):
-            dict_ptr = (<DictionaryVector> key_vector).ptr
-            nulls = <uint8_t*> dict_ptr.null_bitmap
+        dict_accessor = _vector_dict_accessor(key_vector)
+        if dict_accessor != NULL:
+            nulls = dict_accessor.row_nulls
             if not _bitmap_is_valid(nulls, row_idx):
                 data_ptr[0] = NULL
                 data_len[0] = 0
                 return 0
-            dict_values = dict_ptr.dictionary_values
-            if dict_values == NULL or dict_values.type != DRAKEN_STRING:
+            dict_values = dict_accessor.dict_values
+            if dict_values == NULL or dict_accessor.value_type != DRAKEN_STRING:
                 raise UnsupportedSyntaxError(
                     "Carchar group-state engine only supports string dictionary keys on the native encoded-key path."
                 )
-            code = _read_dictionary_code(dict_ptr, row_idx)
+            code = _dict_accessor_read_code(dict_accessor, row_idx)
             nulls = <uint8_t*> dict_values.null_bitmap
             if not _bitmap_is_valid(nulls, code):
                 data_ptr[0] = NULL
@@ -789,10 +876,8 @@ cdef class CarcharGroupStateEngine:
             key_vector = key_vectors[key_idx]
             key_kind = self._multi_group_key_kinds[key_idx]
             if self._is_multi_fixed_kind(key_kind):
-                if isinstance(key_vector, DictionaryVector):
-                    key_value = self._read_dictionary_fixed_key(
-                        <DictionaryVector> key_vector, row_idx, &key_valid_flag
-                    )
+                if _vector_dict_accessor(key_vector) != NULL:
+                    key_value = self._read_dictionary_fixed_key(key_vector, row_idx, &key_valid_flag)
                 elif isinstance(key_vector, Int64Vector):
                     key_valid_flag = 1 if _bitmap_is_valid(<uint8_t*> (<Int64Vector> key_vector).ptr.null_bitmap, row_idx) else 0
                     key_value = _read_integer_value((<Int64Vector> key_vector).ptr, row_idx) if key_valid_flag != 0 else 0
@@ -836,6 +921,8 @@ cdef class CarcharGroupStateEngine:
         cdef Py_ssize_t agg_idx
         cdef int64_t key_kind
         cdef bint stringlike_key_vector = False
+        cdef DictAccessor* dict_accessor = NULL
+        cdef DictAccessor* key_dict_accessor = NULL
 
         if self._mode != MODE_UNINITIALIZED or morsel is None or morsel.num_rows == 0:
             return
@@ -850,6 +937,7 @@ cdef class CarcharGroupStateEngine:
             self._multi_group_key_kinds.clear()
             for column in self._group_by_columns:
                 key_vector = morsel.column(column)
+                dict_accessor = _vector_dict_accessor(key_vector)
                 if isinstance(key_vector, Int64Vector):
                     self._multi_group_key_kinds.push_back(KEY_MULTI_FIXED_INT)
                     continue
@@ -875,8 +963,8 @@ cdef class CarcharGroupStateEngine:
                     self._use_object_keys = True
                     self._multi_key_object_mode = True
                     continue
-                if isinstance(key_vector, DictionaryVector):
-                    key_kind = self._dictionary_key_kind(<DictionaryVector> key_vector)
+                if dict_accessor != NULL:
+                    key_kind = _dict_accessor_key_kind(dict_accessor)
                     if key_kind == 0:
                         self._init_legacy_backend()
                         return
@@ -920,6 +1008,7 @@ cdef class CarcharGroupStateEngine:
                                 return
                     elif fn == "sum":
                         value_vector = morsel.column(column)
+                        dict_accessor = _vector_dict_accessor(value_vector)
                         if isinstance(value_vector, Float64Vector):
                             self._multi_agg_modes.push_back(AGG_SUM)
                             self._multi_value_kinds.push_back(VALUE_FLOAT64)
@@ -928,11 +1017,21 @@ cdef class CarcharGroupStateEngine:
                             self._multi_agg_modes.push_back(AGG_SUM)
                             self._multi_value_kinds.push_back(VALUE_INT64)
                             self._multi_value_columns.append(column)
+                        elif dict_accessor != NULL and dict_accessor.dict_values != NULL:
+                            if dict_accessor.value_type == DRAKEN_FLOAT64 or dict_accessor.value_type == DRAKEN_FLOAT32:
+                                self._multi_agg_modes.push_back(AGG_SUM)
+                                self._multi_value_kinds.push_back(VALUE_DICT_FLOAT64)
+                                self._multi_value_columns.append(column)
+                            else:
+                                self._multi_agg_modes.push_back(AGG_SUM)
+                                self._multi_value_kinds.push_back(VALUE_DICT_INT64)
+                                self._multi_value_columns.append(column)
                         else:
                             self._init_legacy_backend()
                             return
                     elif fn == "min":
                         value_vector = morsel.column(column)
+                        dict_accessor = _vector_dict_accessor(value_vector)
                         if isinstance(value_vector, Float64Vector):
                             self._multi_agg_modes.push_back(AGG_MIN)
                             self._multi_value_kinds.push_back(VALUE_FLOAT64)
@@ -941,16 +1040,31 @@ cdef class CarcharGroupStateEngine:
                             self._multi_agg_modes.push_back(AGG_MIN)
                             self._multi_value_kinds.push_back(VALUE_INT64)
                             self._multi_value_columns.append(column)
-                        elif isinstance(value_vector, (StringVector, DictionaryVector)):
+                        elif isinstance(value_vector, StringVector):
                             self._multi_agg_modes.push_back(AGG_MIN)
                             self._multi_value_kinds.push_back(VALUE_OBJECT)
                             self._multi_value_columns.append(column)
                             self._use_object_keys = True
+                        elif dict_accessor != NULL and dict_accessor.dict_values != NULL:
+                            if dict_accessor.value_type == DRAKEN_STRING:
+                                self._multi_agg_modes.push_back(AGG_MIN)
+                                self._multi_value_kinds.push_back(VALUE_OBJECT)
+                                self._multi_value_columns.append(column)
+                                self._use_object_keys = True
+                            elif dict_accessor.value_type == DRAKEN_FLOAT64 or dict_accessor.value_type == DRAKEN_FLOAT32:
+                                self._multi_agg_modes.push_back(AGG_MIN)
+                                self._multi_value_kinds.push_back(VALUE_DICT_FLOAT64)
+                                self._multi_value_columns.append(column)
+                            else:
+                                self._multi_agg_modes.push_back(AGG_MIN)
+                                self._multi_value_kinds.push_back(VALUE_DICT_INT64)
+                                self._multi_value_columns.append(column)
                         else:
                             self._init_legacy_backend()
                             return
                     elif fn == "max":
                         value_vector = morsel.column(column)
+                        dict_accessor = _vector_dict_accessor(value_vector)
                         if isinstance(value_vector, Float64Vector):
                             self._multi_agg_modes.push_back(AGG_MAX)
                             self._multi_value_kinds.push_back(VALUE_FLOAT64)
@@ -959,11 +1073,25 @@ cdef class CarcharGroupStateEngine:
                             self._multi_agg_modes.push_back(AGG_MAX)
                             self._multi_value_kinds.push_back(VALUE_INT64)
                             self._multi_value_columns.append(column)
-                        elif isinstance(value_vector, (StringVector, DictionaryVector)):
+                        elif isinstance(value_vector, StringVector):
                             self._multi_agg_modes.push_back(AGG_MAX)
                             self._multi_value_kinds.push_back(VALUE_OBJECT)
                             self._multi_value_columns.append(column)
                             self._use_object_keys = True
+                        elif dict_accessor != NULL and dict_accessor.dict_values != NULL:
+                            if dict_accessor.value_type == DRAKEN_STRING:
+                                self._multi_agg_modes.push_back(AGG_MAX)
+                                self._multi_value_kinds.push_back(VALUE_OBJECT)
+                                self._multi_value_columns.append(column)
+                                self._use_object_keys = True
+                            elif dict_accessor.value_type == DRAKEN_FLOAT64 or dict_accessor.value_type == DRAKEN_FLOAT32:
+                                self._multi_agg_modes.push_back(AGG_MAX)
+                                self._multi_value_kinds.push_back(VALUE_DICT_FLOAT64)
+                                self._multi_value_columns.append(column)
+                            else:
+                                self._multi_agg_modes.push_back(AGG_MAX)
+                                self._multi_value_kinds.push_back(VALUE_DICT_INT64)
+                                self._multi_value_columns.append(column)
                         else:
                             self._init_legacy_backend()
                             return
@@ -978,10 +1106,7 @@ cdef class CarcharGroupStateEngine:
                             return
                     elif fn == "count_distinct" or fn == "distinct":
                         value_vector = morsel.column(column)
-                        if isinstance(
-                            value_vector,
-                            (Int64Vector, IntegerVector, Float64Vector, StringVector, DictionaryVector),
-                        ):
+                        if self._supports_count_distinct_value(value_vector):
                             self._multi_agg_modes.push_back(AGG_COUNT_DISTINCT)
                             self._multi_value_kinds.push_back(VALUE_NONE)
                             self._multi_value_columns.append(column)
@@ -1014,42 +1139,74 @@ cdef class CarcharGroupStateEngine:
                         return
             elif fn == "sum":
                 value_vector = morsel.column(column)
+                dict_accessor = _vector_dict_accessor(value_vector)
                 if isinstance(value_vector, Float64Vector):
                     self._agg_mode = AGG_SUM
                     self._value_kind = VALUE_FLOAT64
                 elif isinstance(value_vector, (Int64Vector, IntegerVector)):
                     self._agg_mode = AGG_SUM
                     self._value_kind = VALUE_INT64
+                elif dict_accessor != NULL and dict_accessor.dict_values != NULL:
+                    if dict_accessor.value_type == DRAKEN_FLOAT64 or dict_accessor.value_type == DRAKEN_FLOAT32:
+                        self._agg_mode = AGG_SUM
+                        self._value_kind = VALUE_DICT_FLOAT64
+                    else:
+                        self._agg_mode = AGG_SUM
+                        self._value_kind = VALUE_DICT_INT64
                 else:
                     self._init_legacy_backend()
                     return
             elif fn == "min":
                 value_vector = morsel.column(column)
+                dict_accessor = _vector_dict_accessor(value_vector)
                 if isinstance(value_vector, Float64Vector):
                     self._agg_mode = AGG_MIN
                     self._value_kind = VALUE_FLOAT64
                 elif isinstance(value_vector, (Int64Vector, IntegerVector)):
                     self._agg_mode = AGG_MIN
                     self._value_kind = VALUE_INT64
-                elif isinstance(value_vector, (StringVector, DictionaryVector)):
+                elif isinstance(value_vector, StringVector):
                     self._agg_mode = AGG_MIN
                     self._value_kind = VALUE_OBJECT
                     self._use_object_keys = True
+                elif dict_accessor != NULL and dict_accessor.dict_values != NULL:
+                    if dict_accessor.value_type == DRAKEN_STRING:
+                        self._agg_mode = AGG_MIN
+                        self._value_kind = VALUE_OBJECT
+                        self._use_object_keys = True
+                    elif dict_accessor.value_type == DRAKEN_FLOAT64 or dict_accessor.value_type == DRAKEN_FLOAT32:
+                        self._agg_mode = AGG_MIN
+                        self._value_kind = VALUE_DICT_FLOAT64
+                    else:
+                        self._agg_mode = AGG_MIN
+                        self._value_kind = VALUE_DICT_INT64
                 else:
                     self._init_legacy_backend()
                     return
             elif fn == "max":
                 value_vector = morsel.column(column)
+                dict_accessor = _vector_dict_accessor(value_vector)
                 if isinstance(value_vector, Float64Vector):
                     self._agg_mode = AGG_MAX
                     self._value_kind = VALUE_FLOAT64
                 elif isinstance(value_vector, (Int64Vector, IntegerVector)):
                     self._agg_mode = AGG_MAX
                     self._value_kind = VALUE_INT64
-                elif isinstance(value_vector, (StringVector, DictionaryVector)):
+                elif isinstance(value_vector, StringVector):
                     self._agg_mode = AGG_MAX
                     self._value_kind = VALUE_OBJECT
                     self._use_object_keys = True
+                elif dict_accessor != NULL and dict_accessor.dict_values != NULL:
+                    if dict_accessor.value_type == DRAKEN_STRING:
+                        self._agg_mode = AGG_MAX
+                        self._value_kind = VALUE_OBJECT
+                        self._use_object_keys = True
+                    elif dict_accessor.value_type == DRAKEN_FLOAT64 or dict_accessor.value_type == DRAKEN_FLOAT32:
+                        self._agg_mode = AGG_MAX
+                        self._value_kind = VALUE_DICT_FLOAT64
+                    else:
+                        self._agg_mode = AGG_MAX
+                        self._value_kind = VALUE_DICT_INT64
                 else:
                     self._init_legacy_backend()
                     return
@@ -1063,10 +1220,7 @@ cdef class CarcharGroupStateEngine:
                     return
             elif fn == "count_distinct" or fn == "distinct":
                 value_vector = morsel.column(column)
-                if isinstance(
-                    value_vector,
-                    (Int64Vector, IntegerVector, Float64Vector, StringVector, DictionaryVector),
-                ):
+                if self._supports_count_distinct_value(value_vector):
                     self._agg_mode = AGG_COUNT_DISTINCT
                     self._value_kind = VALUE_NONE
                 else:
@@ -1087,8 +1241,9 @@ cdef class CarcharGroupStateEngine:
 
         key_vector = morsel.column(self._group_column)
         stringlike_key_vector = isinstance(key_vector, StringVector)
-        if isinstance(key_vector, DictionaryVector):
-            key_kind = self._dictionary_key_kind(<DictionaryVector> key_vector)
+        dict_accessor = _vector_dict_accessor(key_vector)
+        if dict_accessor != NULL:
+            key_kind = _dict_accessor_key_kind(dict_accessor)
             if key_kind == 0:
                 self._init_legacy_backend()
                 return
@@ -1118,7 +1273,7 @@ cdef class CarcharGroupStateEngine:
                             value_vector = morsel.column(column)
                             if isinstance(
                                 value_vector,
-                                (Int64Vector, IntegerVector, Float64Vector, StringVector, DictionaryVector),
+                                (Int64Vector, IntegerVector, Float64Vector, StringVector),
                             ):
                                 self._multi_agg_modes.push_back(AGG_COUNT_VALUE)
                                 self._multi_value_kinds.push_back(VALUE_NONE)
@@ -1149,7 +1304,7 @@ cdef class CarcharGroupStateEngine:
                             self._multi_agg_modes.push_back(AGG_MIN)
                             self._multi_value_kinds.push_back(VALUE_INT64)
                             self._multi_value_columns.append(column)
-                        elif isinstance(value_vector, (StringVector, DictionaryVector)):
+                        elif self._is_stringlike_vector(value_vector):
                             self._multi_agg_modes.push_back(AGG_MIN)
                             self._multi_value_kinds.push_back(VALUE_OBJECT)
                             self._multi_value_columns.append(column)
@@ -1166,7 +1321,7 @@ cdef class CarcharGroupStateEngine:
                             self._multi_agg_modes.push_back(AGG_MAX)
                             self._multi_value_kinds.push_back(VALUE_INT64)
                             self._multi_value_columns.append(column)
-                        elif isinstance(value_vector, (StringVector, DictionaryVector)):
+                        elif self._is_stringlike_vector(value_vector):
                             self._multi_agg_modes.push_back(AGG_MAX)
                             self._multi_value_kinds.push_back(VALUE_OBJECT)
                             self._multi_value_columns.append(column)
@@ -1184,10 +1339,7 @@ cdef class CarcharGroupStateEngine:
                             return
                     elif fn == "count_distinct" or fn == "distinct":
                         value_vector = morsel.column(column)
-                        if isinstance(
-                            value_vector,
-                            (Int64Vector, IntegerVector, Float64Vector, StringVector, DictionaryVector),
-                        ):
+                        if self._supports_count_distinct_value(value_vector):
                             self._multi_agg_modes.push_back(AGG_COUNT_DISTINCT)
                             self._multi_value_kinds.push_back(VALUE_NONE)
                             self._multi_value_columns.append(column)
@@ -1199,7 +1351,7 @@ cdef class CarcharGroupStateEngine:
                         return
 
                 # WORKAROUND: Multi-agg carchar path has a segfault bug
-                # Force legacy backend for multi-aggregate queries
+                # Force GroupStateStore backend for multi-aggregate queries
                 self._init_legacy_backend()
                 return
 
@@ -1213,7 +1365,7 @@ cdef class CarcharGroupStateEngine:
                     value_vector = morsel.column(column)
                     if isinstance(
                         value_vector,
-                        (Int64Vector, IntegerVector, Float64Vector, StringVector, DictionaryVector, TimestampVector),
+                        (Int64Vector, IntegerVector, Float64Vector, StringVector, TimestampVector),
                     ):
                         self._agg_mode = AGG_COUNT_VALUE
                         self._value_kind = VALUE_NONE
@@ -1235,6 +1387,12 @@ cdef class CarcharGroupStateEngine:
                 elif isinstance(value_vector, (Int64Vector, IntegerVector)):
                     self._agg_mode = AGG_SUM
                     self._value_kind = VALUE_INT64
+                elif dict_accessor != NULL and dict_accessor.dict_values != NULL:
+                    self._agg_mode = AGG_SUM
+                    self._value_kind = _dict_accessor_value_kind(dict_accessor)
+                    if self._value_kind == VALUE_OBJECT:
+                        self._init_legacy_backend()
+                        return
                 else:
                     self._init_legacy_backend()
                     return
@@ -1246,9 +1404,12 @@ cdef class CarcharGroupStateEngine:
                 elif isinstance(value_vector, (Int64Vector, IntegerVector)):
                     self._agg_mode = AGG_MIN
                     self._value_kind = VALUE_INT64
-                elif isinstance(value_vector, (StringVector, DictionaryVector)):
+                elif isinstance(value_vector, StringVector):
                     self._agg_mode = AGG_MIN
                     self._value_kind = VALUE_OBJECT
+                elif dict_accessor != NULL and dict_accessor.dict_values != NULL:
+                    self._agg_mode = AGG_MIN
+                    self._value_kind = _dict_accessor_value_kind(dict_accessor)
                 elif isinstance(value_vector, TimestampVector):
                     self._agg_mode = AGG_MIN
                     self._value_kind = VALUE_INT64
@@ -1269,9 +1430,12 @@ cdef class CarcharGroupStateEngine:
                 elif isinstance(value_vector, (Int64Vector, IntegerVector)):
                     self._agg_mode = AGG_MAX
                     self._value_kind = VALUE_INT64
-                elif isinstance(value_vector, (StringVector, DictionaryVector)):
+                elif isinstance(value_vector, StringVector):
                     self._agg_mode = AGG_MAX
                     self._value_kind = VALUE_OBJECT
+                elif dict_accessor != NULL and dict_accessor.dict_values != NULL:
+                    self._agg_mode = AGG_MAX
+                    self._value_kind = _dict_accessor_value_kind(dict_accessor)
                 elif isinstance(value_vector, TimestampVector):
                     self._agg_mode = AGG_MAX
                     self._value_kind = VALUE_INT64
@@ -1294,10 +1458,10 @@ cdef class CarcharGroupStateEngine:
                     return
             elif fn == "count_distinct" or fn == "distinct":
                 value_vector = morsel.column(column)
-                if isinstance(
-                    value_vector,
-                    (Int64Vector, IntegerVector, Float64Vector, StringVector, DictionaryVector),
-                ):
+                if self._supports_count_distinct_value(value_vector):
+                    self._agg_mode = AGG_COUNT_DISTINCT
+                    self._value_kind = VALUE_NONE
+                elif _vector_value_dict_accessor(value_vector) != NULL:
                     self._agg_mode = AGG_COUNT_DISTINCT
                     self._value_kind = VALUE_NONE
                 else:
@@ -1314,7 +1478,7 @@ cdef class CarcharGroupStateEngine:
             self._mode = MODE_CARCHAR
             self._readings["feature_groupby_engine_carchar"] += 1
             return
-        elif isinstance(key_vector, DictionaryVector) and len(self._aggregations) > 1:
+        elif _vector_dict_accessor(key_vector) != NULL and len(self._aggregations) > 1:
             self._single_key_kind = key_kind
             self._multi_value_columns = []
             self._multi_distinct_sets = []
@@ -1335,8 +1499,12 @@ cdef class CarcharGroupStateEngine:
                         value_vector = morsel.column(column)
                         if isinstance(
                             value_vector,
-                            (Int64Vector, IntegerVector, Float64Vector, StringVector, DictionaryVector),
+                            (Int64Vector, IntegerVector, Float64Vector, StringVector),
                         ):
+                            self._multi_agg_modes.push_back(AGG_COUNT_VALUE)
+                            self._multi_value_kinds.push_back(VALUE_NONE)
+                            self._multi_value_columns.append(column)
+                        elif _vector_value_dict_accessor(value_vector) != NULL:
                             self._multi_agg_modes.push_back(AGG_COUNT_VALUE)
                             self._multi_value_kinds.push_back(VALUE_NONE)
                             self._multi_value_columns.append(column)
@@ -1345,6 +1513,7 @@ cdef class CarcharGroupStateEngine:
                             return
                 elif fn == "sum":
                     value_vector = morsel.column(column)
+                    dict_accessor = _vector_value_dict_accessor(value_vector)
                     if isinstance(value_vector, Float64Vector):
                         self._multi_agg_modes.push_back(AGG_SUM)
                         self._multi_value_kinds.push_back(VALUE_FLOAT64)
@@ -1352,12 +1521,20 @@ cdef class CarcharGroupStateEngine:
                     elif isinstance(value_vector, (Int64Vector, IntegerVector)):
                         self._multi_agg_modes.push_back(AGG_SUM)
                         self._multi_value_kinds.push_back(VALUE_INT64)
+                        self._multi_value_columns.append(column)
+                    elif dict_accessor != NULL:
+                        self._multi_agg_modes.push_back(AGG_SUM)
+                        self._multi_value_kinds.push_back(_dict_accessor_value_kind(dict_accessor))
+                        if self._multi_value_kinds[self._multi_value_kinds.size() - 1] == VALUE_OBJECT:
+                            self._init_legacy_backend()
+                            return
                         self._multi_value_columns.append(column)
                     else:
                         self._init_legacy_backend()
                         return
                 elif fn == "min":
                     value_vector = morsel.column(column)
+                    dict_accessor = _vector_value_dict_accessor(value_vector)
                     if isinstance(value_vector, Float64Vector):
                         self._multi_agg_modes.push_back(AGG_MIN)
                         self._multi_value_kinds.push_back(VALUE_FLOAT64)
@@ -1366,15 +1543,20 @@ cdef class CarcharGroupStateEngine:
                         self._multi_agg_modes.push_back(AGG_MIN)
                         self._multi_value_kinds.push_back(VALUE_INT64)
                         self._multi_value_columns.append(column)
-                    elif isinstance(value_vector, (StringVector, DictionaryVector)):
+                    elif isinstance(value_vector, StringVector):
                         self._multi_agg_modes.push_back(AGG_MIN)
                         self._multi_value_kinds.push_back(VALUE_OBJECT)
+                        self._multi_value_columns.append(column)
+                    elif dict_accessor != NULL:
+                        self._multi_agg_modes.push_back(AGG_MIN)
+                        self._multi_value_kinds.push_back(_dict_accessor_value_kind(dict_accessor))
                         self._multi_value_columns.append(column)
                     else:
                         self._init_legacy_backend()
                         return
                 elif fn == "max":
                     value_vector = morsel.column(column)
+                    dict_accessor = _vector_value_dict_accessor(value_vector)
                     if isinstance(value_vector, Float64Vector):
                         self._multi_agg_modes.push_back(AGG_MAX)
                         self._multi_value_kinds.push_back(VALUE_FLOAT64)
@@ -1383,9 +1565,13 @@ cdef class CarcharGroupStateEngine:
                         self._multi_agg_modes.push_back(AGG_MAX)
                         self._multi_value_kinds.push_back(VALUE_INT64)
                         self._multi_value_columns.append(column)
-                    elif isinstance(value_vector, (StringVector, DictionaryVector)):
+                    elif isinstance(value_vector, StringVector):
                         self._multi_agg_modes.push_back(AGG_MAX)
                         self._multi_value_kinds.push_back(VALUE_OBJECT)
+                        self._multi_value_columns.append(column)
+                    elif dict_accessor != NULL:
+                        self._multi_agg_modes.push_back(AGG_MAX)
+                        self._multi_value_kinds.push_back(_dict_accessor_value_kind(dict_accessor))
                         self._multi_value_columns.append(column)
                     else:
                         self._init_legacy_backend()
@@ -1401,10 +1587,11 @@ cdef class CarcharGroupStateEngine:
                         return
                 elif fn == "count_distinct" or fn == "distinct":
                     value_vector = morsel.column(column)
-                    if isinstance(
-                        value_vector,
-                        (Int64Vector, IntegerVector, Float64Vector, StringVector, DictionaryVector),
-                    ):
+                    if self._supports_count_distinct_value(value_vector):
+                        self._multi_agg_modes.push_back(AGG_COUNT_DISTINCT)
+                        self._multi_value_kinds.push_back(VALUE_NONE)
+                        self._multi_value_columns.append(column)
+                    elif _vector_value_dict_accessor(value_vector) != NULL:
                         self._multi_agg_modes.push_back(AGG_COUNT_DISTINCT)
                         self._multi_value_kinds.push_back(VALUE_NONE)
                         self._multi_value_columns.append(column)
@@ -1420,7 +1607,7 @@ cdef class CarcharGroupStateEngine:
             self._mode = MODE_CARCHAR
             self._readings["feature_groupby_engine_carchar"] += 1
             return
-        elif isinstance(key_vector, DictionaryVector):
+        elif _vector_dict_accessor(key_vector) != NULL:
             self._single_key_kind = key_kind
             fn = self._aggregations[0][1]
             column = self._aggregations[0][2]
@@ -1432,8 +1619,11 @@ cdef class CarcharGroupStateEngine:
                     value_vector = morsel.column(column)
                     if isinstance(
                         value_vector,
-                        (Int64Vector, IntegerVector, Float64Vector, StringVector, DictionaryVector),
+                        (Int64Vector, IntegerVector, Float64Vector, StringVector),
                     ):
+                        self._agg_mode = AGG_COUNT_VALUE
+                        self._value_kind = VALUE_NONE
+                    elif _vector_value_dict_accessor(value_vector) != NULL:
                         self._agg_mode = AGG_COUNT_VALUE
                         self._value_kind = VALUE_NONE
                     else:
@@ -1441,40 +1631,55 @@ cdef class CarcharGroupStateEngine:
                         return
             elif fn == "sum":
                 value_vector = morsel.column(column)
+                dict_accessor = _vector_value_dict_accessor(value_vector)
                 if isinstance(value_vector, Float64Vector):
                     self._agg_mode = AGG_SUM
                     self._value_kind = VALUE_FLOAT64
                 elif isinstance(value_vector, (Int64Vector, IntegerVector)):
                     self._agg_mode = AGG_SUM
                     self._value_kind = VALUE_INT64
+                elif dict_accessor != NULL:
+                    self._agg_mode = AGG_SUM
+                    self._value_kind = _dict_accessor_value_kind(dict_accessor)
+                    if self._value_kind == VALUE_OBJECT:
+                        self._init_legacy_backend()
+                        return
                 else:
                     self._init_legacy_backend()
                     return
             elif fn == "min":
                 value_vector = morsel.column(column)
+                dict_accessor = _vector_value_dict_accessor(value_vector)
                 if isinstance(value_vector, Float64Vector):
                     self._agg_mode = AGG_MIN
                     self._value_kind = VALUE_FLOAT64
                 elif isinstance(value_vector, (Int64Vector, IntegerVector)):
                     self._agg_mode = AGG_MIN
                     self._value_kind = VALUE_INT64
-                elif isinstance(value_vector, (StringVector, DictionaryVector)):
+                elif isinstance(value_vector, StringVector):
                     self._agg_mode = AGG_MIN
                     self._value_kind = VALUE_OBJECT
+                elif dict_accessor != NULL:
+                    self._agg_mode = AGG_MIN
+                    self._value_kind = _dict_accessor_value_kind(dict_accessor)
                 else:
                     self._init_legacy_backend()
                     return
             elif fn == "max":
                 value_vector = morsel.column(column)
+                dict_accessor = _vector_value_dict_accessor(value_vector)
                 if isinstance(value_vector, Float64Vector):
                     self._agg_mode = AGG_MAX
                     self._value_kind = VALUE_FLOAT64
                 elif isinstance(value_vector, (Int64Vector, IntegerVector)):
                     self._agg_mode = AGG_MAX
                     self._value_kind = VALUE_INT64
-                elif isinstance(value_vector, (StringVector, DictionaryVector)):
+                elif isinstance(value_vector, StringVector):
                     self._agg_mode = AGG_MAX
                     self._value_kind = VALUE_OBJECT
+                elif dict_accessor != NULL:
+                    self._agg_mode = AGG_MAX
+                    self._value_kind = _dict_accessor_value_kind(dict_accessor)
                 else:
                     self._init_legacy_backend()
                     return
@@ -1488,10 +1693,7 @@ cdef class CarcharGroupStateEngine:
                     return
             elif fn == "count_distinct" or fn == "distinct":
                 value_vector = morsel.column(column)
-                if isinstance(
-                    value_vector,
-                    (Int64Vector, IntegerVector, Float64Vector, StringVector, DictionaryVector),
-                ):
+                if self._supports_count_distinct_value(value_vector):
                     self._agg_mode = AGG_COUNT_DISTINCT
                     self._value_kind = VALUE_NONE
                 else:
@@ -1500,90 +1702,6 @@ cdef class CarcharGroupStateEngine:
             elif fn == "hash_one":
                 self._agg_mode = AGG_HASH_ONE
                 self._value_kind = VALUE_OBJECT
-            else:
-                self._init_legacy_backend()
-                return
-
-            self._index = new CarcharIndex(<size_t> max(16, morsel.num_rows * 2), 0.80)
-            self._mode = MODE_CARCHAR
-            self._readings["feature_groupby_engine_carchar"] += 1
-            return
-
-            fn = self._aggregations[0][1]
-            column = self._aggregations[0][2]
-            if fn == "count":
-                if column is None:
-                    self._agg_mode = AGG_COUNT_STAR
-                    self._value_kind = VALUE_NONE
-                else:
-                    value_vector = morsel.column(column)
-                    if isinstance(
-                        value_vector,
-                        (Int64Vector, IntegerVector, Float64Vector, StringVector, DictionaryVector),
-                    ):
-                        self._agg_mode = AGG_COUNT_VALUE
-                        self._value_kind = VALUE_NONE
-                    else:
-                        self._init_legacy_backend()
-                        return
-            elif fn == "sum":
-                value_vector = morsel.column(column)
-                if isinstance(value_vector, Float64Vector):
-                    self._agg_mode = AGG_SUM
-                    self._value_kind = VALUE_FLOAT64
-                elif isinstance(value_vector, (Int64Vector, IntegerVector)):
-                    self._agg_mode = AGG_SUM
-                    self._value_kind = VALUE_INT64
-                else:
-                    self._init_legacy_backend()
-                    return
-            elif fn == "min":
-                value_vector = morsel.column(column)
-                if isinstance(value_vector, Float64Vector):
-                    self._agg_mode = AGG_MIN
-                    self._value_kind = VALUE_FLOAT64
-                elif isinstance(value_vector, (Int64Vector, IntegerVector)):
-                    self._agg_mode = AGG_MIN
-                    self._value_kind = VALUE_INT64
-                elif isinstance(value_vector, (StringVector, DictionaryVector)):
-                    self._agg_mode = AGG_MIN
-                    self._value_kind = VALUE_OBJECT
-                else:
-                    self._init_legacy_backend()
-                    return
-            elif fn == "max":
-                value_vector = morsel.column(column)
-                if isinstance(value_vector, Float64Vector):
-                    self._agg_mode = AGG_MAX
-                    self._value_kind = VALUE_FLOAT64
-                elif isinstance(value_vector, (Int64Vector, IntegerVector)):
-                    self._agg_mode = AGG_MAX
-                    self._value_kind = VALUE_INT64
-                elif isinstance(value_vector, (StringVector, DictionaryVector)):
-                    self._agg_mode = AGG_MAX
-                    self._value_kind = VALUE_OBJECT
-                else:
-                    self._init_legacy_backend()
-                    return
-            elif fn == "avg" or fn == "mean":
-                value_vector = morsel.column(column)
-                if isinstance(value_vector, (Int64Vector, IntegerVector, Float64Vector)):
-                    self._agg_mode = AGG_AVG
-                    self._value_kind = VALUE_FLOAT64
-                else:
-                    self._init_legacy_backend()
-                    return
-            elif fn == "count_distinct" or fn == "distinct":
-                value_vector = morsel.column(column)
-                if isinstance(
-                    value_vector,
-                    (Int64Vector, IntegerVector, Float64Vector, StringVector, DictionaryVector),
-                ):
-                    self._agg_mode = AGG_COUNT_DISTINCT
-                    self._value_kind = VALUE_NONE
-                else:
-                    self._init_legacy_backend()
-                    return
             else:
                 self._init_legacy_backend()
                 return
@@ -1622,6 +1740,7 @@ cdef class CarcharGroupStateEngine:
         fn = self._aggregations[0][1]
         column = self._aggregations[0][2]
         key_vector = morsel.column(self._group_column)
+        key_dict_accessor = _vector_dict_accessor(key_vector)
 
         if isinstance(key_vector, ConstantVector):
             constant_key_vector = <ConstantVector> key_vector
@@ -1654,26 +1773,27 @@ cdef class CarcharGroupStateEngine:
                 Int64Vector,
                 IntegerVector,
                 ConstantVector,
-                DictionaryVector,
                 StringVector,
                 Date32Vector,
                 TimeVector,
                 TimestampVector,
             ),
         ):
-            if hasattr(key_vector, "__getitem__"):
+            if key_dict_accessor != NULL:
+                pass
+            elif hasattr(key_vector, "__getitem__"):
                 self._use_object_keys = True
             else:
                 self._init_legacy_backend()
                 return
 
         if len(self._aggregations) > 1 or (
-            isinstance(key_vector, DictionaryVector) and fn not in ("count_distinct", "distinct")
+            key_dict_accessor != NULL and fn not in ("count_distinct", "distinct")
         ):
             if isinstance(key_vector, ConstantVector):
                 self._init_legacy_backend()
                 return
-            if isinstance(key_vector, DictionaryVector):
+            if key_dict_accessor != NULL:
                 self._use_object_keys = True
 
             for agg_idx in range(len(self._aggregations)):
@@ -1745,10 +1865,7 @@ cdef class CarcharGroupStateEngine:
                         return
                 elif fn == "count_distinct" or fn == "distinct":
                     value_vector = morsel.column(column)
-                    if isinstance(
-                        value_vector,
-                        (Int64Vector, IntegerVector, Float64Vector, StringVector, DictionaryVector),
-                    ):
+                    if self._supports_count_distinct_value(value_vector):
                         self._multi_agg_modes.push_back(AGG_COUNT_DISTINCT)
                         self._multi_value_kinds.push_back(VALUE_NONE)
                         self._multi_value_columns.append(column)
@@ -1820,10 +1937,7 @@ cdef class CarcharGroupStateEngine:
                 return
         elif fn == "count_distinct" or fn == "distinct":
             value_vector = morsel.column(column)
-            if isinstance(
-                value_vector,
-                (Int64Vector, IntegerVector, Float64Vector, StringVector, DictionaryVector),
-            ):
+            if self._supports_count_distinct_value(value_vector):
                 self._agg_mode = AGG_COUNT_DISTINCT
                 self._value_kind = VALUE_NONE
             else:
@@ -1850,8 +1964,8 @@ cdef class CarcharGroupStateEngine:
             )
         elif isinstance(key_vector, TimestampVector):
             self._single_key_kind = KEY_MULTI_FIXED_TIMESTAMP64
-        elif isinstance(key_vector, DictionaryVector):
-            key_kind = self._dictionary_key_kind(<DictionaryVector> key_vector)
+        elif dict_accessor != NULL:
+            key_kind = _dict_accessor_key_kind(dict_accessor)
             if key_kind == 0:
                 self._init_legacy_backend()
                 return
@@ -3491,7 +3605,7 @@ cdef class CarcharGroupStateEngine:
                     self._avg_sums[state_index] = self._avg_sums[state_index] + value_i64
                     self._avg_counts[state_index] = self._avg_counts[state_index] + 1
 
-    cdef void _ingest_dictionary_key_multi(self, Morsel morsel, DictionaryVector key_vector) except *:
+    cdef void _ingest_dictionary_key_multi(self, Morsel morsel, object key_vector) except *:
         cdef uint64_t[::1] row_hashes = morsel.hash([self._group_column])
         cdef Py_ssize_t row_idx
         cdef Py_ssize_t row_count = morsel.num_rows
@@ -3510,7 +3624,7 @@ cdef class CarcharGroupStateEngine:
         cdef Py_ssize_t key_data_len = 0
         cdef int64_t key_valid_flag
         cdef int64_t key_value
-        cdef int64_t key_kind = self._dictionary_key_kind(key_vector)
+        cdef int64_t key_kind = _dict_accessor_key_kind(_vector_dict_accessor(key_vector))
 
         state_indices = <int64_t*> malloc(row_count * sizeof(int64_t))
         if state_indices == NULL and row_count > 0:
@@ -3632,7 +3746,7 @@ cdef class CarcharGroupStateEngine:
             if state_indices != NULL:
                 free(state_indices)
 
-    cdef void _ingest_dictionary_key(self, Morsel morsel, DictionaryVector key_vector) except *:
+    cdef void _ingest_dictionary_key(self, Morsel morsel, object key_vector) except *:
         cdef uint64_t[::1] row_hashes = morsel.hash([self._group_column])
         cdef Py_ssize_t row_idx
         cdef Py_ssize_t row_count = morsel.num_rows
@@ -3642,12 +3756,15 @@ cdef class CarcharGroupStateEngine:
         cdef Py_ssize_t key_data_len = 0
         cdef int64_t key_valid_flag
         cdef int64_t key_value
-        cdef int64_t key_kind = self._dictionary_key_kind(key_vector)
+        cdef int64_t key_kind = _dict_accessor_key_kind(_vector_dict_accessor(key_vector))
         cdef object value_vector
         cdef DrakenFixedBuffer* value_ptr
         cdef int64_t* value_i64_data
         cdef double* value_f64_data
         cdef uint8_t* value_nulls
+        cdef DictAccessor* value_dict_accessor = NULL
+        cdef double val_decoded_f64
+        cdef int64_t val_decoded_i64
 
         state_indices = <int64_t*> malloc(row_count * sizeof(int64_t))
         if state_indices == NULL and row_count > 0:
@@ -3741,6 +3858,44 @@ cdef class CarcharGroupStateEngine:
                             self._avg_sums[state_index] = self._avg_sums[state_index] + value_i64_data[row_idx]
                             self._avg_counts[state_index] = self._avg_counts[state_index] + 1
                 return
+
+            value_dict_accessor = _vector_value_dict_accessor(value_vector)
+            if value_dict_accessor != NULL:
+                value_nulls = value_dict_accessor.row_nulls
+                if self._value_kind == VALUE_DICT_FLOAT64:
+                    for row_idx in range(row_count):
+                        state_index = state_indices[row_idx]
+                        if _bitmap_is_valid(value_nulls, row_idx):
+                            val_decoded_f64 = _dict_accessor_read_float_value(value_dict_accessor, row_idx)
+                            if self._agg_mode == AGG_SUM:
+                                self._f64_state[state_index] = self._f64_state[state_index] + val_decoded_f64
+                                self._seen[state_index] = 1
+                            elif self._agg_mode == AGG_MIN:
+                                if self._seen[state_index] == 0 or val_decoded_f64 < self._f64_state[state_index]:
+                                    self._f64_state[state_index] = val_decoded_f64
+                                self._seen[state_index] = 1
+                            elif self._agg_mode == AGG_MAX:
+                                if self._seen[state_index] == 0 or val_decoded_f64 > self._f64_state[state_index]:
+                                    self._f64_state[state_index] = val_decoded_f64
+                                self._seen[state_index] = 1
+                    return
+                elif self._value_kind == VALUE_DICT_INT64:
+                    for row_idx in range(row_count):
+                        state_index = state_indices[row_idx]
+                        if _bitmap_is_valid(value_nulls, row_idx):
+                            val_decoded_i64 = _dict_accessor_read_int_value(value_dict_accessor, row_idx)
+                            if self._agg_mode == AGG_SUM:
+                                self._i64_state[state_index] = self._i64_state[state_index] + val_decoded_i64
+                                self._seen[state_index] = 1
+                            elif self._agg_mode == AGG_MIN:
+                                if self._seen[state_index] == 0 or val_decoded_i64 < self._i64_state[state_index]:
+                                    self._i64_state[state_index] = val_decoded_i64
+                                self._seen[state_index] = 1
+                            elif self._agg_mode == AGG_MAX:
+                                if self._seen[state_index] == 0 or val_decoded_i64 > self._i64_state[state_index]:
+                                    self._i64_state[state_index] = val_decoded_i64
+                                self._seen[state_index] = 1
+                    return
 
             value_ptr = (<IntegerVector> value_vector).ptr
             value_nulls = <uint8_t*> value_ptr.null_bitmap
@@ -4113,6 +4268,9 @@ cdef class CarcharGroupStateEngine:
         cdef uint8_t* value_nulls
         cdef uint64_t[::1] value_hashes
         cdef int64_t value_i64
+        cdef DictAccessor* value_dict_accessor = NULL
+        cdef double val_decoded_f64
+        cdef int64_t val_decoded_i64
 
         if self._agg_mode == AGG_COUNT_STAR:
             self._constant_count += row_count
@@ -4194,6 +4352,42 @@ cdef class CarcharGroupStateEngine:
                         self._constant_avg_count += 1
             return
 
+        value_dict_accessor = _vector_value_dict_accessor(value_vector)
+        if value_dict_accessor != NULL:
+            value_nulls = value_dict_accessor.row_nulls
+            if self._value_kind == VALUE_DICT_FLOAT64:
+                for row_idx in range(row_count):
+                    if _bitmap_is_valid(value_nulls, row_idx):
+                        val_decoded_f64 = _dict_accessor_read_float_value(value_dict_accessor, row_idx)
+                        if self._agg_mode == AGG_SUM:
+                            self._constant_f64_state += val_decoded_f64
+                            self._constant_seen = 1
+                        elif self._agg_mode == AGG_MIN:
+                            if self._constant_seen == 0 or val_decoded_f64 < self._constant_f64_state:
+                                self._constant_f64_state = val_decoded_f64
+                            self._constant_seen = 1
+                        elif self._agg_mode == AGG_MAX:
+                            if self._constant_seen == 0 or val_decoded_f64 > self._constant_f64_state:
+                                self._constant_f64_state = val_decoded_f64
+                            self._constant_seen = 1
+                return
+            elif self._value_kind == VALUE_DICT_INT64:
+                for row_idx in range(row_count):
+                    if _bitmap_is_valid(value_nulls, row_idx):
+                        val_decoded_i64 = _dict_accessor_read_int_value(value_dict_accessor, row_idx)
+                        if self._agg_mode == AGG_SUM:
+                            self._constant_i64_state += val_decoded_i64
+                            self._constant_seen = 1
+                        elif self._agg_mode == AGG_MIN:
+                            if self._constant_seen == 0 or val_decoded_i64 < self._constant_i64_state:
+                                self._constant_i64_state = val_decoded_i64
+                            self._constant_seen = 1
+                        elif self._agg_mode == AGG_MAX:
+                            if self._constant_seen == 0 or val_decoded_i64 > self._constant_i64_state:
+                                self._constant_i64_state = val_decoded_i64
+                            self._constant_seen = 1
+                return
+
         value_ptr = (<IntegerVector> value_vector).ptr
         value_nulls = <uint8_t*> value_ptr.null_bitmap
         for row_idx in range(row_count):
@@ -4223,6 +4417,7 @@ cdef class CarcharGroupStateEngine:
         cdef object pre_const_hits
         cdef object pre_const_fallbacks
         cdef object key_vector
+        cdef DictAccessor* key_dict_accessor = NULL
 
         self._maybe_init_carchar_mode(morsel)
 
@@ -4259,24 +4454,25 @@ cdef class CarcharGroupStateEngine:
         key_vector = None
         if not self._multi_key_object_mode and not self._multi_key_fixed_mode:
             key_vector = morsel.column(self._group_column)
+            key_dict_accessor = _vector_dict_accessor(key_vector)
         if self._multi_agg_count > 0:
             if self._multi_key_fixed_mode:
                 self._ingest_multi_fixed_key_multi(morsel)
             elif self._multi_key_object_mode:
                 self._ingest_object_key_multi(morsel, None)
             elif (
-                isinstance(key_vector, DictionaryVector)
-                and self._is_multi_fixed_kind(self._dictionary_key_kind(<DictionaryVector> key_vector))
+                key_dict_accessor != NULL
+                and self._is_multi_fixed_kind(_dict_accessor_key_kind(key_dict_accessor))
             ):
-                self._ingest_dictionary_key_multi(morsel, <DictionaryVector> key_vector)
+                self._ingest_dictionary_key_multi(morsel, key_vector)
             elif self._use_object_keys:
                 self._ingest_object_key_multi(morsel, key_vector)
             elif isinstance(key_vector, Int64Vector):
                 self._ingest_int64_key_multi(morsel, <Int64Vector> key_vector)
             elif isinstance(key_vector, IntegerVector):
                 self._ingest_integer_key_multi(morsel, <IntegerVector> key_vector)
-            elif isinstance(key_vector, DictionaryVector):
-                self._ingest_dictionary_key_multi(morsel, <DictionaryVector> key_vector)
+            elif key_dict_accessor != NULL:
+                self._ingest_dictionary_key_multi(morsel, key_vector)
             elif isinstance(key_vector, StringVector):
                 self._ingest_object_key_multi(morsel, key_vector)
             else:
@@ -4293,8 +4489,8 @@ cdef class CarcharGroupStateEngine:
             self._ingest_int64_key(morsel, <Int64Vector> key_vector)
         elif isinstance(key_vector, IntegerVector):
             self._ingest_integer_key(morsel, <IntegerVector> key_vector)
-        elif isinstance(key_vector, DictionaryVector):
-            self._ingest_dictionary_key(morsel, <DictionaryVector> key_vector)
+        elif key_dict_accessor != NULL:
+            self._ingest_dictionary_key(morsel, key_vector)
         elif isinstance(key_vector, StringVector):
             self._ingest_object_key(morsel, key_vector)
         elif isinstance(key_vector, Date32Vector):
@@ -4895,7 +5091,7 @@ cdef class CarcharGroupStateEngine:
                 return Morsel.from_vectors(names, [agg_object_vec, *key_vectors])
             return Morsel.from_vectors(names, [agg_object_vec, key_vec])
 
-        if self._agg_mode == AGG_AVG or self._value_kind == VALUE_FLOAT64:
+        if self._agg_mode == AGG_AVG or self._value_kind == VALUE_FLOAT64 or self._value_kind == VALUE_DICT_FLOAT64:
             agg_f64 = Float64Vector(length)
             agg_f64_data = <double*> agg_f64.ptr.data
             if needs_agg_nulls:

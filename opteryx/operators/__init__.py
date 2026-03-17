@@ -119,6 +119,7 @@ from .table_management_node import TableManagementNode  # ANALYZE TABLE
 from .show_value_node import ShowValueNode  # display node for SHOW
 from .view_management_node import ViewManagementNode  # CREATE/ALTER/DROP VIEW
 from .sort_node import SortNode  # order by selected columns
+from .shuffle_node import ShuffleNode  # hash shuffle partitioning
 from .union_node import UnionNode
 
 
@@ -152,6 +153,7 @@ __all__ = [
     "ShowValueNode",
     "ViewManagementNode",
     "SortNode",
+    "ShuffleNode",
     "UnionNode",
     "is_aggregator",
     "aggregators",

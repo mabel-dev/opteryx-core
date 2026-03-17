@@ -1,7 +1,7 @@
 from libc.stdint cimport int32_t
 from libc.stdint cimport int64_t
 from libc.stdint cimport int8_t
-from libc.stdint cimport uint64_t
+from libc.stdint cimport uint64_t, uint8_t
 
 from opteryx.draken.core.buffers cimport DrakenFixedBuffer
 from opteryx.draken.vectors.vector cimport Vector
@@ -12,6 +12,9 @@ cdef class Int64Vector(Vector):
     cdef object _arrow_null_buf
     cdef DrakenFixedBuffer* ptr
     cdef bint owns_data
+
+    cdef void* dense_ptr(self) noexcept
+    cdef uint8_t* null_bitmap_ptr(self) noexcept
 
     cpdef Int64Vector take(self, int32_t[::1] indices)
     cdef bint _compare_int64_values(self, int64_t left, int64_t right, int op) nogil

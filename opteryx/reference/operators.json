@@ -254,7 +254,7 @@
         "friendly_name": "Bitwise AND",
         "sql_symbol": "&",
         "node_kind": "binary",
-        "category": "binary",
+        "category": "bitwise",
         "description": "Bitwise AND operator.",
         "documentation": "Combines integer operands using a bitwise AND operation.",
         "signature_count": 1,
@@ -283,9 +283,9 @@
         "friendly_name": "Bitwise OR",
         "sql_symbol": "|",
         "node_kind": "binary",
-        "category": "binary",
-        "description": "Bitwise OR operator.",
-        "documentation": "Combines integer operands using a bitwise OR operation.",
+        "category": "bitwise",
+        "description": "Bitwise OR and IP containment operator.",
+        "documentation": "Combines integer operands using a bitwise OR operation. When used with address and CIDR-compatible operands, the same `|` token acts as an IP containment predicate and returns a boolean result.",
         "signature_count": 4,
         "has_dynamic_result": false,
         "left_types": [
@@ -332,14 +332,14 @@
                 "cost_estimate": 100.0
             }
         ],
-        "notes": "The same token may also appear in non-bitwise contexts depending on operand types."
+        "notes": "This operator is overloaded by operand type: integer inputs perform bitwise OR, while address/CIDR-style inputs use `|` for containment checks."
     },
     "BitwiseXor": {
         "ast_symbol": "BitwiseXor",
         "friendly_name": "Bitwise XOR",
         "sql_symbol": "^",
         "node_kind": "binary",
-        "category": "binary",
+        "category": "bitwise",
         "description": "Bitwise XOR operator.",
         "documentation": "Combines integer operands using a bitwise exclusive OR operation.",
         "signature_count": 1,
@@ -1723,7 +1723,7 @@
                 "cost_estimate": 100.0
             }
         ],
-        "notes": "For arrays the result type depends on the array element type, so the exported result type may be dynamic."
+        "notes": "Subcript access is zero-based, the first element is at index 0. For arrays the result type depends on the array element type, so the exported result type may be dynamic."
     },
     "Minus": {
         "ast_symbol": "Minus",
@@ -2691,7 +2691,7 @@
         "friendly_name": "Left shift",
         "sql_symbol": "<<",
         "node_kind": "binary",
-        "category": "binary",
+        "category": "bitwise",
         "description": "Left shift operator.",
         "documentation": "Shifts the bits of the left integer operand left by the number of positions in the right operand.",
         "signature_count": 1,
@@ -2720,7 +2720,7 @@
         "friendly_name": "Right shift",
         "sql_symbol": ">>",
         "node_kind": "binary",
-        "category": "binary",
+        "category": "bitwise",
         "description": "Right shift operator.",
         "documentation": "Shifts the bits of the left integer operand right by the number of positions in the right operand.",
         "signature_count": 1,
