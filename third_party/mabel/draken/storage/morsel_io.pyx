@@ -39,6 +39,7 @@ from opteryx.draken.core.buffers cimport DrakenConstantBuffer
 from opteryx.draken.core.buffers cimport DrakenConstantStringPayload
 from opteryx.draken.core.buffers cimport DrakenType
 from opteryx.draken.core.buffers cimport DrakenVarBuffer
+from opteryx.draken.core.buffers cimport DictAccessor
 from opteryx.draken.core.buffers cimport DRAKEN_BOOL
 from opteryx.draken.core.buffers cimport DRAKEN_CONSTANT
 from opteryx.draken.core.buffers cimport DRAKEN_DATE32
@@ -60,7 +61,9 @@ from opteryx.draken.vectors.constant_vector cimport ConstantVector
 from opteryx.draken.vectors.date32_vector cimport Date32Vector
 from opteryx.draken.vectors.dictionary_vector cimport DictionaryVector
 from opteryx.draken.vectors.float64_vector cimport Float64Vector
+from opteryx.draken.vectors.float64_vector cimport from_packed_dict as float64_from_packed_dict
 from opteryx.draken.vectors.int64_vector cimport Int64Vector
+from opteryx.draken.vectors.int64_vector cimport from_packed_dict as int64_from_packed_dict
 from opteryx.draken.vectors.interval_vector cimport IntervalVector
 from opteryx.draken.vectors.string_vector cimport StringVector
 from opteryx.draken.vectors.time_vector cimport TimeVector
@@ -224,6 +227,16 @@ cdef inline bytes _bytes_from_pointer(const void* ptr, Py_ssize_t length):
 
 cdef inline uint32_t _checksum32(bytes payload):
     return <uint32_t>(hash_bytes(payload) & 0xFFFFFFFF)
+
+
+cdef inline bint _all_bytes_ff(bytes payload):
+    cdef const uint8_t* ptr = <const uint8_t*>PyBytes_AS_STRING(payload)
+    cdef Py_ssize_t i
+    cdef Py_ssize_t n = len(payload)
+    for i in range(n):
+        if ptr[i] != 0xFF:
+            return False
+    return True
 
 
 cdef inline uint32_t _checksum32_ptr(const void* ptr, Py_ssize_t length):
@@ -653,6 +666,42 @@ cdef DrakenFixedBuffer* _fixed_ptr_from_vector(Vector vec, int dtype):
     return NULL
 
 
+cdef inline Vector _build_typed_dict_vector(
+    int dtype,
+    Py_ssize_t row_count,
+    const uint8_t* codes,
+    uint8_t code_width,
+    const uint8_t* row_null_bitmap,
+    int dict_value_type,
+    const void* dictionary,
+    Py_ssize_t dict_size,
+    bint ordered,
+):
+    if dtype == DRAKEN_INT64 and dict_value_type == DRAKEN_INT64:
+        return <Vector>int64_from_packed_dict(
+            codes,
+            code_width,
+            row_count,
+            <const int64_t*>dictionary,
+            dict_size,
+            row_null_bitmap,
+            ordered,
+        )
+    if dtype == DRAKEN_FLOAT64 and dict_value_type == DRAKEN_FLOAT64:
+        return <Vector>float64_from_packed_dict(
+            codes,
+            code_width,
+            row_count,
+            <const double*>dictionary,
+            dict_size,
+            row_null_bitmap,
+            ordered,
+        )
+    raise DrakenMorselStorageError(
+        f"unsupported typed dictionary restore for dtype {dtype} and dictionary value type {dict_value_type}"
+    )
+
+
 cdef Vector _allocate_fixed_vector(int dtype, Py_ssize_t row_count):
     cdef Vector out
 
@@ -915,6 +964,8 @@ cpdef object write_morsel(object path_or_handle, Morsel morsel, dict options=Non
             name_bytes = str(name_obj).encode("utf-8")
 
         dtype = <int>morsel.ptr.column_types[i]
+        vec = <Vector>morsel.ptr.columns[i]
+        dict_accessor = vec.dict_accessor()
         segments = []
 
         if dtype == DRAKEN_STRING:
@@ -929,20 +980,33 @@ cpdef object write_morsel(object path_or_handle, Morsel morsel, dict options=Non
                 values_len = <Py_ssize_t>var_ptr.offsets[row_count]
             segments.append((SEG_VALUES, <intptr_t>var_ptr.data, values_len))
             flags = FLAG_HAS_NULLS if null_len > 0 else 0
-        elif dtype == DRAKEN_DICTIONARY:
+        elif dtype == DRAKEN_DICTIONARY or dict_accessor != NULL:
             encoding = ENCODING_DICT
-            dict_ptr = (<DictionaryVector>(<Vector>morsel.ptr.columns[i])).ptr
-            if dict_ptr == NULL or dict_ptr.dictionary_values == NULL:
-                raise DrakenMorselStorageError("invalid dictionary vector pointer")
+            if dtype == DRAKEN_DICTIONARY:
+                dict_ptr = (<DictionaryVector>vec).ptr
+                if dict_ptr == NULL or dict_ptr.dictionary_values == NULL:
+                    raise DrakenMorselStorageError("invalid dictionary vector pointer")
+                row_nulls = dict_ptr.null_bitmap
+                codes_ptr = dict_ptr.codes
+                code_width = dict_ptr.code_width
+                var_ptr = dict_ptr.dictionary_values
+                dict_ordered = dict_ptr.ordered != 0
+            else:
+                if dict_accessor.dict_values == NULL:
+                    raise DrakenMorselStorageError("invalid typed dictionary accessor")
+                row_nulls = dict_accessor.row_nulls
+                codes_ptr = dict_accessor.codes
+                code_width = dict_accessor.code_width
+                var_ptr = dict_accessor.dict_values
+                dict_ordered = False
 
-            null_len = ((row_count + 7) >> 3) if dict_ptr.null_bitmap != NULL else 0
+            null_len = ((row_count + 7) >> 3) if row_nulls != NULL else 0
             if null_len > 0:
-                segments.append((SEG_NULL, <intptr_t>dict_ptr.null_bitmap, null_len))
+                segments.append((SEG_NULL, <intptr_t>row_nulls, null_len))
 
-            dict_codes_len = row_count * <Py_ssize_t>dict_ptr.code_width
-            segments.append((SEG_CODES, <intptr_t>dict_ptr.codes, dict_codes_len))
+            dict_codes_len = row_count * <Py_ssize_t>code_width
+            segments.append((SEG_CODES, <intptr_t>codes_ptr, dict_codes_len))
 
-            var_ptr = dict_ptr.dictionary_values
             dict_len = <Py_ssize_t>var_ptr.length
             dict_offsets_len = (dict_len + 1) * sizeof(int32_t)
             segments.append((SEG_DICT_OFFSETS, <intptr_t>var_ptr.offsets, dict_offsets_len))
@@ -959,12 +1023,12 @@ cpdef object write_morsel(object path_or_handle, Morsel morsel, dict options=Non
             flags = 0
             if null_len > 0:
                 flags |= FLAG_HAS_NULLS
-            if dict_ptr.ordered != 0:
+            if dict_ordered:
                 flags |= FLAG_DICT_ORDERED
             if dict_null_len > 0:
                 flags |= FLAG_DICT_HAS_DICT_NULLS
-            flags |= _dict_flags_from_code_width(dict_ptr.code_width)
-            flags |= _dict_flags_from_value_type(dict_ptr.dictionary_values.type)
+            flags |= _dict_flags_from_code_width(code_width)
+            flags |= _dict_flags_from_value_type(var_ptr.type)
         elif dtype == DRAKEN_CONSTANT:
             encoding = ENCODING_CONST
             const_ptr = (<ConstantVector>(<Vector>morsel.ptr.columns[i])).ptr
@@ -1544,11 +1608,6 @@ cpdef Morsel read_morsel(object path_or_handle, dict options=None):
                 else:
                     const_ptr.null_bitmap = NULL
             elif encoding == ENCODING_DICT:
-                if dtype != DRAKEN_DICTIONARY:
-                    raise DrakenMorselStorageError(
-                        f"unsupported dictionary dtype {dtype} in DRKM reader"
-                    )
-
                 codes_payload = seg_map.get(SEG_CODES, None)
                 dict_offsets_payload = seg_map.get(SEG_DICT_OFFSETS, None)
                 dict_values_payload = seg_map.get(SEG_DICT_VALUES, None)
@@ -1567,19 +1626,7 @@ cpdef Morsel read_morsel(object path_or_handle, dict options=None):
                     )
                 dict_len = (dict_offsets_len // sizeof(int32_t)) - 1
                 dict_values_len = dict_values_payload[1]
-
-                vec = DictionaryVector(
-                    <size_t>row_count,
-                    <size_t>dict_len,
-                    <size_t>dict_values_len,
-                    code_width,
-                    bool(col_flags & FLAG_DICT_ORDERED),
-                    dict_value_type,
-                )
-                dict_ptr = (<DictionaryVector>vec).ptr
-                if dict_ptr == NULL or dict_ptr.dictionary_values == NULL:
-                    raise DrakenMorselStorageError(f"failed to allocate dictionary vector for column {i}")
-
+                row_null_payload = seg_map.get(SEG_NULL, None)
                 codec_id = codes_payload[0]
                 raw_len = codes_payload[1]
                 comp_len = codes_payload[2]
@@ -1592,9 +1639,13 @@ cpdef Morsel read_morsel(object path_or_handle, dict options=None):
                     )
                 handle.seek(payload_offset, os.SEEK_SET)
                 compressed = _read_exact(handle, comp_len)
-                _decompress_into_ptr(compressed, codec_id, raw_len, dict_ptr.codes)
+                codes_bytes = _decompress_payload(compressed, codec_id, raw_len)
+                if len(codes_bytes) != raw_len:
+                    raise DrakenMorselCorruptionError(
+                        f"decompressed dictionary codes length mismatch for column {i}: expected {raw_len}, got {len(codes_bytes)}"
+                    )
                 if checksum_enabled and checksum:
-                    if _checksum32_ptr(<const void*>dict_ptr.codes, raw_len) != checksum:
+                    if _checksum32(codes_bytes) != checksum:
                         raise DrakenMorselCorruptionError(
                             f"checksum mismatch for dictionary codes in column {i}"
                         )
@@ -1611,9 +1662,13 @@ cpdef Morsel read_morsel(object path_or_handle, dict options=None):
                     )
                 handle.seek(payload_offset, os.SEEK_SET)
                 compressed = _read_exact(handle, comp_len)
-                _decompress_into_ptr(compressed, codec_id, raw_len, dict_ptr.dictionary_values.offsets)
+                dict_offsets_bytes = _decompress_payload(compressed, codec_id, raw_len)
+                if len(dict_offsets_bytes) != raw_len:
+                    raise DrakenMorselCorruptionError(
+                        f"decompressed dictionary offsets length mismatch for column {i}: expected {raw_len}, got {len(dict_offsets_bytes)}"
+                    )
                 if checksum_enabled and checksum:
-                    if _checksum32_ptr(<const void*>dict_ptr.dictionary_values.offsets, raw_len) != checksum:
+                    if _checksum32(dict_offsets_bytes) != checksum:
                         raise DrakenMorselCorruptionError(
                             f"checksum mismatch for dictionary offsets in column {i}"
                         )
@@ -1629,79 +1684,117 @@ cpdef Morsel read_morsel(object path_or_handle, dict options=None):
                     )
                 handle.seek(payload_offset, os.SEEK_SET)
                 compressed = _read_exact(handle, comp_len)
-                _decompress_into_ptr(compressed, codec_id, raw_len, dict_ptr.dictionary_values.data)
+                dict_values_bytes = _decompress_payload(compressed, codec_id, raw_len)
+                if len(dict_values_bytes) != raw_len:
+                    raise DrakenMorselCorruptionError(
+                        f"decompressed dictionary values length mismatch for column {i}: expected {raw_len}, got {len(dict_values_bytes)}"
+                    )
                 if checksum_enabled and checksum:
-                    if _checksum32_ptr(<const void*>dict_ptr.dictionary_values.data, raw_len) != checksum:
+                    if _checksum32(dict_values_bytes) != checksum:
                         raise DrakenMorselCorruptionError(
                             f"checksum mismatch for dictionary values in column {i}"
                         )
 
-                seg_info = seg_map.get(SEG_NULL, None)
-                if seg_info is not None:
-                    codec_id = seg_info[0]
-                    raw_len = seg_info[1]
-                    comp_len = seg_info[2]
-                    checksum = seg_info[3]
-                    payload_offset = seg_info[4]
-                    null_len = (row_count + 7) >> 3
-                    if raw_len != null_len:
+                if dict_null_payload is not None:
+                    codec_id = dict_null_payload[0]
+                    raw_len = dict_null_payload[1]
+                    comp_len = dict_null_payload[2]
+                    checksum = dict_null_payload[3]
+                    payload_offset = dict_null_payload[4]
+                    expected_len = (dict_len + 7) >> 3
+                    if raw_len != expected_len:
                         raise DrakenMorselCorruptionError(
-                            f"row null bitmap length mismatch for dictionary column {i}: expected {null_len}, got {raw_len}"
+                            f"dictionary null bitmap length mismatch for column {i}: expected {expected_len}, got {raw_len}"
                         )
-                    if null_len > 0:
-                        bitmap = <uint8_t*>malloc(<size_t>null_len)
-                        if bitmap == NULL:
-                            raise MemoryError()
-                        handle.seek(payload_offset, os.SEEK_SET)
-                        compressed = _read_exact(handle, comp_len)
-                        _decompress_into_ptr(compressed, codec_id, raw_len, bitmap)
-                        if checksum_enabled and checksum:
-                            if _checksum32_ptr(<const void*>bitmap, raw_len) != checksum:
-                                raise DrakenMorselCorruptionError(
-                                    f"checksum mismatch for row null bitmap in dictionary column {i}"
-                                )
-                        dict_ptr.null_bitmap = bitmap
-                    else:
-                        dict_ptr.null_bitmap = NULL
-                else:
-                    dict_ptr.null_bitmap = NULL
-
-                seg_info = seg_map.get(SEG_DICT_NULL, None)
-                if seg_info is not None:
-                    codec_id = seg_info[0]
-                    raw_len = seg_info[1]
-                    comp_len = seg_info[2]
-                    checksum = seg_info[3]
-                    payload_offset = seg_info[4]
-                    null_len = (dict_len + 7) >> 3
-                    if raw_len != null_len:
+                    handle.seek(payload_offset, os.SEEK_SET)
+                    compressed = _read_exact(handle, comp_len)
+                    dict_null_bytes = _decompress_payload(compressed, codec_id, raw_len)
+                    if len(dict_null_bytes) != raw_len:
                         raise DrakenMorselCorruptionError(
-                            f"dictionary value null bitmap length mismatch for column {i}: expected {null_len}, got {raw_len}"
+                            f"decompressed dictionary null length mismatch for column {i}: expected {raw_len}, got {len(dict_null_bytes)}"
                         )
-                    if null_len > 0:
-                        bitmap = <uint8_t*>malloc(<size_t>null_len)
-                        if bitmap == NULL:
-                            raise MemoryError()
-                        handle.seek(payload_offset, os.SEEK_SET)
-                        compressed = _read_exact(handle, comp_len)
-                        _decompress_into_ptr(compressed, codec_id, raw_len, bitmap)
-                        if checksum_enabled and checksum:
-                            if _checksum32_ptr(<const void*>bitmap, raw_len) != checksum:
-                                raise DrakenMorselCorruptionError(
-                                    f"checksum mismatch for dictionary-value null bitmap in column {i}"
-                                )
-                        dict_ptr.dictionary_values.null_bitmap = bitmap
-                    else:
-                        dict_ptr.dictionary_values.null_bitmap = NULL
-                else:
-                    dict_ptr.dictionary_values.null_bitmap = NULL
+                    if checksum_enabled and checksum:
+                        if _checksum32(dict_null_bytes) != checksum:
+                            raise DrakenMorselCorruptionError(
+                                f"checksum mismatch for dictionary null bitmap in column {i}"
+                            )
+                    if dtype != DRAKEN_DICTIONARY and not _all_bytes_ff(dict_null_bytes):
+                        raise DrakenMorselStorageError(
+                            f"typed dictionary restore does not support dictionary-entry nulls for column {i}"
+                        )
 
-                if dict_len > 0 and dict_ptr.dictionary_values.offsets[dict_len] != dict_values_len:
+                null_bytes = None
+                if row_null_payload is not None:
+                    codec_id = row_null_payload[0]
+                    raw_len = row_null_payload[1]
+                    comp_len = row_null_payload[2]
+                    checksum = row_null_payload[3]
+                    payload_offset = row_null_payload[4]
+                    expected_len = (row_count + 7) >> 3
+                    if raw_len != expected_len:
+                        raise DrakenMorselCorruptionError(
+                            f"row null bitmap length mismatch for dictionary column {i}: expected {expected_len}, got {raw_len}"
+                        )
+                    handle.seek(payload_offset, os.SEEK_SET)
+                    compressed = _read_exact(handle, comp_len)
+                    null_bytes = _decompress_payload(compressed, codec_id, raw_len)
+                    if len(null_bytes) != raw_len:
+                        raise DrakenMorselCorruptionError(
+                            f"decompressed row null bitmap length mismatch for column {i}: expected {raw_len}, got {len(null_bytes)}"
+                        )
+                    if checksum_enabled and checksum:
+                        if _checksum32(null_bytes) != checksum:
+                            raise DrakenMorselCorruptionError(
+                                f"checksum mismatch for row null bitmap in dictionary column {i}"
+                            )
+
+                if dtype == DRAKEN_DICTIONARY:
+                    vec = DictionaryVector(
+                        <size_t>row_count,
+                        <size_t>dict_len,
+                        <size_t>dict_values_len,
+                        code_width,
+                        bool(col_flags & FLAG_DICT_ORDERED),
+                        dict_value_type,
+                    )
+                    dict_ptr = (<DictionaryVector>vec).ptr
+                    if dict_ptr == NULL or dict_ptr.dictionary_values == NULL:
+                        raise DrakenMorselStorageError(f"failed to allocate dictionary vector for column {i}")
+                    if len(codes_bytes) > 0:
+                        memcpy(dict_ptr.codes, <const void*>PyBytes_AS_STRING(codes_bytes), <size_t>len(codes_bytes))
+                    memcpy(dict_ptr.dictionary_values.offsets, <const void*>PyBytes_AS_STRING(dict_offsets_bytes), <size_t>len(dict_offsets_bytes))
+                    if len(dict_values_bytes) > 0:
+                        memcpy(dict_ptr.dictionary_values.data, <const void*>PyBytes_AS_STRING(dict_values_bytes), <size_t>len(dict_values_bytes))
+                    if dict_null_payload is not None:
+                        expected_len = (dict_len + 7) >> 3
+                        if expected_len > 0:
+                            dict_ptr.dictionary_values.null_bitmap = <uint8_t*>malloc(<size_t>expected_len)
+                            if dict_ptr.dictionary_values.null_bitmap == NULL:
+                                raise MemoryError()
+                            memcpy(dict_ptr.dictionary_values.null_bitmap, <const void*>PyBytes_AS_STRING(dict_null_bytes), <size_t>expected_len)
+                    if null_bytes is not None and len(null_bytes) > 0:
+                        dict_ptr.null_bitmap = <uint8_t*>malloc(<size_t>len(null_bytes))
+                        if dict_ptr.null_bitmap == NULL:
+                            raise MemoryError()
+                        memcpy(dict_ptr.null_bitmap, <const void*>PyBytes_AS_STRING(null_bytes), <size_t>len(null_bytes))
+                else:
+                    vec = _build_typed_dict_vector(
+                        dtype,
+                        row_count,
+                        <const uint8_t*>PyBytes_AS_STRING(codes_bytes),
+                        code_width,
+                        <const uint8_t*>NULL if null_bytes is None else <const uint8_t*>PyBytes_AS_STRING(null_bytes),
+                        dict_value_type,
+                        <const void*>PyBytes_AS_STRING(dict_values_bytes),
+                        dict_len,
+                        bool(col_flags & FLAG_DICT_ORDERED),
+                    )
+                if dict_len > 0 and _u32_le_read((<const uint8_t*>PyBytes_AS_STRING(dict_offsets_bytes)) + (dict_len * sizeof(int32_t))) != dict_values_len:
                     raise DrakenMorselStorageError(
-                        f"dictionary offset tail mismatch in column {i}: expected {dict_values_len}, got {dict_ptr.dictionary_values.offsets[dict_len]}"
+                        f"dictionary offset tail mismatch in column {i}: expected {dict_values_len}, got {_u32_le_read((<const uint8_t*>PyBytes_AS_STRING(dict_offsets_bytes)) + (dict_len * sizeof(int32_t)))}"
                     )
 
-                if dict_len > 0:
+                if dtype == DRAKEN_DICTIONARY and dict_len > 0:
                     for row_idx in range(row_count):
                         code = _dict_read_code(dict_ptr, row_idx)
                         if code >= <uint32_t>dict_len:

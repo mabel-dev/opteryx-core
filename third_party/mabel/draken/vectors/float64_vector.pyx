@@ -22,15 +22,91 @@ from cpython.bytes cimport PyBytes_FromStringAndSize, PyBytes_AS_STRING
 from cpython.mem cimport PyMem_Malloc
 from libc.string cimport memset, memcpy
 
-from libc.stdint cimport int32_t, int8_t, intptr_t, uint64_t, uint8_t
-from libc.stdlib cimport malloc
+from libc.stdint cimport int32_t, int8_t, intptr_t, uint16_t, uint32_t, uint64_t, uint8_t
+from libc.stdlib cimport free, malloc
 from libc.math cimport isnan, llround
 
+from opteryx.draken.core.buffers cimport DictAccessor
 from opteryx.draken.core.buffers cimport DrakenFixedBuffer
+from opteryx.draken.core.buffers cimport DrakenVarBuffer
 from opteryx.draken.core.buffers cimport DRAKEN_FLOAT64
 from opteryx.draken.core.fixed_vector cimport alloc_fixed_buffer, buf_dtype, buf_itemsize, buf_length, free_fixed_buffer
+from opteryx.draken.core.var_vector cimport alloc_var_buffer, free_var_buffer
 from opteryx.draken.vectors.vector cimport MIX_HASH_CONSTANT, Vector, NULL_HASH, mix_hash, simd_mix_hash
 from opteryx.draken.vectors.bool_vector cimport BoolVector
+
+
+cdef inline uint8_t _dict_code_width_for_size(Py_ssize_t dict_size) noexcept:
+    if dict_size <= 256:
+        return 1
+    if dict_size <= 65536:
+        return 2
+    return 4
+
+
+cdef inline uint32_t _read_packed_code(const uint8_t* codes, uint8_t code_width, Py_ssize_t row_idx) noexcept nogil:
+    if code_width == 1:
+        return (<const uint8_t*>codes)[row_idx]
+    if code_width == 2:
+        return (<const uint16_t*>codes)[row_idx]
+    return (<const uint32_t*>codes)[row_idx]
+
+
+cdef void _release_dict_storage(Float64Vector vec) noexcept:
+    if vec._dict_codes != NULL:
+        free(vec._dict_codes)
+        vec._dict_codes = NULL
+    if vec._dict_values != NULL:
+        free_var_buffer(vec._dict_values, True)
+        vec._dict_values = NULL
+    vec._dict_code_width = 0
+    vec._dict_ordered = 0
+    vec._dict_accessor.codes = NULL
+    vec._dict_accessor.code_width = 0
+    vec._dict_accessor.row_nulls = NULL
+    vec._dict_accessor.length = 0
+    vec._dict_accessor.dict_values = NULL
+    vec._dict_accessor.value_type = DRAKEN_FLOAT64
+
+
+cdef void _attach_dictionary_storage(Float64Vector vec, const int32_t[::1] codes, const double[::1] dictionary, bint ordered) except *:
+    cdef Py_ssize_t row_count = codes.shape[0]
+    cdef Py_ssize_t dict_size = dictionary.shape[0]
+    cdef uint8_t code_width = _dict_code_width_for_size(dict_size)
+    cdef Py_ssize_t code_bytes = row_count * code_width
+    cdef Py_ssize_t dict_bytes = dict_size * sizeof(double)
+    cdef Py_ssize_t i
+    cdef Py_ssize_t code
+    cdef DrakenVarBuffer* dict_values
+
+    _release_dict_storage(vec)
+
+    if code_bytes > 0:
+        vec._dict_codes = <uint8_t*>malloc(code_bytes)
+        if vec._dict_codes == NULL:
+            raise MemoryError()
+    else:
+        vec._dict_codes = NULL
+
+    dict_values = alloc_var_buffer(DRAKEN_FLOAT64, <size_t>dict_size, <size_t>dict_bytes)
+    dict_values.offsets[0] = 0
+    for i in range(dict_size):
+        dict_values.offsets[i + 1] = <int32_t>((i + 1) * sizeof(double))
+    if dict_bytes > 0:
+        memcpy(dict_values.data, <const void*>&dictionary[0], <size_t>dict_bytes)
+
+    for i in range(row_count):
+        code = <Py_ssize_t>codes[i]
+        if code_width == 1:
+            (<uint8_t*>vec._dict_codes)[i] = <uint8_t>code
+        elif code_width == 2:
+            (<uint16_t*>vec._dict_codes)[i] = <uint16_t>code
+        else:
+            (<uint32_t*>vec._dict_codes)[i] = <uint32_t>code
+
+    vec._dict_values = dict_values
+    vec._dict_code_width = code_width
+    vec._dict_ordered = 1 if ordered else 0
 
 cdef class Float64Vector(Vector):
 
@@ -65,11 +141,33 @@ cdef class Float64Vector(Vector):
         else:
             self.ptr = alloc_fixed_buffer(DRAKEN_FLOAT64, length, 8)
             self.owns_data = True
+        self._dict_values = NULL
+        self._dict_codes = NULL
+        self._dict_code_width = 0
+        self._dict_ordered = 0
+        self._dict_accessor.codes = NULL
+        self._dict_accessor.code_width = 0
+        self._dict_accessor.row_nulls = NULL
+        self._dict_accessor.length = 0
+        self._dict_accessor.dict_values = NULL
+        self._dict_accessor.value_type = DRAKEN_FLOAT64
 
     def __dealloc__(self):
+        _release_dict_storage(self)
         if self.owns_data and self.ptr is not NULL:
             free_fixed_buffer(self.ptr, True)
             self.ptr = NULL
+
+    cdef DictAccessor* dict_accessor(self) noexcept:
+        if self._dict_values == NULL or self._dict_codes == NULL or self.ptr == NULL:
+            return NULL
+        self._dict_accessor.codes = self._dict_codes
+        self._dict_accessor.code_width = self._dict_code_width
+        self._dict_accessor.row_nulls = self.ptr.null_bitmap
+        self._dict_accessor.length = self.ptr.length
+        self._dict_accessor.dict_values = self._dict_values
+        self._dict_accessor.value_type = self._dict_values.type
+        return &self._dict_accessor
 
     cdef void* dense_ptr(self) noexcept:
         if self.ptr == NULL:
@@ -96,6 +194,26 @@ cdef class Float64Vector(Vector):
     @property
     def dtype(self):
         return buf_dtype(self.ptr)
+
+    @property
+    def dictionary_value_type(self):
+        if self._dict_values == NULL:
+            return None
+        return self._dict_values.type
+
+    @property
+    def dictionary_size(self):
+        if self._dict_values == NULL:
+            return 0
+        return self._dict_values.length
+
+    @property
+    def code_width(self):
+        return self._dict_code_width if self._dict_values != NULL else None
+
+    @property
+    def ordered(self):
+        return bool(self._dict_ordered) if self._dict_values != NULL else False
 
     def __getitem__(self, Py_ssize_t i):
         """Return the value at index i, or None if null."""
@@ -137,34 +255,70 @@ cdef class Float64Vector(Vector):
         cdef double* dst = <double*> out.ptr.data
         cdef uint8_t* src_null = <uint8_t*> self.ptr.null_bitmap
         cdef Py_ssize_t out_nbytes
-        cdef uint8_t* out_null
+        cdef uint8_t* out_null = NULL
         cdef int32_t src_idx
         cdef uint8_t byte
+        cdef int32_t* taken_codes = NULL
+        cdef int32_t[::1] taken_codes_view
+        cdef double[::1] dictionary_view
+        cdef Py_ssize_t dict_size = 0
 
         # If source has no null bitmap, copy directly.
         if src_null == NULL:
             for i in range(n):
-                dst[i] = src[indices[i]]
-            out.ptr.null_bitmap = NULL
-            return out
-
-        # Preserve nulls in the output bitmap.
-        out_nbytes = (n + 7) >> 3
-        out_null = <uint8_t*> malloc(out_nbytes)
-        if out_null == NULL:
-            raise MemoryError()
-        memset(out_null, 0, out_nbytes)
-
-        for i in range(n):
-            src_idx = indices[i]
-            byte = src_null[src_idx >> 3]
-            if byte & (1 << (src_idx & 7)):
+                src_idx = indices[i]
                 dst[i] = src[src_idx]
-                out_null[i >> 3] |= (1 << (i & 7))
-            else:
-                dst[i] = 0.0
+            out.ptr.null_bitmap = NULL
+        else:
+            # Preserve nulls in the output bitmap.
+            out_nbytes = (n + 7) >> 3
+            out_null = <uint8_t*> malloc(out_nbytes)
+            if out_null == NULL:
+                raise MemoryError()
+            memset(out_null, 0, out_nbytes)
 
-        out.ptr.null_bitmap = out_null
+            for i in range(n):
+                src_idx = indices[i]
+                byte = src_null[src_idx >> 3]
+                if byte & (1 << (src_idx & 7)):
+                    dst[i] = src[src_idx]
+                    out_null[i >> 3] |= (1 << (i & 7))
+                else:
+                    dst[i] = 0.0
+
+            out.ptr.null_bitmap = out_null
+
+        if self._dict_values != NULL and self._dict_codes != NULL:
+            dict_size = self._dict_values.length
+            if n > 0:
+                taken_codes = <int32_t*>malloc(n * sizeof(int32_t))
+                if taken_codes == NULL:
+                    if out_null != NULL:
+                        free(out_null)
+                        out.ptr.null_bitmap = NULL
+                    raise MemoryError()
+            try:
+                for i in range(n):
+                    src_idx = indices[i]
+                    if src_null != NULL:
+                        byte = src_null[src_idx >> 3]
+                        if (byte & (1 << (src_idx & 7))) == 0:
+                            taken_codes[i] = 0
+                            continue
+                    taken_codes[i] = <int32_t>_read_packed_code(self._dict_codes, self._dict_code_width, src_idx)
+
+                if n > 0:
+                    taken_codes_view = <int32_t[:n]>taken_codes
+                else:
+                    taken_codes_view = <int32_t[:0]>taken_codes
+                if dict_size > 0:
+                    dictionary_view = <double[:dict_size]><double*>self._dict_values.data
+                else:
+                    dictionary_view = <double[:0]><double*>self._dict_values.data
+                _attach_dictionary_storage(out, taken_codes_view, dictionary_view, self._dict_ordered != 0)
+            finally:
+                if taken_codes != NULL:
+                    free(taken_codes)
         return out
 
     cdef inline bint _compare_float_values(self, double left, double right, int op) nogil:
@@ -644,6 +798,8 @@ cdef Float64Vector from_dict(const int32_t[::1] codes, const double[::1] diction
             raise ValueError(f"dictionary index out of bounds at row {i}: {code}")
         dst[i] = dictionary[code]
 
+    _attach_dictionary_storage(vec, codes, dictionary, False)
+
     return vec
 
 
@@ -682,6 +838,73 @@ cdef Float64Vector from_dict_nullable(
             nb[i >> 3] |= <uint8_t>(1 << (i & 7))
         else:
             dst[i] = 0.0
+
+    _attach_dictionary_storage(vec, codes, dictionary, False)
+
+    return vec
+
+
+cdef Float64Vector from_packed_dict(
+    const uint8_t* codes,
+    uint8_t code_width,
+    Py_ssize_t row_count,
+    const double* dictionary,
+    Py_ssize_t dict_size,
+    const uint8_t* row_null_bitmap=NULL,
+    bint ordered=False,
+):
+    cdef Float64Vector vec = Float64Vector(<size_t>row_count)
+    cdef double* dst = <double*>vec.ptr.data
+    cdef Py_ssize_t i
+    cdef uint32_t code
+    cdef Py_ssize_t bitmap_bytes
+    cdef int32_t[::1] codes_view
+    cdef double[::1] dictionary_view
+    cdef int32_t* expanded_codes = NULL
+
+    if dict_size == 0:
+        raise ValueError("Float64Vector.from_packed_dict requires a non-empty dictionary")
+    if code_width != 1 and code_width != 2 and code_width != 4:
+        raise ValueError("unsupported packed dictionary code width")
+
+    if row_null_bitmap != NULL:
+        bitmap_bytes = (row_count + 7) >> 3
+        vec.ptr.null_bitmap = <uint8_t*>malloc(bitmap_bytes)
+        if vec.ptr.null_bitmap == NULL:
+            raise MemoryError()
+        memcpy(vec.ptr.null_bitmap, row_null_bitmap, <size_t>bitmap_bytes)
+    else:
+        vec.ptr.null_bitmap = NULL
+
+    if row_count > 0:
+        expanded_codes = <int32_t*>malloc(row_count * sizeof(int32_t))
+        if expanded_codes == NULL:
+            raise MemoryError()
+
+    try:
+        for i in range(row_count):
+            if row_null_bitmap != NULL and ((row_null_bitmap[i >> 3] >> (i & 7)) & 1) == 0:
+                dst[i] = 0.0
+                expanded_codes[i] = 0
+                continue
+            code = _read_packed_code(codes, code_width, i)
+            if code >= dict_size:
+                raise ValueError(f"dictionary index out of bounds at row {i}: {code}")
+            dst[i] = dictionary[code]
+            expanded_codes[i] = <int32_t>code
+
+        if row_count > 0:
+            codes_view = <int32_t[:row_count]>expanded_codes
+        else:
+            codes_view = <int32_t[:0]>expanded_codes
+        if dict_size > 0:
+            dictionary_view = <double[:dict_size]><double*>dictionary
+        else:
+            dictionary_view = <double[:0]><double*>dictionary
+        _attach_dictionary_storage(vec, codes_view, dictionary_view, ordered)
+    finally:
+        if expanded_codes != NULL:
+            free(expanded_codes)
 
     return vec
 

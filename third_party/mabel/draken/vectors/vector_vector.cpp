@@ -19,7 +19,7 @@
             "-static-libstdc++"
         ],
         "include_dirs": [
-            "/Users/justin/.pyenv/versions/3.13.12/lib/python3.13/site-packages/numpy/_core/include",
+            "/private/var/folders/3f/qvs4ypvs5kzb369l9m0jhbtc0000gn/T/pip-build-env-tcgqnj11/overlay/lib/python3.13/site-packages/numpy/_core/include",
             "src/cpp",
             "src/c",
             "third_party/mabel/draken",
