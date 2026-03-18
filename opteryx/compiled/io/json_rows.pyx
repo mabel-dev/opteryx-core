@@ -55,6 +55,7 @@ cdef enum EncoderKind:
     ENC_CONST_BOOL = 9
     ENC_CONST_STRING = 10
     ENC_CONST_RAW_STRING = 11
+    ENC_GENERIC = 12
 
 
 cdef bytes _LIT_NULL = b"null"
@@ -321,6 +322,8 @@ cdef Py_ssize_t _estimate_value_bytes(
         if encoder == ENC_CONST_RAW_STRING:
             return payload.length if payload.length > 0 else 8
         return payload.length + 6
+    if encoder == ENC_GENERIC:
+        return 24
     raise NotImplementedError("unsupported encoder")
 
 
@@ -385,6 +388,19 @@ cdef Py_ssize_t _measure_value(
         if encoder == ENC_CONST_RAW_STRING:
             return length
         return _measure_json_string(ptr, length)
+    if encoder == ENC_GENERIC:
+        value = vec_obj[row_index]
+        if value is None:
+            return 4
+        if isinstance(value, bytes):
+            generic_bytes = value
+            return _measure_json_string(PyBytes_AS_STRING(generic_bytes), len(generic_bytes))
+        if isinstance(value, str):
+            generic_bytes = value.encode("utf8")
+            return _measure_json_string(PyBytes_AS_STRING(generic_bytes), len(generic_bytes))
+        if isinstance(value, bool):
+            return 4 if value else 5
+        return len(str(value).encode("utf8"))
 
     raise NotImplementedError("unsupported encoder")
 
@@ -405,6 +421,8 @@ cdef Py_ssize_t _write_value(
     cdef const char* ptr
     cdef Py_ssize_t length
     cdef DrakenConstantStringPayload* payload
+    cdef object generic_value
+    cdef bytes generic_bytes
 
     if encoder == ENC_INT64:
         int64_vec = <Int64Vector>vec_obj
@@ -460,6 +478,26 @@ cdef Py_ssize_t _write_value(
             memcpy(dst, ptr, length)
             return length
         return _write_json_string(dst, ptr, length)
+    if encoder == ENC_GENERIC:
+        generic_value = aux_obj[row_index]
+        if generic_value is None:
+            memcpy(dst, b"null", 4)
+            return 4
+        if isinstance(generic_value, bytes):
+            generic_bytes = generic_value
+            return _write_json_string(dst, PyBytes_AS_STRING(generic_bytes), len(generic_bytes))
+        if isinstance(generic_value, str):
+            generic_bytes = generic_value.encode("utf8")
+            return _write_json_string(dst, PyBytes_AS_STRING(generic_bytes), len(generic_bytes))
+        if isinstance(generic_value, bool):
+            if generic_value:
+                memcpy(dst, b"true", 4)
+                return 4
+            memcpy(dst, b"false", 5)
+            return 5
+        generic_bytes = str(generic_value).encode("utf8")
+        memcpy(dst, PyBytes_AS_STRING(generic_bytes), len(generic_bytes))
+        return len(generic_bytes)
 
     raise NotImplementedError("unsupported encoder")
 
@@ -542,6 +580,8 @@ cdef bint _value_is_null_cached(int encoder, object vec_obj, object aux_obj, Py_
     ):
         const_vec = <ConstantVector>vec_obj
         return not _is_valid(const_vec.ptr.null_bitmap, row_index)
+    if encoder == ENC_GENERIC:
+        return aux_obj[row_index] is None
 
     raise NotImplementedError("unsupported encoder")
 
@@ -618,9 +658,7 @@ cpdef StringVector morsel_to_json_rows(
                         f"json serialization does not support ConstantVector value type for column {col_name!r}"
                     )
             elif isinstance(vec_obj, DictionaryVector):
-                raise NotImplementedError(
-                    f"json serialization does not yet support DictionaryVector for column {col_name!r}"
-                )
+                encoder = ENC_GENERIC
             else:
                 raise NotImplementedError(
                     f"json serialization does not support vector type {type(vec_obj).__name__} for column {col_name!r}"
@@ -630,6 +668,8 @@ cpdef StringVector morsel_to_json_rows(
             encoders[col_index] = encoder
             if encoder == ENC_STRING or encoder == ENC_RAW_STRING:
                 aux_obj = vec_obj.view()
+            elif encoder == ENC_GENERIC:
+                aux_obj = vec_obj.to_pylist()
             else:
                 aux_obj = None
             aux_objects.append(aux_obj)

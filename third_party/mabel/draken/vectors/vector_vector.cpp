@@ -1736,6 +1736,7 @@ struct __pyx_t_7opteryx_6draken_7vectors_13string_vector_StringElement;
 struct __pyx_opt_args_7opteryx_6draken_7vectors_13string_vector_12StringVector_like;
 struct __pyx_opt_args_7opteryx_6draken_7vectors_13string_vector_12StringVector_contains;
 struct __pyx_opt_args_7opteryx_6draken_7vectors_13string_vector_12StringVector_hash_into;
+struct __pyx_opt_args_7opteryx_6draken_7vectors_13string_vector_from_dict_buffers;
 
 /* "opteryx/draken/vectors/string_vector.pxd":10
  * 
@@ -1784,6 +1785,18 @@ struct __pyx_opt_args_7opteryx_6draken_7vectors_13string_vector_12StringVector_c
 struct __pyx_opt_args_7opteryx_6draken_7vectors_13string_vector_12StringVector_hash_into {
   int __pyx_n;
   Py_ssize_t offset;
+};
+
+/* "opteryx/draken/vectors/string_vector.pxd":120
+ *     const uint8_t[::1] row_validity,
+ * )
+ * cdef StringVector from_dict_buffers(             # <<<<<<<<<<<<<<
+ *     const int32_t[::1] codes,
+ *     const int32_t[::1] dict_offsets,
+*/
+struct __pyx_opt_args_7opteryx_6draken_7vectors_13string_vector_from_dict_buffers {
+  int __pyx_n;
+  PyObject *row_validity;
 };
 struct __pyx_opt_args_7opteryx_6draken_7vectors_12array_vector_11ArrayVector_hash_into;
 

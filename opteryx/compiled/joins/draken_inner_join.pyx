@@ -23,7 +23,6 @@ from opteryx.draken.morsels.align cimport align_tables
 from opteryx.draken.morsels.morsel cimport Morsel
 from opteryx.draken.vectors.bool_vector cimport BoolVector
 from opteryx.draken.vectors.date32_vector cimport Date32Vector
-from opteryx.draken.vectors.dictionary_vector cimport DictionaryVector
 from opteryx.draken.vectors.float64_vector cimport Float64Vector
 from opteryx.draken.vectors.int64_vector cimport Int64Vector
 from opteryx.draken.vectors.integer_vector cimport IntegerVector
@@ -159,9 +158,6 @@ cdef inline void _append_valid_rows_and_hashes(
         )):
             kinds.append(3)
             null_masks[-1] = vector_obj.is_null()
-        elif isinstance(vector_obj, DictionaryVector):
-            kinds.append(4)
-            null_masks[-1] = (<DictionaryVector> vector_obj).is_null_boolvector().to_pylist()
         else:
             kinds.append(5)
 
@@ -186,10 +182,6 @@ cdef inline void _append_valid_rows_and_hashes(
                     null_masks[column_index],
                     row_index,
                 ):
-                    valid = False
-                    break
-            elif kind == 4:
-                if null_masks[column_index][row_index]:
                     valid = False
                     break
             else:
@@ -248,9 +240,6 @@ cdef inline void _append_bloom_filtered_rows_and_hashes(
         )):
             kinds.append(3)
             null_masks[-1] = vector_obj.is_null()
-        elif isinstance(vector_obj, DictionaryVector):
-            kinds.append(4)
-            null_masks[-1] = (<DictionaryVector> vector_obj).is_null_boolvector().to_pylist()
         else:
             kinds.append(5)
 
@@ -275,10 +264,6 @@ cdef inline void _append_bloom_filtered_rows_and_hashes(
                     null_masks[column_index],
                     row_index,
                 ):
-                    valid = False
-                    break
-            elif kind == 4:
-                if null_masks[column_index][row_index]:
                     valid = False
                     break
             else:

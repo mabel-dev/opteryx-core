@@ -18,9 +18,8 @@ cdef class Int64CountStarKernel:
         cdef Py_ssize_t row_idx
         cdef object key_vector
         cdef Int64Vector key_int64_vector
-        cdef DictionaryVector key_dict_vector
         cdef DrakenFixedBuffer* key_ptr
-        cdef DrakenDictionaryBuffer* key_dict_ptr
+        cdef DictAccessor* key_dict_ptr
         cdef int64_t* key_data
         cdef uint8_t* key_nulls
         cdef uint64_t* key_hashes = NULL
@@ -71,18 +70,21 @@ cdef class Int64CountStarKernel:
             self._null_count = nulls
             return True
 
-        if isinstance(key_vector, DictionaryVector):
+        if isinstance(key_vector, Vector):
+            key_dict_ptr = (<Vector>key_vector).dict_accessor()
+        else:
+            key_dict_ptr = NULL
+
+        if key_dict_ptr != NULL:
             self._hash_keys_mode = True
-            key_dict_vector = <DictionaryVector>key_vector
-            key_dict_ptr = key_dict_vector.ptr
-            if key_dict_ptr == NULL or key_dict_ptr.dictionary_values == NULL:
+            if key_dict_ptr.dict_values == NULL:
                 return False
 
             key_hashes = _build_dict_hashes(key_dict_ptr)
             try:
                 for row_idx in range(row_count):
                     key_code = _dict_read_code(key_dict_ptr, row_idx)
-                    if key_code >= key_dict_ptr.dictionary_values.length:
+                    if key_code >= key_dict_ptr.dict_values.length:
                         raise ValueError("Dictionary key code out of bounds in COUNT(*) kernel")
                     if _dict_row_null(key_dict_ptr, key_code, row_idx):
                         self._seen_null = True

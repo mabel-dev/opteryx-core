@@ -55,6 +55,22 @@ def test_morsel_to_csv_rows_quotes_fields_and_header():
     ]
 
 
+def test_morsel_to_csv_rows_supports_dictionary_columns():
+    dictionary = pa.array(["north", "south"], type=pa.string())
+    indices = pa.array([0, 1, None, 0], type=pa.int8())
+    morsel = Morsel.from_arrow(pa.table({"region": pa.DictionaryArray.from_arrays(indices, dictionary)}))
+
+    rows = morsel_to_csv_rows(morsel, include_header=True).to_pylist()
+
+    assert rows == [
+        b"region",
+        b"north",
+        b"south",
+        b"",
+        b"north",
+    ]
+
+
 def test_morsel_to_csv_strings_supports_custom_separator():
     morsel = Morsel.from_arrow(
         pa.table(
