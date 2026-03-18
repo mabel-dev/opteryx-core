@@ -95,7 +95,7 @@ def test_decode_column_from_chunk_mixed_pages_stays_dictionary_encoded():
     assert used_codes == list(range(len(dictionary_array.dictionary)))
 
 
-def test_decode_column_from_chunk_numeric_dictionary_returns_dictionary_vector():
+def test_decode_column_from_chunk_numeric_dictionary_returns_typed_vector():
     values = [10, 20, None, 10, 30] * 300
     table = pa.table({"n": pa.array(values, type=pa.int64())})
 
@@ -116,7 +116,7 @@ def test_decode_column_from_chunk_numeric_dictionary_returns_dictionary_vector()
     decoded = rp.decode_column_from_chunk(chunk, col_stats)
 
     assert decoded is not None
-    assert decoded.__class__.__name__ == "DictionaryVector"
+    assert decoded.__class__.__name__ == "Int64Vector"
     assert decoded.to_pylist() == values
 
 

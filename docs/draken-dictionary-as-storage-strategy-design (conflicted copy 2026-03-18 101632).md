@@ -17,37 +17,11 @@ Current implementation snapshot:
 - Typed `from_arrow(...)` paths have been narrowed back to dense Arrow interop; dictionary Arrow arrays are rejected and must not be treated as the storage constructor shape.
 - The fixed-width typed `from_dict(...)` constructors now use typed Cython memoryviews internally for codes, dictionary payloads, and row validity instead of generic Python-object indexing in the hot construction path.
 - `StringVector.from_dict(...)` now treats codes and row validity as typed inputs, but its dictionary payload is still Python-level because it has not yet been moved to raw arena-plus-offsets inputs.
-- `Int64Vector` and `Float64Vector` now preserve dictionary storage sidecars across `take(...)` operations, so partitioning/copy paths (including shuffle spill staging) do not silently strip dictionary encoding metadata before DRKM serialization.
-- DRKM writer/reader now preserve typed dictionary-backed numeric vectors (`Int64Vector`, `Float64Vector`) using dictionary segments when `dict_accessor()` is available, rather than requiring a public `DictionaryVector` instance for round-trip.
-
-Current validated state (2026-03-18):
-- Focused dictionary and DRKM suites are passing after the sidecar/take and DRKM typed-restore work:
-    - `tests/draken/morsels/test_morsel_io.py`
-    - `tests/rugo/test_dictionary_vector_decode.py`
-    - `tests/unit/operators/test_group_state_store_dictionary_fastpath.py`
-    - `tests/unit/operators/test_heap_sort_dictionary_fastpath.py`
-    - `tests/unit/operators/test_shuffle_node.py`
-- Broader shuffle/group-by suites are also passing:
-    - `tests/unit/operators/test_draken_aggregate_and_group_node.py`
-    - `tests/unit/operators/test_shuffle_group_by_phase1.py`
-    - `tests/integration/test_shuffle_groupby_golden.py`
-
-Current known regressions (handoff-critical):
-- SQL battery regressions remain in `tests/integration/sql_battery/test_shapes_joins_subqueries.py` and related battery sets.
-- Confirmed active failures include:
-    - `SELECT name FROM $planets WHERE REGEXP_REPLACE(name, '^E', 'G') == 'Garth'`
-        - expected one row (`Earth`), currently returns zero rows in SQL path.
-        - standalone helper behavior was adjusted, but planner/evaluator SQL path is still mismatched.
-    - `SELECT CAST(magnitude AS INTEGER) FROM testdata.satellites WHERE magnitude IS NOT NULL`
-        - expected `171` rows, currently returns `177`.
-        - dataset currently surfaces 6 `NaN` values in `magnitude` (not null bitmap nulls), and `IS NULL`/`IS NOT NULL` semantics are still inconsistent across paths.
 
 Immediate next work:
 - Finish moving the parquet decoder callsites off `_make_dictionary_vector(...)` and onto typed `from_dict(...)` constructors. Fixed-width numeric dictionary columns now use typed constructors; string dictionary columns still emit `DictionaryVector` until the raw string constructor exists.
 - Replace the remaining Python-level string dictionary constructor shape with a raw string storage constructor using arena bytes plus offsets and validity.
-- Fix SQL-path function/type regressions introduced or exposed during transition hardening:
-    - `REGEXP_REPLACE` equality predicate behavior in SQL battery
-    - `NaN` vs `NULL` semantics for floating columns in `IS NULL`/`IS NOT NULL` and casts
+- Decide and implement the DRKM transition path so dictionary encoding can be preserved without requiring public `DictionaryVector` round-tripping at the storage boundary.
 - Stabilize planner and telemetry behavior for dictionary-backed group-by paths so readings match actual engine selection and fastpath use.
 - Make unsupported dictionary float shapes plan explicitly to `GroupStateStore` instead of selecting Carchar and then erroring at runtime.
 - Replace the remaining Abseil-backed distinct sets inside Carchar so dictionary grouping and distinct aggregation are fully on the Carchar path.
@@ -289,15 +263,19 @@ Current transition note:
 - `from_dict(...)` is now the intended storage/backend constructor seam.
 - For fixed-width vectors the internal `cdef from_dict(...)` implementations now operate on typed memoryviews, with only a thin Python wrapper at the classmethod boundary.
 - `StringVector.from_dict(...)` has not reached the same endpoint yet because its dictionary payload still arrives as decoded Python values rather than raw arena bytes and offsets.
-- DRKM currently preserves typed numeric dictionary encoding through morsel spill/readback, but string dictionary persistence is still on the legacy `DictionaryVector` path.
+- `DictionaryVector` therefore still exists today as a compatibility/storage type for the parts of the system that have not yet moved to typed dictionary backends, notably string parquet decode and DRKM dictionary serde.
 
 ### What Is Removed
 
-- `DictionaryVector` public class (target state, not complete)
+- `DictionaryVector` public class
 - `_dictionary_key_kind` / `_dictionary_type_to_key_kind` in `carchar_group_state_engine.pyx` — replaced by `da.value_type` from the accessor
 - `isinstance(vec, DictionaryVector)` at all call sites — replaced by `vec.dict_accessor() != NULL`
 - `_dict_compare` in the evaluator — folds into typed compare functions via `dict_accessor()`
 - `_ingest_object_minmax_for_states` numeric branch workaround (see below)
+
+Landing note:
+- This section is still target-state, not current-state.
+- `DictionaryVector` cannot actually be removed until both remaining dependencies are migrated: string parquet decode and DRKM dictionary serialization/deserialization.
 
 ### What Is Preserved
 
@@ -305,6 +283,9 @@ Current transition note:
 - `DrakenVarBuffer` reuse for numeric dict values — unchanged internally
 - `_read_code` inline helper — retained, moved to shared header or inline in accessor impl
 - All Parquet reader dictionary page handling — adapts callsite only
+
+Additional implementation constraint discovered during Phase 2:
+- DRKM morsel storage currently has an explicit dictionary encoding format and round-trips `DictionaryVector` directly. Removing the public `DictionaryVector` type therefore requires a typed dictionary-aware DRKM path or an equivalent private wrapper at the storage boundary.
 
 ## Migration Path
 
@@ -328,6 +309,7 @@ Phase 1 progress update:
 - Add `Float64Vector.from_dict(...)`, `Int64Vector.from_dict(...)`, `StringVector.from_dict(...)`.
 - Parquet reader produces these instead of `DictionaryVector`.
 - `DictionaryVector` becomes a deprecated alias.
+- Move DRKM dictionary serialization/deserialization off direct `DictionaryVector` round-tripping.
 - Finish planner hardening for grouped aggregation so unsupported shapes route directly to `GroupStateStore` instead of selecting Carchar and failing later.
 - Bring Carchar telemetry/readings into alignment with actual engine choice and dictionary fastpath use.
 - Remove the remaining Abseil-backed distinct-set usage inside Carchar so the Carchar group-state path is internally self-consistent.
@@ -339,20 +321,14 @@ Phase 2 progress update:
 - This means the constructor split is now real at the API and implementation level for fixed-width vectors: `from_arrow(...)` is interop, `from_dict(...)` is backend construction.
 - The parquet reader now routes fixed-width numeric dictionary columns through typed `from_dict(...)` constructors instead of `_make_dictionary_vector(...)`.
 - The parquet reader still emits `DictionaryVector` for string dictionary columns because the raw string constructor still needs arena-bytes-plus-offsets inputs rather than Python values.
-- Typed numeric dictionary sidecars now survive `take(...)`/partitioning, so shuffle spill paths can persist and replay typed dictionary metadata instead of being forced dense before DRKM writes.
-- DRKM now writes typed numeric vectors with dictionary sidecars as dictionary-encoded segments and can restore them back to typed vectors.
+- DRKM morsel serialization and deserialization still preserve dictionary encoding by writing and reading explicit dictionary segments and reconstructing `DictionaryVector` directly.
 - The string constructor is only partially across the boundary: codes and row validity are typed, but dictionary payload is still supplied as Python values. A raw arena-plus-offsets string constructor is still required before the string path is fully storage-native.
-- Phase 2 is no longer blocked on API shape, but it is still blocked on:
-    - remaining producer migrations (especially string dictionary paths), and
-    - active SQL-battery regressions (notably `REGEXP_REPLACE` SQL predicate behavior and float `NaN`/`NULL` semantics).
-
-Handoff note for next implementer:
-- Start from the current failing SQL battery subset and close those before widening migration scope.
-- The dictionary spill/DRKM work is stable in focused and shuffle/group-by suites; avoid refactoring that path until SQL regressions are green.
+- Because of that, Phase 2 is no longer blocked on API shape; it is now blocked on the remaining producer and persistence migrations: raw string constructors, string parquet decode, and DRKM dictionary serde.
 
 ### Phase 3 — Remove DictionaryVector
-- Delete public class.
+- Delete public class after no producer or persistence path requires it.
 - Fix any remaining isinstance checks in non-Carchar code.
+- Remove or privatise the remaining dictionary-specific morsel-storage glue once typed vectors carry dictionary encoding through DRKM directly.
 
 Phase 1 is done. Phase 2 is the active transition track. Phase 3 remains cleanup after the typed-vector backend is stable and the remaining fallback/planner issues are closed.
 

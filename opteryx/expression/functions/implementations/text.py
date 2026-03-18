@@ -531,11 +531,20 @@ def regex_replace(array, _pattern, _replacement):
 
     array_arrow = _as_arrow(array, "Input")
     data_vector = _as_string_vector(array_arrow)
+    input_type = array_arrow.type if array_arrow is not None else None
 
     pattern = as_bytes(_pattern[0])
     replacement = as_bytes(_replacement[0])
 
     try:
-        return vector_regex_replace(data_vector, pattern, replacement).to_arrow()
+        result = vector_regex_replace(data_vector, pattern, replacement).to_arrow()
+        if input_type is not None and (
+            pyarrow.types.is_string(input_type)
+            or pyarrow.types.is_large_string(input_type)
+            or pyarrow.types.is_binary(input_type)
+            or pyarrow.types.is_large_binary(input_type)
+        ):
+            return pyarrow.compute.cast(result, pyarrow.string())
+        return result
     except ValueError as exc:
         raise InvalidFunctionParameterError(str(exc)) from exc

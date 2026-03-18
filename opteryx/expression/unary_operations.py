@@ -27,7 +27,10 @@ def _is_null(values: numpy.ndarray) -> numpy.ndarray:
     if isinstance(values, pyarrow.Array):
         from pyarrow import compute
 
-        return compute.is_null(values)
+        mask = compute.is_null(values)
+        if pyarrow.types.is_floating(values.type):
+            mask = compute.or_(mask, compute.is_nan(values))
+        return mask
     if values.dtype.kind in ("f", "b", "i"):  # float, bool, int
         return numpy.isnan(values)
     elif values.dtype.kind == "M":  # datetime64

@@ -105,6 +105,26 @@ def _coerce_float_set(values) -> frozenset:
     return frozenset(_coerce_float(v) for v in values)
 
 
+def _coerce_int64(value) -> int:
+    if value.__class__.__name__ == "ConstantVector":
+        value = value.scalar_value()
+    if hasattr(value, "as_py"):
+        value = value.as_py()
+    if isinstance(value, numpy.generic):
+        value = value.item()
+    if isinstance(value, datetime.datetime):
+        return int(value.timestamp() * 1_000)
+    if isinstance(value, datetime.date):
+        return (value - _EPOCH_DATE).days
+    if isinstance(value, numpy.datetime64):
+        return int(value.astype("datetime64[D]").astype(numpy.int64))
+    return int(value)
+
+
+def _coerce_int64_set(values) -> frozenset:
+    return frozenset(_coerce_int64(v) for v in values)
+
+
 def _coerce_date32(value) -> int:
     if value.__class__.__name__ == "ConstantVector":
         value = value.scalar_value()
@@ -201,6 +221,8 @@ _FIXED_BUFFER_VECTOR_CLASSES = frozenset(
 
 
 def _is_null_as_boolvector(vec):
+    import pyarrow.compute as _pc
+
     from opteryx.compiled.vector_ops.function_definitions import bool_vector_all_true
     from opteryx.compiled.vector_ops.function_definitions import bool_vector_from_int8_mask
     from opteryx.compiled.vector_ops.function_definitions import (
@@ -215,13 +237,19 @@ def _is_null_as_boolvector(vec):
         if hasattr(vec, "is_null_boolvector"):
             return vec.is_null_boolvector()
 
-        import pyarrow.compute as _pc
-
         from opteryx.draken.interop.arrow import vector_from_arrow as _vfa
 
-        return _vfa(_pc.is_null(vec.to_arrow()))
+        arrow_mask = _pc.is_null(vec.to_arrow())
+        if _pa.types.is_floating(vec.to_arrow().type):
+            arrow_mask = _pc.or_(arrow_mask, _pc.is_nan(vec.to_arrow()))
+        return _vfa(arrow_mask)
 
     if cls_name in _FIXED_BUFFER_VECTOR_CLASSES:
+        if cls_name == "Float64Vector":
+            from opteryx.draken.interop.arrow import vector_from_arrow as _vfa
+
+            arrow_arr = vec.to_arrow()
+            return _vfa(_pc.or_(_pc.is_null(arrow_arr), _pc.is_nan(arrow_arr)))
         return bool_vector_from_int8_mask(vec.is_null(), n)
 
     if cls_name == "ConstantVector":
@@ -235,11 +263,12 @@ def _is_null_as_boolvector(vec):
     if getattr(vec, "null_count", 0) == 0:
         return BoolVector(n)
 
-    import pyarrow.compute as _pc
-
     from opteryx.draken.interop.arrow import vector_from_arrow as _vfa
 
-    return _vfa(_pc.is_null(vec.to_arrow()))
+    arrow_mask = _pc.is_null(vec.to_arrow())
+    if _pa.types.is_floating(vec.to_arrow().type):
+        arrow_mask = _pc.or_(arrow_mask, _pc.is_nan(vec.to_arrow()))
+    return _vfa(arrow_mask)
 
 
 def _string_compare(op: str, vec, right):
@@ -287,7 +316,7 @@ def _int64_compare(op: str, vec, right):
         return BoolVector(len(vec))
 
     if isinstance(right, (list, tuple, set, frozenset)):
-        value_set = frozenset(int(v) for v in right)
+        value_set = _coerce_int64_set(right)
     elif right.__class__.__name__ == "Int64Vector":
         vec_ops = {
             "Eq": vec.equals_vector,
@@ -308,7 +337,7 @@ def _int64_compare(op: str, vec, right):
         float_vec = vector_from_arrow(vec.to_arrow().cast(pa.float64()))
         return _float64_compare(op, float_vec, right)
     else:
-        value = int(right)
+        value = _coerce_int64(right)
 
     if op == "Eq":
         return vec.equals(value)
