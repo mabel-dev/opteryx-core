@@ -16,6 +16,8 @@ mio = pytest.importorskip("opteryx.draken.storage.morsel_io")
 from opteryx.draken.storage.morsel_io import DrakenMorselStorageError
 from opteryx.draken.storage.morsel_io import read_morsel
 from opteryx.draken.storage.morsel_io import write_morsel
+from opteryx.draken.vectors.float64_vector import Float64Vector
+from opteryx.draken.vectors.int64_vector import Int64Vector
 
 
 def _as_py_columns(morsel):
@@ -103,6 +105,40 @@ def test_morsel_io_round_trip_numeric_dictionary_column(tmp_path):
     assert stats["rows"] == original.num_rows
     assert stats["columns"] == original.num_columns
     assert restored.column(b"k").__class__.__name__ == "DictionaryVector"
+    assert _as_py_columns(restored) == _as_py_columns(original)
+
+
+def test_morsel_io_round_trip_typed_int64_dictionary_storage(tmp_path):
+    original = Morsel.from_vectors(
+        ["k"],
+        [Int64Vector.from_dict([0, 1, 2, 1, 0], [10, 20, 30])],
+    )
+    path = tmp_path / "morsel_typed_int64_dict.drkm"
+
+    stats = write_morsel(path, original, {"codec_default": "none", "checksum_enabled": True})
+    restored = read_morsel(path, {"checksum_enabled": True})
+
+    assert stats["rows"] == original.num_rows
+    assert stats["columns"] == original.num_columns
+    assert restored.column(b"k").__class__.__name__ == "Int64Vector"
+    assert getattr(restored.column(b"k"), "dictionary_value_type", None) is not None
+    assert _as_py_columns(restored) == _as_py_columns(original)
+
+
+def test_morsel_io_round_trip_typed_float64_dictionary_storage(tmp_path):
+    original = Morsel.from_vectors(
+        ["k"],
+        [Float64Vector.from_dict([0, 1, 2, 1, 0], [1.5, 2.5, 3.5])],
+    )
+    path = tmp_path / "morsel_typed_float64_dict.drkm"
+
+    stats = write_morsel(path, original, {"codec_default": "none", "checksum_enabled": True})
+    restored = read_morsel(path, {"checksum_enabled": True})
+
+    assert stats["rows"] == original.num_rows
+    assert stats["columns"] == original.num_columns
+    assert restored.column(b"k").__class__.__name__ == "Float64Vector"
+    assert getattr(restored.column(b"k"), "dictionary_value_type", None) is not None
     assert _as_py_columns(restored) == _as_py_columns(original)
 
 

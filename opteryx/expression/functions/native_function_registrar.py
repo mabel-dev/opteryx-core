@@ -175,6 +175,17 @@ def _builtin_text_functions() -> list[FunctionDefinition]:
                         cost_us_per_million=3.0,
                     ),
                 ),
+                FunctionOverload(
+                    id="LENGTH_2",
+                    parameters=(ParameterSpec(name="arr", type_family="array"),),
+                    return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.INTEGER),
+                    kernel=KernelSpec(
+                        engine="arrow",
+                        id="default",
+                        callable_ref=vector_lengther,
+                        cost_us_per_million=3.0,
+                    ),
+                ),
             ),
         ),
         FunctionDefinition(

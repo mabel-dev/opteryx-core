@@ -3,7 +3,9 @@ from libc.stdint cimport int64_t
 from libc.stdint cimport int8_t
 from libc.stdint cimport uint64_t, uint8_t
 
+from opteryx.draken.core.buffers cimport DictAccessor
 from opteryx.draken.core.buffers cimport DrakenFixedBuffer
+from opteryx.draken.core.buffers cimport DrakenVarBuffer
 from opteryx.draken.vectors.vector cimport Vector
 from opteryx.draken.vectors.bool_vector cimport BoolVector
 
@@ -12,7 +14,13 @@ cdef class Float64Vector(Vector):
     cdef object _arrow_null_buf
     cdef DrakenFixedBuffer* ptr
     cdef bint owns_data
+    cdef DictAccessor _dict_accessor
+    cdef DrakenVarBuffer* _dict_values
+    cdef uint8_t* _dict_codes
+    cdef uint8_t _dict_code_width
+    cdef uint8_t _dict_ordered
 
+    cdef DictAccessor* dict_accessor(self) noexcept
     cdef void* dense_ptr(self) noexcept
     cdef uint8_t* null_bitmap_ptr(self) noexcept
 
@@ -52,5 +60,14 @@ cdef Float64Vector from_dict_nullable(
     const int32_t[::1] codes,
     const double[::1] dictionary,
     const uint8_t[::1] row_validity,
+)
+cdef Float64Vector from_packed_dict(
+    const uint8_t* codes,
+    uint8_t code_width,
+    Py_ssize_t row_count,
+    const double* dictionary,
+    Py_ssize_t dict_size,
+    const uint8_t* row_null_bitmap=*,
+    bint ordered=*,
 )
 cdef Float64Vector from_sequence(double[::1] data)

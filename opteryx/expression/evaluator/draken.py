@@ -221,6 +221,8 @@ _FIXED_BUFFER_VECTOR_CLASSES = frozenset(
 
 
 def _is_null_as_boolvector(vec):
+    import pyarrow.compute as _pc
+
     from opteryx.compiled.vector_ops.function_definitions import bool_vector_all_true
     from opteryx.compiled.vector_ops.function_definitions import bool_vector_from_int8_mask
     from opteryx.compiled.vector_ops.function_definitions import (
@@ -234,8 +236,6 @@ def _is_null_as_boolvector(vec):
     if _is_dictionary_encoded_vector(vec):
         if hasattr(vec, "is_null_boolvector"):
             return vec.is_null_boolvector()
-
-        import pyarrow.compute as _pc
 
         from opteryx.draken.interop.arrow import vector_from_arrow as _vfa
 
@@ -264,8 +264,6 @@ def _is_null_as_boolvector(vec):
         return bool_vector_from_inverted_null_bitmap(nb, n)
     if getattr(vec, "null_count", 0) == 0:
         return BoolVector(n)
-
-    import pyarrow.compute as _pc
 
     from opteryx.draken.interop.arrow import vector_from_arrow as _vfa
 
