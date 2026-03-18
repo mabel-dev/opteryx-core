@@ -1215,10 +1215,7 @@ def evaluate_draken(node, morsel):
         temporal_types = {OrsoTypes.DATE, OrsoTypes.TIMESTAMP}
         left_schema_type = getattr(getattr(node.left, "schema_column", None), "type", None)
         right_schema_type = getattr(getattr(node.right, "schema_column", None), "type", None)
-        if (
-            left_schema_type in temporal_types
-            or right_schema_type in temporal_types
-        ):
+        if left_schema_type in temporal_types or right_schema_type in temporal_types:
             if not hasattr(left, "null_count") and left_schema_type in temporal_types:
                 left = _coerce_temporal_scalar_for_arrow(left, left_schema_type)
             if not hasattr(right, "null_count") and right_schema_type in temporal_types:
