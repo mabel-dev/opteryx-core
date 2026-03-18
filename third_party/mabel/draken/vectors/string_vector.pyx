@@ -218,6 +218,38 @@ cdef class StringVector(Vector):
         validity_view = row_validity
         return from_dict_nullable(codes_view, dictionary, validity_view)
 
+    @classmethod
+    def from_dict_buffers(cls, codes, dict_offsets, dict_lengths, arena_bytes, row_validity=None):
+        from array import array as pyarray
+
+        cdef int32_t[::1] codes_view
+        cdef int32_t[::1] offsets_view
+        cdef int32_t[::1] lengths_view
+        cdef uint8_t[::1] arena_view
+        cdef uint8_t[::1] validity_view
+
+        if not isinstance(codes, memoryview):
+            codes = pyarray("i", codes)
+        if not isinstance(dict_offsets, memoryview):
+            dict_offsets = pyarray("i", dict_offsets)
+        if not isinstance(dict_lengths, memoryview):
+            dict_lengths = pyarray("i", dict_lengths)
+        if not isinstance(arena_bytes, memoryview):
+            arena_bytes = bytearray(arena_bytes)
+
+        codes_view = codes
+        offsets_view = dict_offsets
+        lengths_view = dict_lengths
+        arena_view = arena_bytes
+
+        if row_validity is None:
+            return from_dict_buffers(codes_view, offsets_view, lengths_view, arena_view)
+
+        if not isinstance(row_validity, memoryview):
+            row_validity = bytearray(1 if valid else 0 for valid in row_validity)
+        validity_view = row_validity
+        return from_dict_buffers(codes_view, offsets_view, lengths_view, arena_view, validity_view)
+
     def __cinit__(self, size_t length=0, size_t bytes_cap=0, bint wrap=False):
         """
         length>0, wrap=False  -> allocate new owned buffer
@@ -1520,6 +1552,7 @@ cdef StringVector from_dict(const int32_t[::1] codes, list dictionary):
     cdef Py_ssize_t dict_size = len(dictionary)
     cdef Py_ssize_t i
     cdef Py_ssize_t code
+    cdef Py_ssize_t total_bytes = 0
     cdef object value
     cdef bytes encoded
     cdef StringVectorBuilder builder
@@ -1527,7 +1560,17 @@ cdef StringVector from_dict(const int32_t[::1] codes, list dictionary):
     if dict_size == 0:
         raise ValueError("StringVector.from_dict requires a non-empty dictionary")
 
-    builder = StringVectorBuilder.with_counts(row_count, 0)
+    for i in range(row_count):
+        code = <Py_ssize_t>codes[i]
+        if code < 0 or code >= dict_size:
+            raise ValueError(f"dictionary index out of bounds at row {i}: {code}")
+        value = dictionary[code]
+        if isinstance(value, str):
+            total_bytes += len(<str>value)
+        else:
+            total_bytes += len(<bytes>value)
+
+    builder = StringVectorBuilder.with_counts(row_count, total_bytes)
     for i in range(row_count):
         code = <Py_ssize_t>codes[i]
         if code < 0 or code >= dict_size:
@@ -1551,6 +1594,7 @@ cdef StringVector from_dict_nullable(
     cdef Py_ssize_t dict_size = len(dictionary)
     cdef Py_ssize_t i
     cdef Py_ssize_t code
+    cdef Py_ssize_t total_bytes = 0
     cdef object value
     cdef bytes encoded
     cdef StringVectorBuilder builder
@@ -1560,7 +1604,18 @@ cdef StringVector from_dict_nullable(
     if row_validity.shape[0] != row_count:
         raise ValueError("row_validity length must match codes length")
 
-    builder = StringVectorBuilder.with_counts(row_count, 0)
+    for i in range(row_count):
+        if row_validity[i] != 0:
+            code = <Py_ssize_t>codes[i]
+            if code < 0 or code >= dict_size:
+                raise ValueError(f"dictionary index out of bounds at row {i}: {code}")
+            value = dictionary[code]
+            if isinstance(value, str):
+                total_bytes += len(<str>value)
+            else:
+                total_bytes += len(<bytes>value)
+
+    builder = StringVectorBuilder.with_counts(row_count, total_bytes)
     for i in range(row_count):
         if row_validity[i] != 0:
             code = <Py_ssize_t>codes[i]
@@ -1574,6 +1629,68 @@ cdef StringVector from_dict_nullable(
             builder.append(encoded)
         else:
             builder.append_null()
+
+    return builder.finish()
+
+
+cdef StringVector from_dict_buffers(
+    const int32_t[::1] codes,
+    const int32_t[::1] dict_offsets,
+    const int32_t[::1] dict_lengths,
+    const uint8_t[::1] arena_bytes,
+    object row_validity=None,
+):
+    cdef Py_ssize_t row_count = codes.shape[0]
+    cdef Py_ssize_t dict_size = dict_lengths.shape[0]
+    cdef Py_ssize_t i
+    cdef Py_ssize_t code
+    cdef Py_ssize_t total_bytes = 0
+    cdef uint8_t[::1] validity_view
+    cdef const char* arena_ptr
+    cdef StringVectorBuilder builder
+
+    if dict_size == 0:
+        raise ValueError("StringVector.from_dict_buffers requires a non-empty dictionary")
+    if dict_offsets.shape[0] != dict_size:
+        raise ValueError("dict_offsets length must match dict_lengths length")
+
+    for i in range(dict_size):
+        if dict_offsets[i] < 0 or dict_lengths[i] < 0:
+            raise ValueError("dictionary offsets and lengths must be non-negative")
+        if dict_offsets[i] + dict_lengths[i] > arena_bytes.shape[0]:
+            raise ValueError("dictionary offset/length out of arena bounds")
+
+    if row_validity is not None:
+        validity_view = row_validity
+        if validity_view.shape[0] != row_count:
+            raise ValueError("row_validity length must match codes length")
+        for i in range(row_count):
+            if validity_view[i] != 0:
+                code = <Py_ssize_t>codes[i]
+                if code < 0 or code >= dict_size:
+                    raise ValueError(f"dictionary index out of bounds at row {i}: {code}")
+                total_bytes += dict_lengths[code]
+    else:
+        for i in range(row_count):
+            code = <Py_ssize_t>codes[i]
+            if code < 0 or code >= dict_size:
+                raise ValueError(f"dictionary index out of bounds at row {i}: {code}")
+            total_bytes += dict_lengths[code]
+
+    builder = StringVectorBuilder.with_counts(row_count, total_bytes)
+    arena_ptr = <const char*>&arena_bytes[0] if arena_bytes.shape[0] > 0 else NULL
+
+    if row_validity is not None:
+        for i in range(row_count):
+            if validity_view[i] != 0:
+                code = <Py_ssize_t>codes[i]
+                builder.append_bytes(arena_ptr + dict_offsets[code], dict_lengths[code])
+            else:
+                builder.append_null()
+    else:
+        for i in range(row_count):
+            code = <Py_ssize_t>codes[i]
+            builder.append_bytes(arena_ptr + dict_offsets[code], dict_lengths[code])
 
     return builder.finish()
 

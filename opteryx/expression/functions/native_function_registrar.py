@@ -161,12 +161,12 @@ def _builtin_text_functions() -> list[FunctionDefinition]:
             volatility="immutable",
             deterministic=True,
             lifecycle=LifecycleSpec(status="active"),
-            summary="Return length of string.",
-            documentation="Returns the number of characters in the input string.",
+            summary="Return length of string or array.",
+            documentation="Returns the number of characters in a string or the number of elements in an array.",
             overloads=(
                 FunctionOverload(
                     id="LENGTH_1",
-                    parameters=(ParameterSpec(name="str", type_family="string"),),
+                    parameters=(ParameterSpec(name="value", type_family="any"),),
                     return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.INTEGER),
                     kernel=KernelSpec(
                         engine="arrow",

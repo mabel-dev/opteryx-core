@@ -105,6 +105,26 @@ def _coerce_float_set(values) -> frozenset:
     return frozenset(_coerce_float(v) for v in values)
 
 
+def _coerce_int64(value) -> int:
+    if value.__class__.__name__ == "ConstantVector":
+        value = value.scalar_value()
+    if hasattr(value, "as_py"):
+        value = value.as_py()
+    if isinstance(value, numpy.generic):
+        value = value.item()
+    if isinstance(value, datetime.datetime):
+        return int(value.timestamp() * 1_000)
+    if isinstance(value, datetime.date):
+        return (value - _EPOCH_DATE).days
+    if isinstance(value, numpy.datetime64):
+        return int(value.astype("datetime64[D]").astype(numpy.int64))
+    return int(value)
+
+
+def _coerce_int64_set(values) -> frozenset:
+    return frozenset(_coerce_int64(v) for v in values)
+
+
 def _coerce_date32(value) -> int:
     if value.__class__.__name__ == "ConstantVector":
         value = value.scalar_value()
@@ -219,9 +239,19 @@ def _is_null_as_boolvector(vec):
 
         from opteryx.draken.interop.arrow import vector_from_arrow as _vfa
 
-        return _vfa(_pc.is_null(vec.to_arrow()))
+        arrow_mask = _pc.is_null(vec.to_arrow())
+        if _pa.types.is_floating(vec.to_arrow().type):
+            arrow_mask = _pc.or_(arrow_mask, _pc.is_nan(vec.to_arrow()))
+        return _vfa(arrow_mask)
 
     if cls_name in _FIXED_BUFFER_VECTOR_CLASSES:
+        if cls_name == "Float64Vector":
+            import pyarrow.compute as _pc
+
+            from opteryx.draken.interop.arrow import vector_from_arrow as _vfa
+
+            arrow_arr = vec.to_arrow()
+            return _vfa(_pc.or_(_pc.is_null(arrow_arr), _pc.is_nan(arrow_arr)))
         return bool_vector_from_int8_mask(vec.is_null(), n)
 
     if cls_name == "ConstantVector":
@@ -239,7 +269,10 @@ def _is_null_as_boolvector(vec):
 
     from opteryx.draken.interop.arrow import vector_from_arrow as _vfa
 
-    return _vfa(_pc.is_null(vec.to_arrow()))
+    arrow_mask = _pc.is_null(vec.to_arrow())
+    if _pa.types.is_floating(vec.to_arrow().type):
+        arrow_mask = _pc.or_(arrow_mask, _pc.is_nan(vec.to_arrow()))
+    return _vfa(arrow_mask)
 
 
 def _string_compare(op: str, vec, right):
@@ -287,7 +320,7 @@ def _int64_compare(op: str, vec, right):
         return BoolVector(len(vec))
 
     if isinstance(right, (list, tuple, set, frozenset)):
-        value_set = frozenset(int(v) for v in right)
+        value_set = _coerce_int64_set(right)
     elif right.__class__.__name__ == "Int64Vector":
         vec_ops = {
             "Eq": vec.equals_vector,
@@ -308,7 +341,7 @@ def _int64_compare(op: str, vec, right):
         float_vec = vector_from_arrow(vec.to_arrow().cast(pa.float64()))
         return _float64_compare(op, float_vec, right)
     else:
-        value = int(right)
+        value = _coerce_int64(right)
 
     if op == "Eq":
         return vec.equals(value)
@@ -1070,6 +1103,19 @@ def _eval_value(node, morsel):
             return result
 
     if node.node_type in (_NT.BINARY_OPERATOR, _NT.CAST, _NT.FUNCTION):
+        identity = getattr(getattr(node, "schema_column", None), "identity", None)
+        if identity is not None:
+            try:
+                vec = morsel.column(identity if isinstance(identity, bytes) else identity.encode())
+            except KeyError:
+                vec = None
+            if vec is not None:
+                if vec.__class__.__name__ == "ArrowVector":
+                    from opteryx.draken.interop.arrow import vector_from_arrow
+
+                    return vector_from_arrow(vec.to_arrow())
+                return vec
+
         from opteryx.draken.interop.arrow import vector_from_arrow
         from opteryx.draken.interop.arrow import vector_from_sequence
         from opteryx.expression import _inner_evaluate
@@ -1078,6 +1124,8 @@ def _eval_value(node, morsel):
         result = _inner_evaluate(node, arrow_table)
         if isinstance(result, (_pa.Array, _pa.ChunkedArray)):
             return vector_from_arrow(result)
+        if result is not None and result.__class__.__name__.endswith("Vector"):
+            return result
         if not hasattr(result, "__iter__") or isinstance(result, (str, bytes, numpy.generic)):
             from opteryx.draken.vectors.constant_vector import from_scalar as _const_scalar
 
@@ -1165,14 +1213,16 @@ def evaluate_draken(node, morsel):
         from orso.types import OrsoTypes
 
         temporal_types = {OrsoTypes.DATE, OrsoTypes.TIMESTAMP}
+        left_schema_type = getattr(getattr(node.left, "schema_column", None), "type", None)
+        right_schema_type = getattr(getattr(node.right, "schema_column", None), "type", None)
         if (
-            node.left.schema_column.type in temporal_types
-            or node.right.schema_column.type in temporal_types
+            left_schema_type in temporal_types
+            or right_schema_type in temporal_types
         ):
-            if not hasattr(left, "null_count") and node.left.schema_column.type in temporal_types:
-                left = _coerce_temporal_scalar_for_arrow(left, node.left.schema_column.type)
-            if not hasattr(right, "null_count") and node.right.schema_column.type in temporal_types:
-                right = _coerce_temporal_scalar_for_arrow(right, node.right.schema_column.type)
+            if not hasattr(left, "null_count") and left_schema_type in temporal_types:
+                left = _coerce_temporal_scalar_for_arrow(left, left_schema_type)
+            if not hasattr(right, "null_count") and right_schema_type in temporal_types:
+                right = _coerce_temporal_scalar_for_arrow(right, right_schema_type)
 
         if not hasattr(left, "null_count") and not hasattr(right, "null_count"):
             import pyarrow as pa
@@ -1182,10 +1232,10 @@ def evaluate_draken(node, morsel):
 
             scalar_result = filter_operations(
                 pa.array([left]),
-                node.left.schema_column.type,
+                left_schema_type,
                 node.value,
                 pa.array([right]),
-                node.right.schema_column.type,
+                right_schema_type,
             )[0].as_py()
             scalar_result = False if scalar_result is None else bool(scalar_result)
             return BoolVector.from_arrow(
@@ -1264,7 +1314,18 @@ def evaluate_and_append_draken(nodes, morsel):
         if identity in existing:
             continue
         if node.node_type == NodeType.FUNCTION:
-            parameters = [_eval_value(param, morsel) for param in node.parameters]
+            from opteryx.expression import NodeType as _NT
+            from opteryx.expression import _inner_evaluate
+
+            arrow_table = None
+            parameters = []
+            for param in node.parameters:
+                if param.node_type == _NT.LITERAL:
+                    if arrow_table is None:
+                        arrow_table = morsel.to_arrow()
+                    parameters.append(_inner_evaluate(param, arrow_table))
+                else:
+                    parameters.append(_eval_value(param, morsel))
             if len(parameters) == 0:
                 parameters = [morsel.num_rows]
             result = apply_bounded_function(node, *parameters)

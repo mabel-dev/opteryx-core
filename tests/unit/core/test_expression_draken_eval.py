@@ -12,8 +12,8 @@ from orso.types import OrsoTypes
 
 from opteryx.draken.morsels.morsel import Morsel
 from opteryx.expression import NodeType
-from opteryx.expression.evaluator import _eval_value
 from opteryx.expression.evaluator import evaluate_and_append_draken
+from opteryx.expression.evaluator.draken import _eval_value
 from opteryx.models import Node
 
 
@@ -71,6 +71,17 @@ def test_draken_eval_value_expression_list_materializes_children():
     assert len(out) == 2
     assert out[0].to_pylist() == [10, 11, 12]
     assert out[1] == 1
+
+
+def test_regex_replace_filter_uses_materialized_function_column():
+    session = opteryx.session()
+    try:
+        result = session.execute_to_arrow(
+            "SELECT name FROM $planets WHERE REGEXP_REPLACE(name, '^E', 'G') == 'Garth'"
+        )
+        assert result.to_pylist() == [{"name": b"Earth"}]
+    finally:
+        session.close()
 
 
 @pytest.mark.parametrize(
