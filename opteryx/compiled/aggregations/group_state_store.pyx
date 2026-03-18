@@ -8,7 +8,6 @@
 from opteryx.draken.morsels.morsel cimport Morsel
 from opteryx.draken.core.buffers cimport DrakenFixedBuffer
 from opteryx.draken.core.buffers cimport DrakenConstantBuffer
-from opteryx.draken.vectors.dictionary_vector cimport DictionaryVector
 from opteryx.draken.vectors.constant_vector cimport ConstantVector
 from opteryx.compiled.aggregations.aggregate_kernels cimport AGG_AVG
 from opteryx.compiled.aggregations.aggregate_kernels cimport AGG_APPROX_COUNT_DISTINCT
@@ -27,6 +26,7 @@ from opteryx.compiled.aggregations.aggregate_kernels cimport update_state
 from opteryx.draken.vectors.int64_vector cimport Int64Vector
 from opteryx.draken.vectors.float64_vector cimport Float64Vector
 from opteryx.draken.vectors.integer_vector cimport IntegerVector
+from opteryx.draken.vectors.vector cimport Vector
 
 from libc.stdint cimport int8_t, int16_t, int32_t, int64_t, uint8_t, uint64_t
 from libc.stdlib cimport malloc, free
@@ -359,11 +359,11 @@ cdef class GroupStateStore:
         if self._specialized_kernel is not None:
             if len(self._group_by_columns) == 1 and len(self._agg_function_codes) == 1:
                 dict_candidate_vector = morsel.column(self._group_by_columns[0])
-                if isinstance(dict_candidate_vector, DictionaryVector):
+                if isinstance(dict_candidate_vector, Vector) and (<Vector>dict_candidate_vector).dict_accessor() != NULL:
                     dict_fastpath_candidate = True
                 elif self._agg_function_codes[0] == AGG_COUNT_DISTINCT and self._agg_columns[0] is not None:
                     dict_candidate_vector = morsel.column(self._agg_columns[0])
-                    if isinstance(dict_candidate_vector, DictionaryVector):
+                    if isinstance(dict_candidate_vector, Vector) and (<Vector>dict_candidate_vector).dict_accessor() != NULL:
                         dict_fastpath_candidate = True
 
             if self._specialized_kernel.ingest(morsel):

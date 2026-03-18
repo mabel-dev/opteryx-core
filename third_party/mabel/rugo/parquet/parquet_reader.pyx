@@ -92,7 +92,11 @@ from opteryx.draken.vectors.float64_vector cimport (
     from_dict as float64_from_dict,
     from_dict_nullable as float64_from_dict_nullable,
 )
-from opteryx.draken.vectors.string_vector cimport StringVector, StringVectorBuilder
+from opteryx.draken.vectors.string_vector cimport (
+    StringVector,
+    StringVectorBuilder,
+    from_dict_buffers as string_from_dict_buffers,
+)
 from opteryx.draken.vectors.dictionary_vector cimport DictionaryVector
 from opteryx.draken.vectors.bool_vector cimport BoolVector, bool_vector_from_bits
 from opteryx.draken.core.buffers cimport (
@@ -1052,6 +1056,50 @@ cdef Float64Vector _make_typed_float64_from_float32_dictionary_vector(
     return float64_from_dict_nullable(codes, dictionary, validity)
 
 
+cdef StringVector _make_typed_string_dictionary_vector(
+        parquet_reader.DecodedColumn& decoded_col,
+        int32_t num_rows):
+    cdef object codes_obj
+    cdef object validity_obj
+    cdef object offsets_obj
+    cdef object lengths_obj
+    cdef object arena_obj
+    cdef int32_t[::1] codes
+    cdef int32_t[::1] dict_offsets
+    cdef int32_t[::1] dict_lengths
+    cdef uint8_t[::1] arena_bytes
+    cdef uint8_t[::1] validity
+    cdef Py_ssize_t dict_size = decoded_col.string_dict_lens.size()
+    cdef Py_ssize_t arena_size = decoded_col.string_dict_arena.size()
+    cdef Py_ssize_t i
+
+    if dict_size == 0:
+        raise ValueError("typed string dictionary vector requires non-empty dictionary")
+
+    codes_obj, validity_obj = _expanded_dict_codes_and_validity(decoded_col, num_rows)
+    offsets_obj = pyarray('i', [0]) * dict_size
+    lengths_obj = pyarray('i', [0]) * dict_size
+    arena_obj = bytearray(arena_size)
+
+    dict_offsets = offsets_obj
+    dict_lengths = lengths_obj
+    arena_bytes = arena_obj
+
+    for i in range(dict_size):
+        dict_offsets[i] = decoded_col.string_dict_offsets[i]
+        dict_lengths[i] = decoded_col.string_dict_lens[i]
+
+    if arena_size > 0:
+        memcpy(&arena_bytes[0], decoded_col.string_dict_arena.data(), <size_t>arena_size)
+
+    codes = codes_obj
+    _record_dictionary_decode(decoded_col)
+    if validity_obj is None:
+        return string_from_dict_buffers(codes, dict_offsets, dict_lengths, arena_bytes)
+    validity = validity_obj
+    return string_from_dict_buffers(codes, dict_offsets, dict_lengths, arena_bytes, validity)
+
+
 cdef DictionaryVector _make_dictionary_vector(
         parquet_reader.DecodedColumn& decoded_col,
         int32_t num_rows):
@@ -1490,7 +1538,7 @@ def read_parquet(data, column_names=None):
                 _TEL["cython_str_s"] += _time.perf_counter() - _t0
             elif col_type == "byte_array":
                 if _should_emit_dictionary_vector(column, num_rows):
-                    vec = _make_dictionary_vector(column, num_rows)
+                    vec = _make_typed_string_dictionary_vector(column, num_rows)
                 else:
                     if _decoded_has_dictionary(column):
                         _TEL["parquet_dict_materialize_fallbacks"] += 1
@@ -1660,7 +1708,7 @@ def decode_column_from_chunk_to_python(chunk_bytes, col_stats):
         if _should_emit_dictionary_vector(result, num_rows):
             return [
                 _safe_decode_utf8(v) if v is not None else None
-                for v in _make_dictionary_vector(result, <int32_t>result.num_rows).to_pylist()
+                for v in _make_typed_string_dictionary_vector(result, <int32_t>result.num_rows).to_pylist()
             ]
         if _decoded_has_dictionary(result):
             _TEL["parquet_dict_materialize_fallbacks"] += 1
@@ -1806,7 +1854,7 @@ def decode_column_from_chunk(chunk_bytes, col_stats):
     
     elif col_type == "byte_array":
         if _should_emit_dictionary_vector(result, num_rows):
-            return _make_dictionary_vector(result, num_rows)
+            return _make_typed_string_dictionary_vector(result, num_rows)
         if _decoded_has_dictionary(result):
             _TEL["parquet_dict_materialize_fallbacks"] += 1
         return _make_string_vector(result, num_rows)

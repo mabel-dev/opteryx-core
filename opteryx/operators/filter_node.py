@@ -44,7 +44,6 @@ class FilterNode(BasePlanNode):
 
     def execute(self, morsel, **kwargs):
         from opteryx.draken.morsels.morsel import Morsel
-        from opteryx.expression.evaluator import evaluate_and_append_draken
         from opteryx.expression.evaluator import evaluate_draken
 
         if morsel is EOS:
@@ -53,9 +52,6 @@ class FilterNode(BasePlanNode):
 
         if not isinstance(morsel, Morsel):
             morsel = Morsel.from_arrow(morsel.combine_chunks())
-
-        if self.function_evaluations:
-            morsel = evaluate_and_append_draken(self.function_evaluations, morsel)
 
         mask = evaluate_draken(self.filter, morsel)
         filtered = morsel.filter_mask(mask)

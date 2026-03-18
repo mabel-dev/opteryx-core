@@ -246,6 +246,8 @@ def _is_null_as_boolvector(vec):
 
     if cls_name in _FIXED_BUFFER_VECTOR_CLASSES:
         if cls_name == "Float64Vector":
+            import pyarrow.compute as _pc
+
             from opteryx.draken.interop.arrow import vector_from_arrow as _vfa
 
             arrow_arr = vec.to_arrow()
@@ -1099,6 +1101,19 @@ def _eval_value(node, morsel):
             return result
 
     if node.node_type in (_NT.BINARY_OPERATOR, _NT.CAST, _NT.FUNCTION):
+        identity = getattr(getattr(node, "schema_column", None), "identity", None)
+        if identity is not None:
+            try:
+                vec = morsel.column(identity if isinstance(identity, bytes) else identity.encode())
+            except KeyError:
+                vec = None
+            if vec is not None:
+                if vec.__class__.__name__ == "ArrowVector":
+                    from opteryx.draken.interop.arrow import vector_from_arrow
+
+                    return vector_from_arrow(vec.to_arrow())
+                return vec
+
         from opteryx.draken.interop.arrow import vector_from_arrow
         from opteryx.draken.interop.arrow import vector_from_sequence
         from opteryx.expression import _inner_evaluate
@@ -1107,6 +1122,8 @@ def _eval_value(node, morsel):
         result = _inner_evaluate(node, arrow_table)
         if isinstance(result, (_pa.Array, _pa.ChunkedArray)):
             return vector_from_arrow(result)
+        if result is not None and result.__class__.__name__.endswith("Vector"):
+            return result
         if not hasattr(result, "__iter__") or isinstance(result, (str, bytes, numpy.generic)):
             from opteryx.draken.vectors.constant_vector import from_scalar as _const_scalar
 
@@ -1194,14 +1211,13 @@ def evaluate_draken(node, morsel):
         from orso.types import OrsoTypes
 
         temporal_types = {OrsoTypes.DATE, OrsoTypes.TIMESTAMP}
-        if (
-            node.left.schema_column.type in temporal_types
-            or node.right.schema_column.type in temporal_types
-        ):
-            if not hasattr(left, "null_count") and node.left.schema_column.type in temporal_types:
-                left = _coerce_temporal_scalar_for_arrow(left, node.left.schema_column.type)
-            if not hasattr(right, "null_count") and node.right.schema_column.type in temporal_types:
-                right = _coerce_temporal_scalar_for_arrow(right, node.right.schema_column.type)
+        left_schema_type = getattr(getattr(node.left, "schema_column", None), "type", None)
+        right_schema_type = getattr(getattr(node.right, "schema_column", None), "type", None)
+        if left_schema_type in temporal_types or right_schema_type in temporal_types:
+            if not hasattr(left, "null_count") and left_schema_type in temporal_types:
+                left = _coerce_temporal_scalar_for_arrow(left, left_schema_type)
+            if not hasattr(right, "null_count") and right_schema_type in temporal_types:
+                right = _coerce_temporal_scalar_for_arrow(right, right_schema_type)
 
         if not hasattr(left, "null_count") and not hasattr(right, "null_count"):
             import pyarrow as pa
@@ -1211,10 +1227,10 @@ def evaluate_draken(node, morsel):
 
             scalar_result = filter_operations(
                 pa.array([left]),
-                node.left.schema_column.type,
+                left_schema_type,
                 node.value,
                 pa.array([right]),
-                node.right.schema_column.type,
+                right_schema_type,
             )[0].as_py()
             scalar_result = False if scalar_result is None else bool(scalar_result)
             return BoolVector.from_arrow(
@@ -1293,7 +1309,18 @@ def evaluate_and_append_draken(nodes, morsel):
         if identity in existing:
             continue
         if node.node_type == NodeType.FUNCTION:
-            parameters = [_eval_value(param, morsel) for param in node.parameters]
+            from opteryx.expression import NodeType as _NT
+            from opteryx.expression import _inner_evaluate
+
+            arrow_table = None
+            parameters = []
+            for param in node.parameters:
+                if param.node_type == _NT.LITERAL:
+                    if arrow_table is None:
+                        arrow_table = morsel.to_arrow()
+                    parameters.append(_inner_evaluate(param, arrow_table))
+                else:
+                    parameters.append(_eval_value(param, morsel))
             if len(parameters) == 0:
                 parameters = [morsel.num_rows]
             result = apply_bounded_function(node, *parameters)

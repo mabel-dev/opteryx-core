@@ -15,7 +15,7 @@ from libc.stdlib cimport free, malloc
 from opteryx.compiled.aggregations.aggregate_kernels cimport AGG_AVG
 from opteryx.compiled.aggregations.aggregate_kernels cimport AGG_COUNT_DISTINCT
 from opteryx.compiled.aggregations.aggregate_kernels cimport AGG_COUNT_STAR
-from opteryx.draken.core.buffers cimport DrakenDictionaryBuffer
+from opteryx.draken.core.buffers cimport DictAccessor
 from opteryx.draken.core.buffers cimport DrakenFixedBuffer
 from opteryx.draken.core.buffers cimport DrakenVarBuffer
 from opteryx.draken.core.buffers cimport DRAKEN_BOOL
@@ -27,9 +27,9 @@ from opteryx.draken.core.buffers cimport DRAKEN_INT64
 from opteryx.draken.core.buffers cimport DRAKEN_INT8
 from opteryx.draken.core.buffers cimport DRAKEN_STRING
 from opteryx.draken.morsels.morsel cimport Morsel
-from opteryx.draken.vectors.dictionary_vector cimport DictionaryVector
 from opteryx.draken.vectors.float64_vector cimport Float64Vector
 from opteryx.draken.vectors.int64_vector cimport Int64Vector
+from opteryx.draken.vectors.vector cimport Vector
 from opteryx.draken.vectors.vector cimport mix_hash
 from opteryx.third_party.cyan4973.xxhash cimport cy_xxhash3_64
 from opteryx.third_party.abseil.containers cimport IdentityHash
@@ -40,7 +40,7 @@ from opteryx.third_party.abseil.containers cimport flat_hash_set
 cdef object _KERNEL_MISSING = object()
 
 
-cdef inline uint32_t _dict_read_code(const DrakenDictionaryBuffer* ptr, Py_ssize_t row_idx) noexcept nogil:
+cdef inline uint32_t _dict_read_code(const DictAccessor* ptr, Py_ssize_t row_idx) noexcept nogil:
     if ptr.code_width == 1:
         return (<uint8_t*>ptr.codes)[row_idx]
     if ptr.code_width == 2:
@@ -49,13 +49,13 @@ cdef inline uint32_t _dict_read_code(const DrakenDictionaryBuffer* ptr, Py_ssize
 
 
 cdef inline bint _dict_row_null(
-    const DrakenDictionaryBuffer* ptr,
+    const DictAccessor* ptr,
     uint32_t code,
     Py_ssize_t row_idx,
 ) noexcept nogil:
-    cdef DrakenVarBuffer* dict_values = ptr.dictionary_values
-    if ptr.null_bitmap != NULL:
-        if ((ptr.null_bitmap[row_idx >> 3] >> (row_idx & 7)) & 1) == 0:
+    cdef DrakenVarBuffer* dict_values = ptr.dict_values
+    if ptr.row_nulls != NULL:
+        if ((ptr.row_nulls[row_idx >> 3] >> (row_idx & 7)) & 1) == 0:
             return True
     if dict_values != NULL and dict_values.null_bitmap != NULL:
         if ((dict_values.null_bitmap[code >> 3] >> (code & 7)) & 1) == 0:
@@ -63,13 +63,13 @@ cdef inline bint _dict_row_null(
     return False
 
 
-cdef inline object _dict_code_to_object(const DrakenDictionaryBuffer* ptr, uint32_t code):
-    cdef DrakenVarBuffer* dict_values = ptr.dictionary_values
+cdef inline object _dict_code_to_object(const DictAccessor* ptr, uint32_t code):
+    cdef DrakenVarBuffer* dict_values = ptr.dict_values
     cdef int32_t start
     cdef int32_t end
     cdef int dict_type
     if dict_values == NULL:
-        raise ValueError("DictionaryVector is missing dictionary values")
+        raise ValueError("Dictionary-backed vector is missing dictionary values")
     if code >= dict_values.length:
         raise ValueError("Dictionary code out of bounds")
     dict_type = dict_values.type
@@ -98,8 +98,8 @@ cdef inline object _dict_code_to_object(const DrakenDictionaryBuffer* ptr, uint3
     raise TypeError("Unsupported dictionary value type in group-by key materialization")
 
 
-cdef uint64_t* _build_dict_hashes(const DrakenDictionaryBuffer* ptr) except NULL:
-    cdef DrakenVarBuffer* dict_values = ptr.dictionary_values
+cdef uint64_t* _build_dict_hashes(const DictAccessor* ptr) except NULL:
+    cdef DrakenVarBuffer* dict_values = ptr.dict_values
     cdef Py_ssize_t dict_n
     cdef Py_ssize_t code
     cdef uint64_t* out_hashes = NULL
@@ -108,7 +108,7 @@ cdef uint64_t* _build_dict_hashes(const DrakenDictionaryBuffer* ptr) except NULL
     cdef int32_t itemsize
 
     if dict_values == NULL:
-        raise ValueError("DictionaryVector is missing dictionary values")
+        raise ValueError("Dictionary-backed vector is missing dictionary values")
 
     dict_n = dict_values.length
     dict_type = dict_values.type

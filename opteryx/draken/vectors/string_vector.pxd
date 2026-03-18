@@ -117,6 +117,13 @@ cdef StringVector from_dict_nullable(
     list dictionary,
     const uint8_t[::1] row_validity,
 )
+cdef StringVector from_dict_buffers(
+    const int32_t[::1] codes,
+    const int32_t[::1] dict_offsets,
+    const int32_t[::1] dict_lengths,
+    const uint8_t[::1] arena_bytes,
+    object row_validity=*,
+)
 cdef StringVector from_arrow_struct(object array)
 
 cpdef StringVector uppercase(StringVector input)

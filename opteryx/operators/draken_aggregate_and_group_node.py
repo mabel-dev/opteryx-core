@@ -152,10 +152,18 @@ class DrakenAggregateAndGroupNode(BasePlanNode):
                 if identity not in required_columns:
                     required_columns.append(identity)
         self._required_columns = list(dict.fromkeys(required_columns))
-        self._group_by = create_group_state_engine(
-            group_by_columns=self._normalized_group_by_columns,
-            aggregations=self._normalized_aggregations,
-        )
+        if any(group.node_type != NodeType.IDENTIFIER for group in self.groups):
+            from opteryx.compiled.aggregations.group_state_store import GroupStateStore
+
+            self._group_by = GroupStateStore(
+                self._normalized_group_by_columns,
+                self._normalized_aggregations,
+            )
+        else:
+            self._group_by = create_group_state_engine(
+                group_by_columns=self._normalized_group_by_columns,
+                aggregations=self._normalized_aggregations,
+            )
 
     @staticmethod
     def supports(aggregates, groups=None) -> bool:

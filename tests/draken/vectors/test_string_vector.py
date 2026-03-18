@@ -191,6 +191,20 @@ def test_string_vector_from_dict_decodes_dictionary_input():
     assert vec.to_arrow().to_pylist() == [b"alpha", b"beta", b"alpha", None]
 
 
+def test_string_vector_from_dict_buffers_decodes_raw_dictionary_storage():
+    vec = string_vector_module.StringVector.from_dict_buffers(
+        array("i", [0, 1, 0, 0]),
+        array("i", [0, 5]),
+        array("i", [5, 4]),
+        bytearray(b"alphabeta"),
+        bytearray([1, 1, 1, 0]),
+    )
+
+    assert vec.__class__.__name__ == "StringVector"
+    assert vec.to_pylist() == [b"alpha", b"beta", b"alpha", None]
+    assert vec.to_arrow().to_pylist() == [b"alpha", b"beta", b"alpha", None]
+
+
 def test_string_vector_from_arrow_rejects_dictionary_input():
     dictionary = pa.array(["alpha", "beta"], type=pa.string())
     indices = pa.array([0, 1, 0, None], type=pa.int8())

@@ -52,6 +52,7 @@ cdef enum EncoderKind:
     ENC_CONST_FLOAT = 7
     ENC_CONST_BOOL = 8
     ENC_CONST_STRING = 9
+    ENC_GENERIC = 10
 
 
 cdef inline bint _is_valid(const uint8_t* bitmap, Py_ssize_t index) noexcept nogil:
@@ -245,6 +246,8 @@ cdef Py_ssize_t _estimate_value_bytes(int encoder, object vec_obj, object aux_ob
         const_vec = <ConstantVector>vec_obj
         payload = <DrakenConstantStringPayload*>const_vec.ptr.value
         return payload.length + 4
+    if encoder == ENC_GENERIC:
+        return 24
     raise NotImplementedError("unsupported encoder")
 
 
@@ -272,7 +275,21 @@ cdef bint _value_is_null_cached(int encoder, object vec_obj, object aux_obj, Py_
     if encoder == ENC_CONST_INT or encoder == ENC_CONST_FLOAT or encoder == ENC_CONST_BOOL or encoder == ENC_CONST_STRING:
         const_vec = <ConstantVector>vec_obj
         return not _is_valid(const_vec.ptr.null_bitmap, row_index)
+    if encoder == ENC_GENERIC:
+        return aux_obj[row_index] is None
     raise NotImplementedError("unsupported encoder")
+
+
+cdef inline bytes _generic_csv_bytes(object value):
+    if value is None:
+        return b""
+    if isinstance(value, bytes):
+        return value
+    if isinstance(value, str):
+        return value.encode("utf8")
+    if isinstance(value, bool):
+        return b"true" if value else b"false"
+    return str(value).encode("utf8")
 
 
 cdef Py_ssize_t _write_value(int encoder, object vec_obj, object aux_obj, Py_ssize_t row_index, char* dst, char separator) except -1:
@@ -287,6 +304,9 @@ cdef Py_ssize_t _write_value(int encoder, object vec_obj, object aux_obj, Py_ssi
     cdef Py_ssize_t offset
     cdef Py_ssize_t next_offset
     cdef DrakenConstantStringPayload* payload
+    cdef bytes generic_bytes
+    cdef char* generic_ptr = NULL
+    cdef Py_ssize_t generic_len = 0
 
     if encoder == ENC_INT64:
         int64_vec = <Int64Vector>vec_obj
@@ -331,6 +351,10 @@ cdef Py_ssize_t _write_value(int encoder, object vec_obj, object aux_obj, Py_ssi
         ptr = <const char*>payload.data
         length = payload.length
         return _write_csv_field(dst, ptr, length, separator)
+    if encoder == ENC_GENERIC:
+        generic_bytes = _generic_csv_bytes(aux_obj[row_index])
+        PyBytes_AsStringAndSize(generic_bytes, &generic_ptr, &generic_len)
+        return _write_csv_field(dst, generic_ptr, generic_len, separator)
     raise NotImplementedError("unsupported encoder")
 
 
@@ -411,9 +435,9 @@ cpdef StringVector morsel_to_csv_rows(
                 aux_obj = None
                 null_bitmaps[col_index] = (<ConstantVector>vec_obj).ptr.null_bitmap
             elif isinstance(vec_obj, DictionaryVector):
-                raise NotImplementedError(
-                    f"csv serialization does not yet support DictionaryVector for column {col_name!r}"
-                )
+                encoder = ENC_GENERIC
+                aux_obj = vec_obj.to_pylist()
+                null_bitmaps[col_index] = NULL
             else:
                 raise NotImplementedError(
                     f"csv serialization does not support vector type {type(vec_obj).__name__} for column {col_name!r}"

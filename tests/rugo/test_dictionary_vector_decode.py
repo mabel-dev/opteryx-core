@@ -31,7 +31,7 @@ def _native_dictionary_defaults():
         config.PARQUET_DICT_MAX_CARDINALITY_RATIO = prior_ratio
 
 
-def test_decode_column_from_chunk_dictionary_only_returns_dictionary_vector():
+def test_decode_column_from_chunk_dictionary_only_returns_typed_string_vector():
     values = ["alpha", "beta", None, "alpha", "beta"] * 200
     table = pa.table({"category": pa.array(values, type=pa.string())})
 
@@ -55,11 +55,11 @@ def test_decode_column_from_chunk_dictionary_only_returns_dictionary_vector():
     decoded = rp.decode_column_from_chunk(chunk, col_stats)
 
     assert decoded is not None
-    assert decoded.__class__.__name__ == "DictionaryVector"
+    assert decoded.__class__.__name__ == "StringVector"
     assert decoded.to_pylist() == [v.encode("utf8") if v is not None else None for v in values]
 
 
-def test_decode_column_from_chunk_mixed_pages_stays_dictionary_encoded():
+def test_decode_column_from_chunk_mixed_pages_stays_typed_string_encoded():
     frequent = [f"c{i % 5}" for i in range(600)]
     rare = [f"rare-{i:04d}-{'x' * 24}" for i in range(600)]
     values = frequent + rare
@@ -88,11 +88,9 @@ def test_decode_column_from_chunk_mixed_pages_stays_dictionary_encoded():
     decoded = rp.decode_column_from_chunk(chunk, col_stats)
 
     assert decoded is not None
-    assert decoded.__class__.__name__ == "DictionaryVector"
+    assert decoded.__class__.__name__ == "StringVector"
     assert decoded.to_pylist() == [v.encode("utf8") for v in values]
-    dictionary_array = decoded.to_arrow()
-    used_codes = sorted({code for code in dictionary_array.indices.to_pylist() if code is not None})
-    assert used_codes == list(range(len(dictionary_array.dictionary)))
+    assert decoded.to_arrow().to_pylist() == [v.encode("utf8") for v in values]
 
 
 def test_decode_column_from_chunk_numeric_dictionary_returns_typed_vector():

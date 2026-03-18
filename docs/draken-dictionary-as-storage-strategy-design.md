@@ -1,13 +1,15 @@
 # Draken Vector Type System: Encoding as a Storage Strategy
 
 ## Status
-Active — Phase 1 complete; Phase 2 transition and stabilization are next.
+Active — Phase 1 and Phase 2 are complete; Phase 3 cleanup is in progress.
 
 Current implementation snapshot:
 - `DictAccessor` has been added to the Draken buffer declarations.
 - `DictionaryVector.dict_accessor()` is implemented and returns a view over the existing dictionary buffer.
 - Dense vectors now expose `dense_ptr()` and `null_bitmap_ptr()`.
 - The evaluator package has been split into named modules, while preserving the existing public import surface.
+- The evaluator/filter path regressions uncovered during the transition have been fixed again:
+  `REGEXP_REPLACE(...)` predicates reuse materialized expression columns correctly, schema-less literals no longer blow up comparison dispatch, and float `NaN` values are treated as nulls where Draken null semantics expect that behavior.
 - Carchar key detection, key ingestion, and dictionary-backed value-column routing now use accessor-based paths.
 - `carchar_group_state_engine.pyx` no longer contains direct `DictionaryVector` checks or the `_dictionary_key_kind` wrapper.
 - Python-layer expression/function/operator call sites that previously special-cased dictionary encoding have been moved to accessor- or Arrow-shape-based logic.
@@ -16,41 +18,21 @@ Current implementation snapshot:
 - Typed vector classes now expose explicit `from_dict(...)` constructors rather than overloading `from_arrow(...)` with dictionary semantics.
 - Typed `from_arrow(...)` paths have been narrowed back to dense Arrow interop; dictionary Arrow arrays are rejected and must not be treated as the storage constructor shape.
 - The fixed-width typed `from_dict(...)` constructors now use typed Cython memoryviews internally for codes, dictionary payloads, and row validity instead of generic Python-object indexing in the hot construction path.
-- `StringVector.from_dict(...)` now treats codes and row validity as typed inputs, but its dictionary payload is still Python-level because it has not yet been moved to raw arena-plus-offsets inputs.
-- `Int64Vector` and `Float64Vector` now preserve dictionary storage sidecars across `take(...)` operations, so partitioning/copy paths (including shuffle spill staging) do not silently strip dictionary encoding metadata before DRKM serialization.
-- DRKM writer/reader now preserve typed dictionary-backed numeric vectors (`Int64Vector`, `Float64Vector`) using dictionary segments when `dict_accessor()` is available, rather than requiring a public `DictionaryVector` instance for round-trip.
+- `StringVector` now has a raw dictionary-storage constructor over codes, offsets, lengths, arena bytes, and validity, so string dictionary decode no longer needs to materialize through Python lists.
+- Parquet dictionary decode now emits typed vectors for int32, int64, float32, float64, and byte-array/string columns through typed dictionary constructors rather than returning `DictionaryVector` for those shapes.
+- `StringVector.from_dict(...)` and nullable string dictionary construction now precompute byte capacity correctly before writing into the builder.
+- The non-Carchar grouped-aggregation fast paths in `GroupStateStore` and the specialized single-key kernels now detect dictionary encoding through `dict_accessor()` instead of requiring a concrete `DictionaryVector` instance.
 
-Current validated state (2026-03-18):
-- Focused dictionary and DRKM suites are passing after the sidecar/take and DRKM typed-restore work:
-    - `tests/draken/morsels/test_morsel_io.py`
-    - `tests/rugo/test_dictionary_vector_decode.py`
-    - `tests/unit/operators/test_group_state_store_dictionary_fastpath.py`
-    - `tests/unit/operators/test_heap_sort_dictionary_fastpath.py`
-    - `tests/unit/operators/test_shuffle_node.py`
-- Broader shuffle/group-by suites are also passing:
-    - `tests/unit/operators/test_draken_aggregate_and_group_node.py`
-    - `tests/unit/operators/test_shuffle_group_by_phase1.py`
-    - `tests/integration/test_shuffle_groupby_golden.py`
-
-Current known regressions (handoff-critical):
-- SQL battery regressions remain in `tests/integration/sql_battery/test_shapes_joins_subqueries.py` and related battery sets.
-- Confirmed active failures include:
-    - `SELECT name FROM $planets WHERE REGEXP_REPLACE(name, '^E', 'G') == 'Garth'`
-        - expected one row (`Earth`), currently returns zero rows in SQL path.
-        - standalone helper behavior was adjusted, but planner/evaluator SQL path is still mismatched.
-    - `SELECT CAST(magnitude AS INTEGER) FROM testdata.satellites WHERE magnitude IS NOT NULL`
-        - expected `171` rows, currently returns `177`.
-        - dataset currently surfaces 6 `NaN` values in `magnitude` (not null bitmap nulls), and `IS NULL`/`IS NOT NULL` semantics are still inconsistent across paths.
+Focused validation snapshot:
+- `tests/integration/sql_battery/test_shapes_joins_subqueries.py` passes again (`180 passed`) after the evaluator/filter recovery.
+- `tests/draken/vectors/test_string_vector.py` and `tests/rugo/test_dictionary_vector_decode.py` pass (`34 passed`) on the restored typed parquet/string dictionary path.
+- `tests/unit/operators/test_group_state_store_dictionary_fastpath.py`, `tests/unit/operators/test_draken_aggregate_and_group_node.py`, `tests/unit/operators/test_shuffle_group_by_phase1.py`, and `tests/integration/test_shuffle_groupby_golden.py` pass (`59 passed`) on the restored non-Carchar dictionary fast paths.
 
 Immediate next work:
-- Finish moving the parquet decoder callsites off `_make_dictionary_vector(...)` and onto typed `from_dict(...)` constructors. Fixed-width numeric dictionary columns now use typed constructors; string dictionary columns still emit `DictionaryVector` until the raw string constructor exists.
-- Replace the remaining Python-level string dictionary constructor shape with a raw string storage constructor using arena bytes plus offsets and validity.
-- Fix SQL-path function/type regressions introduced or exposed during transition hardening:
-    - `REGEXP_REPLACE` equality predicate behavior in SQL battery
-    - `NaN` vs `NULL` semantics for floating columns in `IS NULL`/`IS NOT NULL` and casts
-- Stabilize planner and telemetry behavior for dictionary-backed group-by paths so readings match actual engine selection and fastpath use.
+- Continue Phase 3 by removing the remaining non-Carchar `DictionaryVector` assumptions in joins, vector ops, and IO that still dispatch on the storage class instead of `dict_accessor()`.
+- Stabilize planner and telemetry behavior for dictionary-backed group-by paths so readings continue to match actual engine selection and fastpath use.
 - Make unsupported dictionary float shapes plan explicitly to `GroupStateStore` instead of selecting Carchar and then erroring at runtime.
-- Replace the remaining Abseil-backed distinct sets inside Carchar so dictionary grouping and distinct aggregation are fully on the Carchar path.
+- Keep the remaining Abseil-backed distinct sets inside Carchar out of this track; that is a separate problem from dictionary encoding.
 
 Interpretation note:
 - The status and phase sections below describe the current project state.
