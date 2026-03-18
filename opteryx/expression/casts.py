@@ -183,6 +183,12 @@ def cast(_type):
         args = [a[0] for a in args]
         kwargs = {}
 
+        def _cast_value(value):
+            value = _normalize_scalar(value)
+            if _is_nullish(value):
+                return None
+            return caster(value, **kwargs)
+
         # VARBINARY is not a canonical OrsoType — map to BLOB
         _resolved_type = "BLOB" if _type == "VARBINARY" else _type
         caster = OrsoTypes[_resolved_type].parse
@@ -208,7 +214,7 @@ def cast(_type):
             return [_parse_array_value(i, args[0], safe_cast=False) for i in arr]
         if _type == "VECTOR":
             return [caster(_unwrap_vector_value(i), **kwargs) for i in arr]
-        return [caster(i, **kwargs) for i in arr]
+        return [_cast_value(i) for i in arr]
 
     return _inner
 
