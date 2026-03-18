@@ -55,6 +55,21 @@ def test_morsel_to_json_rows_escapes_strings_and_omits_nulls():
     ]
 
 
+def test_morsel_to_json_rows_supports_dictionary_columns():
+    dictionary = pa.array(["north", "south"], type=pa.string())
+    indices = pa.array([0, 1, None, 0], type=pa.int8())
+    morsel = Morsel.from_arrow(pa.table({"region": pa.DictionaryArray.from_arrays(indices, dictionary)}))
+
+    rows = morsel_to_json_rows(morsel, omit_null_fields=False).to_pylist()
+
+    assert rows == [
+        b'{"region":"north"}',
+        b'{"region":"south"}',
+        b'{"region":null}',
+        b'{"region":"north"}',
+    ]
+
+
 def test_morsel_to_json_strings_supports_raw_json_columns():
     morsel = Morsel.from_arrow(
         pa.table(
