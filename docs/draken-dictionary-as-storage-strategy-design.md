@@ -1,24 +1,38 @@
 # Draken Vector Type System: Encoding as a Storage Strategy
 
 ## Status
-Active — Phase 1 complete; Phase 2 transition and stabilization are next.
+Active — Phase 1 and Phase 2 are complete; Phase 3 cleanup is in progress.
 
 Current implementation snapshot:
 - `DictAccessor` has been added to the Draken buffer declarations.
 - `DictionaryVector.dict_accessor()` is implemented and returns a view over the existing dictionary buffer.
 - Dense vectors now expose `dense_ptr()` and `null_bitmap_ptr()`.
 - The evaluator package has been split into named modules, while preserving the existing public import surface.
+- The evaluator/filter path regressions uncovered during the transition have been fixed again:
+  `REGEXP_REPLACE(...)` predicates reuse materialized expression columns correctly, schema-less literals no longer blow up comparison dispatch, and float `NaN` values are treated as nulls where Draken null semantics expect that behavior.
 - Carchar key detection, key ingestion, and dictionary-backed value-column routing now use accessor-based paths.
 - `carchar_group_state_engine.pyx` no longer contains direct `DictionaryVector` checks or the `_dictionary_key_kind` wrapper.
 - Python-layer expression/function/operator call sites that previously special-cased dictionary encoding have been moved to accessor- or Arrow-shape-based logic.
 - The grouped-aggregation planner no longer forces `COUNT(*)` to the older `GroupStateStore` backend solely because the aggregation column is `None`.
 - Group-by telemetry now distinguishes `CarcharGroupStateEngine` from `GroupStateStore` explicitly; the old `legacy` label has been removed.
+- Typed vector classes now expose explicit `from_dict(...)` constructors rather than overloading `from_arrow(...)` with dictionary semantics.
+- Typed `from_arrow(...)` paths have been narrowed back to dense Arrow interop; dictionary Arrow arrays are rejected and must not be treated as the storage constructor shape.
+- The fixed-width typed `from_dict(...)` constructors now use typed Cython memoryviews internally for codes, dictionary payloads, and row validity instead of generic Python-object indexing in the hot construction path.
+- `StringVector` now has a raw dictionary-storage constructor over codes, offsets, lengths, arena bytes, and validity, so string dictionary decode no longer needs to materialize through Python lists.
+- Parquet dictionary decode now emits typed vectors for int32, int64, float32, float64, and byte-array/string columns through typed dictionary constructors rather than returning `DictionaryVector` for those shapes.
+- `StringVector.from_dict(...)` and nullable string dictionary construction now precompute byte capacity correctly before writing into the builder.
+- The non-Carchar grouped-aggregation fast paths in `GroupStateStore` and the specialized single-key kernels now detect dictionary encoding through `dict_accessor()` instead of requiring a concrete `DictionaryVector` instance.
+
+Focused validation snapshot:
+- `tests/integration/sql_battery/test_shapes_joins_subqueries.py` passes again (`180 passed`) after the evaluator/filter recovery.
+- `tests/draken/vectors/test_string_vector.py` and `tests/rugo/test_dictionary_vector_decode.py` pass (`34 passed`) on the restored typed parquet/string dictionary path.
+- `tests/unit/operators/test_group_state_store_dictionary_fastpath.py`, `tests/unit/operators/test_draken_aggregate_and_group_node.py`, `tests/unit/operators/test_shuffle_group_by_phase1.py`, and `tests/integration/test_shuffle_groupby_golden.py` pass (`59 passed`) on the restored non-Carchar dictionary fast paths.
 
 Immediate next work:
-- Stabilize planner and telemetry behavior for dictionary-backed group-by paths so readings match actual engine selection and fastpath use.
+- Continue Phase 3 by removing the remaining non-Carchar `DictionaryVector` assumptions in joins, vector ops, and IO that still dispatch on the storage class instead of `dict_accessor()`.
+- Stabilize planner and telemetry behavior for dictionary-backed group-by paths so readings continue to match actual engine selection and fastpath use.
 - Make unsupported dictionary float shapes plan explicitly to `GroupStateStore` instead of selecting Carchar and then erroring at runtime.
-- Replace the remaining Abseil-backed distinct sets inside Carchar so dictionary grouping and distinct aggregation are fully on the Carchar path.
-- Start the typed-vector backend transition described below so dictionary encoding becomes an implementation detail rather than a public vector type.
+- Keep the remaining Abseil-backed distinct sets inside Carchar out of this track; that is a separate problem from dictionary encoding.
 
 Interpretation note:
 - The status and phase sections below describe the current project state.
@@ -252,6 +266,12 @@ Float64Vector(length)                               # dense
 Float64Vector.from_dict(codes, dict_data, ...)      # dictionary-backed
 ```
 
+Current transition note:
+- `from_arrow(...)` remains the Arrow interop API and still assumes Arrow runtime objects.
+- `from_dict(...)` is now the intended storage/backend constructor seam.
+- For fixed-width vectors the internal `cdef from_dict(...)` implementations now operate on typed memoryviews, with only a thin Python wrapper at the classmethod boundary.
+- `StringVector.from_dict(...)` has not reached the same endpoint yet because its dictionary payload still arrives as decoded Python values rather than raw arena bytes and offsets.
+
 ### What Is Removed
 
 - `DictionaryVector` public class
@@ -292,6 +312,16 @@ Phase 1 progress update:
 - Finish planner hardening for grouped aggregation so unsupported shapes route directly to `GroupStateStore` instead of selecting Carchar and failing later.
 - Bring Carchar telemetry/readings into alignment with actual engine choice and dictionary fastpath use.
 - Remove the remaining Abseil-backed distinct-set usage inside Carchar so the Carchar group-state path is internally self-consistent.
+
+Phase 2 progress update:
+- Explicit typed `from_dict(...)` entrypoints now exist on `Float64Vector`, `Int64Vector`, `IntegerVector`, `Date32Vector`, `TimeVector`, `TimestampVector`, and `StringVector`.
+- Typed `from_arrow(...)` constructors have been corrected back to dense Arrow interop only; dictionary Arrow arrays are no longer accepted there.
+- The fixed-width typed `from_dict(...)` implementations now use typed codes, typed dictionary value buffers, and typed row-validity buffers internally rather than generic `object` arguments in the `cdef` construction path.
+- This means the constructor split is now real at the API and implementation level for fixed-width vectors: `from_arrow(...)` is interop, `from_dict(...)` is backend construction.
+- The parquet reader now routes fixed-width numeric dictionary columns through typed `from_dict(...)` constructors instead of `_make_dictionary_vector(...)`.
+- The parquet reader still emits `DictionaryVector` for string dictionary columns because the raw string constructor still needs arena-bytes-plus-offsets inputs rather than Python values.
+- The string constructor is only partially across the boundary: codes and row validity are typed, but dictionary payload is still supplied as Python values. A raw arena-plus-offsets string constructor is still required before the string path is fully storage-native.
+- Because of that, Phase 2 is no longer blocked on API shape; it is now blocked on moving the actual storage producers over to the new constructor seam and finishing the raw string constructor.
 
 ### Phase 3 — Remove DictionaryVector
 - Delete public class.

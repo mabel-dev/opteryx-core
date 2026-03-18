@@ -26,12 +26,10 @@ cdef class Int64CountDistinctInt64Kernel:
         cdef bint value_is_dict = False
         cdef Int64Vector key_int64_vector
         cdef Int64Vector value_i64_vector
-        cdef DictionaryVector key_dict_vector
-        cdef DictionaryVector value_dict_vector
         cdef DrakenFixedBuffer* key_ptr
         cdef DrakenFixedBuffer* value_ptr
-        cdef DrakenDictionaryBuffer* key_dict_ptr
-        cdef DrakenDictionaryBuffer* value_dict_ptr
+        cdef DictAccessor* key_dict_ptr
+        cdef DictAccessor* value_dict_ptr
         cdef DrakenVarBuffer* value_dict_values
         cdef int64_t* key_data
         cdef int64_t* value_i64_data
@@ -61,14 +59,15 @@ cdef class Int64CountDistinctInt64Kernel:
             key_ptr = key_int64_vector.ptr
             key_data = <int64_t*>key_ptr.data
             key_nulls = <uint8_t*>key_ptr.null_bitmap
-        elif isinstance(key_vector, DictionaryVector):
+        elif isinstance(key_vector, Vector):
+            key_dict_ptr = (<Vector>key_vector).dict_accessor()
+            if key_dict_ptr == NULL:
+                return False
             key_is_dict = True
             self._hash_keys_mode = True
-            key_dict_vector = <DictionaryVector>key_vector
-            key_dict_ptr = key_dict_vector.ptr
-            if key_dict_ptr == NULL or key_dict_ptr.dictionary_values == NULL:
+            if key_dict_ptr.dict_values == NULL:
                 return False
-            key_nulls = <uint8_t*>key_dict_ptr.null_bitmap
+            key_nulls = <uint8_t*>key_dict_ptr.row_nulls
             key_hashes = _build_dict_hashes(key_dict_ptr)
         else:
             return False
@@ -79,16 +78,19 @@ cdef class Int64CountDistinctInt64Kernel:
             value_ptr = value_i64_vector.ptr
             value_i64_data = <int64_t*>value_ptr.data
             value_nulls = <uint8_t*>value_ptr.null_bitmap
-        elif isinstance(value_vector, DictionaryVector):
-            value_is_dict = True
-            value_dict_vector = <DictionaryVector>value_vector
-            value_dict_ptr = value_dict_vector.ptr
-            if value_dict_ptr == NULL or value_dict_ptr.dictionary_values == NULL:
+        elif isinstance(value_vector, Vector):
+            value_dict_ptr = (<Vector>value_vector).dict_accessor()
+            if value_dict_ptr == NULL:
                 if key_hashes != NULL:
                     free(key_hashes)
                 return False
-            value_nulls = <uint8_t*>value_dict_ptr.null_bitmap
-            value_dict_values = value_dict_ptr.dictionary_values
+            value_is_dict = True
+            if value_dict_ptr.dict_values == NULL:
+                if key_hashes != NULL:
+                    free(key_hashes)
+                return False
+            value_nulls = <uint8_t*>value_dict_ptr.row_nulls
+            value_dict_values = value_dict_ptr.dict_values
             value_dict_nulls = <uint8_t*>value_dict_values.null_bitmap
             value_hashes = _build_dict_hashes(value_dict_ptr)
         else:
@@ -149,7 +151,7 @@ cdef class Int64CountDistinctInt64Kernel:
 
                     if key_is_dict:
                         key_code = _dict_read_code(key_dict_ptr, row_idx)
-                        if key_code >= key_dict_ptr.dictionary_values.length:
+                        if key_code >= key_dict_ptr.dict_values.length:
                             raise ValueError("Dictionary key code out of bounds in COUNT(DISTINCT) kernel")
                         if _dict_row_null(key_dict_ptr, key_code, row_idx):
                             self._seen_null_key = True
@@ -199,7 +201,7 @@ cdef class Int64CountDistinctInt64Kernel:
                 distinct_value_u64 = <uint64_t>value_i64_data[row_idx]
                 if key_is_dict:
                     key_code = _dict_read_code(key_dict_ptr, row_idx)
-                    if key_code >= key_dict_ptr.dictionary_values.length:
+                    if key_code >= key_dict_ptr.dict_values.length:
                         raise ValueError("Dictionary key code out of bounds in COUNT(DISTINCT) kernel")
                     if _dict_row_null(key_dict_ptr, key_code, row_idx):
                         self._seen_null_key = True

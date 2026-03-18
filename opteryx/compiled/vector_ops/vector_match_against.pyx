@@ -13,12 +13,12 @@ from libc.string cimport memset
 import numpy
 cimport numpy
 
-from opteryx.draken.core.buffers cimport DrakenDictionaryBuffer
+from opteryx.draken.core.buffers cimport DictAccessor
 from opteryx.draken.vectors.bool_vector cimport BoolVector
-from opteryx.draken.vectors.dictionary_vector cimport DictionaryVector
 from opteryx.draken.vectors.string_vector cimport StringVector
 from opteryx.draken.vectors.string_vector cimport _StringVectorCIterator
 from opteryx.draken.vectors.string_vector cimport StringElement
+from opteryx.draken.vectors.vector cimport Vector
 
 numpy.import_array()
 
@@ -29,7 +29,7 @@ cdef inline bint _is_ascii_whitespace(unsigned char ch) noexcept nogil:
     return ch == 9 or ch == 10 or ch == 11 or ch == 12 or ch == 13 or ch == 32
 
 
-cdef inline uint32_t _read_code(const DrakenDictionaryBuffer* ptr, Py_ssize_t i) noexcept nogil:
+cdef inline uint32_t _read_code(const DictAccessor* ptr, Py_ssize_t i) noexcept nogil:
     if ptr.code_width == 1:
         return (<uint8_t*>ptr.codes)[i]
     if ptr.code_width == 2:
@@ -37,11 +37,11 @@ cdef inline uint32_t _read_code(const DrakenDictionaryBuffer* ptr, Py_ssize_t i)
     return (<uint32_t*>ptr.codes)[i]
 
 
-cdef StringVector _wrap_dictionary_values(DictionaryVector values):
+cdef StringVector _wrap_dictionary_values(object owner, const DictAccessor* values):
     cdef StringVector wrapped = StringVector(wrap=True)
-    wrapped.ptr = values.ptr.dictionary_values
+    wrapped.ptr = values.dict_values
     wrapped.owns_data = False
-    wrapped._arrow_data_buf = values
+    wrapped._arrow_data_buf = owner
     wrapped._arrow_offs_buf = None
     wrapped._arrow_null_buf = None
     return wrapped
@@ -152,18 +152,18 @@ cdef BoolVector _vector_match_against_string_vector(
     return out
 
 
-cdef BoolVector _vector_match_against_dictionary_vector(
-    DictionaryVector values,
+cdef BoolVector _vector_match_against_dictionary_accessor(
+    object owner,
+    const DictAccessor* ptr,
     object provider,
     str query_text,
     float min_score=0.6,
 ):
-    cdef DrakenDictionaryBuffer* ptr = values.ptr
     cdef Py_ssize_t n = ptr.length
     cdef Py_ssize_t nbytes = (n + 7) >> 3
     cdef BoolVector out = BoolVector(<size_t>n)
     cdef uint8_t* dst = <uint8_t*>out.ptr.data
-    cdef uint8_t* row_nulls = ptr.null_bitmap
+    cdef uint8_t* row_nulls = ptr.row_nulls
     cdef BoolVector dict_matches
     cdef uint8_t* dict_bits
     cdef Py_ssize_t i
@@ -171,11 +171,11 @@ cdef BoolVector _vector_match_against_dictionary_vector(
 
     memset(dst, 0, nbytes)
 
-    if ptr.dictionary_values == NULL or ptr.dictionary_values.length == 0:
+    if ptr.dict_values == NULL or ptr.dict_values.length == 0:
         return out
 
     dict_matches = _vector_match_against_string_vector(
-        _wrap_dictionary_values(values),
+        _wrap_dictionary_values(owner, ptr),
         provider,
         query_text,
         min_score,
@@ -198,8 +198,13 @@ cpdef BoolVector vector_match_against(
     str query_text,
     float min_score=0.6,
 ):
+    cdef DictAccessor* dict_accessor = NULL
+
+    if isinstance(values, Vector):
+        dict_accessor = (<Vector>values).dict_accessor()
+
+    if dict_accessor != NULL:
+        return _vector_match_against_dictionary_accessor(values, dict_accessor, provider, query_text, min_score)
     if isinstance(values, StringVector):
         return _vector_match_against_string_vector(values, provider, query_text, min_score)
-    if isinstance(values, DictionaryVector):
-        return _vector_match_against_dictionary_vector(values, provider, query_text, min_score)
-    raise TypeError(f"vector_match_against requires StringVector or DictionaryVector, got {type(values)}")
+    raise TypeError(f"vector_match_against requires StringVector or dictionary-encoded Vector, got {type(values)}")

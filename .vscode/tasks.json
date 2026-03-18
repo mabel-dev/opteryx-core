@@ -1,0 +1,169 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "build-ext-inplace",
+			"type": "shell",
+			"command": "/Users/justin/.pyenv/versions/3.13.12/bin/python",
+			"args": [
+				"setup.py",
+				"build_ext",
+				"--inplace"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "pytest-drkm-dict",
+			"type": "shell",
+			"command": "/Users/justin/.pyenv/versions/3.13.12/bin/python",
+			"args": [
+				"-m",
+				"pytest",
+				"tests/draken/morsels/test_morsel_io.py",
+				"tests/rugo/test_dictionary_vector_decode.py",
+				"-q"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "build-ext-inplace-2",
+			"type": "shell",
+			"command": "/Users/justin/.pyenv/versions/3.13.12/bin/python",
+			"args": [
+				"setup.py",
+				"build_ext",
+				"--inplace"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "pytest-drkm-dict-2",
+			"type": "shell",
+			"command": "/Users/justin/.pyenv/versions/3.13.12/bin/python",
+			"args": [
+				"-m",
+				"pytest",
+				"tests/draken/morsels/test_morsel_io.py",
+				"tests/rugo/test_dictionary_vector_decode.py",
+				"-q"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "build-ext-inplace-3",
+			"type": "shell",
+			"command": "/Users/justin/.pyenv/versions/3.13.12/bin/python",
+			"args": [
+				"setup.py",
+				"build_ext",
+				"--inplace"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "pytest-drkm-dict-3",
+			"type": "shell",
+			"command": "/Users/justin/.pyenv/versions/3.13.12/bin/python",
+			"args": [
+				"-m",
+				"pytest",
+				"tests/draken/morsels/test_morsel_io.py",
+				"tests/rugo/test_dictionary_vector_decode.py",
+				"-q"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "cythonize-morsel-io",
+			"type": "shell",
+			"command": "/Users/justin/.pyenv/versions/3.13.12/bin/python",
+			"args": [
+				"-c",
+				"from Cython.Build import cythonize; cythonize('third_party/mabel/draken/storage/morsel_io.pyx', compiler_directives={'language_level':'3'})"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "build-ext-inplace-4",
+			"type": "shell",
+			"command": "/Users/justin/.pyenv/versions/3.13.12/bin/python",
+			"args": [
+				"setup.py",
+				"build_ext",
+				"--inplace"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "pytest-drkm-dict-4",
+			"type": "shell",
+			"command": "/Users/justin/.pyenv/versions/3.13.12/bin/python",
+			"args": [
+				"-m",
+				"pytest",
+				"tests/draken/morsels/test_morsel_io.py",
+				"tests/rugo/test_dictionary_vector_decode.py",
+				"-q"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "probe-typed-dict-sidecar",
+			"type": "shell",
+			"command": "/Users/justin/.pyenv/versions/3.13.12/bin/python",
+			"args": [
+				"-c",
+				"from opteryx.draken.vectors.int64_vector import Int64Vector; v=Int64Vector.from_dict([0,1,2,1,0],[10,20,30]); print(type(v).__name__, getattr(v,'dictionary_value_type',None), getattr(v,'dictionary_size',None), getattr(v,'code_width',None), getattr(v,'ordered',None))"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "probe-typed-dict-sidecar-2",
+			"type": "shell",
+			"command": "/Users/justin/.pyenv/versions/3.13.12/bin/python",
+			"args": [
+				"-c",
+				"from opteryx.draken.vectors.int64_vector import Int64Vector; v = Int64Vector.from_dict([0,1,2,1,0],[10,20,30]); print(type(v).__name__, getattr(v, 'dictionary_value_type', None), getattr(v, 'dictionary_size', None), getattr(v, 'code_width', None), getattr(v, 'ordered', None))"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "pytest-drkm-dict-5",
+			"type": "shell",
+			"command": "/Users/justin/.pyenv/versions/3.13.12/bin/python",
+			"args": [
+				"-m",
+				"pytest",
+				"tests/draken/morsels/test_morsel_io.py",
+				"tests/rugo/test_dictionary_vector_decode.py",
+				"-q"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "pytest-dictionary-fastpath",
+			"type": "shell",
+			"command": "/Users/justin/.pyenv/versions/3.13.12/bin/python",
+			"args": [
+				"-m",
+				"pytest",
+				"tests/unit/operators/test_group_state_store_dictionary_fastpath.py",
+				"tests/unit/operators/test_heap_sort_dictionary_fastpath.py",
+				"-q"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "pytest-shuffle-node",
+			"type": "shell",
+			"command": "/Users/justin/.pyenv/versions/3.13.12/bin/python",
+			"args": [
+				"-m",
+				"pytest",
+				"tests/unit/operators/test_shuffle_node.py",
+				"-q"
+			],
+			"isBackground": false
+		}
+	]
+}

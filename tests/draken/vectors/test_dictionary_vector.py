@@ -7,6 +7,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 import pyarrow as pa
 import pytest
 
+from opteryx.compiled.vector_ops import vector_round_digits
 from opteryx.draken import Morsel, Vector
 
 
@@ -148,6 +149,18 @@ def test_dictionary_vector_numeric_range_predicates():
     assert _as_list(gt) == [False, True, False, True, True]
     assert _as_list(lte) == [True, True, False, False, True]
     assert _as_list(gte) == [False, True, False, True, True]
+
+
+def test_dictionary_vector_round_uses_dictionary_accessor_path():
+    dictionary = pa.array([1.234, 2.345, 3.456], type=pa.float64())
+    indices = pa.array([0, 1, None, 2, 1], type=pa.int8())
+    arr = pa.DictionaryArray.from_arrays(indices, dictionary)
+    vec = Vector.from_arrow(arr)
+
+    rounded = vector_round_digits(vec, 2)
+
+    assert rounded.__class__.__name__ == "Float64Vector"
+    assert rounded.to_pylist() == [1.23, 2.35, None, 3.46, 2.35]
 
 
 def test_dictionary_vector_string_range_predicates_raise():
