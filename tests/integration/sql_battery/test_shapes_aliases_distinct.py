@@ -388,11 +388,7 @@ STATEMENTS = [
         ("SELECT MAX(planetId) FROM testdata.satellites", 1, 1, None),
         ("SELECT AVG(planetId) FROM testdata.satellites", 1, 1, None),
         ("SELECT MIN(planetId) FROM testdata.satellites", 1, 1, None),
-        ("SELECT MIN_MAX(planetId) FROM testdata.satellites", 1, 1, None),
-        ("SELECT PRODUCT(planetId) FROM testdata.satellites", 1, 1, None),
-        ("SELECT STDDEV(planetId) FROM testdata.satellites", 1, 1, None),
         ("SELECT SUM(planetId) FROM testdata.satellites", 1, 1, None),
-        ("SELECT VARIANCE(planetId) FROM testdata.satellites", 1, 1, None),
 
         ("SELECT name || ' ' || name FROM $planets", 9, 1, None),
         ("SELECT 32 * 12", 1, 1, None),

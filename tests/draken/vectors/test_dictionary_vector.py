@@ -9,6 +9,7 @@ import pytest
 
 from opteryx.compiled.vector_ops import vector_round_digits
 from opteryx.draken import Morsel, Vector
+from opteryx.operators.group_state_store import DRAKEN_ENCODING_DICTIONARY
 
 
 def _as_list(result):
@@ -26,7 +27,7 @@ def test_dictionary_vector_round_trip_from_arrow():
     vec = Vector.from_arrow(arr)
     roundtrip = vec.to_arrow()
 
-    assert vec.__class__.__name__ == "DictionaryVector"
+    assert vec.encoding == DRAKEN_ENCODING_DICTIONARY
     assert vec.to_pylist() == [b"alpha", b"beta", None, b"alpha", b"beta"]
     assert roundtrip.to_pylist() == arr.to_pylist()
     assert pa.types.is_dictionary(roundtrip.type)
@@ -50,7 +51,7 @@ def test_morsel_from_arrow_preserves_dictionary_vector():
     morsel = Morsel.from_arrow(table)
     column = morsel.column(b"region")
 
-    assert column.__class__.__name__ == "DictionaryVector"
+    assert column.encoding == DRAKEN_ENCODING_DICTIONARY
     assert column.to_pylist() == [b"north", b"south", b"north", None]
 
 
@@ -92,7 +93,7 @@ def test_dictionary_vector_numeric_round_trip_from_arrow():
     vec = Vector.from_arrow(arr)
     roundtrip = vec.to_arrow()
 
-    assert vec.__class__.__name__ == "DictionaryVector"
+    assert vec.encoding == DRAKEN_ENCODING_DICTIONARY
     assert vec.to_pylist() == [10, 20, None, 30, 20]
     assert roundtrip.to_pylist() == arr.to_pylist()
     assert pa.types.is_dictionary(roundtrip.type)
@@ -191,7 +192,7 @@ def test_dictionary_vector_numeric_type_coverage_round_trip(value_type, dictiona
     vec = Vector.from_arrow(arr)
     roundtrip = vec.to_arrow()
 
-    assert vec.__class__.__name__ == "DictionaryVector"
+    assert vec.encoding == DRAKEN_ENCODING_DICTIONARY
     assert vec.to_pylist() == arr.to_pylist()
     assert pa.types.is_dictionary(roundtrip.type)
     assert roundtrip.type.value_type == value_type

@@ -9,11 +9,13 @@ from pathlib import Path
 if __package__ in {None, ""}:
     sys.path.insert(1, str(Path(__file__).resolve().parents[2]))
     from opteryx.functions.signatures import write_function_signatures
+    from opteryx.reference.aggregate_catalog import write_aggregate_catalog
     from opteryx.reference.operator_catalog import write_operator_catalog
     from opteryx.reference.type_catalog import write_type_catalog
 else:
     from opteryx.functions.signatures import write_function_signatures
 
+    from .aggregate_catalog import write_aggregate_catalog
     from .operator_catalog import write_operator_catalog
     from .type_catalog import write_type_catalog
 
@@ -22,6 +24,7 @@ def reexport_reference_catalogs(base_path: str | Path | None = None) -> dict[str
     root = Path(base_path) if base_path is not None else Path(__file__).resolve().parents[2]
 
     output_paths = {
+        "aggregates": root / "opteryx/reference/aggregates.json",
         "operators": root / "opteryx/reference/operators.json",
         "types": root / "opteryx/reference/types.json",
         "functions": root / "opteryx/functions/function_signatures.json",
@@ -30,6 +33,7 @@ def reexport_reference_catalogs(base_path: str | Path | None = None) -> dict[str
     for output_path in output_paths.values():
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
+    write_aggregate_catalog(output_paths["aggregates"])
     write_operator_catalog(output_paths["operators"])
     write_type_catalog(output_paths["types"])
     write_function_signatures(output_paths["functions"])
@@ -39,7 +43,7 @@ def reexport_reference_catalogs(base_path: str | Path | None = None) -> dict[str
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Rewrite the generated operator, type, and function catalogs."
+        description="Rewrite the generated aggregate, operator, type, and function catalogs."
     )
     parser.add_argument(
         "--base-path",

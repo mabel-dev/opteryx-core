@@ -599,6 +599,7 @@ def _evaluate_and_append_arrow(expressions, table: Table):
         if statement.schema_column.type not in (
             0,
             OrsoTypes._MISSING_TYPE,
+            OrsoTypes.NULL,
             OrsoTypes.INTERVAL,
         ):
             field = pyarrow.field(

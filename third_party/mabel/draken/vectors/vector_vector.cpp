@@ -19,7 +19,7 @@
             "-static-libstdc++"
         ],
         "include_dirs": [
-            "/private/var/folders/3f/qvs4ypvs5kzb369l9m0jhbtc0000gn/T/pip-build-env-tcgqnj11/overlay/lib/python3.13/site-packages/numpy/_core/include",
+            "/Users/justin/.pyenv/versions/3.13.12/lib/python3.13/site-packages/numpy/_core/include",
             "src/cpp",
             "src/c",
             "third_party/mabel/draken",
@@ -1678,7 +1678,7 @@ struct __pyx_memoryview_obj;
 struct __pyx_memoryviewslice_obj;
 struct __pyx_t_7opteryx_6draken_4core_7buffers_DictAccessor;
 
-/* "opteryx/draken/core/buffers.pxd":81
+/* "opteryx/draken/core/buffers.pxd":86
  * # callers never need raw ptr arithmetic.  Phase 1  no C struct changes yet;
  * # dict_values remains DrakenVarBuffer* for both string and numeric backing.
  * cdef struct DictAccessor:             # <<<<<<<<<<<<<<

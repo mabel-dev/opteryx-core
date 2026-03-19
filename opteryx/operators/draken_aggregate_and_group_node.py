@@ -479,7 +479,20 @@ class DrakenAggregateAndGroupNode(BasePlanNode):
                 draken = _prepare_draken_chunk(draken)
             if self._required_columns:
                 draken = draken.select(self._required_columns)
-            self._group_by.ingest(draken)
+            try:
+                self._group_by.ingest(draken)
+            except UnsupportedSyntaxError:
+                # If the compiled Carchar engine fails at runtime (e.g., due to
+                # unsupported string-key shapes), reroute to the more general
+                # GroupStateStore implementation.
+                from opteryx.compiled.aggregations.group_state_store import GroupStateStore
+
+                self._group_by = GroupStateStore(
+                    self._normalized_group_by_columns,
+                    self._normalized_aggregations,
+                )
+                self._group_by.ingest(draken)
+
             self._accumulate_engine_reading_delta(pre_engine_snapshot)
             self.readings["time_groupby_ingest"] += time.monotonic_ns() - ingest_start
             yield EMPTY
@@ -493,7 +506,16 @@ class DrakenAggregateAndGroupNode(BasePlanNode):
                 chunk = _prepare_draken_chunk(chunk)
             if self._required_columns:
                 chunk = chunk.select(self._required_columns)
-            self._group_by.ingest(chunk)
+            try:
+                self._group_by.ingest(chunk)
+            except UnsupportedSyntaxError:
+                from opteryx.compiled.aggregations.group_state_store import GroupStateStore
+
+                self._group_by = GroupStateStore(
+                    self._normalized_group_by_columns,
+                    self._normalized_aggregations,
+                )
+                self._group_by.ingest(chunk)
 
         self._accumulate_engine_reading_delta(pre_engine_snapshot)
         self.readings["time_groupby_ingest"] += time.monotonic_ns() - ingest_start

@@ -44,6 +44,7 @@ from opteryx.draken.core.buffers cimport DRAKEN_BOOL
 from opteryx.draken.core.buffers cimport DRAKEN_CONSTANT
 from opteryx.draken.core.buffers cimport DRAKEN_DATE32
 from opteryx.draken.core.buffers cimport DRAKEN_DICTIONARY
+from opteryx.draken.core.buffers cimport DRAKEN_ENCODING_DICTIONARY
 from opteryx.draken.core.buffers cimport DRAKEN_FLOAT32
 from opteryx.draken.core.buffers cimport DRAKEN_FLOAT64
 from opteryx.draken.core.buffers cimport DRAKEN_INT8
@@ -677,26 +678,85 @@ cdef inline Vector _build_typed_dict_vector(
     Py_ssize_t dict_size,
     bint ordered,
 ):
-    if dtype == DRAKEN_INT64 and dict_value_type == DRAKEN_INT64:
+    # Numeric dictionary vectors are stored in their native width (e.g. int32)
+    # but are surfaced as int64/float64 in the engine. Convert on-read.
+    if dtype == DRAKEN_INT64 and dict_value_type in (
+        DRAKEN_INT8,
+        DRAKEN_INT16,
+        DRAKEN_INT32,
+        DRAKEN_INT64,
+    ):
+        cdef object dictionary_obj
+        cdef int64_t[::1] dictionary_buf
+
+        if dict_value_type == DRAKEN_INT64:
+            return <Vector>int64_from_packed_dict(
+                codes,
+                code_width,
+                row_count,
+                <const int64_t*>dictionary,
+                dict_size,
+                row_null_bitmap,
+                ordered,
+            )
+
+        dictionary_obj = pyarray('q', [0]) * dict_size
+        dictionary_buf = dictionary_obj
+        if dict_value_type == DRAKEN_INT8:
+            cdef const int8_t* src8 = <const int8_t*>dictionary
+            for i in range(dict_size):
+                dictionary_buf[i] = <int64_t>src8[i]
+        elif dict_value_type == DRAKEN_INT16:
+            cdef const int16_t* src16 = <const int16_t*>dictionary
+            for i in range(dict_size):
+                dictionary_buf[i] = <int64_t>src16[i]
+        else:
+            # DRAKEN_INT32
+            cdef const int32_t* src32 = <const int32_t*>dictionary
+            for i in range(dict_size):
+                dictionary_buf[i] = <int64_t>src32[i]
+
         return <Vector>int64_from_packed_dict(
             codes,
             code_width,
             row_count,
-            <const int64_t*>dictionary,
+            <const int64_t*>dictionary_buf,
             dict_size,
             row_null_bitmap,
             ordered,
         )
-    if dtype == DRAKEN_FLOAT64 and dict_value_type == DRAKEN_FLOAT64:
+
+    if dtype == DRAKEN_FLOAT64 and dict_value_type in (DRAKEN_FLOAT32, DRAKEN_FLOAT64):
+        cdef object dictionary_obj
+        cdef double[::1] dictionary_buf
+
+        if dict_value_type == DRAKEN_FLOAT64:
+            return <Vector>float64_from_packed_dict(
+                codes,
+                code_width,
+                row_count,
+                <const double*>dictionary,
+                dict_size,
+                row_null_bitmap,
+                ordered,
+            )
+
+        dictionary_obj = pyarray('d', [0.0]) * dict_size
+        dictionary_buf = dictionary_obj
+        cdef const float* srcf = <const float*>dictionary
+        for i in range(dict_size):
+            dictionary_buf[i] = <double>srcf[i]
+
         return <Vector>float64_from_packed_dict(
             codes,
             code_width,
             row_count,
-            <const double*>dictionary,
+            <const double*>dictionary_buf,
             dict_size,
             row_null_bitmap,
             ordered,
         )
+
     raise DrakenMorselStorageError(
         f"unsupported typed dictionary restore for dtype {dtype} and dictionary value type {dict_value_type}"
     )
@@ -906,6 +966,7 @@ cpdef object write_morsel(object path_or_handle, Morsel morsel, dict options=Non
     cdef bytes name_bytes
     cdef int dtype
     cdef int encoding
+    cdef int draken_encoding
     cdef int flags
     cdef list segments
     cdef DrakenFixedBuffer* fixed_ptr
@@ -966,6 +1027,8 @@ cpdef object write_morsel(object path_or_handle, Morsel morsel, dict options=Non
         dtype = <int>morsel.ptr.column_types[i]
         vec = <Vector>morsel.ptr.columns[i]
         dict_accessor = vec.dict_accessor()
+        # Prefer the unified discriminant instead of type-checking for DictionaryVector.
+        draken_encoding = vec.encoding
         segments = []
 
         if dtype == DRAKEN_STRING:
@@ -980,25 +1043,18 @@ cpdef object write_morsel(object path_or_handle, Morsel morsel, dict options=Non
                 values_len = <Py_ssize_t>var_ptr.offsets[row_count]
             segments.append((SEG_VALUES, <intptr_t>var_ptr.data, values_len))
             flags = FLAG_HAS_NULLS if null_len > 0 else 0
-        elif dtype == DRAKEN_DICTIONARY or dict_accessor != NULL:
+        elif draken_encoding == DRAKEN_ENCODING_DICTIONARY:
             encoding = ENCODING_DICT
-            if dtype == DRAKEN_DICTIONARY:
-                dict_ptr = (<DictionaryVector>vec).ptr
-                if dict_ptr == NULL or dict_ptr.dictionary_values == NULL:
-                    raise DrakenMorselStorageError("invalid dictionary vector pointer")
-                row_nulls = dict_ptr.null_bitmap
-                codes_ptr = dict_ptr.codes
-                code_width = dict_ptr.code_width
-                var_ptr = dict_ptr.dictionary_values
-                dict_ordered = dict_ptr.ordered != 0
-            else:
-                if dict_accessor.dict_values == NULL:
-                    raise DrakenMorselStorageError("invalid typed dictionary accessor")
-                row_nulls = dict_accessor.row_nulls
-                codes_ptr = dict_accessor.codes
-                code_width = dict_accessor.code_width
-                var_ptr = dict_accessor.dict_values
-                dict_ordered = False
+
+            # Prefer the unified discriminant instead of type-checking for DictionaryVector.
+            if dict_accessor == NULL or dict_accessor.dict_values == NULL:
+                raise DrakenMorselStorageError("invalid dictionary accessor")
+
+            row_nulls = dict_accessor.row_nulls
+            codes_ptr = dict_accessor.codes
+            code_width = dict_accessor.code_width
+            var_ptr = dict_accessor.dict_values
+            dict_ordered = bool(getattr(vec, "ordered", False))
 
             null_len = ((row_count + 7) >> 3) if row_nulls != NULL else 0
             if null_len > 0:
@@ -1749,34 +1805,69 @@ cpdef Morsel read_morsel(object path_or_handle, dict options=None):
                             )
 
                 if dtype == DRAKEN_DICTIONARY:
-                    vec = DictionaryVector(
-                        <size_t>row_count,
-                        <size_t>dict_len,
-                        <size_t>dict_values_len,
-                        code_width,
-                        bool(col_flags & FLAG_DICT_ORDERED),
-                        dict_value_type,
-                    )
-                    dict_ptr = (<DictionaryVector>vec).ptr
-                    if dict_ptr == NULL or dict_ptr.dictionary_values == NULL:
-                        raise DrakenMorselStorageError(f"failed to allocate dictionary vector for column {i}")
-                    if len(codes_bytes) > 0:
-                        memcpy(dict_ptr.codes, <const void*>PyBytes_AS_STRING(codes_bytes), <size_t>len(codes_bytes))
-                    memcpy(dict_ptr.dictionary_values.offsets, <const void*>PyBytes_AS_STRING(dict_offsets_bytes), <size_t>len(dict_offsets_bytes))
-                    if len(dict_values_bytes) > 0:
-                        memcpy(dict_ptr.dictionary_values.data, <const void*>PyBytes_AS_STRING(dict_values_bytes), <size_t>len(dict_values_bytes))
-                    if dict_null_payload is not None:
-                        expected_len = (dict_len + 7) >> 3
-                        if expected_len > 0:
-                            dict_ptr.dictionary_values.null_bitmap = <uint8_t*>malloc(<size_t>expected_len)
-                            if dict_ptr.dictionary_values.null_bitmap == NULL:
+                    # Prefer typed dictionary vectors when possible (numeric types).
+                    # This avoids exposing DictionaryVector in higher-level user paths.
+                    if dict_null_payload is None and dict_value_type in (
+                        DRAKEN_INT8,
+                        DRAKEN_INT16,
+                        DRAKEN_INT32,
+                        DRAKEN_INT64,
+                    ):
+                        vec = _build_typed_dict_vector(
+                            DRAKEN_INT64,
+                            row_count,
+                            <const uint8_t*>PyBytes_AS_STRING(codes_bytes),
+                            code_width,
+                            <const uint8_t*>NULL if null_bytes is None else <const uint8_t*>PyBytes_AS_STRING(null_bytes),
+                            dict_value_type,
+                            <const void*>PyBytes_AS_STRING(dict_values_bytes),
+                            dict_len,
+                            bool(col_flags & FLAG_DICT_ORDERED),
+                        )
+                    elif dict_null_payload is None and dict_value_type in (
+                        DRAKEN_FLOAT32,
+                        DRAKEN_FLOAT64,
+                    ):
+                        vec = _build_typed_dict_vector(
+                            DRAKEN_FLOAT64,
+                            row_count,
+                            <const uint8_t*>PyBytes_AS_STRING(codes_bytes),
+                            code_width,
+                            <const uint8_t*>NULL if null_bytes is None else <const uint8_t*>PyBytes_AS_STRING(null_bytes),
+                            dict_value_type,
+                            <const void*>PyBytes_AS_STRING(dict_values_bytes),
+                            dict_len,
+                            bool(col_flags & FLAG_DICT_ORDERED),
+                        )
+                    else:
+                        vec = DictionaryVector(
+                            <size_t>row_count,
+                            <size_t>dict_len,
+                            <size_t>dict_values_len,
+                            code_width,
+                            bool(col_flags & FLAG_DICT_ORDERED),
+                            dict_value_type,
+                        )
+                        dict_ptr = (<DictionaryVector>vec).ptr
+                        if dict_ptr == NULL or dict_ptr.dictionary_values == NULL:
+                            raise DrakenMorselStorageError(f"failed to allocate dictionary vector for column {i}")
+                        if len(codes_bytes) > 0:
+                            memcpy(dict_ptr.codes, <const void*>PyBytes_AS_STRING(codes_bytes), <size_t>len(codes_bytes))
+                        memcpy(dict_ptr.dictionary_values.offsets, <const void*>PyBytes_AS_STRING(dict_offsets_bytes), <size_t>len(dict_offsets_bytes))
+                        if len(dict_values_bytes) > 0:
+                            memcpy(dict_ptr.dictionary_values.data, <const void*>PyBytes_AS_STRING(dict_values_bytes), <size_t>len(dict_values_bytes))
+                        if dict_null_payload is not None:
+                            expected_len = (dict_len + 7) >> 3
+                            if expected_len > 0:
+                                dict_ptr.dictionary_values.null_bitmap = <uint8_t*>malloc(<size_t>expected_len)
+                                if dict_ptr.dictionary_values.null_bitmap == NULL:
+                                    raise MemoryError()
+                                memcpy(dict_ptr.dictionary_values.null_bitmap, <const void*>PyBytes_AS_STRING(dict_null_bytes), <size_t>expected_len)
+                        if null_bytes is not None and len(null_bytes) > 0:
+                            dict_ptr.null_bitmap = <uint8_t*>malloc(<size_t>len(null_bytes))
+                            if dict_ptr.null_bitmap == NULL:
                                 raise MemoryError()
-                            memcpy(dict_ptr.dictionary_values.null_bitmap, <const void*>PyBytes_AS_STRING(dict_null_bytes), <size_t>expected_len)
-                    if null_bytes is not None and len(null_bytes) > 0:
-                        dict_ptr.null_bitmap = <uint8_t*>malloc(<size_t>len(null_bytes))
-                        if dict_ptr.null_bitmap == NULL:
-                            raise MemoryError()
-                        memcpy(dict_ptr.null_bitmap, <const void*>PyBytes_AS_STRING(null_bytes), <size_t>len(null_bytes))
+                            memcpy(dict_ptr.null_bitmap, <const void*>PyBytes_AS_STRING(null_bytes), <size_t>len(null_bytes))
                 else:
                     vec = _build_typed_dict_vector(
                         dtype,

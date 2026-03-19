@@ -29,12 +29,12 @@ from opteryx.draken.core.buffers cimport DRAKEN_INT16
 from opteryx.draken.core.buffers cimport DRAKEN_INT32
 from opteryx.draken.core.buffers cimport DRAKEN_INT64
 from opteryx.draken.core.buffers cimport DRAKEN_STRING
+from opteryx.draken.core.buffers cimport DRAKEN_ENCODING_DICTIONARY
 from opteryx.draken.core.buffers cimport DrakenConstantStringPayload
 from opteryx.draken.core.buffers cimport DrakenFixedBuffer
 from opteryx.draken.morsels.morsel cimport Morsel
 from opteryx.draken.vectors.bool_vector cimport BoolVector
 from opteryx.draken.vectors.constant_vector cimport ConstantVector
-from opteryx.draken.vectors.dictionary_vector cimport DictionaryVector
 from opteryx.draken.vectors.float64_vector cimport Float64Vector
 from opteryx.draken.vectors.int64_vector cimport Int64Vector
 from opteryx.draken.vectors.integer_vector cimport IntegerVector
@@ -657,7 +657,7 @@ cpdef StringVector morsel_to_json_rows(
                     raise NotImplementedError(
                         f"json serialization does not support ConstantVector value type for column {col_name!r}"
                     )
-            elif isinstance(vec_obj, DictionaryVector):
+            elif getattr(vec_obj, "encoding", None) == DRAKEN_ENCODING_DICTIONARY:
                 encoder = ENC_GENERIC
             else:
                 raise NotImplementedError(

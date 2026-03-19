@@ -9,23 +9,16 @@ from opteryx.expression import NodeType
 from opteryx.expression import get_all_nodes_of_type
 
 AGGREGATORS = {
-    "ALL": "all",
-    "ANY": "any",
     "APPROX_COUNT_DISTINCT": "approx_count_distinct",
     "APPROX_PERCENTILE": "approx_percentile",
     "ARRAY_AGG": "hash_list",
     "COUNT": "count",
     "COUNT_DISTINCT": "count_distinct",
-    "HISTOGRAM": "histogram",
     "MAX": "max",
     "AVG": "mean",
     "MIN": "min",
-    "MIN_MAX": "min_max",
     "ANY_VALUE": "hash_one",
-    "PRODUCT": "product",
-    "STDDEV": "stddev",
     "SUM": "sum",
-    "VARIANCE": "variance",
 }
 
 

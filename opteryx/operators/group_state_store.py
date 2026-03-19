@@ -7,6 +7,11 @@ from __future__ import annotations
 
 from opteryx.draken.interop.arrow import vector_from_sequence
 from opteryx.draken.morsels.morsel import Morsel
+from opteryx.draken.vectors.string_vector import StringVector
+from opteryx.exceptions import UnsupportedSyntaxError
+
+# Values match the C enum in `DrakenEncoding`.
+DRAKEN_ENCODING_DICTIONARY = 1
 
 _DATA_FORMAT = "draken"
 
@@ -55,7 +60,7 @@ def normalize_aggregations(aggregations: list[object]) -> list[tuple]:
 
 
 def _is_dictionary_vector(vec: object) -> bool:
-    return vec.__class__.__name__ == "DictionaryVector"
+    return getattr(vec, "encoding", None) == DRAKEN_ENCODING_DICTIONARY
 
 
 def _is_dictionary_float_vector(vec: object) -> bool:
@@ -108,7 +113,6 @@ class ShuffleGroupByOperationV2:
         self._engine = create_group_state_engine(self.group_by_columns, self.aggregations)
         self._backend = getattr(self._engine, "backend", self._engine)
         self.readings = self._engine.readings
-        self._planned_dict_fastpath_fallbacks = 0
 
     def _record_constant_groupby_vector(self, vec) -> None:
         if vec.__class__.__name__ == "ConstantVector":
@@ -153,17 +157,21 @@ class ShuffleGroupByOperationV2:
             self._engine = GroupStateStore(self.group_by_columns, self.aggregations)
             self._backend = self._engine
             self.readings = self._engine.readings
-            if reroute_reason == "count-distinct-dense-float-value":
-                self._planned_dict_fastpath_fallbacks += 1
-        self._engine.ingest(morsel)
+
+        try:
+            self._engine.ingest(morsel)
+        except UnsupportedSyntaxError:
+            # Some shapes (e.g., unencoded string keys) are only detected at runtime
+            # in the compiled Carchar engine. If it fails, reroute to GroupStateStore
+            # and retry.
+            from opteryx.compiled.aggregations.group_state_store import GroupStateStore
+
+            self._engine = GroupStateStore(self.group_by_columns, self.aggregations)
+            self._backend = self._engine
+            self.readings = self._engine.readings
+            self._engine.ingest(morsel)
+
         self.readings = self._engine.readings
-        if (
-            self._planned_dict_fastpath_fallbacks
-            and self.readings["draken_dict_groupby_fastpath_fallbacks"] == 0
-        ):
-            self.readings["draken_dict_groupby_fastpath_fallbacks"] += (
-                self._planned_dict_fastpath_fallbacks
-            )
 
     def _group_state_store_reason_for_morsel(self, morsel: Morsel) -> str | None:
         if self._engine.__class__.__name__ != "CarcharGroupStateEngine":
@@ -174,7 +182,13 @@ class ShuffleGroupByOperationV2:
             return None
 
         for group_column in self.group_by_columns:
-            if _is_dictionary_float_vector(morsel.column(group_column)):
+            group_vec = morsel.column(group_column)
+            # Carchar only supports native encoded storage for string keys.
+            # If a string key arrives as a plain StringVector (non-dictionary),
+            # we must reroute to GroupStateStore to avoid runtime errors.
+            if isinstance(group_vec, StringVector) and not _is_dictionary_vector(group_vec):
+                return "string-key-not-encoded"
+            if _is_dictionary_float_vector(group_vec):
                 return "dict-float-key"
 
         for _, function, column, *_ in self.aggregations:

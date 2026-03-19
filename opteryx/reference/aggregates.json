@@ -1,0 +1,188 @@
+{
+    "ANY_VALUE": {
+        "ast_symbol": "ANY_VALUE",
+        "friendly_name": "Any Value",
+        "kernel_name": "hash_one",
+        "category": "selection",
+        "status": "active",
+        "summary": "Returns one non-null value from the input set.",
+        "description": "Returns one non-null value from the input set.",
+        "documentation": "Useful when a grouped query only needs one representative value from each group.",
+        "sql_forms": [
+            "ANY_VALUE(expr)"
+        ],
+        "support": {
+            "global": false,
+            "grouped": true,
+            "strict_grouped": true
+        }
+    },
+    "APPROX_COUNT_DISTINCT": {
+        "ast_symbol": "APPROX_COUNT_DISTINCT",
+        "friendly_name": "Approximate Count Distinct",
+        "kernel_name": "approx_count_distinct",
+        "category": "approximate",
+        "status": "active",
+        "summary": "Estimates the number of distinct input values.",
+        "description": "Estimates the number of distinct input values.",
+        "documentation": "Uses a sketch-based estimator instead of exact deduplication.",
+        "sql_forms": [
+            "APPROX_COUNT_DISTINCT(expr)"
+        ],
+        "support": {
+            "global": true,
+            "grouped": true,
+            "strict_grouped": true
+        }
+    },
+    "APPROX_PERCENTILE": {
+        "ast_symbol": "APPROX_PERCENTILE",
+        "friendly_name": "Approximate Percentile",
+        "kernel_name": "approx_percentile",
+        "category": "approximate",
+        "status": "active",
+        "summary": "Estimates a percentile using sketch-based aggregation.",
+        "description": "Estimates a percentile using sketch-based aggregation.",
+        "documentation": "Accepts an input expression and a percentile literal between 0.0 and 1.0.",
+        "sql_forms": [
+            "APPROX_PERCENTILE(expr, percentile)"
+        ],
+        "support": {
+            "global": true,
+            "grouped": true,
+            "strict_grouped": true
+        }
+    },
+    "ARRAY_AGG": {
+        "ast_symbol": "ARRAY_AGG",
+        "friendly_name": "Array Aggregate",
+        "kernel_name": "hash_list",
+        "category": "collection",
+        "status": "active",
+        "summary": "Collects input values into an array.",
+        "description": "Collects input values into an array.",
+        "documentation": "Supports DISTINCT, ORDER BY, and LIMIT forms in the aggregate surface.",
+        "sql_forms": [
+            "ARRAY_AGG(expr)",
+            "ARRAY_AGG(DISTINCT expr)",
+            "ARRAY_AGG(expr LIMIT n)",
+            "ARRAY_AGG(expr ORDER BY expr [ASC|DESC] LIMIT n)"
+        ],
+        "support": {
+            "global": true,
+            "grouped": true,
+            "strict_grouped": true
+        }
+    },
+    "AVG": {
+        "ast_symbol": "AVG",
+        "friendly_name": "Average",
+        "kernel_name": "mean",
+        "category": "numeric",
+        "status": "active",
+        "summary": "Computes the arithmetic mean of the input values.",
+        "description": "Computes the arithmetic mean of the input values.",
+        "documentation": "Ignores nulls and divides the running sum by the number of non-null values.",
+        "sql_forms": [
+            "AVG(expr)"
+        ],
+        "support": {
+            "global": true,
+            "grouped": true,
+            "strict_grouped": true
+        }
+    },
+    "COUNT": {
+        "ast_symbol": "COUNT",
+        "friendly_name": "Count",
+        "kernel_name": "count",
+        "category": "counting",
+        "status": "active",
+        "summary": "Counts rows or non-null input values.",
+        "description": "Counts rows or non-null input values.",
+        "documentation": "COUNT(*) counts rows, while COUNT(expr) counts non-null values.",
+        "sql_forms": [
+            "COUNT(*)",
+            "COUNT(expr)",
+            "COUNT(DISTINCT expr)"
+        ],
+        "support": {
+            "global": true,
+            "grouped": true,
+            "strict_grouped": true
+        }
+    },
+    "COUNT_DISTINCT": {
+        "ast_symbol": "COUNT_DISTINCT",
+        "friendly_name": "Count Distinct",
+        "kernel_name": "count_distinct",
+        "category": "counting",
+        "status": "active",
+        "summary": "Counts distinct non-null input values.",
+        "description": "Counts distinct non-null input values.",
+        "documentation": "Exact distinct count over the non-null input values.",
+        "sql_forms": [
+            "COUNT_DISTINCT(expr)",
+            "COUNT(DISTINCT expr)"
+        ],
+        "support": {
+            "global": true,
+            "grouped": true,
+            "strict_grouped": true
+        }
+    },
+    "MAX": {
+        "ast_symbol": "MAX",
+        "friendly_name": "Maximum",
+        "kernel_name": "max",
+        "category": "extrema",
+        "status": "active",
+        "summary": "Returns the largest non-null input value.",
+        "description": "Returns the largest non-null input value.",
+        "documentation": "Returns the greatest comparable non-null value encountered.",
+        "sql_forms": [
+            "MAX(expr)"
+        ],
+        "support": {
+            "global": true,
+            "grouped": true,
+            "strict_grouped": true
+        }
+    },
+    "MIN": {
+        "ast_symbol": "MIN",
+        "friendly_name": "Minimum",
+        "kernel_name": "min",
+        "category": "extrema",
+        "status": "active",
+        "summary": "Returns the smallest non-null input value.",
+        "description": "Returns the smallest non-null input value.",
+        "documentation": "Returns the smallest comparable non-null value encountered.",
+        "sql_forms": [
+            "MIN(expr)"
+        ],
+        "support": {
+            "global": true,
+            "grouped": true,
+            "strict_grouped": true
+        }
+    },
+    "SUM": {
+        "ast_symbol": "SUM",
+        "friendly_name": "Sum",
+        "kernel_name": "sum",
+        "category": "numeric",
+        "status": "active",
+        "summary": "Sums the input values.",
+        "description": "Sums the input values.",
+        "documentation": "Nulls are ignored; non-null values are accumulated.",
+        "sql_forms": [
+            "SUM(expr)"
+        ],
+        "support": {
+            "global": true,
+            "grouped": true,
+            "strict_grouped": true
+        }
+    }
+}

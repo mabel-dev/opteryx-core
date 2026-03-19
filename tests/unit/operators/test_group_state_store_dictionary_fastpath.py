@@ -94,6 +94,12 @@ def test_dictionary_groupby_count_distinct_fallback_for_unsupported_value_type()
     assert op.readings["draken_dict_groupby_fastpath_hits"] == 0
     assert op.readings["draken_dict_groupby_fastpath_fallbacks"] == 1
 
+    # The operation prefers Carchar until it detects an unsupported float/dict
+    # shape, at which point it reroutes to GroupStateStore. The telemetry should
+    # reflect the actual engine used, not a mixed/contaminated counter state.
+    assert op.readings["feature_groupby_engine_carchar"] == 0
+    assert op.readings["feature_groupby_engine_group_state_store"] == 1
+
 
 def test_numeric_dictionary_groupby_count_star_fastpath_hit():
     key = pa.DictionaryArray.from_arrays(

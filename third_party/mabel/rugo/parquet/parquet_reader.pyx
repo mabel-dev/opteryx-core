@@ -97,7 +97,6 @@ from opteryx.draken.vectors.string_vector cimport (
     StringVectorBuilder,
     from_dict_buffers as string_from_dict_buffers,
 )
-from opteryx.draken.vectors.dictionary_vector cimport DictionaryVector
 from opteryx.draken.vectors.bool_vector cimport BoolVector, bool_vector_from_bits
 from opteryx.draken.core.buffers cimport (
     DRAKEN_FLOAT32,
@@ -1100,167 +1099,29 @@ cdef StringVector _make_typed_string_dictionary_vector(
     return string_from_dict_buffers(codes, dict_offsets, dict_lengths, arena_bytes, validity)
 
 
-cdef DictionaryVector _make_dictionary_vector(
+cdef Vector _make_dictionary_vector(
         parquet_reader.DecodedColumn& decoded_col,
         int32_t num_rows):
-    """Build a DictionaryVector from decoded parquet dictionary payload."""
+    """Build a dictionary-encoded Vector from decoded parquet dictionary payload.
+
+    This is a compatibility shim that delegates to the typed dictionary
+    constructors (e.g. :meth:`Int64Vector.from_dict`). This avoids exposing
+    ``DictionaryVector`` as part of the public/parquet path.
+    """
     cdef bytes col_type = decoded_col.type
-    cdef Py_ssize_t dict_size = 0
-    cdef Py_ssize_t i
-    cdef Py_ssize_t val_idx
-    cdef Py_ssize_t nb_bytes
-    cdef uint8_t* nb
-    cdef uint8_t code_width
-    cdef int32_t code
-    cdef Py_ssize_t dict_bytes = 0
-    cdef int32_t itemsize = 0
-    cdef int dict_value_type = DRAKEN_STRING
-    cdef DictionaryVector vec
-    cdef uint8_t* code_u8
-    cdef uint16_t* code_u16
-    cdef uint32_t* code_u32
-    cdef uint8_t bit
-    cdef uint8_t byte
-    cdef int32_t running = 0
 
     if col_type == b"byte_array":
-        dict_size = decoded_col.string_dict_lens.size()
-        dict_bytes = decoded_col.string_dict_arena.size()
-        dict_value_type = DRAKEN_STRING
+        return _make_typed_string_dictionary_vector(decoded_col, num_rows)
     elif col_type == b"int32":
-        dict_size = decoded_col.dict_int32_values.size()
-        itemsize = sizeof(int32_t)
-        dict_bytes = dict_size * itemsize
-        dict_value_type = DRAKEN_INT32
+        return _make_typed_int64_from_int32_dictionary_vector(decoded_col, num_rows)
     elif col_type == b"int64":
-        dict_size = decoded_col.dict_int64_values.size()
-        itemsize = sizeof(int64_t)
-        dict_bytes = dict_size * itemsize
-        dict_value_type = DRAKEN_INT64
+        return _make_typed_int64_dictionary_vector(decoded_col, num_rows)
     elif col_type == b"float32":
-        dict_size = decoded_col.dict_float32_values.size()
-        itemsize = sizeof(float)
-        dict_bytes = dict_size * itemsize
-        dict_value_type = DRAKEN_FLOAT32
+        return _make_typed_float64_from_float32_dictionary_vector(decoded_col, num_rows)
     elif col_type == b"float64":
-        dict_size = decoded_col.dict_float64_values.size()
-        itemsize = sizeof(double)
-        dict_bytes = dict_size * itemsize
-        dict_value_type = DRAKEN_FLOAT64
-    else:
-        raise ValueError(f"unsupported dictionary type for decoded column: {col_type!r}")
+        return _make_typed_float64_dictionary_vector(decoded_col, num_rows)
 
-    if dict_size == 0:
-        raise ValueError("dictionary vector requires non-empty dictionary")
-
-    code_width = decoded_col.code_width if decoded_col.code_width in (1, 2, 4) else _code_width_from_dict_size(dict_size)
-    if dict_bytes == 0:
-        dict_bytes = 1
-
-    vec = DictionaryVector(
-        <size_t>num_rows,
-        <size_t>dict_size,
-        <size_t>dict_bytes,
-        code_width,
-        bool(decoded_col.dict_ordered),
-        dict_value_type,
-    )
-
-    if dict_value_type == DRAKEN_STRING:
-        # Copy dictionary bytes
-        if decoded_col.string_dict_arena.size() > 0:
-            memcpy(
-                vec.ptr.dictionary_values.data,
-                decoded_col.string_dict_arena.data(),
-                <size_t>decoded_col.string_dict_arena.size(),
-            )
-
-        # Convert [offset, len] pairs to Arrow-style cumulative offsets.
-        vec.ptr.dictionary_values.offsets[0] = 0
-        running = 0
-        for i in range(dict_size):
-            running += decoded_col.string_dict_lens[i]
-            vec.ptr.dictionary_values.offsets[i + 1] = running
-    else:
-        if dict_value_type == DRAKEN_INT32:
-            memcpy(
-                vec.ptr.dictionary_values.data,
-                decoded_col.dict_int32_values.data(),
-                <size_t>dict_bytes,
-            )
-        elif dict_value_type == DRAKEN_INT64:
-            memcpy(
-                vec.ptr.dictionary_values.data,
-                decoded_col.dict_int64_values.data(),
-                <size_t>dict_bytes,
-            )
-        elif dict_value_type == DRAKEN_FLOAT32:
-            memcpy(
-                vec.ptr.dictionary_values.data,
-                decoded_col.dict_float32_values.data(),
-                <size_t>dict_bytes,
-            )
-        elif dict_value_type == DRAKEN_FLOAT64:
-            memcpy(
-                vec.ptr.dictionary_values.data,
-                decoded_col.dict_float64_values.data(),
-                <size_t>dict_bytes,
-            )
-        for i in range(dict_size + 1):
-            vec.ptr.dictionary_values.offsets[i] = <int32_t>(i * itemsize)
-
-    if decoded_col.valid_bits.size() > 0:
-        nb_bytes = (num_rows + 7) >> 3
-        nb = <uint8_t*> malloc(nb_bytes)
-        if nb == NULL:
-            raise MemoryError()
-        memcpy(nb, decoded_col.valid_bits.data(), nb_bytes)
-        vec.ptr.null_bitmap = nb
-
-    val_idx = 0
-    code_u8 = <uint8_t*>vec.ptr.codes
-    code_u16 = <uint16_t*>vec.ptr.codes
-    code_u32 = <uint32_t*>vec.ptr.codes
-
-    if decoded_col.valid_bits.size() > 0:
-        for i in range(num_rows):
-            byte = decoded_col.valid_bits[i >> 3]
-            bit = (byte >> (i & 7)) & 1
-            if bit:
-                if val_idx >= decoded_col.dict_indices.size():
-                    raise ValueError("dictionary index stream shorter than number of valid rows")
-                code = decoded_col.dict_indices[val_idx]
-                val_idx += 1
-                if code < 0 or code >= dict_size:
-                    raise ValueError(f"dictionary index out of bounds at row {i}: {code}")
-            else:
-                code = 0
-
-            if code_width == 1:
-                code_u8[i] = <uint8_t>code
-            elif code_width == 2:
-                code_u16[i] = <uint16_t>code
-            else:
-                code_u32[i] = <uint32_t>code
-    else:
-        if decoded_col.dict_indices.size() != num_rows:
-            raise ValueError("dictionary index stream length does not match row count")
-        for i in range(num_rows):
-            code = decoded_col.dict_indices[i]
-            if code < 0 or code >= dict_size:
-                raise ValueError(f"dictionary index out of bounds at row {i}: {code}")
-            if code_width == 1:
-                code_u8[i] = <uint8_t>code
-            elif code_width == 2:
-                code_u16[i] = <uint16_t>code
-            else:
-                code_u32[i] = <uint32_t>code
-
-    _TEL["parquet_dict_columns_decoded"] += 1
-    _TEL["parquet_dict_unique_values"] += dict_size
-    _TEL["parquet_dict_code_width_bytes"] += code_width
-
-    return vec
+    raise ValueError(f"unsupported dictionary type for decoded column: {col_type!r}")
 
 
 cdef BoolVector _make_bool_vector(

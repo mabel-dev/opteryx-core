@@ -925,8 +925,18 @@ def json_access(branch, alias: Optional[List[str]] = None, key=None):
     identifier_node = build(branch["value"])
     key_node = build(branch["path"]["path"][0]["Bracket"]["key"])
 
-    if key_node.node_type == NodeType.IDENTIFIER or key_node.type != OrsoTypes.INTEGER:
-        raise UnsupportedSyntaxError("Subscript values must be integer literals, use `->` to access JSON fields.")
+    from opteryx.exceptions import IncorrectTypeError
+    from opteryx.exceptions import UnsupportedSyntaxError
+
+    if key_node.node_type == NodeType.IDENTIFIER:
+        raise UnsupportedSyntaxError(
+            "Subscript values must be integer literals, use `->` to access JSON fields."
+        )
+
+    if key_node.type != OrsoTypes.INTEGER:
+        raise IncorrectTypeError(
+            "Subscript values must be integer literals, use `->` to access JSON fields."
+        )
 
     key_value = key_node.value
     if isinstance(key_value, str):

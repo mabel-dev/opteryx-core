@@ -5,8 +5,18 @@ from pathlib import Path
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
+from opteryx.reference import export_aggregate_catalog
 from opteryx.reference import export_operator_catalog
 from opteryx.reference import export_type_catalog
+
+
+def test_aggregate_catalog_json_matches_export():
+    catalog_path = Path(__file__).resolve().parents[3] / "opteryx/reference/aggregates.json"
+
+    expected = export_aggregate_catalog()
+    actual = json.loads(catalog_path.read_text(encoding="utf8"))
+
+    assert actual == expected
 
 
 def test_type_catalog_json_matches_export():
@@ -130,3 +140,35 @@ def test_operator_catalog_includes_binder_matrix_metadata():
         "result_type_is_dynamic": False,
         "cost_estimate": 100.0,
     } in xor_operator["signatures"]
+
+
+def test_aggregate_catalog_includes_execution_support():
+    catalog = export_aggregate_catalog()
+
+    count = catalog["COUNT"]
+    assert count["ast_symbol"] == "COUNT"
+    assert count["friendly_name"] == "Count"
+    assert count["kernel_name"] == "count"
+    assert count["category"] == "counting"
+    assert count["status"] == "active"
+    assert count["support"]["global"] is True
+    assert count["support"]["grouped"] is True
+    assert count["sql_forms"] == ["COUNT(*)", "COUNT(expr)", "COUNT(DISTINCT expr)"]
+
+    any_value = catalog["ANY_VALUE"]
+    assert any_value["kernel_name"] == "hash_one"
+    assert any_value["support"]["global"] is False
+    assert any_value["support"]["grouped"] is True
+    assert any_value["status"] == "active"
+    assert set(catalog) == {
+        "ANY_VALUE",
+        "APPROX_COUNT_DISTINCT",
+        "APPROX_PERCENTILE",
+        "ARRAY_AGG",
+        "AVG",
+        "COUNT",
+        "COUNT_DISTINCT",
+        "MAX",
+        "MIN",
+        "SUM",
+    }
