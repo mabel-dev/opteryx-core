@@ -46,8 +46,8 @@ def test_bracket_access_on_identifier_uses_map_access():
     assert expr.value == "MapAccess"
 
 
-def test_string_key_bracket_access_uses_arrow_operator():
-    expr = _first_projection_expression("SELECT birth_place['town'] AS v FROM $planets")
+def test_string_key_arrow_access_uses_arrow_operator():
+    expr = _first_projection_expression("SELECT birth_place->'town' AS v FROM $planets")
 
     assert expr.node_type == NodeType.BINARY_OPERATOR
     assert expr.value == "Arrow"

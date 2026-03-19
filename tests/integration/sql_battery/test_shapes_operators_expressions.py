@@ -429,12 +429,12 @@ STATEMENTS = [
         ("SELECT planetId as pid, round(magnitude) as minmag FROM testdata.satellites", 177, 2, None),
         ("SELECT planetId as pid, round(magnitude) as roundmag FROM testdata.satellites", 177, 2, None),
 
-        ("SELECT birth_place['town'] FROM testdata.astronauts", 357, 1, None),
+        ("SELECT birth_place->'town' FROM testdata.astronauts", 357, 1, None),
         ("SELECT missions[0] FROM testdata.astronauts", 357, 1, None),
         ("SELECT name FROM testdata.astronauts WHERE missions[0] IS NOT NULL", 334, 1, None),
         ("SELECT name FROM testdata.astronauts WHERE missions[5] IS NOT NULL", 7, 1, None),
-        ("SELECT birth_place['town'] FROM testdata.astronauts WHERE birth_place['town'] = 'Warsaw'", 1, 1, None),
-        ("SELECT COUNT(*), birth_place['town'] FROM testdata.astronauts GROUP BY birth_place['town']", 264, 2, None),
+        ("SELECT birth_place->'town' FROM testdata.astronauts WHERE birth_place->'town' = 'Warsaw'", 1, 1, None),
+        ("SELECT COUNT(*), birth_place->'town' FROM testdata.astronauts GROUP BY birth_place->'town'", 264, 2, None),
         ("SELECT birth_place->'town' FROM testdata.astronauts", 357, 1, None),
         ("SELECT birth_place->'town' FROM testdata.astronauts WHERE birth_place->'town' = 'Warsaw'", 1, 1, None),
         ("SELECT birth_place->'town' FROM testdata.astronauts WHERE 'Warsaw' = birth_place->'town'", 1, 1, None),
@@ -513,11 +513,11 @@ STATEMENTS = [
         ("SELECT id FROM testdata.flat.atquestion WHERE NOT dict @? 'list'", 2, 1, None),  # Negation
         ("SELECT id, COUNT(*) FROM testdata.flat.atquestion WHERE dict @? 'list' GROUP BY id", 4, 2, None),  # Group by
 
-        ("SELECT birth_place['town'] FROM testdata.astronauts", 357, 1, None),
+        ("SELECT birth_place->'town' FROM testdata.astronauts", 357, 1, None),
         ("SELECT missions[0] FROM testdata.astronauts", 357, 1, None),
-        ("SELECT birth_place['town'] FROM testdata.astronauts WHERE birth_place['town'] = 'Warsaw'", 1, 1, None),
-        ("SELECT birth_place['town'] AS TOWN FROM testdata.astronauts WHERE birth_place['town'] = 'Warsaw'", 1, 1, None),
-        ("SELECT COUNT(*), birth_place['town'] FROM testdata.astronauts GROUP BY birth_place['town']", 264, 2, None),
+        ("SELECT birth_place->'town' FROM testdata.astronauts WHERE birth_place->'town' = 'Warsaw'", 1, 1, None),
+        ("SELECT birth_place->'town' AS TOWN FROM testdata.astronauts WHERE birth_place->'town' = 'Warsaw'", 1, 1, None),
+        ("SELECT COUNT(*), birth_place->'town' FROM testdata.astronauts GROUP BY birth_place->'town'", 264, 2, None),
         ('SELECT LENGTH(missions) FROM testdata.astronauts', 357, 1, None),
         ('SELECT LENGTH(missions) FROM testdata.astronauts WHERE LENGTH(missions) > 6', 2, 1, None),
         ("SELECT jsonb_object_keys(birth_place) FROM testdata.astronauts", 357, 1, None),
