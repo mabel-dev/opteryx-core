@@ -9,6 +9,7 @@ import sys
 sys.path.insert(1, os.path.join(sys.path[0], "../../../.."))
 
 from opteryx.draken import Morsel
+from opteryx.operators.group_state_store import DRAKEN_ENCODING_DICTIONARY
 from opteryx.draken.vectors.constant_vector import from_scalar as constant_from_scalar
 
 
@@ -88,7 +89,7 @@ def test_morsel_io_round_trip_dictionary_column(tmp_path):
 
     assert stats["rows"] == original.num_rows
     assert stats["columns"] == original.num_columns
-    assert restored.column(b"k").__class__.__name__ == "DictionaryVector"
+    assert restored.column(b"k").encoding == DRAKEN_ENCODING_DICTIONARY
     assert _as_py_columns(restored) == _as_py_columns(original)
 
 
@@ -104,7 +105,7 @@ def test_morsel_io_round_trip_numeric_dictionary_column(tmp_path):
 
     assert stats["rows"] == original.num_rows
     assert stats["columns"] == original.num_columns
-    assert restored.column(b"k").__class__.__name__ == "DictionaryVector"
+    assert restored.column(b"k").encoding == DRAKEN_ENCODING_DICTIONARY
     assert _as_py_columns(restored) == _as_py_columns(original)
 
 

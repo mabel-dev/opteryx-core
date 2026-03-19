@@ -35,6 +35,12 @@ typedef enum {
     DRAKEN_NON_NATIVE     = 100,  // Unoptimized or fallback-wrapped Arrow types
 } DrakenType;
 
+typedef enum {
+    DRAKEN_ENCODING_DENSE      = 0,
+    DRAKEN_ENCODING_DICTIONARY = 1,
+    DRAKEN_ENCODING_RLE        = 2,
+} DrakenEncoding;
+
 typedef struct {
     void* data;               // int64_t*, double*, etc.
     uint8_t* null_bitmap;     // optional, 1 bit per row

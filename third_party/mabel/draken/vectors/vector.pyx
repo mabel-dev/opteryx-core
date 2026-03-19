@@ -22,7 +22,7 @@ types (Int64Vector, StringVector, etc.) implement.
 from libc.stdint cimport uint64_t, int64_t, uint8_t
 from cpython.mem cimport PyMem_Calloc
 
-from opteryx.draken.core.buffers cimport DictAccessor
+from opteryx.draken.core.buffers cimport DictAccessor, DrakenEncoding, DRAKEN_ENCODING_DENSE, DRAKEN_ENCODING_DICTIONARY
 from opteryx.draken.interop.arrow cimport vector_from_arrow
 from opteryx.compiled.structures.relation_statistics cimport to_int
 
@@ -49,6 +49,19 @@ cdef class Vector:
         raise TypeError(
             f"{cls.__name__}.from_arrow cannot wrap Arrow type {arrow_array.type} as {cls.__name__}"
         )
+
+    @property
+    def encoding(self):
+        """Return the storage encoding of this vector.
+
+        This facilitates a single per-morsel branch for dispatching between
+        dense and dictionary paths. The current implementation only distinguishes
+        dictionary vs. dense.
+        """
+        cdef DictAccessor* da = self.dict_accessor()
+        if da != NULL:
+            return DRAKEN_ENCODING_DICTIONARY
+        return DRAKEN_ENCODING_DENSE
 
     cpdef object null_bitmap(self):
         """Return the null bitmap for this vector, or ``None`` when the vector has no nulls."""

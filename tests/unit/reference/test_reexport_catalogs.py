@@ -6,6 +6,7 @@ def test_reexport_reference_catalogs_writes_expected_targets(tmp_path):
     output_paths = reexport_reference_catalogs(tmp_path)
 
     assert output_paths == {
+        "aggregates": tmp_path / "opteryx/reference/aggregates.json",
         "operators": tmp_path / "opteryx/reference/operators.json",
         "types": tmp_path / "opteryx/reference/types.json",
         "functions": tmp_path / "opteryx/functions/function_signatures.json",

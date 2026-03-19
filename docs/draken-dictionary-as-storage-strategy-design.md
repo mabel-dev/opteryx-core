@@ -3,6 +3,25 @@
 ## Status
 Active — Phase 1 and Phase 2 are complete; Phase 3 cleanup is in progress.
 
+### Progress checklist
+- [x] `DictAccessor` added to Draken buffer declarations
+- [x] `DictionaryVector.dict_accessor()` implemented and returns a view over the dictionary buffer
+- [x] Dense vectors expose `dense_ptr()` and `null_bitmap_ptr()` for direct bulk access
+- [x] Evaluator package split into named modules while preserving the public API surface
+- [x] Carchar key ingestion and dictionary-backed value routing use accessor paths
+- [x] `carchar_group_state_engine.pyx` no longer checks `DictionaryVector` directly
+- [x] Typed vectors expose `from_dict(...)` constructors and deny dictionary Arrow in `from_arrow(...)`
+- [x] `.encoding` discriminant property / `DrakenEncoding` enum implemented (dictionary vs dense)
+- [x] Parquet dictionary decode emits typed vectors instead of `DictionaryVector` (all dictionary-decoding paths now return `Int64Vector`/`Float64Vector`/`StringVector` where supported).
+- [x] CSV/JSON writers, and carchar no longer use `isinstance(..., DictionaryVector)` checks
+- [x] Identify remaining references to DictionaryVector; verify encoding dispatch is used where possible and document outstanding legacy uses (DRKM storage, dictionary decoder, date_part kernels).
+- [ ] Remove `DictionaryVector`
+- [x] Telemetry is stabilized and matches the actual execution path
+  - Add unit coverage ensuring `feature_groupby_engine_*` counters reflect the engine actually selected (Carchar vs GroupStateStore vs constant/multi-key variants).
+  - Ensure `draken_dict_groupby_fastpath_hits` / `draken_dict_groupby_fastpath_fallbacks` only increment on actual fastpath hit/fallback (not planned-only) across reroutes.
+  - Ensure `ShuffleGroupByOperationV2` reports `feature_groupby_engine_*` for whichever engine actually executes (no leftover Carchar hits after rerouting to GroupStateStore).
+  - Audit and remove any remaining legacy telemetry keys that no longer correspond to an execution path.
+
 Current implementation snapshot:
 - `DictAccessor` has been added to the Draken buffer declarations.
 - `DictionaryVector.dict_accessor()` is implemented and returns a view over the existing dictionary buffer.
@@ -15,14 +34,15 @@ Current implementation snapshot:
 - Python-layer expression/function/operator call sites that previously special-cased dictionary encoding have been moved to accessor- or Arrow-shape-based logic.
 - The grouped-aggregation planner no longer forces `COUNT(*)` to the older `GroupStateStore` backend solely because the aggregation column is `None`.
 - Group-by telemetry now distinguishes `CarcharGroupStateEngine` from `GroupStateStore` explicitly; the old `legacy` label has been removed.
+- `draken_dict_groupby_fastpath_fallbacks` is now recorded deterministically only when the fallback actually occurs (no longer gated on prior counter value).
 - Typed vector classes now expose explicit `from_dict(...)` constructors rather than overloading `from_arrow(...)` with dictionary semantics.
 - Typed `from_arrow(...)` paths have been narrowed back to dense Arrow interop; dictionary Arrow arrays are rejected and must not be treated as the storage constructor shape.
-- Vectors do not yet expose a `.encoding` discriminant property; consumers must still call `dict_accessor()` (or inspect vector types) to detect dictionary encoding.
+- Vectors expose a `.encoding` property returning a `DrakenEncoding` enum; current implementation distinguishes dictionary vs dense (future work: RLE). This enables a single per-morsel branch for encoding dispatch without `isinstance()`.
 - The fixed-width typed `from_dict(...)` constructors now use typed Cython memoryviews internally for codes, dictionary payloads, and row validity instead of generic Python-object indexing in the hot construction path.
 - `StringVector` exposes a raw dictionary-storage constructor (`from_dict_buffers()`), but some calling sites still materialize dictionaries through Python objects.
 - Parquet dictionary decode still produces `DictionaryVector` in most paths; the current work is to migrate decoder callsites onto typed `from_dict(...)` constructors so numeric and string dict columns no longer require a `DictionaryVector` intermediate.
 - `StringVector.from_dict(...)` and nullable string dictionary construction now precompute byte capacity correctly before writing into the builder.
-- Some I/O writers (CSV/JSON) still perform `isinstance(..., DictionaryVector)` checks; those are targeted for migration to accessor/typed-vector logic.
+- I/O writers (CSV/JSON) and DRKM morsel writer now use `.encoding`/`dict_accessor()` for dictionary dispatch instead of `isinstance(..., DictionaryVector)`.
 - The non-Carchar grouped-aggregation fast paths in `GroupStateStore` and the specialized single-key kernels now detect dictionary encoding through `dict_accessor()` instead of requiring a concrete `DictionaryVector` instance.
 
 Focused validation snapshot:
@@ -32,9 +52,14 @@ Focused validation snapshot:
 
 Immediate next work:
 - Continue Phase 3 by removing the remaining non-Carchar `DictionaryVector` assumptions in joins, vector ops, and IO that still dispatch on the storage class instead of `dict_accessor()`.
+  - Refactor DRKM morsel reader/writer to avoid constructing/inspecting `DictionaryVector` and instead use typed vectors + `.encoding`/`dict_accessor()` dispatch.
+  - Migrate the Parquet dictionary decoder to emit typed dictionary-backed vectors (`*.from_dict(...)`) rather than `DictionaryVector`.
+  - Update `vector_date_part.pyx`/compiled kernels to use `.encoding` dispatch (or expose required `dict_accessor()`-style APIs) so dictionary paths do not rely on `DictionaryVector`.
+  - Audit and update tests that assert `DictionaryVector` at runtime (class name checks, `isinstance()` guards, etc.), replacing them with encoding/typed-vector expectations.
 - Add a `.encoding` discriminant (or equivalent) so callers can cheaply dispatch to dense vs dictionary paths without needing `isinstance()` for dict vectors.
 - Stabilize planner and telemetry behavior for dictionary-backed group-by paths so readings continue to match actual engine selection and fastpath use.
 - Make unsupported dictionary float shapes plan explicitly to `GroupStateStore` instead of selecting Carchar and then erroring at runtime.
+- Add runtime Carchar fallback: if the compiled group-by engine errors due to unsupported string-key shapes, reroute to `GroupStateStore` and continue execution.
 - Keep the remaining Abseil-backed distinct sets inside Carchar out of this track; that is a separate problem from dictionary encoding.
 
 Interpretation note:
@@ -143,9 +168,9 @@ if da != NULL:
 
 The type-dispatch happens once when entering the loop, not once per row.
 
-## Encoding Property
+## Encoding Property (Current Implementation)
 
-Each vector exposes a read-only `.encoding` property returning a `DrakenEncoding` enum:
+Each vector exposes a read-only `.encoding` property returning a `DrakenEncoding` enum. The current implementation distinguishes dictionary vs dense encodings; RLE support is planned.
 
 ```cython
 ctypedef enum DrakenEncoding:
@@ -336,8 +361,9 @@ Handoff note for next implementer:
 - The dictionary spill/DRKM work is stable in focused and shuffle/group-by suites; avoid refactoring that path until SQL regressions are green.
 
 ### Phase 3 — Remove DictionaryVector
-- Delete public class.
-- Fix any remaining isinstance checks in non-Carchar code.
+- Convert remaining tests and call sites that explicitly check for the `DictionaryVector` class to use `.encoding` / `dict_accessor()` semantics.
+- Delete public class once clients no longer rely on it.
+- Fix any remaining `isinstance(..., DictionaryVector)` or `.__class__.__name__ == "DictionaryVector"` usage in non-Carchar code.
 
 Phase 1 is done. Phase 2 is the active transition track. Phase 3 remains cleanup after the typed-vector backend is stable and the remaining fallback/planner issues are closed.
 

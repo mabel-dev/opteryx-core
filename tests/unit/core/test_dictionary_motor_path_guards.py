@@ -51,7 +51,7 @@ def test_parquet_dictionary_decode_is_not_runtime_feature_gated_anymore():
     section = _slice_between(
         text,
         "cdef inline bint _should_emit_dictionary_vector(",
-        "cdef DictionaryVector _make_dictionary_vector(",
+        "cdef Vector _make_dictionary_vector(",
     )
     assert "features.parquet_native_dictionary" not in section
 
