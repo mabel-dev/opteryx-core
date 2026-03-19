@@ -1477,7 +1477,7 @@ cdef class DictionaryVector(Vector):
         else:
             dst.codes = NULL
 
-        if src.null_bitmap != NULL and n > 0:
+        if n > 0:
             out_nb_size = (n + 7) >> 3
             out_null = <uint8_t*>malloc(out_nb_size)
             if out_null == NULL:

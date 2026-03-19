@@ -15,6 +15,10 @@ Active — Phase 1 and Phase 2 are complete; Phase 3 cleanup is in progress.
 - [x] Parquet dictionary decode emits typed vectors instead of `DictionaryVector` (all dictionary-decoding paths now return `Int64Vector`/`Float64Vector`/`StringVector` where supported).
 - [x] CSV/JSON writers, and carchar no longer use `isinstance(..., DictionaryVector)` checks
 - [x] Identify remaining references to DictionaryVector; verify encoding dispatch is used where possible and document outstanding legacy uses (DRKM storage, dictionary decoder, date_part kernels).
+- [x] Int64 `DATEPART` kernels preserve dictionary encoding for sub-second and calendar units without `DictionaryVector`-specific compiled paths
+- [x] Legacy compiled `DictionaryVector` `DATEPART` helpers removed after typed-dispatch takeover
+- [x] DRKM numeric dictionary round-trips restore through typed dictionary-backed vectors again
+- [x] Morsel alignment no longer special-cases `DictionaryVector` in the fast-path/null-padding logic
 - [ ] Remove `DictionaryVector`
 - [x] Telemetry is stabilized and matches the actual execution path
   - Add unit coverage ensuring `feature_groupby_engine_*` counters reflect the engine actually selected (Carchar vs GroupStateStore vs constant/multi-key variants).
@@ -39,22 +43,31 @@ Current implementation snapshot:
 - Typed `from_arrow(...)` paths have been narrowed back to dense Arrow interop; dictionary Arrow arrays are rejected and must not be treated as the storage constructor shape.
 - Vectors expose a `.encoding` property returning a `DrakenEncoding` enum; current implementation distinguishes dictionary vs dense (future work: RLE). This enables a single per-morsel branch for encoding dispatch without `isinstance()`.
 - The fixed-width typed `from_dict(...)` constructors now use typed Cython memoryviews internally for codes, dictionary payloads, and row validity instead of generic Python-object indexing in the hot construction path.
-- `StringVector` exposes a raw dictionary-storage constructor (`from_dict_buffers()`), but some calling sites still materialize dictionaries through Python objects.
-- Parquet dictionary decode still produces `DictionaryVector` in most paths; the current work is to migrate decoder callsites onto typed `from_dict(...)` constructors so numeric and string dict columns no longer require a `DictionaryVector` intermediate.
+- `StringVector` exposes a raw dictionary-buffer decode constructor (`from_dict_buffers()`), but it still materializes dense strings rather than preserving dictionary storage.
+- DRKM numeric dictionary restore now round-trips back into typed dictionary-backed `Int64Vector`/`Float64Vector` storage without the stale post-restore validation path that had been rejecting valid payloads.
+- Morsel alignment now relies on generic vector null-bitmap hooks rather than explicit `DictionaryVector` branches; `DictionaryVector.take()` always allocates an output row-null bitmap so negative-index null padding works generically.
+- The remaining live DRKM `DictionaryVector` construction is now the fallback restore path for string dictionaries and dictionary-entry-null shapes that cannot yet be represented as typed dictionary-backed vectors.
+- Parquet dictionary decode still produces `DictionaryVector` in some legacy paths; the remaining work is to migrate decoder callsites onto typed `from_dict(...)` constructors or add typed string dictionary sidecars where density preservation matters.
 - `StringVector.from_dict(...)` and nullable string dictionary construction now precompute byte capacity correctly before writing into the builder.
 - I/O writers (CSV/JSON) and DRKM morsel writer now use `.encoding`/`dict_accessor()` for dictionary dispatch instead of `isinstance(..., DictionaryVector)`.
 - The non-Carchar grouped-aggregation fast paths in `GroupStateStore` and the specialized single-key kernels now detect dictionary encoding through `dict_accessor()` instead of requiring a concrete `DictionaryVector` instance.
+- The compiled `Int64Vector` `DATEPART` kernels now preserve dictionary encoding across minute/hour/second/year/month/day/dayofweek/dayofyear/quarter by computing over dictionary values and rebuilding typed dictionary-backed output.
+- The temporal dispatcher no longer needs a separate dictionary fast-path for typed `Int64Vector` dictionary storage; Arrow/legacy dictionary inputs now go straight to fallback normalization instead.
+- The old compiled `DictionaryVector` `DATEPART` helper entrypoints were deleted rather than retained as dead compatibility stubs.
 
 Focused validation snapshot:
 - `tests/integration/sql_battery/test_shapes_joins_subqueries.py` passes again (`180 passed`) after the evaluator/filter recovery.
 - `tests/draken/vectors/test_string_vector.py` and `tests/rugo/test_dictionary_vector_decode.py` pass (`34 passed`) on the restored typed parquet/string dictionary path.
 - `tests/unit/operators/test_group_state_store_dictionary_fastpath.py`, `tests/unit/operators/test_draken_aggregate_and_group_node.py`, `tests/unit/operators/test_shuffle_group_by_phase1.py`, and `tests/integration/test_shuffle_groupby_golden.py` pass (`59 passed`) on the restored non-Carchar dictionary fast paths.
+- `tests/unit/functions/test_datepart_correctness.py` passes (`13 passed`) with typed Int64 dictionary-backed `DATEPART` coverage for both sub-second and calendar units, plus public dispatcher coverage after removing the legacy dictionary branch.
+- `tests/draken/morsels/test_morsel_io.py` and `tests/rugo/test_dictionary_vector_decode.py` pass (`18 passed`) after the DRKM numeric dictionary restore fix.
+- `tests/draken/morsels/test_align_tables.py` passes (`5 passed`) with dictionary-column null-padding coverage on the generic alignment path.
 
 Immediate next work:
 - Continue Phase 3 by removing the remaining non-Carchar `DictionaryVector` assumptions in joins, vector ops, and IO that still dispatch on the storage class instead of `dict_accessor()`.
-  - Refactor DRKM morsel reader/writer to avoid constructing/inspecting `DictionaryVector` and instead use typed vectors + `.encoding`/`dict_accessor()` dispatch.
-  - Migrate the Parquet dictionary decoder to emit typed dictionary-backed vectors (`*.from_dict(...)`) rather than `DictionaryVector`.
-  - Update `vector_date_part.pyx`/compiled kernels to use `.encoding` dispatch (or expose required `dict_accessor()`-style APIs) so dictionary paths do not rely on `DictionaryVector`.
+    - Add typed string dictionary sidecar storage so DRKM and parquet string dictionaries can preserve dictionary encoding without constructing `DictionaryVector`.
+    - Narrow the remaining DRKM fallback branch to only shapes that truly require legacy `DictionaryVector` semantics (currently string dictionaries with dictionary-entry nulls and any other unsupported typed restore shapes).
+    - Migrate the remaining Parquet dictionary decoder callsites to emit typed dictionary-backed vectors (`*.from_dict(...)`) rather than `DictionaryVector`.
   - Audit and update tests that assert `DictionaryVector` at runtime (class name checks, `isinstance()` guards, etc.), replacing them with encoding/typed-vector expectations.
 - Add a `.encoding` discriminant (or equivalent) so callers can cheaply dispatch to dense vs dictionary paths without needing `isinstance()` for dict vectors.
 - Stabilize planner and telemetry behavior for dictionary-backed group-by paths so readings continue to match actual engine selection and fastpath use.

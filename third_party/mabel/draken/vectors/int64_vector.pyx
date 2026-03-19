@@ -87,7 +87,7 @@ cdef void _release_dict_storage(Int64Vector vec) noexcept:
     vec._dict_accessor.value_type = DRAKEN_INT64
 
 
-cdef void _attach_dictionary_storage(Int64Vector vec, const int32_t[::1] codes, const int64_t[::1] dictionary, bint ordered) except *:
+cdef void _attach_dictionary_storage(Int64Vector vec, const int32_t[::1] codes, const int64_t[::1] dictionary, bint ordered, const uint8_t* dict_entry_null_bitmap=NULL) except *:
     cdef Py_ssize_t row_count = codes.shape[0]
     cdef Py_ssize_t dict_size = dictionary.shape[0]
     cdef uint8_t code_width = _dict_code_width_for_size(dict_size)
@@ -96,6 +96,7 @@ cdef void _attach_dictionary_storage(Int64Vector vec, const int32_t[::1] codes, 
     cdef Py_ssize_t i
     cdef Py_ssize_t code
     cdef DrakenVarBuffer* dict_values
+    cdef Py_ssize_t bitmap_bytes
 
     _release_dict_storage(vec)
 
@@ -112,6 +113,14 @@ cdef void _attach_dictionary_storage(Int64Vector vec, const int32_t[::1] codes, 
         dict_values.offsets[i + 1] = <int32_t>((i + 1) * sizeof(int64_t))
     if dict_bytes > 0:
         memcpy(dict_values.data, <const void*>&dictionary[0], <size_t>dict_bytes)
+
+    # Copy dictionary entry-level null bitmap if provided
+    if dict_entry_null_bitmap != NULL:
+        bitmap_bytes = (dict_size + 7) >> 3
+        dict_values.null_bitmap = <uint8_t*>malloc(<size_t>bitmap_bytes)
+        if dict_values.null_bitmap == NULL:
+            raise MemoryError()
+        memcpy(dict_values.null_bitmap, dict_entry_null_bitmap, <size_t>bitmap_bytes)
 
     for i in range(row_count):
         code = <Py_ssize_t>codes[i]
@@ -818,6 +827,7 @@ cdef Int64Vector from_packed_dict(
     Py_ssize_t dict_size,
     const uint8_t* row_null_bitmap=NULL,
     bint ordered=False,
+    const uint8_t* dict_entry_null_bitmap=NULL,
 ):
     cdef Int64Vector vec = Int64Vector(<size_t>row_count)
     cdef int64_t* dst = <int64_t*>vec.ptr.data
@@ -867,7 +877,7 @@ cdef Int64Vector from_packed_dict(
             dictionary_view = <int64_t[:dict_size]><int64_t*>dictionary
         else:
             dictionary_view = <int64_t[:0]><int64_t*>dictionary
-        _attach_dictionary_storage(vec, codes_view, dictionary_view, ordered)
+        _attach_dictionary_storage(vec, codes_view, dictionary_view, ordered, dict_entry_null_bitmap)
     finally:
         if expanded_codes != NULL:
             free(expanded_codes)

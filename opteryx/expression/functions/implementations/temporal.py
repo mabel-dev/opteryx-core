@@ -22,21 +22,6 @@ from opteryx.exceptions import InvalidFunctionParameterError
 from opteryx.exceptions import InvalidInternalStateError
 
 
-def _is_dictionary_encoded(value) -> bool:
-    to_arrow = getattr(value, "to_arrow", None)
-    if to_arrow is None:
-        return False
-
-    try:
-        arrow_arr = to_arrow()
-    except Exception:
-        return False
-
-    return isinstance(
-        arrow_arr, (pyarrow.Array, pyarrow.ChunkedArray)
-    ) and pyarrow.types.is_dictionary(arrow_arr.type)
-
-
 def convert_int64_array_to_pyarrow_datetime(values: numpy.ndarray) -> pyarrow.Array:
     """
     Convert a NumPy int64 array to PyArrow TimestampArray, inferring time unit.
@@ -189,23 +174,6 @@ def date_part(part, arr):
         elif part == "quarter":
             return vector_datepart_quarter_i64(arr).to_arrow()
         # Unsupported parts fall through to Arrow slow-path.
-
-    if _is_dictionary_encoded(arr):
-        from opteryx.compiled.vector_ops.function_definitions import vector_datepart_hour_dict
-        from opteryx.compiled.vector_ops.function_definitions import vector_datepart_minute_dict
-        from opteryx.compiled.vector_ops.function_definitions import vector_datepart_second_dict
-
-        # Dictionary optimization: extract from V values, not N rows
-        try:
-            if part == "minute":
-                return vector_datepart_minute_dict(arr).to_arrow()
-            elif part == "hour":
-                return vector_datepart_hour_dict(arr).to_arrow()
-            elif part in ("second", "seconds"):
-                return vector_datepart_second_dict(arr).to_arrow()
-        except (TypeError, AttributeError, NotImplementedError):
-            # Dictionary has unsupported value type - fall through to decode path
-            pass
 
     # --- SLOW PATH: Arrow compute kernels (fallback) ---
 

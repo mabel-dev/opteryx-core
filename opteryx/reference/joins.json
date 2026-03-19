@@ -1,0 +1,163 @@
+{
+    "cross_join": {
+        "canonical_name": "CROSS JOIN",
+        "logical_type": "cross join",
+        "normalized_to": "cross join",
+        "physical_node": "CrossJoinNode",
+        "planner_support": "supported",
+        "status": "supported",
+        "syntax_forms": [
+            "CROSS JOIN",
+            "CROSS JOIN UNNEST"
+        ],
+        "summary": "Cartesian product join.",
+        "documentation": "Supported as a logical cross join and as the execution shape for UNNEST.",
+        "notes": "UNNEST is routed through the cross join path."
+    },
+    "full_outer": {
+        "canonical_name": "FULL OUTER JOIN",
+        "logical_type": "full outer",
+        "normalized_to": "full outer",
+        "physical_node": "OuterJoinNode",
+        "planner_support": "supported",
+        "status": "supported",
+        "syntax_forms": [
+            "FULL JOIN",
+            "FULL OUTER JOIN"
+        ],
+        "summary": "Full outer join.",
+        "documentation": "Produces all rows from both sides, with null-extension on unmatched rows.",
+        "notes": "Requires an ON or USING clause."
+    },
+    "inner": {
+        "canonical_name": "INNER JOIN",
+        "logical_type": "inner",
+        "normalized_to": "inner",
+        "physical_node": "DrakenInnerJoinNode",
+        "planner_support": "supported",
+        "status": "supported",
+        "syntax_forms": [
+            "JOIN",
+            "INNER JOIN"
+        ],
+        "summary": "Inner join.",
+        "documentation": "Matches rows using equality conditions and natural-join normalization.",
+        "notes": "NATURAL JOIN is normalized to inner join by the binder."
+    },
+    "left_anti": {
+        "canonical_name": "LEFT ANTI JOIN",
+        "logical_type": "left anti",
+        "normalized_to": "left anti",
+        "physical_node": "FilterJoinNode",
+        "planner_support": "supported",
+        "status": "supported",
+        "syntax_forms": [
+            "LEFT ANTI JOIN"
+        ],
+        "summary": "Left anti join.",
+        "documentation": "Returns left-side rows that do not match the right side.",
+        "notes": "Implemented through the filter-join path."
+    },
+    "left_outer": {
+        "canonical_name": "LEFT OUTER JOIN",
+        "logical_type": "left outer",
+        "normalized_to": "left outer",
+        "physical_node": "OuterJoinNode",
+        "planner_support": "supported",
+        "status": "supported",
+        "syntax_forms": [
+            "LEFT JOIN",
+            "LEFT OUTER JOIN"
+        ],
+        "summary": "Left outer join.",
+        "documentation": "Returns all left-side rows and matching right-side rows.",
+        "notes": "Requires an ON or USING clause."
+    },
+    "left_semi": {
+        "canonical_name": "LEFT SEMI JOIN",
+        "logical_type": "left semi",
+        "normalized_to": "left semi",
+        "physical_node": "FilterJoinNode",
+        "planner_support": "supported",
+        "status": "supported",
+        "syntax_forms": [
+            "LEFT SEMI JOIN"
+        ],
+        "summary": "Left semi join.",
+        "documentation": "Returns left-side rows that have at least one match on the right.",
+        "notes": "Implemented through the filter-join path."
+    },
+    "natural": {
+        "canonical_name": "NATURAL JOIN",
+        "logical_type": "natural join",
+        "normalized_to": "inner",
+        "physical_node": "DrakenInnerJoinNode",
+        "planner_support": "supported",
+        "status": "supported",
+        "syntax_forms": [
+            "NATURAL JOIN"
+        ],
+        "summary": "Natural join.",
+        "documentation": "Automatically joins on the intersection of column names.",
+        "notes": "The binder rewrites this to an inner join with USING columns."
+    },
+    "non_equi": {
+        "canonical_name": "NON-EQUI JOIN",
+        "logical_type": "non equi",
+        "normalized_to": "non equi",
+        "physical_node": "NonEquiJoinNode",
+        "planner_support": "supported",
+        "status": "supported",
+        "syntax_forms": [
+            "JOIN ... ON a < b",
+            "JOIN ... ON a > b",
+            "JOIN ... ON a != b"
+        ],
+        "summary": "Non-equality join.",
+        "documentation": "Supports join predicates other than equality.",
+        "notes": "Physically executed by the nested-loop join path."
+    },
+    "right_anti": {
+        "canonical_name": "RIGHT ANTI JOIN",
+        "logical_type": "right anti",
+        "normalized_to": "right anti",
+        "physical_node": null,
+        "planner_support": "unsupported",
+        "status": "unsupported",
+        "syntax_forms": [
+            "RIGHT ANTI JOIN"
+        ],
+        "summary": "Right anti join.",
+        "documentation": "Rejected by the planner.",
+        "notes": "The binder/planner only supports left anti and left semi joins."
+    },
+    "right_outer": {
+        "canonical_name": "RIGHT OUTER JOIN",
+        "logical_type": "right outer",
+        "normalized_to": "right outer",
+        "physical_node": "OuterJoinNode",
+        "planner_support": "supported",
+        "status": "supported",
+        "syntax_forms": [
+            "RIGHT JOIN",
+            "RIGHT OUTER JOIN"
+        ],
+        "summary": "Right outer join.",
+        "documentation": "Returns all right-side rows and matching left-side rows.",
+        "notes": "Requires an ON or USING clause."
+    },
+    "right_semi": {
+        "canonical_name": "RIGHT SEMI JOIN",
+        "logical_type": "right semi",
+        "normalized_to": "right semi",
+        "physical_node": null,
+        "planner_support": "unsupported",
+        "status": "unsupported",
+        "syntax_forms": [
+            "RIGHT SEMI JOIN"
+        ],
+        "summary": "Right semi join.",
+        "documentation": "Rejected by the planner.",
+        "notes": "The planner explicitly raises on right semi joins."
+    }
+}

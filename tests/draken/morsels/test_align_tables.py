@@ -11,6 +11,7 @@ import numpy as np
 import pyarrow as pa
 from opteryx.draken import Morsel
 from opteryx.draken import align_tables, align_tables_pyarray
+from opteryx.operators.group_state_store import DRAKEN_ENCODING_DICTIONARY
 
 
 def create_test_morsels(n_rows=100_000):
@@ -160,6 +161,30 @@ def test_align_tables_preserves_null_markers():
     assert result_arrow["flag"].to_pylist() == [True, None, None, False]
     assert result_arrow["value"].to_pylist() == [b"a", None, None, b"c"]
     assert result_arrow["rhs"].to_pylist() == [None, 20, None, 10]
+
+
+def test_align_tables_preserves_dictionary_columns_with_null_padding():
+    source_table = pa.table(
+        {
+            "k": pa.DictionaryArray.from_arrays(
+                pa.array([0, 1, 2], type=pa.int8()),
+                pa.array([b"one", b"two", b"three"]),
+            )
+        }
+    )
+    append_table = pa.table({"rhs": pa.array([10, 20, 30], type=pa.int64())})
+
+    source_morsel = Morsel.from_arrow(source_table)
+    append_morsel = Morsel.from_arrow(append_table)
+
+    source_indices = np.array([0, -1, 2], dtype=np.int32)
+    append_indices = np.array([2, 1, -1], dtype=np.int32)
+
+    result = align_tables_pyarray(source_morsel, append_morsel, source_indices, append_indices)
+
+    assert result.column(b"k").encoding == DRAKEN_ENCODING_DICTIONARY
+    assert result.to_arrow()["k"].to_pylist() == [b"one", None, b"three"]
+    assert result.to_arrow()["rhs"].to_pylist() == [30, 20, None]
 
 
 def benchmark_align():

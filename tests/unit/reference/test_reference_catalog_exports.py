@@ -6,8 +6,11 @@ from pathlib import Path
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
 from opteryx.reference import export_aggregate_catalog
+from opteryx.reference import export_clauses_catalog
+from opteryx.reference import export_joins_catalog
 from opteryx.reference import export_operator_catalog
 from opteryx.reference import export_type_catalog
+from opteryx.reference import export_unary_ops_catalog
 
 
 def test_aggregate_catalog_json_matches_export():
@@ -32,6 +35,33 @@ def test_operator_catalog_json_matches_export():
     catalog_path = Path(__file__).resolve().parents[3] / "opteryx/reference/operators.json"
 
     expected = export_operator_catalog()
+    actual = json.loads(catalog_path.read_text(encoding="utf8"))
+
+    assert actual == expected
+
+
+def test_unary_ops_catalog_json_matches_export():
+    catalog_path = Path(__file__).resolve().parents[3] / "opteryx/reference/unary_ops.json"
+
+    expected = export_unary_ops_catalog()
+    actual = json.loads(catalog_path.read_text(encoding="utf8"))
+
+    assert actual == expected
+
+
+def test_joins_catalog_json_matches_export():
+    catalog_path = Path(__file__).resolve().parents[3] / "opteryx/reference/joins.json"
+
+    expected = export_joins_catalog()
+    actual = json.loads(catalog_path.read_text(encoding="utf8"))
+
+    assert actual == expected
+
+
+def test_clauses_catalog_json_matches_export():
+    catalog_path = Path(__file__).resolve().parents[3] / "opteryx/reference/clauses.json"
+
+    expected = export_clauses_catalog()
     actual = json.loads(catalog_path.read_text(encoding="utf8"))
 
     assert actual == expected
@@ -172,3 +202,66 @@ def test_aggregate_catalog_includes_execution_support():
         "MIN",
         "SUM",
     }
+
+
+def test_unary_ops_catalog_includes_supported_predicates():
+    catalog = export_unary_ops_catalog()
+
+    assert set(catalog) == {
+        "IsFalse",
+        "IsNotFalse",
+        "IsNotNull",
+        "IsNotTrue",
+        "IsNull",
+        "IsTrue",
+        "Not",
+    }
+
+    is_null = catalog["IsNull"]
+    assert is_null["syntax_forms"] == ["expr IS NULL"]
+    assert is_null["node_type"] == "UNARY_OPERATOR"
+    assert is_null["status"] == "active"
+
+    not_expr = catalog["Not"]
+    assert not_expr["node_type"] == "NOT"
+    assert not_expr["syntax_forms"] == ["NOT expr"]
+
+
+def test_joins_catalog_includes_supported_join_types():
+    catalog = export_joins_catalog()
+
+    assert set(catalog) == {
+        "cross_join",
+        "full_outer",
+        "inner",
+        "left_anti",
+        "left_outer",
+        "left_semi",
+        "natural",
+        "non_equi",
+        "right_anti",
+        "right_outer",
+        "right_semi",
+    }
+
+    inner = catalog["inner"]
+    assert inner["normalized_to"] == "inner"
+    assert inner["physical_node"] == "DrakenInnerJoinNode"
+    assert inner["status"] == "supported"
+
+    right_semi = catalog["right_semi"]
+    assert right_semi["status"] == "unsupported"
+    assert right_semi["physical_node"] is None
+
+
+def test_clauses_catalog_includes_query_and_statement_capabilities():
+    catalog = export_clauses_catalog()
+
+    assert "top" in catalog
+    assert catalog["top"]["status"] == "unsupported"
+    assert catalog["top"]["syntax_forms"] == ["SELECT TOP n ..."]
+
+    assert catalog["where"]["scope"] == "query_clause"
+    assert catalog["where"]["planner_entry"] == "plan_query"
+    assert catalog["select"]["scope"] == "statement"
+    assert catalog["with"]["planner_entry"] == "extract_ctes"

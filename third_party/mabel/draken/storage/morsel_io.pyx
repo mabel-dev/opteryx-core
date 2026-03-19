@@ -21,7 +21,10 @@ from cpython.bytes cimport PyBytes_AS_STRING
 from cpython.bytes cimport PyBytes_AsStringAndSize
 from cpython.bytes cimport PyBytes_FromStringAndSize
 from cpython.memoryview cimport PyMemoryView_FromMemory
+from array import array as pyarray
 from libc.stddef cimport size_t
+from libc.stdint cimport int8_t
+from libc.stdint cimport int16_t
 from libc.stdint cimport int32_t
 from libc.stdint cimport int64_t
 from libc.stdint cimport intptr_t
@@ -677,7 +680,17 @@ cdef inline Vector _build_typed_dict_vector(
     const void* dictionary,
     Py_ssize_t dict_size,
     bint ordered,
+    const uint8_t* dict_entry_null_bitmap=NULL,
 ):
+    cdef object dictionary_obj = None
+    cdef int64_t[::1] dictionary_buf_i64
+    cdef double[::1] dictionary_buf_f64
+    cdef Py_ssize_t i
+    cdef const int8_t* src8
+    cdef const int16_t* src16
+    cdef const int32_t* src32
+    cdef const float* srcf
+
     # Numeric dictionary vectors are stored in their native width (e.g. int32)
     # but are surfaced as int64/float64 in the engine. Convert on-read.
     if dtype == DRAKEN_INT64 and dict_value_type in (
@@ -686,9 +699,6 @@ cdef inline Vector _build_typed_dict_vector(
         DRAKEN_INT32,
         DRAKEN_INT64,
     ):
-        cdef object dictionary_obj
-        cdef int64_t[::1] dictionary_buf
-
         if dict_value_type == DRAKEN_INT64:
             return <Vector>int64_from_packed_dict(
                 codes,
@@ -698,38 +708,37 @@ cdef inline Vector _build_typed_dict_vector(
                 dict_size,
                 row_null_bitmap,
                 ordered,
+                dict_entry_null_bitmap,
             )
 
         dictionary_obj = pyarray('q', [0]) * dict_size
-        dictionary_buf = dictionary_obj
+        dictionary_buf_i64 = dictionary_obj
         if dict_value_type == DRAKEN_INT8:
-            cdef const int8_t* src8 = <const int8_t*>dictionary
+            src8 = <const int8_t*>dictionary
             for i in range(dict_size):
-                dictionary_buf[i] = <int64_t>src8[i]
+                dictionary_buf_i64[i] = <int64_t>src8[i]
         elif dict_value_type == DRAKEN_INT16:
-            cdef const int16_t* src16 = <const int16_t*>dictionary
+            src16 = <const int16_t*>dictionary
             for i in range(dict_size):
-                dictionary_buf[i] = <int64_t>src16[i]
+                dictionary_buf_i64[i] = <int64_t>src16[i]
         else:
             # DRAKEN_INT32
-            cdef const int32_t* src32 = <const int32_t*>dictionary
+            src32 = <const int32_t*>dictionary
             for i in range(dict_size):
-                dictionary_buf[i] = <int64_t>src32[i]
+                dictionary_buf_i64[i] = <int64_t>src32[i]
 
         return <Vector>int64_from_packed_dict(
             codes,
             code_width,
             row_count,
-            <const int64_t*>dictionary_buf,
+            &dictionary_buf_i64[0],
             dict_size,
             row_null_bitmap,
             ordered,
+            dict_entry_null_bitmap,
         )
 
     if dtype == DRAKEN_FLOAT64 and dict_value_type in (DRAKEN_FLOAT32, DRAKEN_FLOAT64):
-        cdef object dictionary_obj
-        cdef double[::1] dictionary_buf
-
         if dict_value_type == DRAKEN_FLOAT64:
             return <Vector>float64_from_packed_dict(
                 codes,
@@ -739,22 +748,24 @@ cdef inline Vector _build_typed_dict_vector(
                 dict_size,
                 row_null_bitmap,
                 ordered,
+                dict_entry_null_bitmap,
             )
 
         dictionary_obj = pyarray('d', [0.0]) * dict_size
-        dictionary_buf = dictionary_obj
-        cdef const float* srcf = <const float*>dictionary
+        dictionary_buf_f64 = dictionary_obj
+        srcf = <const float*>dictionary
         for i in range(dict_size):
-            dictionary_buf[i] = <double>srcf[i]
+            dictionary_buf_f64[i] = <double>srcf[i]
 
         return <Vector>float64_from_packed_dict(
             codes,
             code_width,
             row_count,
-            <const double*>dictionary_buf,
+            &dictionary_buf_f64[0],
             dict_size,
             row_null_bitmap,
             ordered,
+            dict_entry_null_bitmap,
         )
 
     raise DrakenMorselStorageError(

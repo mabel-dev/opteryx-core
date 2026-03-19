@@ -19,7 +19,18 @@ import numpy
 import opteryx
 import pyarrow as pa
 import pyarrow.compute as pc
+from opteryx.compiled.vector_ops.function_definitions import vector_datepart_hour_i64
+from opteryx.compiled.vector_ops.function_definitions import vector_datepart_minute_i64
+from opteryx.compiled.vector_ops.function_definitions import vector_datepart_day_i64
+from opteryx.compiled.vector_ops.function_definitions import vector_datepart_dayofweek_i64
+from opteryx.compiled.vector_ops.function_definitions import vector_datepart_dayofyear_i64
+from opteryx.compiled.vector_ops.function_definitions import vector_datepart_month_i64
+from opteryx.compiled.vector_ops.function_definitions import vector_datepart_quarter_i64
+from opteryx.compiled.vector_ops.function_definitions import vector_datepart_second_i64
+from opteryx.compiled.vector_ops.function_definitions import vector_datepart_year_i64
+from opteryx.draken.vectors.int64_vector import Int64Vector
 from opteryx.expression.functions.implementations.temporal import date_part
+from opteryx.operators.group_state_store import DRAKEN_ENCODING_DICTIONARY
 
 
 BASE_DT = datetime.datetime(2024, 1, 15, 14, 30, 45)
@@ -126,6 +137,20 @@ def test_datepart_dictionary_timestamp_falls_back_cleanly():
     assert _as_pylist(actual) == [30, 30, 30, None]
 
 
+def test_datepart_typed_int64_dictionary_vector_uses_typed_dispatch_cleanly():
+    vector = Int64Vector.from_dict(
+        [0, 1, 0, 2],
+        [1705329045, 1705332645, 1705336245],
+        [1, 1, 0, 1],
+    )
+
+    minute = date_part("minute", vector)
+    year = date_part("year", vector)
+
+    assert _as_pylist(minute) == [30, 30, None, 30]
+    assert _as_pylist(year) == [2024, 2024, None, 2024]
+
+
 def test_datepart_numpy_int64_unix_seconds_input():
     """NumPy int64 Unix timestamps should be converted and extracted correctly."""
     unix_seconds = numpy.array([1705329045], dtype=numpy.int64)  # 2024-01-15 14:30:45 UTC
@@ -216,6 +241,49 @@ def test_datepart_query_level_phase2_units_from_clickbench():
                 assert all(v is None or 1 <= v <= 4 for v in norm_values), "quarter out of range"
     finally:
         session.close()
+
+
+def test_datepart_int64_dictionary_vector_preserves_dictionary_encoding():
+    values = [1705329045, 1705332645, 1705336245]
+    vector = Int64Vector.from_dict([0, 1, 0, 2], values, [1, 1, 0, 1])
+
+    minute = vector_datepart_minute_i64(vector)
+    hour = vector_datepart_hour_i64(vector)
+    second = vector_datepart_second_i64(vector)
+
+    assert minute.encoding == DRAKEN_ENCODING_DICTIONARY
+    assert hour.encoding == DRAKEN_ENCODING_DICTIONARY
+    assert second.encoding == DRAKEN_ENCODING_DICTIONARY
+
+    assert minute.to_pylist() == [30, 30, None, 30]
+    assert hour.to_pylist() == [14, 15, None, 16]
+    assert second.to_pylist() == [45, 45, None, 45]
+
+
+def test_datepart_int64_dictionary_vector_preserves_dictionary_encoding_for_calendar_units():
+    values = [1705329045, 1705332645, 1705336245]
+    vector = Int64Vector.from_dict([0, 1, 0, 2], values, [1, 1, 0, 1])
+
+    year = vector_datepart_year_i64(vector)
+    month = vector_datepart_month_i64(vector)
+    day = vector_datepart_day_i64(vector)
+    dayofweek = vector_datepart_dayofweek_i64(vector)
+    dayofyear = vector_datepart_dayofyear_i64(vector)
+    quarter = vector_datepart_quarter_i64(vector)
+
+    assert year.encoding == DRAKEN_ENCODING_DICTIONARY
+    assert month.encoding == DRAKEN_ENCODING_DICTIONARY
+    assert day.encoding == DRAKEN_ENCODING_DICTIONARY
+    assert dayofweek.encoding == DRAKEN_ENCODING_DICTIONARY
+    assert dayofyear.encoding == DRAKEN_ENCODING_DICTIONARY
+    assert quarter.encoding == DRAKEN_ENCODING_DICTIONARY
+
+    assert year.to_pylist() == [2024, 2024, None, 2024]
+    assert month.to_pylist() == [1, 1, None, 1]
+    assert day.to_pylist() == [15, 15, None, 15]
+    assert dayofweek.to_pylist() == [1, 1, None, 1]
+    assert dayofyear.to_pylist() == [15, 15, None, 15]
+    assert quarter.to_pylist() == [1, 1, None, 1]
 
 
 def test_datepart_invalid_int_range_raises_explicit_error():
