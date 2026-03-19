@@ -274,7 +274,7 @@ STATEMENTS = [
         # 1153 temporal extract from cross joins
         ("SELECT p.name, s.name FROM $planets as p, testdata.satellites as s WHERE p.id = s.planetId", 177, 2, None),
         # Can't qualify fields used in subscripts
-        ("SELECT d.birth_place['town'] FROM testdata.astronauts AS d", 357, 1, None),
+        ("SELECT d.birth_place->'town' FROM testdata.astronauts AS d", 357, 1, None),
         # COUNT(*) in non aggregated joins
         ("SELECT COUNT(*), COUNT_DISTINCT(id) FROM $planets;", 1, 2, None),
 ]

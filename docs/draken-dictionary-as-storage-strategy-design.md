@@ -17,10 +17,12 @@ Current implementation snapshot:
 - Group-by telemetry now distinguishes `CarcharGroupStateEngine` from `GroupStateStore` explicitly; the old `legacy` label has been removed.
 - Typed vector classes now expose explicit `from_dict(...)` constructors rather than overloading `from_arrow(...)` with dictionary semantics.
 - Typed `from_arrow(...)` paths have been narrowed back to dense Arrow interop; dictionary Arrow arrays are rejected and must not be treated as the storage constructor shape.
+- Vectors do not yet expose a `.encoding` discriminant property; consumers must still call `dict_accessor()` (or inspect vector types) to detect dictionary encoding.
 - The fixed-width typed `from_dict(...)` constructors now use typed Cython memoryviews internally for codes, dictionary payloads, and row validity instead of generic Python-object indexing in the hot construction path.
-- `StringVector` now has a raw dictionary-storage constructor over codes, offsets, lengths, arena bytes, and validity, so string dictionary decode no longer needs to materialize through Python lists.
-- Parquet dictionary decode now emits typed vectors for int32, int64, float32, float64, and byte-array/string columns through typed dictionary constructors rather than returning `DictionaryVector` for those shapes.
+- `StringVector` exposes a raw dictionary-storage constructor (`from_dict_buffers()`), but some calling sites still materialize dictionaries through Python objects.
+- Parquet dictionary decode still produces `DictionaryVector` in most paths; the current work is to migrate decoder callsites onto typed `from_dict(...)` constructors so numeric and string dict columns no longer require a `DictionaryVector` intermediate.
 - `StringVector.from_dict(...)` and nullable string dictionary construction now precompute byte capacity correctly before writing into the builder.
+- Some I/O writers (CSV/JSON) still perform `isinstance(..., DictionaryVector)` checks; those are targeted for migration to accessor/typed-vector logic.
 - The non-Carchar grouped-aggregation fast paths in `GroupStateStore` and the specialized single-key kernels now detect dictionary encoding through `dict_accessor()` instead of requiring a concrete `DictionaryVector` instance.
 
 Focused validation snapshot:
@@ -30,6 +32,7 @@ Focused validation snapshot:
 
 Immediate next work:
 - Continue Phase 3 by removing the remaining non-Carchar `DictionaryVector` assumptions in joins, vector ops, and IO that still dispatch on the storage class instead of `dict_accessor()`.
+- Add a `.encoding` discriminant (or equivalent) so callers can cheaply dispatch to dense vs dictionary paths without needing `isinstance()` for dict vectors.
 - Stabilize planner and telemetry behavior for dictionary-backed group-by paths so readings continue to match actual engine selection and fastpath use.
 - Make unsupported dictionary float shapes plan explicitly to `GroupStateStore` instead of selecting Carchar and then erroring at runtime.
 - Keep the remaining Abseil-backed distinct sets inside Carchar out of this track; that is a separate problem from dictionary encoding.
@@ -91,7 +94,7 @@ struct DrakenVarBuffer {
 
 `DrakenVarBuffer` is reused for both string and numeric dictionary value stores. For numeric types `offsets` is NULL and `data` is a flat array of `itemsize`-byte values. This is wrong: `uint8_t*` as a generic byte pointer is standard C but `DrakenVarBuffer` is semantically and structurally a string buffer — reusing it for numerics means every numeric consumer must check `offsets == NULL` to know they're in numeric mode, and `_dict_itemsize_for_type` fills a gap that should not exist.
 
-## Revised Struct Layout (After This Change)
+## Proposed Struct Layout (Target / Future)
 
 Split `DrakenDictionaryBuffer.dictionary_values` into two typed fields with a discriminating `value_category`. Only one is non-NULL:
 

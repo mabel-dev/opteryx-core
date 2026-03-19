@@ -52,6 +52,6 @@ SELECT name, CASE WHEN numberOfMoons = 0 THEN 'none' WHEN numberOfMoons = 1 THEN
 SELECT '192.168.0.1' | '192.168.0.0/24';
 
 # ADVANCED STRUCTS
-SELECT birth_place['town'] FROM testdata.astronauts;
-SELECT birth_place['town'], COUNT(*) FROM testdata.astronauts WHERE birth_place['state'] IS NOT NULL GROUP BY birth_place['town'];
+SELECT birth_place->'town' FROM testdata.astronauts;
+SELECT birth_place->'town', COUNT(*) FROM testdata.astronauts WHERE birth_place->'state' IS NOT NULL GROUP BY birth_place->'town';
 SELECT name, SEARCH(birth_place, 'Italy') FROM testdata.astronauts;

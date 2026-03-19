@@ -645,7 +645,7 @@ STATEMENTS = [
         ("SELECT * FROM $planets CROSS JOIN UNNEST(name) AS G", None, None, IncorrectTypeError),
 
         ("SELECT VARCHAR(birth_place) FROM testdata.astronauts", 357, 1, None),
-        ("SELECT name FROM testdata.astronauts WHERE CAST(birth_place AS VARCHAR)['state'] = birth_place['state']", 357, 1, None),
+        ("SELECT name FROM testdata.astronauts WHERE CAST(birth_place AS VARCHAR)->'state' = birth_place->'state'", 357, 1, None),
 
         ("SELECT * FROM testdata.missions WHERE MATCH (Location) AGAINST ('Florida USA')", 911, 8, None),
         ("SELECT * FROM testdata.missions WHERE MATCH (Location) AGAINST ('Russia, Kapustin')", 112, 8, None),
@@ -690,7 +690,7 @@ STATEMENTS = [
         # ALIAS issues [#408]
         ("SELECT $planets.* FROM $planets INNER JOIN (SELECT id FROM $planets AS IP) AS b USING (id)", 9, 20, None),
         # DOUBLE QUOTED STRING [#399]
-        ("SELECT birth_place['town'] FROM testdata.astronauts WHERE birth_place['town'] = \"Rome\"", 1, 1, None),
+        ("SELECT birth_place->'town' FROM testdata.astronauts WHERE birth_place->'town' = \"Rome\"", 1, 1, None),
         # COUNT incorrect
         ("SELECT * FROM (SELECT COUNT(*) AS bodies FROM $planets) AS space WHERE space.bodies > 5", 1, 1, None),
 ]
