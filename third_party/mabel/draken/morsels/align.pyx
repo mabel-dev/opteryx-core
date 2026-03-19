@@ -31,7 +31,6 @@ from opteryx.draken.vectors.int64_vector cimport Int64Vector
 from opteryx.draken.vectors.float64_vector cimport Float64Vector
 from opteryx.draken.vectors.bool_vector cimport BoolVector
 from opteryx.draken.vectors.string_vector cimport StringVector
-from opteryx.draken.vectors.dictionary_vector cimport DictionaryVector
 from opteryx.draken.vectors.constant_vector cimport ConstantVector
 from opteryx.draken.vectors.date32_vector cimport Date32Vector
 from opteryx.draken.vectors.timestamp_vector cimport TimestampVector
@@ -59,8 +58,6 @@ cdef inline Vector _take_vector_fast(Vector vec, int32_t[::1] indices):
         return (<BoolVector>vec).take(indices)
     elif dtype == DrakenType.DRAKEN_STRING:
         return (<StringVector>vec).take(indices)
-    elif dtype == DrakenType.DRAKEN_DICTIONARY:
-        return (<DictionaryVector>vec).take(indices)
     elif dtype == DrakenType.DRAKEN_CONSTANT:
         return (<ConstantVector>vec).take(indices)
     elif dtype == DrakenType.DRAKEN_DATE32:
@@ -86,7 +83,10 @@ cdef inline bint _has_negative_indices(int32_t[::1] indices) nogil:
     return False
 
 
-cdef inline uint8_t* _source_null_bitmap(Vector vec, DrakenType dtype) nogil:
+cdef inline uint8_t* _source_null_bitmap(Vector vec, DrakenType dtype):
+    cdef uint8_t* null_bitmap = vec.null_bitmap_ptr()
+    if null_bitmap != NULL:
+        return null_bitmap
     if dtype == DrakenType.DRAKEN_INT64:
         return (<Int64Vector>vec).ptr.null_bitmap
     elif dtype == DrakenType.DRAKEN_FLOAT64:
@@ -95,8 +95,6 @@ cdef inline uint8_t* _source_null_bitmap(Vector vec, DrakenType dtype) nogil:
         return (<BoolVector>vec).ptr.null_bitmap
     elif dtype == DrakenType.DRAKEN_STRING:
         return (<StringVector>vec).ptr.null_bitmap
-    elif dtype == DrakenType.DRAKEN_DICTIONARY:
-        return (<DictionaryVector>vec).ptr.null_bitmap
     elif dtype == DrakenType.DRAKEN_CONSTANT:
         return (<ConstantVector>vec).ptr.null_bitmap
     elif dtype == DrakenType.DRAKEN_DATE32:
@@ -151,14 +149,6 @@ cdef inline uint8_t* _ensure_output_null_bitmap(Vector vec, DrakenType dtype, Py
                 raise MemoryError()
             (<StringVector>vec).ptr.null_bitmap = out_null
         return out_null
-    elif dtype == DrakenType.DRAKEN_DICTIONARY:
-        out_null = (<DictionaryVector>vec).ptr.null_bitmap
-        if out_null == NULL:
-            out_null = <uint8_t*>malloc(nb_size)
-            if out_null == NULL:
-                raise MemoryError()
-            (<DictionaryVector>vec).ptr.null_bitmap = out_null
-        return out_null
     elif dtype == DrakenType.DRAKEN_CONSTANT:
         out_null = (<ConstantVector>vec).ptr.null_bitmap
         if out_null == NULL:
@@ -207,6 +197,11 @@ cdef inline uint8_t* _ensure_output_null_bitmap(Vector vec, DrakenType dtype, Py
                 raise MemoryError()
             (<ArrayVector>vec).ptr.null_bitmap = out_null
             (<ArrayVector>vec).owns_null_bitmap = True
+        return out_null
+    elif dtype == DrakenType.DRAKEN_DICTIONARY:
+        out_null = vec.null_bitmap_ptr()
+        if out_null == NULL:
+            raise MemoryError()
         return out_null
     return NULL
 

@@ -1,0 +1,244 @@
+"""Helpers for exporting SQL clause and statement capabilities."""
+
+from __future__ import annotations
+
+import json
+from collections import OrderedDict
+from pathlib import Path
+from typing import Any
+
+CLAUSE_DEFINITIONS = {
+    "alter_view": {
+        "canonical_name": "ALTER VIEW",
+        "planner_entry": "plan_alter_view",
+        "scope": "statement",
+        "status": "supported",
+        "syntax_forms": ["ALTER VIEW view_name AS query"],
+        "summary": "Alter a view definition.",
+        "documentation": "The logical planner stores the replacement query and view metadata.",
+        "notes": "Supports optional column lists.",
+    },
+    "analyze_table": {
+        "canonical_name": "ANALYZE TABLE",
+        "planner_entry": "plan_analyze_query",
+        "scope": "statement",
+        "status": "supported",
+        "syntax_forms": ["ANALYZE TABLE table_name"],
+        "summary": "Collect table statistics.",
+        "documentation": "Requires the TABLE keyword and a table name.",
+        "notes": "ANALYZE without TABLE is rejected.",
+    },
+    "comment_on": {
+        "canonical_name": "COMMENT ON",
+        "planner_entry": "plan_comment",
+        "scope": "statement",
+        "status": "supported",
+        "syntax_forms": [
+            "COMMENT ON TABLE object_name IS 'comment'",
+            "COMMENT ON VIEW object_name IS 'comment'",
+            "COMMENT ON EXTENSION object_name IS 'comment'",
+        ],
+        "summary": "Add or update object comments.",
+        "documentation": "The SQL rewriter normalizes TABLE and VIEW to EXTENSION before parsing.",
+        "notes": "Supports IF EXISTS.",
+    },
+    "create_view": {
+        "canonical_name": "CREATE VIEW",
+        "planner_entry": "plan_create_view",
+        "scope": "statement",
+        "status": "supported",
+        "syntax_forms": ["CREATE VIEW view_name AS query"],
+        "summary": "Create a view.",
+        "documentation": "The query body is stored for later planning when the view is referenced.",
+        "notes": "Supports OR REPLACE and optional column lists.",
+    },
+    "distinct": {
+        "canonical_name": "DISTINCT",
+        "planner_entry": "plan_query",
+        "scope": "query_modifier",
+        "status": "supported",
+        "syntax_forms": ["SELECT DISTINCT ...", "DISTINCT ON (...) ..."],
+        "summary": "Deduplicate result rows.",
+        "documentation": "Distinct can be pushed down in some planner paths and appears as a logical plan node.",
+        "notes": "DISTINCT ON is rendered but may be planner-specific.",
+    },
+    "drop_view": {
+        "canonical_name": "DROP VIEW",
+        "planner_entry": "plan_drop_view",
+        "scope": "statement",
+        "status": "supported",
+        "syntax_forms": ["DROP VIEW [IF EXISTS] view_name"],
+        "summary": "Drop a view.",
+        "documentation": "Supports dropping one or more views with optional IF EXISTS and CASCADE/RESTRICT flags.",
+        "notes": "Only DROP VIEW is accepted by this planner path.",
+    },
+    "explain": {
+        "canonical_name": "EXPLAIN",
+        "planner_entry": "plan_explain",
+        "scope": "statement",
+        "status": "supported",
+        "syntax_forms": ["EXPLAIN [ANALYZE] query"],
+        "summary": "Explain a query plan.",
+        "documentation": "Supports textual and Mermaid output formats.",
+        "notes": "GRAPHVIZ is normalized to MERMAID in the planner.",
+    },
+    "from": {
+        "canonical_name": "FROM",
+        "planner_entry": "plan_query",
+        "scope": "query_clause",
+        "status": "supported",
+        "syntax_forms": ["FROM relation"],
+        "summary": "Select a data source.",
+        "documentation": "The planner builds scans, joins, subqueries, and function datasets from FROM sources.",
+        "notes": "Implicit cross joins are supported through relation lists.",
+    },
+    "group_by": {
+        "canonical_name": "GROUP BY",
+        "planner_entry": "plan_query",
+        "scope": "query_clause",
+        "status": "supported",
+        "syntax_forms": ["GROUP BY expr", "GROUP BY ALL"],
+        "summary": "Group rows by expression.",
+        "documentation": "Supports the GROUP BY ALL rewrite path via wildcard projection handling.",
+        "notes": "The logical planner rewrites wildcard grouping into explicit projection columns.",
+    },
+    "having": {
+        "canonical_name": "HAVING",
+        "planner_entry": "plan_query",
+        "scope": "query_clause",
+        "status": "supported",
+        "syntax_forms": ["HAVING predicate"],
+        "summary": "Filter grouped results.",
+        "documentation": "HAVING predicates are preserved in the logical plan and later optimized.",
+        "notes": "Aggregate references in HAVING are handled by planner rewrite paths.",
+    },
+    "limit": {
+        "canonical_name": "LIMIT",
+        "planner_entry": "plan_query",
+        "scope": "query_clause",
+        "status": "supported",
+        "syntax_forms": ["LIMIT n"],
+        "summary": "Limit the number of rows.",
+        "documentation": "The planner also carries OFFSET together with LIMIT in limit_clause metadata.",
+        "notes": "Used by file-pruning and pushdown optimizers.",
+    },
+    "offset": {
+        "canonical_name": "OFFSET",
+        "planner_entry": "plan_query",
+        "scope": "query_clause",
+        "status": "supported",
+        "syntax_forms": ["OFFSET n"],
+        "summary": "Skip rows before returning results.",
+        "documentation": "OFFSET is parsed as part of the limit clause.",
+        "notes": "Usually paired with LIMIT.",
+    },
+    "order_by": {
+        "canonical_name": "ORDER BY",
+        "planner_entry": "plan_query",
+        "scope": "query_clause",
+        "status": "supported",
+        "syntax_forms": ["ORDER BY expr"],
+        "summary": "Sort the result set.",
+        "documentation": "The planner rejects literal ORDER BY expressions and supports alias-aware rewriting.",
+        "notes": "Order-by columns may be injected before projection.",
+    },
+    "select": {
+        "canonical_name": "SELECT",
+        "planner_entry": "plan_query",
+        "scope": "statement",
+        "status": "supported",
+        "syntax_forms": ["SELECT ..."],
+        "summary": "Project query results.",
+        "documentation": "SELECT drives the main query planning path.",
+        "notes": "Supports DISTINCT and set operations via the query planner.",
+    },
+    "set": {
+        "canonical_name": "SET",
+        "planner_entry": "plan_set_variable",
+        "scope": "statement",
+        "status": "supported",
+        "syntax_forms": ["SET variable = value"],
+        "summary": "Assign a session variable.",
+        "documentation": "The logical planner has a dedicated SET node for variable assignment.",
+        "notes": "This is a statement-level capability, not a clause.",
+    },
+    "show_columns": {
+        "canonical_name": "SHOW COLUMNS",
+        "planner_entry": "plan_show_columns",
+        "scope": "statement",
+        "status": "supported",
+        "syntax_forms": ["SHOW COLUMNS FROM relation"],
+        "summary": "Show table columns.",
+        "documentation": "The planner creates SHOW COLUMNS nodes and optionally applies filters.",
+        "notes": "Filtering SHOW COLUMNS is currently rejected.",
+    },
+    "show_create": {
+        "canonical_name": "SHOW CREATE",
+        "planner_entry": "plan_show_create_query",
+        "scope": "statement",
+        "status": "supported",
+        "syntax_forms": ["SHOW CREATE VIEW object_name"],
+        "summary": "Show CREATE SQL for an object.",
+        "documentation": "Handled as a SHOW node with object metadata.",
+        "notes": "Currently used for view-style objects.",
+    },
+    "top": {
+        "canonical_name": "TOP",
+        "planner_entry": "plan_query",
+        "scope": "query_clause",
+        "status": "unsupported",
+        "syntax_forms": ["SELECT TOP n ..."],
+        "summary": "Legacy limit syntax.",
+        "documentation": "Rejected by the planner; use LIMIT instead.",
+        "notes": "The logical planner emits an UnsupportedSyntaxError.",
+    },
+    "union": {
+        "canonical_name": "UNION",
+        "planner_entry": "plan_query",
+        "scope": "set_operation",
+        "status": "supported",
+        "syntax_forms": ["UNION", "UNION ALL"],
+        "summary": "Combine result sets.",
+        "documentation": "The logical planner supports UNION and applies DISTINCT unless ALL is specified.",
+        "notes": "Set operations are routed through the Union logical node.",
+    },
+    "where": {
+        "canonical_name": "WHERE",
+        "planner_entry": "plan_query",
+        "scope": "query_clause",
+        "status": "supported",
+        "syntax_forms": ["WHERE predicate"],
+        "summary": "Filter rows.",
+        "documentation": "WHERE conditions are rewritten into filters and may be optimized or pushed down.",
+        "notes": "Predicate pushdown and boolean simplification operate on WHERE clauses.",
+    },
+    "with": {
+        "canonical_name": "WITH",
+        "planner_entry": "extract_ctes",
+        "scope": "query_clause",
+        "status": "supported",
+        "syntax_forms": ["WITH cte AS (...)"],
+        "summary": "Define common table expressions.",
+        "documentation": "CTEs are extracted before query planning and tracked as subplans.",
+        "notes": "Used for recursive and non-recursive CTE support.",
+    },
+}
+
+
+def export_clauses_catalog() -> OrderedDict[str, dict[str, Any]]:
+    exported: dict[str, dict[str, Any]] = {}
+    for name in sorted(CLAUSE_DEFINITIONS):
+        exported[name] = CLAUSE_DEFINITIONS[name]
+
+    ordered = OrderedDict()
+    for name in sorted(exported):
+        ordered[name] = exported[name]
+    return ordered
+
+
+def write_clauses_catalog(path: str | Path) -> None:
+    output_path = Path(path)
+    output_path.write_text(
+        json.dumps(export_clauses_catalog(), indent=4) + "\n",
+        encoding="utf8",
+    )

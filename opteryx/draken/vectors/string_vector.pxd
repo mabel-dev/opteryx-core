@@ -1,6 +1,7 @@
 # cython: language_level=3
 
 from libc.stdint cimport int32_t, int8_t, intptr_t, uint64_t, uint8_t
+from opteryx.draken.core.buffers cimport DictAccessor
 from opteryx.draken.core.buffers cimport DrakenVarBuffer
 from opteryx.draken.vectors.bool_vector cimport BoolVector
 from opteryx.draken.vectors.vector cimport Vector
@@ -20,7 +21,13 @@ cdef class StringVector(Vector):
 
     cdef DrakenVarBuffer* ptr
     cdef bint owns_data
+    cdef DictAccessor _dict_accessor
+    cdef DrakenVarBuffer* _dict_values
+    cdef uint8_t* _dict_codes
+    cdef uint8_t _dict_code_width
+    cdef uint8_t _dict_ordered
 
+    cdef DictAccessor* dict_accessor(self) noexcept
     cdef void* dense_ptr(self) noexcept
     cdef uint8_t* null_bitmap_ptr(self) noexcept
 
@@ -123,6 +130,17 @@ cdef StringVector from_dict_buffers(
     const int32_t[::1] dict_lengths,
     const uint8_t[::1] arena_bytes,
     object row_validity=*,
+)
+cdef StringVector from_packed_dict(
+    const uint8_t* codes,
+    uint8_t code_width,
+    Py_ssize_t row_count,
+    const int32_t* dict_offsets,
+    const uint8_t* dict_data,
+    Py_ssize_t dict_size,
+    const uint8_t* row_null_bitmap=*,
+    bint ordered=*,
+    const uint8_t* dict_entry_null_bitmap=*,
 )
 cdef StringVector from_arrow_struct(object array)
 

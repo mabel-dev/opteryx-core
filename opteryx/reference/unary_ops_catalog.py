@@ -1,0 +1,114 @@
+"""Helpers for exporting unary predicate capabilities for documentation."""
+
+from __future__ import annotations
+
+import json
+from collections import OrderedDict
+from pathlib import Path
+from typing import Any
+
+UNARY_OPERATION_DEFINITIONS = {
+    "IsFalse": {
+        "ast_symbol": "IsFalse",
+        "category": "boolean_predicate",
+        "documentation": "Returns true when the input evaluates to false.",
+        "implementation": "opteryx.expression.unary_operations._is_false",
+        "node_type": "UNARY_OPERATOR",
+        "notes": "Requires a boolean operand.",
+        "operand_type": "boolean",
+        "status": "active",
+        "summary": "Boolean false test.",
+        "syntax_forms": ["expr IS FALSE"],
+    },
+    "IsNotFalse": {
+        "ast_symbol": "IsNotFalse",
+        "category": "boolean_predicate",
+        "documentation": "Returns true when the input is not false.",
+        "implementation": "opteryx.expression.unary_operations._is_not_false",
+        "node_type": "UNARY_OPERATOR",
+        "notes": "Requires a boolean operand.",
+        "operand_type": "boolean",
+        "status": "active",
+        "summary": "Boolean is-not-false test.",
+        "syntax_forms": ["expr IS NOT FALSE"],
+    },
+    "IsNotNull": {
+        "ast_symbol": "IsNotNull",
+        "category": "null_predicate",
+        "documentation": "Returns true when the input is not null.",
+        "implementation": "opteryx.expression.unary_operations._is_not_null",
+        "node_type": "UNARY_OPERATOR",
+        "notes": "Vectorized null check.",
+        "operand_type": "any",
+        "status": "active",
+        "summary": "Null negation test.",
+        "syntax_forms": ["expr IS NOT NULL"],
+    },
+    "IsNotTrue": {
+        "ast_symbol": "IsNotTrue",
+        "category": "boolean_predicate",
+        "documentation": "Returns true when the input is not true.",
+        "implementation": "opteryx.expression.unary_operations._is_not_true",
+        "node_type": "UNARY_OPERATOR",
+        "notes": "Requires a boolean operand.",
+        "operand_type": "boolean",
+        "status": "active",
+        "summary": "Boolean is-not-true test.",
+        "syntax_forms": ["expr IS NOT TRUE"],
+    },
+    "IsNull": {
+        "ast_symbol": "IsNull",
+        "category": "null_predicate",
+        "documentation": "Returns true when the input is null.",
+        "implementation": "opteryx.expression.unary_operations._is_null",
+        "node_type": "UNARY_OPERATOR",
+        "notes": "Vectorized null check.",
+        "operand_type": "any",
+        "status": "active",
+        "summary": "Null test.",
+        "syntax_forms": ["expr IS NULL"],
+    },
+    "IsTrue": {
+        "ast_symbol": "IsTrue",
+        "category": "boolean_predicate",
+        "documentation": "Returns true when the input evaluates to true.",
+        "implementation": "opteryx.expression.unary_operations._is_true",
+        "node_type": "UNARY_OPERATOR",
+        "notes": "Requires a boolean operand.",
+        "operand_type": "boolean",
+        "status": "active",
+        "summary": "Boolean true test.",
+        "syntax_forms": ["expr IS TRUE"],
+    },
+    "Not": {
+        "ast_symbol": "Not",
+        "category": "logical",
+        "documentation": "Logical negation of a boolean expression.",
+        "implementation": "opteryx.expression.evaluator.draken.evaluate_draken",
+        "node_type": "NOT",
+        "notes": "Built by the planner as NodeType.NOT, not a standard function call.",
+        "operand_type": "boolean",
+        "status": "active",
+        "summary": "Logical negation.",
+        "syntax_forms": ["NOT expr"],
+    },
+}
+
+
+def export_unary_ops_catalog() -> OrderedDict[str, dict[str, Any]]:
+    exported: dict[str, dict[str, Any]] = {}
+    for name in sorted(UNARY_OPERATION_DEFINITIONS):
+        exported[name] = UNARY_OPERATION_DEFINITIONS[name]
+
+    ordered = OrderedDict()
+    for name in sorted(exported):
+        ordered[name] = exported[name]
+    return ordered
+
+
+def write_unary_ops_catalog(path: str | Path) -> None:
+    output_path = Path(path)
+    output_path.write_text(
+        json.dumps(export_unary_ops_catalog(), indent=4) + "\n",
+        encoding="utf8",
+    )

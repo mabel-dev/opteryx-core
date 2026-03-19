@@ -69,5 +69,6 @@ cdef Int64Vector from_packed_dict(
     Py_ssize_t dict_size,
     const uint8_t* row_null_bitmap=*,
     bint ordered=*,
+    const uint8_t* dict_entry_null_bitmap=*,
 )
 cdef Int64Vector from_sequence(int64_t[::1] data)

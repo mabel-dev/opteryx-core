@@ -15,7 +15,7 @@ sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
 import opteryx
 from opteryx.connectors import DiskConnector
-from opteryx.draken.vectors.dictionary_vector import DictionaryVector
+from opteryx.draken import Morsel
 from opteryx.draken.vectors.string_vector import StringVector
 from opteryx.embeddings import create_hybrid_embedding_provider
 from opteryx.embeddings import create_static_embedding_provider
@@ -330,7 +330,7 @@ def test_match_against_scores_dictionary_values_once():
             ["mars is rocky", "venus is hot", "mars is rocky", None],
             type=pyarrow.dictionary(pyarrow.int32(), pyarrow.string()),
         )
-        vector = DictionaryVector.from_arrow(rows)
+        vector = Morsel.from_arrow(pyarrow.table({"v": rows})).column(b"v")
 
         matches = match_against(vector, "planet mars")
         matches = matches.to_pylist() if hasattr(matches, "to_pylist") else matches
