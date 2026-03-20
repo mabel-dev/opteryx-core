@@ -278,11 +278,41 @@ def binary_operations(
         return _ip_containment(left, right)
 
     elif operator == "StringConcat":
+        # Support numpy-filled columns from expression evaluation
+        if isinstance(left, numpy.ndarray):
+            left = pyarrow.array(left)
+        if isinstance(right, numpy.ndarray):
+            right = pyarrow.array(right)
+
         if hasattr(left, "type") and pyarrow.types.is_binary(left.type):
             left = left.cast(pyarrow.large_utf8())
         if hasattr(right, "type") and pyarrow.types.is_binary(right.type):
             right = right.cast(pyarrow.large_utf8())
-        return compute.binary_join_element_wise(left, right, "")
+
+        if isinstance(left, str):
+            left = pyarrow.scalar(left, type=pyarrow.large_utf8())
+        if isinstance(right, str):
+            right = pyarrow.scalar(right, type=pyarrow.large_utf8())
+
+        if isinstance(left, pyarrow.Scalar) and pyarrow.types.is_binary(left.type):
+            left = left.cast(pyarrow.large_utf8())
+        if isinstance(right, pyarrow.Scalar) and pyarrow.types.is_binary(right.type):
+            right = right.cast(pyarrow.large_utf8())
+
+        # Fallback to align to large_string for pyarrow-based operands
+        if hasattr(left, "type") and not pyarrow.types.is_large_string(left.type):
+            try:
+                left = left.cast(pyarrow.large_utf8())
+            except Exception:
+                pass
+        if hasattr(right, "type") and not pyarrow.types.is_large_string(right.type):
+            try:
+                right = right.cast(pyarrow.large_utf8())
+            except Exception:
+                pass
+
+        delim = pyarrow.scalar("", type=pyarrow.large_utf8())
+        return compute.binary_join_element_wise(left, right, delim)
 
     return operation(left, right)
 

@@ -20,14 +20,27 @@ from typing import List
 import numpy
 from pyarrow import compute
 
+_DRAKEN_ENCODING_CONSTANT = 3
+
+
+def _is_constant_like(value) -> bool:
+    return getattr(value, "encoding", None) == _DRAKEN_ENCODING_CONSTANT
+
+
+def _constant_scalar(value):
+    if getattr(value, "encoding", None) == _DRAKEN_ENCODING_CONSTANT:
+        if len(value) == 0:
+            return None
+        return value[0]
+    return value
+
 
 def round1(values):
     """ROUND(values)"""
     from opteryx.compiled.vector_ops import vector_round
     from opteryx.compiled.vector_ops import vector_round_constant
-    from opteryx.draken.vectors.constant_vector import ConstantVector
 
-    if isinstance(values, ConstantVector):
+    if _is_constant_like(values):
         return vector_round_constant(values, 0)
     return vector_round(values)
 
@@ -36,14 +49,14 @@ def round2(values, digits):
     """ROUND(values, digits)"""
     from opteryx.compiled.vector_ops import vector_round_constant
     from opteryx.compiled.vector_ops import vector_round_digits
-    from opteryx.draken.vectors.constant_vector import ConstantVector
 
-    if isinstance(digits, ConstantVector):
-        d = int(digits.scalar_value()) if digits.scalar_value() is not None else 0
+    if _is_constant_like(digits):
+        scalar = _constant_scalar(digits)
+        d = int(scalar) if scalar is not None else 0
     else:
         d = int(digits)
 
-    if isinstance(values, ConstantVector):
+    if _is_constant_like(values):
         return vector_round_constant(values, d)
 
     return vector_round_digits(values, d)

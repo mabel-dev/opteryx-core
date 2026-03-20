@@ -4,7 +4,24 @@
 - **Goal**: Return to correctness baseline before performance tuning
 - **Minimum Bar**: `make t` and `make clickbench` must pass
 - **Secondary**: `make test` (full suite)
-- **Last Updated**: 2026-03-15 (session 8 refresh)
+- **Last Updated**: 2026-03-20 (live verification)
+
+### Live execution status (2026-03-20)
+- `make t`: running output shows 1686 ✅, 90 ❌ (approx 88 failing SQL-cases, plus some unsupported features intentionally exposed)
+- `make clickbench`: 42/42 queries pass (100%)
+- Root currently failing buckets:
+  - TRIM(LEADING/TRAILING/"pattern") `FunctionExecutionError`
+  - JSON access `->` on casted VARCHAR (NotImplementedError)
+  - MATCH() AGAINST() full-text mismatches (row count mismatch)
+  - GENERATE_SERIES path yields UnsupportedSyntaxError in many forms
+  - TIME_BUCKET with date intervals yields IncompatibleTypesError
+  - EXTRACT(ISOYEAR|WEEK|ISOWEEK|millisecond|nanosecond|DECADE|CENTURY|EPOCH|JULIAN|DOW) entry error
+  - CONCAT/CONCAT_WS over arrays and string concat path pyarrow errors
+  - ANY_VALUE grouped semantic row count mismatch
+  - date/COALESCE/interval predicate row count discrepancies
+
+> [!Note]
+> This update is based on the latest local gate executions and replaces the previous 2026-03-15 snapshot.
 
 > [!Note]
 > The goal is not fix at the cost of architectural principles - we do not fix through poor programming practices or changes which violate the design goals of the system.

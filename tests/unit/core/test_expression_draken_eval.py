@@ -12,8 +12,10 @@ from orso.types import OrsoTypes
 
 from opteryx.draken.morsels.morsel import Morsel
 from opteryx.expression import NodeType
+from opteryx.expression import evaluate_and_append
 from opteryx.expression.evaluator import evaluate_and_append_draken
 from opteryx.expression.evaluator.draken import _eval_value
+from opteryx.expression.evaluator.draken import evaluate_draken
 from opteryx.models import Node
 
 
@@ -71,6 +73,42 @@ def test_draken_eval_value_expression_list_materializes_children():
     assert len(out) == 2
     assert out[0].to_pylist() == [10, 11, 12]
     assert out[1] == 1
+
+
+def test_draken_comparison_coerces_typed_constant_encoded_identifier_rhs():
+    morsel = Morsel.from_arrow(pa.table({"clientip": pa.array([7, 8, 7], type=pa.int64())}))
+
+    literal = Node(
+        NodeType.LITERAL,
+        value=7,
+        type=OrsoTypes.INTEGER,
+        schema_column=_schema("seven", OrsoTypes.INTEGER),
+    )
+    morsel = evaluate_and_append([literal], morsel)
+
+    left = Node(
+        NodeType.IDENTIFIER,
+        value="clientip",
+        type=OrsoTypes.INTEGER,
+        schema_column=_schema("clientip", OrsoTypes.INTEGER),
+    )
+    right = Node(
+        NodeType.IDENTIFIER,
+        value="seven",
+        type=OrsoTypes.INTEGER,
+        schema_column=_schema("seven", OrsoTypes.INTEGER),
+    )
+    comparison = Node(
+        NodeType.COMPARISON_OPERATOR,
+        value="Eq",
+        left=left,
+        right=right,
+        schema_column=_schema("clientip_eq_seven", OrsoTypes.BOOLEAN),
+    )
+
+    out = evaluate_draken(comparison, morsel)
+
+    assert out.to_pylist() == [True, False, True]
 
 
 def test_regex_replace_filter_uses_materialized_function_column():

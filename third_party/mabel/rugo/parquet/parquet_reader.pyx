@@ -13,6 +13,7 @@ import struct
 import time as _time
 import opteryx.config as _opteryx_config
 from array import array as pyarray
+from cpython.bytes cimport PyBytes_FromStringAndSize
 
 # ---------------------------------------------------------------------------
 # Telemetry accumulators (reset with reset_telemetry(); read with get_telemetry())
@@ -887,6 +888,34 @@ cdef inline double _dictionary_ratio_limit():
     return ratio_limit
 
 
+cdef inline bint _decoded_all_valid(
+        parquet_reader.DecodedColumn& decoded_col,
+        int32_t num_rows):
+    cdef Py_ssize_t i
+    if num_rows <= 0:
+        return False
+    if decoded_col.valid_bits.size() == 0:
+        return True
+    for i in range(num_rows):
+        if ((decoded_col.valid_bits[i >> 3] >> (i & 7)) & 1) == 0:
+            return False
+    return True
+
+
+cdef inline bint _decoded_all_null(
+        parquet_reader.DecodedColumn& decoded_col,
+        int32_t num_rows):
+    cdef Py_ssize_t i
+    if num_rows <= 0:
+        return False
+    if decoded_col.valid_bits.size() == 0:
+        return False
+    for i in range(num_rows):
+        if ((decoded_col.valid_bits[i >> 3] >> (i & 7)) & 1) != 0:
+            return False
+    return True
+
+
 cdef inline bint _should_emit_dictionary_vector(
         parquet_reader.DecodedColumn& decoded_col,
         int32_t num_rows):
@@ -904,6 +933,16 @@ cdef inline bint _should_emit_dictionary_vector(
         if (<double>dict_size / <double>num_rows) > _dictionary_ratio_limit():
             return False
     return True
+
+
+cdef inline bint _should_emit_constant_vector(
+        parquet_reader.DecodedColumn& decoded_col,
+        int32_t num_rows):
+    if not _decoded_has_dictionary(decoded_col):
+        return False
+    if _decoded_dict_size(decoded_col) != 1:
+        return False
+    return _decoded_all_valid(decoded_col, num_rows) or _decoded_all_null(decoded_col, num_rows)
 
 
 cdef inline void _record_dictionary_decode(parquet_reader.DecodedColumn& decoded_col):
@@ -1122,6 +1161,47 @@ cdef Vector _make_dictionary_vector(
         return _make_typed_float64_dictionary_vector(decoded_col, num_rows)
 
     raise ValueError(f"unsupported dictionary type for decoded column: {col_type!r}")
+
+
+cdef Vector _make_typed_constant_vector(
+        parquet_reader.DecodedColumn& decoded_col,
+        int32_t num_rows):
+    cdef bytes col_type = decoded_col.type
+    cdef bint all_null = _decoded_all_null(decoded_col, num_rows)
+    cdef uint32_t offset
+    cdef int32_t length
+    cdef object value
+
+    _record_dictionary_decode(decoded_col)
+
+    if col_type == b"byte_array":
+        if all_null:
+            return StringVector.from_constant(None, num_rows, is_null=True)
+        offset = decoded_col.string_dict_offsets[0]
+        length = decoded_col.string_dict_lens[0]
+        value = PyBytes_FromStringAndSize(
+            <const char*>decoded_col.string_dict_arena.data() + offset,
+            length,
+        )
+        return StringVector.from_constant(value, num_rows)
+    if col_type == b"int32":
+        if all_null:
+            return Int64Vector.from_constant(None, num_rows, is_null=True)
+        return Int64Vector.from_constant(<int64_t>decoded_col.dict_int32_values[0], num_rows)
+    if col_type == b"int64":
+        if all_null:
+            return Int64Vector.from_constant(None, num_rows, is_null=True)
+        return Int64Vector.from_constant(decoded_col.dict_int64_values[0], num_rows)
+    if col_type == b"float32":
+        if all_null:
+            return Float64Vector.from_constant(None, num_rows, is_null=True)
+        return Float64Vector.from_constant(<double>decoded_col.dict_float32_values[0], num_rows)
+    if col_type == b"float64":
+        if all_null:
+            return Float64Vector.from_constant(None, num_rows, is_null=True)
+        return Float64Vector.from_constant(decoded_col.dict_float64_values[0], num_rows)
+
+    raise ValueError(f"unsupported constant dictionary type for decoded column: {col_type!r}")
 
 
 cdef BoolVector _make_bool_vector(
@@ -1377,7 +1457,9 @@ def read_parquet(data, column_names=None):
             _t0 = _time.perf_counter()
 
             if col_type == "int64":
-                if _should_emit_dictionary_vector(column, num_rows):
+                if _should_emit_constant_vector(column, num_rows):
+                    vec = _make_typed_constant_vector(column, num_rows)
+                elif _should_emit_dictionary_vector(column, num_rows):
                     vec = _make_typed_int64_dictionary_vector(column, num_rows)
                 else:
                     if _decoded_has_dictionary(column):
@@ -1385,7 +1467,9 @@ def read_parquet(data, column_names=None):
                     vec = _make_int64_vector(column, num_rows)
                 _TEL["cython_int64_s"] += _time.perf_counter() - _t0
             elif col_type == "int32":
-                if _should_emit_dictionary_vector(column, num_rows):
+                if _should_emit_constant_vector(column, num_rows):
+                    vec = _make_typed_constant_vector(column, num_rows)
+                elif _should_emit_dictionary_vector(column, num_rows):
                     vec = _make_typed_int64_from_int32_dictionary_vector(column, num_rows)
                 else:
                     if _decoded_has_dictionary(column):
@@ -1398,7 +1482,9 @@ def read_parquet(data, column_names=None):
                     _TEL["parquet_dict_materialize_fallbacks"] += 1
                 _TEL["cython_str_s"] += _time.perf_counter() - _t0
             elif col_type == "byte_array":
-                if _should_emit_dictionary_vector(column, num_rows):
+                if _should_emit_constant_vector(column, num_rows):
+                    vec = _make_typed_constant_vector(column, num_rows)
+                elif _should_emit_dictionary_vector(column, num_rows):
                     vec = _make_typed_string_dictionary_vector(column, num_rows)
                 else:
                     if _decoded_has_dictionary(column):
@@ -1409,7 +1495,9 @@ def read_parquet(data, column_names=None):
                 vec = _make_bool_vector(column, num_rows)
                 _TEL["cython_bool_s"] += _time.perf_counter() - _t0
             elif col_type == "float32":
-                if _should_emit_dictionary_vector(column, num_rows):
+                if _should_emit_constant_vector(column, num_rows):
+                    vec = _make_typed_constant_vector(column, num_rows)
+                elif _should_emit_dictionary_vector(column, num_rows):
                     vec = _make_typed_float64_from_float32_dictionary_vector(column, num_rows)
                 else:
                     if _decoded_has_dictionary(column):
@@ -1417,7 +1505,9 @@ def read_parquet(data, column_names=None):
                     vec = _make_float64_from_float32_vector(column, num_rows)
                 _TEL["cython_float_s"] += _time.perf_counter() - _t0
             elif col_type == "float64":
-                if _should_emit_dictionary_vector(column, num_rows):
+                if _should_emit_constant_vector(column, num_rows):
+                    vec = _make_typed_constant_vector(column, num_rows)
+                elif _should_emit_dictionary_vector(column, num_rows):
                     vec = _make_typed_float64_dictionary_vector(column, num_rows)
                 else:
                     if _decoded_has_dictionary(column):
@@ -1554,18 +1644,27 @@ def decode_column_from_chunk_to_python(chunk_bytes, col_stats):
     cdef int32_t num_rows = <int32_t>result.num_rows
 
     if col_type == "int32":
+        if _should_emit_constant_vector(result, num_rows):
+            return _make_typed_constant_vector(result, <int32_t>result.num_rows).to_pylist()
         if _should_emit_dictionary_vector(result, num_rows):
             return _make_typed_int64_from_int32_dictionary_vector(result, <int32_t>result.num_rows).to_pylist()
         if _decoded_has_dictionary(result):
             _TEL["parquet_dict_materialize_fallbacks"] += 1
         return _make_int64_from_int32_vector(result, num_rows).to_pylist()
     elif col_type == "int64":
+        if _should_emit_constant_vector(result, num_rows):
+            return _make_typed_constant_vector(result, <int32_t>result.num_rows).to_pylist()
         if _should_emit_dictionary_vector(result, num_rows):
             return _make_typed_int64_dictionary_vector(result, <int32_t>result.num_rows).to_pylist()
         if _decoded_has_dictionary(result):
             _TEL["parquet_dict_materialize_fallbacks"] += 1
         return _make_int64_vector(result, num_rows).to_pylist()
     elif col_type == "byte_array":
+        if _should_emit_constant_vector(result, num_rows):
+            return [
+                _safe_decode_utf8(v) if v is not None else None
+                for v in _make_typed_constant_vector(result, <int32_t>result.num_rows).to_pylist()
+            ]
         if _should_emit_dictionary_vector(result, num_rows):
             return [
                 _safe_decode_utf8(v) if v is not None else None
@@ -1580,12 +1679,16 @@ def decode_column_from_chunk_to_python(chunk_bytes, col_stats):
     elif col_type == "boolean":
         return [bool(val) for val in result.boolean_values]
     elif col_type == "float32":
+        if _should_emit_constant_vector(result, num_rows):
+            return _make_typed_constant_vector(result, <int32_t>result.num_rows).to_pylist()
         if _should_emit_dictionary_vector(result, num_rows):
             return _make_typed_float64_from_float32_dictionary_vector(result, <int32_t>result.num_rows).to_pylist()
         if _decoded_has_dictionary(result):
             _TEL["parquet_dict_materialize_fallbacks"] += 1
         return _make_float64_from_float32_vector(result, num_rows).to_pylist()
     elif col_type == "float64":
+        if _should_emit_constant_vector(result, num_rows):
+            return _make_typed_constant_vector(result, <int32_t>result.num_rows).to_pylist()
         if _should_emit_dictionary_vector(result, num_rows):
             return _make_typed_float64_dictionary_vector(result, <int32_t>result.num_rows).to_pylist()
         if _decoded_has_dictionary(result):
@@ -1700,6 +1803,8 @@ def decode_column_from_chunk(chunk_bytes, col_stats):
 
     # Convert C++ DecodedColumn to Draken Vector using the same logic as read_parquet()
     if col_type == "int32":
+        if _should_emit_constant_vector(result, num_rows):
+            return _make_typed_constant_vector(result, num_rows)
         if _should_emit_dictionary_vector(result, num_rows):
             return _make_typed_int64_from_int32_dictionary_vector(result, num_rows)
         if _decoded_has_dictionary(result):
@@ -1707,6 +1812,8 @@ def decode_column_from_chunk(chunk_bytes, col_stats):
         return _make_int64_from_int32_vector(result, num_rows)
     
     elif col_type == "int64":
+        if _should_emit_constant_vector(result, num_rows):
+            return _make_typed_constant_vector(result, num_rows)
         if _should_emit_dictionary_vector(result, num_rows):
             return _make_typed_int64_dictionary_vector(result, num_rows)
         if _decoded_has_dictionary(result):
@@ -1714,6 +1821,8 @@ def decode_column_from_chunk(chunk_bytes, col_stats):
         return _make_int64_vector(result, num_rows)
     
     elif col_type == "byte_array":
+        if _should_emit_constant_vector(result, num_rows):
+            return _make_typed_constant_vector(result, num_rows)
         if _should_emit_dictionary_vector(result, num_rows):
             return _make_typed_string_dictionary_vector(result, num_rows)
         if _decoded_has_dictionary(result):
@@ -1724,6 +1833,8 @@ def decode_column_from_chunk(chunk_bytes, col_stats):
         return _make_bool_vector(result, num_rows)
     
     elif col_type == "float32":
+        if _should_emit_constant_vector(result, num_rows):
+            return _make_typed_constant_vector(result, num_rows)
         if _should_emit_dictionary_vector(result, num_rows):
             return _make_typed_float64_from_float32_dictionary_vector(result, num_rows)
         if _decoded_has_dictionary(result):
@@ -1731,6 +1842,8 @@ def decode_column_from_chunk(chunk_bytes, col_stats):
         return _make_float64_from_float32_vector(result, num_rows)
     
     elif col_type == "float64":
+        if _should_emit_constant_vector(result, num_rows):
+            return _make_typed_constant_vector(result, num_rows)
         if _should_emit_dictionary_vector(result, num_rows):
             return _make_typed_float64_dictionary_vector(result, num_rows)
         if _decoded_has_dictionary(result):

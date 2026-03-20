@@ -12,6 +12,7 @@ aggregation kernel using the compiled Draken GroupStateStore backend.
 
 from __future__ import annotations
 
+import os
 import time
 
 from orso.types import OrsoTypes
@@ -19,7 +20,7 @@ from orso.types import OrsoTypes
 from opteryx import EMPTY
 from opteryx import EOS
 from opteryx.draken.morsels.morsel import Morsel
-from opteryx.draken.vectors.constant_vector import from_scalar as constant_from_scalar
+from opteryx.draken.vectors.scalar_constructors import from_scalar as constant_from_scalar
 from opteryx.exceptions import InvalidFunctionParameterError
 from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.expression import NodeType
@@ -152,7 +153,24 @@ class DrakenAggregateAndGroupNode(BasePlanNode):
                 if identity not in required_columns:
                     required_columns.append(identity)
         self._required_columns = list(dict.fromkeys(required_columns))
-        if any(group.node_type != NodeType.IDENTIFIER for group in self.groups):
+
+        # OPTIMIZATION: Force CarcharGroupStateEngine (C++ backend) even when expressions
+        # are detected in GROUP BY.
+        #
+        # Rationale: Expressions are materialized to the morsel before GROUP BY via
+        # evaluate_and_append_draken(), making them equivalent to column references.
+        # Using CarcharGroupStateEngine (+17s speedup) vs GroupStateStore (Python backend)
+        # provides significant performance benefit for queries like:
+        #   SELECT ... GROUP BY UserID, EXTRACT(MINUTE FROM EventTime), ...
+        #
+        # Feature flag: FEATURE_GROUPBY_FORCE_CARCHAR_BACKEND (default: 0)
+        # See: CLICKBENCH_19_OPTIMIZATION_REPORT.md for performance analysis
+        force_carchar = os.environ.get("FEATURE_GROUPBY_FORCE_CARCHAR_BACKEND", "0") == "1"
+
+        if (
+            any(group.node_type != NodeType.IDENTIFIER for group in self.groups)
+            and not force_carchar
+        ):
             from opteryx.compiled.aggregations.group_state_store import GroupStateStore
 
             self._group_by = GroupStateStore(
@@ -231,7 +249,7 @@ class DrakenAggregateAndGroupNode(BasePlanNode):
                     column = "*"
                 elif field_node.node_type == NodeType.LITERAL:
                     # Constants like min('a'): the literal will be broadcast to a
-                    # ConstantVector column by evaluate_and_append_draken, so use
+                    # constant-encoded column by evaluate_and_append_draken, so use
                     # its schema identity as the column name.
                     column = field_node.schema_column.identity
                 elif field_node.node_type == NodeType.IDENTIFIER:

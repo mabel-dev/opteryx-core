@@ -29,8 +29,9 @@ from libc.stdint cimport uint8_t
 from libc.stdlib cimport malloc
 from libc.string cimport memset, memcpy
 
-from opteryx.draken.core.buffers cimport DrakenFixedBuffer
+from opteryx.draken.core.buffers cimport ConstAccessor, DrakenFixedBuffer
 from opteryx.draken.core.buffers cimport DRAKEN_TIMESTAMP64
+from opteryx.draken.core.buffers cimport DRAKEN_ENCODING_CONSTANT
 from opteryx.draken.core.fixed_vector cimport alloc_fixed_buffer
 from opteryx.draken.core.fixed_vector cimport buf_dtype
 from opteryx.draken.core.fixed_vector cimport buf_itemsize
@@ -79,6 +80,23 @@ cdef int64_t scale_timestamp_to_micros(int64_t value, str unit):
 cdef class TimestampVector(Vector):
 
     @classmethod
+    def from_constant(cls, value, length, is_null=False, timestamp_unit="us"):
+        if length < 0:
+            raise ValueError("length must be non-negative")
+        if value is None and not is_null:
+            raise ValueError("value cannot be None unless is_null=True")
+        cdef TimestampVector vec = TimestampVector(0)
+        vec.ptr.length = <size_t>length
+        vec.ptr.null_bitmap = NULL
+        vec.null_bit_offset = 0
+        vec.timestamp_unit = str(timestamp_unit)
+        vec._has_const = True
+        vec._const_is_null = bool(is_null)
+        vec._const_value = 0 if is_null or value is None else <int64_t>int(value)
+        vec._encoding = DRAKEN_ENCODING_CONSTANT
+        return vec
+
+    @classmethod
     def from_dict(cls, codes, dictionary, row_validity=None, timestamp_unit="us"):
         from array import array as pyarray
 
@@ -119,6 +137,13 @@ cdef class TimestampVector(Vector):
         else:
             self.ptr = alloc_fixed_buffer(DRAKEN_TIMESTAMP64, length, 8)
             self.owns_data = True
+        self._const_accessor.length = 0
+        self._const_accessor.value_type = DRAKEN_TIMESTAMP64
+        self._const_accessor.value_ptr = NULL
+        self._const_accessor.is_null = 0
+        self._const_value = 0
+        self._has_const = False
+        self._const_is_null = False
 
     def __dealloc__(self):
         # Only free if we own the data and the pointer is not NULL
@@ -126,13 +151,22 @@ cdef class TimestampVector(Vector):
             free_fixed_buffer(self.ptr, True)
             self.ptr = NULL
 
+    cdef ConstAccessor* const_accessor(self) noexcept:
+        if not self._has_const or self.ptr == NULL:
+            return NULL
+        self._const_accessor.length = self.ptr.length
+        self._const_accessor.value_type = DRAKEN_TIMESTAMP64
+        self._const_accessor.value_ptr = <void*>&self._const_value
+        self._const_accessor.is_null = 1 if self._const_is_null else 0
+        return &self._const_accessor
+
     cdef void* dense_ptr(self) noexcept:
-        if self.ptr == NULL:
+        if self.ptr == NULL or self._has_const:
             return NULL
         return self.ptr.data
 
     cdef uint8_t* null_bitmap_ptr(self) noexcept:
-        if self.ptr == NULL:
+        if self.ptr == NULL or self._has_const:
             return NULL
         return self.ptr.null_bitmap
 
@@ -158,6 +192,10 @@ cdef class TimestampVector(Vector):
         cdef int64_t* data = <int64_t*> ptr.data
         if i < 0 or i >= ptr.length:
             raise IndexError("Index out of bounds")
+        if self._has_const:
+            if self._const_is_null:
+                return None
+            return self._const_value
         if ptr.null_bitmap != NULL:
             if not _bitmap_is_valid(ptr.null_bitmap, i, self.null_bit_offset):
                 return None
@@ -167,6 +205,10 @@ cdef class TimestampVector(Vector):
     def to_arrow(self):
         """Convert to a PyArrow array."""
         import pyarrow as pa
+        if self._has_const:
+            if self._const_is_null:
+                return pa.nulls(self.ptr.length, type=pa.timestamp(self.timestamp_unit))
+            return pa.array([self._const_value] * self.ptr.length, type=pa.timestamp(self.timestamp_unit))
         
         cdef size_t nbytes = buf_length(self.ptr) * buf_itemsize(self.ptr)
         addr = <intptr_t> self.ptr.data
@@ -186,6 +228,13 @@ cdef class TimestampVector(Vector):
 
     # -------- Example op --------
     cpdef TimestampVector take(self, int32_t[::1] indices):
+        if self._has_const:
+            return TimestampVector.from_constant(
+                None if self._const_is_null else self._const_value,
+                indices.shape[0],
+                is_null=self._const_is_null,
+                timestamp_unit=self.timestamp_unit,
+            )
         cdef Py_ssize_t i, n = indices.shape[0]
         cdef TimestampVector out = TimestampVector(<size_t>n)
         cdef int64_t* src = <int64_t*> self.ptr.data
@@ -293,6 +342,10 @@ cdef class TimestampVector(Vector):
         cdef Py_ssize_t i, n = ptr.length
         if n == 0:
             raise ValueError("Cannot compute min of empty column")
+        if self._has_const:
+            if self._const_is_null:
+                raise ValueError("Cannot compute min of all-null column")
+            return self._const_value
 
         cdef int64_t m
         cdef bint found = False
@@ -325,6 +378,10 @@ cdef class TimestampVector(Vector):
         cdef Py_ssize_t i, n = ptr.length
         if n == 0:
             raise ValueError("Cannot compute max of empty column")
+        if self._has_const:
+            if self._const_is_null:
+                raise ValueError("Cannot compute max of all-null column")
+            return self._const_value
 
         cdef int64_t m
         cdef bint found = False
@@ -362,6 +419,10 @@ cdef class TimestampVector(Vector):
 
         if buf == NULL:
             raise MemoryError()
+        if self._has_const:
+            for i in range(n):
+                buf[i] = 1 if self._const_is_null else 0
+            return <int8_t[:n]> buf
 
         if ptr.null_bitmap == NULL:
             # No nulls — fill with 0
@@ -381,6 +442,8 @@ cdef class TimestampVector(Vector):
         cdef Py_ssize_t i, n = ptr.length
         cdef Py_ssize_t count = 0
         cdef uint8_t byte, bit
+        if self._has_const:
+            return n if self._const_is_null else 0
         if ptr.null_bitmap == NULL:
             return 0
         for i in range(n):
@@ -394,6 +457,14 @@ cdef class TimestampVector(Vector):
         cdef Py_ssize_t i, n = ptr.length
         cdef list out = []
         cdef uint8_t byte, bit
+        if self._has_const:
+            if self._const_is_null:
+                for i in range(n):
+                    out.append(None)
+            else:
+                for i in range(n):
+                    out.append(self._const_value)
+            return out
 
         if ptr.null_bitmap == NULL:
             for i in range(n):
@@ -416,17 +487,22 @@ cdef class TimestampVector(Vector):
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef int64_t* data = <int64_t*> ptr.data
         cdef Py_ssize_t n = ptr.length
+        cdef Py_ssize_t i
+        cdef uint64_t value
+        cdef uint64_t* dst = &out_buf[offset]
+        cdef bint has_nulls = ptr.null_bitmap != NULL
+
+        if self._has_const:
+            value = NULL_HASH if self._const_is_null else <uint64_t>self._const_value
+            for i in range(n):
+                out_buf[offset + i] = mix_hash(out_buf[offset + i], value)
+            return
 
         if n == 0:
             return
 
         if offset < 0 or offset + n > out_buf.shape[0]:
             raise ValueError("TimestampVector.hash_into: output buffer too small")
-
-        cdef Py_ssize_t i
-        cdef uint64_t value
-        cdef uint64_t* dst = &out_buf[offset]
-        cdef bint has_nulls = ptr.null_bitmap != NULL
         cdef uint64_t* as_uint64 = <uint64_t*> data
 
         # Use shared MIX_HASH_CONSTANT directly; no need to pass it in.
@@ -458,6 +534,11 @@ cdef class TimestampVector(Vector):
 
         if offset < 0 or offset + n > out_buf.shape[0]:
             raise ValueError("TimestampVector.compress: output buffer too small")
+        if self._has_const:
+            value = 0 if self._const_is_null else scale_timestamp_to_micros(self._const_value, self.timestamp_unit)
+            for i in range(n):
+                dst[i] = NULL_FLAG if self._const_is_null else value
+            return
 
         # Apply scale factor based on timestamp unit
         if has_nulls:
@@ -473,6 +554,8 @@ cdef class TimestampVector(Vector):
                 dst[i] = scale_timestamp_to_micros(value, self.timestamp_unit)
 
     def __str__(self):
+        if self._has_const:
+            return f"<TimestampVector len={buf_length(self.ptr)} values={[None if self._const_is_null else self._const_value] * min(<Py_ssize_t>buf_length(self.ptr), 10)}>"
         cdef list vals = []
         cdef Py_ssize_t i, k = min(<Py_ssize_t>buf_length(self.ptr), 10)
         cdef int64_t* data = <int64_t*> self.ptr.data

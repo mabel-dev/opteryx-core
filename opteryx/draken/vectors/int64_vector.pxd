@@ -3,6 +3,7 @@ from libc.stdint cimport int64_t
 from libc.stdint cimport int8_t
 from libc.stdint cimport uint64_t, uint8_t
 
+from opteryx.draken.core.buffers cimport ConstAccessor
 from opteryx.draken.core.buffers cimport DictAccessor
 from opteryx.draken.core.buffers cimport DrakenFixedBuffer
 from opteryx.draken.core.buffers cimport DrakenVarBuffer
@@ -19,8 +20,13 @@ cdef class Int64Vector(Vector):
     cdef uint8_t* _dict_codes
     cdef uint8_t _dict_code_width
     cdef uint8_t _dict_ordered
+    cdef ConstAccessor _const_accessor
+    cdef int64_t _const_value
+    cdef bint _has_const
+    cdef bint _const_is_null
 
     cdef DictAccessor* dict_accessor(self) noexcept
+    cdef ConstAccessor* const_accessor(self) noexcept
     cdef void* dense_ptr(self) noexcept
     cdef uint8_t* null_bitmap_ptr(self) noexcept
 

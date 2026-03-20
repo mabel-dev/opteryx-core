@@ -6,12 +6,10 @@ sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 
 
 ROOT = Path(__file__).resolve().parents[3]
-CONSTANT_VECTOR = ROOT / "third_party/mabel/draken/vectors/constant_vector.pyx"
 GROUP_STATE_STORE = ROOT / "opteryx/compiled/aggregations/group_state_store.pyx"
 MORSEL_IO = ROOT / "third_party/mabel/draken/storage/morsel_io.pyx"
 
 MOTOR_PATH_FILES = (
-    CONSTANT_VECTOR,
     GROUP_STATE_STORE,
     MORSEL_IO,
 )

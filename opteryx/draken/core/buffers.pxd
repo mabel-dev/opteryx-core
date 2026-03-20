@@ -27,6 +27,7 @@ cdef extern from "core/buffers.h":
         DRAKEN_ENCODING_DENSE
         DRAKEN_ENCODING_DICTIONARY
         DRAKEN_ENCODING_RLE
+        DRAKEN_ENCODING_CONSTANT
 
     # Fixed-width column
     ctypedef struct DrakenFixedBuffer:
@@ -90,3 +91,9 @@ cdef struct DictAccessor:
     size_t           length      # number of rows
     DrakenVarBuffer* dict_values # backing dictionary buffer
     DrakenType       value_type  # element type of the dictionary entries
+
+cdef struct ConstAccessor:
+    size_t      length
+    DrakenType  value_type
+    void*       value_ptr
+    uint8_t     is_null

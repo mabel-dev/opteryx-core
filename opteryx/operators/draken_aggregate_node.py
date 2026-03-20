@@ -34,10 +34,21 @@ from . import BasePlanNode
 from .draken_aggregate_and_group_node import DrakenAggregateAndGroupNode
 
 _DATA_FORMAT = "draken"
+_DRAKEN_ENCODING_CONSTANT = 3
 
 
 def _column_bytes(identity):
     return identity if isinstance(identity, bytes) else str(identity).encode("utf-8")
+
+
+def _is_constant_vector_like(vector) -> bool:
+    return getattr(vector, "encoding", None) == _DRAKEN_ENCODING_CONSTANT
+
+
+def _constant_scalar_value(vector):
+    if len(vector) == 0:
+        return None
+    return vector[0]
 
 
 def _vector_null_count(vector) -> int:
@@ -56,22 +67,22 @@ def _vector_sum(vector):
     if valid_count == 0:
         return None
 
-    if vector.__class__.__name__ in ("Int64Vector", "Float64Vector"):
-        return vector.sum()
-
-    if vector.__class__.__name__ == "ConstantVector":
-        scalar = vector.scalar_value()
+    if _is_constant_vector_like(vector):
+        scalar = _constant_scalar_value(vector)
         if scalar is None:
             return None
         return scalar * valid_count
+
+    if vector.__class__.__name__ in ("Int64Vector", "Float64Vector"):
+        return vector.sum()
 
     values = _vector_valid_values(vector)
     return sum(values) if values else None
 
 
 def _vector_min(vector):
-    if vector.__class__.__name__ == "ConstantVector":
-        scalar = vector.scalar_value()
+    if _is_constant_vector_like(vector):
+        scalar = _constant_scalar_value(vector)
         return scalar if scalar is not None else None
 
     values = _vector_valid_values(vector)
@@ -79,8 +90,8 @@ def _vector_min(vector):
 
 
 def _vector_max(vector):
-    if vector.__class__.__name__ == "ConstantVector":
-        scalar = vector.scalar_value()
+    if _is_constant_vector_like(vector):
+        scalar = _constant_scalar_value(vector)
         return scalar if scalar is not None else None
 
     values = _vector_valid_values(vector)

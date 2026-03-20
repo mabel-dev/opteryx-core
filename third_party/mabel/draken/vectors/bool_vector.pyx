@@ -23,8 +23,9 @@ from libc.string cimport memcpy, memset
 from libc.stdint cimport int32_t, int8_t, intptr_t, uint64_t, uint8_t, int64_t
 from libc.stdlib cimport malloc, free
 
-from opteryx.draken.core.buffers cimport DrakenFixedBuffer
+from opteryx.draken.core.buffers cimport ConstAccessor, DrakenFixedBuffer
 from opteryx.draken.core.buffers cimport DRAKEN_BOOL
+from opteryx.draken.core.buffers cimport DRAKEN_ENCODING_CONSTANT
 from opteryx.draken.core.fixed_vector cimport alloc_fixed_buffer, buf_dtype, buf_length, free_fixed_buffer
 from opteryx.draken.vectors.vector cimport MIX_HASH_CONSTANT, Vector, NULL_HASH, mix_hash, simd_mix_hash
 
@@ -34,6 +35,22 @@ cdef const uint64_t FALSE_HASH = <uint64_t>0xc2fd8b2343f83ce7
 DEF BOOL_HASH_CHUNK = 1024
 
 cdef class BoolVector(Vector):
+    # Re-Cythonize this implementation when the pxd layout changes.
+
+    @classmethod
+    def from_constant(cls, value, length, is_null=False):
+        if length < 0:
+            raise ValueError("length must be non-negative")
+        if value is None and not is_null:
+            raise ValueError("value cannot be None unless is_null=True")
+        cdef BoolVector vec = BoolVector(0)
+        vec.ptr.length = <size_t>length
+        vec.ptr.null_bitmap = NULL
+        vec._has_const = True
+        vec._const_is_null = bool(is_null)
+        vec._const_value = 0 if is_null or value is None else <uint8_t>(1 if bool(value) else 0)
+        vec._encoding = DRAKEN_ENCODING_CONSTANT
+        return vec
 
     def __cinit__(self, size_t length=0, bint wrap=False):
         cdef size_t nbytes
@@ -52,11 +69,27 @@ cdef class BoolVector(Vector):
                 if self.ptr.data == NULL:
                     raise MemoryError()
             self.owns_data = True
+        self._const_accessor.length = 0
+        self._const_accessor.value_type = DRAKEN_BOOL
+        self._const_accessor.value_ptr = NULL
+        self._const_accessor.is_null = 0
+        self._const_value = 0
+        self._has_const = False
+        self._const_is_null = False
 
     def __dealloc__(self):
         if self.owns_data and self.ptr is not NULL:
             free_fixed_buffer(self.ptr, True)
             self.ptr = NULL
+
+    cdef ConstAccessor* const_accessor(self) noexcept:
+        if not self._has_const or self.ptr == NULL:
+            return NULL
+        self._const_accessor.length = self.ptr.length
+        self._const_accessor.value_type = DRAKEN_BOOL
+        self._const_accessor.value_ptr = <void*>&self._const_value
+        self._const_accessor.is_null = 1 if self._const_is_null else 0
+        return &self._const_accessor
 
     # Properties
     @property
@@ -75,6 +108,10 @@ cdef class BoolVector(Vector):
         cdef DrakenFixedBuffer* ptr = self.ptr
         if i < 0 or i >= ptr.length:
             raise IndexError("Index out of bounds")
+        if self._has_const:
+            if self._const_is_null:
+                return None
+            return bool(self._const_value)
         # null check
         if ptr.null_bitmap != NULL:
             byte = ptr.null_bitmap[i >> 3]
@@ -89,6 +126,10 @@ cdef class BoolVector(Vector):
     def to_arrow(self):
         """Convert to a PyArrow array."""
         import pyarrow as pa
+        if self._has_const:
+            if self._const_is_null:
+                return pa.nulls(self.ptr.length, type=pa.bool_())
+            return pa.array([bool(self._const_value)] * self.ptr.length, type=pa.bool_())
         
         cdef size_t nbytes = (buf_length(self.ptr) + 7) >> 3
         addr = <intptr_t> self.ptr.data
@@ -309,6 +350,12 @@ cdef class BoolVector(Vector):
 
     # -------- Ops --------
     cpdef BoolVector take(self, int32_t[::1] indices):
+        if self._has_const:
+            return BoolVector.from_constant(
+                None if self._const_is_null else bool(self._const_value),
+                indices.shape[0],
+                is_null=self._const_is_null,
+            )
         cdef Py_ssize_t i, n = indices.shape[0]
         cdef BoolVector out = BoolVector(<size_t>n)
         cdef uint8_t* src = <uint8_t*> self.ptr.data
@@ -406,14 +453,18 @@ cdef class BoolVector(Vector):
         """Compress bools to int64_t where True=1, False=0, null=NULL_FLAG"""
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef Py_ssize_t n = ptr.length
+        cdef Py_ssize_t i
         if n == 0:
             return
         if offset < 0 or offset + n > out_buf.shape[0]:
             raise ValueError("BoolVector.compress: output buffer too small")
+        if self._has_const:
+            for i in range(n):
+                out_buf[offset + i] = <int64_t>(-(1 << 63)) if self._const_is_null else (1 if self._const_value else 0)
+            return
         cdef uint8_t* data = <uint8_t*> ptr.data
         cdef uint8_t* null_bitmap = ptr.null_bitmap
         cdef bint has_nulls = null_bitmap != NULL
-        cdef Py_ssize_t i
         for i in range(n):
             if has_nulls and ((null_bitmap[i >> 3] >> (i & 7)) & 1) == 0:
                 out_buf[offset + i] = <int64_t> (-(1 << 63))
@@ -445,6 +496,10 @@ cdef class BoolVector(Vector):
         cdef uint8_t byte, bit
         if buf == NULL:
             raise MemoryError()
+        if self._has_const:
+            for i in range(n):
+                buf[i] = 1 if self._const_is_null else 0
+            return <int8_t[:n]> buf
         if ptr.null_bitmap == NULL:
             for i in range(n):
                 buf[i] = 0
@@ -461,6 +516,8 @@ cdef class BoolVector(Vector):
         cdef Py_ssize_t i, n = ptr.length
         cdef Py_ssize_t count = 0
         cdef uint8_t byte, bit
+        if self._has_const:
+            return n if self._const_is_null else 0
         if ptr.null_bitmap == NULL:
             return 0
         for i in range(n):
@@ -475,6 +532,14 @@ cdef class BoolVector(Vector):
         cdef Py_ssize_t i, n = ptr.length
         cdef list out = []
         cdef uint8_t byte, bit
+        if self._has_const:
+            if self._const_is_null:
+                for i in range(n):
+                    out.append(None)
+            else:
+                for i in range(n):
+                    out.append(bool(self._const_value))
+            return out
         for i in range(n):
             if ptr.null_bitmap != NULL:
                 byte = ptr.null_bitmap[i >> 3]
@@ -493,18 +558,23 @@ cdef class BoolVector(Vector):
     ) except *:
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef Py_ssize_t n = ptr.length
+        cdef Py_ssize_t i
+        cdef uint64_t value
+        if self._has_const:
+            value = NULL_HASH if self._const_is_null else (TRUE_HASH if self._const_value else FALSE_HASH)
+            for i in range(n):
+                out_buf[offset + i] = mix_hash(out_buf[offset + i], value)
+            return
         if n == 0:
             return
 
         if offset < 0 or offset + n > out_buf.shape[0]:
             raise ValueError("BoolVector.hash_into: output buffer too small")
 
-        cdef Py_ssize_t i
         cdef Py_ssize_t block = 0
         cdef Py_ssize_t j = 0
         cdef Py_ssize_t idx = 0
         cdef uint8_t byte, bit
-        cdef uint64_t value
         cdef uint64_t* dst = &out_buf[offset]
         cdef uint8_t* values = <uint8_t*> ptr.data
         cdef bint has_nulls = ptr.null_bitmap != NULL
@@ -541,6 +611,8 @@ cdef class BoolVector(Vector):
             dst[i] = mix_hash(dst[i], value)
 
     def __str__(self):
+        if self._has_const:
+            return f"<BoolVector len={buf_length(self.ptr)} values={[None if self._const_is_null else bool(self._const_value)] * min(<Py_ssize_t>buf_length(self.ptr), 10)}>"
         cdef list vals = []
         cdef Py_ssize_t i, k = min(<Py_ssize_t>buf_length(self.ptr), 10)
         for i in range(k):

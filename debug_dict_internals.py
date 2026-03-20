@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import pyarrow as pa
+
 from opteryx.draken import Morsel
 
 # Create a dictionary vector

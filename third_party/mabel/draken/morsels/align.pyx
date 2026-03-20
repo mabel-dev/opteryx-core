@@ -31,7 +31,6 @@ from opteryx.draken.vectors.int64_vector cimport Int64Vector
 from opteryx.draken.vectors.float64_vector cimport Float64Vector
 from opteryx.draken.vectors.bool_vector cimport BoolVector
 from opteryx.draken.vectors.string_vector cimport StringVector
-from opteryx.draken.vectors.constant_vector cimport ConstantVector
 from opteryx.draken.vectors.date32_vector cimport Date32Vector
 from opteryx.draken.vectors.timestamp_vector cimport TimestampVector
 from opteryx.draken.vectors.interval_vector cimport IntervalVector
@@ -58,8 +57,6 @@ cdef inline Vector _take_vector_fast(Vector vec, int32_t[::1] indices):
         return (<BoolVector>vec).take(indices)
     elif dtype == DrakenType.DRAKEN_STRING:
         return (<StringVector>vec).take(indices)
-    elif dtype == DrakenType.DRAKEN_CONSTANT:
-        return (<ConstantVector>vec).take(indices)
     elif dtype == DrakenType.DRAKEN_DATE32:
         return (<Date32Vector>vec).take(indices)
     elif dtype == DrakenType.DRAKEN_TIMESTAMP64:
@@ -95,8 +92,6 @@ cdef inline uint8_t* _source_null_bitmap(Vector vec, DrakenType dtype):
         return (<BoolVector>vec).ptr.null_bitmap
     elif dtype == DrakenType.DRAKEN_STRING:
         return (<StringVector>vec).ptr.null_bitmap
-    elif dtype == DrakenType.DRAKEN_CONSTANT:
-        return (<ConstantVector>vec).ptr.null_bitmap
     elif dtype == DrakenType.DRAKEN_DATE32:
         return (<Date32Vector>vec).ptr.null_bitmap
     elif dtype == DrakenType.DRAKEN_TIMESTAMP64:
@@ -148,14 +143,6 @@ cdef inline uint8_t* _ensure_output_null_bitmap(Vector vec, DrakenType dtype, Py
             if out_null == NULL:
                 raise MemoryError()
             (<StringVector>vec).ptr.null_bitmap = out_null
-        return out_null
-    elif dtype == DrakenType.DRAKEN_CONSTANT:
-        out_null = (<ConstantVector>vec).ptr.null_bitmap
-        if out_null == NULL:
-            out_null = <uint8_t*>malloc(nb_size)
-            if out_null == NULL:
-                raise MemoryError()
-            (<ConstantVector>vec).ptr.null_bitmap = out_null
         return out_null
     elif dtype == DrakenType.DRAKEN_DATE32:
         out_null = (<Date32Vector>vec).ptr.null_bitmap

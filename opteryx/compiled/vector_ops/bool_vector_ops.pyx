@@ -77,7 +77,7 @@ cpdef BoolVector bool_vector_from_inverted_null_bitmap(object bitmap_mv, Py_ssiz
 cpdef BoolVector bool_vector_all_true(Py_ssize_t n):
     """Build a BoolVector with all bits set (all True / IS NULL for null constants).
 
-    Used when a column is known to be entirely SQL NULL (e.g. ConstantVector
+    Used when a column is known to be entirely SQL NULL (e.g. constant encoding
     with scalar_value() == None).
 
     Args:

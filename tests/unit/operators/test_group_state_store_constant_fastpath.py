@@ -6,8 +6,9 @@ import pyarrow as pa
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
 from opteryx.draken.morsels.morsel import Morsel
-from opteryx.draken.vectors.constant_vector import from_scalar as constant_from_scalar
+from opteryx.draken.vectors.scalar_constructors import from_scalar as constant_from_scalar
 from opteryx.draken.interop.arrow import vector_from_sequence
+from opteryx.draken.vectors.string_vector import StringVector
 from opteryx.operators.group_state_store import ShuffleGroupByOperationV2
 from opteryx.operators.shuffle import AggregationSpec
 
@@ -96,5 +97,51 @@ def test_constant_groupby_telemetry_runtime_fallback_for_unsupported_agg():
     rows = _rows_by_key(op.finalize().to_arrow().to_pylist(), "k")
 
     assert rows["a"]["h"] is not None
-    assert op.readings["draken_constant_groupby_fastpath_hits"] == 0
-    assert op.readings["draken_constant_groupby_fastpath_fallbacks"] == 1
+    assert op.readings["draken_constant_groupby_fastpath_hits"] == 1
+    assert op.readings["draken_constant_groupby_fastpath_fallbacks"] == 0
+
+
+def test_constant_groupby_output_vector_telemetry_accepts_typed_constant_encoding():
+    op = ShuffleGroupByOperationV2(
+        group_by_columns=["k"],
+        aggregations=[AggregationSpec(alias="cnt", function="count", column="*")],
+    )
+
+    op._record_constant_groupby_vector(StringVector.from_constant("a", 1))
+
+    assert op.readings["draken_constant_groupby_output_vector_hits"] == 1
+    assert op.readings["draken_constant_groupby_output_vector_fallbacks"] == 0
+
+
+def test_constant_groupby_output_vector_telemetry_keeps_legacy_constant_support():
+    op = ShuffleGroupByOperationV2(
+        group_by_columns=["k"],
+        aggregations=[AggregationSpec(alias="cnt", function="count", column="*")],
+    )
+
+    op._record_constant_groupby_vector(constant_from_scalar("a", 1, dtype=pa.string()))
+
+    assert op.readings["draken_constant_groupby_output_vector_hits"] == 1
+    assert op.readings["draken_constant_groupby_output_vector_fallbacks"] == 0
+
+
+def test_typed_constant_key_uses_compiled_constant_mode_for_sum():
+    morsel = Morsel.from_vectors(
+        ["k", "v"],
+        [
+            StringVector.from_constant("a", 3),
+            vector_from_sequence([1.0, 2.0, 3.0]),
+        ],
+    )
+    op = ShuffleGroupByOperationV2(
+        group_by_columns=["k"],
+        aggregations=[AggregationSpec(alias="sum_v", function="sum", column="v")],
+    )
+
+    op.ingest(morsel)
+    rows = _rows_by_key(op.finalize().to_arrow().to_pylist(), "k")
+
+    assert rows["a"]["sum_v"] == 6.0
+    assert op.readings["feature_groupby_engine_constant"] == 1
+    assert op.readings["draken_constant_groupby_fastpath_hits"] == 1
+    assert op.readings["draken_constant_groupby_fastpath_fallbacks"] == 0

@@ -30,8 +30,9 @@ from libc.stdint cimport uint64_t
 from libc.stdint cimport uint8_t
 from libc.stdlib cimport malloc
 
-from opteryx.draken.core.buffers cimport DrakenFixedBuffer
+from opteryx.draken.core.buffers cimport ConstAccessor, DrakenFixedBuffer
 from opteryx.draken.core.buffers cimport DRAKEN_DATE32
+from opteryx.draken.core.buffers cimport DRAKEN_ENCODING_CONSTANT
 from opteryx.draken.core.fixed_vector cimport alloc_fixed_buffer
 from opteryx.draken.core.fixed_vector cimport buf_dtype
 from opteryx.draken.core.fixed_vector cimport buf_itemsize
@@ -43,6 +44,21 @@ from opteryx.draken.vectors.bool_vector cimport BoolVector
 DEF DATE32_HASH_CHUNK = 1024
 
 cdef class Date32Vector(Vector):
+
+    @classmethod
+    def from_constant(cls, value, length, is_null=False):
+        if length < 0:
+            raise ValueError("length must be non-negative")
+        if value is None and not is_null:
+            raise ValueError("value cannot be None unless is_null=True")
+        cdef Date32Vector vec = Date32Vector(0)
+        vec.ptr.length = <size_t>length
+        vec.ptr.null_bitmap = NULL
+        vec._has_const = True
+        vec._const_is_null = bool(is_null)
+        vec._const_value = 0 if is_null or value is None else <int32_t>int(value)
+        vec._encoding = DRAKEN_ENCODING_CONSTANT
+        return vec
 
     @classmethod
     def from_dict(cls, codes, dictionary, row_validity=None):
@@ -79,6 +95,13 @@ cdef class Date32Vector(Vector):
         else:
             self.ptr = alloc_fixed_buffer(DRAKEN_DATE32, length, 4)
             self.owns_data = True
+        self._const_accessor.length = 0
+        self._const_accessor.value_type = DRAKEN_DATE32
+        self._const_accessor.value_ptr = NULL
+        self._const_accessor.is_null = 0
+        self._const_value = 0
+        self._has_const = False
+        self._const_is_null = False
 
     def __dealloc__(self):
         # Only free if we own the data and the pointer is not NULL
@@ -86,13 +109,22 @@ cdef class Date32Vector(Vector):
             free_fixed_buffer(self.ptr, True)
             self.ptr = NULL
 
+    cdef ConstAccessor* const_accessor(self) noexcept:
+        if not self._has_const or self.ptr == NULL:
+            return NULL
+        self._const_accessor.length = self.ptr.length
+        self._const_accessor.value_type = DRAKEN_DATE32
+        self._const_accessor.value_ptr = <void*>&self._const_value
+        self._const_accessor.is_null = 1 if self._const_is_null else 0
+        return &self._const_accessor
+
     cdef void* dense_ptr(self) noexcept:
-        if self.ptr == NULL:
+        if self.ptr == NULL or self._has_const:
             return NULL
         return self.ptr.data
 
     cdef uint8_t* null_bitmap_ptr(self) noexcept:
-        if self.ptr == NULL:
+        if self.ptr == NULL or self._has_const:
             return NULL
         return self.ptr.null_bitmap
 
@@ -118,6 +150,10 @@ cdef class Date32Vector(Vector):
         cdef int32_t* data = <int32_t*> ptr.data
         if i < 0 or i >= ptr.length:
             raise IndexError("Index out of bounds")
+        if self._has_const:
+            if self._const_is_null:
+                return None
+            return self._const_value
         if ptr.null_bitmap != NULL:
             byte = ptr.null_bitmap[i >> 3]
             bit = (byte >> (i & 7)) & 1
@@ -129,6 +165,10 @@ cdef class Date32Vector(Vector):
     def to_arrow(self):
         """Convert to a PyArrow array."""
         import pyarrow as pa
+        if self._has_const:
+            if self._const_is_null:
+                return pa.nulls(self.ptr.length, type=pa.date32())
+            return pa.array([self._const_value] * self.ptr.length, type=pa.date32())
         
         cdef size_t nbytes = buf_length(self.ptr) * buf_itemsize(self.ptr)
         addr = <intptr_t> self.ptr.data
@@ -146,6 +186,12 @@ cdef class Date32Vector(Vector):
 
     # -------- Example op --------
     cpdef Date32Vector take(self, int32_t[::1] indices):
+        if self._has_const:
+            return Date32Vector.from_constant(
+                None if self._const_is_null else self._const_value,
+                indices.shape[0],
+                is_null=self._const_is_null,
+            )
         cdef Py_ssize_t i, n = indices.shape[0]
         cdef Date32Vector out = Date32Vector(<size_t>n)
         cdef int32_t* src = <int32_t*> self.ptr.data
@@ -255,6 +301,10 @@ cdef class Date32Vector(Vector):
         cdef Py_ssize_t i, n = ptr.length
         if n == 0:
             raise ValueError("Cannot compute min of empty column")
+        if self._has_const:
+            if self._const_is_null:
+                raise ValueError("Cannot compute min of all-null column")
+            return self._const_value
 
         cdef int32_t m
         cdef bint found = False
@@ -291,6 +341,10 @@ cdef class Date32Vector(Vector):
         cdef Py_ssize_t i, n = ptr.length
         if n == 0:
             raise ValueError("Cannot compute max of empty column")
+        if self._has_const:
+            if self._const_is_null:
+                raise ValueError("Cannot compute max of all-null column")
+            return self._const_value
 
         cdef int32_t m
         cdef bint found = False
@@ -330,6 +384,10 @@ cdef class Date32Vector(Vector):
 
         if buf == NULL:
             raise MemoryError()
+        if self._has_const:
+            for i in range(n):
+                buf[i] = 1 if self._const_is_null else 0
+            return <int8_t[:n]> buf
 
         if ptr.null_bitmap == NULL:
             # No nulls — fill with 0
@@ -351,6 +409,8 @@ cdef class Date32Vector(Vector):
         cdef Py_ssize_t i, n = ptr.length
         cdef Py_ssize_t count = 0
         cdef uint8_t byte, bit
+        if self._has_const:
+            return n if self._const_is_null else 0
         if ptr.null_bitmap == NULL:
             return 0
         for i in range(n):
@@ -367,6 +427,14 @@ cdef class Date32Vector(Vector):
         cdef list out = []
         cdef uint8_t byte, bit
 
+        if self._has_const:
+            if self._const_is_null:
+                for i in range(n):
+                    out.append(None)
+            else:
+                for i in range(n):
+                    out.append(self._const_value)
+            return out
         if ptr.null_bitmap == NULL:
             for i in range(n):
                 out.append(data[i])
@@ -389,13 +457,6 @@ cdef class Date32Vector(Vector):
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef int32_t* data = <int32_t*> ptr.data
         cdef Py_ssize_t n = ptr.length
-
-        if n == 0:
-            return
-
-        if offset < 0 or offset + n > out_buf.shape[0]:
-            raise ValueError("Date32Vector.hash_into: output buffer too small")
-
         cdef Py_ssize_t i
         cdef Py_ssize_t block = 0
         cdef Py_ssize_t j = 0
@@ -406,6 +467,18 @@ cdef class Date32Vector(Vector):
         cdef bint has_nulls = null_bitmap != NULL
         cdef uint64_t[DATE32_HASH_CHUNK] scratch
         cdef uint64_t* scratch_ptr = <uint64_t*> scratch
+
+        if self._has_const:
+            value = NULL_HASH if self._const_is_null else <uint64_t><int64_t>self._const_value
+            for i in range(n):
+                out_buf[offset + i] = mix_hash(out_buf[offset + i], value)
+            return
+
+        if n == 0:
+            return
+
+        if offset < 0 or offset + n > out_buf.shape[0]:
+            raise ValueError("Date32Vector.hash_into: output buffer too small")
 
 
         if not has_nulls:
@@ -437,18 +510,21 @@ cdef class Date32Vector(Vector):
         cdef Py_ssize_t n = ptr.length
         cdef int64_t NULL_FLAG = <int64_t> -9223372036854775808
         cdef int64_t MICROSECONDS_PER_DAY = <int64_t>86400000000
-
-        if n == 0:
-            return
-
-        if offset < 0 or offset + n > out_buf.shape[0]:
-            raise ValueError("Date32Vector.compress: output buffer too small")
-
         cdef int64_t* dst = &out_buf[offset]
         cdef uint8_t* null_bitmap = ptr.null_bitmap
         cdef bint has_nulls = null_bitmap != NULL
         cdef Py_ssize_t i
         cdef uint8_t byte, bit
+
+        if self._has_const:
+            for i in range(n):
+                dst[i] = <int64_t> (-(1 << 63)) if self._const_is_null else (<int64_t> self._const_value * MICROSECONDS_PER_DAY)
+            return
+        if n == 0:
+            return
+
+        if offset < 0 or offset + n > out_buf.shape[0]:
+            raise ValueError("Date32Vector.compress: output buffer too small")
 
         if has_nulls:
             for i in range(n):
@@ -463,6 +539,8 @@ cdef class Date32Vector(Vector):
                 dst[i] = <int64_t> data[i] * MICROSECONDS_PER_DAY
 
     def __str__(self):
+        if self._has_const:
+            return f"<Date32Vector len={buf_length(self.ptr)} values={[None if self._const_is_null else self._const_value] * min(<Py_ssize_t>buf_length(self.ptr), 10)}>"
         cdef list vals = []
         cdef Py_ssize_t i, k = min(<Py_ssize_t>buf_length(self.ptr), 10)
         cdef int32_t* data = <int32_t*> self.ptr.data

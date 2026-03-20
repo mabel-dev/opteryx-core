@@ -13,8 +13,8 @@ if __package__ in {None, ""}:
     from opteryx.reference.clauses_catalog import write_clauses_catalog
     from opteryx.reference.joins_catalog import write_joins_catalog
     from opteryx.reference.operator_catalog import write_operator_catalog
-    from opteryx.reference.unary_ops_catalog import write_unary_ops_catalog
     from opteryx.reference.type_catalog import write_type_catalog
+    from opteryx.reference.unary_ops_catalog import write_unary_ops_catalog
 else:
     from opteryx.functions.signatures import write_function_signatures
 
@@ -22,8 +22,8 @@ else:
     from .clauses_catalog import write_clauses_catalog
     from .joins_catalog import write_joins_catalog
     from .operator_catalog import write_operator_catalog
-    from .unary_ops_catalog import write_unary_ops_catalog
     from .type_catalog import write_type_catalog
+    from .unary_ops_catalog import write_unary_ops_catalog
 
 
 def reexport_reference_catalogs(base_path: str | Path | None = None) -> dict[str, Path]:

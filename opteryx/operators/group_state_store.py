@@ -11,7 +11,10 @@ from opteryx.draken.vectors.string_vector import StringVector
 from opteryx.exceptions import UnsupportedSyntaxError
 
 # Values match the C enum in `DrakenEncoding`.
+DRAKEN_ENCODING_DENSE = 0
 DRAKEN_ENCODING_DICTIONARY = 1
+DRAKEN_ENCODING_RLE = 2
+DRAKEN_ENCODING_CONSTANT = 3
 
 _DATA_FORMAT = "draken"
 
@@ -61,6 +64,10 @@ def normalize_aggregations(aggregations: list[object]) -> list[tuple]:
 
 def _is_dictionary_vector(vec: object) -> bool:
     return getattr(vec, "encoding", None) == DRAKEN_ENCODING_DICTIONARY
+
+
+def _is_constant_vector(vec: object) -> bool:
+    return getattr(vec, "encoding", None) == DRAKEN_ENCODING_CONSTANT
 
 
 def _is_dictionary_float_vector(vec: object) -> bool:
@@ -115,7 +122,7 @@ class ShuffleGroupByOperationV2:
         self.readings = self._engine.readings
 
     def _record_constant_groupby_vector(self, vec) -> None:
-        if vec.__class__.__name__ == "ConstantVector":
+        if _is_constant_vector(vec):
             self.readings["draken_constant_groupby_output_vector_hits"] += 1
         else:
             self.readings["draken_constant_groupby_output_vector_fallbacks"] += 1
@@ -183,6 +190,8 @@ class ShuffleGroupByOperationV2:
 
         for group_column in self.group_by_columns:
             group_vec = morsel.column(group_column)
+            if _is_constant_vector(group_vec):
+                return "constant-key"
             # Carchar only supports native encoded storage for string keys.
             # If a string key arrives as a plain StringVector (non-dictionary),
             # we must reroute to GroupStateStore to avoid runtime errors.

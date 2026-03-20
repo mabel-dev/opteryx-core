@@ -14,6 +14,8 @@ if not hasattr(cio, "morsel_to_csv_rows") or not hasattr(cio, "morsel_to_csv_str
 from opteryx.compiled.io import morsel_to_csv_rows
 from opteryx.compiled.io import morsel_to_csv_strings
 from opteryx.draken.morsels.morsel import Morsel
+from opteryx.draken.vectors.int64_vector import Int64Vector
+from opteryx.draken.vectors.string_vector import StringVector
 
 
 def test_morsel_to_csv_strings_basic_scalars():
@@ -68,6 +70,40 @@ def test_morsel_to_csv_rows_supports_dictionary_columns():
         b"south",
         b"",
         b"north",
+    ]
+
+
+def test_morsel_to_csv_rows_supports_typed_constant_columns():
+    morsel = Morsel.from_vectors(
+        ["id", "name"],
+        [
+            Int64Vector.from_constant(7, 3),
+            StringVector.from_constant("north", 3),
+        ],
+    )
+
+    rows = morsel_to_csv_rows(morsel, include_header=True).to_pylist()
+
+    assert rows == [
+        b"id,name",
+        b"7,north",
+        b"7,north",
+        b"7,north",
+    ]
+
+
+def test_morsel_to_csv_rows_supports_typed_all_null_constant_columns():
+    morsel = Morsel.from_vectors(
+        ["name"],
+        [StringVector.from_constant(None, 2, is_null=True)],
+    )
+
+    rows = morsel_to_csv_rows(morsel, include_header=True).to_pylist()
+
+    assert rows == [
+        b"name",
+        b"",
+        b"",
     ]
 
 

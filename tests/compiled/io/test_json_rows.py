@@ -15,6 +15,8 @@ if not hasattr(cio, "morsel_to_json_rows") or not hasattr(cio, "morsel_to_json_s
 from opteryx.draken.morsels.morsel import Morsel
 from opteryx.compiled.io import morsel_to_json_rows
 from opteryx.compiled.io import morsel_to_json_strings
+from opteryx.draken.vectors.int64_vector import Int64Vector
+from opteryx.draken.vectors.string_vector import StringVector
 
 
 def test_morsel_to_json_strings_basic_scalars():
@@ -70,6 +72,37 @@ def test_morsel_to_json_rows_supports_dictionary_columns():
     ]
 
 
+def test_morsel_to_json_rows_supports_typed_constant_columns():
+    morsel = Morsel.from_vectors(
+        ["id", "name"],
+        [
+            Int64Vector.from_constant(7, 2),
+            StringVector.from_constant("north", 2),
+        ],
+    )
+
+    rows = morsel_to_json_rows(morsel, omit_null_fields=False).to_pylist()
+
+    assert rows == [
+        b'{"id":7,"name":"north"}',
+        b'{"id":7,"name":"north"}',
+    ]
+
+
+def test_morsel_to_json_rows_supports_typed_all_null_constant_columns():
+    morsel = Morsel.from_vectors(
+        ["name"],
+        [StringVector.from_constant(None, 2, is_null=True)],
+    )
+
+    rows = morsel_to_json_rows(morsel, omit_null_fields=False).to_pylist()
+
+    assert rows == [
+        b'{"name":null}',
+        b'{"name":null}',
+    ]
+
+
 def test_morsel_to_json_strings_supports_raw_json_columns():
     morsel = Morsel.from_arrow(
         pa.table(
@@ -85,6 +118,20 @@ def test_morsel_to_json_strings_supports_raw_json_columns():
     assert rows == [
         '{"id":1,"payload":{"a":1}}',
         '{"id":2,"payload":[1,2,3]}',
+    ]
+
+
+def test_morsel_to_json_strings_supports_typed_constant_raw_json_columns():
+    morsel = Morsel.from_vectors(
+        ["payload"],
+        [StringVector.from_constant('{"a":1}', 2)],
+    )
+
+    rows = morsel_to_json_strings(morsel, raw_json_columns=["payload"])
+
+    assert rows == [
+        '{"payload":{"a":1}}',
+        '{"payload":{"a":1}}',
     ]
 
 

@@ -75,18 +75,8 @@ def test_groupby_dictionary_motor_files_have_no_arrow_numpy_or_pylist():
             assert token not in text, f"unexpected token in {relpath}: {token}"
 
 
-def test_dictionary_vector_predicate_kernel_section_has_no_arrow_or_numpy():
-    text = _read("third_party/mabel/draken/vectors/dictionary_vector.pyx")
-    section = _slice_between(
-        text,
-        "cpdef BoolVector less_than(self, object literal):",
-        "cpdef DictionaryVector take(self, int32_t[::1] indices):",
-    )
-
-    forbidden = ("import pyarrow", "pyarrow", "numpy", "to_pylist")
-
-    for token in forbidden:
-        assert token not in section, f"unexpected token in predicate kernel section: {token}"
+def test_legacy_dictionary_vector_source_is_removed():
+    assert not (ROOT / "third_party/mabel/draken/vectors/dictionary_vector.pyx").exists()
 
 
 def test_expression_constant_fastpath_section_has_no_arrow_numpy_materialization():
@@ -107,16 +97,3 @@ def test_expression_constant_fastpath_section_has_no_arrow_numpy_materialization
     for token in forbidden:
         assert token not in section, f"unexpected token in constant fastpath section: {token}"
 
-
-def test_constant_vector_predicate_kernel_section_has_no_arrow_or_numpy():
-    text = _read("third_party/mabel/draken/vectors/constant_vector.pyx")
-    section = _slice_between(
-        text,
-        "cpdef BoolVector less_than(self, object literal):",
-        "cdef void hash_into(",
-    )
-
-    forbidden = ("import pyarrow", "pyarrow", "numpy", "to_pylist")
-
-    for token in forbidden:
-        assert token not in section, f"unexpected token in constant predicate section: {token}"

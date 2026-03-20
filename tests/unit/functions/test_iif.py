@@ -14,7 +14,7 @@ from opteryx.draken.vectors.string_vector import StringVector
 from opteryx.draken.vectors.vector import Vector
 
 
-from opteryx.draken.vectors.constant_vector import from_scalar
+from opteryx.draken.vectors.scalar_constructors import from_scalar
 
 
 def test_vector_iif_treats_null_condition_as_false():
@@ -28,9 +28,13 @@ def test_vector_iif_treats_null_condition_as_false():
 
 
 def test_vector_iif_broadcasts_scalar_branch_values():
+    branch = from_scalar(b"yes", 3)
+
+    assert isinstance(branch, StringVector)
+
     result = vector_iif(
         Vector.from_arrow(pyarrow.array([True, False, True], type=pyarrow.bool_())),
-        from_scalar(b"yes", 3),
+        branch,
         from_scalar(b"no", 3),
     )
 

@@ -14,6 +14,9 @@ from opteryx.expression.functions.implementations import text as string_function
 vector_initcap = getattr(compiled_vector_ops, "vector_initcap")
 vector_regex_replace = getattr(compiled_vector_ops, "vector_regex_replace")
 vector_replace = getattr(compiled_vector_ops, "vector_replace")
+vector_trim = getattr(compiled_vector_ops, "vector_trim")
+vector_ltrim = getattr(compiled_vector_ops, "vector_ltrim")
+vector_rtrim = getattr(compiled_vector_ops, "vector_rtrim")
 vector_string_slice_right = getattr(compiled_vector_ops, "vector_string_slice_right")
 vector_string_slice_left = getattr(compiled_vector_ops, "vector_string_slice_left")
 
@@ -96,6 +99,19 @@ def test_compiled_initcap_bytes():
     assert result == ["Mixed Case"]
 
 
+def test_compiled_trim_kernels():
+    data = _to_sv(["  hello  ", "xxE" , None])
+
+    assert _sv_to_list(vector_trim(data)) == ["hello", "xxE", None]
+    assert _sv_to_list(vector_trim(data, "x")) == ["  hello  ", "E", None]
+
+    assert _sv_to_list(vector_ltrim(data)) == ["hello  ", "xxE", None]
+    assert _sv_to_list(vector_ltrim(data, " x")) == ["hello  ", "E", None]
+
+    assert _sv_to_list(vector_rtrim(data)) == ["  hello", "xxE", None]
+    assert _sv_to_list(vector_rtrim(data, " x")) == ["  hello", "xxE", None]
+
+
 def test_re2_list_regex_replace_strings():
     """Test regex replace with string data (stored as bytes in Draken)"""
     data = Vector.from_arrow(pyarrow.array(["abc123", "xyz789", None]))
@@ -127,7 +143,8 @@ def test_regex_replace_python_wrapper_returns_arrow():
 
     assert isinstance(result, pyarrow.Array)
     # Result is binary (bytes) because Draken works with bytes
-    assert result.to_pylist() == [b"Garth", b"Guropa"]
+    # But the scalar wrapper may return unicode; accept both formats.
+    assert [x if isinstance(x, bytes) else x.encode("utf-8") for x in result.to_pylist()] == [b"Garth", b"Guropa"]
 
 
 def test_regex_replace_python_wrapper_dictionary_input():

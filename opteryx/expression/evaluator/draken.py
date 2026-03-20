@@ -22,6 +22,7 @@ _NEGATED_OPS = {
     "NotInStr": "InStr",
     "NotIInStr": "IInStr",
 }
+_DRAKEN_ENCODING_CONSTANT = 3
 
 
 def _dictionary_arrow_type(vec):
@@ -105,9 +106,24 @@ def _coerce_float_set(values) -> frozenset:
     return frozenset(_coerce_float(v) for v in values)
 
 
+def _is_typed_constant_encoded_vector(value) -> bool:
+    return getattr(value, "encoding", None) == _DRAKEN_ENCODING_CONSTANT
+
+
+def _is_constant_vector_like(value) -> bool:
+    return _is_typed_constant_encoded_vector(value)
+
+
+def _constant_scalar_value(value):
+    if _is_typed_constant_encoded_vector(value):
+        if len(value) == 0:
+            return None
+        return value[0]
+    return value
+
+
 def _coerce_int64(value) -> int:
-    if value.__class__.__name__ == "ConstantVector":
-        value = value.scalar_value()
+    value = _constant_scalar_value(value)
     if hasattr(value, "as_py"):
         value = value.as_py()
     if isinstance(value, numpy.generic):
@@ -126,8 +142,7 @@ def _coerce_int64_set(values) -> frozenset:
 
 
 def _coerce_date32(value) -> int:
-    if value.__class__.__name__ == "ConstantVector":
-        value = value.scalar_value()
+    value = _constant_scalar_value(value)
     if hasattr(value, "as_py"):
         value = value.as_py()
     if isinstance(value, numpy.generic):
@@ -144,8 +159,7 @@ def _coerce_date32_set(values) -> frozenset:
 
 
 def _coerce_timestamp(value) -> int:
-    if value.__class__.__name__ == "ConstantVector":
-        value = value.scalar_value()
+    value = _constant_scalar_value(value)
     if hasattr(value, "as_py"):
         value = value.as_py()
     if isinstance(value, numpy.generic):
@@ -233,6 +247,11 @@ def _is_null_as_boolvector(vec):
     cls_name = vec.__class__.__name__
     n = len(vec)
 
+    if _is_typed_constant_encoded_vector(vec):
+        if getattr(vec, "null_count", 0) == n:
+            return bool_vector_all_true(n)
+        return BoolVector(n)
+
     if _is_dictionary_encoded_vector(vec):
         if hasattr(vec, "is_null_boolvector"):
             return vec.is_null_boolvector()
@@ -254,8 +273,8 @@ def _is_null_as_boolvector(vec):
             return _vfa(_pc.or_(_pc.is_null(arrow_arr), _pc.is_nan(arrow_arr)))
         return bool_vector_from_int8_mask(vec.is_null(), n)
 
-    if cls_name == "ConstantVector":
-        if vec.scalar_value() is None:
+    if _is_typed_constant_encoded_vector(vec):
+        if len(vec) == 0 or vec[0] is None:
             return bool_vector_all_true(n)
         return BoolVector(n)
 
@@ -523,12 +542,12 @@ def _dict_compare(op: str, vec, right):
     if right is None:
         return BoolVector(len(vec))
 
-    if right.__class__.__name__ == "ConstantVector":
-        right = right.scalar_value()
+    if _is_constant_vector_like(right):
+        right = _constant_scalar_value(right)
     elif right.__class__.__name__ == "ArrowVector":
         arr = right.to_arrow()
         right = arr[0].as_py() if len(arr) == 1 else arr
-    elif hasattr(right, "to_arrow") and right.__class__.__name__ != "ConstantVector":
+    elif hasattr(right, "to_arrow") and not _is_constant_vector_like(right):
         arrow_ops = {
             "Eq": pc.equal,
             "NotEq": pc.not_equal,
@@ -641,7 +660,7 @@ def _constant_compare(op: str, vec, right):
         return vec.greater_than_or_equals(right)
     if op == "InList":
         return vec.in_list(right)
-    raise NotImplementedError(f"ConstantVector: unsupported op {op!r}")
+    raise NotImplementedError(f"constant-encoded vector: unsupported op {op!r}")
 
 
 _ARROW_COMPARE_OPS = {
@@ -874,7 +893,7 @@ def draken_compare(op: str, left, right):
         result = _interval_compare(op, left, right)
     elif _is_dictionary_encoded_vector(left):
         result = _dict_compare(op, left, right)
-    elif cls == "ConstantVector":
+    elif _is_typed_constant_encoded_vector(left):
         result = _constant_compare(op, left, right)
     elif cls == "ArrowVector":
         result = _arrow_vector_compare(op, left, right)
@@ -1125,7 +1144,7 @@ def _eval_value(node, morsel):
         if result is not None and result.__class__.__name__.endswith("Vector"):
             return result
         if not hasattr(result, "__iter__") or isinstance(result, (str, bytes, numpy.generic)):
-            from opteryx.draken.vectors.constant_vector import from_scalar as _const_scalar
+            from opteryx.draken.vectors.scalar_constructors import from_scalar as _const_scalar
 
             vec = _const_scalar(result, morsel.num_rows)
             if vec is not None:
@@ -1334,7 +1353,7 @@ def evaluate_and_append_draken(nodes, morsel):
             if isinstance(result, (_pa_local.Array, _pa_local.ChunkedArray)):
                 result = _vfa(result)
             elif not hasattr(result, "__iter__") or isinstance(result, (str, bytes)):
-                from opteryx.draken.vectors.constant_vector import from_scalar as _const_scalar
+                from opteryx.draken.vectors.scalar_constructors import from_scalar as _const_scalar
 
                 vec = _const_scalar(result, morsel.num_rows)
                 result = _vfa(_pa_local.array([result] * morsel.num_rows)) if vec is None else vec

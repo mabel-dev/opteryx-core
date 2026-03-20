@@ -228,7 +228,7 @@ class TestFloat64Aggregations:
 
 
 class TestConstantAggregations:
-    """Test aggregation helpers on ConstantVector."""
+    """Test aggregation helpers on constant-encoded vectors."""
 
     def test_constant_numeric_sum(self):
         vec = Vector.from_arrow(pa.array([3, 3, None, 3], type=pa.int64()))

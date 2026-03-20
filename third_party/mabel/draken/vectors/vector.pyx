@@ -22,7 +22,7 @@ types (Int64Vector, StringVector, etc.) implement.
 from libc.stdint cimport uint64_t, int64_t, uint8_t
 from cpython.mem cimport PyMem_Calloc
 
-from opteryx.draken.core.buffers cimport DictAccessor, DrakenEncoding, DRAKEN_ENCODING_DENSE, DRAKEN_ENCODING_DICTIONARY
+from opteryx.draken.core.buffers cimport ConstAccessor, DictAccessor, DrakenEncoding, DRAKEN_ENCODING_DENSE
 from opteryx.draken.interop.arrow cimport vector_from_arrow
 from opteryx.compiled.structures.relation_statistics cimport to_int
 
@@ -30,6 +30,9 @@ cdef const uint64_t MIX_HASH_CONSTANT = <uint64_t>0x9e3779b97f4a7c15ULL
 cdef const uint64_t NULL_HASH = <uint64_t>0x4c3f95a36ab8eccaULL
 
 cdef class Vector:
+
+    def __cinit__(self):
+        self._encoding = DRAKEN_ENCODING_DENSE
 
     @classmethod
     def from_arrow(cls, arrow_array):
@@ -55,19 +58,19 @@ cdef class Vector:
         """Return the storage encoding of this vector.
 
         This facilitates a single per-morsel branch for dispatching between
-        dense and dictionary paths. The current implementation only distinguishes
-        dictionary vs. dense.
+        storage layouts. The current implementation explicitly tracks the
+        active encoding rather than inferring it from the available accessors.
         """
-        cdef DictAccessor* da = self.dict_accessor()
-        if da != NULL:
-            return DRAKEN_ENCODING_DICTIONARY
-        return DRAKEN_ENCODING_DENSE
+        return self._encoding
 
     cpdef object null_bitmap(self):
         """Return the null bitmap for this vector, or ``None`` when the vector has no nulls."""
         return None
 
     cdef DictAccessor* dict_accessor(self) noexcept:
+        return NULL
+
+    cdef ConstAccessor* const_accessor(self) noexcept:
         return NULL
 
     cdef void* dense_ptr(self) noexcept:

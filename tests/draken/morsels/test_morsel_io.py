@@ -3,22 +3,29 @@ import struct
 import pyarrow as pa
 import pytest
 
-import os
 import sys
+from pathlib import Path
 
-sys.path.insert(1, os.path.join(sys.path[0], "../../../.."))
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from opteryx.draken import Morsel
-from opteryx.operators.group_state_store import DRAKEN_ENCODING_DICTIONARY
-from opteryx.draken.vectors.constant_vector import from_scalar as constant_from_scalar
+from opteryx.draken.vectors.scalar_constructors import from_scalar as constant_from_scalar
 
 
 mio = pytest.importorskip("opteryx.draken.storage.morsel_io")
 from opteryx.draken.storage.morsel_io import DrakenMorselStorageError
 from opteryx.draken.storage.morsel_io import read_morsel
 from opteryx.draken.storage.morsel_io import write_morsel
+from opteryx.draken.vectors.date32_vector import Date32Vector
 from opteryx.draken.vectors.float64_vector import Float64Vector
 from opteryx.draken.vectors.int64_vector import Int64Vector
+from opteryx.draken.vectors.string_vector import StringVector
+from opteryx.draken.vectors.time_vector import TimeVector
+from opteryx.draken.vectors.timestamp_vector import TimestampVector
+
+
+DRAKEN_ENCODING_CONSTANT = 3
+DRAKEN_ENCODING_DICTIONARY = 1
 
 
 def _as_py_columns(morsel):
@@ -159,9 +166,43 @@ def test_morsel_io_round_trip_constant_columns(tmp_path):
 
     assert stats["rows"] == original.num_rows
     assert stats["columns"] == original.num_columns
-    assert restored.column(b"i").__class__.__name__ == "ConstantVector"
-    assert restored.column(b"n").__class__.__name__ == "ConstantVector"
-    assert restored.column(b"s").__class__.__name__ == "ConstantVector"
+    assert getattr(restored.column(b"i"), "encoding", None) == 3
+    assert getattr(restored.column(b"n"), "encoding", None) == 3
+    assert getattr(restored.column(b"s"), "encoding", None) == 3
+    assert _as_py_columns(restored) == _as_py_columns(original)
+
+
+def test_morsel_io_round_trip_typed_constant_columns(tmp_path):
+    original = Morsel.from_vectors(
+        ["i", "s", "d", "t", "ts", "n"],
+        [
+            Int64Vector.from_constant(7, 4),
+            StringVector.from_constant("x", 4),
+            Date32Vector.from_constant(12_345, 4),
+            TimeVector.from_constant(1_000_000, 4, is_time64=True),
+            TimestampVector.from_constant(2_000_000, 4),
+            StringVector.from_constant(None, 4, is_null=True),
+        ],
+    )
+    path = tmp_path / "morsel_typed_constant.drkm"
+
+    stats = write_morsel(path, original, {"codec_default": "none", "checksum_enabled": True})
+    restored = read_morsel(path, {"checksum_enabled": True})
+
+    assert stats["rows"] == original.num_rows
+    assert stats["columns"] == original.num_columns
+    assert restored.column(b"i").__class__.__name__ == "Int64Vector"
+    assert restored.column(b"s").__class__.__name__ == "StringVector"
+    assert restored.column(b"d").__class__.__name__ == "Date32Vector"
+    assert restored.column(b"t").__class__.__name__ == "TimeVector"
+    assert restored.column(b"ts").__class__.__name__ == "TimestampVector"
+    assert restored.column(b"n").__class__.__name__ == "StringVector"
+    assert restored.column(b"i").encoding == DRAKEN_ENCODING_CONSTANT
+    assert restored.column(b"s").encoding == DRAKEN_ENCODING_CONSTANT
+    assert restored.column(b"d").encoding == DRAKEN_ENCODING_CONSTANT
+    assert restored.column(b"t").encoding == DRAKEN_ENCODING_CONSTANT
+    assert restored.column(b"ts").encoding == DRAKEN_ENCODING_CONSTANT
+    assert restored.column(b"n").encoding == DRAKEN_ENCODING_CONSTANT
     assert _as_py_columns(restored) == _as_py_columns(original)
 
 

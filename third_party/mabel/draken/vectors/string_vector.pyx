@@ -22,13 +22,19 @@ from cpython.mem cimport PyMem_Malloc, PyMem_Free
 from cpython.bytes cimport PyBytes_AS_STRING
 from cpython.bytes cimport PyBytes_FromStringAndSize
 from libc.stddef cimport size_t
-from libc.stdint cimport int32_t, intptr_t, uint8_t, uint64_t, int64_t, uint32_t, uintptr_t
+from libc.stdint cimport int32_t, intptr_t, uint8_t, uint64_t, int64_t, uint32_t, uint16_t, uintptr_t
 from libc.string cimport memcpy, memset, memcmp
 from libc.stdlib cimport malloc, realloc, free
 
+from opteryx.draken.core.buffers cimport ConstAccessor
+from opteryx.draken.core.buffers cimport DictAccessor
+from opteryx.draken.core.buffers cimport DRAKEN_ENCODING_DENSE
+from opteryx.draken.core.buffers cimport DRAKEN_ENCODING_CONSTANT
+from opteryx.draken.core.buffers cimport DRAKEN_ENCODING_DICTIONARY
 from opteryx.draken.core.buffers cimport DrakenVarBuffer
+from opteryx.draken.core.buffers cimport DrakenConstantStringPayload
 from opteryx.draken.core.buffers cimport DRAKEN_STRING
-from opteryx.draken.core.var_vector cimport alloc_var_buffer, buf_dtype
+from opteryx.draken.core.var_vector cimport alloc_var_buffer, buf_dtype, free_var_buffer
 from opteryx.draken.vectors.array_vector cimport ArrayVector, DrakenArrayBuffer
 
 cdef extern from "xxhash.h":
@@ -60,6 +66,173 @@ from opteryx.draken.vectors.vector cimport MIX_HASH_CONSTANT, Vector, NULL_HASH,
 from opteryx.draken.vectors.bool_vector cimport BoolVector
 
 DEF STRING_HASH_CHUNK = 256
+
+
+cdef inline object _coerce_literal_bytes(object literal):
+    if literal is None:
+        return None
+    if hasattr(literal, "as_py"):
+        try:
+            literal = literal.as_py()
+        except Exception:
+            return None
+    if isinstance(literal, (bytes, bytearray, memoryview)):
+        try:
+            return bytes(literal)
+        except Exception:
+            return None
+    if isinstance(literal, str):
+        try:
+            return literal.encode("utf8")
+        except Exception:
+            return None
+    return None
+
+
+cdef inline int _compare_bytes_lex(
+    const uint8_t* left,
+    Py_ssize_t left_len,
+    const uint8_t* right,
+    Py_ssize_t right_len,
+) noexcept nogil:
+    cdef Py_ssize_t min_len = left_len if left_len < right_len else right_len
+    cdef int cmp_res = 0
+
+    if min_len > 0:
+        cmp_res = memcmp(left, right, <size_t>min_len)
+    if cmp_res < 0:
+        return -1
+    if cmp_res > 0:
+        return 1
+    if left_len < right_len:
+        return -1
+    if left_len > right_len:
+        return 1
+    return 0
+
+
+cdef BoolVector _constant_bool_result(Py_ssize_t n, bint matched, bint is_null) except *:
+    cdef Py_ssize_t nbytes = (n + 7) >> 3
+    cdef BoolVector out = BoolVector(<size_t>n)
+    cdef uint8_t* dst = <uint8_t*> out.ptr.data
+    cdef uint8_t* out_null = NULL
+    cdef uint8_t mask
+
+    if nbytes > 0:
+        memset(dst, 0, nbytes)
+
+    if is_null:
+        if nbytes != 0:
+            out_null = <uint8_t*> malloc(nbytes)
+            if out_null == NULL:
+                raise MemoryError()
+            memset(out_null, 0, nbytes)
+            out.ptr.null_bitmap = out_null
+        else:
+            out.ptr.null_bitmap = NULL
+        return out
+
+    if matched and nbytes > 0:
+        memset(dst, 0xFF, nbytes)
+        if (n & 7) != 0:
+            mask = <uint8_t>((1 << (n & 7)) - 1)
+            dst[nbytes - 1] &= mask
+
+    out.ptr.null_bitmap = NULL
+    return out
+
+
+cdef inline uint8_t _dict_code_width_for_size(Py_ssize_t dict_size) noexcept:
+    if dict_size <= 256:
+        return 1
+    if dict_size <= 65536:
+        return 2
+    return 4
+
+
+cdef inline uint32_t _read_packed_code(const uint8_t* codes, uint8_t code_width, Py_ssize_t row_idx) noexcept nogil:
+    if code_width == 1:
+        return (<const uint8_t*>codes)[row_idx]
+    if code_width == 2:
+        return (<const uint16_t*>codes)[row_idx]
+    return (<const uint32_t*>codes)[row_idx]
+
+
+cdef void _release_dict_storage(StringVector vec) noexcept:
+    if vec._dict_codes != NULL:
+        free(vec._dict_codes)
+        vec._dict_codes = NULL
+    if vec._dict_values != NULL:
+        free_var_buffer(vec._dict_values, True)
+        vec._dict_values = NULL
+    vec._dict_code_width = 0
+    vec._dict_ordered = 0
+    vec._dict_accessor.codes = NULL
+    vec._dict_accessor.code_width = 0
+    vec._dict_accessor.row_nulls = NULL
+    vec._dict_accessor.length = 0
+    vec._dict_accessor.dict_values = NULL
+    vec._dict_accessor.value_type = DRAKEN_STRING
+    if not vec._has_const:
+        vec._encoding = DRAKEN_ENCODING_DENSE
+
+
+cdef void _attach_dictionary_storage_from_buffers(
+    StringVector vec,
+    const int32_t[::1] codes,
+    const int32_t[::1] dict_offsets,
+    const int32_t[::1] dict_lengths,
+    const uint8_t[::1] arena_bytes,
+    bint ordered,
+    const uint8_t* dict_entry_null_bitmap=NULL,
+) except *:
+    cdef Py_ssize_t row_count = codes.shape[0]
+    cdef Py_ssize_t dict_size = dict_lengths.shape[0]
+    cdef uint8_t code_width = _dict_code_width_for_size(dict_size)
+    cdef Py_ssize_t code_bytes = row_count * code_width
+    cdef Py_ssize_t bitmap_bytes
+    cdef Py_ssize_t arena_size = arena_bytes.shape[0]
+    cdef Py_ssize_t i
+    cdef Py_ssize_t code
+    cdef DrakenVarBuffer* dict_values
+
+    _release_dict_storage(vec)
+
+    if code_bytes > 0:
+        vec._dict_codes = <uint8_t*>malloc(code_bytes)
+        if vec._dict_codes == NULL:
+            raise MemoryError()
+    else:
+        vec._dict_codes = NULL
+
+    dict_values = alloc_var_buffer(DRAKEN_STRING, <size_t>dict_size, <size_t>arena_size)
+    if dict_size > 0:
+        for i in range(dict_size):
+            dict_values.offsets[i] = dict_offsets[i]
+        dict_values.offsets[dict_size] = dict_offsets[dict_size]
+    if arena_size > 0:
+        memcpy(dict_values.data, <const void*>&arena_bytes[0], <size_t>arena_size)
+
+    if dict_entry_null_bitmap != NULL:
+        bitmap_bytes = (dict_size + 7) >> 3
+        dict_values.null_bitmap = <uint8_t*>malloc(<size_t>bitmap_bytes)
+        if dict_values.null_bitmap == NULL:
+            raise MemoryError()
+        memcpy(dict_values.null_bitmap, dict_entry_null_bitmap, <size_t>bitmap_bytes)
+
+    for i in range(row_count):
+        code = <Py_ssize_t>codes[i]
+        if code_width == 1:
+            (<uint8_t*>vec._dict_codes)[i] = <uint8_t>code
+        elif code_width == 2:
+            (<uint16_t*>vec._dict_codes)[i] = <uint16_t>code
+        else:
+            (<uint32_t*>vec._dict_codes)[i] = <uint32_t>code
+
+    vec._dict_values = dict_values
+    vec._dict_code_width = code_width
+    vec._dict_ordered = 1 if ordered else 0
+    vec._encoding = DRAKEN_ENCODING_DICTIONARY
 
 
 cdef inline uint64_t _load_le_u64_partial(const uint8_t* ptr, size_t n) nogil:
@@ -196,6 +369,7 @@ cdef bint _sv_contains_ci(
 
 
 cdef class StringVector(Vector):
+    # Re-Cythonize this implementation when the pxd layout changes.
 
     @classmethod
     def from_dict(cls, codes, dictionary, row_validity=None):
@@ -250,6 +424,55 @@ cdef class StringVector(Vector):
         validity_view = row_validity
         return from_dict_buffers(codes_view, offsets_view, lengths_view, arena_view, validity_view)
 
+    @classmethod
+    def from_constant(cls, value, length, is_null=False):
+        cdef StringVector vec
+        cdef DrakenConstantStringPayload* payload
+        cdef bytes value_bytes
+        cdef char* src
+        cdef Py_ssize_t src_len
+
+        if length < 0:
+            raise ValueError("length must be non-negative")
+        if value is None and not is_null:
+            raise ValueError("value cannot be None unless is_null=True")
+
+        vec = StringVector(0, 0, True)
+        vec.ptr = <DrakenVarBuffer*> malloc(sizeof(DrakenVarBuffer))
+        if vec.ptr == NULL:
+            raise MemoryError()
+        vec.owns_data = False
+        vec.ptr.data = NULL
+        vec.ptr.offsets = NULL
+        vec.ptr.null_bitmap = NULL
+        vec.ptr.length = <size_t>length
+        vec.ptr.type = DRAKEN_STRING
+        vec._has_const = True
+        vec._const_is_null = bool(is_null)
+        vec._encoding = DRAKEN_ENCODING_CONSTANT
+
+        payload = <DrakenConstantStringPayload*> malloc(sizeof(DrakenConstantStringPayload))
+        if payload == NULL:
+            raise MemoryError()
+        payload.data = NULL
+        payload.length = 0
+        vec._const_value = payload
+
+        if not is_null:
+            value_bytes = _coerce_literal_bytes(value)
+            if value_bytes is None:
+                raise TypeError("StringVector.from_constant expects bytes-like or str value")
+            src_len = len(value_bytes)
+            payload.length = <int32_t>src_len
+            if src_len > 0:
+                src = PyBytes_AS_STRING(value_bytes)
+                payload.data = <uint8_t*> malloc(<size_t>src_len)
+                if payload.data == NULL:
+                    raise MemoryError()
+                memcpy(payload.data, src, <size_t>src_len)
+
+        return vec
+
     def __cinit__(self, size_t length=0, size_t bytes_cap=0, bint wrap=False):
         """
         length>0, wrap=False  -> allocate new owned buffer
@@ -261,14 +484,70 @@ cdef class StringVector(Vector):
         else:
             self.ptr = alloc_var_buffer(DRAKEN_STRING, length, bytes_cap)
             self.owns_data = True
+        self._dict_values = NULL
+        self._dict_codes = NULL
+        self._dict_code_width = 0
+        self._dict_ordered = 0
+        self._dict_accessor.codes = NULL
+        self._dict_accessor.code_width = 0
+        self._dict_accessor.row_nulls = NULL
+        self._dict_accessor.length = 0
+        self._dict_accessor.dict_values = NULL
+        self._dict_accessor.value_type = DRAKEN_STRING
+        self._const_accessor.length = 0
+        self._const_accessor.value_type = DRAKEN_STRING
+        self._const_accessor.value_ptr = NULL
+        self._const_accessor.is_null = 0
+        self._const_value = NULL
+        self._has_const = False
+        self._const_is_null = False
+
+    def __dealloc__(self):
+        _release_dict_storage(self)
+        if self._const_value != NULL:
+            if self._const_value.data != NULL:
+                free(self._const_value.data)
+            free(self._const_value)
+            self._const_value = NULL
+
+        if self.ptr != NULL:
+            if self.owns_data:
+                if self.ptr.data != NULL:
+                    free(self.ptr.data)
+                if self.ptr.offsets != NULL:
+                    free(self.ptr.offsets)
+                if self.ptr.null_bitmap != NULL:
+                    free(self.ptr.null_bitmap)
+            free(self.ptr)
+            self.ptr = NULL
+
+    cdef DictAccessor* dict_accessor(self) noexcept:
+        if self._dict_values == NULL or self._dict_codes == NULL or self.ptr == NULL:
+            return NULL
+        self._dict_accessor.codes = self._dict_codes
+        self._dict_accessor.code_width = self._dict_code_width
+        self._dict_accessor.row_nulls = self.ptr.null_bitmap
+        self._dict_accessor.length = self.ptr.length
+        self._dict_accessor.dict_values = self._dict_values
+        self._dict_accessor.value_type = self._dict_values.type
+        return &self._dict_accessor
+
+    cdef ConstAccessor* const_accessor(self) noexcept:
+        if not self._has_const or self.ptr == NULL or self._const_value == NULL:
+            return NULL
+        self._const_accessor.length = self.ptr.length
+        self._const_accessor.value_type = DRAKEN_STRING
+        self._const_accessor.value_ptr = <void*>self._const_value
+        self._const_accessor.is_null = 1 if self._const_is_null else 0
+        return &self._const_accessor
 
     cdef void* dense_ptr(self) noexcept:
-        if self.ptr == NULL:
+        if self.ptr == NULL or self._has_const:
             return NULL
         return self.ptr.data
 
     cdef uint8_t* null_bitmap_ptr(self) noexcept:
-        if self.ptr == NULL:
+        if self.ptr == NULL or self._has_const:
             return NULL
         return self.ptr.null_bitmap
 
@@ -284,12 +563,40 @@ cdef class StringVector(Vector):
     def dtype(self):
         return buf_dtype(self.ptr)
 
+    @property
+    def dictionary_value_type(self):
+        if self._dict_values == NULL:
+            return None
+        return self._dict_values.type
+
+    @property
+    def dictionary_size(self):
+        if self._dict_values == NULL:
+            return 0
+        return self._dict_values.length
+
+    @property
+    def code_width(self):
+        return self._dict_code_width if self._dict_values != NULL else None
+
+    @property
+    def ordered(self):
+        return bool(self._dict_ordered) if self._dict_values != NULL else False
+
     def to_arrow(self):
         """
         Zero-copy conversion to Arrow StringArray (bytes-based).
         Keeps a reference to this vector to prevent premature garbage collection.
         """
         import pyarrow as pa
+
+        if self._has_const:
+            if self._const_is_null:
+                return pa.nulls(self.ptr.length, type=pa.binary())
+            return pa.array(
+                [PyBytes_FromStringAndSize(<char*>self._const_value.data, self._const_value.length)] * self.ptr.length,
+                type=pa.binary(),
+            )
         
         cdef DrakenVarBuffer* ptr = self.ptr
         cdef size_t n = ptr.length
@@ -328,6 +635,11 @@ cdef class StringVector(Vector):
         if i < 0 or i >= ptr.length:
             raise IndexError("Index out of range")
 
+        if self._has_const:
+            if self._const_is_null:
+                return None
+            return PyBytes_FromStringAndSize(<char*>self._const_value.data, self._const_value.length)
+
         # Check for null value
         if ptr.null_bitmap != NULL:
             byte = ptr.null_bitmap[i >> 3]
@@ -342,10 +654,14 @@ cdef class StringVector(Vector):
         return PyBytes_FromStringAndSize(base + start, nbytes)
 
     def __iter__(self):
+        if self._has_const:
+            return iter(self.to_pylist())
         return _StringVectorIterator(self)
 
     def c_iter(self):
         """Return a C-level iterator for high-performance kernel operations."""
+        if self._has_const:
+            raise NotImplementedError("StringVector.c_iter() is not available for constant encoding")
         return _StringVectorCIterator._from_ptr(self.ptr)
 
     cpdef Py_ssize_t byte_length(self, Py_ssize_t i):
@@ -353,10 +669,16 @@ cdef class StringVector(Vector):
         cdef DrakenVarBuffer* ptr = self.ptr
         if i < 0 or i >= ptr.length:
             raise IndexError("Index out of range")
+        if self._has_const:
+            if self._const_is_null:
+                return 0
+            return self._const_value.length
         return ptr.offsets[i + 1] - ptr.offsets[i]
 
     cpdef object buffers(self):
         """Expose data, offsets, and null bitmap buffers as zero-copy views."""
+        if self._has_const:
+            raise NotImplementedError("StringVector.buffers() is not available for constant encoding")
         cdef DrakenVarBuffer* ptr = self.ptr
         cdef Py_ssize_t n = ptr.length
         cdef Py_ssize_t total_bytes = ptr.offsets[n]
@@ -375,6 +697,8 @@ cdef class StringVector(Vector):
 
     cpdef object null_bitmap(self):
         """Return the null bitmap as a Python ``memoryview``, or ``None`` if all values are valid."""
+        if self._has_const:
+            return None
         cdef DrakenVarBuffer* ptr = self.ptr
         cdef Py_ssize_t nb_size
         if ptr.null_bitmap == NULL:
@@ -386,10 +710,14 @@ cdef class StringVector(Vector):
 
     cpdef int32_t[::1] lengths(self):
         """Return a direct view over the offsets buffer for fast length computations."""
+        if self._has_const:
+            raise NotImplementedError("StringVector.lengths() is not available for constant encoding")
         return <int32_t[: self.ptr.length + 1]> self.ptr.offsets
 
     cpdef object view(self):
         """Return a lightweight pointer/length view for zero-copy consumers."""
+        if self._has_const:
+            raise NotImplementedError("StringVector.view() is not available for constant encoding")
         return _StringVectorView(self)
 
     @property
@@ -399,6 +727,8 @@ cdef class StringVector(Vector):
         cdef Py_ssize_t i, n = ptr.length
         cdef Py_ssize_t count = 0
         cdef uint8_t byte, bit
+        if self._has_const:
+            return n if self._const_is_null else 0
         if ptr.null_bitmap == NULL:
             return 0
         for i in range(n):
@@ -422,6 +752,18 @@ cdef class StringVector(Vector):
         cdef uint8_t* dst = <uint8_t*> out.ptr.data
         cdef uint8_t* out_null = NULL
         cdef uint8_t mask
+        cdef int cmp_res
+
+        if self._has_const:
+            if self._const_is_null:
+                return _constant_bool_result(n, False, True)
+            cmp_res = _compare_bytes_lex(
+                <const uint8_t*>self._const_value.data,
+                self._const_value.length,
+                <const uint8_t*>PyBytes_AS_STRING(value),
+                len(value),
+            )
+            return _constant_bool_result(n, cmp_res == 0, False)
         memset(dst, 0, nbytes)
         if nb_ptr != NULL and nbytes != 0:
             out_null = <uint8_t*> malloc(nbytes)
@@ -473,6 +815,18 @@ cdef class StringVector(Vector):
         cdef Py_ssize_t val_len = len(value)
         cdef int32_t start, end, str_len
         cdef Py_ssize_t i
+        cdef int cmp_res
+
+        if self._has_const:
+            if self._const_is_null:
+                return _constant_bool_result(n, False, True)
+            cmp_res = _compare_bytes_lex(
+                <const uint8_t*>self._const_value.data,
+                self._const_value.length,
+                <const uint8_t*>val_ptr,
+                val_len,
+            )
+            return _constant_bool_result(n, cmp_res != 0, False)
 
         memset(dst, 0, nbytes)
         if nb_ptr != NULL and nbytes != 0:
@@ -515,6 +869,17 @@ cdef class StringVector(Vector):
         cdef int32_t start, end, str_len, min_len
         cdef int cmp_res
         cdef Py_ssize_t i
+
+        if self._has_const:
+            if self._const_is_null:
+                return _constant_bool_result(n, False, True)
+            cmp_res = _compare_bytes_lex(
+                <const uint8_t*>self._const_value.data,
+                self._const_value.length,
+                <const uint8_t*>val_ptr,
+                val_len,
+            )
+            return _constant_bool_result(n, cmp_res < 0, False)
 
         memset(dst, 0, nbytes)
         if nb_ptr != NULL and nbytes != 0:
@@ -560,6 +925,17 @@ cdef class StringVector(Vector):
         cdef int cmp_res
         cdef Py_ssize_t i
 
+        if self._has_const:
+            if self._const_is_null:
+                return _constant_bool_result(n, False, True)
+            cmp_res = _compare_bytes_lex(
+                <const uint8_t*>self._const_value.data,
+                self._const_value.length,
+                <const uint8_t*>val_ptr,
+                val_len,
+            )
+            return _constant_bool_result(n, cmp_res > 0, False)
+
         memset(dst, 0, nbytes)
         if nb_ptr != NULL and nbytes != 0:
             out_null = <uint8_t*> malloc(nbytes)
@@ -604,6 +980,17 @@ cdef class StringVector(Vector):
         cdef int cmp_res
         cdef Py_ssize_t i
 
+        if self._has_const:
+            if self._const_is_null:
+                return _constant_bool_result(n, False, True)
+            cmp_res = _compare_bytes_lex(
+                <const uint8_t*>self._const_value.data,
+                self._const_value.length,
+                <const uint8_t*>val_ptr,
+                val_len,
+            )
+            return _constant_bool_result(n, cmp_res <= 0, False)
+
         memset(dst, 0, nbytes)
         if nb_ptr != NULL and nbytes != 0:
             out_null = <uint8_t*> malloc(nbytes)
@@ -647,6 +1034,17 @@ cdef class StringVector(Vector):
         cdef int32_t start, end, str_len, min_len
         cdef int cmp_res
         cdef Py_ssize_t i
+
+        if self._has_const:
+            if self._const_is_null:
+                return _constant_bool_result(n, False, True)
+            cmp_res = _compare_bytes_lex(
+                <const uint8_t*>self._const_value.data,
+                self._const_value.length,
+                <const uint8_t*>val_ptr,
+                val_len,
+            )
+            return _constant_bool_result(n, cmp_res >= 0, False)
 
         memset(dst, 0, nbytes)
         if nb_ptr != NULL and nbytes != 0:
@@ -693,6 +1091,12 @@ cdef class StringVector(Vector):
         cdef Py_ssize_t i
         cdef bytes cell_bytes
 
+        if self._has_const:
+            if self._const_is_null:
+                return _constant_bool_result(n, False, True)
+            cell_bytes = PyBytes_FromStringAndSize(<char*>self._const_value.data, self._const_value.length)
+            return _constant_bool_result(n, cell_bytes in value_set, False)
+
         memset(dst, 0, nbytes)
         if nb_ptr != NULL and nbytes != 0:
             out_null = <uint8_t*> malloc(nbytes)
@@ -732,6 +1136,21 @@ cdef class StringVector(Vector):
         cdef Py_ssize_t pat_len = len(pattern)
         cdef int32_t start, end, str_len
         cdef Py_ssize_t i
+
+        if self._has_const:
+            if self._const_is_null:
+                return _constant_bool_result(n, False, True)
+            return _constant_bool_result(
+                n,
+                _sv_sql_like_match(
+                    <const uint8_t*>self._const_value.data,
+                    self._const_value.length,
+                    <const uint8_t*>pat_ptr,
+                    pat_len,
+                    ignore_case,
+                ),
+                False,
+            )
 
         memset(dst, 0, nbytes)
         if nb_ptr != NULL and nbytes != 0:
@@ -777,6 +1196,12 @@ cdef class StringVector(Vector):
 
         compiled = re.compile(pattern)
 
+        if self._has_const:
+            if self._const_is_null:
+                return _constant_bool_result(n, False, True)
+            cell_bytes = PyBytes_FromStringAndSize(<char*>self._const_value.data, self._const_value.length)
+            return _constant_bool_result(n, compiled.search(cell_bytes) is not None, False)
+
         memset(dst, 0, nbytes)
         if nb_ptr != NULL and nbytes != 0:
             out_null = <uint8_t*> malloc(nbytes)
@@ -817,6 +1242,41 @@ cdef class StringVector(Vector):
         cdef uint8_t* ndl_lower = NULL
         cdef int32_t start, end, str_len
         cdef Py_ssize_t i, j
+
+        if self._has_const:
+            if self._const_is_null:
+                return _constant_bool_result(n, False, True)
+            if ignore_case and ndl_len > 0:
+                ndl_lower = <uint8_t*>malloc(<size_t>ndl_len)
+                if ndl_lower == NULL:
+                    raise MemoryError()
+                for j in range(ndl_len):
+                    ndl_lower[j] = _sv_ascii_lower(<uint8_t>ndl_ptr_char[j])
+            try:
+                if ignore_case:
+                    return _constant_bool_result(
+                        n,
+                        _sv_contains_ci(
+                            <const uint8_t*>self._const_value.data,
+                            self._const_value.length,
+                            ndl_lower if ndl_lower != NULL else <uint8_t*>ndl_ptr_char,
+                            ndl_len,
+                        ),
+                        False,
+                    )
+                return _constant_bool_result(
+                    n,
+                    _sv_contains_cs(
+                        <const uint8_t*>self._const_value.data,
+                        self._const_value.length,
+                        <const uint8_t*>ndl_ptr_char,
+                        ndl_len,
+                    ),
+                    False,
+                )
+            finally:
+                if ndl_lower != NULL:
+                    free(ndl_lower)
 
         memset(dst, 0, nbytes)
         if nb_ptr != NULL and nbytes != 0:
@@ -873,6 +1333,15 @@ cdef class StringVector(Vector):
         cdef char* data = <char*> ptr.data
         cdef uint8_t byte, bit
 
+        if self._has_const:
+            if self._const_is_null:
+                for i in range(n):
+                    out.append(None)
+            else:
+                for i in range(n):
+                    out.append(PyBytes_FromStringAndSize(<char*>self._const_value.data, self._const_value.length))
+            return out
+
         for i in range(n):
             if ptr.null_bitmap != NULL:
                 byte = ptr.null_bitmap[i >> 3]
@@ -894,6 +1363,8 @@ cdef class StringVector(Vector):
     ) except *:
         cdef DrakenVarBuffer* ptr = self.ptr
         cdef Py_ssize_t n = ptr.length
+        cdef uint64_t value
+        cdef Py_ssize_t i
 
         if n == 0:
             return
@@ -901,10 +1372,21 @@ cdef class StringVector(Vector):
         if offset < 0 or offset + n > out_buf.shape[0]:
             raise ValueError("StringVector.hash_into: output buffer too small")
 
+        if self._has_const:
+            if self._const_is_null:
+                value = NULL_HASH
+            else:
+                if self._const_value.length <= 16:
+                    value = _short_string_hash(<const uint8_t*>self._const_value.data, <size_t>self._const_value.length)
+                else:
+                    value = XXH3_64bits(<const void*>self._const_value.data, <size_t>self._const_value.length)
+            for i in range(n):
+                out_buf[offset + i] = mix_hash(out_buf[offset + i], value)
+            return
+
         cdef const uint8_t* data = <const uint8_t*> ptr.data
         cdef int32_t* offsets = ptr.offsets
         cdef uint8_t* nb_ptr = ptr.null_bitmap
-        cdef Py_ssize_t i
         cdef Py_ssize_t j
         cdef uint8_t byte
         cdef size_t str_len
@@ -966,6 +1448,20 @@ cdef class StringVector(Vector):
         cdef bint has_nulls = null_bitmap != NULL
         cdef uint64_t acc
 
+        if self._has_const:
+            for i in range(n):
+                if self._const_is_null:
+                    out_buf[offset + i] = <int64_t> (-(1 << 63))
+                    continue
+                memset(tmp, 0, 8)
+                for j in range(min(7, self._const_value.length)):
+                    tmp[1 + j] = (<char*>self._const_value.data)[j]
+                acc = 0
+                for j in range(8):
+                    acc = (acc << 8) | (<uint8_t> tmp[j])
+                out_buf[offset + i] = <int64_t> acc
+            return
+
         for i in range(n):
             if has_nulls and ((null_bitmap[i >> 3] >> (i & 7)) & 1) == 0:
                 out_buf[offset + i] = <int64_t> (-(1 << 63))
@@ -989,6 +1485,19 @@ cdef class StringVector(Vector):
         cdef size_t total_bytes = 0
         cdef Py_ssize_t i
         cdef int32_t src_idx
+        cdef Py_ssize_t dict_size
+        cdef int32_t* taken_codes = NULL
+        cdef int32_t[::1] taken_codes_view
+        cdef int32_t[::1] dictionary_offsets_view
+        cdef int32_t[::1] dictionary_lengths_view
+        cdef uint8_t[::1] dictionary_arena_view
+
+        if self._has_const:
+            return StringVector.from_constant(
+                None if self._const_is_null else PyBytes_FromStringAndSize(<char*>self._const_value.data, self._const_value.length),
+                n,
+                is_null=self._const_is_null,
+            )
 
         for i in range(n):
             src_idx = indices[i]
@@ -1042,11 +1551,52 @@ cdef class StringVector(Vector):
                 if not src_bit:
                     dst_ptr.null_bitmap[i >> 3] &= ~(1 << (i & 7))
 
+        if self._dict_values != NULL and self._dict_codes != NULL:
+            dict_size = self._dict_values.length
+            if n > 0:
+                taken_codes = <int32_t*>malloc(n * sizeof(int32_t))
+                if taken_codes == NULL:
+                    raise MemoryError()
+            try:
+                for i in range(n):
+                    src_idx = indices[i]
+                    if has_nulls:
+                        src_bit = (
+                            (src_ptr.null_bitmap[src_idx >> 3] >> (src_idx & 7)) & 1
+                        )
+                        if not src_bit:
+                            taken_codes[i] = 0
+                            continue
+                    taken_codes[i] = <int32_t>_read_packed_code(self._dict_codes, self._dict_code_width, src_idx)
+
+                if n > 0:
+                    taken_codes_view = <int32_t[:n]>taken_codes
+                else:
+                    taken_codes_view = <int32_t[:0]>taken_codes
+                dictionary_offsets_view = <int32_t[:dict_size + 1]>self._dict_values.offsets
+                dictionary_lengths_view = <int32_t[:dict_size]>self._dict_values.offsets
+                dictionary_arena_view = <uint8_t[:self._dict_values.offsets[dict_size]]>self._dict_values.data
+                _attach_dictionary_storage_from_buffers(
+                    result,
+                    taken_codes_view,
+                    dictionary_offsets_view,
+                    dictionary_lengths_view,
+                    dictionary_arena_view,
+                    self._dict_ordered != 0,
+                    self._dict_values.null_bitmap,
+                )
+            finally:
+                if taken_codes != NULL:
+                    free(taken_codes)
+
         return result
 
     def __str__(self):
         cdef list vals = []
         cdef Py_ssize_t i, k = min(self.ptr.length, 5)
+        if self._has_const:
+            vals = [None if self._const_is_null else PyBytes_FromStringAndSize(<char*>self._const_value.data, self._const_value.length)] * k
+            return f"<StringVector len={self.ptr.length} values={vals}>"
         for i in range(k):
             vals.append(self[i])
         return f"<StringVector len={self.ptr.length} values={vals}>"
@@ -1553,12 +2103,41 @@ cdef StringVector from_dict(const int32_t[::1] codes, list dictionary):
     cdef Py_ssize_t i
     cdef Py_ssize_t code
     cdef Py_ssize_t total_bytes = 0
+    cdef Py_ssize_t arena_bytes_count = 0
     cdef object value
     cdef bytes encoded
     cdef StringVectorBuilder builder
+    cdef StringVector vec
+    cdef int32_t* dict_offsets_buf = NULL
+    cdef int32_t* dict_lengths_buf = NULL
+    cdef uint8_t* arena_buf = NULL
+    cdef int32_t[::1] dict_offsets_view
+    cdef int32_t[::1] dict_lengths_view
+    cdef uint8_t[::1] arena_view
 
     if dict_size == 0:
         raise ValueError("StringVector.from_dict requires a non-empty dictionary")
+
+    if dict_size > 0:
+        dict_offsets_buf = <int32_t*>malloc((dict_size + 1) * sizeof(int32_t))
+        dict_lengths_buf = <int32_t*>malloc(dict_size * sizeof(int32_t))
+        if dict_offsets_buf == NULL or dict_lengths_buf == NULL:
+            if dict_offsets_buf != NULL:
+                free(dict_offsets_buf)
+            if dict_lengths_buf != NULL:
+                free(dict_lengths_buf)
+            raise MemoryError()
+
+    dict_offsets_buf[0] = 0
+    for i in range(dict_size):
+        value = dictionary[i]
+        if isinstance(value, str):
+            encoded = (<str>value).encode("utf-8")
+        else:
+            encoded = <bytes>value
+        arena_bytes_count += len(encoded)
+        dict_lengths_buf[i] = <int32_t>len(encoded)
+        dict_offsets_buf[i + 1] = <int32_t>arena_bytes_count
 
     for i in range(row_count):
         code = <Py_ssize_t>codes[i]
@@ -1570,19 +2149,47 @@ cdef StringVector from_dict(const int32_t[::1] codes, list dictionary):
         else:
             total_bytes += len(<bytes>value)
 
-    builder = StringVectorBuilder.with_counts(row_count, total_bytes)
-    for i in range(row_count):
-        code = <Py_ssize_t>codes[i]
-        if code < 0 or code >= dict_size:
-            raise ValueError(f"dictionary index out of bounds at row {i}: {code}")
-        value = dictionary[code]
-        if isinstance(value, str):
-            encoded = (<str>value).encode("utf-8")
-        else:
-            encoded = <bytes>value
-        builder.append(encoded)
+    if arena_bytes_count > 0:
+        arena_buf = <uint8_t*>malloc(arena_bytes_count)
+        if arena_buf == NULL:
+            free(dict_offsets_buf)
+            free(dict_lengths_buf)
+            raise MemoryError()
+        for i in range(dict_size):
+            value = dictionary[i]
+            if isinstance(value, str):
+                encoded = (<str>value).encode("utf-8")
+            else:
+                encoded = <bytes>value
+            if len(encoded) > 0:
+                memcpy(arena_buf + dict_offsets_buf[i], PyBytes_AS_STRING(encoded), len(encoded))
 
-    return builder.finish()
+    try:
+        builder = StringVectorBuilder.with_counts(row_count, total_bytes)
+        for i in range(row_count):
+            code = <Py_ssize_t>codes[i]
+            if code < 0 or code >= dict_size:
+                raise ValueError(f"dictionary index out of bounds at row {i}: {code}")
+            value = dictionary[code]
+            if isinstance(value, str):
+                encoded = (<str>value).encode("utf-8")
+            else:
+                encoded = <bytes>value
+            builder.append(encoded)
+
+        vec = builder.finish()
+        dict_offsets_view = <int32_t[:dict_size + 1]>dict_offsets_buf
+        dict_lengths_view = <int32_t[:dict_size]>dict_lengths_buf
+        arena_view = <uint8_t[:arena_bytes_count]>arena_buf
+        _attach_dictionary_storage_from_buffers(vec, codes, dict_offsets_view, dict_lengths_view, arena_view, False)
+        return vec
+    finally:
+        if dict_offsets_buf != NULL:
+            free(dict_offsets_buf)
+        if dict_lengths_buf != NULL:
+            free(dict_lengths_buf)
+        if arena_buf != NULL:
+            free(arena_buf)
 
 
 cdef StringVector from_dict_nullable(
@@ -1595,14 +2202,43 @@ cdef StringVector from_dict_nullable(
     cdef Py_ssize_t i
     cdef Py_ssize_t code
     cdef Py_ssize_t total_bytes = 0
+    cdef Py_ssize_t arena_bytes_count = 0
     cdef object value
     cdef bytes encoded
     cdef StringVectorBuilder builder
+    cdef StringVector vec
+    cdef int32_t* dict_offsets_buf = NULL
+    cdef int32_t* dict_lengths_buf = NULL
+    cdef uint8_t* arena_buf = NULL
+    cdef int32_t[::1] dict_offsets_view
+    cdef int32_t[::1] dict_lengths_view
+    cdef uint8_t[::1] arena_view
 
     if dict_size == 0:
         raise ValueError("StringVector.from_dict requires a non-empty dictionary")
     if row_validity.shape[0] != row_count:
         raise ValueError("row_validity length must match codes length")
+
+    if dict_size > 0:
+        dict_offsets_buf = <int32_t*>malloc((dict_size + 1) * sizeof(int32_t))
+        dict_lengths_buf = <int32_t*>malloc(dict_size * sizeof(int32_t))
+        if dict_offsets_buf == NULL or dict_lengths_buf == NULL:
+            if dict_offsets_buf != NULL:
+                free(dict_offsets_buf)
+            if dict_lengths_buf != NULL:
+                free(dict_lengths_buf)
+            raise MemoryError()
+
+    dict_offsets_buf[0] = 0
+    for i in range(dict_size):
+        value = dictionary[i]
+        if isinstance(value, str):
+            encoded = (<str>value).encode("utf-8")
+        else:
+            encoded = <bytes>value
+        arena_bytes_count += len(encoded)
+        dict_lengths_buf[i] = <int32_t>len(encoded)
+        dict_offsets_buf[i + 1] = <int32_t>arena_bytes_count
 
     for i in range(row_count):
         if row_validity[i] != 0:
@@ -1615,22 +2251,50 @@ cdef StringVector from_dict_nullable(
             else:
                 total_bytes += len(<bytes>value)
 
-    builder = StringVectorBuilder.with_counts(row_count, total_bytes)
-    for i in range(row_count):
-        if row_validity[i] != 0:
-            code = <Py_ssize_t>codes[i]
-            if code < 0 or code >= dict_size:
-                raise ValueError(f"dictionary index out of bounds at row {i}: {code}")
-            value = dictionary[code]
+    if arena_bytes_count > 0:
+        arena_buf = <uint8_t*>malloc(arena_bytes_count)
+        if arena_buf == NULL:
+            free(dict_offsets_buf)
+            free(dict_lengths_buf)
+            raise MemoryError()
+        for i in range(dict_size):
+            value = dictionary[i]
             if isinstance(value, str):
                 encoded = (<str>value).encode("utf-8")
             else:
                 encoded = <bytes>value
-            builder.append(encoded)
-        else:
-            builder.append_null()
+            if len(encoded) > 0:
+                memcpy(arena_buf + dict_offsets_buf[i], PyBytes_AS_STRING(encoded), len(encoded))
 
-    return builder.finish()
+    try:
+        builder = StringVectorBuilder.with_counts(row_count, total_bytes)
+        for i in range(row_count):
+            if row_validity[i] != 0:
+                code = <Py_ssize_t>codes[i]
+                if code < 0 or code >= dict_size:
+                    raise ValueError(f"dictionary index out of bounds at row {i}: {code}")
+                value = dictionary[code]
+                if isinstance(value, str):
+                    encoded = (<str>value).encode("utf-8")
+                else:
+                    encoded = <bytes>value
+                builder.append(encoded)
+            else:
+                builder.append_null()
+
+        vec = builder.finish()
+        dict_offsets_view = <int32_t[:dict_size + 1]>dict_offsets_buf
+        dict_lengths_view = <int32_t[:dict_size]>dict_lengths_buf
+        arena_view = <uint8_t[:arena_bytes_count]>arena_buf
+        _attach_dictionary_storage_from_buffers(vec, codes, dict_offsets_view, dict_lengths_view, arena_view, False)
+        return vec
+    finally:
+        if dict_offsets_buf != NULL:
+            free(dict_offsets_buf)
+        if dict_lengths_buf != NULL:
+            free(dict_lengths_buf)
+        if arena_buf != NULL:
+            free(arena_buf)
 
 
 cdef StringVector from_dict_buffers(
@@ -1648,6 +2312,7 @@ cdef StringVector from_dict_buffers(
     cdef uint8_t[::1] validity_view
     cdef const char* arena_ptr
     cdef StringVectorBuilder builder
+    cdef StringVector vec
 
     if dict_size == 0:
         raise ValueError("StringVector.from_dict_buffers requires a non-empty dictionary")
@@ -1692,7 +2357,87 @@ cdef StringVector from_dict_buffers(
             code = <Py_ssize_t>codes[i]
             builder.append_bytes(arena_ptr + dict_offsets[code], dict_lengths[code])
 
-    return builder.finish()
+    vec = builder.finish()
+    _attach_dictionary_storage_from_buffers(vec, codes, dict_offsets, dict_lengths, arena_bytes, False)
+    return vec
+
+
+cdef StringVector from_packed_dict(
+    const uint8_t* codes,
+    uint8_t code_width,
+    Py_ssize_t row_count,
+    const int32_t* dict_offsets,
+    const uint8_t* dict_data,
+    Py_ssize_t dict_size,
+    const uint8_t* row_null_bitmap=NULL,
+    bint ordered=False,
+    const uint8_t* dict_entry_null_bitmap=NULL,
+):
+    cdef int32_t* expanded_codes = NULL
+    cdef int32_t* lengths_buf = NULL
+    cdef uint8_t* row_validity = NULL
+    cdef int32_t[::1] codes_view
+    cdef int32_t[::1] offsets_view
+    cdef int32_t[::1] lengths_view
+    cdef uint8_t[::1] arena_view
+    cdef uint8_t[::1] validity_view
+    cdef Py_ssize_t i
+    cdef uint32_t code
+    cdef Py_ssize_t arena_size
+
+    if dict_size == 0:
+        raise ValueError("StringVector.from_packed_dict requires a non-empty dictionary")
+    if code_width != 1 and code_width != 2 and code_width != 4:
+        raise ValueError("unsupported packed dictionary code width")
+
+    if row_count > 0:
+        expanded_codes = <int32_t*>malloc(row_count * sizeof(int32_t))
+        if expanded_codes == NULL:
+            raise MemoryError()
+        if row_null_bitmap != NULL:
+            row_validity = <uint8_t*>malloc(row_count)
+            if row_validity == NULL:
+                free(expanded_codes)
+                raise MemoryError()
+    lengths_buf = <int32_t*>malloc(dict_size * sizeof(int32_t))
+    if lengths_buf == NULL:
+        if expanded_codes != NULL:
+            free(expanded_codes)
+        if row_validity != NULL:
+            free(row_validity)
+        raise MemoryError()
+
+    try:
+        for i in range(dict_size):
+            lengths_buf[i] = dict_offsets[i + 1] - dict_offsets[i]
+        for i in range(row_count):
+            if row_null_bitmap != NULL and ((row_null_bitmap[i >> 3] >> (i & 7)) & 1) == 0:
+                expanded_codes[i] = 0
+                row_validity[i] = 0
+                continue
+            code = _read_packed_code(codes, code_width, i)
+            if code >= dict_size:
+                raise ValueError(f"dictionary index out of bounds at row {i}: {code}")
+            expanded_codes[i] = <int32_t>code
+            if row_validity != NULL:
+                row_validity[i] = 1
+
+        codes_view = <int32_t[:row_count]>expanded_codes
+        offsets_view = <int32_t[:dict_size]><int32_t*>dict_offsets
+        lengths_view = <int32_t[:dict_size]>lengths_buf
+        arena_size = dict_offsets[dict_size]
+        arena_view = <uint8_t[:arena_size]><uint8_t*>dict_data
+        if row_validity != NULL:
+            validity_view = <uint8_t[:row_count]>row_validity
+            return from_dict_buffers(codes_view, offsets_view, lengths_view, arena_view, validity_view)
+        return from_dict_buffers(codes_view, offsets_view, lengths_view, arena_view)
+    finally:
+        if expanded_codes != NULL:
+            free(expanded_codes)
+        if lengths_buf != NULL:
+            free(lengths_buf)
+        if row_validity != NULL:
+            free(row_validity)
 
 cdef void copy_bitmap_shifted(uint8_t* src, uint8_t* dst, Py_ssize_t offset, Py_ssize_t length) noexcept nogil:
     cdef Py_ssize_t i

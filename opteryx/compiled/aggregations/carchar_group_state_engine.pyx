@@ -17,7 +17,7 @@ from libc.stdlib cimport malloc, free
 from libc.string cimport memset, memcmp
 from libcpp.vector cimport vector
 
-from opteryx.draken.core.buffers cimport DrakenConstantBuffer
+from opteryx.draken.core.buffers cimport ConstAccessor
 from opteryx.draken.core.buffers cimport DictAccessor
 from opteryx.draken.core.buffers cimport DrakenDictionaryBuffer
 from opteryx.draken.core.buffers cimport DrakenFixedBuffer
@@ -34,10 +34,10 @@ from opteryx.draken.core.buffers cimport DRAKEN_STRING
 from opteryx.draken.core.buffers cimport DRAKEN_TIME32
 from opteryx.draken.core.buffers cimport DRAKEN_TIME64
 from opteryx.draken.core.buffers cimport DRAKEN_TIMESTAMP64
+from opteryx.draken.core.buffers cimport DrakenConstantStringPayload
 from opteryx.draken.interop.arrow import vector_from_sequence
 from opteryx.draken.morsels.morsel cimport Morsel
 from opteryx.draken.morsels.morsel import Morsel
-from opteryx.draken.vectors.constant_vector cimport ConstantVector
 from opteryx.draken.vectors.float64_vector cimport Float64Vector
 from opteryx.draken.vectors.int64_vector cimport Int64Vector
 from opteryx.draken.vectors.integer_vector cimport IntegerVector
@@ -152,6 +152,45 @@ cdef inline DictAccessor* _vector_dict_accessor(object vec) noexcept:
     if isinstance(vec, Vector):
         return (<Vector> vec).dict_accessor()
     return NULL
+
+
+cdef inline ConstAccessor* _vector_const_accessor(object vec) noexcept:
+    if isinstance(vec, Vector):
+        return (<Vector> vec).const_accessor()
+    return NULL
+
+
+cdef inline bint _is_constant_like_vector(object vec) noexcept:
+    return _vector_const_accessor(vec) != NULL
+
+
+cdef inline bint _const_accessor_is_null(ConstAccessor* accessor) noexcept:
+    return accessor == NULL or accessor.is_null != 0
+
+
+cdef object _const_accessor_scalar(ConstAccessor* accessor):
+    cdef DrakenConstantStringPayload* payload
+
+    if accessor == NULL or accessor.is_null != 0:
+        return None
+    if accessor.value_type == DRAKEN_INT8:
+        return (<int8_t*>accessor.value_ptr)[0]
+    if accessor.value_type == DRAKEN_INT16:
+        return (<int16_t*>accessor.value_ptr)[0]
+    if accessor.value_type == DRAKEN_INT32 or accessor.value_type == DRAKEN_DATE32 or accessor.value_type == DRAKEN_TIME32:
+        return (<int32_t*>accessor.value_ptr)[0]
+    if accessor.value_type == DRAKEN_INT64 or accessor.value_type == DRAKEN_TIME64 or accessor.value_type == DRAKEN_TIMESTAMP64:
+        return (<int64_t*>accessor.value_ptr)[0]
+    if accessor.value_type == DRAKEN_FLOAT32:
+        return (<float*>accessor.value_ptr)[0]
+    if accessor.value_type == DRAKEN_FLOAT64:
+        return (<double*>accessor.value_ptr)[0]
+    if accessor.value_type == DRAKEN_BOOL:
+        return (<uint8_t*>accessor.value_ptr)[0] != 0
+    if accessor.value_type == DRAKEN_STRING:
+        payload = <DrakenConstantStringPayload*>accessor.value_ptr
+        return PyBytes_FromStringAndSize(<const char*>payload.data, payload.length)
+    return None
 
 
 cdef inline uint8_t* _vector_null_bitmap(object vec) noexcept:
@@ -425,7 +464,7 @@ cdef class CarcharGroupStateEngine:
         return 0
 
     cdef void _record_constant_groupby_vector(self, object vec):
-        if vec.__class__.__name__ == "ConstantVector":
+        if _is_constant_like_vector(vec):
             self._readings["draken_constant_groupby_output_vector_hits"] += 1
         else:
             self._readings["draken_constant_groupby_output_vector_fallbacks"] += 1
@@ -921,9 +960,7 @@ cdef class CarcharGroupStateEngine:
         cdef object key_vector
         cdef object value_vector
         cdef tuple aggregation
-        cdef ConstantVector constant_key_vector
-        cdef DrakenConstantBuffer* constant_ptr
-        cdef Py_ssize_t null_count
+        cdef ConstAccessor* key_const_accessor = NULL
         cdef Py_ssize_t agg_idx
         cdef int64_t key_kind
         cdef bint stringlike_key_vector = False
@@ -1407,9 +1444,9 @@ cdef class CarcharGroupStateEngine:
                     ):
                         self._agg_mode = AGG_COUNT_VALUE
                         self._value_kind = VALUE_NONE
-                    elif isinstance(value_vector, ConstantVector):
+                    elif _vector_const_accessor(value_vector) != NULL:
                         # Non-null constant value: COUNT('a') == COUNT(*) for each group
-                        if (<ConstantVector> value_vector).null_count != 0:
+                        if _const_accessor_is_null(_vector_const_accessor(value_vector)):
                             self._init_legacy_backend()
                             return
                         self._agg_mode = AGG_COUNT_STAR
@@ -1451,8 +1488,8 @@ cdef class CarcharGroupStateEngine:
                 elif isinstance(value_vector, TimestampVector):
                     self._agg_mode = AGG_MIN
                     self._value_kind = VALUE_INT64
-                elif isinstance(value_vector, ConstantVector):
-                    if (<ConstantVector> value_vector).null_count != 0:
+                elif _vector_const_accessor(value_vector) != NULL:
+                    if _const_accessor_is_null(_vector_const_accessor(value_vector)):
                         self._init_legacy_backend()
                         return
                     self._agg_mode = AGG_MIN
@@ -1477,8 +1514,8 @@ cdef class CarcharGroupStateEngine:
                 elif isinstance(value_vector, TimestampVector):
                     self._agg_mode = AGG_MAX
                     self._value_kind = VALUE_INT64
-                elif isinstance(value_vector, ConstantVector):
-                    if (<ConstantVector> value_vector).null_count != 0:
+                elif _vector_const_accessor(value_vector) != NULL:
+                    if _const_accessor_is_null(_vector_const_accessor(value_vector)):
                         self._init_legacy_backend()
                         return
                     self._agg_mode = AGG_MAX
@@ -1787,30 +1824,14 @@ cdef class CarcharGroupStateEngine:
         column = self._aggregations[0][2]
         key_vector = morsel.column(self._group_column)
         key_dict_accessor = _vector_dict_accessor(key_vector)
+        key_const_accessor = _vector_const_accessor(key_vector)
 
-        if isinstance(key_vector, ConstantVector):
-            constant_key_vector = <ConstantVector> key_vector
-            null_count = constant_key_vector.null_count
-            if null_count != 0 and null_count != morsel.num_rows:
-                self._init_legacy_backend()
-                return
-
-            constant_ptr = constant_key_vector.ptr
-            if null_count == morsel.num_rows:
+        if key_const_accessor != NULL:
+            if key_const_accessor.is_null != 0:
                 self._constant_key_scalar = None
                 self._constant_key_valid = 0
             else:
-                if constant_ptr.value_type == DRAKEN_INT64:
-                    self._constant_key_scalar = (<int64_t*> constant_ptr.value)[0]
-                elif constant_ptr.value_type == DRAKEN_FLOAT64:
-                    self._constant_key_scalar = (<double*> constant_ptr.value)[0]
-                elif constant_ptr.value_type == DRAKEN_BOOL:
-                    self._constant_key_scalar = (<uint8_t*> constant_ptr.value)[0] != 0
-                elif constant_ptr.value_type == DRAKEN_STRING:
-                    self._constant_key_scalar = constant_key_vector.scalar_value()
-                else:
-                    self._init_legacy_backend()
-                    return
+                self._constant_key_scalar = _const_accessor_scalar(key_const_accessor)
                 self._constant_key_valid = 1
 
         if not isinstance(
@@ -1818,7 +1839,6 @@ cdef class CarcharGroupStateEngine:
             (
                 Int64Vector,
                 IntegerVector,
-                ConstantVector,
                 StringVector,
                 Date32Vector,
                 TimeVector,
@@ -1836,7 +1856,7 @@ cdef class CarcharGroupStateEngine:
         if len(self._aggregations) > 1 or (
             key_dict_accessor != NULL and fn not in ("count_distinct", "distinct")
         ):
-            if isinstance(key_vector, ConstantVector):
+            if _is_constant_like_vector(key_vector):
                 self._init_legacy_backend()
                 return
             if key_dict_accessor != NULL:
@@ -1996,7 +2016,7 @@ cdef class CarcharGroupStateEngine:
             self._init_legacy_backend()
             return
 
-        if isinstance(key_vector, ConstantVector):
+        if _is_constant_like_vector(key_vector):
             self._mode = MODE_CONSTANT
             self._readings["feature_groupby_engine_constant"] += 1
             return
@@ -2451,11 +2471,11 @@ cdef class CarcharGroupStateEngine:
         cdef int cmp
         cdef bytes const_bytes_obj
 
-        if isinstance(value_vector, ConstantVector):
+        if _vector_const_accessor(value_vector) != NULL:
             # All rows have the same constant value; initialise unseen states only.
-            if (<ConstantVector> value_vector).null_count != 0:
+            if _const_accessor_is_null(_vector_const_accessor(value_vector)):
                 return  # null constant: no states updated
-            value_obj = value_vector[0]
+            value_obj = _const_accessor_scalar(_vector_const_accessor(value_vector))
             if value_obj is None:
                 return
             if isinstance(value_obj, bytes):
@@ -2538,10 +2558,10 @@ cdef class CarcharGroupStateEngine:
         cdef int cmp
         cdef bytes const_bytes_obj
 
-        if isinstance(value_vector, ConstantVector):
-            if (<ConstantVector> value_vector).null_count != 0:
+        if _vector_const_accessor(value_vector) != NULL:
+            if _const_accessor_is_null(_vector_const_accessor(value_vector)):
                 return
-            value_obj = value_vector[0]
+            value_obj = _const_accessor_scalar(_vector_const_accessor(value_vector))
             if value_obj is None:
                 return
             if isinstance(value_obj, bytes):
@@ -4411,6 +4431,7 @@ cdef class CarcharGroupStateEngine:
         cdef Py_ssize_t row_idx
         cdef Py_ssize_t row_count = morsel.num_rows
         cdef object value_vector
+        cdef object value_obj
         cdef DrakenFixedBuffer* value_ptr
         cdef int64_t* value_i64_data
         cdef double* value_f64_data
@@ -4418,6 +4439,7 @@ cdef class CarcharGroupStateEngine:
         cdef uint64_t[::1] value_hashes
         cdef int64_t value_i64
         cdef DictAccessor* value_dict_accessor = NULL
+        cdef ConstAccessor* value_const_accessor = NULL
         cdef double val_decoded_f64
         cdef int64_t val_decoded_i64
 
@@ -4451,6 +4473,84 @@ cdef class CarcharGroupStateEngine:
             return
 
         value_vector = morsel.column(self._value_column)
+        value_const_accessor = _vector_const_accessor(value_vector)
+        if value_const_accessor != NULL:
+            if self._agg_mode == AGG_COUNT_VALUE:
+                if value_const_accessor.is_null == 0:
+                    self._constant_count += row_count
+                return
+
+            if value_const_accessor.is_null != 0:
+                return
+
+            value_obj = value_vector[0]
+            if self._agg_mode == AGG_HASH_ONE:
+                if self._constant_seen == 0:
+                    self._constant_object_state = value_obj
+                self._constant_seen = 1
+                return
+            if self._value_kind == VALUE_OBJECT:
+                if self._agg_mode == AGG_MIN:
+                    if self._constant_seen == 0 or value_obj < self._constant_object_state:
+                        self._constant_object_state = value_obj
+                    self._constant_seen = 1
+                elif self._agg_mode == AGG_MAX:
+                    if self._constant_seen == 0 or value_obj > self._constant_object_state:
+                        self._constant_object_state = value_obj
+                    self._constant_seen = 1
+                elif self._agg_mode == AGG_COUNT_DISTINCT:
+                    if self._constant_distinct_set is None:
+                        self._constant_distinct_set = FlatHashSet()
+                    value_hashes = morsel.hash([self._value_column])
+                    if row_count > 0 and (<FlatHashSet> self._constant_distinct_set).insert(value_hashes[0]):
+                        self._constant_count += 1
+                return
+
+            if self._value_kind == VALUE_FLOAT64:
+                val_decoded_f64 = <double> value_obj
+                if self._agg_mode == AGG_SUM:
+                    self._constant_f64_state += row_count * val_decoded_f64
+                    self._constant_seen = 1
+                elif self._agg_mode == AGG_MIN:
+                    if self._constant_seen == 0 or val_decoded_f64 < self._constant_f64_state:
+                        self._constant_f64_state = val_decoded_f64
+                    self._constant_seen = 1
+                elif self._agg_mode == AGG_MAX:
+                    if self._constant_seen == 0 or val_decoded_f64 > self._constant_f64_state:
+                        self._constant_f64_state = val_decoded_f64
+                    self._constant_seen = 1
+                elif self._agg_mode == AGG_AVG:
+                    self._constant_avg_sum += row_count * val_decoded_f64
+                    self._constant_avg_count += row_count
+                elif self._agg_mode == AGG_COUNT_DISTINCT:
+                    if self._constant_distinct_set is None:
+                        self._constant_distinct_set = FlatHashSet()
+                    if (<FlatHashSet> self._constant_distinct_set).insert(<uint64_t> val_decoded_f64):
+                        self._constant_count += 1
+                return
+
+            val_decoded_i64 = <int64_t> value_obj
+            if self._agg_mode == AGG_SUM:
+                self._constant_i64_state += row_count * val_decoded_i64
+                self._constant_seen = 1
+            elif self._agg_mode == AGG_MIN:
+                if self._constant_seen == 0 or val_decoded_i64 < self._constant_i64_state:
+                    self._constant_i64_state = val_decoded_i64
+                self._constant_seen = 1
+            elif self._agg_mode == AGG_MAX:
+                if self._constant_seen == 0 or val_decoded_i64 > self._constant_i64_state:
+                    self._constant_i64_state = val_decoded_i64
+                self._constant_seen = 1
+            elif self._agg_mode == AGG_AVG:
+                self._constant_avg_sum += row_count * val_decoded_i64
+                self._constant_avg_count += row_count
+            elif self._agg_mode == AGG_COUNT_DISTINCT:
+                if self._constant_distinct_set is None:
+                    self._constant_distinct_set = FlatHashSet()
+                if (<FlatHashSet> self._constant_distinct_set).insert(<uint64_t> val_decoded_i64):
+                    self._constant_count += 1
+            return
+
         if isinstance(value_vector, Float64Vector):
             value_ptr = (<Float64Vector> value_vector).ptr
             value_f64_data = <double*> value_ptr.data

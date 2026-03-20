@@ -1,8 +1,11 @@
+from pathlib import Path
+
 #!/usr/bin/env python3
 import pyarrow as pa
-from pathlib import Path
+
 from opteryx.draken import Morsel
-from opteryx.draken.storage import write_morsel, read_morsel
+from opteryx.draken.storage import read_morsel
+from opteryx.draken.storage import write_morsel
 
 # Test 1: Dictionary WITH nulls (the failing case)
 print("=== Test 1: Dictionary with nulls ===")
