@@ -133,7 +133,14 @@ def _typed_constant_vector(value, length: int, schema_column):
         from opteryx.draken.vectors.date32_vector import Date32Vector
 
         if not is_null:
-            value = pyarrow.array([value], type=pyarrow.date32()).cast(pyarrow.int32())[0].as_py()
+            if isinstance(value, datetime.datetime):
+                value = value.date()
+            if isinstance(value, numpy.datetime64):
+                value = value.astype("datetime64[D]").astype(numpy.int64)
+            if isinstance(value, datetime.date):
+                value = (value - datetime.date(1970, 1, 1)).days
+            else:
+                value = pyarrow.array([value], type=pyarrow.date32()).cast(pyarrow.int32())[0].as_py()
         return Date32Vector.from_constant(0 if is_null else value, length, is_null=is_null)
 
     if target_type == OrsoTypes.TIMESTAMP:

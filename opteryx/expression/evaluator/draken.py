@@ -12,6 +12,7 @@ from .function_execution import _is_draken_vector
 from .function_execution import apply_bounded_function
 
 _EPOCH_DATE = datetime.date(1970, 1, 1)
+_EPOCH_DATETIME = datetime.datetime(1970, 1, 1)
 
 _NEGATED_OPS = {
     "NotEq": "Eq",
@@ -171,9 +172,14 @@ def _coerce_timestamp(value) -> int:
     if isinstance(value, numpy.datetime64):
         return int(value.astype("datetime64[us]").astype(numpy.int64))
     if isinstance(value, datetime.datetime):
-        return int(value.timestamp() * 1_000_000)
+        if value.tzinfo is not None:
+            value = value.astimezone(datetime.timezone.utc).replace(tzinfo=None)
+        return int((value - _EPOCH_DATETIME).total_seconds() * 1_000_000)
     if isinstance(value, datetime.date):
-        return int(datetime.datetime(value.year, value.month, value.day).timestamp() * 1_000_000)
+        return int(
+            (datetime.datetime(value.year, value.month, value.day) - _EPOCH_DATETIME).total_seconds()
+            * 1_000_000
+        )
     if value.__class__.__name__ == "ArrowVector":
         scalar = value._arr[0].as_py()
         if scalar is None:
@@ -247,6 +253,13 @@ def _is_null_as_boolvector(vec):
     cls_name = vec.__class__.__name__
     n = len(vec)
 
+    def _true_for_nulls(mask):
+        # Arrow compute can preserve nulls in boolean results; for IS NULL we
+        # want those positions to evaluate to True, not remain nullable.
+        if getattr(mask, "null_count", 0):
+            return _pc.fill_null(mask, True)
+        return mask
+
     if _is_typed_constant_encoded_vector(vec):
         if getattr(vec, "null_count", 0) == n:
             return bool_vector_all_true(n)
@@ -258,9 +271,9 @@ def _is_null_as_boolvector(vec):
 
         from opteryx.draken.interop.arrow import vector_from_arrow as _vfa
 
-        arrow_mask = _pc.is_null(vec.to_arrow())
+        arrow_mask = _true_for_nulls(_pc.is_null(vec.to_arrow()))
         if _pa.types.is_floating(vec.to_arrow().type):
-            arrow_mask = _pc.or_(arrow_mask, _pc.is_nan(vec.to_arrow()))
+            arrow_mask = _true_for_nulls(_pc.or_(arrow_mask, _pc.is_nan(vec.to_arrow())))
         return _vfa(arrow_mask)
 
     if cls_name in _FIXED_BUFFER_VECTOR_CLASSES:
@@ -270,7 +283,7 @@ def _is_null_as_boolvector(vec):
             from opteryx.draken.interop.arrow import vector_from_arrow as _vfa
 
             arrow_arr = vec.to_arrow()
-            return _vfa(_pc.or_(_pc.is_null(arrow_arr), _pc.is_nan(arrow_arr)))
+            return _vfa(_true_for_nulls(_pc.or_(_pc.is_null(arrow_arr), _pc.is_nan(arrow_arr))))
         return bool_vector_from_int8_mask(vec.is_null(), n)
 
     if _is_typed_constant_encoded_vector(vec):
@@ -286,9 +299,9 @@ def _is_null_as_boolvector(vec):
 
     from opteryx.draken.interop.arrow import vector_from_arrow as _vfa
 
-    arrow_mask = _pc.is_null(vec.to_arrow())
+    arrow_mask = _true_for_nulls(_pc.is_null(vec.to_arrow()))
     if _pa.types.is_floating(vec.to_arrow().type):
-        arrow_mask = _pc.or_(arrow_mask, _pc.is_nan(vec.to_arrow()))
+        arrow_mask = _true_for_nulls(_pc.or_(arrow_mask, _pc.is_nan(vec.to_arrow())))
     return _vfa(arrow_mask)
 
 
@@ -373,6 +386,53 @@ def _int64_compare(op: str, vec, right):
     if op == "InList":
         return vec.in_list(value_set)
     raise NotImplementedError(f"Int64Vector: unsupported op {op!r}")
+
+
+def _int64_temporal_compare(op: str, vec, right, temporal_type):
+    from orso.types import OrsoTypes
+
+    from opteryx.draken.vectors.bool_vector import BoolVector
+
+    if right is None:
+        return BoolVector(len(vec))
+
+    if temporal_type == OrsoTypes.TIMESTAMP:
+        coerce = _coerce_timestamp
+    elif temporal_type == OrsoTypes.DATE:
+        coerce = _coerce_date32
+    else:
+        return _int64_compare(op, vec, right)
+
+    if isinstance(right, (list, tuple, set, frozenset)):
+        value_set = frozenset(coerce(value) for value in right)
+    elif right.__class__.__name__ == "Int64Vector":
+        vec_ops = {
+            "Eq": vec.equals_vector,
+            "Lt": vec.less_than_vector,
+            "Gt": vec.greater_than_vector,
+            "LtEq": vec.less_than_or_equals_vector,
+            "GtEq": vec.greater_than_or_equals_vector,
+        }
+        fn = vec_ops.get(op)
+        if fn is None:
+            raise NotImplementedError(f"Int64Vector temporal vector-vector: unsupported op {op!r}")
+        return fn(right)
+    else:
+        value = coerce(right)
+
+    if op == "Eq":
+        return vec.equals(value)
+    if op == "Lt":
+        return vec.less_than(value)
+    if op == "Gt":
+        return vec.greater_than(value)
+    if op == "LtEq":
+        return vec.less_than_or_equals(value)
+    if op == "GtEq":
+        return vec.greater_than_or_equals(value)
+    if op == "InList":
+        return vec.in_list(value_set)
+    raise NotImplementedError(f"Int64Vector temporal: unsupported op {op!r}")
 
 
 def _float64_compare(op: str, vec, right):
@@ -731,7 +791,9 @@ def _string_anyop_like(vec, patterns, ignore_case: bool):
     return result
 
 
-def draken_compare(op: str, left, right):
+def draken_compare(op: str, left, right, left_schema_type=None, right_schema_type=None):
+    from orso.types import OrsoTypes
+
     if op == "AnyOpEq":
         from opteryx.compiled.vector_ops import vector_anyop_eq
 
@@ -875,14 +937,10 @@ def draken_compare(op: str, left, right):
     if cls == "StringVector":
         result = _string_compare(op, left, right)
     elif cls == "Int64Vector" or cls == "IntegerVector":
-        if cls == "IntegerVector":
-            import pyarrow as pa
-
-            from opteryx.draken.interop.arrow import vector_from_arrow
-
-            arrow_arr = left.to_arrow().cast(pa.int64())
-            left = vector_from_arrow(arrow_arr)
-        result = _int64_compare(op, left, right)
+        if left_schema_type in (OrsoTypes.DATE, OrsoTypes.TIMESTAMP):
+            result = _int64_temporal_compare(op, left, right, left_schema_type)
+        else:
+            result = _int64_compare(op, left, right)
     elif cls == "Float64Vector":
         result = _float64_compare(op, left, right)
     elif cls == "TimestampVector":
@@ -1255,7 +1313,7 @@ def evaluate_draken(node, morsel):
             return BoolVector.from_arrow(
                 pa.array([scalar_result] * morsel.num_rows, type=pa.bool_())
             )
-        return draken_compare(node.value, left, right)
+        return draken_compare(node.value, left, right, left_schema_type, right_schema_type)
 
     if node_type == NodeType.UNARY_OPERATOR:
         return _unary_draken(node.value, node.centre, morsel)

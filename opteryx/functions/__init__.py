@@ -116,7 +116,7 @@ def fixed_value_function(function, context):
         # CURRENT_TIMESTAMP is an alias for NOW, so we return the same value
         return OrsoTypes.TIMESTAMP, numpy.datetime64(context.execution_context.connected_at, "us")
     if function in ("CURRENT_DATE", "TODAY"):
-        return OrsoTypes.DATE, numpy.datetime64(context.execution_context.connected_at.date())
+        return OrsoTypes.DATE, numpy.datetime64(context.execution_context.connected_at.date(), "D")
     if function in ("YESTERDAY",):
         return OrsoTypes.DATE, numpy.datetime64(
             context.execution_context.connected_at.date() - datetime.timedelta(days=1), "D"

@@ -96,6 +96,29 @@ def date_part(part, arr):
 
     vector_type = arr.__class__.__name__
 
+    if hasattr(arr, "to_arrow") and vector_type not in (
+        "TimestampVector",
+        "Int64Vector",
+        "Date32Vector",
+    ):
+        from opteryx.draken.interop.arrow import vector_from_arrow
+
+        arrow_arr = arr.to_arrow()
+        if pyarrow.types.is_date32(arrow_arr.type) or pyarrow.types.is_date64(arrow_arr.type):
+            arr = vector_from_arrow(arrow_arr.cast(pyarrow.timestamp("us")))
+            vector_type = arr.__class__.__name__
+        elif pyarrow.types.is_timestamp(arrow_arr.type) or pyarrow.types.is_int64(arrow_arr.type):
+            arr = vector_from_arrow(arrow_arr)
+            vector_type = arr.__class__.__name__
+
+    if vector_type == "Date32Vector":
+        from opteryx.draken.interop.arrow import vector_from_arrow
+
+        # Reuse the existing timestamp kernels by interpreting date32 values
+        # as midnight UTC timestamps.
+        arr = vector_from_arrow(arr.to_arrow().cast(pyarrow.timestamp("us")))
+        vector_type = arr.__class__.__name__
+
     if vector_type == "TimestampVector":
         from opteryx.compiled.vector_ops.function_definitions import vector_datepart_day
         from opteryx.compiled.vector_ops.function_definitions import vector_datepart_dayofweek

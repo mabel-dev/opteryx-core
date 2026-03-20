@@ -15,6 +15,8 @@ sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
 from opteryx import EOS
 from opteryx.draken.morsels.morsel import Morsel
+from opteryx.draken.vectors.int64_vector import Int64Vector
+from opteryx.draken.vectors.string_vector import StringVector
 from opteryx.expression import NodeType
 from opteryx.expression.functions import get_catalog
 from opteryx.models import Node
@@ -114,6 +116,21 @@ def _normalize_rows(rows):
 
 def _decode_strings(values):
     return [value.decode("utf-8") if isinstance(value, bytes) else value for value in values]
+
+
+def _make_q19_style_chunk(user_ids, minutes, phrases, counts):
+    return Morsel.from_vectors(
+        ["UserID", "m", "SearchPhrase", "COUNT(*)"],
+        [
+            Int64Vector.from_arrow(pa.array(user_ids, type=pa.int64())),
+            Int64Vector.from_dict(
+                list(range(len(minutes))),
+                minutes,
+            ),
+            StringVector.from_arrow(pa.array(phrases, type=pa.binary())),
+            Int64Vector.from_arrow(pa.array(counts, type=pa.int64())),
+        ],
+    )
 
 
 def test_dictionary_integer_vector_is_exact_compressible():
@@ -230,6 +247,34 @@ def test_top_n_multi_key_integer_dictionary_matches_materialized_order():
 
     assert _normalize_rows(asc_dict) == _normalize_rows(asc_expected)
     assert _normalize_rows(desc_dict) == _normalize_rows(desc_expected)
+
+
+def test_heap_sort_execute_merges_chunked_top_n_before_eos():
+    node = HeapSortNode(QueryProperties("heap-sort-test", {}), order_by=[], limit=2)
+    node.mapped_order = [("COUNT(*)", "DESC")]
+
+    chunk1 = _make_q19_style_chunk(
+        [1, 2],
+        [45, 23],
+        [b"", b""],
+        [37, 31],
+    )
+    chunk2 = _make_q19_style_chunk(
+        [3, 4],
+        [3, 50],
+        [b"", b""],
+        [28, 25],
+    )
+
+    list(node.execute(chunk1))
+    list(node.execute(chunk2))
+    outputs = [chunk for chunk in node.execute(EOS) if chunk is not EOS]
+
+    assert len(outputs) == 1
+    assert outputs[0].to_arrow().to_pylist() == [
+        {"UserID": 1, "m": 45, "SearchPhrase": b"", "COUNT(*)": 37},
+        {"UserID": 2, "m": 23, "SearchPhrase": b"", "COUNT(*)": 31},
+    ]
 
 
 def test_top_n_vector_similarity_uses_native_scoring_path():
