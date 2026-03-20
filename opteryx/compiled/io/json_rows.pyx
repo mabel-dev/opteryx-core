@@ -29,12 +29,13 @@ from opteryx.draken.core.buffers cimport DRAKEN_INT16
 from opteryx.draken.core.buffers cimport DRAKEN_INT32
 from opteryx.draken.core.buffers cimport DRAKEN_INT64
 from opteryx.draken.core.buffers cimport DRAKEN_STRING
+from opteryx.draken.core.buffers cimport DRAKEN_ENCODING_CONSTANT
 from opteryx.draken.core.buffers cimport DRAKEN_ENCODING_DICTIONARY
+from opteryx.draken.core.buffers cimport ConstAccessor
 from opteryx.draken.core.buffers cimport DrakenConstantStringPayload
 from opteryx.draken.core.buffers cimport DrakenFixedBuffer
 from opteryx.draken.morsels.morsel cimport Morsel
 from opteryx.draken.vectors.bool_vector cimport BoolVector
-from opteryx.draken.vectors.constant_vector cimport ConstantVector
 from opteryx.draken.vectors.float64_vector cimport Float64Vector
 from opteryx.draken.vectors.int64_vector cimport Int64Vector
 from opteryx.draken.vectors.integer_vector cimport IntegerVector
@@ -278,16 +279,75 @@ cdef set _normalize_raw_columns(object raw_json_columns):
     return normalized
 
 
-cdef int _constant_encoder(ConstantVector vec, bint raw_json):
-    if vec.ptr.value_type == DRAKEN_INT64:
+cdef inline ConstAccessor* _typed_constant_accessor(object vec_obj) noexcept:
+    if getattr(vec_obj, "encoding", None) != DRAKEN_ENCODING_CONSTANT:
+        return NULL
+    if isinstance(vec_obj, Int64Vector):
+        return (<Int64Vector>vec_obj).const_accessor()
+    if isinstance(vec_obj, IntegerVector):
+        return (<IntegerVector>vec_obj).const_accessor()
+    if isinstance(vec_obj, Float64Vector):
+        return (<Float64Vector>vec_obj).const_accessor()
+    if isinstance(vec_obj, BoolVector):
+        return (<BoolVector>vec_obj).const_accessor()
+    if isinstance(vec_obj, StringVector):
+        return (<StringVector>vec_obj).const_accessor()
+    return NULL
+
+
+cdef inline int _typed_constant_encoder(object vec_obj, bint raw_json):
+    cdef ConstAccessor* accessor = _typed_constant_accessor(vec_obj)
+    if accessor == NULL:
+        return 0
+    if accessor.value_type == DRAKEN_INT8 or accessor.value_type == DRAKEN_INT16 or accessor.value_type == DRAKEN_INT32 or accessor.value_type == DRAKEN_INT64:
         return ENC_CONST_INT
-    if vec.ptr.value_type == DRAKEN_FLOAT64:
+    if accessor.value_type == DRAKEN_FLOAT64:
         return ENC_CONST_FLOAT
-    if vec.ptr.value_type == DRAKEN_BOOL:
+    if accessor.value_type == DRAKEN_BOOL:
         return ENC_CONST_BOOL
-    if vec.ptr.value_type == DRAKEN_STRING:
+    if accessor.value_type == DRAKEN_STRING:
         return ENC_CONST_RAW_STRING if raw_json else ENC_CONST_STRING
     return 0
+
+
+cdef inline bint _constant_is_null(object vec_obj) noexcept:
+    cdef ConstAccessor* accessor
+    accessor = _typed_constant_accessor(vec_obj)
+    if accessor == NULL:
+        return False
+    return accessor.is_null != 0
+
+
+cdef inline int64_t _constant_int_value(object vec_obj) noexcept:
+    cdef ConstAccessor* accessor
+    accessor = _typed_constant_accessor(vec_obj)
+    if accessor == NULL or accessor.value_ptr == NULL:
+        return 0
+    return (<int64_t*>accessor.value_ptr)[0]
+
+
+cdef inline double _constant_float_value(object vec_obj) noexcept:
+    cdef ConstAccessor* accessor
+    accessor = _typed_constant_accessor(vec_obj)
+    if accessor == NULL or accessor.value_ptr == NULL:
+        return 0.0
+    return (<double*>accessor.value_ptr)[0]
+
+
+cdef inline bint _constant_bool_value(object vec_obj) noexcept:
+    cdef ConstAccessor* accessor
+    accessor = _typed_constant_accessor(vec_obj)
+    if accessor == NULL or accessor.value_ptr == NULL:
+        return False
+    return (<uint8_t*>accessor.value_ptr)[0] != 0
+
+
+cdef inline DrakenConstantStringPayload* _constant_string_payload(object vec_obj) noexcept:
+    cdef ConstAccessor* accessor
+    accessor = _typed_constant_accessor(vec_obj)
+    if accessor == NULL or accessor.value_ptr == NULL:
+        return NULL
+    return <DrakenConstantStringPayload*>accessor.value_ptr
 
 
 cdef Py_ssize_t _estimate_value_bytes(
@@ -297,7 +357,6 @@ cdef Py_ssize_t _estimate_value_bytes(
     Py_ssize_t num_rows,
 ) except -1:
     cdef StringVector string_vec
-    cdef ConstantVector const_vec
     cdef DrakenConstantStringPayload* payload
     cdef Py_ssize_t total_bytes
 
@@ -317,8 +376,9 @@ cdef Py_ssize_t _estimate_value_bytes(
             return total_bytes if total_bytes > 0 else 8
         return total_bytes + 6
     if encoder == ENC_CONST_STRING or encoder == ENC_CONST_RAW_STRING:
-        const_vec = <ConstantVector>vec_obj
-        payload = <DrakenConstantStringPayload*>const_vec.ptr.value
+        payload = _constant_string_payload(vec_obj)
+        if payload == NULL:
+            return 8
         if encoder == ENC_CONST_RAW_STRING:
             return payload.length if payload.length > 0 else 8
         return payload.length + 6
@@ -338,7 +398,6 @@ cdef Py_ssize_t _measure_value(
     cdef BoolVector bool_vec
     cdef StringVector string_vec
     cdef _StringVectorView string_view
-    cdef ConstantVector const_vec
     cdef const char* ptr
     cdef Py_ssize_t length
     cdef DrakenConstantStringPayload* payload
@@ -369,20 +428,18 @@ cdef Py_ssize_t _measure_value(
         return _measure_json_string(ptr, length)
 
     if encoder == ENC_CONST_INT:
-        const_vec = <ConstantVector>vec_obj
-        return _measure_int64((<int64_t*>const_vec.ptr.value)[0])
+        return _measure_int64(_constant_int_value(vec_obj))
 
     if encoder == ENC_CONST_FLOAT:
-        const_vec = <ConstantVector>vec_obj
-        return _measure_float64((<double*>const_vec.ptr.value)[0])
+        return _measure_float64(_constant_float_value(vec_obj))
 
     if encoder == ENC_CONST_BOOL:
-        const_vec = <ConstantVector>vec_obj
-        return 4 if (<uint8_t*>const_vec.ptr.value)[0] else 5
+        return 4 if _constant_bool_value(vec_obj) else 5
 
     if encoder == ENC_CONST_STRING or encoder == ENC_CONST_RAW_STRING:
-        const_vec = <ConstantVector>vec_obj
-        payload = <DrakenConstantStringPayload*>const_vec.ptr.value
+        payload = _constant_string_payload(vec_obj)
+        if payload == NULL:
+            return 0
         ptr = <const char*>payload.data
         length = payload.length
         if encoder == ENC_CONST_RAW_STRING:
@@ -417,7 +474,6 @@ cdef Py_ssize_t _write_value(
     cdef Float64Vector float_vec
     cdef BoolVector bool_vec
     cdef _StringVectorView string_view
-    cdef ConstantVector const_vec
     cdef const char* ptr
     cdef Py_ssize_t length
     cdef DrakenConstantStringPayload* payload
@@ -454,24 +510,22 @@ cdef Py_ssize_t _write_value(
         return _write_json_string(dst, ptr, length)
 
     if encoder == ENC_CONST_INT:
-        const_vec = <ConstantVector>vec_obj
-        return _write_int64(dst, (<int64_t*>const_vec.ptr.value)[0])
+        return _write_int64(dst, _constant_int_value(vec_obj))
 
     if encoder == ENC_CONST_FLOAT:
-        const_vec = <ConstantVector>vec_obj
-        return _write_float64(dst, (<double*>const_vec.ptr.value)[0])
+        return _write_float64(dst, _constant_float_value(vec_obj))
 
     if encoder == ENC_CONST_BOOL:
-        const_vec = <ConstantVector>vec_obj
-        if (<uint8_t*>const_vec.ptr.value)[0]:
+        if _constant_bool_value(vec_obj):
             memcpy(dst, b"true", 4)
             return 4
         memcpy(dst, b"false", 5)
         return 5
 
     if encoder == ENC_CONST_STRING or encoder == ENC_CONST_RAW_STRING:
-        const_vec = <ConstantVector>vec_obj
-        payload = <DrakenConstantStringPayload*>const_vec.ptr.value
+        payload = _constant_string_payload(vec_obj)
+        if payload == NULL:
+            return 0
         ptr = <const char*>payload.data
         length = payload.length
         if encoder == ENC_CONST_RAW_STRING:
@@ -509,7 +563,6 @@ cdef bint _value_is_null(int encoder, object vec_obj, Py_ssize_t row_index) exce
     cdef BoolVector bool_vec
     cdef StringVector string_vec
     cdef _StringVectorView string_view
-    cdef ConstantVector const_vec
 
     if encoder == ENC_INT64:
         int64_vec = <Int64Vector>vec_obj
@@ -539,8 +592,7 @@ cdef bint _value_is_null(int encoder, object vec_obj, Py_ssize_t row_index) exce
         or encoder == ENC_CONST_STRING
         or encoder == ENC_CONST_RAW_STRING
     ):
-        const_vec = <ConstantVector>vec_obj
-        return not _is_valid(const_vec.ptr.null_bitmap, row_index)
+        return _constant_is_null(vec_obj)
 
     raise NotImplementedError("unsupported encoder")
 
@@ -550,7 +602,6 @@ cdef bint _value_is_null_cached(int encoder, object vec_obj, object aux_obj, Py_
     cdef IntegerVector integer_vec
     cdef Float64Vector float_vec
     cdef BoolVector bool_vec
-    cdef ConstantVector const_vec
 
     if encoder == ENC_INT64:
         int64_vec = <Int64Vector>vec_obj
@@ -578,8 +629,7 @@ cdef bint _value_is_null_cached(int encoder, object vec_obj, object aux_obj, Py_
         or encoder == ENC_CONST_STRING
         or encoder == ENC_CONST_RAW_STRING
     ):
-        const_vec = <ConstantVector>vec_obj
-        return not _is_valid(const_vec.ptr.null_bitmap, row_index)
+        return _constant_is_null(vec_obj)
     if encoder == ENC_GENERIC:
         return aux_obj[row_index] is None
 
@@ -641,7 +691,13 @@ cpdef StringVector morsel_to_json_rows(
             vec_obj = morsel.column(col_name)
             raw_json = col_name in raw_columns
 
-            if isinstance(vec_obj, Int64Vector):
+            if getattr(vec_obj, "encoding", None) == DRAKEN_ENCODING_CONSTANT:
+                encoder = _typed_constant_encoder(vec_obj, raw_json)
+                if encoder == 0:
+                    raise NotImplementedError(
+                        f"json serialization does not support typed constant value type for column {col_name!r}"
+                    )
+            elif isinstance(vec_obj, Int64Vector):
                 encoder = ENC_INT64
             elif isinstance(vec_obj, IntegerVector):
                 encoder = ENC_INTEGER
@@ -651,12 +707,6 @@ cpdef StringVector morsel_to_json_rows(
                 encoder = ENC_BOOL
             elif isinstance(vec_obj, StringVector):
                 encoder = ENC_RAW_STRING if raw_json else ENC_STRING
-            elif isinstance(vec_obj, ConstantVector):
-                encoder = _constant_encoder(<ConstantVector>vec_obj, raw_json)
-                if encoder == 0:
-                    raise NotImplementedError(
-                        f"json serialization does not support ConstantVector value type for column {col_name!r}"
-                    )
             elif getattr(vec_obj, "encoding", None) == DRAKEN_ENCODING_DICTIONARY:
                 encoder = ENC_GENERIC
             else:
@@ -731,9 +781,9 @@ cpdef StringVector morsel_to_json_rows(
                         ) + 1
                     elif encoder == ENC_CONST_STRING or encoder == ENC_CONST_RAW_STRING:
                         reserve_needed = pos + key_first_lens[col_index] + (
-                            (<DrakenConstantStringPayload*>(<ConstantVector>vec_obj).ptr.value).length
+                            _constant_string_payload(vec_obj).length
                             if encoder == ENC_CONST_RAW_STRING
-                            else ((<DrakenConstantStringPayload*>(<ConstantVector>vec_obj).ptr.value).length * 6 + 2)
+                            else (_constant_string_payload(vec_obj).length * 6 + 2)
                         ) + 1
                     _ensure_scratch_capacity(&scratch, &scratch_capacity, reserve_needed)
                     memcpy(scratch + pos, key_first_ptrs[col_index], key_first_lens[col_index])
@@ -747,9 +797,9 @@ cpdef StringVector morsel_to_json_rows(
                         ) + 1
                     elif encoder == ENC_CONST_STRING or encoder == ENC_CONST_RAW_STRING:
                         reserve_needed = pos + key_next_lens[col_index] + (
-                            (<DrakenConstantStringPayload*>(<ConstantVector>vec_obj).ptr.value).length
+                            _constant_string_payload(vec_obj).length
                             if encoder == ENC_CONST_RAW_STRING
-                            else ((<DrakenConstantStringPayload*>(<ConstantVector>vec_obj).ptr.value).length * 6 + 2)
+                            else (_constant_string_payload(vec_obj).length * 6 + 2)
                         ) + 1
                     _ensure_scratch_capacity(&scratch, &scratch_capacity, reserve_needed)
                     memcpy(scratch + pos, key_next_ptrs[col_index], key_next_lens[col_index])

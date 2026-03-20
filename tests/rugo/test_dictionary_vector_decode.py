@@ -10,6 +10,8 @@ import pytest
 import opteryx.config as config
 import opteryx.rugo.parquet as rp
 
+DRAKEN_ENCODING_CONSTANT = 3
+
 
 def _column_chunk(raw: bytes, col_stats: dict) -> bytes:
     dict_off = col_stats.get("dictionary_page_offset")
@@ -115,6 +117,58 @@ def test_decode_column_from_chunk_numeric_dictionary_returns_typed_vector():
 
     assert decoded is not None
     assert decoded.__class__.__name__ == "Int64Vector"
+    assert decoded.to_pylist() == values
+
+
+def test_decode_column_from_chunk_single_entry_string_dictionary_becomes_constant():
+    values = ["north"] * 256
+    table = pa.table({"category": pa.array(values, type=pa.string())})
+
+    sink = pa.BufferOutputStream()
+    pq.write_table(
+        table,
+        sink,
+        compression="zstd",
+        use_dictionary=True,
+        data_page_size=1024,
+    )
+    raw = sink.getvalue().to_pybytes()
+
+    metadata = rp.read_metadata_from_bytes(raw)
+    col_stats = metadata["row_groups"][0]["columns"][0]
+    chunk = _column_chunk(raw, col_stats)
+
+    decoded = rp.decode_column_from_chunk(chunk, col_stats)
+
+    assert decoded is not None
+    assert decoded.__class__.__name__ == "StringVector"
+    assert decoded.encoding == DRAKEN_ENCODING_CONSTANT
+    assert decoded.to_pylist() == [b"north"] * len(values)
+
+
+def test_decode_column_from_chunk_single_entry_numeric_dictionary_becomes_constant():
+    values = [7] * 256
+    table = pa.table({"n": pa.array(values, type=pa.int64())})
+
+    sink = pa.BufferOutputStream()
+    pq.write_table(
+        table,
+        sink,
+        compression="zstd",
+        use_dictionary=True,
+        data_page_size=1024,
+    )
+    raw = sink.getvalue().to_pybytes()
+
+    metadata = rp.read_metadata_from_bytes(raw)
+    col_stats = metadata["row_groups"][0]["columns"][0]
+    chunk = _column_chunk(raw, col_stats)
+
+    decoded = rp.decode_column_from_chunk(chunk, col_stats)
+
+    assert decoded is not None
+    assert decoded.__class__.__name__ == "Int64Vector"
+    assert decoded.encoding == DRAKEN_ENCODING_CONSTANT
     assert decoded.to_pylist() == values
 
 

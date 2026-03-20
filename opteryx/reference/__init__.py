@@ -7,10 +7,10 @@ from .joins_catalog import write_joins_catalog
 from .operator_catalog import export_operator_catalog
 from .operator_catalog import write_operator_catalog
 from .reexport_catalogs import reexport_reference_catalogs
-from .unary_ops_catalog import export_unary_ops_catalog
-from .unary_ops_catalog import write_unary_ops_catalog
 from .type_catalog import export_type_catalog
 from .type_catalog import write_type_catalog
+from .unary_ops_catalog import export_unary_ops_catalog
+from .unary_ops_catalog import write_unary_ops_catalog
 
 __all__ = [
     "export_aggregate_catalog",

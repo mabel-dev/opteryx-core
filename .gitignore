@@ -226,17 +226,6 @@ opteryx/third_party/ulfjack/ryu.c
 third_party/mabel/draken/interop/arrow.c*
 third_party/mabel/draken/morsels/align.c*
 third_party/mabel/draken/morsels/morsel.c*
-third_party/mabel/draken/vectors/array_vector.c*
-third_party/mabel/draken/vectors/bool_vector.c*
-third_party/mabel/draken/vectors/date32_vector.c*
-third_party/mabel/draken/vectors/float64_vector.c*
-third_party/mabel/draken/vectors/int64_vector.c*
-third_party/mabel/draken/vectors/interval_vector.c*
-third_party/mabel/draken/vectors/string_vector.c*
-third_party/mabel/draken/vectors/time_vector.c*
-third_party/mabel/draken/vectors/dictionary_vector.c*
-third_party/mabel/draken/vectors/integer_vector.c*
-third_party/mabel/draken/vectors/timestamp_vector.c*
 third_party/mabel/draken/vectors/vector.c*
 third_party/mabel/rugo/jsonl/jsonl_reader.c*
 third_party/mabel/rugo/parquet/parquet_reader.c*
@@ -247,6 +236,5 @@ tools/load_gh_messages.py
 opteryx/iops/ring_atomic.c
 third_party/mabel/draken/storage/morsel_io.c*
 opteryx/third_party/lz4/lz4.c
-third_party/mabel/draken/vectors/constant_vector.c*
-third_party/mabel/draken/vectors/integer_vector.c*
-third_party/mabel/draken/vectors/vector_vector.c*
+third_party/mabel/draken/vectors/*_vector.c*
+third_party/mabel/draken/vectors/scalar_constructors.cpp

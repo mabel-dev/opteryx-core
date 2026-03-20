@@ -33,7 +33,11 @@ from libc.stdint cimport uint64_t
 from libc.stdint cimport uint8_t
 from libc.stdlib cimport free, malloc
 
+from opteryx.draken.core.buffers cimport ConstAccessor
 from opteryx.draken.core.buffers cimport DictAccessor
+from opteryx.draken.core.buffers cimport DRAKEN_ENCODING_DENSE
+from opteryx.draken.core.buffers cimport DRAKEN_ENCODING_CONSTANT
+from opteryx.draken.core.buffers cimport DRAKEN_ENCODING_DICTIONARY
 from opteryx.draken.core.buffers cimport DrakenFixedBuffer
 from opteryx.draken.core.buffers cimport DrakenVarBuffer
 from opteryx.draken.core.buffers cimport DRAKEN_INT64
@@ -85,6 +89,7 @@ cdef void _release_dict_storage(Int64Vector vec) noexcept:
     vec._dict_accessor.length = 0
     vec._dict_accessor.dict_values = NULL
     vec._dict_accessor.value_type = DRAKEN_INT64
+    vec._encoding = DRAKEN_ENCODING_DENSE
 
 
 cdef void _attach_dictionary_storage(Int64Vector vec, const int32_t[::1] codes, const int64_t[::1] dictionary, bint ordered, const uint8_t* dict_entry_null_bitmap=NULL) except *:
@@ -134,6 +139,7 @@ cdef void _attach_dictionary_storage(Int64Vector vec, const int32_t[::1] codes, 
     vec._dict_values = dict_values
     vec._dict_code_width = code_width
     vec._dict_ordered = 1 if ordered else 0
+    vec._encoding = DRAKEN_ENCODING_DICTIONARY
 
 cdef class Int64Vector(Vector):
 
@@ -161,6 +167,22 @@ cdef class Int64Vector(Vector):
         validity_view = row_validity
         return from_dict_nullable(codes_view, dictionary_view, validity_view)
 
+    @classmethod
+    def from_constant(cls, value, length, is_null=False):
+        if length < 0:
+            raise ValueError("length must be non-negative")
+        if value is None and not is_null:
+            raise ValueError("value cannot be None unless is_null=True")
+        cdef Int64Vector vec = Int64Vector(0)
+
+        vec.ptr.length = <size_t>length
+        vec.ptr.null_bitmap = NULL
+        vec._has_const = True
+        vec._const_is_null = bool(is_null)
+        vec._const_value = 0 if is_null or value is None else <int64_t>int(value)
+        vec._encoding = DRAKEN_ENCODING_CONSTANT
+        return vec
+
     def __cinit__(self, size_t length=0, bint wrap=False):
         """
         length>0, wrap=False  -> allocate new owned buffer
@@ -182,6 +204,13 @@ cdef class Int64Vector(Vector):
         self._dict_accessor.length = 0
         self._dict_accessor.dict_values = NULL
         self._dict_accessor.value_type = DRAKEN_INT64
+        self._const_accessor.length = 0
+        self._const_accessor.value_type = DRAKEN_INT64
+        self._const_accessor.value_ptr = NULL
+        self._const_accessor.is_null = 0
+        self._const_value = 0
+        self._has_const = False
+        self._const_is_null = False
 
     def __dealloc__(self):
         _release_dict_storage(self)
@@ -201,13 +230,22 @@ cdef class Int64Vector(Vector):
         self._dict_accessor.value_type = self._dict_values.type
         return &self._dict_accessor
 
+    cdef ConstAccessor* const_accessor(self) noexcept:
+        if not self._has_const or self.ptr == NULL:
+            return NULL
+        self._const_accessor.length = self.ptr.length
+        self._const_accessor.value_type = DRAKEN_INT64
+        self._const_accessor.value_ptr = <void*>&self._const_value
+        self._const_accessor.is_null = 1 if self._const_is_null else 0
+        return &self._const_accessor
+
     cdef void* dense_ptr(self) noexcept:
-        if self.ptr == NULL:
+        if self.ptr == NULL or self._has_const:
             return NULL
         return self.ptr.data
 
     cdef uint8_t* null_bitmap_ptr(self) noexcept:
-        if self.ptr == NULL:
+        if self.ptr == NULL or self._has_const:
             return NULL
         return self.ptr.null_bitmap
 
@@ -250,9 +288,15 @@ cdef class Int64Vector(Vector):
     def __getitem__(self, Py_ssize_t i):
         """Return the value at index i, or None if null."""
         cdef DrakenFixedBuffer* ptr = self.ptr
-        cdef int64_t* data = <int64_t*> ptr.data
+        cdef uint8_t byte
+        cdef uint8_t bit
         if i < 0 or i >= ptr.length:
             raise IndexError("Index out of bounds")
+        if self._has_const:
+            if self._const_is_null:
+                return None
+            return self._const_value
+        cdef int64_t* data = <int64_t*> ptr.data
         if ptr.null_bitmap != NULL:
             byte = ptr.null_bitmap[i >> 3]
             bit = (byte >> (i & 7)) & 1
@@ -264,6 +308,11 @@ cdef class Int64Vector(Vector):
     def to_arrow(self):
         """Convert to a PyArrow array."""
         import pyarrow as pa
+
+        if self._has_const:
+            if self._const_is_null:
+                return pa.nulls(self.ptr.length, type=pa.int64())
+            return pa.array([self._const_value] * self.ptr.length, type=pa.int64())
 
         cdef size_t nbytes = buf_length(self.ptr) * buf_itemsize(self.ptr)
         addr = <intptr_t> self.ptr.data
@@ -288,6 +337,12 @@ cdef class Int64Vector(Vector):
     # -------- Example op --------
     cpdef Int64Vector take(self, int32_t[::1] indices):
         cdef Py_ssize_t i, n = indices.shape[0]
+        if self._has_const:
+            return Int64Vector.from_constant(
+                None if self._const_is_null else self._const_value,
+                n,
+                is_null=self._const_is_null,
+            )
         cdef Int64Vector out = Int64Vector(<size_t>n)
         cdef int64_t* src = <int64_t*> self.ptr.data
         cdef int64_t* dst = <int64_t*> out.ptr.data
@@ -376,14 +431,48 @@ cdef class Int64Vector(Vector):
 
     cdef BoolVector _compare_scalar(self, int64_t value, int op):
         cdef DrakenFixedBuffer* ptr = self.ptr
+        cdef Py_ssize_t n
+        cdef Py_ssize_t nbytes
+        cdef BoolVector out
+        cdef uint8_t* dst
+        cdef uint8_t* out_null = NULL
+        cdef Py_ssize_t i
+        cdef uint8_t mask
+        cdef bint matched
+
+        if self._has_const:
+            n = ptr.length
+            nbytes = (n + 7) >> 3
+            out = BoolVector(<size_t>n)
+            dst = <uint8_t*>out.ptr.data
+            if nbytes > 0:
+                memset(dst, 0, nbytes)
+            if self._const_is_null:
+                if nbytes != 0:
+                    out_null = <uint8_t*>malloc(nbytes)
+                    if out_null == NULL:
+                        raise MemoryError()
+                    memset(out_null, 0, nbytes)
+                    out.ptr.null_bitmap = out_null
+                else:
+                    out.ptr.null_bitmap = NULL
+                return out
+
+            matched = self._compare_int64_values(self._const_value, value, op)
+            if matched and nbytes > 0:
+                memset(dst, 0xFF, nbytes)
+                if (n & 7) != 0:
+                    mask = <uint8_t>((1 << (n & 7)) - 1)
+                    dst[nbytes - 1] &= mask
+            out.ptr.null_bitmap = NULL
+            return out
+
         cdef int64_t* data = <int64_t*> ptr.data
         cdef uint8_t* src_null = ptr.null_bitmap
-        cdef Py_ssize_t i, n = ptr.length
-        cdef Py_ssize_t nbytes = (n + 7) >> 3
-        cdef BoolVector out = BoolVector(<size_t>n)
-        cdef uint8_t* dst = <uint8_t*> out.ptr.data
-        cdef uint8_t* out_null = NULL
-        cdef uint8_t mask
+        n = ptr.length
+        nbytes = (n + 7) >> 3
+        out = BoolVector(<size_t>n)
+        dst = <uint8_t*> out.ptr.data
 
         memset(dst, 0, nbytes)
         if src_null != NULL and nbytes != 0:
@@ -484,17 +573,47 @@ cdef class Int64Vector(Vector):
     cpdef BoolVector in_list(self, object value_set):
         """Return mask: 1 if element is in value_set, else 0. Propagates NULLs."""
         cdef DrakenFixedBuffer* ptr = self.ptr
-        cdef int64_t* data = <int64_t*> ptr.data
-        cdef uint8_t* src_null = ptr.null_bitmap
-        cdef Py_ssize_t i, n = ptr.length
-        cdef Py_ssize_t nbytes = (n + 7) >> 3
-        cdef BoolVector out = BoolVector(<size_t>n)
-        cdef uint8_t* dst = <uint8_t*> out.ptr.data
+        cdef Py_ssize_t i, n
+        cdef Py_ssize_t nbytes
+        cdef BoolVector out
+        cdef uint8_t* dst
         cdef uint8_t* out_null = NULL
         cdef uint8_t mask
 
         if not isinstance(value_set, (set, frozenset)):
             value_set = set(value_set)
+
+        if self._has_const:
+            n = ptr.length
+            nbytes = (n + 7) >> 3
+            out = BoolVector(<size_t>n)
+            dst = <uint8_t*> out.ptr.data
+            if nbytes > 0:
+                memset(dst, 0, nbytes)
+            if self._const_is_null:
+                if nbytes != 0:
+                    out_null = <uint8_t*> malloc(nbytes)
+                    if out_null == NULL:
+                        raise MemoryError()
+                    memset(out_null, 0, nbytes)
+                    out.ptr.null_bitmap = out_null
+                else:
+                    out.ptr.null_bitmap = NULL
+                return out
+            if self._const_value in value_set and nbytes > 0:
+                memset(dst, 0xFF, nbytes)
+                if (n & 7) != 0:
+                    mask = <uint8_t>((1 << (n & 7)) - 1)
+                    dst[nbytes - 1] &= mask
+            out.ptr.null_bitmap = NULL
+            return out
+
+        cdef int64_t* data = <int64_t*> ptr.data
+        cdef uint8_t* src_null = ptr.null_bitmap
+        n = ptr.length
+        nbytes = (n + 7) >> 3
+        out = BoolVector(<size_t>n)
+        dst = <uint8_t*> out.ptr.data
 
         memset(dst, 0, nbytes)
         if src_null != NULL and nbytes != 0:
@@ -516,6 +635,10 @@ cdef class Int64Vector(Vector):
         return out
 
     cpdef int64_t sum(self):
+        if self._has_const:
+            if self._const_is_null:
+                return 0
+            return <int64_t>(self.ptr.length * self._const_value)
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef int64_t* data = <int64_t*> ptr.data
         cdef Py_ssize_t i, n = ptr.length
@@ -525,6 +648,10 @@ cdef class Int64Vector(Vector):
         return total
 
     cpdef int64_t min(self):
+        if self._has_const:
+            if self.ptr.length == 0 or self._const_is_null:
+                raise ValueError("Cannot compute min of empty column")
+            return self._const_value
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef int64_t* data = <int64_t*> ptr.data
         cdef Py_ssize_t i, n = ptr.length
@@ -537,6 +664,10 @@ cdef class Int64Vector(Vector):
         return m
 
     cpdef int64_t max(self):
+        if self._has_const:
+            if self.ptr.length == 0 or self._const_is_null:
+                raise ValueError("Cannot compute max of empty column")
+            return self._const_value
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef int64_t* data = <int64_t*> ptr.data
         cdef Py_ssize_t i, n = ptr.length
@@ -560,6 +691,11 @@ cdef class Int64Vector(Vector):
         if buf == NULL:
             raise MemoryError()
 
+        if self._has_const:
+            for i in range(n):
+                buf[i] = 1 if self._const_is_null else 0
+            return <int8_t[:n]> buf
+
         if ptr.null_bitmap == NULL:
             # No nulls — fill with 0
             for i in range(n):
@@ -580,6 +716,8 @@ cdef class Int64Vector(Vector):
         cdef Py_ssize_t i, n = ptr.length
         cdef Py_ssize_t count = 0
         cdef uint8_t byte, bit
+        if self._has_const:
+            return n if self._const_is_null else 0
         if ptr.null_bitmap == NULL:
             return 0
         for i in range(n):
@@ -591,9 +729,19 @@ cdef class Int64Vector(Vector):
 
     cpdef list to_pylist(self):
         cdef DrakenFixedBuffer* ptr = self.ptr
-        cdef int64_t* data = <int64_t*> ptr.data
         cdef Py_ssize_t i, n = ptr.length
         cdef list out = []
+
+        if self._has_const:
+            if self._const_is_null:
+                for i in range(n):
+                    out.append(None)
+            else:
+                for i in range(n):
+                    out.append(self._const_value)
+            return out
+
+        cdef int64_t* data = <int64_t*> ptr.data
         cdef uint8_t byte, bit
 
         if ptr.null_bitmap == NULL:
@@ -616,9 +764,11 @@ cdef class Int64Vector(Vector):
         Py_ssize_t offset=0
     ) except *:
         cdef DrakenFixedBuffer* ptr = self.ptr
-        cdef int64_t* data = <int64_t*> ptr.data
         cdef Py_ssize_t n = ptr.length
         cdef uint64_t* dst_base
+        cdef Py_ssize_t i
+        cdef uint64_t value
+        cdef uint8_t byte
 
         if n == 0:
             return
@@ -627,9 +777,13 @@ cdef class Int64Vector(Vector):
             raise ValueError("Int64Vector.hash_into: output buffer too small")
         dst_base = &out_buf[0]
 
-        cdef Py_ssize_t i
-        cdef uint8_t byte
-        cdef uint64_t value
+        if self._has_const:
+            value = NULL_HASH if self._const_is_null else <uint64_t>self._const_value
+            for i in range(n):
+                dst_base[offset + i] = mix_hash(dst_base[offset + i], value)
+            return
+
+        cdef int64_t* data = <int64_t*> ptr.data
         cdef uint64_t* dst = dst_base + offset
         cdef uint64_t* as_uint64 = <uint64_t*> data
         cdef uint8_t* null_bitmap = ptr.null_bitmap
@@ -653,9 +807,9 @@ cdef class Int64Vector(Vector):
         directly into the output buffer.
         """
         cdef DrakenFixedBuffer* ptr = self.ptr
-        cdef int64_t* src = <int64_t*> ptr.data
         cdef Py_ssize_t n = ptr.length
         cdef int64_t* dst_base
+        cdef Py_ssize_t i
 
         if n == 0:
             return
@@ -665,9 +819,15 @@ cdef class Int64Vector(Vector):
 
         dst_base = &out_buf[0]
         cdef int64_t* dst = dst_base + offset
+
+        if self._has_const:
+            for i in range(n):
+                dst[i] = <int64_t>-9223372036854775808 if self._const_is_null else self._const_value
+            return
+
         cdef uint8_t* null_bitmap = ptr.null_bitmap
         cdef bint has_nulls = null_bitmap != NULL
-        cdef Py_ssize_t i
+        cdef int64_t* src = <int64_t*> ptr.data
 
         if not has_nulls:
             # Fast path: bulk copy
@@ -683,6 +843,9 @@ cdef class Int64Vector(Vector):
     def __str__(self):
         cdef list vals = []
         cdef Py_ssize_t i, k = min(<Py_ssize_t>buf_length(self.ptr), 10)
+        if self._has_const:
+            vals = [None if self._const_is_null else self._const_value] * k
+            return f"<Int64Vector len={buf_length(self.ptr)} values={vals}>"
         cdef int64_t* data = <int64_t*> self.ptr.data
         for i in range(k):
             vals.append(data[i])

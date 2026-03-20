@@ -42,6 +42,7 @@ _DICT_NUMERIC_FASTPATH_OPS = frozenset(("Lt", "Gt", "LtEq", "GtEq"))
 _CONSTANT_FASTPATH_OPS = frozenset(
     ("Eq", "NotEq", "InList", "NotInList", "Lt", "Gt", "LtEq", "GtEq")
 )
+_DRAKEN_ENCODING_CONSTANT = 3
 
 # Operators where null compression isn't safe
 skip_compression_ops = {
@@ -90,13 +91,78 @@ def _record_constant_fallback():
 
 
 def _constant_vector(arr):
-    if arr.__class__.__name__ == "ConstantVector":
+    if getattr(arr, "encoding", None) == _DRAKEN_ENCODING_CONSTANT:
         return arr
     return None
 
 
 def _has_constant_candidate(arr):
-    return arr.__class__.__name__ == "ConstantVector"
+    return _constant_vector(arr) is not None
+
+
+def _typed_constant_scalar(arr):
+    if len(arr) == 0:
+        return None
+    return arr[0]
+
+
+def _normalize_typed_constant_compare_value(scalar, value):
+    if isinstance(scalar, bytes):
+        if isinstance(value, str):
+            return value.encode()
+        if isinstance(value, (list, tuple, set)):
+            return [item.encode() if isinstance(item, str) else item for item in value]
+    return value
+
+
+def _typed_constant_fastpath(arr, operator, value):
+    from opteryx.draken.vectors.bool_vector import BoolVector
+
+    scalar = _typed_constant_scalar(arr)
+    value = _normalize_typed_constant_compare_value(scalar, value)
+
+    if scalar is None:
+        if operator == "InList":
+            result = None in _coerce_in_list_values(value)
+            return BoolVector.from_arrow(
+                pyarrow.array([bool(result)] * len(arr), type=pyarrow.bool_())
+            )
+        if operator == "NotInList":
+            result = None not in _coerce_in_list_values(value)
+            return BoolVector.from_arrow(
+                pyarrow.array([bool(result)] * len(arr), type=pyarrow.bool_())
+            )
+        return BoolVector(len(arr))
+
+    if hasattr(value, "item"):
+        try:
+            value = value.item()
+        except Exception:
+            pass
+
+    try:
+        if operator == "Eq":
+            result = scalar == value
+        elif operator == "NotEq":
+            result = scalar != value
+        elif operator == "InList":
+            result = scalar in _coerce_in_list_values(value)
+        elif operator == "NotInList":
+            result = scalar not in _coerce_in_list_values(value)
+        elif operator == "Lt":
+            result = scalar < value
+        elif operator == "Gt":
+            result = scalar > value
+        elif operator == "LtEq":
+            result = scalar <= value
+        elif operator == "GtEq":
+            result = scalar >= value
+        else:
+            return None
+    except Exception:
+        return None
+
+    return BoolVector.from_arrow(pyarrow.array([bool(result)] * len(arr), type=pyarrow.bool_()))
 
 
 def _constant_fastpath(arr, operator, value):
@@ -104,25 +170,31 @@ def _constant_fastpath(arr, operator, value):
     if vec is None:
         return None
 
-    if operator == "Eq":
-        return vec.equals(value)
-    if operator == "NotEq":
-        return vec.not_equals(value)
-    if operator in ("InList", "NotInList"):
-        result = vec.in_list(_coerce_in_list_values(value))
-        if operator == "NotInList":
-            result = result.not_vector()
-        return result
-    if operator == "Lt":
-        return vec.less_than(value)
-    if operator == "Gt":
-        return vec.greater_than(value)
-    if operator == "LtEq":
-        return vec.less_than_or_equals(value)
-    if operator == "GtEq":
-        return vec.greater_than_or_equals(value)
+    scalar = _typed_constant_scalar(vec)
+    value = _normalize_typed_constant_compare_value(scalar, value)
 
-    return None
+    try:
+        if operator == "Eq":
+            return vec.equals(value)
+        if operator == "NotEq":
+            return vec.not_equals(value)
+        if operator in ("InList", "NotInList"):
+            result = vec.in_list(_coerce_in_list_values(value))
+            if operator == "NotInList":
+                result = result.not_vector()
+            return result
+        if operator == "Lt":
+            return vec.less_than(value)
+        if operator == "Gt":
+            return vec.greater_than(value)
+        if operator == "LtEq":
+            return vec.less_than_or_equals(value)
+        if operator == "GtEq":
+            return vec.greater_than_or_equals(value)
+    except Exception:
+        return _typed_constant_fastpath(vec, operator, value)
+
+    return _typed_constant_fastpath(vec, operator, value)
 
 
 def _dictionary_arrow_type(arr):
@@ -448,9 +520,7 @@ def _inner_filter_operations(arr, operator, value):
     Execute filter operations, this returns an array of the indexes of the rows that
     match the filter
     """
-    # Convert Draken vectors to Arrow if needed
-    if hasattr(arr, "to_arrow") and not isinstance(arr, (pyarrow.Array, pyarrow.ChunkedArray)):
-        arr = arr.to_arrow()
+    raw_arr = arr
 
     if not operator.startswith(("AnyOp", "AllOp")):
         try:
@@ -466,31 +536,38 @@ def _inner_filter_operations(arr, operator, value):
             # Scalar literal (e.g. int/float/bool) - keep as-is.
             pass
 
-    dict_candidate = _has_dictionary_candidate(arr)
-    constant_candidate = _has_constant_candidate(arr)
+    dict_candidate = _has_dictionary_candidate(raw_arr)
+    constant_candidate = _has_constant_candidate(raw_arr)
     numeric_dict_candidate = (
         dict_candidate
         and operator in _DICT_NUMERIC_FASTPATH_OPS
-        and _dictionary_supports_numeric_fastpath(arr)
+        and _dictionary_supports_numeric_fastpath(raw_arr)
     )
 
     if constant_candidate and operator not in _CONSTANT_FASTPATH_OPS:
         raise NotImplementedError(f"Constant motor path does not support operator `{operator}`.")
 
     if constant_candidate:
-        fast = _constant_fastpath(arr, operator, value)
+        fast = _constant_fastpath(raw_arr, operator, value)
         if fast is not None:
             _record_constant_hit()
             return fast
         _record_constant_fallback()
         raise RuntimeError(f"Constant fastpath failed for `{operator}`.")
 
+    if hasattr(raw_arr, "to_arrow") and not isinstance(
+        raw_arr, (pyarrow.Array, pyarrow.ChunkedArray)
+    ):
+        arr = raw_arr.to_arrow()
+    else:
+        arr = raw_arr
+
     if dict_candidate and operator not in _DICT_FASTPATH_OPS and not numeric_dict_candidate:
         raise NotImplementedError(f"Dictionary motor path does not support operator `{operator}`.")
 
     if operator == "Eq":
         if dict_candidate:
-            fast = _dictionary_fastpath(arr, operator, value)
+            fast = _dictionary_fastpath(raw_arr, operator, value)
             if fast is not None:
                 _record_dict_hit()
                 return fast

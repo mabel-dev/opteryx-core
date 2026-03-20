@@ -195,7 +195,7 @@ Defaults to ``PARQUET_FILES_IN_FLIGHT * PARQUET_ROWGROUPS_PER_FILE_IN_FLIGHT`` s
 introducing this cap does not silently reduce prior effective concurrency.
 """
 
-PARQUET_GLOBAL_RANGE_READERS: int = int(get("PARQUET_GLOBAL_RANGE_READERS", 24))
+PARQUET_GLOBAL_RANGE_READERS: int = int(get("PARQUET_GLOBAL_RANGE_READERS", 64))
 """Hard cap for in-flight column range reads across the full parquet scan."""
 
 PARQUET_RANGE_READERS_PER_ROWGROUP: int = int(get("PARQUET_RANGE_READERS_PER_ROWGROUP", 10))
@@ -204,7 +204,7 @@ PARQUET_RANGE_READERS_PER_ROWGROUP: int = int(get("PARQUET_RANGE_READERS_PER_ROW
 PARQUET_PREFETCH_FOOTER_WORKERS: int = int(get("PARQUET_PREFETCH_FOOTER_WORKERS", 64))
 """Concurrency for parquet footer prefetch in ParquetReadNode preflight."""
 
-PARQUET_ACTIVE_ROWGROUPS_TARGET: int = int(get("PARQUET_ACTIVE_ROWGROUPS_TARGET", 3))
+PARQUET_ACTIVE_ROWGROUPS_TARGET: int = int(get("PARQUET_ACTIVE_ROWGROUPS_TARGET", 16))
 """Target active row groups for continuous-feed scheduling."""
 
 PARQUET_WARM_START_OPS: int = int(get("PARQUET_WARM_START_OPS", 10))

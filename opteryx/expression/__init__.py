@@ -95,6 +95,81 @@ def _arrow_type_for_schema_column(schema_column):
     return getattr(arrow_field, "type", None)
 
 
+def _typed_constant_vector(value, length: int, schema_column):
+    """
+    Create a typed constant-encoded Draken vector when the output type is known.
+
+    Returns `None` when the type is not yet supported by typed constant encoding,
+    allowing callers to fall back to Arrow materialization if the type is still unknown.
+    """
+    if schema_column is None or length < 0:
+        return None
+
+    target_type = getattr(schema_column, "type", None)
+    arrow_type = _arrow_type_for_schema_column(schema_column)
+    is_null = value is None
+
+    if target_type == OrsoTypes.BOOLEAN:
+        from opteryx.draken.vectors.bool_vector import BoolVector
+
+        return BoolVector.from_constant(False if is_null else value, length, is_null=is_null)
+
+    if target_type == OrsoTypes.INTEGER:
+        from opteryx.draken.vectors.integer_vector import IntegerVector
+
+        return IntegerVector.from_constant(0 if is_null else value, length, is_null=is_null)
+
+    if target_type == OrsoTypes.DOUBLE:
+        from opteryx.draken.vectors.float64_vector import Float64Vector
+
+        return Float64Vector.from_constant(0.0 if is_null else value, length, is_null=is_null)
+
+    if target_type in (OrsoTypes.VARCHAR, OrsoTypes.BLOB):
+        from opteryx.draken.vectors.string_vector import StringVector
+
+        return StringVector.from_constant(b"" if is_null else value, length, is_null=is_null)
+
+    if target_type == OrsoTypes.DATE:
+        from opteryx.draken.vectors.date32_vector import Date32Vector
+
+        if not is_null:
+            value = pyarrow.array([value], type=pyarrow.date32()).cast(pyarrow.int32())[0].as_py()
+        return Date32Vector.from_constant(0 if is_null else value, length, is_null=is_null)
+
+    if target_type == OrsoTypes.TIMESTAMP:
+        from opteryx.draken.vectors.timestamp_vector import TimestampVector
+
+        timestamp_type = (
+            arrow_type if pyarrow.types.is_timestamp(arrow_type) else pyarrow.timestamp("us")
+        )
+        timestamp_unit = timestamp_type.unit
+        if not is_null:
+            value = pyarrow.array([value], type=timestamp_type).cast(pyarrow.int64())[0].as_py()
+        return TimestampVector.from_constant(
+            0 if is_null else value,
+            length,
+            is_null=is_null,
+            timestamp_unit=timestamp_unit,
+        )
+
+    if target_type == OrsoTypes.TIME:
+        from opteryx.draken.vectors.time_vector import TimeVector
+
+        is_time64 = bool(arrow_type and pyarrow.types.is_time64(arrow_type))
+        time_type = arrow_type or pyarrow.time64("us")
+        if not is_null:
+            cast_type = pyarrow.int64() if pyarrow.types.is_time64(time_type) else pyarrow.int32()
+            value = pyarrow.array([value], type=time_type).cast(cast_type)[0].as_py()
+        return TimeVector.from_constant(
+            0 if is_null else value,
+            length,
+            is_null=is_null,
+            is_time64=is_time64,
+        )
+
+    return None
+
+
 LOGICAL_OPERATIONS: Dict[NodeType, Callable] = {
     NodeType.AND: pyarrow.compute.and_,
     NodeType.OR: pyarrow.compute.or_,
@@ -578,7 +653,9 @@ def _evaluate_and_append_arrow(expressions, table: Table):
             OrsoTypes.DATE,
             OrsoTypes.TIMESTAMP,
         ):
-            from opteryx.draken.vectors.constant_vector import from_scalar as constant_from_scalar
+            from opteryx.draken.vectors.scalar_constructors import (
+                from_scalar as constant_from_scalar,
+            )
 
             target_type = _arrow_type_for_schema_column(statement.schema_column)
             literal_vec = constant_from_scalar(statement.value, table.num_rows, dtype=target_type)
@@ -654,13 +731,14 @@ def _evaluate_and_append_morsel(expressions, morsel):
     """
     Evaluate expressions against a Draken Morsel.
 
-    Literal expressions are appended natively as ConstantVectors. If a non-literal
-    expression is encountered we fall back to Arrow evaluation for the remaining
-    expressions, then convert back to a Morsel.
+    Typed literal expressions are appended natively as typed constant-encoded
+    vectors where possible. If a non-literal expression is encountered we fall
+    back to Arrow evaluation for the remaining expressions, then convert back
+    to a Morsel.
     """
     from opteryx.draken.interop.arrow import vector_from_arrow
     from opteryx.draken.morsels.morsel import Morsel
-    from opteryx.draken.vectors.constant_vector import from_scalar as constant_from_scalar
+    from opteryx.draken.vectors.scalar_constructors import from_scalar as constant_from_scalar
 
     prioritized_expressions = prioritize_evaluation(expressions)
     names = list(morsel.column_names)
@@ -677,12 +755,15 @@ def _evaluate_and_append_morsel(expressions, morsel):
         if not should_evaluate(statement):
             continue
 
-        if statement.node_type == NodeType.LITERAL and statement.type not in (
-            OrsoTypes.DATE,
-            OrsoTypes.TIMESTAMP,
-        ):
-            target_type = _arrow_type_for_schema_column(statement.schema_column)
-            literal_vec = constant_from_scalar(statement.value, morsel.num_rows, dtype=target_type)
+        if statement.node_type == NodeType.LITERAL:
+            literal_vec = _typed_constant_vector(
+                statement.value, morsel.num_rows, statement.schema_column
+            )
+            if literal_vec is None:
+                target_type = _arrow_type_for_schema_column(statement.schema_column)
+                literal_vec = constant_from_scalar(
+                    statement.value, morsel.num_rows, dtype=target_type
+                )
             if literal_vec is not None:
                 names.append(identity)
                 vectors.append(literal_vec)

@@ -1,6 +1,6 @@
 from libc.stdint cimport int8_t, int32_t, int64_t, uint64_t, uint8_t
 
-from opteryx.draken.core.buffers cimport DrakenFixedBuffer, DrakenType
+from opteryx.draken.core.buffers cimport ConstAccessor, DrakenFixedBuffer, DrakenType
 from opteryx.draken.vectors.vector cimport Vector
 
 cdef class IntegerVector(Vector):
@@ -8,7 +8,12 @@ cdef class IntegerVector(Vector):
     cdef object _arrow_null_buf
     cdef DrakenFixedBuffer* ptr
     cdef bint owns_data
+    cdef ConstAccessor _const_accessor
+    cdef int64_t _const_value
+    cdef bint _has_const
+    cdef bint _const_is_null
 
+    cdef ConstAccessor* const_accessor(self) noexcept
     cdef void* dense_ptr(self) noexcept
     cdef uint8_t* null_bitmap_ptr(self) noexcept
 

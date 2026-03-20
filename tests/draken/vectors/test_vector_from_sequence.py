@@ -14,7 +14,7 @@ from opteryx.draken.interop.arrow import vector_from_sequence
 from opteryx.draken.vectors.int64_vector import Int64Vector
 from opteryx.draken.vectors.float64_vector import Float64Vector
 from opteryx.draken.vectors.bool_vector import BoolVector
-from opteryx.draken.vectors.constant_vector import ConstantVector
+from opteryx.draken.vectors.int64_vector import Int64Vector
 
 
 class TestVectorFromSequenceInt64:
@@ -325,17 +325,18 @@ class TestVectorFromSequenceConstant:
 
     def test_constant_int_sequence(self):
         vec = vector_from_sequence([7, 7, 7, 7])
-        assert isinstance(vec, ConstantVector)
+        assert isinstance(vec, Int64Vector)
+        assert getattr(vec, "encoding", None) == 3
         assert vec.to_pylist() == [7, 7, 7, 7]
 
     def test_constant_with_null_bitmap_sequence(self):
         vec = vector_from_sequence([b"x", None, b"x", b"x"])
-        assert isinstance(vec, ConstantVector)
+        assert getattr(vec, "encoding", None) != 3
         assert vec.to_pylist() == [b"x", None, b"x", b"x"]
 
     def test_non_constant_sequence_falls_back(self):
         vec = vector_from_sequence([1, 2, 1])
-        assert not isinstance(vec, ConstantVector)
+        assert getattr(vec, "encoding", None) != 3
         assert vec.to_arrow().to_pylist() == [1, 2, 1]
 
 

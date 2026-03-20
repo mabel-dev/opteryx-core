@@ -9,8 +9,7 @@ Covers:
 - draken_compare: ArrayContainsAll (column @>> literal_list)
 - draken_compare: AnyOpLike / AnyOpNotLike / AnyOpILike / AnyOpNotILike
 - draken_compare: AtQuestion (@?)
-- IS NULL on DictionaryVector with NaN-encoded nulls (native is_null_boolvector)
-- IS NULL on DictionaryVector with bitmap nulls
+- IS NULL on dictionary-encoded inputs through the evaluator path
 """
 
 import os
@@ -50,7 +49,7 @@ def _array_vec_str(rows):
 
 
 def _dict_vec_float(values):
-    """Create a DictionaryVector from float64 values (may contain float('nan') for SQL NULL)."""
+    """Create a float input from dictionary-encoded Arrow data."""
     return vector_from_arrow(
         pa.array(values, type=pa.float64()).dictionary_encode()
     )
@@ -230,43 +229,6 @@ class TestArrayContainsAll:
         result = draken_compare("ArrayContainsAll", col, [])
         # Vacuously true for all non-null rows
         assert bv_to_list(result) == [True, True]
-
-
-# ---------------------------------------------------------------------------
-# IS NULL: native DictionaryVector.is_null_boolvector()
-# ---------------------------------------------------------------------------
-
-
-class TestIsNullDictionaryVector:
-    def test_nan_encoded_nulls(self):
-        """NaN in float dict values should produce IS NULL = True."""
-        vec = _dict_vec_float([1.0, float("nan"), 2.0, float("nan"), 3.0])
-        result = vec.is_null_boolvector()
-        assert bv_to_list(result) == [False, True, False, True, False]
-
-    def test_no_nulls(self):
-        vec = _dict_vec_float([1.0, 2.0, 3.0])
-        result = vec.is_null_boolvector()
-        assert bv_to_list(result) == [False, False, False]
-
-    def test_all_null(self):
-        vec = _dict_vec_float([float("nan"), float("nan")])
-        result = vec.is_null_boolvector()
-        assert bv_to_list(result) == [True, True]
-
-    def test_bitmap_nulls(self):
-        """Proper Arrow null bitmap (not NaN) should also produce IS NULL = True."""
-        arr = pa.array([1.0, None, 2.0, None], type=pa.float64()).dictionary_encode()
-        vec = vector_from_arrow(arr)
-        result = vec.is_null_boolvector()
-        assert bv_to_list(result) == [False, True, False, True]
-
-    def test_mixed_nan_and_value(self):
-        """Mix of normal values, NaN, and repeated values."""
-        vals = [5.0, float("nan"), 5.0, 10.0, float("nan")]
-        vec = _dict_vec_float(vals)
-        result = vec.is_null_boolvector()
-        assert bv_to_list(result) == [False, True, False, False, True]
 
 
 class TestIsNullViaEvaluateDraken:

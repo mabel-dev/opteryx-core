@@ -19,6 +19,7 @@ from opteryx.draken.morsels.morsel import Morsel
 from opteryx.expression import NodeType
 from opteryx.expression import evaluate_and_append
 from opteryx.models import QueryProperties
+from opteryx.operators.group_state_store import DRAKEN_ENCODING_CONSTANT
 
 from . import BasePlanNode
 
@@ -68,7 +69,7 @@ class ProjectionNode(BasePlanNode):
                 )
             except Exception:
                 continue
-            if col.__class__.__name__ == "ConstantVector":
+            if getattr(col, "encoding", None) == DRAKEN_ENCODING_CONSTANT:
                 emitted += 1
         return emitted
 

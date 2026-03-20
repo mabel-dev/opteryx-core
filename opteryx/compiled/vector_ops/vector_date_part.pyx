@@ -28,9 +28,6 @@ Phase 4 (Future):
 """
 
 from libc.stdint cimport int64_t
-from libc.stdint cimport uint8_t
-from libc.stdint cimport uint16_t
-from libc.stdint cimport uint32_t
 from libc.stddef cimport size_t
 from cpython.array cimport array, clone
 

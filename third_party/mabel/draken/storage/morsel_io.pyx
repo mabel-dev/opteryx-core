@@ -42,11 +42,12 @@ from opteryx.draken.core.buffers cimport DrakenConstantBuffer
 from opteryx.draken.core.buffers cimport DrakenConstantStringPayload
 from opteryx.draken.core.buffers cimport DrakenType
 from opteryx.draken.core.buffers cimport DrakenVarBuffer
+from opteryx.draken.core.buffers cimport ConstAccessor
 from opteryx.draken.core.buffers cimport DictAccessor
 from opteryx.draken.core.buffers cimport DRAKEN_BOOL
-from opteryx.draken.core.buffers cimport DRAKEN_CONSTANT
 from opteryx.draken.core.buffers cimport DRAKEN_DATE32
 from opteryx.draken.core.buffers cimport DRAKEN_DICTIONARY
+from opteryx.draken.core.buffers cimport DRAKEN_ENCODING_CONSTANT
 from opteryx.draken.core.buffers cimport DRAKEN_ENCODING_DICTIONARY
 from opteryx.draken.core.buffers cimport DRAKEN_FLOAT32
 from opteryx.draken.core.buffers cimport DRAKEN_FLOAT64
@@ -61,15 +62,16 @@ from opteryx.draken.core.buffers cimport DRAKEN_TIME64
 from opteryx.draken.core.buffers cimport DRAKEN_TIMESTAMP64
 from opteryx.draken.morsels.morsel cimport Morsel
 from opteryx.draken.vectors.bool_vector cimport BoolVector
-from opteryx.draken.vectors.constant_vector cimport ConstantVector
 from opteryx.draken.vectors.date32_vector cimport Date32Vector
-from opteryx.draken.vectors.dictionary_vector cimport DictionaryVector
 from opteryx.draken.vectors.float64_vector cimport Float64Vector
 from opteryx.draken.vectors.float64_vector cimport from_packed_dict as float64_from_packed_dict
 from opteryx.draken.vectors.int64_vector cimport Int64Vector
 from opteryx.draken.vectors.int64_vector cimport from_packed_dict as int64_from_packed_dict
+from opteryx.draken.vectors.integer_vector cimport IntegerVector
 from opteryx.draken.vectors.interval_vector cimport IntervalVector
 from opteryx.draken.vectors.string_vector cimport StringVector
+from opteryx.draken.vectors.string_vector cimport StringVectorBuilder
+from opteryx.draken.vectors.string_vector cimport from_dict_buffers as string_from_dict_buffers
 from opteryx.draken.vectors.time_vector cimport TimeVector
 from opteryx.draken.vectors.timestamp_vector cimport TimestampVector
 from opteryx.draken.vectors.vector cimport Vector
@@ -620,7 +622,7 @@ cdef inline int _dict_flags_from_value_type(int dtype):
 
 
 cdef inline int _const_value_type_from_flags(int flags):
-    cdef uint8_t encoded = <uint8_t>((flags >> FLAG_CONST_VALUE_TYPE_SHIFT) & 0x3)
+    cdef uint8_t encoded = <uint8_t>((flags >> FLAG_CONST_VALUE_TYPE_SHIFT) & 0x1F)
     if encoded == 0:
         return DRAKEN_INT64
     if encoded == 1:
@@ -629,6 +631,20 @@ cdef inline int _const_value_type_from_flags(int flags):
         return DRAKEN_BOOL
     if encoded == 3:
         return DRAKEN_STRING
+    if encoded == 4:
+        return DRAKEN_INT8
+    if encoded == 5:
+        return DRAKEN_INT16
+    if encoded == 6:
+        return DRAKEN_INT32
+    if encoded == 7:
+        return DRAKEN_DATE32
+    if encoded == 8:
+        return DRAKEN_TIME32
+    if encoded == 9:
+        return DRAKEN_TIME64
+    if encoded == 10:
+        return DRAKEN_TIMESTAMP64
     raise DrakenMorselCorruptionError(f"invalid constant value-type encoding in flags: {encoded}")
 
 
@@ -641,7 +657,95 @@ cdef inline int _const_flags_from_value_type(int dtype):
         return 2 << FLAG_CONST_VALUE_TYPE_SHIFT
     if dtype == DRAKEN_STRING:
         return 3 << FLAG_CONST_VALUE_TYPE_SHIFT
+    if dtype == DRAKEN_INT8:
+        return 4 << FLAG_CONST_VALUE_TYPE_SHIFT
+    if dtype == DRAKEN_INT16:
+        return 5 << FLAG_CONST_VALUE_TYPE_SHIFT
+    if dtype == DRAKEN_INT32:
+        return 6 << FLAG_CONST_VALUE_TYPE_SHIFT
+    if dtype == DRAKEN_DATE32:
+        return 7 << FLAG_CONST_VALUE_TYPE_SHIFT
+    if dtype == DRAKEN_TIME32:
+        return 8 << FLAG_CONST_VALUE_TYPE_SHIFT
+    if dtype == DRAKEN_TIME64:
+        return 9 << FLAG_CONST_VALUE_TYPE_SHIFT
+    if dtype == DRAKEN_TIMESTAMP64:
+        return 10 << FLAG_CONST_VALUE_TYPE_SHIFT
     raise DrakenMorselStorageError(f"unsupported constant value dtype {dtype}")
+
+
+cdef inline Py_ssize_t _const_value_length_for_type(int dtype):
+    if dtype == DRAKEN_INT8:
+        return sizeof(int8_t)
+    if dtype == DRAKEN_INT16:
+        return sizeof(int16_t)
+    if dtype == DRAKEN_INT32 or dtype == DRAKEN_DATE32 or dtype == DRAKEN_TIME32:
+        return sizeof(int32_t)
+    if dtype == DRAKEN_INT64 or dtype == DRAKEN_TIME64 or dtype == DRAKEN_TIMESTAMP64:
+        return sizeof(int64_t)
+    if dtype == DRAKEN_FLOAT64:
+        return sizeof(double)
+    if dtype == DRAKEN_BOOL:
+        return sizeof(uint8_t)
+    raise DrakenMorselStorageError(f"unsupported constant value dtype {dtype}")
+
+
+cdef inline Vector _build_typed_const_vector(
+    int dtype,
+    int const_value_type,
+    object scalar_value,
+    Py_ssize_t row_count,
+    bint is_null,
+):
+    cdef Vector vec
+    cdef IntegerVector int_vec
+    cdef size_t itemsize
+
+    if dtype == DRAKEN_INT64:
+        return <Vector>Int64Vector.from_constant(scalar_value, row_count, is_null=is_null)
+    if dtype == DRAKEN_FLOAT64:
+        return <Vector>Float64Vector.from_constant(scalar_value, row_count, is_null=is_null)
+    if dtype == DRAKEN_BOOL:
+        return <Vector>BoolVector.from_constant(scalar_value, row_count, is_null=is_null)
+    if dtype == DRAKEN_STRING:
+        return <Vector>StringVector.from_constant(scalar_value, row_count, is_null=is_null)
+    if dtype == DRAKEN_DATE32:
+        return <Vector>Date32Vector.from_constant(scalar_value, row_count, is_null=is_null)
+    if dtype == DRAKEN_TIMESTAMP64:
+        return <Vector>TimestampVector.from_constant(
+            scalar_value,
+            row_count,
+            is_null=is_null,
+            timestamp_unit="us",
+        )
+    if dtype == DRAKEN_TIME32:
+        return <Vector>TimeVector.from_constant(
+            scalar_value,
+            row_count,
+            is_null=is_null,
+            is_time64=False,
+        )
+    if dtype == DRAKEN_TIME64:
+        return <Vector>TimeVector.from_constant(
+            scalar_value,
+            row_count,
+            is_null=is_null,
+            is_time64=True,
+        )
+    if dtype == DRAKEN_INT8 or dtype == DRAKEN_INT16 or dtype == DRAKEN_INT32:
+        int_vec = IntegerVector.from_constant(scalar_value, row_count, is_null=is_null)
+        int_vec.ptr.type = <DrakenType>dtype
+        if dtype == DRAKEN_INT8:
+            itemsize = 1
+        elif dtype == DRAKEN_INT16:
+            itemsize = 2
+        else:
+            itemsize = 4
+        int_vec.ptr.itemsize = itemsize
+        return <Vector>int_vec
+    raise DrakenMorselStorageError(
+        f"unsupported typed constant restore for dtype {dtype} and constant value type {const_value_type}"
+    )
 
 
 cdef inline uint32_t _dict_read_code(DrakenDictionaryBuffer* ptr, Py_ssize_t row_idx):
@@ -650,6 +754,18 @@ cdef inline uint32_t _dict_read_code(DrakenDictionaryBuffer* ptr, Py_ssize_t row
     if ptr.code_width == 2:
         return (<uint16_t*>ptr.codes)[row_idx]
     return (<uint32_t*>ptr.codes)[row_idx]
+
+
+cdef inline uint32_t _dict_read_packed_code(
+    const uint8_t* codes,
+    uint8_t code_width,
+    Py_ssize_t row_idx,
+):
+    if code_width == 1:
+        return (<const uint8_t*>codes)[row_idx]
+    if code_width == 2:
+        return (<const uint16_t*>codes)[row_idx]
+    return (<const uint32_t*>codes)[row_idx]
 
 
 cdef DrakenFixedBuffer* _fixed_ptr_from_vector(Vector vec, int dtype):
@@ -771,6 +887,70 @@ cdef inline Vector _build_typed_dict_vector(
     raise DrakenMorselStorageError(
         f"unsupported typed dictionary restore for dtype {dtype} and dictionary value type {dict_value_type}"
     )
+
+
+cdef Vector _build_dense_string_dict_vector(
+    Py_ssize_t row_count,
+    const uint8_t* codes,
+    uint8_t code_width,
+    bytes dict_offsets_bytes,
+    bytes dict_values_bytes,
+    bytes null_bytes,
+    bytes dict_null_bytes,
+):
+    cdef const int32_t* dict_offsets
+    cdef const uint8_t* arena_bytes
+    cdef const uint8_t* row_null_bitmap = NULL
+    cdef const uint8_t* dict_entry_null_bitmap = NULL
+    cdef Py_ssize_t dict_len
+    cdef Py_ssize_t i
+    cdef uint32_t code
+    cdef int32_t start
+    cdef int32_t end
+    cdef Py_ssize_t total_bytes = 0
+    cdef StringVectorBuilder builder
+
+    dict_len = (len(dict_offsets_bytes) // sizeof(int32_t)) - 1
+    if dict_len <= 0:
+        raise DrakenMorselCorruptionError("dictionary string payload must contain at least one entry")
+
+    dict_offsets = <const int32_t*>PyBytes_AS_STRING(dict_offsets_bytes)
+    arena_bytes = <const uint8_t*>PyBytes_AS_STRING(dict_values_bytes) if len(dict_values_bytes) > 0 else NULL
+    if null_bytes is not None and len(null_bytes) > 0:
+        row_null_bitmap = <const uint8_t*>PyBytes_AS_STRING(null_bytes)
+    if dict_null_bytes is not None and len(dict_null_bytes) > 0:
+        dict_entry_null_bitmap = <const uint8_t*>PyBytes_AS_STRING(dict_null_bytes)
+
+    for i in range(row_count):
+        if row_null_bitmap != NULL and ((row_null_bitmap[i >> 3] >> (i & 7)) & 1) == 0:
+            continue
+        code = _dict_read_packed_code(codes, code_width, i)
+        if code >= dict_len:
+            raise DrakenMorselCorruptionError(f"dictionary code out of bounds at row {i}: {code}")
+        if dict_entry_null_bitmap != NULL and ((dict_entry_null_bitmap[code >> 3] >> (code & 7)) & 1) == 0:
+            continue
+        start = dict_offsets[code]
+        end = dict_offsets[code + 1]
+        if end < start:
+            raise DrakenMorselCorruptionError("dictionary offsets are invalid")
+        total_bytes += end - start
+
+    builder = StringVectorBuilder.with_counts(row_count, total_bytes)
+    for i in range(row_count):
+        if row_null_bitmap != NULL and ((row_null_bitmap[i >> 3] >> (i & 7)) & 1) == 0:
+            builder.append_null()
+            continue
+        code = _dict_read_packed_code(codes, code_width, i)
+        if code >= dict_len:
+            raise DrakenMorselCorruptionError(f"dictionary code out of bounds at row {i}: {code}")
+        if dict_entry_null_bitmap != NULL and ((dict_entry_null_bitmap[code >> 3] >> (code & 7)) & 1) == 0:
+            builder.append_null()
+            continue
+        start = dict_offsets[code]
+        end = dict_offsets[code + 1]
+        builder.append_bytes(<const char*>(arena_bytes + start), end - start)
+
+    return <Vector>builder.finish()
 
 
 cdef Vector _allocate_fixed_vector(int dtype, Py_ssize_t row_count):
@@ -1017,6 +1197,7 @@ cpdef object write_morsel(object path_or_handle, Morsel morsel, dict options=Non
     cdef uint64_t compressed_written = 0
     cdef uint64_t blocks_written = 0
     cdef object sink_bytes_view
+    cdef ConstAccessor* const_accessor
 
     if codec_id == CODEC_LZ4:
         lz4 = _load_lz4()
@@ -1042,7 +1223,26 @@ cpdef object write_morsel(object path_or_handle, Morsel morsel, dict options=Non
         draken_encoding = vec.encoding
         segments = []
 
-        if dtype == DRAKEN_STRING:
+        if draken_encoding == DRAKEN_ENCODING_CONSTANT:
+            encoding = ENCODING_CONST
+            const_accessor = vec.const_accessor()
+            if const_accessor == NULL:
+                raise DrakenMorselStorageError("invalid typed constant accessor")
+
+            if const_accessor.value_type == DRAKEN_STRING:
+                const_str = <DrakenConstantStringPayload*>const_accessor.value_ptr
+                if const_str == NULL:
+                    raise DrakenMorselStorageError("invalid typed constant string payload pointer")
+                const_value_len = const_str.length
+                segments.append((SEG_CONST_VALUE, <intptr_t>const_str.data, const_value_len))
+            else:
+                const_value_len = _const_value_length_for_type(<int>const_accessor.value_type)
+                segments.append((SEG_CONST_VALUE, <intptr_t>const_accessor.value_ptr, const_value_len))
+
+            flags = _const_flags_from_value_type(<int>const_accessor.value_type)
+            if const_accessor.is_null != 0:
+                flags |= FLAG_HAS_NULLS
+        elif dtype == DRAKEN_STRING:
             encoding = ENCODING_VAR
             var_ptr = (<StringVector>(<Vector>morsel.ptr.columns[i])).ptr
             null_len = ((row_count + 7) >> 3) if var_ptr.null_bitmap != NULL else 0
@@ -1096,40 +1296,6 @@ cpdef object write_morsel(object path_or_handle, Morsel morsel, dict options=Non
                 flags |= FLAG_DICT_HAS_DICT_NULLS
             flags |= _dict_flags_from_code_width(code_width)
             flags |= _dict_flags_from_value_type(var_ptr.type)
-        elif dtype == DRAKEN_CONSTANT:
-            encoding = ENCODING_CONST
-            const_ptr = (<ConstantVector>(<Vector>morsel.ptr.columns[i])).ptr
-            if const_ptr == NULL:
-                raise DrakenMorselStorageError("invalid constant vector pointer")
-
-            null_len = ((row_count + 7) >> 3) if const_ptr.null_bitmap != NULL else 0
-            if null_len > 0:
-                segments.append((SEG_NULL, <intptr_t>const_ptr.null_bitmap, null_len))
-
-            if const_ptr.value_type == DRAKEN_INT64:
-                const_value_len = sizeof(int64_t)
-                segments.append((SEG_CONST_VALUE, <intptr_t>const_ptr.value, const_value_len))
-            elif const_ptr.value_type == DRAKEN_FLOAT64:
-                const_value_len = sizeof(double)
-                segments.append((SEG_CONST_VALUE, <intptr_t>const_ptr.value, const_value_len))
-            elif const_ptr.value_type == DRAKEN_BOOL:
-                const_value_len = sizeof(uint8_t)
-                segments.append((SEG_CONST_VALUE, <intptr_t>const_ptr.value, const_value_len))
-            elif const_ptr.value_type == DRAKEN_STRING:
-                const_str = <DrakenConstantStringPayload*>const_ptr.value
-                if const_str == NULL:
-                    raise DrakenMorselStorageError("invalid constant string payload pointer")
-                const_value_len = const_str.length
-                segments.append((SEG_CONST_VALUE, <intptr_t>const_str.data, const_value_len))
-            else:
-                raise DrakenMorselStorageError(
-                    f"unsupported constant value type {<int>const_ptr.value_type}"
-                )
-
-            flags = 0
-            if null_len > 0:
-                flags |= FLAG_HAS_NULLS
-            flags |= _const_flags_from_value_type(<int>const_ptr.value_type)
         elif _is_supported_fixed_type(dtype):
             encoding = ENCODING_FIXED
             fixed_ptr = _fixed_ptr_from_vector(<Vector>morsel.ptr.columns[i], dtype)
@@ -1558,11 +1724,6 @@ cpdef Morsel read_morsel(object path_or_handle, dict options=None):
                 else:
                     fixed_ptr.null_bitmap = NULL
             elif encoding == ENCODING_CONST:
-                if dtype != DRAKEN_CONSTANT:
-                    raise DrakenMorselStorageError(
-                        f"unsupported constant dtype {dtype} in DRKM reader"
-                    )
-
                 seg_info = seg_map.get(SEG_CONST_VALUE, None)
                 if seg_info is None:
                     raise DrakenMorselCorruptionError(
@@ -1580,7 +1741,7 @@ cpdef Morsel read_morsel(object path_or_handle, dict options=None):
                 compressed = _read_exact(handle, comp_len)
 
                 if const_value_type == DRAKEN_INT64:
-                    expected_len = sizeof(int64_t)
+                    expected_len = _const_value_length_for_type(const_value_type)
                     if raw_len != expected_len:
                         raise DrakenMorselCorruptionError(
                             f"constant int64 payload length mismatch for column {i}: expected {expected_len}, got {raw_len}"
@@ -1594,7 +1755,7 @@ cpdef Morsel read_morsel(object path_or_handle, dict options=None):
                             )
                     scalar_value = scalar_i64
                 elif const_value_type == DRAKEN_FLOAT64:
-                    expected_len = sizeof(double)
+                    expected_len = _const_value_length_for_type(const_value_type)
                     if raw_len != expected_len:
                         raise DrakenMorselCorruptionError(
                             f"constant float64 payload length mismatch for column {i}: expected {expected_len}, got {raw_len}"
@@ -1608,7 +1769,7 @@ cpdef Morsel read_morsel(object path_or_handle, dict options=None):
                             )
                     scalar_value = scalar_f64
                 elif const_value_type == DRAKEN_BOOL:
-                    expected_len = sizeof(uint8_t)
+                    expected_len = _const_value_length_for_type(const_value_type)
                     if raw_len != expected_len:
                         raise DrakenMorselCorruptionError(
                             f"constant bool payload length mismatch for column {i}: expected {expected_len}, got {raw_len}"
@@ -1621,6 +1782,40 @@ cpdef Morsel read_morsel(object path_or_handle, dict options=None):
                                 f"checksum mismatch for constant value in column {i}"
                             )
                     scalar_value = scalar_bool != 0
+                elif (
+                    const_value_type == DRAKEN_INT8
+                    or const_value_type == DRAKEN_INT16
+                    or const_value_type == DRAKEN_INT32
+                    or const_value_type == DRAKEN_DATE32
+                    or const_value_type == DRAKEN_TIME32
+                ):
+                    expected_len = _const_value_length_for_type(const_value_type)
+                    if raw_len != expected_len:
+                        raise DrakenMorselCorruptionError(
+                            f"constant 32-bit payload length mismatch for column {i}: expected {expected_len}, got {raw_len}"
+                        )
+                    scalar_i32 = 0
+                    _decompress_into_ptr(compressed, codec_id, raw_len, &scalar_i32)
+                    if checksum_enabled and checksum:
+                        if _checksum32_ptr(<const void*>&scalar_i32, raw_len) != checksum:
+                            raise DrakenMorselCorruptionError(
+                                f"checksum mismatch for constant value in column {i}"
+                            )
+                    scalar_value = scalar_i32
+                elif const_value_type == DRAKEN_TIME64 or const_value_type == DRAKEN_TIMESTAMP64:
+                    expected_len = _const_value_length_for_type(const_value_type)
+                    if raw_len != expected_len:
+                        raise DrakenMorselCorruptionError(
+                            f"constant 64-bit payload length mismatch for column {i}: expected {expected_len}, got {raw_len}"
+                        )
+                    scalar_i64 = 0
+                    _decompress_into_ptr(compressed, codec_id, raw_len, &scalar_i64)
+                    if checksum_enabled and checksum:
+                        if _checksum32_ptr(<const void*>&scalar_i64, raw_len) != checksum:
+                            raise DrakenMorselCorruptionError(
+                                f"checksum mismatch for constant value in column {i}"
+                            )
+                    scalar_value = scalar_i64
                 elif const_value_type == DRAKEN_STRING:
                     payload = _decompress_payload(compressed, codec_id, raw_len)
                     if len(payload) != raw_len:
@@ -1638,42 +1833,13 @@ cpdef Morsel read_morsel(object path_or_handle, dict options=None):
                         f"unsupported constant value dtype {const_value_type} in DRKM reader"
                     )
 
-                vec = ConstantVector(<size_t>row_count, const_value_type, scalar_value)
-                const_ptr = (<ConstantVector>vec).ptr
-                if const_ptr == NULL:
-                    raise DrakenMorselStorageError(
-                        f"failed to allocate constant vector for column {i}"
-                    )
-
-                seg_info = seg_map.get(SEG_NULL, None)
-                if seg_info is not None:
-                    codec_id = seg_info[0]
-                    raw_len = seg_info[1]
-                    comp_len = seg_info[2]
-                    checksum = seg_info[3]
-                    payload_offset = seg_info[4]
-                    null_len = (row_count + 7) >> 3
-                    if raw_len != null_len:
-                        raise DrakenMorselCorruptionError(
-                            f"null bitmap length mismatch for constant column {i}: expected {null_len}, got {raw_len}"
-                        )
-                    if null_len > 0:
-                        bitmap = <uint8_t*>malloc(<size_t>null_len)
-                        if bitmap == NULL:
-                            raise MemoryError()
-                        handle.seek(payload_offset, os.SEEK_SET)
-                        compressed = _read_exact(handle, comp_len)
-                        _decompress_into_ptr(compressed, codec_id, raw_len, bitmap)
-                        if checksum_enabled and checksum:
-                            if _checksum32_ptr(<const void*>bitmap, raw_len) != checksum:
-                                raise DrakenMorselCorruptionError(
-                                    f"checksum mismatch for null bitmap in constant column {i}"
-                                )
-                        const_ptr.null_bitmap = bitmap
-                    else:
-                        const_ptr.null_bitmap = NULL
-                else:
-                    const_ptr.null_bitmap = NULL
+                vec = _build_typed_const_vector(
+                    dtype,
+                    const_value_type,
+                    scalar_value,
+                    row_count,
+                    bool(col_flags & FLAG_HAS_NULLS),
+                )
             elif encoding == ENCODING_DICT:
                 codes_payload = seg_map.get(SEG_CODES, None)
                 dict_offsets_payload = seg_map.get(SEG_DICT_OFFSETS, None)
@@ -1817,7 +1983,8 @@ cpdef Morsel read_morsel(object path_or_handle, dict options=None):
 
                 if dtype == DRAKEN_DICTIONARY:
                     # Prefer typed dictionary vectors when possible (numeric types).
-                    # This avoids exposing DictionaryVector in higher-level user paths.
+                    # DictionaryVector has been retired; restore into typed dictionary
+                    # vectors where available, or dense strings otherwise.
                     if dict_null_payload is None and dict_value_type in (
                         DRAKEN_INT8,
                         DRAKEN_INT16,
@@ -1850,35 +2017,20 @@ cpdef Morsel read_morsel(object path_or_handle, dict options=None):
                             dict_len,
                             bool(col_flags & FLAG_DICT_ORDERED),
                         )
-                    else:
-                        vec = DictionaryVector(
-                            <size_t>row_count,
-                            <size_t>dict_len,
-                            <size_t>dict_values_len,
+                    elif dtype == DRAKEN_STRING:
+                        vec = _build_dense_string_dict_vector(
+                            row_count,
+                            <const uint8_t*>PyBytes_AS_STRING(codes_bytes),
                             code_width,
-                            bool(col_flags & FLAG_DICT_ORDERED),
-                            dict_value_type,
+                            dict_offsets_bytes,
+                            dict_values_bytes,
+                            null_bytes,
+                            dict_null_bytes,
                         )
-                        dict_ptr = (<DictionaryVector>vec).ptr
-                        if dict_ptr == NULL or dict_ptr.dictionary_values == NULL:
-                            raise DrakenMorselStorageError(f"failed to allocate dictionary vector for column {i}")
-                        if len(codes_bytes) > 0:
-                            memcpy(dict_ptr.codes, <const void*>PyBytes_AS_STRING(codes_bytes), <size_t>len(codes_bytes))
-                        memcpy(dict_ptr.dictionary_values.offsets, <const void*>PyBytes_AS_STRING(dict_offsets_bytes), <size_t>len(dict_offsets_bytes))
-                        if len(dict_values_bytes) > 0:
-                            memcpy(dict_ptr.dictionary_values.data, <const void*>PyBytes_AS_STRING(dict_values_bytes), <size_t>len(dict_values_bytes))
-                        if dict_null_payload is not None:
-                            expected_len = (dict_len + 7) >> 3
-                            if expected_len > 0:
-                                dict_ptr.dictionary_values.null_bitmap = <uint8_t*>malloc(<size_t>expected_len)
-                                if dict_ptr.dictionary_values.null_bitmap == NULL:
-                                    raise MemoryError()
-                                memcpy(dict_ptr.dictionary_values.null_bitmap, <const void*>PyBytes_AS_STRING(dict_null_bytes), <size_t>expected_len)
-                        if null_bytes is not None and len(null_bytes) > 0:
-                            dict_ptr.null_bitmap = <uint8_t*>malloc(<size_t>len(null_bytes))
-                            if dict_ptr.null_bitmap == NULL:
-                                raise MemoryError()
-                            memcpy(dict_ptr.null_bitmap, <const void*>PyBytes_AS_STRING(null_bytes), <size_t>len(null_bytes))
+                    else:
+                        raise DrakenMorselStorageError(
+                            f"unsupported dictionary restore for dtype {dtype} and value type {dict_value_type}"
+                        )
                 else:
                     vec = _build_typed_dict_vector(
                         dtype,

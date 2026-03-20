@@ -9,7 +9,7 @@
 from libc.stddef cimport size_t
 from libc.stdint cimport uint64_t, int64_t, uint8_t
 
-from opteryx.draken.core.buffers cimport DictAccessor
+from opteryx.draken.core.buffers cimport ConstAccessor, DictAccessor, DrakenEncoding
 
 from opteryx.draken.interop.arrow import vector_from_arrow
 
@@ -26,8 +26,10 @@ cdef inline uint64_t mix_hash(uint64_t current, uint64_t value) nogil:
 
 cdef class Vector:
     cdef bint here
+    cdef DrakenEncoding _encoding
     cpdef object null_bitmap(self)
     cdef DictAccessor* dict_accessor(self) noexcept
+    cdef ConstAccessor* const_accessor(self) noexcept
     cdef void* dense_ptr(self) noexcept
     cdef uint8_t* null_bitmap_ptr(self) noexcept
     cdef void hash_into(self, uint64_t[::1] out_buf, Py_ssize_t offset=*) except *

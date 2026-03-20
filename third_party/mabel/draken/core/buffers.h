@@ -39,6 +39,7 @@ typedef enum {
     DRAKEN_ENCODING_DENSE      = 0,
     DRAKEN_ENCODING_DICTIONARY = 1,
     DRAKEN_ENCODING_RLE        = 2,
+    DRAKEN_ENCODING_CONSTANT   = 3,
 } DrakenEncoding;
 
 typedef struct {

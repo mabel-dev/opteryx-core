@@ -65,7 +65,7 @@ def _coerce_param_for_draken(p):
                 function=None,
             )
 
-    from opteryx.draken.vectors.constant_vector import from_scalar as _const_scalar
+    from opteryx.draken.vectors.scalar_constructors import from_scalar as _const_scalar
 
     if isinstance(p, (bool, int, float, str, bytes, type(None))):
         vec = _const_scalar(p, 1)

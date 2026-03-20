@@ -29,6 +29,7 @@ from libc.string cimport memset
 
 from opteryx.draken.core.buffers cimport DrakenFixedBuffer, DrakenType
 from opteryx.draken.core.buffers cimport DRAKEN_INT8, DRAKEN_INT16, DRAKEN_INT32
+from opteryx.draken.core.buffers cimport ConstAccessor, DRAKEN_ENCODING_CONSTANT
 from opteryx.draken.core.fixed_vector cimport (
     alloc_fixed_buffer, buf_dtype, buf_itemsize, buf_length, free_fixed_buffer,
 )
@@ -39,6 +40,29 @@ DEF INTEGER_HASH_CHUNK = 1024
 
 cdef class IntegerVector(Vector):
     """Fixed-width signed integer vector supporting int8, int16, and int32 widths."""
+
+    @classmethod
+    def from_constant(cls, value, length, is_null=False):
+        cdef DrakenType dtype = DRAKEN_INT32
+        cdef int64_t ivalue = 0
+        if length < 0:
+            raise ValueError("length must be non-negative")
+        if value is None and not is_null:
+            raise ValueError("value cannot be None unless is_null=True")
+        if not is_null and value is not None:
+            ivalue = <int64_t>int(value)
+            if ivalue >= -128 and ivalue <= 127:
+                dtype = DRAKEN_INT8
+            elif ivalue >= -32768 and ivalue <= 32767:
+                dtype = DRAKEN_INT16
+        cdef IntegerVector vec = IntegerVector(dtype, 0)
+        vec.ptr.length = <size_t>length
+        vec.ptr.null_bitmap = NULL
+        vec._has_const = True
+        vec._const_is_null = bool(is_null)
+        vec._const_value = 0 if is_null or value is None else ivalue
+        vec._encoding = DRAKEN_ENCODING_CONSTANT
+        return vec
 
     @classmethod
     def from_dict(cls, codes, dictionary, row_validity=None):
@@ -78,19 +102,35 @@ cdef class IntegerVector(Vector):
                 itemsize = 4
             self.ptr = alloc_fixed_buffer(dtype, length, itemsize)
             self.owns_data = True
+        self._const_accessor.length = 0
+        self._const_accessor.value_type = dtype
+        self._const_accessor.value_ptr = NULL
+        self._const_accessor.is_null = 0
+        self._const_value = 0
+        self._has_const = False
+        self._const_is_null = False
 
     def __dealloc__(self):
         if self.owns_data and self.ptr is not NULL:
             free_fixed_buffer(self.ptr, True)
             self.ptr = NULL
 
+    cdef ConstAccessor* const_accessor(self) noexcept:
+        if not self._has_const or self.ptr == NULL:
+            return NULL
+        self._const_accessor.length = self.ptr.length
+        self._const_accessor.value_type = self.ptr.type
+        self._const_accessor.value_ptr = <void*>&self._const_value
+        self._const_accessor.is_null = 1 if self._const_is_null else 0
+        return &self._const_accessor
+
     cdef void* dense_ptr(self) noexcept:
-        if self.ptr == NULL:
+        if self.ptr == NULL or self._has_const:
             return NULL
         return self.ptr.data
 
     cdef uint8_t* null_bitmap_ptr(self) noexcept:
-        if self.ptr == NULL:
+        if self.ptr == NULL or self._has_const:
             return NULL
         return self.ptr.null_bitmap
 
@@ -113,6 +153,10 @@ cdef class IntegerVector(Vector):
         cdef DrakenFixedBuffer* ptr = self.ptr
         if i < 0 or i >= <Py_ssize_t>ptr.length:
             raise IndexError("Index out of bounds")
+        if self._has_const:
+            if self._const_is_null:
+                return None
+            return <int8_t>self._const_value if ptr.itemsize == 1 else (<int16_t>self._const_value if ptr.itemsize == 2 else <int32_t>self._const_value)
         if ptr.null_bitmap != NULL:
             if not ((ptr.null_bitmap[i >> 3] >> (i & 7)) & 1):
                 return None
@@ -125,6 +169,19 @@ cdef class IntegerVector(Vector):
 
     def to_arrow(self):
         import pyarrow as pa
+        if self._has_const:
+            if self.ptr.type == DRAKEN_INT8:
+                if self._const_is_null:
+                    return pa.nulls(self.ptr.length, type=pa.int8())
+                return pa.array([<int8_t>self._const_value] * self.ptr.length, type=pa.int8())
+            elif self.ptr.type == DRAKEN_INT16:
+                if self._const_is_null:
+                    return pa.nulls(self.ptr.length, type=pa.int16())
+                return pa.array([<int16_t>self._const_value] * self.ptr.length, type=pa.int16())
+            else:
+                if self._const_is_null:
+                    return pa.nulls(self.ptr.length, type=pa.int32())
+                return pa.array([<int32_t>self._const_value] * self.ptr.length, type=pa.int32())
         cdef size_t nbytes = buf_length(self.ptr) * buf_itemsize(self.ptr)
         cdef intptr_t addr = <intptr_t>self.ptr.data
         data_buf = pa.foreign_buffer(addr, nbytes, base=self)
@@ -151,6 +208,10 @@ cdef class IntegerVector(Vector):
         cdef int16_t* d16
         cdef int32_t* d32
         cdef list out = []
+        if self._has_const:
+            for i in range(n):
+                out.append(None if self._const_is_null else self[i])
+            return out
         if ptr.itemsize == 1:
             d8 = <int8_t*>ptr.data
             if ptr.null_bitmap == NULL:
@@ -198,6 +259,12 @@ cdef class IntegerVector(Vector):
         cdef int32_t* d32
         cdef uint64_t[INTEGER_HASH_CHUNK] scratch
         cdef uint64_t* scratch_ptr = <uint64_t*> scratch
+
+        if self._has_const:
+            value = NULL_HASH if self._const_is_null else <uint64_t>self._const_value
+            for i in range(n):
+                out_buf[offset + i] = mix_hash(out_buf[offset + i], value)
+            return
 
         if n == 0:
             return

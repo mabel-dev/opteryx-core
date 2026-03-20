@@ -28,7 +28,7 @@ from libc.string cimport memcpy
 from opteryx.draken.core.buffers cimport DictAccessor
 from opteryx.draken.vectors.float64_vector cimport Float64Vector
 from opteryx.draken.vectors.int64_vector cimport Int64Vector
-from opteryx.draken.vectors.constant_vector cimport from_scalar, ConstantVector
+from opteryx.draken.vectors.scalar_constructors cimport from_scalar
 from opteryx.draken.vectors.vector cimport Vector
 from opteryx.draken.core.buffers cimport DrakenVarBuffer
 from opteryx.draken.core.buffers cimport DRAKEN_FLOAT64, DRAKEN_FLOAT32, DRAKEN_INT64, DRAKEN_INT32, DRAKEN_INT16, DRAKEN_INT8
@@ -45,6 +45,12 @@ cdef inline double _round_to_digits(double value, int digits) nogil:
     # digits < 0
     scale = c_pow(10.0, -digits)
     return c_round(value / scale) * scale
+
+
+cdef object _constant_scalar_value(object values):
+    if len(values) == 0:
+        return None
+    return values[0]
 
 
 cpdef Float64Vector vector_round(object values):
@@ -154,11 +160,11 @@ cpdef Float64Vector vector_round_digits(object values, int digits):
     return out_vec
 
 
-cpdef ConstantVector vector_round_constant(ConstantVector values, int digits):
+cpdef object vector_round_constant(object values, int digits):
     """ROUND(constant, digits): round a constant scalar value to a constant."""
-    cdef object val = values.scalar_value()
+    cdef object val = _constant_scalar_value(values)
     cdef size_t n = <size_t> len(values)
 
     if val is None:
-        return from_scalar(None, n)
-    return from_scalar(_round_to_digits(float(val), digits), n)
+        return from_scalar(None, n, dtype=DRAKEN_FLOAT64)
+    return from_scalar(_round_to_digits(float(val), digits), n, dtype=DRAKEN_FLOAT64)

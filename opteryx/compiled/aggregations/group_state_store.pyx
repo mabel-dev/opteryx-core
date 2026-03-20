@@ -7,8 +7,7 @@
 
 from opteryx.draken.morsels.morsel cimport Morsel
 from opteryx.draken.core.buffers cimport DrakenFixedBuffer
-from opteryx.draken.core.buffers cimport DrakenConstantBuffer
-from opteryx.draken.vectors.constant_vector cimport ConstantVector
+from opteryx.draken.core.buffers cimport ConstAccessor
 from opteryx.compiled.aggregations.aggregate_kernels cimport AGG_AVG
 from opteryx.compiled.aggregations.aggregate_kernels cimport AGG_APPROX_COUNT_DISTINCT
 from opteryx.compiled.aggregations.aggregate_kernels cimport AGG_APPROX_PERCENTILE
@@ -190,7 +189,6 @@ cdef class GroupStateStore:
                 raise ValueError(f"unsupported aggregation function '{function}'")
 
         # Fast path for common single-aggregate shapes.
-        # Excludes HASH_ONE because its sentinel is owned by aggregate_kernels.
         if len(self._agg_function_codes) == 1:
             if self._agg_function_codes[0] in (
                 AGG_COUNT_STAR,
@@ -200,6 +198,7 @@ cdef class GroupStateStore:
                 AGG_MAX,
                 AGG_AVG,
                 AGG_COUNT_DISTINCT,
+                AGG_HASH_ONE,
             ):
                 self._single_mode = self._agg_function_codes[0]
                 self._single_column = self._agg_columns[0]
@@ -272,8 +271,8 @@ cdef class GroupStateStore:
         """Return telemetry dict compatible with CarcharGroupStateEngine"""
         return {
             "feature_groupby_engine_carchar": 0,
-            "feature_groupby_engine_constant": 0,
-            "feature_groupby_engine_group_state_store": 1,
+            "feature_groupby_engine_constant": 1 if self._constant_groupby_fastpath_hits > 0 else 0,
+            "feature_groupby_engine_group_state_store": 0 if self._constant_groupby_fastpath_hits > 0 else 1,
             "feature_groupby_engine_multi_key_fixed": 0,
             "feature_groupby_engine_multi_key_object": 0,
             "draken_dict_groupby_fastpath_hits": self._dict_groupby_fastpath_hits,
@@ -337,13 +336,12 @@ cdef class GroupStateStore:
         cdef uint64_t* _narrow_value_buf
         cdef bint dict_fastpath_candidate = False
         cdef object dict_candidate_vector
-        cdef ConstantVector key_constant_vector
-        cdef DrakenConstantBuffer* key_const_ptr
-        cdef uint8_t* key_const_nulls
+        cdef Vector key_vector_base
+        cdef ConstAccessor* key_const_accessor
         cdef object key_const_scalar
         cdef Py_ssize_t key_const_valid_rows
         cdef Py_ssize_t key_const_null_rows
-        cdef bint key_const_valid
+        cdef bint key_const_typed = False
         cdef object key_const_state
         cdef object key_const_null_state
 
@@ -387,112 +385,60 @@ cdef class GroupStateStore:
         # Constant group-key fast path for the common single-aggregate shapes.
         # This avoids per-row hash/key materialization when all rows share one
         # logical key value (with optional NULL-key rows via bitmap).
-        if key_count == 1 and isinstance(key_vector0, ConstantVector):
-            if single_mode == AGG_COUNT_STAR:
-                key_constant_vector = <ConstantVector>key_vector0
-                key_const_ptr = key_constant_vector.ptr
-                key_const_nulls = <uint8_t*>key_const_ptr.null_bitmap
-                key_const_scalar = key_constant_vector.scalar_value()
-                key_const_valid_rows = 0
-                key_const_null_rows = 0
+        key_const_accessor = NULL
+        if key_count == 1 and isinstance(key_vector0, Vector):
+            key_vector_base = <Vector>key_vector0
+            key_const_accessor = key_vector_base.const_accessor()
+            if key_const_accessor != NULL:
+                key_const_typed = True
+                key_const_scalar = None if key_const_accessor.is_null else key_vector0[0]
+                key_const_valid_rows = 0 if key_const_accessor.is_null else row_count
+                key_const_null_rows = row_count if key_const_accessor.is_null else 0
 
-                if key_const_nulls == NULL:
-                    key_const_valid_rows = row_count
-                else:
-                    for row_idx in range(row_count):
-                        key_const_valid = ((key_const_nulls[row_idx >> 3] >> (row_idx & 7)) & 1) != 0
-                        if key_const_valid:
-                            key_const_valid_rows += 1
+                if single_mode == AGG_COUNT_STAR:
+                    if key_const_valid_rows > 0:
+                        key_const_state = self._states.get(key_const_scalar)
+                        if key_const_state is None:
+                            self._states[key_const_scalar] = key_const_valid_rows
                         else:
-                            key_const_null_rows += 1
+                            self._states[key_const_scalar] = key_const_state + key_const_valid_rows
 
-                if key_const_valid_rows > 0:
-                    key_const_state = self._states.get(key_const_scalar)
-                    if key_const_state is None:
-                        self._states[key_const_scalar] = key_const_valid_rows
-                    else:
-                        self._states[key_const_scalar] = key_const_state + key_const_valid_rows
+                    if key_const_null_rows > 0:
+                        key_const_null_state = self._states.get(None)
+                        if key_const_null_state is None:
+                            self._states[None] = key_const_null_rows
+                        else:
+                            self._states[None] = key_const_null_state + key_const_null_rows
 
-                if key_const_null_rows > 0:
-                    key_const_null_state = self._states.get(None)
-                    if key_const_null_state is None:
-                        self._states[None] = key_const_null_rows
-                    else:
-                        self._states[None] = key_const_null_state + key_const_null_rows
+                    self._constant_groupby_fastpath_hits += 1
+                    return
 
-                self._constant_groupby_fastpath_hits += 1
-                return
-
-            if single_mode == AGG_COUNT:
-                key_constant_vector = <ConstantVector>key_vector0
-                key_const_ptr = key_constant_vector.ptr
-                key_const_nulls = <uint8_t*>key_const_ptr.null_bitmap
-                key_const_scalar = key_constant_vector.scalar_value()
-                single_column = self._single_column
-                single_vector = morsel.column(single_column)
-
-                if key_const_nulls == NULL:
-                    key_const_state = self._states.get(key_const_scalar)
+                if single_mode == AGG_COUNT:
+                    single_column = self._single_column
+                    single_vector = morsel.column(single_column)
+                    key_const_state = self._states.get(
+                        None if key_const_typed and key_const_accessor.is_null else key_const_scalar
+                    )
                     if key_const_state is None:
                         key_const_state = 0
                     for row_idx in range(row_count):
                         value = single_vector[row_idx]
                         if value is not None:
                             key_const_state += 1
-                    self._states[key_const_scalar] = key_const_state
-                else:
-                    key_const_state = self._states.get(key_const_scalar)
-                    if key_const_state is None:
-                        key_const_state = 0
-                    key_const_null_state = self._states.get(None)
-                    if key_const_null_state is None:
-                        key_const_null_state = 0
-                    key_const_valid_rows = 0
-                    key_const_null_rows = 0
+                    self._states[None if key_const_accessor.is_null else key_const_scalar] = key_const_state
+                    self._constant_groupby_fastpath_hits += 1
+                    return
+
+                if single_mode in (AGG_SUM, AGG_MIN, AGG_MAX, AGG_AVG, AGG_COUNT_DISTINCT, AGG_HASH_ONE):
+                    single_column = self._single_column
+                    single_vector = morsel.column(single_column)
+                    key_const_state = self._states.get(
+                        None if key_const_accessor.is_null else key_const_scalar,
+                        _MISSING,
+                    )
 
                     for row_idx in range(row_count):
-                        key_const_valid = ((key_const_nulls[row_idx >> 3] >> (row_idx & 7)) & 1) != 0
                         value = single_vector[row_idx]
-                        if key_const_valid:
-                            key_const_valid_rows += 1
-                            if value is not None:
-                                key_const_state += 1
-                        else:
-                            key_const_null_rows += 1
-                            if value is not None:
-                                key_const_null_state += 1
-
-                    if key_const_valid_rows > 0:
-                        self._states[key_const_scalar] = key_const_state
-                    if key_const_null_rows > 0:
-                        self._states[None] = key_const_null_state
-
-                self._constant_groupby_fastpath_hits += 1
-                return
-
-            if single_mode in (AGG_SUM, AGG_MIN, AGG_MAX, AGG_AVG, AGG_COUNT_DISTINCT):
-                key_constant_vector = <ConstantVector>key_vector0
-                key_const_ptr = key_constant_vector.ptr
-                key_const_nulls = <uint8_t*>key_const_ptr.null_bitmap
-                key_const_scalar = key_constant_vector.scalar_value()
-                single_column = self._single_column
-                single_vector = morsel.column(single_column)
-
-                key_const_state = self._states.get(key_const_scalar, _MISSING)
-                key_const_null_state = self._states.get(None, _MISSING)
-                key_const_valid_rows = 0
-                key_const_null_rows = 0
-
-                for row_idx in range(row_count):
-                    if key_const_nulls == NULL:
-                        key_const_valid = True
-                    else:
-                        key_const_valid = ((key_const_nulls[row_idx >> 3] >> (row_idx & 7)) & 1) != 0
-
-                    value = single_vector[row_idx]
-
-                    if key_const_valid:
-                        key_const_valid_rows += 1
                         if single_mode == AGG_SUM:
                             if key_const_state is _MISSING:
                                 key_const_state = None
@@ -516,53 +462,21 @@ cdef class GroupStateStore:
                             if value is not None:
                                 key_const_state[0] += value
                                 key_const_state[1] += 1
-                        else:  # AGG_COUNT_DISTINCT
+                        elif single_mode == AGG_COUNT_DISTINCT:
                             if key_const_state is _MISSING:
                                 key_const_state = set()
                             if value is not None:
                                 key_const_state.add(value)
-                    else:
-                        key_const_null_rows += 1
-                        if single_mode == AGG_SUM:
-                            if key_const_null_state is _MISSING:
-                                key_const_null_state = None
-                            if value is not None:
-                                key_const_null_state = (
-                                    value if key_const_null_state is None else key_const_null_state + value
-                                )
-                        elif single_mode == AGG_MIN:
-                            if key_const_null_state is _MISSING:
-                                key_const_null_state = None
-                            if value is not None:
-                                if key_const_null_state is None or value < key_const_null_state:
-                                    key_const_null_state = value
-                        elif single_mode == AGG_MAX:
-                            if key_const_null_state is _MISSING:
-                                key_const_null_state = None
-                            if value is not None:
-                                if key_const_null_state is None or value > key_const_null_state:
-                                    key_const_null_state = value
-                        elif single_mode == AGG_AVG:
-                            if key_const_null_state is _MISSING:
-                                key_const_null_state = [0, 0]
-                            if value is not None:
-                                key_const_null_state[0] += value
-                                key_const_null_state[1] += 1
-                        else:  # AGG_COUNT_DISTINCT
-                            if key_const_null_state is _MISSING:
-                                key_const_null_state = set()
-                            if value is not None:
-                                key_const_null_state.add(value)
+                        else:
+                            if key_const_state is _MISSING:
+                                key_const_state = new_state(single_mode, agg_options[0])
+                            key_const_state = update_state(single_mode, key_const_state, value)
 
-                if key_const_valid_rows > 0:
-                    self._states[key_const_scalar] = key_const_state
-                if key_const_null_rows > 0:
-                    self._states[None] = key_const_null_state
+                    self._states[None if key_const_accessor.is_null else key_const_scalar] = key_const_state
+                    self._constant_groupby_fastpath_hits += 1
+                    return
 
-                self._constant_groupby_fastpath_hits += 1
-                return
-
-            self._constant_groupby_fastpath_fallbacks += 1
+                self._constant_groupby_fastpath_fallbacks += 1
 
         if self._int64_count_star_mode:
             if key_count != 1 or not isinstance(key_vector0, (Int64Vector, IntegerVector)):

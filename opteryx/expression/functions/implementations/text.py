@@ -24,10 +24,12 @@ from pyarrow import compute
 
 from opteryx.compiled.vector_ops import vector_initcap
 from opteryx.compiled.vector_ops import vector_length
+from opteryx.compiled.vector_ops import vector_ltrim
 from opteryx.compiled.vector_ops import vector_match_against
 from opteryx.compiled.vector_ops import vector_md5
 from opteryx.compiled.vector_ops import vector_replace
 from opteryx.compiled.vector_ops import vector_reverse
+from opteryx.compiled.vector_ops import vector_rtrim
 from opteryx.compiled.vector_ops import vector_sha1
 from opteryx.compiled.vector_ops import vector_sha256
 from opteryx.compiled.vector_ops import vector_sha512
@@ -35,6 +37,7 @@ from opteryx.compiled.vector_ops import vector_soundex
 from opteryx.compiled.vector_ops import vector_string_length
 from opteryx.compiled.vector_ops import vector_string_slice_left
 from opteryx.compiled.vector_ops import vector_string_slice_right
+from opteryx.compiled.vector_ops import vector_trim
 from opteryx.draken.vectors.string_vector import StringVector
 from opteryx.draken.vectors.string_vector import lowercase as string_vector_lowercase
 from opteryx.draken.vectors.string_vector import uppercase as string_vector_uppercase
@@ -396,24 +399,6 @@ def position(string, sub):
     if isinstance(sub, bytes):
         sub = sub.decode("utf8", errors="ignore")
     return string.find(sub) + 1
-
-
-def trim(*args):
-    if len(args) == 1:
-        return compute.utf8_trim_whitespace(args[0])
-    return compute.utf8_trim(args[0], args[1][0])
-
-
-def ltrim(*args):
-    if len(args) == 1:
-        return compute.utf8_ltrim_whitespace(args[0])
-    return compute.utf8_ltrim(args[0], args[1][0])
-
-
-def rtrim(*args):
-    if len(args) == 1:
-        return compute.utf8_rtrim_whitespace(args[0])
-    return compute.utf8_rtrim(args[0], args[1][0])
 
 
 def levenshtein(a, b):

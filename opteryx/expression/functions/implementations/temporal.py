@@ -63,54 +63,38 @@ def convert_int64_array_to_pyarrow_datetime(values: numpy.ndarray) -> pyarrow.Ar
 
 def date_part(part, arr):
     """
-    Also the EXTRACT function - we extract a given part from an array of dates.
+    Extract a part from a date/timestamp (EXTRACT function).
 
-    Accepts any temporal input: Draken vectors, PyArrow arrays, or Python
-    scalars/sequences.
+    Accepts Draken vectors (TimestampVector, Int64Vector) or PyArrow arrays.
 
-    Fast path: Draken vectors → compiled vector_ops (Cython)
-    Slow path: PyArrow arrays → Arrow compute kernels (fallback)
+    Compiled kernels only - NO Arrow compute fallback:
+    - Raises InvalidFunctionParameterError if datepart is not supported
+    - All extraction is done via compiled Cython kernels for performance
+    - PyArrow inputs are converted to Draken vectors automatically
+
+    Supported dateparts: minute, hour, second, year, month, day, dayofweek, dayofyear, quarter
+    Unsupported dateparts: week, isoweek, isoyear, decade, century, epoch, julian, date,
+                           millisecond, microsecond, nanosecond (require implementation)
     """
     # Normalize part name early
     part = (part[0] if not isinstance(part, str) else part).lower()  # [#325]
 
-    # Units that require temporal input normalization.
-    temporal_parts = {
-        "nanosecond",
-        "nanoseconds",
-        "microsecond",
-        "microseconds",
-        "millisecond",
-        "milliseconds",
-        "second",
-        "minute",
-        "hour",
-        "day",
-        "dayofweek",
-        "dow",
-        "week",
-        "isoweek",
-        "month",
-        "quarter",
-        "dayofyear",
-        "doy",
-        "year",
-        "isoyear",
-        "decade",
-        "century",
-        "epoch",
-        "julian",
-        "date",
-    }
-
     # Handle NumPy arrays that are integer timestamps
-    if isinstance(arr, numpy.ndarray) and numpy.issubdtype(arr.dtype, numpy.integer):
-        # Convert int64 array to timestamp using the helper (detects precision)
-        arr = convert_int64_array_to_pyarrow_datetime(arr)
-        # Now continue with normal Draken vector flow - will check if TimestampVector below
-        vector_type = arr.__class__.__name__
-    else:
-        vector_type = arr.__class__.__name__
+    if isinstance(arr, numpy.ndarray):
+        if numpy.issubdtype(arr.dtype, numpy.integer):
+            # Convert int64 array to timestamp using the helper (detects precision)
+            arr = convert_int64_array_to_pyarrow_datetime(arr)
+        elif numpy.issubdtype(arr.dtype, numpy.datetime64):
+            # Convert numpy datetime64 directly to PyArrow timestamp
+            arr = pyarrow.array(arr)
+
+    # Convert PyArrow arrays to Draken vectors
+    if isinstance(arr, (pyarrow.Array, pyarrow.ChunkedArray)):
+        from opteryx.draken.interop.arrow import vector_from_arrow
+
+        arr = vector_from_arrow(arr)
+
+    vector_type = arr.__class__.__name__
 
     if vector_type == "TimestampVector":
         from opteryx.compiled.vector_ops.function_definitions import vector_datepart_day
@@ -141,8 +125,13 @@ def date_part(part, arr):
             return vector_datepart_dayofyear(arr).to_arrow()
         elif part == "quarter":
             return vector_datepart_quarter(arr).to_arrow()
-        # Unsupported parts (week, isoweek, isoyear, epoch, julian, date, …)
-        # fall through to the Arrow slow-path below.
+
+        # Unsupported datepart for TimestampVector - raise error instead of falling back
+        raise InvalidFunctionParameterError(
+            f"EXTRACT({part.upper()}) is not yet supported. "
+            f"Supported parts: minute, hour, second, year, month, day, dayofweek, dayofyear, quarter. "
+            f"To add {part.upper()}, implement vector_datepart_{part}() in vector_ops/vector_date_part.pyx"
+        )
 
     if vector_type == "Int64Vector":
         from opteryx.compiled.vector_ops.function_definitions import vector_datepart_day_i64
@@ -173,73 +162,19 @@ def date_part(part, arr):
             return vector_datepart_dayofyear_i64(arr).to_arrow()
         elif part == "quarter":
             return vector_datepart_quarter_i64(arr).to_arrow()
-        # Unsupported parts fall through to Arrow slow-path.
 
-    # --- SLOW PATH: Arrow compute kernels (fallback) ---
+        # Unsupported datepart for Int64Vector - raise error instead of falling back
+        raise InvalidFunctionParameterError(
+            f"EXTRACT({part.upper()}) is not yet supported for int64 timestamps. "
+            f"Supported parts: minute, hour, second, year, month, day, dayofweek, dayofyear, quarter. "
+            f"To add {part.upper()}, implement vector_datepart_{part}_i64() in vector_ops/vector_date_part.pyx"
+        )
 
-    j2000_scalar = pyarrow.array(
-        [datetime.datetime(2000, 1, 1, 12, 0, 0)], type=pyarrow.timestamp("us")
+    # --- NO FALLBACK: Raise error for unsupported input types ---
+    raise InvalidFunctionParameterError(
+        f"EXTRACT({part.upper()}) expects TimestampVector or Int64Vector input, "
+        f"got {vector_type}. No fallback available."
     )
-    extractors = {
-        "nanosecond": compute.nanosecond,
-        "nanoseconds": compute.nanosecond,
-        "microsecond": compute.microsecond,
-        "microseconds": compute.microsecond,
-        "millisecond": compute.millisecond,
-        "milliseconds": compute.millisecond,
-        "second": compute.second,
-        "minute": compute.minute,
-        "hour": compute.hour,
-        "day": compute.day,
-        "dayofweek": compute.day_of_week,
-        "dow": compute.day_of_week,
-        "date": lambda x: compute.cast(x, "date32"),
-        "week": compute.week,
-        "isoweek": compute.iso_week,
-        "month": compute.month,
-        "quarter": compute.quarter,
-        "dayofyear": compute.day_of_year,
-        "doy": compute.day_of_year,
-        "year": compute.year,
-        "isoyear": compute.iso_year,
-        "decade": lambda x: compute.divide(compute.year(x), 10),
-        "century": lambda x: compute.add(compute.divide(compute.year(x), 100), 1),
-        "epoch": lambda x: compute.divide(compute.cast(x, "int64"), 1_000_000.0),
-        "julian": lambda x: compute.add(
-            compute.divide(
-                compute.milliseconds_between(
-                    compute.cast(x, pyarrow.timestamp("ms")), j2000_scalar
-                ),
-                86_400_000.0,
-            ),
-            2_451_545.0,
-        ),
-    }
-
-    # --- Normalise to a flat pyarrow.Array (zero-copy for Draken vectors) ---
-    if hasattr(arr, "to_arrow"):
-        # Draken vectors (Date32Vector, TimestampVector, ArrowVector, …)
-        arr = arr.to_arrow()
-
-    if isinstance(arr, pyarrow.ChunkedArray):
-        arr = arr.combine_chunks() if arr.num_chunks > 1 else arr.chunk(0)
-
-    # For temporal extraction units, normalize integer/dictionary inputs to timestamp.
-    if part in temporal_parts and isinstance(arr, pyarrow.Array):
-        if pyarrow.types.is_dictionary(arr.type):
-            arr = arr.dictionary_decode()
-        if pyarrow.types.is_integer(arr.type):
-            arr = convert_int64_array_to_pyarrow_datetime(arr)
-
-    if not isinstance(arr, pyarrow.Array):
-        # Numpy arrays or plain Python sequences: wrap in pyarrow (no datetime64 cast)
-        arr = pyarrow.array(arr)
-
-    if part in temporal_parts and pyarrow.types.is_integer(arr.type):
-        arr = convert_int64_array_to_pyarrow_datetime(arr)
-
-    if part in extractors:
-        return extractors[part](arr)
 
 
 def trunc_temporal(arr, part):
@@ -252,17 +187,6 @@ def trunc_temporal(arr, part):
     from opteryx.utils.dates import date_trunc
 
     return date_trunc(part, arr)
-
-    from opteryx.utils import suggest_alternative
-
-    alt = suggest_alternative(part, list(extractors.keys()))
-    if not alt:
-        raise InvalidFunctionParameterError(
-            f"Date part `{part}` unsupported for EXTRACT."
-        )  # pragma: no cover
-    raise InvalidFunctionParameterError(
-        f"Date part `{part}` unsupported for EXTRACT. Did you mean '{alt}'?"
-    )
 
 
 def date_diff(part, start, end):

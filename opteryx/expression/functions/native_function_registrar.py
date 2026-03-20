@@ -65,48 +65,6 @@ def _builtin_text_functions() -> list[FunctionDefinition]:
             return _pa.array(result, type=_pa.large_binary())
         raise TypeError(f"CONCAT: unsupported input type {type(arr)}")
 
-    def _concat_ws_kernel(sep, arr):
-        """CONCAT_WS(sep, array_col): join elements with separator."""
-        import numpy as _np
-        import pyarrow as _pa
-
-        from opteryx.draken.interop.arrow import vector_from_arrow as _vfa
-        from opteryx.draken.vectors.array_vector import ArrayVector as _AV
-
-        if hasattr(sep, "as_py"):
-            sep = sep.as_py()
-        if isinstance(sep, (_pa.Array, _pa.ChunkedArray)):
-            sep = sep[0].as_py()
-        if isinstance(sep, _np.ndarray) and len(sep) > 0:
-            sep = sep[0]
-        if sep is None:
-            return None
-        if isinstance(sep, str):
-            sep = sep.encode("utf-8")
-
-        if isinstance(arr, _AV):
-            return _vector_concat_ws_cython(sep, arr).to_arrow()
-        if isinstance(arr, _pa.ChunkedArray):
-            arr = arr.combine_chunks()
-        if isinstance(arr, _pa.ListArray):
-            return _vector_concat_ws_cython(sep, _vfa(arr)).to_arrow()
-        if isinstance(arr, _np.ndarray):
-            result = []
-            for row in arr:
-                if row is None:
-                    result.append(None)
-                else:
-                    parts = [
-                        v.encode("utf-8")
-                        if isinstance(v, str)
-                        else (v if isinstance(v, bytes) else b"")
-                        for v in row
-                        if v is not None
-                    ]
-                    result.append(sep.join(parts))
-            return _pa.array(result, type=_pa.large_binary())
-        raise TypeError(f"CONCAT_WS: unsupported input type {type(arr)}")
-
     return [
         FunctionDefinition(
             name="UPPER",
@@ -957,6 +915,9 @@ def _builtin_text_extended_functions() -> list[FunctionDefinition]:
     from pyarrow import compute
 
     from opteryx.compiled.vector_ops import vector_concat_ws_array as _vector_concat_ws_cython
+    from opteryx.compiled.vector_ops import vector_ltrim as _vector_ltrim
+    from opteryx.compiled.vector_ops import vector_rtrim as _vector_rtrim
+    from opteryx.compiled.vector_ops import vector_trim as _vector_trim
     from opteryx.expression.functions.implementations import text as string_functions
     from opteryx.functions import _get_string
     from opteryx.functions import _initcap
@@ -1160,25 +1121,28 @@ def _builtin_text_extended_functions() -> list[FunctionDefinition]:
         ),
         _make(
             "TRIM",
-            string_functions.trim,
+            _vector_trim,
             OrsoTypes.VARCHAR,
             (_s, ParameterSpec(name="chars", type_family="string", optional=True)),
+            engine="draken",
             null_policy="passthru",
             summary="Trim leading and trailing characters.",
         ),
         _make(
             "LTRIM",
-            string_functions.ltrim,
+            _vector_ltrim,
             OrsoTypes.VARCHAR,
             (_s, ParameterSpec(name="chars", type_family="string", optional=True)),
+            engine="draken",
             null_policy="passthru",
             summary="Trim leading characters.",
         ),
         _make(
             "RTRIM",
-            string_functions.rtrim,
+            _vector_rtrim,
             OrsoTypes.VARCHAR,
             (_s, ParameterSpec(name="chars", type_family="string", optional=True)),
+            engine="draken",
             null_policy="passthru",
             summary="Trim trailing characters.",
         ),

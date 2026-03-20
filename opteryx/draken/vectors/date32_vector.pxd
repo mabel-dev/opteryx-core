@@ -2,7 +2,7 @@ from libc.stdint cimport int32_t
 from libc.stdint cimport int8_t
 from libc.stdint cimport uint64_t, uint8_t
 
-from opteryx.draken.core.buffers cimport DrakenFixedBuffer
+from opteryx.draken.core.buffers cimport ConstAccessor, DrakenFixedBuffer
 from opteryx.draken.vectors.vector cimport Vector
 from opteryx.draken.vectors.bool_vector cimport BoolVector
 
@@ -11,7 +11,12 @@ cdef class Date32Vector(Vector):
     cdef object _arrow_null_buf
     cdef DrakenFixedBuffer* ptr
     cdef bint owns_data
+    cdef ConstAccessor _const_accessor
+    cdef int32_t _const_value
+    cdef bint _has_const
+    cdef bint _const_is_null
 
+    cdef ConstAccessor* const_accessor(self) noexcept
     cdef void* dense_ptr(self) noexcept
     cdef uint8_t* null_bitmap_ptr(self) noexcept
 

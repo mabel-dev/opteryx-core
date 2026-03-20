@@ -43,7 +43,6 @@ from opteryx.draken.vectors.interval_vector cimport (
 )
 from opteryx.draken.vectors.array_vector cimport from_arrow as array_from_arrow
 from opteryx.draken.vectors.vector_vector cimport from_arrow as vector_from_arrow_vector
-from opteryx.draken.vectors.dictionary_vector cimport from_arrow as dictionary_from_arrow
 
 from opteryx.draken.vectors.arrow_vector import from_arrow as arrow_from_arrow
 from opteryx.draken.vectors.int64_vector cimport Int64Vector
@@ -52,7 +51,99 @@ from opteryx.draken.vectors.float64_vector cimport Float64Vector
 from opteryx.draken.vectors.float64_vector cimport from_sequence as float64_from_sequence
 from opteryx.draken.vectors.bool_vector cimport BoolVector
 from opteryx.draken.vectors.bool_vector cimport from_sequence as bool_from_sequence
-from opteryx.draken.vectors.constant_vector cimport from_sequence as constant_from_sequence
+from opteryx.draken.vectors.scalar_constructors cimport from_sequence as constant_from_sequence
+
+cdef object _typed_constant_from_arrow_value(object value_type, object value, Py_ssize_t length, bint is_null):
+    import pyarrow as pa
+    from opteryx.draken.vectors.bool_vector import BoolVector
+    from opteryx.draken.vectors.date32_vector import Date32Vector
+    from opteryx.draken.vectors.float64_vector import Float64Vector
+    from opteryx.draken.vectors.int64_vector import Int64Vector
+    from opteryx.draken.vectors.integer_vector import IntegerVector
+    from opteryx.draken.vectors.string_vector import StringVector
+    from opteryx.draken.vectors.time_vector import TimeVector
+    from opteryx.draken.vectors.timestamp_vector import TimestampVector
+
+    if pa.types.is_int64(value_type):
+        return Int64Vector.from_constant(value, length, is_null=is_null)
+    if pa.types.is_int8(value_type) or pa.types.is_int16(value_type) or pa.types.is_int32(value_type):
+        return IntegerVector.from_constant(value, length, is_null=is_null)
+    if pa.types.is_float32(value_type) or pa.types.is_float64(value_type):
+        return Float64Vector.from_constant(value, length, is_null=is_null)
+    if pa.types.is_boolean(value_type):
+        return BoolVector.from_constant(value, length, is_null=is_null)
+    if (
+        pa.types.is_string(value_type)
+        or pa.types.is_binary(value_type)
+        or pa.types.is_large_string(value_type)
+        or pa.types.is_large_binary(value_type)
+    ):
+        return StringVector.from_constant(value, length, is_null=is_null)
+    if pa.types.is_date32(value_type):
+        if is_null:
+            return Date32Vector.from_constant(None, length, is_null=True)
+        return Date32Vector.from_constant(
+            pa.array([value], type=value_type).cast(pa.int32())[0].as_py(),
+            length,
+        )
+    if pa.types.is_timestamp(value_type):
+        if is_null:
+            return TimestampVector.from_constant(None, length, is_null=True, timestamp_unit=value_type.unit)
+        return TimestampVector.from_constant(
+            pa.array([value], type=value_type).cast(pa.int64())[0].as_py(),
+            length,
+            timestamp_unit=value_type.unit,
+        )
+    if pa.types.is_time32(value_type):
+        if is_null:
+            return TimeVector.from_constant(None, length, is_null=True, is_time64=False)
+        return TimeVector.from_constant(
+            pa.array([value], type=value_type).cast(pa.int32())[0].as_py(),
+            length,
+            is_time64=False,
+        )
+    if pa.types.is_time64(value_type):
+        if is_null:
+            return TimeVector.from_constant(None, length, is_null=True, is_time64=True)
+        return TimeVector.from_constant(
+            pa.array([value], type=value_type).cast(pa.int64())[0].as_py(),
+            length,
+            is_time64=True,
+        )
+    return None
+
+
+cdef object _maybe_constant_from_dictionary_array(object array):
+    cdef Py_ssize_t length = len(array)
+    cdef Py_ssize_t dict_size = len(array.dictionary)
+    cdef object value_type = array.type.value_type
+
+    if length == 0:
+        return None
+    if array.null_count == length:
+        return _typed_constant_from_arrow_value(value_type, None, length, True)
+    if array.null_count != 0:
+        return None
+    if dict_size != 1:
+        return None
+    return _typed_constant_from_arrow_value(value_type, array.dictionary[0].as_py(), length, False)
+
+
+cdef object _maybe_constant_from_run_end_array(object array):
+    cdef Py_ssize_t length = len(array)
+    cdef object value_type = array.type.value_type
+
+    if length == 0:
+        return None
+    if len(array.values) != 1:
+        return None
+    if len(array.run_ends) != 1:
+        return None
+    if array.run_ends[0].as_py() != length:
+        return None
+    if not array.values[0].is_valid:
+        return _typed_constant_from_arrow_value(value_type, None, length, True)
+    return _typed_constant_from_arrow_value(value_type, array.values[0].as_py(), length, False)
 
 cdef void release_arrow_array(ArrowArray* arr) noexcept:
     free(<void*>arr.buffers)
@@ -105,6 +196,7 @@ cpdef object vector_from_arrow(object array):
     cdef object raw_lengths
     cdef object length_value
     cdef object fixed_array
+    cdef object const_vec = None
     cdef bint uniform_lengths
     cdef object dimension = None
     
@@ -124,10 +216,15 @@ cpdef object vector_from_arrow(object array):
 
     pa_type = array.type
     if pa.types.is_dictionary(pa_type):
-        try:
-            return dictionary_from_arrow(array)
-        except TypeError:
-            return arrow_from_arrow(array)
+        const_vec = _maybe_constant_from_dictionary_array(array)
+        if const_vec is not None:
+            return const_vec
+        return vector_from_arrow(array.dictionary_decode())
+    if pa.types.is_run_end_encoded(pa_type):
+        const_vec = _maybe_constant_from_run_end_array(array)
+        if const_vec is not None:
+            return const_vec
+        return vector_from_arrow(pa.array(array.to_pylist(), type=pa_type.value_type))
     if pa_type.equals(pa.int64()):
         return int64_from_arrow(array)
     if (

@@ -817,7 +817,6 @@ class Session(DataFrame):
         any other intermediate format) except when absolutely required.
         """
         from opteryx.draken.morsels.morsel import Morsel
-        from opteryx.draken.vectors.constant_vector import ConstantVector
 
         _DRAKEN_TO_ORSO = {
             1: OrsoTypes.INTEGER,  # INT8
@@ -839,11 +838,6 @@ class Session(DataFrame):
             columns = []
             for name, dtype in zip(morsel.column_names, morsel.column_types):
                 dtype_int = int(dtype)
-                if dtype_int == 62:  # DRAKEN_CONSTANT — resolve underlying type
-                    try:
-                        dtype_int = int(morsel.column(name).value_type)
-                    except Exception:
-                        dtype_int = 60  # fallback to STRING
                 orso_type = _DRAKEN_TO_ORSO.get(dtype_int, OrsoTypes.VARCHAR)
                 col_name = name.decode("utf-8") if isinstance(name, bytes) else name
                 columns.append(FlatColumn(name=col_name, type=orso_type))
