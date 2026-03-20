@@ -6,11 +6,11 @@ sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 
 
 ROOT = Path(__file__).resolve().parents[3]
-GROUP_STATE_STORE = ROOT / "opteryx/compiled/aggregations/group_state_store.pyx"
+CARCHAR_GROUP_STATE_ENGINE = ROOT / "opteryx/compiled/aggregations/carchar_group_state_engine.pyx"
 MORSEL_IO = ROOT / "third_party/mabel/draken/storage/morsel_io.pyx"
 
 MOTOR_PATH_FILES = (
-    GROUP_STATE_STORE,
+    CARCHAR_GROUP_STATE_ENGINE,
     MORSEL_IO,
 )
 
@@ -30,5 +30,5 @@ def test_constant_motor_paths_have_no_arrow_compute_dependency():
 
 
 def test_constant_groupby_motor_path_has_no_to_pylist_calls():
-    source = GROUP_STATE_STORE.read_text(encoding="utf-8")
+    source = CARCHAR_GROUP_STATE_ENGINE.read_text(encoding="utf-8")
     assert ".to_pylist(" not in source

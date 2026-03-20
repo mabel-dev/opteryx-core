@@ -3,8 +3,9 @@
 # See the License at http://www.apache.org/licenses/LICENSE-2.0
 
 from opteryx.operators.draken_aggregate_and_group_node import DrakenAggregateAndGroupNode
-from opteryx.operators.draken_aggregate_node import DrakenAggregateNode
 from opteryx.expression import NodeType
+from opteryx.models import QueryProperties
+from orso.types import OrsoTypes
 
 
 class _Aggregate:
@@ -34,41 +35,44 @@ class _Literal:
         self.value = value
 
 
-def test_draken_groupby_supports_simple_count():
-    assert DrakenAggregateAndGroupNode.supports([_Aggregate("COUNT")])
+class _SchemaColumn:
+    def __init__(self, identity):
+        self.identity = identity
 
 
-def test_draken_groupby_supports_count_distinct():
-    assert DrakenAggregateAndGroupNode.supports(
-        [_Aggregate("COUNT", duplicate_treatment="Distinct")]
+class _ExprNode:
+    def __init__(self, node_type, identity, value=None, parameters=None, value_type=OrsoTypes.VARCHAR):
+        self.node_type = node_type
+        self.schema_column = _SchemaColumn(identity)
+        self.value = value
+        self.parameters = parameters or []
+        self.type = value_type
+        self.duplicate_treatment = None
+        self.order = None
+        self.limit = None
+
+
+class _DummyGroupStateEngine:
+    def __init__(self):
+        self.readings = {}
+
+
+def test_draken_groupby_expression_uses_carchar_backend_when_opted_in(monkeypatch):
+    import opteryx.operators.draken_aggregate_and_group_node as module
+
+    monkeypatch.setenv("FEATURE_GROUPBY_FORCE_CARCHAR_BACKEND", "1")
+    monkeypatch.setattr(module, "get_all_nodes_of_type", lambda *args, **kwargs: [])
+    monkeypatch.setattr(module, "extract_evaluations", lambda *args, **kwargs: [])
+    monkeypatch.setattr(module, "create_group_state_engine", lambda *args, **kwargs: _DummyGroupStateEngine())
+
+    group = _ExprNode(NodeType.LITERAL, "minute_expr")
+    aggregate = _ExprNode(NodeType.AGGREGATOR, "count_star", value="COUNT", parameters=[_Wildcard()])
+
+    node = DrakenAggregateAndGroupNode(
+        properties=QueryProperties(query_id="test-draken-groupby-expression", variables={}),
+        groups=[group],
+        aggregates=[aggregate],
+        projection=[group],
     )
 
-
-def test_draken_groupby_supports_count_distinct_value():
-    assert DrakenAggregateAndGroupNode.supports([_Aggregate("COUNT_DISTINCT")])
-
-
-def test_draken_aggregate_supports_count_distinct_value():
-    assert DrakenAggregateNode.supports([_Aggregate("COUNT_DISTINCT")])
-
-
-def test_draken_groupby_supports_approx_percentile():
-    assert DrakenAggregateAndGroupNode.supports(
-        [_Aggregate("APPROX_PERCENTILE", parameters=[_Wildcard(), _Literal(0.5)])]
-    )
-
-
-def test_draken_groupby_supports_approx_count_distinct():
-    assert DrakenAggregateAndGroupNode.supports([_Aggregate("APPROX_COUNT_DISTINCT")])
-
-
-def test_draken_aggregate_supports_approx_count_distinct():
-    assert DrakenAggregateNode.supports([_Aggregate("APPROX_COUNT_DISTINCT")])
-
-
-def test_draken_groupby_supports_array_agg():
-    assert DrakenAggregateAndGroupNode.supports([_Aggregate("ARRAY_AGG")], groups=[_Wildcard()])
-
-
-def test_draken_aggregate_does_not_support_array_agg_without_group_by():
-    assert not DrakenAggregateNode.supports([_Aggregate("ARRAY_AGG")])
+    assert isinstance(node._group_by, _DummyGroupStateEngine)

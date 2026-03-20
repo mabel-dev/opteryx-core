@@ -7,7 +7,6 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-import opteryx.config as config
 import opteryx.rugo.parquet as rp
 
 DRAKEN_ENCODING_CONSTANT = 3
@@ -21,16 +20,6 @@ def _column_chunk(raw: bytes, col_stats: dict) -> bytes:
     else:
         base_offset = data_off
     return raw[base_offset : base_offset + col_stats["total_compressed_size"]]
-
-
-@pytest.fixture(autouse=True)
-def _native_dictionary_defaults():
-    prior_ratio = config.PARQUET_DICT_MAX_CARDINALITY_RATIO
-    config.PARQUET_DICT_MAX_CARDINALITY_RATIO = 0.5
-    try:
-        yield
-    finally:
-        config.PARQUET_DICT_MAX_CARDINALITY_RATIO = prior_ratio
 
 
 def test_decode_column_from_chunk_dictionary_only_returns_typed_string_vector():
@@ -86,7 +75,6 @@ def test_decode_column_from_chunk_mixed_pages_stays_typed_string_encoded():
         pytest.skip("writer did not emit mixed dictionary/plain pages on this platform")
 
     chunk = _column_chunk(raw, col_stats)
-    config.PARQUET_DICT_MAX_CARDINALITY_RATIO = 1.0
     decoded = rp.decode_column_from_chunk(chunk, col_stats)
 
     assert decoded is not None
@@ -172,7 +160,7 @@ def test_decode_column_from_chunk_single_entry_numeric_dictionary_becomes_consta
     assert decoded.to_pylist() == values
 
 
-def test_decode_column_from_chunk_cardinality_ratio_fallback_to_string_vector():
+def test_decode_column_from_chunk_dictionary_remains_typed_string_vector():
     values = [f"token-{i % 8}" for i in range(800)]
     table = pa.table({"category": pa.array(values, type=pa.string())})
 
@@ -191,14 +179,13 @@ def test_decode_column_from_chunk_cardinality_ratio_fallback_to_string_vector():
     chunk = _column_chunk(raw, col_stats)
 
     rp.reset_telemetry()
-    config.PARQUET_DICT_MAX_CARDINALITY_RATIO = 0.001
     decoded = rp.decode_column_from_chunk(chunk, col_stats)
     tel = rp.get_telemetry()
 
     assert decoded is not None
     assert decoded.__class__.__name__ == "StringVector"
     assert decoded.to_pylist() == [v.encode("utf8") for v in values]
-    assert tel["parquet_dict_materialize_fallbacks"] >= 1
+    assert tel["parquet_dict_materialize_fallbacks"] == 0
 
 
 def test_decode_column_from_chunk_null_heavy_dictionary_correctness():

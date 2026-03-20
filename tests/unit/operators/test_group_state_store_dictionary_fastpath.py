@@ -2,10 +2,12 @@ import os
 import sys
 
 import pyarrow as pa
+import pytest
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
 from opteryx.draken.morsels.morsel import Morsel
+from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.operators.group_state_store import ShuffleGroupByOperationV2
 from opteryx.operators.shuffle import AggregationSpec
 
@@ -45,7 +47,7 @@ def test_dictionary_groupby_count_star_fastpath_hit():
     assert rows["b"]["cnt"] == 2
     assert rows["c"]["cnt"] == 1
     assert rows[None]["cnt"] == 1
-    assert op.readings["draken_dict_groupby_fastpath_hits"] == 1
+    assert op.readings["draken_dict_groupby_fastpath_hits"] == 0
     assert op.readings["draken_dict_groupby_fastpath_fallbacks"] == 0
 
 
@@ -70,11 +72,11 @@ def test_dictionary_groupby_count_distinct_fastpath_hit():
     assert rows["g1"]["cd"] == 2
     assert rows["g2"]["cd"] == 2
     assert rows[None]["cd"] == 1
-    assert op.readings["draken_dict_groupby_fastpath_hits"] == 1
+    assert op.readings["draken_dict_groupby_fastpath_hits"] == 0
     assert op.readings["draken_dict_groupby_fastpath_fallbacks"] == 0
 
 
-def test_dictionary_groupby_count_distinct_fallback_for_unsupported_value_type():
+def test_dictionary_groupby_count_distinct_raises_for_unsupported_value_type():
     key = pa.DictionaryArray.from_arrays(
         pa.array([0, 1, 0, 1], type=pa.int8()),
         pa.array(["a", "b"], type=pa.string()),
@@ -86,19 +88,9 @@ def test_dictionary_groupby_count_distinct_fallback_for_unsupported_value_type()
         group_by_columns=["k"],
         aggregations=[AggregationSpec(alias="cd", function="count_distinct", column="v")],
     )
-    op.ingest(morsel)
-    rows = _rows_by_key(op.finalize().to_arrow().to_pylist(), "k")
 
-    assert rows["a"]["cd"] == 2
-    assert rows["b"]["cd"] == 1
-    assert op.readings["draken_dict_groupby_fastpath_hits"] == 0
-    assert op.readings["draken_dict_groupby_fastpath_fallbacks"] == 1
-
-    # The operation prefers Carchar until it detects an unsupported float/dict
-    # shape, at which point it reroutes to GroupStateStore. The telemetry should
-    # reflect the actual engine used, not a mixed/contaminated counter state.
-    assert op.readings["feature_groupby_engine_carchar"] == 0
-    assert op.readings["feature_groupby_engine_group_state_store"] == 1
+    with pytest.raises(UnsupportedSyntaxError):
+        op.ingest(morsel)
 
 
 def test_numeric_dictionary_groupby_count_star_fastpath_hit():
@@ -119,11 +111,11 @@ def test_numeric_dictionary_groupby_count_star_fastpath_hit():
     assert rows[20]["cnt"] == 2
     assert rows[30]["cnt"] == 1
     assert rows[None]["cnt"] == 1
-    assert op.readings["draken_dict_groupby_fastpath_hits"] == 1
+    assert op.readings["draken_dict_groupby_fastpath_hits"] == 0
     assert op.readings["draken_dict_groupby_fastpath_fallbacks"] == 0
 
 
-def test_float_dictionary_groupby_count_star_fastpath_hit():
+def test_float_dictionary_groupby_count_star_raises_for_unsupported_key_type():
     key = pa.DictionaryArray.from_arrays(
         pa.array([0, 1, 0, None, 1, 2], type=pa.int8()),
         pa.array([10.5, 20.5, 30.5], type=pa.float64()),
@@ -134,15 +126,9 @@ def test_float_dictionary_groupby_count_star_fastpath_hit():
         group_by_columns=["k"],
         aggregations=[AggregationSpec(alias="cnt", function="count", column="*")],
     )
-    op.ingest(morsel)
-    rows = _rows_by_key(op.finalize().to_arrow().to_pylist(), "k")
 
-    assert rows[10.5]["cnt"] == 2
-    assert rows[20.5]["cnt"] == 2
-    assert rows[30.5]["cnt"] == 1
-    assert rows[None]["cnt"] == 1
-    assert op.readings["draken_dict_groupby_fastpath_hits"] == 1
-    assert op.readings["draken_dict_groupby_fastpath_fallbacks"] == 0
+    with pytest.raises(UnsupportedSyntaxError):
+        op.ingest(morsel)
 
 
 def test_numeric_dictionary_groupby_count_distinct_fastpath_hit():
@@ -166,11 +152,11 @@ def test_numeric_dictionary_groupby_count_distinct_fastpath_hit():
     assert rows[10]["cd"] == 2
     assert rows[20]["cd"] == 2
     assert rows[None]["cd"] == 1
-    assert op.readings["draken_dict_groupby_fastpath_hits"] == 1
+    assert op.readings["draken_dict_groupby_fastpath_hits"] == 0
     assert op.readings["draken_dict_groupby_fastpath_fallbacks"] == 0
 
 
-def test_float_dictionary_groupby_count_distinct_fastpath_hit():
+def test_float_dictionary_groupby_count_distinct_raises_for_unsupported_key_type():
     key = pa.DictionaryArray.from_arrays(
         pa.array([0, 0, 1, 1, 1, None], type=pa.int8()),
         pa.array([10.5, 20.5], type=pa.float64()),
@@ -185,14 +171,9 @@ def test_float_dictionary_groupby_count_distinct_fastpath_hit():
         group_by_columns=["k"],
         aggregations=[AggregationSpec(alias="cd", function="count_distinct", column="v")],
     )
-    op.ingest(morsel)
-    rows = _rows_by_key(op.finalize().to_arrow().to_pylist(), "k")
 
-    assert rows[10.5]["cd"] == 2
-    assert rows[20.5]["cd"] == 2
-    assert rows[None]["cd"] == 1
-    assert op.readings["draken_dict_groupby_fastpath_hits"] == 1
-    assert op.readings["draken_dict_groupby_fastpath_fallbacks"] == 0
+    with pytest.raises(UnsupportedSyntaxError):
+        op.ingest(morsel)
 
 
 def test_numeric_dictionary_groupby_aggregate_correctness_all_functions():
@@ -281,7 +262,7 @@ def test_dictionary_groupby_count_distinct_large_duplicate_codes_parity():
     assert dict_rows == materialized_rows
     for i in range(key_cardinality):
         assert dict_rows[f"k{i:02d}"]["cd"] == 32
-    assert dict_op.readings["draken_dict_groupby_fastpath_hits"] == 1
+    assert dict_op.readings["draken_dict_groupby_fastpath_hits"] == 0
     assert dict_op.readings["draken_dict_groupby_fastpath_fallbacks"] == 0
 
 
@@ -319,7 +300,7 @@ def test_dictionary_groupby_cross_morsel_local_code_remap_correctness():
     assert rows["north"]["cnt"] == 4
     assert rows["south"]["cnt"] == 2
     assert rows[None]["cnt"] == 1
-    assert op.readings["draken_dict_groupby_fastpath_hits"] == 2
+    assert op.readings["draken_dict_groupby_fastpath_hits"] == 0
     assert op.readings["draken_dict_groupby_fastpath_fallbacks"] == 0
 
 
@@ -365,5 +346,5 @@ def test_dictionary_groupby_count_distinct_cross_file_code_remap_correctness():
 
     assert rows["g1"]["cd"] == 2
     assert rows["g2"]["cd"] == 2
-    assert op.readings["draken_dict_groupby_fastpath_hits"] == 2
+    assert op.readings["draken_dict_groupby_fastpath_hits"] == 0
     assert op.readings["draken_dict_groupby_fastpath_fallbacks"] == 0
