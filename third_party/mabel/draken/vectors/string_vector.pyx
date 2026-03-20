@@ -1525,7 +1525,7 @@ cdef class StringVector(Vector):
 
         if has_nulls and n > 0:
             nb_size = (n + 7) >> 3
-            dst_ptr.null_bitmap = <uint8_t*> PyMem_Malloc(nb_size)
+            dst_ptr.null_bitmap = <uint8_t*> malloc(nb_size)
             if dst_ptr.null_bitmap == NULL:
                 raise MemoryError()
             memset(dst_ptr.null_bitmap, 0xFF, nb_size)
@@ -1550,44 +1550,6 @@ cdef class StringVector(Vector):
                 )
                 if not src_bit:
                     dst_ptr.null_bitmap[i >> 3] &= ~(1 << (i & 7))
-
-        if self._dict_values != NULL and self._dict_codes != NULL:
-            dict_size = self._dict_values.length
-            if n > 0:
-                taken_codes = <int32_t*>malloc(n * sizeof(int32_t))
-                if taken_codes == NULL:
-                    raise MemoryError()
-            try:
-                for i in range(n):
-                    src_idx = indices[i]
-                    if has_nulls:
-                        src_bit = (
-                            (src_ptr.null_bitmap[src_idx >> 3] >> (src_idx & 7)) & 1
-                        )
-                        if not src_bit:
-                            taken_codes[i] = 0
-                            continue
-                    taken_codes[i] = <int32_t>_read_packed_code(self._dict_codes, self._dict_code_width, src_idx)
-
-                if n > 0:
-                    taken_codes_view = <int32_t[:n]>taken_codes
-                else:
-                    taken_codes_view = <int32_t[:0]>taken_codes
-                dictionary_offsets_view = <int32_t[:dict_size + 1]>self._dict_values.offsets
-                dictionary_lengths_view = <int32_t[:dict_size]>self._dict_values.offsets
-                dictionary_arena_view = <uint8_t[:self._dict_values.offsets[dict_size]]>self._dict_values.data
-                _attach_dictionary_storage_from_buffers(
-                    result,
-                    taken_codes_view,
-                    dictionary_offsets_view,
-                    dictionary_lengths_view,
-                    dictionary_arena_view,
-                    self._dict_ordered != 0,
-                    self._dict_values.null_bitmap,
-                )
-            finally:
-                if taken_codes != NULL:
-                    free(taken_codes)
 
         return result
 
@@ -2314,6 +2276,8 @@ cdef StringVector from_dict_buffers(
     cdef StringVectorBuilder builder
     cdef StringVector vec
 
+    if row_count == 0:
+        return StringVector(0, 0)
     if dict_size == 0:
         raise ValueError("StringVector.from_dict_buffers requires a non-empty dictionary")
     if dict_offsets.shape[0] != dict_size:
@@ -2385,6 +2349,8 @@ cdef StringVector from_packed_dict(
     cdef uint32_t code
     cdef Py_ssize_t arena_size
 
+    if row_count == 0:
+        return StringVector(0, 0)
     if dict_size == 0:
         raise ValueError("StringVector.from_packed_dict requires a non-empty dictionary")
     if code_width != 1 and code_width != 2 and code_width != 4:
@@ -2566,7 +2532,7 @@ cpdef StringVector uppercase(StringVector input):
     # Copy null bitmap if present
     if in_ptr.null_bitmap != NULL:
         nb_size = (n + 7) // 8
-        out_ptr.null_bitmap = <uint8_t*> PyMem_Malloc(nb_size)
+        out_ptr.null_bitmap = <uint8_t*> malloc(nb_size)
         if out_ptr.null_bitmap == NULL:
             raise MemoryError()
         memcpy(out_ptr.null_bitmap, in_ptr.null_bitmap, nb_size)
@@ -2603,7 +2569,7 @@ cpdef StringVector lowercase(StringVector input):
     # Copy null bitmap if present
     if in_ptr.null_bitmap != NULL:
         nb_size = (n + 7) // 8
-        out_ptr.null_bitmap = <uint8_t*> PyMem_Malloc(nb_size)
+        out_ptr.null_bitmap = <uint8_t*> malloc(nb_size)
         if out_ptr.null_bitmap == NULL:
             raise MemoryError()
         memcpy(out_ptr.null_bitmap, in_ptr.null_bitmap, nb_size)

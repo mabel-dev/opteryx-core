@@ -100,6 +100,7 @@ class HeapSortNode(BasePlanNode):
                     f"`ORDER BY` must reference columns from `SELECT`. {cnfe}"
                 ) from cnfe
         self.table = None
+        self._chunk_buffer = []
 
     @property
     def config(self):  # pragma: no cover
@@ -140,14 +141,23 @@ class HeapSortNode(BasePlanNode):
 
         _ = kwargs  # kwargs are part of the execution contract
         if morsel is EOS:
-            if self.table is None:
+            if self.table is None and not self._chunk_buffer:
                 yield EOS
                 return
 
-            if (self.limit is None or self.limit <= 0) and self.mapped_order:
+            if self.limit and self.limit > 0 and self.mapped_order:
+                if self._chunk_buffer:
+                    combined = pyarrow.concat_tables(
+                        [chunk.to_arrow() for chunk in self._chunk_buffer],
+                        promote_options="permissive",
+                    )
+                    combined = combined.combine_chunks()
+                    self.table = Morsel.from_arrow(combined)
+                    self.table = self._top_n(self.table)
+                elif self.table is not None:
+                    self.table = self._top_n(self.table)
+            elif (self.limit is None or self.limit <= 0) and self.mapped_order:
                 self.table = self._sort_morsel(self.table)
-            elif self.limit and self.limit > 0 and self.mapped_order:
-                self.table = self._top_n(self.table)
 
             yield self.table
             yield EOS
@@ -167,11 +177,8 @@ class HeapSortNode(BasePlanNode):
 
             if self.limit and self.limit > 0:
                 chunk = self._top_n(chunk)
-                if self.table is None:
-                    self.table = chunk
-                else:
-                    self.table.append(chunk)
-                    self.table = self._top_n(self.table)
+                if chunk.num_rows > 0:
+                    self._chunk_buffer.append(chunk)
             else:
                 if self.table is None:
                     self.table = chunk
@@ -206,7 +213,12 @@ class HeapSortNode(BasePlanNode):
             vectors = []
             for name in names:
                 vector = morsel.column(name)
-                if vector.__class__.__name__ in py_materialize_types:
+                use_python_materialization = (
+                    vector.__class__.__name__ in py_materialize_types
+                    or not hasattr(vector, "take")
+                    or getattr(vector, "dictionary_size", 0) > 0
+                )
+                if use_python_materialization:
                     values = vector.to_pylist()
                     vectors.append(
                         vector_from_sequence([values[row_index] for row_index in row_indices])
@@ -219,7 +231,12 @@ class HeapSortNode(BasePlanNode):
         vectors = []
         for name in names:
             vec = morsel.column(name)
-            if vec.__class__.__name__ in py_materialize_types:
+            use_python_materialization = (
+                vec.__class__.__name__ in py_materialize_types
+                or not hasattr(vec, "take")
+                or getattr(vec, "dictionary_size", 0) > 0
+            )
+            if use_python_materialization:
                 values = vec.to_pylist()
                 vectors.append(
                     vector_from_sequence([values[row_index] for row_index in row_indices])

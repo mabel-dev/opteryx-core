@@ -1492,11 +1492,28 @@ cdef class Morsel:
         etc.).
         """
         cdef int i, n_columns = self.ptr.num_columns
+        cdef object empty_indices
         cdef Vector src_vec
         cdef Vector dst_vec
 
+        try:
+            from array import array as pyarray
+
+            empty_indices = pyarray("i")
+        except Exception:
+            empty_indices = []
+
         for i in range(n_columns):
             src_vec = <Vector>self.ptr.columns[i]
+            try:
+                dst_vec = src_vec.take(empty_indices)
+                if dst_vec is not None:
+                    self._columns[i] = dst_vec
+                    self.ptr.columns[i] = <void*>dst_vec
+                    continue
+            except Exception:
+                pass
+
             dst_vec = self._empty_vector_like(i, src_vec)
 
             self._columns[i] = dst_vec
@@ -1509,10 +1526,10 @@ cdef class Morsel:
         """Create an empty vector that preserves the source vector's type."""
         cdef DrakenType expected = self.ptr.column_types[column_index]
         cdef Vector candidate
-        cdef object arrow_array
 
         # First try to instantiate the vector class directly. Prefer this
-        # path to avoid round-tripping through Arrow.
+        # path and fail fast if the concrete vector cannot build an empty
+        # instance without help.
         try:
             candidate = src_vec.__class__(<size_t>0)
             if candidate is not None and self._vector_dtype_matches(candidate, expected):
@@ -1520,20 +1537,17 @@ cdef class Morsel:
         except Exception:
             candidate = None
 
-        # Next, attempt to go through Arrow using the existing column data.
+        # Fall back to an empty Arrow round-trip. This preserves the source
+        # logical type for vectors that cannot be instantiated with a bare
+        # size argument, including Arrow-backed non-native vectors.
         try:
-            arrow_array = src_vec.to_arrow()
-            arrow_array = arrow_array.slice(0, 0)
-            return <Vector>Vector.from_arrow(arrow_array)
-        except Exception:
-            arrow_array = None
+            import pyarrow as pa
 
-        # Finally, synthesize an empty Arrow array from the stored type
-        # metadata. This handles vector implementations that cannot expose
-        # Arrow data (for example partially initialized ArrayVectors).
-        arrow_array = self._empty_arrow_array_for_type(expected, src_vec)
-        if arrow_array is not None:
-            return <Vector>Vector.from_arrow(arrow_array)
+            candidate = vector_from_arrow(pa.array([], type=src_vec.to_arrow().type))
+            if candidate is not None and self._vector_dtype_matches(candidate, expected):
+                return candidate
+        except Exception:
+            candidate = None
 
         cdef int expected_code = <int>expected
         raise RuntimeError(
@@ -1550,91 +1564,6 @@ cdef class Morsel:
             # If the vector does not expose dtype, accept it. Downstream
             # consumers (hashing/to_arrow) will validate behavior.
             return True
-
-    cdef object _empty_arrow_array_for_type(self, DrakenType dtype, Vector src_vec):
-        """Return a zero-length Arrow array for the requested Draken type."""
-        import pyarrow as pa
-        cdef object arrow_type = self._arrow_type_for_draken(dtype, src_vec)
-        if arrow_type is None:
-            return None
-        return pa.array([], type=arrow_type)
-
-    cdef object _arrow_type_for_draken(self, DrakenType dtype, Vector src_vec):
-        """Map Draken types to PyArrow DataTypes for empty vector creation."""
-        import pyarrow as pa
-        cdef DrakenType child_dtype_val
-        cdef int child_dtype_int
-        cdef object child_type
-        cdef object child_dtype_obj
-
-        if dtype == DRAKEN_INT8:
-            return pa.int8()
-        if dtype == DRAKEN_INT16:
-            return pa.int16()
-        if dtype == DRAKEN_INT32:
-            return pa.int32()
-        if dtype == DRAKEN_INT64:
-            return pa.int64()
-        if dtype == DRAKEN_FLOAT32:
-            return pa.float32()
-        if dtype == DRAKEN_FLOAT64:
-            return pa.float64()
-        if dtype == DRAKEN_DATE32:
-            return pa.date32()
-        if dtype == DRAKEN_TIMESTAMP64:
-            return pa.timestamp("us")
-        if dtype == DRAKEN_TIME32:
-            return pa.time32("s")
-        if dtype == DRAKEN_TIME64:
-            return pa.time64("us")
-        if dtype == DRAKEN_INTERVAL:
-            return pa.month_day_nano_interval()
-        if dtype == DRAKEN_BOOL:
-            return pa.bool_()
-        if dtype == DRAKEN_STRING:
-            return pa.binary()
-        if dtype == DRAKEN_DICTIONARY:
-            try:
-                arr = src_vec.to_arrow()
-                return arr.type
-            except Exception:
-                return pa.dictionary(pa.uint32(), pa.binary())
-        if dtype == DRAKEN_CONSTANT:
-            try:
-                arr = src_vec.to_arrow()
-                return arr.type
-            except Exception:
-                return None
-        if dtype == DRAKEN_ARRAY:
-            child_type = None
-            child_dtype_obj = None
-
-            try:
-                child_dtype_obj = getattr(src_vec, "child_dtype", None)
-            except Exception:
-                child_dtype_obj = None
-
-            if child_dtype_obj is not None:
-                try:
-                    child_dtype_int = int(child_dtype_obj)
-                    child_dtype_val = <DrakenType> child_dtype_int
-                    if child_dtype_val != DRAKEN_NON_NATIVE:
-                        child_type = self._arrow_type_for_draken(child_dtype_val, src_vec)
-                except Exception:
-                    child_type = None
-
-            if child_type is None:
-                child_type = pa.null()
-            return pa.list_(child_type)
-
-        if dtype == DRAKEN_NON_NATIVE:
-            try:
-                arr = src_vec.to_arrow()
-                return arr.type
-            except Exception:
-                return None
-
-        return None
 
     def select(self, columns) -> Morsel:
         """

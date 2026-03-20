@@ -1,3 +1,4 @@
+import datetime
 import os
 import sys
 from types import SimpleNamespace
@@ -11,10 +12,12 @@ import opteryx
 from orso.types import OrsoTypes
 
 from opteryx.draken.morsels.morsel import Morsel
+from opteryx.draken.vectors.arrow_vector import ArrowVector
 from opteryx.expression import NodeType
 from opteryx.expression import evaluate_and_append
 from opteryx.expression.evaluator import evaluate_and_append_draken
 from opteryx.expression.evaluator.draken import _eval_value
+from opteryx.expression.evaluator.draken import _is_null_as_boolvector
 from opteryx.expression.evaluator.draken import evaluate_draken
 from opteryx.models import Node
 
@@ -170,5 +173,46 @@ def test_grouped_clickbench_style_expressions_stay_native(sql, expected_rows):
         assert agg.get("feature_groupby_engine_group_state_store", 0) == 0
         assert agg.get("feature_groupby_draken_eval_arrow_fallback", 0) == 0
         assert agg.get("feature_groupby_draken_eval_native", 0) >= 1
+    finally:
+        session.close()
+
+
+def test_empty_morsel_preserves_non_native_columns():
+    map_type = pa.map_(pa.string(), pa.int64())
+    morsel = Morsel.from_vectors(
+        ["meta"],
+        [ArrowVector(pa.array([[("alpha", 1)]], type=map_type))],
+    )
+
+    morsel.empty()
+
+    assert morsel.num_rows == 0
+    assert morsel.column(b"meta").to_arrow().type == map_type
+
+
+def test_is_null_mask_returns_true_for_null_float_values():
+    session = opteryx.session()
+    try:
+        morsel = next(iter(session.execute_to_morsels("SELECT * FROM $planets")))
+        vec = morsel.column(b"surface_pressure")
+        mask = _is_null_as_boolvector(vec)
+
+        assert mask.to_pylist() == [False, False, False, False, True, True, True, True, False]
+        assert mask.null_count == 0
+        assert mask.any() == 1
+    finally:
+        session.close()
+
+
+def test_current_date_projection_materializes_as_date_values():
+    session = opteryx.session()
+    try:
+        result = session.execute_to_arrow("SELECT CURRENT_DATE() FROM $planets")
+
+        assert result.num_rows == 9
+        assert result.num_columns == 1
+        values = result.column(0).to_pylist()
+        assert all(isinstance(value, datetime.date) for value in values)
+        assert len({value for value in values}) == 1
     finally:
         session.close()

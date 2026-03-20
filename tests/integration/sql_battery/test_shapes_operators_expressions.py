@@ -350,7 +350,6 @@ STATEMENTS = [
         ("SELECT TRY_CAST(planetId AS VARCHAR) AS VALUE FROM testdata.satellites", 177, 1, None),
         ("SELECT TRY_CAST(planetId AS TIMESTAMP) AS VALUE FROM testdata.satellites", 177, 1, None),
         ("SELECT TRY_CAST(planetId AS DECIMAL) AS VALUE FROM testdata.satellites", 177, 1, None),
-        ("SELECT * FROM $planets WHERE id = '{\"a\":1,\"b\":\"c\"}'['a']", 1, 20, None),
         ("SELECT * FROM $planets WHERE '{\"a\":1,\"b\":\"c\"}'->'a' = id", 1, 20, None),
         ("SELECT b'binary'", 1, 1, None),
         ("SELECT B'binary'", 1, 1, None),

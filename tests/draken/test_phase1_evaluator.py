@@ -16,6 +16,7 @@ Covers:
 
 import os
 import sys
+import datetime
 
 import pyarrow as pa
 import pytest
@@ -68,6 +69,12 @@ def _identifier_node(col: FlatColumn):
 
 def _literal_node(value):
     return Node(NodeType.LITERAL, value=value)
+
+
+def _typed_literal_node(value, typ: OrsoTypes):
+    node = Node(NodeType.LITERAL, value=value, schema_column=FlatColumn(name=str(value), type=typ))
+    node.type = typ
+    return node
 
 
 def _comparison_node(op: str, left_node, right_node):
@@ -362,6 +369,30 @@ class TestEvaluateDrakenTreeWalker:
         vec = vector_from_arrow(pa.array(["foobar", "foo", "bar"], type=pa.string()))
         morsel = _morsel(col.identity, vec)
         tree = _comparison_node("Like", _identifier_node(col), _literal_node(b"foo%"))
+        result = evaluate_draken(tree, morsel)
+        assert bv_to_list(result) == [True, True, False]
+
+    def test_timestamp_int64_temporal_comparison(self):
+        col = FlatColumn(name="Lauched_at", type=OrsoTypes.TIMESTAMP, identity="launch")
+        vec = vector_from_sequence([-386310720000000, 4102444800000000])
+        morsel = _morsel(col.identity, vec)
+        tree = _comparison_node(
+            "Lt",
+            _identifier_node(col),
+            _typed_literal_node(datetime.datetime(2100, 1, 1), OrsoTypes.TIMESTAMP),
+        )
+        result = evaluate_draken(tree, morsel)
+        assert bv_to_list(result) == [True, False]
+
+    def test_date_int64_temporal_comparison(self):
+        col = FlatColumn(name="birth_date", type=OrsoTypes.DATE, identity="birth")
+        vec = vector_from_sequence([-10000, -9000, 47482])
+        morsel = _morsel(col.identity, vec)
+        tree = _comparison_node(
+            "Lt",
+            _identifier_node(col),
+            _typed_literal_node(datetime.date(1950, 1, 1), OrsoTypes.DATE),
+        )
         result = evaluate_draken(tree, morsel)
         assert bv_to_list(result) == [True, True, False]
 
