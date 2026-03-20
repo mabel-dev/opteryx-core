@@ -15,7 +15,7 @@ def _slice_between(text: str, start_marker: str, end_marker: str) -> str:
 
 
 def test_expression_dictionary_fastpath_section_has_no_arrow_numpy_materialization():
-    text = _read("opteryx/managers/expression/ops.py")
+    text = _read("opteryx/expression/ops.py")
     section = _slice_between(
         text,
         "def _dictionary_fastpath(arr, operator, value):",
@@ -35,13 +35,13 @@ def test_expression_dictionary_fastpath_section_has_no_arrow_numpy_materializati
 
 
 def test_expression_dictionary_fastpath_is_not_runtime_feature_gated_anymore():
-    text = _read("opteryx/managers/expression/ops.py")
+    text = _read("opteryx/expression/ops.py")
     assert "features.draken_dict_expr_fastpath" not in text
-    assert "dict_candidate = _has_dictionary_candidate(arr)" in text
+    assert "dict_candidate = _has_dictionary_candidate(raw_arr)" in text
 
 
 def test_groupby_dictionary_fastpath_is_not_runtime_feature_gated_anymore():
-    text = _read("opteryx/operators/group_state_store.py")
+    text = _read("opteryx/operators/draken_aggregate_and_group_node.py")
     assert "features.draken_dict_groupby_fastpath" not in text
     assert "enable_dict_fastpath" not in text
 
@@ -51,14 +51,14 @@ def test_parquet_dictionary_decode_is_not_runtime_feature_gated_anymore():
     section = _slice_between(
         text,
         "cdef inline bint _should_emit_dictionary_vector(",
-        "cdef Vector _make_dictionary_vector(",
+        "cdef inline bint _should_emit_constant_vector(",
     )
     assert "features.parquet_native_dictionary" not in section
 
 
 def test_groupby_dictionary_motor_files_have_no_arrow_numpy_or_pylist():
     paths = [
-        "opteryx/compiled/aggregations/group_state_store.pyx",
+        "opteryx/compiled/aggregations/carchar_group_state_engine.pyx",
         "opteryx/compiled/aggregations/group_by_draken.pyx",
         "opteryx/compiled/aggregations/group_by_draken_kernels/00_common.pyx",
         "opteryx/compiled/aggregations/group_by_draken_kernels/10_count_star_int64.pyx",
@@ -80,7 +80,7 @@ def test_legacy_dictionary_vector_source_is_removed():
 
 
 def test_expression_constant_fastpath_section_has_no_arrow_numpy_materialization():
-    text = _read("opteryx/managers/expression/ops.py")
+    text = _read("opteryx/expression/ops.py")
     section = _slice_between(
         text,
         "def _constant_fastpath(arr, operator, value):",
@@ -96,4 +96,3 @@ def test_expression_constant_fastpath_section_has_no_arrow_numpy_materialization
 
     for token in forbidden:
         assert token not in section, f"unexpected token in constant fastpath section: {token}"
-

@@ -16,10 +16,10 @@ from collections.abc import Iterable
 
 from opteryx import EOS
 from opteryx.draken.morsels.morsel import Morsel
+from opteryx.draken.encoding import DRAKEN_ENCODING_CONSTANT
 from opteryx.expression import NodeType
 from opteryx.expression import evaluate_and_append
 from opteryx.models import QueryProperties
-from opteryx.operators.group_state_store import DRAKEN_ENCODING_CONSTANT
 
 from . import BasePlanNode
 

@@ -112,6 +112,19 @@ def test_compiled_trim_kernels():
     assert _sv_to_list(vector_rtrim(data, " x")) == ["  hello", "xxE", None]
 
 
+def test_compiled_trim_from_literal():
+    from opteryx.draken.vectors.string_vector import StringVector
+    from opteryx.draken.vectors.scalar_constructors import from_scalar
+    import pyarrow as pa
+
+    arr = StringVector.from_arrow(pa.array(["xxxhelloxxx"]))
+    assert _sv_to_list(vector_trim(arr, "x")) == ["hello"]
+    assert _sv_to_list(vector_trim(arr, from_scalar("x", 1))) == ["hello"]
+    assert _sv_to_list(vector_trim(arr, StringVector.from_arrow(pa.array(["x"])))) == ["hello"]
+    assert _sv_to_list(vector_trim(arr, [b"x"])) == ["hello"]
+    assert _sv_to_list(vector_rtrim(arr, " x")) == ["xxxhello"]
+
+
 def test_re2_list_regex_replace_strings():
     """Test regex replace with string data (stored as bytes in Draken)"""
     data = Vector.from_arrow(pyarrow.array(["abc123", "xyz789", None]))

@@ -7,12 +7,11 @@
 Draken-native grouped aggregation node.
 
 This node keeps existing planner/expression behavior but executes the grouped
-aggregation kernel using the compiled Draken GroupStateStore backend.
+aggregation kernel using the compiled Draken backend.
 """
 
 from __future__ import annotations
 
-import os
 import time
 
 from orso.types import OrsoTypes
@@ -28,9 +27,6 @@ from opteryx.expression import get_all_nodes_of_type
 from opteryx.expression.evaluator import evaluate_and_append_draken
 from opteryx.models import QueryProperties
 from opteryx.operators.aggregate_helpers import extract_evaluations
-from opteryx.operators.group_state_store import create_group_state_engine
-from opteryx.operators.group_state_store import normalize_aggregations
-from opteryx.operators.group_state_store import normalize_group_by_columns
 from opteryx.operators.shuffle import AggregationSpec
 
 from . import BasePlanNode
@@ -41,11 +37,72 @@ _DATA_FORMAT = "draken"
 CHUNK_SIZE = 65536
 
 
+def _normalize_column_name(column: str | bytes) -> bytes:
+    if isinstance(column, bytes):
+        return column
+    return str(column).encode("utf-8")
+
+
+def _default_alias(column: str | bytes | None, function: str) -> str:
+    fn = function.lower()
+    if column is None:
+        return fn
+    column_name = column.decode("utf-8") if isinstance(column, bytes) else str(column)
+    return f"{column_name}_{fn}"
+
+
+def _is_constant_vector(vec: object) -> bool:
+    return getattr(vec, "encoding", None) == 3
+
+
+def _is_dictionary_vector(vec: object) -> bool:
+    return getattr(vec, "encoding", None) == 1
+
+
+def _is_dictionary_float_vector(vec: object) -> bool:
+    return _is_dictionary_vector(vec) and getattr(vec, "dictionary_value_type", None) in {20, 21}
+
+
+def normalize_group_by_columns(group_by_columns: list[str | bytes]) -> list[bytes]:
+    return [_normalize_column_name(column) for column in group_by_columns]
+
+
+def normalize_aggregations(aggregations: list[object]) -> list[tuple]:
+    return [DrakenAggregateAndGroupNode._normalize_aggregation(spec) for spec in aggregations]
+
+
+def create_group_state_engine(group_by_columns, aggregations):
+    from opteryx.compiled.aggregations.carchar_group_state_engine import CarcharGroupStateEngine
+
+    return CarcharGroupStateEngine(group_by_columns, aggregations)
+
+
+def _groupby_unsupported_reason(group_by_columns, aggregations, morsel) -> str | None:
+    if morsel is None or morsel.num_rows == 0:
+        return None
+
+    for group_column in group_by_columns:
+        group_vec = morsel.column(group_column)
+        if _is_constant_vector(group_vec):
+            return "constant-key"
+        if _is_dictionary_float_vector(group_vec):
+            return "dict-float-key"
+
+    for _, function, column, *_ in aggregations:
+        if function in ("count_distinct", "distinct") and column is not None:
+            value_vector = morsel.column(column)
+            if value_vector.__class__.__name__ == "Float64Vector":
+                return "count-distinct-dense-float-value"
+            if _is_dictionary_float_vector(value_vector):
+                return "count-distinct-dict-float-value"
+
+    return None
+
+
 class DrakenAggregateAndGroupNode(BasePlanNode):
     ENGINE_READING_KEYS = (
         "feature_groupby_engine_carchar",
         "feature_groupby_engine_constant",
-        "feature_groupby_engine_group_state_store",
         "feature_groupby_engine_multi_key_fixed",
         "feature_groupby_engine_multi_key_object",
         "draken_dict_groupby_fastpath_hits",
@@ -68,25 +125,6 @@ class DrakenAggregateAndGroupNode(BasePlanNode):
             "MAX",
             "AVG",
             "COUNT_DISTINCT",
-            "ANY_VALUE",
-        }
-    )
-    # MAX was previously omitted: the Draken kernel implemented it but
-    # the planner refused to use it in strict mode until we were confident
-    # the fast-finalize semantics were deterministic.  With the rewritten
-    # expression engine and proper handling of dictionary columns we can
-    # safely include it and avoid the Arrow fallback entirely.
-    FAST_PATH_AGGREGATES = frozenset(
-        {
-            "COUNT",
-            "SUM",
-            "AVG",
-            "MIN",
-            "MAX",
-            "COUNT_DISTINCT",
-            "APPROX_COUNT_DISTINCT",
-            "APPROX_PERCENTILE",
-            "ARRAY_AGG",
             "ANY_VALUE",
         }
     )
@@ -154,71 +192,10 @@ class DrakenAggregateAndGroupNode(BasePlanNode):
                     required_columns.append(identity)
         self._required_columns = list(dict.fromkeys(required_columns))
 
-        # OPTIMIZATION: Force CarcharGroupStateEngine (C++ backend) even when expressions
-        # are detected in GROUP BY.
-        #
-        # Rationale: Expressions are materialized to the morsel before GROUP BY via
-        # evaluate_and_append_draken(), making them equivalent to column references.
-        # Using CarcharGroupStateEngine (+17s speedup) vs GroupStateStore (Python backend)
-        # provides significant performance benefit for queries like:
-        #   SELECT ... GROUP BY UserID, EXTRACT(MINUTE FROM EventTime), ...
-        #
-        # Feature flag: FEATURE_GROUPBY_FORCE_CARCHAR_BACKEND (default: 0)
-        # See: CLICKBENCH_19_OPTIMIZATION_REPORT.md for performance analysis
-        force_carchar = os.environ.get("FEATURE_GROUPBY_FORCE_CARCHAR_BACKEND", "0") == "1"
-
-        if (
-            any(group.node_type != NodeType.IDENTIFIER for group in self.groups)
-            and not force_carchar
-        ):
-            from opteryx.compiled.aggregations.group_state_store import GroupStateStore
-
-            self._group_by = GroupStateStore(
-                self._normalized_group_by_columns,
-                self._normalized_aggregations,
-            )
-        else:
-            self._group_by = create_group_state_engine(
-                group_by_columns=self._normalized_group_by_columns,
-                aggregations=self._normalized_aggregations,
-            )
-
-    @staticmethod
-    def supports(aggregates, groups=None) -> bool:
-        groups = groups or []
-        requires_group_by = False
-
-        for aggregate in aggregates:
-            if aggregate.value not in DrakenAggregateAndGroupNode.SUPPORTED_AGGREGATES:
-                return False
-            if not aggregate.parameters:
-                return False
-            if aggregate.value == "ARRAY_AGG":
-                requires_group_by = True
-                if len(aggregate.parameters) != 1:
-                    return False
-            if aggregate.value == "APPROX_COUNT_DISTINCT" and len(aggregate.parameters) != 1:
-                return False
-            if aggregate.value == "APPROX_PERCENTILE":
-                if len(aggregate.parameters) != 2:
-                    return False
-                if aggregate.parameters[1].node_type != NodeType.LITERAL:
-                    return False
-
-            if aggregate.value not in DrakenAggregateAndGroupNode.FAST_PATH_AGGREGATES:
-                # MAX/ONE/ANY_VALUE kernels are not admitted in strict mode
-                # until their fast finalize semantics are fully deterministic.
-                return False
-
-        if requires_group_by and not groups:
-            return False
-
-        if not groups:
-            return True
-
-        # Allow expressions in GROUP BY - the execute() method already handles
-        # evaluation via evaluate_and_append(self.groups, arrow_table)
-        return True
+        self._group_by = create_group_state_engine(
+            group_by_columns=self._normalized_group_by_columns,
+            aggregations=self._normalized_aggregations,
+        )
 
     @property
     def config(self):  # pragma: no cover
@@ -349,49 +326,6 @@ class DrakenAggregateAndGroupNode(BasePlanNode):
 
         draken = self.ensure_draken_morsel(morsel)
 
-        def _decode_dict_value_columns(chunk):
-            """Decode dictionary-encoded value columns used in SUM/AVG/MIN/MAX to their
-            underlying numeric type so Carchar routes them correctly."""
-            import pyarrow as pa
-
-            from opteryx.draken.interop.arrow import vector_from_arrow
-            from opteryx.draken.morsels.morsel import Morsel
-
-            needs_rebuild = False
-            decoded_columns = {}
-            for spec in self._normalized_aggregations:
-                fn = spec[1] if len(spec) > 1 else None
-                if fn not in ("sum", "avg", "mean", "min", "max"):
-                    continue
-                col = spec[2] if len(spec) > 2 else None
-                if col is None:
-                    continue
-                col_key = col if isinstance(col, bytes) else col.encode()
-                if col_key in decoded_columns:
-                    continue
-                try:
-                    vec = chunk.column(col_key)
-                except KeyError:
-                    continue
-                if not hasattr(vec, "to_arrow"):
-                    continue
-                arrow_arr = vec.to_arrow()
-                if not pa.types.is_dictionary(arrow_arr.type):
-                    continue
-                decoded_columns[col_key] = vector_from_arrow(arrow_arr.dictionary_decode())
-                needs_rebuild = True
-            if not needs_rebuild:
-                return chunk
-            names = list(chunk.column_names)
-            vectors = []
-            for name in names:
-                key = name if isinstance(name, bytes) else name.encode()
-                if key in decoded_columns:
-                    vectors.append(decoded_columns[key])
-                else:
-                    vectors.append(chunk.column(key))
-            return Morsel.from_vectors(names, vectors)
-
         def _prepare_draken_chunk(chunk):
             if chunk == EOS:
                 return EOS
@@ -491,51 +425,25 @@ class DrakenAggregateAndGroupNode(BasePlanNode):
             return
 
         ingest_start = time.monotonic_ns()
-        if isinstance(draken, Morsel):
-            pre_engine_snapshot = self._engine_reading_snapshot()
-            if self._needs_arrow_eval:
-                draken = _prepare_draken_chunk(draken)
-            if self._required_columns:
-                draken = draken.select(self._required_columns)
-            try:
-                self._group_by.ingest(draken)
-            except UnsupportedSyntaxError:
-                # If the compiled Carchar engine fails at runtime (e.g., due to
-                # unsupported string-key shapes), reroute to the more general
-                # GroupStateStore implementation.
-                from opteryx.compiled.aggregations.group_state_store import GroupStateStore
-
-                self._group_by = GroupStateStore(
-                    self._normalized_group_by_columns,
-                    self._normalized_aggregations,
-                )
-                self._group_by.ingest(draken)
-
-            self._accumulate_engine_reading_delta(pre_engine_snapshot)
-            self.readings["time_groupby_ingest"] += time.monotonic_ns() - ingest_start
-            yield EMPTY
-            return
-
         pre_engine_snapshot = self._engine_reading_snapshot()
-        for chunk in draken:
-            if chunk is None or chunk is EOS or chunk.num_rows == 0:
-                continue
-            if self._needs_arrow_eval:
-                chunk = _prepare_draken_chunk(chunk)
-            if self._required_columns:
-                chunk = chunk.select(self._required_columns)
-            try:
-                self._group_by.ingest(chunk)
-            except UnsupportedSyntaxError:
-                from opteryx.compiled.aggregations.group_state_store import GroupStateStore
+        if self._needs_arrow_eval:
+            draken = _prepare_draken_chunk(draken)
+        if self._required_columns:
+            draken = draken.select(self._required_columns)
 
-                self._group_by = GroupStateStore(
-                    self._normalized_group_by_columns,
-                    self._normalized_aggregations,
-                )
-                self._group_by.ingest(chunk)
+        unsupported_reason = _groupby_unsupported_reason(
+            self._normalized_group_by_columns,
+            self._normalized_aggregations,
+            draken,
+        )
+        if unsupported_reason is not None:
+            raise UnsupportedSyntaxError(
+                f"Draken group-by does not support {unsupported_reason}."
+            )
+
+        self._group_by.ingest(draken)
 
         self._accumulate_engine_reading_delta(pre_engine_snapshot)
         self.readings["time_groupby_ingest"] += time.monotonic_ns() - ingest_start
-
         yield EMPTY
+        return

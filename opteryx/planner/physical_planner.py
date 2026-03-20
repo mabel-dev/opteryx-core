@@ -31,35 +31,23 @@ def create_physical_plan(logical_plan, query_properties) -> PhysicalPlan:
 
         # fmt: off
         if node_type == LogicalPlanStepType.Aggregate:
-            if operators.DrakenAggregateNode.supports(node_config["aggregates"]):
-                node = operators.DrakenAggregateNode(
-                    query_properties,
-                    **{
-                        k: v
-                        for k, v in node_config.items()
-                        if k in ("aggregates", "all_relations")
-                    },
-                )
-            else:
-                raise UnsupportedSyntaxError(
-                    "Draken aggregator does not support this query shape"
-                )
+            node = operators.DrakenAggregateNode(
+                query_properties,
+                **{
+                    k: v
+                    for k, v in node_config.items()
+                    if k in ("aggregates", "all_relations")
+                },
+            )
         elif node_type == LogicalPlanStepType.AggregateAndGroup:
-            if operators.DrakenAggregateAndGroupNode.supports(
-                node_config["aggregates"], node_config.get("groups")
-            ):
-                node = operators.DrakenAggregateAndGroupNode(
-                    query_properties,
-                    **{
-                        k: v
-                        for k, v in node_config.items()
-                        if k in ("aggregates", "groups", "projection", "all_relations")
-                    },
-                )
-            else:
-                raise UnsupportedSyntaxError(
-                    "Draken aggregator does not support this query shape"
-                )
+            node = operators.DrakenAggregateAndGroupNode(
+                query_properties,
+                **{
+                    k: v
+                    for k, v in node_config.items()
+                    if k in ("aggregates", "groups", "projection", "all_relations")
+                },
+            )
         elif node_type == LogicalPlanStepType.Distinct:
             node = operators.DistinctNode(query_properties, **node_config)
         elif node_type == LogicalPlanStepType.Exit:

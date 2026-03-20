@@ -31,7 +31,6 @@ from opteryx.nanobind.carchar_native import CarcharSet
 from opteryx.operators.aggregate_helpers import extract_evaluations
 
 from . import BasePlanNode
-from .draken_aggregate_and_group_node import DrakenAggregateAndGroupNode
 
 _DATA_FORMAT = "draken"
 _DRAKEN_ENCODING_CONSTANT = 3
@@ -319,10 +318,6 @@ class DrakenAggregateNode(BasePlanNode):
         ]
         self.all_identifiers = list(dict.fromkeys(all_identifiers))
         self.collectors = [_DrakenAggregateCollector(aggregate) for aggregate in self.aggregates]
-
-    @staticmethod
-    def supports(aggregates, groups=None) -> bool:
-        return DrakenAggregateAndGroupNode.supports(aggregates, groups=groups or [])
 
     @property
     def config(self):  # pragma: no cover

@@ -471,7 +471,7 @@ cdef class CarcharGroupStateEngine:
 
     cdef void _init_legacy_backend(self):
         raise UnsupportedSyntaxError(
-            "Carchar group-state engine does not support runtime fallback; choose GroupStateStore explicitly in planning."
+            "Carchar group-state engine does not support this query shape."
         )
 
     cdef inline bint _has_multi_agg(self) noexcept:

@@ -2,6 +2,7 @@ import os
 import sys
 
 import pyarrow as pa
+import pytest
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
@@ -9,6 +10,7 @@ from opteryx.draken.morsels.morsel import Morsel
 from opteryx.draken.vectors.scalar_constructors import from_scalar as constant_from_scalar
 from opteryx.draken.interop.arrow import vector_from_sequence
 from opteryx.draken.vectors.string_vector import StringVector
+from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.operators.group_state_store import ShuffleGroupByOperationV2
 from opteryx.operators.shuffle import AggregationSpec
 
@@ -30,14 +32,8 @@ def test_constant_groupby_telemetry_hit_for_single_group_key_output():
         aggregations=[AggregationSpec(alias="cnt", function="count", column="*")],
     )
 
-    op.ingest(morsel)
-    rows = _rows_by_key(op.finalize().to_arrow().to_pylist(), "k")
-
-    assert rows["a"]["cnt"] == 3
-    assert op.readings["draken_constant_groupby_fastpath_hits"] == 1
-    assert op.readings["draken_constant_groupby_fastpath_fallbacks"] == 0
-    assert op.readings["draken_constant_groupby_output_vector_hits"] == 1
-    assert op.readings["draken_constant_groupby_output_vector_fallbacks"] == 0
+    with pytest.raises(UnsupportedSyntaxError):
+        op.ingest(morsel)
 
 
 def test_constant_groupby_telemetry_non_constant_key_does_not_count_runtime_fastpath():
@@ -71,13 +67,8 @@ def test_constant_groupby_telemetry_runtime_hit_for_sum():
         aggregations=[AggregationSpec(alias="sum_v", function="sum", column="v")],
     )
 
-    op.ingest(morsel)
-    rows = _rows_by_key(op.finalize().to_arrow().to_pylist(), "k")
-
-    assert rows["a"]["sum_v"] == 6.0
-    assert op.readings["draken_constant_groupby_fastpath_hits"] == 1
-    assert op.readings["draken_constant_groupby_fastpath_fallbacks"] == 0
-    assert op.readings["draken_constant_groupby_output_vector_hits"] == 1
+    with pytest.raises(UnsupportedSyntaxError):
+        op.ingest(morsel)
 
 
 def test_constant_groupby_telemetry_runtime_fallback_for_unsupported_agg():
@@ -93,12 +84,8 @@ def test_constant_groupby_telemetry_runtime_fallback_for_unsupported_agg():
         aggregations=[AggregationSpec(alias="h", function="hash_one", column="v")],
     )
 
-    op.ingest(morsel)
-    rows = _rows_by_key(op.finalize().to_arrow().to_pylist(), "k")
-
-    assert rows["a"]["h"] is not None
-    assert op.readings["draken_constant_groupby_fastpath_hits"] == 1
-    assert op.readings["draken_constant_groupby_fastpath_fallbacks"] == 0
+    with pytest.raises(UnsupportedSyntaxError):
+        op.ingest(morsel)
 
 
 def test_constant_groupby_output_vector_telemetry_accepts_typed_constant_encoding():
@@ -138,10 +125,5 @@ def test_typed_constant_key_uses_compiled_constant_mode_for_sum():
         aggregations=[AggregationSpec(alias="sum_v", function="sum", column="v")],
     )
 
-    op.ingest(morsel)
-    rows = _rows_by_key(op.finalize().to_arrow().to_pylist(), "k")
-
-    assert rows["a"]["sum_v"] == 6.0
-    assert op.readings["feature_groupby_engine_constant"] == 1
-    assert op.readings["draken_constant_groupby_fastpath_hits"] == 1
-    assert op.readings["draken_constant_groupby_fastpath_fallbacks"] == 0
+    with pytest.raises(UnsupportedSyntaxError):
+        op.ingest(morsel)

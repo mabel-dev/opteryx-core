@@ -1,10 +1,9 @@
 """
 Phase 1 dictionary decode benchmark harness.
 
-Measures decode throughput, peak RSS, and output-memory footprint for parquet string columns under:
-1. Native dictionary decode with default ratio threshold.
-2. Native dictionary decode with permissive ratio threshold.
-3. Native dictionary decode with aggressive ratio threshold (forced fallback).
+Measures decode throughput, peak RSS, and output-memory footprint for parquet string columns.
+The dictionary path is always enabled now, so this benchmark compares datasets with different
+cardinality rather than toggling a decode policy.
 
 Run with:
     python tests/performance/benchmarks/bench_dictionary_phase1_decode.py
@@ -25,7 +24,6 @@ import pyarrow.parquet as pq
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
-import opteryx.config as config
 import opteryx.rugo.parquet as rp
 
 
@@ -83,13 +81,8 @@ def _measure(raw: bytes, repeat: int = 6):
     return statistics.mean(samples), rows, storage_bytes, vector_types
 
 
-def _run_case(raw: bytes, *, ratio: float):
-    prior_ratio = config.PARQUET_DICT_MAX_CARDINALITY_RATIO
-    try:
-        config.PARQUET_DICT_MAX_CARDINALITY_RATIO = ratio
-        return _measure(raw)
-    finally:
-        config.PARQUET_DICT_MAX_CARDINALITY_RATIO = prior_ratio
+def _run_case(raw: bytes):
+    return _measure(raw)
 
 
 def _peak_rss_bytes() -> int:
@@ -100,15 +93,13 @@ def _peak_rss_bytes() -> int:
     return rss * 1024
 
 
-def _run_case_subprocess(raw_path: str, *, ratio: float) -> dict:
+def _run_case_subprocess(raw_path: str) -> dict:
     cmd = [
         sys.executable,
         __file__,
         "--run-case",
         "--raw-path",
         raw_path,
-        "--ratio",
-        str(ratio),
     ]
     result = subprocess.run(cmd, check=True, capture_output=True, text=True)
     lines = [line for line in result.stdout.splitlines() if line.strip()]
@@ -117,10 +108,10 @@ def _run_case_subprocess(raw_path: str, *, ratio: float) -> dict:
     return json.loads(lines[-1])
 
 
-def _run_case_cli(raw_path: str, *, ratio: float):
+def _run_case_cli(raw_path: str):
     with open(raw_path, "rb") as f:
         raw = f.read()
-    decode_ms, out_rows, storage_bytes, vector_types = _run_case(raw, ratio=ratio)
+    decode_ms, out_rows, storage_bytes, vector_types = _run_case(raw)
     print(
         json.dumps(
             {
@@ -156,18 +147,12 @@ def benchmark_phase1_decode(rows: int = 400_000):
 
         for label, _ in datasets:
             print(f"\n[{label}]")
-            scenarios = [
-                ("ratio=0.5 (default)", 0.5),
-                ("ratio=1.0 (permissive)", 1.0),
-                ("ratio=0.001 (fallback)", 0.001),
-            ]
-            for name, ratio in scenarios:
-                payload = _run_case_subprocess(dataset_paths[label], ratio=ratio)
-                print(
-                    f"{name:<24}  {payload['rows']:10d}  {payload['decode_ms']:12.2f}"
-                    f"  {payload['peak_rss_bytes'] / (1024 * 1024):13.2f}  {payload['storage_bytes'] / (1024 * 1024):12.2f}"
-                    f"  {payload['vector_types']:<20}"
-                )
+            payload = _run_case_subprocess(dataset_paths[label])
+            print(
+                f"{'native-dictionary':<24}  {payload['rows']:10d}  {payload['decode_ms']:12.2f}"
+                f"  {payload['peak_rss_bytes'] / (1024 * 1024):13.2f}  {payload['storage_bytes'] / (1024 * 1024):12.2f}"
+                f"  {payload['vector_types']:<20}"
+            )
 
 
 if __name__ == "__main__":
@@ -175,15 +160,11 @@ if __name__ == "__main__":
     parser.add_argument("--run-case", action="store_true")
     parser.add_argument("--rows", type=int, default=400_000)
     parser.add_argument("--raw-path", type=str, default="")
-    parser.add_argument("--ratio", type=float, default=0.5)
     args = parser.parse_args()
 
     if args.run_case:
         if not args.raw_path:
             raise ValueError("--raw-path is required with --run-case")
-        _run_case_cli(
-            args.raw_path,
-            ratio=args.ratio,
-        )
+        _run_case_cli(args.raw_path)
     else:
         benchmark_phase1_decode(rows=args.rows)

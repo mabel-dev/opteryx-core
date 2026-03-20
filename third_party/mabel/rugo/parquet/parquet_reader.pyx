@@ -876,18 +876,6 @@ cdef inline Py_ssize_t _decoded_dict_size(parquet_reader.DecodedColumn& decoded_
     return 0
 
 
-cdef inline double _dictionary_ratio_limit():
-    cdef double ratio_limit = 0.5
-    cdef object ratio_obj = _opteryx_config.PARQUET_DICT_MAX_CARDINALITY_RATIO
-    try:
-        ratio_limit = float(ratio_obj)
-    except Exception:
-        ratio_limit = 0.5
-    if ratio_limit < 0.0:
-        return 0.0
-    return ratio_limit
-
-
 cdef inline bint _decoded_all_valid(
         parquet_reader.DecodedColumn& decoded_col,
         int32_t num_rows):
@@ -925,13 +913,6 @@ cdef inline bint _should_emit_dictionary_vector(
     dict_size = _decoded_dict_size(decoded_col)
     if dict_size <= 0:
         return False
-
-    # Cardinality fallback is only applied for string dictionaries.
-    if decoded_col.type == b"byte_array":
-        if num_rows <= 0:
-            return False
-        if (<double>dict_size / <double>num_rows) > _dictionary_ratio_limit():
-            return False
     return True
 
 
