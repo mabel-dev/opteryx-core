@@ -727,6 +727,14 @@ extensions = [
         extra_compile_args=CPP_FLAGS,
     ),
     Extension(
+        "opteryx.compiled.morsel_ops.sort",
+        sources=["opteryx/compiled/morsel_ops/sort.pyx"],
+        include_dirs=include_dirs,
+        language="c++",
+        extra_compile_args=CPP_FLAGS,
+        depends=["third_party/mabel/draken/core/buffers.h"],
+    ),
+    Extension(
         "opteryx.compiled.table_ops.distinct",
         sources=["opteryx/compiled/table_ops/distinct.pyx", "src/cpp/intbuffer.cpp"],
         include_dirs=include_dirs,
