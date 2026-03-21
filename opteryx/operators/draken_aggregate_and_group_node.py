@@ -221,7 +221,9 @@ class DrakenAggregateAndGroupNode(BasePlanNode):
     @staticmethod
     def _extract_percentile_option(aggregator) -> float:
         if len(aggregator.parameters) != 2:
-            raise InvalidFunctionParameterError("APPROX_PERCENTILE requires two arguments, the column and the percentile")
+            raise InvalidFunctionParameterError(
+                "APPROX_PERCENTILE requires two arguments, the column and the percentile"
+            )
         percentile_node = aggregator.parameters[1]
         if percentile_node.node_type != NodeType.LITERAL:
             raise InvalidFunctionParameterError(
@@ -310,12 +312,8 @@ class DrakenAggregateAndGroupNode(BasePlanNode):
         pre_engine_snapshot = self._engine_reading_snapshot()
         readings = getattr(self._groupby_engine, "readings", None) or {}
         pre_backend_ns = readings.get("time_groupby_finalize_backend_ns", 0)
-        pre_rows_to_vectors_ns = readings.get(
-            "time_groupby_finalize_rows_to_vectors_ns", 0
-        )
-        pre_morsel_build_ns = readings.get(
-            "time_groupby_finalize_morsel_build_ns", 0
-        )
+        pre_rows_to_vectors_ns = readings.get("time_groupby_finalize_rows_to_vectors_ns", 0)
+        pre_morsel_build_ns = readings.get("time_groupby_finalize_morsel_build_ns", 0)
         pre_rows_count = readings.get("groupby_finalize_rows_count", 0)
         pre_chunks_emitted = readings.get("groupby_finalize_chunks_emitted", 0)
         pre_fast_path_hits = readings.get("groupby_finalize_fast_path_hits", 0)
@@ -333,16 +331,12 @@ class DrakenAggregateAndGroupNode(BasePlanNode):
         self.readings["time_groupby_finalize"] += finalize_total_ns
         self.readings["groupby_output_morsels"] += emitted
 
-        backend_delta_ns = (
-            readings.get("time_groupby_finalize_backend_ns", 0) - pre_backend_ns
-        )
+        backend_delta_ns = readings.get("time_groupby_finalize_backend_ns", 0) - pre_backend_ns
         rows_to_vectors_delta_ns = (
-            readings.get("time_groupby_finalize_rows_to_vectors_ns", 0)
-            - pre_rows_to_vectors_ns
+            readings.get("time_groupby_finalize_rows_to_vectors_ns", 0) - pre_rows_to_vectors_ns
         )
         morsel_build_delta_ns = (
-            readings.get("time_groupby_finalize_morsel_build_ns", 0)
-            - pre_morsel_build_ns
+            readings.get("time_groupby_finalize_morsel_build_ns", 0) - pre_morsel_build_ns
         )
         self.readings["time_groupby_finalize_backend"] += backend_delta_ns
         self.readings["time_groupby_finalize_rows_to_vectors"] += rows_to_vectors_delta_ns
