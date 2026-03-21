@@ -3,7 +3,7 @@ import sys
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
-from opteryx.compiled.aggregations.carchar_group_state_engine import CarcharGroupStateEngine
+from opteryx.compiled.aggregations.group_by_engine import CarcharGroupStateEngine
 from opteryx.draken.morsels.morsel import Morsel
 from opteryx.draken.vectors.int64_vector import Int64Vector
 
@@ -47,8 +47,8 @@ def test_carchar_engine_uses_typed_constant_value_for_sum_in_constant_mode():
     assert engine.readings["feature_groupby_engine_constant"] == 1
 
 
-def test_carchar_engine_handles_typed_all_null_constant_value_for_hash_one():
-    engine = CarcharGroupStateEngine([b"k"], [("h", "hash_one", b"v")])
+def test_carchar_engine_handles_typed_all_null_constant_value_for_any_value():
+    engine = CarcharGroupStateEngine([b"k"], [("h", "any_value", b"v")])
     morsel = Morsel.from_vectors(
         ["k", "v"],
         [

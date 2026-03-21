@@ -28,7 +28,7 @@ _SUPPORTED_FUNCTIONS = frozenset(
         "approx_percentile",
         "array_agg",
         "distinct",
-        "hash_one",
+        "any_value",
     }
 )
 
@@ -131,7 +131,7 @@ class ShuffleGroupByOperation:
             return ApproximatePercentileState(0.5 if options is None else float(options))
         if function == "array_agg":
             return ArrayAggState(options)
-        if function == "hash_one":
+        if function == "any_value":
             return _UNSET
         raise ValueError(f"unsupported aggregation function '{function}'")
 
@@ -178,7 +178,7 @@ class ShuffleGroupByOperation:
         if function == "array_agg":
             state.add_value(value)
             return state
-        if function == "hash_one":
+        if function == "any_value":
             if state is _UNSET and value is not None:
                 return value
             return state
@@ -199,7 +199,7 @@ class ShuffleGroupByOperation:
             return state.quantile()
         if function == "array_agg":
             return state.finalize()
-        if function == "hash_one":
+        if function == "any_value":
             return None if state is _UNSET else state
         raise ValueError(f"unsupported aggregation function '{function}'")
 

@@ -101,7 +101,7 @@ def _reference_group_by(
                     key_state[alias] = [0, 0]
                 elif function in ("count_distinct", "distinct"):
                     key_state[alias] = set()
-                elif function == "hash_one":
+                elif function == "any_value":
                     key_state[alias] = _UNSET
                 else:  # pragma: no cover
                     raise ValueError(f"unsupported function in reference path: {function}")
@@ -136,7 +136,7 @@ def _reference_group_by(
                 if value is None:
                     continue
                 key_state[alias].add(value)
-            elif function == "hash_one" and key_state[alias] is _UNSET and value is not None:
+            elif function == "any_value" and key_state[alias] is _UNSET and value is not None:
                 key_state[alias] = value
 
     if not states:
@@ -151,7 +151,7 @@ def _reference_group_by(
                 states[empty_key][alias] = [0, 0]
             elif function in ("count_distinct", "distinct"):
                 states[empty_key][alias] = set()
-            elif function == "hash_one":
+            elif function == "any_value":
                 states[empty_key][alias] = _UNSET
 
     result = {}
@@ -163,7 +163,7 @@ def _reference_group_by(
                 row[alias] = None if state[1] == 0 else state[0] / state[1]
             elif function in ("count_distinct", "distinct"):
                 row[alias] = len(state)
-            elif function == "hash_one":
+            elif function == "any_value":
                 row[alias] = None if state is _UNSET else state
             else:
                 row[alias] = state
@@ -250,7 +250,7 @@ def test_phase1_golden_multi_key_multi_aggregate():
         AggregationSpec(alias="max_v", function="max", column="v"),
         AggregationSpec(alias="avg_v", function="avg", column="v"),
         AggregationSpec(alias="distinct_t", function="count_distinct", column="t"),
-        AggregationSpec(alias="one_t", function="hash_one", column="t"),
+        AggregationSpec(alias="one_t", function="any_value", column="t"),
     ]
     _assert_group_by_matches_reference(
         rows,
@@ -345,7 +345,7 @@ def test_phase1_global_aggregate_non_empty_and_empty():
         AggregationSpec(alias="sum_v", function="sum", column="v"),
         AggregationSpec(alias="avg_v", function="mean", column="v"),
         AggregationSpec(alias="distinct_t", function="distinct", column="t"),
-        AggregationSpec(alias="one_t", function="hash_one", column="t"),
+        AggregationSpec(alias="one_t", function="any_value", column="t"),
     ]
     _assert_group_by_matches_reference(
         non_empty_rows,
@@ -379,7 +379,7 @@ def test_phase1_randomized_chunking_invariance():
         AggregationSpec(alias="min_v", function="min", column="v"),
         AggregationSpec(alias="max_v", function="max", column="v"),
         AggregationSpec(alias="distinct_t", function="count_distinct", column="t"),
-        AggregationSpec(alias="one_t", function="hash_one", column="t"),
+        AggregationSpec(alias="one_t", function="any_value", column="t"),
     ]
 
     _assert_group_by_matches_reference(

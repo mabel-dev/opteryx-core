@@ -1625,6 +1625,108 @@ cdef class Morsel:
         self._encoded_names = new_encoded_names
         self._rebuild_name_to_index()
 
+    cpdef void append_vector(self, object name, Vector vector):
+        """Append a single vector as a new column in-place."""
+        cdef Py_ssize_t i
+        cdef Py_ssize_t n_columns
+        cdef Py_ssize_t vector_length
+        cdef bytes encoded_name
+        cdef void** new_columns = NULL
+        cdef const char** new_column_names = NULL
+        cdef DrakenType* new_column_types = NULL
+        cdef list new_column_list
+        cdef list new_encoded_names
+        cdef Vector existing_vec
+
+        if isinstance(name, str):
+            encoded_name = name.encode("utf-8")
+        elif isinstance(name, bytes):
+            encoded_name = <bytes>name
+        else:
+            raise TypeError("column name must be str or bytes")
+
+        vector_length = len(vector)
+
+        if self.ptr is NULL:
+            self.ptr = <DrakenMorsel*> PyMem_Malloc(sizeof(DrakenMorsel))
+            if self.ptr == NULL:
+                raise MemoryError()
+
+            self.ptr.num_columns = 1
+            self.ptr.num_rows = vector_length
+            self.ptr.columns = <void**> PyMem_Malloc(sizeof(void*))
+            self.ptr.column_names = <const char**> PyMem_Malloc(sizeof(const char*))
+            self.ptr.column_types = <DrakenType*> PyMem_Malloc(sizeof(DrakenType))
+            if (
+                self.ptr.columns == NULL
+                or self.ptr.column_names == NULL
+                or self.ptr.column_types == NULL
+            ):
+                if self.ptr.columns != NULL:
+                    PyMem_Free(self.ptr.columns)
+                if self.ptr.column_names != NULL:
+                    PyMem_Free(self.ptr.column_names)
+                if self.ptr.column_types != NULL:
+                    PyMem_Free(self.ptr.column_types)
+                PyMem_Free(self.ptr)
+                self.ptr = NULL
+                raise MemoryError()
+
+            self._columns = [vector]
+            self._encoded_names = [encoded_name]
+            self.ptr.columns[0] = <void*>vector
+            self.ptr.column_names[0] = <const char*>encoded_name
+            self.ptr.column_types[0] = vector.dtype
+            self._rebuild_name_to_index()
+            return
+
+        n_columns = self.ptr.num_columns
+        if self.ptr.num_rows != vector_length:
+            raise ValueError(
+                f"Cannot append vector of length {vector_length} to morsel with {self.ptr.num_rows} rows"
+            )
+
+        new_columns = <void**> PyMem_Malloc(sizeof(void*) * (n_columns + 1))
+        new_column_names = <const char**> PyMem_Malloc(sizeof(const char*) * (n_columns + 1))
+        new_column_types = <DrakenType*> PyMem_Malloc(sizeof(DrakenType) * (n_columns + 1))
+        if new_columns == NULL or new_column_names == NULL or new_column_types == NULL:
+            if new_columns != NULL:
+                PyMem_Free(new_columns)
+            if new_column_names != NULL:
+                PyMem_Free(new_column_names)
+            if new_column_types != NULL:
+                PyMem_Free(new_column_types)
+            raise MemoryError()
+
+        new_column_list = [None] * (n_columns + 1)
+        new_encoded_names = [None] * (n_columns + 1)
+
+        for i in range(n_columns):
+            existing_vec = <Vector>self.ptr.columns[i]
+            new_column_list[i] = existing_vec
+            new_encoded_names[i] = self._encoded_names[i]
+            new_columns[i] = <void*>existing_vec
+            new_column_names[i] = self.ptr.column_names[i]
+            new_column_types[i] = self.ptr.column_types[i]
+
+        new_column_list[n_columns] = vector
+        new_encoded_names[n_columns] = encoded_name
+        new_columns[n_columns] = <void*>vector
+        new_column_names[n_columns] = <const char*>encoded_name
+        new_column_types[n_columns] = vector.dtype
+
+        PyMem_Free(self.ptr.columns)
+        PyMem_Free(self.ptr.column_names)
+        PyMem_Free(self.ptr.column_types)
+
+        self.ptr.columns = new_columns
+        self.ptr.column_names = new_column_names
+        self.ptr.column_types = new_column_types
+        self.ptr.num_columns = n_columns + 1
+        self._columns = new_column_list
+        self._encoded_names = new_encoded_names
+        self._rebuild_name_to_index()
+
     def rename(self, names) -> Morsel:
         """
         Rename columns (IN-PLACE operation - modifies this Morsel).

@@ -12,6 +12,7 @@ import pyarrow as pa
 import opteryx.draken as draken
 
 from opteryx.draken.vectors._hash_api import hash_into as hash_into_vector
+from opteryx.draken.vectors.scalar_constructors import from_scalar as constant_from_scalar
 
 
 def _hash_view_to_list(buffer):
@@ -43,6 +44,7 @@ def test_methods_exist():
     assert hasattr(morsel, 'take')
     assert hasattr(morsel, 'select')
     assert hasattr(morsel, 'rename')
+    assert hasattr(morsel, 'append_vector')
     assert hasattr(morsel, 'to_arrow')
     assert hasattr(draken.Morsel, 'iter_from_arrow')
     
@@ -50,6 +52,7 @@ def test_methods_exist():
     assert callable(morsel.take)
     assert callable(morsel.select)
     assert callable(morsel.rename)
+    assert callable(morsel.append_vector)
     assert callable(morsel.to_arrow)
     assert callable(draken.Morsel.iter_from_arrow)
 
@@ -85,6 +88,20 @@ def test_column_access_returns_vectors():
 
     assert numeric_vector.to_pylist() == [10, 20, 30]
     assert string_vector.to_pylist() == [b'x', b'y', b'z']
+
+
+def test_append_vector_adds_column_in_place():
+    """Appending one vector should extend the schema without rebuilding the morsel."""
+    table = pa.table({'a': [1, 2, 3]})
+    morsel = draken.Morsel.from_arrow(table)
+    star_vector = constant_from_scalar(1, morsel.num_rows, dtype="int8")
+
+    morsel.append_vector("*", star_vector)
+
+    assert morsel.num_columns == 2
+    assert morsel.column_names == [b'a', b'*']
+    assert morsel.column(b'*').to_pylist() == [1, 1, 1]
+    assert morsel.to_arrow().column_names == ['a', '*']
 
 
 def test_column_lookup_requires_bytes_names():

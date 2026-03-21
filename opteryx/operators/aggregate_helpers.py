@@ -17,7 +17,7 @@ AGGREGATORS = {
     "MAX": "max",
     "AVG": "mean",
     "MIN": "min",
-    "ANY_VALUE": "hash_one",
+    "ANY_VALUE": "any_value",
     "SUM": "sum",
 }
 

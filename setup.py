@@ -627,36 +627,90 @@ extensions = [
         extra_compile_args=CPP_FLAGS,
     ),
     Extension(
-        "opteryx.compiled.aggregations.aggregate_kernels",
+        "opteryx.compiled.aggregations.key_codec",
         sources=[
-            "opteryx/compiled/aggregations/aggregate_kernels.pyx",
+            "opteryx/compiled/aggregations/key_codec.pyx",
         ],
         include_dirs=include_dirs,
         language="c++",
         extra_compile_args=CPP_FLAGS,
     ),
     Extension(
-        "opteryx.compiled.aggregations.key_serializer",
+        "opteryx.compiled.aggregations.vector_readers",
         sources=[
-            "opteryx/compiled/aggregations/key_serializer.pyx",
+            "opteryx/compiled/aggregations/vector_readers.pyx",
         ],
         include_dirs=include_dirs,
         language="c++",
         extra_compile_args=CPP_FLAGS,
     ),
     Extension(
-        "opteryx.compiled.aggregations.group_by_draken",
+        "opteryx.compiled.aggregations.group_by_finalize",
         sources=[
-            "opteryx/compiled/aggregations/group_by_draken.pyx",
+            "opteryx/compiled/aggregations/group_by_finalize.pyx",
         ],
         include_dirs=include_dirs,
         language="c++",
         extra_compile_args=CPP_FLAGS,
     ),
     Extension(
-        "opteryx.compiled.aggregations.carchar_group_state_engine",
+        "opteryx.compiled.aggregations.kernels.count_star",
         sources=[
-            "opteryx/compiled/aggregations/carchar_group_state_engine.pyx",
+            "opteryx/compiled/aggregations/kernels/count_star.pyx",
+        ],
+        include_dirs=include_dirs,
+        language="c++",
+        extra_compile_args=CPP_FLAGS,
+    ),
+    Extension(
+        "opteryx.compiled.aggregations.kernels.sum_float64",
+        sources=[
+            "opteryx/compiled/aggregations/kernels/sum_float64.pyx",
+        ],
+        include_dirs=include_dirs,
+        language="c++",
+        extra_compile_args=CPP_FLAGS,
+    ),
+    Extension(
+        "opteryx.compiled.aggregations.kernels.sum_int64",
+        sources=[
+            "opteryx/compiled/aggregations/kernels/sum_int64.pyx",
+        ],
+        include_dirs=include_dirs,
+        language="c++",
+        extra_compile_args=CPP_FLAGS,
+    ),
+    Extension(
+        "opteryx.compiled.aggregations.kernels.min_max_fixed",
+        sources=[
+            "opteryx/compiled/aggregations/kernels/min_max_fixed.pyx",
+        ],
+        include_dirs=include_dirs,
+        language="c++",
+        extra_compile_args=CPP_FLAGS,
+    ),
+    Extension(
+        "opteryx.compiled.aggregations.kernels.avg_float64",
+        sources=[
+            "opteryx/compiled/aggregations/kernels/avg_float64.pyx",
+        ],
+        include_dirs=include_dirs,
+        language="c++",
+        extra_compile_args=CPP_FLAGS,
+    ),
+    Extension(
+        "opteryx.compiled.aggregations.kernels.avg_int64",
+        sources=[
+            "opteryx/compiled/aggregations/kernels/avg_int64.pyx",
+        ],
+        include_dirs=include_dirs,
+        language="c++",
+        extra_compile_args=CPP_FLAGS,
+    ),
+    Extension(
+        "opteryx.compiled.aggregations.group_by_engine",
+        sources=[
+            "opteryx/compiled/aggregations/group_by_engine.pyx",
             "src/cpp/cpu_features.cpp",
         ],
         include_dirs=include_dirs,
@@ -725,10 +779,6 @@ def generate_consolidated_module(module_dir, output_file):
 # Generate vector_ops, joins, and aggregation kernels
 generate_consolidated_module("opteryx/compiled/vector_ops", "opteryx/compiled/vector_ops/vector_ops.pyx")
 generate_consolidated_module("opteryx/compiled/joins", "opteryx/compiled/joins/joins.pyx")
-generate_consolidated_module(
-    "opteryx/compiled/aggregations/group_by_draken_kernels",
-    "opteryx/compiled/aggregations/group_by_draken.pyx",
-)
 
 # Add consolidated modules with their dependencies
 # Link args for vector_ops (use -lcrypto on non-macOS and -pthread where appropriate)

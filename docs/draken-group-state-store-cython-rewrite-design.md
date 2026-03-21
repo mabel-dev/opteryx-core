@@ -420,6 +420,13 @@ Implemented:
   - `MIN`
   - `MAX`
   - `AVG`
+- one-aggregate and multi-aggregate kernels extracted to standalone `.pyx` modules:
+  - `kernels/sum_float64.pyx` — `sum_f64_accumulate`, `sum_f64_multi_accumulate`, dict variants
+  - `kernels/sum_int64.pyx` — `sum_i64_accumulate`, `sum_integer_accumulate`, multi variants, dict variants
+  - `kernels/min_max_fixed.pyx` — `minmax_f64_*`, `minmax_i64_*`, `minmax_integer_*`, multi and dict variants (10 functions)
+  - `kernels/avg_float64.pyx` — `avg_f64_accumulate`, `avg_f64_multi_accumulate`, dict variants (4 functions)
+  - `kernels/avg_int64.pyx` — `avg_i64_accumulate`, `avg_integer_accumulate`, multi variants, dict variants (6 functions)
+- all 11 engine ingest methods wired to kernel dispatch for SUM, MIN, MAX, AVG
 - one-aggregate compiled `COUNT(DISTINCT)` support for:
   - fixed-width numeric distinct inputs
   - string distinct inputs via hashed value stream
@@ -468,6 +475,12 @@ Still missing from the original Phase-1 vision:
 - broader typed finalize paths for object-heavy outputs without `vector_from_sequence(...)`
 - broader native grouped-expression coverage for any remaining unsupported query shapes
 
+Completed beyond original Phase-1 scope:
+
+- standalone kernel `.pyx` modules for SUM, MIN/MAX, AVG (all types including dict-encoded value columns)
+- `AVG` kernel has no `TimestampVector` support — `AVG(timestamp)` is invalid SQL and was not present in the original fallthrough either
+- all 11 `_ingest_*` methods wired to kernel dispatch; no inline accumulation loops remain for SUM, MIN, MAX, or AVG
+
 The important nuance is:
 
 - the implementation has proven the engine boundary and the state-index shape
@@ -496,9 +509,9 @@ This should replace the current Python `_rows_to_vectors()` path entirely for th
 
 Add:
 
-- multi-aggregate kernels
-- dictionary-key kernels
-- constant-key kernels
+- ~~multi-aggregate kernels~~ ✓ DONE — all 11 ingest methods wired for SUM, MIN, MAX, AVG
+- ~~dictionary-key kernels~~ ✓ DONE — dict-encoded value column support in single-agg and multi-agg paths
+- ~~constant-key kernels~~ ✓ DONE — constant-key mode implemented
 - typed distinct kernels
 
 ### Phase 3
@@ -847,9 +860,9 @@ Objective:
 
 Status:
 
-- partially done
-- one-aggregate state arrays are working for the current fixed-width slice
-- multi-aggregate compiled state is still missing
+- complete
+- one-aggregate and multi-aggregate state arrays implemented for all key and value shapes
+- SUM, MIN, MAX, AVG kernels extracted to standalone `kernels/` modules
 
 Phase-1 supported functions:
 
@@ -908,13 +921,18 @@ Success condition:
 
 Current status:
 
-- implemented:
-  - single-key `Int64Vector`
-  - single-key `IntegerVector`
-  - single-key `ConstantVector`
-- not yet implemented:
-  - single-key `DictionaryVector`
-  - multi-aggregate fixed-width kernels
+- complete — all 11 ingest paths implemented:
+  - single-key `Int64Vector` ✓
+  - single-key `IntegerVector` ✓
+  - single-key `ConstantVector` ✓
+  - single-key `DictionaryVector` ✓ (including dict-encoded value column support)
+  - single-key `StringVector` / object key ✓
+  - multi-aggregate fixed-width (int64 key) ✓
+  - multi-aggregate fixed-width (integer key) ✓
+  - multi-aggregate multi-fixed-key ✓
+  - multi-aggregate dictionary key ✓ (including dict-encoded value column support)
+  - multi-aggregate object key ✓
+  - multi-key fixed-width single-aggregate ✓
 
 ### Step 6: Implement Direct Chunked Finalize
 
@@ -1095,12 +1113,19 @@ Progress notes:
   - single-key `Int64Vector`
   - single-key `IntegerVector`
   - single-key `ConstantVector`
-  - one-aggregate compiled finalize
-- remaining:
   - single-key `DictionaryVector`
-  - multi-aggregate fixed-width values
-  - encoded key store
-  - node integration
+  - multi-aggregate fixed-width values (all 11 ingest methods)
+  - one-aggregate compiled finalize
+  - SUM kernel family extracted to `kernels/sum_float64.pyx` + `kernels/sum_int64.pyx`
+  - MIN/MAX kernel family extracted to `kernels/min_max_fixed.pyx`
+  - AVG kernel family extracted to `kernels/avg_float64.pyx` + `kernels/avg_int64.pyx`
+    - no TimestampVector support (AVG of timestamps is invalid SQL)
+    - dict-encoded value support in `_ingest_dictionary_key` and `_ingest_dictionary_key_multi`
+  - all 11 engine ingest methods wired to kernel dispatch for SUM, MIN, MAX, AVG
+- remaining:
+  - encoded key store (byte-limit accounting)
+  - node integration (planner flag to select compiled path)
+  - COUNT_DISTINCT typed kernels
 
 Practical Phase-1 exit should now be interpreted as:
 

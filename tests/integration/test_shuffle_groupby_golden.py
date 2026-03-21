@@ -46,7 +46,7 @@ def _sql_expr(spec: AggregationSpec) -> str:
         return f"AVG({column}) AS {alias}"
     if function in ("count_distinct", "distinct"):
         return f"COUNT(DISTINCT {column}) AS {alias}"
-    if function == "hash_one":
+    if function == "any_value":
         return f"ANY_VALUE({column}) AS {alias}"
     raise ValueError(f"unsupported function for SQL projection: {function}")
 

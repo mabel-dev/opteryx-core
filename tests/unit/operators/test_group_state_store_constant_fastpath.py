@@ -81,7 +81,7 @@ def test_constant_groupby_telemetry_runtime_fallback_for_unsupported_agg():
     )
     op = ShuffleGroupByOperationV2(
         group_by_columns=["k"],
-        aggregations=[AggregationSpec(alias="h", function="hash_one", column="v")],
+        aggregations=[AggregationSpec(alias="h", function="any_value", column="v")],
     )
 
     with pytest.raises(UnsupportedSyntaxError):

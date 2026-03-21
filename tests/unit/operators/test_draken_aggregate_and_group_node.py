@@ -63,7 +63,7 @@ def test_draken_groupby_expression_uses_carchar_backend_when_opted_in(monkeypatc
     monkeypatch.setenv("FEATURE_GROUPBY_FORCE_CARCHAR_BACKEND", "1")
     monkeypatch.setattr(module, "get_all_nodes_of_type", lambda *args, **kwargs: [])
     monkeypatch.setattr(module, "extract_evaluations", lambda *args, **kwargs: [])
-    monkeypatch.setattr(module, "create_group_state_engine", lambda *args, **kwargs: _DummyGroupStateEngine())
+    monkeypatch.setattr(module, "create_groupby_engine", lambda *args, **kwargs: _DummyGroupStateEngine())
 
     group = _ExprNode(NodeType.LITERAL, "minute_expr")
     aggregate = _ExprNode(NodeType.AGGREGATOR, "count_star", value="COUNT", parameters=[_Wildcard()])
@@ -75,4 +75,4 @@ def test_draken_groupby_expression_uses_carchar_backend_when_opted_in(monkeypatc
         projection=[group],
     )
 
-    assert isinstance(node._group_by, _DummyGroupStateEngine)
+    assert isinstance(node._groupby_engine, _DummyGroupStateEngine)
