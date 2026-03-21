@@ -9,9 +9,7 @@ import sys
 
 import numpy
 from Cython.Build import cythonize
-from setuptools import Extension
-from setuptools import find_packages
-from setuptools import setup
+from setuptools import Extension, find_packages, setup
 from setuptools.command.build_ext import build_ext as build_ext_orig
 from setuptools_rust import RustExtension
 
@@ -700,6 +698,33 @@ extensions = [
         extra_compile_args=CPP_FLAGS,
     ),
     Extension(
+        "opteryx.compiled.aggregations.kernels.any_value_fixed",
+        sources=[
+            "opteryx/compiled/aggregations/kernels/any_value_fixed.pyx",
+        ],
+        include_dirs=include_dirs,
+        language="c++",
+        extra_compile_args=CPP_FLAGS,
+    ),
+    Extension(
+        "opteryx.compiled.aggregations.kernels.any_value_var",
+        sources=[
+            "opteryx/compiled/aggregations/kernels/any_value_var.pyx",
+        ],
+        include_dirs=include_dirs,
+        language="c++",
+        extra_compile_args=CPP_FLAGS,
+    ),
+    Extension(
+        "opteryx.compiled.aggregations.kernels.min_max_var",
+        sources=[
+            "opteryx/compiled/aggregations/kernels/min_max_var.pyx",
+        ],
+        include_dirs=include_dirs,
+        language="c++",
+        extra_compile_args=CPP_FLAGS,
+    ),
+    Extension(
         "opteryx.compiled.aggregations.kernels.avg_float64",
         sources=[
             "opteryx/compiled/aggregations/kernels/avg_float64.pyx",
@@ -721,6 +746,15 @@ extensions = [
         "opteryx.compiled.aggregations.kernels.count_distinct",
         sources=[
             "opteryx/compiled/aggregations/kernels/count_distinct.pyx",
+        ],
+        include_dirs=include_dirs,
+        language="c++",
+        extra_compile_args=CPP_FLAGS,
+    ),
+    Extension(
+        "opteryx.compiled.aggregations.kernels.count",
+        sources=[
+            "opteryx/compiled/aggregations/kernels/count.pyx",
         ],
         include_dirs=include_dirs,
         language="c++",

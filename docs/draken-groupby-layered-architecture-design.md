@@ -419,43 +419,137 @@ for everything else) before calling the kernel.
 
 Done when the engine contains no inline COUNT(DISTINCT) loops.
 
-### Step D6 — Extract `count.pyx`
+### Step D6 — Extract `count.pyx` ✓ DONE
 
 COUNT(col) is a null check: increment the counter if the validity bit is set.
 The primitive is the validity bitmap, not the value type — one file, no type
 specialization, `cdef noexcept nogil`. Wire the engine; delete inline
 COUNT(col) branches.
 
+New files:
+- `kernels/count.pyx` + `.pxd` — two functions, both `noexcept nogil`:
+  `count_accumulate` (single-agg) and `count_multi_accumulate` (multi-agg).
+  Neither takes a value pointer — only the null bitmap is needed.
+
+**Inline loop removal scope:** All 11 ingest methods contained
+`if self._agg_mode == AGG_COUNT_VALUE:` / `if agg_mode == AGG_COUNT_VALUE:`
+inline increment blocks embedded inside per-type fallthrough loops.
+Categorised into three groups:
+
+1. **Per-row key-building single-agg** (`_ingest_fixed_width_key`,
+   `_ingest_int64_key`, `_ingest_integer_key`, `_ingest_multi_fixed_key`):
+   Added a two-pass `AGG_COUNT_VALUE` block after the AVG block (following the
+   same pattern as COUNT_STAR/SUM/AVG). Removed the per-type fallthrough loops
+   entirely (they contained only the COUNT_VALUE check; AGG_HASH_ONE already
+   did nothing in those loops).
+
+2. **Pre-built `state_indices` single-agg** (`_ingest_dictionary_key`,
+   `_ingest_object_key`): Replaced per-type fallthrough loops with a direct
+   `count_accumulate` call, fetching `value_vector` only for its null bitmap.
+
+3. **Multi-agg methods** (`_ingest_int64_key_multi`, `_ingest_integer_key_multi`,
+   `_ingest_multi_fixed_key_multi`, `_ingest_dictionary_key_multi`,
+   `_ingest_object_key_multi`): Added `if agg_mode == AGG_COUNT_VALUE:
+   count_multi_accumulate(...); continue` after the AVG `continue`. Removed
+   the per-type fallthrough sections (including dict-accessor and bounds-check
+   branches that existed only to serve COUNT_VALUE).
+
 Done when the engine contains no inline COUNT(col) loops.
 
-### Step D7 — Extract `any_value_fixed.pyx` + `any_value_var.pyx` + `min_max_var.pyx`
+### Step D7.1 — Extract `any_value_fixed.pyx`
 
-This step covers all aggregates whose variable-width (string) state requires
-the engine's arena/object storage — `ANY_VALUE` and `MIN/MAX` on strings share
-the same blocker (`_store_object_state_bytes`, `_compare_bytes`) and must be
-resolved together.
+This step isolates the low-risk part of D7: fixed-width `ANY_VALUE` only.
+No arena work, no string state, no object storage refactor.
 
-Confirm or resolve Open Question 3 before writing:
-- `any_value_fixed.pyx`: store the 64-bit value inline in carchar state; skip
-  row if state is already non-null.
-- `any_value_var.pyx`: store arena pointer/offset in carchar state; skip row
-  if state already holds a pointer.
-- `min_max_var.pyx`: string MIN/MAX — comparison via `_compare_bytes` with
-  arena-backed state storage. Covers plain, dict-encoded, and constant string
-  encodings. Currently implemented as engine-internal helpers
-  `_ingest_object_minmax_for_states` / `_ingest_object_minmax_multi_for_states`.
+Scope:
+- fixed-width value columns only (`int64`, `timestamp64`, generic integer, and
+  any other value shape that can be stored inline in the 64-bit state slot)
+- single-agg and multi-agg paths
+- first non-null row wins; later rows for that state are skipped
 
-All three files require the same prerequisite: the string state arena
-(`_object_state_bytes`, `_store_object_state_bytes`, `_compare_bytes`) must be
-accessible to standalone kernel functions. Either pass the arena as explicit
-pointer arguments or extract it into a shared C++ struct — decide at the start
-of this step.
+New files:
+- `kernels/any_value_fixed.pyx` + `.pxd`
 
-Wire the engine; delete inline ANY_VALUE and string MIN/MAX branches.
+Wire the engine; delete inline fixed-width `ANY_VALUE` branches.
 
-Done when the engine contains no inline ANY_VALUE or string MIN/MAX loops and
+Done when the engine contains no inline fixed-width `ANY_VALUE` loops.
+
+### Step D7.2 — Extract `any_value_var.pyx`
+
+This step handles variable-width `ANY_VALUE` using the arena-backed state path.
+
+Design choice:
+- variable-width `ANY_VALUE` always stores through the arena
+- no attempt is made here to inline short strings into the state; simplicity
+  wins over small-string optimization for now
+
+Scope:
+- string / variable-width `ANY_VALUE`
+- single-agg and multi-agg paths
+- first non-null row wins; later rows for that state are skipped
+
+New files:
+- `kernels/any_value_var.pyx` + `.pxd`
+
+Prerequisite:
+- the arena/state write path must be callable from outside the inline engine
+  loops. That can be done either by passing explicit arena/state buffers into
+  the kernel boundary, or by introducing a small shared helper layer for
+  `_object_state_bytes` / `_store_object_state_bytes` and their multi-agg
+  equivalents.
+
+Wire the engine; delete inline variable-width `ANY_VALUE` branches.
+
+Done when the engine contains no inline variable-width `ANY_VALUE` loops.
+
+### Step D7.3 — Extract `min_max_var.pyx`
+
+This step handles string `MIN/MAX` using the same arena-backed storage model as
+variable-width `ANY_VALUE`.
+
+Design choice:
+- string `MIN/MAX` also uses the arena-backed storage path
+- comparisons remain byte-based via `_compare_bytes`
+
+Scope:
+- string / variable-width `MIN` and `MAX`
+- single-agg and multi-agg paths
+- plain, dict-encoded, and constant string encodings
+
+New files:
+- `kernels/min_max_var.pyx` + `.pxd`
+
+Current implementation note:
+- the string `MIN/MAX` path is currently engine-owned in
+  `_ingest_object_minmax_for_states` /
+  `_ingest_object_minmax_multi_for_states`
+- this step is the point where those helpers must either become thin dispatch
+  shims or be removed entirely
+
+Prerequisite:
+- the arena/state storage and compare path
+  (`_object_state_bytes`, `_store_object_state_bytes`, `_compare_bytes`, and
+  their multi-agg equivalents) must be accessible at the kernel boundary.
+
+Wire the engine; delete inline string `MIN/MAX` branches.
+
+Done when the engine contains no inline string `MIN/MAX` loops and
 `_ingest_object_minmax_for_states` / `_ingest_object_minmax_multi_for_states`
 are removed.
+
+### Step D7.4 — Cleanup and boundary enforcement
+
+After D7.1–D7.3 land, clean up the temporary glue introduced during the split.
+
+Scope:
+- remove placeholder kernels or temporary adapter code
+- consolidate any duplicated arena helpers introduced to make D7.2/D7.3 land
+- ensure the final layering matches the target architecture:
+  engine dispatch at the top, kernels on the hot path, no accidental Python
+  work inside per-row loops
+
+Done when the post-split code reads cleanly, with no temporary D7 scaffolding
+left behind.
 
 ### Step E — Thin the coordinator
 
