@@ -83,7 +83,7 @@ def test_shuffle_group_by_global_empty_input_returns_single_row():
             AggregationSpec(alias="cnt", function="count", column="*"),
             AggregationSpec(alias="sum_v", function="sum", column="v"),
             AggregationSpec(alias="avg_v", function="mean", column="v"),
-            AggregationSpec(alias="one_v", function="hash_one", column="v"),
+            AggregationSpec(alias="one_v", function="any_value", column="v"),
         ],
     )
     rows = _group_by_to_rows(operation.finalize())

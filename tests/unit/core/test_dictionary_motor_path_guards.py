@@ -58,13 +58,16 @@ def test_parquet_dictionary_decode_is_not_runtime_feature_gated_anymore():
 
 def test_groupby_dictionary_motor_files_have_no_arrow_numpy_or_pylist():
     paths = [
-        "opteryx/compiled/aggregations/carchar_group_state_engine.pyx",
-        "opteryx/compiled/aggregations/group_by_draken.pyx",
-        "opteryx/compiled/aggregations/group_by_draken_kernels/00_common.pyx",
-        "opteryx/compiled/aggregations/group_by_draken_kernels/10_count_star_int64.pyx",
-        "opteryx/compiled/aggregations/group_by_draken_kernels/20_count_distinct_int64.pyx",
-        "opteryx/compiled/aggregations/group_by_draken_kernels/30_avg_int64_float64.pyx",
-        "opteryx/compiled/aggregations/group_by_draken_kernels/90_factory.pyx",
+        "opteryx/compiled/aggregations/group_by_engine.pyx",
+        "opteryx/compiled/aggregations/key_codec.pyx",
+        "opteryx/compiled/aggregations/vector_readers.pyx",
+        "opteryx/compiled/aggregations/group_by_finalize.pyx",
+        "opteryx/compiled/aggregations/kernels/count_star.pyx",
+        "opteryx/compiled/aggregations/kernels/sum_float64.pyx",
+        "opteryx/compiled/aggregations/kernels/sum_int64.pyx",
+        "opteryx/compiled/aggregations/kernels/min_max_fixed.pyx",
+        "opteryx/compiled/aggregations/kernels/avg_float64.pyx",
+        "opteryx/compiled/aggregations/kernels/avg_int64.pyx",
     ]
 
     forbidden = ("pyarrow", "numpy", "to_pylist")

@@ -43,60 +43,33 @@ def _normalize_column_name(column: str | bytes) -> bytes:
     return str(column).encode("utf-8")
 
 
-def _default_alias(column: str | bytes | None, function: str) -> str:
-    fn = function.lower()
-    if column is None:
-        return fn
-    column_name = column.decode("utf-8") if isinstance(column, bytes) else str(column)
-    return f"{column_name}_{fn}"
-
-
-def _is_constant_vector(vec: object) -> bool:
-    return getattr(vec, "encoding", None) == 3
-
-
-def _is_dictionary_vector(vec: object) -> bool:
-    return getattr(vec, "encoding", None) == 1
-
-
-def _is_dictionary_float_vector(vec: object) -> bool:
-    return _is_dictionary_vector(vec) and getattr(vec, "dictionary_value_type", None) in {20, 21}
-
-
 def normalize_group_by_columns(group_by_columns: list[str | bytes]) -> list[bytes]:
     return [_normalize_column_name(column) for column in group_by_columns]
 
 
+def _normalize_aggregation(spec) -> tuple:
+    if not isinstance(spec, AggregationSpec):
+        raise TypeError("aggregations must be AggregationSpec instances")
+
+    function = str(spec.function).lower()
+    column = spec.column
+    if column in ("*", b"*"):
+        column = None
+    elif column is not None:
+        column = _normalize_column_name(column)
+
+    alias = str(spec.alias)
+    return alias, function, column
+
+
 def normalize_aggregations(aggregations: list[object]) -> list[tuple]:
-    return [DrakenAggregateAndGroupNode._normalize_aggregation(spec) for spec in aggregations]
+    return [_normalize_aggregation(spec) for spec in aggregations]
 
 
-def create_group_state_engine(group_by_columns, aggregations):
-    from opteryx.compiled.aggregations.carchar_group_state_engine import CarcharGroupStateEngine
+def create_groupby_engine(group_by_columns, aggregations):
+    from opteryx.compiled.aggregations.group_by_engine import CarcharGroupStateEngine
 
     return CarcharGroupStateEngine(group_by_columns, aggregations)
-
-
-def _groupby_unsupported_reason(group_by_columns, aggregations, morsel) -> str | None:
-    if morsel is None or morsel.num_rows == 0:
-        return None
-
-    for group_column in group_by_columns:
-        group_vec = morsel.column(group_column)
-        if _is_constant_vector(group_vec):
-            return "constant-key"
-        if _is_dictionary_float_vector(group_vec):
-            return "dict-float-key"
-
-    for _, function, column, *_ in aggregations:
-        if function in ("count_distinct", "distinct") and column is not None:
-            value_vector = morsel.column(column)
-            if value_vector.__class__.__name__ == "Float64Vector":
-                return "count-distinct-dense-float-value"
-            if _is_dictionary_float_vector(value_vector):
-                return "count-distinct-dict-float-value"
-
-    return None
 
 
 class DrakenAggregateAndGroupNode(BasePlanNode):
@@ -152,18 +125,18 @@ class DrakenAggregateAndGroupNode(BasePlanNode):
         ]
         self.all_identifiers = list(dict.fromkeys(all_identifiers))
         self.evaluatable_nodes = extract_evaluations(self.aggregates)
-        self._needs_arrow_eval = bool(self.evaluatable_nodes) or any(
+        self._needs_expression_eval = bool(self.evaluatable_nodes) or any(
             group.node_type != NodeType.IDENTIFIER for group in self.groups
         )
         self.group_by_columns = list({node.schema_column.identity for node in self.groups})
         self._aggregation_specs = self._build_aggregation_specs(self.aggregates)
 
         # Handle GROUP BY without aggregates by adding implicit COUNT(*)
-        # This allows the group state engine to work correctly
+        # This allows the group-by engine to work correctly
         if not self._aggregation_specs and self.group_by_columns:
             # Add implicit COUNT(*) aggregate for GROUP BY with no explicit aggregates
             self._aggregation_specs = [
-                AggregationSpec(alias="count", function="count", column=None)
+                AggregationSpec(alias="$implicit-count", function="count", column=None)
             ]
             # Mark that we added an implicit aggregate so we can remove it from output later
             self._implicit_count_added = True
@@ -192,7 +165,7 @@ class DrakenAggregateAndGroupNode(BasePlanNode):
                     required_columns.append(identity)
         self._required_columns = list(dict.fromkeys(required_columns))
 
-        self._group_by = create_group_state_engine(
+        self._groupby_engine = create_groupby_engine(
             group_by_columns=self._normalized_group_by_columns,
             aggregations=self._normalized_aggregations,
         )
@@ -248,7 +221,7 @@ class DrakenAggregateAndGroupNode(BasePlanNode):
     @staticmethod
     def _extract_percentile_option(aggregator) -> float:
         if len(aggregator.parameters) != 2:
-            raise InvalidFunctionParameterError("APPROX_PERCENTILE expects two arguments")
+            raise InvalidFunctionParameterError("APPROX_PERCENTILE requires two arguments, the column and the percentile")
         percentile_node = aggregator.parameters[1]
         if percentile_node.node_type != NodeType.LITERAL:
             raise InvalidFunctionParameterError(
@@ -264,28 +237,15 @@ class DrakenAggregateAndGroupNode(BasePlanNode):
     @staticmethod
     def _normalize_aggregate_function(aggregator) -> str:
         value = aggregator.value
-        if value == "COUNT":
-            if aggregator.duplicate_treatment == "Distinct":
-                return "count_distinct"
-            return "count"
-        if value == "SUM":
-            return "sum"
-        if value == "MIN":
-            return "min"
-        if value == "MAX":
-            return "max"
-        if value == "AVG":
-            return "avg"
-        if value == "APPROX_COUNT_DISTINCT":
-            return "approx_count_distinct"
-        if value == "APPROX_PERCENTILE":
-            return "approx_percentile"
-        if value == "ARRAY_AGG":
-            return "array_agg"
-        if value == "ANY_VALUE":
-            return "hash_one"
-        if value == "COUNT_DISTINCT":
+        function = value.lower()
+        if function == "count" and aggregator.duplicate_treatment == "Distinct":
             return "count_distinct"
+        if function in ("count", "sum", "min", "max", "avg"):
+            return function
+        if function == "count_distinct":
+            return "count_distinct"
+        if function in ("approx_count_distinct", "approx_percentile", "array_agg", "any_value"):
+            return function
         raise UnsupportedSyntaxError(f"Unsupported aggregate function for Draken group-by: {value}")
 
     @staticmethod
@@ -311,137 +271,116 @@ class DrakenAggregateAndGroupNode(BasePlanNode):
         }
 
     def _engine_reading_snapshot(self):
-        return {key: self._group_by.readings.get(key, 0) for key in self.ENGINE_READING_KEYS}
+        readings = getattr(self._groupby_engine, "readings", None) or {}
+        return {key: readings.get(key, 0) for key in self.ENGINE_READING_KEYS}
 
     def _accumulate_engine_reading_delta(self, snapshot):
+        readings = getattr(self._groupby_engine, "readings", None) or {}
         for key in self.ENGINE_READING_KEYS:
-            current = self._group_by.readings.get(key, 0)
+            current = readings.get(key, 0)
             previous = snapshot.get(key, 0)
             delta = current - previous
             if delta:
                 self.readings[key] += delta
+
+    def _prepare_groupby_chunk(self, chunk):
+        if chunk == EOS:
+            return EOS
+        if self.all_identifiers:
+            chunk = chunk.select(self.all_identifiers)
+        if b"*" not in chunk.column_names and "*" not in chunk.column_names:
+            star_vector = constant_from_scalar(1, chunk.num_rows, dtype="int8")
+            chunk.append_vector("*", star_vector)
+
+        eval_start = time.monotonic_ns()
+        try:
+            if self.evaluatable_nodes:
+                chunk = evaluate_and_append_draken(self.evaluatable_nodes, chunk)
+            chunk = evaluate_and_append_draken(self.groups, chunk)
+            self.readings["feature_groupby_draken_eval_native"] += 1
+            return chunk
+        except (NotImplementedError, TypeError, UnsupportedSyntaxError) as err:
+            raise UnsupportedSyntaxError(
+                f"Draken grouped expression evaluation does not support this query shape: {err}"
+            ) from err
+        finally:
+            self.readings["time_group_by_evaluations"] += time.monotonic_ns() - eval_start
+
+    def _finalize_groupby(self):
+        pre_engine_snapshot = self._engine_reading_snapshot()
+        readings = getattr(self._groupby_engine, "readings", None) or {}
+        pre_backend_ns = readings.get("time_groupby_finalize_backend_ns", 0)
+        pre_rows_to_vectors_ns = readings.get(
+            "time_groupby_finalize_rows_to_vectors_ns", 0
+        )
+        pre_morsel_build_ns = readings.get(
+            "time_groupby_finalize_morsel_build_ns", 0
+        )
+        pre_rows_count = readings.get("groupby_finalize_rows_count", 0)
+        pre_chunks_emitted = readings.get("groupby_finalize_chunks_emitted", 0)
+        pre_fast_path_hits = readings.get("groupby_finalize_fast_path_hits", 0)
+
+        st = time.monotonic_ns()
+        emitted = 0
+        for result in self._groupby_engine.finalize_morsels(chunk_size=CHUNK_SIZE):
+            emitted += 1
+            # If we added an implicit COUNT(*) for GROUP BY with no aggregates,
+            # remove it from the output (it's the first column)
+            if self._implicit_count_added:
+                result = result.select(result.column_names[1:])
+            yield result
+        finalize_total_ns = time.monotonic_ns() - st
+        self.readings["time_groupby_finalize"] += finalize_total_ns
+        self.readings["groupby_output_morsels"] += emitted
+
+        backend_delta_ns = (
+            readings.get("time_groupby_finalize_backend_ns", 0) - pre_backend_ns
+        )
+        rows_to_vectors_delta_ns = (
+            readings.get("time_groupby_finalize_rows_to_vectors_ns", 0)
+            - pre_rows_to_vectors_ns
+        )
+        morsel_build_delta_ns = (
+            readings.get("time_groupby_finalize_morsel_build_ns", 0)
+            - pre_morsel_build_ns
+        )
+        self.readings["time_groupby_finalize_backend"] += backend_delta_ns
+        self.readings["time_groupby_finalize_rows_to_vectors"] += rows_to_vectors_delta_ns
+        self.readings["time_groupby_finalize_morsel_build"] += morsel_build_delta_ns
+
+        accounted_ns = backend_delta_ns + rows_to_vectors_delta_ns + morsel_build_delta_ns
+        self.readings["time_groupby_finalize_accounted"] += accounted_ns
+        self.readings["time_groupby_finalize_emit_wait"] += max(0, finalize_total_ns - accounted_ns)
+
+        self.readings["groupby_finalize_rows"] += (
+            readings.get("groupby_finalize_rows_count", 0) - pre_rows_count
+        )
+        self.readings["groupby_finalize_chunks"] += (
+            readings.get("groupby_finalize_chunks_emitted", 0) - pre_chunks_emitted
+        )
+        self.readings["groupby_finalize_fast_path_hits"] += (
+            readings.get("groupby_finalize_fast_path_hits", 0) - pre_fast_path_hits
+        )
+        self._accumulate_engine_reading_delta(pre_engine_snapshot)
 
     def execute(self, morsel, **kwargs):
         _ = kwargs
 
         draken = self.ensure_draken_morsel(morsel)
 
-        def _prepare_draken_chunk(chunk):
-            if chunk == EOS:
-                return EOS
-            if self.all_identifiers:
-                chunk = chunk.select(self.all_identifiers)
-            if b"*" not in chunk.column_names and "*" not in chunk.column_names:
-                star_vector = constant_from_scalar(1, chunk.num_rows, dtype="int8")
-                chunk = Morsel.from_vectors(
-                    [*chunk.column_names, "*"],
-                    [
-                        *(
-                            chunk.column(name if isinstance(name, bytes) else name.encode())
-                            for name in chunk.column_names
-                        ),
-                        star_vector,
-                    ],
-                )
-
-            eval_start = time.monotonic_ns()
-            try:
-                if self.evaluatable_nodes:
-                    chunk = evaluate_and_append_draken(self.evaluatable_nodes, chunk)
-                chunk = evaluate_and_append_draken(self.groups, chunk)
-                self.readings["feature_groupby_draken_eval_native"] += 1
-                return chunk
-            except (NotImplementedError, TypeError, UnsupportedSyntaxError) as err:
-                raise UnsupportedSyntaxError(
-                    f"Draken grouped expression evaluation does not support this query shape: {err}"
-                ) from err
-            finally:
-                self.readings["time_group_by_evaluations"] += time.monotonic_ns() - eval_start
-
-        if draken != EOS and self._needs_arrow_eval and isinstance(draken, Morsel):
-            draken = _prepare_draken_chunk(draken)
-
         if draken == EOS:
-            pre_engine_snapshot = self._engine_reading_snapshot()
-            pre_backend_ns = self._group_by.readings.get("time_groupby_finalize_backend_ns", 0)
-            pre_rows_to_vectors_ns = self._group_by.readings.get(
-                "time_groupby_finalize_rows_to_vectors_ns", 0
-            )
-            pre_morsel_build_ns = self._group_by.readings.get(
-                "time_groupby_finalize_morsel_build_ns", 0
-            )
-            pre_rows_count = self._group_by.readings.get("groupby_finalize_rows_count", 0)
-            pre_chunks_emitted = self._group_by.readings.get("groupby_finalize_chunks_emitted", 0)
-            pre_fast_path_hits = self._group_by.readings.get("groupby_finalize_fast_path_hits", 0)
-
-            st = time.monotonic_ns()
-            emitted = 0
-            for result in self._group_by.finalize_morsels(chunk_size=CHUNK_SIZE):
-                emitted += 1
-                # If we added an implicit COUNT(*) for GROUP BY with no aggregates,
-                # remove it from the output (it's the first column)
-                if self._implicit_count_added:
-                    result = result.select(result.column_names[1:])
-                yield result
-            finalize_total_ns = time.monotonic_ns() - st
-            self.readings["time_groupby_finalize"] += finalize_total_ns
-            self.readings["groupby_output_morsels"] += emitted
-
-            backend_delta_ns = (
-                self._group_by.readings.get("time_groupby_finalize_backend_ns", 0) - pre_backend_ns
-            )
-            rows_to_vectors_delta_ns = (
-                self._group_by.readings.get("time_groupby_finalize_rows_to_vectors_ns", 0)
-                - pre_rows_to_vectors_ns
-            )
-            morsel_build_delta_ns = (
-                self._group_by.readings.get("time_groupby_finalize_morsel_build_ns", 0)
-                - pre_morsel_build_ns
-            )
-            self.readings["time_groupby_finalize_backend"] += backend_delta_ns
-            self.readings["time_groupby_finalize_rows_to_vectors"] += rows_to_vectors_delta_ns
-            self.readings["time_groupby_finalize_morsel_build"] += morsel_build_delta_ns
-
-            accounted_ns = backend_delta_ns + rows_to_vectors_delta_ns + morsel_build_delta_ns
-            self.readings["time_groupby_finalize_accounted"] += accounted_ns
-            self.readings["time_groupby_finalize_emit_wait"] += max(
-                0, finalize_total_ns - accounted_ns
-            )
-
-            self.readings["groupby_finalize_rows"] += (
-                self._group_by.readings.get("groupby_finalize_rows_count", 0) - pre_rows_count
-            )
-            self.readings["groupby_finalize_chunks"] += (
-                self._group_by.readings.get("groupby_finalize_chunks_emitted", 0)
-                - pre_chunks_emitted
-            )
-            self.readings["groupby_finalize_fast_path_hits"] += (
-                self._group_by.readings.get("groupby_finalize_fast_path_hits", 0)
-                - pre_fast_path_hits
-            )
-            self._accumulate_engine_reading_delta(pre_engine_snapshot)
-
+            yield from self._finalize_groupby()
             yield EOS
             return
 
         ingest_start = time.monotonic_ns()
         pre_engine_snapshot = self._engine_reading_snapshot()
-        if self._needs_arrow_eval:
-            draken = _prepare_draken_chunk(draken)
+        if self._needs_expression_eval:
+            draken = self._prepare_groupby_chunk(draken)
         if self._required_columns:
             draken = draken.select(self._required_columns)
 
-        unsupported_reason = _groupby_unsupported_reason(
-            self._normalized_group_by_columns,
-            self._normalized_aggregations,
-            draken,
-        )
-        if unsupported_reason is not None:
-            raise UnsupportedSyntaxError(
-                f"Draken group-by does not support {unsupported_reason}."
-            )
-
-        self._group_by.ingest(draken)
+        self._groupby_engine.ingest(draken)
 
         self._accumulate_engine_reading_delta(pre_engine_snapshot)
         self.readings["time_groupby_ingest"] += time.monotonic_ns() - ingest_start

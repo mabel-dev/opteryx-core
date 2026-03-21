@@ -6,7 +6,7 @@ sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 
 
 ROOT = Path(__file__).resolve().parents[3]
-CARCHAR_GROUP_STATE_ENGINE = ROOT / "opteryx/compiled/aggregations/carchar_group_state_engine.pyx"
+CARCHAR_GROUP_STATE_ENGINE = ROOT / "opteryx/compiled/aggregations/group_by_engine.pyx"
 MORSEL_IO = ROOT / "third_party/mabel/draken/storage/morsel_io.pyx"
 
 MOTOR_PATH_FILES = (

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from array import array
 import time
+import sys
 
 from cpython.bytes cimport PyBytes_FromStringAndSize
 from libc.stddef cimport size_t
@@ -48,6 +49,404 @@ from opteryx.draken.vectors.time_vector cimport TimeVector
 from opteryx.draken.vectors.timestamp_vector cimport TimestampVector
 from opteryx.draken.vectors.vector cimport Vector
 from opteryx.exceptions import UnsupportedSyntaxError
+from libcpp.string cimport string
+from opteryx.compiled.aggregations.key_codec cimport append_multi_key_record
+from opteryx.compiled.aggregations.key_codec cimport append_single_encoded_key_record
+from opteryx.compiled.aggregations.key_codec cimport append_single_fixed_key_record
+from opteryx.compiled.aggregations.key_codec cimport decode_single_fixed_key_record
+from opteryx.compiled.aggregations.key_codec cimport decode_multi_payload_keys
+from opteryx.compiled.aggregations.key_codec cimport decode_single_payload_key
+from opteryx.compiled.aggregations.vector_readers cimport _dict_accessor_key_kind
+from opteryx.compiled.aggregations.vector_readers cimport _dict_accessor_read_float_value
+from opteryx.compiled.aggregations.vector_readers cimport _dict_accessor_read_int_value
+from opteryx.compiled.aggregations.vector_readers cimport _dict_accessor_value_kind
+from opteryx.compiled.aggregations.vector_readers cimport _extract_stringlike_key
+from opteryx.compiled.aggregations.vector_readers cimport _read_dictionary_fixed_key
+from opteryx.compiled.aggregations.vector_readers cimport _dict_read_code
+from opteryx.compiled.aggregations.vector_readers cimport _vector_dict_accessor
+from opteryx.compiled.aggregations.vector_readers cimport _vector_value_dict_accessor
+from opteryx.compiled.aggregations.group_by_finalize cimport build_encoded_key_vector
+from opteryx.compiled.aggregations.group_by_finalize cimport build_multi_encoded_key_vector
+from opteryx.compiled.aggregations.group_by_finalize cimport build_multi_object_state_vector
+from opteryx.compiled.aggregations.group_by_finalize cimport build_native_object_vector
+from opteryx.compiled.aggregations.group_by_finalize cimport build_object_state_vector
+from opteryx.compiled.aggregations.group_by_finalize cimport build_finalize_key_vectors
+from opteryx.compiled.aggregations.group_by_finalize cimport build_finalize_object_aggregate_vector
+from opteryx.compiled.aggregations.group_by_finalize cimport build_finalize_multi_object_aggregate_vector
+from opteryx.compiled.aggregations.group_by_finalize cimport build_finalize_scalar_aggregate_vector
+from opteryx.compiled.aggregations.group_by_finalize cimport build_finalize_multi_aggregate_vectors
+from opteryx.compiled.aggregations.group_by_finalize cimport build_constant_groupby_vectors
+from opteryx.compiled.aggregations.group_by_finalize cimport build_payload_multi_key_vectors
+from opteryx.compiled.aggregations.group_by_finalize cimport build_finalize_single_key_vector
+from opteryx.compiled.aggregations.group_by_finalize cimport build_single_fixed_key_vector
+from opteryx.compiled.aggregations.kernels.count_star cimport count_star_accumulate
+from opteryx.compiled.aggregations.kernels.count_star cimport count_star_multi_accumulate
+from opteryx.compiled.aggregations.kernels.sum_float64 cimport sum_f64_accumulate
+from opteryx.compiled.aggregations.kernels.sum_float64 cimport sum_f64_accumulate_from_dict
+from opteryx.compiled.aggregations.kernels.sum_float64 cimport sum_f64_multi_accumulate
+from opteryx.compiled.aggregations.kernels.sum_float64 cimport sum_f64_multi_accumulate_from_dict
+from opteryx.compiled.aggregations.kernels.sum_int64 cimport sum_i64_accumulate
+from opteryx.compiled.aggregations.kernels.sum_int64 cimport sum_i64_accumulate_from_dict
+from opteryx.compiled.aggregations.kernels.sum_int64 cimport sum_integer_accumulate
+from opteryx.compiled.aggregations.kernels.sum_int64 cimport sum_i64_multi_accumulate
+from opteryx.compiled.aggregations.kernels.sum_int64 cimport sum_i64_multi_accumulate_from_dict
+from opteryx.compiled.aggregations.kernels.sum_int64 cimport sum_integer_multi_accumulate
+from opteryx.compiled.aggregations.kernels.min_max_fixed cimport minmax_f64_accumulate
+from opteryx.compiled.aggregations.kernels.min_max_fixed cimport minmax_f64_accumulate_from_dict
+from opteryx.compiled.aggregations.kernels.min_max_fixed cimport minmax_i64_accumulate
+from opteryx.compiled.aggregations.kernels.min_max_fixed cimport minmax_i64_accumulate_from_dict
+from opteryx.compiled.aggregations.kernels.min_max_fixed cimport minmax_integer_accumulate
+from opteryx.compiled.aggregations.kernels.min_max_fixed cimport minmax_f64_multi_accumulate
+from opteryx.compiled.aggregations.kernels.min_max_fixed cimport minmax_f64_multi_accumulate_from_dict
+from opteryx.compiled.aggregations.kernels.min_max_fixed cimport minmax_i64_multi_accumulate
+from opteryx.compiled.aggregations.kernels.min_max_fixed cimport minmax_i64_multi_accumulate_from_dict
+from opteryx.compiled.aggregations.kernels.min_max_fixed cimport minmax_integer_multi_accumulate
+from opteryx.compiled.aggregations.kernels.avg_float64 cimport avg_f64_accumulate
+from opteryx.compiled.aggregations.kernels.avg_float64 cimport avg_f64_accumulate_from_dict
+from opteryx.compiled.aggregations.kernels.avg_float64 cimport avg_f64_multi_accumulate
+from opteryx.compiled.aggregations.kernels.avg_float64 cimport avg_f64_multi_accumulate_from_dict
+from opteryx.compiled.aggregations.kernels.avg_int64 cimport avg_i64_accumulate
+from opteryx.compiled.aggregations.kernels.avg_int64 cimport avg_i64_accumulate_from_dict
+from opteryx.compiled.aggregations.kernels.avg_int64 cimport avg_integer_accumulate
+from opteryx.compiled.aggregations.kernels.avg_int64 cimport avg_i64_multi_accumulate
+from opteryx.compiled.aggregations.kernels.avg_int64 cimport avg_i64_multi_accumulate_from_dict
+from opteryx.compiled.aggregations.kernels.avg_int64 cimport avg_integer_multi_accumulate
+# --- constant-key ingest (inlined from constant_keys.pyx) ---
+
+cdef void _ingest_constant_distinct(object self, Morsel morsel, object value_vector, Py_ssize_t row_count):
+    cdef Py_ssize_t row_idx
+    cdef DrakenFixedBuffer* value_ptr
+    cdef int64_t* value_i64_data
+    cdef uint8_t* value_nulls
+    cdef uint64_t[::1] value_hashes
+
+    if self._constant_distinct_set is None:
+        self._constant_distinct_set = FlatHashSet()
+
+    if isinstance(value_vector, Int64Vector):
+        value_ptr = (<Int64Vector> value_vector).ptr
+        value_i64_data = <int64_t*> value_ptr.data
+        value_nulls = <uint8_t*> value_ptr.null_bitmap
+        for row_idx in range(row_count):
+            if _bitmap_is_valid(value_nulls, row_idx) and (<FlatHashSet> self._constant_distinct_set).insert(<uint64_t> value_i64_data[row_idx]):
+                self._constant_count += 1
+        return
+
+    if isinstance(value_vector, IntegerVector):
+        value_ptr = (<IntegerVector> value_vector).ptr
+        value_nulls = <uint8_t*> value_ptr.null_bitmap
+        for row_idx in range(row_count):
+            if _bitmap_is_valid(value_nulls, row_idx) and (<FlatHashSet> self._constant_distinct_set).insert(<uint64_t> _read_integer_value(value_ptr, row_idx)):
+                self._constant_count += 1
+        return
+
+    value_nulls = (<Vector> value_vector).null_bitmap_ptr()
+    value_hashes = morsel.hash([self._value_column])
+    for row_idx in range(row_count):
+        if _bitmap_is_valid(value_nulls, row_idx) and (<FlatHashSet> self._constant_distinct_set).insert(value_hashes[row_idx]):
+            self._constant_count += 1
+
+
+cdef void _ingest_constant_const_accessor(
+    object self,
+    Morsel morsel,
+    object value_vector,
+    ConstAccessor* value_const_accessor,
+    Py_ssize_t row_count,
+):
+    cdef object value_obj
+    cdef uint64_t[::1] value_hashes
+    cdef double val_decoded_f64
+    cdef int64_t val_decoded_i64
+
+    if self._agg_mode == 2:
+        if value_const_accessor.is_null == 0:
+            self._constant_count += row_count
+        return
+
+    if value_const_accessor.is_null != 0:
+        return
+
+    value_obj = value_vector[0]
+    if self._agg_mode == 8:
+        if self._constant_seen == 0:
+            self._constant_object_state = value_obj
+        self._constant_seen = 1
+        return
+
+    if self._value_kind == 3:
+        if self._agg_mode == 4:
+            if self._constant_seen == 0 or value_obj < self._constant_object_state:
+                self._constant_object_state = value_obj
+            self._constant_seen = 1
+        elif self._agg_mode == 5:
+            if self._constant_seen == 0 or value_obj > self._constant_object_state:
+                self._constant_object_state = value_obj
+            self._constant_seen = 1
+        elif self._agg_mode == 7:
+            _ingest_constant_distinct(self, morsel, value_vector, row_count)
+        return
+
+    if self._value_kind == 2:
+        val_decoded_f64 = <double> value_obj
+        if self._agg_mode == 3:
+            self._constant_f64_state += row_count * val_decoded_f64
+            self._constant_seen = 1
+        elif self._agg_mode == 4:
+            if self._constant_seen == 0 or val_decoded_f64 < self._constant_f64_state:
+                self._constant_f64_state = val_decoded_f64
+            self._constant_seen = 1
+        elif self._agg_mode == 5:
+            if self._constant_seen == 0 or val_decoded_f64 > self._constant_f64_state:
+                self._constant_f64_state = val_decoded_f64
+            self._constant_seen = 1
+        elif self._agg_mode == 6:
+            self._constant_avg_sum += row_count * val_decoded_f64
+            self._constant_avg_count += row_count
+        elif self._agg_mode == 7:
+            _ingest_constant_distinct(self, morsel, value_vector, row_count)
+        return
+
+    val_decoded_i64 = <int64_t> value_obj
+    if self._agg_mode == 3:
+        self._constant_i64_state += row_count * val_decoded_i64
+        self._constant_seen = 1
+    elif self._agg_mode == 4:
+        if self._constant_seen == 0 or val_decoded_i64 < self._constant_i64_state:
+            self._constant_i64_state = val_decoded_i64
+        self._constant_seen = 1
+    elif self._agg_mode == 5:
+        if self._constant_seen == 0 or val_decoded_i64 > self._constant_i64_state:
+            self._constant_i64_state = val_decoded_i64
+        self._constant_seen = 1
+    elif self._agg_mode == 6:
+        self._constant_avg_sum += row_count * val_decoded_i64
+        self._constant_avg_count += row_count
+    elif self._agg_mode == 7:
+        _ingest_constant_distinct(self, morsel, value_vector, row_count)
+
+
+cdef void _ingest_constant_vector_values(object self, object value_vector, Py_ssize_t row_count):
+    cdef Py_ssize_t row_idx
+    cdef DrakenFixedBuffer* value_ptr
+    cdef int64_t* value_i64_data
+    cdef double* value_f64_data
+    cdef uint8_t* value_nulls
+    cdef DictAccessor* value_dict_accessor = NULL
+    cdef double val_decoded_f64
+    cdef int64_t val_decoded_i64
+
+    if isinstance(value_vector, Float64Vector):
+        value_ptr = (<Float64Vector> value_vector).ptr
+        value_f64_data = <double*> value_ptr.data
+        value_nulls = <uint8_t*> value_ptr.null_bitmap
+        for row_idx in range(row_count):
+            if self._agg_mode == 2:
+                if _bitmap_is_valid(value_nulls, row_idx):
+                    self._constant_count += 1
+            elif _bitmap_is_valid(value_nulls, row_idx):
+                if self._agg_mode == 3:
+                    self._constant_f64_state += value_f64_data[row_idx]
+                    self._constant_seen = 1
+                elif self._agg_mode == 4:
+                    if self._constant_seen == 0 or value_f64_data[row_idx] < self._constant_f64_state:
+                        self._constant_f64_state = value_f64_data[row_idx]
+                    self._constant_seen = 1
+                elif self._agg_mode == 5:
+                    if self._constant_seen == 0 or value_f64_data[row_idx] > self._constant_f64_state:
+                        self._constant_f64_state = value_f64_data[row_idx]
+                    self._constant_seen = 1
+                elif self._agg_mode == 6:
+                    self._constant_avg_sum += value_f64_data[row_idx]
+                    self._constant_avg_count += 1
+        return
+
+    if isinstance(value_vector, Int64Vector):
+        value_ptr = (<Int64Vector> value_vector).ptr
+        value_i64_data = <int64_t*> value_ptr.data
+        value_nulls = <uint8_t*> value_ptr.null_bitmap
+        for row_idx in range(row_count):
+            if self._agg_mode == 2:
+                if _bitmap_is_valid(value_nulls, row_idx):
+                    self._constant_count += 1
+            elif _bitmap_is_valid(value_nulls, row_idx):
+                if self._agg_mode == 3:
+                    self._constant_i64_state += value_i64_data[row_idx]
+                    self._constant_seen = 1
+                elif self._agg_mode == 4:
+                    if self._constant_seen == 0 or value_i64_data[row_idx] < self._constant_i64_state:
+                        self._constant_i64_state = value_i64_data[row_idx]
+                    self._constant_seen = 1
+                elif self._agg_mode == 5:
+                    if self._constant_seen == 0 or value_i64_data[row_idx] > self._constant_i64_state:
+                        self._constant_i64_state = value_i64_data[row_idx]
+                    self._constant_seen = 1
+                elif self._agg_mode == 6:
+                    self._constant_avg_sum += value_i64_data[row_idx]
+                    self._constant_avg_count += 1
+        return
+
+    value_dict_accessor = _vector_value_dict_accessor(value_vector)
+    if value_dict_accessor != NULL:
+        value_nulls = value_dict_accessor.row_nulls
+        if self._value_kind == 5:
+            for row_idx in range(row_count):
+                if _bitmap_is_valid(value_nulls, row_idx):
+                    val_decoded_f64 = _dict_accessor_read_float_value(value_dict_accessor, row_idx)
+                    if self._agg_mode == 3:
+                        self._constant_f64_state += val_decoded_f64
+                        self._constant_seen = 1
+                    elif self._agg_mode == 4:
+                        if self._constant_seen == 0 or val_decoded_f64 < self._constant_f64_state:
+                            self._constant_f64_state = val_decoded_f64
+                        self._constant_seen = 1
+                    elif self._agg_mode == 5:
+                        if self._constant_seen == 0 or val_decoded_f64 > self._constant_f64_state:
+                            self._constant_f64_state = val_decoded_f64
+                        self._constant_seen = 1
+            return
+        elif self._value_kind == 4:
+            for row_idx in range(row_count):
+                if _bitmap_is_valid(value_nulls, row_idx):
+                    val_decoded_i64 = _dict_accessor_read_int_value(value_dict_accessor, row_idx)
+                    if self._agg_mode == 3:
+                        self._constant_i64_state += val_decoded_i64
+                        self._constant_seen = 1
+                    elif self._agg_mode == 4:
+                        if self._constant_seen == 0 or val_decoded_i64 < self._constant_i64_state:
+                            self._constant_i64_state = val_decoded_i64
+                        self._constant_seen = 1
+                    elif self._agg_mode == 5:
+                        if self._constant_seen == 0 or val_decoded_i64 > self._constant_i64_state:
+                            self._constant_i64_state = val_decoded_i64
+                        self._constant_seen = 1
+            return
+
+    value_ptr = (<IntegerVector> value_vector).ptr
+    value_nulls = <uint8_t*> value_ptr.null_bitmap
+    for row_idx in range(row_count):
+        if self._agg_mode == 2:
+            if _bitmap_is_valid(value_nulls, row_idx):
+                self._constant_count += 1
+        elif _bitmap_is_valid(value_nulls, row_idx):
+            val_decoded_i64 = _read_integer_value(value_ptr, row_idx)
+            if self._agg_mode == 3:
+                self._constant_i64_state += val_decoded_i64
+                self._constant_seen = 1
+            elif self._agg_mode == 4:
+                if self._constant_seen == 0 or val_decoded_i64 < self._constant_i64_state:
+                    self._constant_i64_state = val_decoded_i64
+                self._constant_seen = 1
+            elif self._agg_mode == 5:
+                if self._constant_seen == 0 or val_decoded_i64 > self._constant_i64_state:
+                    self._constant_i64_state = val_decoded_i64
+                self._constant_seen = 1
+            elif self._agg_mode == 6:
+                self._constant_avg_sum += val_decoded_i64
+                self._constant_avg_count += 1
+
+
+cdef void ingest_constant_mode(object self, Morsel morsel) except *:
+    cdef Py_ssize_t row_count = morsel.num_rows
+    cdef object value_vector
+    cdef ConstAccessor* value_const_accessor = NULL
+
+    if self._agg_mode == 1:
+        self._constant_count += row_count
+        return
+
+    if self._agg_mode == 7:
+        value_vector = morsel.column(self._value_column)
+        _ingest_constant_distinct(self, morsel, value_vector, row_count)
+        return
+
+    value_vector = morsel.column(self._value_column)
+    value_const_accessor = _vector_const_accessor(value_vector)
+    if value_const_accessor != NULL:
+        _ingest_constant_const_accessor(self, morsel, value_vector, value_const_accessor, row_count)
+        return
+
+    _ingest_constant_vector_values(self, value_vector, row_count)
+
+
+# --- groupby telemetry (inlined from groupby_telemetry.pyx) ---
+
+cdef void initialize_groupby_readings(object self, object key_store_limit_bytes) noexcept:
+    self._readings = {
+        "time_groupby_finalize_backend_ns": 0,
+        "time_groupby_finalize_rows_to_vectors_ns": 0,
+        "time_groupby_finalize_morsel_build_ns": 0,
+        "groupby_finalize_rows_count": 0,
+        "groupby_finalize_chunks_emitted": 0,
+        "groupby_finalize_fast_path_hits": 0,
+        "draken_dict_groupby_fastpath_hits": 0,
+        "draken_dict_groupby_fastpath_fallbacks": 0,
+        "draken_constant_groupby_fastpath_hits": 0,
+        "draken_constant_groupby_fastpath_fallbacks": 0,
+        "draken_constant_groupby_output_vector_hits": 0,
+        "draken_constant_groupby_output_vector_fallbacks": 0,
+        "groupby_key_store_limit_bytes": 0 if key_store_limit_bytes is None else key_store_limit_bytes,
+        "groupby_key_store_bytes": 0,
+        "feature_groupby_engine_carchar": 0,
+        "feature_groupby_engine_constant": 0,
+        "feature_groupby_engine_multi_key_fixed": 0,
+        "feature_groupby_engine_multi_key_object": 0,
+    }
+
+
+cdef inline void record_finalize_backend_time(object self, long long started_ns) noexcept:
+    self._readings["time_groupby_finalize_backend_ns"] += time.monotonic_ns() - started_ns
+
+
+cdef inline void record_finalize_rows_to_vectors_time(object self, long long started_ns) noexcept:
+    self._readings["time_groupby_finalize_rows_to_vectors_ns"] += time.monotonic_ns() - started_ns
+
+
+cdef inline void record_finalize_morsel_build_time(object self, long long started_ns) noexcept:
+    self._readings["time_groupby_finalize_morsel_build_ns"] += time.monotonic_ns() - started_ns
+
+
+cdef inline void record_finalize_rows_count(object self, Py_ssize_t rows) noexcept:
+    self._readings["groupby_finalize_rows_count"] += rows
+
+
+cdef inline void record_finalize_chunk_emitted(object self) noexcept:
+    self._readings["groupby_finalize_chunks_emitted"] += 1
+
+
+cdef inline void record_finalize_fast_path_hit(object self) noexcept:
+    self._readings["groupby_finalize_fast_path_hits"] += 1
+
+
+cdef inline void record_feature_groupby_engine_carchar(object self) noexcept:
+    self._readings["feature_groupby_engine_carchar"] += 1
+
+
+cdef inline void record_feature_groupby_engine_constant(object self) noexcept:
+    self._readings["feature_groupby_engine_constant"] += 1
+
+
+cdef inline void record_feature_groupby_engine_multi_key_fixed(object self) noexcept:
+    self._readings["feature_groupby_engine_multi_key_fixed"] += 1
+
+
+cdef inline void record_feature_groupby_engine_multi_key_object(object self) noexcept:
+    self._readings["feature_groupby_engine_multi_key_object"] += 1
+
+
+cdef inline void record_dict_groupby_fastpath_hit(object self) noexcept:
+    self._readings["draken_dict_groupby_fastpath_hits"] += 1
+
+
+cdef inline void record_groupby_key_store_bytes(object self, size_t key_store_bytes) noexcept:
+    self._readings["groupby_key_store_bytes"] = key_store_bytes
+
+
+cdef inline void record_constant_groupby_vector(object self, object vec) noexcept:
+    if _is_constant_like_vector(vec):
+        self._readings["draken_constant_groupby_output_vector_hits"] += 1
+    else:
+        self._readings["draken_constant_groupby_output_vector_fallbacks"] += 1
 from opteryx.third_party.abseil.containers cimport FlatHashSet
 
 
@@ -61,7 +460,6 @@ cdef extern from "carchar_index.hpp" namespace "opteryx::carchar":
 
 
 cdef int MODE_UNINITIALIZED = 0
-cdef int MODE_LEGACY = 1
 cdef int MODE_CARCHAR = 2
 cdef int MODE_CONSTANT = 3
 
@@ -88,14 +486,6 @@ cdef int KEY_MULTI_FIXED_TIME32 = 3
 cdef int KEY_MULTI_FIXED_TIME64 = 4
 cdef int KEY_MULTI_FIXED_TIMESTAMP64 = 5
 cdef int KEY_MULTI_ENCODED_STRING = 6
-
-
-cdef inline uint32_t _dict_read_code(const DrakenDictionaryBuffer* ptr, Py_ssize_t i) noexcept nogil:
-    if ptr.code_width == 1:
-        return (<uint8_t*>ptr.codes)[i]
-    if ptr.code_width == 2:
-        return (<uint16_t*>ptr.codes)[i]
-    return (<uint32_t*>ptr.codes)[i]
 
 
 cdef inline bint _bitmap_is_valid(uint8_t* bitmap, Py_ssize_t index) noexcept:
@@ -148,12 +538,6 @@ cdef inline int64_t _dictionary_type_to_key_kind(int dict_type) noexcept:
     return 0
 
 
-cdef inline DictAccessor* _vector_dict_accessor(object vec) noexcept:
-    if isinstance(vec, Vector):
-        return (<Vector> vec).dict_accessor()
-    return NULL
-
-
 cdef inline ConstAccessor* _vector_const_accessor(object vec) noexcept:
     if isinstance(vec, Vector):
         return (<Vector> vec).const_accessor()
@@ -199,83 +583,6 @@ cdef inline uint8_t* _vector_null_bitmap(object vec) noexcept:
     return NULL
 
 
-cdef inline uint32_t _dict_accessor_read_code(const DictAccessor* ptr, Py_ssize_t i) noexcept nogil:
-    if ptr.code_width == 1:
-        return (<uint8_t*>ptr.codes)[i]
-    if ptr.code_width == 2:
-        return (<uint16_t*>ptr.codes)[i]
-    return (<uint32_t*>ptr.codes)[i]
-
-
-cdef inline int64_t _dict_accessor_key_kind(const DictAccessor* dict_accessor) noexcept:
-    if dict_accessor == NULL or dict_accessor.dict_values == NULL:
-        return 0
-    return _dictionary_type_to_key_kind(dict_accessor.value_type)
-
-
-cdef inline DictAccessor* _vector_value_dict_accessor(object vec) noexcept:
-    cdef DictAccessor* dict_accessor = _vector_dict_accessor(vec)
-    if dict_accessor == NULL or dict_accessor.dict_values == NULL:
-        return NULL
-    return dict_accessor
-
-
-cdef inline int _dict_accessor_value_kind(const DictAccessor* dict_accessor) noexcept:
-    if dict_accessor == NULL or dict_accessor.dict_values == NULL:
-        return VALUE_NONE
-    if dict_accessor.value_type == DRAKEN_STRING:
-        return VALUE_OBJECT
-    if dict_accessor.value_type == DRAKEN_FLOAT64 or dict_accessor.value_type == DRAKEN_FLOAT32:
-        return VALUE_DICT_FLOAT64
-    return VALUE_DICT_INT64
-
-
-cdef inline double _dict_accessor_read_float_value(
-    const DictAccessor* dict_accessor,
-    Py_ssize_t row_idx,
-) except *:
-    cdef uint32_t code
-
-    code = _dict_accessor_read_code(dict_accessor, row_idx)
-    if code >= dict_accessor.dict_values.length:
-        raise IndexError("Dictionary code out of range")
-    if dict_accessor.value_type == DRAKEN_FLOAT32:
-        return (<float*>dict_accessor.dict_values.data)[code]
-    return (<double*>dict_accessor.dict_values.data)[code]
-
-
-cdef inline int64_t _dict_accessor_read_int_value(
-    const DictAccessor* dict_accessor,
-    Py_ssize_t row_idx,
-) except *:
-    cdef uint32_t code
-
-    code = _dict_accessor_read_code(dict_accessor, row_idx)
-    if code >= dict_accessor.dict_values.length:
-        raise IndexError("Dictionary code out of range")
-    if dict_accessor.value_type == DRAKEN_INT8:
-        return (<int8_t*>dict_accessor.dict_values.data)[code]
-    if dict_accessor.value_type == DRAKEN_INT16:
-        return (<int16_t*>dict_accessor.dict_values.data)[code]
-    if (
-        dict_accessor.value_type == DRAKEN_INT32
-        or dict_accessor.value_type == DRAKEN_DATE32
-        or dict_accessor.value_type == DRAKEN_TIME32
-    ):
-        return (<int32_t*>dict_accessor.dict_values.data)[code]
-    if (
-        dict_accessor.value_type == DRAKEN_INT64
-        or dict_accessor.value_type == DRAKEN_TIME64
-        or dict_accessor.value_type == DRAKEN_TIMESTAMP64
-    ):
-        return (<int64_t*>dict_accessor.dict_values.data)[code]
-    if dict_accessor.value_type == DRAKEN_BOOL:
-        return 1 if (<uint8_t*>dict_accessor.dict_values.data)[code] != 0 else 0
-    raise UnsupportedSyntaxError(
-        "Carchar group-state engine only supports fixed-width and string dictionary values."
-    )
-
-
 cdef inline uint8_t* _alloc_valid_bitmap(Py_ssize_t length) except NULL:
     cdef Py_ssize_t nbytes
     cdef uint8_t* bitmap
@@ -292,10 +599,9 @@ cdef inline uint8_t* _alloc_valid_bitmap(Py_ssize_t length) except NULL:
 
 
 cdef class CarcharGroupStateEngine:
-    cdef object _legacy_backend
     cdef list _group_by_columns
     cdef list _aggregations
-    cdef dict _readings
+    cdef public dict _readings
     cdef object _key_store_limit_bytes
 
     cdef int _mode
@@ -358,7 +664,7 @@ cdef class CarcharGroupStateEngine:
     cdef vector[int32_t] _multi_object_state_lengths
     cdef list _multi_distinct_sets
     cdef vector[uint8_t] _key_payload_bytes
-    cdef vector[int32_t] _key_payload_offsets
+    cdef vector[int64_t] _key_payload_offsets
 
     def __cinit__(
         self,
@@ -366,7 +672,6 @@ cdef class CarcharGroupStateEngine:
         list aggregations,
         object key_store_limit_bytes=None,
     ):
-        self._legacy_backend = None
         self._group_by_columns = group_by_columns
         self._aggregations = aggregations
         self._key_store_limit_bytes = key_store_limit_bytes
@@ -402,27 +707,7 @@ cdef class CarcharGroupStateEngine:
         self._multi_object_state_lengths.clear()
         self._encoded_key_offsets.push_back(0)
         self._key_payload_offsets.push_back(0)
-        self._readings = {
-            "time_groupby_finalize_backend_ns": 0,
-            "time_groupby_finalize_rows_to_vectors_ns": 0,
-            "time_groupby_finalize_morsel_build_ns": 0,
-            "groupby_finalize_rows_count": 0,
-            "groupby_finalize_chunks_emitted": 0,
-            "groupby_finalize_fast_path_hits": 0,
-            "draken_dict_groupby_fastpath_hits": 0,
-            "draken_dict_groupby_fastpath_fallbacks": 0,
-            "draken_constant_groupby_fastpath_hits": 0,
-            "draken_constant_groupby_fastpath_fallbacks": 0,
-            "draken_constant_groupby_output_vector_hits": 0,
-            "draken_constant_groupby_output_vector_fallbacks": 0,
-            "groupby_key_store_limit_bytes": 0 if key_store_limit_bytes is None else key_store_limit_bytes,
-            "groupby_key_store_bytes": 0,
-            "feature_groupby_engine_carchar": 0,
-            "feature_groupby_engine_constant": 0,
-            "feature_groupby_engine_group_state_store": 0,
-            "feature_groupby_engine_multi_key_fixed": 0,
-            "feature_groupby_engine_multi_key_object": 0,
-        }
+        initialize_groupby_readings(self, key_store_limit_bytes)
 
     def __dealloc__(self):
         if self._index is not NULL:
@@ -431,48 +716,19 @@ cdef class CarcharGroupStateEngine:
 
     @property
     def backend(self):
-        if self._mode == MODE_LEGACY:
-            return self._legacy_backend
         return self
 
     @property
     def readings(self):
         return self._readings
 
-    @property
-    def dict_groupby_fastpath_hits(self):
-        if self._mode == MODE_LEGACY:
-            return getattr(self._legacy_backend, "dict_groupby_fastpath_hits", 0)
-        return 0
-
-    @property
-    def dict_groupby_fastpath_fallbacks(self):
-        if self._mode == MODE_LEGACY:
-            return getattr(self._legacy_backend, "dict_groupby_fastpath_fallbacks", 0)
-        return 0
-
-    @property
-    def constant_groupby_fastpath_hits(self):
-        if self._mode == MODE_LEGACY:
-            return getattr(self._legacy_backend, "constant_groupby_fastpath_hits", 0)
-        return 0
-
-    @property
-    def constant_groupby_fastpath_fallbacks(self):
-        if self._mode == MODE_LEGACY:
-            return getattr(self._legacy_backend, "constant_groupby_fastpath_fallbacks", 0)
-        return 0
-
-    cdef void _record_constant_groupby_vector(self, object vec):
-        if _is_constant_like_vector(vec):
-            self._readings["draken_constant_groupby_output_vector_hits"] += 1
-        else:
-            self._readings["draken_constant_groupby_output_vector_fallbacks"] += 1
-
-    cdef void _init_legacy_backend(self):
+    cdef void _raise_unsupported_shape(self):
         raise UnsupportedSyntaxError(
             "Carchar group-state engine does not support this query shape."
         )
+
+    cdef void _init_legacy_backend(self):
+        self._raise_unsupported_shape()
 
     cdef inline bint _has_multi_agg(self) noexcept:
         return self._multi_agg_count > 0
@@ -486,12 +742,6 @@ cdef class CarcharGroupStateEngine:
         return <Py_ssize_t>state_index * self._multi_agg_count + agg_idx
 
     cdef object _debug_key_payload_value(self, Py_ssize_t state_index):
-        cdef Py_ssize_t pos
-        cdef Py_ssize_t key_idx
-        cdef uint8_t valid_flag
-        cdef int64_t key_value
-        cdef Py_ssize_t data_len
-        cdef bytes raw
         cdef list key_values
         cdef list key_valids
 
@@ -505,44 +755,20 @@ cdef class CarcharGroupStateEngine:
                 return tuple(key_values), tuple(key_valids)
             return self._group_key_values[state_index], self._group_key_valid[state_index]
 
-        pos = self._key_payload_offsets[state_index]
         if len(self._group_by_columns) > 1:
-            key_values = []
-            key_valids = []
-            for key_idx in range(len(self._group_by_columns)):
-                valid_flag = self._key_payload_bytes[pos]
-                pos += 1
-                key_valids.append(1 if valid_flag != 0 else 0)
-                if self._is_multi_fixed_kind(self._multi_group_key_kinds[key_idx]):
-                    key_value = self._payload_read_i64(&pos)
-                    key_values.append(key_value if valid_flag != 0 else None)
-                else:
-                    data_len = <Py_ssize_t> self._payload_read_vsize(&pos)
-                    if valid_flag == 0:
-                        key_values.append(None)
-                    else:
-                        raw = <bytes> PyBytes_FromStringAndSize(
-                            <const char*> &self._key_payload_bytes[pos],
-                            data_len,
-                        )
-                        key_values.append(raw.decode("utf-8"))
-                    pos += data_len
-            return tuple(key_values), tuple(key_valids)
+            return decode_multi_payload_keys(
+                self._key_payload_bytes,
+                self._key_payload_offsets,
+                self._multi_group_key_kinds,
+                state_index,
+            )
 
-        valid_flag = self._key_payload_bytes[pos]
-        pos += 1
-        if self._is_multi_fixed_kind(self._single_key_kind):
-            key_value = self._payload_read_i64(&pos)
-            return (key_value if valid_flag != 0 else None), (1 if valid_flag != 0 else 0)
-
-        data_len = <Py_ssize_t> self._payload_read_vsize(&pos)
-        if valid_flag == 0:
-            return None, 0
-        raw = <bytes> PyBytes_FromStringAndSize(
-            <const char*> &self._key_payload_bytes[pos],
-            data_len,
+        return decode_single_payload_key(
+            self._key_payload_bytes,
+            self._key_payload_offsets,
+            state_index,
+            self._single_key_kind,
         )
-        return raw.decode("utf-8"), 1
 
     cdef inline bint _agg_output_is_float(self, Py_ssize_t agg_idx) noexcept:
         if self._multi_agg_count > 0:
@@ -676,7 +902,7 @@ cdef class CarcharGroupStateEngine:
             return 0
 
         dict_values = dict_accessor.dict_values
-        code = _dict_accessor_read_code(dict_accessor, row_idx)
+        code = _dict_read_code(dict_accessor, row_idx)
         if code >= dict_values.length:
             raise IndexError("Dictionary code out of range")
 
@@ -783,7 +1009,7 @@ cdef class CarcharGroupStateEngine:
                 raise UnsupportedSyntaxError(
                     "Carchar group-state engine only supports string dictionary keys on the native encoded-key path."
                 )
-            code = _dict_accessor_read_code(dict_accessor, row_idx)
+            code = _dict_read_code(dict_accessor, row_idx)
             nulls = <uint8_t*> dict_values.null_bitmap
             if not _bitmap_is_valid(nulls, code):
                 data_ptr[0] = NULL
@@ -799,110 +1025,67 @@ cdef class CarcharGroupStateEngine:
             "Carchar group-state engine only supports native encoded storage for string-like group keys."
         )
 
-    cdef inline void _payload_push_u8(self, uint8_t value) noexcept:
-        self._key_payload_bytes.push_back(value)
-
-    cdef inline void _payload_push_vsize(self, uint64_t value) noexcept:
-        cdef uint8_t byte_value
-        while value >= 0x80:
-            byte_value = <uint8_t>((value & 0x7F) | 0x80)
-            self._key_payload_bytes.push_back(byte_value)
-            value >>= 7
-        self._key_payload_bytes.push_back(<uint8_t> value)
-
-    cdef inline void _payload_push_i64(self, int64_t value) noexcept:
-        cdef uint64_t encoded = <uint64_t> value
-        self._key_payload_bytes.push_back(<uint8_t>(encoded & 0xFF))
-        self._key_payload_bytes.push_back(<uint8_t>((encoded >> 8) & 0xFF))
-        self._key_payload_bytes.push_back(<uint8_t>((encoded >> 16) & 0xFF))
-        self._key_payload_bytes.push_back(<uint8_t>((encoded >> 24) & 0xFF))
-        self._key_payload_bytes.push_back(<uint8_t>((encoded >> 32) & 0xFF))
-        self._key_payload_bytes.push_back(<uint8_t>((encoded >> 40) & 0xFF))
-        self._key_payload_bytes.push_back(<uint8_t>((encoded >> 48) & 0xFF))
-        self._key_payload_bytes.push_back(<uint8_t>((encoded >> 56) & 0xFF))
-
-    cdef inline uint64_t _payload_read_vsize(self, Py_ssize_t* position) noexcept:
-        cdef Py_ssize_t pos = position[0]
-        cdef uint64_t value = 0
-        cdef uint64_t shift = 0
-        cdef uint8_t byte_value
-
-        while True:
-            byte_value = self._key_payload_bytes[pos]
-            pos += 1
-            value |= <uint64_t>(byte_value & 0x7F) << shift
-            if (byte_value & 0x80) == 0:
-                break
-            shift += 7
-
-        position[0] = pos
-        return value
-
-    cdef inline int64_t _payload_read_i64(self, Py_ssize_t* position) noexcept:
-        cdef Py_ssize_t pos = position[0]
-        cdef uint64_t value = (
-            <uint64_t> self._key_payload_bytes[pos]
-            | (<uint64_t> self._key_payload_bytes[pos + 1] << 8)
-            | (<uint64_t> self._key_payload_bytes[pos + 2] << 16)
-            | (<uint64_t> self._key_payload_bytes[pos + 3] << 24)
-            | (<uint64_t> self._key_payload_bytes[pos + 4] << 32)
-            | (<uint64_t> self._key_payload_bytes[pos + 5] << 40)
-            | (<uint64_t> self._key_payload_bytes[pos + 6] << 48)
-            | (<uint64_t> self._key_payload_bytes[pos + 7] << 56)
-        )
-        position[0] = pos + 8
-        return <int64_t> value
-
-    cdef inline void _append_payload_bytes(self, const char* data_ptr, Py_ssize_t data_len) noexcept:
-        cdef Py_ssize_t idx
-        for idx in range(data_len):
-            self._key_payload_bytes.push_back(<uint8_t> data_ptr[idx])
-
-    cdef inline void _seal_payload_record(self) noexcept:
-        self._key_payload_offsets.push_back(<int32_t> self._key_payload_bytes.size())
-
     cdef inline void _append_single_payload_key(
         self,
         const char* data_ptr,
         Py_ssize_t data_len,
         int64_t key_valid_flag,
     ) except *:
-        self._payload_push_u8(1 if key_valid_flag != 0 else 0)
-        self._payload_push_vsize(<uint64_t> data_len if key_valid_flag != 0 else 0)
-        if key_valid_flag != 0 and data_len > 0:
-            self._append_payload_bytes(data_ptr, data_len)
-        self._seal_payload_record()
+        if not append_single_encoded_key_record(
+            self._key_payload_bytes,
+            self._key_payload_offsets,
+            data_ptr,
+            data_len,
+            key_valid_flag,
+        ):
+            raise RuntimeError("failed to serialize encoded group key record")
 
     cdef inline void _append_single_fixed_payload_key(
         self,
         int64_t key_value,
         int64_t key_valid_flag,
-    ) noexcept:
-        self._payload_push_u8(1 if key_valid_flag != 0 else 0)
-        self._payload_push_i64(key_value if key_valid_flag != 0 else 0)
-        self._seal_payload_record()
+    ) except *:
+        if not append_single_fixed_key_record(
+            self._key_payload_bytes,
+            self._key_payload_offsets,
+            key_value,
+            key_valid_flag,
+        ):
+            raise RuntimeError("failed to serialize fixed group key record")
 
     cdef inline void _append_multi_fixed_payload_key(
         self,
         list key_ptrs,
         list key_nulls,
         Py_ssize_t row_idx,
-    ) noexcept:
+    ) except *:
         cdef Py_ssize_t key_idx
         cdef DrakenFixedBuffer* key_ptr
         cdef uint8_t* key_null_bitmap
         cdef int64_t key_value
         cdef int64_t key_valid_flag
+        cdef vector[int64_t] fixed_values
+        cdef vector[int64_t] fixed_valids
+        cdef vector[string] encoded_values
+        cdef vector[int64_t] encoded_valids
 
         for key_idx in range(len(key_ptrs)):
             key_ptr = <DrakenFixedBuffer*> <size_t> key_ptrs[key_idx]
             key_null_bitmap = <uint8_t*> <size_t> key_nulls[key_idx]
             key_valid_flag = 1 if _bitmap_is_valid(key_null_bitmap, row_idx) else 0
             key_value = _read_integer_value(key_ptr, row_idx) if key_valid_flag != 0 else 0
-            self._payload_push_u8(1 if key_valid_flag != 0 else 0)
-            self._payload_push_i64(key_value)
+            fixed_values.push_back(key_value)
+            fixed_valids.push_back(key_valid_flag)
 
-        self._seal_payload_record()
+        if not append_multi_key_record(
+            self._key_payload_bytes,
+            self._key_payload_offsets,
+            fixed_values,
+            fixed_valids,
+            encoded_values,
+            encoded_valids,
+        ):
+            raise RuntimeError("failed to serialize multi fixed group key record")
 
     cdef inline void _append_multi_payload_key(
         self,
@@ -916,6 +1099,11 @@ cdef class CarcharGroupStateEngine:
         cdef const char* data_ptr = NULL
         cdef Py_ssize_t data_len = 0
         cdef object key_vector
+        cdef vector[int64_t] fixed_values
+        cdef vector[int64_t] fixed_valids
+        cdef vector[string] encoded_values
+        cdef vector[int64_t] encoded_valids
+        cdef string encoded_value
 
         for key_idx in range(len(key_vectors)):
             key_vector = key_vectors[key_idx]
@@ -942,17 +1130,27 @@ cdef class CarcharGroupStateEngine:
                     raise UnsupportedSyntaxError(
                         "Unsupported fixed-width group key vector in Carchar payload arena."
                     )
-                self._payload_push_u8(1 if key_valid_flag != 0 else 0)
-                self._payload_push_i64(key_value if key_valid_flag != 0 else 0)
+                fixed_values.push_back(key_value)
+                fixed_valids.push_back(key_valid_flag)
                 continue
 
             key_valid_flag = self._extract_stringlike_key(key_vector, row_idx, &data_ptr, &data_len)
-            self._payload_push_u8(1 if key_valid_flag != 0 else 0)
-            self._payload_push_vsize(<uint64_t> data_len if key_valid_flag != 0 else 0)
-            if key_valid_flag != 0 and data_len > 0:
-                self._append_payload_bytes(data_ptr, data_len)
+            if key_valid_flag != 0:
+                encoded_value.assign(data_ptr, <size_t> data_len)
+            else:
+                encoded_value.clear()
+            encoded_values.push_back(encoded_value)
+            encoded_valids.push_back(key_valid_flag)
 
-        self._seal_payload_record()
+        if not append_multi_key_record(
+            self._key_payload_bytes,
+            self._key_payload_offsets,
+            fixed_values,
+            fixed_valids,
+            encoded_values,
+            encoded_valids,
+        ):
+            raise RuntimeError("failed to serialize multi group key record")
 
     cdef void _maybe_init_carchar_mode(self, Morsel morsel):
         cdef object fn
@@ -1023,11 +1221,11 @@ cdef class CarcharGroupStateEngine:
                 self._use_object_keys = False
                 self._init_multi_fixed_key_columns(len(self._group_by_columns))
                 self._init_multi_encoded_key_columns(len(self._group_by_columns))
-                self._readings["feature_groupby_engine_multi_key_fixed"] += 1
+                record_feature_groupby_engine_multi_key_fixed(self)
             else:
                 self._init_multi_fixed_key_columns(len(self._group_by_columns))
                 self._init_multi_encoded_key_columns(len(self._group_by_columns))
-                self._readings["feature_groupby_engine_multi_key_object"] += 1
+                record_feature_groupby_engine_multi_key_object(self)
 
             if len(self._aggregations) > 1:
                 for agg_idx in range(len(self._aggregations)):
@@ -1163,7 +1361,7 @@ cdef class CarcharGroupStateEngine:
                 self._multi_agg_count = len(self._aggregations)
                 self._index = new CarcharIndex(<size_t> max(16, morsel.num_rows * 2), 0.80)
                 self._mode = MODE_CARCHAR
-                self._readings["feature_groupby_engine_carchar"] += 1
+                record_feature_groupby_engine_carchar(self)
                 return
 
             fn = self._aggregations[0][1]
@@ -1269,7 +1467,7 @@ cdef class CarcharGroupStateEngine:
                 else:
                     self._init_legacy_backend()
                     return
-            elif fn == "hash_one":
+            elif fn == "any_value":
                 self._agg_mode = AGG_HASH_ONE
                 self._value_kind = VALUE_OBJECT
                 self._use_object_keys = True
@@ -1279,7 +1477,7 @@ cdef class CarcharGroupStateEngine:
 
             self._index = new CarcharIndex(<size_t> max(16, morsel.num_rows * 2), 0.80)
             self._mode = MODE_CARCHAR
-            self._readings["feature_groupby_engine_carchar"] += 1
+            record_feature_groupby_engine_carchar(self)
             return
 
         key_vector = morsel.column(self._group_column)
@@ -1427,7 +1625,7 @@ cdef class CarcharGroupStateEngine:
                 self._multi_agg_count = len(self._aggregations)
                 self._index = new CarcharIndex(<size_t> max(16, morsel.num_rows * 2), 0.80)
                 self._mode = MODE_CARCHAR
-                self._readings["feature_groupby_engine_carchar"] += 1
+                record_feature_groupby_engine_carchar(self)
                 return
 
             fn = self._aggregations[0][1]
@@ -1542,7 +1740,7 @@ cdef class CarcharGroupStateEngine:
                 else:
                     self._init_legacy_backend()
                     return
-            elif fn == "hash_one":
+            elif fn == "any_value":
                 self._agg_mode = AGG_HASH_ONE
                 self._value_kind = VALUE_OBJECT
             else:
@@ -1551,7 +1749,7 @@ cdef class CarcharGroupStateEngine:
 
             self._index = new CarcharIndex(<size_t> max(16, morsel.num_rows * 2), 0.80)
             self._mode = MODE_CARCHAR
-            self._readings["feature_groupby_engine_carchar"] += 1
+            record_feature_groupby_engine_carchar(self)
             return
         elif _vector_dict_accessor(key_vector) != NULL and len(self._aggregations) > 1:
             self._single_key_kind = key_kind
@@ -1688,7 +1886,7 @@ cdef class CarcharGroupStateEngine:
             self._multi_agg_count = len(self._aggregations)
             self._index = new CarcharIndex(<size_t> max(16, morsel.num_rows * 2), 0.80)
             self._mode = MODE_CARCHAR
-            self._readings["feature_groupby_engine_carchar"] += 1
+            record_feature_groupby_engine_carchar(self)
             return
         elif _vector_dict_accessor(key_vector) != NULL:
             self._single_key_kind = key_kind
@@ -1782,7 +1980,7 @@ cdef class CarcharGroupStateEngine:
                 else:
                     self._init_legacy_backend()
                     return
-            elif fn == "hash_one":
+            elif fn == "any_value":
                 self._agg_mode = AGG_HASH_ONE
                 self._value_kind = VALUE_OBJECT
             else:
@@ -1791,7 +1989,7 @@ cdef class CarcharGroupStateEngine:
 
             self._index = new CarcharIndex(<size_t> max(16, morsel.num_rows * 2), 0.80)
             self._mode = MODE_CARCHAR
-            self._readings["feature_groupby_engine_carchar"] += 1
+            record_feature_groupby_engine_carchar(self)
             return
 
         self._multi_agg_count = 0
@@ -1945,7 +2143,7 @@ cdef class CarcharGroupStateEngine:
             self._multi_agg_count = len(self._aggregations)
             self._index = new CarcharIndex(<size_t> max(16, morsel.num_rows * 2), 0.80)
             self._mode = MODE_CARCHAR
-            self._readings["feature_groupby_engine_carchar"] += 1
+            record_feature_groupby_engine_carchar(self)
             return
 
         if fn == "count":
@@ -2009,7 +2207,7 @@ cdef class CarcharGroupStateEngine:
             else:
                 self._init_legacy_backend()
                 return
-        elif fn == "hash_one":
+        elif fn == "any_value":
             self._agg_mode = AGG_HASH_ONE
             self._value_kind = VALUE_OBJECT
         else:
@@ -2018,7 +2216,7 @@ cdef class CarcharGroupStateEngine:
 
         if _is_constant_like_vector(key_vector):
             self._mode = MODE_CONSTANT
-            self._readings["feature_groupby_engine_constant"] += 1
+            record_feature_groupby_engine_constant(self)
             return
 
         self._single_key_kind = KEY_MULTI_FIXED_INT
@@ -2043,7 +2241,7 @@ cdef class CarcharGroupStateEngine:
             self._use_object_keys = True
         self._index = new CarcharIndex(<size_t> max(16, morsel.num_rows * 2), 0.80)
         self._mode = MODE_CARCHAR
-        self._readings["feature_groupby_engine_carchar"] += 1
+        record_feature_groupby_engine_carchar(self)
 
     cdef void _reserve_for_rows(self, Py_ssize_t row_count):
         cdef size_t expected
@@ -2115,7 +2313,7 @@ cdef class CarcharGroupStateEngine:
             self._avg_counts.push_back(0)
 
         key_store_bytes = <size_t> self._key_payload_bytes.size()
-        self._readings["groupby_key_store_bytes"] = key_store_bytes
+        record_groupby_key_store_bytes(self, key_store_bytes)
         if (
             self._key_store_limit_bytes is not None
             and key_store_bytes > <size_t> self._key_store_limit_bytes
@@ -2167,7 +2365,7 @@ cdef class CarcharGroupStateEngine:
             self._avg_counts.push_back(0)
 
         key_store_bytes = <size_t> self._key_payload_bytes.size()
-        self._readings["groupby_key_store_bytes"] = key_store_bytes
+        record_groupby_key_store_bytes(self, key_store_bytes)
         if (
             self._key_store_limit_bytes is not None
             and key_store_bytes > <size_t> self._key_store_limit_bytes
@@ -2222,7 +2420,7 @@ cdef class CarcharGroupStateEngine:
             self._avg_counts.push_back(0)
 
         key_store_bytes = <size_t> self._key_payload_bytes.size()
-        self._readings["groupby_key_store_bytes"] = key_store_bytes
+        record_groupby_key_store_bytes(self, key_store_bytes)
         if (
             self._key_store_limit_bytes is not None
             and key_store_bytes > <size_t> self._key_store_limit_bytes
@@ -2245,7 +2443,7 @@ cdef class CarcharGroupStateEngine:
         self._index.insert_new(row_hash, payload_ref)
         self._append_multi_payload_key(key_vectors, row_idx)
         key_store_bytes = <size_t> self._key_payload_bytes.size()
-        self._readings["groupby_key_store_bytes"] = key_store_bytes
+        record_groupby_key_store_bytes(self, key_store_bytes)
 
         self._object_state.append(None)
         self._object_state_starts.push_back(0)
@@ -2285,7 +2483,13 @@ cdef class CarcharGroupStateEngine:
 
     cdef list _build_multi_fixed_key_vectors(self, Py_ssize_t start, Py_ssize_t stop):
         if <Py_ssize_t> self._key_payload_offsets.size() >= stop + 1:
-            return self._build_payload_multi_key_vectors(start, stop)
+            return build_payload_multi_key_vectors(
+                self._key_payload_bytes,
+                self._key_payload_offsets,
+                self._multi_group_key_kinds,
+                start,
+                stop,
+            )
         cdef Py_ssize_t key_count = len(self._group_by_columns)
         cdef Py_ssize_t key_idx
         cdef Py_ssize_t row_idx
@@ -2638,12 +2842,18 @@ cdef class CarcharGroupStateEngine:
         cdef int64_t* state_indices = NULL
 
         if self._agg_mode == AGG_COUNT_STAR:
-            for row_idx in range(row_count):
-                key_valid = _bitmap_is_valid(key_nulls, row_idx)
-                key_valid_flag = 1 if key_valid else 0
-                key_value = _read_integer_value(key_ptr, row_idx) if key_valid else 0
-                state_index = self._find_or_insert_state(row_hashes[row_idx], key_value, key_valid_flag)
-                self._counts[state_index] = self._counts[state_index] + 1
+            state_indices = <int64_t*> malloc(row_count * sizeof(int64_t))
+            if state_indices == NULL and row_count > 0:
+                raise MemoryError()
+            try:
+                for row_idx in range(row_count):
+                    key_valid = _bitmap_is_valid(key_nulls, row_idx)
+                    key_valid_flag = 1 if key_valid else 0
+                    key_value = _read_integer_value(key_ptr, row_idx) if key_valid else 0
+                    state_indices[row_idx] = self._find_or_insert_state(row_hashes[row_idx], key_value, key_valid_flag)
+                count_star_accumulate(self._counts.data(), state_indices, row_count)
+            finally:
+                free(state_indices)
             return
 
         if self._agg_mode == AGG_COUNT_DISTINCT:
@@ -2662,6 +2872,40 @@ cdef class CarcharGroupStateEngine:
             finally:
                 if state_indices != NULL:
                     free(state_indices)
+            return
+
+        if self._agg_mode == AGG_SUM:
+            state_indices = <int64_t*> malloc(row_count * sizeof(int64_t))
+            if state_indices == NULL and row_count > 0:
+                raise MemoryError()
+            try:
+                for row_idx in range(row_count):
+                    key_valid = _bitmap_is_valid(key_nulls, row_idx)
+                    key_valid_flag = 1 if key_valid else 0
+                    key_value = _read_integer_value(key_ptr, row_idx) if key_valid else 0
+                    state_indices[row_idx] = self._find_or_insert_state(
+                        row_hashes[row_idx], key_value, key_valid_flag
+                    )
+                value_vector = morsel.column(self._value_column)
+                if isinstance(value_vector, Float64Vector):
+                    value_ptr = (<Float64Vector> value_vector).ptr
+                    sum_f64_accumulate(
+                        self._f64_state.data(), self._seen.data(), state_indices,
+                        <double*> value_ptr.data, <uint8_t*> value_ptr.null_bitmap, row_count,
+                    )
+                elif isinstance(value_vector, Int64Vector):
+                    value_ptr = (<Int64Vector> value_vector).ptr
+                    sum_i64_accumulate(
+                        self._i64_state.data(), self._seen.data(), state_indices,
+                        <int64_t*> value_ptr.data, <uint8_t*> value_ptr.null_bitmap, row_count,
+                    )
+                else:
+                    value_ptr = (<IntegerVector> value_vector).ptr
+                    sum_integer_accumulate(
+                        self._i64_state.data(), self._seen.data(), state_indices, value_ptr, row_count,
+                    )
+            finally:
+                free(state_indices)
             return
 
         value_vector = morsel.column(self._value_column)
@@ -2683,6 +2927,78 @@ cdef class CarcharGroupStateEngine:
                     free(state_indices)
             return
 
+        if self._agg_mode in (AGG_MIN, AGG_MAX):
+            state_indices = <int64_t*> malloc(row_count * sizeof(int64_t))
+            if state_indices == NULL and row_count > 0:
+                raise MemoryError()
+            try:
+                for row_idx in range(row_count):
+                    key_valid = _bitmap_is_valid(key_nulls, row_idx)
+                    key_valid_flag = 1 if key_valid else 0
+                    key_value = _read_integer_value(key_ptr, row_idx) if key_valid else 0
+                    state_indices[row_idx] = self._find_or_insert_state(
+                        row_hashes[row_idx], key_value, key_valid_flag
+                    )
+                if isinstance(value_vector, Float64Vector):
+                    value_ptr = (<Float64Vector> value_vector).ptr
+                    minmax_f64_accumulate(
+                        self._f64_state.data(), self._seen.data(), state_indices,
+                        <double*> value_ptr.data, <uint8_t*> value_ptr.null_bitmap, row_count, self._agg_mode == AGG_MIN,
+                    )
+                elif isinstance(value_vector, Int64Vector):
+                    value_ptr = (<Int64Vector> value_vector).ptr
+                    minmax_i64_accumulate(
+                        self._i64_state.data(), self._seen.data(), state_indices,
+                        <int64_t*> value_ptr.data, <uint8_t*> value_ptr.null_bitmap, row_count, self._agg_mode == AGG_MIN,
+                    )
+                elif isinstance(value_vector, TimestampVector):
+                    value_ptr = (<TimestampVector> value_vector).ptr
+                    minmax_i64_accumulate(
+                        self._i64_state.data(), self._seen.data(), state_indices,
+                        <int64_t*> value_ptr.data, <uint8_t*> value_ptr.null_bitmap, row_count, self._agg_mode == AGG_MIN,
+                    )
+                else:
+                    value_ptr = (<IntegerVector> value_vector).ptr
+                    minmax_integer_accumulate(
+                        self._i64_state.data(), self._seen.data(), state_indices, value_ptr, row_count, self._agg_mode == AGG_MIN,
+                    )
+            finally:
+                free(state_indices)
+            return
+
+        if self._agg_mode == AGG_AVG:
+            state_indices = <int64_t*> malloc(row_count * sizeof(int64_t))
+            if state_indices == NULL and row_count > 0:
+                raise MemoryError()
+            try:
+                for row_idx in range(row_count):
+                    key_valid = _bitmap_is_valid(key_nulls, row_idx)
+                    key_valid_flag = 1 if key_valid else 0
+                    key_value = _read_integer_value(key_ptr, row_idx) if key_valid else 0
+                    state_indices[row_idx] = self._find_or_insert_state(
+                        row_hashes[row_idx], key_value, key_valid_flag
+                    )
+                if isinstance(value_vector, Float64Vector):
+                    value_ptr = (<Float64Vector> value_vector).ptr
+                    avg_f64_accumulate(
+                        self._avg_sums.data(), self._avg_counts.data(), state_indices,
+                        <double*> value_ptr.data, <uint8_t*> value_ptr.null_bitmap, row_count,
+                    )
+                elif isinstance(value_vector, Int64Vector):
+                    value_ptr = (<Int64Vector> value_vector).ptr
+                    avg_i64_accumulate(
+                        self._avg_sums.data(), self._avg_counts.data(), state_indices,
+                        <int64_t*> value_ptr.data, <uint8_t*> value_ptr.null_bitmap, row_count,
+                    )
+                else:
+                    value_ptr = (<IntegerVector> value_vector).ptr
+                    avg_integer_accumulate(
+                        self._avg_sums.data(), self._avg_counts.data(), state_indices, value_ptr, row_count,
+                    )
+            finally:
+                free(state_indices)
+            return
+
         if isinstance(value_vector, Float64Vector):
             value_ptr = (<Float64Vector> value_vector).ptr
             value_f64_data = <double*> value_ptr.data
@@ -2695,21 +3011,6 @@ cdef class CarcharGroupStateEngine:
                 if self._agg_mode == AGG_COUNT_VALUE:
                     if _bitmap_is_valid(value_nulls, row_idx):
                         self._counts[state_index] = self._counts[state_index] + 1
-                elif _bitmap_is_valid(value_nulls, row_idx):
-                    if self._agg_mode == AGG_SUM:
-                        self._f64_state[state_index] = self._f64_state[state_index] + value_f64_data[row_idx]
-                        self._seen[state_index] = 1
-                    elif self._agg_mode == AGG_MIN:
-                        if self._seen[state_index] == 0 or value_f64_data[row_idx] < self._f64_state[state_index]:
-                            self._f64_state[state_index] = value_f64_data[row_idx]
-                        self._seen[state_index] = 1
-                    elif self._agg_mode == AGG_MAX:
-                        if self._seen[state_index] == 0 or value_f64_data[row_idx] > self._f64_state[state_index]:
-                            self._f64_state[state_index] = value_f64_data[row_idx]
-                        self._seen[state_index] = 1
-                    elif self._agg_mode == AGG_AVG:
-                        self._avg_sums[state_index] = self._avg_sums[state_index] + value_f64_data[row_idx]
-                        self._avg_counts[state_index] = self._avg_counts[state_index] + 1
             return
 
         if isinstance(value_vector, Int64Vector):
@@ -2724,26 +3025,10 @@ cdef class CarcharGroupStateEngine:
                 if self._agg_mode == AGG_COUNT_VALUE:
                     if _bitmap_is_valid(value_nulls, row_idx):
                         self._counts[state_index] = self._counts[state_index] + 1
-                elif _bitmap_is_valid(value_nulls, row_idx):
-                    if self._agg_mode == AGG_SUM:
-                        self._i64_state[state_index] = self._i64_state[state_index] + value_i64_data[row_idx]
-                        self._seen[state_index] = 1
-                    elif self._agg_mode == AGG_MIN:
-                        if self._seen[state_index] == 0 or value_i64_data[row_idx] < self._i64_state[state_index]:
-                            self._i64_state[state_index] = value_i64_data[row_idx]
-                        self._seen[state_index] = 1
-                    elif self._agg_mode == AGG_MAX:
-                        if self._seen[state_index] == 0 or value_i64_data[row_idx] > self._i64_state[state_index]:
-                            self._i64_state[state_index] = value_i64_data[row_idx]
-                        self._seen[state_index] = 1
-                    elif self._agg_mode == AGG_AVG:
-                        self._avg_sums[state_index] = self._avg_sums[state_index] + value_i64_data[row_idx]
-                        self._avg_counts[state_index] = self._avg_counts[state_index] + 1
             return
 
         if isinstance(value_vector, TimestampVector):
             value_ptr = (<TimestampVector> value_vector).ptr
-            value_i64_data = <int64_t*> value_ptr.data
             value_nulls = <uint8_t*> value_ptr.null_bitmap
             for row_idx in range(row_count):
                 key_valid = _bitmap_is_valid(key_nulls, row_idx)
@@ -2753,15 +3038,6 @@ cdef class CarcharGroupStateEngine:
                 if self._agg_mode == AGG_COUNT_VALUE:
                     if _bitmap_is_valid(value_nulls, row_idx):
                         self._counts[state_index] = self._counts[state_index] + 1
-                elif _bitmap_is_valid(value_nulls, row_idx):
-                    if self._agg_mode == AGG_MIN:
-                        if self._seen[state_index] == 0 or value_i64_data[row_idx] < self._i64_state[state_index]:
-                            self._i64_state[state_index] = value_i64_data[row_idx]
-                        self._seen[state_index] = 1
-                    elif self._agg_mode == AGG_MAX:
-                        if self._seen[state_index] == 0 or value_i64_data[row_idx] > self._i64_state[state_index]:
-                            self._i64_state[state_index] = value_i64_data[row_idx]
-                        self._seen[state_index] = 1
             return
 
         value_ptr = (<IntegerVector> value_vector).ptr
@@ -2774,22 +3050,6 @@ cdef class CarcharGroupStateEngine:
             if self._agg_mode == AGG_COUNT_VALUE:
                 if _bitmap_is_valid(value_nulls, row_idx):
                     self._counts[state_index] = self._counts[state_index] + 1
-            elif _bitmap_is_valid(value_nulls, row_idx):
-                key_value = _read_integer_value(value_ptr, row_idx)
-                if self._agg_mode == AGG_SUM:
-                    self._i64_state[state_index] = self._i64_state[state_index] + key_value
-                    self._seen[state_index] = 1
-                elif self._agg_mode == AGG_MIN:
-                    if self._seen[state_index] == 0 or key_value < self._i64_state[state_index]:
-                        self._i64_state[state_index] = key_value
-                    self._seen[state_index] = 1
-                elif self._agg_mode == AGG_MAX:
-                    if self._seen[state_index] == 0 or key_value > self._i64_state[state_index]:
-                        self._i64_state[state_index] = key_value
-                    self._seen[state_index] = 1
-                elif self._agg_mode == AGG_AVG:
-                    self._avg_sums[state_index] = self._avg_sums[state_index] + key_value
-                    self._avg_counts[state_index] = self._avg_counts[state_index] + 1
 
     cdef void _ingest_int64_key(self, Morsel morsel, Int64Vector key_vector):
         cdef uint64_t[::1] row_hashes = morsel.hash([self._group_column])
@@ -2810,12 +3070,18 @@ cdef class CarcharGroupStateEngine:
         cdef int64_t* state_indices = NULL
 
         if self._agg_mode == AGG_COUNT_STAR:
-            for row_idx in range(row_count):
-                key_valid = _bitmap_is_valid(key_nulls, row_idx)
-                key_valid_flag = 1 if key_valid else 0
-                key_value = key_data[row_idx] if key_valid else 0
-                state_index = self._find_or_insert_state(row_hashes[row_idx], key_value, key_valid_flag)
-                self._counts[state_index] = self._counts[state_index] + 1
+            state_indices = <int64_t*> malloc(row_count * sizeof(int64_t))
+            if state_indices == NULL and row_count > 0:
+                raise MemoryError()
+            try:
+                for row_idx in range(row_count):
+                    key_valid = _bitmap_is_valid(key_nulls, row_idx)
+                    key_valid_flag = 1 if key_valid else 0
+                    key_value = key_data[row_idx] if key_valid else 0
+                    state_indices[row_idx] = self._find_or_insert_state(row_hashes[row_idx], key_value, key_valid_flag)
+                count_star_accumulate(self._counts.data(), state_indices, row_count)
+            finally:
+                free(state_indices)
             return
 
         if self._agg_mode == AGG_COUNT_DISTINCT:
@@ -2834,6 +3100,40 @@ cdef class CarcharGroupStateEngine:
             finally:
                 if state_indices != NULL:
                     free(state_indices)
+            return
+
+        if self._agg_mode == AGG_SUM:
+            state_indices = <int64_t*> malloc(row_count * sizeof(int64_t))
+            if state_indices == NULL and row_count > 0:
+                raise MemoryError()
+            try:
+                for row_idx in range(row_count):
+                    key_valid = _bitmap_is_valid(key_nulls, row_idx)
+                    key_valid_flag = 1 if key_valid else 0
+                    key_value = key_data[row_idx] if key_valid else 0
+                    state_indices[row_idx] = self._find_or_insert_state(
+                        row_hashes[row_idx], key_value, key_valid_flag
+                    )
+                value_vector = morsel.column(self._value_column)
+                if isinstance(value_vector, Float64Vector):
+                    value_ptr = (<Float64Vector> value_vector).ptr
+                    sum_f64_accumulate(
+                        self._f64_state.data(), self._seen.data(), state_indices,
+                        <double*> value_ptr.data, <uint8_t*> value_ptr.null_bitmap, row_count,
+                    )
+                elif isinstance(value_vector, Int64Vector):
+                    value_ptr = (<Int64Vector> value_vector).ptr
+                    sum_i64_accumulate(
+                        self._i64_state.data(), self._seen.data(), state_indices,
+                        <int64_t*> value_ptr.data, <uint8_t*> value_ptr.null_bitmap, row_count,
+                    )
+                else:
+                    value_ptr = (<IntegerVector> value_vector).ptr
+                    sum_integer_accumulate(
+                        self._i64_state.data(), self._seen.data(), state_indices, value_ptr, row_count,
+                    )
+            finally:
+                free(state_indices)
             return
 
         value_vector = morsel.column(self._value_column)
@@ -2859,6 +3159,78 @@ cdef class CarcharGroupStateEngine:
                     self._constant_seen = 1
             return
 
+        if self._agg_mode in (AGG_MIN, AGG_MAX):
+            state_indices = <int64_t*> malloc(row_count * sizeof(int64_t))
+            if state_indices == NULL and row_count > 0:
+                raise MemoryError()
+            try:
+                for row_idx in range(row_count):
+                    key_valid = _bitmap_is_valid(key_nulls, row_idx)
+                    key_valid_flag = 1 if key_valid else 0
+                    key_value = key_data[row_idx] if key_valid else 0
+                    state_indices[row_idx] = self._find_or_insert_state(
+                        row_hashes[row_idx], key_value, key_valid_flag
+                    )
+                if isinstance(value_vector, Float64Vector):
+                    value_ptr = (<Float64Vector> value_vector).ptr
+                    minmax_f64_accumulate(
+                        self._f64_state.data(), self._seen.data(), state_indices,
+                        <double*> value_ptr.data, <uint8_t*> value_ptr.null_bitmap, row_count, self._agg_mode == AGG_MIN,
+                    )
+                elif isinstance(value_vector, Int64Vector):
+                    value_ptr = (<Int64Vector> value_vector).ptr
+                    minmax_i64_accumulate(
+                        self._i64_state.data(), self._seen.data(), state_indices,
+                        <int64_t*> value_ptr.data, <uint8_t*> value_ptr.null_bitmap, row_count, self._agg_mode == AGG_MIN,
+                    )
+                elif isinstance(value_vector, TimestampVector):
+                    value_ptr = (<TimestampVector> value_vector).ptr
+                    minmax_i64_accumulate(
+                        self._i64_state.data(), self._seen.data(), state_indices,
+                        <int64_t*> value_ptr.data, <uint8_t*> value_ptr.null_bitmap, row_count, self._agg_mode == AGG_MIN,
+                    )
+                else:
+                    value_ptr = (<IntegerVector> value_vector).ptr
+                    minmax_integer_accumulate(
+                        self._i64_state.data(), self._seen.data(), state_indices, value_ptr, row_count, self._agg_mode == AGG_MIN,
+                    )
+            finally:
+                free(state_indices)
+            return
+
+        if self._agg_mode == AGG_AVG:
+            state_indices = <int64_t*> malloc(row_count * sizeof(int64_t))
+            if state_indices == NULL and row_count > 0:
+                raise MemoryError()
+            try:
+                for row_idx in range(row_count):
+                    key_valid = _bitmap_is_valid(key_nulls, row_idx)
+                    key_valid_flag = 1 if key_valid else 0
+                    key_value = key_data[row_idx] if key_valid else 0
+                    state_indices[row_idx] = self._find_or_insert_state(
+                        row_hashes[row_idx], key_value, key_valid_flag
+                    )
+                if isinstance(value_vector, Float64Vector):
+                    value_ptr = (<Float64Vector> value_vector).ptr
+                    avg_f64_accumulate(
+                        self._avg_sums.data(), self._avg_counts.data(), state_indices,
+                        <double*> value_ptr.data, <uint8_t*> value_ptr.null_bitmap, row_count,
+                    )
+                elif isinstance(value_vector, Int64Vector):
+                    value_ptr = (<Int64Vector> value_vector).ptr
+                    avg_i64_accumulate(
+                        self._avg_sums.data(), self._avg_counts.data(), state_indices,
+                        <int64_t*> value_ptr.data, <uint8_t*> value_ptr.null_bitmap, row_count,
+                    )
+                else:
+                    value_ptr = (<IntegerVector> value_vector).ptr
+                    avg_integer_accumulate(
+                        self._avg_sums.data(), self._avg_counts.data(), state_indices, value_ptr, row_count,
+                    )
+            finally:
+                free(state_indices)
+            return
+
         if isinstance(value_vector, Float64Vector):
             value_ptr = (<Float64Vector> value_vector).ptr
             value_f64_data = <double*> value_ptr.data
@@ -2871,21 +3243,6 @@ cdef class CarcharGroupStateEngine:
                 if self._agg_mode == AGG_COUNT_VALUE:
                     if _bitmap_is_valid(value_nulls, row_idx):
                         self._counts[state_index] = self._counts[state_index] + 1
-                elif _bitmap_is_valid(value_nulls, row_idx):
-                    if self._agg_mode == AGG_SUM:
-                        self._f64_state[state_index] = self._f64_state[state_index] + value_f64_data[row_idx]
-                        self._seen[state_index] = 1
-                    elif self._agg_mode == AGG_MIN:
-                        if self._seen[state_index] == 0 or value_f64_data[row_idx] < self._f64_state[state_index]:
-                            self._f64_state[state_index] = value_f64_data[row_idx]
-                        self._seen[state_index] = 1
-                    elif self._agg_mode == AGG_MAX:
-                        if self._seen[state_index] == 0 or value_f64_data[row_idx] > self._f64_state[state_index]:
-                            self._f64_state[state_index] = value_f64_data[row_idx]
-                        self._seen[state_index] = 1
-                    elif self._agg_mode == AGG_AVG:
-                        self._avg_sums[state_index] = self._avg_sums[state_index] + value_f64_data[row_idx]
-                        self._avg_counts[state_index] = self._avg_counts[state_index] + 1
             return
 
         if isinstance(value_vector, Int64Vector):
@@ -2900,26 +3257,10 @@ cdef class CarcharGroupStateEngine:
                 if self._agg_mode == AGG_COUNT_VALUE:
                     if _bitmap_is_valid(value_nulls, row_idx):
                         self._counts[state_index] = self._counts[state_index] + 1
-                elif _bitmap_is_valid(value_nulls, row_idx):
-                    if self._agg_mode == AGG_SUM:
-                        self._i64_state[state_index] = self._i64_state[state_index] + value_i64_data[row_idx]
-                        self._seen[state_index] = 1
-                    elif self._agg_mode == AGG_MIN:
-                        if self._seen[state_index] == 0 or value_i64_data[row_idx] < self._i64_state[state_index]:
-                            self._i64_state[state_index] = value_i64_data[row_idx]
-                        self._seen[state_index] = 1
-                    elif self._agg_mode == AGG_MAX:
-                        if self._seen[state_index] == 0 or value_i64_data[row_idx] > self._i64_state[state_index]:
-                            self._i64_state[state_index] = value_i64_data[row_idx]
-                        self._seen[state_index] = 1
-                    elif self._agg_mode == AGG_AVG:
-                        self._avg_sums[state_index] = self._avg_sums[state_index] + value_i64_data[row_idx]
-                        self._avg_counts[state_index] = self._avg_counts[state_index] + 1
             return
 
         if isinstance(value_vector, TimestampVector):
             value_ptr = (<TimestampVector> value_vector).ptr
-            value_i64_data = <int64_t*> value_ptr.data
             value_nulls = <uint8_t*> value_ptr.null_bitmap
             for row_idx in range(row_count):
                 key_valid = _bitmap_is_valid(key_nulls, row_idx)
@@ -2929,15 +3270,6 @@ cdef class CarcharGroupStateEngine:
                 if self._agg_mode == AGG_COUNT_VALUE:
                     if _bitmap_is_valid(value_nulls, row_idx):
                         self._counts[state_index] = self._counts[state_index] + 1
-                elif _bitmap_is_valid(value_nulls, row_idx):
-                    if self._agg_mode == AGG_MIN:
-                        if self._seen[state_index] == 0 or value_i64_data[row_idx] < self._i64_state[state_index]:
-                            self._i64_state[state_index] = value_i64_data[row_idx]
-                        self._seen[state_index] = 1
-                    elif self._agg_mode == AGG_MAX:
-                        if self._seen[state_index] == 0 or value_i64_data[row_idx] > self._i64_state[state_index]:
-                            self._i64_state[state_index] = value_i64_data[row_idx]
-                        self._seen[state_index] = 1
             return
 
         value_ptr = (<IntegerVector> value_vector).ptr
@@ -2950,22 +3282,6 @@ cdef class CarcharGroupStateEngine:
             if self._agg_mode == AGG_COUNT_VALUE:
                 if _bitmap_is_valid(value_nulls, row_idx):
                     self._counts[state_index] = self._counts[state_index] + 1
-            elif _bitmap_is_valid(value_nulls, row_idx):
-                key_value = _read_integer_value(value_ptr, row_idx)
-                if self._agg_mode == AGG_SUM:
-                    self._i64_state[state_index] = self._i64_state[state_index] + key_value
-                    self._seen[state_index] = 1
-                elif self._agg_mode == AGG_MIN:
-                    if self._seen[state_index] == 0 or key_value < self._i64_state[state_index]:
-                        self._i64_state[state_index] = key_value
-                    self._seen[state_index] = 1
-                elif self._agg_mode == AGG_MAX:
-                    if self._seen[state_index] == 0 or key_value > self._i64_state[state_index]:
-                        self._i64_state[state_index] = key_value
-                    self._seen[state_index] = 1
-                elif self._agg_mode == AGG_AVG:
-                    self._avg_sums[state_index] = self._avg_sums[state_index] + key_value
-                    self._avg_counts[state_index] = self._avg_counts[state_index] + 1
 
     cdef void _ingest_integer_key(self, Morsel morsel, IntegerVector key_vector):
         cdef uint64_t[::1] row_hashes = morsel.hash([self._group_column])
@@ -2985,12 +3301,18 @@ cdef class CarcharGroupStateEngine:
         cdef int64_t* state_indices = NULL
 
         if self._agg_mode == AGG_COUNT_STAR:
-            for row_idx in range(row_count):
-                key_valid = _bitmap_is_valid(key_nulls, row_idx)
-                key_valid_flag = 1 if key_valid else 0
-                key_value = _read_integer_value(key_ptr, row_idx) if key_valid else 0
-                state_index = self._find_or_insert_state(row_hashes[row_idx], key_value, key_valid_flag)
-                self._counts[state_index] = self._counts[state_index] + 1
+            state_indices = <int64_t*> malloc(row_count * sizeof(int64_t))
+            if state_indices == NULL and row_count > 0:
+                raise MemoryError()
+            try:
+                for row_idx in range(row_count):
+                    key_valid = _bitmap_is_valid(key_nulls, row_idx)
+                    key_valid_flag = 1 if key_valid else 0
+                    key_value = _read_integer_value(key_ptr, row_idx) if key_valid else 0
+                    state_indices[row_idx] = self._find_or_insert_state(row_hashes[row_idx], key_value, key_valid_flag)
+                count_star_accumulate(self._counts.data(), state_indices, row_count)
+            finally:
+                free(state_indices)
             return
 
         if self._agg_mode == AGG_COUNT_DISTINCT:
@@ -3011,7 +3333,107 @@ cdef class CarcharGroupStateEngine:
                     free(state_indices)
             return
 
+        if self._agg_mode == AGG_SUM:
+            state_indices = <int64_t*> malloc(row_count * sizeof(int64_t))
+            if state_indices == NULL and row_count > 0:
+                raise MemoryError()
+            try:
+                for row_idx in range(row_count):
+                    key_valid = _bitmap_is_valid(key_nulls, row_idx)
+                    key_valid_flag = 1 if key_valid else 0
+                    key_value = _read_integer_value(key_ptr, row_idx) if key_valid else 0
+                    state_indices[row_idx] = self._find_or_insert_state(
+                        row_hashes[row_idx], key_value, key_valid_flag
+                    )
+                value_vector = morsel.column(self._value_column)
+                if isinstance(value_vector, Float64Vector):
+                    value_ptr = (<Float64Vector> value_vector).ptr
+                    sum_f64_accumulate(
+                        self._f64_state.data(), self._seen.data(), state_indices,
+                        <double*> value_ptr.data, <uint8_t*> value_ptr.null_bitmap, row_count,
+                    )
+                elif isinstance(value_vector, Int64Vector):
+                    value_ptr = (<Int64Vector> value_vector).ptr
+                    sum_i64_accumulate(
+                        self._i64_state.data(), self._seen.data(), state_indices,
+                        <int64_t*> value_ptr.data, <uint8_t*> value_ptr.null_bitmap, row_count,
+                    )
+                else:
+                    value_ptr = (<IntegerVector> value_vector).ptr
+                    sum_integer_accumulate(
+                        self._i64_state.data(), self._seen.data(), state_indices, value_ptr, row_count,
+                    )
+            finally:
+                free(state_indices)
+            return
+
         value_vector = morsel.column(self._value_column)
+        if self._agg_mode in (AGG_MIN, AGG_MAX):
+            state_indices = <int64_t*> malloc(row_count * sizeof(int64_t))
+            if state_indices == NULL and row_count > 0:
+                raise MemoryError()
+            try:
+                for row_idx in range(row_count):
+                    key_valid = _bitmap_is_valid(key_nulls, row_idx)
+                    key_valid_flag = 1 if key_valid else 0
+                    key_value = _read_integer_value(key_ptr, row_idx) if key_valid else 0
+                    state_indices[row_idx] = self._find_or_insert_state(
+                        row_hashes[row_idx], key_value, key_valid_flag
+                    )
+                if isinstance(value_vector, Float64Vector):
+                    value_ptr = (<Float64Vector> value_vector).ptr
+                    minmax_f64_accumulate(
+                        self._f64_state.data(), self._seen.data(), state_indices,
+                        <double*> value_ptr.data, <uint8_t*> value_ptr.null_bitmap, row_count, self._agg_mode == AGG_MIN,
+                    )
+                elif isinstance(value_vector, Int64Vector):
+                    value_ptr = (<Int64Vector> value_vector).ptr
+                    minmax_i64_accumulate(
+                        self._i64_state.data(), self._seen.data(), state_indices,
+                        <int64_t*> value_ptr.data, <uint8_t*> value_ptr.null_bitmap, row_count, self._agg_mode == AGG_MIN,
+                    )
+                else:
+                    value_ptr = (<IntegerVector> value_vector).ptr
+                    minmax_integer_accumulate(
+                        self._i64_state.data(), self._seen.data(), state_indices, value_ptr, row_count, self._agg_mode == AGG_MIN,
+                    )
+            finally:
+                free(state_indices)
+            return
+
+        if self._agg_mode == AGG_AVG:
+            state_indices = <int64_t*> malloc(row_count * sizeof(int64_t))
+            if state_indices == NULL and row_count > 0:
+                raise MemoryError()
+            try:
+                for row_idx in range(row_count):
+                    key_valid = _bitmap_is_valid(key_nulls, row_idx)
+                    key_valid_flag = 1 if key_valid else 0
+                    key_value = _read_integer_value(key_ptr, row_idx) if key_valid else 0
+                    state_indices[row_idx] = self._find_or_insert_state(
+                        row_hashes[row_idx], key_value, key_valid_flag
+                    )
+                if isinstance(value_vector, Float64Vector):
+                    value_ptr = (<Float64Vector> value_vector).ptr
+                    avg_f64_accumulate(
+                        self._avg_sums.data(), self._avg_counts.data(), state_indices,
+                        <double*> value_ptr.data, <uint8_t*> value_ptr.null_bitmap, row_count,
+                    )
+                elif isinstance(value_vector, Int64Vector):
+                    value_ptr = (<Int64Vector> value_vector).ptr
+                    avg_i64_accumulate(
+                        self._avg_sums.data(), self._avg_counts.data(), state_indices,
+                        <int64_t*> value_ptr.data, <uint8_t*> value_ptr.null_bitmap, row_count,
+                    )
+                else:
+                    value_ptr = (<IntegerVector> value_vector).ptr
+                    avg_integer_accumulate(
+                        self._avg_sums.data(), self._avg_counts.data(), state_indices, value_ptr, row_count,
+                    )
+            finally:
+                free(state_indices)
+            return
+
         if isinstance(value_vector, Float64Vector):
             value_ptr = (<Float64Vector> value_vector).ptr
             value_f64_data = <double*> value_ptr.data
@@ -3024,21 +3446,6 @@ cdef class CarcharGroupStateEngine:
                 if self._agg_mode == AGG_COUNT_VALUE:
                     if _bitmap_is_valid(value_nulls, row_idx):
                         self._counts[state_index] = self._counts[state_index] + 1
-                elif _bitmap_is_valid(value_nulls, row_idx):
-                    if self._agg_mode == AGG_SUM:
-                        self._f64_state[state_index] = self._f64_state[state_index] + value_f64_data[row_idx]
-                        self._seen[state_index] = 1
-                    elif self._agg_mode == AGG_MIN:
-                        if self._seen[state_index] == 0 or value_f64_data[row_idx] < self._f64_state[state_index]:
-                            self._f64_state[state_index] = value_f64_data[row_idx]
-                        self._seen[state_index] = 1
-                    elif self._agg_mode == AGG_MAX:
-                        if self._seen[state_index] == 0 or value_f64_data[row_idx] > self._f64_state[state_index]:
-                            self._f64_state[state_index] = value_f64_data[row_idx]
-                        self._seen[state_index] = 1
-                    elif self._agg_mode == AGG_AVG:
-                        self._avg_sums[state_index] = self._avg_sums[state_index] + value_f64_data[row_idx]
-                        self._avg_counts[state_index] = self._avg_counts[state_index] + 1
             return
 
         if isinstance(value_vector, Int64Vector):
@@ -3053,21 +3460,6 @@ cdef class CarcharGroupStateEngine:
                 if self._agg_mode == AGG_COUNT_VALUE:
                     if _bitmap_is_valid(value_nulls, row_idx):
                         self._counts[state_index] = self._counts[state_index] + 1
-                elif _bitmap_is_valid(value_nulls, row_idx):
-                    if self._agg_mode == AGG_SUM:
-                        self._i64_state[state_index] = self._i64_state[state_index] + value_i64_data[row_idx]
-                        self._seen[state_index] = 1
-                    elif self._agg_mode == AGG_MIN:
-                        if self._seen[state_index] == 0 or value_i64_data[row_idx] < self._i64_state[state_index]:
-                            self._i64_state[state_index] = value_i64_data[row_idx]
-                        self._seen[state_index] = 1
-                    elif self._agg_mode == AGG_MAX:
-                        if self._seen[state_index] == 0 or value_i64_data[row_idx] > self._i64_state[state_index]:
-                            self._i64_state[state_index] = value_i64_data[row_idx]
-                        self._seen[state_index] = 1
-                    elif self._agg_mode == AGG_AVG:
-                        self._avg_sums[state_index] = self._avg_sums[state_index] + value_i64_data[row_idx]
-                        self._avg_counts[state_index] = self._avg_counts[state_index] + 1
             return
 
         value_ptr = (<IntegerVector> value_vector).ptr
@@ -3080,22 +3472,6 @@ cdef class CarcharGroupStateEngine:
             if self._agg_mode == AGG_COUNT_VALUE:
                 if _bitmap_is_valid(value_nulls, row_idx):
                     self._counts[state_index] = self._counts[state_index] + 1
-            elif _bitmap_is_valid(value_nulls, row_idx):
-                key_value = _read_integer_value(value_ptr, row_idx)
-                if self._agg_mode == AGG_SUM:
-                    self._i64_state[state_index] = self._i64_state[state_index] + key_value
-                    self._seen[state_index] = 1
-                elif self._agg_mode == AGG_MIN:
-                    if self._seen[state_index] == 0 or key_value < self._i64_state[state_index]:
-                        self._i64_state[state_index] = key_value
-                    self._seen[state_index] = 1
-                elif self._agg_mode == AGG_MAX:
-                    if self._seen[state_index] == 0 or key_value > self._i64_state[state_index]:
-                        self._i64_state[state_index] = key_value
-                    self._seen[state_index] = 1
-                elif self._agg_mode == AGG_AVG:
-                    self._avg_sums[state_index] = self._avg_sums[state_index] + key_value
-                    self._avg_counts[state_index] = self._avg_counts[state_index] + 1
 
     cdef void _ingest_int64_key_multi(self, Morsel morsel, Int64Vector key_vector) except *:
         cdef uint64_t[::1] row_hashes = morsel.hash([self._group_column])
@@ -3132,14 +3508,121 @@ cdef class CarcharGroupStateEngine:
             for agg_idx in range(self._multi_agg_count):
                 agg_mode = self._multi_agg_modes[agg_idx]
                 if agg_mode == AGG_COUNT_STAR:
-                    for row_idx in range(row_count):
-                        offset = self._multi_offset(state_indices[row_idx], agg_idx)
-                        if offset >= <Py_ssize_t> self._multi_counts.size() or offset < 0:
-                            raise RuntimeError(f"[int64_multi] offset out of bounds: {offset}, size={self._multi_counts.size()}, row={row_idx}, state={state_indices[row_idx]}, agg={agg_idx}, total_agg={self._multi_agg_count}")
-                        self._multi_counts[offset] = self._multi_counts[offset] + 1
+                    count_star_multi_accumulate(self._multi_counts.data(), state_indices, row_count, self._multi_agg_count, agg_idx)
                     continue
                 if agg_mode == AGG_COUNT_DISTINCT:
                     self._ingest_count_distinct_multi_for_states(morsel, state_indices, row_count, agg_idx)
+                    continue
+
+                if agg_mode == AGG_SUM:
+                    value_vector = morsel.column(self._multi_value_columns[agg_idx])
+                    if isinstance(value_vector, Float64Vector):
+                        value_ptr = (<Float64Vector> value_vector).ptr
+                        sum_f64_multi_accumulate(
+                            self._multi_f64_state.data(), self._multi_seen.data(), state_indices,
+                            <double*> value_ptr.data, <uint8_t*> value_ptr.null_bitmap,
+                            row_count, self._multi_agg_count, agg_idx,
+                        )
+                    elif isinstance(value_vector, Int64Vector):
+                        value_ptr = (<Int64Vector> value_vector).ptr
+                        sum_i64_multi_accumulate(
+                            self._multi_i64_state.data(), self._multi_seen.data(), state_indices,
+                            <int64_t*> value_ptr.data, <uint8_t*> value_ptr.null_bitmap,
+                            row_count, self._multi_agg_count, agg_idx,
+                        )
+                    else:
+                        value_dict_accessor = _vector_value_dict_accessor(value_vector)
+                        if value_dict_accessor != NULL:
+                            if self._multi_value_kinds[agg_idx] == VALUE_DICT_FLOAT64:
+                                sum_f64_multi_accumulate_from_dict(
+                                    self._multi_f64_state.data(), self._multi_seen.data(), state_indices,
+                                    value_dict_accessor, row_count, self._multi_agg_count, agg_idx,
+                                )
+                            else:
+                                sum_i64_multi_accumulate_from_dict(
+                                    self._multi_i64_state.data(), self._multi_seen.data(), state_indices,
+                                    value_dict_accessor, row_count, self._multi_agg_count, agg_idx,
+                                )
+                        else:
+                            value_ptr = (<IntegerVector> value_vector).ptr
+                            sum_integer_multi_accumulate(
+                                self._multi_i64_state.data(), self._multi_seen.data(), state_indices,
+                                value_ptr, row_count, self._multi_agg_count, agg_idx,
+                            )
+                    continue
+
+                if agg_mode in (AGG_MIN, AGG_MAX):
+                    value_vector = morsel.column(self._multi_value_columns[agg_idx])
+                    if isinstance(value_vector, Float64Vector):
+                        value_ptr = (<Float64Vector> value_vector).ptr
+                        minmax_f64_multi_accumulate(
+                            self._multi_f64_state.data(), self._multi_seen.data(), state_indices,
+                            <double*> value_ptr.data, <uint8_t*> value_ptr.null_bitmap,
+                            row_count, self._multi_agg_count, agg_idx, agg_mode == AGG_MIN,
+                        )
+                    elif isinstance(value_vector, Int64Vector):
+                        value_ptr = (<Int64Vector> value_vector).ptr
+                        minmax_i64_multi_accumulate(
+                            self._multi_i64_state.data(), self._multi_seen.data(), state_indices,
+                            <int64_t*> value_ptr.data, <uint8_t*> value_ptr.null_bitmap,
+                            row_count, self._multi_agg_count, agg_idx, agg_mode == AGG_MIN,
+                        )
+                    else:
+                        value_dict_accessor = _vector_value_dict_accessor(value_vector)
+                        if value_dict_accessor != NULL:
+                            if self._multi_value_kinds[agg_idx] == VALUE_DICT_FLOAT64:
+                                minmax_f64_multi_accumulate_from_dict(
+                                    self._multi_f64_state.data(), self._multi_seen.data(), state_indices,
+                                    value_dict_accessor, row_count, self._multi_agg_count, agg_idx, agg_mode == AGG_MIN,
+                                )
+                            else:
+                                minmax_i64_multi_accumulate_from_dict(
+                                    self._multi_i64_state.data(), self._multi_seen.data(), state_indices,
+                                    value_dict_accessor, row_count, self._multi_agg_count, agg_idx, agg_mode == AGG_MIN,
+                                )
+                        else:
+                            value_ptr = (<IntegerVector> value_vector).ptr
+                            minmax_integer_multi_accumulate(
+                                self._multi_i64_state.data(), self._multi_seen.data(), state_indices,
+                                value_ptr, row_count, self._multi_agg_count, agg_idx, agg_mode == AGG_MIN,
+                            )
+                    continue
+
+                if agg_mode == AGG_AVG:
+                    value_vector = morsel.column(self._multi_value_columns[agg_idx])
+                    if isinstance(value_vector, Float64Vector):
+                        value_ptr = (<Float64Vector> value_vector).ptr
+                        avg_f64_multi_accumulate(
+                            self._multi_avg_sums.data(), self._multi_avg_counts.data(), state_indices,
+                            <double*> value_ptr.data, <uint8_t*> value_ptr.null_bitmap,
+                            row_count, self._multi_agg_count, agg_idx,
+                        )
+                    elif isinstance(value_vector, Int64Vector):
+                        value_ptr = (<Int64Vector> value_vector).ptr
+                        avg_i64_multi_accumulate(
+                            self._multi_avg_sums.data(), self._multi_avg_counts.data(), state_indices,
+                            <int64_t*> value_ptr.data, <uint8_t*> value_ptr.null_bitmap,
+                            row_count, self._multi_agg_count, agg_idx,
+                        )
+                    else:
+                        value_dict_accessor = _vector_value_dict_accessor(value_vector)
+                        if value_dict_accessor != NULL:
+                            if self._multi_value_kinds[agg_idx] == VALUE_DICT_FLOAT64:
+                                avg_f64_multi_accumulate_from_dict(
+                                    self._multi_avg_sums.data(), self._multi_avg_counts.data(), state_indices,
+                                    value_dict_accessor, row_count, self._multi_agg_count, agg_idx,
+                                )
+                            else:
+                                avg_i64_multi_accumulate_from_dict(
+                                    self._multi_avg_sums.data(), self._multi_avg_counts.data(), state_indices,
+                                    value_dict_accessor, row_count, self._multi_agg_count, agg_idx,
+                                )
+                        else:
+                            value_ptr = (<IntegerVector> value_vector).ptr
+                            avg_integer_multi_accumulate(
+                                self._multi_avg_sums.data(), self._multi_avg_counts.data(), state_indices,
+                                value_ptr, row_count, self._multi_agg_count, agg_idx,
+                            )
                     continue
 
                 value_vector = morsel.column(self._multi_value_columns[agg_idx])
@@ -3155,20 +3638,6 @@ cdef class CarcharGroupStateEngine:
                             raise RuntimeError(f"[int64_multi float] offset out of bounds: {offset}, size={self._multi_f64_state.size()}")
                         if agg_mode == AGG_COUNT_VALUE:
                             self._multi_counts[offset] = self._multi_counts[offset] + 1
-                        elif agg_mode == AGG_SUM:
-                            self._multi_f64_state[offset] = self._multi_f64_state[offset] + value_f64_data[row_idx]
-                            self._multi_seen[offset] = 1
-                        elif agg_mode == AGG_MIN:
-                            if self._multi_seen[offset] == 0 or value_f64_data[row_idx] < self._multi_f64_state[offset]:
-                                self._multi_f64_state[offset] = value_f64_data[row_idx]
-                            self._multi_seen[offset] = 1
-                        elif agg_mode == AGG_MAX:
-                            if self._multi_seen[offset] == 0 or value_f64_data[row_idx] > self._multi_f64_state[offset]:
-                                self._multi_f64_state[offset] = value_f64_data[row_idx]
-                            self._multi_seen[offset] = 1
-                        elif agg_mode == AGG_AVG:
-                            self._multi_avg_sums[offset] = self._multi_avg_sums[offset] + value_f64_data[row_idx]
-                            self._multi_avg_counts[offset] = self._multi_avg_counts[offset] + 1
                     continue
 
                 if isinstance(value_vector, Int64Vector):
@@ -3183,20 +3652,6 @@ cdef class CarcharGroupStateEngine:
                             raise RuntimeError(f"[int64_multi int] offset out of bounds: {offset}, size={self._multi_i64_state.size()}")
                         if agg_mode == AGG_COUNT_VALUE:
                             self._multi_counts[offset] = self._multi_counts[offset] + 1
-                        elif agg_mode == AGG_SUM:
-                            self._multi_i64_state[offset] = self._multi_i64_state[offset] + value_i64_data[row_idx]
-                            self._multi_seen[offset] = 1
-                        elif agg_mode == AGG_MIN:
-                            if self._multi_seen[offset] == 0 or value_i64_data[row_idx] < self._multi_i64_state[offset]:
-                                self._multi_i64_state[offset] = value_i64_data[row_idx]
-                            self._multi_seen[offset] = 1
-                        elif agg_mode == AGG_MAX:
-                            if self._multi_seen[offset] == 0 or value_i64_data[row_idx] > self._multi_i64_state[offset]:
-                                self._multi_i64_state[offset] = value_i64_data[row_idx]
-                            self._multi_seen[offset] = 1
-                        elif agg_mode == AGG_AVG:
-                            self._multi_avg_sums[offset] = self._multi_avg_sums[offset] + value_i64_data[row_idx]
-                            self._multi_avg_counts[offset] = self._multi_avg_counts[offset] + 1
                     continue
 
                 value_dict_accessor = _vector_value_dict_accessor(value_vector)
@@ -3207,46 +3662,16 @@ cdef class CarcharGroupStateEngine:
                             if not _bitmap_is_valid(value_nulls, row_idx):
                                 continue
                             offset = self._multi_offset(state_indices[row_idx], agg_idx)
-                            val_decoded_f64 = _dict_accessor_read_float_value(value_dict_accessor, row_idx)
                             if agg_mode == AGG_COUNT_VALUE:
                                 self._multi_counts[offset] = self._multi_counts[offset] + 1
-                            elif agg_mode == AGG_SUM:
-                                self._multi_f64_state[offset] = self._multi_f64_state[offset] + val_decoded_f64
-                                self._multi_seen[offset] = 1
-                            elif agg_mode == AGG_MIN:
-                                if self._multi_seen[offset] == 0 or val_decoded_f64 < self._multi_f64_state[offset]:
-                                    self._multi_f64_state[offset] = val_decoded_f64
-                                self._multi_seen[offset] = 1
-                            elif agg_mode == AGG_MAX:
-                                if self._multi_seen[offset] == 0 or val_decoded_f64 > self._multi_f64_state[offset]:
-                                    self._multi_f64_state[offset] = val_decoded_f64
-                                self._multi_seen[offset] = 1
-                            elif agg_mode == AGG_AVG:
-                                self._multi_avg_sums[offset] = self._multi_avg_sums[offset] + val_decoded_f64
-                                self._multi_avg_counts[offset] = self._multi_avg_counts[offset] + 1
                         continue
                     elif self._multi_value_kinds[agg_idx] == VALUE_DICT_INT64:
                         for row_idx in range(row_count):
                             if not _bitmap_is_valid(value_nulls, row_idx):
                                 continue
                             offset = self._multi_offset(state_indices[row_idx], agg_idx)
-                            val_decoded_i64 = _dict_accessor_read_int_value(value_dict_accessor, row_idx)
                             if agg_mode == AGG_COUNT_VALUE:
                                 self._multi_counts[offset] = self._multi_counts[offset] + 1
-                            elif agg_mode == AGG_SUM:
-                                self._multi_i64_state[offset] = self._multi_i64_state[offset] + val_decoded_i64
-                                self._multi_seen[offset] = 1
-                            elif agg_mode == AGG_MIN:
-                                if self._multi_seen[offset] == 0 or val_decoded_i64 < self._multi_i64_state[offset]:
-                                    self._multi_i64_state[offset] = val_decoded_i64
-                                self._multi_seen[offset] = 1
-                            elif agg_mode == AGG_MAX:
-                                if self._multi_seen[offset] == 0 or val_decoded_i64 > self._multi_i64_state[offset]:
-                                    self._multi_i64_state[offset] = val_decoded_i64
-                                self._multi_seen[offset] = 1
-                            elif agg_mode == AGG_AVG:
-                                self._multi_avg_sums[offset] = self._multi_avg_sums[offset] + val_decoded_i64
-                                self._multi_avg_counts[offset] = self._multi_avg_counts[offset] + 1
                         continue
 
                 value_ptr = (<IntegerVector> value_vector).ptr
@@ -3259,22 +3684,6 @@ cdef class CarcharGroupStateEngine:
                         raise RuntimeError(f"[int64_multi integer] offset out of bounds: {offset}, size={self._multi_i64_state.size()}")
                     if agg_mode == AGG_COUNT_VALUE:
                         self._multi_counts[offset] = self._multi_counts[offset] + 1
-                    else:
-                        value_i64 = _read_integer_value(value_ptr, row_idx)
-                        if agg_mode == AGG_SUM:
-                            self._multi_i64_state[offset] = self._multi_i64_state[offset] + value_i64
-                            self._multi_seen[offset] = 1
-                        elif agg_mode == AGG_MIN:
-                            if self._multi_seen[offset] == 0 or value_i64 < self._multi_i64_state[offset]:
-                                self._multi_i64_state[offset] = value_i64
-                            self._multi_seen[offset] = 1
-                        elif agg_mode == AGG_MAX:
-                            if self._multi_seen[offset] == 0 or value_i64 > self._multi_i64_state[offset]:
-                                self._multi_i64_state[offset] = value_i64
-                            self._multi_seen[offset] = 1
-                        elif agg_mode == AGG_AVG:
-                            self._multi_avg_sums[offset] = self._multi_avg_sums[offset] + value_i64
-                            self._multi_avg_counts[offset] = self._multi_avg_counts[offset] + 1
         finally:
             if state_indices != NULL:
                 free(state_indices)
@@ -3313,12 +3722,82 @@ cdef class CarcharGroupStateEngine:
             for agg_idx in range(self._multi_agg_count):
                 agg_mode = self._multi_agg_modes[agg_idx]
                 if agg_mode == AGG_COUNT_STAR:
-                    for row_idx in range(row_count):
-                        offset = self._multi_offset(state_indices[row_idx], agg_idx)
-                        self._multi_counts[offset] = self._multi_counts[offset] + 1
+                    count_star_multi_accumulate(self._multi_counts.data(), state_indices, row_count, self._multi_agg_count, agg_idx)
                     continue
                 if agg_mode == AGG_COUNT_DISTINCT:
                     self._ingest_count_distinct_multi_for_states(morsel, state_indices, row_count, agg_idx)
+                    continue
+
+                if agg_mode == AGG_SUM:
+                    value_vector = morsel.column(self._multi_value_columns[agg_idx])
+                    if isinstance(value_vector, Float64Vector):
+                        value_ptr = (<Float64Vector> value_vector).ptr
+                        sum_f64_multi_accumulate(
+                            self._multi_f64_state.data(), self._multi_seen.data(), state_indices,
+                            <double*> value_ptr.data, <uint8_t*> value_ptr.null_bitmap,
+                            row_count, self._multi_agg_count, agg_idx,
+                        )
+                    elif isinstance(value_vector, Int64Vector):
+                        value_ptr = (<Int64Vector> value_vector).ptr
+                        sum_i64_multi_accumulate(
+                            self._multi_i64_state.data(), self._multi_seen.data(), state_indices,
+                            <int64_t*> value_ptr.data, <uint8_t*> value_ptr.null_bitmap,
+                            row_count, self._multi_agg_count, agg_idx,
+                        )
+                    else:
+                        value_ptr = (<IntegerVector> value_vector).ptr
+                        sum_integer_multi_accumulate(
+                            self._multi_i64_state.data(), self._multi_seen.data(), state_indices,
+                            value_ptr, row_count, self._multi_agg_count, agg_idx,
+                        )
+                    continue
+
+                if agg_mode in (AGG_MIN, AGG_MAX):
+                    value_vector = morsel.column(self._multi_value_columns[agg_idx])
+                    if isinstance(value_vector, Float64Vector):
+                        value_ptr = (<Float64Vector> value_vector).ptr
+                        minmax_f64_multi_accumulate(
+                            self._multi_f64_state.data(), self._multi_seen.data(), state_indices,
+                            <double*> value_ptr.data, <uint8_t*> value_ptr.null_bitmap,
+                            row_count, self._multi_agg_count, agg_idx, agg_mode == AGG_MIN,
+                        )
+                    elif isinstance(value_vector, Int64Vector):
+                        value_ptr = (<Int64Vector> value_vector).ptr
+                        minmax_i64_multi_accumulate(
+                            self._multi_i64_state.data(), self._multi_seen.data(), state_indices,
+                            <int64_t*> value_ptr.data, <uint8_t*> value_ptr.null_bitmap,
+                            row_count, self._multi_agg_count, agg_idx, agg_mode == AGG_MIN,
+                        )
+                    else:
+                        value_ptr = (<IntegerVector> value_vector).ptr
+                        minmax_integer_multi_accumulate(
+                            self._multi_i64_state.data(), self._multi_seen.data(), state_indices,
+                            value_ptr, row_count, self._multi_agg_count, agg_idx, agg_mode == AGG_MIN,
+                        )
+                    continue
+
+                if agg_mode == AGG_AVG:
+                    value_vector = morsel.column(self._multi_value_columns[agg_idx])
+                    if isinstance(value_vector, Float64Vector):
+                        value_ptr = (<Float64Vector> value_vector).ptr
+                        avg_f64_multi_accumulate(
+                            self._multi_avg_sums.data(), self._multi_avg_counts.data(), state_indices,
+                            <double*> value_ptr.data, <uint8_t*> value_ptr.null_bitmap,
+                            row_count, self._multi_agg_count, agg_idx,
+                        )
+                    elif isinstance(value_vector, Int64Vector):
+                        value_ptr = (<Int64Vector> value_vector).ptr
+                        avg_i64_multi_accumulate(
+                            self._multi_avg_sums.data(), self._multi_avg_counts.data(), state_indices,
+                            <int64_t*> value_ptr.data, <uint8_t*> value_ptr.null_bitmap,
+                            row_count, self._multi_agg_count, agg_idx,
+                        )
+                    else:
+                        value_ptr = (<IntegerVector> value_vector).ptr
+                        avg_integer_multi_accumulate(
+                            self._multi_avg_sums.data(), self._multi_avg_counts.data(), state_indices,
+                            value_ptr, row_count, self._multi_agg_count, agg_idx,
+                        )
                     continue
 
                 value_vector = morsel.column(self._multi_value_columns[agg_idx])
@@ -3332,20 +3811,6 @@ cdef class CarcharGroupStateEngine:
                         offset = self._multi_offset(state_indices[row_idx], agg_idx)
                         if agg_mode == AGG_COUNT_VALUE:
                             self._multi_counts[offset] = self._multi_counts[offset] + 1
-                        elif agg_mode == AGG_SUM:
-                            self._multi_f64_state[offset] = self._multi_f64_state[offset] + value_f64_data[row_idx]
-                            self._multi_seen[offset] = 1
-                        elif agg_mode == AGG_MIN:
-                            if self._multi_seen[offset] == 0 or value_f64_data[row_idx] < self._multi_f64_state[offset]:
-                                self._multi_f64_state[offset] = value_f64_data[row_idx]
-                            self._multi_seen[offset] = 1
-                        elif agg_mode == AGG_MAX:
-                            if self._multi_seen[offset] == 0 or value_f64_data[row_idx] > self._multi_f64_state[offset]:
-                                self._multi_f64_state[offset] = value_f64_data[row_idx]
-                            self._multi_seen[offset] = 1
-                        elif agg_mode == AGG_AVG:
-                            self._multi_avg_sums[offset] = self._multi_avg_sums[offset] + value_f64_data[row_idx]
-                            self._multi_avg_counts[offset] = self._multi_avg_counts[offset] + 1
                     continue
 
                 if isinstance(value_vector, Int64Vector):
@@ -3358,20 +3823,6 @@ cdef class CarcharGroupStateEngine:
                         offset = self._multi_offset(state_indices[row_idx], agg_idx)
                         if agg_mode == AGG_COUNT_VALUE:
                             self._multi_counts[offset] = self._multi_counts[offset] + 1
-                        elif agg_mode == AGG_SUM:
-                            self._multi_i64_state[offset] = self._multi_i64_state[offset] + value_i64_data[row_idx]
-                            self._multi_seen[offset] = 1
-                        elif agg_mode == AGG_MIN:
-                            if self._multi_seen[offset] == 0 or value_i64_data[row_idx] < self._multi_i64_state[offset]:
-                                self._multi_i64_state[offset] = value_i64_data[row_idx]
-                            self._multi_seen[offset] = 1
-                        elif agg_mode == AGG_MAX:
-                            if self._multi_seen[offset] == 0 or value_i64_data[row_idx] > self._multi_i64_state[offset]:
-                                self._multi_i64_state[offset] = value_i64_data[row_idx]
-                            self._multi_seen[offset] = 1
-                        elif agg_mode == AGG_AVG:
-                            self._multi_avg_sums[offset] = self._multi_avg_sums[offset] + value_i64_data[row_idx]
-                            self._multi_avg_counts[offset] = self._multi_avg_counts[offset] + 1
                     continue
 
                 value_ptr = (<IntegerVector> value_vector).ptr
@@ -3382,22 +3833,6 @@ cdef class CarcharGroupStateEngine:
                     offset = self._multi_offset(state_indices[row_idx], agg_idx)
                     if agg_mode == AGG_COUNT_VALUE:
                         self._multi_counts[offset] = self._multi_counts[offset] + 1
-                    else:
-                        value_i64 = _read_integer_value(value_ptr, row_idx)
-                        if agg_mode == AGG_SUM:
-                            self._multi_i64_state[offset] = self._multi_i64_state[offset] + value_i64
-                            self._multi_seen[offset] = 1
-                        elif agg_mode == AGG_MIN:
-                            if self._multi_seen[offset] == 0 or value_i64 < self._multi_i64_state[offset]:
-                                self._multi_i64_state[offset] = value_i64
-                            self._multi_seen[offset] = 1
-                        elif agg_mode == AGG_MAX:
-                            if self._multi_seen[offset] == 0 or value_i64 > self._multi_i64_state[offset]:
-                                self._multi_i64_state[offset] = value_i64
-                            self._multi_seen[offset] = 1
-                        elif agg_mode == AGG_AVG:
-                            self._multi_avg_sums[offset] = self._multi_avg_sums[offset] + value_i64
-                            self._multi_avg_counts[offset] = self._multi_avg_counts[offset] + 1
         finally:
             if state_indices != NULL:
                 free(state_indices)
@@ -3460,12 +3895,82 @@ cdef class CarcharGroupStateEngine:
             for agg_idx in range(self._multi_agg_count):
                 agg_mode = self._multi_agg_modes[agg_idx]
                 if agg_mode == AGG_COUNT_STAR:
-                    for row_idx in range(row_count):
-                        offset = self._multi_offset(state_indices[row_idx], agg_idx)
-                        self._multi_counts[offset] = self._multi_counts[offset] + 1
+                    count_star_multi_accumulate(self._multi_counts.data(), state_indices, row_count, self._multi_agg_count, agg_idx)
                     continue
                 if agg_mode == AGG_COUNT_DISTINCT:
                     self._ingest_count_distinct_multi_for_states(morsel, state_indices, row_count, agg_idx)
+                    continue
+
+                if agg_mode == AGG_SUM:
+                    value_vector = morsel.column(self._multi_value_columns[agg_idx])
+                    if isinstance(value_vector, Float64Vector):
+                        value_ptr = (<Float64Vector> value_vector).ptr
+                        sum_f64_multi_accumulate(
+                            self._multi_f64_state.data(), self._multi_seen.data(), state_indices,
+                            <double*> value_ptr.data, <uint8_t*> value_ptr.null_bitmap,
+                            row_count, self._multi_agg_count, agg_idx,
+                        )
+                    elif isinstance(value_vector, Int64Vector):
+                        value_ptr = (<Int64Vector> value_vector).ptr
+                        sum_i64_multi_accumulate(
+                            self._multi_i64_state.data(), self._multi_seen.data(), state_indices,
+                            <int64_t*> value_ptr.data, <uint8_t*> value_ptr.null_bitmap,
+                            row_count, self._multi_agg_count, agg_idx,
+                        )
+                    else:
+                        value_ptr = (<IntegerVector> value_vector).ptr
+                        sum_integer_multi_accumulate(
+                            self._multi_i64_state.data(), self._multi_seen.data(), state_indices,
+                            value_ptr, row_count, self._multi_agg_count, agg_idx,
+                        )
+                    continue
+
+                if agg_mode in (AGG_MIN, AGG_MAX):
+                    value_vector = morsel.column(self._multi_value_columns[agg_idx])
+                    if isinstance(value_vector, Float64Vector):
+                        value_ptr = (<Float64Vector> value_vector).ptr
+                        minmax_f64_multi_accumulate(
+                            self._multi_f64_state.data(), self._multi_seen.data(), state_indices,
+                            <double*> value_ptr.data, <uint8_t*> value_ptr.null_bitmap,
+                            row_count, self._multi_agg_count, agg_idx, agg_mode == AGG_MIN,
+                        )
+                    elif isinstance(value_vector, Int64Vector):
+                        value_ptr = (<Int64Vector> value_vector).ptr
+                        minmax_i64_multi_accumulate(
+                            self._multi_i64_state.data(), self._multi_seen.data(), state_indices,
+                            <int64_t*> value_ptr.data, <uint8_t*> value_ptr.null_bitmap,
+                            row_count, self._multi_agg_count, agg_idx, agg_mode == AGG_MIN,
+                        )
+                    else:
+                        value_ptr = (<IntegerVector> value_vector).ptr
+                        minmax_integer_multi_accumulate(
+                            self._multi_i64_state.data(), self._multi_seen.data(), state_indices,
+                            value_ptr, row_count, self._multi_agg_count, agg_idx, agg_mode == AGG_MIN,
+                        )
+                    continue
+
+                if agg_mode == AGG_AVG:
+                    value_vector = morsel.column(self._multi_value_columns[agg_idx])
+                    if isinstance(value_vector, Float64Vector):
+                        value_ptr = (<Float64Vector> value_vector).ptr
+                        avg_f64_multi_accumulate(
+                            self._multi_avg_sums.data(), self._multi_avg_counts.data(), state_indices,
+                            <double*> value_ptr.data, <uint8_t*> value_ptr.null_bitmap,
+                            row_count, self._multi_agg_count, agg_idx,
+                        )
+                    elif isinstance(value_vector, Int64Vector):
+                        value_ptr = (<Int64Vector> value_vector).ptr
+                        avg_i64_multi_accumulate(
+                            self._multi_avg_sums.data(), self._multi_avg_counts.data(), state_indices,
+                            <int64_t*> value_ptr.data, <uint8_t*> value_ptr.null_bitmap,
+                            row_count, self._multi_agg_count, agg_idx,
+                        )
+                    else:
+                        value_ptr = (<IntegerVector> value_vector).ptr
+                        avg_integer_multi_accumulate(
+                            self._multi_avg_sums.data(), self._multi_avg_counts.data(), state_indices,
+                            value_ptr, row_count, self._multi_agg_count, agg_idx,
+                        )
                     continue
 
                 value_vector = morsel.column(self._multi_value_columns[agg_idx])
@@ -3479,20 +3984,6 @@ cdef class CarcharGroupStateEngine:
                         offset = self._multi_offset(state_indices[row_idx], agg_idx)
                         if agg_mode == AGG_COUNT_VALUE:
                             self._multi_counts[offset] = self._multi_counts[offset] + 1
-                        elif agg_mode == AGG_SUM:
-                            self._multi_f64_state[offset] = self._multi_f64_state[offset] + value_f64_data[row_idx]
-                            self._multi_seen[offset] = 1
-                        elif agg_mode == AGG_MIN:
-                            if self._multi_seen[offset] == 0 or value_f64_data[row_idx] < self._multi_f64_state[offset]:
-                                self._multi_f64_state[offset] = value_f64_data[row_idx]
-                            self._multi_seen[offset] = 1
-                        elif agg_mode == AGG_MAX:
-                            if self._multi_seen[offset] == 0 or value_f64_data[row_idx] > self._multi_f64_state[offset]:
-                                self._multi_f64_state[offset] = value_f64_data[row_idx]
-                            self._multi_seen[offset] = 1
-                        elif agg_mode == AGG_AVG:
-                            self._multi_avg_sums[offset] = self._multi_avg_sums[offset] + value_f64_data[row_idx]
-                            self._multi_avg_counts[offset] = self._multi_avg_counts[offset] + 1
                     continue
 
                 if isinstance(value_vector, Int64Vector):
@@ -3505,20 +3996,6 @@ cdef class CarcharGroupStateEngine:
                         offset = self._multi_offset(state_indices[row_idx], agg_idx)
                         if agg_mode == AGG_COUNT_VALUE:
                             self._multi_counts[offset] = self._multi_counts[offset] + 1
-                        elif agg_mode == AGG_SUM:
-                            self._multi_i64_state[offset] = self._multi_i64_state[offset] + value_i64_data[row_idx]
-                            self._multi_seen[offset] = 1
-                        elif agg_mode == AGG_MIN:
-                            if self._multi_seen[offset] == 0 or value_i64_data[row_idx] < self._multi_i64_state[offset]:
-                                self._multi_i64_state[offset] = value_i64_data[row_idx]
-                            self._multi_seen[offset] = 1
-                        elif agg_mode == AGG_MAX:
-                            if self._multi_seen[offset] == 0 or value_i64_data[row_idx] > self._multi_i64_state[offset]:
-                                self._multi_i64_state[offset] = value_i64_data[row_idx]
-                            self._multi_seen[offset] = 1
-                        elif agg_mode == AGG_AVG:
-                            self._multi_avg_sums[offset] = self._multi_avg_sums[offset] + value_i64_data[row_idx]
-                            self._multi_avg_counts[offset] = self._multi_avg_counts[offset] + 1
                     continue
 
                 value_ptr = (<IntegerVector> value_vector).ptr
@@ -3529,22 +4006,6 @@ cdef class CarcharGroupStateEngine:
                     offset = self._multi_offset(state_indices[row_idx], agg_idx)
                     if agg_mode == AGG_COUNT_VALUE:
                         self._multi_counts[offset] = self._multi_counts[offset] + 1
-                    else:
-                        value_i64 = _read_integer_value(value_ptr, row_idx)
-                        if agg_mode == AGG_SUM:
-                            self._multi_i64_state[offset] = self._multi_i64_state[offset] + value_i64
-                            self._multi_seen[offset] = 1
-                        elif agg_mode == AGG_MIN:
-                            if self._multi_seen[offset] == 0 or value_i64 < self._multi_i64_state[offset]:
-                                self._multi_i64_state[offset] = value_i64
-                            self._multi_seen[offset] = 1
-                        elif agg_mode == AGG_MAX:
-                            if self._multi_seen[offset] == 0 or value_i64 > self._multi_i64_state[offset]:
-                                self._multi_i64_state[offset] = value_i64
-                            self._multi_seen[offset] = 1
-                        elif agg_mode == AGG_AVG:
-                            self._multi_avg_sums[offset] = self._multi_avg_sums[offset] + value_i64
-                            self._multi_avg_counts[offset] = self._multi_avg_counts[offset] + 1
         finally:
             if state_indices != NULL:
                 free(state_indices)
@@ -3585,13 +4046,20 @@ cdef class CarcharGroupStateEngine:
                 key_nulls.append(<size_t> <uint8_t*> (<IntegerVector> group_vector).ptr.null_bitmap)
 
         if self._agg_mode == AGG_COUNT_STAR:
-            for row_idx in range(row_count):
-                state_index = -1
-                if not self._index.lookup_fast(row_hashes[row_idx], state_index):
-                    state_index = self._find_or_insert_multi_fixed_state(
-                        row_hashes[row_idx], key_ptrs, key_nulls, row_idx
-                    )
-                self._counts[state_index] = self._counts[state_index] + 1
+            state_indices = <int64_t*> malloc(row_count * sizeof(int64_t))
+            if state_indices == NULL and row_count > 0:
+                raise MemoryError()
+            try:
+                for row_idx in range(row_count):
+                    state_index = -1
+                    if not self._index.lookup_fast(row_hashes[row_idx], state_index):
+                        state_index = self._find_or_insert_multi_fixed_state(
+                            row_hashes[row_idx], key_ptrs, key_nulls, row_idx
+                        )
+                    state_indices[row_idx] = state_index
+                count_star_accumulate(self._counts.data(), state_indices, row_count)
+            finally:
+                free(state_indices)
             return
 
         if self._agg_mode == AGG_COUNT_DISTINCT:
@@ -3611,6 +4079,40 @@ cdef class CarcharGroupStateEngine:
             finally:
                 if state_indices != NULL:
                     free(state_indices)
+            return
+
+        if self._agg_mode == AGG_SUM:
+            state_indices = <int64_t*> malloc(row_count * sizeof(int64_t))
+            if state_indices == NULL and row_count > 0:
+                raise MemoryError()
+            try:
+                for row_idx in range(row_count):
+                    state_index = -1
+                    if not self._index.lookup_fast(row_hashes[row_idx], state_index):
+                        state_index = self._find_or_insert_multi_fixed_state(
+                            row_hashes[row_idx], key_ptrs, key_nulls, row_idx
+                        )
+                    state_indices[row_idx] = state_index
+                value_vector = morsel.column(self._value_column)
+                if isinstance(value_vector, Float64Vector):
+                    value_ptr = (<Float64Vector> value_vector).ptr
+                    sum_f64_accumulate(
+                        self._f64_state.data(), self._seen.data(), state_indices,
+                        <double*> value_ptr.data, <uint8_t*> value_ptr.null_bitmap, row_count,
+                    )
+                elif isinstance(value_vector, Int64Vector):
+                    value_ptr = (<Int64Vector> value_vector).ptr
+                    sum_i64_accumulate(
+                        self._i64_state.data(), self._seen.data(), state_indices,
+                        <int64_t*> value_ptr.data, <uint8_t*> value_ptr.null_bitmap, row_count,
+                    )
+                else:
+                    value_ptr = (<IntegerVector> value_vector).ptr
+                    sum_integer_accumulate(
+                        self._i64_state.data(), self._seen.data(), state_indices, value_ptr, row_count,
+                    )
+            finally:
+                free(state_indices)
             return
 
         value_vector = morsel.column(self._value_column)
@@ -3633,6 +4135,72 @@ cdef class CarcharGroupStateEngine:
                     free(state_indices)
             return
 
+        if self._agg_mode in (AGG_MIN, AGG_MAX):
+            state_indices = <int64_t*> malloc(row_count * sizeof(int64_t))
+            if state_indices == NULL and row_count > 0:
+                raise MemoryError()
+            try:
+                for row_idx in range(row_count):
+                    state_index = -1
+                    if not self._index.lookup_fast(row_hashes[row_idx], state_index):
+                        state_index = self._find_or_insert_multi_fixed_state(
+                            row_hashes[row_idx], key_ptrs, key_nulls, row_idx
+                        )
+                    state_indices[row_idx] = state_index
+                if isinstance(value_vector, Float64Vector):
+                    value_ptr = (<Float64Vector> value_vector).ptr
+                    minmax_f64_accumulate(
+                        self._f64_state.data(), self._seen.data(), state_indices,
+                        <double*> value_ptr.data, <uint8_t*> value_ptr.null_bitmap, row_count, self._agg_mode == AGG_MIN,
+                    )
+                elif isinstance(value_vector, Int64Vector):
+                    value_ptr = (<Int64Vector> value_vector).ptr
+                    minmax_i64_accumulate(
+                        self._i64_state.data(), self._seen.data(), state_indices,
+                        <int64_t*> value_ptr.data, <uint8_t*> value_ptr.null_bitmap, row_count, self._agg_mode == AGG_MIN,
+                    )
+                else:
+                    value_ptr = (<IntegerVector> value_vector).ptr
+                    minmax_integer_accumulate(
+                        self._i64_state.data(), self._seen.data(), state_indices, value_ptr, row_count, self._agg_mode == AGG_MIN,
+                    )
+            finally:
+                free(state_indices)
+            return
+
+        if self._agg_mode == AGG_AVG:
+            state_indices = <int64_t*> malloc(row_count * sizeof(int64_t))
+            if state_indices == NULL and row_count > 0:
+                raise MemoryError()
+            try:
+                for row_idx in range(row_count):
+                    state_index = -1
+                    if not self._index.lookup_fast(row_hashes[row_idx], state_index):
+                        state_index = self._find_or_insert_multi_fixed_state(
+                            row_hashes[row_idx], key_ptrs, key_nulls, row_idx
+                        )
+                    state_indices[row_idx] = state_index
+                if isinstance(value_vector, Float64Vector):
+                    value_ptr = (<Float64Vector> value_vector).ptr
+                    avg_f64_accumulate(
+                        self._avg_sums.data(), self._avg_counts.data(), state_indices,
+                        <double*> value_ptr.data, <uint8_t*> value_ptr.null_bitmap, row_count,
+                    )
+                elif isinstance(value_vector, Int64Vector):
+                    value_ptr = (<Int64Vector> value_vector).ptr
+                    avg_i64_accumulate(
+                        self._avg_sums.data(), self._avg_counts.data(), state_indices,
+                        <int64_t*> value_ptr.data, <uint8_t*> value_ptr.null_bitmap, row_count,
+                    )
+                else:
+                    value_ptr = (<IntegerVector> value_vector).ptr
+                    avg_integer_accumulate(
+                        self._avg_sums.data(), self._avg_counts.data(), state_indices, value_ptr, row_count,
+                    )
+            finally:
+                free(state_indices)
+            return
+
         if isinstance(value_vector, Float64Vector):
             value_ptr = (<Float64Vector> value_vector).ptr
             value_f64_data = <double*> value_ptr.data
@@ -3646,21 +4214,6 @@ cdef class CarcharGroupStateEngine:
                 if self._agg_mode == AGG_COUNT_VALUE:
                     if _bitmap_is_valid(value_nulls, row_idx):
                         self._counts[state_index] = self._counts[state_index] + 1
-                elif _bitmap_is_valid(value_nulls, row_idx):
-                    if self._agg_mode == AGG_SUM:
-                        self._f64_state[state_index] = self._f64_state[state_index] + value_f64_data[row_idx]
-                        self._seen[state_index] = 1
-                    elif self._agg_mode == AGG_MIN:
-                        if self._seen[state_index] == 0 or value_f64_data[row_idx] < self._f64_state[state_index]:
-                            self._f64_state[state_index] = value_f64_data[row_idx]
-                        self._seen[state_index] = 1
-                    elif self._agg_mode == AGG_MAX:
-                        if self._seen[state_index] == 0 or value_f64_data[row_idx] > self._f64_state[state_index]:
-                            self._f64_state[state_index] = value_f64_data[row_idx]
-                        self._seen[state_index] = 1
-                    elif self._agg_mode == AGG_AVG:
-                        self._avg_sums[state_index] = self._avg_sums[state_index] + value_f64_data[row_idx]
-                        self._avg_counts[state_index] = self._avg_counts[state_index] + 1
             return
 
         if isinstance(value_vector, Int64Vector):
@@ -3676,21 +4229,6 @@ cdef class CarcharGroupStateEngine:
                 if self._agg_mode == AGG_COUNT_VALUE:
                     if _bitmap_is_valid(value_nulls, row_idx):
                         self._counts[state_index] = self._counts[state_index] + 1
-                elif _bitmap_is_valid(value_nulls, row_idx):
-                    if self._agg_mode == AGG_SUM:
-                        self._i64_state[state_index] = self._i64_state[state_index] + value_i64_data[row_idx]
-                        self._seen[state_index] = 1
-                    elif self._agg_mode == AGG_MIN:
-                        if self._seen[state_index] == 0 or value_i64_data[row_idx] < self._i64_state[state_index]:
-                            self._i64_state[state_index] = value_i64_data[row_idx]
-                        self._seen[state_index] = 1
-                    elif self._agg_mode == AGG_MAX:
-                        if self._seen[state_index] == 0 or value_i64_data[row_idx] > self._i64_state[state_index]:
-                            self._i64_state[state_index] = value_i64_data[row_idx]
-                        self._seen[state_index] = 1
-                    elif self._agg_mode == AGG_AVG:
-                        self._avg_sums[state_index] = self._avg_sums[state_index] + value_i64_data[row_idx]
-                        self._avg_counts[state_index] = self._avg_counts[state_index] + 1
             return
 
         value_ptr = (<IntegerVector> value_vector).ptr
@@ -3704,22 +4242,6 @@ cdef class CarcharGroupStateEngine:
             if self._agg_mode == AGG_COUNT_VALUE:
                 if _bitmap_is_valid(value_nulls, row_idx):
                     self._counts[state_index] = self._counts[state_index] + 1
-            elif _bitmap_is_valid(value_nulls, row_idx):
-                value_i64 = _read_integer_value(value_ptr, row_idx)
-                if self._agg_mode == AGG_SUM:
-                    self._i64_state[state_index] = self._i64_state[state_index] + value_i64
-                    self._seen[state_index] = 1
-                elif self._agg_mode == AGG_MIN:
-                    if self._seen[state_index] == 0 or value_i64 < self._i64_state[state_index]:
-                        self._i64_state[state_index] = value_i64
-                    self._seen[state_index] = 1
-                elif self._agg_mode == AGG_MAX:
-                    if self._seen[state_index] == 0 or value_i64 > self._i64_state[state_index]:
-                        self._i64_state[state_index] = value_i64
-                    self._seen[state_index] = 1
-                elif self._agg_mode == AGG_AVG:
-                    self._avg_sums[state_index] = self._avg_sums[state_index] + value_i64
-                    self._avg_counts[state_index] = self._avg_counts[state_index] + 1
 
     cdef void _ingest_dictionary_key_multi(self, Morsel morsel, object key_vector) except *:
         cdef uint64_t[::1] row_hashes = morsel.hash([self._group_column])
@@ -3776,12 +4298,121 @@ cdef class CarcharGroupStateEngine:
             for agg_idx in range(self._multi_agg_count):
                 agg_mode = self._multi_agg_modes[agg_idx]
                 if agg_mode == AGG_COUNT_STAR:
-                    for row_idx in range(row_count):
-                        offset = self._multi_offset(state_indices[row_idx], agg_idx)
-                        self._multi_counts[offset] = self._multi_counts[offset] + 1
+                    count_star_multi_accumulate(self._multi_counts.data(), state_indices, row_count, self._multi_agg_count, agg_idx)
                     continue
                 if agg_mode == AGG_COUNT_DISTINCT:
                     self._ingest_count_distinct_multi_for_states(morsel, state_indices, row_count, agg_idx)
+                    continue
+
+                if agg_mode == AGG_SUM:
+                    value_vector = morsel.column(self._multi_value_columns[agg_idx])
+                    if isinstance(value_vector, Float64Vector):
+                        value_ptr = (<Float64Vector> value_vector).ptr
+                        sum_f64_multi_accumulate(
+                            self._multi_f64_state.data(), self._multi_seen.data(), state_indices,
+                            <double*> value_ptr.data, <uint8_t*> value_ptr.null_bitmap,
+                            row_count, self._multi_agg_count, agg_idx,
+                        )
+                    elif isinstance(value_vector, Int64Vector):
+                        value_ptr = (<Int64Vector> value_vector).ptr
+                        sum_i64_multi_accumulate(
+                            self._multi_i64_state.data(), self._multi_seen.data(), state_indices,
+                            <int64_t*> value_ptr.data, <uint8_t*> value_ptr.null_bitmap,
+                            row_count, self._multi_agg_count, agg_idx,
+                        )
+                    else:
+                        value_dict_accessor = _vector_value_dict_accessor(value_vector)
+                        if value_dict_accessor != NULL:
+                            if self._multi_value_kinds[agg_idx] == VALUE_DICT_FLOAT64:
+                                sum_f64_multi_accumulate_from_dict(
+                                    self._multi_f64_state.data(), self._multi_seen.data(), state_indices,
+                                    value_dict_accessor, row_count, self._multi_agg_count, agg_idx,
+                                )
+                            else:
+                                sum_i64_multi_accumulate_from_dict(
+                                    self._multi_i64_state.data(), self._multi_seen.data(), state_indices,
+                                    value_dict_accessor, row_count, self._multi_agg_count, agg_idx,
+                                )
+                        else:
+                            value_ptr = (<IntegerVector> value_vector).ptr
+                            sum_integer_multi_accumulate(
+                                self._multi_i64_state.data(), self._multi_seen.data(), state_indices,
+                                value_ptr, row_count, self._multi_agg_count, agg_idx,
+                            )
+                    continue
+
+                if agg_mode in (AGG_MIN, AGG_MAX):
+                    value_vector = morsel.column(self._multi_value_columns[agg_idx])
+                    if isinstance(value_vector, Float64Vector):
+                        value_ptr = (<Float64Vector> value_vector).ptr
+                        minmax_f64_multi_accumulate(
+                            self._multi_f64_state.data(), self._multi_seen.data(), state_indices,
+                            <double*> value_ptr.data, <uint8_t*> value_ptr.null_bitmap,
+                            row_count, self._multi_agg_count, agg_idx, agg_mode == AGG_MIN,
+                        )
+                    elif isinstance(value_vector, Int64Vector):
+                        value_ptr = (<Int64Vector> value_vector).ptr
+                        minmax_i64_multi_accumulate(
+                            self._multi_i64_state.data(), self._multi_seen.data(), state_indices,
+                            <int64_t*> value_ptr.data, <uint8_t*> value_ptr.null_bitmap,
+                            row_count, self._multi_agg_count, agg_idx, agg_mode == AGG_MIN,
+                        )
+                    else:
+                        value_dict_accessor = _vector_value_dict_accessor(value_vector)
+                        if value_dict_accessor != NULL:
+                            if self._multi_value_kinds[agg_idx] == VALUE_DICT_FLOAT64:
+                                minmax_f64_multi_accumulate_from_dict(
+                                    self._multi_f64_state.data(), self._multi_seen.data(), state_indices,
+                                    value_dict_accessor, row_count, self._multi_agg_count, agg_idx, agg_mode == AGG_MIN,
+                                )
+                            else:
+                                minmax_i64_multi_accumulate_from_dict(
+                                    self._multi_i64_state.data(), self._multi_seen.data(), state_indices,
+                                    value_dict_accessor, row_count, self._multi_agg_count, agg_idx, agg_mode == AGG_MIN,
+                                )
+                        else:
+                            value_ptr = (<IntegerVector> value_vector).ptr
+                            minmax_integer_multi_accumulate(
+                                self._multi_i64_state.data(), self._multi_seen.data(), state_indices,
+                                value_ptr, row_count, self._multi_agg_count, agg_idx, agg_mode == AGG_MIN,
+                            )
+                    continue
+
+                if agg_mode == AGG_AVG:
+                    value_vector = morsel.column(self._multi_value_columns[agg_idx])
+                    if isinstance(value_vector, Float64Vector):
+                        value_ptr = (<Float64Vector> value_vector).ptr
+                        avg_f64_multi_accumulate(
+                            self._multi_avg_sums.data(), self._multi_avg_counts.data(), state_indices,
+                            <double*> value_ptr.data, <uint8_t*> value_ptr.null_bitmap,
+                            row_count, self._multi_agg_count, agg_idx,
+                        )
+                    elif isinstance(value_vector, Int64Vector):
+                        value_ptr = (<Int64Vector> value_vector).ptr
+                        avg_i64_multi_accumulate(
+                            self._multi_avg_sums.data(), self._multi_avg_counts.data(), state_indices,
+                            <int64_t*> value_ptr.data, <uint8_t*> value_ptr.null_bitmap,
+                            row_count, self._multi_agg_count, agg_idx,
+                        )
+                    else:
+                        value_dict_accessor = _vector_value_dict_accessor(value_vector)
+                        if value_dict_accessor != NULL:
+                            if self._multi_value_kinds[agg_idx] == VALUE_DICT_FLOAT64:
+                                avg_f64_multi_accumulate_from_dict(
+                                    self._multi_avg_sums.data(), self._multi_avg_counts.data(), state_indices,
+                                    value_dict_accessor, row_count, self._multi_agg_count, agg_idx,
+                                )
+                            else:
+                                avg_i64_multi_accumulate_from_dict(
+                                    self._multi_avg_sums.data(), self._multi_avg_counts.data(), state_indices,
+                                    value_dict_accessor, row_count, self._multi_agg_count, agg_idx,
+                                )
+                        else:
+                            value_ptr = (<IntegerVector> value_vector).ptr
+                            avg_integer_multi_accumulate(
+                                self._multi_avg_sums.data(), self._multi_avg_counts.data(), state_indices,
+                                value_ptr, row_count, self._multi_agg_count, agg_idx,
+                            )
                     continue
 
                 value_vector = morsel.column(self._multi_value_columns[agg_idx])
@@ -3795,20 +4426,6 @@ cdef class CarcharGroupStateEngine:
                         offset = self._multi_offset(state_indices[row_idx], agg_idx)
                         if agg_mode == AGG_COUNT_VALUE:
                             self._multi_counts[offset] = self._multi_counts[offset] + 1
-                        elif agg_mode == AGG_SUM:
-                            self._multi_f64_state[offset] = self._multi_f64_state[offset] + value_f64_data[row_idx]
-                            self._multi_seen[offset] = 1
-                        elif agg_mode == AGG_MIN:
-                            if self._multi_seen[offset] == 0 or value_f64_data[row_idx] < self._multi_f64_state[offset]:
-                                self._multi_f64_state[offset] = value_f64_data[row_idx]
-                            self._multi_seen[offset] = 1
-                        elif agg_mode == AGG_MAX:
-                            if self._multi_seen[offset] == 0 or value_f64_data[row_idx] > self._multi_f64_state[offset]:
-                                self._multi_f64_state[offset] = value_f64_data[row_idx]
-                            self._multi_seen[offset] = 1
-                        elif agg_mode == AGG_AVG:
-                            self._multi_avg_sums[offset] = self._multi_avg_sums[offset] + value_f64_data[row_idx]
-                            self._multi_avg_counts[offset] = self._multi_avg_counts[offset] + 1
                     continue
 
                 if isinstance(value_vector, Int64Vector):
@@ -3821,20 +4438,6 @@ cdef class CarcharGroupStateEngine:
                         offset = self._multi_offset(state_indices[row_idx], agg_idx)
                         if agg_mode == AGG_COUNT_VALUE:
                             self._multi_counts[offset] = self._multi_counts[offset] + 1
-                        elif agg_mode == AGG_SUM:
-                            self._multi_i64_state[offset] = self._multi_i64_state[offset] + value_i64_data[row_idx]
-                            self._multi_seen[offset] = 1
-                        elif agg_mode == AGG_MIN:
-                            if self._multi_seen[offset] == 0 or value_i64_data[row_idx] < self._multi_i64_state[offset]:
-                                self._multi_i64_state[offset] = value_i64_data[row_idx]
-                            self._multi_seen[offset] = 1
-                        elif agg_mode == AGG_MAX:
-                            if self._multi_seen[offset] == 0 or value_i64_data[row_idx] > self._multi_i64_state[offset]:
-                                self._multi_i64_state[offset] = value_i64_data[row_idx]
-                            self._multi_seen[offset] = 1
-                        elif agg_mode == AGG_AVG:
-                            self._multi_avg_sums[offset] = self._multi_avg_sums[offset] + value_i64_data[row_idx]
-                            self._multi_avg_counts[offset] = self._multi_avg_counts[offset] + 1
                     continue
 
                 value_dict_accessor = _vector_value_dict_accessor(value_vector)
@@ -3848,20 +4451,6 @@ cdef class CarcharGroupStateEngine:
                             val_decoded_f64 = _dict_accessor_read_float_value(value_dict_accessor, row_idx)
                             if agg_mode == AGG_COUNT_VALUE:
                                 self._multi_counts[offset] = self._multi_counts[offset] + 1
-                            elif agg_mode == AGG_SUM:
-                                self._multi_f64_state[offset] = self._multi_f64_state[offset] + val_decoded_f64
-                                self._multi_seen[offset] = 1
-                            elif agg_mode == AGG_MIN:
-                                if self._multi_seen[offset] == 0 or val_decoded_f64 < self._multi_f64_state[offset]:
-                                    self._multi_f64_state[offset] = val_decoded_f64
-                                self._multi_seen[offset] = 1
-                            elif agg_mode == AGG_MAX:
-                                if self._multi_seen[offset] == 0 or val_decoded_f64 > self._multi_f64_state[offset]:
-                                    self._multi_f64_state[offset] = val_decoded_f64
-                                self._multi_seen[offset] = 1
-                            elif agg_mode == AGG_AVG:
-                                self._multi_avg_sums[offset] = self._multi_avg_sums[offset] + val_decoded_f64
-                                self._multi_avg_counts[offset] = self._multi_avg_counts[offset] + 1
                         continue
                     elif self._multi_value_kinds[agg_idx] == VALUE_DICT_INT64:
                         for row_idx in range(row_count):
@@ -3871,20 +4460,6 @@ cdef class CarcharGroupStateEngine:
                             val_decoded_i64 = _dict_accessor_read_int_value(value_dict_accessor, row_idx)
                             if agg_mode == AGG_COUNT_VALUE:
                                 self._multi_counts[offset] = self._multi_counts[offset] + 1
-                            elif agg_mode == AGG_SUM:
-                                self._multi_i64_state[offset] = self._multi_i64_state[offset] + val_decoded_i64
-                                self._multi_seen[offset] = 1
-                            elif agg_mode == AGG_MIN:
-                                if self._multi_seen[offset] == 0 or val_decoded_i64 < self._multi_i64_state[offset]:
-                                    self._multi_i64_state[offset] = val_decoded_i64
-                                self._multi_seen[offset] = 1
-                            elif agg_mode == AGG_MAX:
-                                if self._multi_seen[offset] == 0 or val_decoded_i64 > self._multi_i64_state[offset]:
-                                    self._multi_i64_state[offset] = val_decoded_i64
-                                self._multi_seen[offset] = 1
-                            elif agg_mode == AGG_AVG:
-                                self._multi_avg_sums[offset] = self._multi_avg_sums[offset] + val_decoded_i64
-                                self._multi_avg_counts[offset] = self._multi_avg_counts[offset] + 1
                         continue
 
                 value_ptr = (<IntegerVector> value_vector).ptr
@@ -3895,22 +4470,6 @@ cdef class CarcharGroupStateEngine:
                     offset = self._multi_offset(state_indices[row_idx], agg_idx)
                     if agg_mode == AGG_COUNT_VALUE:
                         self._multi_counts[offset] = self._multi_counts[offset] + 1
-                    else:
-                        value_i64 = _read_integer_value(value_ptr, row_idx)
-                        if agg_mode == AGG_SUM:
-                            self._multi_i64_state[offset] = self._multi_i64_state[offset] + value_i64
-                            self._multi_seen[offset] = 1
-                        elif agg_mode == AGG_MIN:
-                            if self._multi_seen[offset] == 0 or value_i64 < self._multi_i64_state[offset]:
-                                self._multi_i64_state[offset] = value_i64
-                            self._multi_seen[offset] = 1
-                        elif agg_mode == AGG_MAX:
-                            if self._multi_seen[offset] == 0 or value_i64 > self._multi_i64_state[offset]:
-                                self._multi_i64_state[offset] = value_i64
-                            self._multi_seen[offset] = 1
-                        elif agg_mode == AGG_AVG:
-                            self._multi_avg_sums[offset] = self._multi_avg_sums[offset] + value_i64
-                            self._multi_avg_counts[offset] = self._multi_avg_counts[offset] + 1
         finally:
             if state_indices != NULL:
                 free(state_indices)
@@ -3964,15 +4523,116 @@ cdef class CarcharGroupStateEngine:
                     )
 
             if self._agg_mode == AGG_COUNT_STAR:
-                for row_idx in range(row_count):
-                    self._counts[state_indices[row_idx]] = self._counts[state_indices[row_idx]] + 1
+                count_star_accumulate(self._counts.data(), state_indices, row_count)
                 return
             if self._agg_mode == AGG_COUNT_DISTINCT:
                 self._ingest_count_distinct_for_states(morsel, state_indices, row_count)
                 return
 
+            if self._agg_mode == AGG_SUM:
+                value_vector = morsel.column(self._value_column)
+                if isinstance(value_vector, Float64Vector):
+                    value_ptr = (<Float64Vector> value_vector).ptr
+                    sum_f64_accumulate(
+                        self._f64_state.data(), self._seen.data(), state_indices,
+                        <double*> value_ptr.data, <uint8_t*> value_ptr.null_bitmap, row_count,
+                    )
+                elif isinstance(value_vector, Int64Vector):
+                    value_ptr = (<Int64Vector> value_vector).ptr
+                    sum_i64_accumulate(
+                        self._i64_state.data(), self._seen.data(), state_indices,
+                        <int64_t*> value_ptr.data, <uint8_t*> value_ptr.null_bitmap, row_count,
+                    )
+                else:
+                    value_dict_accessor = _vector_value_dict_accessor(value_vector)
+                    if value_dict_accessor != NULL:
+                        if self._value_kind == VALUE_DICT_FLOAT64:
+                            sum_f64_accumulate_from_dict(
+                                self._f64_state.data(), self._seen.data(), state_indices,
+                                value_dict_accessor, row_count,
+                            )
+                        else:
+                            sum_i64_accumulate_from_dict(
+                                self._i64_state.data(), self._seen.data(), state_indices,
+                                value_dict_accessor, row_count,
+                            )
+                    else:
+                        value_ptr = (<IntegerVector> value_vector).ptr
+                        sum_integer_accumulate(
+                            self._i64_state.data(), self._seen.data(), state_indices, value_ptr, row_count,
+                        )
+                return
+
             if self._value_kind == VALUE_OBJECT and self._agg_mode in (AGG_MIN, AGG_MAX, AGG_HASH_ONE):
                 self._ingest_object_minmax_for_states(morsel, state_indices, row_count)
+                return
+
+            if self._agg_mode in (AGG_MIN, AGG_MAX):
+                value_vector = morsel.column(self._value_column)
+                if isinstance(value_vector, Float64Vector):
+                    value_ptr = (<Float64Vector> value_vector).ptr
+                    minmax_f64_accumulate(
+                        self._f64_state.data(), self._seen.data(), state_indices,
+                        <double*> value_ptr.data, <uint8_t*> value_ptr.null_bitmap, row_count, self._agg_mode == AGG_MIN,
+                    )
+                elif isinstance(value_vector, Int64Vector):
+                    value_ptr = (<Int64Vector> value_vector).ptr
+                    minmax_i64_accumulate(
+                        self._i64_state.data(), self._seen.data(), state_indices,
+                        <int64_t*> value_ptr.data, <uint8_t*> value_ptr.null_bitmap, row_count, self._agg_mode == AGG_MIN,
+                    )
+                else:
+                    value_dict_accessor = _vector_value_dict_accessor(value_vector)
+                    if value_dict_accessor != NULL:
+                        if self._value_kind == VALUE_DICT_FLOAT64:
+                            minmax_f64_accumulate_from_dict(
+                                self._f64_state.data(), self._seen.data(), state_indices,
+                                value_dict_accessor, row_count, self._agg_mode == AGG_MIN,
+                            )
+                        else:
+                            minmax_i64_accumulate_from_dict(
+                                self._i64_state.data(), self._seen.data(), state_indices,
+                                value_dict_accessor, row_count, self._agg_mode == AGG_MIN,
+                            )
+                    else:
+                        value_ptr = (<IntegerVector> value_vector).ptr
+                        minmax_integer_accumulate(
+                            self._i64_state.data(), self._seen.data(), state_indices, value_ptr, row_count, self._agg_mode == AGG_MIN,
+                        )
+                return
+
+            if self._agg_mode == AGG_AVG:
+                value_vector = morsel.column(self._value_column)
+                if isinstance(value_vector, Float64Vector):
+                    value_ptr = (<Float64Vector> value_vector).ptr
+                    avg_f64_accumulate(
+                        self._avg_sums.data(), self._avg_counts.data(), state_indices,
+                        <double*> value_ptr.data, <uint8_t*> value_ptr.null_bitmap, row_count,
+                    )
+                elif isinstance(value_vector, Int64Vector):
+                    value_ptr = (<Int64Vector> value_vector).ptr
+                    avg_i64_accumulate(
+                        self._avg_sums.data(), self._avg_counts.data(), state_indices,
+                        <int64_t*> value_ptr.data, <uint8_t*> value_ptr.null_bitmap, row_count,
+                    )
+                else:
+                    value_dict_accessor = _vector_value_dict_accessor(value_vector)
+                    if value_dict_accessor != NULL:
+                        if self._value_kind == VALUE_DICT_FLOAT64:
+                            avg_f64_accumulate_from_dict(
+                                self._avg_sums.data(), self._avg_counts.data(), state_indices,
+                                value_dict_accessor, row_count,
+                            )
+                        else:
+                            avg_i64_accumulate_from_dict(
+                                self._avg_sums.data(), self._avg_counts.data(), state_indices,
+                                value_dict_accessor, row_count,
+                            )
+                    else:
+                        value_ptr = (<IntegerVector> value_vector).ptr
+                        avg_integer_accumulate(
+                            self._avg_sums.data(), self._avg_counts.data(), state_indices, value_ptr, row_count,
+                        )
                 return
 
             value_vector = morsel.column(self._value_column)
@@ -3985,21 +4645,6 @@ cdef class CarcharGroupStateEngine:
                     if self._agg_mode == AGG_COUNT_VALUE:
                         if _bitmap_is_valid(value_nulls, row_idx):
                             self._counts[state_index] = self._counts[state_index] + 1
-                    elif _bitmap_is_valid(value_nulls, row_idx):
-                        if self._agg_mode == AGG_SUM:
-                            self._f64_state[state_index] = self._f64_state[state_index] + value_f64_data[row_idx]
-                            self._seen[state_index] = 1
-                        elif self._agg_mode == AGG_MIN:
-                            if self._seen[state_index] == 0 or value_f64_data[row_idx] < self._f64_state[state_index]:
-                                self._f64_state[state_index] = value_f64_data[row_idx]
-                            self._seen[state_index] = 1
-                        elif self._agg_mode == AGG_MAX:
-                            if self._seen[state_index] == 0 or value_f64_data[row_idx] > self._f64_state[state_index]:
-                                self._f64_state[state_index] = value_f64_data[row_idx]
-                            self._seen[state_index] = 1
-                        elif self._agg_mode == AGG_AVG:
-                            self._avg_sums[state_index] = self._avg_sums[state_index] + value_f64_data[row_idx]
-                            self._avg_counts[state_index] = self._avg_counts[state_index] + 1
                 return
 
             if isinstance(value_vector, Int64Vector):
@@ -4011,60 +4656,12 @@ cdef class CarcharGroupStateEngine:
                     if self._agg_mode == AGG_COUNT_VALUE:
                         if _bitmap_is_valid(value_nulls, row_idx):
                             self._counts[state_index] = self._counts[state_index] + 1
-                    elif _bitmap_is_valid(value_nulls, row_idx):
-                        if self._agg_mode == AGG_SUM:
-                            self._i64_state[state_index] = self._i64_state[state_index] + value_i64_data[row_idx]
-                            self._seen[state_index] = 1
-                        elif self._agg_mode == AGG_MIN:
-                            if self._seen[state_index] == 0 or value_i64_data[row_idx] < self._i64_state[state_index]:
-                                self._i64_state[state_index] = value_i64_data[row_idx]
-                            self._seen[state_index] = 1
-                        elif self._agg_mode == AGG_MAX:
-                            if self._seen[state_index] == 0 or value_i64_data[row_idx] > self._i64_state[state_index]:
-                                self._i64_state[state_index] = value_i64_data[row_idx]
-                            self._seen[state_index] = 1
-                        elif self._agg_mode == AGG_AVG:
-                            self._avg_sums[state_index] = self._avg_sums[state_index] + value_i64_data[row_idx]
-                            self._avg_counts[state_index] = self._avg_counts[state_index] + 1
                 return
 
             value_dict_accessor = _vector_value_dict_accessor(value_vector)
             if value_dict_accessor != NULL:
-                value_nulls = value_dict_accessor.row_nulls
-                if self._value_kind == VALUE_DICT_FLOAT64:
-                    for row_idx in range(row_count):
-                        state_index = state_indices[row_idx]
-                        if _bitmap_is_valid(value_nulls, row_idx):
-                            val_decoded_f64 = _dict_accessor_read_float_value(value_dict_accessor, row_idx)
-                            if self._agg_mode == AGG_SUM:
-                                self._f64_state[state_index] = self._f64_state[state_index] + val_decoded_f64
-                                self._seen[state_index] = 1
-                            elif self._agg_mode == AGG_MIN:
-                                if self._seen[state_index] == 0 or val_decoded_f64 < self._f64_state[state_index]:
-                                    self._f64_state[state_index] = val_decoded_f64
-                                self._seen[state_index] = 1
-                            elif self._agg_mode == AGG_MAX:
-                                if self._seen[state_index] == 0 or val_decoded_f64 > self._f64_state[state_index]:
-                                    self._f64_state[state_index] = val_decoded_f64
-                                self._seen[state_index] = 1
-                    return
-                elif self._value_kind == VALUE_DICT_INT64:
-                    for row_idx in range(row_count):
-                        state_index = state_indices[row_idx]
-                        if _bitmap_is_valid(value_nulls, row_idx):
-                            val_decoded_i64 = _dict_accessor_read_int_value(value_dict_accessor, row_idx)
-                            if self._agg_mode == AGG_SUM:
-                                self._i64_state[state_index] = self._i64_state[state_index] + val_decoded_i64
-                                self._seen[state_index] = 1
-                            elif self._agg_mode == AGG_MIN:
-                                if self._seen[state_index] == 0 or val_decoded_i64 < self._i64_state[state_index]:
-                                    self._i64_state[state_index] = val_decoded_i64
-                                self._seen[state_index] = 1
-                            elif self._agg_mode == AGG_MAX:
-                                if self._seen[state_index] == 0 or val_decoded_i64 > self._i64_state[state_index]:
-                                    self._i64_state[state_index] = val_decoded_i64
-                                self._seen[state_index] = 1
-                    return
+                # MIN/MAX handled by dispatch above; COUNT_VALUE/AVG on dict values handled above
+                return
 
             value_ptr = (<IntegerVector> value_vector).ptr
             value_nulls = <uint8_t*> value_ptr.null_bitmap
@@ -4073,22 +4670,6 @@ cdef class CarcharGroupStateEngine:
                 if self._agg_mode == AGG_COUNT_VALUE:
                     if _bitmap_is_valid(value_nulls, row_idx):
                         self._counts[state_index] = self._counts[state_index] + 1
-                elif _bitmap_is_valid(value_nulls, row_idx):
-                    key_value = _read_integer_value(value_ptr, row_idx)
-                    if self._agg_mode == AGG_SUM:
-                        self._i64_state[state_index] = self._i64_state[state_index] + key_value
-                        self._seen[state_index] = 1
-                    elif self._agg_mode == AGG_MIN:
-                        if self._seen[state_index] == 0 or key_value < self._i64_state[state_index]:
-                            self._i64_state[state_index] = key_value
-                        self._seen[state_index] = 1
-                    elif self._agg_mode == AGG_MAX:
-                        if self._seen[state_index] == 0 or key_value > self._i64_state[state_index]:
-                            self._i64_state[state_index] = key_value
-                        self._seen[state_index] = 1
-                    elif self._agg_mode == AGG_AVG:
-                        self._avg_sums[state_index] = self._avg_sums[state_index] + key_value
-                        self._avg_counts[state_index] = self._avg_counts[state_index] + 1
         finally:
             if state_indices != NULL:
                 free(state_indices)
@@ -4122,27 +4703,6 @@ cdef class CarcharGroupStateEngine:
             raise MemoryError()
 
         try:
-            if self._agg_mode == AGG_COUNT_STAR:
-                for row_idx in range(row_count):
-                    if self._multi_key_object_mode:
-                        state_index = self._find_or_insert_multi_encoded_state(
-                            row_hashes[row_idx],
-                            key_vectors,
-                            row_idx,
-                        )
-                    else:
-                        key_valid_flag = self._extract_stringlike_key(
-                            key_vectors[0], row_idx, &key_data_ptr, &key_data_len
-                        )
-                        state_index = self._find_or_insert_encoded_state(
-                            row_hashes[row_idx],
-                            key_data_ptr,
-                            key_data_len,
-                            key_valid_flag,
-                        )
-                    self._counts[state_index] = self._counts[state_index] + 1
-                return
-
             for row_idx in range(row_count):
                 state_index = -1
                 if self._index.lookup_fast(row_hashes[row_idx], state_index):
@@ -4165,12 +4725,84 @@ cdef class CarcharGroupStateEngine:
                         key_valid_flag,
                     )
 
+            if self._agg_mode == AGG_COUNT_STAR:
+                count_star_accumulate(self._counts.data(), state_indices, row_count)
+                return
             if self._agg_mode == AGG_COUNT_DISTINCT:
                 self._ingest_count_distinct_for_states(morsel, state_indices, row_count)
                 return
 
+            if self._agg_mode == AGG_SUM:
+                value_vector = morsel.column(self._value_column)
+                if isinstance(value_vector, Float64Vector):
+                    value_ptr = (<Float64Vector> value_vector).ptr
+                    sum_f64_accumulate(
+                        self._f64_state.data(), self._seen.data(), state_indices,
+                        <double*> value_ptr.data, <uint8_t*> value_ptr.null_bitmap, row_count,
+                    )
+                elif isinstance(value_vector, Int64Vector):
+                    value_ptr = (<Int64Vector> value_vector).ptr
+                    sum_i64_accumulate(
+                        self._i64_state.data(), self._seen.data(), state_indices,
+                        <int64_t*> value_ptr.data, <uint8_t*> value_ptr.null_bitmap, row_count,
+                    )
+                else:
+                    value_ptr = (<IntegerVector> value_vector).ptr
+                    sum_integer_accumulate(
+                        self._i64_state.data(), self._seen.data(), state_indices, value_ptr, row_count,
+                    )
+                return
+
             if self._value_kind == VALUE_OBJECT and self._agg_mode in (AGG_MIN, AGG_MAX, AGG_HASH_ONE):
                 self._ingest_object_minmax_for_states(morsel, state_indices, row_count)
+                return
+
+            if self._agg_mode in (AGG_MIN, AGG_MAX):
+                value_vector = morsel.column(self._value_column)
+                if isinstance(value_vector, Float64Vector):
+                    value_ptr = (<Float64Vector> value_vector).ptr
+                    minmax_f64_accumulate(
+                        self._f64_state.data(), self._seen.data(), state_indices,
+                        <double*> value_ptr.data, <uint8_t*> value_ptr.null_bitmap, row_count, self._agg_mode == AGG_MIN,
+                    )
+                elif isinstance(value_vector, Int64Vector):
+                    value_ptr = (<Int64Vector> value_vector).ptr
+                    minmax_i64_accumulate(
+                        self._i64_state.data(), self._seen.data(), state_indices,
+                        <int64_t*> value_ptr.data, <uint8_t*> value_ptr.null_bitmap, row_count, self._agg_mode == AGG_MIN,
+                    )
+                elif isinstance(value_vector, TimestampVector):
+                    value_ptr = (<TimestampVector> value_vector).ptr
+                    minmax_i64_accumulate(
+                        self._i64_state.data(), self._seen.data(), state_indices,
+                        <int64_t*> value_ptr.data, <uint8_t*> value_ptr.null_bitmap, row_count, self._agg_mode == AGG_MIN,
+                    )
+                else:
+                    value_ptr = (<IntegerVector> value_vector).ptr
+                    minmax_integer_accumulate(
+                        self._i64_state.data(), self._seen.data(), state_indices, value_ptr, row_count, self._agg_mode == AGG_MIN,
+                    )
+                return
+
+            if self._agg_mode == AGG_AVG:
+                value_vector = morsel.column(self._value_column)
+                if isinstance(value_vector, Float64Vector):
+                    value_ptr = (<Float64Vector> value_vector).ptr
+                    avg_f64_accumulate(
+                        self._avg_sums.data(), self._avg_counts.data(), state_indices,
+                        <double*> value_ptr.data, <uint8_t*> value_ptr.null_bitmap, row_count,
+                    )
+                elif isinstance(value_vector, Int64Vector):
+                    value_ptr = (<Int64Vector> value_vector).ptr
+                    avg_i64_accumulate(
+                        self._avg_sums.data(), self._avg_counts.data(), state_indices,
+                        <int64_t*> value_ptr.data, <uint8_t*> value_ptr.null_bitmap, row_count,
+                    )
+                else:
+                    value_ptr = (<IntegerVector> value_vector).ptr
+                    avg_integer_accumulate(
+                        self._avg_sums.data(), self._avg_counts.data(), state_indices, value_ptr, row_count,
+                    )
                 return
 
             value_vector = morsel.column(self._value_column)
@@ -4183,21 +4815,6 @@ cdef class CarcharGroupStateEngine:
                     if self._agg_mode == AGG_COUNT_VALUE:
                         if _bitmap_is_valid(value_nulls, row_idx):
                             self._counts[state_index] = self._counts[state_index] + 1
-                    elif _bitmap_is_valid(value_nulls, row_idx):
-                        if self._agg_mode == AGG_SUM:
-                            self._f64_state[state_index] = self._f64_state[state_index] + value_f64_data[row_idx]
-                            self._seen[state_index] = 1
-                        elif self._agg_mode == AGG_MIN:
-                            if self._seen[state_index] == 0 or value_f64_data[row_idx] < self._f64_state[state_index]:
-                                self._f64_state[state_index] = value_f64_data[row_idx]
-                            self._seen[state_index] = 1
-                        elif self._agg_mode == AGG_MAX:
-                            if self._seen[state_index] == 0 or value_f64_data[row_idx] > self._f64_state[state_index]:
-                                self._f64_state[state_index] = value_f64_data[row_idx]
-                            self._seen[state_index] = 1
-                        elif self._agg_mode == AGG_AVG:
-                            self._avg_sums[state_index] = self._avg_sums[state_index] + value_f64_data[row_idx]
-                            self._avg_counts[state_index] = self._avg_counts[state_index] + 1
                 return
 
             if isinstance(value_vector, Int64Vector):
@@ -4209,41 +4826,16 @@ cdef class CarcharGroupStateEngine:
                     if self._agg_mode == AGG_COUNT_VALUE:
                         if _bitmap_is_valid(value_nulls, row_idx):
                             self._counts[state_index] = self._counts[state_index] + 1
-                    elif _bitmap_is_valid(value_nulls, row_idx):
-                        if self._agg_mode == AGG_SUM:
-                            self._i64_state[state_index] = self._i64_state[state_index] + value_i64_data[row_idx]
-                            self._seen[state_index] = 1
-                        elif self._agg_mode == AGG_MIN:
-                            if self._seen[state_index] == 0 or value_i64_data[row_idx] < self._i64_state[state_index]:
-                                self._i64_state[state_index] = value_i64_data[row_idx]
-                            self._seen[state_index] = 1
-                        elif self._agg_mode == AGG_MAX:
-                            if self._seen[state_index] == 0 or value_i64_data[row_idx] > self._i64_state[state_index]:
-                                self._i64_state[state_index] = value_i64_data[row_idx]
-                            self._seen[state_index] = 1
-                        elif self._agg_mode == AGG_AVG:
-                            self._avg_sums[state_index] = self._avg_sums[state_index] + value_i64_data[row_idx]
-                            self._avg_counts[state_index] = self._avg_counts[state_index] + 1
                 return
 
             if isinstance(value_vector, TimestampVector):
                 value_ptr = (<TimestampVector> value_vector).ptr
-                value_i64_data = <int64_t*> value_ptr.data
                 value_nulls = <uint8_t*> value_ptr.null_bitmap
                 for row_idx in range(row_count):
                     state_index = state_indices[row_idx]
                     if self._agg_mode == AGG_COUNT_VALUE:
                         if _bitmap_is_valid(value_nulls, row_idx):
                             self._counts[state_index] = self._counts[state_index] + 1
-                    elif _bitmap_is_valid(value_nulls, row_idx):
-                        if self._agg_mode == AGG_MIN:
-                            if self._seen[state_index] == 0 or value_i64_data[row_idx] < self._i64_state[state_index]:
-                                self._i64_state[state_index] = value_i64_data[row_idx]
-                            self._seen[state_index] = 1
-                        elif self._agg_mode == AGG_MAX:
-                            if self._seen[state_index] == 0 or value_i64_data[row_idx] > self._i64_state[state_index]:
-                                self._i64_state[state_index] = value_i64_data[row_idx]
-                            self._seen[state_index] = 1
                 return
 
             value_ptr = (<IntegerVector> value_vector).ptr
@@ -4253,22 +4845,6 @@ cdef class CarcharGroupStateEngine:
                 if self._agg_mode == AGG_COUNT_VALUE:
                     if _bitmap_is_valid(value_nulls, row_idx):
                         self._counts[state_index] = self._counts[state_index] + 1
-                elif _bitmap_is_valid(value_nulls, row_idx):
-                    value_i64 = _read_integer_value(value_ptr, row_idx)
-                    if self._agg_mode == AGG_SUM:
-                        self._i64_state[state_index] = self._i64_state[state_index] + value_i64
-                        self._seen[state_index] = 1
-                    elif self._agg_mode == AGG_MIN:
-                        if self._seen[state_index] == 0 or value_i64 < self._i64_state[state_index]:
-                            self._i64_state[state_index] = value_i64
-                        self._seen[state_index] = 1
-                    elif self._agg_mode == AGG_MAX:
-                        if self._seen[state_index] == 0 or value_i64 > self._i64_state[state_index]:
-                            self._i64_state[state_index] = value_i64
-                        self._seen[state_index] = 1
-                    elif self._agg_mode == AGG_AVG:
-                        self._avg_sums[state_index] = self._avg_sums[state_index] + value_i64
-                        self._avg_counts[state_index] = self._avg_counts[state_index] + 1
         finally:
             if state_indices != NULL:
                 free(state_indices)
@@ -4330,9 +4906,7 @@ cdef class CarcharGroupStateEngine:
             for agg_idx in range(self._multi_agg_count):
                 agg_mode = self._multi_agg_modes[agg_idx]
                 if agg_mode == AGG_COUNT_STAR:
-                    for row_idx in range(row_count):
-                        offset = self._multi_offset(state_indices[row_idx], agg_idx)
-                        self._multi_counts[offset] = self._multi_counts[offset] + 1
+                    count_star_multi_accumulate(self._multi_counts.data(), state_indices, row_count, self._multi_agg_count, agg_idx)
                     continue
                 if agg_mode == AGG_COUNT_DISTINCT:
                     self._ingest_count_distinct_multi_for_states(morsel, state_indices, row_count, agg_idx)
@@ -4346,6 +4920,78 @@ cdef class CarcharGroupStateEngine:
                     )
                     continue
 
+                if agg_mode == AGG_SUM:
+                    value_vector = morsel.column(self._multi_value_columns[agg_idx])
+                    if isinstance(value_vector, Float64Vector):
+                        value_ptr = (<Float64Vector> value_vector).ptr
+                        sum_f64_multi_accumulate(
+                            self._multi_f64_state.data(), self._multi_seen.data(), state_indices,
+                            <double*> value_ptr.data, <uint8_t*> value_ptr.null_bitmap,
+                            row_count, self._multi_agg_count, agg_idx,
+                        )
+                    elif isinstance(value_vector, Int64Vector):
+                        value_ptr = (<Int64Vector> value_vector).ptr
+                        sum_i64_multi_accumulate(
+                            self._multi_i64_state.data(), self._multi_seen.data(), state_indices,
+                            <int64_t*> value_ptr.data, <uint8_t*> value_ptr.null_bitmap,
+                            row_count, self._multi_agg_count, agg_idx,
+                        )
+                    else:
+                        value_ptr = (<IntegerVector> value_vector).ptr
+                        sum_integer_multi_accumulate(
+                            self._multi_i64_state.data(), self._multi_seen.data(), state_indices,
+                            value_ptr, row_count, self._multi_agg_count, agg_idx,
+                        )
+                    continue
+
+                if agg_mode in (AGG_MIN, AGG_MAX):
+                    value_vector = morsel.column(self._multi_value_columns[agg_idx])
+                    if isinstance(value_vector, Float64Vector):
+                        value_ptr = (<Float64Vector> value_vector).ptr
+                        minmax_f64_multi_accumulate(
+                            self._multi_f64_state.data(), self._multi_seen.data(), state_indices,
+                            <double*> value_ptr.data, <uint8_t*> value_ptr.null_bitmap,
+                            row_count, self._multi_agg_count, agg_idx, agg_mode == AGG_MIN,
+                        )
+                    elif isinstance(value_vector, Int64Vector):
+                        value_ptr = (<Int64Vector> value_vector).ptr
+                        minmax_i64_multi_accumulate(
+                            self._multi_i64_state.data(), self._multi_seen.data(), state_indices,
+                            <int64_t*> value_ptr.data, <uint8_t*> value_ptr.null_bitmap,
+                            row_count, self._multi_agg_count, agg_idx, agg_mode == AGG_MIN,
+                        )
+                    else:
+                        value_ptr = (<IntegerVector> value_vector).ptr
+                        minmax_integer_multi_accumulate(
+                            self._multi_i64_state.data(), self._multi_seen.data(), state_indices,
+                            value_ptr, row_count, self._multi_agg_count, agg_idx, agg_mode == AGG_MIN,
+                        )
+                    continue
+
+                if agg_mode == AGG_AVG:
+                    value_vector = morsel.column(self._multi_value_columns[agg_idx])
+                    if isinstance(value_vector, Float64Vector):
+                        value_ptr = (<Float64Vector> value_vector).ptr
+                        avg_f64_multi_accumulate(
+                            self._multi_avg_sums.data(), self._multi_avg_counts.data(), state_indices,
+                            <double*> value_ptr.data, <uint8_t*> value_ptr.null_bitmap,
+                            row_count, self._multi_agg_count, agg_idx,
+                        )
+                    elif isinstance(value_vector, Int64Vector):
+                        value_ptr = (<Int64Vector> value_vector).ptr
+                        avg_i64_multi_accumulate(
+                            self._multi_avg_sums.data(), self._multi_avg_counts.data(), state_indices,
+                            <int64_t*> value_ptr.data, <uint8_t*> value_ptr.null_bitmap,
+                            row_count, self._multi_agg_count, agg_idx,
+                        )
+                    else:
+                        value_ptr = (<IntegerVector> value_vector).ptr
+                        avg_integer_multi_accumulate(
+                            self._multi_avg_sums.data(), self._multi_avg_counts.data(), state_indices,
+                            value_ptr, row_count, self._multi_agg_count, agg_idx,
+                        )
+                    continue
+
                 value_vector = morsel.column(self._multi_value_columns[agg_idx])
                 if isinstance(value_vector, Float64Vector):
                     value_ptr = (<Float64Vector> value_vector).ptr
@@ -4357,20 +5003,6 @@ cdef class CarcharGroupStateEngine:
                         offset = self._multi_offset(state_indices[row_idx], agg_idx)
                         if agg_mode == AGG_COUNT_VALUE:
                             self._multi_counts[offset] = self._multi_counts[offset] + 1
-                        elif agg_mode == AGG_SUM:
-                            self._multi_f64_state[offset] = self._multi_f64_state[offset] + value_f64_data[row_idx]
-                            self._multi_seen[offset] = 1
-                        elif agg_mode == AGG_MIN:
-                            if self._multi_seen[offset] == 0 or value_f64_data[row_idx] < self._multi_f64_state[offset]:
-                                self._multi_f64_state[offset] = value_f64_data[row_idx]
-                            self._multi_seen[offset] = 1
-                        elif agg_mode == AGG_MAX:
-                            if self._multi_seen[offset] == 0 or value_f64_data[row_idx] > self._multi_f64_state[offset]:
-                                self._multi_f64_state[offset] = value_f64_data[row_idx]
-                            self._multi_seen[offset] = 1
-                        elif agg_mode == AGG_AVG:
-                            self._multi_avg_sums[offset] = self._multi_avg_sums[offset] + value_f64_data[row_idx]
-                            self._multi_avg_counts[offset] = self._multi_avg_counts[offset] + 1
                     continue
 
                 if isinstance(value_vector, Int64Vector):
@@ -4383,20 +5015,6 @@ cdef class CarcharGroupStateEngine:
                         offset = self._multi_offset(state_indices[row_idx], agg_idx)
                         if agg_mode == AGG_COUNT_VALUE:
                             self._multi_counts[offset] = self._multi_counts[offset] + 1
-                        elif agg_mode == AGG_SUM:
-                            self._multi_i64_state[offset] = self._multi_i64_state[offset] + value_i64_data[row_idx]
-                            self._multi_seen[offset] = 1
-                        elif agg_mode == AGG_MIN:
-                            if self._multi_seen[offset] == 0 or value_i64_data[row_idx] < self._multi_i64_state[offset]:
-                                self._multi_i64_state[offset] = value_i64_data[row_idx]
-                            self._multi_seen[offset] = 1
-                        elif agg_mode == AGG_MAX:
-                            if self._multi_seen[offset] == 0 or value_i64_data[row_idx] > self._multi_i64_state[offset]:
-                                self._multi_i64_state[offset] = value_i64_data[row_idx]
-                            self._multi_seen[offset] = 1
-                        elif agg_mode == AGG_AVG:
-                            self._multi_avg_sums[offset] = self._multi_avg_sums[offset] + value_i64_data[row_idx]
-                            self._multi_avg_counts[offset] = self._multi_avg_counts[offset] + 1
                     continue
 
                 value_ptr = (<IntegerVector> value_vector).ptr
@@ -4407,290 +5025,20 @@ cdef class CarcharGroupStateEngine:
                     offset = self._multi_offset(state_indices[row_idx], agg_idx)
                     if agg_mode == AGG_COUNT_VALUE:
                         self._multi_counts[offset] = self._multi_counts[offset] + 1
-                    else:
-                        value_i64 = _read_integer_value(value_ptr, row_idx)
-                        if agg_mode == AGG_SUM:
-                            self._multi_i64_state[offset] = self._multi_i64_state[offset] + value_i64
-                            self._multi_seen[offset] = 1
-                        elif agg_mode == AGG_MIN:
-                            if self._multi_seen[offset] == 0 or value_i64 < self._multi_i64_state[offset]:
-                                self._multi_i64_state[offset] = value_i64
-                            self._multi_seen[offset] = 1
-                        elif agg_mode == AGG_MAX:
-                            if self._multi_seen[offset] == 0 or value_i64 > self._multi_i64_state[offset]:
-                                self._multi_i64_state[offset] = value_i64
-                            self._multi_seen[offset] = 1
-                        elif agg_mode == AGG_AVG:
-                            self._multi_avg_sums[offset] = self._multi_avg_sums[offset] + value_i64
-                            self._multi_avg_counts[offset] = self._multi_avg_counts[offset] + 1
         finally:
             if state_indices != NULL:
                 free(state_indices)
 
     cdef void _ingest_constant_mode(self, Morsel morsel):
-        cdef Py_ssize_t row_idx
-        cdef Py_ssize_t row_count = morsel.num_rows
-        cdef object value_vector
-        cdef object value_obj
-        cdef DrakenFixedBuffer* value_ptr
-        cdef int64_t* value_i64_data
-        cdef double* value_f64_data
-        cdef uint8_t* value_nulls
-        cdef uint64_t[::1] value_hashes
-        cdef int64_t value_i64
-        cdef DictAccessor* value_dict_accessor = NULL
-        cdef ConstAccessor* value_const_accessor = NULL
-        cdef double val_decoded_f64
-        cdef int64_t val_decoded_i64
-
-        if self._agg_mode == AGG_COUNT_STAR:
-            self._constant_count += row_count
-            return
-
-        if self._agg_mode == AGG_COUNT_DISTINCT:
-            if self._constant_distinct_set is None:
-                self._constant_distinct_set = FlatHashSet()
-            value_vector = morsel.column(self._value_column)
-            value_nulls = self._value_null_bitmap(value_vector)
-            if isinstance(value_vector, Int64Vector):
-                value_ptr = (<Int64Vector> value_vector).ptr
-                value_i64_data = <int64_t*> value_ptr.data
-                for row_idx in range(row_count):
-                    if _bitmap_is_valid(value_nulls, row_idx) and (<FlatHashSet> self._constant_distinct_set).insert(<uint64_t> value_i64_data[row_idx]):
-                        self._constant_count += 1
-                return
-            if isinstance(value_vector, IntegerVector):
-                value_ptr = (<IntegerVector> value_vector).ptr
-                for row_idx in range(row_count):
-                    if _bitmap_is_valid(value_nulls, row_idx) and (<FlatHashSet> self._constant_distinct_set).insert(<uint64_t> _read_integer_value(value_ptr, row_idx)):
-                        self._constant_count += 1
-                return
-
-            value_hashes = morsel.hash([self._value_column])
-            for row_idx in range(row_count):
-                if _bitmap_is_valid(value_nulls, row_idx) and (<FlatHashSet> self._constant_distinct_set).insert(value_hashes[row_idx]):
-                    self._constant_count += 1
-            return
-
-        value_vector = morsel.column(self._value_column)
-        value_const_accessor = _vector_const_accessor(value_vector)
-        if value_const_accessor != NULL:
-            if self._agg_mode == AGG_COUNT_VALUE:
-                if value_const_accessor.is_null == 0:
-                    self._constant_count += row_count
-                return
-
-            if value_const_accessor.is_null != 0:
-                return
-
-            value_obj = value_vector[0]
-            if self._agg_mode == AGG_HASH_ONE:
-                if self._constant_seen == 0:
-                    self._constant_object_state = value_obj
-                self._constant_seen = 1
-                return
-            if self._value_kind == VALUE_OBJECT:
-                if self._agg_mode == AGG_MIN:
-                    if self._constant_seen == 0 or value_obj < self._constant_object_state:
-                        self._constant_object_state = value_obj
-                    self._constant_seen = 1
-                elif self._agg_mode == AGG_MAX:
-                    if self._constant_seen == 0 or value_obj > self._constant_object_state:
-                        self._constant_object_state = value_obj
-                    self._constant_seen = 1
-                elif self._agg_mode == AGG_COUNT_DISTINCT:
-                    if self._constant_distinct_set is None:
-                        self._constant_distinct_set = FlatHashSet()
-                    value_hashes = morsel.hash([self._value_column])
-                    if row_count > 0 and (<FlatHashSet> self._constant_distinct_set).insert(value_hashes[0]):
-                        self._constant_count += 1
-                return
-
-            if self._value_kind == VALUE_FLOAT64:
-                val_decoded_f64 = <double> value_obj
-                if self._agg_mode == AGG_SUM:
-                    self._constant_f64_state += row_count * val_decoded_f64
-                    self._constant_seen = 1
-                elif self._agg_mode == AGG_MIN:
-                    if self._constant_seen == 0 or val_decoded_f64 < self._constant_f64_state:
-                        self._constant_f64_state = val_decoded_f64
-                    self._constant_seen = 1
-                elif self._agg_mode == AGG_MAX:
-                    if self._constant_seen == 0 or val_decoded_f64 > self._constant_f64_state:
-                        self._constant_f64_state = val_decoded_f64
-                    self._constant_seen = 1
-                elif self._agg_mode == AGG_AVG:
-                    self._constant_avg_sum += row_count * val_decoded_f64
-                    self._constant_avg_count += row_count
-                elif self._agg_mode == AGG_COUNT_DISTINCT:
-                    if self._constant_distinct_set is None:
-                        self._constant_distinct_set = FlatHashSet()
-                    if (<FlatHashSet> self._constant_distinct_set).insert(<uint64_t> val_decoded_f64):
-                        self._constant_count += 1
-                return
-
-            val_decoded_i64 = <int64_t> value_obj
-            if self._agg_mode == AGG_SUM:
-                self._constant_i64_state += row_count * val_decoded_i64
-                self._constant_seen = 1
-            elif self._agg_mode == AGG_MIN:
-                if self._constant_seen == 0 or val_decoded_i64 < self._constant_i64_state:
-                    self._constant_i64_state = val_decoded_i64
-                self._constant_seen = 1
-            elif self._agg_mode == AGG_MAX:
-                if self._constant_seen == 0 or val_decoded_i64 > self._constant_i64_state:
-                    self._constant_i64_state = val_decoded_i64
-                self._constant_seen = 1
-            elif self._agg_mode == AGG_AVG:
-                self._constant_avg_sum += row_count * val_decoded_i64
-                self._constant_avg_count += row_count
-            elif self._agg_mode == AGG_COUNT_DISTINCT:
-                if self._constant_distinct_set is None:
-                    self._constant_distinct_set = FlatHashSet()
-                if (<FlatHashSet> self._constant_distinct_set).insert(<uint64_t> val_decoded_i64):
-                    self._constant_count += 1
-            return
-
-        if isinstance(value_vector, Float64Vector):
-            value_ptr = (<Float64Vector> value_vector).ptr
-            value_f64_data = <double*> value_ptr.data
-            value_nulls = <uint8_t*> value_ptr.null_bitmap
-            for row_idx in range(row_count):
-                if self._agg_mode == AGG_COUNT_VALUE:
-                    if _bitmap_is_valid(value_nulls, row_idx):
-                        self._constant_count += 1
-                elif _bitmap_is_valid(value_nulls, row_idx):
-                    if self._agg_mode == AGG_SUM:
-                        self._constant_f64_state += value_f64_data[row_idx]
-                        self._constant_seen = 1
-                    elif self._agg_mode == AGG_MIN:
-                        if self._constant_seen == 0 or value_f64_data[row_idx] < self._constant_f64_state:
-                            self._constant_f64_state = value_f64_data[row_idx]
-                        self._constant_seen = 1
-                    elif self._agg_mode == AGG_MAX:
-                        if self._constant_seen == 0 or value_f64_data[row_idx] > self._constant_f64_state:
-                            self._constant_f64_state = value_f64_data[row_idx]
-                        self._constant_seen = 1
-                    elif self._agg_mode == AGG_AVG:
-                        self._constant_avg_sum += value_f64_data[row_idx]
-                        self._constant_avg_count += 1
-            return
-
-        if isinstance(value_vector, Int64Vector):
-            value_ptr = (<Int64Vector> value_vector).ptr
-            value_i64_data = <int64_t*> value_ptr.data
-            value_nulls = <uint8_t*> value_ptr.null_bitmap
-            for row_idx in range(row_count):
-                if self._agg_mode == AGG_COUNT_VALUE:
-                    if _bitmap_is_valid(value_nulls, row_idx):
-                        self._constant_count += 1
-                elif _bitmap_is_valid(value_nulls, row_idx):
-                    if self._agg_mode == AGG_SUM:
-                        self._constant_i64_state += value_i64_data[row_idx]
-                        self._constant_seen = 1
-                    elif self._agg_mode == AGG_MIN:
-                        if self._constant_seen == 0 or value_i64_data[row_idx] < self._constant_i64_state:
-                            self._constant_i64_state = value_i64_data[row_idx]
-                        self._constant_seen = 1
-                    elif self._agg_mode == AGG_MAX:
-                        if self._constant_seen == 0 or value_i64_data[row_idx] > self._constant_i64_state:
-                            self._constant_i64_state = value_i64_data[row_idx]
-                        self._constant_seen = 1
-                    elif self._agg_mode == AGG_AVG:
-                        self._constant_avg_sum += value_i64_data[row_idx]
-                        self._constant_avg_count += 1
-            return
-
-        value_dict_accessor = _vector_value_dict_accessor(value_vector)
-        if value_dict_accessor != NULL:
-            value_nulls = value_dict_accessor.row_nulls
-            if self._value_kind == VALUE_DICT_FLOAT64:
-                for row_idx in range(row_count):
-                    if _bitmap_is_valid(value_nulls, row_idx):
-                        val_decoded_f64 = _dict_accessor_read_float_value(value_dict_accessor, row_idx)
-                        if self._agg_mode == AGG_SUM:
-                            self._constant_f64_state += val_decoded_f64
-                            self._constant_seen = 1
-                        elif self._agg_mode == AGG_MIN:
-                            if self._constant_seen == 0 or val_decoded_f64 < self._constant_f64_state:
-                                self._constant_f64_state = val_decoded_f64
-                            self._constant_seen = 1
-                        elif self._agg_mode == AGG_MAX:
-                            if self._constant_seen == 0 or val_decoded_f64 > self._constant_f64_state:
-                                self._constant_f64_state = val_decoded_f64
-                            self._constant_seen = 1
-                return
-            elif self._value_kind == VALUE_DICT_INT64:
-                for row_idx in range(row_count):
-                    if _bitmap_is_valid(value_nulls, row_idx):
-                        val_decoded_i64 = _dict_accessor_read_int_value(value_dict_accessor, row_idx)
-                        if self._agg_mode == AGG_SUM:
-                            self._constant_i64_state += val_decoded_i64
-                            self._constant_seen = 1
-                        elif self._agg_mode == AGG_MIN:
-                            if self._constant_seen == 0 or val_decoded_i64 < self._constant_i64_state:
-                                self._constant_i64_state = val_decoded_i64
-                            self._constant_seen = 1
-                        elif self._agg_mode == AGG_MAX:
-                            if self._constant_seen == 0 or val_decoded_i64 > self._constant_i64_state:
-                                self._constant_i64_state = val_decoded_i64
-                            self._constant_seen = 1
-                return
-
-        value_ptr = (<IntegerVector> value_vector).ptr
-        value_nulls = <uint8_t*> value_ptr.null_bitmap
-        for row_idx in range(row_count):
-            if self._agg_mode == AGG_COUNT_VALUE:
-                if _bitmap_is_valid(value_nulls, row_idx):
-                    self._constant_count += 1
-            elif _bitmap_is_valid(value_nulls, row_idx):
-                value_i64 = _read_integer_value(value_ptr, row_idx)
-                if self._agg_mode == AGG_SUM:
-                    self._constant_i64_state += value_i64
-                    self._constant_seen = 1
-                elif self._agg_mode == AGG_MIN:
-                    if self._constant_seen == 0 or value_i64 < self._constant_i64_state:
-                        self._constant_i64_state = value_i64
-                    self._constant_seen = 1
-                elif self._agg_mode == AGG_MAX:
-                    if self._constant_seen == 0 or value_i64 > self._constant_i64_state:
-                        self._constant_i64_state = value_i64
-                    self._constant_seen = 1
-                elif self._agg_mode == AGG_AVG:
-                    self._constant_avg_sum += value_i64
-                    self._constant_avg_count += 1
+        ingest_constant_mode(self, morsel)
 
     cpdef void ingest(self, Morsel morsel):
-        cdef object pre_dict_hits
-        cdef object pre_dict_fallbacks
-        cdef object pre_const_hits
-        cdef object pre_const_fallbacks
         cdef object key_vector
         cdef object group_column
         cdef DictAccessor* key_dict_accessor = NULL
         cdef bint saw_dict_group_key = False
 
         self._maybe_init_carchar_mode(morsel)
-
-        if self._mode == MODE_LEGACY:
-            pre_dict_hits = getattr(self._legacy_backend, "dict_groupby_fastpath_hits", 0)
-            pre_dict_fallbacks = getattr(self._legacy_backend, "dict_groupby_fastpath_fallbacks", 0)
-            pre_const_hits = getattr(self._legacy_backend, "constant_groupby_fastpath_hits", 0)
-            pre_const_fallbacks = getattr(self._legacy_backend, "constant_groupby_fastpath_fallbacks", 0)
-            self._legacy_backend.ingest(morsel)
-            self._readings["draken_dict_groupby_fastpath_hits"] += (
-                getattr(self._legacy_backend, "dict_groupby_fastpath_hits", 0) - pre_dict_hits
-            )
-            self._readings["draken_dict_groupby_fastpath_fallbacks"] += (
-                getattr(self._legacy_backend, "dict_groupby_fastpath_fallbacks", 0) - pre_dict_fallbacks
-            )
-            self._readings["draken_constant_groupby_fastpath_hits"] += (
-                getattr(self._legacy_backend, "constant_groupby_fastpath_hits", 0) - pre_const_hits
-            )
-            self._readings["draken_constant_groupby_fastpath_fallbacks"] += (
-                getattr(self._legacy_backend, "constant_groupby_fastpath_fallbacks", 0) - pre_const_fallbacks
-            )
-            return
 
         if self._mode == MODE_CONSTANT:
             if morsel is None or morsel.num_rows == 0:
@@ -4707,7 +5055,7 @@ cdef class CarcharGroupStateEngine:
                 break
 
         if saw_dict_group_key:
-            self._readings["draken_dict_groupby_fastpath_hits"] += 1
+            record_dict_groupby_fastpath_hit(self)
 
         self._reserve_for_rows(morsel.num_rows)
         key_vector = None
@@ -4770,427 +5118,60 @@ cdef class CarcharGroupStateEngine:
         ]
 
     cdef object _build_single_fixed_key_vector(self, Py_ssize_t start, Py_ssize_t stop):
-        cdef Py_ssize_t row_idx
-        cdef Py_ssize_t length = stop - start
-        cdef object key_vec
-        cdef Int64Vector key_vec_i64
-        cdef int64_t* key_data_i64 = NULL
-        cdef uint8_t* key_nulls = NULL
-        cdef bint needs_key_nulls = False
-        cdef Py_ssize_t pos
-        cdef uint8_t valid_flag
-        cdef int64_t key_value
-
-        if <Py_ssize_t> self._key_payload_offsets.size() >= stop + 1:
-            for row_idx in range(start, stop):
-                pos = self._key_payload_offsets[row_idx]
-                valid_flag = self._key_payload_bytes[pos]
-                if valid_flag == 0:
-                    needs_key_nulls = True
-                    break
-        else:
-            if <Py_ssize_t> self._group_key_values.size() < stop:
-                raise RuntimeError("single-key fixed value store shorter than finalize range")
-            if <Py_ssize_t> self._group_key_valid.size() < stop:
-                raise RuntimeError("single-key fixed validity store shorter than finalize range")
-            for row_idx in range(start, stop):
-                if self._group_key_valid[row_idx] == 0:
-                    needs_key_nulls = True
-                    break
-
-        key_vec_i64 = Int64Vector(length)
-        key_vec = key_vec_i64
-        key_data_i64 = <int64_t*> key_vec_i64.ptr.data
-
-        if needs_key_nulls:
-            key_nulls = _alloc_valid_bitmap(length)
-            key_vec_i64.ptr.null_bitmap = key_nulls
-
-        for row_idx in range(length):
-            if <Py_ssize_t> self._key_payload_offsets.size() >= start + row_idx + 2:
-                pos = self._key_payload_offsets[start + row_idx]
-                valid_flag = self._key_payload_bytes[pos]
-                pos += 1
-                key_value = self._payload_read_i64(&pos)
-            else:
-                valid_flag = 1 if self._group_key_valid[start + row_idx] != 0 else 0
-                key_value = self._group_key_values[start + row_idx]
-            key_data_i64[row_idx] = key_value
-            if key_nulls != NULL and valid_flag != 0:
-                _bitmap_set_valid(key_nulls, row_idx)
-
-        return key_vec
-
-    cdef list _build_object_key_vectors(self, Py_ssize_t start, Py_ssize_t stop):
-        cdef list vectors
-        cdef object built_vec
-
-        if len(self._group_by_columns) == 1 and not self._multi_key_object_mode:
-            if self._key_payload_offsets.size() < <size_t>(stop + 1):
-                built_vec = self._build_single_fixed_key_vector(start, stop)
-                self._record_constant_groupby_vector(built_vec)
-                return [built_vec]
-            built_vec = self._build_encoded_key_vector(start, stop)
-            self._record_constant_groupby_vector(built_vec)
-            return [built_vec]
-
-        vectors = self._build_payload_multi_key_vectors(start, stop)
-        for built_vec in vectors:
-            self._record_constant_groupby_vector(built_vec)
-        return vectors
-
-    cdef list _build_payload_multi_key_vectors(self, Py_ssize_t start, Py_ssize_t stop):
-        cdef Py_ssize_t key_count = len(self._group_by_columns)
-        cdef Py_ssize_t length = stop - start
-        cdef Py_ssize_t row_idx
-        cdef Py_ssize_t key_idx
-        cdef Py_ssize_t pos
-        cdef uint8_t valid_flag
-        cdef int64_t key_value
-        cdef Py_ssize_t data_len
-        cdef int64_t key_kind
-        cdef list vectors = [None] * key_count
-        cdef list builders = [None] * key_count
-        cdef list total_bytes = [0] * key_count
-        cdef list needs_nulls = [False] * key_count
-        cdef list fixed_ptrs = [0] * key_count
-        cdef list fixed_null_ptrs = [0] * key_count
-        cdef object key_vec
-        cdef Int64Vector key_vec_i64
-        cdef Date32Vector key_vec_d32
-        cdef TimeVector key_vec_t32
-        cdef TimeVector key_vec_t64
-        cdef TimestampVector key_vec_ts
-        cdef StringVectorBuilder builder
-        cdef uint8_t* key_nulls = NULL
-
-        if <Py_ssize_t> self._key_payload_offsets.size() < stop + 1:
-            raise RuntimeError("encoded key payload offsets shorter than finalize range")
-
-        for row_idx in range(start, stop):
-            pos = self._key_payload_offsets[row_idx]
-            for key_idx in range(key_count):
-                key_kind = self._multi_group_key_kinds[key_idx]
-                valid_flag = self._key_payload_bytes[pos]
-                pos += 1
-                if self._is_multi_fixed_kind(key_kind):
-                    if valid_flag == 0:
-                        needs_nulls[key_idx] = True
-                    key_value = self._payload_read_i64(&pos)
-                else:
-                    data_len = <Py_ssize_t> self._payload_read_vsize(&pos)
-                    if valid_flag == 0:
-                        needs_nulls[key_idx] = True
-                    else:
-                        total_bytes[key_idx] = total_bytes[key_idx] + data_len
-                    pos += data_len
-
-        for key_idx in range(key_count):
-            key_kind = self._multi_group_key_kinds[key_idx]
-            if self._is_multi_fixed_kind(key_kind):
-                if key_kind == KEY_MULTI_FIXED_DATE32:
-                    key_vec_d32 = Date32Vector(length)
-                    key_vec = key_vec_d32
-                    fixed_ptrs[key_idx] = <size_t> key_vec_d32.ptr.data
-                    if needs_nulls[key_idx]:
-                        key_nulls = _alloc_valid_bitmap(length)
-                        key_vec_d32.ptr.null_bitmap = key_nulls
-                        fixed_null_ptrs[key_idx] = <size_t> key_nulls
-                elif key_kind == KEY_MULTI_FIXED_TIME32:
-                    key_vec_t32 = TimeVector(length, is_time64=False)
-                    key_vec = key_vec_t32
-                    fixed_ptrs[key_idx] = <size_t> key_vec_t32.ptr.data
-                    if needs_nulls[key_idx]:
-                        key_nulls = _alloc_valid_bitmap(length)
-                        key_vec_t32.ptr.null_bitmap = key_nulls
-                        fixed_null_ptrs[key_idx] = <size_t> key_nulls
-                elif key_kind == KEY_MULTI_FIXED_TIME64:
-                    key_vec_t64 = TimeVector(length, is_time64=True)
-                    key_vec = key_vec_t64
-                    fixed_ptrs[key_idx] = <size_t> key_vec_t64.ptr.data
-                    if needs_nulls[key_idx]:
-                        key_nulls = _alloc_valid_bitmap(length)
-                        key_vec_t64.ptr.null_bitmap = key_nulls
-                        fixed_null_ptrs[key_idx] = <size_t> key_nulls
-                elif key_kind == KEY_MULTI_FIXED_TIMESTAMP64:
-                    key_vec_ts = TimestampVector(length)
-                    key_vec = key_vec_ts
-                    fixed_ptrs[key_idx] = <size_t> key_vec_ts.ptr.data
-                    if needs_nulls[key_idx]:
-                        key_nulls = _alloc_valid_bitmap(length)
-                        key_vec_ts.ptr.null_bitmap = key_nulls
-                        fixed_null_ptrs[key_idx] = <size_t> key_nulls
-                else:
-                    key_vec_i64 = Int64Vector(length)
-                    key_vec = key_vec_i64
-                    fixed_ptrs[key_idx] = <size_t> key_vec_i64.ptr.data
-                    if needs_nulls[key_idx]:
-                        key_nulls = _alloc_valid_bitmap(length)
-                        key_vec_i64.ptr.null_bitmap = key_nulls
-                        fixed_null_ptrs[key_idx] = <size_t> key_nulls
-                vectors[key_idx] = key_vec
-            else:
-                builders[key_idx] = StringVectorBuilder.with_counts(length, total_bytes[key_idx])
-
-        for row_idx in range(length):
-            pos = self._key_payload_offsets[start + row_idx]
-            for key_idx in range(key_count):
-                key_kind = self._multi_group_key_kinds[key_idx]
-                valid_flag = self._key_payload_bytes[pos]
-                pos += 1
-                if self._is_multi_fixed_kind(key_kind):
-                    key_value = self._payload_read_i64(&pos)
-                    if key_kind == KEY_MULTI_FIXED_DATE32 or key_kind == KEY_MULTI_FIXED_TIME32:
-                        (<int32_t*> <size_t> fixed_ptrs[key_idx])[row_idx] = <int32_t> key_value
-                    else:
-                        (<int64_t*> <size_t> fixed_ptrs[key_idx])[row_idx] = key_value
-                    if fixed_null_ptrs[key_idx] != 0 and valid_flag != 0:
-                        _bitmap_set_valid(<uint8_t*> <size_t> fixed_null_ptrs[key_idx], row_idx)
-                else:
-                    data_len = <Py_ssize_t> self._payload_read_vsize(&pos)
-                    builder = builders[key_idx]
-                    if valid_flag == 0:
-                        builder.append_null()
-                    elif data_len > 0:
-                        builder.append_bytes(<const char*> &self._key_payload_bytes[pos], data_len)
-                    else:
-                        builder.append_bytes(NULL, 0)
-                    pos += data_len
-
-        for key_idx in range(key_count):
-            if not self._is_multi_fixed_kind(self._multi_group_key_kinds[key_idx]):
-                vectors[key_idx] = builders[key_idx].finish()
-
-        return vectors
+        return build_single_fixed_key_vector(
+            self._key_payload_bytes,
+            self._key_payload_offsets,
+            self._group_key_values,
+            self._group_key_valid,
+            self._single_key_kind,
+            start,
+            stop,
+        )
 
     cdef object _build_encoded_key_vector(self, Py_ssize_t start, Py_ssize_t stop):
-        cdef Py_ssize_t row_idx
-        cdef Py_ssize_t length = stop - start
-        cdef Py_ssize_t total_bytes = 0
-        cdef Py_ssize_t pos
-        cdef uint8_t valid_flag
-        cdef Py_ssize_t data_len
-        cdef StringVectorBuilder builder
-
-        if <Py_ssize_t> self._key_payload_offsets.size() < stop + 1:
-            raise RuntimeError("encoded key payload offsets shorter than finalize range")
-
-        for row_idx in range(start, stop):
-            pos = self._key_payload_offsets[row_idx]
-            valid_flag = self._key_payload_bytes[pos]
-            pos += 1
-            data_len = <Py_ssize_t> self._payload_read_vsize(&pos)
-            if valid_flag != 0:
-                total_bytes += data_len
-
-        builder = StringVectorBuilder.with_counts(length, total_bytes)
-        for row_idx in range(start, stop):
-            pos = self._key_payload_offsets[row_idx]
-            valid_flag = self._key_payload_bytes[pos]
-            pos += 1
-            data_len = <Py_ssize_t> self._payload_read_vsize(&pos)
-            if valid_flag == 0:
-                builder.append_null()
-                continue
-            if data_len > 0:
-                builder.append_bytes(<const char*> &self._key_payload_bytes[pos], data_len)
-            else:
-                builder.append_bytes(NULL, 0)
-        return builder.finish()
+        return build_encoded_key_vector(
+            self._key_payload_bytes,
+            self._key_payload_offsets,
+            start,
+            stop,
+        )
 
     cdef object _build_multi_encoded_key_vector(
         self, Py_ssize_t key_idx, Py_ssize_t start, Py_ssize_t stop
     ):
-        cdef Py_ssize_t row_idx
-        cdef Py_ssize_t length = stop - start
-        cdef Py_ssize_t total_bytes = 0
-        cdef int32_t start_offset
-        cdef int32_t stop_offset
-        cdef StringVectorBuilder builder
-
-        if <Py_ssize_t> self._multi_encoded_key_valid[key_idx].size() < stop:
-            raise RuntimeError("encoded multi-key validity store shorter than finalize range")
-        if <Py_ssize_t> self._multi_encoded_key_offsets[key_idx].size() < stop + 1:
-            raise RuntimeError("encoded multi-key offset store shorter than finalize range")
-
-        for row_idx in range(start, stop):
-            if self._multi_encoded_key_valid[key_idx][row_idx] != 0:
-                start_offset = self._multi_encoded_key_offsets[key_idx][row_idx]
-                stop_offset = self._multi_encoded_key_offsets[key_idx][row_idx + 1]
-                total_bytes += stop_offset - start_offset
-
-        builder = StringVectorBuilder.with_counts(length, total_bytes)
-        for row_idx in range(start, stop):
-            if self._multi_encoded_key_valid[key_idx][row_idx] == 0:
-                builder.append_null()
-                continue
-            start_offset = self._multi_encoded_key_offsets[key_idx][row_idx]
-            stop_offset = self._multi_encoded_key_offsets[key_idx][row_idx + 1]
-            if stop_offset > start_offset:
-                builder.append_bytes(
-                    <const char*> &self._multi_encoded_key_bytes[key_idx][start_offset],
-                    stop_offset - start_offset,
-                )
-            else:
-                builder.append_bytes(NULL, 0)
-        return builder.finish()
-
-    cdef list _build_multi_fixed_key_vectors_for_column(
-        self, Py_ssize_t key_idx, Py_ssize_t start, Py_ssize_t stop
-    ):
-        cdef list built_vectors
-        if <Py_ssize_t> self._key_payload_offsets.size() >= stop + 1:
-            built_vectors = self._build_payload_multi_key_vectors(start, stop)
-            return [built_vectors[key_idx]]
-        cdef Py_ssize_t row_idx
-        cdef Py_ssize_t length = stop - start
-        cdef object key_vec
-        cdef Int64Vector key_vec_i64
-        cdef Date32Vector key_vec_d32
-        cdef TimeVector key_vec_t32
-        cdef TimeVector key_vec_t64
-        cdef TimestampVector key_vec_ts
-        cdef int64_t* key_data_i64
-        cdef int32_t* key_data_i32
-        cdef uint8_t* key_nulls = NULL
-        cdef bint needs_key_nulls = False
-        cdef int64_t key_kind = self._multi_group_key_kinds[key_idx]
-
-        if <Py_ssize_t> self._multi_group_key_values[key_idx].size() < stop:
-            raise RuntimeError("fixed multi-key value store shorter than finalize range")
-        if <Py_ssize_t> self._multi_group_key_valid[key_idx].size() < stop:
-            raise RuntimeError("fixed multi-key validity store shorter than finalize range")
-
-        for row_idx in range(start, stop):
-            if self._multi_group_key_valid[key_idx][row_idx] == 0:
-                needs_key_nulls = True
-                break
-
-        if key_kind == KEY_MULTI_FIXED_DATE32:
-            key_vec_d32 = Date32Vector(length)
-            key_vec = key_vec_d32
-            key_data_i32 = <int32_t*> key_vec_d32.ptr.data
-        elif key_kind == KEY_MULTI_FIXED_TIME32:
-            key_vec_t32 = TimeVector(length, is_time64=False)
-            key_vec = key_vec_t32
-            key_data_i32 = <int32_t*> key_vec_t32.ptr.data
-        elif key_kind == KEY_MULTI_FIXED_TIME64:
-            key_vec_t64 = TimeVector(length, is_time64=True)
-            key_vec = key_vec_t64
-            key_data_i64 = <int64_t*> key_vec_t64.ptr.data
-        elif key_kind == KEY_MULTI_FIXED_TIMESTAMP64:
-            key_vec_ts = TimestampVector(length)
-            key_vec = key_vec_ts
-            key_data_i64 = <int64_t*> key_vec_ts.ptr.data
-        else:
-            key_vec_i64 = Int64Vector(length)
-            key_vec = key_vec_i64
-            key_data_i64 = <int64_t*> key_vec_i64.ptr.data
-
-        if needs_key_nulls:
-            key_nulls = _alloc_valid_bitmap(length)
-            if key_kind == KEY_MULTI_FIXED_DATE32:
-                key_vec_d32.ptr.null_bitmap = key_nulls
-            elif key_kind == KEY_MULTI_FIXED_TIME32:
-                key_vec_t32.ptr.null_bitmap = key_nulls
-            elif key_kind == KEY_MULTI_FIXED_TIME64:
-                key_vec_t64.ptr.null_bitmap = key_nulls
-            elif key_kind == KEY_MULTI_FIXED_TIMESTAMP64:
-                key_vec_ts.ptr.null_bitmap = key_nulls
-            else:
-                key_vec_i64.ptr.null_bitmap = key_nulls
-
-        for row_idx in range(length):
-            if key_kind == KEY_MULTI_FIXED_DATE32 or key_kind == KEY_MULTI_FIXED_TIME32:
-                key_data_i32[row_idx] = <int32_t> self._multi_group_key_values[key_idx][start + row_idx]
-            else:
-                key_data_i64[row_idx] = self._multi_group_key_values[key_idx][start + row_idx]
-            if key_nulls != NULL and self._multi_group_key_valid[key_idx][start + row_idx] != 0:
-                _bitmap_set_valid(key_nulls, row_idx)
-
-        return [key_vec]
+        return build_multi_encoded_key_vector(
+            self._multi_encoded_key_bytes,
+            self._multi_encoded_key_offsets,
+            self._multi_encoded_key_valid,
+            key_idx,
+            start,
+            stop,
+        )
 
     cdef object _build_native_object_vector(self, list values):
-        cdef Py_ssize_t i
-        cdef Py_ssize_t total_bytes = 0
-        cdef object value
-        cdef bytes encoded
-        cdef StringVectorBuilder builder
-
-        for i in range(len(values)):
-            value = values[i]
-            if value is None:
-                continue
-            if isinstance(value, bytes):
-                total_bytes += len(value)
-                continue
-            if isinstance(value, str):
-                total_bytes += len((<str> value).encode("utf-8"))
-                continue
-            return vector_from_sequence(values)
-
-        builder = StringVectorBuilder.with_counts(len(values), total_bytes)
-        for i in range(len(values)):
-            value = values[i]
-            if value is None:
-                builder.append_null()
-            elif isinstance(value, bytes):
-                builder.append(<bytes> value)
-            else:
-                encoded = (<str> value).encode("utf-8")
-                builder.append(encoded)
-        return builder.finish()
+        return build_native_object_vector(values)
 
     cdef object _build_object_state_vector(self, Py_ssize_t start, Py_ssize_t stop):
-        cdef Py_ssize_t row_idx
-        cdef Py_ssize_t length = stop - start
-        cdef Py_ssize_t total_bytes = 0
-        cdef Py_ssize_t state_index
-        cdef StringVectorBuilder builder
-
-        for row_idx in range(length):
-            state_index = start + row_idx
-            if self._seen[state_index] != 0:
-                total_bytes += self._object_state_lengths[state_index]
-
-        builder = StringVectorBuilder.with_counts(length, total_bytes)
-        for row_idx in range(length):
-            state_index = start + row_idx
-            if self._seen[state_index] == 0:
-                builder.append_null()
-            else:
-                builder.append_bytes(
-                    <const char*> &self._object_state_bytes[self._object_state_starts[state_index]],
-                    self._object_state_lengths[state_index],
-                )
-        return builder.finish()
+        return build_object_state_vector(
+            self._object_state_bytes,
+            self._object_state_starts,
+            self._object_state_lengths,
+            self._seen,
+            start,
+            stop,
+        )
 
     cdef object _build_multi_object_state_vector(self, Py_ssize_t start, Py_ssize_t stop, Py_ssize_t agg_idx):
-        cdef Py_ssize_t row_idx
-        cdef Py_ssize_t length = stop - start
-        cdef Py_ssize_t total_bytes = 0
-        cdef Py_ssize_t state_index
-        cdef Py_ssize_t offset
-        cdef StringVectorBuilder builder
-
-        for row_idx in range(length):
-            state_index = start + row_idx
-            offset = self._multi_offset(state_index, agg_idx)
-            if self._multi_seen[offset] != 0:
-                total_bytes += self._multi_object_state_lengths[offset]
-
-        builder = StringVectorBuilder.with_counts(length, total_bytes)
-        for row_idx in range(length):
-            state_index = start + row_idx
-            offset = self._multi_offset(state_index, agg_idx)
-            if self._multi_seen[offset] == 0:
-                builder.append_null()
-            else:
-                builder.append_bytes(
-                    <const char*> &self._multi_object_state_bytes[self._multi_object_state_starts[offset]],
-                    self._multi_object_state_lengths[offset],
-                )
-        return builder.finish()
+        return build_multi_object_state_vector(
+            self._multi_object_state_bytes,
+            self._multi_object_state_starts,
+            self._multi_object_state_lengths,
+            self._multi_seen,
+            self._multi_agg_count,
+            agg_idx,
+            start,
+            stop,
+        )
 
     cdef Morsel _empty_morsel(self):
         cdef list names = self._output_names()
@@ -5310,10 +5291,28 @@ cdef class CarcharGroupStateEngine:
         if self._multi_key_fixed_mode:
             key_vectors = self._build_multi_fixed_key_vectors(start, stop)
         elif self._use_object_keys:
-            key_vectors = self._build_object_key_vectors(start, stop)
+            key_vectors = build_finalize_key_vectors(
+                self._key_payload_bytes,
+                self._key_payload_offsets,
+                self._group_key_values,
+                self._group_key_valid,
+                self._single_key_kind,
+                self._multi_key_object_mode,
+                self._multi_group_key_kinds,
+                start,
+                stop,
+            )
             key_vec = key_vectors[0]
-        elif self._single_key_kind != KEY_MULTI_FIXED_INT or <Py_ssize_t> self._key_payload_offsets.size() >= stop + 1:
-            key_vec = self._build_single_fixed_key_vector(start, stop)
+        elif self._single_key_kind != KEY_MULTI_FIXED_INT:
+            key_vec = build_finalize_single_key_vector(
+                self._key_payload_bytes,
+                self._key_payload_offsets,
+                self._group_key_values,
+                self._group_key_valid,
+                self._single_key_kind,
+                start,
+                stop,
+            )
         else:
             for state_index in range(start, stop):
                 if self._group_key_valid[state_index] == 0:
@@ -5326,24 +5325,23 @@ cdef class CarcharGroupStateEngine:
                 key_nulls = _alloc_valid_bitmap(length)
                 key_vec_i64.ptr.null_bitmap = key_nulls
 
+        if key_data != NULL:
+            for i in range(length):
+                state_index = start + i
+                key_data[i] = self._group_key_values[state_index]
+                if key_nulls != NULL and self._group_key_valid[state_index] != 0:
+                    _bitmap_set_valid(key_nulls, i)
+
         if self._value_kind == VALUE_OBJECT and self._agg_mode in (AGG_MIN, AGG_MAX, AGG_HASH_ONE):
-            if key_data != NULL:
-                for i in range(length):
-                    state_index = start + i
-                    key_data[i] = self._group_key_values[state_index]
-                    if key_nulls != NULL and self._group_key_valid[state_index] != 0:
-                        _bitmap_set_valid(key_nulls, i)
-            if self._object_state_lengths.size() == self._state_count():
-                agg_object_vec = self._build_object_state_vector(start, stop)
-            else:
-                agg_objects = []
-                for i in range(length):
-                    state_index = start + i
-                    if self._seen[state_index] == 0:
-                        agg_objects.append(None)
-                    else:
-                        agg_objects.append(self._object_state[state_index])
-                agg_object_vec = self._build_native_object_vector(agg_objects)
+            agg_object_vec = build_finalize_object_aggregate_vector(
+                self._object_state_bytes,
+                self._object_state_starts,
+                self._object_state_lengths,
+                self._seen,
+                self._object_state,
+                start,
+                stop,
+            )
             if self._multi_key_fixed_mode:
                 return Morsel.from_vectors(names, [agg_object_vec, *key_vectors])
             if self._use_object_keys and self._multi_key_object_mode:
@@ -5351,40 +5349,18 @@ cdef class CarcharGroupStateEngine:
             return Morsel.from_vectors(names, [agg_object_vec, key_vec])
 
         if self._agg_mode == AGG_AVG or self._value_kind == VALUE_FLOAT64 or self._value_kind == VALUE_DICT_FLOAT64:
-            agg_f64 = Float64Vector(length)
-            agg_f64_data = <double*> agg_f64.ptr.data
-            if needs_agg_nulls:
-                agg_nulls = _alloc_valid_bitmap(length)
-                agg_f64.ptr.null_bitmap = agg_nulls
-
-            for i in range(length):
-                state_index = start + i
-                if key_data != NULL:
-                    key_data[i] = self._group_key_values[state_index]
-                    if key_nulls != NULL and self._group_key_valid[state_index] != 0:
-                        _bitmap_set_valid(key_nulls, i)
-
-                if self._agg_mode in (AGG_COUNT_STAR, AGG_COUNT_VALUE, AGG_COUNT_DISTINCT):
-                    agg_f64_data[i] = <double> self._counts[state_index]
-                    if agg_nulls != NULL:
-                        _bitmap_set_valid(agg_nulls, i)
-                elif self._agg_mode == AGG_SUM or self._agg_mode == AGG_MIN or self._agg_mode == AGG_MAX:
-                    agg_f64_data[i] = self._f64_state[state_index]
-                    if agg_nulls != NULL:
-                        if self._seen[state_index] != 0:
-                            _bitmap_set_valid(agg_nulls, i)
-                    else:
-                        agg_f64.ptr.null_bitmap = NULL
-                else:
-                    if self._avg_counts[state_index] == 0:
-                        agg_f64_data[i] = 0.0
-                    else:
-                        agg_f64_data[i] = self._avg_sums[state_index] / self._avg_counts[state_index]
-                    if agg_nulls != NULL:
-                        if self._avg_counts[state_index] != 0:
-                            _bitmap_set_valid(agg_nulls, i)
-                    else:
-                        agg_f64.ptr.null_bitmap = NULL
+            agg_f64 = build_finalize_scalar_aggregate_vector(
+                self._agg_mode,
+                self._value_kind,
+                self._counts,
+                self._i64_state,
+                self._f64_state,
+                self._seen,
+                self._avg_sums,
+                self._avg_counts,
+                start,
+                stop,
+            )
 
             if self._multi_key_fixed_mode:
                 return Morsel.from_vectors(names, [agg_f64, *key_vectors])
@@ -5392,30 +5368,18 @@ cdef class CarcharGroupStateEngine:
                 return Morsel.from_vectors(names, [agg_f64, *key_vectors])
             return Morsel.from_vectors(names, [agg_f64, key_vec])
 
-        agg_i64 = Int64Vector(length)
-        agg_i64_data = <int64_t*> agg_i64.ptr.data
-        if needs_agg_nulls:
-            agg_nulls = _alloc_valid_bitmap(length)
-            agg_i64.ptr.null_bitmap = agg_nulls
-
-        for i in range(length):
-            state_index = start + i
-            if key_data != NULL:
-                key_data[i] = self._group_key_values[state_index]
-                if key_nulls != NULL and self._group_key_valid[state_index] != 0:
-                    _bitmap_set_valid(key_nulls, i)
-
-            if self._agg_mode in (AGG_COUNT_STAR, AGG_COUNT_VALUE, AGG_COUNT_DISTINCT):
-                agg_i64_data[i] = self._counts[state_index]
-                if agg_nulls != NULL:
-                    _bitmap_set_valid(agg_nulls, i)
-            elif self._agg_mode == AGG_SUM or self._agg_mode == AGG_MIN or self._agg_mode == AGG_MAX:
-                agg_i64_data[i] = self._i64_state[state_index]
-                if agg_nulls != NULL:
-                    if self._seen[state_index] != 0:
-                        _bitmap_set_valid(agg_nulls, i)
-                else:
-                    agg_i64.ptr.null_bitmap = NULL
+        agg_i64 = build_finalize_scalar_aggregate_vector(
+            self._agg_mode,
+            self._value_kind,
+            self._counts,
+            self._i64_state,
+            self._f64_state,
+            self._seen,
+            self._avg_sums,
+            self._avg_counts,
+            start,
+            stop,
+        )
 
         if self._multi_key_fixed_mode:
             return Morsel.from_vectors(names, [agg_i64, *key_vectors])
@@ -5431,22 +5395,9 @@ cdef class CarcharGroupStateEngine:
         cdef Int64Vector key_vec_i64
         cdef int64_t* key_data = NULL
         cdef uint8_t* key_nulls = NULL
-        cdef list vectors = []
-        cdef Int64Vector agg_i64
-        cdef Float64Vector agg_f64
-        cdef int64_t* agg_i64_data
-        cdef double* agg_f64_data
-        cdef uint8_t* agg_nulls = NULL
-        cdef Py_ssize_t i
         cdef Py_ssize_t state_index
-        cdef Py_ssize_t agg_idx
-        cdef Py_ssize_t offset
         cdef bint needs_key_nulls = False
-        cdef bint needs_agg_nulls = False
-        cdef int64_t agg_mode
-        cdef int64_t agg_value_kind
-        cdef list agg_objects
-        cdef object agg_object_vec
+        cdef list vectors
 
         if self._multi_key_fixed_mode:
             key_vectors = self._build_multi_fixed_key_vectors(start, stop)
@@ -5463,23 +5414,27 @@ cdef class CarcharGroupStateEngine:
             and self._is_multi_fixed_kind(self._single_key_kind)
             and (<Py_ssize_t> self._key_payload_offsets.size() >= stop + 1 or self._encoded_key_valid.size() == 0)
         ):
-            if <Py_ssize_t> self._key_payload_offsets.size() >= stop + 1:
-                key_vec = self._build_single_fixed_key_vector(start, stop)
-            else:
-                key_vec_i64 = Int64Vector(length)
-                key_vec = key_vec_i64
-                key_data = <int64_t*> key_vec_i64.ptr.data
-                if needs_key_nulls:
-                    key_nulls = _alloc_valid_bitmap(length)
-                    key_vec_i64.ptr.null_bitmap = key_nulls
-
-                for i in range(length):
-                    state_index = start + i
-                    key_data[i] = self._group_key_values[state_index]
-                    if key_nulls != NULL and self._group_key_valid[state_index] != 0:
-                        _bitmap_set_valid(key_nulls, i)
+            key_vec = build_finalize_single_key_vector(
+                self._key_payload_bytes,
+                self._key_payload_offsets,
+                self._group_key_values,
+                self._group_key_valid,
+                self._single_key_kind,
+                start,
+                stop,
+            )
         elif self._use_object_keys:
-            key_vectors = self._build_object_key_vectors(start, stop)
+            key_vectors = build_finalize_key_vectors(
+                self._key_payload_bytes,
+                self._key_payload_offsets,
+                self._group_key_values,
+                self._group_key_valid,
+                self._single_key_kind,
+                self._multi_key_object_mode,
+                self._multi_group_key_kinds,
+                start,
+                stop,
+            )
             key_vec = key_vectors[0]
         else:
             key_vec_i64 = Int64Vector(length)
@@ -5495,80 +5450,23 @@ cdef class CarcharGroupStateEngine:
                 if key_nulls != NULL and self._group_key_valid[state_index] != 0:
                     _bitmap_set_valid(key_nulls, i)
 
-        for agg_idx in range(self._multi_agg_count):
-            agg_mode = self._multi_agg_modes[agg_idx]
-            agg_value_kind = self._multi_value_kinds[agg_idx]
-            needs_agg_nulls = False
-            if agg_mode in (AGG_SUM, AGG_MIN, AGG_MAX):
-                for state_index in range(start, stop):
-                    if self._multi_seen[self._multi_offset(state_index, agg_idx)] == 0:
-                        needs_agg_nulls = True
-                        break
-            elif agg_mode == AGG_AVG:
-                for state_index in range(start, stop):
-                    if self._multi_avg_counts[self._multi_offset(state_index, agg_idx)] == 0:
-                        needs_agg_nulls = True
-                        break
-
-            agg_nulls = NULL
-            if agg_value_kind == VALUE_OBJECT and agg_mode in (AGG_MIN, AGG_MAX):
-                if self._multi_object_state_lengths.size() == self._multi_counts.size():
-                    agg_object_vec = self._build_multi_object_state_vector(start, stop, agg_idx)
-                else:
-                    agg_objects = []
-                    for i in range(length):
-                        state_index = start + i
-                        offset = self._multi_offset(state_index, agg_idx)
-                        if self._multi_seen[offset] == 0:
-                            agg_objects.append(None)
-                        else:
-                            agg_objects.append(self._multi_object_state[offset])
-                    agg_object_vec = self._build_native_object_vector(agg_objects)
-                vectors.append(agg_object_vec)
-                continue
-            if self._agg_output_is_float(agg_idx):
-                agg_f64 = Float64Vector(length)
-                agg_f64_data = <double*> agg_f64.ptr.data
-                if needs_agg_nulls:
-                    agg_nulls = _alloc_valid_bitmap(length)
-                    agg_f64.ptr.null_bitmap = agg_nulls
-                for i in range(length):
-                    state_index = start + i
-                    offset = self._multi_offset(state_index, agg_idx)
-                    if agg_mode in (AGG_COUNT_STAR, AGG_COUNT_VALUE, AGG_COUNT_DISTINCT):
-                        agg_f64_data[i] = <double> self._multi_counts[offset]
-                        if agg_nulls != NULL:
-                            _bitmap_set_valid(agg_nulls, i)
-                    elif agg_mode in (AGG_SUM, AGG_MIN, AGG_MAX):
-                        agg_f64_data[i] = self._multi_f64_state[offset]
-                        if agg_nulls != NULL and self._multi_seen[offset] != 0:
-                            _bitmap_set_valid(agg_nulls, i)
-                    else:
-                        if self._multi_avg_counts[offset] == 0:
-                            agg_f64_data[i] = 0.0
-                        else:
-                            agg_f64_data[i] = self._multi_avg_sums[offset] / self._multi_avg_counts[offset]
-                        if agg_nulls != NULL and self._multi_avg_counts[offset] != 0:
-                            _bitmap_set_valid(agg_nulls, i)
-                vectors.append(agg_f64)
-            else:
-                agg_i64 = Int64Vector(length)
-                agg_i64_data = <int64_t*> agg_i64.ptr.data
-                if needs_agg_nulls:
-                    agg_nulls = _alloc_valid_bitmap(length)
-                    agg_i64.ptr.null_bitmap = agg_nulls
-                for i in range(length):
-                    state_index = start + i
-                    offset = self._multi_offset(state_index, agg_idx)
-                    if agg_mode in (AGG_COUNT_STAR, AGG_COUNT_VALUE, AGG_COUNT_DISTINCT):
-                        agg_i64_data[i] = self._multi_counts[offset]
-                        if agg_nulls != NULL:
-                            _bitmap_set_valid(agg_nulls, i)
-                    else:
-                        agg_i64_data[i] = self._multi_i64_state[offset]
-                        if agg_nulls != NULL and self._multi_seen[offset] != 0:
-                            _bitmap_set_valid(agg_nulls, i)
-                vectors.append(agg_i64)
+        vectors = build_finalize_multi_aggregate_vectors(
+            self._multi_agg_modes,
+            self._multi_value_kinds,
+            self._multi_counts,
+            self._multi_i64_state,
+            self._multi_f64_state,
+            self._multi_seen,
+            self._multi_avg_sums,
+            self._multi_avg_counts,
+            self._multi_object_state_bytes,
+            self._multi_object_state_starts,
+            self._multi_object_state_lengths,
+            self._multi_object_state,
+            self._multi_agg_count,
+            start,
+            stop,
+        )
 
         if self._multi_key_fixed_mode:
             vectors.extend(key_vectors)
@@ -5591,17 +5489,14 @@ cdef class CarcharGroupStateEngine:
     cpdef object finalize_fast_columns(self):
         cdef Py_ssize_t n
         cdef Py_ssize_t idx
-        cdef Py_ssize_t pos
         cdef object keys
         cdef object values_q
         cdef object values_d
         cdef int64_t[::1] key_view
         cdef int64_t[::1] value_q_view
         cdef double[::1] value_d_view
-        cdef uint8_t valid_flag
+        cdef int64_t valid_flag
 
-        if self._mode == MODE_LEGACY:
-            return self._legacy_backend.finalize_fast_columns()
         if self._multi_agg_count > 0:
             return None
         if self._mode == MODE_CONSTANT:
@@ -5639,12 +5534,16 @@ cdef class CarcharGroupStateEngine:
         key_view = keys
         if <Py_ssize_t> self._key_payload_offsets.size() >= n + 1:
             for idx in range(n):
-                pos = self._key_payload_offsets[idx]
-                valid_flag = self._key_payload_bytes[pos]
+                if not decode_single_fixed_key_record(
+                    self._key_payload_bytes,
+                    self._key_payload_offsets,
+                    idx,
+                    &key_view[idx],
+                    &valid_flag,
+                ):
+                    return None
                 if valid_flag == 0:
                     return None
-                pos += 1
-                key_view[idx] = self._payload_read_i64(&pos)
         else:
             for idx in range(n):
                 if self._group_key_valid[idx] == 0:
@@ -5693,9 +5592,6 @@ cdef class CarcharGroupStateEngine:
         cdef Py_ssize_t start
         cdef Py_ssize_t stop
         cdef list chunks
-
-        if self._mode == MODE_LEGACY and hasattr(self._legacy_backend, "finalize_fast_columns_chunked"):
-            return self._legacy_backend.finalize_fast_columns_chunked(chunk_size)
 
         fast_columns = self.finalize_fast_columns()
         if fast_columns is None:
@@ -5758,7 +5654,7 @@ cdef class CarcharGroupStateEngine:
             return
 
         if self._mode == MODE_CONSTANT:
-            self._readings["groupby_finalize_rows_count"] += 1
+            record_finalize_rows_count(self, 1)
             if self._agg_mode == AGG_COUNT_STAR or self._agg_mode == AGG_COUNT_VALUE:
                 agg_value = self._constant_count
             elif self._value_kind == VALUE_OBJECT and self._agg_mode in (AGG_MIN, AGG_MAX, AGG_HASH_ONE):
@@ -5783,121 +5679,23 @@ cdef class CarcharGroupStateEngine:
 
             key_value = self._constant_key_scalar if self._constant_key_valid != 0 else None
             vector_st = time.monotonic_ns()
-            agg_vec = self._build_native_object_vector([agg_value]) if self._agg_output_is_object(0) else vector_from_sequence([agg_value])
-            key_out_vec = self._build_native_object_vector([key_value]) if self._use_object_keys else vector_from_sequence([key_value])
-            self._record_constant_groupby_vector(key_out_vec)
-            self._readings["time_groupby_finalize_rows_to_vectors_ns"] += (
-                time.monotonic_ns() - vector_st
+            agg_vec, key_out_vec = build_constant_groupby_vectors(
+                agg_value,
+                key_value,
+                self._agg_output_is_object(0),
+                self._use_object_keys,
             )
+            record_constant_groupby_vector(self, key_out_vec)
+            record_finalize_rows_to_vectors_time(self, vector_st)
             morsel_st = time.monotonic_ns()
             morsel = Morsel.from_vectors(self._output_names(), [agg_vec, key_out_vec])
-            self._readings["time_groupby_finalize_morsel_build_ns"] += (
-                time.monotonic_ns() - morsel_st
-            )
-            self._readings["groupby_finalize_chunks_emitted"] += 1
+            record_finalize_morsel_build_time(self, morsel_st)
+            record_finalize_chunk_emitted(self)
             yield morsel
             return
 
-        if self._mode == MODE_LEGACY:
-            if len(self._aggregations) == 1 and len(self._group_by_columns) == 1 and self._aggregations[0][1] in ("count", "count_distinct", "mean", "avg"):
-                names = [self._aggregations[0][0], self._group_by_columns[0].decode("utf-8")]
-                if hasattr(self._legacy_backend, "finalize_fast_columns_chunked"):
-                    backend_st = time.monotonic_ns()
-                    fast_chunks = self._legacy_backend.finalize_fast_columns_chunked(chunk_size)
-                    self._readings["time_groupby_finalize_backend_ns"] += time.monotonic_ns() - backend_st
-                    if fast_chunks is not None:
-                        self._readings["groupby_finalize_fast_path_hits"] += 1
-                        for keys, values in fast_chunks:
-                            self._readings["groupby_finalize_rows_count"] += len(keys)
-                            vector_st = time.monotonic_ns()
-                            key_vec = vector_from_sequence(keys)
-                            self._record_constant_groupby_vector(key_vec)
-                            vectors = [vector_from_sequence(values), key_vec]
-                            self._readings["time_groupby_finalize_rows_to_vectors_ns"] += (
-                                time.monotonic_ns() - vector_st
-                            )
-                            morsel_st = time.monotonic_ns()
-                            morsel = Morsel.from_vectors(names, vectors)
-                            self._readings["time_groupby_finalize_morsel_build_ns"] += (
-                                time.monotonic_ns() - morsel_st
-                            )
-                            self._readings["groupby_finalize_chunks_emitted"] += 1
-                            yield morsel
-                        return
-
-                backend_st = time.monotonic_ns()
-                fast_columns = self._legacy_backend.finalize_fast_columns()
-                self._readings["time_groupby_finalize_backend_ns"] += time.monotonic_ns() - backend_st
-                if fast_columns is not None:
-                    keys, values = fast_columns
-                    self._readings["groupby_finalize_fast_path_hits"] += 1
-                    self._readings["groupby_finalize_rows_count"] += len(keys)
-                    total = len(keys)
-                    for start in range(0, total, chunk_size):
-                        stop = min(total, start + chunk_size)
-                        vector_st = time.monotonic_ns()
-                        key_vec = vector_from_sequence(keys[start:stop])
-                        self._record_constant_groupby_vector(key_vec)
-                        vectors = [vector_from_sequence(values[start:stop]), key_vec]
-                        self._readings["time_groupby_finalize_rows_to_vectors_ns"] += (
-                            time.monotonic_ns() - vector_st
-                        )
-                        morsel_st = time.monotonic_ns()
-                        morsel = Morsel.from_vectors(names, vectors)
-                        self._readings["time_groupby_finalize_morsel_build_ns"] += (
-                            time.monotonic_ns() - morsel_st
-                        )
-                        self._readings["groupby_finalize_chunks_emitted"] += 1
-                        yield morsel
-                    return
-
-            backend_st = time.monotonic_ns()
-            rows = self._legacy_backend.finalize_rows()
-            self._readings["time_groupby_finalize_backend_ns"] += time.monotonic_ns() - backend_st
-            names = self._output_names()
-            self._readings["groupby_finalize_rows_count"] += len(rows)
-
-            if not rows:
-                yield self._empty_morsel()
-                return
-
-            total = len(rows)
-            agg_count = len(self._aggregations)
-            key_count = len(self._group_by_columns)
-            for start in range(0, total, chunk_size):
-                stop = min(total, start + chunk_size)
-                vector_st = time.monotonic_ns()
-                vectors = []
-                # Legacy path should not be used for supported Carchar mode.
-                # Keep behavior identical by reconstructing through Python columns.
-                output_values = [[] for _ in range(agg_count)]
-                key_outputs = [[] for _ in range(key_count)]
-                for row_idx in range(start, stop):
-                    key, finalized_values = rows[row_idx]
-                    for agg_idx in range(agg_count):
-                        output_values[agg_idx].append(finalized_values[agg_idx])
-                    for key_idx in range(key_count):
-                        key_outputs[key_idx].append(key[key_idx])
-
-                vectors = [vector_from_sequence(output_values[agg_idx]) for agg_idx in range(agg_count)]
-                for key_idx in range(key_count):
-                    key_vec = vector_from_sequence(key_outputs[key_idx])
-                    self._record_constant_groupby_vector(key_vec)
-                    vectors.append(key_vec)
-                self._readings["time_groupby_finalize_rows_to_vectors_ns"] += (
-                    time.monotonic_ns() - vector_st
-                )
-                morsel_st = time.monotonic_ns()
-                morsel = Morsel.from_vectors(names, vectors)
-                self._readings["time_groupby_finalize_morsel_build_ns"] += (
-                    time.monotonic_ns() - morsel_st
-                )
-                self._readings["groupby_finalize_chunks_emitted"] += 1
-                yield morsel
-            return
-
         total = self._state_count()
-        self._readings["groupby_finalize_rows_count"] += total
+        record_finalize_rows_count(self, total)
         if total == 0:
             yield self._empty_morsel()
             return
@@ -5909,8 +5707,6 @@ cdef class CarcharGroupStateEngine:
                 morsel = self._build_chunk_morsel_multi(start, stop)
             else:
                 morsel = self._build_chunk_morsel(start, stop)
-            self._readings["time_groupby_finalize_rows_to_vectors_ns"] += (
-                time.monotonic_ns() - vector_st
-            )
-            self._readings["groupby_finalize_chunks_emitted"] += 1
+            record_finalize_rows_to_vectors_time(self, vector_st)
+            record_finalize_chunk_emitted(self)
             yield morsel

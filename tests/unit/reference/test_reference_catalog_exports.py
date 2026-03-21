@@ -186,7 +186,7 @@ def test_aggregate_catalog_includes_execution_support():
     assert count["sql_forms"] == ["COUNT(*)", "COUNT(expr)", "COUNT(DISTINCT expr)"]
 
     any_value = catalog["ANY_VALUE"]
-    assert any_value["kernel_name"] == "hash_one"
+    assert any_value["kernel_name"] == "any_value"
     assert any_value["support"]["global"] is False
     assert any_value["support"]["grouped"] is True
     assert any_value["status"] == "active"

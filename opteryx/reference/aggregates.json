@@ -2,7 +2,7 @@
     "ANY_VALUE": {
         "ast_symbol": "ANY_VALUE",
         "friendly_name": "Any Value",
-        "kernel_name": "hash_one",
+        "kernel_name": "any_value",
         "category": "selection",
         "status": "active",
         "summary": "Returns one non-null value from the input set.",
