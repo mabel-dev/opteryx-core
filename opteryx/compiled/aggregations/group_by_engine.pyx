@@ -111,6 +111,8 @@ from opteryx.compiled.aggregations.kernels.avg_int64 cimport avg_integer_accumul
 from opteryx.compiled.aggregations.kernels.avg_int64 cimport avg_i64_multi_accumulate
 from opteryx.compiled.aggregations.kernels.avg_int64 cimport avg_i64_multi_accumulate_from_dict
 from opteryx.compiled.aggregations.kernels.avg_int64 cimport avg_integer_multi_accumulate
+from opteryx.compiled.aggregations.kernels.count_distinct cimport count_distinct_accumulate
+from opteryx.compiled.aggregations.kernels.count_distinct cimport count_distinct_multi_accumulate
 # --- constant-key ingest (inlined from constant_keys.pyx) ---
 
 cdef void _ingest_constant_distinct(object self, Morsel morsel, object value_vector, Py_ssize_t row_count):
@@ -2563,49 +2565,54 @@ cdef class CarcharGroupStateEngine:
         int64_t* state_indices,
         Py_ssize_t row_count,
     ) except *:
+        # Type-specific divergence: build a uniform uint64_t* hash buffer for the
+        # kernel.  Int64 values are reinterpret-cast in place; sub-64-bit integers
+        # are expanded into a temporary heap buffer; all other types (strings,
+        # dict-encoded, etc.) go through morsel.hash().
         cdef object value_vector = morsel.column(self._value_column)
-        cdef uint8_t* value_nulls = self._value_null_bitmap(value_vector)
-        cdef uint64_t[::1] value_hashes
+        cdef uint8_t* value_nulls = _vector_null_bitmap(value_vector)
         cdef DrakenFixedBuffer* value_ptr
-        cdef int64_t* value_i64_data
+        cdef uint64_t* temp_hashes = NULL
+        cdef uint64_t[::1] hash_view
         cdef Py_ssize_t row_idx
-        cdef FlatHashSet distinct_set
-        cdef int64_t state_index
-        cdef uint64_t distinct_value_u64
 
         if isinstance(value_vector, Int64Vector):
             value_ptr = (<Int64Vector> value_vector).ptr
-            value_i64_data = <int64_t*> value_ptr.data
-            for row_idx in range(row_count):
-                if not _bitmap_is_valid(value_nulls, row_idx):
-                    continue
-                state_index = state_indices[row_idx]
-                distinct_set = <FlatHashSet> self._distinct_sets[state_index]
-                distinct_value_u64 = <uint64_t> value_i64_data[row_idx]
-                if distinct_set.insert(distinct_value_u64):
-                    self._counts[state_index] = self._counts[state_index] + 1
+            count_distinct_accumulate(
+                self._distinct_sets, self._counts.data(),
+                <uint64_t*> value_ptr.data,
+                value_nulls,
+                state_indices, row_count,
+            )
             return
 
         if isinstance(value_vector, IntegerVector):
             value_ptr = (<IntegerVector> value_vector).ptr
-            for row_idx in range(row_count):
-                if not _bitmap_is_valid(value_nulls, row_idx):
-                    continue
-                state_index = state_indices[row_idx]
-                distinct_set = <FlatHashSet> self._distinct_sets[state_index]
-                distinct_value_u64 = <uint64_t> _read_integer_value(value_ptr, row_idx)
-                if distinct_set.insert(distinct_value_u64):
-                    self._counts[state_index] = self._counts[state_index] + 1
+            temp_hashes = <uint64_t*> malloc(row_count * sizeof(uint64_t))
+            if temp_hashes == NULL and row_count > 0:
+                raise MemoryError()
+            try:
+                for row_idx in range(row_count):
+                    temp_hashes[row_idx] = <uint64_t> _read_integer_value(value_ptr, row_idx)
+                count_distinct_accumulate(
+                    self._distinct_sets, self._counts.data(),
+                    temp_hashes, value_nulls,
+                    state_indices, row_count,
+                )
+            finally:
+                free(temp_hashes)
             return
 
-        value_hashes = morsel.hash([self._value_column])
-        for row_idx in range(row_count):
-            if not _bitmap_is_valid(value_nulls, row_idx):
-                continue
-            state_index = state_indices[row_idx]
-            distinct_set = <FlatHashSet> self._distinct_sets[state_index]
-            if distinct_set.insert(value_hashes[row_idx]):
-                self._counts[state_index] = self._counts[state_index] + 1
+        if row_count == 0:
+            return
+
+        hash_view = morsel.hash([self._value_column])
+        count_distinct_accumulate(
+            self._distinct_sets, self._counts.data(),
+            <uint64_t*> &hash_view[0],
+            value_nulls,
+            state_indices, row_count,
+        )
 
     cdef void _ingest_count_distinct_multi_for_states(
         self,
@@ -2614,49 +2621,53 @@ cdef class CarcharGroupStateEngine:
         Py_ssize_t row_count,
         Py_ssize_t agg_idx,
     ) except *:
+        # Same type dispatch as the single-agg path, but targets
+        # _multi_distinct_sets / _multi_counts and carries multi_agg_count +
+        # agg_idx through to the kernel for the offset formula.
         cdef object value_vector = morsel.column(self._multi_value_columns[agg_idx])
-        cdef uint8_t* value_nulls = self._value_null_bitmap(value_vector)
-        cdef uint64_t[::1] value_hashes
+        cdef uint8_t* value_nulls = _vector_null_bitmap(value_vector)
         cdef DrakenFixedBuffer* value_ptr
-        cdef int64_t* value_i64_data
+        cdef uint64_t* temp_hashes = NULL
+        cdef uint64_t[::1] hash_view
         cdef Py_ssize_t row_idx
-        cdef Py_ssize_t offset
-        cdef FlatHashSet distinct_set
-        cdef uint64_t distinct_value_u64
 
         if isinstance(value_vector, Int64Vector):
             value_ptr = (<Int64Vector> value_vector).ptr
-            value_i64_data = <int64_t*> value_ptr.data
-            for row_idx in range(row_count):
-                if not _bitmap_is_valid(value_nulls, row_idx):
-                    continue
-                offset = self._multi_offset(state_indices[row_idx], agg_idx)
-                distinct_set = <FlatHashSet> self._multi_distinct_sets[offset]
-                distinct_value_u64 = <uint64_t> value_i64_data[row_idx]
-                if distinct_set.insert(distinct_value_u64):
-                    self._multi_counts[offset] = self._multi_counts[offset] + 1
+            count_distinct_multi_accumulate(
+                self._multi_distinct_sets, self._multi_counts.data(),
+                <uint64_t*> value_ptr.data,
+                value_nulls,
+                state_indices, row_count, self._multi_agg_count, agg_idx,
+            )
             return
 
         if isinstance(value_vector, IntegerVector):
             value_ptr = (<IntegerVector> value_vector).ptr
-            for row_idx in range(row_count):
-                if not _bitmap_is_valid(value_nulls, row_idx):
-                    continue
-                offset = self._multi_offset(state_indices[row_idx], agg_idx)
-                distinct_set = <FlatHashSet> self._multi_distinct_sets[offset]
-                distinct_value_u64 = <uint64_t> _read_integer_value(value_ptr, row_idx)
-                if distinct_set.insert(distinct_value_u64):
-                    self._multi_counts[offset] = self._multi_counts[offset] + 1
+            temp_hashes = <uint64_t*> malloc(row_count * sizeof(uint64_t))
+            if temp_hashes == NULL and row_count > 0:
+                raise MemoryError()
+            try:
+                for row_idx in range(row_count):
+                    temp_hashes[row_idx] = <uint64_t> _read_integer_value(value_ptr, row_idx)
+                count_distinct_multi_accumulate(
+                    self._multi_distinct_sets, self._multi_counts.data(),
+                    temp_hashes, value_nulls,
+                    state_indices, row_count, self._multi_agg_count, agg_idx,
+                )
+            finally:
+                free(temp_hashes)
             return
 
-        value_hashes = morsel.hash([self._multi_value_columns[agg_idx]])
-        for row_idx in range(row_count):
-            if not _bitmap_is_valid(value_nulls, row_idx):
-                continue
-            offset = self._multi_offset(state_indices[row_idx], agg_idx)
-            distinct_set = <FlatHashSet> self._multi_distinct_sets[offset]
-            if distinct_set.insert(value_hashes[row_idx]):
-                self._multi_counts[offset] = self._multi_counts[offset] + 1
+        if row_count == 0:
+            return
+
+        hash_view = morsel.hash([self._multi_value_columns[agg_idx]])
+        count_distinct_multi_accumulate(
+            self._multi_distinct_sets, self._multi_counts.data(),
+            <uint64_t*> &hash_view[0],
+            value_nulls,
+            state_indices, row_count, self._multi_agg_count, agg_idx,
+        )
 
     cdef void _ingest_object_minmax_for_states(
         self,

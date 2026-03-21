@@ -17,6 +17,7 @@ from setuptools_rust import RustExtension
 
 LIBRARY = "opteryx"
 
+
 class build_ext(build_ext_orig):
     def build_extensions(self):
         if self.compiler and ".S" not in self.compiler.src_extensions:
@@ -28,8 +29,10 @@ class build_ext(build_ext_orig):
     def build_extension(self, ext):
         # Create a unique build_temp per extension to avoid collisions when the
         # same source file is used by multiple extensions in a parallel build.
-        orig_build_temp = getattr(self, 'build_temp', None) or self.get_finalized_command('build').build_temp
-        safe_name = ext.name.replace('.', '_')
+        orig_build_temp = (
+            getattr(self, "build_temp", None) or self.get_finalized_command("build").build_temp
+        )
+        safe_name = ext.name.replace(".", "_")
         per_ext_build_temp = os.path.join(orig_build_temp, safe_name)
         os.makedirs(per_ext_build_temp, exist_ok=True)
         # Temporarily override build_temp used by underlying compiler invocations
@@ -38,22 +41,32 @@ class build_ext(build_ext_orig):
             # If building a C++ extension on Linux, ensure we add the extra link
             # args to statically link libstdc++ and libgcc to avoid requiring
             # newer GLIBC/GLIBCXX on target systems.
-            if is_linux() and getattr(ext, 'language', '') == 'c++':
-                ext.extra_link_args = list(getattr(ext, 'extra_link_args', [])) + LD_EXTRA
+            if is_linux() and getattr(ext, "language", "") == "c++":
+                ext.extra_link_args = list(getattr(ext, "extra_link_args", [])) + LD_EXTRA
             super().build_extension(ext)
         finally:
             # Restore original build_temp after building this extension
             self.build_temp = orig_build_temp
 
+
 # Platform detection
-def is_mac(): return platform.system() == "Darwin"
-def is_win(): return platform.system() == "Windows" 
-def is_linux(): return platform.system() == "Linux"
+def is_mac():
+    return platform.system() == "Darwin"
+
+
+def is_win():
+    return platform.system() == "Windows"
+
+
+def is_linux():
+    return platform.system() == "Linux"
+
 
 # Skip extension building for clean command
 if "clean" in [arg.lower() for arg in sys.argv[1:] if arg and not arg.startswith("-")]:
     print("Skipping native extension build for clean command")
     sys.exit(0)
+
 
 # Architecture detection for SIMD
 def detect_architecture():
@@ -100,7 +113,7 @@ if is_win():
     C_FLAGS = ["/O2"]  # MSVC supports C11 by default in modern versions
     # MSVC LTO (link-time code generation)
     if OPTERYX_ENABLE_LTO:
-        CPP_FLAGS.append('/GL')
+        CPP_FLAGS.append("/GL")
         # linker flag /LTCG will be added via extra_link_args when needed
 elif is_linux():
     CPP_FLAGS.append("-fvisibility=default")
@@ -111,16 +124,16 @@ if OPTERYX_ENABLE_LTO and not is_win():
     CPP_FLAGS.append("-flto")
     C_FLAGS.append("-flto")
     # ensure linker uses LTO as well
-    LD_EXTRA = list(LD_EXTRA) if 'LD_EXTRA' in globals() else []
+    LD_EXTRA = list(LD_EXTRA) if "LD_EXTRA" in globals() else []
     LD_EXTRA.append("-flto")
 
 # PGO support (opt-in). The CI/release pipeline may run a profile-generate
 # build followed by exercising the binary and then a profile-use rebuild.
 if OPTERYX_ENABLE_PGO and not is_win():
-    if OPTERYX_PGO_PHASE == 'generate':
+    if OPTERYX_PGO_PHASE == "generate":
         CPP_FLAGS.append("-fprofile-generate")
         C_FLAGS.append("-fprofile-generate")
-    elif OPTERYX_PGO_PHASE == 'use':
+    elif OPTERYX_PGO_PHASE == "use":
         CPP_FLAGS.append("-fprofile-use")
         CPP_FLAGS.append("-fprofile-correction")
         C_FLAGS.append("-fprofile-use")
@@ -136,7 +149,7 @@ LD_EXTRA = ["-static-libstdc++"] if is_mac() else ["-static-libstdc++", "-static
 # MSVC LTO linker flag when requested
 if is_win() and OPTERYX_ENABLE_LTO:
     # '/LTCG' enables link-time code generation on MSVC
-    LD_EXTRA.append('/LTCG')
+    LD_EXTRA.append("/LTCG")
 
 # SIMD-specific flags (deterministic baseline to avoid host-specific AVX512/etc.)
 if arch == "x86_64":
@@ -149,7 +162,7 @@ elif arch == "arm" and not is_mac():
 # Common warning suppressions
 WARNING_FLAGS = [
     "-Wno-unused-function",
-    "-Wno-unreachable-code-fallthrough", 
+    "-Wno-unreachable-code-fallthrough",
     "-Wno-sign-compare",
     "-Wno-unused-command-line-argument",
 ]
@@ -159,7 +172,8 @@ C_FLAGS.extend(WARNING_FLAGS)
 # Include directories
 include_dirs = [
     numpy.get_include(),
-    "src/cpp", "src/c", 
+    "src/cpp",
+    "src/c",
     "third_party/mabel/draken",
     "third_party/mabel/carchar",
     "third_party/abseil",
@@ -189,6 +203,7 @@ with open(f"{LIBRARY}/__version__.py", "r", encoding="UTF8") as v:
 
 with open("README.md", "r", encoding="UTF8") as f:
     long_description = f.read()
+
 
 # Helper for draken extensions
 def make_draken_extension(module_path, source_file, language="c++", depends=None):
@@ -236,10 +251,12 @@ def get_zstd_vendor_sources():
         sources.append(f"{RUGO_PARQUET}/vendor/zstd/decompress/huf_decompress_amd64.S")
     return sources
 
+
 def get_lz4_vendor_sources():
     """Return vendored lz4 block-codec sources."""
     RUGO_PARQUET = "third_party/mabel/rugo/parquet"
     return [f"{RUGO_PARQUET}/vendor/lz4/lz4.c"]
+
 
 def get_parquet_vendor_sources():
     """Return vendored zstd/snappy source files to build into parquet extension.
@@ -264,6 +281,7 @@ def get_parquet_vendor_sources():
     vendor_sources.extend(get_zstd_vendor_sources())
     return vendor_sources
 
+
 # Link args for parquet extension - ensure libcrypto is linked on Linux so
 # the runtime 'ldd' check in CI can verify its presence. Don't add -lcrypto
 # on macOS where the system library naming differs.
@@ -275,7 +293,6 @@ if not is_mac():
 
 # Define all extensions
 extensions = [
-    
     # Third-party libraries
     Extension(
         "opteryx.third_party.abseil.containers",
@@ -306,9 +323,6 @@ extensions = [
         include_dirs=include_dirs,
         extra_compile_args=C_FLAGS + ["-std=c99", "-DBASE64_IMPLEMENTATION"],
     ),
-
-
-
     Extension(
         "opteryx.third_party.cyan4973.xxhash",
         sources=[
@@ -327,7 +341,7 @@ extensions = [
         extra_compile_args=C_FLAGS,
     ),
     Extension(
-        "opteryx.third_party.fastfloat.fast_float", 
+        "opteryx.third_party.fastfloat.fast_float",
         sources=["opteryx/third_party/fastfloat/fast_float.pyx"],
         include_dirs=include_dirs,
         language="c++",
@@ -349,13 +363,12 @@ extensions = [
     Extension(
         "opteryx.third_party.facebook.zstd",
         sources=["opteryx/third_party/facebook/zstd.pyx"] + get_zstd_vendor_sources(),
-        include_dirs=
-            include_dirs
-            + [
-                "third_party/mabel/rugo/parquet/vendor/zstd",
-                "third_party/mabel/rugo/parquet/vendor/zstd/common",
-                "third_party/mabel/rugo/parquet/vendor/zstd/decompress",
-            ],
+        include_dirs=include_dirs
+        + [
+            "third_party/mabel/rugo/parquet/vendor/zstd",
+            "third_party/mabel/rugo/parquet/vendor/zstd/common",
+            "third_party/mabel/rugo/parquet/vendor/zstd/decompress",
+        ],
         define_macros=[("ZSTD_STATIC_LINKING_ONLY", "1")],
         language="c++",
         extra_compile_args=CPP_FLAGS,
@@ -379,9 +392,7 @@ extensions = [
         sources=["opteryx/third_party/fuzzy/soundex.pyx"],
         extra_compile_args=C_FLAGS,
     ),
-    
     # File format readers
-
     Extension(
         "opteryx.rugo.parquet",
         sources=(
@@ -395,7 +406,8 @@ extensions = [
                 "third_party/mabel/rugo/parquet/compression.cpp",
                 "third_party/mabel/rugo/parquet/bloom_filter.cpp",
                 "src/cpp/cpu_features.cpp",
-            ] + get_parquet_vendor_sources()
+            ]
+            + get_parquet_vendor_sources()
         ),
         include_dirs=(
             include_dirs
@@ -412,7 +424,7 @@ extensions = [
         extra_link_args=parquet_link_args + LD_EXTRA,
     ),
     Extension(
-        "opteryx.rugo.jsonl", 
+        "opteryx.rugo.jsonl",
         sources=[
             "third_party/mabel/rugo/jsonl/jsonl_reader.pyx",
             "third_party/mabel/rugo/jsonl/decode.cpp",
@@ -426,7 +438,6 @@ extensions = [
         language="c++",
         extra_compile_args=CPP_FLAGS,
     ),
-    
     # Draken core components
     make_draken_extension("interop.arrow", "interop/arrow.pyx"),
     make_draken_extension("vectors.vector", "vectors/vector.pyx"),
@@ -478,7 +489,6 @@ extensions = [
         language="c++",
         extra_compile_args=CPP_FLAGS,
     ),
-    
     # Core compiled components
     Extension(
         "opteryx.compiled.functions.strings",
@@ -486,7 +496,7 @@ extensions = [
             "opteryx/compiled/functions/strings.pyx",
             "src/cpp/simd_search.cpp",
             "src/cpp/simd_string_ops.cpp",
-            "src/cpp/cpu_features.cpp"
+            "src/cpp/cpu_features.cpp",
         ],
         include_dirs=include_dirs,
         language="c++",
@@ -515,7 +525,7 @@ extensions = [
         "opteryx.compiled.simd_probe",
         sources=[
             "opteryx/compiled/simd_probe.pyx",
-            "src/cpp/simd_env.cpp", 
+            "src/cpp/simd_env.cpp",
             "src/cpp/cpu_features.cpp",
         ],
         include_dirs=include_dirs,
@@ -708,6 +718,15 @@ extensions = [
         extra_compile_args=CPP_FLAGS,
     ),
     Extension(
+        "opteryx.compiled.aggregations.kernels.count_distinct",
+        sources=[
+            "opteryx/compiled/aggregations/kernels/count_distinct.pyx",
+        ],
+        include_dirs=include_dirs,
+        language="c++",
+        extra_compile_args=CPP_FLAGS,
+    ),
+    Extension(
         "opteryx.compiled.aggregations.group_by_engine",
         sources=[
             "opteryx/compiled/aggregations/group_by_engine.pyx",
@@ -749,6 +768,7 @@ extensions = [
     ),
 ]
 
+
 # Auto-generate consolidated modules
 def generate_consolidated_module(module_dir, output_file):
     output_abs = os.path.abspath(output_file)
@@ -767,7 +787,7 @@ def generate_consolidated_module(module_dir, output_file):
             print(f"Skipping {output_file}; consolidated module is up to date")
             return
 
-    with open(output_file, 'w', encoding="UTF8") as f:
+    with open(output_file, "w", encoding="UTF8") as f:
         f.write("# Auto-generated consolidated module\n# DO NOT EDIT - generated by setup.py\n\n")
         for pyx_file in pyx_files:
             include_path = os.path.relpath(pyx_file, os.path.dirname(output_file))
@@ -776,8 +796,11 @@ def generate_consolidated_module(module_dir, output_file):
 
     print(f"Generated {output_file} with {len(pyx_files)} includes")
 
+
 # Generate vector_ops, joins, and aggregation kernels
-generate_consolidated_module("opteryx/compiled/vector_ops", "opteryx/compiled/vector_ops/vector_ops.pyx")
+generate_consolidated_module(
+    "opteryx/compiled/vector_ops", "opteryx/compiled/vector_ops/vector_ops.pyx"
+)
 generate_consolidated_module("opteryx/compiled/joins", "opteryx/compiled/joins/joins.pyx")
 
 # Add consolidated modules with their dependencies
@@ -789,43 +812,48 @@ vector_ops_link_args = []
 if not is_win():
     vector_ops_link_args.append("-pthread")
 
-extensions.extend([
-    Extension(
-        "opteryx.compiled.vector_ops.function_definitions",
-        sources=(
-            ["opteryx/compiled/vector_ops/vector_ops.pyx"]
-            + sorted(glob.glob("third_party/re2/re2/*.cc") + [
-                "third_party/re2/util/strutil.cc",
-                "third_party/re2/util/rune.cc",
-                "src/cpp/simd_env.cpp",
-                "src/cpp/simd_search.cpp",
-                "src/cpp/simd_datepart.cpp",
-                "src/cpp/cpu_features.cpp",
-                "third_party/crypto/md5.cpp",
-                "third_party/crypto/sha1.cpp",
-                "third_party/crypto/sha2.cpp",
-                "third_party/crypto/sha512.cpp",
-            ])
+extensions.extend(
+    [
+        Extension(
+            "opteryx.compiled.vector_ops.function_definitions",
+            sources=(
+                ["opteryx/compiled/vector_ops/vector_ops.pyx"]
+                + sorted(
+                    glob.glob("third_party/re2/re2/*.cc")
+                    + [
+                        "third_party/re2/util/strutil.cc",
+                        "third_party/re2/util/rune.cc",
+                        "src/cpp/simd_env.cpp",
+                        "src/cpp/simd_search.cpp",
+                        "src/cpp/simd_datepart.cpp",
+                        "src/cpp/cpu_features.cpp",
+                        "third_party/crypto/md5.cpp",
+                        "third_party/crypto/sha1.cpp",
+                        "third_party/crypto/sha2.cpp",
+                        "third_party/crypto/sha512.cpp",
+                    ]
+                )
+            ),
+            include_dirs=include_dirs,
+            language="c++",
+            extra_compile_args=CPP_FLAGS,
+            extra_link_args=vector_ops_link_args,
+            define_macros=[("VENDORED_DIGESTS", "1")],
         ),
-        include_dirs=include_dirs,
-        language="c++",
-        extra_compile_args=CPP_FLAGS,
-        extra_link_args=vector_ops_link_args,
-        define_macros=[("VENDORED_DIGESTS", "1")],
-    ),
-    Extension(
-        "opteryx.compiled.joins.join_definitions", 
-        sources=[
-            "opteryx/compiled/joins/joins.pyx",
-            "src/cpp/join_kernels.cpp",
-            "src/cpp/intbuffer.cpp",
-            "src/cpp/cpu_features.cpp",
-        ],
-        include_dirs=include_dirs,
-        language="c++",
-        extra_compile_args=CPP_FLAGS,
-    ),
-])
+        Extension(
+            "opteryx.compiled.joins.join_definitions",
+            sources=[
+                "opteryx/compiled/joins/joins.pyx",
+                "src/cpp/join_kernels.cpp",
+                "src/cpp/intbuffer.cpp",
+                "src/cpp/cpu_features.cpp",
+            ],
+            include_dirs=include_dirs,
+            language="c++",
+            extra_compile_args=CPP_FLAGS,
+        ),
+    ]
+)
 # Require vendored nanobind headers for building the nanobind-backed extension.
 if not (
     os.path.exists("third_party/nanobind/nanobind.h")
@@ -843,7 +871,8 @@ extensions.append(
             "src/cpp/vector_length_native.cpp",
             "third_party/nanobind/src/nb_combined.cpp",
         ],
-        include_dirs=include_dirs + [
+        include_dirs=include_dirs
+        + [
             "third_party/nanobind",
             "third_party/nanobind/src",
             "third_party/nanobind/ext/robin_map/include",
@@ -863,7 +892,8 @@ extensions.append(
             "src/cpp/directories.cpp",
             "third_party/nanobind/src/nb_combined.cpp",
         ],
-        include_dirs=include_dirs + [
+        include_dirs=include_dirs
+        + [
             "third_party/nanobind",
             "third_party/nanobind/src",
             "third_party/nanobind/ext/robin_map/include",
@@ -908,7 +938,8 @@ extensions.append(
             "src/cpp/cpu_features.cpp",
             "third_party/nanobind/src/nb_combined.cpp",
         ],
-        include_dirs=include_dirs + [
+        include_dirs=include_dirs
+        + [
             "third_party/mabel/carchar",
             "third_party/nanobind",
             "third_party/nanobind/src",
@@ -927,7 +958,8 @@ extensions.append(
             "src/cpp/vector_search_native.cpp",
             "third_party/nanobind/src/nb_combined.cpp",
         ],
-        include_dirs=include_dirs + [
+        include_dirs=include_dirs
+        + [
             "third_party/nanobind",
             "third_party/nanobind/src",
             "third_party/nanobind/ext/robin_map/include",
@@ -945,7 +977,8 @@ extensions.append(
             "src/cpp/usearch_native.cpp",
             "third_party/nanobind/src/nb_combined.cpp",
         ],
-        include_dirs=include_dirs + [
+        include_dirs=include_dirs
+        + [
             "third_party/usearch/include",
             "third_party/usearch/fp16/include",
             "third_party/usearch/simsimd/include",
@@ -953,7 +986,8 @@ extensions.append(
             "third_party/nanobind/src",
             "third_party/nanobind/ext/robin_map/include",
         ],
-        extra_compile_args=CPP_FLAGS + [
+        extra_compile_args=CPP_FLAGS
+        + [
             "-fno-strict-aliasing",
             "-DNB_COMPACT_ASSERTIONS",
             "-DUSEARCH_USE_SIMSIMD=1",
@@ -962,6 +996,7 @@ extensions.append(
         language="c++",
     )
 )
+
 
 def _select_onnxruntime_sdk():
     if is_mac() and arch == "aarch64":
@@ -1012,16 +1047,20 @@ if _ort_include and _ort_lib and os.path.exists(_ort_include) and os.path.exists
                 "src/cpp/minilm_native.cpp",
                 "third_party/nanobind/src/nb_combined.cpp",
             ],
-            include_dirs=include_dirs + [
+            include_dirs=include_dirs
+            + [
                 _ort_include,
                 "third_party/nanobind",
                 "third_party/nanobind/src",
                 "third_party/nanobind/ext/robin_map/include",
             ],
             extra_compile_args=CPP_FLAGS + ["-fno-strict-aliasing", "-DNB_COMPACT_ASSERTIONS"],
-            extra_link_args=LD_EXTRA + [
+            extra_link_args=LD_EXTRA
+            + [
                 f"-L{_ort_lib}",
-            ] + extra_link + [
+            ]
+            + extra_link
+            + [
                 f"-Wl,-rpath,{_ort_rpath}",
             ],
             language="c++",
@@ -1038,10 +1077,13 @@ setup(
     packages=find_packages(include=[LIBRARY, f"{LIBRARY}.*", "opteryx_core", "opteryx_core.*"]),
     python_requires=">=3.13",
     url="https://github.com/mabel-dev/opteryx/",
-    ext_modules=cythonize(extensions, compiler_directives={
-        "language_level": "3", 
-        "linetrace": "a" in __version__ or "b" in __version__,
-    }),
+    ext_modules=cythonize(
+        extensions,
+        compiler_directives={
+            "language_level": "3",
+            "linetrace": "a" in __version__ or "b" in __version__,
+        },
+    ),
     rust_extensions=[RustExtension("opteryx.compute", "Cargo.toml", debug=False)],  # Add Rust here
     package_data={"": ["*.pyx", "*.pxd", "*.h"]},
     cmdclass={"build_ext": build_ext},
