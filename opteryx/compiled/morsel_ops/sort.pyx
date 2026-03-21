@@ -19,9 +19,13 @@ Dense string columns use a 7-byte prefix radix sort (via compress_into) with
 a full-content memcmp tiebreak applied inside any bin whose strings share
 their first 7 bytes.
 
-Dictionary-encoded columns are sorted on their raw dictionary codes — correct
-for GROUP BY (same code == same value == same group).  Semantic ORDER BY on
-dictionary strings is a follow-on.
+Dictionary-encoded columns are sorted by semantic value order, making the
+result ORDER BY-correct.  A remap table is built by sorting the D dictionary
+entries and assigning rank 0..D-1; codes are replaced with ranks before the
+radix pass.  The remap table is small (D ≤ 256 for uint8 codes, ≤ 65536 for
+uint16 codes) and fits in L1/L2 cache, so scalar lookup is fast.  The
+SIMD-accelerated simd_remap_u8 / simd_remap_u16 functions in simd_remap.cpp
+are available for external callers that apply remaps across many morsels.
 
 Nulls are represented as INT64_MIN by compress_into, which maps to the
 smallest unsigned key after the sign-bit flip, giving NULLS FIRST for ASC.
@@ -30,15 +34,39 @@ smallest unsigned key after the sign-bit flip, giving NULLS FIRST for ASC.
 from array import array
 
 from cpython.mem cimport PyMem_Malloc, PyMem_Free
-from libc.stdint cimport int32_t, int64_t, uint8_t, uint32_t, uint64_t
-from libc.string cimport memset, memcpy
+from libc.stdint cimport int8_t, int16_t, int32_t, int64_t, uint8_t, uint16_t, uint32_t, uint64_t
+from libc.string cimport memset, memcpy, memcmp
 
-from opteryx.draken.core.buffers cimport DictAccessor, DrakenVarBuffer
+from opteryx.draken.core.buffers cimport (
+    DictAccessor,
+    DrakenVarBuffer,
+    DrakenType,
+    DRAKEN_INT8,
+    DRAKEN_INT16,
+    DRAKEN_INT32,
+    DRAKEN_INT64,
+    DRAKEN_FLOAT32,
+    DRAKEN_FLOAT64,
+    DRAKEN_BOOL,
+    DRAKEN_STRING,
+    DRAKEN_DATE32,
+    DRAKEN_TIMESTAMP64,
+    DRAKEN_TIME32,
+    DRAKEN_TIME64,
+)
 from opteryx.draken.vectors.string_vector cimport StringVector
 from opteryx.compiled.aggregations.vector_readers cimport (
     _vector_dict_accessor,
     _dict_read_code,
 )
+
+
+# ── SIMD remap ────────────────────────────────────────────────────────────────
+
+cdef extern from "src/cpp/simd_remap.h" nogil:
+    void simd_remap_u8(uint8_t* codes, size_t n, const uint8_t* remap_table)
+    void simd_remap_u16(uint16_t* codes, size_t n, const uint16_t* remap_table)
+    void simd_remap_u32(uint32_t* codes, size_t n, const uint32_t* remap_table)
 
 
 # ── Inline C++: memcmp tiebreak via std::stable_sort ─────────────────────────
@@ -180,6 +208,183 @@ cdef inline uint64_t _asc_xor  = <uint64_t>0x8000000000000000ULL
 cdef inline uint64_t _desc_xor = <uint64_t>0x7FFFFFFFFFFFFFFFULL
 
 
+# ── Dictionary remap helpers ──────────────────────────────────────────────────
+
+cdef inline int64_t _dict_value_as_int64(
+    const DrakenVarBuffer* dv,
+    DrakenType value_type,
+    uint32_t code,
+) noexcept nogil:
+    """
+    Read the dictionary value at position 'code' as a sortable int64.
+    Returns INT64_MIN for null entries.  Handles fixed-width numeric types.
+    For DRAKEN_STRING, the caller must handle string comparison separately.
+    """
+    cdef uint8_t* nulls = <uint8_t*>dv.null_bitmap
+    cdef int64_t bits
+    cdef double d
+    cdef int32_t fbits
+    cdef float f
+
+    if nulls != NULL and ((nulls[code >> 3] >> (code & 7)) & 1) == 0:
+        return <int64_t>-9223372036854775808LL  # INT64_MIN
+
+    if value_type == DRAKEN_INT64 or value_type == DRAKEN_TIMESTAMP64 or value_type == DRAKEN_TIME64:
+        return (<int64_t*>dv.data)[code]
+    if value_type == DRAKEN_INT32 or value_type == DRAKEN_DATE32 or value_type == DRAKEN_TIME32:
+        return <int64_t>((<int32_t*>dv.data)[code])
+    if value_type == DRAKEN_INT16:
+        return <int64_t>((<int16_t*>dv.data)[code])
+    if value_type == DRAKEN_INT8:
+        return <int64_t>((<int8_t*>dv.data)[code])
+    if value_type == DRAKEN_FLOAT64:
+        # Reinterpret double bits as int64, apply IEEE 754 sort fix.
+        # Positive doubles: bit-pattern order == value order.
+        # Negative doubles: bit-patterns are reversed → XOR all bits.
+        d = (<double*>dv.data)[code]
+        memcpy(&bits, &d, 8)
+        if bits < 0:
+            bits = bits ^ <int64_t>0x7FFFFFFFFFFFFFFFLL
+        return bits
+    if value_type == DRAKEN_FLOAT32:
+        f = (<float*>dv.data)[code]
+        memcpy(&fbits, &f, 4)
+        if fbits < 0:
+            fbits = fbits ^ <int32_t>0x7FFFFFFF
+        return <int64_t>fbits
+    if value_type == DRAKEN_BOOL:
+        return <int64_t>((<uint8_t*>dv.data)[code] != 0)
+    # Unknown type: return code as key (preserves existing GROUP BY behaviour).
+    return <int64_t>code
+
+
+cdef uint32_t* _build_numeric_dict_remap(
+    const DictAccessor* acc,
+) noexcept:
+    """
+    Build a remap table for a numeric-valued dictionary column.
+
+    remap[old_code] = rank   where rank 0 is the semantically smallest value.
+    The caller inverts order for descending sort by XOR-ing keys with the
+    all-ones mask for the code width.
+
+    Returns a heap-allocated uint32[D] array, or NULL on malloc failure.
+    The caller is responsible for freeing it with PyMem_Free.
+    """
+    cdef DrakenVarBuffer* dv = acc.dict_values
+    if dv == NULL:
+        return NULL
+
+    cdef Py_ssize_t D = <Py_ssize_t>dv.length
+    if D == 0:
+        return NULL
+
+    # Build an array of (sortable_int64_key, original_code) pairs.
+    cdef int64_t* sort_keys = <int64_t*>PyMem_Malloc(D * sizeof(int64_t))
+    cdef uint32_t* order    = <uint32_t*>PyMem_Malloc(D * sizeof(uint32_t))
+    cdef uint32_t* remap    = <uint32_t*>PyMem_Malloc(D * sizeof(uint32_t))
+
+    if sort_keys == NULL or order == NULL or remap == NULL:
+        PyMem_Free(sort_keys)
+        PyMem_Free(order)
+        PyMem_Free(remap)
+        return NULL
+
+    cdef Py_ssize_t i, j
+    for i in range(D):
+        sort_keys[i] = _dict_value_as_int64(dv, acc.value_type, <uint32_t>i)
+        order[i] = <uint32_t>i
+
+    # Insertion sort ascending: D is typically small (< 1000).
+    # Caller handles descending by XOR-ing keys with the all-ones mask.
+    cdef uint32_t key_order
+    cdef int64_t key_val
+    for i in range(1, D):
+        key_order = order[i]
+        key_val   = sort_keys[key_order]
+        j = i - 1
+        while j >= 0 and sort_keys[order[j]] > key_val:
+            order[j + 1] = order[j]
+            j -= 1
+        order[j + 1] = key_order
+
+    # Invert permutation: remap[old_code] = rank.
+    for i in range(D):
+        remap[order[i]] = <uint32_t>i
+
+    PyMem_Free(sort_keys)
+    PyMem_Free(order)
+    return remap
+
+
+cdef uint32_t* _build_string_dict_remap(
+    const DictAccessor* acc,
+) noexcept:
+    """
+    Build a remap table for a string-valued dictionary column.
+
+    Sorts D strings lexicographically ascending using memcmp; assigns rank 0
+    to the lexicographically smallest string.  The caller handles descending
+    sort by XOR-ing keys with the all-ones mask for the code width.
+
+    Returns a heap-allocated uint32[D] array, or NULL on malloc failure.
+    """
+    cdef DrakenVarBuffer* dv = acc.dict_values
+    if dv == NULL or dv.offsets == NULL:
+        return NULL
+
+    cdef Py_ssize_t D = <Py_ssize_t>dv.length
+    if D == 0:
+        return NULL
+
+    cdef const char* data    = <const char*>dv.data
+    cdef int32_t* offsets    = dv.offsets
+    cdef uint32_t* order     = <uint32_t*>PyMem_Malloc(D * sizeof(uint32_t))
+    cdef uint32_t* remap     = <uint32_t*>PyMem_Malloc(D * sizeof(uint32_t))
+
+    if order == NULL or remap == NULL:
+        PyMem_Free(order)
+        PyMem_Free(remap)
+        return NULL
+
+    cdef Py_ssize_t i, j
+    for i in range(D):
+        order[i] = <uint32_t>i
+
+    # Insertion sort ascending by lexicographic string value.
+    # Caller handles descending sort by XOR-ing keys with the all-ones mask.
+    cdef uint32_t key_code
+    cdef int32_t sa, la, sb, lb, cm, cmp_result
+    for i in range(1, D):
+        key_code = order[i]
+        sa = offsets[key_code]
+        la = offsets[key_code + 1] - sa
+
+        j = i - 1
+        while j >= 0:
+            sb = offsets[order[j]]
+            lb = offsets[order[j] + 1] - sb
+            cm = la if la < lb else lb
+            if cm > 0:
+                cmp_result = memcmp(data + sa, data + sb, <size_t>cm)
+            else:
+                cmp_result = 0
+            if cmp_result == 0:
+                cmp_result = la - lb
+            if cmp_result < 0:
+                break
+            order[j + 1] = order[j]
+            j -= 1
+        order[j + 1] = key_code
+
+    # Invert permutation: remap[old_code] = rank.
+    for i in range(D):
+        remap[order[i]] = <uint32_t>i
+
+    PyMem_Free(order)
+    return remap
+
+
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def morsel_sort(morsel, list column_names, list ascending):
@@ -229,6 +434,8 @@ def morsel_sort(morsel, list column_names, list ascending):
     cdef uint64_t key_xor
     cdef bint asc
     cdef int n_passes
+    cdef uint32_t* remap = NULL
+    cdef uint64_t flip
 
     try:
         # LSD: iterate columns from least-significant to most-significant.
@@ -246,15 +453,51 @@ def morsel_sort(morsel, list column_names, list ascending):
             acc = _vector_dict_accessor(vec)
 
             if acc != NULL:
-                # ── Dictionary-encoded: sort on raw codes ────────────────────
-                # code_width is 1, 2, or 4 bytes → same number of radix passes.
+                # ── Dictionary-encoded: semantic ORDER BY via code remap ──────
+                # Build a remap[old_code] = semantic_rank table, then radix-
+                # sort on ranks.  This is ORDER BY-correct (rank 0 = smallest
+                # value) unlike raw code order which is insertion-ordered.
                 n_passes = acc.code_width
-                if asc:
-                    for i in range(n):
-                        keys[i] = <uint64_t>_dict_read_code(acc, i)
+
+                if acc.value_type == DRAKEN_STRING:
+                    remap = _build_string_dict_remap(acc)
                 else:
-                    for i in range(n):
-                        keys[i] = <uint64_t>_dict_read_code(acc, i) ^ <uint64_t>0xFFFFFFFF
+                    remap = _build_numeric_dict_remap(acc)
+
+                if remap != NULL:
+                    # Fill uint64 keys from remapped ranks.  The remap table
+                    # is uint32[D] (D ≤ 65536 for u16, ≤ 256 for u8), so it
+                    # fits in L1/L2 cache — scalar lookup is fast enough.
+                    if n_passes == 1:
+                        for i in range(n):
+                            keys[i] = <uint64_t>remap[(<uint8_t*>acc.codes)[i]]
+                    elif n_passes == 2:
+                        for i in range(n):
+                            keys[i] = <uint64_t>remap[(<uint16_t*>acc.codes)[i]]
+                    else:  # n_passes == 4
+                        for i in range(n):
+                            keys[i] = <uint64_t>remap[(<uint32_t*>acc.codes)[i]]
+
+                    # Apply asc/desc XOR: for ascending, rank 0 is smallest
+                    # (no XOR needed); for descending, invert all bits within
+                    # the code_width so larger ranks sort first.
+                    if not asc:
+                        flip = (<uint64_t>1 << (8 * n_passes)) - 1
+                        for i in range(n):
+                            keys[i] ^= flip
+
+                    PyMem_Free(remap)
+                    remap = NULL
+                else:
+                    # Remap build failed (malloc); fall back to raw code order.
+                    # This is GROUP BY-correct but not ORDER BY-correct.
+                    if asc:
+                        for i in range(n):
+                            keys[i] = <uint64_t>_dict_read_code(acc, i)
+                    else:
+                        for i in range(n):
+                            keys[i] = <uint64_t>_dict_read_code(acc, i) ^ <uint64_t>0xFFFFFFFF
+
                 _radix_sort(perm_buf, tmp_buf, keys, n, n_passes)
 
             elif isinstance(vec, StringVector):
@@ -297,4 +540,5 @@ def morsel_sort(morsel, list column_names, list ascending):
     finally:
         PyMem_Free(perm_buf)
         PyMem_Free(tmp_buf)
-        PyMem_Free(keys)   # NULL-safe; guards against early MemoryError exit
+        PyMem_Free(keys)    # NULL-safe
+        PyMem_Free(remap)   # NULL-safe
