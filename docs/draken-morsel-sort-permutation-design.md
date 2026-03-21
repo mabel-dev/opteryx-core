@@ -62,9 +62,31 @@ Call `compress_into()` to fill an `int64` key buffer. Run LSD radix sort over th
 
 ### Dictionary-encoded columns
 
-Dictionary codes are small integers (`uint8`, `uint16`, or `uint32` depending on dictionary size). Extract codes directly from the vector internals — do not call `compress_into()`. Radix sort on codes: 1 pass for `uint8`, 2 for `uint16`, 4 for `uint32`.
+Dictionary codes are small integers (`uint8`, `uint16`, or `uint32` depending on dictionary size). To produce ORDER BY-correct ordering, codes must first be remapped from insertion-ordered integers to value-ordered ranks, then radix-sorted on those ranks.
 
-This is **correct for GROUP BY**: same code → same value → same group. It is **not correct for ORDER BY** (codes are insertion-ordered, not value-ordered). ORDER BY on dictionary columns is a follow-on.
+**Phase 1 — build remap table:**
+
+The dictionary has D unique entries (values).  Sort the D entries by semantic value using a simple insertion sort (D is typically < 1000).  Assign rank 0 to the smallest value.  Build `remap[old_code] = rank` by inverting the sort permutation.
+
+For numeric dictionary values, sort keys are derived directly from the stored `int8`/`int16`/`int32`/`int64`/`float32`/`float64`/`bool` values.  For string dictionaries, sort keys are derived by lexicographic `memcmp` of the stored strings.
+
+**Phase 2 — apply remap via SIMD:**
+
+Apply `remap` in-place on a temporary copy of the N-row code array using the SIMD-accelerated dispatch functions in `src/cpp/simd_remap.cpp`:
+
+| Code width | Function | SIMD strategy |
+|---|---|---|
+| `uint8` (D ≤ 256) | `simd_remap_u8` | AVX2: 16-pass `vpshufb`, 32 codes/iter; NEON: 4-pass `vqtbl4q_u8`, 16 codes/iter |
+| `uint16` (D ≤ 65536) | `simd_remap_u16` | AVX2: `_mm256_i32gather_epi32` with scale=2, 8 codes/iter; NEON: scalar |
+| `uint32` | `simd_remap_u32` | Scalar (table too large for SIMD benefit) |
+
+The `simd_remap_u16` gather reads 32-bit values at `scale=2`; on little-endian x86 the low 16 bits contain the target entry.  The remap table must be allocated with one extra element past the last valid code to avoid out-of-bounds reads.
+
+**Phase 3 — radix sort on remapped codes:**
+
+Remapped codes (now ranks 0..D-1) are placed into the `uint64` key array and radix-sorted using the same LSD radix sort as other column types.  Descending order is handled by XORing with `(1 << (8 * code_width)) - 1` before the radix pass, consistent with the numeric descending strategy.
+
+This is correct for both **GROUP BY** (same rank == same value == same group) and **ORDER BY** (rank order == semantic value order).
 
 ### Dense strings
 
