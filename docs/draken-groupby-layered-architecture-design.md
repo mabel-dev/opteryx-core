@@ -389,7 +389,7 @@ accumulation loops remain in the engine.
 
 Done when the engine contains no inline AVG loops.
 
-### Step D5 — Extract `count_distinct.pyx`
+### Step D5 — Extract `count_distinct.pyx` ✓ DONE
 
 All value types reduce to `uint64_t` before insertion into the per-group
 `FlatHashSet`, so a single kernel file covers every type:
@@ -406,13 +406,16 @@ New files:
 - `kernels/count_distinct.pyx` + `.pxd` — single-agg and multi-agg variants:
   `count_distinct_accumulate` and `count_distinct_multi_accumulate`
 
-Key constraint: `_distinct_sets` and `_multi_distinct_sets` are currently Python
-lists of `FlatHashSet` Python Extension objects. The kernel cannot receive a
-`vector[FlatHashSet]` directly. Either pass a `FlatHashSet**` array built on the
-stack at dispatch time, or accept `list` at the kernel boundary and resolve
-`FlatHashSet` pointers inside the kernel before the per-row loop. Decide which
-approach at implementation time — the per-row loop itself is still `nogil`-safe
-once the set pointers are resolved.
+**FlatHashSet constraint resolution:** The `list` at the kernel boundary
+approach was chosen. The kernel accepts `list distinct_sets` (Python list of
+`FlatHashSet` extension objects), pre-resolves each to a raw
+`flat_hash_set<uint64_t, IdentityHash>*` pointer (into a malloc'd C array)
+before the per-row loop, then runs the per-row loop `nogil` using those raw
+C++ pointers. An inline C++ helper (`opteryx_cd::fhs_insert_new`) wraps
+`flat_hash_set::insert(v).second` to avoid materialising `pair<iterator,bool>`
+in Cython. The engine dispatch handles the three type branches (Int64 direct
+cast, IntegerVector expand into a temp `uint64_t[]` buffer, and `morsel.hash()`
+for everything else) before calling the kernel.
 
 Done when the engine contains no inline COUNT(DISTINCT) loops.
 

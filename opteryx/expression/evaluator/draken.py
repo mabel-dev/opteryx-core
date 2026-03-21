@@ -177,7 +177,9 @@ def _coerce_timestamp(value) -> int:
         return int((value - _EPOCH_DATETIME).total_seconds() * 1_000_000)
     if isinstance(value, datetime.date):
         return int(
-            (datetime.datetime(value.year, value.month, value.day) - _EPOCH_DATETIME).total_seconds()
+            (
+                datetime.datetime(value.year, value.month, value.day) - _EPOCH_DATETIME
+            ).total_seconds()
             * 1_000_000
         )
     if value.__class__.__name__ == "ArrowVector":
