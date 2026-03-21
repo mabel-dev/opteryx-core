@@ -780,6 +780,19 @@ extensions = [
         extra_compile_args=CPP_FLAGS,
     ),
     Extension(
+        "opteryx.compiled.morsel_ops.sort",
+        sources=[
+            "opteryx/compiled/morsel_ops/sort.pyx",
+            "src/cpp/simd_remap.cpp",
+            "src/cpp/cpu_features.cpp",
+            "src/cpp/simd_env.cpp",
+        ],
+        include_dirs=include_dirs,
+        language="c++",
+        extra_compile_args=CPP_FLAGS,
+        depends=["third_party/mabel/draken/core/buffers.h", "src/cpp/simd_remap.h"],
+    ),
+    Extension(
         "opteryx.compiled.table_ops.distinct",
         sources=["opteryx/compiled/table_ops/distinct.pyx", "src/cpp/intbuffer.cpp"],
         include_dirs=include_dirs,
