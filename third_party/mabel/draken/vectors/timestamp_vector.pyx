@@ -561,6 +561,44 @@ cdef class TimestampVector(Vector):
             simd_mix_hash(dst + i, scratch_ptr, <size_t> block)
             i += block
 
+    cdef bint c_hash_into(self, uint64_t* out, Py_ssize_t n) noexcept nogil:
+        cdef DrakenFixedBuffer* ptr = self.ptr
+        cdef int64_t* data = <int64_t*> ptr.data
+        cdef Py_ssize_t i, j, block
+        cdef uint64_t value
+        cdef bint has_nulls = ptr.null_bitmap != NULL
+
+        if self._has_const:
+            value = NULL_HASH if self._const_is_null else <uint64_t>self._const_value
+            for i in range(n):
+                out[i] = mix_hash(out[i], value)
+            return 0
+
+        if n == 0:
+            return 0
+
+        cdef uint64_t* as_uint64 = <uint64_t*> data
+        cdef uint64_t[TIMESTAMP_HASH_CHUNK] scratch
+        cdef uint64_t* scratch_ptr = <uint64_t*> scratch
+
+        if not has_nulls:
+            simd_mix_hash(out, as_uint64, <size_t> n)
+            return 0
+
+        i = 0
+        while i < n:
+            block = n - i
+            if block > TIMESTAMP_HASH_CHUNK:
+                block = TIMESTAMP_HASH_CHUNK
+            for j in range(block):
+                if _bitmap_is_valid(ptr.null_bitmap, i + j, self.null_bit_offset):
+                    scratch[j] = as_uint64[i + j]
+                else:
+                    scratch[j] = NULL_HASH
+            simd_mix_hash(out + i, scratch_ptr, <size_t> block)
+            i += block
+        return 0
+
     cdef void compress_into(self, int64_t[::1] out_buf, Py_ssize_t offset=0) except *:
         """Fast compress for TimestampVector: scale raw int64 values to microseconds."""
         cdef DrakenFixedBuffer* ptr = self.ptr

@@ -33,6 +33,7 @@ cdef class Vector:
     cdef void* dense_ptr(self) noexcept
     cdef uint8_t* null_bitmap_ptr(self) noexcept
     cdef void hash_into(self, uint64_t[::1] out_buf, Py_ssize_t offset=*) except *
+    cdef bint c_hash_into(self, uint64_t* out, Py_ssize_t n) noexcept nogil
     cpdef uint64_t[::1] hash(self)
 
     # Compress: convert each value to a signed 64-bit integer using the

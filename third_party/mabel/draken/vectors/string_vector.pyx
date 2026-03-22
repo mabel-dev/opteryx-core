@@ -1430,6 +1430,71 @@ cdef class StringVector(Vector):
                 simd_mix_hash(dst + i, scratch_ptr, <size_t> block)
                 i += block
 
+    cdef bint c_hash_into(self, uint64_t* out, Py_ssize_t n) noexcept nogil:
+        cdef DrakenVarBuffer* ptr = self.ptr
+        cdef uint64_t value
+        cdef Py_ssize_t i
+
+        if n == 0:
+            return 0
+
+        if self._has_const:
+            if self._const_is_null:
+                value = NULL_HASH
+            else:
+                if self._const_value.length <= 16:
+                    value = _short_string_hash(<const uint8_t*>self._const_value.data, <size_t>self._const_value.length)
+                else:
+                    value = XXH3_64bits(<const void*>self._const_value.data, <size_t>self._const_value.length)
+            for i in range(n):
+                out[i] = mix_hash(out[i], value)
+            return 0
+
+        cdef const uint8_t* data = <const uint8_t*> ptr.data
+        cdef int32_t* offsets = ptr.offsets
+        cdef uint8_t* nb_ptr = ptr.null_bitmap
+        cdef Py_ssize_t j, block
+        cdef uint8_t byte
+        cdef size_t str_len
+        cdef int32_t start, end
+        cdef uint64_t[STRING_HASH_CHUNK] scratch
+        cdef uint64_t* scratch_ptr = <uint64_t*> scratch
+        cdef Py_ssize_t idx
+
+        i = 0
+        while i < n:
+            block = n - i
+            if block > STRING_HASH_CHUNK:
+                block = STRING_HASH_CHUNK
+
+            if nb_ptr != NULL:
+                for j in range(block):
+                    idx = i + j
+                    byte = nb_ptr[idx >> 3]
+                    if ((byte >> (idx & 7)) & 1) == 0:
+                        scratch[j] = NULL_HASH
+                        continue
+                    start = offsets[idx]
+                    end = offsets[idx + 1]
+                    str_len = <size_t>(end - start)
+                    if str_len <= 16:
+                        scratch[j] = _short_string_hash(data + start, str_len)
+                    else:
+                        scratch[j] = XXH3_64bits(data + start, str_len)
+            else:
+                for j in range(block):
+                    start = offsets[i + j]
+                    end = offsets[i + j + 1]
+                    str_len = <size_t>(end - start)
+                    if str_len <= 16:
+                        scratch[j] = _short_string_hash(data + start, str_len)
+                    else:
+                        scratch[j] = XXH3_64bits(data + start, str_len)
+
+            simd_mix_hash(out + i, scratch_ptr, <size_t> block)
+            i += block
+        return 0
+
     cdef void compress_into(self, int64_t[::1] out_buf, Py_ssize_t offset=0) except *:
         """Fast compress for StringVector: pack first 7 bytes into big-endian int64."""
         cdef DrakenVarBuffer* ptr = self.ptr
