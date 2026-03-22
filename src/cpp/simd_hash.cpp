@@ -53,14 +53,15 @@ inline __m256i mullo_u64(__m256i a, __m256i b) {
 
 #if defined(__ARM_NEON) || defined(__ARM_NEON__)
 inline uint64x2_t mullo_u64(uint64x2_t a, uint64x2_t b) {
-    alignas(16) uint64_t a_vals[2];
-    alignas(16) uint64_t b_vals[2];
-    alignas(16) uint64_t res_vals[2];
-    vst1q_u64(a_vals, a);
-    vst1q_u64(b_vals, b);
-    res_vals[0] = a_vals[0] * b_vals[0];
-    res_vals[1] = a_vals[1] * b_vals[1];
-    return vld1q_u64(res_vals);
+    uint32x2_t a_lo = vmovn_u64(a);
+    uint32x2_t b_lo = vmovn_u64(b);
+    uint32x2_t a_hi = vshrn_n_u64(a, 32);
+    uint32x2_t b_hi = vshrn_n_u64(b, 32);
+    uint64x2_t lo_lo = vmull_u32(a_lo, b_lo);
+    uint64x2_t lo_hi = vmull_u32(a_lo, b_hi);
+    uint64x2_t hi_lo = vmull_u32(a_hi, b_lo);
+    uint64x2_t cross = vaddq_u64(lo_hi, hi_lo);
+    return vaddq_u64(lo_lo, vshlq_n_u64(cross, 32));
 }
 #endif
 
@@ -141,4 +142,68 @@ void simd_mix_hash(uint64_t* dest, const uint64_t* values, std::size_t count) {
     }, simd_mix_hash_scalar);
 
     return fn(dest, values, count);
+}
+
+// ---------------------------------------------------------------------------
+// simd_scale_date32: multiply int32 day values by 86400000000 -> int64 µs
+// ---------------------------------------------------------------------------
+
+static const int64_t DATE32_SCALE = 86400000000LL;
+
+static void simd_scale_date32_scalar(const int32_t* src, int64_t* dest, std::size_t count) {
+    for (std::size_t i = 0; i < count; ++i) {
+        dest[i] = static_cast<int64_t>(src[i]) * DATE32_SCALE;
+    }
+}
+
+#if defined(__AVX2__)
+static void simd_scale_date32_avx2(const int32_t* src, int64_t* dest, std::size_t count) {
+    // _mm256_cvtepi32_epi64 converts 4×int32 (__m128i) to 4×int64 (__m256i)
+    const __m256i scale_vec = _mm256_set1_epi64x(DATE32_SCALE);
+    std::size_t i = 0;
+    for (; i + 4 <= count; i += 4) {
+        __m128i src_vec = _mm_loadu_si128(reinterpret_cast<const __m128i*>(src + i));
+        __m256i widened = _mm256_cvtepi32_epi64(src_vec);
+        __m256i result  = mullo_u64(widened, scale_vec);
+        _mm256_storeu_si256(reinterpret_cast<__m256i*>(dest + i), result);
+    }
+    if (i < count) {
+        simd_scale_date32_scalar(src + i, dest + i, count - i);
+    }
+}
+#endif
+
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+static void simd_scale_date32_neon(const int32_t* src, int64_t* dest, std::size_t count) {
+    const uint64x2_t scale_vec = vdupq_n_u64(static_cast<uint64_t>(DATE32_SCALE));
+    std::size_t i = 0;
+    for (; i + 2 <= count; i += 2) {
+        int32x2_t src_vec = vld1_s32(src + i);
+        int64x2_t widened = vmovl_s32(src_vec);
+        uint64x2_t result = mullo_u64(vreinterpretq_u64_s64(widened), scale_vec);
+        vst1q_s64(dest + i, vreinterpretq_s64_u64(result));
+    }
+    if (i < count) {
+        simd_scale_date32_scalar(src + i, dest + i, count - i);
+    }
+}
+#endif
+
+void simd_scale_date32(const int32_t* src, int64_t* dest, std::size_t count) {
+    if (src == nullptr || dest == nullptr || count == 0) {
+        return;
+    }
+    using fn_t = void(*)(const int32_t*, int64_t*, std::size_t);
+    static std::atomic<fn_t> cache{nullptr};
+
+    fn_t fn = simd::select_dispatch<fn_t>(cache, {
+#if defined(__AVX2__)
+        { &cpu_supports_avx2, simd_scale_date32_avx2 },
+#endif
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+        { &cpu_supports_neon, simd_scale_date32_neon },
+#endif
+    }, simd_scale_date32_scalar);
+
+    return fn(src, dest, count);
 }
