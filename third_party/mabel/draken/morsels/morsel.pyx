@@ -916,7 +916,7 @@ cdef class Morsel:
         cdef Py_ssize_t ln = length
         cdef Vector vec
         cdef object new_vec
-        
+
         if ln <= 0 or start >= self.ptr.num_rows:
             # return an empty morsel of the same schema
             result = self._full_copy()
@@ -1420,19 +1420,19 @@ cdef class Morsel:
                 if n_indices == 0:
                     self._empty_inplace()
                     return
-                
+
                 indices_ptr = <int32_t*>PyMem_Malloc(n_indices * sizeof(int32_t))
                 if indices_ptr == NULL:
                     raise MemoryError()
                 free_indices = True
-                
+
                 # Fast copy/cast loop
                 for i in range(n_indices):
                     indices_ptr[i] = <int32_t>input_view_64[i]
-                    
+
                 indices_view = <int32_t[:n_indices]>indices_ptr
                 indices_ready = True
-                
+
             except (TypeError, ValueError):
                 pass
 
@@ -1890,11 +1890,9 @@ cdef class Morsel:
         should re-zero and fall back to the Python hash() path.
         """
         cdef int32_t i
-        cdef Vector vec
         cdef bint had_fallback = 0
 
         for i in range(n_cols):
-            vec = <Vector>self.ptr.columns[col_indices[i]]
-            if vec.c_hash_into(out, n_rows) != 0:
+            if (<Vector>self.ptr.columns[col_indices[i]]).c_hash_into(out, n_rows) != 0:
                 had_fallback = 1
         return had_fallback
