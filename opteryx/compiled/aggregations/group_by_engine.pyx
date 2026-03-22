@@ -117,6 +117,8 @@ from opteryx.compiled.aggregations.kernels.any_value_fixed cimport any_value_fix
 from opteryx.compiled.aggregations.kernels.any_value_fixed cimport any_value_fixed_multi_accumulate
 from opteryx.compiled.aggregations.kernels.any_value_fixed cimport any_value_fixed_integer_accumulate
 from opteryx.compiled.aggregations.kernels.any_value_fixed cimport any_value_fixed_integer_multi_accumulate
+from opteryx.compiled.aggregations.kernels.any_value_var cimport any_value_var_accumulate
+from opteryx.compiled.aggregations.kernels.any_value_var cimport any_value_var_multi_accumulate
 from opteryx.compiled.aggregations.kernels.min_max_var cimport minmax_var_accumulate
 from opteryx.compiled.aggregations.kernels.min_max_var cimport minmax_var_multi_accumulate
 # --- constant-key ingest (inlined from constant_keys.pyx) ---
@@ -2694,6 +2696,11 @@ cdef class CarcharGroupStateEngine:
         cdef Py_ssize_t data_len = 0
         cdef int64_t valid_flag
         cdef bytes const_bytes_obj
+        cdef const char** values_data = NULL
+        cdef Py_ssize_t* values_lens = NULL
+        cdef Py_ssize_t max_bytes = 0
+        cdef size_t cursor_start
+        cdef size_t arena_cursor
 
         if _vector_const_accessor(value_vector) != NULL:
             if _const_accessor_is_null(_vector_const_accessor(value_vector)):
@@ -2717,16 +2724,46 @@ cdef class CarcharGroupStateEngine:
             return
 
         if self._is_stringlike_vector(value_vector):
-            for row_idx in range(row_count):
-                if not _bitmap_is_valid(value_nulls, row_idx):
-                    continue
-                valid_flag = self._extract_stringlike_key(value_vector, row_idx, &data_ptr, &data_len)
-                if valid_flag == 0:
-                    continue
-                state_index = state_indices[row_idx]
-                if self._seen[state_index] == 0:
-                    self._store_object_state_bytes(state_index, data_ptr, data_len)
-                    self._seen[state_index] = 1
+            values_data = <const char**> malloc(row_count * sizeof(void*))
+            values_lens = <Py_ssize_t*> malloc(row_count * sizeof(Py_ssize_t))
+            if values_data == NULL or values_lens == NULL:
+                free(values_data)
+                free(values_lens)
+                raise MemoryError()
+            max_bytes = 0
+            try:
+                for row_idx in range(row_count):
+                    if not _bitmap_is_valid(value_nulls, row_idx):
+                        values_data[row_idx] = NULL
+                        values_lens[row_idx] = 0
+                        continue
+                    valid_flag = self._extract_stringlike_key(
+                        value_vector, row_idx, &values_data[row_idx], &values_lens[row_idx]
+                    )
+                    if valid_flag == 0:
+                        values_data[row_idx] = NULL
+                        values_lens[row_idx] = 0
+                    else:
+                        max_bytes += values_lens[row_idx]
+                cursor_start = self._object_state_bytes.size()
+                self._object_state_bytes.resize(cursor_start + max_bytes)
+                arena_cursor = cursor_start
+                any_value_var_accumulate(
+                    self._object_state_bytes.data(),
+                    self._object_state_starts.data(),
+                    self._object_state_lengths.data(),
+                    &arena_cursor,
+                    self._seen.data(),
+                    state_indices,
+                    values_data,
+                    values_lens,
+                    value_nulls,
+                    row_count,
+                )
+                self._object_state_bytes.resize(arena_cursor)
+            finally:
+                free(values_data)
+                free(values_lens)
             return
 
         for row_idx in range(row_count):
@@ -2759,6 +2796,11 @@ cdef class CarcharGroupStateEngine:
         cdef Py_ssize_t data_len = 0
         cdef int64_t valid_flag
         cdef bytes const_bytes_obj
+        cdef const char** mv_values_data = NULL
+        cdef Py_ssize_t* mv_values_lens = NULL
+        cdef Py_ssize_t mv_max_bytes = 0
+        cdef size_t mv_cursor_start
+        cdef size_t mv_arena_cursor
 
         if _vector_const_accessor(value_vector) != NULL:
             if _const_accessor_is_null(_vector_const_accessor(value_vector)):
@@ -2782,16 +2824,48 @@ cdef class CarcharGroupStateEngine:
             return
 
         if self._is_stringlike_vector(value_vector):
-            for row_idx in range(row_count):
-                if not _bitmap_is_valid(value_nulls, row_idx):
-                    continue
-                valid_flag = self._extract_stringlike_key(value_vector, row_idx, &data_ptr, &data_len)
-                if valid_flag == 0:
-                    continue
-                offset = self._multi_offset(state_indices[row_idx], agg_idx)
-                if self._multi_seen[offset] == 0:
-                    self._store_multi_object_state_bytes(offset, data_ptr, data_len)
-                    self._multi_seen[offset] = 1
+            mv_values_data = <const char**> malloc(row_count * sizeof(void*))
+            mv_values_lens = <Py_ssize_t*> malloc(row_count * sizeof(Py_ssize_t))
+            if mv_values_data == NULL or mv_values_lens == NULL:
+                free(mv_values_data)
+                free(mv_values_lens)
+                raise MemoryError()
+            mv_max_bytes = 0
+            try:
+                for row_idx in range(row_count):
+                    if not _bitmap_is_valid(value_nulls, row_idx):
+                        mv_values_data[row_idx] = NULL
+                        mv_values_lens[row_idx] = 0
+                        continue
+                    valid_flag = self._extract_stringlike_key(
+                        value_vector, row_idx, &mv_values_data[row_idx], &mv_values_lens[row_idx]
+                    )
+                    if valid_flag == 0:
+                        mv_values_data[row_idx] = NULL
+                        mv_values_lens[row_idx] = 0
+                    else:
+                        mv_max_bytes += mv_values_lens[row_idx]
+                mv_cursor_start = self._multi_object_state_bytes.size()
+                self._multi_object_state_bytes.resize(mv_cursor_start + mv_max_bytes)
+                mv_arena_cursor = mv_cursor_start
+                any_value_var_multi_accumulate(
+                    self._multi_object_state_bytes.data(),
+                    self._multi_object_state_starts.data(),
+                    self._multi_object_state_lengths.data(),
+                    &mv_arena_cursor,
+                    self._multi_seen.data(),
+                    state_indices,
+                    mv_values_data,
+                    mv_values_lens,
+                    value_nulls,
+                    row_count,
+                    self._multi_agg_count,
+                    agg_idx,
+                )
+                self._multi_object_state_bytes.resize(mv_arena_cursor)
+            finally:
+                free(mv_values_data)
+                free(mv_values_lens)
             return
 
         for row_idx in range(row_count):
