@@ -41,7 +41,8 @@ class DistinctNode(BasePlanNode):
         return "Distinction"
 
     def execute(self, morsel, **kwargs):
-        from opteryx.compiled.morsel_ops.distinct import CarcharSetWrapper, distinct
+        from opteryx.compiled.morsel_ops.distinct import CarcharSetWrapper
+        from opteryx.compiled.morsel_ops.distinct import distinct
 
         if self._hash_set is None:
             self._hash_set = CarcharSetWrapper()

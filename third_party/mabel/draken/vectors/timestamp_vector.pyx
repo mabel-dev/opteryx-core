@@ -63,7 +63,7 @@ cdef inline int _unit_code_from_str(str unit):
     else:
         return UNIT_S
 
-cdef inline int64_t _apply_unit_scale(int64_t v, int unit_code) nogil:
+cdef inline int64_t _apply_unit_scale(int64_t v, int unit_code):
     cdef int64_t factor
     if unit_code == UNIT_NS:
         return v // 1000
@@ -245,7 +245,7 @@ cdef class TimestampVector(Vector):
             if self._const_is_null:
                 return pa.nulls(self.ptr.length, type=pa.timestamp(self.timestamp_unit))
             return pa.array([self._const_value] * self.ptr.length, type=pa.timestamp(self.timestamp_unit))
-        
+
         cdef size_t nbytes = buf_length(self.ptr) * buf_itemsize(self.ptr)
         addr = <intptr_t> self.ptr.data
         data_buf = pa.foreign_buffer(addr, nbytes, base=self)
@@ -630,7 +630,7 @@ cdef TimestampVector from_arrow(object array):
             timestamp_unit = arrow_type.unit
     except:
         pass  # Use default if metadata unavailable
-    
+
     vec.timestamp_unit = timestamp_unit
     vec._unit_code = _unit_code_from_str(timestamp_unit)
 
@@ -672,19 +672,19 @@ cdef TimestampVector from_arrow(object array):
             n_bytes = (vec.ptr.length + 7) // 8
             new_bitmap = PyBytes_FromStringAndSize(NULL, n_bytes)
             dst_bitmap = <uint8_t*> PyBytes_AS_STRING(new_bitmap)
-            
+
             byte_offset = offset >> 3
             bit_offset = offset & 7
             src_bitmap = <uint8_t*> nb_addr + byte_offset
-            
+
             shift_down = bit_offset
             shift_up = 8 - bit_offset
-            
+
             for i in range(n_bytes):
                 val = src_bitmap[i] >> shift_down
                 val |= (src_bitmap[i+1] << shift_up)
                 dst_bitmap[i] = val
-                
+
             vec.ptr.null_bitmap = dst_bitmap
             vec._arrow_null_buf = new_bitmap # Keep alive
             vec.null_bit_offset = 0

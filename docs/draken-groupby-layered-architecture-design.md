@@ -577,7 +577,7 @@ Done when the engine contains no inline string `MIN/MAX` loops and
 `_ingest_object_minmax_for_states` / `_ingest_object_minmax_multi_for_states`
 are reduced to dispatch/adaptor logic around the kernel call.
 
-### Step D7.4 — Cleanup and boundary enforcement
+### Step D7.4 — Cleanup and boundary enforcement ✓ DONE
 
 After D7.1–D7.3 land, clean up the temporary glue introduced during the split.
 
@@ -587,6 +587,29 @@ Scope:
 - ensure the final layering matches the target architecture:
   engine dispatch at the top, kernels on the hot path, no accidental Python
   work inside per-row loops
+
+Implementation notes:
+- `any_value_var.pyx` is now wired into the engine's stringlike `ANY_VALUE`
+  path instead of sitting as unused scaffolding.
+- `any_value_var.pyx` / `.pxd` were brought into alignment with the same arena
+  contract used by `min_max_var.pyx`: `int32_t` start/length arrays and a
+  mutable `size_t` arena cursor passed from the engine.
+- `_ingest_any_value_var_for_states` and
+  `_ingest_any_value_var_multi_for_states` still own the constant-value shortcut
+  and Python-object fallback, but their stringlike hot path now delegates to
+  `any_value_var_accumulate` / `any_value_var_multi_accumulate`.
+- Dead placeholder dictionary variants were removed from `any_value_fixed.pyx`
+  and `any_value_fixed.pxd`:
+  `any_value_fixed_accumulate_from_dict` and
+  `any_value_fixed_multi_accumulate_from_dict`.
+- The corresponding dead exports/import surface for those placeholder functions
+  was removed so the engine/kernel boundary now reflects only live dispatches.
+- At this point the D7 split is coherent:
+  - D7.1: fixed-width `ANY_VALUE` through `any_value_fixed.pyx`
+  - D7.2: variable-width `ANY_VALUE` through `any_value_var.pyx`
+  - D7.3: string `MIN/MAX` through `min_max_var.pyx`
+  - object/constant fallbacks remain engine-owned where Python semantics are
+    still required, but the hot stringlike loops are kernelized.
 
 Done when the post-split code reads cleanly, with no temporary D7 scaffolding
 left behind.

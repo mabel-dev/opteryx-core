@@ -58,21 +58,6 @@ cdef void any_value_fixed_accumulate(
                 seen[sidx] = 1
 
 
-cdef void any_value_fixed_accumulate_from_dict(
-    int64_t* i64_state,
-    int64_t* seen,
-    const int64_t* state_indices,
-    DictAccessor* accessor,
-    Py_ssize_t row_count,
-) except *:
-    """
-    Placeholder for dictionary-backed vectors.
-
-    ANY_VALUE fixed-width is intended for direct fixed-width storage. The engine
-    can route dictionary-encoded values through the generic object/var path if
-    needed.
-    """
-    raise NotImplementedError("dictionary-backed ANY_VALUE fixed kernel is not implemented")
 
 
 cdef void any_value_fixed_multi_accumulate(
@@ -106,23 +91,6 @@ cdef void any_value_fixed_multi_accumulate(
                 multi_seen[offset] = 1
 
 
-cdef void any_value_fixed_multi_accumulate_from_dict(
-    int64_t* multi_i64_state,
-    int64_t* multi_seen,
-    const int64_t* state_indices,
-    DictAccessor* accessor,
-    Py_ssize_t row_count,
-    Py_ssize_t multi_agg_count,
-    Py_ssize_t agg_idx,
-) except *:
-    """
-    Placeholder for dictionary-backed vectors.
-
-    ANY_VALUE fixed-width is intended for direct fixed-width storage. The engine
-    can route dictionary-encoded values through the generic object/var path if
-    needed.
-    """
-    raise NotImplementedError("dictionary-backed ANY_VALUE fixed kernel is not implemented")
 
 
 cdef void any_value_fixed_integer_accumulate(
