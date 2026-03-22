@@ -66,7 +66,7 @@ from opteryx.compiled.aggregations.vector_readers cimport (
 # They are declared here for external callers that mutate the codes buffer
 # across many morsels.  morsel_sort itself uses scalar scatter-to-uint64.
 
-cdef extern from "src/cpp/simd_remap.h" nogil:
+cdef extern from "simd_remap.h" nogil:
     void simd_remap_u8(uint8_t* codes, size_t n, const uint8_t* remap_table)
     void simd_remap_u16(uint16_t* codes, size_t n, const uint16_t* remap_table)
     void simd_remap_u32(uint32_t* codes, size_t n, const uint32_t* remap_table)
@@ -455,6 +455,7 @@ def morsel_sort(morsel, list column_names, list ascending):
     cdef int n_passes
     cdef uint32_t* remap = NULL
     cdef uint64_t flip
+    cdef unsigned int[::1] rv
 
     try:
         # LSD: iterate columns from least-significant to most-significant.
@@ -556,7 +557,7 @@ def morsel_sort(morsel, list column_names, list ascending):
 
         # Copy perm into a Python array and return.
         result = array("I", bytes(n * sizeof(uint32_t)))
-        cdef unsigned int[::1] rv = result
+        rv = result
         memcpy(&rv[0], perm_buf, n * sizeof(uint32_t))
         return result
 
