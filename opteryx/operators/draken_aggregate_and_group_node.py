@@ -397,12 +397,27 @@ class DrakenAggregateAndGroupNode(BasePlanNode):
 
         ingest_start = time.monotonic_ns()
         pre_engine_snapshot = self._engine_reading_snapshot()
-        if self._needs_expression_eval:
-            draken = self._prepare_groupby_chunk(draken)
-        if self._required_columns:
-            draken = draken.select(self._required_columns)
 
-        self._groupby_engine.ingest(draken)
+        if isinstance(draken, Morsel):
+            if draken.num_rows > 0:
+                if self._needs_expression_eval:
+                    draken = self._prepare_groupby_chunk(draken)
+                if self._required_columns:
+                    draken = draken.select(self._required_columns)
+                self._groupby_engine.ingest(draken)
+            self._accumulate_engine_reading_delta(pre_engine_snapshot)
+            self.readings["time_groupby_ingest"] += time.monotonic_ns() - ingest_start
+            yield EMPTY
+            return
+
+        for chunk in draken:
+            if chunk is None or chunk is EOS or chunk.num_rows == 0:
+                continue
+            if self._needs_expression_eval:
+                chunk = self._prepare_groupby_chunk(chunk)
+            if self._required_columns:
+                chunk = chunk.select(self._required_columns)
+            self._groupby_engine.ingest(chunk)
 
         self._accumulate_engine_reading_delta(pre_engine_snapshot)
         self.readings["time_groupby_ingest"] += time.monotonic_ns() - ingest_start
