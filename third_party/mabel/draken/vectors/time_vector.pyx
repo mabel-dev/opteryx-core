@@ -413,6 +413,58 @@ cdef class TimeVector(Vector):
 
                 dst[i] = mix_hash(dst[i], value)
 
+    cdef bint c_hash_into(self, uint64_t* out, Py_ssize_t n) noexcept nogil:
+        cdef DrakenFixedBuffer* ptr = self.ptr
+        cdef Py_ssize_t i
+        cdef uint64_t value
+        cdef uint8_t byte, bit
+        cdef int64_t* data64
+        cdef int32_t* data32
+        cdef bint has_nulls = ptr.null_bitmap != NULL
+        cdef Py_ssize_t block = 0
+        cdef Py_ssize_t j = 0
+        cdef uint64_t[TIME32_HASH_CHUNK] scratch32
+        cdef uint64_t* scratch32_ptr = <uint64_t*> scratch32
+
+        if self._has_const:
+            value = NULL_HASH if self._const_is_null else <uint64_t>self._const_value
+            for i in range(n):
+                out[i] = mix_hash(out[i], value)
+            return 0
+
+        if n == 0:
+            return 0
+
+        if self.is_time64:
+            data64 = <int64_t*> ptr.data
+            if not has_nulls:
+                simd_mix_hash(out, <uint64_t*> data64, <size_t> n)
+                return 0
+            for i in range(n):
+                byte = ptr.null_bitmap[i >> 3]
+                bit = (byte >> (i & 7)) & 1
+                value = <uint64_t> data64[i] if bit else NULL_HASH
+                out[i] = mix_hash(out[i], value)
+        else:
+            data32 = <int32_t*> ptr.data
+            if not has_nulls:
+                i = 0
+                while i < n:
+                    block = n - i
+                    if block > TIME32_HASH_CHUNK:
+                        block = TIME32_HASH_CHUNK
+                    for j in range(block):
+                        scratch32[j] = <uint64_t>(<int64_t> data32[i + j])
+                    simd_mix_hash(out + i, scratch32_ptr, <size_t> block)
+                    i += block
+                return 0
+            for i in range(n):
+                byte = ptr.null_bitmap[i >> 3]
+                bit = (byte >> (i & 7)) & 1
+                value = <uint64_t>(<int64_t> data32[i]) if bit else NULL_HASH
+                out[i] = mix_hash(out[i], value)
+        return 0
+
     cdef void compress_into(self, int64_t[::1] out_buf, Py_ssize_t offset=0) except *:
         """Fast compress for TimeVector: handle both time32 and time64."""
         cdef DrakenFixedBuffer* ptr = self.ptr

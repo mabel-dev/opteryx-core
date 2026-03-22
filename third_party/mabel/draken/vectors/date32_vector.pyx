@@ -510,6 +510,53 @@ cdef class Date32Vector(Vector):
             simd_mix_hash(dst + i, scratch_ptr, <size_t> block)
             i += block
 
+    cdef bint c_hash_into(self, uint64_t* out, Py_ssize_t n) noexcept nogil:
+        cdef DrakenFixedBuffer* ptr = self.ptr
+        cdef int32_t* data = <int32_t*> ptr.data
+        cdef Py_ssize_t i
+        cdef Py_ssize_t block = 0
+        cdef Py_ssize_t j = 0
+        cdef uint64_t value
+        cdef uint8_t* null_bitmap = ptr.null_bitmap
+        cdef bint has_nulls = null_bitmap != NULL
+        cdef uint64_t[DATE32_HASH_CHUNK] scratch
+        cdef uint64_t* scratch_ptr = <uint64_t*> scratch
+
+        if self._has_const:
+            value = NULL_HASH if self._const_is_null else <uint64_t><int64_t>self._const_value
+            for i in range(n):
+                out[i] = mix_hash(out[i], value)
+            return 0
+
+        if n == 0:
+            return 0
+
+        if not has_nulls:
+            i = 0
+            while i < n:
+                block = n - i
+                if block > DATE32_HASH_CHUNK:
+                    block = DATE32_HASH_CHUNK
+                for j in range(block):
+                    scratch[j] = <uint64_t>(<int64_t> data[i + j])
+                simd_mix_hash(out + i, scratch_ptr, <size_t> block)
+                i += block
+            return 0
+
+        i = 0
+        while i < n:
+            block = n - i
+            if block > DATE32_HASH_CHUNK:
+                block = DATE32_HASH_CHUNK
+            for j in range(block):
+                if (null_bitmap[(i + j) >> 3] >> ((i + j) & 7)) & 1:
+                    scratch[j] = <uint64_t>(<int64_t> data[i + j])
+                else:
+                    scratch[j] = NULL_HASH
+            simd_mix_hash(out + i, scratch_ptr, <size_t> block)
+            i += block
+        return 0
+
     cdef void compress_into(self, int64_t[::1] out_buf, Py_ssize_t offset=0) except *:
         """Fast compress for Date32Vector: scale int32 days to int64 microseconds (to match datetimes)."""
         cdef DrakenFixedBuffer* ptr = self.ptr

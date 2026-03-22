@@ -98,6 +98,10 @@ cdef class Vector:
 
         py_hash(out_buf, offset=offset)
 
+    cdef bint c_hash_into(self, uint64_t* out, Py_ssize_t n) noexcept nogil:
+        """Nogil hash variant. Returns 0 on success, 1 if GIL is required."""
+        return 1  # base class / unknown type; caller must fall back to hash_into
+
     cpdef uint64_t[::1] hash(self):
         """Create an output buffer, call `hash_into`, and return the buffer.
 

@@ -800,6 +800,38 @@ cdef class Int64Vector(Vector):
         else:
             simd_mix_hash(dst, as_uint64, <size_t>n)
 
+    cdef bint c_hash_into(self, uint64_t* out, Py_ssize_t n) noexcept nogil:
+        cdef DrakenFixedBuffer* ptr = self.ptr
+        cdef Py_ssize_t i
+        cdef uint64_t value
+        cdef uint8_t byte
+
+        if n == 0:
+            return 0
+
+        if self._has_const:
+            value = NULL_HASH if self._const_is_null else <uint64_t>self._const_value
+            for i in range(n):
+                out[i] = mix_hash(out[i], value)
+            return 0
+
+        cdef int64_t* data = <int64_t*> ptr.data
+        cdef uint64_t* as_uint64 = <uint64_t*> data
+        cdef uint8_t* null_bitmap = ptr.null_bitmap
+        cdef bint has_nulls = null_bitmap != NULL
+
+        if has_nulls:
+            for i in range(n):
+                byte = null_bitmap[i >> 3]
+                if byte & (1 << (i & 7)):
+                    value = <uint64_t> data[i]
+                else:
+                    value = NULL_HASH
+                out[i] = mix_hash(out[i], value)
+        else:
+            simd_mix_hash(out, as_uint64, <size_t>n)
+        return 0
+
     cdef void compress_into(self, int64_t[::1] out_buf, Py_ssize_t offset=0) except *:
         """Fast per-element compress for Int64Vector (no Python conversions).
 

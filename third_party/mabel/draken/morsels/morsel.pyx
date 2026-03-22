@@ -24,7 +24,7 @@ from cpython.mem cimport PyMem_Calloc
 from cpython.mem cimport PyMem_Free
 from cpython.mem cimport PyMem_Malloc
 from libc.stddef cimport size_t
-from libc.stdlib cimport malloc
+from libc.stdlib cimport malloc, free
 from libc.string cimport memcpy, memset, strlen
 from libc.stdint cimport int32_t, int64_t, uint8_t
 from libc.stdint cimport uint64_t
@@ -1836,3 +1836,65 @@ cdef class Morsel:
             vec.hash_into(out_view, 0)
 
         return <uint64_t[:row_count]> out_buf
+
+    cdef int32_t* _resolve_columns_to_indices(
+        self, object columns, int32_t* out_n_cols
+    ) except NULL:
+        """Resolve column names/None to a malloc'd int32 array of column indices.
+
+        Returns a heap-allocated array; caller must free() it.
+        Sets *out_n_cols to the number of entries.
+        Raises on unknown column name or MemoryError.
+        """
+        cdef int32_t n_cols
+        cdef int32_t* result
+        cdef int32_t i
+
+        if columns is None:
+            n_cols = <int32_t>self.ptr.num_columns
+            result = <int32_t*>malloc(<size_t>n_cols * sizeof(int32_t))
+            if result == NULL:
+                raise MemoryError()
+            for i in range(n_cols):
+                result[i] = i
+            out_n_cols[0] = n_cols
+            return result
+
+        if isinstance(columns, (str, bytes, int)):
+            columns = [columns]
+
+        n_cols = <int32_t>len(columns)
+        result = <int32_t*>malloc(<size_t>n_cols * sizeof(int32_t))
+        if result == NULL:
+            raise MemoryError()
+
+        for i, col in enumerate(columns):
+            result[i] = <int32_t>self._column_index_from_name(col)
+
+        out_n_cols[0] = n_cols
+        return result
+
+    cdef bint c_hash(
+        self,
+        uint64_t* out,
+        int32_t* col_indices,
+        int32_t n_cols,
+        Py_ssize_t n_rows,
+    ) noexcept nogil:
+        """Hash n_rows rows from the selected columns into out[], without the GIL.
+
+        out must be pre-zeroed (calloc).  col_indices must be pre-validated.
+        Returns 0 if all columns hashed successfully.
+        Returns 1 if any column could not hash without the GIL (e.g. ArrayVector);
+        in that case the buffer contains only partial results and the caller
+        should re-zero and fall back to the Python hash() path.
+        """
+        cdef int32_t i
+        cdef Vector vec
+        cdef bint had_fallback = 0
+
+        for i in range(n_cols):
+            vec = <Vector>self.ptr.columns[col_indices[i]]
+            if vec.c_hash_into(out, n_rows) != 0:
+                had_fallback = 1
+        return had_fallback
