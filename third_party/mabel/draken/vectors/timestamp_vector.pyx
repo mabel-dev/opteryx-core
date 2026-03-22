@@ -81,7 +81,7 @@ cdef inline int64_t _apply_unit_scale(int64_t v, int unit_code):
     return v * factor
 
 
-cdef inline bint _bitmap_is_valid(uint8_t* bitmap, Py_ssize_t idx, Py_ssize_t bit_offset):
+cdef inline bint _bitmap_is_valid(uint8_t* bitmap, Py_ssize_t idx, Py_ssize_t bit_offset) noexcept nogil:
     cdef Py_ssize_t bit_index = idx + bit_offset
     cdef uint8_t byte = bitmap[bit_index >> 3]
     return (byte >> (bit_index & 7)) & 1
