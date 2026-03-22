@@ -614,12 +614,22 @@ Implementation notes:
 Done when the post-split code reads cleanly, with no temporary D7 scaffolding
 left behind.
 
-### Step E — Thin the coordinator
+### Step E — Thin the coordinator ✓ DONE
 
-`DrakenAggregateAndGroupNode` should only: prepare morsels, evaluate
-expressions, call `ingest()` or `finalize_morsels()`, record operator timings.
-Remove any mechanics that belong in the engine. The coordinator should be
-readable end to end without reading engine internals.
+`DrakenAggregateAndGroupNode` now acts as a coordinator only: it prepares
+morsels, evaluates expressions, calls `ingest()` / `finalize_morsels()`, and
+records operator timings.
+
+Implementation notes:
+- required-column derivation was moved out of the constructor body into a
+  dedicated helper (`_build_required_columns`)
+- finalized morsel shaping (including removal of the implicit `COUNT(*)`
+  column for bare `GROUP BY`) was isolated in `_postprocess_finalized_morsel`
+- finalize metric accounting was isolated in `_record_finalize_metrics`
+- `_finalize_groupby()` now reads as orchestration rather than mixed orchestration
+  plus metric bookkeeping
+- no per-row logic lives in the coordinator; all hot-path aggregation mechanics
+  remain inside the engine and kernel layers
 
 Done when the coordinator contains no per-row logic and no engine-internal
 knowledge.

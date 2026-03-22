@@ -16,14 +16,11 @@ import time
 
 from orso.types import OrsoTypes
 
-from opteryx import EMPTY
-from opteryx import EOS
+from opteryx import EMPTY, EOS
 from opteryx.draken.morsels.morsel import Morsel
 from opteryx.draken.vectors.scalar_constructors import from_scalar as constant_from_scalar
-from opteryx.exceptions import InvalidFunctionParameterError
-from opteryx.exceptions import UnsupportedSyntaxError
-from opteryx.expression import NodeType
-from opteryx.expression import get_all_nodes_of_type
+from opteryx.exceptions import InvalidFunctionParameterError, UnsupportedSyntaxError
+from opteryx.expression import NodeType, get_all_nodes_of_type
 from opteryx.expression.evaluator import evaluate_and_append_draken
 from opteryx.models import QueryProperties
 from opteryx.operators.aggregate_helpers import extract_evaluations
@@ -145,25 +142,7 @@ class DrakenAggregateAndGroupNode(BasePlanNode):
 
         self._normalized_group_by_columns = normalize_group_by_columns(self.group_by_columns)
         self._normalized_aggregations = normalize_aggregations(self._aggregation_specs)
-        required_columns = list(self.group_by_columns)
-        # Use actual identifiers (base column names) instead of full expressions
-        # This handles cases like SUM((event ->> 'bytes_processed')::INTEGER) where
-        # we need to select just the 'event' column, not the full expression
-        required_columns.extend(
-            identifier for identifier in self.all_identifiers if identifier not in required_columns
-        )
-        # Also include evaluated expression identities so they don't get dropped by select()
-        for node in self.evaluatable_nodes:
-            identity = node.schema_column.identity
-            if identity not in required_columns:
-                required_columns.append(identity)
-        # Include group expression identities (for complex GROUP BY expressions)
-        for node in self.groups:
-            if node.node_type != NodeType.IDENTIFIER:
-                identity = node.schema_column.identity
-                if identity not in required_columns:
-                    required_columns.append(identity)
-        self._required_columns = list(dict.fromkeys(required_columns))
+        self._required_columns = self._build_required_columns()
 
         self._groupby_engine = create_groupby_engine(
             group_by_columns=self._normalized_group_by_columns,
@@ -217,6 +196,27 @@ class DrakenAggregateAndGroupNode(BasePlanNode):
                     )
                 )
         return specs
+
+    def _build_required_columns(self):
+        required_columns = list(self.group_by_columns)
+        # Use actual identifiers (base column names) instead of full expressions
+        # This handles cases like SUM((event ->> 'bytes_processed')::INTEGER) where
+        # we need to select just the 'event' column, not the full expression
+        required_columns.extend(
+            identifier for identifier in self.all_identifiers if identifier not in required_columns
+        )
+        # Also include evaluated expression identities so they don't get dropped by select()
+        for node in self.evaluatable_nodes:
+            identity = node.schema_column.identity
+            if identity not in required_columns:
+                required_columns.append(identity)
+        # Include group expression identities (for complex GROUP BY expressions)
+        for node in self.groups:
+            if node.node_type != NodeType.IDENTIFIER:
+                identity = node.schema_column.identity
+                if identity not in required_columns:
+                    required_columns.append(identity)
+        return list(dict.fromkeys(required_columns))
 
     @staticmethod
     def _extract_percentile_option(aggregator) -> float:
@@ -308,26 +308,25 @@ class DrakenAggregateAndGroupNode(BasePlanNode):
         finally:
             self.readings["time_group_by_evaluations"] += time.monotonic_ns() - eval_start
 
-    def _finalize_groupby(self):
-        pre_engine_snapshot = self._engine_reading_snapshot()
-        readings = getattr(self._groupby_engine, "readings", None) or {}
-        pre_backend_ns = readings.get("time_groupby_finalize_backend_ns", 0)
-        pre_rows_to_vectors_ns = readings.get("time_groupby_finalize_rows_to_vectors_ns", 0)
-        pre_morsel_build_ns = readings.get("time_groupby_finalize_morsel_build_ns", 0)
-        pre_rows_count = readings.get("groupby_finalize_rows_count", 0)
-        pre_chunks_emitted = readings.get("groupby_finalize_chunks_emitted", 0)
-        pre_fast_path_hits = readings.get("groupby_finalize_fast_path_hits", 0)
+    def _postprocess_finalized_morsel(self, result):
+        if self._implicit_count_added:
+            return result.select(result.column_names[1:])
+        return result
 
-        st = time.monotonic_ns()
-        emitted = 0
-        for result in self._groupby_engine.finalize_morsels(chunk_size=CHUNK_SIZE):
-            emitted += 1
-            # If we added an implicit COUNT(*) for GROUP BY with no aggregates,
-            # remove it from the output (it's the first column)
-            if self._implicit_count_added:
-                result = result.select(result.column_names[1:])
-            yield result
-        finalize_total_ns = time.monotonic_ns() - st
+    def _record_finalize_metrics(
+        self,
+        pre_engine_snapshot,
+        pre_backend_ns,
+        pre_rows_to_vectors_ns,
+        pre_morsel_build_ns,
+        pre_rows_count,
+        pre_chunks_emitted,
+        pre_fast_path_hits,
+        finalize_total_ns,
+        emitted,
+    ):
+        readings = getattr(self._groupby_engine, "readings", None) or {}
+
         self.readings["time_groupby_finalize"] += finalize_total_ns
         self.readings["groupby_output_morsels"] += emitted
 
@@ -356,6 +355,35 @@ class DrakenAggregateAndGroupNode(BasePlanNode):
             readings.get("groupby_finalize_fast_path_hits", 0) - pre_fast_path_hits
         )
         self._accumulate_engine_reading_delta(pre_engine_snapshot)
+
+    def _finalize_groupby(self):
+        pre_engine_snapshot = self._engine_reading_snapshot()
+        readings = getattr(self._groupby_engine, "readings", None) or {}
+        pre_backend_ns = readings.get("time_groupby_finalize_backend_ns", 0)
+        pre_rows_to_vectors_ns = readings.get("time_groupby_finalize_rows_to_vectors_ns", 0)
+        pre_morsel_build_ns = readings.get("time_groupby_finalize_morsel_build_ns", 0)
+        pre_rows_count = readings.get("groupby_finalize_rows_count", 0)
+        pre_chunks_emitted = readings.get("groupby_finalize_chunks_emitted", 0)
+        pre_fast_path_hits = readings.get("groupby_finalize_fast_path_hits", 0)
+
+        st = time.monotonic_ns()
+        emitted = 0
+        for result in self._groupby_engine.finalize_morsels(chunk_size=CHUNK_SIZE):
+            emitted += 1
+            yield self._postprocess_finalized_morsel(result)
+        finalize_total_ns = time.monotonic_ns() - st
+
+        self._record_finalize_metrics(
+            pre_engine_snapshot=pre_engine_snapshot,
+            pre_backend_ns=pre_backend_ns,
+            pre_rows_to_vectors_ns=pre_rows_to_vectors_ns,
+            pre_morsel_build_ns=pre_morsel_build_ns,
+            pre_rows_count=pre_rows_count,
+            pre_chunks_emitted=pre_chunks_emitted,
+            pre_fast_path_hits=pre_fast_path_hits,
+            finalize_total_ns=finalize_total_ns,
+            emitted=emitted,
+        )
 
     def execute(self, morsel, **kwargs):
         _ = kwargs
