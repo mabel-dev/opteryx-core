@@ -44,7 +44,7 @@ cdef int AGG_MIN = 4
 cdef int AGG_MAX = 5
 cdef int AGG_AVG = 6
 cdef int AGG_COUNT_DISTINCT = 7
-cdef int AGG_HASH_ONE = 8
+cdef int AGG_ANY_VALUE = 8
 
 cdef int VALUE_NONE = 0
 cdef int VALUE_INT64 = 1
