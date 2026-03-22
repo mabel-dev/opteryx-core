@@ -6,118 +6,162 @@
 # cython: infer_types=True
 
 """
-ANY_VALUE kernel for variable-width values.
+kernels/any_value_var.pyx — Variable-width ANY_VALUE accumulation kernels.
 
-This kernel keeps the first non-null value per state. For variable-width data,
-the caller is expected to provide pointers into arena/object storage and the
-kernel simply copies bytes into the provided state storage on the first hit.
+ANY_VALUE keeps the first non-null value seen per group state and ignores all
+subsequent rows for that state.
 
-Design intent:
-- single-aggregate path: state_bytes/state_starts/state_lengths + seen bitmap
-- multi-aggregate path: multi_state_bytes/multi_starts/multi_lengths + multi_seen
-- null rows are skipped
-- once a state has been set, subsequent rows are ignored
+The engine is responsible for the outer plumbing:
+  1. Extracting per-row string pointers/lengths from the value column
+     (via _extract_stringlike_key for StringVector / dict-string).
+  2. Pre-allocating enough space in the arena:
+       self._object_state_bytes.resize(current_size + max_bytes_needed)
+  3. Passing a mutable arena_cursor pointer; the kernel advances it as it
+     appends new values into the pre-allocated region.
+  4. Trimming the arena after the call:
+       self._object_state_bytes.resize(arena_cursor[0])
+
+The kernel never calls push_back or any Python function — the entire
+per-row loop is noexcept nogil.
+
+Engine state types:
+  - _object_state_starts  / _multi_object_state_starts  : vector[int32_t]
+  - _object_state_lengths / _multi_object_state_lengths : vector[int32_t]
+  - _seen                 / _multi_seen                 : vector[int64_t]
+
+All pointer arguments must remain valid for the duration of the call (no
+reallocation between pre-allocate and the call site).
 """
 
-from libc.stdint cimport int64_t, uint8_t
+from libc.stdint cimport int32_t, int64_t, uint8_t
 from libc.stddef cimport size_t
 from libc.string cimport memcpy
 
 from opteryx.compiled.aggregations.kernels.utils cimport _bitmap_is_valid
 
 
+# ---------------------------------------------------------------------------
+# Single-aggregate path
+# ---------------------------------------------------------------------------
+
 cdef void any_value_var_accumulate(
-    uint8_t* state_bytes,
-    int64_t* state_starts,
-    int64_t* state_lengths,
-    int64_t* seen,
-    const int64_t* state_indices,
-    const char** values_data,
-    const int64_t* values_lengths,
-    const uint8_t* value_nulls,
-    Py_ssize_t row_count,
+    uint8_t*          state_bytes,
+    int32_t*          state_starts,
+    int32_t*          state_lengths,
+    size_t*           arena_cursor,
+    int64_t*          seen,
+    const int64_t*    state_indices,
+    const char**      values_data,
+    const Py_ssize_t* values_lengths,
+    const uint8_t*    value_nulls,
+    Py_ssize_t        row_count,
 ) noexcept nogil:
     """
-    Keep the first non-null variable-width value for each state.
+    Accumulate ANY_VALUE for variable-width string values (single-agg path).
+
+    Keeps the first non-null value seen for each group state; all subsequent
+    rows for an already-set state are silently ignored.
 
     Parameters
     ----------
-    state_bytes:
-        Flat arena-backed byte buffer for stored state values.
-    state_starts / state_lengths:
-        Per-state offsets and lengths into state_bytes.
-    seen:
-        Per-state first-value flag. Once set, the state is left unchanged.
-    state_indices:
+    state_bytes
+        Pre-allocated arena buffer.  New bytes are written starting at
+        state_bytes[arena_cursor[0]], which is advanced after each write.
+    state_starts / state_lengths
+        Per-state offsets (int32) and byte lengths into state_bytes.
+    arena_cursor
+        Mutable pointer to the current write position in state_bytes.
+        The caller must have reserved at least sum(values_lengths[i] for unseen
+        states) bytes beyond the initial cursor value before calling.
+    seen
+        Per-state flag: 0 = no value stored yet, 1 = value is present.
+    state_indices
         Group-state index for each row.
-    values_data / values_lengths:
-        Row-wise pointers and lengths for the incoming variable-width values.
-    value_nulls:
-        Null bitmap for the input column. NULL means all rows are valid.
-    row_count:
-        Number of rows in this batch.
+    values_data / values_lengths
+        Per-row string pointers and lengths.  NULL pointer or length <= 0
+        means the row should be skipped.
+    value_nulls
+        Row null bitmap; NULL means all rows are non-null.
+    row_count
+        Number of rows in this morsel batch.
     """
-    cdef Py_ssize_t i
-    cdef int64_t sidx
+    cdef Py_ssize_t  i
+    cdef int64_t     sidx
     cdef const char* src
-    cdef int64_t src_len
+    cdef Py_ssize_t  src_len
 
     for i in range(row_count):
         if not _bitmap_is_valid(value_nulls, i):
+            continue
+
+        src     = values_data[i]
+        src_len = values_lengths[i]
+
+        if src == NULL or src_len <= 0:
             continue
 
         sidx = state_indices[i]
+
         if seen[sidx] != 0:
+            # State already has a value — first-wins, skip this row.
             continue
 
-        src = values_data[i]
-        src_len = values_lengths[i]
-        if src != NULL and src_len > 0:
-            memcpy(
-                <void*> (state_bytes + state_starts[sidx]),
-                <const void*> src,
-                <size_t> src_len,
-            )
-        state_lengths[sidx] = src_len
+        # First non-null value for this state: write to arena.
+        state_starts[sidx]  = <int32_t> arena_cursor[0]
+        state_lengths[sidx] = <int32_t> src_len
+        memcpy(state_bytes + arena_cursor[0], src, <size_t> src_len)
+        arena_cursor[0] += <size_t> src_len
         seen[sidx] = 1
 
 
+# ---------------------------------------------------------------------------
+# Multi-aggregate path
+# ---------------------------------------------------------------------------
+
 cdef void any_value_var_multi_accumulate(
-    uint8_t* multi_state_bytes,
-    int64_t* multi_state_starts,
-    int64_t* multi_state_lengths,
-    int64_t* multi_seen,
-    const int64_t* state_indices,
-    const char** values_data,
-    const int64_t* values_lengths,
-    const uint8_t* value_nulls,
-    Py_ssize_t row_count,
-    Py_ssize_t multi_agg_count,
-    Py_ssize_t agg_idx,
+    uint8_t*          state_bytes,
+    int32_t*          state_starts,
+    int32_t*          state_lengths,
+    size_t*           arena_cursor,
+    int64_t*          seen,
+    const int64_t*    state_indices,
+    const char**      values_data,
+    const Py_ssize_t* values_lengths,
+    const uint8_t*    value_nulls,
+    Py_ssize_t        row_count,
+    Py_ssize_t        multi_agg_count,
+    Py_ssize_t        agg_idx,
 ) noexcept nogil:
     """
-    Keep the first non-null variable-width value for each (state, aggregate) slot.
+    Accumulate ANY_VALUE for variable-width string values (multi-agg path).
+
+    The flat slot for (state, agg_idx) is:
+        offset = state_index * multi_agg_count + agg_idx
+
+    All pointer arguments carry the same semantics as the single-agg variant.
     """
-    cdef Py_ssize_t i
-    cdef Py_ssize_t offset
+    cdef Py_ssize_t  i
+    cdef Py_ssize_t  offset
     cdef const char* src
-    cdef int64_t src_len
+    cdef Py_ssize_t  src_len
 
     for i in range(row_count):
         if not _bitmap_is_valid(value_nulls, i):
             continue
 
-        offset = state_indices[i] * multi_agg_count + agg_idx
-        if multi_seen[offset] != 0:
+        src     = values_data[i]
+        src_len = values_lengths[i]
+
+        if src == NULL or src_len <= 0:
             continue
 
-        src = values_data[i]
-        src_len = values_lengths[i]
-        if src != NULL and src_len > 0:
-            memcpy(
-                <void*> (multi_state_bytes + multi_state_starts[offset]),
-                <const void*> src,
-                <size_t> src_len,
-            )
-        multi_state_lengths[offset] = src_len
-        multi_seen[offset] = 1
+        offset = state_indices[i] * multi_agg_count + agg_idx
+
+        if seen[offset] != 0:
+            continue
+
+        state_starts[offset]  = <int32_t> arena_cursor[0]
+        state_lengths[offset] = <int32_t> src_len
+        memcpy(state_bytes + arena_cursor[0], src, <size_t> src_len)
+        arena_cursor[0] += <size_t> src_len
+        seen[offset] = 1
