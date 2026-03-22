@@ -793,6 +793,18 @@ extensions = [
         depends=["third_party/mabel/draken/core/buffers.h", "src/cpp/simd_remap.h"],
     ),
     Extension(
+        "opteryx.compiled.morsel_ops.distinct",
+        sources=["opteryx/compiled/morsel_ops/distinct.pyx"],
+        include_dirs=include_dirs,
+        language="c++",
+        extra_compile_args=CPP_FLAGS,
+        depends=[
+            "third_party/mabel/carchar/carchar_set.hpp",
+            "third_party/mabel/carchar/carchar_common.hpp",
+            "third_party/mabel/carchar/carchar_simd.hpp",
+        ],
+    ),
+    Extension(
         "opteryx.compiled.table_ops.distinct",
         sources=["opteryx/compiled/table_ops/distinct.pyx", "src/cpp/intbuffer.cpp"],
         include_dirs=include_dirs,
