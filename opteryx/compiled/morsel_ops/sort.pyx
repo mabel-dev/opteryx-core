@@ -62,6 +62,9 @@ from opteryx.compiled.aggregations.vector_readers cimport (
 
 
 # ── SIMD remap ────────────────────────────────────────────────────────────────
+# These functions remap codes in-place (uint8→uint8, uint16→uint16).
+# They are declared here for external callers that mutate the codes buffer
+# across many morsels.  morsel_sort itself uses scalar scatter-to-uint64.
 
 cdef extern from "src/cpp/simd_remap.h" nogil:
     void simd_remap_u8(uint8_t* codes, size_t n, const uint8_t* remap_table)
@@ -69,7 +72,7 @@ cdef extern from "src/cpp/simd_remap.h" nogil:
     void simd_remap_u32(uint32_t* codes, size_t n, const uint32_t* remap_table)
 
 
-# ── Inline C++: memcmp tiebreak via std::stable_sort ─────────────────────────
+# ── Inline C++: memcmp tiebreak + std::sort helpers ──────────────────────────
 
 cdef extern from * nogil:
     """
@@ -94,6 +97,38 @@ cdef extern from * nogil:
                 return ascending ? (r < 0) : (r > 0);
             });
     }
+
+    // O(D log D) sort for numeric dictionary remap building.
+    // Sorts the order[] array by sort_keys[order[i]] ascending.
+    static void _sort_numeric_remap(
+        uint32_t* order,
+        uint32_t D,
+        const int64_t* sort_keys
+    ) {
+        std::sort(order, order + D,
+            [sort_keys](uint32_t a, uint32_t b) {
+                return sort_keys[a] < sort_keys[b];
+            });
+    }
+
+    // O(D log D) sort for string dictionary remap building.
+    // Sorts the order[] array by lexicographic value of string at order[i].
+    static void _sort_string_remap(
+        uint32_t* order,
+        uint32_t D,
+        const char* data,
+        const int32_t* offsets
+    ) {
+        std::sort(order, order + D,
+            [data, offsets](uint32_t a, uint32_t b) {
+                int32_t sa = offsets[a], la = offsets[a + 1] - sa;
+                int32_t sb = offsets[b], lb = offsets[b + 1] - sb;
+                int32_t cm = (la < lb) ? la : lb;
+                int r = cm ? std::memcmp(data + sa, data + sb, (size_t)cm) : 0;
+                if (r == 0) r = la - lb;
+                return r < 0;
+            });
+    }
     """
     void _do_tiebreak_sort(
         uint32_t* begin,
@@ -101,6 +136,19 @@ cdef extern from * nogil:
         const char* data,
         const int32_t* offsets,
         bint ascending,
+    ) nogil
+
+    void _sort_numeric_remap(
+        uint32_t* order,
+        uint32_t D,
+        const int64_t* sort_keys,
+    ) nogil
+
+    void _sort_string_remap(
+        uint32_t* order,
+        uint32_t D,
+        const char* data,
+        const int32_t* offsets,
     ) nogil
 
 
@@ -290,23 +338,14 @@ cdef uint32_t* _build_numeric_dict_remap(
         PyMem_Free(remap)
         return NULL
 
-    cdef Py_ssize_t i, j
+    cdef Py_ssize_t i
     for i in range(D):
         sort_keys[i] = _dict_value_as_int64(dv, acc.value_type, <uint32_t>i)
         order[i] = <uint32_t>i
 
-    # Insertion sort ascending: D is typically small (< 1000).
-    # Caller handles descending by XOR-ing keys with the all-ones mask.
-    cdef uint32_t key_order
-    cdef int64_t key_val
-    for i in range(1, D):
-        key_order = order[i]
-        key_val   = sort_keys[key_order]
-        j = i - 1
-        while j >= 0 and sort_keys[order[j]] > key_val:
-            order[j + 1] = order[j]
-            j -= 1
-        order[j + 1] = key_order
+    # O(D log D) sort via std::sort — correct for all dictionary sizes,
+    # including uint16 codes where D can reach 65536.
+    _sort_numeric_remap(order, <uint32_t>D, sort_keys)
 
     # Invert permutation: remap[old_code] = rank.
     for i in range(D):
@@ -347,35 +386,12 @@ cdef uint32_t* _build_string_dict_remap(
         PyMem_Free(remap)
         return NULL
 
-    cdef Py_ssize_t i, j
+    cdef Py_ssize_t i
     for i in range(D):
         order[i] = <uint32_t>i
 
-    # Insertion sort ascending by lexicographic string value.
-    # Caller handles descending sort by XOR-ing keys with the all-ones mask.
-    cdef uint32_t key_code
-    cdef int32_t sa, la, sb, lb, cm, cmp_result
-    for i in range(1, D):
-        key_code = order[i]
-        sa = offsets[key_code]
-        la = offsets[key_code + 1] - sa
-
-        j = i - 1
-        while j >= 0:
-            sb = offsets[order[j]]
-            lb = offsets[order[j] + 1] - sb
-            cm = la if la < lb else lb
-            if cm > 0:
-                cmp_result = memcmp(data + sa, data + sb, <size_t>cm)
-            else:
-                cmp_result = 0
-            if cmp_result == 0:
-                cmp_result = la - lb
-            if cmp_result < 0:
-                break
-            order[j + 1] = order[j]
-            j -= 1
-        order[j + 1] = key_code
+    # O(D log D) lexicographic sort via std::sort — correct for all sizes.
+    _sort_string_remap(order, <uint32_t>D, data, offsets)
 
     # Invert permutation: remap[old_code] = rank.
     for i in range(D):
@@ -415,18 +431,21 @@ def morsel_sort(morsel, list column_names, list ascending):
     if n == 0:
         return array("I")
 
+    # Allocate all three C buffers once; reuse keys across every column.
+    # perm and tmp swap roles each radix pass; keys is overwritten per column.
     cdef uint32_t* perm_buf = <uint32_t*> PyMem_Malloc(n * sizeof(uint32_t))
     cdef uint32_t* tmp_buf  = <uint32_t*> PyMem_Malloc(n * sizeof(uint32_t))
-    if perm_buf == NULL or tmp_buf == NULL:
+    cdef uint64_t* keys     = <uint64_t*> PyMem_Malloc(n * sizeof(uint64_t))
+    if perm_buf == NULL or tmp_buf == NULL or keys == NULL:
         PyMem_Free(perm_buf)
         PyMem_Free(tmp_buf)
+        PyMem_Free(keys)
         raise MemoryError()
 
     cdef Py_ssize_t i
     for i in range(n):
         perm_buf[i] = <uint32_t>i
 
-    cdef uint64_t* keys = NULL
     cdef int64_t[::1] signed_mv
     cdef DictAccessor* acc
     cdef StringVector sv
@@ -446,17 +465,13 @@ def morsel_sort(morsel, list column_names, list ascending):
 
             vec = morsel.column(col_name)
 
-            keys = <uint64_t*> PyMem_Malloc(n * sizeof(uint64_t))
-            if keys == NULL:
-                raise MemoryError()
-
             acc = _vector_dict_accessor(vec)
 
             if acc != NULL:
                 # ── Dictionary-encoded: semantic ORDER BY via code remap ──────
-                # Build a remap[old_code] = semantic_rank table, then radix-
-                # sort on ranks.  This is ORDER BY-correct (rank 0 = smallest
-                # value) unlike raw code order which is insertion-ordered.
+                # Build a remap[old_code] = semantic_rank table (O(D log D)),
+                # then radix-sort on ranks.  This is ORDER BY-correct unlike
+                # raw code order which is insertion-ordered.
                 n_passes = acc.code_width
 
                 if acc.value_type == DRAKEN_STRING:
@@ -465,26 +480,36 @@ def morsel_sort(morsel, list column_names, list ascending):
                     remap = _build_numeric_dict_remap(acc)
 
                 if remap != NULL:
-                    # Fill uint64 keys from remapped ranks.  The remap table
-                    # is uint32[D] (D ≤ 65536 for u16, ≤ 256 for u8), so it
-                    # fits in L1/L2 cache — scalar lookup is fast enough.
+                    # Fill uint64 keys from remapped ranks, then radix sort.
+                    # Remap table fits in L1/L2 (≤256 entries for u8 codes,
+                    # ≤65536 for u16).  Release GIL: only raw C pointer work.
                     if n_passes == 1:
-                        for i in range(n):
-                            keys[i] = <uint64_t>remap[(<uint8_t*>acc.codes)[i]]
+                        with nogil:
+                            for i in range(n):
+                                keys[i] = <uint64_t>remap[(<uint8_t*>acc.codes)[i]]
+                            if not asc:
+                                flip = (<uint64_t>1 << (8 * n_passes)) - 1
+                                for i in range(n):
+                                    keys[i] ^= flip
+                            _radix_sort(perm_buf, tmp_buf, keys, n, n_passes)
                     elif n_passes == 2:
-                        for i in range(n):
-                            keys[i] = <uint64_t>remap[(<uint16_t*>acc.codes)[i]]
+                        with nogil:
+                            for i in range(n):
+                                keys[i] = <uint64_t>remap[(<uint16_t*>acc.codes)[i]]
+                            if not asc:
+                                flip = (<uint64_t>1 << (8 * n_passes)) - 1
+                                for i in range(n):
+                                    keys[i] ^= flip
+                            _radix_sort(perm_buf, tmp_buf, keys, n, n_passes)
                     else:  # n_passes == 4
-                        for i in range(n):
-                            keys[i] = <uint64_t>remap[(<uint32_t*>acc.codes)[i]]
-
-                    # Apply asc/desc XOR: for ascending, rank 0 is smallest
-                    # (no XOR needed); for descending, invert all bits within
-                    # the code_width so larger ranks sort first.
-                    if not asc:
-                        flip = (<uint64_t>1 << (8 * n_passes)) - 1
-                        for i in range(n):
-                            keys[i] ^= flip
+                        with nogil:
+                            for i in range(n):
+                                keys[i] = <uint64_t>remap[(<uint32_t*>acc.codes)[i]]
+                            if not asc:
+                                flip = (<uint64_t>1 << (8 * n_passes)) - 1
+                                for i in range(n):
+                                    keys[i] ^= flip
+                            _radix_sort(perm_buf, tmp_buf, keys, n, n_passes)
 
                     PyMem_Free(remap)
                     remap = NULL
@@ -497,8 +522,7 @@ def morsel_sort(morsel, list column_names, list ascending):
                     else:
                         for i in range(n):
                             keys[i] = <uint64_t>_dict_read_code(acc, i) ^ <uint64_t>0xFFFFFFFF
-
-                _radix_sort(perm_buf, tmp_buf, keys, n, n_passes)
+                    _radix_sort(perm_buf, tmp_buf, keys, n, n_passes)
 
             elif isinstance(vec, StringVector):
                 # ── String column ────────────────────────────────────────────
@@ -507,9 +531,10 @@ def morsel_sort(morsel, list column_names, list ascending):
                 # dense StringVectors need a memcmp pass for strings > 7 bytes.
                 sv = <StringVector>vec
                 signed_mv = sv.compress()
-                for i in range(n):
-                    keys[i] = <uint64_t>signed_mv[i] ^ key_xor
-                _radix_sort(perm_buf, tmp_buf, keys, n, 8)
+                with nogil:
+                    for i in range(n):
+                        keys[i] = <uint64_t>signed_mv[i] ^ key_xor
+                    _radix_sort(perm_buf, tmp_buf, keys, n, 8)
 
                 if not sv._has_const:
                     sv_ptr = sv.ptr
@@ -524,12 +549,10 @@ def morsel_sort(morsel, list column_names, list ascending):
                 # ── Numeric / timestamp / date / bool / other ────────────────
                 # compress_into returns a sortable signed int64 for all these.
                 signed_mv = vec.compress()
-                for i in range(n):
-                    keys[i] = <uint64_t>signed_mv[i] ^ key_xor
-                _radix_sort(perm_buf, tmp_buf, keys, n, 8)
-
-            PyMem_Free(keys)
-            keys = NULL
+                with nogil:
+                    for i in range(n):
+                        keys[i] = <uint64_t>signed_mv[i] ^ key_xor
+                    _radix_sort(perm_buf, tmp_buf, keys, n, 8)
 
         # Copy perm into a Python array and return.
         result = array("I", bytes(n * sizeof(uint32_t)))
@@ -540,5 +563,5 @@ def morsel_sort(morsel, list column_names, list ascending):
     finally:
         PyMem_Free(perm_buf)
         PyMem_Free(tmp_buf)
-        PyMem_Free(keys)    # NULL-safe
+        PyMem_Free(keys)
         PyMem_Free(remap)   # NULL-safe
