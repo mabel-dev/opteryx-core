@@ -8,15 +8,15 @@ Sort Node
 
 This is a SQL Query Execution Plan Node.
 
-This node orders a dataset
+This node orders a dataset using a permutation-based LSD radix sort over Draken
+morsels.  Dictionary-encoded columns are ORDER BY-correct (codes are remapped to
+value rank before sorting, with AVX2/NEON SIMD acceleration for uint8 codes).
 """
 
-import pyarrow as pa
 from orso.types import OrsoTypes
-from pyarrow import Table
-from pyarrow import concat_tables
 
 from opteryx import EOS
+from opteryx.compiled.morsel_ops.sort import morsel_sort
 from opteryx.exceptions import ColumnNotFoundError
 from opteryx.expression import NodeType
 from opteryx.expression import evaluate_and_append
@@ -24,17 +24,14 @@ from opteryx.models import QueryProperties
 
 from . import BasePlanNode
 
-_DATA_FORMAT = "arrow"
-
-
-CHUNK_SIZE = 65536
+_DATA_FORMAT = "arrow,draken"
 
 
 class SortNode(BasePlanNode):
     def __init__(self, properties: QueryProperties, **parameters):
         BasePlanNode.__init__(self, properties=properties, **parameters)
         self.order_by = parameters.get("order_by", [])
-        self.morsels = []
+        self._morsel = None
 
     @property
     def config(self):  # pragma: no cover
@@ -44,65 +41,52 @@ class SortNode(BasePlanNode):
     def name(self):  # pragma: no cover
         return "Sort"
 
-    def execute(self, morsel: Table, **kwargs) -> Table:
-        morsel = self.ensure_arrow_table(morsel)
+    def execute(self, morsel, **kwargs):
+        morsel = self.ensure_draken_morsel(morsel)
 
-        if morsel != EOS:
+        if morsel is not EOS:
             if morsel.num_rows > 0:
-                self.morsels.append(morsel)
+                if self._morsel is None:
+                    self._morsel = morsel
+                else:
+                    self._morsel.append(morsel)
             yield None
             return
 
-        if len(self.morsels) == 0:
+        if self._morsel is None:
             yield EOS
             return
 
-        table = concat_tables(self.morsels, promote_options="permissive")
-
-        mapped_order = []
+        column_names = []
+        ascending_flags = []
         evaluations = []
 
         for column, direction in self.order_by:
             if column.node_type == NodeType.LITERAL and column.type == OrsoTypes.INTEGER:
-                # we have an index rather than a column name, it's a natural
-                # number but the list of column names is zero-based, so we
-                # subtract one
-                column_name = table.column_names[int(column.value) - 1]
-                mapped_order.append(
-                    (
-                        column_name,
-                        direction,
-                    )
-                )
+                # ORDER BY <position> — natural number, 1-based
+                col_name = self._morsel.column_names[int(column.value) - 1]
+                column_names.append(col_name if isinstance(col_name, bytes) else col_name.encode())
             else:
                 if column.node_type != NodeType.IDENTIFIER:
                     evaluations.append(column)
                 try:
-                    mapped_order.append(
-                        (
-                            column.schema_column.identity,
-                            direction,
-                        )
+                    identity = column.schema_column.identity
+                    column_names.append(
+                        identity if isinstance(identity, bytes) else identity.encode()
                     )
                 except ColumnNotFoundError as cnfe:  # pragma: no cover
                     raise ColumnNotFoundError(
                         f"`ORDER BY` must reference columns as they appear in the `SELECT` clause. {cnfe}"
-                    )
+                    ) from cnfe
+
+            asc = not str(direction).upper().startswith("DESC")
+            ascending_flags.append(asc)
 
         if evaluations:
-            table = evaluate_and_append(evaluations, table)
+            self._morsel = evaluate_and_append(evaluations, self._morsel)
 
-        # Arrow cannot sort dictionary-encoded columns; decode any that appear in sort order
-        for col_name, _ in mapped_order:
-            col_idx = table.schema.get_field_index(col_name)
-            if col_idx >= 0 and pa.types.is_dictionary(table.schema.field(col_name).type):
-                decoded = table.column(col_name).cast(table.schema.field(col_name).type.value_type)
-                table = table.set_column(col_idx, col_name, decoded)
+        perm = morsel_sort(self._morsel, column_names, ascending_flags)
+        self._morsel.take(list(perm))
 
-        table = table.sort_by(mapped_order)
-
-        num_rows = table.num_rows
-        for start in range(0, num_rows, CHUNK_SIZE):
-            yield table.slice(start, min(CHUNK_SIZE, num_rows - start))
-
+        yield self._morsel
         yield EOS
