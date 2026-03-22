@@ -79,7 +79,7 @@ cdef void count_distinct_accumulate(
     for state_idx in range(n_states):
         if state_hashes[state_idx]:
             temp_hashes_view = numpy.array(state_hashes[state_idx], dtype=numpy.uint64)
-            new_count = (<CarcharSet> distinct_sets[state_idx]).insert_many(temp_hashes_view)
+            new_count = distinct_sets[state_idx].insert_many(temp_hashes_view)
             counts[state_idx] = counts[state_idx] + <int64_t> new_count
 
 
@@ -143,5 +143,5 @@ cdef void count_distinct_multi_accumulate(
         if state_hashes[state_idx]:
             offset = state_idx * multi_agg_count + agg_idx
             temp_hashes_view = numpy.array(state_hashes[state_idx], dtype=numpy.uint64)
-            new_count = (<CarcharSet> distinct_sets[offset]).insert_many(temp_hashes_view)
+            new_count = distinct_sets[offset].insert_many(temp_hashes_view)
             multi_counts[offset] = multi_counts[offset] + <int64_t> new_count

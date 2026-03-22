@@ -10,6 +10,9 @@ from __future__ import annotations
 from array import array
 import time
 import sys
+import numpy
+
+from opteryx.nanobind.carchar_native import CarcharSet
 
 from cpython.bytes cimport PyBytes_FromStringAndSize
 from libc.stddef cimport size_t
@@ -146,7 +149,7 @@ cdef void _ingest_constant_distinct(object self, Morsel morsel, object value_vec
                 temp_hashes.append(<uint64_t> value_i64_data[row_idx])
         if temp_hashes:
             value_hashes_view = numpy.array(temp_hashes, dtype=numpy.uint64)
-            (<CarcharSet> self._constant_distinct_set).insert_many(value_hashes_view)
+            self._constant_distinct_set.insert_many(value_hashes_view)
         return
 
     if isinstance(value_vector, IntegerVector):
@@ -158,12 +161,12 @@ cdef void _ingest_constant_distinct(object self, Morsel morsel, object value_vec
                 temp_hashes.append(<uint64_t> _read_integer_value(value_ptr, row_idx))
         if temp_hashes:
             value_hashes_view = numpy.array(temp_hashes, dtype=numpy.uint64)
-            (<CarcharSet> self._constant_distinct_set).insert_many(value_hashes_view)
+            self._constant_distinct_set.insert_many(value_hashes_view)
         return
 
     value_nulls = (<Vector> value_vector).null_bitmap_ptr()
     value_hashes = morsel.hash([self._value_column])
-    (<CarcharSet> self._constant_distinct_set).insert_many(value_hashes)
+    self._constant_distinct_set.insert_many(value_hashes)
 
 
 cdef void _ingest_constant_const_accessor(
@@ -466,10 +469,6 @@ cdef inline void record_constant_groupby_vector(object self, object vec) noexcep
         self._readings["draken_constant_groupby_output_vector_hits"] += 1
     else:
         self._readings["draken_constant_groupby_output_vector_fallbacks"] += 1
-    from opteryx.nanobind.carchar_native import CarcharSet
-
-
-# CarcharSet import removed - using CarcharSet for COUNT(DISTINCT) instead
 
 
 cdef extern from "carchar_index.hpp" namespace "opteryx::carchar":
@@ -6074,7 +6073,7 @@ cdef class CarcharGroupStateEngine:
                     [
                         0
                         if self._constant_distinct_set is None
-                        else <int64_t> (<CarcharSet> self._constant_distinct_set).size()
+                        else <int64_t> self._constant_distinct_set.size()
                     ],
                 )
             if self._value_kind == VALUE_OBJECT:
@@ -6233,7 +6232,7 @@ cdef class CarcharGroupStateEngine:
                 if self._constant_distinct_set is None:
                     agg_value = 0
                 else:
-                    agg_value = <int64_t> (<CarcharSet> self._constant_distinct_set).size()
+                    agg_value = <int64_t> self._constant_distinct_set.size()
             elif self._value_kind == VALUE_OBJECT and self._agg_mode in (AGG_MIN, AGG_MAX, AGG_ANY_VALUE):
                 if self._constant_seen == 0:
                     agg_value = None
