@@ -131,30 +131,39 @@ cdef void _ingest_constant_distinct(object self, Morsel morsel, object value_vec
     cdef uint64_t[::1] value_hashes
 
     if self._constant_distinct_set is None:
-        self._constant_distinct_set = FlatHashSet()
+        self._constant_distinct_set = CarcharSet()
+
+    cdef uint64_t[::1] value_hashes_view
+    cdef Py_ssize_t temp_row_idx
 
     if isinstance(value_vector, Int64Vector):
         value_ptr = (<Int64Vector> value_vector).ptr
         value_i64_data = <int64_t*> value_ptr.data
         value_nulls = <uint8_t*> value_ptr.null_bitmap
+        temp_hashes = []
         for row_idx in range(row_count):
-            if _bitmap_is_valid(value_nulls, row_idx) and (<FlatHashSet> self._constant_distinct_set).insert(<uint64_t> value_i64_data[row_idx]):
-                self._constant_count += 1
+            if _bitmap_is_valid(value_nulls, row_idx):
+                temp_hashes.append(<uint64_t> value_i64_data[row_idx])
+        if temp_hashes:
+            value_hashes_view = numpy.array(temp_hashes, dtype=numpy.uint64)
+            (<CarcharSet> self._constant_distinct_set).insert_many(value_hashes_view)
         return
 
     if isinstance(value_vector, IntegerVector):
         value_ptr = (<IntegerVector> value_vector).ptr
         value_nulls = <uint8_t*> value_ptr.null_bitmap
+        temp_hashes = []
         for row_idx in range(row_count):
-            if _bitmap_is_valid(value_nulls, row_idx) and (<FlatHashSet> self._constant_distinct_set).insert(<uint64_t> _read_integer_value(value_ptr, row_idx)):
-                self._constant_count += 1
+            if _bitmap_is_valid(value_nulls, row_idx):
+                temp_hashes.append(<uint64_t> _read_integer_value(value_ptr, row_idx))
+        if temp_hashes:
+            value_hashes_view = numpy.array(temp_hashes, dtype=numpy.uint64)
+            (<CarcharSet> self._constant_distinct_set).insert_many(value_hashes_view)
         return
 
     value_nulls = (<Vector> value_vector).null_bitmap_ptr()
     value_hashes = morsel.hash([self._value_column])
-    for row_idx in range(row_count):
-        if _bitmap_is_valid(value_nulls, row_idx) and (<FlatHashSet> self._constant_distinct_set).insert(value_hashes[row_idx]):
-            self._constant_count += 1
+    (<CarcharSet> self._constant_distinct_set).insert_many(value_hashes)
 
 
 cdef void _ingest_constant_const_accessor(
@@ -457,7 +466,10 @@ cdef inline void record_constant_groupby_vector(object self, object vec) noexcep
         self._readings["draken_constant_groupby_output_vector_hits"] += 1
     else:
         self._readings["draken_constant_groupby_output_vector_fallbacks"] += 1
-from opteryx.third_party.abseil.containers cimport FlatHashSet
+    from opteryx.nanobind.carchar_native import CarcharSet
+
+
+# CarcharSet import removed - using CarcharSet for COUNT(DISTINCT) instead
 
 
 cdef extern from "carchar_index.hpp" namespace "opteryx::carchar":
@@ -2298,7 +2310,7 @@ cdef class CarcharGroupStateEngine:
         self._object_state_starts.push_back(0)
         self._object_state_lengths.push_back(0)
         if self._agg_mode == AGG_COUNT_DISTINCT:
-            self._distinct_sets.append(FlatHashSet())
+            self._distinct_sets.append(CarcharSet())
         if self._multi_agg_count > 0:
             for agg_idx in range(self._multi_agg_count):
                 self._multi_counts.push_back(0)
@@ -2311,7 +2323,7 @@ cdef class CarcharGroupStateEngine:
                 self._multi_object_state_starts.push_back(0)
                 self._multi_object_state_lengths.push_back(0)
                 if self._multi_agg_modes[agg_idx] == AGG_COUNT_DISTINCT:
-                    self._multi_distinct_sets.append(FlatHashSet())
+                    self._multi_distinct_sets.append(CarcharSet())
                 else:
                     self._multi_distinct_sets.append(None)
         else:
@@ -2350,7 +2362,7 @@ cdef class CarcharGroupStateEngine:
         self._object_state_starts.push_back(0)
         self._object_state_lengths.push_back(0)
         if self._agg_mode == AGG_COUNT_DISTINCT:
-            self._distinct_sets.append(FlatHashSet())
+            self._distinct_sets.append(CarcharSet())
         if self._multi_agg_count > 0:
             for agg_idx in range(self._multi_agg_count):
                 self._multi_counts.push_back(0)
@@ -2363,7 +2375,7 @@ cdef class CarcharGroupStateEngine:
                 self._multi_object_state_starts.push_back(0)
                 self._multi_object_state_lengths.push_back(0)
                 if self._multi_agg_modes[agg_idx] == AGG_COUNT_DISTINCT:
-                    self._multi_distinct_sets.append(FlatHashSet())
+                    self._multi_distinct_sets.append(CarcharSet())
                 else:
                     self._multi_distinct_sets.append(None)
         else:
@@ -2405,7 +2417,7 @@ cdef class CarcharGroupStateEngine:
         self._object_state_starts.push_back(0)
         self._object_state_lengths.push_back(0)
         if self._agg_mode == AGG_COUNT_DISTINCT:
-            self._distinct_sets.append(FlatHashSet())
+            self._distinct_sets.append(CarcharSet())
         if self._multi_agg_count > 0:
             for agg_idx in range(self._multi_agg_count):
                 self._multi_counts.push_back(0)
@@ -2418,7 +2430,7 @@ cdef class CarcharGroupStateEngine:
                 self._multi_object_state_starts.push_back(0)
                 self._multi_object_state_lengths.push_back(0)
                 if self._multi_agg_modes[agg_idx] == AGG_COUNT_DISTINCT:
-                    self._multi_distinct_sets.append(FlatHashSet())
+                    self._multi_distinct_sets.append(CarcharSet())
                 else:
                     self._multi_distinct_sets.append(None)
         else:
@@ -2459,7 +2471,7 @@ cdef class CarcharGroupStateEngine:
         self._object_state_starts.push_back(0)
         self._object_state_lengths.push_back(0)
         if self._agg_mode == AGG_COUNT_DISTINCT:
-            self._distinct_sets.append(FlatHashSet())
+            self._distinct_sets.append(CarcharSet())
         if self._multi_agg_count > 0:
             for agg_idx in range(self._multi_agg_count):
                 self._multi_counts.push_back(0)
@@ -2472,7 +2484,7 @@ cdef class CarcharGroupStateEngine:
                 self._multi_object_state_starts.push_back(0)
                 self._multi_object_state_lengths.push_back(0)
                 if self._multi_agg_modes[agg_idx] == AGG_COUNT_DISTINCT:
-                    self._multi_distinct_sets.append(FlatHashSet())
+                    self._multi_distinct_sets.append(CarcharSet())
                 else:
                     self._multi_distinct_sets.append(None)
         else:
@@ -6054,8 +6066,17 @@ cdef class CarcharGroupStateEngine:
             if self._constant_key_valid == 0 or not isinstance(self._constant_key_scalar, int):
                 return None
             keys = array("q", [<int64_t> self._constant_key_scalar])
-            if self._agg_mode in (AGG_COUNT_STAR, AGG_COUNT_VALUE, AGG_COUNT_DISTINCT):
+            if self._agg_mode in (AGG_COUNT_STAR, AGG_COUNT_VALUE):
                 return keys, array("q", [self._constant_count])
+            if self._agg_mode == AGG_COUNT_DISTINCT:
+                return keys, array(
+                    "q",
+                    [
+                        0
+                        if self._constant_distinct_set is None
+                        else <int64_t> (<CarcharSet> self._constant_distinct_set).size()
+                    ],
+                )
             if self._value_kind == VALUE_OBJECT:
                 return None
             if self._agg_mode in (AGG_SUM, AGG_MIN, AGG_MAX):
@@ -6208,6 +6229,11 @@ cdef class CarcharGroupStateEngine:
             record_finalize_rows_count(self, 1)
             if self._agg_mode == AGG_COUNT_STAR or self._agg_mode == AGG_COUNT_VALUE:
                 agg_value = self._constant_count
+            elif self._agg_mode == AGG_COUNT_DISTINCT:
+                if self._constant_distinct_set is None:
+                    agg_value = 0
+                else:
+                    agg_value = <int64_t> (<CarcharSet> self._constant_distinct_set).size()
             elif self._value_kind == VALUE_OBJECT and self._agg_mode in (AGG_MIN, AGG_MAX, AGG_ANY_VALUE):
                 if self._constant_seen == 0:
                     agg_value = None

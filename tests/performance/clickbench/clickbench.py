@@ -1,6 +1,7 @@
 import os
-import pytest
 import sys
+
+import pytest
 
 os.environ.pop("OPTERYX_DEBUG", None)
 os.environ["FEATURE_USE_DRAKEN_AGGREGATOR"] = "1"
@@ -65,12 +66,12 @@ STATEMENTS = [
 
 
 @pytest.mark.parametrize("statement, exception", STATEMENTS)
-def test_sql_battery(statement:str, exception: Optional[Exception]):
+def test_sql_battery(statement: str, exception: Optional[Exception]):
     """
     Test an battery of statements
     """
 
-    from opteryx.exceptions import UnsupportedSyntaxError, MissingSqlStatement
+    from opteryx.exceptions import MissingSqlStatement, UnsupportedSyntaxError
 
     session = None
     try:
@@ -78,9 +79,9 @@ def test_sql_battery(statement:str, exception: Optional[Exception]):
         session = opteryx.session()
         for _ in session.execute_to_morsels(statement):
             pass
-        assert (
-            exception is None
-        ), f"Exception {exception} not raised but expected\n{format_sql(statement)}"
+        assert exception is None, (
+            f"Exception {exception} not raised but expected\n{format_sql(statement)}"
+        )
     except AssertionError as error:
         raise error
     except UnsupportedSyntaxError:
@@ -110,25 +111,35 @@ if __name__ == "__main__":  # pragma: no cover
     from tests import trunc_printable
 
     parser = argparse.ArgumentParser(description="ClickBench Performance Test")
-    parser.add_argument('--warm', action='store_true', default=True, help='Run warm queries (3 iterations per query)')
-    parser.add_argument('--iterations', type=int, default=3, help='Number of iterations for warm queries (default: 3)')
+    parser.add_argument(
+        "--warm",
+        action="store_true",
+        default=True,
+        help="Run warm queries (3 iterations per query)",
+    )
+    parser.add_argument(
+        "--iterations",
+        type=int,
+        default=3,
+        help="Number of iterations for warm queries (default: 3)",
+    )
     args = parser.parse_args()
 
     start_suite = time.monotonic_ns()
     width = shutil.get_terminal_size((80, 20))[0] - 18
-    passed:int = 0
-    failed:int = 0
-    nl:str = "\n"
+    passed: int = 0
+    failed: int = 0
+    nl: str = "\n"
     failures = []
     warm_results = []
 
     if args.warm:
-        print(f"{'='*80}")
+        print(f"{'=' * 80}")
         print(f"CLICKBENCH WARM PERFORMANCE BENCHMARK")
         print(f"Version: {opteryx.__version__}")
         print(f"Iterations per query: {args.iterations}")
-        print(f"{'='*80}\n")
-        
+        print(f"{'=' * 80}\n")
+
         # Cold start
         print("Warming up (cold start)...")
         start = time.monotonic_ns()
@@ -144,23 +155,25 @@ if __name__ == "__main__":  # pragma: no cover
         finally:
             if warm_session is not None:
                 warm_session.close()
-        
-        print(f"{'Query':<8} {'Iteration 1':<16} {'Iteration 2':<16} {'Iteration 3':<16}         {'Avg':<13} {'Min':<13} {'Max':<13}")
+
+        print(
+            f"{'Query':<8} {'Iteration 1':<16} {'Iteration 2':<16} {'Iteration 3':<16}         {'Avg':<13} {'Min':<13} {'Max':<13}"
+        )
         print("-" * 102)
 
     print(f"RUNNING CLICKBENCH BATTERY OF {len(STATEMENTS)} QUERIES\n")
     for index, (statement, err) in enumerate(STATEMENTS):
-        #statement = statement.replace("testdata.clickbench_tiny", "(SELECT * FROM scratch.hits LIMIT 10_000_000)")
-        #statement = statement.replace("testdata.clickbench_tiny", "scratch.hits")
-        #statement = statement.replace("testdata.clickbench_tiny", "scratch.hits_single")
+        # statement = statement.replace("testdata.clickbench_tiny", "scratch.hits")
+        statement = statement.replace("testdata.clickbench_tiny", "scratch.hits_mid")
+        # statement = statement.replace("testdata.clickbench_tiny", "scratch.hits_single")
         printable = statement
         query_num = f"Q{(index + 1):02d}"
-        
+
         if args.warm:
             # Run multiple iterations for warm query testing
             times = []
             query_failed = False
-            
+
             for iteration in range(args.iterations):
                 gc.collect()
                 session = None
@@ -185,33 +198,37 @@ if __name__ == "__main__":  # pragma: no cover
                 finally:
                     if session is not None:
                         session.close()
-            
+
             if not query_failed and times:
                 avg_time = sum(times) / len(times)
                 min_time = min(times)
                 max_time = max(times)
-                
+
                 # Format iteration times
                 iter_strs = [f"{t:.2f}ms" for t in times]
                 while len(iter_strs) < 3:
                     iter_strs.append("-")
-                
+
                 status = ""
                 if min_time > 5000:
                     status = " ⚠️ VERY SLOW"
                 elif min_time > 2000:
                     status = " ⚠️ SLOW"
 
-                print(f"{query_num:<8} {iter_strs[0]:<16} {iter_strs[1]:<16} {iter_strs[2]:<16} "
-                      f"{avg_time:>9.2f}ms   {min_time:>9.2f}ms   {max_time:>9.2f}ms{status}")
-                
-                warm_results.append({
-                    'query': query_num,
-                    'avg': avg_time,
-                    'min': min_time,
-                    'max': max_time,
-                    'times': times
-                })
+                print(
+                    f"{query_num:<8} {iter_strs[0]:<16} {iter_strs[1]:<16} {iter_strs[2]:<16} "
+                    f"{avg_time:>9.2f}ms   {min_time:>9.2f}ms   {max_time:>9.2f}ms{status}"
+                )
+
+                warm_results.append(
+                    {
+                        "query": query_num,
+                        "avg": avg_time,
+                        "min": min_time,
+                        "max": max_time,
+                        "times": times,
+                    }
+                )
                 passed += 1
         else:
             # Original single-run mode
@@ -225,7 +242,7 @@ if __name__ == "__main__":  # pragma: no cover
                 start = time.monotonic_ns()
                 test_sql_battery(statement, err)
                 print(
-                    f"\033[38;2;26;185;67m{str(int((time.monotonic_ns() - start)/1e6)).rjust(4)}ms\033[0m ✅",
+                    f"\033[38;2;26;185;67m{str(int((time.monotonic_ns() - start) / 1e6)).rjust(4)}ms\033[0m ✅",
                     end="",
                 )
                 passed += 1
@@ -235,7 +252,9 @@ if __name__ == "__main__":  # pragma: no cover
                     print()
             except Exception as err:
                 failed += 1
-                print(f"\033[0;31m{str(int((time.monotonic_ns() - start)/1e6)).rjust(4)}ms ❌ {failed}\033[0m")
+                print(
+                    f"\033[0;31m{str(int((time.monotonic_ns() - start) / 1e6)).rjust(4)}ms ❌ {failed}\033[0m"
+                )
                 print(">", err)
                 failures.append((statement, err))
 
@@ -251,49 +270,51 @@ if __name__ == "__main__":  # pragma: no cover
         f"  \033[38;2;26;185;67m{passed} passed ({(passed * 100) // (passed + failed)}%)\033[0m\n"
         f"  \033[38;2;255;121;198m{failed} failed\033[0m"
     )
-    
+
     # Analysis for warm mode
     if args.warm and warm_results:
-        print(f"\n{'='*80}")
+        print(f"\n{'=' * 80}")
         print("PERFORMANCE ANALYSIS")
-        print(f"{'='*80}\n")
-        
+        print(f"{'=' * 80}\n")
+
         # Find slow queries
-        very_slow = [r for r in warm_results if r['avg'] > 1000]
-        slow = [r for r in warm_results if 500 < r['avg'] <= 1000]
-        moderate = [r for r in warm_results if 100 < r['avg'] <= 500]
-        
+        very_slow = [r for r in warm_results if r["avg"] > 1000]
+        slow = [r for r in warm_results if 500 < r["avg"] <= 1000]
+        moderate = [r for r in warm_results if 100 < r["avg"] <= 500]
+
         if very_slow:
             print(f"⚠️  VERY SLOW queries (>1000ms):")
-            for r in sorted(very_slow, key=lambda x: x['avg'], reverse=True):
+            for r in sorted(very_slow, key=lambda x: x["avg"], reverse=True):
                 print(f"  {r['query']}: {r['avg']:.2f}ms")
-        
+
         if slow:
             print(f"\n⚠️  Slow queries (>500ms):")
-            for r in sorted(slow, key=lambda x: x['avg'], reverse=True):
+            for r in sorted(slow, key=lambda x: x["avg"], reverse=True):
                 print(f"  {r['query']}: {r['avg']:.2f}ms")
-        
+
         if moderate:
             print(f"\n⚠️  Moderate queries (>100ms):")
-            for r in sorted(moderate, key=lambda x: x['avg'], reverse=True):
+            for r in sorted(moderate, key=lambda x: x["avg"], reverse=True):
                 print(f"  {r['query']}: {r['avg']:.2f}ms")
-        
+
         if not (very_slow or slow or moderate):
             print("✅ All queries completed in good time (<100ms)")
-        
+
         # Check variance
         high_variance = []
         for r in warm_results:
-            if r['min'] > 0 and r['max'] / r['min'] > 2.0:
-                high_variance.append((r['query'], r['min'], r['max'], r['max'] / r['min']))
-        
+            if r["min"] > 0 and r["max"] / r["min"] > 2.0:
+                high_variance.append((r["query"], r["min"], r["max"], r["max"] / r["min"]))
+
         if high_variance:
             print(f"\n⚠️  High variance queries (max/min > 2x):")
-            for query, min_t, max_t, ratio in sorted(high_variance, key=lambda x: x[3], reverse=True):
+            for query, min_t, max_t, ratio in sorted(
+                high_variance, key=lambda x: x[3], reverse=True
+            ):
                 print(f"  {query}: {min_t:.2f}ms - {max_t:.2f}ms (ratio: {ratio:.1f}x)")
-        
+
         # Overall stats
-        all_times = [r['avg'] for r in warm_results]
+        all_times = [r["avg"] for r in warm_results]
         if all_times:
             avg_overall = sum(all_times) / len(all_times)
             print(f"\nOverall average time: {avg_overall:.2f}ms")
