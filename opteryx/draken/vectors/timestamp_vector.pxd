@@ -14,6 +14,7 @@ cdef class TimestampVector(Vector):
     cdef DrakenFixedBuffer* ptr
     cdef bint owns_data
     cdef str timestamp_unit  # 'ns', 'us', 'ms', or 's'
+    cdef int _unit_code     # integer alias for timestamp_unit (0=ns,1=us,2=ms,3=s)
     cdef ConstAccessor _const_accessor
     cdef int64_t _const_value
     cdef bint _has_const
