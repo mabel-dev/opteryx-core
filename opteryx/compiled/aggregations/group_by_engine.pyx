@@ -113,6 +113,12 @@ from opteryx.compiled.aggregations.kernels.avg_int64 cimport avg_i64_multi_accum
 from opteryx.compiled.aggregations.kernels.avg_int64 cimport avg_integer_multi_accumulate
 from opteryx.compiled.aggregations.kernels.count_distinct cimport count_distinct_accumulate
 from opteryx.compiled.aggregations.kernels.count_distinct cimport count_distinct_multi_accumulate
+from opteryx.compiled.aggregations.kernels.any_value_fixed cimport any_value_fixed_accumulate
+from opteryx.compiled.aggregations.kernels.any_value_fixed cimport any_value_fixed_multi_accumulate
+from opteryx.compiled.aggregations.kernels.any_value_fixed cimport any_value_fixed_integer_accumulate
+from opteryx.compiled.aggregations.kernels.any_value_fixed cimport any_value_fixed_integer_multi_accumulate
+from opteryx.compiled.aggregations.kernels.min_max_var cimport minmax_var_accumulate
+from opteryx.compiled.aggregations.kernels.min_max_var cimport minmax_var_multi_accumulate
 # --- constant-key ingest (inlined from constant_keys.pyx) ---
 
 cdef void _ingest_constant_distinct(object self, Morsel morsel, object value_vector, Py_ssize_t row_count):
@@ -2669,6 +2675,136 @@ cdef class CarcharGroupStateEngine:
             state_indices, row_count, self._multi_agg_count, agg_idx,
         )
 
+    cdef void _ingest_any_value_var_for_states(
+        self,
+        Morsel morsel,
+        int64_t* state_indices,
+        Py_ssize_t row_count,
+    ) except *:
+        """
+        ANY_VALUE accumulation for variable-width (string/object) values.
+        Keeps the first non-null value seen per group state.
+        """
+        cdef object value_vector = morsel.column(self._value_column)
+        cdef uint8_t* value_nulls = self._value_null_bitmap(value_vector)
+        cdef Py_ssize_t row_idx
+        cdef int64_t state_index
+        cdef object value_obj
+        cdef const char* data_ptr = NULL
+        cdef Py_ssize_t data_len = 0
+        cdef int64_t valid_flag
+        cdef bytes const_bytes_obj
+
+        if _vector_const_accessor(value_vector) != NULL:
+            if _const_accessor_is_null(_vector_const_accessor(value_vector)):
+                return
+            value_obj = _const_accessor_scalar(_vector_const_accessor(value_vector))
+            if value_obj is None:
+                return
+            if isinstance(value_obj, bytes):
+                const_bytes_obj = <bytes> value_obj
+            elif isinstance(value_obj, str):
+                const_bytes_obj = (<str> value_obj).encode('utf-8')
+            else:
+                const_bytes_obj = str(value_obj).encode('utf-8')
+            data_ptr = <const char*> const_bytes_obj
+            data_len = len(const_bytes_obj)
+            for row_idx in range(row_count):
+                state_index = state_indices[row_idx]
+                if self._seen[state_index] == 0:
+                    self._store_object_state_bytes(state_index, data_ptr, data_len)
+                    self._seen[state_index] = 1
+            return
+
+        if self._is_stringlike_vector(value_vector):
+            for row_idx in range(row_count):
+                if not _bitmap_is_valid(value_nulls, row_idx):
+                    continue
+                valid_flag = self._extract_stringlike_key(value_vector, row_idx, &data_ptr, &data_len)
+                if valid_flag == 0:
+                    continue
+                state_index = state_indices[row_idx]
+                if self._seen[state_index] == 0:
+                    self._store_object_state_bytes(state_index, data_ptr, data_len)
+                    self._seen[state_index] = 1
+            return
+
+        for row_idx in range(row_count):
+            if not _bitmap_is_valid(value_nulls, row_idx):
+                continue
+            state_index = state_indices[row_idx]
+            value_obj = value_vector[row_idx]
+            if value_obj is None:
+                continue
+            if self._seen[state_index] == 0:
+                self._object_state[state_index] = value_obj
+                self._seen[state_index] = 1
+
+    cdef void _ingest_any_value_var_multi_for_states(
+        self,
+        Morsel morsel,
+        int64_t* state_indices,
+        Py_ssize_t row_count,
+        Py_ssize_t agg_idx,
+    ) except *:
+        """
+        ANY_VALUE accumulation for variable-width (string/object) values — multi-agg path.
+        """
+        cdef object value_vector = morsel.column(self._multi_value_columns[agg_idx])
+        cdef uint8_t* value_nulls = self._value_null_bitmap(value_vector)
+        cdef Py_ssize_t row_idx
+        cdef Py_ssize_t offset
+        cdef object value_obj
+        cdef const char* data_ptr = NULL
+        cdef Py_ssize_t data_len = 0
+        cdef int64_t valid_flag
+        cdef bytes const_bytes_obj
+
+        if _vector_const_accessor(value_vector) != NULL:
+            if _const_accessor_is_null(_vector_const_accessor(value_vector)):
+                return
+            value_obj = _const_accessor_scalar(_vector_const_accessor(value_vector))
+            if value_obj is None:
+                return
+            if isinstance(value_obj, bytes):
+                const_bytes_obj = <bytes> value_obj
+            elif isinstance(value_obj, str):
+                const_bytes_obj = (<str> value_obj).encode('utf-8')
+            else:
+                const_bytes_obj = str(value_obj).encode('utf-8')
+            data_ptr = <const char*> const_bytes_obj
+            data_len = len(const_bytes_obj)
+            for row_idx in range(row_count):
+                offset = self._multi_offset(state_indices[row_idx], agg_idx)
+                if self._multi_seen[offset] == 0:
+                    self._store_multi_object_state_bytes(offset, data_ptr, data_len)
+                    self._multi_seen[offset] = 1
+            return
+
+        if self._is_stringlike_vector(value_vector):
+            for row_idx in range(row_count):
+                if not _bitmap_is_valid(value_nulls, row_idx):
+                    continue
+                valid_flag = self._extract_stringlike_key(value_vector, row_idx, &data_ptr, &data_len)
+                if valid_flag == 0:
+                    continue
+                offset = self._multi_offset(state_indices[row_idx], agg_idx)
+                if self._multi_seen[offset] == 0:
+                    self._store_multi_object_state_bytes(offset, data_ptr, data_len)
+                    self._multi_seen[offset] = 1
+            return
+
+        for row_idx in range(row_count):
+            if not _bitmap_is_valid(value_nulls, row_idx):
+                continue
+            offset = self._multi_offset(state_indices[row_idx], agg_idx)
+            value_obj = value_vector[row_idx]
+            if value_obj is None:
+                continue
+            if self._multi_seen[offset] == 0:
+                self._multi_object_state[offset] = value_obj
+                self._multi_seen[offset] = 1
+
     cdef void _ingest_object_minmax_for_states(
         self,
         Morsel morsel,
@@ -2685,6 +2821,11 @@ cdef class CarcharGroupStateEngine:
         cdef int64_t valid_flag
         cdef int cmp
         cdef bytes const_bytes_obj
+        cdef const char** values_data = NULL
+        cdef Py_ssize_t* values_lens = NULL
+        cdef Py_ssize_t max_bytes = 0
+        cdef size_t cursor_start
+        cdef size_t arena_cursor
 
         if _vector_const_accessor(value_vector) != NULL:
             # All rows have the same constant value; initialise unseen states only.
@@ -2709,29 +2850,50 @@ cdef class CarcharGroupStateEngine:
             return
 
         if self._is_stringlike_vector(value_vector):
-            for row_idx in range(row_count):
-                if not _bitmap_is_valid(value_nulls, row_idx):
-                    continue
-                valid_flag = self._extract_stringlike_key(value_vector, row_idx, &data_ptr, &data_len)
-                if valid_flag == 0:
-                    continue
-                state_index = state_indices[row_idx]
-                if self._seen[state_index] == 0:
-                    self._store_object_state_bytes(state_index, data_ptr, data_len)
-                    self._seen[state_index] = 1
-                    continue
-                cmp = self._compare_bytes(
-                    data_ptr,
-                    data_len,
-                    &self._object_state_bytes[self._object_state_starts[state_index]],
-                    self._object_state_lengths[state_index],
+            values_data = <const char**> malloc(row_count * sizeof(void*))
+            values_lens = <Py_ssize_t*> malloc(row_count * sizeof(Py_ssize_t))
+            if values_data == NULL or values_lens == NULL:
+                free(values_data)
+                free(values_lens)
+                raise MemoryError()
+            max_bytes = 0
+            try:
+                for row_idx in range(row_count):
+                    if not _bitmap_is_valid(value_nulls, row_idx):
+                        values_data[row_idx] = NULL
+                        values_lens[row_idx] = 0
+                        continue
+                    valid_flag = self._extract_stringlike_key(
+                        value_vector, row_idx, &values_data[row_idx], &values_lens[row_idx]
+                    )
+                    if valid_flag == 0:
+                        values_data[row_idx] = NULL
+                        values_lens[row_idx] = 0
+                    else:
+                        max_bytes += values_lens[row_idx]
+                # Pre-allocate worst-case space in the arena, then let the
+                # kernel advance the cursor to the actual bytes written.
+                cursor_start = self._object_state_bytes.size()
+                self._object_state_bytes.resize(cursor_start + max_bytes)
+                arena_cursor = cursor_start
+                minmax_var_accumulate(
+                    self._object_state_bytes.data(),
+                    self._object_state_starts.data(),
+                    self._object_state_lengths.data(),
+                    &arena_cursor,
+                    self._seen.data(),
+                    state_indices,
+                    values_data,
+                    values_lens,
+                    value_nulls,
+                    row_count,
+                    self._agg_mode == AGG_MIN,
                 )
-                if (
-                    (self._agg_mode == AGG_MIN and cmp < 0)
-                    or (self._agg_mode == AGG_MAX and cmp > 0)
-                ):
-                    self._store_object_state_bytes(state_index, data_ptr, data_len)
-                self._seen[state_index] = 1
+                # Trim arena to bytes actually written.
+                self._object_state_bytes.resize(arena_cursor)
+            finally:
+                free(values_data)
+                free(values_lens)
             return
 
         for row_idx in range(row_count):
@@ -2747,10 +2909,6 @@ cdef class CarcharGroupStateEngine:
                 self._seen[state_index] = 1
             elif self._agg_mode == AGG_MAX:
                 if self._seen[state_index] == 0 or value_obj > self._object_state[state_index]:
-                    self._object_state[state_index] = value_obj
-                self._seen[state_index] = 1
-            elif self._agg_mode == AGG_ANY_VALUE:
-                if self._seen[state_index] == 0:
                     self._object_state[state_index] = value_obj
                 self._seen[state_index] = 1
 
@@ -2772,6 +2930,11 @@ cdef class CarcharGroupStateEngine:
         cdef int64_t valid_flag
         cdef int cmp
         cdef bytes const_bytes_obj
+        cdef const char** mv_values_data = NULL
+        cdef Py_ssize_t* mv_values_lens = NULL
+        cdef Py_ssize_t mv_max_bytes = 0
+        cdef size_t mv_cursor_start
+        cdef size_t mv_arena_cursor
 
         if _vector_const_accessor(value_vector) != NULL:
             if _const_accessor_is_null(_vector_const_accessor(value_vector)):
@@ -2795,29 +2958,49 @@ cdef class CarcharGroupStateEngine:
             return
 
         if self._is_stringlike_vector(value_vector):
-            for row_idx in range(row_count):
-                if not _bitmap_is_valid(value_nulls, row_idx):
-                    continue
-                valid_flag = self._extract_stringlike_key(value_vector, row_idx, &data_ptr, &data_len)
-                if valid_flag == 0:
-                    continue
-                offset = self._multi_offset(state_indices[row_idx], agg_idx)
-                if self._multi_seen[offset] == 0:
-                    self._store_multi_object_state_bytes(offset, data_ptr, data_len)
-                    self._multi_seen[offset] = 1
-                    continue
-                cmp = self._compare_bytes(
-                    data_ptr,
-                    data_len,
-                    &self._multi_object_state_bytes[self._multi_object_state_starts[offset]],
-                    self._multi_object_state_lengths[offset],
+            mv_values_data = <const char**> malloc(row_count * sizeof(void*))
+            mv_values_lens = <Py_ssize_t*> malloc(row_count * sizeof(Py_ssize_t))
+            if mv_values_data == NULL or mv_values_lens == NULL:
+                free(mv_values_data)
+                free(mv_values_lens)
+                raise MemoryError()
+            mv_max_bytes = 0
+            try:
+                for row_idx in range(row_count):
+                    if not _bitmap_is_valid(value_nulls, row_idx):
+                        mv_values_data[row_idx] = NULL
+                        mv_values_lens[row_idx] = 0
+                        continue
+                    valid_flag = self._extract_stringlike_key(
+                        value_vector, row_idx, &mv_values_data[row_idx], &mv_values_lens[row_idx]
+                    )
+                    if valid_flag == 0:
+                        mv_values_data[row_idx] = NULL
+                        mv_values_lens[row_idx] = 0
+                    else:
+                        mv_max_bytes += mv_values_lens[row_idx]
+                mv_cursor_start = self._multi_object_state_bytes.size()
+                self._multi_object_state_bytes.resize(mv_cursor_start + mv_max_bytes)
+                mv_arena_cursor = mv_cursor_start
+                minmax_var_multi_accumulate(
+                    self._multi_object_state_bytes.data(),
+                    self._multi_object_state_starts.data(),
+                    self._multi_object_state_lengths.data(),
+                    &mv_arena_cursor,
+                    self._multi_seen.data(),
+                    state_indices,
+                    mv_values_data,
+                    mv_values_lens,
+                    value_nulls,
+                    row_count,
+                    self._multi_agg_count,
+                    agg_idx,
+                    agg_mode == AGG_MIN,
                 )
-                if (
-                    (agg_mode == AGG_MIN and cmp < 0)
-                    or (agg_mode == AGG_MAX and cmp > 0)
-                ):
-                    self._store_multi_object_state_bytes(offset, data_ptr, data_len)
-                self._multi_seen[offset] = 1
+                self._multi_object_state_bytes.resize(mv_arena_cursor)
+            finally:
+                free(mv_values_data)
+                free(mv_values_lens)
             return
 
         for row_idx in range(row_count):
@@ -2920,7 +3103,25 @@ cdef class CarcharGroupStateEngine:
             return
 
         value_vector = morsel.column(self._value_column)
-        if self._value_kind == VALUE_OBJECT and self._agg_mode in (AGG_MIN, AGG_MAX, AGG_ANY_VALUE):
+        if self._value_kind == VALUE_OBJECT and self._agg_mode == AGG_ANY_VALUE:
+            state_indices = <int64_t*> malloc(row_count * sizeof(int64_t))
+            if state_indices == NULL and row_count > 0:
+                raise MemoryError()
+            try:
+                for row_idx in range(row_count):
+                    key_valid = _bitmap_is_valid(key_nulls, row_idx)
+                    key_valid_flag = 1 if key_valid else 0
+                    key_value = _read_integer_value(key_ptr, row_idx) if key_valid else 0
+                    state_indices[row_idx] = self._find_or_insert_state(
+                        row_hashes[row_idx], key_value, key_valid_flag
+                    )
+                self._ingest_any_value_var_for_states(morsel, state_indices, row_count)
+            finally:
+                if state_indices != NULL:
+                    free(state_indices)
+            return
+
+        if self._value_kind == VALUE_OBJECT and self._agg_mode in (AGG_MIN, AGG_MAX):
             state_indices = <int64_t*> malloc(row_count * sizeof(int64_t))
             if state_indices == NULL and row_count > 0:
                 raise MemoryError()
@@ -4231,7 +4432,26 @@ cdef class CarcharGroupStateEngine:
             return
 
         value_vector = morsel.column(self._value_column)
-        if self._value_kind == VALUE_OBJECT and self._agg_mode in (AGG_MIN, AGG_MAX, AGG_ANY_VALUE):
+        if self._value_kind == VALUE_OBJECT and self._agg_mode == AGG_ANY_VALUE:
+            state_indices = <int64_t*> malloc(row_count * sizeof(int64_t))
+            if state_indices == NULL and row_count > 0:
+                raise MemoryError()
+            try:
+                for row_idx in range(row_count):
+                    state_index = -1
+                    if self._index.lookup_fast(row_hashes[row_idx], state_index):
+                        state_indices[row_idx] = state_index
+                    else:
+                        state_indices[row_idx] = self._find_or_insert_multi_fixed_state(
+                            row_hashes[row_idx], key_ptrs, key_nulls, row_idx
+                        )
+                self._ingest_any_value_var_for_states(morsel, state_indices, row_count)
+            finally:
+                if state_indices != NULL:
+                    free(state_indices)
+            return
+
+        if self._value_kind == VALUE_OBJECT and self._agg_mode in (AGG_MIN, AGG_MAX):
             state_indices = <int64_t*> malloc(row_count * sizeof(int64_t))
             if state_indices == NULL and row_count > 0:
                 raise MemoryError()
@@ -4721,7 +4941,11 @@ cdef class CarcharGroupStateEngine:
                         )
                 return
 
-            if self._value_kind == VALUE_OBJECT and self._agg_mode in (AGG_MIN, AGG_MAX, AGG_ANY_VALUE):
+            if self._value_kind == VALUE_OBJECT and self._agg_mode == AGG_ANY_VALUE:
+                self._ingest_any_value_var_for_states(morsel, state_indices, row_count)
+                return
+
+            if self._value_kind == VALUE_OBJECT and self._agg_mode in (AGG_MIN, AGG_MAX):
                 self._ingest_object_minmax_for_states(morsel, state_indices, row_count)
                 return
 
@@ -4945,7 +5169,11 @@ cdef class CarcharGroupStateEngine:
                     )
                 return
 
-            if self._value_kind == VALUE_OBJECT and self._agg_mode in (AGG_MIN, AGG_MAX, AGG_ANY_VALUE):
+            if self._value_kind == VALUE_OBJECT and self._agg_mode == AGG_ANY_VALUE:
+                self._ingest_any_value_var_for_states(morsel, state_indices, row_count)
+                return
+
+            if self._value_kind == VALUE_OBJECT and self._agg_mode in (AGG_MIN, AGG_MAX):
                 self._ingest_object_minmax_for_states(morsel, state_indices, row_count)
                 return
 
@@ -5105,6 +5333,15 @@ cdef class CarcharGroupStateEngine:
                     continue
                 if (
                     self._multi_value_kinds[agg_idx] == VALUE_OBJECT
+                    and agg_mode == AGG_ANY_VALUE
+                ):
+                    self._ingest_any_value_var_multi_for_states(
+                        morsel, state_indices, row_count, agg_idx
+                    )
+                    continue
+
+                if (
+                    self._multi_value_kinds[agg_idx] == VALUE_OBJECT
                     and agg_mode in (AGG_MIN, AGG_MAX)
                 ):
                     self._ingest_object_minmax_multi_for_states(
@@ -5184,7 +5421,7 @@ cdef class CarcharGroupStateEngine:
                         )
                     continue
 
-                if agg_mode == AGG_ANY_VALUE:
+                if agg_mode == AGG_ANY_VALUE and self._multi_value_kinds[agg_idx] != VALUE_OBJECT:
                     value_vector = morsel.column(self._multi_value_columns[agg_idx])
                     if isinstance(value_vector, Float64Vector):
                         value_ptr = (<Float64Vector> value_vector).ptr
