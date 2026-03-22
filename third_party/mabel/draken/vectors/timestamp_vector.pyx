@@ -46,6 +46,40 @@ cdef int64_t MICROSECONDS_PER_SECOND = 1_000_000
 cdef int64_t MICROSECONDS_PER_MILLISECOND = 1_000
 cdef int64_t NULL_FLAG = <int64_t>-9223372036854775808
 
+# Integer unit codes — avoids Python str comparison in the compress hot loop
+DEF TIMESTAMP_HASH_CHUNK = 1024
+DEF UNIT_NS = 0
+DEF UNIT_US = 1
+DEF UNIT_MS = 2
+DEF UNIT_S  = 3
+
+cdef inline int _unit_code_from_str(str unit):
+    if unit == 'ns':
+        return UNIT_NS
+    elif unit == 'us':
+        return UNIT_US
+    elif unit == 'ms':
+        return UNIT_MS
+    else:
+        return UNIT_S
+
+cdef inline int64_t _apply_unit_scale(int64_t v, int unit_code) nogil:
+    cdef int64_t factor
+    if unit_code == UNIT_NS:
+        return v // 1000
+    elif unit_code == UNIT_US:
+        return v
+    elif unit_code == UNIT_MS:
+        factor = 1000
+    else:  # UNIT_S
+        factor = 1000000
+    # Overflow-safe multiply (clamp to int64 limits)
+    if v > 0 and v > 9223372036854775807 // factor:
+        return 9223372036854775807
+    if v < 0 and v < (-9223372036854775807 - 1) // factor:
+        return -9223372036854775808
+    return v * factor
+
 
 cdef inline bint _bitmap_is_valid(uint8_t* bitmap, Py_ssize_t idx, Py_ssize_t bit_offset):
     cdef Py_ssize_t bit_index = idx + bit_offset
@@ -90,6 +124,7 @@ cdef class TimestampVector(Vector):
         vec.ptr.null_bitmap = NULL
         vec.null_bit_offset = 0
         vec.timestamp_unit = str(timestamp_unit)
+        vec._unit_code = _unit_code_from_str(timestamp_unit)
         vec._has_const = True
         vec._const_is_null = bool(is_null)
         vec._const_value = 0 if is_null or value is None else <int64_t>int(value)
@@ -130,6 +165,7 @@ cdef class TimestampVector(Vector):
         self._arrow_null_buf = None
         self._arrow_data_buf = None
         self.timestamp_unit = 'us'  # Default to microseconds
+        self._unit_code = UNIT_US
 
         if wrap:
             self.ptr = NULL
@@ -487,7 +523,7 @@ cdef class TimestampVector(Vector):
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef int64_t* data = <int64_t*> ptr.data
         cdef Py_ssize_t n = ptr.length
-        cdef Py_ssize_t i
+        cdef Py_ssize_t i, j, block
         cdef uint64_t value
         cdef uint64_t* dst = &out_buf[offset]
         cdef bint has_nulls = ptr.null_bitmap != NULL
@@ -504,19 +540,26 @@ cdef class TimestampVector(Vector):
         if offset < 0 or offset + n > out_buf.shape[0]:
             raise ValueError("TimestampVector.hash_into: output buffer too small")
         cdef uint64_t* as_uint64 = <uint64_t*> data
+        cdef uint64_t[TIMESTAMP_HASH_CHUNK] scratch
+        cdef uint64_t* scratch_ptr = <uint64_t*> scratch
 
         # Use shared MIX_HASH_CONSTANT directly; no need to pass it in.
         if not has_nulls:
             simd_mix_hash(dst, as_uint64, <size_t> n)
             return
 
-        for i in range(n):
-            if not _bitmap_is_valid(ptr.null_bitmap, i, self.null_bit_offset):
-                value = NULL_HASH
-            else:
-                value = <uint64_t> data[i]
-
-            dst[i] = mix_hash(dst[i], value)
+        i = 0
+        while i < n:
+            block = n - i
+            if block > TIMESTAMP_HASH_CHUNK:
+                block = TIMESTAMP_HASH_CHUNK
+            for j in range(block):
+                if _bitmap_is_valid(ptr.null_bitmap, i + j, self.null_bit_offset):
+                    scratch[j] = as_uint64[i + j]
+                else:
+                    scratch[j] = NULL_HASH
+            simd_mix_hash(dst + i, scratch_ptr, <size_t> block)
+            i += block
 
     cdef void compress_into(self, int64_t[::1] out_buf, Py_ssize_t offset=0) except *:
         """Fast compress for TimestampVector: scale raw int64 values to microseconds."""
@@ -535,7 +578,7 @@ cdef class TimestampVector(Vector):
         if offset < 0 or offset + n > out_buf.shape[0]:
             raise ValueError("TimestampVector.compress: output buffer too small")
         if self._has_const:
-            value = 0 if self._const_is_null else scale_timestamp_to_micros(self._const_value, self.timestamp_unit)
+            value = 0 if self._const_is_null else _apply_unit_scale(self._const_value, self._unit_code)
             for i in range(n):
                 dst[i] = NULL_FLAG if self._const_is_null else value
             return
@@ -545,13 +588,13 @@ cdef class TimestampVector(Vector):
             for i in range(n):
                 if _bitmap_is_valid(null_bitmap, i, self.null_bit_offset):
                     value = src[i]
-                    dst[i] = scale_timestamp_to_micros(value, self.timestamp_unit)
+                    dst[i] = _apply_unit_scale(value, self._unit_code)
                 else:
                     dst[i] = NULL_FLAG
         else:
             for i in range(n):
                 value = src[i]
-                dst[i] = scale_timestamp_to_micros(value, self.timestamp_unit)
+                dst[i] = _apply_unit_scale(value, self._unit_code)
 
     def __str__(self):
         if self._has_const:
@@ -589,6 +632,7 @@ cdef TimestampVector from_arrow(object array):
         pass  # Use default if metadata unavailable
     
     vec.timestamp_unit = timestamp_unit
+    vec._unit_code = _unit_code_from_str(timestamp_unit)
 
     cdef object bufs = array.buffers()
     vec._arrow_null_buf = bufs[0]
@@ -667,6 +711,7 @@ cdef TimestampVector from_dict(
         raise ValueError("TimestampVector.from_dict requires a non-empty dictionary")
 
     vec.timestamp_unit = timestamp_unit
+    vec._unit_code = _unit_code_from_str(timestamp_unit)
     vec.ptr.null_bitmap = NULL
     vec.null_bit_offset = 0
     for i in range(row_count):
@@ -699,6 +744,7 @@ cdef TimestampVector from_dict_nullable(
         raise ValueError("row_validity length must match codes length")
 
     vec.timestamp_unit = timestamp_unit
+    vec._unit_code = _unit_code_from_str(timestamp_unit)
     nb_bytes = (row_count + 7) >> 3
     nb = <uint8_t*>malloc(nb_bytes)
     if nb == NULL:

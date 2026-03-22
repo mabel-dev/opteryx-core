@@ -22,6 +22,7 @@ from cpython.bytes cimport PyBytes_FromStringAndSize, PyBytes_AS_STRING
 from cpython.mem cimport PyMem_Malloc, PyMem_Free
 from libc.string cimport memset, memcpy
 
+from libc.stddef cimport size_t
 from libc.stdint cimport int32_t
 from libc.stdint cimport int64_t
 from libc.stdint cimport int8_t
@@ -40,6 +41,9 @@ from opteryx.draken.core.fixed_vector cimport buf_length
 from opteryx.draken.core.fixed_vector cimport free_fixed_buffer
 from opteryx.draken.vectors.vector cimport MIX_HASH_CONSTANT, Vector, NULL_HASH, mix_hash, simd_mix_hash
 from opteryx.draken.vectors.bool_vector cimport BoolVector
+
+cdef extern from "simd_hash.h":
+    void simd_scale_date32(const int32_t* src, int64_t* dest, size_t count) nogil
 
 DEF DATE32_HASH_CHUNK = 1024
 
@@ -493,15 +497,18 @@ cdef class Date32Vector(Vector):
                 i += block
             return
 
-        for i in range(n):
-            byte = null_bitmap[i >> 3]
-            bit = (byte >> (i & 7)) & 1
-            if not bit:
-                value = NULL_HASH
-            else:
-                value = <uint64_t> data[i]
-
-            dst[i] = mix_hash(dst[i], value)
+        i = 0
+        while i < n:
+            block = n - i
+            if block > DATE32_HASH_CHUNK:
+                block = DATE32_HASH_CHUNK
+            for j in range(block):
+                if (null_bitmap[(i + j) >> 3] >> ((i + j) & 7)) & 1:
+                    scratch[j] = <uint64_t>(<int64_t> data[i + j])
+                else:
+                    scratch[j] = NULL_HASH
+            simd_mix_hash(dst + i, scratch_ptr, <size_t> block)
+            i += block
 
     cdef void compress_into(self, int64_t[::1] out_buf, Py_ssize_t offset=0) except *:
         """Fast compress for Date32Vector: scale int32 days to int64 microseconds (to match datetimes)."""
@@ -535,8 +542,7 @@ cdef class Date32Vector(Vector):
                 else:
                     dst[i] = NULL_FLAG
         else:
-            for i in range(n):
-                dst[i] = <int64_t> data[i] * MICROSECONDS_PER_DAY
+            simd_scale_date32(data, dst, <size_t>n)
 
     def __str__(self):
         if self._has_const:

@@ -24,7 +24,7 @@ from libc.string cimport memset, memcpy
 
 from libc.stdint cimport int32_t, int8_t, intptr_t, uint16_t, uint32_t, uint64_t, uint8_t
 from libc.stdlib cimport free, malloc
-from libc.math cimport isnan, llround
+from libc.math cimport isinf, isnan, llround
 
 from opteryx.draken.core.buffers cimport ConstAccessor
 from opteryx.draken.core.buffers cimport DictAccessor
@@ -39,6 +39,7 @@ from opteryx.draken.core.var_vector cimport alloc_var_buffer, free_var_buffer
 from opteryx.draken.vectors.vector cimport MIX_HASH_CONSTANT, Vector, NULL_HASH, mix_hash, simd_mix_hash
 from opteryx.draken.vectors.bool_vector cimport BoolVector
 
+DEF FLOAT64_HASH_CHUNK = 1024
 
 cdef inline uint8_t _dict_code_width_for_size(Py_ssize_t dict_size) noexcept:
     if dict_size <= 256:
@@ -773,8 +774,7 @@ cdef class Float64Vector(Vector):
     ) except *:
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef Py_ssize_t n = ptr.length
-        cdef Py_ssize_t i
-        cdef uint8_t byte
+        cdef Py_ssize_t i, j, block
         cdef uint64_t value
 
         if n == 0:
@@ -793,16 +793,23 @@ cdef class Float64Vector(Vector):
         cdef uint64_t* dst = &out_buf[offset]
         cdef uint8_t* null_bitmap = ptr.null_bitmap
         cdef bint has_nulls = null_bitmap != NULL
+        cdef uint64_t[FLOAT64_HASH_CHUNK] scratch
+        cdef uint64_t* scratch_ptr = <uint64_t*> scratch
 
         # Use shared MIX_HASH_CONSTANT directly; no need to pass it in.
         if has_nulls:
-            for i in range(n):
-                byte = null_bitmap[i >> 3]
-                if byte & (1 << (i & 7)):
-                    value = bits[i]
-                else:
-                    value = NULL_HASH
-                dst[i] = mix_hash(dst[i], value)
+            i = 0
+            while i < n:
+                block = n - i
+                if block > FLOAT64_HASH_CHUNK:
+                    block = FLOAT64_HASH_CHUNK
+                for j in range(block):
+                    if null_bitmap[(i + j) >> 3] & (1 << ((i + j) & 7)):
+                        scratch[j] = bits[i + j]
+                    else:
+                        scratch[j] = NULL_HASH
+                simd_mix_hash(dst + i, scratch_ptr, <size_t> block)
+                i += block
         else:
             simd_mix_hash(dst, bits, <size_t>n)
             return
@@ -838,11 +845,8 @@ cdef class Float64Vector(Vector):
                 if isnan(v):
                     dst[i] = NULL_FLAG
                     continue
-                if v == float("inf"):
-                    dst[i] = MAX_SIGNED
-                    continue
-                if v == float("-inf"):
-                    dst[i] = MIN_SIGNED
+                elif isinf(v):
+                    dst[i] = MAX_SIGNED if v > 0.0 else MIN_SIGNED
                     continue
                 rv = llround(v)
                 if rv < MIN_SIGNED:
@@ -863,11 +867,8 @@ cdef class Float64Vector(Vector):
                 if isnan(v):
                     dst[i] = NULL_FLAG
                     continue
-                if v == float("inf"):
-                    dst[i] = MAX_SIGNED
-                    continue
-                if v == float("-inf"):
-                    dst[i] = MIN_SIGNED
+                elif isinf(v):
+                    dst[i] = MAX_SIGNED if v > 0.0 else MIN_SIGNED
                     continue
                 rv = llround(v)
                 if rv < MIN_SIGNED:
@@ -882,11 +883,8 @@ cdef class Float64Vector(Vector):
                 if isnan(v):
                     dst[i] = NULL_FLAG
                     continue
-                if v == float("inf"):
-                    dst[i] = MAX_SIGNED
-                    continue
-                if v == float("-inf"):
-                    dst[i] = MIN_SIGNED
+                elif isinf(v):
+                    dst[i] = MAX_SIGNED if v > 0.0 else MIN_SIGNED
                     continue
                 rv = llround(v)
                 if rv < MIN_SIGNED:

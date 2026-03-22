@@ -1434,7 +1434,6 @@ cdef class StringVector(Vector):
         """Fast compress for StringVector: pack first 7 bytes into big-endian int64."""
         cdef DrakenVarBuffer* ptr = self.ptr
         cdef Py_ssize_t n = ptr.length
-        cdef char tmp[8]
 
         if n == 0:
             return
@@ -1442,42 +1441,43 @@ cdef class StringVector(Vector):
             raise ValueError("StringVector.compress: output buffer too small")
 
         cdef int32_t start, end
-        cdef Py_ssize_t i, j
+        cdef Py_ssize_t i, j, copy_len
         cdef char* base = <char*> ptr.data
         cdef uint8_t* null_bitmap = ptr.null_bitmap
         cdef bint has_nulls = null_bitmap != NULL
         cdef uint64_t acc
 
         if self._has_const:
-            for i in range(n):
-                if self._const_is_null:
-                    out_buf[offset + i] = <int64_t> (-(1 << 63))
-                    continue
-                memset(tmp, 0, 8)
-                for j in range(min(7, self._const_value.length)):
-                    tmp[1 + j] = (<char*>self._const_value.data)[j]
-                acc = 0
-                for j in range(8):
-                    acc = (acc << 8) | (<uint8_t> tmp[j])
-                out_buf[offset + i] = <int64_t> acc
+            if self._const_is_null:
+                for i in range(n):
+                    out_buf[offset + i] = <int64_t>(-(1 << 63))
+            else:
+                copy_len = self._const_value.length
+                if copy_len > 7:
+                    copy_len = 7
+                acc = <uint64_t>0
+                for j in range(copy_len):
+                    acc = (acc << 8) | (<uint64_t>(<uint8_t>((<char*>self._const_value.data)[j])))
+                acc = acc << (<uint64_t>(8 * (7 - copy_len)))
+                for i in range(n):
+                    out_buf[offset + i] = <int64_t>acc
             return
 
         for i in range(n):
             if has_nulls and ((null_bitmap[i >> 3] >> (i & 7)) & 1) == 0:
-                out_buf[offset + i] = <int64_t> (-(1 << 63))
+                out_buf[offset + i] = <int64_t>(-(1 << 63))
                 continue
 
             start = ptr.offsets[i]
             end = ptr.offsets[i + 1]
-            memset(tmp, 0, 8)
-            # copy up to 7 bytes into tmp[1:]
-            for j in range(min(7, end - start)):
-                tmp[1 + j] = base[start + j]
-
-            acc = 0
-            for j in range(8):
-                acc = (acc << 8) | (<uint8_t> tmp[j])
-            out_buf[offset + i] = <int64_t> acc
+            copy_len = end - start
+            if copy_len > 7:
+                copy_len = 7
+            acc = <uint64_t>0
+            for j in range(copy_len):
+                acc = (acc << 8) | (<uint64_t>(<uint8_t>base[start + j]))
+            acc = acc << (<uint64_t>(8 * (7 - copy_len)))
+            out_buf[offset + i] = <int64_t>acc
 
     cpdef StringVector take(self, int32_t[::1] indices):
         cdef DrakenVarBuffer* src_ptr = self.ptr

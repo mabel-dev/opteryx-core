@@ -465,11 +465,21 @@ cdef class BoolVector(Vector):
         cdef uint8_t* data = <uint8_t*> ptr.data
         cdef uint8_t* null_bitmap = ptr.null_bitmap
         cdef bint has_nulls = null_bitmap != NULL
-        for i in range(n):
-            if has_nulls and ((null_bitmap[i >> 3] >> (i & 7)) & 1) == 0:
-                out_buf[offset + i] = <int64_t> (-(1 << 63))
-            else:
-                out_buf[offset + i] = 1 if ((data[i >> 3] >> (i & 7)) & 1) != 0 else 0
+        cdef uint8_t dbyte, nbyte
+        cdef Py_ssize_t remaining, bit_i
+        i = 0
+        while i < n:
+            remaining = n - i
+            if remaining > 8:
+                remaining = 8
+            dbyte = data[i >> 3]
+            nbyte = null_bitmap[i >> 3] if has_nulls else 0xFF
+            for bit_i in range(remaining):
+                if (nbyte >> bit_i) & 1:
+                    out_buf[offset + i + bit_i] = 1 if (dbyte >> bit_i) & 1 else 0
+                else:
+                    out_buf[offset + i + bit_i] = <int64_t>(-(1 << 63))
+            i += remaining
 
     cpdef int8_t any(self):
         cdef DrakenFixedBuffer* ptr = self.ptr
@@ -597,18 +607,19 @@ cdef class BoolVector(Vector):
                 i += block
             return
 
-        for i in range(n):
-            byte = ptr.null_bitmap[i >> 3]
-            bit = (byte >> (i & 7)) & 1
-            if not bit:
-                value = NULL_HASH
-            else:
-                if ((values)[i >> 3] >> (i & 7)) & 1:
-                    value = TRUE_HASH
+        i = 0
+        while i < n:
+            block = n - i
+            if block > BOOL_HASH_CHUNK:
+                block = BOOL_HASH_CHUNK
+            for j in range(block):
+                idx = i + j
+                if (ptr.null_bitmap[idx >> 3] >> (idx & 7)) & 1:
+                    scratch[j] = TRUE_HASH if (values[idx >> 3] >> (idx & 7)) & 1 else FALSE_HASH
                 else:
-                    value = FALSE_HASH
-
-            dst[i] = mix_hash(dst[i], value)
+                    scratch[j] = NULL_HASH
+            simd_mix_hash(dst + i, scratch_ptr, <size_t> block)
+            i += block
 
     def __str__(self):
         if self._has_const:
