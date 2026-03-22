@@ -621,6 +621,59 @@ cdef class BoolVector(Vector):
             simd_mix_hash(dst + i, scratch_ptr, <size_t> block)
             i += block
 
+    cdef bint c_hash_into(self, uint64_t* out, Py_ssize_t n) noexcept nogil:
+        cdef DrakenFixedBuffer* ptr = self.ptr
+        cdef Py_ssize_t i
+        cdef uint64_t value
+
+        if self._has_const:
+            value = NULL_HASH if self._const_is_null else (TRUE_HASH if self._const_value else FALSE_HASH)
+            for i in range(n):
+                out[i] = mix_hash(out[i], value)
+            return 0
+
+        if n == 0:
+            return 0
+
+        cdef Py_ssize_t block = 0
+        cdef Py_ssize_t j = 0
+        cdef Py_ssize_t idx = 0
+        cdef uint8_t* values = <uint8_t*> ptr.data
+        cdef bint has_nulls = ptr.null_bitmap != NULL
+        cdef uint64_t[BOOL_HASH_CHUNK] scratch
+        cdef uint64_t* scratch_ptr = <uint64_t*> scratch
+
+        if not has_nulls:
+            i = 0
+            while i < n:
+                block = n - i
+                if block > BOOL_HASH_CHUNK:
+                    block = BOOL_HASH_CHUNK
+                for j in range(block):
+                    idx = i + j
+                    if (values[idx >> 3] >> (idx & 7)) & 1:
+                        scratch[j] = TRUE_HASH
+                    else:
+                        scratch[j] = FALSE_HASH
+                simd_mix_hash(out + i, scratch_ptr, <size_t> block)
+                i += block
+            return 0
+
+        i = 0
+        while i < n:
+            block = n - i
+            if block > BOOL_HASH_CHUNK:
+                block = BOOL_HASH_CHUNK
+            for j in range(block):
+                idx = i + j
+                if (ptr.null_bitmap[idx >> 3] >> (idx & 7)) & 1:
+                    scratch[j] = TRUE_HASH if (values[idx >> 3] >> (idx & 7)) & 1 else FALSE_HASH
+                else:
+                    scratch[j] = NULL_HASH
+            simd_mix_hash(out + i, scratch_ptr, <size_t> block)
+            i += block
+        return 0
+
     def __str__(self):
         if self._has_const:
             return f"<BoolVector len={buf_length(self.ptr)} values={[None if self._const_is_null else bool(self._const_value)] * min(<Py_ssize_t>buf_length(self.ptr), 10)}>"

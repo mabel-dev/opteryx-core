@@ -814,6 +814,44 @@ cdef class Float64Vector(Vector):
             simd_mix_hash(dst, bits, <size_t>n)
             return
 
+    cdef bint c_hash_into(self, uint64_t* out, Py_ssize_t n) noexcept nogil:
+        cdef DrakenFixedBuffer* ptr = self.ptr
+        cdef Py_ssize_t i, j, block
+        cdef uint64_t value
+
+        if n == 0:
+            return 0
+
+        if self._has_const:
+            value = NULL_HASH if self._const_is_null else (<uint64_t*>&self._const_value)[0]
+            for i in range(n):
+                out[i] = mix_hash(out[i], value)
+            return 0
+
+        cdef double* data = <double*> ptr.data
+        cdef uint64_t* bits = <uint64_t*> data
+        cdef uint8_t* null_bitmap = ptr.null_bitmap
+        cdef bint has_nulls = null_bitmap != NULL
+        cdef uint64_t[FLOAT64_HASH_CHUNK] scratch
+        cdef uint64_t* scratch_ptr = <uint64_t*> scratch
+
+        if has_nulls:
+            i = 0
+            while i < n:
+                block = n - i
+                if block > FLOAT64_HASH_CHUNK:
+                    block = FLOAT64_HASH_CHUNK
+                for j in range(block):
+                    if null_bitmap[(i + j) >> 3] & (1 << ((i + j) & 7)):
+                        scratch[j] = bits[i + j]
+                    else:
+                        scratch[j] = NULL_HASH
+                simd_mix_hash(out + i, scratch_ptr, <size_t> block)
+                i += block
+        else:
+            simd_mix_hash(out, bits, <size_t>n)
+        return 0
+
     cdef void compress_into(self, int64_t[::1] out_buf, Py_ssize_t offset=0) except *:
         """Fast compress for Float64Vector with NaN/Inf handling and clamping."""
         cdef DrakenFixedBuffer* ptr = self.ptr
