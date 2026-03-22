@@ -325,6 +325,81 @@ cdef class IntegerVector(Vector):
                     value = <uint64_t>(<int64_t>d32[i]) if (byte >> (i & 7)) & 1 else NULL_HASH
                     dst[i] = mix_hash(dst[i], value)
 
+    cdef bint c_hash_into(self, uint64_t* out, Py_ssize_t n) noexcept nogil:
+        cdef DrakenFixedBuffer* ptr = self.ptr
+        cdef uint8_t* null_bitmap = ptr.null_bitmap
+        cdef bint has_nulls = null_bitmap != NULL
+        cdef Py_ssize_t i, block, j
+        cdef uint8_t byte
+        cdef uint64_t value
+        cdef int8_t* d8
+        cdef int16_t* d16
+        cdef int32_t* d32
+        cdef uint64_t[INTEGER_HASH_CHUNK] scratch
+        cdef uint64_t* scratch_ptr = <uint64_t*> scratch
+
+        if self._has_const:
+            value = NULL_HASH if self._const_is_null else <uint64_t>self._const_value
+            for i in range(n):
+                out[i] = mix_hash(out[i], value)
+            return 0
+
+        if n == 0:
+            return 0
+
+        if ptr.itemsize == 1:
+            d8 = <int8_t*>ptr.data
+            if not has_nulls:
+                i = 0
+                while i < n:
+                    block = n - i
+                    if block > INTEGER_HASH_CHUNK:
+                        block = INTEGER_HASH_CHUNK
+                    for j in range(block):
+                        scratch[j] = <uint64_t>(<int64_t>d8[i + j])
+                    simd_mix_hash(out + i, scratch_ptr, <size_t>block)
+                    i += block
+            else:
+                for i in range(n):
+                    byte = null_bitmap[i >> 3]
+                    value = <uint64_t>(<int64_t>d8[i]) if (byte >> (i & 7)) & 1 else NULL_HASH
+                    out[i] = mix_hash(out[i], value)
+        elif ptr.itemsize == 2:
+            d16 = <int16_t*>ptr.data
+            if not has_nulls:
+                i = 0
+                while i < n:
+                    block = n - i
+                    if block > INTEGER_HASH_CHUNK:
+                        block = INTEGER_HASH_CHUNK
+                    for j in range(block):
+                        scratch[j] = <uint64_t>(<int64_t>d16[i + j])
+                    simd_mix_hash(out + i, scratch_ptr, <size_t>block)
+                    i += block
+            else:
+                for i in range(n):
+                    byte = null_bitmap[i >> 3]
+                    value = <uint64_t>(<int64_t>d16[i]) if (byte >> (i & 7)) & 1 else NULL_HASH
+                    out[i] = mix_hash(out[i], value)
+        else:  # itemsize == 4
+            d32 = <int32_t*>ptr.data
+            if not has_nulls:
+                i = 0
+                while i < n:
+                    block = n - i
+                    if block > INTEGER_HASH_CHUNK:
+                        block = INTEGER_HASH_CHUNK
+                    for j in range(block):
+                        scratch[j] = <uint64_t>(<int64_t>d32[i + j])
+                    simd_mix_hash(out + i, scratch_ptr, <size_t>block)
+                    i += block
+            else:
+                for i in range(n):
+                    byte = null_bitmap[i >> 3]
+                    value = <uint64_t>(<int64_t>d32[i]) if (byte >> (i & 7)) & 1 else NULL_HASH
+                    out[i] = mix_hash(out[i], value)
+        return 0
+
     def __str__(self):
         cdef list vals = []
         cdef Py_ssize_t i, k = min(<Py_ssize_t>buf_length(self.ptr), 10)

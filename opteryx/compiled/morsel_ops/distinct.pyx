@@ -10,27 +10,24 @@
 
 Carchar-backed DISTINCT for Draken Morsels.
 
-    indices, seen_hashes = distinct(morsel, seen_hashes=None, columns=None)
+    distinct(morsel, seen_hashes, columns=None)
 
-Returns a uint32 array of row indices to keep, plus the (possibly new)
-CarcharSetWrapper so the caller can persist state for streaming DISTINCT.
-
-All hash-table probing and index-building runs without the GIL; the only
-Python-level work is the single morsel.hash() call (one per batch) and
-object creation on the first call.
+Filters the morsel IN PLACE.  For column types that support nogil hashing
+(all fixed-width numeric, bool, date/time, string), the entire pipeline —
+hash → CarcharSet probe → branchless index scatter — runs in a single
+nogil block.  ArrayVector columns (rare) fall back to the Python hash()
+path, after which mark_new and scatter still run nogil.
 """
 
-from array import array
-
-from cpython.mem cimport PyMem_Malloc, PyMem_Free
-from libc.stdint cimport uint8_t, uint32_t, uint64_t
+from libc.stdlib cimport calloc, malloc, free
+from libc.string cimport memset, memcpy
+from libc.stdint cimport int32_t, uint8_t, uint64_t
 from libc.stddef cimport size_t
 
 from opteryx.draken.morsels.morsel cimport Morsel
 
 
 # ── CarcharSet C++ binding ────────────────────────────────────────────────────
-# Headers are on the include path at third_party/mabel/carchar/.
 
 cdef extern from "carchar_set.hpp" namespace "opteryx::carchar" nogil:
     cdef cppclass CarcharSet:
@@ -40,14 +37,13 @@ cdef extern from "carchar_set.hpp" namespace "opteryx::carchar" nogil:
         size_t size() noexcept
 
 
-# ── Python-visible wrapper (holds state across streaming calls) ───────────────
+# ── Python-visible wrapper ────────────────────────────────────────────────────
 
 cdef class CarcharSetWrapper:
     """Persistent Carchar hash set for streaming DISTINCT.
 
-    Wraps a heap-allocated CarcharSet so the set survives across morsel
-    boundaries.  Passed back to the caller and threaded through subsequent
-    calls via the seen_hashes parameter.
+    Create once, pass to every distinct() call; the set is mutated in place
+    so duplicates are tracked across morsel boundaries.
     """
     cdef CarcharSet* _ptr
 
@@ -65,81 +61,89 @@ cdef class CarcharSetWrapper:
 
 def distinct(Morsel morsel, CarcharSetWrapper seen_hashes, list columns=None):
     """
-    Compute distinct indices for a Draken Morsel using Carchar SIMD hashing.
+    Filter a Draken Morsel to distinct rows, in place.
 
     Parameters
     ----------
     morsel : Morsel
-        The morsel whose rows are to be de-duplicated.
+        Modified in place; duplicate rows are removed.
     seen_hashes : CarcharSetWrapper
-        Set that accumulates seen row hashes; mutated in place.  Create once
-        with ``CarcharSetWrapper()`` and reuse across morsels for streaming
-        DISTINCT.
+        Accumulates row hashes across calls for streaming DISTINCT.
     columns : list of bytes, optional
-        Column names (as bytes) to include in the row hash.  Uses all
-        columns when None.
-
-    Returns
-    -------
-    array('I')
-        uint32 row indices of rows to keep (first occurrence of each distinct
-        key).  Empty array when all rows are duplicates.
+        Column names to hash; all columns used when None.
     """
-    cdef uint64_t[::1] row_hashes
-    cdef Py_ssize_t n
-    cdef CarcharSet* cs
-    cdef uint64_t* hashes_ptr
-    cdef uint8_t* mask
-    cdef size_t count
-    cdef uint32_t* out_ptr
-    cdef Py_ssize_t i
-    cdef Py_ssize_t j
-    cdef unsigned int[::1] rv
-
-    # Get per-row hashes from the morsel (one Python call per batch).
-    if columns is None:
-        row_hashes = morsel.hash()
-    else:
-        row_hashes = morsel.hash(columns=columns)
-
-    n = row_hashes.shape[0]
+    cdef Py_ssize_t n = morsel.ptr.num_rows
+    cdef CarcharSet* cs = seen_hashes._ptr
+    cdef uint64_t* hashes_ptr = NULL
+    cdef uint8_t*  mask      = NULL
+    cdef int32_t*  idx_buf   = NULL
+    cdef int32_t*  col_indices = NULL
+    cdef int32_t   n_cols = 0
+    cdef size_t    count
+    cdef Py_ssize_t i, j
+    cdef bint had_fallback
+    cdef uint64_t[::1] py_hashes
 
     if n == 0:
-        return array("I")
+        return
 
-    cs = seen_hashes._ptr
-    hashes_ptr = &row_hashes[0]
+    # ── Resolve column names → C int array (WITH GIL, once) ──────────────────
+    col_indices = morsel._resolve_columns_to_indices(columns, &n_cols)
+    if col_indices == NULL:
+        raise MemoryError()
 
-    # Allocate a per-row boolean mask on the heap (avoids any Python object).
-    mask = <uint8_t*>PyMem_Malloc(<size_t>n)
+    # ── Allocate hash buffer (calloc = zeroed, nogil-safe allocator) ──────────
+    hashes_ptr = <uint64_t*>calloc(<size_t>n, sizeof(uint64_t))
+    if hashes_ptr == NULL:
+        free(col_indices)
+        raise MemoryError()
+
+    mask = <uint8_t*>malloc(<size_t>n)
     if mask == NULL:
+        free(col_indices)
+        free(hashes_ptr)
         raise MemoryError()
 
     try:
-        # ── Hot path: nogil ───────────────────────────────────────────────────
-        # mark_new writes 1 for new keys, 0 for duplicates, returns new-key count.
+        # ── Fast path: hash + probe in one nogil block ────────────────────────
+        with nogil:
+            had_fallback = morsel.c_hash(hashes_ptr, col_indices, n_cols, n)
+
+        if had_fallback:
+            # At least one column (e.g. ArrayVector) couldn't hash without GIL.
+            # Re-zero and redo via the Python hash() path, then continue nogil.
+            memset(hashes_ptr, 0, <size_t>n * sizeof(uint64_t))
+            if columns is None:
+                py_hashes = morsel.hash()
+            else:
+                py_hashes = morsel.hash(columns=columns)
+            memcpy(hashes_ptr, &py_hashes[0], <size_t>n * sizeof(uint64_t))
+
         with nogil:
             count = cs.mark_new(hashes_ptr, mask, <size_t>n)
 
         if count == 0:
-            return array("I")
+            morsel._empty_inplace()
+            return
 
-        # Branchless scatter: write i unconditionally, advance j only when new.
-        # mask[i] is 0 or 1, so true==1 / false==0 eliminates the branch.
-        # When j reaches count the stray writes land at out_ptr[count]; allocate
-        # n slots (not count) so that overshoot stays in-bounds.  Trim afterward.
-        result = array("I", bytes(n * sizeof(uint32_t)))
-        rv = result
-        out_ptr = <uint32_t*>&rv[0]
+        # Allocate count+1 int32 slots: branchless scatter may write one slot
+        # past position count-1 when j == count and mask[i] == 0.
+        idx_buf = <int32_t*>malloc((<size_t>count + 1) * sizeof(int32_t))
+        if idx_buf == NULL:
+            raise MemoryError()
+
         j = 0
-
         with nogil:
             for i in range(n):
-                out_ptr[j] = <uint32_t>i
+                idx_buf[j] = <int32_t>i
                 j += <Py_ssize_t>mask[i]
 
-        del result[j:]   # trim over-allocated tail (the "special last step")
-        return result
+        # cdef method: no Python dispatch; typed memoryview hits the int32
+        # fast path in _take_inplace directly — no copy, no extra allocation.
+        morsel._take_inplace(<int32_t[:<Py_ssize_t>count]>idx_buf)
 
     finally:
-        PyMem_Free(mask)
+        free(col_indices)
+        free(hashes_ptr)
+        free(mask)
+        free(idx_buf)

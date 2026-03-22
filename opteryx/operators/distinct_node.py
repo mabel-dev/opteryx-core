@@ -66,13 +66,9 @@ class DistinctNode(BasePlanNode):
             return
 
         for chunk in [morsel]:
-            unique_indexes = distinct(chunk, self._hash_set, columns=self._distinct_on)
+            distinct(chunk, self._hash_set, columns=self._distinct_on)
 
-            if len(unique_indexes) > 0:
-                chunk.take(unique_indexes)
-                yield chunk
-            elif not self.at_least_one_yielded:
-                chunk.empty()
+            if len(chunk) > 0 or not self.at_least_one_yielded:
                 yield chunk
 
             self.at_least_one_yielded = True
