@@ -29,7 +29,7 @@ class DistinctNode(BasePlanNode):
             self._distinct_on = [
                 col.schema_column.identity.encode("utf-8") for col in self._distinct_on
             ]
-        self.hash_set = None
+        self._hash_set = None
         self.at_least_one_yielded = False
 
     @property
@@ -41,7 +41,10 @@ class DistinctNode(BasePlanNode):
         return "Distinction"
 
     def execute(self, morsel, **kwargs):
-        from opteryx.compiled.table_ops.distinct import distinct
+        from opteryx.compiled.morsel_ops.distinct import CarcharSetWrapper, distinct
+
+        if self._hash_set is None:
+            self._hash_set = CarcharSetWrapper()
 
         if morsel == EOS:
             yield EOS
@@ -63,10 +66,7 @@ class DistinctNode(BasePlanNode):
             return
 
         for chunk in [morsel]:
-            # Use Draken-based distinct with column names as bytes
-            unique_indexes, self.hash_set = distinct(
-                chunk, columns=self._distinct_on, seen_hashes=self.hash_set
-            )
+            unique_indexes = distinct(chunk, self._hash_set, columns=self._distinct_on)
 
             if len(unique_indexes) > 0:
                 chunk.take(unique_indexes)
