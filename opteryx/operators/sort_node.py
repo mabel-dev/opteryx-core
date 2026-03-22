@@ -17,6 +17,7 @@ from orso.types import OrsoTypes
 
 from opteryx import EOS
 from opteryx.compiled.morsel_ops.sort import morsel_sort
+from opteryx.draken.morsels.morsel import Morsel
 from opteryx.exceptions import ColumnNotFoundError
 from opteryx.expression import NodeType
 from opteryx.expression import evaluate_and_append
@@ -24,14 +25,14 @@ from opteryx.models import QueryProperties
 
 from . import BasePlanNode
 
-_DATA_FORMAT = "arrow,draken"
+_DATA_FORMAT = "draken"
 
 
 class SortNode(BasePlanNode):
     def __init__(self, properties: QueryProperties, **parameters):
         BasePlanNode.__init__(self, properties=properties, **parameters)
         self.order_by = parameters.get("order_by", [])
-        self._morsel = None
+        self._morsels = []
 
     @property
     def config(self):  # pragma: no cover
@@ -46,16 +47,15 @@ class SortNode(BasePlanNode):
 
         if morsel is not EOS:
             if morsel.num_rows > 0:
-                if self._morsel is None:
-                    self._morsel = morsel
-                else:
-                    self._morsel.append(morsel)
+                self._morsels.append(morsel)
             yield None
             return
 
-        if self._morsel is None:
+        if not self._morsels:
             yield EOS
             return
+
+        combined = Morsel.combine(self._morsels)
 
         column_names = []
         ascending_flags = []
@@ -64,7 +64,7 @@ class SortNode(BasePlanNode):
         for column, direction in self.order_by:
             if column.node_type == NodeType.LITERAL and column.type == OrsoTypes.INTEGER:
                 # ORDER BY <position> — natural number, 1-based
-                col_name = self._morsel.column_names[int(column.value) - 1]
+                col_name = combined.column_names[int(column.value) - 1]
                 column_names.append(col_name if isinstance(col_name, bytes) else col_name.encode())
             else:
                 if column.node_type != NodeType.IDENTIFIER:
@@ -83,10 +83,10 @@ class SortNode(BasePlanNode):
             ascending_flags.append(asc)
 
         if evaluations:
-            self._morsel = evaluate_and_append(evaluations, self._morsel)
+            combined = evaluate_and_append(evaluations, combined)
 
-        perm = morsel_sort(self._morsel, column_names, ascending_flags)
-        self._morsel.take(list(perm))
+        perm = morsel_sort(combined, column_names, ascending_flags)
+        combined.take(list(perm))
 
-        yield self._morsel
+        yield combined
         yield EOS
