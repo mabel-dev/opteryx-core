@@ -855,6 +855,43 @@ cdef class IntervalVector(Vector):
                 value = mix_hash(partial, <uint64_t>data[i].microseconds)
             dst[i] = mix_hash(dst[i], value)
 
+    cdef bint c_hash_into(self, uint64_t* out, Py_ssize_t n) noexcept nogil:
+        cdef DrakenFixedBuffer* ptr = self.ptr
+        if n == 0:
+            return 0
+
+        cdef Py_ssize_t i
+        cdef IntervalValue* data = <IntervalValue*> ptr.data
+        cdef uint64_t value
+        cdef uint64_t partial
+        cdef bint has_nulls = ptr.null_bitmap != NULL
+        cdef Py_ssize_t block = 0
+        cdef Py_ssize_t j = 0
+        cdef uint64_t[INTERVAL_HASH_CHUNK] scratch
+        cdef uint64_t* scratch_ptr = <uint64_t*> scratch
+
+        if not has_nulls:
+            i = 0
+            while i < n:
+                block = n - i
+                if block > INTERVAL_HASH_CHUNK:
+                    block = INTERVAL_HASH_CHUNK
+                for j in range(block):
+                    partial = mix_hash(0, <uint64_t>data[i + j].months)
+                    scratch[j] = mix_hash(partial, <uint64_t>data[i + j].microseconds)
+                simd_mix_hash(out + i, scratch_ptr, <size_t> block)
+                i += block
+            return 0
+
+        for i in range(n):
+            if not _is_valid(ptr, i):
+                value = NULL_HASH
+            else:
+                partial = mix_hash(0, <uint64_t>data[i].months)
+                value = mix_hash(partial, <uint64_t>data[i].microseconds)
+            out[i] = mix_hash(out[i], value)
+        return 0
+
     cdef void compress_into(self, int64_t[::1] out_buf, Py_ssize_t offset=0) except *:
         """Fast compress for IntervalVector: use months component for ordering."""
         cdef DrakenFixedBuffer* ptr = self.ptr

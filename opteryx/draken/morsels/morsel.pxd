@@ -1,4 +1,4 @@
-from libc.stdint cimport uint64_t
+from libc.stdint cimport int32_t, uint64_t
 from opteryx.draken.vectors.vector cimport Vector
 from opteryx.draken.core.buffers cimport DrakenMorsel, DrakenType
 
@@ -23,3 +23,5 @@ cdef class Morsel:
     cdef inline void _rebuild_name_to_index(self)
     cdef inline dict _ensure_name_map(self)
     cdef inline Py_ssize_t _column_index_from_name(self, object column)
+    cdef int32_t* _resolve_columns_to_indices(self, object columns, int32_t* out_n_cols) except NULL
+    cdef bint c_hash(self, uint64_t* out, int32_t* col_indices, int32_t n_cols, Py_ssize_t n_rows) noexcept nogil
