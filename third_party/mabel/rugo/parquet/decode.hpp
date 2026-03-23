@@ -21,6 +21,8 @@ struct DecodedColumn {
   std::vector<double> float64_values;    // for float64
   std::string type; // "int32", "int64", "string", "boolean", "float32", "float64"
   int32_t num_rows = 0;  // total rows including nulls (= sum of page_values)
+  int32_t pages_skipped = 0;  // pages skipped due to row_mask (no selected rows in page)
+  int32_t pages_decoded = 0;  // pages that passed the row_mask check and were decompressed/decoded
   int32_t max_rep_level = 0;  // from ColumnStats (needed by Cython for list offset reconstruction)
   int32_t max_def_level = 0;  // from ColumnStats (needed by Cython for list offset reconstruction)
   // Raw level vectors (populated when max_rep > 0 or max_def > 0, respectively).
@@ -81,7 +83,18 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t* data, size_t size,
                                     int64_t* ext_int64   = nullptr,
                                     double*  ext_float64 = nullptr,
                                     int32_t* ext_int32   = nullptr,
-                                    float*   ext_float32 = nullptr);
+                                    float*   ext_float32 = nullptr,
+                                    const uint8_t* row_mask = nullptr);
+
+// Convenience overload: no ext_* zero-copy buffers, only a row_mask.
+// Matches the 4-argument Cython binding DecodeColumnFromChunk(data, size, col, mask).
+inline DecodedColumn DecodeColumnFromChunk(const uint8_t* data, size_t size,
+                                           const ColumnStats* target_col,
+                                           const uint8_t* row_mask) {
+  return DecodeColumnFromChunk(data, size, target_col,
+                               nullptr, nullptr, nullptr, nullptr,
+                               row_mask);
+}
 
 // Decode a specific column from memory buffer for a specific row group.
 // Pass non-null ext_* pointer (pre-allocated, capacity >= row_group.num_rows)

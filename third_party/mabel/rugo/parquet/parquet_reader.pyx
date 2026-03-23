@@ -32,6 +32,8 @@ _TEL = {
     "parquet_dict_unique_values": 0,
     "parquet_dict_code_width_bytes": 0,
     "parquet_dict_materialize_fallbacks": 0,
+    "parquet_pages_skipped": 0,  # pages skipped via row_mask (no selected rows in page)
+    "parquet_pages_decoded": 0,  # pages decompressed/decoded when row_mask was active
 }
 
 
@@ -533,7 +535,7 @@ cdef Int64Vector _make_int64_vector(
         and decoded_col.dict_int64_values.size() > 0
         and decoded_col.int64_values.size() == 0
     )
-    
+
     # If we have a valid_bits bitmap, scatter values into positions and set null bitmap
     if decoded_col.valid_bits.size() > 0:
         for i in range(num_rows):
@@ -665,7 +667,7 @@ cdef Float64Vector _make_float64_vector(
         and decoded_col.dict_float64_values.size() > 0
         and decoded_col.float64_values.size() == 0
     )
-    
+
     if decoded_col.valid_bits.size() > 0:
         for i in range(num_rows):
             if (decoded_col.valid_bits[i >> 3] >> (i & 7)) & 1:
@@ -1193,16 +1195,16 @@ cdef BoolVector _make_bool_vector(
     cdef uint8_t* valid_bits
     cdef Py_ssize_t i, val_idx = 0
     cdef Py_ssize_t nb_bytes = (num_rows + 7) >> 3
-    
+
     # Allocate and pack boolean values into bits
     value_bits = <uint8_t*> malloc(nb_bytes)
     if value_bits == NULL:
         raise MemoryError()
-    
+
     # Zero out the value_bits
     for i in range(nb_bytes):
         value_bits[i] = 0
-    
+
     if decoded_col.valid_bits.size() > 0:
         # We have a validity bitmap; values are scattered
         for i in range(num_rows):
@@ -1221,7 +1223,7 @@ cdef BoolVector _make_bool_vector(
             if decoded_col.boolean_values[i]:
                 value_bits[i >> 3] |= (1 << (i & 7))
         valid_bits = NULL
-    
+
     return bool_vector_from_bits(value_bits, valid_bits, num_rows)
 
 
@@ -1679,7 +1681,7 @@ def decode_column_from_chunk_to_python(chunk_bytes, col_stats):
         return None
 
 
-def decode_column_from_chunk(chunk_bytes, col_stats):
+def decode_column_from_chunk(chunk_bytes, col_stats, row_mask=None):
     """Decode a single column from an isolated range-read buffer (default: returns Draken Vector).
 
     This is the primary API for the columnar range-read design.  Rather than
@@ -1710,6 +1712,8 @@ def decode_column_from_chunk(chunk_bytes, col_stats):
     cdef dict_off
     cdef data_off
     cdef base_offset
+    cdef const uint8_t[::1] mask_view
+    cdef const uint8_t* mask_ptr = NULL
 
     if isinstance(chunk_bytes, (bytes, bytearray)):
         mem_view = memoryview(chunk_bytes).cast('B')
@@ -1773,8 +1777,19 @@ def decode_column_from_chunk(chunk_bytes, col_stats):
     if cpp_col.encodings.empty():
         cpp_col.encodings.push_back(0)  # default: PLAIN
 
+    if row_mask is not None:
+        mask_view = row_mask  # expects a contiguous numpy uint8 array
+        mask_ptr = &mask_view[0]
+
     with nogil:
-        result = parquet_reader.DecodeColumnFromChunk(&mem_view[0], size, &cpp_col)
+        if mask_ptr != NULL:
+            result = parquet_reader.DecodeColumnFromChunk(&mem_view[0], size, &cpp_col, mask_ptr)
+        else:
+            result = parquet_reader.DecodeColumnFromChunk(&mem_view[0], size, &cpp_col)
+
+    if mask_ptr != NULL:
+        _TEL["parquet_pages_skipped"] += <int32_t>result.pages_skipped
+        _TEL["parquet_pages_decoded"] += <int32_t>result.pages_decoded
 
     if not result.success:
         return None
@@ -1791,7 +1806,7 @@ def decode_column_from_chunk(chunk_bytes, col_stats):
         if _decoded_has_dictionary(result):
             _TEL["parquet_dict_materialize_fallbacks"] += 1
         return _make_int64_from_int32_vector(result, num_rows)
-    
+
     elif col_type == "int64":
         if _should_emit_constant_vector(result, num_rows):
             return _make_typed_constant_vector(result, num_rows)
@@ -1800,7 +1815,7 @@ def decode_column_from_chunk(chunk_bytes, col_stats):
         if _decoded_has_dictionary(result):
             _TEL["parquet_dict_materialize_fallbacks"] += 1
         return _make_int64_vector(result, num_rows)
-    
+
     elif col_type == "byte_array":
         if _should_emit_constant_vector(result, num_rows):
             return _make_typed_constant_vector(result, num_rows)
@@ -1809,10 +1824,10 @@ def decode_column_from_chunk(chunk_bytes, col_stats):
         if _decoded_has_dictionary(result):
             _TEL["parquet_dict_materialize_fallbacks"] += 1
         return _make_string_vector(result, num_rows)
-    
+
     elif col_type == "boolean":
         return _make_bool_vector(result, num_rows)
-    
+
     elif col_type == "float32":
         if _should_emit_constant_vector(result, num_rows):
             return _make_typed_constant_vector(result, num_rows)
@@ -1821,7 +1836,7 @@ def decode_column_from_chunk(chunk_bytes, col_stats):
         if _decoded_has_dictionary(result):
             _TEL["parquet_dict_materialize_fallbacks"] += 1
         return _make_float64_from_float32_vector(result, num_rows)
-    
+
     elif col_type == "float64":
         if _should_emit_constant_vector(result, num_rows):
             return _make_typed_constant_vector(result, num_rows)
@@ -1830,7 +1845,7 @@ def decode_column_from_chunk(chunk_bytes, col_stats):
         if _decoded_has_dictionary(result):
             _TEL["parquet_dict_materialize_fallbacks"] += 1
         return _make_float64_vector(result, num_rows)
-    
+
     else:
         return None
 
@@ -1885,7 +1900,7 @@ def decode_column_from_memory(data, str column_name, row_group_stats, int row_gr
         cpp_col.dictionary_page_offset = col.dictionary_page_offset if col.dictionary_page_offset is not None else -1
         cpp_col.has_min = col.has_min if col.has_min is not None else False
         cpp_col.has_max = col.has_max if col.has_max is not None else False
-        
+
         # Handle min/max values which can be different types
         if col.min:
             if isinstance(col.min, bytes):
@@ -1896,7 +1911,7 @@ def decode_column_from_memory(data, str column_name, row_group_stats, int row_gr
                 cpp_col.min = str(col.min).encode("utf-8")
         else:
             cpp_col.min = b""
-            
+
         if col.max:
             if isinstance(col.max, bytes):
                 cpp_col.max = col.max
@@ -1906,7 +1921,7 @@ def decode_column_from_memory(data, str column_name, row_group_stats, int row_gr
                 cpp_col.max = str(col.max).encode("utf-8")
         else:
             cpp_col.max = b""
-            
+
         cpp_col.null_count = col.null_count if col.null_count is not None else -1
         cpp_col.distinct_count = col.distinct_count if col.distinct_count is not None else -1
         cpp_col.bloom_offset = col.bloom_offset if col.bloom_offset is not None else -1

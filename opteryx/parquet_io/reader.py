@@ -29,23 +29,11 @@ import heapq
 import struct
 import time
 from collections import deque
-from concurrent.futures import FIRST_COMPLETED
-from concurrent.futures import Future
-from concurrent.futures import ThreadPoolExecutor
-from concurrent.futures import as_completed
-from concurrent.futures import wait
-from dataclasses import dataclass
-from dataclasses import field
-from typing import Any
-from typing import Deque
-from typing import Dict
-from typing import Iterator
-from typing import List
-from typing import Optional
-from typing import Tuple
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, as_completed, wait
+from dataclasses import dataclass, field
+from typing import Any, Deque, Dict, Iterator, List, Optional, Tuple
 
-from opteryx.parquet_io.cache import InMemoryParquetCache
-from opteryx.parquet_io.cache import ParquetCache
+from opteryx.parquet_io.cache import InMemoryParquetCache, ParquetCache
 from opteryx.parquet_io.predicates import row_group_may_satisfy
 
 
@@ -245,6 +233,7 @@ def fetch_columns(
     cache: Optional[ParquetCache] = None,
     decoder: Optional[Any] = None,
     connector: Optional[str] = None,
+    row_mask=None,
 ) -> Dict[str, Any]:
     """
     Fetch and decode specific column chunks from a row group.
@@ -327,6 +316,17 @@ def fetch_columns(
             misses.append(col_name)
             cache_misses += 1
 
+    # Snapshot rugo page counters before decode so we can compute per-call
+    # deltas only (counters are cumulative across the process lifetime).
+    _pages_skipped_before: int = 0
+    _pages_decoded_before: int = 0
+    if row_mask is not None and misses:
+        from opteryx.rugo import parquet as _rugo_parquet
+
+        _tel_before = _rugo_parquet.get_telemetry()
+        _pages_skipped_before = _tel_before.get("parquet_pages_skipped", 0)
+        _pages_decoded_before = _tel_before.get("parquet_pages_decoded", 0)
+
     # Batch-read missing column chunks
     if misses:
         # Compute byte ranges for each missed column
@@ -406,7 +406,11 @@ def fetch_columns(
 
             try:
                 decode_start_ns = time.monotonic_ns()
-                decoded = decoder(raw_bytes, col_stats)
+                decoded = (
+                    decoder(raw_bytes, col_stats)
+                    if row_mask is None
+                    else decoder(raw_bytes, col_stats, row_mask)
+                )
                 time_decode_columns_ns += time.monotonic_ns() - decode_start_ns
                 if decoded is None:
                     raise RuntimeError(
@@ -443,6 +447,16 @@ def fetch_columns(
     result_dict["__time_decode_columns_ns__"] = time_decode_columns_ns
     result_dict["__cache_column_hits__"] = cache_hits
     result_dict["__cache_column_misses__"] = cache_misses
+    if row_mask is not None:
+        from opteryx.rugo import parquet as _rugo_parquet
+
+        _tel_after = _rugo_parquet.get_telemetry()
+        result_dict["__pages_skipped__"] = (
+            _tel_after.get("parquet_pages_skipped", 0) - _pages_skipped_before
+        )
+        result_dict["__pages_decoded__"] = (
+            _tel_after.get("parquet_pages_decoded", 0) - _pages_decoded_before
+        )
     return result_dict
 
 

@@ -11,20 +11,14 @@ Architecture:
 - OpteryxTable: Transient table-specific engine (handles data reading for one table)
 """
 
-from typing import Dict
-from typing import Optional
-from typing import Tuple
+from typing import Dict, Optional, Tuple
 
 from orso.schema import RelationSchema
 
 from opteryx.connectors import TableType
-from opteryx.connectors.capabilities import Diachronic
-from opteryx.connectors.capabilities import Eidetic
-from opteryx.connectors.capabilities import PredicatePushable
-from opteryx.exceptions import DatasetNotFoundError
-from opteryx.exceptions import DatasetReadError
-from opteryx.models import FileEntry
-from opteryx.models import Manifest
+from opteryx.connectors.capabilities import Diachronic, Eidetic, PredicatePushable
+from opteryx.exceptions import DatasetNotFoundError, DatasetReadError
+from opteryx.models import FileEntry, Manifest
 
 
 class OpteryxTable(Diachronic, PredicatePushable):
@@ -57,8 +51,18 @@ class OpteryxTable(Diachronic, PredicatePushable):
         "GtEq": True,
         "Lt": True,
         "LtEq": True,
-        "Like": False,
-        "NotLike": False,
+        "Like": True,
+        "NotLike": True,
+        "ILike": True,
+        "NotILike": True,
+        "InStr": True,
+        "NotInStr": True,
+        "IInStr": True,
+        "NotIInStr": True,
+        "InList": True,
+        "NotInList": True,
+        "RLike": True,
+        "NotRLike": True,
     }
 
     def __init__(self, dataset: str, catalog, workspace: str, **kwargs):
@@ -217,8 +221,18 @@ class OpteryxConnector(Eidetic, PredicatePushable):
         "GtEq": True,
         "Lt": True,
         "LtEq": True,
-        "Like": False,
-        "NotLike": False,
+        "Like": True,
+        "NotLike": True,
+        "ILike": True,
+        "NotILike": True,
+        "InStr": True,
+        "NotInStr": True,
+        "IInStr": True,
+        "NotIInStr": True,
+        "InList": True,
+        "NotInList": True,
+        "RLike": True,
+        "NotRLike": True,
     }
 
     def __init__(self, *args, catalog=None, telemetry=None, **kwargs):

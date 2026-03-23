@@ -6,8 +6,7 @@
 import json
 import typing
 from os import environ
-from typing import Optional
-from typing import Union
+from typing import Optional, Union
 
 
 def memory_allocation_calculation(allocation: Union[float, int]) -> int:
@@ -319,8 +318,12 @@ class Features:
     io_process_rowgroup_ring = str(get("FEATURE_IO_PROCESS_ROWGROUP_RING", "0")).lower() in ("1", "true", "yes")
     use_serial_reader = parse_connector_targets(_serial_reader_setting, default=("LOCAL",))
     parquet_thread_scheduler = str(get("FEATURE_PARQUET_THREAD_SCHEDULER", "0")).lower() in ("1", "true", "yes")
+    parquet_late_materialization = str(get("FEATURE_PARQUET_LATE_MATERIALIZATION", "1")).lower() in ("1", "true", "yes")
 
 
 features = Features()
+
+PARQUET_LATE_MATERIALIZATION_ABANDON_AFTER: int = int(get("PARQUET_LATE_MATERIALIZATION_ABANDON_AFTER", 5))
+"""Consecutive fully-passing row groups before abandoning two-pass mode for the rest of the query."""
 
 # fmt:on

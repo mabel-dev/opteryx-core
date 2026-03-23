@@ -27,8 +27,7 @@ between I/O and decode across all files and row groups simultaneously.
 from __future__ import annotations
 
 import time
-from concurrent.futures import ThreadPoolExecutor
-from concurrent.futures import as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from copy import deepcopy
 from typing import Generator
 
@@ -37,22 +36,15 @@ import pyarrow
 from orso.schema import convert_orso_schema_to_arrow_schema
 from orso.tools import random_string
 
-from opteryx import EOS
-from opteryx import config
+from opteryx import EOS, config
 from opteryx.draken.morsels.morsel import Morsel
-from opteryx.expression import NodeType
-from opteryx.expression import get_all_nodes_of_type
-from opteryx.models import Node
-from opteryx.models import QueryProperties
-from opteryx.parquet_io import InMemoryParquetCache
-from opteryx.parquet_io import fetch_footer
-from opteryx.parquet_io import iter_row_groups
+from opteryx.expression import NodeType, get_all_nodes_of_type
+from opteryx.models import Node, QueryProperties
+from opteryx.parquet_io import InMemoryParquetCache, fetch_columns, fetch_footer, iter_row_groups
 from opteryx.parquet_io.predicates import extract_predicate_stats
 from opteryx.utils.parquet_decoder import parquet_decoder
 
-from .read_node import ReaderNode
-from .read_node import normalize_morsel
-from .read_node import struct_to_jsonb
+from .read_node import ReaderNode, normalize_morsel, struct_to_jsonb
 
 _DATA_FORMAT = "arrow,draken"
 
@@ -116,6 +108,35 @@ class ParquetReadNode(ReaderNode):
             )
         if self.readings.get("parquet_scan_strategy"):
             base["parquet_scan_strategy"] = self.readings["parquet_scan_strategy"]
+        lm_pass1 = self.readings.get("parquet_latmat_pass1_row_groups", 0)
+        if lm_pass1 > 0:
+            base["parquet_latmat_pass1_row_groups"] = lm_pass1
+            base["parquet_latmat_pass2_row_groups"] = self.readings.get(
+                "parquet_latmat_pass2_row_groups", 0
+            )
+            base["parquet_latmat_skipped_row_groups"] = self.readings.get(
+                "parquet_latmat_skipped_row_groups", 0
+            )
+            base["parquet_latmat_abandoned_files"] = self.readings.get(
+                "parquet_latmat_abandoned_files", 0
+            )
+            base["parquet_latmat_pass2_bytes"] = self.readings.get("parquet_latmat_pass2_bytes", 0)
+            base["parquet_latmat_skipped_pages"] = self.readings.get(
+                "parquet_latmat_skipped_pages", 0
+            )
+            base["parquet_latmat_decoded_pages"] = self.readings.get(
+                "parquet_latmat_decoded_pages", 0
+            )
+            lm_total_pages = (
+                base["parquet_latmat_skipped_pages"] + base["parquet_latmat_decoded_pages"]
+            )
+            if lm_total_pages > 0:
+                base["parquet_latmat_page_skip_ratio"] = (
+                    base["parquet_latmat_skipped_pages"] / lm_total_pages
+                )
+            base["parquet_latmat_skip_ratio"] = (
+                self.readings.get("parquet_latmat_skipped_row_groups", 0) / lm_pass1
+            )
         return base
 
     @staticmethod
@@ -175,8 +196,7 @@ class ParquetReadNode(ReaderNode):
         if predicate_root is None:
             return morsel, morsel.num_rows, morsel.num_rows
 
-        from opteryx.expression.evaluator import evaluate_and_append_draken
-        from opteryx.expression.evaluator import evaluate_draken
+        from opteryx.expression.evaluator import evaluate_and_append_draken, evaluate_draken
 
         rows_before_filter = morsel.num_rows
 
@@ -383,6 +403,31 @@ class ParquetReadNode(ReaderNode):
         output_identity_order = [column.identity for column in output_schema.columns]
         predicate_root = self._compose_predicates(self.predicates or [])
 
+        # ── Two-pass late materialization column split ────────────────────────
+        # pass1_column_names: filter columns only — fetched for every row group.
+        # pass2_column_names: projection-only columns — fetched only for row groups
+        # that have at least one row surviving the Pass 1 predicate evaluation.
+        # Two-pass is skipped when predicates are absent, there are no projection-
+        # only columns (e.g. SELECT url WHERE url LIKE …), or the feature is off.
+        pass2_identity_set = projected_identity_set - filter_identity_set
+        two_pass_eligible = (
+            config.features.parquet_late_materialization
+            and bool(predicate_root)
+            and bool(filter_identity_set)
+            and bool(pass2_identity_set)
+        )
+        pass1_column_names: list = []
+        pass2_column_names: list = []
+        pass1_name_to_identity: dict = {}
+        pass2_name_to_identity: dict = {}
+        if two_pass_eligible:
+            _p1_cols = [c for c in base_schema.columns if c.identity in filter_identity_set]
+            _p2_cols = [c for c in base_schema.columns if c.identity in pass2_identity_set]
+            pass1_column_names = [c.name for c in _p1_cols]
+            pass2_column_names = [c.name for c in _p2_cols]
+            pass1_name_to_identity = {c.name: c.identity for c in _p1_cols}
+            pass2_name_to_identity = {c.name: c.identity for c in _p2_cols}
+
         # ── Empty manifest ────────────────────────────────────────────────────
         if not self.manifest or self.manifest.get_file_count() == 0:
             from orso import DataFrame
@@ -439,6 +484,13 @@ class ParquetReadNode(ReaderNode):
         self.readings["io_rowgroup_slice_count"] += 0
         self.readings["io_deserialize_ns"] += 0
         self.readings["io_serialize_ns"] += 0
+        self.readings["parquet_latmat_pass1_row_groups"] += 0
+        self.readings["parquet_latmat_pass2_row_groups"] += 0
+        self.readings["parquet_latmat_skipped_row_groups"] += 0
+        self.readings["parquet_latmat_abandoned_files"] += 0
+        self.readings["parquet_latmat_pass2_bytes"] += 0
+        self.readings["parquet_latmat_skipped_pages"] += 0
+        self.readings["parquet_latmat_decoded_pages"] += 0
 
         # Phase 1 predicate pushdown: extract (col, op, value) triples from pushed-down
         # predicates so the reader can prune row groups using footer min/max stats.
@@ -539,6 +591,9 @@ class ParquetReadNode(ReaderNode):
             return
 
         result_morsel = None
+        two_pass_active = two_pass_eligible
+        consecutive_full_pass = 0
+        scan_column_names = pass1_column_names if two_pass_eligible else column_names
 
         decode_start = time.monotonic_ns()
         total_rows_before_filter = 0
@@ -547,7 +602,7 @@ class ParquetReadNode(ReaderNode):
             for row_group in iter_row_groups(
                 filesystem,
                 blob_paths,
-                column_names,
+                scan_column_names,
                 cache,
                 predicates=predicate_stats,
                 file_sizes=file_sizes or None,
@@ -556,7 +611,7 @@ class ParquetReadNode(ReaderNode):
                 prefetched_footers=prefetched_footers,
             ):
                 path = row_group.pop("__path__")
-                _ = row_group.pop("__row_group__")
+                rg_idx = row_group.pop("__row_group__")
                 self.readings["parquet_row_groups_pruned"] = row_group.pop(
                     "__row_groups_pruned__", 0
                 )
@@ -698,27 +753,122 @@ class ParquetReadNode(ReaderNode):
                 for key in [k for k in row_group if k.startswith("__")]:
                     row_group.pop(key, None)
 
-                # Assemble the projected columns into a Draken Morsel directly.
-                # Each value is a DrakenVector; we map data-file names to identity
-                # names so the morsel arrives downstream already correctly labelled.
-                identity_names = [name_to_identity[col] for col in row_group]
-                vectors = list(row_group.values())
-                if not identity_names:
-                    # Zero-projection query (e.g. COUNT(*) with a pushed-down WHERE
-                    # predicate that stripped all columns).  The reader cannot build a
-                    # Morsel with no columns; row-level filtering for this case is an
-                    # architectural concern for the planner, not the reader.
-                    continue
-                result_morsel = Morsel.from_vectors(identity_names, vectors)
-                rows_before_filter = result_morsel.num_rows
-                rows_after_filter = rows_before_filter
-                if predicate_root is not None:
-                    result_morsel, rows_before_filter, rows_after_filter = (
-                        self._apply_predicates_to_morsel(
-                            result_morsel,
-                            predicate_root,
-                        )
+                # ── Morsel assembly ───────────────────────────────────────────
+                if two_pass_eligible:
+                    from opteryx.expression.evaluator import (
+                        evaluate_and_append_draken,
+                        evaluate_draken,
                     )
+
+                    # Build Pass 1 morsel from filter columns only.
+                    p1_identity_names = [pass1_name_to_identity[col] for col in row_group]
+                    p1_vectors = list(row_group.values())
+                    if not p1_identity_names:
+                        continue
+                    p1_morsel = Morsel.from_vectors(p1_identity_names, p1_vectors)
+                    rows_before_filter = p1_morsel.num_rows
+
+                    # Evaluate predicate to get the raw BoolVector mask.
+                    # Handle FUNCTION nodes first (mirrors _apply_predicates_to_morsel).
+                    function_nodes = get_all_nodes_of_type(
+                        predicate_root, select_nodes=(NodeType.FUNCTION,)
+                    )
+                    if function_nodes:
+                        p1_morsel = evaluate_and_append_draken(function_nodes, p1_morsel)
+                    mask = evaluate_draken(predicate_root, p1_morsel)
+
+                    self.readings["parquet_latmat_pass1_row_groups"] += 1
+
+                    # Zero-hit fast path: skip Pass 2 entirely for this row group.
+                    # Only applies when the abandonment heuristic has not fired.
+                    if two_pass_active and not mask.any():
+                        total_rows_before_filter += rows_before_filter
+                        self.readings["parquet_latmat_skipped_row_groups"] += 1
+                        self.readings["row_groups_read"] = (
+                            self.readings.get("row_groups_read", 0) + 1
+                        )
+                        if path not in self._parquet_files_seen:
+                            self._parquet_files_seen.add(path)
+                            self.readings["files_read"] = len(self._parquet_files_seen)
+                            self.readings["blobs_seen"] += 1
+                        continue
+
+                    # Pass 2: fetch projection-only columns for this (path, rg_idx).
+                    import numpy as _np
+
+                    _mask_np = _np.asarray(mask.to_pylist(), dtype=_np.uint8)
+                    pass2_raw = fetch_columns(
+                        filesystem,
+                        path,
+                        rg_idx,
+                        pass2_column_names,
+                        cache,
+                        connector=connector_type,
+                        row_mask=_mask_np,
+                    )
+                    p2_bytes = pass2_raw.pop("__bytes_fetched__", 0)
+                    self.readings["parquet_latmat_pass2_bytes"] += p2_bytes
+                    self.bytes_in += p2_bytes
+                    self.readings["parquet_latmat_skipped_pages"] += pass2_raw.pop(
+                        "__pages_skipped__", 0
+                    )
+                    self.readings["parquet_latmat_decoded_pages"] += pass2_raw.pop(
+                        "__pages_decoded__", 0
+                    )
+                    for _k in [k for k in list(pass2_raw) if k.startswith("__")]:
+                        pass2_raw.pop(_k)
+
+                    # Pass 1 filtered morsel (K rows).
+                    p1_filtered = p1_morsel.filter_mask(mask)
+
+                    # Pass 2 vectors are already K rows (decoder applied the mask).
+                    p2_identity_names = [pass2_name_to_identity[col] for col in pass2_raw]
+                    result_morsel = Morsel.from_vectors(
+                        p1_identity_names + p2_identity_names,
+                        [
+                            p1_filtered.column(n.encode() if isinstance(n, str) else n)
+                            for n in p1_identity_names
+                        ]
+                        + list(pass2_raw.values()),
+                    )
+                    rows_after_filter = result_morsel.num_rows
+
+                    self.readings["parquet_latmat_pass2_row_groups"] += 1
+
+                    # Abandonment heuristic: when the predicate is consistently
+                    # non-selective, stop skipping Pass 2 for zero-survivor row groups.
+                    if two_pass_active:
+                        if rows_after_filter == rows_before_filter:
+                            consecutive_full_pass += 1
+                            if (
+                                consecutive_full_pass
+                                >= config.PARQUET_LATE_MATERIALIZATION_ABANDON_AFTER
+                            ):
+                                two_pass_active = False
+                                self.readings["parquet_latmat_abandoned_files"] += 1
+                        else:
+                            consecutive_full_pass = 0
+
+                else:
+                    # Single-pass path: existing behaviour, unchanged.
+                    identity_names = [name_to_identity[col] for col in row_group]
+                    vectors = list(row_group.values())
+                    if not identity_names:
+                        # Zero-projection query (e.g. COUNT(*) with a pushed-down WHERE
+                        # predicate that stripped all columns).  The reader cannot build a
+                        # Morsel with no columns; row-level filtering for this case is an
+                        # architectural concern for the planner, not the reader.
+                        continue
+                    result_morsel = Morsel.from_vectors(identity_names, vectors)
+                    rows_before_filter = result_morsel.num_rows
+                    rows_after_filter = rows_before_filter
+                    if predicate_root is not None:
+                        result_morsel, rows_before_filter, rows_after_filter = (
+                            self._apply_predicates_to_morsel(
+                                result_morsel,
+                                predicate_root,
+                            )
+                        )
                 total_rows_before_filter += rows_before_filter
                 total_rows_after_filter += rows_after_filter
                 if output_identity_order:

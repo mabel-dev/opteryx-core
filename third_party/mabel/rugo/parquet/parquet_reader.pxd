@@ -16,17 +16,17 @@ cdef extern from "metadata.hpp":
         string name
         string physical_type
         string logical_type
-        
+
         # Sizes & counts
         int64_t num_values
         int64_t total_uncompressed_size
         int64_t total_compressed_size
-        
+
         # Offsets
         int64_t data_page_offset
         int64_t index_page_offset
         int64_t dictionary_page_offset
-        
+
         # Statistics
         bint has_min
         bint has_max
@@ -34,15 +34,15 @@ cdef extern from "metadata.hpp":
         string max
         int64_t null_count
         int64_t distinct_count
-        
+
         # Bloom filter
         int64_t bloom_offset
         int64_t bloom_length
-        
+
         # Encodings & codec
         vector[int32_t] encodings
         int32_t codec
-        
+
         # Key/value metadata
         unordered_map[string, string] key_value_metadata
 
@@ -87,7 +87,7 @@ cdef extern from "metadata.hpp":
     FileStats ReadParquetMetadata(const string& path)
     FileStats ReadParquetMetadataFromBuffer(const uint8_t* buf, size_t size, const MetadataParseOptions& options)
     bint TestBloomFilter(const string& file_path, long long bloom_offset, long long bloom_length, const string& value)
-    
+
     # Helper functions
     const char* EncodingToString(int32_t enc)
     const char* CompressionCodecToString(int32_t codec)
@@ -112,6 +112,8 @@ cdef extern from "decode.hpp":
         vector[float] float32_values
         vector[double] float64_values
         string type
+        int32_t pages_skipped
+        int32_t pages_decoded
         bint success
         # Zero-copy output pointers (set by caller before decode)
         int64_t* ext_int64
@@ -125,17 +127,18 @@ cdef extern from "decode.hpp":
         vector[int32_t]  string_dict_lens
         uint8_t code_width
         bint dict_ordered
-    
+
     cdef cppclass DecodedTable:
         vector[vector[DecodedColumn]] row_groups  # [row_group][column]
         vector[string] column_names
         bint success
-    
+
     bint CanDecode(const string& path)
     bint CanDecode(const uint8_t* data, size_t size)
-    
+
     # New memory-based functions
     DecodedColumn DecodeColumnFromChunk(const uint8_t* data, size_t size, const ColumnStats* col) nogil
+    DecodedColumn DecodeColumnFromChunk(const uint8_t* data, size_t size, const ColumnStats* col, const uint8_t* row_mask) nogil
     DecodedColumn DecodeColumnFromMemory(const uint8_t* data, size_t size, const string& column_name, const RowGroupStats& row_group, int row_group_index) nogil
     DecodedColumn DecodeColumnFromMemory(const uint8_t* data, size_t size, const string& column_name, const RowGroupStats& row_group, int row_group_index, int64_t* ext_int64, double* ext_float64, int32_t* ext_int32, float* ext_float32) nogil
     DecodedTable ReadParquet(const uint8_t* data, size_t size, const vector[string]& column_names) nogil
