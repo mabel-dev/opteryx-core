@@ -12,7 +12,6 @@ Gives information about a dataset's columns
 """
 
 import pyarrow
-
 from opteryx.models import QueryProperties
 
 from . import BasePlanNode

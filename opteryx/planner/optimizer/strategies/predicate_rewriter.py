@@ -44,9 +44,6 @@ import re
 from typing import Callable
 from typing import Dict
 
-from orso.schema import ConstantColumn
-from orso.types import OrsoTypes
-
 from opteryx.expression import ExpressionColumn
 from opteryx.expression import NodeType
 from opteryx.expression import format_expression
@@ -60,6 +57,8 @@ from opteryx.utils.dates import add_single_unit
 from opteryx.utils.dates import parse_iso
 from opteryx.utils.dates import truncate_single
 from opteryx.utils.sql import sql_like_to_regex
+from orso.schema import ConstantColumn
+from orso.types import OrsoTypes
 
 from .optimization_strategy import OptimizationStrategy
 from .optimization_strategy import OptimizerContext

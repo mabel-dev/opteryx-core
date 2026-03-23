@@ -17,7 +17,6 @@ from typing import Union
 
 from minio.select import OutputSerialization
 from minio.xml import SubElement
-
 from opteryx.connectors.capabilities import PredicatePushable
 from opteryx.exceptions import MissingDependencyError
 from opteryx.exceptions import UnmetRequirementError

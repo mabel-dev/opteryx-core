@@ -22,13 +22,13 @@ Supported comparisons:
 
 import numpy
 import pyarrow
-from pyarrow import Table
-
-from opteryx import EOS
 from opteryx.compiled.joins import non_equi_nested_loop_join
 from opteryx.draken import Morsel
 from opteryx.draken import align_tables
 from opteryx.models import QueryProperties
+from pyarrow import Table
+
+from opteryx import EOS
 
 from . import JoinNode
 

@@ -9,8 +9,9 @@ Union Node
 This is a SQL Query Execution Plan Node.
 """
 
-from opteryx import EOS
 from opteryx.models import QueryProperties
+
+from opteryx import EOS
 
 from . import BasePlanNode
 

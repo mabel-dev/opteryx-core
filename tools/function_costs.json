@@ -1,0 +1,1334 @@
+{
+  "timestamp": 1774303760.0702589,
+  "total_functions": 87,
+  "total_kernels": 96,
+  "successful": 96,
+  "functions": {
+    "UPPER": [
+      {
+        "kernel_id": "default",
+        "engine": "arrow",
+        "cost_us_per_million": 8.0668,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 2.167,
+        "max_us": 29.875,
+        "avg_us": 8.0668,
+        "success": true,
+        "error": null
+      }
+    ],
+    "LOWER": [
+      {
+        "kernel_id": "default",
+        "engine": "arrow",
+        "cost_us_per_million": 7.708400000000001,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 2.209,
+        "max_us": 27.542,
+        "avg_us": 7.7084,
+        "success": true,
+        "error": null
+      }
+    ],
+    "LENGTH": [
+      {
+        "kernel_id": "default",
+        "engine": "arrow",
+        "cost_us_per_million": 6.424600000000001,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 2.25,
+        "max_us": 21.416,
+        "avg_us": 6.424600000000001,
+        "success": true,
+        "error": null
+      },
+      {
+        "kernel_id": "default",
+        "engine": "arrow",
+        "cost_us_per_million": 5.9164,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 2.542,
+        "max_us": 17.333,
+        "avg_us": 5.9164,
+        "success": true,
+        "error": null
+      }
+    ],
+    "CONCAT": [
+      {
+        "kernel_id": "default",
+        "engine": "draken",
+        "cost_us_per_million": 2.1,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 0.75,
+        "max_us": 7.0,
+        "avg_us": 2.1,
+        "success": true,
+        "error": null
+      }
+    ],
+    "SUBSTRING": [
+      {
+        "kernel_id": "default",
+        "engine": "arrow",
+        "cost_us_per_million": 1.2082000000000002,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 0.291,
+        "max_us": 4.625,
+        "avg_us": 1.2082000000000002,
+        "success": true,
+        "error": null
+      },
+      {
+        "kernel_id": "default",
+        "engine": "arrow",
+        "cost_us_per_million": 1.0412000000000001,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 0.291,
+        "max_us": 3.666,
+        "avg_us": 1.0412000000000001,
+        "success": true,
+        "error": null
+      }
+    ],
+    "CHAR": [
+      {
+        "kernel_id": "default",
+        "engine": "arrow",
+        "cost_us_per_million": 2.4916,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 0.541,
+        "max_us": 9.625,
+        "avg_us": 2.4916,
+        "success": true,
+        "error": null
+      }
+    ],
+    "ASCII": [
+      {
+        "kernel_id": "default",
+        "engine": "arrow",
+        "cost_us_per_million": 109566.64180000001,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 106815.458,
+        "max_us": 117641.334,
+        "avg_us": 109566.64180000001,
+        "success": true,
+        "error": null
+      }
+    ],
+    "LEFT": [
+      {
+        "kernel_id": "default",
+        "engine": "arrow",
+        "cost_us_per_million": 2.1,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 0.333,
+        "max_us": 8.834,
+        "avg_us": 2.1,
+        "success": true,
+        "error": null
+      }
+    ],
+    "RIGHT": [
+      {
+        "kernel_id": "default",
+        "engine": "arrow",
+        "cost_us_per_million": 1.1664,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 0.291,
+        "max_us": 4.417,
+        "avg_us": 1.1664,
+        "success": true,
+        "error": null
+      }
+    ],
+    "REVERSE": [
+      {
+        "kernel_id": "default",
+        "engine": "arrow",
+        "cost_us_per_million": 11.966800000000001,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 2.292,
+        "max_us": 48.625,
+        "avg_us": 11.966800000000001,
+        "success": true,
+        "error": null
+      }
+    ],
+    "SOUNDEX": [
+      {
+        "kernel_id": "default",
+        "engine": "arrow",
+        "cost_us_per_million": 9.1,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 2.333,
+        "max_us": 34.834,
+        "avg_us": 9.1,
+        "success": true,
+        "error": null
+      }
+    ],
+    "INITCAP": [
+      {
+        "kernel_id": "default",
+        "engine": "arrow",
+        "cost_us_per_million": 5.975,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 2.208,
+        "max_us": 20.5,
+        "avg_us": 5.975,
+        "success": true,
+        "error": null
+      }
+    ],
+    "CONCAT_WS": [
+      {
+        "kernel_id": "default",
+        "engine": "draken",
+        "cost_us_per_million": 1.5912000000000002,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 0.291,
+        "max_us": 6.291,
+        "avg_us": 1.5912000000000002,
+        "success": true,
+        "error": null
+      }
+    ],
+    "POSITION": [
+      {
+        "kernel_id": "default",
+        "engine": "draken",
+        "cost_us_per_million": 0.7252,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 0.292,
+        "max_us": 2.209,
+        "avg_us": 0.7252,
+        "success": true,
+        "error": null
+      }
+    ],
+    "TRIM": [
+      {
+        "kernel_id": "default",
+        "engine": "draken",
+        "cost_us_per_million": 1.05,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 0.292,
+        "max_us": 3.75,
+        "avg_us": 1.05,
+        "success": true,
+        "error": null
+      }
+    ],
+    "LTRIM": [
+      {
+        "kernel_id": "default",
+        "engine": "draken",
+        "cost_us_per_million": 0.9667999999999998,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 0.292,
+        "max_us": 3.417,
+        "avg_us": 0.9667999999999999,
+        "success": true,
+        "error": null
+      }
+    ],
+    "RTRIM": [
+      {
+        "kernel_id": "default",
+        "engine": "draken",
+        "cost_us_per_million": 0.8834,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 0.25,
+        "max_us": 3.083,
+        "avg_us": 0.8834,
+        "success": true,
+        "error": null
+      }
+    ],
+    "LPAD": [
+      {
+        "kernel_id": "default",
+        "engine": "arrow",
+        "cost_us_per_million": 1.0584,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 0.375,
+        "max_us": 3.625,
+        "avg_us": 1.0584,
+        "success": true,
+        "error": null
+      }
+    ],
+    "RPAD": [
+      {
+        "kernel_id": "default",
+        "engine": "arrow",
+        "cost_us_per_million": 0.7163999999999999,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 0.375,
+        "max_us": 1.958,
+        "avg_us": 0.7163999999999999,
+        "success": true,
+        "error": null
+      }
+    ],
+    "LEVENSHTEIN": [
+      {
+        "kernel_id": "default",
+        "engine": "arrow",
+        "cost_us_per_million": 0.767,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 0.334,
+        "max_us": 2.292,
+        "avg_us": 0.767,
+        "success": true,
+        "error": null
+      }
+    ],
+    "SPLIT": [
+      {
+        "kernel_id": "default",
+        "engine": "arrow",
+        "cost_us_per_million": 8.224799999999998,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 2.375,
+        "max_us": 30.791,
+        "avg_us": 8.224799999999998,
+        "success": true,
+        "error": null
+      }
+    ],
+    "_MATCH_AGAINST": [
+      {
+        "kernel_id": "default",
+        "engine": "arrow",
+        "cost_us_per_million": 1.1669999999999998,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 0.292,
+        "max_us": 4.292,
+        "avg_us": 1.1669999999999998,
+        "success": true,
+        "error": null
+      }
+    ],
+    "REPLACE": [
+      {
+        "kernel_id": "default",
+        "engine": "arrow",
+        "cost_us_per_million": 1.3336,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 0.417,
+        "max_us": 4.792,
+        "avg_us": 1.3336,
+        "success": true,
+        "error": null
+      }
+    ],
+    "REGEXP_REPLACE": [
+      {
+        "kernel_id": "default",
+        "engine": "arrow",
+        "cost_us_per_million": 1.2332,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 0.375,
+        "max_us": 4.292,
+        "avg_us": 1.2332,
+        "success": true,
+        "error": null
+      }
+    ],
+    "_GET_STRING": [
+      {
+        "kernel_id": "default",
+        "engine": "arrow",
+        "cost_us_per_million": 0.6417999999999999,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 0.25,
+        "max_us": 1.958,
+        "avg_us": 0.6417999999999999,
+        "success": true,
+        "error": null
+      }
+    ],
+    "ROUND": [
+      {
+        "kernel_id": "default",
+        "engine": "draken",
+        "cost_us_per_million": 4.9084,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 1.5,
+        "max_us": 17.458,
+        "avg_us": 4.9084,
+        "success": true,
+        "error": null
+      },
+      {
+        "kernel_id": "default",
+        "engine": "draken",
+        "cost_us_per_million": 0.8416,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 0.333,
+        "max_us": 2.75,
+        "avg_us": 0.8416,
+        "success": true,
+        "error": null
+      }
+    ],
+    "ABS": [
+      {
+        "kernel_id": "default",
+        "engine": "arrow",
+        "cost_us_per_million": 221.0254,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 130.792,
+        "max_us": 554.709,
+        "avg_us": 221.0254,
+        "success": true,
+        "error": null
+      }
+    ],
+    "CEILING": [
+      {
+        "kernel_id": "default",
+        "engine": "arrow",
+        "cost_us_per_million": 137.675,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 132.125,
+        "max_us": 154.584,
+        "avg_us": 137.675,
+        "success": true,
+        "error": null
+      }
+    ],
+    "FLOOR": [
+      {
+        "kernel_id": "default",
+        "engine": "arrow",
+        "cost_us_per_million": 134.2418,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 128.583,
+        "max_us": 141.667,
+        "avg_us": 134.2418,
+        "success": true,
+        "error": null
+      }
+    ],
+    "SQRT": [
+      {
+        "kernel_id": "default",
+        "engine": "arrow",
+        "cost_us_per_million": 242.0582,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 219.791,
+        "max_us": 303.5,
+        "avg_us": 242.0582,
+        "success": true,
+        "error": null
+      }
+    ],
+    "SIGN": [
+      {
+        "kernel_id": "default",
+        "engine": "arrow",
+        "cost_us_per_million": 327.025,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 296.334,
+        "max_us": 439.708,
+        "avg_us": 327.025,
+        "success": true,
+        "error": null
+      }
+    ],
+    "TRUNC": [
+      {
+        "kernel_id": "numeric",
+        "engine": "arrow",
+        "cost_us_per_million": 142.78320000000002,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 134.458,
+        "max_us": 154.542,
+        "avg_us": 142.78320000000002,
+        "success": true,
+        "error": null
+      },
+      {
+        "kernel_id": "temporal",
+        "engine": "arrow",
+        "cost_us_per_million": 0.9584,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 0.292,
+        "max_us": 3.292,
+        "avg_us": 0.9583999999999999,
+        "success": true,
+        "error": null
+      }
+    ],
+    "POWER": [
+      {
+        "kernel_id": "default",
+        "engine": "arrow",
+        "cost_us_per_million": 0.8584000000000002,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 0.333,
+        "max_us": 2.834,
+        "avg_us": 0.8584000000000002,
+        "success": true,
+        "error": null
+      }
+    ],
+    "LOG": [
+      {
+        "kernel_id": "default",
+        "engine": "arrow",
+        "cost_us_per_million": 1.0417999999999998,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 0.292,
+        "max_us": 3.75,
+        "avg_us": 1.0417999999999998,
+        "success": true,
+        "error": null
+      }
+    ],
+    "COALESCE": [
+      {
+        "kernel_id": "default",
+        "engine": "arrow",
+        "cost_us_per_million": 15852.508399999999,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 15319.25,
+        "max_us": 16170.875,
+        "avg_us": 15852.5084,
+        "success": true,
+        "error": null
+      }
+    ],
+    "IFNULL": [
+      {
+        "kernel_id": "default",
+        "engine": "arrow",
+        "cost_us_per_million": 1.5252,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 0.292,
+        "max_us": 6.083,
+        "avg_us": 1.5252,
+        "success": true,
+        "error": null
+      }
+    ],
+    "IFNOTNULL": [
+      {
+        "kernel_id": "default",
+        "engine": "arrow",
+        "cost_us_per_million": 0.7419999999999999,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 0.292,
+        "max_us": 2.167,
+        "avg_us": 0.7419999999999999,
+        "success": true,
+        "error": null
+      }
+    ],
+    "NULLIF": [
+      {
+        "kernel_id": "default",
+        "engine": "arrow",
+        "cost_us_per_million": 0.7165999999999999,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 0.292,
+        "max_us": 2.25,
+        "avg_us": 0.7165999999999999,
+        "success": true,
+        "error": null
+      }
+    ],
+    "IIF": [
+      {
+        "kernel_id": "default",
+        "engine": "draken",
+        "cost_us_per_million": 1.3830000000000002,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 0.375,
+        "max_us": 5.166,
+        "avg_us": 1.3830000000000002,
+        "success": true,
+        "error": null
+      }
+    ],
+    "_PASSTHRU": [
+      {
+        "kernel_id": "default",
+        "engine": "arrow",
+        "cost_us_per_million": 0.2832,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 0.042,
+        "max_us": 1.083,
+        "avg_us": 0.2832,
+        "success": true,
+        "error": null
+      }
+    ],
+    "_CASE": [
+      {
+        "kernel_id": "default",
+        "engine": "arrow",
+        "cost_us_per_million": 1.0416,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 0.292,
+        "max_us": 3.666,
+        "avg_us": 1.0416,
+        "success": true,
+        "error": null
+      }
+    ],
+    "CURRENT_DATE": [
+      {
+        "kernel_id": "constant",
+        "engine": "arrow",
+        "cost_us_per_million": 1.0498,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 0.291,
+        "max_us": 3.708,
+        "avg_us": 1.0498,
+        "success": true,
+        "error": null
+      }
+    ],
+    "CURRENT_TIME": [
+      {
+        "kernel_id": "constant",
+        "engine": "arrow",
+        "cost_us_per_million": 0.7332000000000001,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 0.333,
+        "max_us": 2.25,
+        "avg_us": 0.7332000000000001,
+        "success": true,
+        "error": null
+      }
+    ],
+    "CURRENT_TIMESTAMP": [
+      {
+        "kernel_id": "constant",
+        "engine": "arrow",
+        "cost_us_per_million": 1.0002,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 0.333,
+        "max_us": 3.5,
+        "avg_us": 1.0002,
+        "success": true,
+        "error": null
+      }
+    ],
+    "UTC_TIMESTAMP": [
+      {
+        "kernel_id": "constant",
+        "engine": "arrow",
+        "cost_us_per_million": 0.8246,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 0.291,
+        "max_us": 2.791,
+        "avg_us": 0.8246,
+        "success": true,
+        "error": null
+      }
+    ],
+    "VERSION": [
+      {
+        "kernel_id": "constant",
+        "engine": "arrow",
+        "cost_us_per_million": 0.7752,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 0.292,
+        "max_us": 2.5,
+        "avg_us": 0.7752,
+        "success": true,
+        "error": null
+      }
+    ],
+    "CONNECTION_ID": [
+      {
+        "kernel_id": "constant",
+        "engine": "arrow",
+        "cost_us_per_million": 0.5998000000000001,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 0.333,
+        "max_us": 1.583,
+        "avg_us": 0.5998000000000001,
+        "success": true,
+        "error": null
+      }
+    ],
+    "DATABASE": [
+      {
+        "kernel_id": "constant",
+        "engine": "arrow",
+        "cost_us_per_million": 0.7082,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 0.333,
+        "max_us": 2.083,
+        "avg_us": 0.7082,
+        "success": true,
+        "error": null
+      }
+    ],
+    "USER": [
+      {
+        "kernel_id": "constant",
+        "engine": "arrow",
+        "cost_us_per_million": 0.9334,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 0.375,
+        "max_us": 3.125,
+        "avg_us": 0.9334,
+        "success": true,
+        "error": null
+      }
+    ],
+    "PI": [
+      {
+        "kernel_id": "constant",
+        "engine": "arrow",
+        "cost_us_per_million": 0.7747999999999999,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 0.291,
+        "max_us": 2.542,
+        "avg_us": 0.7747999999999999,
+        "success": true,
+        "error": null
+      }
+    ],
+    "PHI": [
+      {
+        "kernel_id": "constant",
+        "engine": "arrow",
+        "cost_us_per_million": 0.7832000000000001,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 0.333,
+        "max_us": 2.458,
+        "avg_us": 0.7832000000000001,
+        "success": true,
+        "error": null
+      }
+    ],
+    "E": [
+      {
+        "kernel_id": "constant",
+        "engine": "arrow",
+        "cost_us_per_million": 0.8,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 0.334,
+        "max_us": 2.458,
+        "avg_us": 0.8,
+        "success": true,
+        "error": null
+      }
+    ],
+    "EXTRACT": [
+      {
+        "kernel_id": "default",
+        "engine": "arrow",
+        "cost_us_per_million": 0.867,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 0.334,
+        "max_us": 2.709,
+        "avg_us": 0.867,
+        "success": true,
+        "error": null
+      },
+      {
+        "kernel_id": "default",
+        "engine": "arrow",
+        "cost_us_per_million": 0.9664000000000001,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 0.291,
+        "max_us": 3.375,
+        "avg_us": 0.9664000000000001,
+        "success": true,
+        "error": null
+      }
+    ],
+    "TIME_BUCKET": [
+      {
+        "kernel_id": "default",
+        "engine": "arrow",
+        "cost_us_per_million": 1.0752,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 0.375,
+        "max_us": 3.583,
+        "avg_us": 1.0752,
+        "success": true,
+        "error": null
+      }
+    ],
+    "DATEDIFF": [
+      {
+        "kernel_id": "default",
+        "engine": "arrow",
+        "cost_us_per_million": 0.8832000000000001,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 0.416,
+        "max_us": 2.5,
+        "avg_us": 0.8832000000000001,
+        "success": true,
+        "error": null
+      }
+    ],
+    "TIMEDIFF": [
+      {
+        "kernel_id": "default",
+        "engine": "arrow",
+        "cost_us_per_million": 0.6752,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 0.292,
+        "max_us": 1.958,
+        "avg_us": 0.6752,
+        "success": true,
+        "error": null
+      }
+    ],
+    "DATE_FORMAT": [
+      {
+        "kernel_id": "default",
+        "engine": "arrow",
+        "cost_us_per_million": 0.85,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 0.25,
+        "max_us": 2.916,
+        "avg_us": 0.85,
+        "success": true,
+        "error": null
+      }
+    ],
+    "FROM_UNIXTIME": [
+      {
+        "kernel_id": "default",
+        "engine": "arrow",
+        "cost_us_per_million": 3.175,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 0.75,
+        "max_us": 11.875,
+        "avg_us": 3.175,
+        "success": true,
+        "error": null
+      }
+    ],
+    "UNIXTIME": [
+      {
+        "kernel_id": "default",
+        "engine": "arrow",
+        "cost_us_per_million": 8.8416,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 2.917,
+        "max_us": 29.5,
+        "avg_us": 8.8416,
+        "success": true,
+        "error": null
+      }
+    ],
+    "GREATEST": [
+      {
+        "kernel_id": "default",
+        "engine": "arrow",
+        "cost_us_per_million": 4482220.2916,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 4458235.042,
+        "max_us": 4520606.125,
+        "avg_us": 4482220.2916,
+        "success": true,
+        "error": null
+      }
+    ],
+    "LEAST": [
+      {
+        "kernel_id": "default",
+        "engine": "arrow",
+        "cost_us_per_million": 4419443.3666,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 4365774.875,
+        "max_us": 4466320.167,
+        "avg_us": 4419443.3666,
+        "success": true,
+        "error": null
+      }
+    ],
+    "SORT": [
+      {
+        "kernel_id": "default",
+        "engine": "arrow",
+        "cost_us_per_million": 4.924799999999999,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 1.166,
+        "max_us": 18.333,
+        "avg_us": 4.924799999999999,
+        "success": true,
+        "error": null
+      }
+    ],
+    "_ARRAY": [
+      {
+        "kernel_id": "default",
+        "engine": "arrow",
+        "cost_us_per_million": 0.24959999999999996,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 0.041,
+        "max_us": 1.0,
+        "avg_us": 0.24959999999999996,
+        "success": true,
+        "error": null
+      }
+    ],
+    "_TRY_ARRAY": [
+      {
+        "kernel_id": "default",
+        "engine": "arrow",
+        "cost_us_per_million": 0.3084,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 0.083,
+        "max_us": 1.125,
+        "avg_us": 0.3084,
+        "success": true,
+        "error": null
+      }
+    ],
+    "HASH": [
+      {
+        "kernel_id": "default",
+        "engine": "arrow",
+        "cost_us_per_million": 437424.6918,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 434767.167,
+        "max_us": 441372.0,
+        "avg_us": 437424.6918,
+        "success": true,
+        "error": null
+      }
+    ],
+    "MD5": [
+      {
+        "kernel_id": "default",
+        "engine": "arrow",
+        "cost_us_per_million": 8.4416,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 2.416,
+        "max_us": 30.459,
+        "avg_us": 8.4416,
+        "success": true,
+        "error": null
+      }
+    ],
+    "SHA1": [
+      {
+        "kernel_id": "default",
+        "engine": "arrow",
+        "cost_us_per_million": 5.1,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 2.042,
+        "max_us": 16.875,
+        "avg_us": 5.1,
+        "success": true,
+        "error": null
+      }
+    ],
+    "SHA224": [
+      {
+        "kernel_id": "default",
+        "engine": "arrow",
+        "cost_us_per_million": 634394.8164,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 627205.958,
+        "max_us": 642242.25,
+        "avg_us": 634394.8164,
+        "success": true,
+        "error": null
+      }
+    ],
+    "SHA256": [
+      {
+        "kernel_id": "default",
+        "engine": "arrow",
+        "cost_us_per_million": 7.558400000000001,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 2.292,
+        "max_us": 27.5,
+        "avg_us": 7.558400000000001,
+        "success": true,
+        "error": null
+      }
+    ],
+    "SHA384": [
+      {
+        "kernel_id": "default",
+        "engine": "arrow",
+        "cost_us_per_million": 714225.825,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 704473.209,
+        "max_us": 726251.375,
+        "avg_us": 714225.825,
+        "success": true,
+        "error": null
+      }
+    ],
+    "SHA512": [
+      {
+        "kernel_id": "default",
+        "engine": "arrow",
+        "cost_us_per_million": 7.475,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 2.333,
+        "max_us": 26.75,
+        "avg_us": 7.475,
+        "success": true,
+        "error": null
+      }
+    ],
+    "RANDOM": [
+      {
+        "kernel_id": "default",
+        "engine": "arrow",
+        "cost_us_per_million": 85541.625,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 84343.291,
+        "max_us": 86628.959,
+        "avg_us": 85541.625,
+        "success": true,
+        "error": null
+      },
+      {
+        "kernel_id": "zero_arg",
+        "engine": "arrow",
+        "cost_us_per_million": 84973.53339999999,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 83818.958,
+        "max_us": 85706.5,
+        "avg_us": 84973.53339999999,
+        "success": true,
+        "error": null
+      }
+    ],
+    "NORMAL": [
+      {
+        "kernel_id": "default",
+        "engine": "arrow",
+        "cost_us_per_million": 86571.94200000001,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 85192.0,
+        "max_us": 89093.0,
+        "avg_us": 86571.94200000001,
+        "success": true,
+        "error": null
+      },
+      {
+        "kernel_id": "zero_arg",
+        "engine": "arrow",
+        "cost_us_per_million": 85861.93340000001,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 85162.875,
+        "max_us": 87089.125,
+        "avg_us": 85861.93340000001,
+        "success": true,
+        "error": null
+      }
+    ],
+    "RANDOM_STRING": [
+      {
+        "kernel_id": "default",
+        "engine": "arrow",
+        "cost_us_per_million": 372872.8334,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 364990.917,
+        "max_us": 380889.083,
+        "avg_us": 372872.8334,
+        "success": true,
+        "error": null
+      }
+    ],
+    "BASE64_ENCODE": [
+      {
+        "kernel_id": "default",
+        "engine": "arrow",
+        "cost_us_per_million": 3.3998000000000004,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 0.792,
+        "max_us": 12.833,
+        "avg_us": 3.3998000000000004,
+        "success": true,
+        "error": null
+      }
+    ],
+    "BASE64_DECODE": [
+      {
+        "kernel_id": "default",
+        "engine": "arrow",
+        "cost_us_per_million": 2.6,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 0.875,
+        "max_us": 8.833,
+        "avg_us": 2.6,
+        "success": true,
+        "error": null
+      }
+    ],
+    "BASE85_ENCODE": [
+      {
+        "kernel_id": "default",
+        "engine": "arrow",
+        "cost_us_per_million": 1328408.1332,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 1319781.333,
+        "max_us": 1335683.542,
+        "avg_us": 1328408.1332,
+        "success": true,
+        "error": null
+      }
+    ],
+    "BASE85_DECODE": [
+      {
+        "kernel_id": "default",
+        "engine": "arrow",
+        "cost_us_per_million": 7.350200000000001,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 2.292,
+        "max_us": 24.0,
+        "avg_us": 7.350200000000001,
+        "success": true,
+        "error": null
+      }
+    ],
+    "HEX_ENCODE": [
+      {
+        "kernel_id": "default",
+        "engine": "arrow",
+        "cost_us_per_million": 539725.9918,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 531046.875,
+        "max_us": 550943.833,
+        "avg_us": 539725.9918,
+        "success": true,
+        "error": null
+      }
+    ],
+    "HEX_DECODE": [
+      {
+        "kernel_id": "default",
+        "engine": "arrow",
+        "cost_us_per_million": 3.8747999999999996,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 1.375,
+        "max_us": 12.458,
+        "avg_us": 3.8747999999999996,
+        "success": true,
+        "error": null
+      }
+    ],
+    "ARRAY_CONTAINS": [
+      {
+        "kernel_id": "default",
+        "engine": "arrow",
+        "cost_us_per_million": 1.1916,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 0.292,
+        "max_us": 4.458,
+        "avg_us": 1.1916,
+        "success": true,
+        "error": null
+      }
+    ],
+    "ARRAY_CONTAINS_ANY": [
+      {
+        "kernel_id": "default",
+        "engine": "arrow",
+        "cost_us_per_million": 1.0246000000000002,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 0.333,
+        "max_us": 3.458,
+        "avg_us": 1.0246000000000002,
+        "success": true,
+        "error": null
+      }
+    ],
+    "ARRAY_CONTAINS_ALL": [
+      {
+        "kernel_id": "default",
+        "engine": "arrow",
+        "cost_us_per_million": 1.2084,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 0.291,
+        "max_us": 4.5,
+        "avg_us": 1.2084,
+        "success": true,
+        "error": null
+      }
+    ],
+    "JSONB_OBJECT_KEYS": [
+      {
+        "kernel_id": "default",
+        "engine": "arrow",
+        "cost_us_per_million": 590.2082,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 577.167,
+        "max_us": 627.083,
+        "avg_us": 590.2082,
+        "success": true,
+        "error": null
+      }
+    ],
+    "HUMANIZE": [
+      {
+        "kernel_id": "default",
+        "engine": "arrow",
+        "cost_us_per_million": 775947.1668,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 771386.5,
+        "max_us": 782410.167,
+        "avg_us": 775947.1668,
+        "success": true,
+        "error": null
+      }
+    ],
+    "COSINE_SIMILARITY": [
+      {
+        "kernel_id": "default",
+        "engine": "arrow",
+        "cost_us_per_million": 1.3336,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 0.292,
+        "max_us": 5.042,
+        "avg_us": 1.3336,
+        "success": true,
+        "error": null
+      },
+      {
+        "kernel_id": "default",
+        "engine": "arrow",
+        "cost_us_per_million": 0.8999999999999998,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 0.333,
+        "max_us": 2.917,
+        "avg_us": 0.8999999999999998,
+        "success": true,
+        "error": null
+      }
+    ],
+    "COSINE_DISTANCE": [
+      {
+        "kernel_id": "default",
+        "engine": "arrow",
+        "cost_us_per_million": 1.1748,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 0.333,
+        "max_us": 4.208,
+        "avg_us": 1.1748,
+        "success": true,
+        "error": null
+      },
+      {
+        "kernel_id": "default",
+        "engine": "arrow",
+        "cost_us_per_million": 1.0003999999999997,
+        "sample_size": 1000000,
+        "runs": 5,
+        "min_us": 0.292,
+        "max_us": 3.417,
+        "avg_us": 1.0003999999999997,
+        "success": true,
+        "error": null
+      }
+    ]
+  }
+}

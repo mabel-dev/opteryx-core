@@ -16,10 +16,10 @@ Note: CROSS JOIN UNNEST is implemented by the UnnestJoinNode
 
 import numpy
 import pyarrow
-
-from opteryx import EOS
 from opteryx.compiled.structures.carchar_set import CarcharSetWrapper
 from opteryx.models import QueryProperties
+
+from opteryx import EOS
 
 from . import JoinNode
 

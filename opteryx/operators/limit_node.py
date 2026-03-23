@@ -13,9 +13,10 @@ This Node performs the LIMIT and the OFFSET steps
 
 from collections.abc import Iterable
 
-from opteryx import EOS
 from opteryx.draken.morsels.morsel import Morsel
 from opteryx.models import QueryProperties
+
+from opteryx import EOS
 
 from . import BasePlanNode
 

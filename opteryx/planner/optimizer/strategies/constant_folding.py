@@ -19,8 +19,6 @@ entered expressions we can optimize, and again at the end which handles where
 we've rewritten expressions at part of other optimizations which can be folded.
 """
 
-from orso.types import OrsoTypes
-
 from opteryx.expression import NodeType
 from opteryx.expression import evaluate
 from opteryx.expression import get_all_nodes_of_type
@@ -31,6 +29,7 @@ from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner import LogicalPlanNode
 from opteryx.planner.logical_planner import LogicalPlanStepType
 from opteryx.virtual_datasets import no_table_data
+from orso.types import OrsoTypes
 
 from .optimization_strategy import OptimizationStrategy
 from .optimization_strategy import OptimizerContext

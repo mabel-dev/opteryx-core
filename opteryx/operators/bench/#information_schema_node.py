@@ -15,7 +15,6 @@ import datetime
 from typing import Iterable
 
 import pyarrow
-
 from opteryx.exceptions import DatasetNotFoundError
 from opteryx.models import QueryProperties
 from opteryx.operators import BasePlanNode

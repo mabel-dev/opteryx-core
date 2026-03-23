@@ -28,10 +28,6 @@ import time
 
 import numpy
 import pyarrow
-from pyarrow import ArrowNotImplementedError
-from pyarrow import compute
-
-import opteryx
 from opteryx.compiled.vector_ops import vector_contains_all
 from opteryx.compiled.vector_ops import vector_contains_any
 from opteryx.compiled.vector_ops import vector_encode_utf8 as to_blob
@@ -58,6 +54,10 @@ from opteryx.expression.functions.implementations.text import to_upper
 from opteryx.expression.functions.implementations.text import vector_lengther
 from opteryx.third_party.cyan4973.xxhash import hash_bytes
 from opteryx.utils import dates
+from pyarrow import ArrowNotImplementedError
+from pyarrow import compute
+
+import opteryx
 
 # to_lower, to_upper imported from opteryx.expression.functions.implementations.text
 

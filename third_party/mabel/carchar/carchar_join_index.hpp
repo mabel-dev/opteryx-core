@@ -15,6 +15,31 @@ class CarcharJoinIndex {
     explicit CarcharJoinIndex(std::size_t initial_capacity = kMinCapacity, double load_factor = 0.80)
         : index_(initial_capacity, load_factor) {}
 
+    // Persistent probe cache — survives across calls so repeated probes of the same
+    // keys (probe-heavy workloads, repeated joins) pay zero probe cost after the first hit.
+    struct ProbeCache {
+        static constexpr std::size_t CACHE_SIZE = 256U;  // Power of 2; matches old stack cache size
+        std::array<std::uint64_t, CACHE_SIZE> keys{};
+        std::array<std::uint32_t, CACHE_SIZE> counts{};
+        std::array<std::uint8_t,  CACHE_SIZE> valid{};
+
+        bool lookup(std::uint64_t key, std::uint32_t& count_out) const noexcept {
+            const std::size_t slot = static_cast<std::size_t>(key) & (CACHE_SIZE - 1U);
+            if (valid[slot] != 0U && keys[slot] == key) {
+                count_out = counts[slot];
+                return true;
+            }
+            return false;
+        }
+
+        void update(std::uint64_t key, std::uint32_t count) noexcept {
+            const std::size_t slot = static_cast<std::size_t>(key) & (CACHE_SIZE - 1U);
+            keys[slot] = key;
+            counts[slot] = count;
+            valid[slot] = 1U;
+        }
+    };
+
     std::size_t size() const noexcept { return index_.size(); }
     std::size_t capacity() const noexcept { return index_.capacity(); }
     void reserve(std::size_t expected_entries) {
@@ -129,34 +154,29 @@ class CarcharJoinIndex {
    private:
     bool should_group_probe_batch(std::size_t length) const noexcept {
         const std::size_t group_count = index_.probe_group_count();
-        return length >= 4096U && group_count >= 8U && group_count <= 1024U;
+        // Raised upper bound from 1024 → 4096 so medium-dup workloads (~2K groups) also
+        // benefit from locality grouping.  Low-dup tables (~32K+ groups) still fall through
+        // to linear because scatter overhead exceeds the locality benefit at ~3 keys/group.
+        return length >= 4096U && group_count >= 8U && group_count <= 4096U;
     }
 
     std::uint64_t probe_row_count_sum_linear(const std::uint64_t* keys, std::size_t length) const {
-        constexpr std::size_t kProbeCacheSize = 256U;
-        std::array<std::uint64_t, kProbeCacheSize> cache_keys {};
-        std::array<std::uint32_t, kProbeCacheSize> cache_counts {};
-        std::array<std::uint8_t, kProbeCacheSize> cache_valid {};
         std::uint64_t total = 0;
         std::int64_t payload_ref = -1;
         for (std::size_t i = 0; i < length; ++i) {
             const std::uint64_t key = keys[i];
-            const std::size_t cache_slot = static_cast<std::size_t>(key & (kProbeCacheSize - 1U));
-            if (cache_valid[cache_slot] != 0U && cache_keys[cache_slot] == key) {
-                total += static_cast<std::uint64_t>(cache_counts[cache_slot]);
+            std::uint32_t count = 0;
+            // Persistent cache: hits survive across calls — probe-heavy and repeated workloads
+            // pay zero probe cost for hot keys after the first miss.
+            if (probe_cache_.lookup(key, count)) {
+                total += static_cast<std::uint64_t>(count);
                 continue;
             }
-            if (index_.lookup_fast(keys[i], payload_ref)) {
-                const std::uint32_t count = row_counts_[static_cast<std::size_t>(payload_ref)];
-                cache_valid[cache_slot] = 1U;
-                cache_keys[cache_slot] = key;
-                cache_counts[cache_slot] = count;
-                total += static_cast<std::uint64_t>(count);
-            } else {
-                cache_valid[cache_slot] = 1U;
-                cache_keys[cache_slot] = key;
-                cache_counts[cache_slot] = 0U;
+            if (index_.lookup_fast(key, payload_ref)) {
+                count = row_counts_[static_cast<std::size_t>(payload_ref)];
             }
+            probe_cache_.update(key, count);
+            total += static_cast<std::uint64_t>(count);
         }
         return total;
     }
@@ -302,6 +322,7 @@ class CarcharJoinIndex {
     CarcharIndex index_;
     std::vector<RowListEntry> row_lists_;
     std::vector<std::uint32_t> row_counts_;
+    mutable ProbeCache probe_cache_;
     mutable std::vector<std::uint64_t> grouped_probe_keys_;
     mutable std::vector<std::int64_t> grouped_probe_rows_;
     mutable std::vector<std::size_t> probe_group_counts_;

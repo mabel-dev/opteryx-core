@@ -19,9 +19,6 @@ from __future__ import annotations
 import time
 from threading import Lock
 
-from opteryx import EMPTY
-from opteryx import EOS
-from opteryx import config
 from opteryx.compiled.joins import build_side_carchar_morsel_map
 from opteryx.compiled.joins import get_last_draken_inner_join_metrics
 from opteryx.compiled.joins import inner_join_carchar_morsel_aligned
@@ -31,6 +28,10 @@ from opteryx.expression import NodeType
 from opteryx.expression import get_all_nodes_of_type
 from opteryx.expression.evaluator import evaluate_and_append_draken
 from opteryx.models import QueryProperties
+
+from opteryx import EMPTY
+from opteryx import EOS
+from opteryx import config
 
 from . import JoinNode
 

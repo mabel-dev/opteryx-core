@@ -18,7 +18,6 @@ Includes:
 
 import numpy
 import pyarrow
-
 from opteryx.embeddings import embed_text_matrix
 from opteryx.embeddings import embed_text_values
 from opteryx.embeddings import get_embedding_provider

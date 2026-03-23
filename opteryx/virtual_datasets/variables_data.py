@@ -9,12 +9,11 @@ This is a virtual dataset which is calculated at access time.
 It is the system variables collection.
 """
 
+from opteryx.draken.interop.arrow import vector_from_sequence
+from opteryx.draken.morsels.morsel import Morsel
 from orso.schema import FlatColumn
 from orso.schema import RelationSchema
 from orso.types import OrsoTypes
-
-from opteryx.draken.interop.arrow import vector_from_sequence
-from opteryx.draken.morsels.morsel import Morsel
 
 __all__ = ("read", "schema")
 

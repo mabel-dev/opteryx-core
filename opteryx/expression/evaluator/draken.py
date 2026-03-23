@@ -5,7 +5,6 @@ import decimal
 
 import numpy
 import pyarrow as _pa
-
 from opteryx.exceptions import ColumnReferencedBeforeEvaluationError
 
 from .function_execution import _is_draken_vector
@@ -201,9 +200,8 @@ def _coerce_interval(value) -> tuple:
 
 
 def _coerce_temporal_scalar_for_arrow(value, target_type):
-    from orso.types import OrsoTypes
-
     from opteryx.expression.casts import parse_timestamp_value
+    from orso.types import OrsoTypes
 
     if hasattr(value, "as_py"):
         value = value.as_py()
@@ -244,7 +242,6 @@ _FIXED_BUFFER_VECTOR_CLASSES = frozenset(
 
 def _is_null_as_boolvector(vec):
     import pyarrow.compute as _pc
-
     from opteryx.compiled.vector_ops.function_definitions import bool_vector_all_true
     from opteryx.compiled.vector_ops.function_definitions import bool_vector_from_int8_mask
     from opteryx.compiled.vector_ops.function_definitions import (
@@ -281,7 +278,6 @@ def _is_null_as_boolvector(vec):
     if cls_name in _FIXED_BUFFER_VECTOR_CLASSES:
         if cls_name == "Float64Vector":
             import pyarrow.compute as _pc
-
             from opteryx.draken.interop.arrow import vector_from_arrow as _vfa
 
             arrow_arr = vec.to_arrow()
@@ -367,7 +363,6 @@ def _int64_compare(op: str, vec, right):
         return fn(right)
     elif right.__class__.__name__ == "Float64Vector":
         import pyarrow as pa
-
         from opteryx.draken.interop.arrow import vector_from_arrow
 
         float_vec = vector_from_arrow(vec.to_arrow().cast(pa.float64()))
@@ -391,9 +386,8 @@ def _int64_compare(op: str, vec, right):
 
 
 def _int64_temporal_compare(op: str, vec, right, temporal_type):
-    from orso.types import OrsoTypes
-
     from opteryx.draken.vectors.bool_vector import BoolVector
+    from orso.types import OrsoTypes
 
     if right is None:
         return BoolVector(len(vec))
@@ -501,7 +495,6 @@ def _timestamp_compare(op: str, vec, right):
         return BoolVector.from_arrow(result_arr)
     elif right.__class__.__name__ == "Date32Vector":
         import pyarrow as _pa_local
-
         from opteryx.draken.interop.arrow import vector_from_arrow as _vfa
 
         ts_right = _vfa(right.to_arrow().cast(_pa_local.timestamp("us")))
@@ -548,7 +541,6 @@ def _date32_compare(op: str, vec, right):
         return fn(right)
     elif right.__class__.__name__ == "TimestampVector":
         import pyarrow as _pa_local
-
         from opteryx.draken.interop.arrow import vector_from_arrow as _vfa
 
         ts_left = _vfa(vec.to_arrow().cast(_pa_local.timestamp("us")))
@@ -594,7 +586,6 @@ def _interval_compare(op: str, vec, right):
 def _dict_compare(op: str, vec, right):
     import pyarrow as pa
     import pyarrow.compute as pc
-
     from opteryx.draken.vectors.bool_vector import BoolVector
 
     vec = _dictionary_compare_vector(vec)
@@ -738,7 +729,6 @@ _ARROW_COMPARE_OPS = {
 def _arrow_vector_compare(op: str, vec, right):
     import pyarrow as pa
     import pyarrow.compute as pc
-
     from opteryx.draken.vectors.bool_vector import BoolVector
 
     pc_op = _ARROW_COMPARE_OPS.get(op)
@@ -870,7 +860,6 @@ def draken_compare(op: str, left, right, left_schema_type=None, right_schema_typ
         return vector_anyop_ilike(right, _ensure_array_vector(left)).not_vector()
     if op == "AtQuestion":
         import pyarrow as pa
-
         from opteryx.draken.interop.arrow import vector_from_arrow
         from opteryx.third_party.tktech import csimdjson as simdjson
 
@@ -965,7 +954,6 @@ def draken_compare(op: str, left, right, left_schema_type=None, right_schema_typ
         elif op == "InList":
             import pyarrow as _pa_local
             import pyarrow.compute as _pac
-
             from opteryx.draken.vectors.bool_vector import BoolVector as _BoolVec
 
             bool_set = {bool(v) for v in right if v is not None}
@@ -975,7 +963,6 @@ def draken_compare(op: str, left, right, left_schema_type=None, right_schema_typ
             result = _BoolVec.from_arrow(result_arr)
         else:
             import pyarrow.compute as _pac
-
             from opteryx.draken.vectors.bool_vector import BoolVector as _BoolVec
 
             bool_arrow_ops = {
@@ -1002,7 +989,6 @@ _INTERVAL_TYPES = frozenset(("IntervalVector",))
 def _date_minus_date_draken(left_vec, right_vec):
     import pyarrow as pa
     import pyarrow.compute as pc
-
     from opteryx.draken.interop.arrow import vector_from_arrow
     from opteryx.expression.intervals import MICROSECONDS_PER_DAY
     from opteryx.expression.intervals import _intervals_to_month_day_nano
@@ -1277,7 +1263,6 @@ def evaluate_draken(node, morsel):
 
     if node_type == NodeType.LITERAL:
         import pyarrow as pa
-
         from opteryx.draken.vectors.bool_vector import BoolVector
 
         val = node.value
@@ -1300,7 +1285,6 @@ def evaluate_draken(node, morsel):
 
         if not hasattr(left, "null_count") and not hasattr(right, "null_count"):
             import pyarrow as pa
-
             from opteryx.draken.vectors.bool_vector import BoolVector
             from opteryx.expression.ops import filter_operations
 
@@ -1336,7 +1320,6 @@ def evaluate_draken(node, morsel):
                 )
             if result.dtype.kind in ("b", "O", "f", "i", "u"):
                 import pyarrow as pa
-
                 from opteryx.draken.vectors.bool_vector import BoolVector
 
                 try:
@@ -1407,7 +1390,6 @@ def evaluate_and_append_draken(nodes, morsel):
             result = _eval_value(node, morsel)
         if not _is_draken_vector(result):
             import pyarrow as _pa_local
-
             from opteryx.draken.interop.arrow import vector_from_arrow as _vfa
 
             if isinstance(result, (_pa_local.Array, _pa_local.ChunkedArray)):

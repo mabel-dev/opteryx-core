@@ -19,11 +19,12 @@ This node doesn't do any calculations, it is a pure Projection.
 
 from collections.abc import Iterable
 
-from opteryx import EOS
 from opteryx.draken.morsels.morsel import Morsel
 from opteryx.exceptions import AmbiguousIdentifierError
 from opteryx.exceptions import InvalidInternalStateError
 from opteryx.models import QueryProperties
+
+from opteryx import EOS
 
 from . import BasePlanNode
 
