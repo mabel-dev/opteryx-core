@@ -4,8 +4,7 @@ import sys
 sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 
 import opteryx
-
-from opteryx.compiled.aggregations.array_agg import ArrayAggState
+from opteryx.compiled.aggregations.scalar_kernels import ArrayAggState
 
 
 def _run(sql):

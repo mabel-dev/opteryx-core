@@ -10,7 +10,7 @@ import numpy
 cimport numpy
 numpy.import_array()
 
-from opteryx.third_party.abseil.containers cimport FlatHashSet
+from opteryx.compiled.structures.carchar_set cimport CarcharSetWrapper
 from opteryx.third_party.fastfloat.fast_float cimport c_parse_fast_float as parse_fast_float
 
 from libc.stdint cimport int32_t, int64_t, uint64_t, uint8_t, uintptr_t
@@ -290,7 +290,7 @@ cpdef tuple build_filtered_rows_indices_and_column(object column, set valid_valu
     return indices_mv[:k], flat_mv[:k]
 
 
-cpdef tuple list_distinct(numpy.ndarray values, int64_t[::1] indices, FlatHashSet seen_hashes=None):
+cpdef tuple list_distinct(numpy.ndarray values, int64_t[::1] indices, CarcharSetWrapper seen_hashes=None):
     cdef:
         Py_ssize_t i = 0
         Py_ssize_t j = 0
@@ -302,7 +302,7 @@ cpdef tuple list_distinct(numpy.ndarray values, int64_t[::1] indices, FlatHashSe
         int64_t[::1] new_indices = numpy.empty(n, dtype=numpy.int64)
 
     if seen_hashes is None:
-        seen_hashes = FlatHashSet()
+        seen_hashes = CarcharSetWrapper()
 
     for i in range(n):
         v = values[i]

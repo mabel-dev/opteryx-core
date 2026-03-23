@@ -13,20 +13,42 @@ divergence (Int64 direct reinterpret-cast, IntegerVector expand-to-u64,
 morsel.hash() for strings/other) is performed by the engine before calling
 into these kernels.
 
-Uses CarcharSet which provides insert_many() that returns the count of newly
-inserted values, allowing efficient batch insertion with immediate feedback
-on how many distinct values were added.
+CarcharSetWrapper is a Cython extension type whose _ptr field exposes the
+underlying CarcharSet* directly.  The pointer-extraction phase (with GIL)
+runs once per morsel; the per-row accumulation loop runs entirely without
+the GIL via a noexcept C++ wrapper around CarcharSet::insert_or_ignore.
 """
 
 from libc.stdint cimport int64_t, uint8_t, uint64_t
+from libc.stdlib cimport malloc, free
 
+from opteryx.compiled.structures.carchar_set cimport CarcharSet, CarcharSetWrapper
 from opteryx.compiled.aggregations.kernels.utils cimport _bitmap_is_valid
 
-import numpy
 
+# ---------------------------------------------------------------------------
+# noexcept C++ wrapper
+#
+# CarcharSet::insert_or_ignore can trigger a resize that throws std::bad_alloc.
+# We wrap it noexcept here (matching the prior implementation) so the hot
+# accumulation loop can run without the GIL.  OOM will call std::terminate.
+# ---------------------------------------------------------------------------
+cdef extern from *:
+    """
+    #include "carchar_set.hpp"
+    namespace opteryx_cd {
+        static inline bool carchar_insert_new(
 
-# Import CarcharSet from nanobind binding
-from opteryx.nanobind.carchar_native import CarcharSet
+            opteryx::carchar::CarcharSet* s, uint64_t v
+        ) noexcept {
+            return s->insert_or_ignore(v);
+        }
+    }
+    """
+    bint _carchar_insert_new "opteryx_cd::carchar_insert_new"(
+        CarcharSet* s,
+        uint64_t v,
+    ) noexcept nogil
 
 
 # ---------------------------------------------------------------------------
@@ -44,7 +66,7 @@ cdef void count_distinct_accumulate(
     """
     Accumulate COUNT(DISTINCT) for a pre-hashed value column (single-aggregate path).
 
-    distinct_sets   Python list[CarcharSet], one entry per group state.
+    distinct_sets   Python list[CarcharSetWrapper], one entry per group state.
                     len(distinct_sets) == number of group states allocated so far.
     counts          Per-state int64_t counter array (self._counts.data()).
     value_hashes    uint64_t hash / bit-cast for every row of the value column.
@@ -52,35 +74,38 @@ cdef void count_distinct_accumulate(
     state_indices   Group-state index for each row.
     row_count       Number of rows in this morsel batch.
 
-    For each non-null row i the hash value_hashes[i] is inserted into the
-    CarcharSet for group state state_indices[i].  counts[state] is
-    incremented by the number of newly inserted values (carchar.insert_many
-    returns the count of new insertions).
+    Pointer-extraction phase (with GIL): resolve each CarcharSetWrapper Python
+    object to its underlying CarcharSet*.  Once sets_ptr is populated the
+    per-row accumulation loop runs without the GIL.
     """
     cdef Py_ssize_t n_states = len(distinct_sets)
-    cdef Py_ssize_t state_idx
+    cdef CarcharSet** sets_ptr = NULL
+    cdef Py_ssize_t i
     cdef Py_ssize_t row_idx
     cdef int64_t sidx
-    cdef list state_hashes
-    cdef uint64_t[::1] temp_hashes_view
-    cdef size_t new_count
 
     if n_states == 0 or row_count == 0:
         return
 
-    # Collect hashes grouped by state
-    state_hashes = [[] for _ in range(n_states)]
-    for row_idx in range(row_count):
-        if _bitmap_is_valid(value_nulls, row_idx):
-            sidx = state_indices[row_idx]
-            state_hashes[sidx].append(value_hashes[row_idx])
+    sets_ptr = <CarcharSet**> malloc(n_states * sizeof(void*))
+    if sets_ptr == NULL:
+        raise MemoryError("count_distinct_accumulate: cannot allocate sets_ptr")
 
-    # Insert batches per state and accumulate new count
-    for state_idx in range(n_states):
-        if state_hashes[state_idx]:
-            temp_hashes_view = numpy.array(state_hashes[state_idx], dtype=numpy.uint64)
-            new_count = distinct_sets[state_idx].insert_many(temp_hashes_view)
-            counts[state_idx] = counts[state_idx] + <int64_t> new_count
+    try:
+        # Resolve each CarcharSetWrapper Python object to its raw CarcharSet*.
+        # This is the only section that touches Python objects; once sets_ptr
+        # is populated the per-row loop runs without the GIL.
+        for i in range(n_states):
+            sets_ptr[i] = (<CarcharSetWrapper> distinct_sets[i])._ptr
+
+        with nogil:
+            for row_idx in range(row_count):
+                if _bitmap_is_valid(value_nulls, row_idx):
+                    sidx = state_indices[row_idx]
+                    if _carchar_insert_new(sets_ptr[sidx], value_hashes[row_idx]):
+                        counts[sidx] = counts[sidx] + 1
+    finally:
+        free(sets_ptr)
 
 
 # ---------------------------------------------------------------------------
@@ -102,7 +127,7 @@ cdef void count_distinct_multi_accumulate(
 
     distinct_sets   self._multi_distinct_sets — a flat Python list of length
                     (num_group_states * multi_agg_count).  Slots at index
-                    (state * multi_agg_count + agg_idx) hold CarcharSet
+                    (state * multi_agg_count + agg_idx) hold CarcharSetWrapper
                     objects for COUNT(DISTINCT) aggregates; all other slots
                     hold None and are not accessed by this function.
     multi_counts    Flat int64_t counter array (self._multi_counts.data()).
@@ -116,13 +141,11 @@ cdef void count_distinct_multi_accumulate(
     agg_idx         Which aggregate slot this call is servicing.
     """
     cdef Py_ssize_t n_states
-    cdef Py_ssize_t state_idx
+    cdef CarcharSet** sets_ptr = NULL
+    cdef Py_ssize_t i
     cdef Py_ssize_t row_idx
     cdef int64_t sidx
     cdef Py_ssize_t offset
-    cdef list state_hashes
-    cdef uint64_t[::1] temp_hashes_view
-    cdef size_t new_count
 
     if multi_agg_count == 0 or row_count == 0:
         return
@@ -131,17 +154,22 @@ cdef void count_distinct_multi_accumulate(
     if n_states == 0:
         return
 
-    # Collect hashes grouped by state for this aggregation index
-    state_hashes = [[] for _ in range(n_states)]
-    for row_idx in range(row_count):
-        if _bitmap_is_valid(value_nulls, row_idx):
-            sidx = state_indices[row_idx]
-            state_hashes[sidx].append(value_hashes[row_idx])
+    sets_ptr = <CarcharSet**> malloc(n_states * sizeof(void*))
+    if sets_ptr == NULL:
+        raise MemoryError("count_distinct_multi_accumulate: cannot allocate sets_ptr")
 
-    # Insert batches per state and accumulate new count
-    for state_idx in range(n_states):
-        if state_hashes[state_idx]:
-            offset = state_idx * multi_agg_count + agg_idx
-            temp_hashes_view = numpy.array(state_hashes[state_idx], dtype=numpy.uint64)
-            new_count = distinct_sets[offset].insert_many(temp_hashes_view)
-            multi_counts[offset] = multi_counts[offset] + <int64_t> new_count
+    try:
+        # Resolve only the agg_idx slot for each state — skipping the None
+        # entries that belong to other aggregate modes.
+        for i in range(n_states):
+            sets_ptr[i] = (<CarcharSetWrapper> distinct_sets[i * multi_agg_count + agg_idx])._ptr
+
+        with nogil:
+            for row_idx in range(row_count):
+                if _bitmap_is_valid(value_nulls, row_idx):
+                    sidx = state_indices[row_idx]
+                    offset = sidx * multi_agg_count + agg_idx
+                    if _carchar_insert_new(sets_ptr[sidx], value_hashes[row_idx]):
+                        multi_counts[offset] = multi_counts[offset] + 1
+    finally:
+        free(sets_ptr)

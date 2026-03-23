@@ -19,42 +19,13 @@ nogil block.  ArrayVector columns (rare) fall back to the Python hash()
 path, after which mark_new and scatter still run nogil.
 """
 
-from libc.stdlib cimport calloc, malloc, free
+from libc.stdlib cimport malloc, free
 from libc.string cimport memset, memcpy
-from libc.stdint cimport int32_t, uint8_t, uint64_t
+from libc.stdint cimport int32_t, uint64_t
 from libc.stddef cimport size_t
 
 from opteryx.draken.morsels.morsel cimport Morsel
-
-
-# ── CarcharSet C++ binding ────────────────────────────────────────────────────
-
-cdef extern from "carchar_set.hpp" namespace "opteryx::carchar" nogil:
-    cdef cppclass CarcharSet:
-        CarcharSet(size_t initial_capacity, double load_factor) except +
-        void reserve(size_t expected_entries)
-        size_t mark_new(const uint64_t* keys, uint8_t* out_is_new, size_t length) noexcept
-        size_t size() noexcept
-
-
-# ── Python-visible wrapper ────────────────────────────────────────────────────
-
-cdef class CarcharSetWrapper:
-    """Persistent Carchar hash set for streaming DISTINCT.
-
-    Create once, pass to every distinct() call; the set is mutated in place
-    so duplicates are tracked across morsel boundaries.
-    """
-    cdef CarcharSet* _ptr
-
-    def __cinit__(self, size_t initial_capacity=2048):
-        self._ptr = new CarcharSet(initial_capacity, 0.80)
-
-    def __dealloc__(self):
-        del self._ptr
-
-    def __len__(self):
-        return <Py_ssize_t>self._ptr.size()
+from opteryx.compiled.structures.carchar_set cimport CarcharSet, CarcharSetWrapper
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -75,12 +46,10 @@ def distinct(Morsel morsel, CarcharSetWrapper seen_hashes, list columns=None):
     cdef Py_ssize_t n = morsel.ptr.num_rows
     cdef CarcharSet* cs = seen_hashes._ptr
     cdef uint64_t* hashes_ptr = NULL
-    cdef uint8_t*  mask      = NULL
     cdef int32_t*  idx_buf   = NULL
     cdef int32_t*  col_indices = NULL
     cdef int32_t   n_cols = 0
     cdef size_t    count
-    cdef Py_ssize_t i, j
     cdef bint had_fallback
     cdef uint64_t[::1] py_hashes
 
@@ -92,14 +61,15 @@ def distinct(Morsel morsel, CarcharSetWrapper seen_hashes, list columns=None):
     if col_indices == NULL:
         raise MemoryError()
 
-    # ── Allocate hash buffer (calloc = zeroed, nogil-safe allocator) ──────────
-    hashes_ptr = <uint64_t*>calloc(<size_t>n, sizeof(uint64_t))
+    # ── Allocate hash buffer — malloc is sufficient; c_hash writes every slot ─
+    hashes_ptr = <uint64_t*>malloc(<size_t>n * sizeof(uint64_t))
     if hashes_ptr == NULL:
         free(col_indices)
         raise MemoryError()
 
-    mask = <uint8_t*>malloc(<size_t>n)
-    if mask == NULL:
+    # ── Pre-allocate index buffer (worst case: all rows are new) ─────────────
+    idx_buf = <int32_t*>malloc(<size_t>n * sizeof(int32_t))
+    if idx_buf == NULL:
         free(col_indices)
         free(hashes_ptr)
         raise MemoryError()
@@ -120,23 +90,11 @@ def distinct(Morsel morsel, CarcharSetWrapper seen_hashes, list columns=None):
             memcpy(hashes_ptr, &py_hashes[0], <size_t>n * sizeof(uint64_t))
 
         with nogil:
-            count = cs.mark_new(hashes_ptr, mask, <size_t>n)
+            count = cs.mark_new_indices_32(hashes_ptr, idx_buf, <size_t>n)
 
         if count == 0:
             morsel._empty_inplace()
             return
-
-        # Allocate count+1 int32 slots: branchless scatter may write one slot
-        # past position count-1 when j == count and mask[i] == 0.
-        idx_buf = <int32_t*>malloc((<size_t>count + 1) * sizeof(int32_t))
-        if idx_buf == NULL:
-            raise MemoryError()
-
-        j = 0
-        with nogil:
-            for i in range(n):
-                idx_buf[j] = <int32_t>i
-                j += <Py_ssize_t>mask[i]
 
         # cdef method: no Python dispatch; typed memoryview hits the int32
         # fast path in _take_inplace directly — no copy, no extra allocation.
@@ -145,5 +103,4 @@ def distinct(Morsel morsel, CarcharSetWrapper seen_hashes, list columns=None):
     finally:
         free(col_indices)
         free(hashes_ptr)
-        free(mask)
         free(idx_buf)

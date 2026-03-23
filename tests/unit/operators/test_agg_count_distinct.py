@@ -8,10 +8,10 @@ import sys
 sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 
 import pyarrow as pa
+from opteryx.nanobind.carchar_native import CarcharSet
 
 import opteryx
-import opteryx.compiled.aggregations.count_distinct as count_distinct_module  # type: ignore[attr-defined]
-from opteryx.nanobind.carchar_native import CarcharSet
+import opteryx.compiled.aggregations.scalar_kernels as count_distinct_module  # type: ignore[attr-defined]
 
 python_count_distinct = count_distinct_module.count_distinct
 count_distinct_draken = count_distinct_module.count_distinct_draken
@@ -19,6 +19,7 @@ count_distinct_draken = count_distinct_module.count_distinct_draken
 
 def _distinct_size(func, column):
     return func(column, None).size()
+
 
 def test_count_distinct_parquet():
     cur = opteryx.query("SELECT COUNT(DISTINCT user_name) FROM testdata.flat.formats.parquet;")
@@ -29,8 +30,9 @@ def test_count_distinct_parquet():
     first = cur.fetchone()[0]
     assert first == 83606, first
 
+
 def test_count_distinct_identifier_group_by():
-    """ we're reading data from the file, even though it starts SELECT COUNT(*) FROM """
+    """we're reading data from the file, even though it starts SELECT COUNT(*) FROM"""
     cur = opteryx.query(
         "SELECT COUNT(DISTINCT user_name) AS un FROM testdata.flat.formats.parquet GROUP BY following ORDER BY un DESC;"
     )
@@ -60,7 +62,8 @@ def test_draken_hash_matches_python_for_chunked_arrays():
         count_distinct_draken, column
     )
 
+
 if __name__ == "__main__":  # pragma: no cover
     from tests import run_tests
-    
+
     run_tests()

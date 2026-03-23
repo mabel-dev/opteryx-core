@@ -9,7 +9,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from opteryx.compiled.aggregations.array_agg import ArrayAggState
+from opteryx.compiled.aggregations.scalar_kernels import ArrayAggState
 from opteryx.draken.interop.arrow import vector_from_sequence
 from opteryx.draken.morsels.morsel import Morsel
 
@@ -122,11 +122,11 @@ class ShuffleGroupByOperation:
         if function in ("count_distinct", "distinct"):
             return set()
         if function == "approx_count_distinct":
-            from opteryx.compiled.aggregations.approximate_count import ApproximateCountState
+            from opteryx.compiled.aggregations.scalar_kernels import ApproximateCountState
 
             return ApproximateCountState()
         if function == "approx_percentile":
-            from opteryx.compiled.aggregations.approximate_median import ApproximatePercentileState
+            from opteryx.compiled.aggregations.scalar_kernels import ApproximatePercentileState
 
             return ApproximatePercentileState(0.5 if options is None else float(options))
         if function == "array_agg":

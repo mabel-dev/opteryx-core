@@ -18,8 +18,8 @@ import numpy
 import pyarrow
 
 from opteryx import EOS
+from opteryx.compiled.structures.carchar_set import CarcharSetWrapper
 from opteryx.models import QueryProperties
-from opteryx.third_party.abseil.containers import FlatHashSet
 
 from . import JoinNode
 
@@ -128,7 +128,7 @@ class CrossJoinNode(JoinNode):
         self.right_buffer = []
         self.left_relation = None
         self.right_relation = None
-        self.hash_set = FlatHashSet()
+        self.hash_set = CarcharSetWrapper()
 
         self.continue_executing = True
 

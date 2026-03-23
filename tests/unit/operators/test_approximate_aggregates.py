@@ -2,8 +2,7 @@
 
 import pyarrow as pa
 
-from opteryx.compiled.aggregations.approximate_count import approximate_count
-from opteryx.compiled.aggregations.approximate_median import approximate_percentile
+from opteryx.compiled.aggregations.scalar_kernels import approximate_count, approximate_percentile
 
 
 def test_approximate_count_estimates_distinct_values():

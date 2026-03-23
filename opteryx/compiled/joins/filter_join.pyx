@@ -12,10 +12,10 @@ numpy.import_array()
 
 from libc.stdint cimport int64_t, uint64_t
 from opteryx.compiled.table_ops.hash_ops cimport compute_row_hashes
-from opteryx.third_party.abseil.containers cimport FlatHashSet
+from opteryx.compiled.structures.carchar_set cimport CarcharSetWrapper
 
 
-cpdef FlatHashSet filter_join_set(table, list columns=None, FlatHashSet seen_hashes=None):
+cpdef CarcharSetWrapper filter_join_set(table, list columns=None, CarcharSetWrapper seen_hashes=None):
     cdef:
         Py_ssize_t num_rows = table.num_rows
         uint64_t[::1] row_hashes = numpy.empty(num_rows, dtype=numpy.uint64)
@@ -25,7 +25,7 @@ cpdef FlatHashSet filter_join_set(table, list columns=None, FlatHashSet seen_has
     compute_row_hashes(table, columns_of_interest, row_hashes)
 
     if seen_hashes is None:
-        seen_hashes = FlatHashSet()
+        seen_hashes = CarcharSetWrapper()
 
     for row_idx in range(num_rows):
         seen_hashes.insert(row_hashes[row_idx])
@@ -33,7 +33,7 @@ cpdef FlatHashSet filter_join_set(table, list columns=None, FlatHashSet seen_has
     return seen_hashes
 
 
-cpdef semi_join(object relation, list join_columns, FlatHashSet seen_hashes):
+cpdef semi_join(object relation, list join_columns, CarcharSetWrapper seen_hashes):
     cdef:
         Py_ssize_t num_rows = relation.num_rows
         Py_ssize_t row_idx
@@ -50,7 +50,8 @@ cpdef semi_join(object relation, list join_columns, FlatHashSet seen_hashes):
 
     return relation.take(index_buffer[:count]) if count > 0 else relation.slice(0, 0)
 
-cpdef anti_join(object relation, list join_columns, FlatHashSet seen_hashes):
+
+cpdef anti_join(object relation, list join_columns, CarcharSetWrapper seen_hashes):
     cdef:
         Py_ssize_t num_rows = relation.num_rows
         Py_ssize_t row_idx
