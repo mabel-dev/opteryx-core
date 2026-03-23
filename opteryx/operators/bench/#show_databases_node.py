@@ -12,7 +12,6 @@ This is a SQL Query Execution Plan Node.
 from typing import Iterable
 
 import pyarrow
-
 from opteryx.models import QueryProperties
 from opteryx.operators import BasePlanNode
 from opteryx.operators import OperatorType

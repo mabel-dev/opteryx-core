@@ -34,15 +34,6 @@ from typing import Union
 from uuid import uuid4
 
 import pyarrow
-from orso import DataFrame
-from orso import converters
-from orso.schema import FlatColumn
-from orso.schema import RelationSchema
-from orso.types import OrsoTypes
-
-from opteryx import EOS
-from opteryx import config
-from opteryx import utils
 from opteryx.constants import QueryStatus
 from opteryx.constants import ResultType
 from opteryx.exceptions import InconsistentSchemaError
@@ -57,6 +48,15 @@ from opteryx.models import ExecutionContext
 from opteryx.models import QueryTelemetry
 from opteryx.tracing import record_event
 from opteryx.utils import sql
+from orso import DataFrame
+from orso import converters
+from orso.schema import FlatColumn
+from orso.schema import RelationSchema
+from orso.types import OrsoTypes
+
+from opteryx import EOS
+from opteryx import config
+from opteryx import utils
 
 
 class Session(DataFrame):

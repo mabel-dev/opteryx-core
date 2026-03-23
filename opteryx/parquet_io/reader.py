@@ -29,11 +29,23 @@ import heapq
 import struct
 import time
 from collections import deque
-from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, as_completed, wait
-from dataclasses import dataclass, field
-from typing import Any, Deque, Dict, Iterator, List, Optional, Tuple
+from concurrent.futures import FIRST_COMPLETED
+from concurrent.futures import Future
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import as_completed
+from concurrent.futures import wait
+from dataclasses import dataclass
+from dataclasses import field
+from typing import Any
+from typing import Deque
+from typing import Dict
+from typing import Iterator
+from typing import List
+from typing import Optional
+from typing import Tuple
 
-from opteryx.parquet_io.cache import InMemoryParquetCache, ParquetCache
+from opteryx.parquet_io.cache import InMemoryParquetCache
+from opteryx.parquet_io.cache import ParquetCache
 from opteryx.parquet_io.predicates import row_group_may_satisfy
 
 
@@ -85,8 +97,9 @@ def _read_footer_payload(
         tuple(envelope, bytes_fetched, elapsed_ns)
     """
     # trace footer IO
-    from opteryx import config as _cfg
     from opteryx.tracing import record_event
+
+    from opteryx import config as _cfg
 
     if _cfg.OPTERYX_TRACE:
         kwargs = {"file_id": path, "component": "footer"}
@@ -353,8 +366,9 @@ def fetch_columns(
         # Batch read all missing column chunks
         read_start_ns = time.monotonic_ns()
         # record download of column-batch
-        from opteryx import config as _cfg
         from opteryx.tracing import record_event
+
+        from opteryx import config as _cfg
 
         if _cfg.OPTERYX_TRACE:
             kwargs = {
@@ -390,8 +404,9 @@ def fetch_columns(
             col_stats = name_to_stats[col_name]
 
             # record per-column decode events
-            from opteryx import config as _cfg
             from opteryx.tracing import record_event
+
+            from opteryx import config as _cfg
 
             if _cfg.OPTERYX_TRACE:
                 kwargs = {
@@ -475,8 +490,9 @@ def _fetch_columns_task(
     Also emits high‑level row-group decode events for tracing so that the
     waterfall tool can collapse per-column activity if desired.
     """
-    from opteryx import config as _cfg
     from opteryx.tracing import record_event
+
+    from opteryx import config as _cfg
 
     start_ns = time.monotonic_ns()
 
@@ -852,8 +868,9 @@ def _read_rowgroup_task(
     ranges = [(work.offset, work.length) for work in column_work]
 
     # tracing: download start for this row group
-    from opteryx import config as _cfg
     from opteryx.tracing import record_event
+
+    from opteryx import config as _cfg
 
     if _cfg.OPTERYX_TRACE:
         kwargs = {"file_id": path, "component": "columns", "rg_idx": rg_idx}
@@ -903,8 +920,9 @@ def _decode_column_task(
     submitted_ns: int,
     connector: Optional[str] = None,
 ) -> Dict[str, Any]:
-    from opteryx import config as _cfg
     from opteryx.tracing import record_event
+
+    from opteryx import config as _cfg
 
     task_start_ns = time.monotonic_ns()
     queue_wait_ns = task_start_ns - submitted_ns

@@ -9,12 +9,6 @@ from typing import List
 from typing import Set
 from typing import Tuple
 
-from orso.schema import ConstantColumn
-from orso.schema import FlatColumn
-from orso.schema import RelationSchema
-from orso.tools import random_string
-from orso.types import OrsoTypes
-
 from opteryx.exceptions import AmbiguousDatasetError
 from opteryx.exceptions import InvalidFunctionParameterError
 from opteryx.exceptions import UnsupportedSyntaxError
@@ -27,6 +21,11 @@ from opteryx.planner.binder.binder import merge_schemas
 from opteryx.planner.binder.binding_context import BindingContext
 from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.virtual_datasets import derived
+from orso.schema import ConstantColumn
+from orso.schema import FlatColumn
+from orso.schema import RelationSchema
+from orso.tools import random_string
+from orso.types import OrsoTypes
 
 CAMEL_TO_SNAKE = re.compile(r"(?<!^)(?=[A-Z])")
 
@@ -616,7 +615,6 @@ class BinderVisitor:
             node.url = node.args[0].value
 
             import requests
-
             from opteryx.utils.parquet_decoder import parquet_decoder
 
             if not str(node.url).lower().endswith(".parquet"):

@@ -15,10 +15,6 @@ from typing import List
 from typing import Optional
 
 import numpy
-from orso.types import OrsoTypes
-
-from opteryx import functions
-from opteryx import operators
 from opteryx.exceptions import ArrayWithMixedTypesError
 from opteryx.exceptions import SqlError
 from opteryx.exceptions import UnsupportedSyntaxError
@@ -34,6 +30,10 @@ from opteryx.models import LogicalColumn
 from opteryx.models import Node
 from opteryx.utils import dates
 from opteryx.utils import suggest_alternative
+from orso.types import OrsoTypes
+
+from opteryx import functions
+from opteryx import operators
 
 # Epoch constants for converting datetime literals to Draken-native integers.
 # DATE literals are stored as int (days since epoch, fits int32).

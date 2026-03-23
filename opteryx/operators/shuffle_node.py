@@ -9,7 +9,6 @@ from collections import defaultdict
 from collections.abc import Iterable
 from typing import Any
 
-from opteryx import EOS
 from opteryx.compiled.structures.shuffle_partition import row_indexes_by_bin_flat
 from opteryx.draken.morsels.morsel import Morsel
 from opteryx.managers.kvstores import create_kv_store
@@ -17,6 +16,8 @@ from opteryx.models import QueryProperties
 from opteryx.operators.shuffle import BinStore
 from opteryx.operators.shuffle.partitioning import normalize_num_bins
 from opteryx.operators.shuffle.partitioning import select_num_bins_from_rows
+
+from opteryx import EOS
 
 from . import BasePlanNode
 

@@ -19,7 +19,6 @@ from typing import Tuple
 
 import pyarrow as pa
 import pyarrow.parquet as pq
-
 from opteryx.connectors.io_systems import OpteryxLocalFileSystem
 
 

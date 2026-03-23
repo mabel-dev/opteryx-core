@@ -13,12 +13,12 @@ from typing import Optional
 from typing import Tuple
 
 import pyarrow
-
-from opteryx import EOS
 from opteryx.constants import ResultType
 from opteryx.exceptions import InvalidInternalStateError
 from opteryx.models import PhysicalPlan
 from opteryx.models import QueryTelemetry
+
+from opteryx import EOS
 
 
 def execute(

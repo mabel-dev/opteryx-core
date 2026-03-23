@@ -22,9 +22,6 @@ the number of rows returned from a JOIN the better, so rather than filter
 after a join, we add conditions to the JOIN.
 """
 
-from orso.tools import random_string
-from orso.types import OrsoTypes
-
 from opteryx.connectors.capabilities import PredicatePushable
 from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.expression import NodeType
@@ -36,6 +33,8 @@ from opteryx.planner.binder.binder_visitor import extract_join_fields
 from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner import LogicalPlanNode
 from opteryx.planner.logical_planner import LogicalPlanStepType
+from orso.tools import random_string
+from orso.types import OrsoTypes
 
 from .optimization_strategy import OptimizationStrategy
 from .optimization_strategy import OptimizerContext

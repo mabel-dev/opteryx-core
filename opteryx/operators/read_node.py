@@ -18,14 +18,14 @@ from collections import defaultdict
 from typing import Generator
 
 import pyarrow
-from orso.schema import RelationSchema
-from orso.schema import convert_orso_schema_to_arrow_schema
-
-from opteryx import EOS
 from opteryx.draken.morsels.morsel import Morsel
 from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.models import QueryProperties
 from opteryx.utils.json_compat import dumps as json_dumps
+from orso.schema import RelationSchema
+from orso.schema import convert_orso_schema_to_arrow_schema
+
+from opteryx import EOS
 
 from . import BasePlanNode
 

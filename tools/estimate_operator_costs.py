@@ -1,14 +1,24 @@
 # pragma: no cover
 import decimal
+import os
+import sys
 
 import pyarrow
-from orso.types import OrsoTypes
-
-import opteryx
 from opteryx.expression import NodeType
 from opteryx.expression import evaluate
 from opteryx.expression.ops import filter_operations
 from opteryx.models import Node
+from orso.tools import parse_iso
+from orso.types import OrsoTypes
+
+import opteryx
+
+sys.path.insert(1, os.path.join(sys.path[0], "../../../mabel/orso"))
+sys.path.insert(1, os.path.join(sys.path[0], ".."))
+sys.path.insert(1, os.path.join(sys.path[0], "../../pyiceberg-firestore-gcs"))
+
+
+
 
 OPERATORS = [
     "Eq",
@@ -42,8 +52,8 @@ LITERALS = [
     (OrsoTypes.INTEGER, int(4)),
     (OrsoTypes.DOUBLE, float(4)),
     (OrsoTypes.STRUCT, {"a": "b"}),
-    (OrsoTypes.DATE, opteryx.utils.dates.parse_iso("2022-01-01").date()),
-    (OrsoTypes.TIMESTAMP, opteryx.utils.dates.parse_iso("2022-01-01 13:31")),
+    (OrsoTypes.DATE, parse_iso("2022-01-01").date()),
+    (OrsoTypes.TIMESTAMP, parse_iso("2022-01-01 13:31")),
     (OrsoTypes.VARCHAR, "1" * 50),
     (OrsoTypes.BLOB, b"1" * 50),
 ]

@@ -12,10 +12,10 @@ This is a SQL Query Execution Plan Node.
 from typing import Generator
 
 import pyarrow
-
-from opteryx import EOS
 from opteryx.exceptions import SqlError
 from opteryx.models import QueryProperties
+
+from opteryx import EOS
 
 from . import ReaderNode
 

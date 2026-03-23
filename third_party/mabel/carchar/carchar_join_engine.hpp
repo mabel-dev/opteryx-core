@@ -187,32 +187,11 @@ class CarcharJoinEngine {
             return partitions_[0].probe_row_count_sum(keys, length);
         }
 
-        if (sealed_) {
-            constexpr std::size_t kProbeCacheSize = 256U;
-            std::array<std::uint64_t, kProbeCacheSize> cache_keys {};
-            std::array<std::uint32_t, kProbeCacheSize> cache_counts {};
-            std::array<std::uint8_t, kProbeCacheSize> cache_valid {};
-            std::uint64_t total = 0;
-
-            for (std::size_t i = 0; i < length; ++i) {
-                const std::uint64_t key = keys[i];
-                const std::size_t cache_slot = static_cast<std::size_t>(key & (kProbeCacheSize - 1U));
-                if (cache_valid[cache_slot] != 0U && cache_keys[cache_slot] == key) {
-                    total += static_cast<std::uint64_t>(cache_counts[cache_slot]);
-                    continue;
-                }
-
-                const std::size_t partition_index = partition_for_key(key);
-                const std::uint32_t count =
-                    static_cast<std::uint32_t>(sealed_partitions_[partition_index].row_count_for_key(key));
-                cache_valid[cache_slot] = 1U;
-                cache_keys[cache_slot] = key;
-                cache_counts[cache_slot] = count;
-                total += static_cast<std::uint64_t>(count);
-            }
-            return total;
-        }
-
+        // Multi-partition path: group keys by partition, then dispatch each batch to
+        // the appropriate per-partition probe (SealedPartition or CarcharJoinIndex).
+        // This replaces the old sealed early-exit which used a stack-allocated per-call
+        // cache and called the slow row_count_for_key() single-key path, bypassing the
+        // batch-grouping and persistent HotKeyCache inside SealedPartition::probe_row_count_sum().
         partition_counts_.assign(partition_count_, 0U);
         partition_offsets_.assign(partition_count_, 0U);
         for (std::size_t i = 0; i < length; ++i) {
@@ -226,10 +205,10 @@ class CarcharJoinEngine {
         }
 
         grouped_probe_keys_.resize(length);
-        std::vector<std::size_t> write_offsets = partition_offsets_;
+        partition_write_offsets_ = partition_offsets_;
         for (std::size_t i = 0; i < length; ++i) {
             const std::size_t partition_index = partition_for_key(keys[i]);
-            grouped_probe_keys_[write_offsets[partition_index]++] = keys[i];
+            grouped_probe_keys_[partition_write_offsets_[partition_index]++] = keys[i];
         }
 
         std::uint64_t total = 0;
@@ -341,6 +320,39 @@ class CarcharJoinEngine {
         std::vector<std::uint32_t> row_counts;
         std::vector<std::int64_t> payload_refs;
 
+        // Hot-key cache for frequently accessed keys (Improvement 2)
+        struct HotKeyCache {
+            static constexpr std::size_t CACHE_SIZE = 64;  // Power of 2, 1 KB fits in L1
+            std::array<std::uint64_t, CACHE_SIZE> keys{};
+            std::array<std::uint32_t, CACHE_SIZE> counts{};
+            std::array<std::uint8_t, CACHE_SIZE> valid{};
+
+            bool lookup(std::uint64_t key, std::uint32_t& count_out) const noexcept {
+                const std::size_t slot = key & (CACHE_SIZE - 1U);
+                if (valid[slot] != 0U && keys[slot] == key) {
+                    count_out = counts[slot];
+                    return true;
+                }
+                return false;
+            }
+
+            void update(std::uint64_t key, std::uint32_t count) noexcept {
+                const std::size_t slot = key & (CACHE_SIZE - 1U);
+                keys[slot] = key;
+                counts[slot] = count;
+                valid[slot] = 1U;
+            }
+        };
+
+        mutable HotKeyCache hot_key_cache;
+
+        // Reusable scratch buffers for batch grouping path (Improvement 1 v1.1)
+        // Declared mutable to avoid per-call heap allocation inside const probe method.
+        mutable std::vector<std::size_t> probe_scratch_counts;
+        mutable std::vector<std::size_t> probe_scratch_offsets;
+        mutable std::vector<std::size_t> probe_scratch_write;
+        mutable std::vector<std::uint64_t> probe_scratch_keys;
+
         void build_from(
             const std::vector<std::pair<std::uint64_t, std::int64_t>>& items,
             const CarcharJoinIndex& payload_source,
@@ -429,14 +441,159 @@ class CarcharJoinEngine {
             if (capacity == 0 || keys == nullptr || length == 0) {
                 return 0;
             }
-            const auto probe_finder = detail::select_bucket_probe_finder();
+
             std::uint64_t total = 0;
+
+            // Small-batch path: scalar per-key probe with hot-key cache.
+            // Grouping overhead is not worth paying for fewer than kBatchThreshold keys.
+            constexpr std::size_t kBatchThreshold = 64U;
+            if (length < kBatchThreshold) {
+                const auto probe_finder = detail::select_bucket_probe_finder();
+                for (std::size_t i = 0; i < length; ++i) {
+                    std::uint32_t count = 0;
+                    if (hot_key_cache.lookup(keys[i], count)) {
+                        total += static_cast<std::uint64_t>(count);
+                        continue;
+                    }
+                    const auto result =
+                        probe_finder(control.data(), hashes.data(), capacity, keys[i], key_tag(keys[i]));
+                    if (result.found) {
+                        count = static_cast<std::uint32_t>(row_counts[result.slot]);
+                    }
+                    hot_key_cache.update(keys[i], count);
+                    total += static_cast<std::uint64_t>(count);
+                }
+                return total;
+            }
+
+            // --- Batch grouping path (Improvement 1 v1.1) ---
+            //
+            // Strategy:
+            //   Pass 1 — accumulate cache hits into total; count cache misses per bucket.
+            //   Pass 2 — scatter cache misses into bucket-ordered scratch array (no is_cached flags).
+            //   Pass 3 — for each non-empty bucket, load its control group once and answer all
+            //             keys mapped to it using match_mask64 SWAR tag scan (same quality as
+            //             per-key probe kernel, now amortised across all keys in the bucket).
+            //
+            // All scratch vectors are mutable members — no per-call heap allocation.
+
+            const std::size_t sealed_bucket_count = capacity / kGroupWidth;
+            if (sealed_bucket_count == 0) {
+                // Degenerate layout: fall back to scalar.
+                const auto probe_finder = detail::select_bucket_probe_finder();
+                for (std::size_t i = 0; i < length; ++i) {
+                    std::uint32_t count = 0;
+                    if (hot_key_cache.lookup(keys[i], count)) {
+                        total += static_cast<std::uint64_t>(count);
+                        continue;
+                    }
+                    const auto result =
+                        probe_finder(control.data(), hashes.data(), capacity, keys[i], key_tag(keys[i]));
+                    if (result.found) {
+                        count = static_cast<std::uint32_t>(row_counts[result.slot]);
+                    }
+                    hot_key_cache.update(keys[i], count);
+                    total += static_cast<std::uint64_t>(count);
+                }
+                return total;
+            }
+
+            const std::size_t bucket_mask = sealed_bucket_count - 1U;
+
+            // Pass 1: accumulate cache hits; count misses per bucket.
+            probe_scratch_counts.assign(sealed_bucket_count, 0U);
             for (std::size_t i = 0; i < length; ++i) {
-                const auto result = probe_finder(control.data(), hashes.data(), capacity, keys[i], key_tag(keys[i]));
-                if (result.found) {
-                    total += static_cast<std::uint64_t>(row_counts[result.slot]);
+                std::uint32_t cached_count = 0;
+                if (hot_key_cache.lookup(keys[i], cached_count)) {
+                    total += static_cast<std::uint64_t>(cached_count);
+                    continue;
+                }
+                ++probe_scratch_counts[static_cast<std::size_t>(keys[i]) & bucket_mask];
+            }
+
+            // Prefix-sum to get per-bucket write offsets; also compute total miss count.
+            probe_scratch_offsets.resize(sealed_bucket_count);
+            probe_scratch_write.resize(sealed_bucket_count);
+            std::size_t noncached = 0;
+            for (std::size_t i = 0; i < sealed_bucket_count; ++i) {
+                probe_scratch_offsets[i] = noncached;
+                probe_scratch_write[i]   = noncached;
+                noncached += probe_scratch_counts[i];
+            }
+
+            if (noncached == 0) {
+                return total;
+            }
+
+            // Pass 2: scatter cache misses into bucket-ordered scratch array.
+            // Re-scan input — cache hit check is cheap (L1 array lookup).
+            probe_scratch_keys.resize(noncached);
+            for (std::size_t i = 0; i < length; ++i) {
+                std::uint32_t dummy = 0;
+                if (hot_key_cache.lookup(keys[i], dummy)) {
+                    continue;
+                }
+                const std::size_t bucket = static_cast<std::size_t>(keys[i]) & bucket_mask;
+                probe_scratch_keys[probe_scratch_write[bucket]++] = keys[i];
+            }
+
+            // Pass 3: probe each non-empty bucket once.
+            // Control bytes for a bucket fit in one 8-byte word (scalar) or two (SIMD widths).
+            // match_mask64 scans 8 control bytes in ~4 instructions — same quality as the
+            // per-key probe kernel, but each bucket load is now shared by all keys in that bucket.
+            for (std::size_t bucket_idx = 0; bucket_idx < sealed_bucket_count; ++bucket_idx) {
+                const std::size_t count = probe_scratch_counts[bucket_idx];
+                if (count == 0U) {
+                    continue;
+                }
+
+                const std::size_t start  = probe_scratch_offsets[bucket_idx];
+                const std::size_t base   = bucket_idx * kGroupWidth;
+                const std::uint8_t* ctrl = control.data() + base;
+
+                // Load control group(s) once for this bucket.
+                const std::uint64_t group_lo = detail::load_u64(ctrl);
+#if defined(__AVX2__) || defined(__ARM_NEON) || defined(__ARM_NEON__)
+                const std::uint64_t group_hi = detail::load_u64(ctrl + 8U);
+#endif
+
+                for (std::size_t k = 0; k < count; ++k) {
+                    const std::uint64_t key  = probe_scratch_keys[start + k];
+                    const std::uint8_t  tag  = key_tag(key);
+                    std::uint32_t found_count = 0;
+                    bool found = false;
+
+                    // SWAR tag scan on lo 8 lanes.
+                    std::uint64_t matches = detail::match_mask64(group_lo, tag);
+                    while (matches != 0U) {
+                        const std::size_t lane = detail::first_group_index64(matches);
+                        if (hashes[base + lane] == key) {
+                            found_count = row_counts[base + lane];
+                            found = true;
+                            break;
+                        }
+                        matches &= (matches - 1U);
+                    }
+
+#if defined(__AVX2__) || defined(__ARM_NEON) || defined(__ARM_NEON__)
+                    // SWAR tag scan on hi 8 lanes (only for 16-wide groups).
+                    if (!found) {
+                        std::uint64_t matches_hi = detail::match_mask64(group_hi, tag);
+                        while (matches_hi != 0U) {
+                            const std::size_t lane = detail::first_group_index64(matches_hi);
+                            if (hashes[base + 8U + lane] == key) {
+                                found_count = row_counts[base + 8U + lane];
+                                break;
+                            }
+                            matches_hi &= (matches_hi - 1U);
+                        }
+                    }
+#endif
+                    hot_key_cache.update(key, found_count);
+                    total += static_cast<std::uint64_t>(found_count);
                 }
             }
+
             return total;
         }
 
@@ -444,7 +601,8 @@ class CarcharJoinEngine {
             return control.size() * sizeof(std::uint8_t) +
                    hashes.size() * sizeof(std::uint64_t) +
                    row_counts.size() * sizeof(std::uint32_t) +
-                   payload_refs.size() * sizeof(std::int64_t);
+                   payload_refs.size() * sizeof(std::int64_t) +
+                   sizeof(HotKeyCache);
         }
     };
 
@@ -484,6 +642,7 @@ class CarcharJoinEngine {
     mutable std::vector<std::uint64_t> grouped_probe_keys_;
     mutable std::vector<std::size_t> partition_counts_;
     mutable std::vector<std::size_t> partition_offsets_;
+    mutable std::vector<std::size_t> partition_write_offsets_;
 };
 
 }  // namespace opteryx::carchar

@@ -10,7 +10,6 @@ This is a SQL Query Execution Plan Node.
 """
 
 import pyarrow
-
 from opteryx.exceptions import DatasetNotFoundError
 from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.models import QueryProperties

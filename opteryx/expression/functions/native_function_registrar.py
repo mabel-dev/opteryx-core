@@ -14,14 +14,13 @@ The implementations themselves are in:
         utility.py
 """
 
-from orso.types import OrsoTypes
-
 from opteryx.expression.functions import FunctionDefinition
 from opteryx.expression.functions import FunctionOverload
 from opteryx.expression.functions import KernelSpec
 from opteryx.expression.functions import LifecycleSpec
 from opteryx.expression.functions import ParameterSpec
 from opteryx.expression.functions import ReturnSpec
+from orso.types import OrsoTypes
 
 
 def _builtin_text_functions() -> list[FunctionDefinition]:
@@ -38,7 +37,6 @@ def _builtin_text_functions() -> list[FunctionDefinition]:
         """CONCAT(array_col): join all string elements of each row, no separator."""
         import numpy as _np
         import pyarrow as _pa
-
         from opteryx.draken.interop.arrow import vector_from_arrow as _vfa
         from opteryx.draken.vectors.array_vector import ArrayVector as _AV
 
@@ -223,9 +221,8 @@ def _builtin_text_functions() -> list[FunctionDefinition]:
 
 def _builtin_arithmetic_functions() -> list[FunctionDefinition]:
     """Arithmetic and numeric functions."""
-    from pyarrow import compute
-
     from opteryx.expression.functions.implementations import arithmetic as number_functions
+    from pyarrow import compute
 
     return [
         FunctionDefinition(
@@ -283,7 +280,7 @@ def _builtin_arithmetic_functions() -> list[FunctionDefinition]:
                         engine="arrow",
                         id="default",
                         callable_ref=compute.abs,
-                        cost_us_per_million=1.0,
+                        cost_us_per_million=221.0,
                     ),
                 ),
             ),
@@ -311,7 +308,7 @@ def _builtin_arithmetic_functions() -> list[FunctionDefinition]:
                         engine="arrow",
                         id="default",
                         callable_ref=number_functions.ceiling,
-                        cost_us_per_million=2.0,
+                        cost_us_per_million=138.0,
                     ),
                 ),
             ),
@@ -339,7 +336,7 @@ def _builtin_arithmetic_functions() -> list[FunctionDefinition]:
                         engine="arrow",
                         id="default",
                         callable_ref=number_functions.floor,
-                        cost_us_per_million=2.0,
+                        cost_us_per_million=135.0,
                     ),
                 ),
             ),
@@ -362,7 +359,7 @@ def _builtin_arithmetic_functions() -> list[FunctionDefinition]:
                         engine="arrow",
                         id="default",
                         callable_ref=compute.sqrt,
-                        cost_us_per_million=3.0,
+                        cost_us_per_million=242.0,
                     ),
                 ),
             ),
@@ -472,7 +469,7 @@ def _builtin_logical_functions() -> list[FunctionDefinition]:
                         id="default",
                         callable_ref=_coalesce_kernel,
                         null_policy="passthru",
-                        cost_us_per_million=5.0,
+                        cost_us_per_million=15852.0,
                     ),
                 ),
             ),
@@ -499,7 +496,7 @@ def _builtin_logical_functions() -> list[FunctionDefinition]:
                         id="default",
                         callable_ref=other_functions.if_null,
                         null_policy="passthru",
-                        cost_us_per_million=4.0,
+                        cost_us_per_million=1.53,
                     ),
                 ),
             ),
@@ -526,7 +523,7 @@ def _builtin_logical_functions() -> list[FunctionDefinition]:
                         id="default",
                         callable_ref=other_functions.if_null,  # same kernel, different semantics handled by evaluator
                         null_policy="passthru",
-                        cost_us_per_million=4.0,
+                        cost_us_per_million=0.74,
                     ),
                 ),
             ),
@@ -552,7 +549,7 @@ def _builtin_logical_functions() -> list[FunctionDefinition]:
                         engine="arrow",
                         id="default",
                         callable_ref=other_functions.null_if,
-                        cost_us_per_million=3.0,
+                        cost_us_per_million=0.72,
                     ),
                 ),
             ),
@@ -580,7 +577,7 @@ def _builtin_logical_functions() -> list[FunctionDefinition]:
                         id="default",
                         callable_ref=_iif_kernel,
                         null_policy="bypass",
-                        cost_us_per_million=2.0,
+                        cost_us_per_million=1.38,
                     ),
                 ),
             ),
@@ -603,7 +600,7 @@ def _builtin_logical_functions() -> list[FunctionDefinition]:
                         engine="arrow",
                         id="default",
                         callable_ref=lambda x: x,
-                        cost_us_per_million=0.1,
+                        cost_us_per_million=0.28,
                     ),
                 ),
             ),
@@ -627,7 +624,7 @@ def _builtin_logical_functions() -> list[FunctionDefinition]:
                         id="default",
                         callable_ref=_case_kernel,
                         null_policy="passthru",
-                        cost_us_per_million=3.0,
+                        cost_us_per_million=1.04,
                     ),
                 ),
             ),
@@ -675,15 +672,11 @@ def _builtin_constant_functions() -> list[FunctionDefinition]:
             ),
         )
 
+    # fmt: off
     return [
-        _make("CURRENT_DATE", OrsoTypes.DATE, summary="Current date (SQL-92)."),
-        _make("CURRENT_TIME", OrsoTypes.TIME, summary="Current time (SQL-92)."),
-        _make(
-            "CURRENT_TIMESTAMP",
-            OrsoTypes.TIMESTAMP,
-            aliases=("NOW",),
-            summary="Current timestamp (SQL-92).",
-        ),
+        _make("CURRENT_DATE", OrsoTypes.DATE, summary="Current date."),
+        _make("CURRENT_TIME", OrsoTypes.TIME, summary="Current time."),
+        _make("CURRENT_TIMESTAMP", OrsoTypes.TIMESTAMP, aliases=("NOW",), summary="Current timestamp."),
         _make("UTC_TIMESTAMP", OrsoTypes.TIMESTAMP, summary="Current UTC timestamp."),
         _make("VERSION", OrsoTypes.VARCHAR, summary="Database version string."),
         _make("CONNECTION_ID", OrsoTypes.INTEGER, summary="Current connection identifier."),
@@ -693,6 +686,7 @@ def _builtin_constant_functions() -> list[FunctionDefinition]:
         _make("PHI", OrsoTypes.DOUBLE, summary="Golden ratio φ."),
         _make("E", OrsoTypes.DOUBLE, summary="Euler's number e."),
     ]
+    # fmt: on
 
 
 def _datepart_return_type(arg_nodes) -> OrsoTypes:
@@ -734,7 +728,7 @@ def _builtin_temporal_extra_functions() -> list[FunctionDefinition]:
                         engine="arrow",
                         id="default",
                         callable_ref=date_functions.date_part,
-                        cost_us_per_million=4.0,
+                        cost_us_per_million=0.87,
                     ),
                 ),
                 FunctionOverload(
@@ -748,7 +742,7 @@ def _builtin_temporal_extra_functions() -> list[FunctionDefinition]:
                         engine="arrow",
                         id="default",
                         callable_ref=date_functions.date_part,
-                        cost_us_per_million=4.0,
+                        cost_us_per_million=0.97,
                     ),
                 ),
             ),
@@ -759,7 +753,6 @@ def _builtin_temporal_extra_functions() -> list[FunctionDefinition]:
 def _builtin_utility_functions() -> list[FunctionDefinition]:
     """Utility functions: array ops, subscript, element access."""
     import numpy
-
     from opteryx.functions import _iterate_single_parameter as _isingle
     from opteryx.functions import _sort as _sort_factory
 
@@ -804,7 +797,7 @@ def _builtin_utility_functions() -> list[FunctionDefinition]:
                         engine="arrow",
                         id="default",
                         callable_ref=_greatest_kernel,
-                        cost_us_per_million=3.0,
+                        cost_us_per_million=4482220.29,
                     ),
                 ),
             ),
@@ -827,7 +820,7 @@ def _builtin_utility_functions() -> list[FunctionDefinition]:
                         engine="arrow",
                         id="default",
                         callable_ref=_least_kernel,
-                        cost_us_per_million=3.0,
+                        cost_us_per_million=4419443.37,
                     ),
                 ),
             ),
@@ -850,7 +843,7 @@ def _builtin_utility_functions() -> list[FunctionDefinition]:
                         engine="arrow",
                         id="default",
                         callable_ref=_sort_kernel,
-                        cost_us_per_million=5.0,
+                        cost_us_per_million=4.92,
                     ),
                 ),
             ),
@@ -876,7 +869,7 @@ def _builtin_utility_functions() -> list[FunctionDefinition]:
                         engine="arrow",
                         id="default",
                         callable_ref=lambda *a: None,  # constructed inline by evaluator
-                        cost_us_per_million=2.0,
+                        cost_us_per_million=0.25,
                     ),
                 ),
             ),
@@ -902,7 +895,7 @@ def _builtin_utility_functions() -> list[FunctionDefinition]:
                         engine="arrow",
                         id="default",
                         callable_ref=lambda *a: None,
-                        cost_us_per_million=2.0,
+                        cost_us_per_million=0.31,
                     ),
                 ),
             ),
@@ -912,8 +905,6 @@ def _builtin_utility_functions() -> list[FunctionDefinition]:
 
 def _builtin_text_extended_functions() -> list[FunctionDefinition]:
     """Remaining string/text functions not in the core text group."""
-    from pyarrow import compute
-
     from opteryx.compiled.vector_ops import vector_concat_ws_array as _vector_concat_ws_cython
     from opteryx.compiled.vector_ops import vector_ltrim as _vector_ltrim
     from opteryx.compiled.vector_ops import vector_rtrim as _vector_rtrim
@@ -927,12 +918,12 @@ def _builtin_text_extended_functions() -> list[FunctionDefinition]:
     from opteryx.functions import _soundex
     from opteryx.functions import _string_slice_left
     from opteryx.functions import _string_slice_right
+    from pyarrow import compute
 
     def _concat_ws_kernel(sep, arr):
         """CONCAT_WS(sep, array_col): join elements with separator."""
         import numpy as _np
         import pyarrow as _pa
-
         from opteryx.draken.interop.arrow import vector_from_arrow as _vfa
         from opteryx.draken.vectors.array_vector import ArrayVector as _AV
 
@@ -979,7 +970,6 @@ def _builtin_text_extended_functions() -> list[FunctionDefinition]:
         relative to SQL order (needle first, haystack second)."""
         import numpy as _np
         import pyarrow as _pa
-
         from opteryx.draken.interop.arrow import vector_from_arrow as _vfa
         from opteryx.draken.vectors.string_vector import StringVector as _SV
 
@@ -1061,6 +1051,7 @@ def _builtin_text_extended_functions() -> list[FunctionDefinition]:
             OrsoTypes.VARCHAR,
             (_any,),
             summary="Convert codepoint to character.",
+            cost=2.49,
         ),
         _make(
             "ASCII",
@@ -1068,6 +1059,7 @@ def _builtin_text_extended_functions() -> list[FunctionDefinition]:
             OrsoTypes.INTEGER,
             (_s,),
             summary="Return ASCII codepoint of first character.",
+            cost=109566.64,
         ),
         _make(
             "LEFT",
@@ -1075,6 +1067,7 @@ def _builtin_text_extended_functions() -> list[FunctionDefinition]:
             OrsoTypes.VARCHAR,
             (_s, _n),
             summary="Return leftmost N characters.",
+            cost=2.10,
         ),
         _make(
             "RIGHT",
@@ -1082,10 +1075,18 @@ def _builtin_text_extended_functions() -> list[FunctionDefinition]:
             OrsoTypes.VARCHAR,
             (_s, _n),
             summary="Return rightmost N characters.",
+            cost=1.17,
         ),
-        _make("REVERSE", _reverse, OrsoTypes.VARCHAR, (_s,), summary="Reverse a string."),
         _make(
-            "SOUNDEX", _soundex, OrsoTypes.VARCHAR, (_s,), summary="Return Soundex phonetic code."
+            "REVERSE", _reverse, OrsoTypes.VARCHAR, (_s,), summary="Reverse a string.", cost=11.97
+        ),
+        _make(
+            "SOUNDEX",
+            _soundex,
+            OrsoTypes.VARCHAR,
+            (_s,),
+            summary="Return Soundex phonetic code.",
+            cost=9.10,
         ),
         _make(
             "INITCAP",
@@ -1094,6 +1095,7 @@ def _builtin_text_extended_functions() -> list[FunctionDefinition]:
             (_s,),
             aliases=("TITLE", "TITLECASE"),
             summary="Capitalise first letter of each word.",
+            cost=5.97,
         ),
         _make(
             "CONCAT_WS",
@@ -1107,6 +1109,7 @@ def _builtin_text_extended_functions() -> list[FunctionDefinition]:
             engine="draken",
             summary="Concatenate with separator.",
             null_policy="passthru",
+            cost=1.59,
         ),
         _make(
             "POSITION",
@@ -1118,6 +1121,7 @@ def _builtin_text_extended_functions() -> list[FunctionDefinition]:
             ),
             engine="draken",
             summary="Find position of substring.",
+            cost=0.73,
         ),
         _make(
             "TRIM",
@@ -1127,6 +1131,7 @@ def _builtin_text_extended_functions() -> list[FunctionDefinition]:
             engine="draken",
             null_policy="passthru",
             summary="Trim leading and trailing characters.",
+            cost=1.05,
         ),
         _make(
             "LTRIM",
@@ -1136,6 +1141,7 @@ def _builtin_text_extended_functions() -> list[FunctionDefinition]:
             engine="draken",
             null_policy="passthru",
             summary="Trim leading characters.",
+            cost=0.97,
         ),
         _make(
             "RTRIM",
@@ -1145,6 +1151,7 @@ def _builtin_text_extended_functions() -> list[FunctionDefinition]:
             engine="draken",
             null_policy="passthru",
             summary="Trim trailing characters.",
+            cost=0.88,
         ),
         _make(
             "LPAD",
@@ -1156,6 +1163,7 @@ def _builtin_text_extended_functions() -> list[FunctionDefinition]:
                 ParameterSpec(name="fill", type_family="string", optional=True),
             ),
             summary="Left-pad string to width.",
+            cost=1.06,
         ),
         _make(
             "RPAD",
@@ -1167,6 +1175,7 @@ def _builtin_text_extended_functions() -> list[FunctionDefinition]:
                 ParameterSpec(name="fill", type_family="string", optional=True),
             ),
             summary="Right-pad string to width.",
+            cost=0.72,
         ),
         _make(
             "LEVENSHTEIN",
@@ -1176,7 +1185,7 @@ def _builtin_text_extended_functions() -> list[FunctionDefinition]:
                 ParameterSpec(name="a", type_family="string"),
                 ParameterSpec(name="b", type_family="string"),
             ),
-            cost=50.0,
+            cost=0.77,
             summary="Levenshtein edit distance between two strings.",
         ),
         _make(
@@ -1190,6 +1199,7 @@ def _builtin_text_extended_functions() -> list[FunctionDefinition]:
             ),
             null_policy="passthru",
             summary="Split string into array.",
+            cost=8.22,
         ),
         _make(
             "_MATCH_AGAINST",
@@ -1199,7 +1209,7 @@ def _builtin_text_extended_functions() -> list[FunctionDefinition]:
                 _s,
                 ParameterSpec(name="pattern", type_family="string"),
             ),
-            cost=20.0,
+            cost=1.17,
             summary="Full-text match.",
         ),
         _make(
@@ -1212,6 +1222,7 @@ def _builtin_text_extended_functions() -> list[FunctionDefinition]:
                 ParameterSpec(name="replacement", type_family="string"),
             ),
             summary="Replace occurrences of substring.",
+            cost=1.33,
         ),
         _make(
             "REGEXP_REPLACE",
@@ -1234,6 +1245,7 @@ def _builtin_text_extended_functions() -> list[FunctionDefinition]:
                 ParameterSpec(name="key", type_family="string"),
             ),
             summary="Extract string field from struct/map.",
+            cost=0.64,
         ),
     ]
 
@@ -1298,17 +1310,29 @@ def _builtin_hash_encoding_functions() -> list[FunctionDefinition]:
     _b = ParameterSpec(name="blob", type_family="any")
 
     return [
-        _make("HASH", _hash_kernel, OrsoTypes.BLOB, (_any,), cost=15.0, summary="Generic hash."),
-        _make("MD5", _md5, OrsoTypes.BLOB, (_any,), cost=12.0, summary="MD5 hash."),
-        _make("SHA1", _sha1, OrsoTypes.BLOB, (_any,), cost=12.0, summary="SHA-1 hash."),
         _make(
-            "SHA224", _sha224_kernel, OrsoTypes.BLOB, (_any,), cost=14.0, summary="SHA-224 hash."
+            "HASH", _hash_kernel, OrsoTypes.BLOB, (_any,), cost=437424.69, summary="Generic hash."
         ),
-        _make("SHA256", _sha256, OrsoTypes.BLOB, (_any,), cost=14.0, summary="SHA-256 hash."),
+        _make("MD5", _md5, OrsoTypes.BLOB, (_any,), cost=8.44, summary="MD5 hash."),
+        _make("SHA1", _sha1, OrsoTypes.BLOB, (_any,), cost=5.10, summary="SHA-1 hash."),
         _make(
-            "SHA384", _sha384_kernel, OrsoTypes.BLOB, (_any,), cost=14.0, summary="SHA-384 hash."
+            "SHA224",
+            _sha224_kernel,
+            OrsoTypes.BLOB,
+            (_any,),
+            cost=634394.82,
+            summary="SHA-224 hash.",
         ),
-        _make("SHA512", _sha512, OrsoTypes.BLOB, (_any,), cost=14.0, summary="SHA-512 hash."),
+        _make("SHA256", _sha256, OrsoTypes.BLOB, (_any,), cost=7.56, summary="SHA-256 hash."),
+        _make(
+            "SHA384",
+            _sha384_kernel,
+            OrsoTypes.BLOB,
+            (_any,),
+            cost=714225.82,
+            summary="SHA-384 hash.",
+        ),
+        _make("SHA512", _sha512, OrsoTypes.BLOB, (_any,), cost=7.47, summary="SHA-512 hash."),
         FunctionDefinition(
             name="RANDOM",
             aliases=("RAND",),
@@ -1328,7 +1352,7 @@ def _builtin_hash_encoding_functions() -> list[FunctionDefinition]:
                         id="default",
                         callable_ref=number_functions.random_number,
                         null_policy="compress",
-                        cost_us_per_million=10.0,
+                        cost_us_per_million=85541.62,
                     ),
                 ),
                 FunctionOverload(
@@ -1340,7 +1364,7 @@ def _builtin_hash_encoding_functions() -> list[FunctionDefinition]:
                         id="zero_arg",
                         callable_ref=number_functions.random_number,
                         null_policy="compress",
-                        cost_us_per_million=10.0,
+                        cost_us_per_million=85541.62,
                     ),
                 ),
             ),
@@ -1364,7 +1388,7 @@ def _builtin_hash_encoding_functions() -> list[FunctionDefinition]:
                         id="default",
                         callable_ref=number_functions.random_normal,
                         null_policy="compress",
-                        cost_us_per_million=10.0,
+                        cost_us_per_million=86571.94,
                     ),
                 ),
                 FunctionOverload(
@@ -1376,7 +1400,7 @@ def _builtin_hash_encoding_functions() -> list[FunctionDefinition]:
                         id="zero_arg",
                         callable_ref=number_functions.random_normal,
                         null_policy="compress",
-                        cost_us_per_million=10.0,
+                        cost_us_per_million=86571.94,
                     ),
                 ),
             ),
@@ -1388,6 +1412,7 @@ def _builtin_hash_encoding_functions() -> list[FunctionDefinition]:
             (_n,),
             volatility="volatile",
             summary="Generate random strings.",
+            cost=372872.83,
         ),
         _make(
             "BASE64_ENCODE",
@@ -1395,6 +1420,7 @@ def _builtin_hash_encoding_functions() -> list[FunctionDefinition]:
             OrsoTypes.BLOB,
             (_b,),
             summary="Base64 encode.",
+            cost=3.40,
         ),
         _make(
             "BASE64_DECODE",
@@ -1402,40 +1428,61 @@ def _builtin_hash_encoding_functions() -> list[FunctionDefinition]:
             OrsoTypes.BLOB,
             (_b,),
             summary="Base64 decode.",
+            cost=2.60,
         ),
-        _make("BASE85_ENCODE", _base85_enc_kernel, OrsoTypes.BLOB, (_b,), summary="Base85 encode."),
-        _make("BASE85_DECODE", _base85_dec_kernel, OrsoTypes.BLOB, (_b,), summary="Base85 decode."),
-        _make("HEX_ENCODE", _hex_enc_kernel, OrsoTypes.BLOB, (_b,), summary="Hex encode."),
-        _make("HEX_DECODE", _hex_dec_kernel, OrsoTypes.BLOB, (_b,), summary="Hex decode."),
+        _make(
+            "BASE85_ENCODE",
+            _base85_enc_kernel,
+            OrsoTypes.BLOB,
+            (_b,),
+            summary="Base85 encode.",
+            cost=1328408.13,
+        ),
+        _make(
+            "BASE85_DECODE",
+            _base85_dec_kernel,
+            OrsoTypes.BLOB,
+            (_b,),
+            summary="Base85 decode.",
+            cost=7.35,
+        ),
+        _make(
+            "HEX_ENCODE",
+            _hex_enc_kernel,
+            OrsoTypes.BLOB,
+            (_b,),
+            summary="Hex encode.",
+            cost=539725.99,
+        ),
+        _make(
+            "HEX_DECODE", _hex_dec_kernel, OrsoTypes.BLOB, (_b,), summary="Hex decode.", cost=3.87
+        ),
     ]
 
 
 def _builtin_array_misc_functions() -> list[FunctionDefinition]:
     """Array membership tests and miscellaneous column-level functions."""
+    # fmt: off
     from opteryx.compiled.vector_ops import vector_contains_all
     from opteryx.compiled.vector_ops import vector_contains_any
     from opteryx.expression.functions.implementations.logical import if_null as _of_if_null
     from opteryx.expression.functions.implementations.logical import null_if as _of_null_if
     from opteryx.expression.functions.implementations.utility import (
-        array_contains as _of_array_contains,
-    )
+        array_contains as _of_array_contains,)
     from opteryx.expression.functions.implementations.utility import (
-        array_contains_all as _of_array_contains_all,
-    )
+        array_contains_all as _of_array_contains_all,)
     from opteryx.expression.functions.implementations.utility import (
-        array_contains_any as _of_array_contains_any,
-    )
+        array_contains_any as _of_array_contains_any,)
     from opteryx.expression.functions.implementations.utility import (
-        cosine_distance as _of_cosine_distance,
-    )
+        cosine_distance as _of_cosine_distance,)
     from opteryx.expression.functions.implementations.utility import (
-        cosine_similarity as _of_cosine_similarity,
-    )
+        cosine_similarity as _of_cosine_similarity,)
     from opteryx.expression.functions.implementations.utility import embed as _of_embed
     from opteryx.expression.functions.implementations.utility import humanize as _of_humanize
     from opteryx.expression.functions.implementations.utility import (
-        jsonb_object_keys as _of_jsonb_object_keys,
-    )
+        jsonb_object_keys as _of_jsonb_object_keys,)
+
+    # fmt: on
 
     class other_functions:
         array_contains = staticmethod(_of_array_contains)
@@ -1492,6 +1539,7 @@ def _builtin_array_misc_functions() -> list[FunctionDefinition]:
             (_arr, _item),
             null_policy="passthru",
             summary="Test if array contains item.",
+            cost=1.19,
         ),
         _make(
             "ARRAY_CONTAINS_ANY",
@@ -1500,6 +1548,7 @@ def _builtin_array_misc_functions() -> list[FunctionDefinition]:
             (_arr, _set),
             null_policy="passthru",
             summary="Test if array contains any item from set.",
+            cost=1.02,
         ),
         _make(
             "ARRAY_CONTAINS_ALL",
@@ -1508,13 +1557,14 @@ def _builtin_array_misc_functions() -> list[FunctionDefinition]:
             (_arr, _set),
             null_policy="passthru",
             summary="Test if array contains all items from set.",
+            cost=1.21,
         ),
         _make(
             "JSONB_OBJECT_KEYS",
             other_functions.jsonb_object_keys,
             OrsoTypes.ARRAY,
             (ParameterSpec(name="json", type_family="any"),),
-            cost=15.0,
+            cost=590.21,
             summary="Extract keys from JSON object.",
         ),
         _make(
@@ -1522,7 +1572,7 @@ def _builtin_array_misc_functions() -> list[FunctionDefinition]:
             other_functions.humanize,
             OrsoTypes.VARCHAR,
             (ParameterSpec(name="val", type_family="any"),),
-            cost=10.0,
+            cost=775947.17,
             summary="Format number in human-readable form.",
         ),
         FunctionDefinition(
@@ -1544,7 +1594,7 @@ def _builtin_array_misc_functions() -> list[FunctionDefinition]:
                         id="default",
                         callable_ref=other_functions.embed,
                         null_policy="compress",
-                        cost_us_per_million=120.0,
+                        cost_us_per_million=1_000_000.0,
                     ),
                 ),
             ),
@@ -1571,7 +1621,7 @@ def _builtin_array_misc_functions() -> list[FunctionDefinition]:
                         id="default",
                         callable_ref=other_functions.cosine_similarity,
                         null_policy="compress",
-                        cost_us_per_million=30.0,
+                        cost_us_per_million=1.33,
                     ),
                 ),
                 FunctionOverload(
@@ -1586,7 +1636,7 @@ def _builtin_array_misc_functions() -> list[FunctionDefinition]:
                         id="default",
                         callable_ref=other_functions.cosine_similarity,
                         null_policy="compress",
-                        cost_us_per_million=30.0,
+                        cost_us_per_million=1.33,
                     ),
                 ),
             ),
@@ -1613,7 +1663,7 @@ def _builtin_array_misc_functions() -> list[FunctionDefinition]:
                         id="default",
                         callable_ref=other_functions.cosine_distance,
                         null_policy="compress",
-                        cost_us_per_million=30.0,
+                        cost_us_per_million=1.17,
                     ),
                 ),
                 FunctionOverload(
@@ -1628,7 +1678,7 @@ def _builtin_array_misc_functions() -> list[FunctionDefinition]:
                         id="default",
                         callable_ref=other_functions.cosine_distance,
                         null_policy="compress",
-                        cost_us_per_million=30.0,
+                        cost_us_per_million=1.17,
                     ),
                 ),
             ),
@@ -1638,10 +1688,9 @@ def _builtin_array_misc_functions() -> list[FunctionDefinition]:
 
 def _builtin_arithmetic_extended_functions() -> list[FunctionDefinition]:
     """Numeric functions not in the core arithmetic group."""
-    from pyarrow import compute
-
     from opteryx.expression.functions.implementations import arithmetic as number_functions
     from opteryx.expression.functions.implementations import temporal as date_functions
+    from pyarrow import compute
 
     def _make(
         name, callable_ref, ret, params, aliases=(), cost=2.0, null_policy="compress", summary=""
@@ -1677,7 +1726,12 @@ def _builtin_arithmetic_extended_functions() -> list[FunctionDefinition]:
 
     return [
         _make(
-            "SIGN", compute.sign, OrsoTypes.INTEGER, (_num,), summary="Sign of number (-1, 0, 1)."
+            "SIGN",
+            compute.sign,
+            OrsoTypes.INTEGER,
+            (_num,),
+            summary="Sign of number (-1, 0, 1).",
+            cost=327.02,
         ),
         FunctionDefinition(
             name="TRUNC",
@@ -1702,7 +1756,7 @@ def _builtin_arithmetic_extended_functions() -> list[FunctionDefinition]:
                         engine="arrow",
                         id="numeric",
                         callable_ref=number_functions.trunc,
-                        cost_us_per_million=2.0,
+                        cost_us_per_million=142.78,
                     ),
                 ),
                 FunctionOverload(
@@ -1716,7 +1770,7 @@ def _builtin_arithmetic_extended_functions() -> list[FunctionDefinition]:
                         engine="arrow",
                         id="temporal",
                         callable_ref=date_functions.trunc_temporal,
-                        cost_us_per_million=4.0,
+                        cost_us_per_million=0.96,
                     ),
                 ),
             ),
@@ -1726,7 +1780,7 @@ def _builtin_arithmetic_extended_functions() -> list[FunctionDefinition]:
             number_functions.safe_power,
             OrsoTypes.DOUBLE,
             (_num, ParameterSpec(name="exp", type_family="numeric")),
-            cost=5.0,
+            cost=0.86,
             summary="Raise base to exponent (SQL-92).",
         ),
         _make(
@@ -1735,6 +1789,7 @@ def _builtin_arithmetic_extended_functions() -> list[FunctionDefinition]:
             OrsoTypes.DOUBLE,
             (_num, ParameterSpec(name="base", type_family="numeric")),
             summary="Logarithm with arbitrary base.",
+            cost=1.04,
         ),
     ]
 
@@ -1785,6 +1840,7 @@ def _builtin_temporal_functions() -> list[FunctionDefinition]:
                 _date,
             ),
             summary="Bucket date into fixed-width intervals.",
+            cost=1.08,
         ),
         _make(
             "DATEDIFF",
@@ -1792,7 +1848,7 @@ def _builtin_temporal_functions() -> list[FunctionDefinition]:
             OrsoTypes.INTEGER,
             (_part, _date, ParameterSpec(name="end", type_family="temporal")),
             aliases=("DATE_DIFF",),
-            cost=5.0,
+            cost=0.88,
             summary="Difference between two dates in the specified unit.",
         ),
         _make(
@@ -1804,7 +1860,7 @@ def _builtin_temporal_functions() -> list[FunctionDefinition]:
                 ParameterSpec(name="time2", type_family="temporal"),
             ),
             aliases=("TIME_DIFF",),
-            cost=5.0,
+            cost=0.68,
             summary="Difference between two times.",
         ),
         _make(
@@ -1812,7 +1868,7 @@ def _builtin_temporal_functions() -> list[FunctionDefinition]:
             date_functions.date_format,
             OrsoTypes.VARCHAR,
             (_date, ParameterSpec(name="pattern", type_family="string", constant_only=True)),
-            cost=6.0,
+            cost=0.85,
             summary="Format date/timestamp as string.",
         ),
         _make(
@@ -1820,7 +1876,7 @@ def _builtin_temporal_functions() -> list[FunctionDefinition]:
             date_functions.from_unixtimestamp,
             OrsoTypes.TIMESTAMP,
             (ParameterSpec(name="ts", type_family="numeric"),),
-            cost=4.0,
+            cost=3.17,
             summary="Convert Unix timestamp to TIMESTAMP.",
         ),
         _make(
@@ -1829,7 +1885,7 @@ def _builtin_temporal_functions() -> list[FunctionDefinition]:
             OrsoTypes.INTEGER,
             (_date,),
             aliases=("TO_UNIXTIME",),
-            cost=3.0,
+            cost=8.84,
             summary="Convert TIMESTAMP to Unix epoch seconds.",
         ),
     ]

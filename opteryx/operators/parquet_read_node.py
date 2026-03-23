@@ -27,24 +27,33 @@ between I/O and decode across all files and row groups simultaneously.
 from __future__ import annotations
 
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import as_completed
 from copy import deepcopy
 from typing import Generator
 
 import numpy
 import pyarrow
+from opteryx.draken.morsels.morsel import Morsel
+from opteryx.expression import NodeType
+from opteryx.expression import get_all_nodes_of_type
+from opteryx.models import Node
+from opteryx.models import QueryProperties
+from opteryx.parquet_io import InMemoryParquetCache
+from opteryx.parquet_io import fetch_columns
+from opteryx.parquet_io import fetch_footer
+from opteryx.parquet_io import iter_row_groups
+from opteryx.parquet_io.predicates import extract_predicate_stats
+from opteryx.utils.parquet_decoder import parquet_decoder
 from orso.schema import convert_orso_schema_to_arrow_schema
 from orso.tools import random_string
 
-from opteryx import EOS, config
-from opteryx.draken.morsels.morsel import Morsel
-from opteryx.expression import NodeType, get_all_nodes_of_type
-from opteryx.models import Node, QueryProperties
-from opteryx.parquet_io import InMemoryParquetCache, fetch_columns, fetch_footer, iter_row_groups
-from opteryx.parquet_io.predicates import extract_predicate_stats
-from opteryx.utils.parquet_decoder import parquet_decoder
+from opteryx import EOS
+from opteryx import config
 
-from .read_node import ReaderNode, normalize_morsel, struct_to_jsonb
+from .read_node import ReaderNode
+from .read_node import normalize_morsel
+from .read_node import struct_to_jsonb
 
 _DATA_FORMAT = "arrow,draken"
 
@@ -196,7 +205,8 @@ class ParquetReadNode(ReaderNode):
         if predicate_root is None:
             return morsel, morsel.num_rows, morsel.num_rows
 
-        from opteryx.expression.evaluator import evaluate_and_append_draken, evaluate_draken
+        from opteryx.expression.evaluator import evaluate_and_append_draken
+        from opteryx.expression.evaluator import evaluate_draken
 
         rows_before_filter = morsel.num_rows
 
@@ -755,10 +765,8 @@ class ParquetReadNode(ReaderNode):
 
                 # ── Morsel assembly ───────────────────────────────────────────
                 if two_pass_eligible:
-                    from opteryx.expression.evaluator import (
-                        evaluate_and_append_draken,
-                        evaluate_draken,
-                    )
+                    from opteryx.expression.evaluator import evaluate_and_append_draken
+                    from opteryx.expression.evaluator import evaluate_draken
 
                     # Build Pass 1 morsel from filter columns only.
                     p1_identity_names = [pass1_name_to_identity[col] for col in row_group]

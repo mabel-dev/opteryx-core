@@ -11,11 +11,12 @@ This is a SQL Query Execution Plan Node.
 This node is responsible for applying filters to datasets.
 """
 
-from opteryx import EOS
 from opteryx.expression import NodeType
 from opteryx.expression import format_expression
 from opteryx.expression import get_all_nodes_of_type
 from opteryx.models import QueryProperties
+
+from opteryx import EOS
 
 from . import BasePlanNode
 

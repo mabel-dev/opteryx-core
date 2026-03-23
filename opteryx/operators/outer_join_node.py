@@ -18,8 +18,6 @@ from array import array
 from typing import List
 
 import pyarrow
-
-from opteryx import EOS
 from opteryx.compiled.joins import build_side_hash_map
 from opteryx.compiled.joins import probe_side_hash_map
 from opteryx.compiled.joins import right_join
@@ -28,6 +26,8 @@ from opteryx.compiled.structures.buffers import IntBuffer
 from opteryx.compiled.structures.hash_table import HashTable
 from opteryx.models import QueryProperties
 from opteryx.utils.arrow import align_tables
+
+from opteryx import EOS
 
 from . import JoinNode
 

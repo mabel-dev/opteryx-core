@@ -11,9 +11,10 @@ This is a SQL Query Execution Plan Node.
 This Node eliminates duplicate records.
 """
 
-from opteryx import EOS
 from opteryx.draken import Morsel
 from opteryx.models import QueryProperties
+
+from opteryx import EOS
 
 from . import BasePlanNode
 

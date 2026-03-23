@@ -16,11 +16,13 @@ presence or absence of matching rows in the right table.
 import time
 
 import pyarrow
-
-from opteryx import EOS
-from opteryx.compiled.joins import anti_join, filter_join_set, semi_join
+from opteryx.compiled.joins import anti_join
+from opteryx.compiled.joins import filter_join_set
+from opteryx.compiled.joins import semi_join
 from opteryx.compiled.structures.carchar_set import CarcharSetWrapper
 from opteryx.models import QueryProperties
+
+from opteryx import EOS
 
 from . import JoinNode
 

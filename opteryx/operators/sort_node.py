@@ -13,15 +13,15 @@ morsels.  Dictionary-encoded columns are ORDER BY-correct (codes are remapped to
 value rank before sorting, with AVX2/NEON SIMD acceleration for uint8 codes).
 """
 
-from orso.types import OrsoTypes
-
-from opteryx import EOS
 from opteryx.compiled.morsel_ops.sort import morsel_sort
 from opteryx.draken.morsels.morsel import Morsel
 from opteryx.exceptions import ColumnNotFoundError
 from opteryx.expression import NodeType
 from opteryx.expression import evaluate_and_append
 from opteryx.models import QueryProperties
+from orso.types import OrsoTypes
+
+from opteryx import EOS
 
 from . import BasePlanNode
 

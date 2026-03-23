@@ -23,18 +23,17 @@ been run if this strategy didn't run.
 
 from itertools import permutations
 
-from orso.schema import ConstantColumn
-from orso.tools import random_string
-
-# pragma: no cover
-from orso.types import OrsoTypes
-
 from opteryx.expression import NodeType
 from opteryx.expression import get_all_nodes_of_type
 from opteryx.models import Node
 from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner import LogicalPlanNode
 from opteryx.planner.logical_planner import LogicalPlanStepType
+from orso.schema import ConstantColumn
+from orso.tools import random_string
+
+# pragma: no cover
+from orso.types import OrsoTypes
 
 from .optimization_strategy import OptimizationStrategy
 from .optimization_strategy import OptimizerContext
@@ -46,16 +45,16 @@ BASIC_COMPARISON_COSTS = {
     OrsoTypes.ARRAY: 10.00,  # expensive
     OrsoTypes.BLOB: 0.058,  # varies based on length, this is 50 bytes
     OrsoTypes.JSONB: 10.00,  # JSONB (treat as expensive)
-    OrsoTypes.BOOLEAN: 0.004,
-    OrsoTypes.DATE: 0.01,
-    OrsoTypes.DECIMAL: 2.871,
-    OrsoTypes.DOUBLE: 0.003,
-    OrsoTypes.INTEGER: 0.002,
+    OrsoTypes.BOOLEAN: 0.003,
+    OrsoTypes.DATE: 0.008,
+    OrsoTypes.DECIMAL: 1.533,
+    OrsoTypes.DOUBLE: 0.002,
+    OrsoTypes.INTEGER: 0.001,
     OrsoTypes.INTERVAL: 10.00,  # expensive
     OrsoTypes.STRUCT: 10.00,  # expensive
-    OrsoTypes.TIMESTAMP: 0.009,
+    OrsoTypes.TIMESTAMP: 0.008,
     OrsoTypes.TIME: 10.00,  # expensive
-    OrsoTypes.VARCHAR: 0.375,  # varies based on length, this is 50 chars
+    OrsoTypes.VARCHAR: 0.231,  # varies based on length, this is 50 chars
     OrsoTypes.NULL: 10.00,  # for completeness
     getattr(OrsoTypes, "_MISSING_TYPE", 0): 10.00,  # for completeness
     0: 10.00,  # for completeness

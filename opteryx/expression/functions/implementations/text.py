@@ -20,8 +20,6 @@ from typing import List
 import numpy
 import pyarrow
 import pyarrow as pa
-from pyarrow import compute
-
 from opteryx.compiled.vector_ops import vector_initcap
 from opteryx.compiled.vector_ops import vector_length
 from opteryx.compiled.vector_ops import vector_ltrim
@@ -43,6 +41,7 @@ from opteryx.draken.vectors.string_vector import lowercase as string_vector_lowe
 from opteryx.draken.vectors.string_vector import uppercase as string_vector_uppercase
 from opteryx.embeddings import get_embedding_provider
 from opteryx.exceptions import InvalidFunctionParameterError
+from pyarrow import compute
 
 # ---------------------------------------------------------------------------
 # SIMD / Draken-backed kernels (migrated from opteryx/functions/__init__.py)

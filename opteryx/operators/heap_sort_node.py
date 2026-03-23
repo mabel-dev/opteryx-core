@@ -22,8 +22,6 @@ from functools import cmp_to_key
 
 import numpy
 import pyarrow
-
-from opteryx import EOS
 from opteryx.draken.interop.arrow import vector_from_sequence
 from opteryx.draken.morsels.morsel import Morsel
 from opteryx.exceptions import ColumnNotFoundError
@@ -33,6 +31,8 @@ from opteryx.models import QueryProperties
 from opteryx.vector_types import get_vector_source_identifier
 from opteryx.vector_types import node_is_numeric_vector
 from opteryx.vector_types import node_is_vector_query_expression
+
+from opteryx import EOS
 
 from . import BasePlanNode
 

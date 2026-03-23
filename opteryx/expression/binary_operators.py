@@ -11,12 +11,11 @@ from typing import Union
 
 import numpy
 import pyarrow
-from orso.types import OrsoTypes
-from pyarrow import compute
-
 from opteryx.compiled import vector_ops
 from opteryx.expression.intervals import MICROSECONDS_PER_DAY
 from opteryx.third_party.tktech import csimdjson as simdjson
+from orso.types import OrsoTypes
+from pyarrow import compute
 
 # Initialize simdjson parser once
 parser = simdjson.Parser()
@@ -190,7 +189,6 @@ def _ip_containment(left: List[Optional[str]], right: List[str]) -> List[Optiona
     try:
         normalized_left = [_normalize_ip(v) for v in left]
         import pyarrow as _pyarrow
-
         from opteryx.draken.interop.arrow import vector_from_arrow as _vector_from_arrow
 
         arr = _pyarrow.array(normalized_left, type=_pyarrow.string())
