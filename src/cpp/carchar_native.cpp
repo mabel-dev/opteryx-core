@@ -115,6 +115,63 @@ std::size_t set_mark_new(CarcharSet& set, nb::handle keys_obj, nb::handle out_ma
     return set.mark_new(keys, out_mask, length);
 }
 
+std::size_t set_mark_new_selected(
+    CarcharSet& set,
+    nb::handle keys_obj,
+    nb::handle selection_obj,
+    nb::handle out_mask_obj
+) {
+    BufferView keys_view;
+    BufferView selection_view;
+    BufferView out_mask_view;
+    acquire_buffer(keys_obj, PyBUF_SIMPLE, keys_view, "keys object does not support buffer protocol");
+    acquire_buffer(
+        selection_obj,
+        PyBUF_SIMPLE,
+        selection_view,
+        "selection object does not support buffer protocol"
+    );
+    acquire_buffer(
+        out_mask_obj,
+        PyBUF_WRITABLE,
+        out_mask_view,
+        "out_mask object must be a writable buffer"
+    );
+
+    if (keys_view.view.len % static_cast<Py_ssize_t>(sizeof(std::uint64_t)) != 0) {
+        throw nb::value_error("keys buffer must contain packed uint64 values");
+    }
+    if (selection_view.view.len % static_cast<Py_ssize_t>(sizeof(std::int64_t)) != 0) {
+        throw nb::value_error("selection buffer must contain packed int64 values");
+    }
+
+    const auto key_count = static_cast<std::size_t>(keys_view.view.len / sizeof(std::uint64_t));
+    const auto selection_count =
+        static_cast<std::size_t>(selection_view.view.len / sizeof(std::int64_t));
+    if (out_mask_view.view.len < static_cast<Py_ssize_t>(selection_count)) {
+        throw nb::value_error("out_mask buffer must have at least len(selection) bytes");
+    }
+
+    const auto* keys = static_cast<const std::uint64_t*>(keys_view.view.buf);
+    const auto* selection = static_cast<const std::int64_t*>(selection_view.view.buf);
+    auto* out_mask = static_cast<std::uint8_t*>(out_mask_view.view.buf);
+
+    std::size_t inserted = 0;
+    for (std::size_t i = 0; i < selection_count; ++i) {
+        const auto row_index = selection[i];
+        if (row_index < 0 || static_cast<std::size_t>(row_index) >= key_count) {
+            throw nb::value_error("selection index out of range");
+        }
+        if (set.insert_or_ignore(keys[static_cast<std::size_t>(row_index)])) {
+            out_mask[i] = 1U;
+            ++inserted;
+        } else {
+            out_mask[i] = 0U;
+        }
+    }
+    return inserted;
+}
+
 std::pair<std::vector<std::int64_t>, std::vector<std::int64_t>> probe_join_indices_engine(
     CarcharJoinEngine& engine,
     nb::handle keys_obj,
@@ -248,7 +305,14 @@ NB_MODULE(carchar_native, m) {
         .def("insert_or_ignore", &CarcharSet::insert_or_ignore, nb::arg("key"))
         .def("insert_many", &set_insert_many, nb::arg("keys"))
         .def("contains_many_count", &set_contains_many_count, nb::arg("keys"))
-        .def("mark_new", &set_mark_new, nb::arg("keys"), nb::arg("out_mask"));
+        .def("mark_new", &set_mark_new, nb::arg("keys"), nb::arg("out_mask"))
+        .def(
+            "mark_new_selected",
+            &set_mark_new_selected,
+            nb::arg("keys"),
+            nb::arg("selection"),
+            nb::arg("out_mask")
+        );
 
     nb::class_<CarcharJoinIndex>(m, "CarcharJoinIndex")
         .def(nb::init<std::size_t, double>(), nb::arg("initial_capacity") = 16,

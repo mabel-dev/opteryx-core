@@ -16,15 +16,16 @@ from __future__ import annotations
 import time
 
 from opteryx import EOS
-from opteryx.compiled.aggregations.approximate_count import ApproximateCountState
-from opteryx.compiled.aggregations.approximate_count import approximate_count_draken
-from opteryx.compiled.aggregations.approximate_median import ApproximatePercentileState
-from opteryx.compiled.aggregations.approximate_median import approximate_percentile_draken
+from opteryx.compiled.aggregations.scalar_kernels import (
+    ApproximateCountState,
+    ApproximatePercentileState,
+    approximate_count_draken,
+    approximate_percentile_draken,
+)
 from opteryx.draken.interop.arrow import vector_from_sequence
 from opteryx.draken.morsels.morsel import Morsel
 from opteryx.exceptions import InvalidFunctionParameterError
-from opteryx.expression import NodeType
-from opteryx.expression import get_all_nodes_of_type
+from opteryx.expression import NodeType, get_all_nodes_of_type
 from opteryx.expression.evaluator import evaluate_and_append_draken
 from opteryx.models import QueryProperties
 from opteryx.nanobind.carchar_native import CarcharSet

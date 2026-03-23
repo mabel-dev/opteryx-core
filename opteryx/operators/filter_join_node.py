@@ -18,11 +18,9 @@ import time
 import pyarrow
 
 from opteryx import EOS
-from opteryx.compiled.joins import anti_join
-from opteryx.compiled.joins import filter_join_set
-from opteryx.compiled.joins import semi_join
+from opteryx.compiled.joins import anti_join, filter_join_set, semi_join
+from opteryx.compiled.structures.carchar_set import CarcharSetWrapper
 from opteryx.models import QueryProperties
-from opteryx.third_party.abseil.containers import FlatHashSet
 
 from . import JoinNode
 
@@ -43,7 +41,7 @@ class FilterJoinNode(JoinNode):
         self.right_columns = parameters.get("right_columns")
         self.right_readers = parameters.get("right_readers")
 
-        self.right_hash_set = FlatHashSet()
+        self.right_hash_set = CarcharSetWrapper()
 
     @property
     def name(self):  # pragma: no cover

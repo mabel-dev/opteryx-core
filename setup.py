@@ -9,9 +9,7 @@ import sys
 
 import numpy
 from Cython.Build import cythonize
-from setuptools import Extension
-from setuptools import find_packages
-from setuptools import setup
+from setuptools import Extension, find_packages, setup
 from setuptools.command.build_ext import build_ext as build_ext_orig
 from setuptools_rust import RustExtension
 
@@ -540,6 +538,21 @@ extensions = [
         extra_compile_args=CPP_FLAGS,
     ),
     Extension(
+        "opteryx.compiled.structures.carchar_set",
+        sources=[
+            "opteryx/compiled/structures/carchar_set.pyx",
+            "src/cpp/cpu_features.cpp",
+        ],
+        include_dirs=include_dirs,
+        language="c++",
+        extra_compile_args=CPP_FLAGS,
+        depends=[
+            "third_party/mabel/carchar/carchar_set.hpp",
+            "third_party/mabel/carchar/carchar_common.hpp",
+            "third_party/mabel/carchar/carchar_simd.hpp",
+        ],
+    ),
+    Extension(
         "opteryx.compiled.structures.node",
         sources=["opteryx/compiled/structures/node.pyx"],
         include_dirs=include_dirs,
@@ -599,38 +612,11 @@ extensions = [
     ),
     # Aggregations: count_distinct and group-by helpers (C++ implementations)
     Extension(
-        "opteryx.compiled.aggregations.count_distinct",
+        "opteryx.compiled.aggregations.scalar_kernels._definitions",
         sources=[
-            "opteryx/compiled/aggregations/count_distinct.pyx",
-        ],
-        include_dirs=include_dirs,
-        language="c++",
-        extra_compile_args=CPP_FLAGS,
-    ),
-    Extension(
-        "opteryx.compiled.aggregations.approximate_count",
-        sources=[
-            "opteryx/compiled/aggregations/approximate_count.pyx",
+            "opteryx/compiled/aggregations/scalar_kernels/_definitions.pyx",
             "src/cpp/hllpp.cpp",
-        ],
-        include_dirs=include_dirs,
-        language="c++",
-        extra_compile_args=CPP_FLAGS,
-    ),
-    Extension(
-        "opteryx.compiled.aggregations.approximate_median",
-        sources=[
-            "opteryx/compiled/aggregations/approximate_median.pyx",
             "third_party/tdigest-c/src/tdigest_cpp.cpp",
-        ],
-        include_dirs=include_dirs,
-        language="c++",
-        extra_compile_args=CPP_FLAGS,
-    ),
-    Extension(
-        "opteryx.compiled.aggregations.array_agg",
-        sources=[
-            "opteryx/compiled/aggregations/array_agg.pyx",
         ],
         include_dirs=include_dirs,
         language="c++",
@@ -796,7 +782,10 @@ extensions = [
     ),
     Extension(
         "opteryx.compiled.morsel_ops.distinct",
-        sources=["opteryx/compiled/morsel_ops/distinct.pyx"],
+        sources=[
+            "opteryx/compiled/morsel_ops/distinct.pyx",
+            "src/cpp/cpu_features.cpp",
+        ],
         include_dirs=include_dirs,
         language="c++",
         extra_compile_args=CPP_FLAGS,
@@ -808,7 +797,11 @@ extensions = [
     ),
     Extension(
         "opteryx.compiled.table_ops.distinct",
-        sources=["opteryx/compiled/table_ops/distinct.pyx", "src/cpp/intbuffer.cpp"],
+        sources=[
+            "opteryx/compiled/table_ops/distinct.pyx",
+            "src/cpp/intbuffer.cpp",
+            "src/cpp/cpu_features.cpp",
+        ],
         include_dirs=include_dirs,
         language="c++",
         extra_compile_args=CPP_FLAGS,
@@ -863,6 +856,11 @@ generate_consolidated_module(
     "opteryx/compiled/vector_ops", "opteryx/compiled/vector_ops/vector_ops.pyx"
 )
 generate_consolidated_module("opteryx/compiled/joins", "opteryx/compiled/joins/joins.pyx")
+generate_consolidated_module(
+    "opteryx/compiled/aggregations/scalar_kernels",
+    "opteryx/compiled/aggregations/scalar_kernels/_definitions.pyx",
+)
+
 
 # Add consolidated modules with their dependencies
 # Link args for vector_ops (use -lcrypto on non-macOS and -pthread where appropriate)

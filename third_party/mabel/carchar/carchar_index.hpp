@@ -26,7 +26,7 @@ class CarcharIndex {
         if (capacity_ == 0) {
             return 0;
         }
-        return static_cast<std::size_t>((normalize_key(key) & (capacity_ - 1U)) / kGroupWidth);
+        return static_cast<std::size_t>((key & (capacity_ - 1U)) / kGroupWidth);
     }
 
     void reserve(std::size_t expected_entries) {
@@ -61,7 +61,6 @@ class CarcharIndex {
     }
 
     bool lookup(std::uint64_t key, std::int64_t& payload_ref_out) {
-        key = normalize_key(key);
         const auto result = find_slot(key);
         ++lookup_count_;
         record_lookup_probe_length(result.probes);
@@ -73,7 +72,6 @@ class CarcharIndex {
     }
 
     bool lookup_fast(std::uint64_t key, std::int64_t& payload_ref_out) const {
-        key = normalize_key(key);
         const auto result = find_slot(key);
         if (!result.found) {
             return false;
@@ -84,7 +82,6 @@ class CarcharIndex {
 
     std::size_t insert_new(std::uint64_t key, std::int64_t payload_ref) {
         ensure_insert_capacity();
-        key = normalize_key(key);
         const auto result = find_slot(key);
         ++insert_count_;
         record_insert_probe_length(result.probes);
@@ -98,7 +95,6 @@ class CarcharIndex {
     template <typename PayloadFactory>
     std::pair<std::int64_t, bool> find_or_insert(std::uint64_t key, PayloadFactory&& payload_factory) {
         ensure_insert_capacity();
-        key = normalize_key(key);
         const auto result = find_slot(key);
         ++insert_count_;
         record_insert_probe_length(result.probes);
@@ -154,6 +150,7 @@ class CarcharIndex {
         hashes_.assign(capacity_, 0U);
         payload_refs_.assign(capacity_, -1);
         size_ = 0;
+        probe_finder_ = detail::select_probe_finder();
     }
 
     void ensure_insert_capacity() {
@@ -207,8 +204,7 @@ class CarcharIndex {
 
     FindResult find_slot(std::uint64_t key) const {
         const std::uint8_t tag = key_tag(key);
-        const auto probe_finder = detail::select_probe_finder();
-        const auto result = probe_finder(control_.data(), hashes_.data(), capacity_, key, tag);
+        const auto result = probe_finder_(control_.data(), hashes_.data(), capacity_, key, tag);
         if (result.probes < capacity_) {
             return {result.slot, result.found, result.probes};
         }
@@ -218,9 +214,9 @@ class CarcharIndex {
     void resize(std::size_t new_capacity) {
         new_capacity = std::max(kMinCapacity, next_power_of_two(new_capacity));
 
-        const auto old_control = control_;
-        const auto old_hashes = hashes_;
-        const auto old_payload_refs = payload_refs_;
+        auto old_control      = std::move(control_);
+        auto old_hashes       = std::move(hashes_);
+        auto old_payload_refs = std::move(payload_refs_);
         const auto old_capacity = capacity_;
 
         initialize_storage(new_capacity);
@@ -242,6 +238,7 @@ class CarcharIndex {
     std::vector<std::int64_t> payload_refs_;
     std::size_t size_ = 0;
     double load_factor_ = 0.80;
+    detail::ProbeFn probe_finder_ = nullptr;
 
     std::size_t resize_count_ = 0;
     std::size_t lookup_count_ = 0;

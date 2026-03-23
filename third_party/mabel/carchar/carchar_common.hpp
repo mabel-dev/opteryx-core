@@ -13,14 +13,8 @@ namespace opteryx::carchar {
 constexpr std::uint8_t kEmpty = 0x80;
 constexpr std::size_t kMinCapacity = 16;
 constexpr std::size_t kGroupWidth = detail::kProbeGroupWidth;
-constexpr std::uint64_t kMask64 = std::numeric_limits<std::uint64_t>::max();
-
 inline std::size_t next_power_of_two(std::size_t value) {
     return std::bit_ceil(std::max<std::size_t>(value, 1U));
-}
-
-inline std::uint64_t normalize_key(std::uint64_t key) {
-    return key & kMask64;
 }
 
 inline std::uint8_t key_tag(std::uint64_t key) {

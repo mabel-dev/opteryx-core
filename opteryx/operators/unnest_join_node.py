@@ -12,19 +12,16 @@ This implements a CROSS JOIN UNNEST, this isn't really a JOIN in that it doesn't
 together, but it does unnest a column in a table and repeat the rows in the table for each value.
 """
 
-from typing import Generator
-from typing import Set
-from typing import Tuple
+from typing import Generator, Set, Tuple
 
 import numpy
 import pyarrow
 from orso.schema import FlatColumn
 
 from opteryx import EOS
+from opteryx.compiled.structures.carchar_set import CarcharSetWrapper
 from opteryx.expression import NodeType
-from opteryx.models import LogicalColumn
-from opteryx.models import QueryProperties
-from opteryx.third_party.abseil.containers import FlatHashSet
+from opteryx.models import LogicalColumn, QueryProperties
 
 from . import BasePlanNode
 
@@ -58,11 +55,13 @@ def _cross_join_unnest_column(
     Returns:
         A generator that yields the resulting `pyarrow.Table` objects.
     """
-    from opteryx.compiled.joins import build_filtered_rows_indices_and_column
-    from opteryx.compiled.joins import build_rows_indices_and_column
-    from opteryx.compiled.joins import list_distinct
-    from opteryx.compiled.joins import numpy_build_filtered_rows_indices_and_column
-    from opteryx.compiled.joins import numpy_build_rows_indices_and_column
+    from opteryx.compiled.joins import (
+        build_filtered_rows_indices_and_column,
+        build_rows_indices_and_column,
+        list_distinct,
+        numpy_build_filtered_rows_indices_and_column,
+        numpy_build_rows_indices_and_column,
+    )
 
     batch_size: int = INTERNAL_BATCH_SIZE
     at_least_once = False
@@ -246,7 +245,7 @@ class UnnestJoinNode(BasePlanNode):
             self._unnest_target.identity,
         }
 
-        self.hash_set = FlatHashSet()
+        self.hash_set = CarcharSetWrapper()
 
     @property
     def name(self):  # pragma: no cover
