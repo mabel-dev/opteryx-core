@@ -1,0 +1,219 @@
+# cython: language_level=3
+# cython: boundscheck=False
+# cython: wraparound=False
+# cython: nonecheck=False
+# cython: cdivision=True
+# cython: infer_types=True
+# distutils: language = c++
+
+"""
+opteryx/compiled/structures/carchar_set.pyx
+
+Cython extension type wrapping opteryx::carchar::CarcharSet.
+
+Drop-in replacement for FlatHashSet with the same cdef API surface so all
+call sites (joins, distinct operations, aggregation kernels) can be migrated
+without restructuring hot-path code.
+
+Design notes
+------------
+- CarcharSet is heap-allocated via `new`/`delete` so Cython never tries to
+  default-construct or copy the C++ object.
+- Hot-path methods (insert, contains, reserve, find_new_indices_out*) are all
+  declared `noexcept nogil` so callers can hold these loops inside `with nogil`
+  blocks.  If CarcharSet::insert_or_ignore triggers a resize that throws
+  std::bad_alloc, std::terminate() is called — the same behaviour as the
+  FlatHashSet predecessor, and correct for an out-of-memory situation inside a
+  query engine.
+- The C++ inline wrappers in the `cdef extern from *` block give each hot
+  operation a single-instruction call boundary with no exception-table overhead.
+"""
+
+from libc.stdint cimport int32_t, int64_t, uint64_t, uint8_t
+from libc.stddef cimport size_t
+
+
+# ---------------------------------------------------------------------------
+# noexcept C++ wrappers
+#
+# CarcharSet::insert_or_ignore and reserve() can reallocate; we wrap them
+# noexcept here so the hot-path cdef methods can carry the nogil qualifier.
+# ---------------------------------------------------------------------------
+cdef extern from *:
+    """
+    #include "carchar_set.hpp"
+    namespace opteryx_csw {
+
+        static inline bool insert_new(
+            opteryx::carchar::CarcharSet* s, uint64_t v
+        ) noexcept {
+            return s->insert_or_ignore(v);
+        }
+
+        static inline bool probe(
+            const opteryx::carchar::CarcharSet* s, uint64_t v
+        ) noexcept {
+            return s->contains(v);
+        }
+
+        static inline void pre_reserve(
+            opteryx::carchar::CarcharSet* s, size_t n
+        ) noexcept {
+            s->reserve(n);
+        }
+
+        static inline size_t mark_new_idx32(
+            opteryx::carchar::CarcharSet* s,
+            const uint64_t* keys,
+            int32_t* out_indices,
+            size_t length
+        ) noexcept {
+            return s->mark_new_indices_32(keys, out_indices, length);
+        }
+
+        static inline size_t mark_new_idx64(
+            opteryx::carchar::CarcharSet* s,
+            const uint64_t* keys,
+            int64_t* out_indices,
+            size_t length
+        ) noexcept {
+            return s->mark_new_indices_64(keys, out_indices, length);
+        }
+
+    }  // namespace opteryx_csw
+    """
+    bint _csw_insert "opteryx_csw::insert_new"(
+        CarcharSet* s, uint64_t v
+    ) noexcept nogil
+
+    bint _csw_contains "opteryx_csw::probe"(
+        const CarcharSet* s, uint64_t v
+    ) noexcept nogil
+
+    void _csw_reserve "opteryx_csw::pre_reserve"(
+        CarcharSet* s, size_t n
+    ) noexcept nogil
+
+    size_t _csw_mark_new_idx32 "opteryx_csw::mark_new_idx32"(
+        CarcharSet* s,
+        const uint64_t* keys,
+        int32_t* out_indices,
+        size_t length,
+    ) noexcept nogil
+
+    size_t _csw_mark_new_idx64 "opteryx_csw::mark_new_idx64"(
+        CarcharSet* s,
+        const uint64_t* keys,
+        int64_t* out_indices,
+        size_t length,
+    ) noexcept nogil
+
+
+# ---------------------------------------------------------------------------
+# CarcharSetWrapper
+# ---------------------------------------------------------------------------
+
+cdef class CarcharSetWrapper:
+    """
+    Persistent Carchar hash set for set-membership and distinct workloads.
+
+    Wraps a heap-allocated opteryx::carchar::CarcharSet and exposes the same
+    cdef API as the old FlatHashSet so all existing call sites compile without
+    structural changes.
+
+    Python-visible constructor::
+
+        seen = CarcharSetWrapper()            # default 16-slot, 0.80 load
+        seen = CarcharSetWrapper(4096)        # pre-sized
+        seen = CarcharSetWrapper(4096, 0.75)  # custom load factor
+
+    All hot-path methods are ``cdef noexcept nogil`` and can be called from
+    inside ``with nogil:`` blocks.
+    """
+
+    def __cinit__(self, size_t initial_capacity=16, double load_factor=0.80):
+        self._ptr = new CarcharSet(initial_capacity, load_factor)
+
+    def __dealloc__(self):
+        if self._ptr is not NULL:
+            del self._ptr
+            self._ptr = NULL
+
+    def __len__(self):
+        return <Py_ssize_t>self._ptr.size()
+
+    def __repr__(self):
+        return f"CarcharSetWrapper(size={self._ptr.size()}, capacity={self._ptr.capacity()})"
+
+    # -----------------------------------------------------------------------
+    # Python-visible accessors
+    # -----------------------------------------------------------------------
+
+    cpdef size_t size(self):
+        """Return the number of entries currently in the set."""
+        return self._ptr.size()
+
+    cpdef size_t capacity(self):
+        """Return the current allocated capacity of the set."""
+        return self._ptr.capacity()
+
+    cpdef bint add(self, uint64_t value):
+        """Insert value; return True if newly inserted (Python-visible alias)."""
+        return _csw_insert(self._ptr, value)
+
+    cpdef bint has(self, uint64_t value):
+        """Return True if value is present (Python-visible alias)."""
+        return _csw_contains(self._ptr, value)
+
+    cpdef void reserve_py(self, size_t capacity):
+        """Pre-allocate for at least `capacity` entries (Python-visible)."""
+        _csw_reserve(self._ptr, capacity)
+
+    # -----------------------------------------------------------------------
+    # cdef hot-path methods — noexcept nogil
+    # -----------------------------------------------------------------------
+
+    cdef inline bint insert(self, uint64_t value) noexcept nogil:
+        """Insert value; return True if newly inserted."""
+        return _csw_insert(self._ptr, value)
+
+    cdef inline bint contains(self, uint64_t value) noexcept nogil:
+        """Return True if value is present in the set."""
+        return _csw_contains(self._ptr, value)
+
+    cdef inline void reserve(self, size_t capacity) noexcept nogil:
+        """Pre-allocate for at least `capacity` entries."""
+        _csw_reserve(self._ptr, capacity)
+
+    cdef Py_ssize_t find_new_indices_out(
+        self,
+        uint64_t* hashes,
+        Py_ssize_t length,
+        int64_t* out_indices,
+    ) noexcept nogil:
+        """
+        Insert hashes[0..length); write index i into out_indices for each
+        newly-inserted entry.  Returns the count of newly-inserted entries.
+
+        Equivalent to FlatHashSet.find_new_indices_out — used by
+        table_ops/distinct for large (>= 2^31 row) datasets.
+        """
+        return <Py_ssize_t>_csw_mark_new_idx64(
+            self._ptr, hashes, out_indices, <size_t>length
+        )
+
+    cdef Py_ssize_t find_new_indices_out_32(
+        self,
+        uint64_t* hashes,
+        Py_ssize_t length,
+        int32_t* out_indices,
+    ) noexcept nogil:
+        """
+        Same as find_new_indices_out but writes int32 row indices.
+
+        Used when num_rows < 2^31 (the common case).  Equivalent to
+        FlatHashSet.find_new_indices_out_32.
+        """
+        return <Py_ssize_t>_csw_mark_new_idx32(
+            self._ptr, hashes, out_indices, <size_t>length
+        )
