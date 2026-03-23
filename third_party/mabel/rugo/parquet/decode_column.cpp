@@ -114,13 +114,24 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
                                     int64_t* ext_int64,
                                     double*  ext_float64,
                                     int32_t* ext_int32,
-                                    float*   ext_float32) {
+                                    float*   ext_float32,
+                                    const uint8_t* row_mask) {
   DecodedColumn result;
   result.ext_int64   = ext_int64;
   result.ext_float64 = ext_float64;
   result.ext_int32   = ext_int32;
   result.ext_float32 = ext_float32;
   result.ext_written = 0;
+
+  // When masking, disable zero-copy external buffers — force internal vectors
+  // so the post-loop filter has a single consistent place to apply the mask.
+  if (row_mask != nullptr) {
+    ext_int64  = nullptr;
+    ext_float64 = nullptr;
+    ext_int32  = nullptr;
+    ext_float32 = nullptr;
+  }
+
   ++rugo_tel::calls;
 
   try {
@@ -308,6 +319,12 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
     std::unordered_map<uint32_t, int32_t> float32_dict_map;
     std::unordered_map<uint64_t, int32_t> float64_dict_map;
 
+    int32_t page_row_offset = 0;
+    std::vector<uint8_t> decoded_row_mask;
+    if (row_mask != nullptr) {
+      decoded_row_mask.reserve(total_needed > 0 ? (size_t)total_needed : 65536u);
+    }
+
     while (cursor < chunk_limit &&
            (total_needed <= 0 || total_collected < total_needed)) {
 
@@ -332,6 +349,30 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
       size_t avail = (size_t)(chunk_limit - compressed_data);
       if (compressed_size == 0 || compressed_size > avail)
         compressed_size = avail;
+
+      // ── Row-mask page skipping ──────────────────────────────────────
+      if (row_mask != nullptr) {
+        bool any_selected = false;
+        for (int32_t _i = 0; _i < page_values && !any_selected; ++_i) {
+          if (row_mask[page_row_offset + _i]) any_selected = true;
+        }
+        if (!any_selected) {
+          // No selected rows in this page: skip decompression entirely.
+          page_row_offset += page_values;
+          total_collected += page_values;
+          cursor = compressed_data + compressed_size;
+          ++result.pages_skipped;
+          continue;
+        }
+        // Page has selections: record which of its rows are wanted.
+        for (int32_t _i = 0; _i < page_values; ++_i) {
+          decoded_row_mask.push_back(row_mask[page_row_offset + _i]);
+        }
+        page_row_offset += page_values;
+      }
+      // ────────────────────────────────────────────────────────────────
+
+      ++result.pages_decoded;  // this page survived the row_mask check (or no mask); will be decompressed
 
       // Decompress if needed.
       const uint8_t *data_ptr;
@@ -845,6 +886,123 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
       cursor = compressed_data + compressed_size;
     }  // end page loop
 
+    const int32_t total_rows_all_pages = total_collected;
+
+    // ── Post-loop row-mask filter ──────────────────────────────────────────
+    // If a row_mask was supplied, filter all accumulated output vectors down
+    // to only the K selected rows.  Pages with zero selections were already
+    // skipped above; here we handle partial selections within decoded pages.
+    if (row_mask != nullptr && !decoded_row_mask.empty()) {
+      const int32_t total_decoded = (int32_t)decoded_row_mask.size();
+      int32_t K = 0;
+      for (uint8_t m : decoded_row_mask) K += (int32_t)m;
+
+      if (K < total_decoded) {
+        const bool has_nulls =
+            (target_col->max_definition_level > 0 && !all_def_levels.empty());
+
+        if (!has_nulls) {
+          // Non-nullable: one value per row — simple mask filter on each vector.
+          auto filt_i32 = [&](std::vector<int32_t>& v) {
+            if (v.empty()) return;
+            std::vector<int32_t> o; o.reserve(K);
+            for (int32_t i = 0; i < (int32_t)v.size() && i < total_decoded; ++i)
+              if (decoded_row_mask[i]) o.push_back(v[i]);
+            v = std::move(o);
+          };
+          auto filt_i64 = [&](std::vector<int64_t>& v) {
+            if (v.empty()) return;
+            std::vector<int64_t> o; o.reserve(K);
+            for (int32_t i = 0; i < (int32_t)v.size() && i < total_decoded; ++i)
+              if (decoded_row_mask[i]) o.push_back(v[i]);
+            v = std::move(o);
+          };
+          auto filt_f32 = [&](std::vector<float>& v) {
+            if (v.empty()) return;
+            std::vector<float> o; o.reserve(K);
+            for (int32_t i = 0; i < (int32_t)v.size() && i < total_decoded; ++i)
+              if (decoded_row_mask[i]) o.push_back(v[i]);
+            v = std::move(o);
+          };
+          auto filt_f64 = [&](std::vector<double>& v) {
+            if (v.empty()) return;
+            std::vector<double> o; o.reserve(K);
+            for (int32_t i = 0; i < (int32_t)v.size() && i < total_decoded; ++i)
+              if (decoded_row_mask[i]) o.push_back(v[i]);
+            v = std::move(o);
+          };
+          filt_i32(result.int32_values);
+          filt_i64(result.int64_values);
+          filt_f32(result.float32_values);
+          filt_f64(result.float64_values);
+          filt_i32(result.dict_indices);
+          if (!result.boolean_values.empty()) {
+            std::vector<uint8_t> o; o.reserve(K);
+            for (int32_t i = 0; i < (int32_t)result.boolean_values.size() && i < total_decoded; ++i)
+              if (decoded_row_mask[i]) o.push_back(result.boolean_values[i]);
+            result.boolean_values = std::move(o);
+          }
+        } else {
+          // Nullable: use def_levels to map rows → value positions.
+          // Values in the stream correspond only to non-null rows.
+          const int32_t max_def = target_col->max_definition_level;
+          const bool have_i32   = !result.int32_values.empty();
+          const bool have_i64   = !result.int64_values.empty();
+          const bool have_f32   = !result.float32_values.empty();
+          const bool have_f64   = !result.float64_values.empty();
+          const bool have_dict  = !result.dict_indices.empty();
+          const bool have_bool  = !result.boolean_values.empty();
+
+          std::vector<int32_t> o_i32;
+          std::vector<int64_t> o_i64;
+          std::vector<float>   o_f32;
+          std::vector<double>  o_f64;
+          std::vector<int32_t> o_dict;
+          std::vector<uint8_t> o_bool;
+
+          int32_t val_idx = 0;
+          for (int32_t row_i = 0; row_i < total_decoded; ++row_i) {
+            const bool non_null = (row_i < (int32_t)all_def_levels.size() &&
+                                   all_def_levels[row_i] == max_def);
+            const bool selected = decoded_row_mask[row_i] != 0;
+            if (non_null) {
+              if (selected) {
+                if (have_i32  && val_idx < (int32_t)result.int32_values.size())
+                  o_i32.push_back(result.int32_values[val_idx]);
+                if (have_i64  && val_idx < (int32_t)result.int64_values.size())
+                  o_i64.push_back(result.int64_values[val_idx]);
+                if (have_f32  && val_idx < (int32_t)result.float32_values.size())
+                  o_f32.push_back(result.float32_values[val_idx]);
+                if (have_f64  && val_idx < (int32_t)result.float64_values.size())
+                  o_f64.push_back(result.float64_values[val_idx]);
+                if (have_dict && val_idx < (int32_t)result.dict_indices.size())
+                  o_dict.push_back(result.dict_indices[val_idx]);
+                if (have_bool && val_idx < (int32_t)result.boolean_values.size())
+                  o_bool.push_back(result.boolean_values[val_idx]);
+              }
+              ++val_idx;
+            }
+          }
+          if (have_i32)  result.int32_values   = std::move(o_i32);
+          if (have_i64)  result.int64_values   = std::move(o_i64);
+          if (have_f32)  result.float32_values = std::move(o_f32);
+          if (have_f64)  result.float64_values = std::move(o_f64);
+          if (have_dict) result.dict_indices   = std::move(o_dict);
+          if (have_bool) result.boolean_values = std::move(o_bool);
+        }
+
+        // Filter def_levels to selected rows (valid_bits is built from this below).
+        if (!all_def_levels.empty()) {
+          std::vector<int32_t> od; od.reserve(K);
+          for (int32_t i = 0; i < total_decoded && i < (int32_t)all_def_levels.size(); ++i)
+            if (decoded_row_mask[i]) od.push_back(all_def_levels[i]);
+          all_def_levels = std::move(od);
+        }
+      }
+      total_collected = K;
+    }
+    // ── End post-loop row-mask filter ──────────────────────────────────────
+
     result.num_rows = total_collected;
 
     if (result.type == "byte_array" && !result.string_dict_lens.empty()) {
@@ -887,7 +1045,7 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
 
     // Success: all expected values collected (or at least some, if total unknown).
     if (total_needed > 0) {
-      result.success = (total_collected == total_needed);
+      result.success = (total_rows_all_pages == total_needed);
     } else {
       result.success = (total_collected > 0);
     }

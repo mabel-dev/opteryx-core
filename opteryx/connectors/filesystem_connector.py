@@ -6,27 +6,19 @@ This provides a gateway connector (FileSystemConnector) and transient table read
 """
 
 import os
-from concurrent.futures import FIRST_COMPLETED
-from concurrent.futures import ThreadPoolExecutor
-from concurrent.futures import wait
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from threading import Lock
-from typing import Dict
-from typing import Optional
-from typing import Tuple
+from typing import Dict, Optional, Tuple
 
 import pyarrow
 from orso.schema import RelationSchema
 from orso.types import OrsoTypes
 
 from opteryx.connectors import TableType
-from opteryx.connectors.base.base_connector import BaseConnector
-from opteryx.connectors.base.base_connector import BaseTable
-from opteryx.connectors.capabilities import LimitPushable
-from opteryx.connectors.capabilities import PredicatePushable
+from opteryx.connectors.base.base_connector import BaseConnector, BaseTable
+from opteryx.connectors.capabilities import LimitPushable, PredicatePushable
 from opteryx.draken.morsels.morsel import Morsel
-from opteryx.exceptions import DataError
-from opteryx.exceptions import DatasetNotFoundError
-from opteryx.exceptions import EmptyDatasetError
+from opteryx.exceptions import DataError, DatasetNotFoundError, EmptyDatasetError
 from opteryx.tracing import record_event
 from opteryx.utils.parquet_decoder import parquet_decoder
 
@@ -57,6 +49,18 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
         "GtEq": True,
         "Lt": True,
         "LtEq": True,
+        "Like": True,
+        "NotLike": True,
+        "ILike": True,
+        "NotILike": True,
+        "InStr": True,
+        "NotInStr": True,
+        "IInStr": True,
+        "NotIInStr": True,
+        "InList": True,
+        "NotInList": True,
+        "RLike": True,
+        "NotRLike": True,
     }
 
     PUSHABLE_TYPES = {
