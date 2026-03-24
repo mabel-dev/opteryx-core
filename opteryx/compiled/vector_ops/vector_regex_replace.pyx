@@ -6,13 +6,16 @@
 # cython: wraparound=False
 # cython: boundscheck=False
 
-from opteryx.draken.vectors.string_vector cimport _StringVectorCIterator, StringElement
-from opteryx.draken.vectors import string_vector as string_vector_module
-
 from libc.stddef cimport size_t
+from libc.stdint cimport int32_t, uint8_t
 from cpython.bytes cimport PyBytes_AsStringAndSize
+
 from libcpp.string cimport string
 from libcpp.unordered_map cimport unordered_map
+
+from opteryx.draken.vectors.string_vector cimport StringVector
+from opteryx.draken.vectors import string_vector as string_vector_module
+from opteryx.draken.core.buffers cimport DrakenVarBuffer
 
 cdef extern from "re2/stringpiece.h" namespace "re2":
     cdef cppclass StringPiece:
@@ -32,19 +35,22 @@ cdef extern from "re2/re2.h" namespace "re2":
 # Module-level cache: pattern bytes → compiled RE2 pointer (never freed; process lifetime).
 cdef unordered_map[string, RE2*] _re2_cache
 
-cpdef object vector_regex_replace(object data, bytes pattern, bytes replacement):
-    """Top-level wrapper for list regex replace using Draken C-level iterator.
 
-    Uses Draken 0.3.0b80+ C-level iterator and append_bytes() to eliminate
-    Python object creation overhead. The entire operation happens at C level
-    except for the initial setup and final conversion.
+cpdef StringVector vector_regex_replace(StringVector data, bytes pattern, bytes replacement):
+    """Draken-native regex replacement using RE2 engine.
 
-    Performance improvements vs Python iterator:
-    - No Python bytes object created per element
+    Accepts and returns StringVector directly, eliminating Python/Arrow conversion overhead.
+
+    Uses direct access to DrakenVarBuffer for maximum performance:
+    - No Python object creation per element
     - Direct pointer access to Draken internal buffers
     - Zero-copy append via append_bytes(ptr, length)
+    - Pattern caching across calls
     """
-    cdef Py_ssize_t length = data.length
+    cdef DrakenVarBuffer* ptr = data.ptr
+    cdef Py_ssize_t n = ptr.length
+    cdef Py_ssize_t i
+    cdef int32_t start, end
 
     # Compile RE2 pattern once
     cdef char* pattern_buf = <char*>0
@@ -55,18 +61,9 @@ cpdef object vector_regex_replace(object data, bytes pattern, bytes replacement)
     cdef StringPiece repl_piece
     cdef string pattern_str
     cdef string repl_str
-
-    # For processing elements
-    cdef StringElement elem
-    cdef string value_str  # Reused buffer for each element
-    cdef _StringVectorCIterator it  # C-level iterator
-    cdef object builder  # StringVectorBuilder
-    cdef Py_ssize_t estimated_bytes_per_entry = 50
-
-    # Pre-allocate string buffer to reduce reallocation overhead
-    # This capacity will grow if needed but helps for common case
-    value_str.reserve(256)
+    cdef string value_str
     cdef size_t buffer_capacity = 256
+    cdef object builder
 
     # Extract pattern and replacement buffers
     PyBytes_AsStringAndSize(pattern, &pattern_buf, &pattern_len)
@@ -87,27 +84,31 @@ cpdef object vector_regex_replace(object data, bytes pattern, bytes replacement)
     repl_piece = StringPiece(repl_str)
 
     # Create builder with estimated capacity (at least 10% larger for variation)
-    estimated_bytes_per_entry = max(estimated_bytes_per_entry, int(estimated_bytes_per_entry * 1.1))
-    builder = string_vector_module.StringVectorBuilder.with_estimate(length, estimated_bytes_per_entry)
+    cdef Py_ssize_t estimated_bytes_per_entry = max(50, int(50 * 1.1))
+    builder = string_vector_module.StringVectorBuilder.with_estimate(n, estimated_bytes_per_entry)
 
-    # Get C-level iterator
-    it = data.c_iter()
+    # Pre-allocate string buffer
+    value_str.reserve(256)
 
-    # Process all elements at C level
-    while it.next(&elem):
-        if elem.is_null:
+    # Process all elements directly from buffer
+    for i in range(n):
+        if ptr.null_bitmap != NULL and not ((ptr.null_bitmap[i >> 3] >> (i & 7)) & 1):
             builder.append_null()
-        else:
-            # Reuse string buffer - reallocate if needed, doubling capacity
-            if buffer_capacity < elem.length:
-                buffer_capacity = elem.length * 2
-                value_str.reserve(buffer_capacity)
-            value_str.assign(elem.ptr, <size_t>elem.length)
+            continue
 
-            # RE2 performs in-place replacement
-            RE2.GlobalReplace(&value_str, regex[0], repl_piece)
+        start = ptr.offsets[i]
+        end = ptr.offsets[i + 1]
 
-            # Append directly from C++ string to Draken builder (zero-copy from builder's perspective)
-            builder.append_bytes(value_str.c_str(), value_str.size())
+        # Reuse string buffer - reallocate if needed, doubling capacity
+        if buffer_capacity < (end - start):
+            buffer_capacity = <size_t>(end - start) * 2
+            value_str.reserve(buffer_capacity)
+        value_str.assign((<const char*>ptr.data) + start, <size_t>(end - start))
+
+        # RE2 performs in-place replacement
+        RE2.GlobalReplace(&value_str, regex[0], repl_piece)
+
+        # Append directly from C++ string to Draken builder (zero-copy from builder's perspective)
+        builder.append_bytes(value_str.c_str(), value_str.size())
 
     return builder.finish()

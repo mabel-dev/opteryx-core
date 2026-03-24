@@ -28,6 +28,7 @@ def _builtin_text_functions() -> list[FunctionDefinition]:
     # Import existing implementations
     from opteryx.compiled.vector_ops import vector_concat_array as _vector_concat_cython
     from opteryx.compiled.vector_ops import vector_concat_ws_array as _vector_concat_ws_cython
+    from opteryx.compiled.vector_ops import vector_regex_replace as _vector_regex_replace_cython
     from opteryx.expression.functions.implementations import text as string_functions
     from opteryx.expression.functions.implementations.text import to_lower
     from opteryx.expression.functions.implementations.text import to_upper
