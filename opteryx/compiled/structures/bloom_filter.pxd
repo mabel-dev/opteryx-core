@@ -16,10 +16,12 @@ cdef class BloomFilter:
     cdef uint64_t bit_mask
 
     cdef inline void _add(self, const uint64_t item)
-    cdef inline bint _possibly_contains(self, const uint64_t item)
+    cdef inline bint _possibly_contains_fast(self, const uint64_t item) nogil
     cpdef uint8_t[::1] possibly_contains_many(self, object relation, list columns)
+    cpdef uint8_t[::1] possibly_contains_many_direct(self, uint64_t[::1] hashes)
 
     cpdef void add(self, const uint64_t item)
     cpdef bint possibly_contains(self, const uint64_t item)
 
 cpdef BloomFilter create_bloom_filter(object relation, list columns)
+cpdef BloomFilter create_bloom_filter_from_hashes(uint64_t[::1] hashes)

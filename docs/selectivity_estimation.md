@@ -250,6 +250,62 @@ actual_selectivity = actual_rows / input_rows
 # If estimated < actual: decrease dampening_factor (more optimistic)
 ```
 
+## Histogram-Backed Estimation
+
+When histograms (distograms) are available via `ColumnStatistics.histogram`, the estimator uses actual distribution data instead of uniform distribution assumptions.
+
+### Usage
+
+```python
+from opteryx.third_party.maki_nage.distogram import load
+
+# Get distogram from Manifest
+distogram = manifest.get_distogram("age")
+
+# Attach to column statistics
+col_stats = ColumnStatistics(
+    column_name="age",
+    data_type="int",
+    histogram=distogram,
+    _total_rows=manifest.get_record_count()
+)
+
+# SelectivityEstimator automatically uses histogram when available
+estimator = SelectivityEstimator()
+selectivity = estimator.estimate_single_predicate(pred, stats)
+# Uses histogram for accurate selectivity based on actual distribution
+```
+
+### How It Works
+
+When `ColumnStatistics` has a histogram:
+1. `estimate_selectivity_with_histogram()` uses `count_up_to()` from distogram
+2. For range predicates: `count(upper) - count(lower)` / total_count
+3. Falls back to uniform distribution if histogram is unavailable
+
+This dramatically improves accuracy for:
+- Skewed distributions (e.g., many users in US region)
+- Non-uniform data (e.g., log-scale values)
+- Exact selectivity when histogram covers the predicates
+
+## Testing
+
+Comprehensive test suite in `tests/unit/optimizer/statistics/test_estimators.py`:
+
+- **82 tests** covering all estimation primitives and histogram backing
+- ColumnRange intersection and width calculations (15 tests)
+- ColumnStatistics selectivity estimation (9 tests)
+- SelectivityEstimator single and multiple predicates (13 tests)
+- CardinalityEstimator GROUP BY and JOINs (8 tests)
+- RangeEstimator bound narrowing (5 tests)
+- Integration tests combining multiple components (3 tests)
+- **Histogram-backed selectivity tests (10 tests)**
+
+Run tests with:
+```bash
+pytest tests/unit/optimizer/statistics/test_estimators.py -v
+```
+
 ## Future Enhancements
 
 1. **Histogram integration**: Replace uniform distribution with actual distribution shapes

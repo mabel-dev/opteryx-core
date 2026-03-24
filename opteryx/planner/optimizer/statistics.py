@@ -11,9 +11,13 @@ Supports:
 from dataclasses import dataclass
 from dataclasses import replace
 from enum import Enum
+from typing import TYPE_CHECKING
 from typing import Optional
 from typing import Tuple
 from typing import Union
+
+if TYPE_CHECKING:
+    from opteryx.third_party.maki_nage import Distogram
 
 
 @dataclass(frozen=True)
@@ -69,8 +73,11 @@ class ColumnStatistics:
     value_range: ColumnRange = ColumnRange()
 
     # Distribution information (histogram, sketch, etc.)
-    # For now: None, will be extended with histogram/sketch backing
+    # Can be a Distogram from maki_nage library for histogram-backed estimation
     histogram: Optional[object] = None
+
+    # Total rows in the relation (needed for selectivity calculation with histogram)
+    _total_rows: Optional[int] = None
 
     def estimate_selectivity(
         self, predicate_lower: Optional[float] = None, predicate_upper: Optional[float] = None
@@ -104,6 +111,73 @@ class ColumnStatistics:
         # Selectivity = intersection_width / range_width
         selectivity = intersection_width / range_width
         return max(0.0, min(1.0, selectivity))
+
+    def estimate_selectivity_with_histogram(
+        self, predicate_lower: Optional[float] = None, predicate_upper: Optional[float] = None
+    ) -> Optional[float]:
+        """
+        Estimate selectivity of a range predicate using histogram (distogram).
+
+        Uses the distogram if available to compute exact selectivity based on
+        the actual distribution. Falls back to None if histogram is unavailable.
+
+        Args:
+            predicate_lower: Lower bound of predicate (inclusive)
+            predicate_upper: Upper bound of predicate (inclusive)
+
+        Returns:
+            Estimated selectivity in [0, 1], or None if histogram unavailable
+        """
+        if self.histogram is None or self._total_rows is None or self._total_rows == 0:
+            return None
+
+        if predicate_lower is None and predicate_upper is None:
+            return 1.0
+
+        # Import distogram functions
+        from opteryx.third_party.maki_nage.distogram import count
+        from opteryx.third_party.maki_nage.distogram import count_up_to
+
+        distogram = self.histogram
+
+        try:
+            total_count = count(distogram)
+            if total_count is None or total_count == 0:
+                return None
+
+            # Compute count within range [predicate_lower, predicate_upper]
+            if predicate_lower is not None and predicate_upper is not None:
+                # Range predicate: col >= lower AND col <= upper
+                count_upper = count_up_to(distogram, predicate_upper)
+                count_lower = count_up_to(distogram, predicate_lower)
+
+                if count_upper is None or count_lower is None:
+                    return None
+
+                # count_up_to includes the value, so we subtract from count_lower
+                range_count = count_upper - count_lower
+            elif predicate_lower is not None:
+                # Lower bound only: col >= lower
+                count_upper = count(distogram)
+                count_lower = count_up_to(distogram, predicate_lower)
+
+                if count_upper is None or count_lower is None:
+                    return None
+
+                range_count = count_upper - count_lower
+            else:
+                # Upper bound only: col <= upper
+                count_upper = count_up_to(distogram, predicate_upper)
+                if count_upper is None:
+                    return None
+                range_count = count_upper
+
+            selectivity = range_count / total_count
+            return max(0.0, min(1.0, selectivity))
+
+        except (TypeError, AttributeError, ValueError):
+            # Histogram format or values incompatible
+            return None
 
 
 @dataclass
@@ -219,6 +293,11 @@ class SelectivityEstimator:
 
         elif predicate.predicate_type == PredicateType.RANGE:
             lower, upper = predicate.to_range_bounds()
+            # Try histogram-backed estimation first
+            hist_selectivity = col_stats.estimate_selectivity_with_histogram(lower, upper)
+            if hist_selectivity is not None:
+                return hist_selectivity
+            # Fall back to uniform distribution assumption
             return col_stats.estimate_selectivity(lower, upper)
 
         elif predicate.predicate_type == PredicateType.IN_LIST:

@@ -14,20 +14,17 @@ from __future__ import annotations
 
 import time
 
+from orso.types import OrsoTypes
+
+from opteryx import EMPTY, EOS
 from opteryx.draken.morsels.morsel import Morsel
 from opteryx.draken.vectors.scalar_constructors import from_scalar as constant_from_scalar
-from opteryx.exceptions import InvalidFunctionParameterError
-from opteryx.exceptions import UnsupportedSyntaxError
-from opteryx.expression import NodeType
-from opteryx.expression import get_all_nodes_of_type
+from opteryx.exceptions import InvalidFunctionParameterError, UnsupportedSyntaxError
+from opteryx.expression import NodeType, get_all_nodes_of_type
 from opteryx.expression.evaluator import evaluate_and_append_draken
 from opteryx.models import QueryProperties
 from opteryx.operators.aggregate_helpers import extract_evaluations
 from opteryx.operators.shuffle import AggregationSpec
-from orso.types import OrsoTypes
-
-from opteryx import EMPTY
-from opteryx import EOS
 
 from . import BasePlanNode
 
@@ -86,6 +83,18 @@ class DrakenAggregateAndGroupNode(BasePlanNode):
         "draken_constant_groupby_output_vector_fallbacks",
         "groupby_key_store_bytes",
         "groupby_key_store_limit_bytes",
+        # ingest hot-loop diagnostics
+        "groupby_ingest_hits",
+        "groupby_ingest_misses",
+        "time_groupby_ingest_state_assign_ns",
+        # bloom filter diagnostics
+        "groupby_bloom_checks",
+        "groupby_bloom_skips",
+        "groupby_bloom_false_positives",
+        # ingest phase breakdown
+        "time_groupby_hash_ns",
+        "time_groupby_reserve_ns",
+        "time_groupby_accumulate_ns",
     )
     SUPPORTED_AGGREGATES = frozenset(
         {
