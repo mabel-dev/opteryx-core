@@ -83,8 +83,8 @@ cpdef StringVector vector_regex_replace(StringVector data, bytes pattern, bytes 
 
     repl_piece = StringPiece(repl_str)
 
-    # Create builder with estimated capacity (at least 10% larger for variation)
-    cdef Py_ssize_t estimated_bytes_per_entry = max(50, int(50 * 1.1))
+    # Create builder with estimated capacity
+    cdef Py_ssize_t estimated_bytes_per_entry = 100
     builder = string_vector_module.StringVectorBuilder.with_estimate(n, estimated_bytes_per_entry)
 
     # Pre-allocate string buffer

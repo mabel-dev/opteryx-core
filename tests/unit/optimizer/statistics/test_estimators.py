@@ -1087,3 +1087,185 @@ class TestIntegration:
 
         # Now the range is narrower, selectivity would be more accurate
         # for subsequent predicates
+
+
+class TestHistogramBacking:
+    """Tests for histogram-backed selectivity estimation."""
+
+    def _create_distogram_from_bins(self):
+        """Helper to create a simple distogram."""
+        from opteryx.third_party.maki_nage.distogram import load
+
+        # Create a distogram from 100 bins, min=0, max=100
+        # Simulating uniform distribution: 1000 rows across 100 bins = 10 rows per bin
+        bins = [(i + 0.5, 10) for i in range(100)]
+        return load(bins, 0.0, 100.0)
+
+    def test_estimate_selectivity_with_histogram_no_histogram(self):
+        """Test that None is returned when no histogram available."""
+        col = ColumnStatistics(
+            column_name="age",
+            data_type="int",
+            histogram=None,  # No histogram
+            _total_rows=1000,
+        )
+
+        selectivity = col.estimate_selectivity_with_histogram(
+            predicate_lower=25, predicate_upper=75
+        )
+        assert selectivity is None
+
+    def test_estimate_selectivity_with_histogram_no_total_rows(self):
+        """Test that None is returned when total_rows is None."""
+        col = ColumnStatistics(
+            column_name="age",
+            data_type="int",
+            histogram=self._create_distogram_from_bins(),
+            _total_rows=None,  # Missing total rows
+        )
+
+        selectivity = col.estimate_selectivity_with_histogram(
+            predicate_lower=25, predicate_upper=75
+        )
+        assert selectivity is None
+
+    def test_estimate_selectivity_with_histogram_full_range(self):
+        """Test selectivity for full range with histogram."""
+        col = ColumnStatistics(
+            column_name="age",
+            data_type="int",
+            histogram=self._create_distogram_from_bins(),
+            _total_rows=1000,
+        )
+
+        selectivity = col.estimate_selectivity_with_histogram()
+        assert selectivity == 1.0
+
+    def test_estimate_selectivity_with_histogram_half_range(self):
+        """Test selectivity for half the range with histogram."""
+        col = ColumnStatistics(
+            column_name="age",
+            data_type="int",
+            histogram=self._create_distogram_from_bins(),
+            _total_rows=1000,
+        )
+
+        # Range [0, 50] is half of [0, 100]
+        selectivity = col.estimate_selectivity_with_histogram(
+            predicate_lower=0, predicate_upper=50
+        )
+
+        # Should be approximately 0.5
+        assert selectivity == pytest.approx(0.5, abs=0.05)
+
+    def test_estimate_selectivity_with_histogram_quarter_range(self):
+        """Test selectivity for quarter range with histogram."""
+        col = ColumnStatistics(
+            column_name="age",
+            data_type="int",
+            histogram=self._create_distogram_from_bins(),
+            _total_rows=1000,
+        )
+
+        # Range [25, 75] is half of [0, 100]
+        selectivity = col.estimate_selectivity_with_histogram(
+            predicate_lower=25, predicate_upper=75
+        )
+
+        # Should be approximately 0.5
+        assert selectivity == pytest.approx(0.5, abs=0.05)
+
+    def test_estimate_selectivity_with_histogram_lower_bound_only(self):
+        """Test selectivity with only lower bound."""
+        col = ColumnStatistics(
+            column_name="age",
+            data_type="int",
+            histogram=self._create_distogram_from_bins(),
+            _total_rows=1000,
+        )
+
+        # age >= 75, should be approximately 0.25
+        selectivity = col.estimate_selectivity_with_histogram(predicate_lower=75)
+        assert selectivity == pytest.approx(0.25, abs=0.05)
+
+    def test_estimate_selectivity_with_histogram_upper_bound_only(self):
+        """Test selectivity with only upper bound."""
+        col = ColumnStatistics(
+            column_name="age",
+            data_type="int",
+            histogram=self._create_distogram_from_bins(),
+            _total_rows=1000,
+        )
+
+        # age <= 25, should be approximately 0.25
+        selectivity = col.estimate_selectivity_with_histogram(predicate_upper=25)
+        assert selectivity == pytest.approx(0.25, abs=0.05)
+
+    def test_estimate_selectivity_with_histogram_outside_bounds(self):
+        """Test selectivity for range outside histogram bounds."""
+        col = ColumnStatistics(
+            column_name="age",
+            data_type="int",
+            histogram=self._create_distogram_from_bins(),
+            _total_rows=1000,
+        )
+
+        # Range [200, 300] is outside [0, 100]
+        selectivity = col.estimate_selectivity_with_histogram(
+            predicate_lower=200, predicate_upper=300
+        )
+
+        # Should return None because outside bounds
+        assert selectivity is None
+
+    def test_selectivity_estimator_uses_histogram(self):
+        """Test that SelectivityEstimator uses histogram when available."""
+        from opteryx.third_party.maki_nage.distogram import load
+
+        bins = [(i + 0.5, 10) for i in range(100)]
+        distogram = load(bins, 0.0, 100.0)
+
+        col = ColumnStatistics(
+            column_name="age",
+            data_type="int",
+            histogram=distogram,
+            _total_rows=1000,
+            value_range=ColumnRange(lower_bound=0, upper_bound=100),
+        )
+        stats = RelationStatistics(row_count=1000, columns={"age": col})
+
+        estimator = SelectivityEstimator()
+        pred = Predicate(
+            column_name="age",
+            predicate_type=PredicateType.RANGE,
+            lower_bound=0,
+            upper_bound=50,
+        )
+
+        selectivity = estimator.estimate_single_predicate(pred, stats)
+
+        # Should use histogram and get approximately 0.5
+        assert selectivity == pytest.approx(0.5, abs=0.05)
+
+    def test_selectivity_estimator_falls_back_to_uniform(self):
+        """Test that SelectivityEstimator falls back to uniform when histogram unavailable."""
+        col = ColumnStatistics(
+            column_name="age",
+            data_type="int",
+            histogram=None,  # No histogram
+            value_range=ColumnRange(lower_bound=0, upper_bound=100),
+        )
+        stats = RelationStatistics(row_count=1000, columns={"age": col})
+
+        estimator = SelectivityEstimator()
+        pred = Predicate(
+            column_name="age",
+            predicate_type=PredicateType.RANGE,
+            lower_bound=0,
+            upper_bound=50,
+        )
+
+        selectivity = estimator.estimate_single_predicate(pred, stats)
+
+        # Should fall back to uniform distribution: 50/100 = 0.5
+        assert selectivity == pytest.approx(0.5, abs=0.01)

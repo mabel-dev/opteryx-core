@@ -11,26 +11,28 @@ This is not a general perpose Bloom Filter, if used outside Opteryx it may not
 perform entirely as expected as it is optimized for a specific configuration
 and constraints.
 
-We have four size options, all using 2 hashes:
-    - a 8k slot bit array for up to 1000 items (about 4.9% FPR)
-    - a 512k slot bit array for up to 60k items (about 4.2% FPR)
+We have five size options, all using 2 hashes:
+    - a 8k slot bit array for up to 1,000 items (about 4.9% FPR)
+    - a 512k slot bit array for up to 62,000 items (about 4.2% FPR)
     - a 8m slot bit array for up to 1m items (about 4.5% FPR)
     - a 128m slot bit array for up to 16m items (about 4.7% FPR)
+    - a 2b slot bit array for up to 256m items (about 0.3% FPR at 56m items)
 
 We perform one hash and then use a calculation based on the golden ratio to
 determine the second position. This is cheaper than performing two hashes whilst
 still providing a good enough split of the two hashes.
 
-The primary use for this structure is to prefilter JOINs, it is many times faster
-(about 20x from initial benchmarking) to test for containment in the bloom filter
-that to look up the item in the hash table.
+The primary use for this structure is to prefilter JOINs and GROUP BY operations.
+It is many times faster (about 20x from initial benchmarking) to test for
+containment in the bloom filter than to look up the item in the hash table.
 
 Building the filter is fast - for tables up to 1 million records we create the filter
 (1m records is roughly a 0.005s build). If the filter isn't effective (less that 5%
 eliminations) we discard it which has meant some waste work.
 
-The 16m set is the limit at the moment, it takes about 0.08 seconds to build which
-is the limit of what we think we should speculatively build.
+The 16m set takes about 0.08 seconds to build which is acceptable for speculative
+use in joins. The MASSIVE (256m) tier is intended for group-by pre-filtering where
+the build cost is amortised over the ingest phase.
 """
 
 from libc.stdlib cimport calloc, free
@@ -52,6 +54,7 @@ cdef uint32_t BIT64_ARRAY_SIZE_TINY = 128  # 128 * 64 = 8,192 bits
 cdef uint32_t BIT64_ARRAY_SIZE_SMALL = 8 * 1024  # 8K * 64 = 524,288 bits
 cdef uint32_t BIT64_ARRAY_SIZE_LARGE = 128 * 1024  # 128K * 64 = 8,388,608 bits
 cdef uint32_t BIT64_ARRAY_SIZE_HUGE = 2 * 1024 * 1024  # 2M * 64 = 134,217,728 bits
+cdef uint32_t BIT64_ARRAY_SIZE_MASSIVE = 32 * 1024 * 1024  # 32M * 64 = 2,147,483,648 bits
 
 # Golden ratio constant for second hash
 cdef uint64_t GOLDEN_RATIO = 0x9E3779B97F4A7C15ULL
@@ -72,6 +75,9 @@ cdef class BloomFilter:
         elif expected_records <= 16_000_000:
             self.bit64_array_size = BIT64_ARRAY_SIZE_HUGE
             self.bit_array_size_bits = BIT64_ARRAY_SIZE_HUGE * 64
+        elif expected_records <= 256_000_000:
+            self.bit64_array_size = BIT64_ARRAY_SIZE_MASSIVE
+            self.bit_array_size_bits = BIT64_ARRAY_SIZE_MASSIVE * 64
         else:
             raise ValueError("Too many records for this Bloom filter implementation")
 
@@ -102,21 +108,21 @@ cdef class BloomFilter:
     cpdef void add(self, const uint64_t item):
         self._add(item)
 
-    cdef inline bint _possibly_contains(self, const uint64_t item):
-        cdef uint64_t h1, h2, mask1, mask2
+    cdef inline bint _possibly_contains_fast(self, const uint64_t item) nogil:
+        cdef uint64_t h1 = item & self.bit_mask
+        cdef uint64_t h2 = (item * GOLDEN_RATIO) & self.bit_mask
 
-        h1 = item & self.bit_mask
-        h2 = (item * GOLDEN_RATIO) & self.bit_mask
+        # Load both 64-bit chunks before computing shifts, enabling ILP on superscalar CPUs
+        cdef uint64_t chunk1 = self.bit_array[h1 >> 6]
+        cdef uint64_t chunk2 = self.bit_array[h2 >> 6]
 
-        # Check both bits with single 64-bit load each
-        mask1 = (<uint64_t>1) << (h1 & 0x3F)
-        mask2 = (<uint64_t>1) << (h2 & 0x3F)
+        cdef uint64_t mask1 = (<uint64_t>1) << (h1 & 0x3F)
+        cdef uint64_t mask2 = (<uint64_t>1) << (h2 & 0x3F)
 
-        return (self.bit_array[h1 >> 6] & mask1) != 0 and \
-               (self.bit_array[h2 >> 6] & mask2) != 0
+        return (chunk1 & mask1) != 0 and (chunk2 & mask2) != 0
 
     cpdef bint possibly_contains(self, const uint64_t item):
-        return self._possibly_contains(item)
+        return self._possibly_contains_fast(item)
 
     cpdef uint8_t[::1] possibly_contains_many(self, object relation, list columns):
         """
@@ -157,6 +163,42 @@ cdef class BloomFilter:
 
         return result
 
+    cpdef uint8_t[::1] possibly_contains_many_direct(self, uint64_t[::1] hashes):
+        """
+        Batch membership check on pre-computed hash values.
+
+        Use when hashes are already available (e.g. from a join probe or group-by
+        ingest pass) to avoid redundant hash computation.  Returns a bit-packed
+        boolean buffer (LSB-first, PyArrow bool_ layout).
+        """
+        cdef Py_ssize_t num_hashes = hashes.shape[0]
+        cdef Py_ssize_t num_bytes = (num_hashes + 7) >> 3
+        cdef array result_arr = clone(_UINT8_TEMPLATE, num_bytes, True)
+        cdef uint8_t[::1] result = result_arr
+        cdef Py_ssize_t i
+        cdef uint64_t hash_val, h1, h2
+        cdef uint64_t chunk1, chunk2, mask1, mask2
+        cdef uint64_t bit_mask = self.bit_mask
+        cdef uint64_t golden_ratio = GOLDEN_RATIO
+        cdef uint64_t* bit_array = self.bit_array
+
+        for i in range(num_hashes):
+            hash_val = hashes[i]
+
+            h1 = hash_val & bit_mask
+            h2 = (hash_val * golden_ratio) & bit_mask
+
+            chunk1 = bit_array[h1 >> 6]
+            chunk2 = bit_array[h2 >> 6]
+
+            mask1 = (<uint64_t>1) << (h1 & 0x3F)
+            mask2 = (<uint64_t>1) << (h2 & 0x3F)
+
+            if (chunk1 & mask1) != 0 and (chunk2 & mask2) != 0:
+                result[i >> 3] |= <uint8_t>(1 << (i & 7))
+
+        return result
+
 cpdef BloomFilter create_bloom_filter(object relation, list columns):
     """
     Optimized Bloom filter creation with better cache behavior.
@@ -190,6 +232,42 @@ cpdef BloomFilter create_bloom_filter(object relation, list columns):
         h1 = hash_val & bit_mask
         h2 = (hash_val * golden_ratio) & bit_mask
 
+        bit_array[h1 >> 6] |= (<uint64_t>1) << (h1 & 0x3F)
+        bit_array[h2 >> 6] |= (<uint64_t>1) << (h2 & 0x3F)
+
+    return bf
+
+
+cpdef BloomFilter create_bloom_filter_from_hashes(uint64_t[::1] hashes):
+    """
+    Build a Bloom filter directly from pre-computed hash values.
+
+    Fast path when hashes are already available (e.g. from a join build side or
+    group-by ingest).  Avoids the relation/column indirection overhead of
+    create_bloom_filter().
+
+    Returns None if hashes is empty or exceeds the maximum supported cardinality
+    (256 million items).
+    """
+    cdef Py_ssize_t num_hashes = hashes.shape[0]
+    cdef BloomFilter bf
+    cdef Py_ssize_t i
+    cdef uint64_t hash_val, h1, h2
+    cdef uint64_t bit_mask
+    cdef uint64_t golden_ratio = GOLDEN_RATIO
+    cdef uint64_t* bit_array
+
+    if num_hashes == 0 or num_hashes > <Py_ssize_t>256_000_000:
+        return None
+
+    bf = BloomFilter(<uint32_t>num_hashes)
+    bit_mask = bf.bit_mask
+    bit_array = bf.bit_array
+
+    for i in range(num_hashes):
+        hash_val = hashes[i]
+        h1 = hash_val & bit_mask
+        h2 = (hash_val * golden_ratio) & bit_mask
         bit_array[h1 >> 6] |= (<uint64_t>1) << (h1 & 0x3F)
         bit_array[h2 >> 6] |= (<uint64_t>1) << (h2 & 0x3F)
 
