@@ -10,7 +10,7 @@ from array import array
 
 from cpython.mem cimport PyMem_Malloc, PyMem_Free
 
-from libc.math cimport isnan
+
 from libc.stddef cimport size_t
 from libc.stdint cimport int32_t, int64_t, uint32_t, uint64_t
 from libcpp.utility cimport pair
@@ -18,19 +18,12 @@ from libcpp.vector cimport vector
 
 from time import perf_counter_ns
 
-from opteryx.compiled.structures.bloom_filter cimport BloomFilter
+from opteryx.compiled.structures.bloom_filter cimport BloomFilter, create_bloom_filter_from_hashes
 from opteryx.draken.morsels.align cimport align_tables
 from opteryx.draken.morsels.morsel cimport Morsel
-from opteryx.draken.vectors.bool_vector cimport BoolVector
-from opteryx.draken.vectors.date32_vector cimport Date32Vector
-from opteryx.draken.vectors.float64_vector cimport Float64Vector
-from opteryx.draken.vectors.int64_vector cimport Int64Vector
-from opteryx.draken.vectors.integer_vector cimport IntegerVector
-from opteryx.draken.vectors.string_vector cimport StringVector
-from opteryx.draken.vectors.string_vector cimport _StringVectorView
-from opteryx.draken.vectors.time_vector cimport TimeVector
-from opteryx.draken.vectors.timestamp_vector cimport TimestampVector
-from opteryx.compiled.structures.bloom_filter import BloomFilter as PyBloomFilter
+from opteryx.draken.vectors.vector cimport NULL_HASH
+
+
 
 
 cdef extern from "carchar.hpp" namespace "opteryx::carchar":
@@ -89,209 +82,43 @@ cdef class DrakenCarcharJoinMap:
         return self.bloom_filter is not None
 
 
-cdef inline bytes _column_name_bytes(object column_name):
-    if isinstance(column_name, bytes):
-        return column_name
-    return str(column_name).encode("utf8")
-
-
-cdef inline bint _row_valid_from_null_mask(object null_mask, Py_ssize_t row_index):
-    return null_mask[row_index] == 0
-
-
-cdef inline bint _float_row_valid(Float64Vector float_vector, object null_mask, Py_ssize_t row_index):
-    if null_mask is not None and null_mask[row_index] != 0:
-        return False
-    return not isnan((<double*> float_vector.ptr.data)[row_index])
-
-
-cdef inline bint _row_valid_generic(object row_values, Py_ssize_t row_index):
-    cdef object value = row_values[row_index]
-    if value is None:
-        return False
-    if isinstance(value, float) and value != value:
-        return False
-    return True
-
-
 cdef inline void _append_valid_rows_and_hashes(
-    Morsel relation,
-    list join_columns,
     uint64_t[::1] row_hashes,
     vector[uint64_t]& valid_hashes,
     vector[int64_t]& valid_rows,
 ):
-    cdef Py_ssize_t num_rows = relation.num_rows
-    cdef list vectors = []
-    cdef list null_masks = []
-    cdef list string_views = []
-    cdef list kinds = []
-    cdef object column_name
-    cdef object vector_obj
-    cdef Py_ssize_t row_index
-    cdef Py_ssize_t column_index
-    cdef int kind
-    cdef bint valid
+    cdef Py_ssize_t num_rows = row_hashes.shape[0]
+    cdef Py_ssize_t i
+    cdef uint64_t h
 
     valid_hashes.reserve(num_rows)
     valid_rows.reserve(num_rows)
 
-    for column_name in join_columns:
-        vector_obj = relation.column(_column_name_bytes(column_name))
-        vectors.append(vector_obj)
-        null_masks.append(None)
-        string_views.append(None)
-
-        if isinstance(vector_obj, Float64Vector):
-            kinds.append(1)
-            null_masks[-1] = (<Float64Vector> vector_obj).is_null()
-        elif isinstance(vector_obj, StringVector):
-            kinds.append(2)
-            string_views[-1] = (<StringVector> vector_obj).view()
-        elif isinstance(vector_obj, (
-            Int64Vector,
-            IntegerVector,
-            BoolVector,
-            Date32Vector,
-            TimestampVector,
-            TimeVector,
-        )):
-            kinds.append(3)
-            null_masks[-1] = vector_obj.is_null()
-        else:
-            kinds.append(5)
-
-    for row_index in range(num_rows):
-        valid = True
-        for column_index in range(len(vectors)):
-            kind = kinds[column_index]
-            if kind == 1:
-                if not _float_row_valid(
-                    <Float64Vector> vectors[column_index],
-                    null_masks[column_index],
-                    row_index,
-                ):
-                    valid = False
-                    break
-            elif kind == 2:
-                if (<_StringVectorView> string_views[column_index]).is_null(row_index):
-                    valid = False
-                    break
-            elif kind == 3:
-                if not _row_valid_from_null_mask(
-                    null_masks[column_index],
-                    row_index,
-                ):
-                    valid = False
-                    break
-            else:
-                if not _row_valid_generic(vectors[column_index], row_index):
-                    valid = False
-                    break
-
-        if valid:
-            valid_rows.push_back(<int64_t> row_index)
-            valid_hashes.push_back(row_hashes[row_index])
+    for i in range(num_rows):
+        h = row_hashes[i]
+        if h != NULL_HASH:
+            valid_rows.push_back(i)
+            valid_hashes.push_back(h)
 
 
 cdef inline void _append_bloom_filtered_rows_and_hashes(
-    Morsel relation,
-    list join_columns,
     uint64_t[::1] row_hashes,
     BloomFilter bloom_filter,
     vector[uint64_t]& candidate_hashes,
     vector[int64_t]& candidate_rows,
 ):
-    cdef Py_ssize_t num_rows = relation.num_rows
-    cdef list vectors = []
-    cdef list null_masks = []
-    cdef list string_views = []
-    cdef list kinds = []
-    cdef object column_name
-    cdef object vector_obj
-    cdef Py_ssize_t row_index
-    cdef Py_ssize_t column_index
-    cdef int kind
-    cdef bint valid
-    cdef uint64_t hash_value
+    cdef Py_ssize_t num_rows = row_hashes.shape[0]
+    cdef Py_ssize_t i
+    cdef uint64_t h
 
     candidate_hashes.reserve(num_rows)
     candidate_rows.reserve(num_rows)
 
-    for column_name in join_columns:
-        vector_obj = relation.column(_column_name_bytes(column_name))
-        vectors.append(vector_obj)
-        null_masks.append(None)
-        string_views.append(None)
-
-        if isinstance(vector_obj, Float64Vector):
-            kinds.append(1)
-            null_masks[-1] = (<Float64Vector> vector_obj).is_null()
-        elif isinstance(vector_obj, StringVector):
-            kinds.append(2)
-            string_views[-1] = (<StringVector> vector_obj).view()
-        elif isinstance(vector_obj, (
-            Int64Vector,
-            IntegerVector,
-            BoolVector,
-            Date32Vector,
-            TimestampVector,
-            TimeVector,
-        )):
-            kinds.append(3)
-            null_masks[-1] = vector_obj.is_null()
-        else:
-            kinds.append(5)
-
-    for row_index in range(num_rows):
-        valid = True
-        for column_index in range(len(vectors)):
-            kind = kinds[column_index]
-            if kind == 1:
-                if not _float_row_valid(
-                    <Float64Vector> vectors[column_index],
-                    null_masks[column_index],
-                    row_index,
-                ):
-                    valid = False
-                    break
-            elif kind == 2:
-                if (<_StringVectorView> string_views[column_index]).is_null(row_index):
-                    valid = False
-                    break
-            elif kind == 3:
-                if not _row_valid_from_null_mask(
-                    null_masks[column_index],
-                    row_index,
-                ):
-                    valid = False
-                    break
-            else:
-                if not _row_valid_generic(vectors[column_index], row_index):
-                    valid = False
-                    break
-
-        if not valid:
-            continue
-
-        hash_value = row_hashes[row_index]
-        if bloom_filter._possibly_contains(hash_value):
-            candidate_rows.push_back(<int64_t> row_index)
-            candidate_hashes.push_back(hash_value)
-
-
-cdef inline BloomFilter _build_bloom_filter_from_hashes(const vector[uint64_t]& row_hashes):
-    cdef size_t length = row_hashes.size()
-    cdef BloomFilter bloom_filter
-    cdef size_t i
-
-    if length == 0 or length > <size_t>16_000_000:
-        return None
-
-    bloom_filter = <BloomFilter>PyBloomFilter(<uint32_t>length)
-    for i in range(length):
-        bloom_filter._add(row_hashes[i])
-    return bloom_filter
+    for i in range(num_rows):
+        h = row_hashes[i]
+        if h != NULL_HASH and bloom_filter._possibly_contains_fast(h):
+            candidate_rows.push_back(i)
+            candidate_hashes.push_back(h)
 
 
 cdef object _int32_array_from_vector(const vector[int64_t]& values):
@@ -341,6 +168,8 @@ cpdef DrakenCarcharJoinMap build_side_carchar_morsel_map(
     cdef vector[uint64_t] valid_hashes
     cdef vector[int64_t] valid_rows
     cdef long long bloom_start
+    cdef uint64_t* hashes_ptr
+    cdef Py_ssize_t hashes_len
 
     ht = DrakenCarcharJoinMap(num_rows, probe_load_factor)
     last_draken_inner_join_build_bloom_time_ns = 0
@@ -349,7 +178,7 @@ cpdef DrakenCarcharJoinMap build_side_carchar_morsel_map(
         return ht
 
     row_hashes = relation.hash(join_columns)
-    _append_valid_rows_and_hashes(relation, join_columns, row_hashes, valid_hashes, valid_rows)
+    _append_valid_rows_and_hashes(row_hashes, valid_hashes, valid_rows)
 
     if valid_rows.size() != 0:
         ht.engine.insert_batch(
@@ -357,9 +186,11 @@ cpdef DrakenCarcharJoinMap build_side_carchar_morsel_map(
             &valid_rows[0],
             <size_t> valid_rows.size(),
         )
-        if valid_hashes.size() <= <size_t>16_000_000:
+        if valid_hashes.size() != 0 and valid_hashes.size() <= <size_t>16_000_000:
             bloom_start = perf_counter_ns()
-            ht.bloom_filter = _build_bloom_filter_from_hashes(valid_hashes)
+            hashes_ptr = valid_hashes.data()
+            hashes_len = <Py_ssize_t> valid_hashes.size()
+            ht.bloom_filter = create_bloom_filter_from_hashes(<uint64_t[:hashes_len:1]>hashes_ptr)
             last_draken_inner_join_build_bloom_time_ns = perf_counter_ns() - bloom_start
 
     ht.seal()
@@ -416,8 +247,6 @@ cpdef tuple inner_join_carchar_morsel(
         bloom_filter = <BloomFilter>left_hash_table.bloom_filter
         bloom_start = perf_counter_ns()
         _append_bloom_filtered_rows_and_hashes(
-            right_relation,
-            join_columns,
             row_hashes,
             bloom_filter,
             probe_hashes,
@@ -430,8 +259,6 @@ cpdef tuple inner_join_carchar_morsel(
         )
     else:
         _append_valid_rows_and_hashes(
-            right_relation,
-            join_columns,
             row_hashes,
             probe_hashes,
             probe_rows,
@@ -525,8 +352,6 @@ cpdef object inner_join_carchar_morsel_aligned(
         bloom_filter = <BloomFilter>left_hash_table.bloom_filter
         bloom_start = perf_counter_ns()
         _append_bloom_filtered_rows_and_hashes(
-            right_relation,
-            join_columns,
             row_hashes,
             bloom_filter,
             probe_hashes,
@@ -539,8 +364,6 @@ cpdef object inner_join_carchar_morsel_aligned(
         )
     else:
         _append_valid_rows_and_hashes(
-            right_relation,
-            join_columns,
             row_hashes,
             probe_hashes,
             probe_rows,

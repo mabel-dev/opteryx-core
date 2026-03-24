@@ -13,6 +13,7 @@ import sys
 import numpy
 
 from opteryx.compiled.structures.carchar_set cimport CarcharSetWrapper
+from opteryx.compiled.structures.bloom_filter cimport BloomFilter
 
 from cpython.bytes cimport PyBytes_FromStringAndSize
 from libc.stddef cimport size_t
@@ -404,6 +405,18 @@ cdef void initialize_groupby_readings(object self, object key_store_limit_bytes)
         "feature_groupby_engine_constant": 0,
         "feature_groupby_engine_multi_key_fixed": 0,
         "feature_groupby_engine_multi_key_object": 0,
+        # ingest hot-loop diagnostics
+        "groupby_ingest_hits": 0,
+        "groupby_ingest_misses": 0,
+        "time_groupby_ingest_state_assign_ns": 0,
+        # bloom filter diagnostics (zero until bloom filter is wired up)
+        "groupby_bloom_checks": 0,
+        "groupby_bloom_skips": 0,
+        "groupby_bloom_false_positives": 0,
+        # ingest phase breakdown (identify the unaccounted ~33s)
+        "time_groupby_hash_ns": 0,
+        "time_groupby_reserve_ns": 0,
+        "time_groupby_accumulate_ns": 0,
     }
 
 
@@ -462,6 +475,43 @@ cdef inline void record_constant_groupby_vector(object self, object vec) noexcep
         self._readings["draken_constant_groupby_output_vector_fallbacks"] += 1
 
 
+cdef inline void record_ingest_state_assign_time(object self, long long started_ns) noexcept:
+    self._readings["time_groupby_ingest_state_assign_ns"] += time.monotonic_ns() - started_ns
+
+
+cdef inline void record_ingest_hit_miss_counts(
+    object self,
+    Py_ssize_t hits,
+    Py_ssize_t misses,
+) noexcept:
+    self._readings["groupby_ingest_hits"] += hits
+    self._readings["groupby_ingest_misses"] += misses
+
+
+cdef inline void record_groupby_hash_time(object self, long long started_ns) noexcept:
+    self._readings["time_groupby_hash_ns"] += time.monotonic_ns() - started_ns
+
+
+cdef inline void record_groupby_reserve_time(object self, long long started_ns) noexcept:
+    self._readings["time_groupby_reserve_ns"] += time.monotonic_ns() - started_ns
+
+
+cdef inline void record_groupby_accumulate_time(object self, long long started_ns) noexcept:
+    self._readings["time_groupby_accumulate_ns"] += time.monotonic_ns() - started_ns
+
+
+cdef inline void record_bloom_stats(
+    object self,
+    Py_ssize_t checks,
+    Py_ssize_t skips,
+    Py_ssize_t fps,
+) noexcept:
+    self._readings["groupby_bloom_checks"] += checks
+    self._readings["groupby_bloom_skips"] += skips
+    self._readings["groupby_bloom_false_positives"] += fps
+
+
+
 cdef extern from "carchar_index.hpp" namespace "opteryx::carchar":
     cdef cppclass CarcharIndex:
         CarcharIndex(size_t initial_capacity, double load_factor) except +
@@ -484,6 +534,8 @@ cdef int AGG_MAX = 5
 cdef int AGG_AVG = 6
 cdef int AGG_COUNT_DISTINCT = 7
 cdef int AGG_ANY_VALUE = 8
+
+cdef double CARCHAR_INDEX_LOAD_FACTOR = 0.70
 
 cdef int VALUE_NONE = 0
 cdef int VALUE_INT64 = 1
@@ -619,25 +671,25 @@ cdef class CarcharGroupStateEngine:
     cdef int _mode
     cdef Py_ssize_t _multi_agg_count
     cdef bint _use_object_keys
-    cdef int _agg_mode
-    cdef int _value_kind
+    cdef public int _agg_mode
+    cdef public int _value_kind
     cdef int64_t _single_key_kind
     cdef bytes _group_column
-    cdef object _value_column
+    cdef public object _value_column
     cdef CarcharIndex* _index
     cdef bint _multi_key_object_mode
     cdef bint _multi_key_fixed_mode
 
     cdef object _constant_key_scalar
-    cdef object _constant_distinct_set
-    cdef object _constant_object_state
+    cdef public object _constant_distinct_set
+    cdef public object _constant_object_state
     cdef int64_t _constant_key_valid
-    cdef int64_t _constant_count
-    cdef int64_t _constant_i64_state
-    cdef double _constant_f64_state
-    cdef int64_t _constant_seen
-    cdef double _constant_avg_sum
-    cdef int64_t _constant_avg_count
+    cdef public int64_t _constant_count
+    cdef public int64_t _constant_i64_state
+    cdef public double _constant_f64_state
+    cdef public int64_t _constant_seen
+    cdef public double _constant_avg_sum
+    cdef public int64_t _constant_avg_count
 
     cdef vector[int64_t] _group_key_values
     cdef vector[int64_t] _group_key_valid
@@ -678,6 +730,10 @@ cdef class CarcharGroupStateEngine:
     cdef vector[uint8_t] _key_payload_bytes
     cdef vector[int64_t] _key_payload_offsets
 
+    cdef BloomFilter _groupby_bloom          # None until second morsel; never reset after creation
+    cdef vector[uint64_t] _bloom_hashes      # hash of each new state during first morsel
+    cdef bint _use_bloom                     # True once bloom is ready to use
+
     def __cinit__(
         self,
         list group_by_columns,
@@ -700,6 +756,8 @@ cdef class CarcharGroupStateEngine:
         self._multi_value_columns = []
         self._multi_distinct_sets = []
         self._index = NULL
+        self._groupby_bloom = None
+        self._use_bloom = False
         self._constant_key_scalar = None
         self._constant_distinct_set = None
         self._constant_object_state = None
@@ -1371,7 +1429,7 @@ cdef class CarcharGroupStateEngine:
                         return
 
                 self._multi_agg_count = len(self._aggregations)
-                self._index = new CarcharIndex(<size_t> max(16, morsel.num_rows * 2), 0.80)
+                self._index = new CarcharIndex(<size_t> max(16, morsel.num_rows * 2), CARCHAR_INDEX_LOAD_FACTOR)
                 self._mode = MODE_CARCHAR
                 record_feature_groupby_engine_carchar(self)
                 return
@@ -1487,7 +1545,7 @@ cdef class CarcharGroupStateEngine:
                 self._init_legacy_backend()
                 return
 
-            self._index = new CarcharIndex(<size_t> max(16, morsel.num_rows * 2), 0.80)
+            self._index = new CarcharIndex(<size_t> max(16, morsel.num_rows * 2), CARCHAR_INDEX_LOAD_FACTOR)
             self._mode = MODE_CARCHAR
             record_feature_groupby_engine_carchar(self)
             return
@@ -1635,7 +1693,7 @@ cdef class CarcharGroupStateEngine:
                         return
 
                 self._multi_agg_count = len(self._aggregations)
-                self._index = new CarcharIndex(<size_t> max(16, morsel.num_rows * 2), 0.80)
+                self._index = new CarcharIndex(<size_t> max(16, morsel.num_rows * 2), CARCHAR_INDEX_LOAD_FACTOR)
                 self._mode = MODE_CARCHAR
                 record_feature_groupby_engine_carchar(self)
                 return
@@ -1759,7 +1817,7 @@ cdef class CarcharGroupStateEngine:
                 self._init_legacy_backend()
                 return
 
-            self._index = new CarcharIndex(<size_t> max(16, morsel.num_rows * 2), 0.80)
+            self._index = new CarcharIndex(<size_t> max(16, morsel.num_rows * 2), CARCHAR_INDEX_LOAD_FACTOR)
             self._mode = MODE_CARCHAR
             record_feature_groupby_engine_carchar(self)
             return
@@ -1896,7 +1954,7 @@ cdef class CarcharGroupStateEngine:
                     return
 
             self._multi_agg_count = len(self._aggregations)
-            self._index = new CarcharIndex(<size_t> max(16, morsel.num_rows * 2), 0.80)
+            self._index = new CarcharIndex(<size_t> max(16, morsel.num_rows * 2), CARCHAR_INDEX_LOAD_FACTOR)
             self._mode = MODE_CARCHAR
             record_feature_groupby_engine_carchar(self)
             return
@@ -1999,7 +2057,7 @@ cdef class CarcharGroupStateEngine:
                 self._init_legacy_backend()
                 return
 
-            self._index = new CarcharIndex(<size_t> max(16, morsel.num_rows * 2), 0.80)
+            self._index = new CarcharIndex(<size_t> max(16, morsel.num_rows * 2), CARCHAR_INDEX_LOAD_FACTOR)
             self._mode = MODE_CARCHAR
             record_feature_groupby_engine_carchar(self)
             return
@@ -2153,7 +2211,7 @@ cdef class CarcharGroupStateEngine:
                     return
 
             self._multi_agg_count = len(self._aggregations)
-            self._index = new CarcharIndex(<size_t> max(16, morsel.num_rows * 2), 0.80)
+            self._index = new CarcharIndex(<size_t> max(16, morsel.num_rows * 2), CARCHAR_INDEX_LOAD_FACTOR)
             self._mode = MODE_CARCHAR
             record_feature_groupby_engine_carchar(self)
             return
@@ -2251,37 +2309,56 @@ cdef class CarcharGroupStateEngine:
                 self._single_key_kind = key_kind
         elif isinstance(key_vector, StringVector) or self._use_object_keys:
             self._use_object_keys = True
-        self._index = new CarcharIndex(<size_t> max(16, morsel.num_rows * 2), 0.80)
+        self._groupby_bloom = None
+        self._use_bloom = False
+        self._bloom_hashes.clear()
+        self._index = new CarcharIndex(<size_t> max(16, morsel.num_rows * 2), CARCHAR_INDEX_LOAD_FACTOR)
         self._mode = MODE_CARCHAR
         record_feature_groupby_engine_carchar(self)
 
     cdef void _reserve_for_rows(self, Py_ssize_t row_count):
-        cdef size_t expected
-        cdef size_t flat_expected
+        # Only pre-reserve the CarcharIndex hash table.  It uses next_power_of_two
+        # internally, so repeated calls trigger at most O(log n) resizes total and
+        # each resize rehashes into a table twice the previous size — O(n) amortised.
+        #
+        # The state vectors (_counts, _i64_state, etc.) are intentionally NOT reserved
+        # here.  std::vector::reserve(n) allocates *exactly* n slots with no doubling.
+        # Calling reserve(state_count + morsel_rows) on every morsel therefore triggers
+        # a realloc+memcpy of the full vector content 325 times, producing O(n²/2)
+        # total memcpy work (~540 GB for this workload).  Letting push_back drive
+        # natural 2× doubling reduces that to O(n) amortised (~3 GB total).
         if self._mode != MODE_CARCHAR or row_count <= 0:
             return
-        expected = <size_t> self._state_count() + <size_t>row_count
-        self._index.reserve(expected)
-        self._group_key_values.reserve(expected)
-        self._group_key_valid.reserve(expected)
-        self._key_payload_offsets.reserve(expected + 1)
-        if self._multi_agg_count > 0:
-            flat_expected = expected * <size_t> self._multi_agg_count
-            self._multi_counts.reserve(flat_expected)
-            self._multi_i64_state.reserve(flat_expected)
-            self._multi_f64_state.reserve(flat_expected)
-            self._multi_seen.reserve(flat_expected)
-            self._multi_avg_sums.reserve(flat_expected)
-            self._multi_avg_counts.reserve(flat_expected)
-            self._multi_object_state_starts.reserve(flat_expected)
-            self._multi_object_state_lengths.reserve(flat_expected)
+        self._index.reserve(<size_t> self._state_count() + <size_t>row_count)
+
+    cdef inline bint _bloom_might_contain(self, uint64_t h) noexcept:
+        """Return True if row may be an existing group (must call lookup_fast).
+        Return False only when bloom guarantees this hash has never been inserted."""
+        if not self._use_bloom:
+            return True
+        return self._groupby_bloom._possibly_contains_fast(h)
+
+    cdef inline void _bloom_record_new_state(self, uint64_t row_hash) noexcept:
+        """Called whenever a new group state is inserted. Adds hash to bloom or staging vector."""
+        if self._use_bloom:
+            self._groupby_bloom._add(row_hash)
+        else:
+            self._bloom_hashes.push_back(row_hash)
+
+    cdef void _maybe_init_bloom(self) except *:
+        """Create and populate bloom filter from first-morsel staged hashes."""
+        cdef Py_ssize_t state_count = self._state_count()
+        cdef size_t estimated_total
+        cdef size_t i
+        if self._use_bloom or state_count == 0:
             return
-        self._counts.reserve(expected)
-        self._i64_state.reserve(expected)
-        self._f64_state.reserve(expected)
-        self._seen.reserve(expected)
-        self._avg_sums.reserve(expected)
-        self._avg_counts.reserve(expected)
+        # Size filter for estimated total cardinality; cap at 200M to avoid OOM.
+        estimated_total = min(<size_t>state_count * 200, <size_t>200_000_000)
+        self._groupby_bloom = BloomFilter(<uint32_t>estimated_total)
+        for i in range(self._bloom_hashes.size()):
+            self._groupby_bloom._add(self._bloom_hashes[i])
+        self._bloom_hashes.clear()
+        self._use_bloom = True
 
     cdef inline int64_t _find_or_insert_state(
         self, uint64_t row_hash, int64_t key_value, int64_t key_valid_flag
@@ -2290,7 +2367,7 @@ cdef class CarcharGroupStateEngine:
         cdef size_t key_store_bytes
         cdef Py_ssize_t agg_idx
 
-        if self._index.lookup_fast(row_hash, payload_ref):
+        if self._bloom_might_contain(row_hash) and self._index.lookup_fast(row_hash, payload_ref):
             return payload_ref
 
         payload_ref = <int64_t> self._state_count()
@@ -2332,6 +2409,7 @@ cdef class CarcharGroupStateEngine:
         ):
             raise MemoryError("group key store exceeded configured limit")
 
+        self._bloom_record_new_state(row_hash)
         return payload_ref
 
     cdef inline int64_t _find_or_insert_multi_fixed_state(
@@ -2341,7 +2419,7 @@ cdef class CarcharGroupStateEngine:
         cdef size_t key_store_bytes
         cdef Py_ssize_t agg_idx
 
-        if self._index.lookup_fast(row_hash, payload_ref):
+        if self._bloom_might_contain(row_hash) and self._index.lookup_fast(row_hash, payload_ref):
             return payload_ref
 
         payload_ref = <int64_t> self._state_count()
@@ -2384,6 +2462,7 @@ cdef class CarcharGroupStateEngine:
         ):
             raise MemoryError("group key store exceeded configured limit")
 
+        self._bloom_record_new_state(row_hash)
         return payload_ref
 
     cdef inline int64_t _find_or_insert_encoded_state(
@@ -2397,7 +2476,7 @@ cdef class CarcharGroupStateEngine:
         cdef size_t key_store_bytes
         cdef Py_ssize_t agg_idx
 
-        if self._index.lookup_fast(row_hash, payload_ref):
+        if self._bloom_might_contain(row_hash) and self._index.lookup_fast(row_hash, payload_ref):
             return payload_ref
 
         payload_ref = <int64_t> self._state_count()
@@ -2439,6 +2518,7 @@ cdef class CarcharGroupStateEngine:
         ):
             raise MemoryError("group key store exceeded configured limit")
 
+        self._bloom_record_new_state(row_hash)
         return payload_ref
 
     cdef inline int64_t _find_or_insert_multi_encoded_state(
@@ -2448,7 +2528,7 @@ cdef class CarcharGroupStateEngine:
         cdef size_t key_store_bytes
         cdef Py_ssize_t agg_idx
 
-        if self._index.lookup_fast(row_hash, payload_ref):
+        if self._bloom_might_contain(row_hash) and self._index.lookup_fast(row_hash, payload_ref):
             return payload_ref
 
         payload_ref = <int64_t> self._state_count()
@@ -2491,6 +2571,161 @@ cdef class CarcharGroupStateEngine:
         ):
             raise MemoryError("group key store exceeded configured limit")
 
+        self._bloom_record_new_state(row_hash)
+        return payload_ref
+
+    cdef inline int64_t _insert_fixed_state_known_miss(
+        self, uint64_t row_hash, int64_t key_value, int64_t key_valid_flag
+    ) except *:
+        """Insert a new fixed-key state; caller has already verified a miss via lookup_fast.
+
+        Precondition: lookup_fast(row_hash, ...) already returned False.
+        Skips the redundant second probe that _find_or_insert_state would perform.
+        """
+        cdef int64_t payload_ref = <int64_t> self._state_count()
+        cdef size_t key_store_bytes
+        cdef Py_ssize_t agg_idx
+        self._index.insert_new(row_hash, payload_ref)
+        self._append_single_fixed_payload_key(key_value, key_valid_flag)
+        self._object_state.append(None)
+        self._object_state_starts.push_back(0)
+        self._object_state_lengths.push_back(0)
+        if self._agg_mode == AGG_COUNT_DISTINCT:
+            self._distinct_sets.append(CarcharSetWrapper())
+        if self._multi_agg_count > 0:
+            for agg_idx in range(self._multi_agg_count):
+                self._multi_counts.push_back(0)
+                self._multi_i64_state.push_back(0)
+                self._multi_f64_state.push_back(0.0)
+                self._multi_seen.push_back(0)
+                self._multi_avg_sums.push_back(0.0)
+                self._multi_avg_counts.push_back(0)
+                self._multi_object_state.append(None)
+                self._multi_object_state_starts.push_back(0)
+                self._multi_object_state_lengths.push_back(0)
+                if self._multi_agg_modes[agg_idx] == AGG_COUNT_DISTINCT:
+                    self._multi_distinct_sets.append(CarcharSetWrapper())
+                else:
+                    self._multi_distinct_sets.append(None)
+        else:
+            self._counts.push_back(0)
+            self._i64_state.push_back(0)
+            self._f64_state.push_back(0.0)
+            self._seen.push_back(0)
+            self._avg_sums.push_back(0.0)
+            self._avg_counts.push_back(0)
+        key_store_bytes = <size_t> self._key_payload_bytes.size()
+        record_groupby_key_store_bytes(self, key_store_bytes)
+        if (
+            self._key_store_limit_bytes is not None
+            and key_store_bytes > <size_t> self._key_store_limit_bytes
+        ):
+            raise MemoryError("group key store exceeded configured limit")
+        self._bloom_record_new_state(row_hash)
+        return payload_ref
+
+    cdef inline int64_t _insert_encoded_state_known_miss(
+        self,
+        uint64_t row_hash,
+        const char* data_ptr,
+        Py_ssize_t data_len,
+        int64_t key_valid_flag,
+    ) except *:
+        """Insert a new encoded-key state; caller has already verified a miss via lookup_fast.
+
+        Precondition: lookup_fast(row_hash, ...) already returned False.
+        Skips the redundant second probe that _find_or_insert_encoded_state would perform.
+        """
+        cdef int64_t payload_ref = <int64_t> self._state_count()
+        cdef size_t key_store_bytes
+        cdef Py_ssize_t agg_idx
+        self._index.insert_new(row_hash, payload_ref)
+        self._append_single_payload_key(data_ptr, data_len, key_valid_flag)
+        self._object_state.append(None)
+        self._object_state_starts.push_back(0)
+        self._object_state_lengths.push_back(0)
+        if self._agg_mode == AGG_COUNT_DISTINCT:
+            self._distinct_sets.append(CarcharSetWrapper())
+        if self._multi_agg_count > 0:
+            for agg_idx in range(self._multi_agg_count):
+                self._multi_counts.push_back(0)
+                self._multi_i64_state.push_back(0)
+                self._multi_f64_state.push_back(0.0)
+                self._multi_seen.push_back(0)
+                self._multi_avg_sums.push_back(0.0)
+                self._multi_avg_counts.push_back(0)
+                self._multi_object_state.append(None)
+                self._multi_object_state_starts.push_back(0)
+                self._multi_object_state_lengths.push_back(0)
+                if self._multi_agg_modes[agg_idx] == AGG_COUNT_DISTINCT:
+                    self._multi_distinct_sets.append(CarcharSetWrapper())
+                else:
+                    self._multi_distinct_sets.append(None)
+        else:
+            self._counts.push_back(0)
+            self._i64_state.push_back(0)
+            self._f64_state.push_back(0.0)
+            self._seen.push_back(0)
+            self._avg_sums.push_back(0.0)
+            self._avg_counts.push_back(0)
+        key_store_bytes = <size_t> self._key_payload_bytes.size()
+        record_groupby_key_store_bytes(self, key_store_bytes)
+        if (
+            self._key_store_limit_bytes is not None
+            and key_store_bytes > <size_t> self._key_store_limit_bytes
+        ):
+            raise MemoryError("group key store exceeded configured limit")
+        self._bloom_record_new_state(row_hash)
+        return payload_ref
+
+    cdef inline int64_t _insert_multi_encoded_state_known_miss(
+        self, uint64_t row_hash, list key_vectors, Py_ssize_t row_idx
+    ) except *:
+        """Insert a new multi-encoded-key state; caller has already verified a miss via lookup_fast.
+
+        Precondition: lookup_fast(row_hash, ...) already returned False.
+        Skips the redundant second probe that _find_or_insert_multi_encoded_state would perform.
+        """
+        cdef int64_t payload_ref = <int64_t> self._state_count()
+        cdef size_t key_store_bytes
+        cdef Py_ssize_t agg_idx
+        self._index.insert_new(row_hash, payload_ref)
+        self._append_multi_payload_key(key_vectors, row_idx)
+        key_store_bytes = <size_t> self._key_payload_bytes.size()
+        record_groupby_key_store_bytes(self, key_store_bytes)
+        self._object_state.append(None)
+        self._object_state_starts.push_back(0)
+        self._object_state_lengths.push_back(0)
+        if self._agg_mode == AGG_COUNT_DISTINCT:
+            self._distinct_sets.append(CarcharSetWrapper())
+        if self._multi_agg_count > 0:
+            for agg_idx in range(self._multi_agg_count):
+                self._multi_counts.push_back(0)
+                self._multi_i64_state.push_back(0)
+                self._multi_f64_state.push_back(0.0)
+                self._multi_seen.push_back(0)
+                self._multi_avg_sums.push_back(0.0)
+                self._multi_avg_counts.push_back(0)
+                self._multi_object_state.append(None)
+                self._multi_object_state_starts.push_back(0)
+                self._multi_object_state_lengths.push_back(0)
+                if self._multi_agg_modes[agg_idx] == AGG_COUNT_DISTINCT:
+                    self._multi_distinct_sets.append(CarcharSetWrapper())
+                else:
+                    self._multi_distinct_sets.append(None)
+        else:
+            self._counts.push_back(0)
+            self._i64_state.push_back(0)
+            self._f64_state.push_back(0.0)
+            self._seen.push_back(0)
+            self._avg_sums.push_back(0.0)
+            self._avg_counts.push_back(0)
+        if (
+            self._key_store_limit_bytes is not None
+            and key_store_bytes > <size_t> self._key_store_limit_bytes
+        ):
+            raise MemoryError("group key store exceeded configured limit")
+        self._bloom_record_new_state(row_hash)
         return payload_ref
 
     cdef list _build_multi_fixed_key_vectors(self, Py_ssize_t start, Py_ssize_t stop):
@@ -3096,7 +3331,6 @@ cdef class CarcharGroupStateEngine:
                 self._multi_seen[offset] = 1
 
     cdef void _ingest_fixed_width_key(self, Morsel morsel, DrakenFixedBuffer* key_ptr):
-        cdef uint64_t[::1] row_hashes = morsel.hash([self._group_column])
         cdef uint8_t* key_nulls = <uint8_t*> key_ptr.null_bitmap
         cdef Py_ssize_t row_idx
         cdef Py_ssize_t row_count = morsel.num_rows
@@ -3110,53 +3344,66 @@ cdef class CarcharGroupStateEngine:
         cdef double* value_f64_data
         cdef uint8_t* value_nulls
         cdef int64_t* state_indices = NULL
+        cdef Py_ssize_t local_hits = 0, local_misses = 0
+        cdef Py_ssize_t local_bloom_checks = 0, local_bloom_skips = 0, local_bloom_fps = 0
+        cdef long long t_hash_start, t_state_assign_start, t_accum_start
+        cdef uint64_t[::1] row_hashes
 
-        if self._agg_mode == AGG_COUNT_STAR:
-            state_indices = <int64_t*> malloc(row_count * sizeof(int64_t))
-            if state_indices == NULL and row_count > 0:
-                raise MemoryError()
-            try:
-                for row_idx in range(row_count):
-                    key_valid = _bitmap_is_valid(key_nulls, row_idx)
-                    key_valid_flag = 1 if key_valid else 0
-                    key_value = _read_integer_value(key_ptr, row_idx) if key_valid else 0
-                    state_indices[row_idx] = self._find_or_insert_state(row_hashes[row_idx], key_value, key_valid_flag)
+        t_hash_start = time.monotonic_ns()
+        row_hashes = morsel.hash([self._group_column])
+        record_groupby_hash_time(self, t_hash_start)
+
+        state_indices = <int64_t*> malloc(row_count * sizeof(int64_t))
+        if state_indices == NULL and row_count > 0:
+            raise MemoryError()
+
+        try:
+            # --- Phase 1: assign state indices with bloom pre-filter and telemetry ---
+            t_state_assign_start = time.monotonic_ns()
+            for row_idx in range(row_count):
+                state_index = -1
+                if self._bloom_might_contain(row_hashes[row_idx]) and self._index.lookup_fast(row_hashes[row_idx], state_index):
+                    local_hits += 1
+                    state_indices[row_idx] = state_index
+                    continue
+                if self._use_bloom:
+                    if not self._groupby_bloom._possibly_contains_fast(row_hashes[row_idx]):
+                        local_bloom_skips += 1
+                    else:
+                        local_bloom_fps += 1
+                local_misses += 1
+                key_valid = _bitmap_is_valid(key_nulls, row_idx)
+                key_valid_flag = 1 if key_valid else 0
+                key_value = _read_integer_value(key_ptr, row_idx) if key_valid else 0
+                state_indices[row_idx] = self._insert_fixed_state_known_miss(row_hashes[row_idx], key_value, key_valid_flag)
+            record_ingest_state_assign_time(self, t_state_assign_start)
+            record_ingest_hit_miss_counts(self, local_hits, local_misses)
+            record_bloom_stats(self, local_bloom_checks, local_bloom_skips, local_bloom_fps)
+
+            # --- Phase 2: accumulate ---
+            t_accum_start = time.monotonic_ns()
+            if self._agg_mode == AGG_COUNT_STAR:
                 count_star_accumulate(self._counts.data(), state_indices, row_count)
-            finally:
-                free(state_indices)
-            return
+                record_groupby_accumulate_time(self, t_accum_start)
+                return
 
-        if self._agg_mode == AGG_COUNT_DISTINCT:
-            state_indices = <int64_t*> malloc(row_count * sizeof(int64_t))
-            if state_indices == NULL and row_count > 0:
-                raise MemoryError()
-            try:
-                for row_idx in range(row_count):
-                    key_valid = _bitmap_is_valid(key_nulls, row_idx)
-                    key_valid_flag = 1 if key_valid else 0
-                    key_value = _read_integer_value(key_ptr, row_idx) if key_valid else 0
-                    state_indices[row_idx] = self._find_or_insert_state(
-                        row_hashes[row_idx], key_value, key_valid_flag
-                    )
+            if self._agg_mode == AGG_COUNT_DISTINCT:
                 self._ingest_count_distinct_for_states(morsel, state_indices, row_count)
-            finally:
-                if state_indices != NULL:
-                    free(state_indices)
-            return
+                record_groupby_accumulate_time(self, t_accum_start)
+                return
 
-        if self._agg_mode == AGG_SUM:
-            state_indices = <int64_t*> malloc(row_count * sizeof(int64_t))
-            if state_indices == NULL and row_count > 0:
-                raise MemoryError()
-            try:
-                for row_idx in range(row_count):
-                    key_valid = _bitmap_is_valid(key_nulls, row_idx)
-                    key_valid_flag = 1 if key_valid else 0
-                    key_value = _read_integer_value(key_ptr, row_idx) if key_valid else 0
-                    state_indices[row_idx] = self._find_or_insert_state(
-                        row_hashes[row_idx], key_value, key_valid_flag
-                    )
-                value_vector = morsel.column(self._value_column)
+            value_vector = morsel.column(self._value_column)
+            if self._value_kind == VALUE_OBJECT and self._agg_mode == AGG_ANY_VALUE:
+                self._ingest_any_value_var_for_states(morsel, state_indices, row_count)
+                record_groupby_accumulate_time(self, t_accum_start)
+                return
+
+            if self._value_kind == VALUE_OBJECT and self._agg_mode in (AGG_MIN, AGG_MAX):
+                self._ingest_object_minmax_for_states(morsel, state_indices, row_count)
+                record_groupby_accumulate_time(self, t_accum_start)
+                return
+
+            if self._agg_mode == AGG_SUM:
                 if isinstance(value_vector, Float64Vector):
                     value_ptr = (<Float64Vector> value_vector).ptr
                     sum_f64_accumulate(
@@ -3174,59 +3421,10 @@ cdef class CarcharGroupStateEngine:
                     sum_integer_accumulate(
                         self._i64_state.data(), self._seen.data(), state_indices, value_ptr, row_count,
                     )
-            finally:
-                free(state_indices)
-            return
+                record_groupby_accumulate_time(self, t_accum_start)
+                return
 
-        value_vector = morsel.column(self._value_column)
-        if self._value_kind == VALUE_OBJECT and self._agg_mode == AGG_ANY_VALUE:
-            state_indices = <int64_t*> malloc(row_count * sizeof(int64_t))
-            if state_indices == NULL and row_count > 0:
-                raise MemoryError()
-            try:
-                for row_idx in range(row_count):
-                    key_valid = _bitmap_is_valid(key_nulls, row_idx)
-                    key_valid_flag = 1 if key_valid else 0
-                    key_value = _read_integer_value(key_ptr, row_idx) if key_valid else 0
-                    state_indices[row_idx] = self._find_or_insert_state(
-                        row_hashes[row_idx], key_value, key_valid_flag
-                    )
-                self._ingest_any_value_var_for_states(morsel, state_indices, row_count)
-            finally:
-                if state_indices != NULL:
-                    free(state_indices)
-            return
-
-        if self._value_kind == VALUE_OBJECT and self._agg_mode in (AGG_MIN, AGG_MAX):
-            state_indices = <int64_t*> malloc(row_count * sizeof(int64_t))
-            if state_indices == NULL and row_count > 0:
-                raise MemoryError()
-            try:
-                for row_idx in range(row_count):
-                    key_valid = _bitmap_is_valid(key_nulls, row_idx)
-                    key_valid_flag = 1 if key_valid else 0
-                    key_value = _read_integer_value(key_ptr, row_idx) if key_valid else 0
-                    state_indices[row_idx] = self._find_or_insert_state(
-                        row_hashes[row_idx], key_value, key_valid_flag
-                    )
-                self._ingest_object_minmax_for_states(morsel, state_indices, row_count)
-            finally:
-                if state_indices != NULL:
-                    free(state_indices)
-            return
-
-        if self._agg_mode in (AGG_MIN, AGG_MAX):
-            state_indices = <int64_t*> malloc(row_count * sizeof(int64_t))
-            if state_indices == NULL and row_count > 0:
-                raise MemoryError()
-            try:
-                for row_idx in range(row_count):
-                    key_valid = _bitmap_is_valid(key_nulls, row_idx)
-                    key_valid_flag = 1 if key_valid else 0
-                    key_value = _read_integer_value(key_ptr, row_idx) if key_valid else 0
-                    state_indices[row_idx] = self._find_or_insert_state(
-                        row_hashes[row_idx], key_value, key_valid_flag
-                    )
+            if self._agg_mode in (AGG_MIN, AGG_MAX):
                 if isinstance(value_vector, Float64Vector):
                     value_ptr = (<Float64Vector> value_vector).ptr
                     minmax_f64_accumulate(
@@ -3250,22 +3448,10 @@ cdef class CarcharGroupStateEngine:
                     minmax_integer_accumulate(
                         self._i64_state.data(), self._seen.data(), state_indices, value_ptr, row_count, self._agg_mode == AGG_MIN,
                     )
-            finally:
-                free(state_indices)
-            return
+                record_groupby_accumulate_time(self, t_accum_start)
+                return
 
-        if self._agg_mode == AGG_AVG:
-            state_indices = <int64_t*> malloc(row_count * sizeof(int64_t))
-            if state_indices == NULL and row_count > 0:
-                raise MemoryError()
-            try:
-                for row_idx in range(row_count):
-                    key_valid = _bitmap_is_valid(key_nulls, row_idx)
-                    key_valid_flag = 1 if key_valid else 0
-                    key_value = _read_integer_value(key_ptr, row_idx) if key_valid else 0
-                    state_indices[row_idx] = self._find_or_insert_state(
-                        row_hashes[row_idx], key_value, key_valid_flag
-                    )
+            if self._agg_mode == AGG_AVG:
                 if isinstance(value_vector, Float64Vector):
                     value_ptr = (<Float64Vector> value_vector).ptr
                     avg_f64_accumulate(
@@ -3283,116 +3469,64 @@ cdef class CarcharGroupStateEngine:
                     avg_integer_accumulate(
                         self._avg_sums.data(), self._avg_counts.data(), state_indices, value_ptr, row_count,
                     )
-            finally:
-                free(state_indices)
-            return
+                record_groupby_accumulate_time(self, t_accum_start)
+                return
 
-        if self._agg_mode == AGG_ANY_VALUE:
-            state_indices = <int64_t*> malloc(row_count * sizeof(int64_t))
-            if state_indices == NULL and row_count > 0:
-                raise MemoryError()
-            try:
-                for row_idx in range(row_count):
-                    key_valid = _bitmap_is_valid(key_nulls, row_idx)
-                    key_valid_flag = 1 if key_valid else 0
-                    key_value = _read_integer_value(key_ptr, row_idx) if key_valid else 0
-                    state_indices[row_idx] = self._find_or_insert_state(
-                        row_hashes[row_idx], key_value, key_valid_flag
-                    )
+            if self._agg_mode == AGG_ANY_VALUE:
                 if isinstance(value_vector, Float64Vector):
                     value_ptr = (<Float64Vector> value_vector).ptr
                     any_value_fixed_accumulate(
-                        self._i64_state.data(),
-                        self._seen.data(),
-                        state_indices,
-                        value_ptr,
-                        row_count,
+                        self._i64_state.data(), self._seen.data(), state_indices, value_ptr, row_count,
                     )
                 elif isinstance(value_vector, Int64Vector):
                     value_ptr = (<Int64Vector> value_vector).ptr
                     any_value_fixed_accumulate(
-                        self._i64_state.data(),
-                        self._seen.data(),
-                        state_indices,
-                        value_ptr,
-                        row_count,
+                        self._i64_state.data(), self._seen.data(), state_indices, value_ptr, row_count,
                     )
                 elif isinstance(value_vector, TimestampVector):
                     value_ptr = (<TimestampVector> value_vector).ptr
                     any_value_fixed_accumulate(
-                        self._i64_state.data(),
-                        self._seen.data(),
-                        state_indices,
-                        value_ptr,
-                        row_count,
+                        self._i64_state.data(), self._seen.data(), state_indices, value_ptr, row_count,
                     )
                 else:
                     value_ptr = (<IntegerVector> value_vector).ptr
                     any_value_fixed_integer_accumulate(
-                        self._i64_state.data(),
-                        self._seen.data(),
-                        state_indices,
-                        value_ptr,
-                        row_count,
+                        self._i64_state.data(), self._seen.data(), state_indices, value_ptr, row_count,
                     )
-            finally:
+                record_groupby_accumulate_time(self, t_accum_start)
+                return
+
+            # Fall-through: AGG_COUNT_VALUE (state_indices precomputed; no per-row key extraction needed)
+            if isinstance(value_vector, Float64Vector):
+                value_ptr = (<Float64Vector> value_vector).ptr
+                value_nulls = <uint8_t*> value_ptr.null_bitmap
+                for row_idx in range(row_count):
+                    if _bitmap_is_valid(value_nulls, row_idx):
+                        self._counts[state_indices[row_idx]] = self._counts[state_indices[row_idx]] + 1
+            elif isinstance(value_vector, Int64Vector):
+                value_ptr = (<Int64Vector> value_vector).ptr
+                value_nulls = <uint8_t*> value_ptr.null_bitmap
+                for row_idx in range(row_count):
+                    if _bitmap_is_valid(value_nulls, row_idx):
+                        self._counts[state_indices[row_idx]] = self._counts[state_indices[row_idx]] + 1
+            elif isinstance(value_vector, TimestampVector):
+                value_ptr = (<TimestampVector> value_vector).ptr
+                value_nulls = <uint8_t*> value_ptr.null_bitmap
+                for row_idx in range(row_count):
+                    if _bitmap_is_valid(value_nulls, row_idx):
+                        self._counts[state_indices[row_idx]] = self._counts[state_indices[row_idx]] + 1
+            else:
+                value_ptr = (<IntegerVector> value_vector).ptr
+                value_nulls = <uint8_t*> value_ptr.null_bitmap
+                for row_idx in range(row_count):
+                    if _bitmap_is_valid(value_nulls, row_idx):
+                        self._counts[state_indices[row_idx]] = self._counts[state_indices[row_idx]] + 1
+            record_groupby_accumulate_time(self, t_accum_start)
+        finally:
+            if state_indices != NULL:
                 free(state_indices)
-            return
-
-        if isinstance(value_vector, Float64Vector):
-            value_ptr = (<Float64Vector> value_vector).ptr
-            value_f64_data = <double*> value_ptr.data
-            value_nulls = <uint8_t*> value_ptr.null_bitmap
-            for row_idx in range(row_count):
-                key_valid = _bitmap_is_valid(key_nulls, row_idx)
-                key_valid_flag = 1 if key_valid else 0
-                key_value = _read_integer_value(key_ptr, row_idx) if key_valid else 0
-                state_index = self._find_or_insert_state(row_hashes[row_idx], key_value, key_valid_flag)
-                if self._agg_mode == AGG_COUNT_VALUE:
-                    if _bitmap_is_valid(value_nulls, row_idx):
-                        self._counts[state_index] = self._counts[state_index] + 1
-            return
-
-        if isinstance(value_vector, Int64Vector):
-            value_ptr = (<Int64Vector> value_vector).ptr
-            value_i64_data = <int64_t*> value_ptr.data
-            value_nulls = <uint8_t*> value_ptr.null_bitmap
-            for row_idx in range(row_count):
-                key_valid = _bitmap_is_valid(key_nulls, row_idx)
-                key_valid_flag = 1 if key_valid else 0
-                key_value = _read_integer_value(key_ptr, row_idx) if key_valid else 0
-                state_index = self._find_or_insert_state(row_hashes[row_idx], key_value, key_valid_flag)
-                if self._agg_mode == AGG_COUNT_VALUE:
-                    if _bitmap_is_valid(value_nulls, row_idx):
-                        self._counts[state_index] = self._counts[state_index] + 1
-            return
-
-        if isinstance(value_vector, TimestampVector):
-            value_ptr = (<TimestampVector> value_vector).ptr
-            value_nulls = <uint8_t*> value_ptr.null_bitmap
-            for row_idx in range(row_count):
-                key_valid = _bitmap_is_valid(key_nulls, row_idx)
-                key_valid_flag = 1 if key_valid else 0
-                key_value = _read_integer_value(key_ptr, row_idx) if key_valid else 0
-                state_index = self._find_or_insert_state(row_hashes[row_idx], key_value, key_valid_flag)
-                if self._agg_mode == AGG_COUNT_VALUE:
-                    if _bitmap_is_valid(value_nulls, row_idx):
-                        self._counts[state_index] = self._counts[state_index] + 1
-            return
-
-        value_ptr = (<IntegerVector> value_vector).ptr
-        value_nulls = <uint8_t*> value_ptr.null_bitmap
-        for row_idx in range(row_count):
-            key_valid = _bitmap_is_valid(key_nulls, row_idx)
-            key_valid_flag = 1 if key_valid else 0
-            key_value = _read_integer_value(key_ptr, row_idx) if key_valid else 0
-            state_index = self._find_or_insert_state(row_hashes[row_idx], key_value, key_valid_flag)
-            if self._agg_mode == AGG_COUNT_VALUE:
-                if _bitmap_is_valid(value_nulls, row_idx):
-                    self._counts[state_index] = self._counts[state_index] + 1
 
     cdef void _ingest_int64_key(self, Morsel morsel, Int64Vector key_vector):
-        cdef uint64_t[::1] row_hashes = morsel.hash([self._group_column])
         cdef DrakenFixedBuffer* key_ptr = key_vector.ptr
         cdef int64_t* key_data = <int64_t*> key_ptr.data
         cdef uint8_t* key_nulls = <uint8_t*> key_ptr.null_bitmap
@@ -3408,76 +3542,14 @@ cdef class CarcharGroupStateEngine:
         cdef double* value_f64_data
         cdef uint8_t* value_nulls
         cdef int64_t* state_indices = NULL
+        cdef Py_ssize_t local_hits = 0, local_misses = 0
+        cdef Py_ssize_t local_bloom_checks = 0, local_bloom_skips = 0, local_bloom_fps = 0
+        cdef long long t_hash_start, t_state_assign_start, t_accum_start
+        cdef uint64_t[::1] row_hashes
 
-        if self._agg_mode == AGG_COUNT_STAR:
-            state_indices = <int64_t*> malloc(row_count * sizeof(int64_t))
-            if state_indices == NULL and row_count > 0:
-                raise MemoryError()
-            try:
-                for row_idx in range(row_count):
-                    key_valid = _bitmap_is_valid(key_nulls, row_idx)
-                    key_valid_flag = 1 if key_valid else 0
-                    key_value = key_data[row_idx] if key_valid else 0
-                    state_indices[row_idx] = self._find_or_insert_state(row_hashes[row_idx], key_value, key_valid_flag)
-                count_star_accumulate(self._counts.data(), state_indices, row_count)
-            finally:
-                free(state_indices)
-            return
-
-        if self._agg_mode == AGG_COUNT_DISTINCT:
-            state_indices = <int64_t*> malloc(row_count * sizeof(int64_t))
-            if state_indices == NULL and row_count > 0:
-                raise MemoryError()
-            try:
-                for row_idx in range(row_count):
-                    key_valid = _bitmap_is_valid(key_nulls, row_idx)
-                    key_valid_flag = 1 if key_valid else 0
-                    key_value = key_data[row_idx] if key_valid else 0
-                    state_indices[row_idx] = self._find_or_insert_state(
-                        row_hashes[row_idx], key_value, key_valid_flag
-                    )
-                self._ingest_count_distinct_for_states(morsel, state_indices, row_count)
-            finally:
-                if state_indices != NULL:
-                    free(state_indices)
-            return
-
-        if self._agg_mode == AGG_SUM:
-            state_indices = <int64_t*> malloc(row_count * sizeof(int64_t))
-            if state_indices == NULL and row_count > 0:
-                raise MemoryError()
-            try:
-                for row_idx in range(row_count):
-                    key_valid = _bitmap_is_valid(key_nulls, row_idx)
-                    key_valid_flag = 1 if key_valid else 0
-                    key_value = key_data[row_idx] if key_valid else 0
-                    state_indices[row_idx] = self._find_or_insert_state(
-                        row_hashes[row_idx], key_value, key_valid_flag
-                    )
-                value_vector = morsel.column(self._value_column)
-                if isinstance(value_vector, Float64Vector):
-                    value_ptr = (<Float64Vector> value_vector).ptr
-                    sum_f64_accumulate(
-                        self._f64_state.data(), self._seen.data(), state_indices,
-                        <double*> value_ptr.data, <uint8_t*> value_ptr.null_bitmap, row_count,
-                    )
-                elif isinstance(value_vector, Int64Vector):
-                    value_ptr = (<Int64Vector> value_vector).ptr
-                    sum_i64_accumulate(
-                        self._i64_state.data(), self._seen.data(), state_indices,
-                        <int64_t*> value_ptr.data, <uint8_t*> value_ptr.null_bitmap, row_count,
-                    )
-                else:
-                    value_ptr = (<IntegerVector> value_vector).ptr
-                    sum_integer_accumulate(
-                        self._i64_state.data(), self._seen.data(), state_indices, value_ptr, row_count,
-                    )
-            finally:
-                free(state_indices)
-            return
-
-        value_vector = morsel.column(self._value_column)
+        # Edge case: object-valued agg using constant (non-per-group) state
         if self._value_kind == VALUE_OBJECT and self._agg_mode in (AGG_MIN, AGG_MAX, AGG_ANY_VALUE):
+            value_vector = morsel.column(self._value_column)
             value_nulls = self._value_null_bitmap(value_vector)
             for row_idx in range(row_count):
                 if not _bitmap_is_valid(value_nulls, row_idx):
@@ -3499,245 +3571,51 @@ cdef class CarcharGroupStateEngine:
                     self._constant_seen = 1
             return
 
-        if self._agg_mode in (AGG_MIN, AGG_MAX):
-            state_indices = <int64_t*> malloc(row_count * sizeof(int64_t))
-            if state_indices == NULL and row_count > 0:
-                raise MemoryError()
-            try:
-                for row_idx in range(row_count):
-                    key_valid = _bitmap_is_valid(key_nulls, row_idx)
-                    key_valid_flag = 1 if key_valid else 0
-                    key_value = key_data[row_idx] if key_valid else 0
-                    state_indices[row_idx] = self._find_or_insert_state(
-                        row_hashes[row_idx], key_value, key_valid_flag
-                    )
-                if isinstance(value_vector, Float64Vector):
-                    value_ptr = (<Float64Vector> value_vector).ptr
-                    minmax_f64_accumulate(
-                        self._f64_state.data(), self._seen.data(), state_indices,
-                        <double*> value_ptr.data, <uint8_t*> value_ptr.null_bitmap, row_count, self._agg_mode == AGG_MIN,
-                    )
-                elif isinstance(value_vector, Int64Vector):
-                    value_ptr = (<Int64Vector> value_vector).ptr
-                    minmax_i64_accumulate(
-                        self._i64_state.data(), self._seen.data(), state_indices,
-                        <int64_t*> value_ptr.data, <uint8_t*> value_ptr.null_bitmap, row_count, self._agg_mode == AGG_MIN,
-                    )
-                elif isinstance(value_vector, TimestampVector):
-                    value_ptr = (<TimestampVector> value_vector).ptr
-                    minmax_i64_accumulate(
-                        self._i64_state.data(), self._seen.data(), state_indices,
-                        <int64_t*> value_ptr.data, <uint8_t*> value_ptr.null_bitmap, row_count, self._agg_mode == AGG_MIN,
-                    )
-                else:
-                    value_ptr = (<IntegerVector> value_vector).ptr
-                    minmax_integer_accumulate(
-                        self._i64_state.data(), self._seen.data(), state_indices, value_ptr, row_count, self._agg_mode == AGG_MIN,
-                    )
-            finally:
-                free(state_indices)
-            return
+        t_hash_start = time.monotonic_ns()
+        row_hashes = morsel.hash([self._group_column])
+        record_groupby_hash_time(self, t_hash_start)
 
-        if self._agg_mode == AGG_AVG:
-            state_indices = <int64_t*> malloc(row_count * sizeof(int64_t))
-            if state_indices == NULL and row_count > 0:
-                raise MemoryError()
-            try:
-                for row_idx in range(row_count):
-                    key_valid = _bitmap_is_valid(key_nulls, row_idx)
-                    key_valid_flag = 1 if key_valid else 0
-                    key_value = key_data[row_idx] if key_valid else 0
-                    state_indices[row_idx] = self._find_or_insert_state(
-                        row_hashes[row_idx], key_value, key_valid_flag
-                    )
-                if isinstance(value_vector, Float64Vector):
-                    value_ptr = (<Float64Vector> value_vector).ptr
-                    avg_f64_accumulate(
-                        self._avg_sums.data(), self._avg_counts.data(), state_indices,
-                        <double*> value_ptr.data, <uint8_t*> value_ptr.null_bitmap, row_count,
-                    )
-                elif isinstance(value_vector, Int64Vector):
-                    value_ptr = (<Int64Vector> value_vector).ptr
-                    avg_i64_accumulate(
-                        self._avg_sums.data(), self._avg_counts.data(), state_indices,
-                        <int64_t*> value_ptr.data, <uint8_t*> value_ptr.null_bitmap, row_count,
-                    )
-                else:
-                    value_ptr = (<IntegerVector> value_vector).ptr
-                    avg_integer_accumulate(
-                        self._avg_sums.data(), self._avg_counts.data(), state_indices, value_ptr, row_count,
-                    )
-            finally:
-                free(state_indices)
-            return
+        state_indices = <int64_t*> malloc(row_count * sizeof(int64_t))
+        if state_indices == NULL and row_count > 0:
+            raise MemoryError()
 
-        if self._agg_mode == AGG_ANY_VALUE:
-            state_indices = <int64_t*> malloc(row_count * sizeof(int64_t))
-            if state_indices == NULL and row_count > 0:
-                raise MemoryError()
-            try:
-                for row_idx in range(row_count):
-                    key_valid = _bitmap_is_valid(key_nulls, row_idx)
-                    key_valid_flag = 1 if key_valid else 0
-                    key_value = key_data[row_idx] if key_valid else 0
-                    state_indices[row_idx] = self._find_or_insert_state(
-                        row_hashes[row_idx], key_value, key_valid_flag
-                    )
-                if isinstance(value_vector, Float64Vector):
-                    value_ptr = (<Float64Vector> value_vector).ptr
-                    any_value_fixed_accumulate(
-                        self._i64_state.data(),
-                        self._seen.data(),
-                        state_indices,
-                        value_ptr,
-                        row_count,
-                    )
-                elif isinstance(value_vector, Int64Vector):
-                    value_ptr = (<Int64Vector> value_vector).ptr
-                    any_value_fixed_accumulate(
-                        self._i64_state.data(),
-                        self._seen.data(),
-                        state_indices,
-                        value_ptr,
-                        row_count,
-                    )
-                elif isinstance(value_vector, TimestampVector):
-                    value_ptr = (<TimestampVector> value_vector).ptr
-                    any_value_fixed_accumulate(
-                        self._i64_state.data(),
-                        self._seen.data(),
-                        state_indices,
-                        value_ptr,
-                        row_count,
-                    )
-                else:
-                    value_ptr = (<IntegerVector> value_vector).ptr
-                    any_value_fixed_integer_accumulate(
-                        self._i64_state.data(),
-                        self._seen.data(),
-                        state_indices,
-                        value_ptr,
-                        row_count,
-                    )
-            finally:
-                free(state_indices)
-            return
-
-        if isinstance(value_vector, Float64Vector):
-            value_ptr = (<Float64Vector> value_vector).ptr
-            value_f64_data = <double*> value_ptr.data
-            value_nulls = <uint8_t*> value_ptr.null_bitmap
+        try:
+            # --- Phase 1: assign state indices with bloom pre-filter and telemetry ---
+            t_state_assign_start = time.monotonic_ns()
             for row_idx in range(row_count):
+                state_index = -1
+                if self._bloom_might_contain(row_hashes[row_idx]) and self._index.lookup_fast(row_hashes[row_idx], state_index):
+                    local_hits += 1
+                    state_indices[row_idx] = state_index
+                    continue
+                if self._use_bloom:
+                    if not self._groupby_bloom._possibly_contains_fast(row_hashes[row_idx]):
+                        local_bloom_skips += 1
+                    else:
+                        local_bloom_fps += 1
+                local_misses += 1
                 key_valid = _bitmap_is_valid(key_nulls, row_idx)
                 key_valid_flag = 1 if key_valid else 0
                 key_value = key_data[row_idx] if key_valid else 0
-                state_index = self._find_or_insert_state(row_hashes[row_idx], key_value, key_valid_flag)
-                if self._agg_mode == AGG_COUNT_VALUE:
-                    if _bitmap_is_valid(value_nulls, row_idx):
-                        self._counts[state_index] = self._counts[state_index] + 1
-            return
+                state_indices[row_idx] = self._insert_fixed_state_known_miss(row_hashes[row_idx], key_value, key_valid_flag)
+            record_ingest_state_assign_time(self, t_state_assign_start)
+            record_ingest_hit_miss_counts(self, local_hits, local_misses)
+            record_bloom_stats(self, local_bloom_checks, local_bloom_skips, local_bloom_fps)
 
-        if isinstance(value_vector, Int64Vector):
-            value_ptr = (<Int64Vector> value_vector).ptr
-            value_i64_data = <int64_t*> value_ptr.data
-            value_nulls = <uint8_t*> value_ptr.null_bitmap
-            for row_idx in range(row_count):
-                key_valid = _bitmap_is_valid(key_nulls, row_idx)
-                key_valid_flag = 1 if key_valid else 0
-                key_value = key_data[row_idx] if key_valid else 0
-                state_index = self._find_or_insert_state(row_hashes[row_idx], key_value, key_valid_flag)
-                if self._agg_mode == AGG_COUNT_VALUE:
-                    if _bitmap_is_valid(value_nulls, row_idx):
-                        self._counts[state_index] = self._counts[state_index] + 1
-            return
-
-        if isinstance(value_vector, TimestampVector):
-            value_ptr = (<TimestampVector> value_vector).ptr
-            value_nulls = <uint8_t*> value_ptr.null_bitmap
-            for row_idx in range(row_count):
-                key_valid = _bitmap_is_valid(key_nulls, row_idx)
-                key_valid_flag = 1 if key_valid else 0
-                key_value = key_data[row_idx] if key_valid else 0
-                state_index = self._find_or_insert_state(row_hashes[row_idx], key_value, key_valid_flag)
-                if self._agg_mode == AGG_COUNT_VALUE:
-                    if _bitmap_is_valid(value_nulls, row_idx):
-                        self._counts[state_index] = self._counts[state_index] + 1
-            return
-
-        value_ptr = (<IntegerVector> value_vector).ptr
-        value_nulls = <uint8_t*> value_ptr.null_bitmap
-        for row_idx in range(row_count):
-            key_valid = _bitmap_is_valid(key_nulls, row_idx)
-            key_valid_flag = 1 if key_valid else 0
-            key_value = key_data[row_idx] if key_valid else 0
-            state_index = self._find_or_insert_state(row_hashes[row_idx], key_value, key_valid_flag)
-            if self._agg_mode == AGG_COUNT_VALUE:
-                if _bitmap_is_valid(value_nulls, row_idx):
-                    self._counts[state_index] = self._counts[state_index] + 1
-
-    cdef void _ingest_integer_key(self, Morsel morsel, IntegerVector key_vector):
-        cdef uint64_t[::1] row_hashes = morsel.hash([self._group_column])
-        cdef DrakenFixedBuffer* key_ptr = key_vector.ptr
-        cdef uint8_t* key_nulls = <uint8_t*> key_ptr.null_bitmap
-        cdef Py_ssize_t row_idx
-        cdef Py_ssize_t row_count = morsel.num_rows
-        cdef int64_t state_index
-        cdef int64_t key_value
-        cdef bint key_valid
-        cdef int64_t key_valid_flag
-        cdef object value_vector
-        cdef DrakenFixedBuffer* value_ptr
-        cdef int64_t* value_i64_data
-        cdef double* value_f64_data
-        cdef uint8_t* value_nulls
-        cdef int64_t* state_indices = NULL
-
-        if self._agg_mode == AGG_COUNT_STAR:
-            state_indices = <int64_t*> malloc(row_count * sizeof(int64_t))
-            if state_indices == NULL and row_count > 0:
-                raise MemoryError()
-            try:
-                for row_idx in range(row_count):
-                    key_valid = _bitmap_is_valid(key_nulls, row_idx)
-                    key_valid_flag = 1 if key_valid else 0
-                    key_value = _read_integer_value(key_ptr, row_idx) if key_valid else 0
-                    state_indices[row_idx] = self._find_or_insert_state(row_hashes[row_idx], key_value, key_valid_flag)
+            # --- Phase 2: accumulate ---
+            t_accum_start = time.monotonic_ns()
+            if self._agg_mode == AGG_COUNT_STAR:
                 count_star_accumulate(self._counts.data(), state_indices, row_count)
-            finally:
-                free(state_indices)
-            return
+                record_groupby_accumulate_time(self, t_accum_start)
+                return
 
-        if self._agg_mode == AGG_COUNT_DISTINCT:
-            state_indices = <int64_t*> malloc(row_count * sizeof(int64_t))
-            if state_indices == NULL and row_count > 0:
-                raise MemoryError()
-            try:
-                for row_idx in range(row_count):
-                    key_valid = _bitmap_is_valid(key_nulls, row_idx)
-                    key_valid_flag = 1 if key_valid else 0
-                    key_value = _read_integer_value(key_ptr, row_idx) if key_valid else 0
-                    state_indices[row_idx] = self._find_or_insert_state(
-                        row_hashes[row_idx], key_value, key_valid_flag
-                    )
+            if self._agg_mode == AGG_COUNT_DISTINCT:
                 self._ingest_count_distinct_for_states(morsel, state_indices, row_count)
-            finally:
-                if state_indices != NULL:
-                    free(state_indices)
-            return
+                record_groupby_accumulate_time(self, t_accum_start)
+                return
 
-        if self._agg_mode == AGG_SUM:
-            state_indices = <int64_t*> malloc(row_count * sizeof(int64_t))
-            if state_indices == NULL and row_count > 0:
-                raise MemoryError()
-            try:
-                for row_idx in range(row_count):
-                    key_valid = _bitmap_is_valid(key_nulls, row_idx)
-                    key_valid_flag = 1 if key_valid else 0
-                    key_value = _read_integer_value(key_ptr, row_idx) if key_valid else 0
-                    state_indices[row_idx] = self._find_or_insert_state(
-                        row_hashes[row_idx], key_value, key_valid_flag
-                    )
-                value_vector = morsel.column(self._value_column)
+            value_vector = morsel.column(self._value_column)
+            if self._agg_mode == AGG_SUM:
                 if isinstance(value_vector, Float64Vector):
                     value_ptr = (<Float64Vector> value_vector).ptr
                     sum_f64_accumulate(
@@ -3755,23 +3633,10 @@ cdef class CarcharGroupStateEngine:
                     sum_integer_accumulate(
                         self._i64_state.data(), self._seen.data(), state_indices, value_ptr, row_count,
                     )
-            finally:
-                free(state_indices)
-            return
+                record_groupby_accumulate_time(self, t_accum_start)
+                return
 
-        value_vector = morsel.column(self._value_column)
-        if self._agg_mode in (AGG_MIN, AGG_MAX):
-            state_indices = <int64_t*> malloc(row_count * sizeof(int64_t))
-            if state_indices == NULL and row_count > 0:
-                raise MemoryError()
-            try:
-                for row_idx in range(row_count):
-                    key_valid = _bitmap_is_valid(key_nulls, row_idx)
-                    key_valid_flag = 1 if key_valid else 0
-                    key_value = _read_integer_value(key_ptr, row_idx) if key_valid else 0
-                    state_indices[row_idx] = self._find_or_insert_state(
-                        row_hashes[row_idx], key_value, key_valid_flag
-                    )
+            if self._agg_mode in (AGG_MIN, AGG_MAX):
                 if isinstance(value_vector, Float64Vector):
                     value_ptr = (<Float64Vector> value_vector).ptr
                     minmax_f64_accumulate(
@@ -3784,27 +3649,21 @@ cdef class CarcharGroupStateEngine:
                         self._i64_state.data(), self._seen.data(), state_indices,
                         <int64_t*> value_ptr.data, <uint8_t*> value_ptr.null_bitmap, row_count, self._agg_mode == AGG_MIN,
                     )
+                elif isinstance(value_vector, TimestampVector):
+                    value_ptr = (<TimestampVector> value_vector).ptr
+                    minmax_i64_accumulate(
+                        self._i64_state.data(), self._seen.data(), state_indices,
+                        <int64_t*> value_ptr.data, <uint8_t*> value_ptr.null_bitmap, row_count, self._agg_mode == AGG_MIN,
+                    )
                 else:
                     value_ptr = (<IntegerVector> value_vector).ptr
                     minmax_integer_accumulate(
                         self._i64_state.data(), self._seen.data(), state_indices, value_ptr, row_count, self._agg_mode == AGG_MIN,
                     )
-            finally:
-                free(state_indices)
-            return
+                record_groupby_accumulate_time(self, t_accum_start)
+                return
 
-        if self._agg_mode == AGG_AVG:
-            state_indices = <int64_t*> malloc(row_count * sizeof(int64_t))
-            if state_indices == NULL and row_count > 0:
-                raise MemoryError()
-            try:
-                for row_idx in range(row_count):
-                    key_valid = _bitmap_is_valid(key_nulls, row_idx)
-                    key_valid_flag = 1 if key_valid else 0
-                    key_value = _read_integer_value(key_ptr, row_idx) if key_valid else 0
-                    state_indices[row_idx] = self._find_or_insert_state(
-                        row_hashes[row_idx], key_value, key_valid_flag
-                    )
+            if self._agg_mode == AGG_AVG:
                 if isinstance(value_vector, Float64Vector):
                     value_ptr = (<Float64Vector> value_vector).ptr
                     avg_f64_accumulate(
@@ -3822,48 +3681,213 @@ cdef class CarcharGroupStateEngine:
                     avg_integer_accumulate(
                         self._avg_sums.data(), self._avg_counts.data(), state_indices, value_ptr, row_count,
                     )
-            finally:
+                record_groupby_accumulate_time(self, t_accum_start)
+                return
+
+            if self._agg_mode == AGG_ANY_VALUE:
+                if isinstance(value_vector, Float64Vector):
+                    value_ptr = (<Float64Vector> value_vector).ptr
+                    any_value_fixed_accumulate(
+                        self._i64_state.data(), self._seen.data(), state_indices, value_ptr, row_count,
+                    )
+                elif isinstance(value_vector, Int64Vector):
+                    value_ptr = (<Int64Vector> value_vector).ptr
+                    any_value_fixed_accumulate(
+                        self._i64_state.data(), self._seen.data(), state_indices, value_ptr, row_count,
+                    )
+                elif isinstance(value_vector, TimestampVector):
+                    value_ptr = (<TimestampVector> value_vector).ptr
+                    any_value_fixed_accumulate(
+                        self._i64_state.data(), self._seen.data(), state_indices, value_ptr, row_count,
+                    )
+                else:
+                    value_ptr = (<IntegerVector> value_vector).ptr
+                    any_value_fixed_integer_accumulate(
+                        self._i64_state.data(), self._seen.data(), state_indices, value_ptr, row_count,
+                    )
+                record_groupby_accumulate_time(self, t_accum_start)
+                return
+
+            # Fall-through: AGG_COUNT_VALUE (state_indices precomputed; no per-row key extraction needed)
+            if isinstance(value_vector, Float64Vector):
+                value_ptr = (<Float64Vector> value_vector).ptr
+                value_nulls = <uint8_t*> value_ptr.null_bitmap
+                for row_idx in range(row_count):
+                    if _bitmap_is_valid(value_nulls, row_idx):
+                        self._counts[state_indices[row_idx]] = self._counts[state_indices[row_idx]] + 1
+            elif isinstance(value_vector, Int64Vector):
+                value_ptr = (<Int64Vector> value_vector).ptr
+                value_nulls = <uint8_t*> value_ptr.null_bitmap
+                for row_idx in range(row_count):
+                    if _bitmap_is_valid(value_nulls, row_idx):
+                        self._counts[state_indices[row_idx]] = self._counts[state_indices[row_idx]] + 1
+            elif isinstance(value_vector, TimestampVector):
+                value_ptr = (<TimestampVector> value_vector).ptr
+                value_nulls = <uint8_t*> value_ptr.null_bitmap
+                for row_idx in range(row_count):
+                    if _bitmap_is_valid(value_nulls, row_idx):
+                        self._counts[state_indices[row_idx]] = self._counts[state_indices[row_idx]] + 1
+            else:
+                value_ptr = (<IntegerVector> value_vector).ptr
+                value_nulls = <uint8_t*> value_ptr.null_bitmap
+                for row_idx in range(row_count):
+                    if _bitmap_is_valid(value_nulls, row_idx):
+                        self._counts[state_indices[row_idx]] = self._counts[state_indices[row_idx]] + 1
+            record_groupby_accumulate_time(self, t_accum_start)
+        finally:
+            if state_indices != NULL:
                 free(state_indices)
-            return
 
-        if isinstance(value_vector, Float64Vector):
-            value_ptr = (<Float64Vector> value_vector).ptr
-            value_f64_data = <double*> value_ptr.data
-            value_nulls = <uint8_t*> value_ptr.null_bitmap
+    cdef void _ingest_integer_key(self, Morsel morsel, IntegerVector key_vector):
+        cdef DrakenFixedBuffer* key_ptr = key_vector.ptr
+        cdef uint8_t* key_nulls = <uint8_t*> key_ptr.null_bitmap
+        cdef Py_ssize_t row_idx
+        cdef Py_ssize_t row_count = morsel.num_rows
+        cdef int64_t state_index
+        cdef int64_t key_value
+        cdef bint key_valid
+        cdef int64_t key_valid_flag
+        cdef object value_vector
+        cdef DrakenFixedBuffer* value_ptr
+        cdef int64_t* value_i64_data
+        cdef double* value_f64_data
+        cdef uint8_t* value_nulls
+        cdef int64_t* state_indices = NULL
+        cdef Py_ssize_t local_hits = 0, local_misses = 0
+        cdef Py_ssize_t local_bloom_checks = 0, local_bloom_skips = 0, local_bloom_fps = 0
+        cdef long long t_hash_start, t_state_assign_start, t_accum_start
+        cdef uint64_t[::1] row_hashes
+
+        t_hash_start = time.monotonic_ns()
+        row_hashes = morsel.hash([self._group_column])
+        record_groupby_hash_time(self, t_hash_start)
+
+        state_indices = <int64_t*> malloc(row_count * sizeof(int64_t))
+        if state_indices == NULL and row_count > 0:
+            raise MemoryError()
+
+        try:
+            # --- Phase 1: assign state indices with bloom pre-filter and telemetry ---
+            t_state_assign_start = time.monotonic_ns()
             for row_idx in range(row_count):
+                state_index = -1
+                if self._bloom_might_contain(row_hashes[row_idx]) and self._index.lookup_fast(row_hashes[row_idx], state_index):
+                    local_hits += 1
+                    state_indices[row_idx] = state_index
+                    continue
+                if self._use_bloom:
+                    if not self._groupby_bloom._possibly_contains_fast(row_hashes[row_idx]):
+                        local_bloom_skips += 1
+                    else:
+                        local_bloom_fps += 1
+                local_misses += 1
                 key_valid = _bitmap_is_valid(key_nulls, row_idx)
                 key_valid_flag = 1 if key_valid else 0
                 key_value = _read_integer_value(key_ptr, row_idx) if key_valid else 0
-                state_index = self._find_or_insert_state(row_hashes[row_idx], key_value, key_valid_flag)
-                if self._agg_mode == AGG_COUNT_VALUE:
-                    if _bitmap_is_valid(value_nulls, row_idx):
-                        self._counts[state_index] = self._counts[state_index] + 1
-            return
+                state_indices[row_idx] = self._insert_fixed_state_known_miss(row_hashes[row_idx], key_value, key_valid_flag)
+            record_ingest_state_assign_time(self, t_state_assign_start)
+            record_ingest_hit_miss_counts(self, local_hits, local_misses)
+            record_bloom_stats(self, local_bloom_checks, local_bloom_skips, local_bloom_fps)
 
-        if isinstance(value_vector, Int64Vector):
-            value_ptr = (<Int64Vector> value_vector).ptr
-            value_i64_data = <int64_t*> value_ptr.data
-            value_nulls = <uint8_t*> value_ptr.null_bitmap
-            for row_idx in range(row_count):
-                key_valid = _bitmap_is_valid(key_nulls, row_idx)
-                key_valid_flag = 1 if key_valid else 0
-                key_value = _read_integer_value(key_ptr, row_idx) if key_valid else 0
-                state_index = self._find_or_insert_state(row_hashes[row_idx], key_value, key_valid_flag)
-                if self._agg_mode == AGG_COUNT_VALUE:
-                    if _bitmap_is_valid(value_nulls, row_idx):
-                        self._counts[state_index] = self._counts[state_index] + 1
-            return
+            # --- Phase 2: accumulate ---
+            t_accum_start = time.monotonic_ns()
+            if self._agg_mode == AGG_COUNT_STAR:
+                count_star_accumulate(self._counts.data(), state_indices, row_count)
+                record_groupby_accumulate_time(self, t_accum_start)
+                return
 
-        value_ptr = (<IntegerVector> value_vector).ptr
-        value_nulls = <uint8_t*> value_ptr.null_bitmap
-        for row_idx in range(row_count):
-            key_valid = _bitmap_is_valid(key_nulls, row_idx)
-            key_valid_flag = 1 if key_valid else 0
-            key_value = _read_integer_value(key_ptr, row_idx) if key_valid else 0
-            state_index = self._find_or_insert_state(row_hashes[row_idx], key_value, key_valid_flag)
-            if self._agg_mode == AGG_COUNT_VALUE:
-                if _bitmap_is_valid(value_nulls, row_idx):
-                    self._counts[state_index] = self._counts[state_index] + 1
+            if self._agg_mode == AGG_COUNT_DISTINCT:
+                self._ingest_count_distinct_for_states(morsel, state_indices, row_count)
+                record_groupby_accumulate_time(self, t_accum_start)
+                return
+
+            value_vector = morsel.column(self._value_column)
+            if self._agg_mode == AGG_SUM:
+                if isinstance(value_vector, Float64Vector):
+                    value_ptr = (<Float64Vector> value_vector).ptr
+                    sum_f64_accumulate(
+                        self._f64_state.data(), self._seen.data(), state_indices,
+                        <double*> value_ptr.data, <uint8_t*> value_ptr.null_bitmap, row_count,
+                    )
+                elif isinstance(value_vector, Int64Vector):
+                    value_ptr = (<Int64Vector> value_vector).ptr
+                    sum_i64_accumulate(
+                        self._i64_state.data(), self._seen.data(), state_indices,
+                        <int64_t*> value_ptr.data, <uint8_t*> value_ptr.null_bitmap, row_count,
+                    )
+                else:
+                    value_ptr = (<IntegerVector> value_vector).ptr
+                    sum_integer_accumulate(
+                        self._i64_state.data(), self._seen.data(), state_indices, value_ptr, row_count,
+                    )
+                record_groupby_accumulate_time(self, t_accum_start)
+                return
+
+            if self._agg_mode in (AGG_MIN, AGG_MAX):
+                if isinstance(value_vector, Float64Vector):
+                    value_ptr = (<Float64Vector> value_vector).ptr
+                    minmax_f64_accumulate(
+                        self._f64_state.data(), self._seen.data(), state_indices,
+                        <double*> value_ptr.data, <uint8_t*> value_ptr.null_bitmap, row_count, self._agg_mode == AGG_MIN,
+                    )
+                elif isinstance(value_vector, Int64Vector):
+                    value_ptr = (<Int64Vector> value_vector).ptr
+                    minmax_i64_accumulate(
+                        self._i64_state.data(), self._seen.data(), state_indices,
+                        <int64_t*> value_ptr.data, <uint8_t*> value_ptr.null_bitmap, row_count, self._agg_mode == AGG_MIN,
+                    )
+                else:
+                    value_ptr = (<IntegerVector> value_vector).ptr
+                    minmax_integer_accumulate(
+                        self._i64_state.data(), self._seen.data(), state_indices, value_ptr, row_count, self._agg_mode == AGG_MIN,
+                    )
+                record_groupby_accumulate_time(self, t_accum_start)
+                return
+
+            if self._agg_mode == AGG_AVG:
+                if isinstance(value_vector, Float64Vector):
+                    value_ptr = (<Float64Vector> value_vector).ptr
+                    avg_f64_accumulate(
+                        self._avg_sums.data(), self._avg_counts.data(), state_indices,
+                        <double*> value_ptr.data, <uint8_t*> value_ptr.null_bitmap, row_count,
+                    )
+                elif isinstance(value_vector, Int64Vector):
+                    value_ptr = (<Int64Vector> value_vector).ptr
+                    avg_i64_accumulate(
+                        self._avg_sums.data(), self._avg_counts.data(), state_indices,
+                        <int64_t*> value_ptr.data, <uint8_t*> value_ptr.null_bitmap, row_count,
+                    )
+                else:
+                    value_ptr = (<IntegerVector> value_vector).ptr
+                    avg_integer_accumulate(
+                        self._avg_sums.data(), self._avg_counts.data(), state_indices, value_ptr, row_count,
+                    )
+                record_groupby_accumulate_time(self, t_accum_start)
+                return
+
+            # Fall-through: AGG_COUNT_VALUE (state_indices precomputed; no per-row key extraction needed)
+            if isinstance(value_vector, Float64Vector):
+                value_ptr = (<Float64Vector> value_vector).ptr
+                value_nulls = <uint8_t*> value_ptr.null_bitmap
+                for row_idx in range(row_count):
+                    if _bitmap_is_valid(value_nulls, row_idx):
+                        self._counts[state_indices[row_idx]] = self._counts[state_indices[row_idx]] + 1
+            elif isinstance(value_vector, Int64Vector):
+                value_ptr = (<Int64Vector> value_vector).ptr
+                value_nulls = <uint8_t*> value_ptr.null_bitmap
+                for row_idx in range(row_count):
+                    if _bitmap_is_valid(value_nulls, row_idx):
+                        self._counts[state_indices[row_idx]] = self._counts[state_indices[row_idx]] + 1
+            else:
+                value_ptr = (<IntegerVector> value_vector).ptr
+                value_nulls = <uint8_t*> value_ptr.null_bitmap
+                for row_idx in range(row_count):
+                    if _bitmap_is_valid(value_nulls, row_idx):
+                        self._counts[state_indices[row_idx]] = self._counts[state_indices[row_idx]] + 1
+            record_groupby_accumulate_time(self, t_accum_start)
+        finally:
+            if state_indices != NULL:
+                free(state_indices)
 
     cdef void _ingest_int64_key_multi(self, Morsel morsel, Int64Vector key_vector) except *:
         cdef uint64_t[::1] row_hashes = morsel.hash([self._group_column])
@@ -3873,6 +3897,7 @@ cdef class CarcharGroupStateEngine:
         cdef Py_ssize_t row_idx
         cdef Py_ssize_t row_count = morsel.num_rows
         cdef int64_t* state_indices = NULL
+        cdef int64_t state_index
         cdef int64_t key_value
         cdef int64_t key_valid_flag
         cdef Py_ssize_t agg_idx
@@ -3884,6 +3909,8 @@ cdef class CarcharGroupStateEngine:
         cdef double* value_f64_data
         cdef uint8_t* value_nulls
         cdef int64_t value_i64
+        cdef Py_ssize_t local_hits = 0, local_misses = 0
+        cdef Py_ssize_t local_bloom_checks = 0, local_bloom_skips = 0, local_bloom_fps = 0
 
         state_indices = <int64_t*> malloc(row_count * sizeof(int64_t))
         if state_indices == NULL and row_count > 0:
@@ -3891,11 +3918,24 @@ cdef class CarcharGroupStateEngine:
 
         try:
             for row_idx in range(row_count):
+                state_index = -1
+                if self._bloom_might_contain(row_hashes[row_idx]) and self._index.lookup_fast(row_hashes[row_idx], state_index):
+                    local_hits += 1
+                    state_indices[row_idx] = state_index
+                    continue
+                if self._use_bloom:
+                    if not self._groupby_bloom._possibly_contains_fast(row_hashes[row_idx]):
+                        local_bloom_skips += 1
+                    else:
+                        local_bloom_fps += 1
+                local_misses += 1
                 key_valid_flag = 1 if _bitmap_is_valid(key_nulls, row_idx) else 0
                 key_value = key_data[row_idx] if key_valid_flag != 0 else 0
-                state_indices[row_idx] = self._find_or_insert_state(
+                state_indices[row_idx] = self._insert_fixed_state_known_miss(
                     row_hashes[row_idx], key_value, key_valid_flag
                 )
+            record_ingest_hit_miss_counts(self, local_hits, local_misses)
+            record_bloom_stats(self, local_bloom_checks, local_bloom_skips, local_bloom_fps)
 
             for agg_idx in range(self._multi_agg_count):
                 agg_mode = self._multi_agg_modes[agg_idx]
@@ -4087,6 +4127,7 @@ cdef class CarcharGroupStateEngine:
         cdef Py_ssize_t row_idx
         cdef Py_ssize_t row_count = morsel.num_rows
         cdef int64_t* state_indices = NULL
+        cdef int64_t state_index
         cdef int64_t key_value
         cdef int64_t key_valid_flag
         cdef Py_ssize_t agg_idx
@@ -4098,6 +4139,8 @@ cdef class CarcharGroupStateEngine:
         cdef double* value_f64_data
         cdef uint8_t* value_nulls
         cdef int64_t value_i64
+        cdef Py_ssize_t local_hits = 0, local_misses = 0
+        cdef Py_ssize_t local_bloom_checks = 0, local_bloom_skips = 0, local_bloom_fps = 0
 
         state_indices = <int64_t*> malloc(row_count * sizeof(int64_t))
         if state_indices == NULL and row_count > 0:
@@ -4105,11 +4148,24 @@ cdef class CarcharGroupStateEngine:
 
         try:
             for row_idx in range(row_count):
+                state_index = -1
+                if self._bloom_might_contain(row_hashes[row_idx]) and self._index.lookup_fast(row_hashes[row_idx], state_index):
+                    local_hits += 1
+                    state_indices[row_idx] = state_index
+                    continue
+                if self._use_bloom:
+                    if not self._groupby_bloom._possibly_contains_fast(row_hashes[row_idx]):
+                        local_bloom_skips += 1
+                    else:
+                        local_bloom_fps += 1
+                local_misses += 1
                 key_valid_flag = 1 if _bitmap_is_valid(key_nulls, row_idx) else 0
                 key_value = _read_integer_value(key_ptr, row_idx) if key_valid_flag != 0 else 0
-                state_indices[row_idx] = self._find_or_insert_state(
+                state_indices[row_idx] = self._insert_fixed_state_known_miss(
                     row_hashes[row_idx], key_value, key_valid_flag
                 )
+            record_ingest_hit_miss_counts(self, local_hits, local_misses)
+            record_bloom_stats(self, local_bloom_checks, local_bloom_skips, local_bloom_fps)
 
             for agg_idx in range(self._multi_agg_count):
                 agg_mode = self._multi_agg_modes[agg_idx]
@@ -4720,6 +4776,9 @@ cdef class CarcharGroupStateEngine:
         cdef int64_t key_valid_flag
         cdef int64_t key_value
         cdef int64_t key_kind = _dict_accessor_key_kind(_vector_dict_accessor(key_vector))
+        cdef Py_ssize_t local_bloom_checks = 0
+        cdef Py_ssize_t local_bloom_skips = 0
+        cdef Py_ssize_t local_bloom_fps = 0
 
         state_indices = <int64_t*> malloc(row_count * sizeof(int64_t))
         if state_indices == NULL and row_count > 0:
@@ -4728,12 +4787,19 @@ cdef class CarcharGroupStateEngine:
         try:
             for row_idx in range(row_count):
                 state_index = -1
-                if self._index.lookup_fast(row_hashes[row_idx], state_index):
+                if self._use_bloom:
+                    local_bloom_checks += 1
+                if self._bloom_might_contain(row_hashes[row_idx]) and self._index.lookup_fast(row_hashes[row_idx], state_index):
                     state_indices[row_idx] = state_index
                     continue
+                if self._use_bloom:
+                    if not self._groupby_bloom._possibly_contains_fast(row_hashes[row_idx]):
+                        local_bloom_skips += 1
+                    else:
+                        local_bloom_fps += 1
                 if self._is_multi_fixed_kind(key_kind):
                     key_value = self._read_dictionary_fixed_key(key_vector, row_idx, &key_valid_flag)
-                    state_indices[row_idx] = self._find_or_insert_state(
+                    state_indices[row_idx] = self._insert_fixed_state_known_miss(
                         row_hashes[row_idx],
                         key_value,
                         key_valid_flag,
@@ -4742,12 +4808,13 @@ cdef class CarcharGroupStateEngine:
                     key_valid_flag = self._extract_stringlike_key(
                         key_vector, row_idx, &key_data_ptr, &key_data_len
                     )
-                    state_indices[row_idx] = self._find_or_insert_encoded_state(
+                    state_indices[row_idx] = self._insert_encoded_state_known_miss(
                         row_hashes[row_idx],
                         key_data_ptr,
                         key_data_len,
                         key_valid_flag,
                     )
+            record_bloom_stats(self, local_bloom_checks, local_bloom_skips, local_bloom_fps)
 
             for agg_idx in range(self._multi_agg_count):
                 agg_mode = self._multi_agg_modes[agg_idx]
@@ -4947,6 +5014,9 @@ cdef class CarcharGroupStateEngine:
         cdef DictAccessor* value_dict_accessor = NULL
         cdef double val_decoded_f64
         cdef int64_t val_decoded_i64
+        cdef Py_ssize_t local_bloom_checks = 0
+        cdef Py_ssize_t local_bloom_skips = 0
+        cdef Py_ssize_t local_bloom_fps = 0
 
         state_indices = <int64_t*> malloc(row_count * sizeof(int64_t))
         if state_indices == NULL and row_count > 0:
@@ -4955,12 +5025,19 @@ cdef class CarcharGroupStateEngine:
         try:
             for row_idx in range(row_count):
                 state_index = -1
-                if self._index.lookup_fast(row_hashes[row_idx], state_index):
+                if self._use_bloom:
+                    local_bloom_checks += 1
+                if self._bloom_might_contain(row_hashes[row_idx]) and self._index.lookup_fast(row_hashes[row_idx], state_index):
                     state_indices[row_idx] = state_index
                     continue
+                if self._use_bloom:
+                    if not self._groupby_bloom._possibly_contains_fast(row_hashes[row_idx]):
+                        local_bloom_skips += 1
+                    else:
+                        local_bloom_fps += 1
                 if self._is_multi_fixed_kind(key_kind):
                     key_value = self._read_dictionary_fixed_key(key_vector, row_idx, &key_valid_flag)
-                    state_indices[row_idx] = self._find_or_insert_state(
+                    state_indices[row_idx] = self._insert_fixed_state_known_miss(
                         row_hashes[row_idx],
                         key_value,
                         key_valid_flag,
@@ -4969,12 +5046,13 @@ cdef class CarcharGroupStateEngine:
                     key_valid_flag = self._extract_stringlike_key(
                         key_vector, row_idx, &key_data_ptr, &key_data_len
                     )
-                    state_indices[row_idx] = self._find_or_insert_encoded_state(
+                    state_indices[row_idx] = self._insert_encoded_state_known_miss(
                         row_hashes[row_idx],
                         key_data_ptr,
                         key_data_len,
                         key_valid_flag,
                     )
+            record_bloom_stats(self, local_bloom_checks, local_bloom_skips, local_bloom_fps)
 
             if self._agg_mode == AGG_COUNT_STAR:
                 count_star_accumulate(self._counts.data(), state_indices, row_count)
@@ -5167,7 +5245,7 @@ cdef class CarcharGroupStateEngine:
                 free(state_indices)
 
     cdef void _ingest_object_key(self, Morsel morsel, object key_vector) except *:
-        cdef uint64_t[::1] row_hashes = morsel.hash(self._group_by_columns)
+        cdef uint64_t[::1] row_hashes
         cdef Py_ssize_t row_idx
         cdef Py_ssize_t row_count = morsel.num_rows
         cdef int64_t* state_indices = NULL
@@ -5183,6 +5261,18 @@ cdef class CarcharGroupStateEngine:
         cdef const char* key_data_ptr = NULL
         cdef Py_ssize_t key_data_len = 0
         cdef int64_t key_valid_flag
+        cdef Py_ssize_t local_hits = 0
+        cdef Py_ssize_t local_misses = 0
+        cdef Py_ssize_t local_bloom_checks = 0
+        cdef Py_ssize_t local_bloom_skips = 0
+        cdef Py_ssize_t local_bloom_fps = 0
+        cdef long long t_state_assign_start
+        cdef long long t_hash_start
+        cdef long long t_accum_start
+
+        t_hash_start = time.monotonic_ns()
+        row_hashes = morsel.hash(self._group_by_columns)
+        record_groupby_hash_time(self, t_hash_start)
 
         if self._multi_key_object_mode:
             for group_name in self._group_by_columns:
@@ -5195,13 +5285,23 @@ cdef class CarcharGroupStateEngine:
             raise MemoryError()
 
         try:
+            t_state_assign_start = time.monotonic_ns()
             for row_idx in range(row_count):
                 state_index = -1
-                if self._index.lookup_fast(row_hashes[row_idx], state_index):
+                if self._use_bloom:
+                    local_bloom_checks += 1
+                if self._bloom_might_contain(row_hashes[row_idx]) and self._index.lookup_fast(row_hashes[row_idx], state_index):
+                    local_hits += 1
                     state_indices[row_idx] = state_index
                     continue
+                if self._use_bloom:
+                    if not self._groupby_bloom._possibly_contains_fast(row_hashes[row_idx]):
+                        local_bloom_skips += 1
+                    else:
+                        local_bloom_fps += 1
+                local_misses += 1
                 if self._multi_key_object_mode:
-                    state_indices[row_idx] = self._find_or_insert_multi_encoded_state(
+                    state_indices[row_idx] = self._insert_multi_encoded_state_known_miss(
                         row_hashes[row_idx],
                         key_vectors,
                         row_idx,
@@ -5210,18 +5310,24 @@ cdef class CarcharGroupStateEngine:
                     key_valid_flag = self._extract_stringlike_key(
                         key_vectors[0], row_idx, &key_data_ptr, &key_data_len
                     )
-                    state_indices[row_idx] = self._find_or_insert_encoded_state(
+                    state_indices[row_idx] = self._insert_encoded_state_known_miss(
                         row_hashes[row_idx],
                         key_data_ptr,
                         key_data_len,
                         key_valid_flag,
                     )
+            record_ingest_state_assign_time(self, t_state_assign_start)
+            record_ingest_hit_miss_counts(self, local_hits, local_misses)
+            record_bloom_stats(self, local_bloom_checks, local_bloom_skips, local_bloom_fps)
+            t_accum_start = time.monotonic_ns()
 
             if self._agg_mode == AGG_COUNT_STAR:
                 count_star_accumulate(self._counts.data(), state_indices, row_count)
+                record_groupby_accumulate_time(self, t_accum_start)
                 return
             if self._agg_mode == AGG_COUNT_DISTINCT:
                 self._ingest_count_distinct_for_states(morsel, state_indices, row_count)
+                record_groupby_accumulate_time(self, t_accum_start)
                 return
 
             if self._agg_mode == AGG_SUM:
@@ -5243,14 +5349,17 @@ cdef class CarcharGroupStateEngine:
                     sum_integer_accumulate(
                         self._i64_state.data(), self._seen.data(), state_indices, value_ptr, row_count,
                     )
+                record_groupby_accumulate_time(self, t_accum_start)
                 return
 
             if self._value_kind == VALUE_OBJECT and self._agg_mode == AGG_ANY_VALUE:
                 self._ingest_any_value_var_for_states(morsel, state_indices, row_count)
+                record_groupby_accumulate_time(self, t_accum_start)
                 return
 
             if self._value_kind == VALUE_OBJECT and self._agg_mode in (AGG_MIN, AGG_MAX):
                 self._ingest_object_minmax_for_states(morsel, state_indices, row_count)
+                record_groupby_accumulate_time(self, t_accum_start)
                 return
 
             if self._agg_mode in (AGG_MIN, AGG_MAX):
@@ -5278,6 +5387,7 @@ cdef class CarcharGroupStateEngine:
                     minmax_integer_accumulate(
                         self._i64_state.data(), self._seen.data(), state_indices, value_ptr, row_count, self._agg_mode == AGG_MIN,
                     )
+                record_groupby_accumulate_time(self, t_accum_start)
                 return
 
             if self._agg_mode == AGG_AVG:
@@ -5299,6 +5409,7 @@ cdef class CarcharGroupStateEngine:
                     avg_integer_accumulate(
                         self._avg_sums.data(), self._avg_counts.data(), state_indices, value_ptr, row_count,
                     )
+                record_groupby_accumulate_time(self, t_accum_start)
                 return
 
             value_vector = morsel.column(self._value_column)
@@ -5311,6 +5422,7 @@ cdef class CarcharGroupStateEngine:
                     if self._agg_mode == AGG_COUNT_VALUE:
                         if _bitmap_is_valid(value_nulls, row_idx):
                             self._counts[state_index] = self._counts[state_index] + 1
+                record_groupby_accumulate_time(self, t_accum_start)
                 return
 
             if isinstance(value_vector, Int64Vector):
@@ -5322,6 +5434,7 @@ cdef class CarcharGroupStateEngine:
                     if self._agg_mode == AGG_COUNT_VALUE:
                         if _bitmap_is_valid(value_nulls, row_idx):
                             self._counts[state_index] = self._counts[state_index] + 1
+                record_groupby_accumulate_time(self, t_accum_start)
                 return
 
             if isinstance(value_vector, TimestampVector):
@@ -5332,6 +5445,7 @@ cdef class CarcharGroupStateEngine:
                     if self._agg_mode == AGG_COUNT_VALUE:
                         if _bitmap_is_valid(value_nulls, row_idx):
                             self._counts[state_index] = self._counts[state_index] + 1
+                record_groupby_accumulate_time(self, t_accum_start)
                 return
 
             value_ptr = (<IntegerVector> value_vector).ptr
@@ -5341,12 +5455,13 @@ cdef class CarcharGroupStateEngine:
                 if self._agg_mode == AGG_COUNT_VALUE:
                     if _bitmap_is_valid(value_nulls, row_idx):
                         self._counts[state_index] = self._counts[state_index] + 1
+            record_groupby_accumulate_time(self, t_accum_start)
         finally:
             if state_indices != NULL:
                 free(state_indices)
 
     cdef void _ingest_object_key_multi(self, Morsel morsel, object key_vector) except *:
-        cdef uint64_t[::1] row_hashes = morsel.hash(self._group_by_columns)
+        cdef uint64_t[::1] row_hashes
         cdef Py_ssize_t row_idx
         cdef Py_ssize_t row_count = morsel.num_rows
         cdef int64_t* state_indices = NULL
@@ -5365,6 +5480,18 @@ cdef class CarcharGroupStateEngine:
         cdef const char* key_data_ptr = NULL
         cdef Py_ssize_t key_data_len = 0
         cdef int64_t key_valid_flag
+        cdef Py_ssize_t local_hits = 0
+        cdef Py_ssize_t local_misses = 0
+        cdef Py_ssize_t local_bloom_checks = 0
+        cdef Py_ssize_t local_bloom_skips = 0
+        cdef Py_ssize_t local_bloom_fps = 0
+        cdef long long t_state_assign_start
+        cdef long long t_hash_start
+        cdef long long t_accum_start
+
+        t_hash_start = time.monotonic_ns()
+        row_hashes = morsel.hash(self._group_by_columns)
+        record_groupby_hash_time(self, t_hash_start)
 
         if self._multi_key_object_mode:
             for group_name in self._group_by_columns:
@@ -5377,13 +5504,23 @@ cdef class CarcharGroupStateEngine:
             raise MemoryError()
 
         try:
+            t_state_assign_start = time.monotonic_ns()
             for row_idx in range(row_count):
                 state_index = -1
-                if self._index.lookup_fast(row_hashes[row_idx], state_index):
+                if self._use_bloom:
+                    local_bloom_checks += 1
+                if self._bloom_might_contain(row_hashes[row_idx]) and self._index.lookup_fast(row_hashes[row_idx], state_index):
+                    local_hits += 1
                     state_indices[row_idx] = state_index
                     continue
+                if self._use_bloom:
+                    if not self._groupby_bloom._possibly_contains_fast(row_hashes[row_idx]):
+                        local_bloom_skips += 1
+                    else:
+                        local_bloom_fps += 1
+                local_misses += 1
                 if self._multi_key_object_mode:
-                    state_indices[row_idx] = self._find_or_insert_multi_encoded_state(
+                    state_indices[row_idx] = self._insert_multi_encoded_state_known_miss(
                         row_hashes[row_idx],
                         key_vectors,
                         row_idx,
@@ -5392,12 +5529,16 @@ cdef class CarcharGroupStateEngine:
                     key_valid_flag = self._extract_stringlike_key(
                         key_vectors[0], row_idx, &key_data_ptr, &key_data_len
                     )
-                    state_indices[row_idx] = self._find_or_insert_encoded_state(
+                    state_indices[row_idx] = self._insert_encoded_state_known_miss(
                         row_hashes[row_idx],
                         key_data_ptr,
                         key_data_len,
                         key_valid_flag,
                     )
+            record_ingest_state_assign_time(self, t_state_assign_start)
+            record_ingest_hit_miss_counts(self, local_hits, local_misses)
+            record_bloom_stats(self, local_bloom_checks, local_bloom_skips, local_bloom_fps)
+            t_accum_start = time.monotonic_ns()
 
             for agg_idx in range(self._multi_agg_count):
                 agg_mode = self._multi_agg_modes[agg_idx]
@@ -5578,6 +5719,7 @@ cdef class CarcharGroupStateEngine:
                     offset = self._multi_offset(state_indices[row_idx], agg_idx)
                     if agg_mode == AGG_COUNT_VALUE:
                         self._multi_counts[offset] = self._multi_counts[offset] + 1
+            record_groupby_accumulate_time(self, t_accum_start)
         finally:
             if state_indices != NULL:
                 free(state_indices)
@@ -5590,6 +5732,7 @@ cdef class CarcharGroupStateEngine:
         cdef object group_column
         cdef DictAccessor* key_dict_accessor = NULL
         cdef bint saw_dict_group_key = False
+        cdef long long t_reserve_start
 
         self._maybe_init_carchar_mode(morsel)
 
@@ -5610,7 +5753,10 @@ cdef class CarcharGroupStateEngine:
         if saw_dict_group_key:
             record_dict_groupby_fastpath_hit(self)
 
+        self._maybe_init_bloom()
+        t_reserve_start = time.monotonic_ns()
         self._reserve_for_rows(morsel.num_rows)
+        record_groupby_reserve_time(self, t_reserve_start)
         key_vector = None
         if not self._multi_key_object_mode and not self._multi_key_fixed_mode:
             key_vector = morsel.column(self._group_column)
@@ -5856,7 +6002,10 @@ cdef class CarcharGroupStateEngine:
                 stop,
             )
             key_vec = key_vectors[0]
-        elif self._single_key_kind != KEY_MULTI_FIXED_INT:
+        elif (
+            self._single_key_kind != KEY_MULTI_FIXED_INT
+            or <Py_ssize_t> self._key_payload_offsets.size() >= stop + 1
+        ):
             key_vec = build_finalize_single_key_vector(
                 self._key_payload_bytes,
                 self._key_payload_offsets,
@@ -5867,6 +6016,7 @@ cdef class CarcharGroupStateEngine:
                 stop,
             )
         else:
+            # Legacy non-Carchar path: _group_key_values/_group_key_valid are directly populated.
             for state_index in range(start, stop):
                 if self._group_key_valid[state_index] == 0:
                     needs_key_nulls = True
@@ -5954,11 +6104,17 @@ cdef class CarcharGroupStateEngine:
 
         if self._multi_key_fixed_mode:
             key_vectors = self._build_multi_fixed_key_vectors(start, stop)
-        else:
+        elif <Py_ssize_t> self._group_key_valid.size() >= stop:
+            # Legacy non-Carchar path: _group_key_valid is directly populated.
             for state_index in range(start, stop):
                 if self._group_key_valid[state_index] == 0:
                     needs_key_nulls = True
                     break
+        # else: Carchar path — _group_key_valid is not populated; nulls are encoded
+        # in _key_payload_bytes/_key_payload_offsets and handled by
+        # build_finalize_single_key_vector below.  needs_key_nulls stays False,
+        # but that variable is only consumed by the legacy else-branch below which
+        # is never reached in Carchar mode (the elif condition is True there).
 
         if self._multi_key_fixed_mode:
             pass
