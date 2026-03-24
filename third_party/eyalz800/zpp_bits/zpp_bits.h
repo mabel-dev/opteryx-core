@@ -82,7 +82,21 @@ template <class ToType,
                               is_trivially_copyable_v<FromType>>>
 constexpr ToType bit_cast(FromType const & from) noexcept
 {
+#if defined(__has_builtin)
+#if __has_builtin(__builtin_bit_cast)
     return __builtin_bit_cast(ToType, from);
+#else
+    ToType dest{};
+    std::memcpy(&dest, &from, sizeof(ToType));
+    return dest;
+#endif
+#elif defined(__GNUC__) && __GNUC__ >= 11
+    return __builtin_bit_cast(ToType, from);
+#else
+    ToType dest{};
+    std::memcpy(&dest, &from, sizeof(ToType));
+    return dest;
+#endif
 }
 } // namespace std
 #endif
