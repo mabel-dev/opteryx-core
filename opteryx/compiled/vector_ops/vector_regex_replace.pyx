@@ -66,6 +66,7 @@ cpdef object vector_regex_replace(object data, bytes pattern, bytes replacement)
     # Pre-allocate string buffer to reduce reallocation overhead
     # This capacity will grow if needed but helps for common case
     value_str.reserve(256)
+    cdef size_t buffer_capacity = 256
 
     # Extract pattern and replacement buffers
     PyBytes_AsStringAndSize(pattern, &pattern_buf, &pattern_len)
@@ -85,7 +86,8 @@ cpdef object vector_regex_replace(object data, bytes pattern, bytes replacement)
 
     repl_piece = StringPiece(repl_str)
 
-    # Create builder with estimated capacity
+    # Create builder with estimated capacity (at least 10% larger for variation)
+    estimated_bytes_per_entry = max(estimated_bytes_per_entry, int(estimated_bytes_per_entry * 1.1))
     builder = string_vector_module.StringVectorBuilder.with_estimate(length, estimated_bytes_per_entry)
 
     # Get C-level iterator
@@ -96,7 +98,10 @@ cpdef object vector_regex_replace(object data, bytes pattern, bytes replacement)
         if elem.is_null:
             builder.append_null()
         else:
-            # Reuse string buffer - assign() may reuse capacity
+            # Reuse string buffer - reallocate if needed, doubling capacity
+            if buffer_capacity < elem.length:
+                buffer_capacity = elem.length * 2
+                value_str.reserve(buffer_capacity)
             value_str.assign(elem.ptr, <size_t>elem.length)
 
             # RE2 performs in-place replacement
