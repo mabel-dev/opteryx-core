@@ -6,45 +6,82 @@ import glob
 import os
 import platform
 import sys
+import threading
 
 import numpy
 from Cython.Build import cythonize
-from setuptools import Extension, find_packages, setup
+from setuptools import Extension
+from setuptools import find_packages
+from setuptools import setup
 from setuptools.command.build_ext import build_ext as build_ext_orig
 from setuptools_rust import RustExtension
 
 LIBRARY = "opteryx"
 
 
+# Thread-local storage so each parallel ThreadPool worker in build_extensions
+# sees its own per-extension build_temp without clobbering other threads.
+_build_temp_local = threading.local()
+
+
 class build_ext(build_ext_orig):
+    """build_ext subclass that isolates each extension's object files into a
+    unique subdirectory of build_temp.
+
+    build_temp is backed by threading.local so parallel workers never see
+    each other's value between the set and the first read inside
+    build_ext_orig.build_extension() -> compiler.compile(output_dir=...).
+
+    All source-file subdirectories are pre-created before compilation starts
+    so that macOS clang's atomic-rename strategy (.tmp -> .o) never encounters
+    a missing target directory.
+    """
+
+    @property
+    def build_temp(self):
+        # Per-thread override takes priority; fall back to the base value that
+        # finalize_options / the setuptools machinery wrote on the main thread.
+        return getattr(_build_temp_local, "value", None) or self.__dict__.get(
+            "_build_temp_base", ""
+        )
+
+    @build_temp.setter
+    def build_temp(self, value):
+        # Keep both the thread-local and a shared base so the main-thread /
+        # non-parallel code paths continue to work correctly.
+        _build_temp_local.value = value
+        self.__dict__["_build_temp_base"] = value
+
     def build_extensions(self):
         if self.compiler and ".S" not in self.compiler.src_extensions:
             self.compiler.src_extensions.append(".S")
-        # Best-effort: if `self.parallel` exists and is > 1, keep it to allow parallel builds
-        # but the per-extension build_temp in build_extension prevents object file collisions.
         super().build_extensions()
 
     def build_extension(self, ext):
-        # Create a unique build_temp per extension to avoid collisions when the
-        # same source file is used by multiple extensions in a parallel build.
-        orig_build_temp = (
-            getattr(self, "build_temp", None) or self.get_finalized_command("build").build_temp
-        )
+        # Derive a stable per-extension subdirectory from the shared base so
+        # that object files from different extensions never collide.
+        orig_base = self.__dict__.get("_build_temp_base", "") or ""
         safe_name = ext.name.replace(".", "_")
-        per_ext_build_temp = os.path.join(orig_build_temp, safe_name)
+        per_ext_build_temp = os.path.join(orig_base, safe_name)
         os.makedirs(per_ext_build_temp, exist_ok=True)
-        # Temporarily override build_temp used by underlying compiler invocations
-        self.build_temp = per_ext_build_temp
+
+        # Pre-create every source-mirrored subdirectory so macOS clang's
+        # atomic rename (.tmp -> .o) never encounters a missing directory.
+        for src in ext.sources:
+            subdir = os.path.join(per_ext_build_temp, os.path.dirname(src))
+            if subdir:
+                os.makedirs(subdir, exist_ok=True)
+
+        # Point this thread's build_temp at the per-extension directory.
+        # Other threads each maintain their own value and are unaffected.
+        prev = getattr(_build_temp_local, "value", None)
+        _build_temp_local.value = per_ext_build_temp
         try:
-            # If building a C++ extension on Linux, ensure we add the extra link
-            # args to statically link libstdc++ and libgcc to avoid requiring
-            # newer GLIBC/GLIBCXX on target systems.
             if is_linux() and getattr(ext, "language", "") == "c++":
                 ext.extra_link_args = list(getattr(ext, "extra_link_args", [])) + LD_EXTRA
             super().build_extension(ext)
         finally:
-            # Restore original build_temp after building this extension
-            self.build_temp = orig_build_temp
+            _build_temp_local.value = prev
 
 
 # Platform detection
@@ -509,6 +546,18 @@ extensions = [
             "src/cpp/simd_search.cpp",
             "src/cpp/simd_string_ops.cpp",
             "src/cpp/cpu_features.cpp",
+        ],
+        include_dirs=include_dirs,
+        language="c++",
+        extra_compile_args=CPP_FLAGS,
+        extra_link_args=LD_EXTRA,
+    ),
+    # SIMD capability probe — exposes cpu_architecture() to Python
+    Extension(
+        "opteryx.compiled.simd_probe",
+        sources=[
+            "opteryx/compiled/simd_probe.pyx",
+            "src/cpp/simd_env.cpp",
         ],
         include_dirs=include_dirs,
         language="c++",
@@ -1022,13 +1071,44 @@ extensions.append(
         "opteryx.nanobind.carchar_native",
         sources=[
             "src/cpp/carchar_native.cpp",
-            "src/cpp/regex_compiler_native.cpp",
-            "src/cpp/cpu_features.cpp",
             "third_party/nanobind/src/nb_combined.cpp",
         ],
         include_dirs=include_dirs
         + [
             "third_party/mabel/carchar",
+            "third_party/nanobind",
+            "third_party/nanobind/src",
+            "third_party/nanobind/ext/robin_map/include",
+        ],
+        extra_compile_args=CPP_FLAGS + ["-fno-strict-aliasing", "-DNB_COMPACT_ASSERTIONS"],
+        extra_link_args=LD_EXTRA,
+        language="c++",
+    )
+)
+
+# regex_compiler_native: RE2 AST-based regex -> DFA-ops translator.
+# Lives at opteryx.compiled.functions.regex_compiler_native so the Python
+# shim at opteryx/compiled/functions/regex_compiler_native.py can import it.
+# It needs its own extension (not bundled into carchar_native) because it
+# defines a separate NB_MODULE(regex_compiler_native, ...).
+extensions.append(
+    Extension(
+        "opteryx.compiled.functions._regex_compiler_native",
+        sources=(
+            [
+                "src/cpp/regex_compiler_native.cpp",
+                "third_party/nanobind/src/nb_combined.cpp",
+            ]
+            + sorted(
+                glob.glob("third_party/re2/re2/*.cc")
+                + [
+                    "third_party/re2/util/strutil.cc",
+                    "third_party/re2/util/rune.cc",
+                ]
+            )
+        ),
+        include_dirs=include_dirs
+        + [
             "third_party/nanobind",
             "third_party/nanobind/src",
             "third_party/nanobind/ext/robin_map/include",

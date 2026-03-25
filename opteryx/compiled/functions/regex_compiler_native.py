@@ -18,22 +18,20 @@ dataclasses used across the Python executor path.
 """
 
 from functools import lru_cache
-from typing import Optional, Tuple
+from typing import Tuple
 
 # Normalisation helper lives with other text implementations.
 from opteryx.expression.functions.implementations.text import _normalise_replacement
 
 # Import the datatypes used by the rest of the Python codepath.
-from opteryx.expression.functions.regex_compiler import (
-    CompiledProcedure,
-    Operation,
-    OperationType,
-)
+from opteryx.expression.functions.regex_compiler import CompiledProcedure
+from opteryx.expression.functions.regex_compiler import Operation
+from opteryx.expression.functions.regex_compiler import OperationType
 
 # Try to import the native binding that will be built into the compiled functions
 # package. If it is not available, the compiler will always fall back to RE2.
 try:
-    from opteryx.compiled.functions import regex_compiler_native as _native  # type: ignore
+    from opteryx.compiled.functions import _regex_compiler_native as _native  # type: ignore
 
     _NATIVE_AVAILABLE = True
 except Exception:
