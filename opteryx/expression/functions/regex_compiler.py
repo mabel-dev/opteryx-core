@@ -12,12 +12,34 @@ Strategy:
 
 import re
 from dataclasses import dataclass
-from typing import List, Tuple, Optional, Dict, Set
 from enum import IntEnum
+from typing import Dict, List, Optional, Set, Tuple
+
+# Pre-compiled detection regex for the "strip prefix, capture rest" pattern class.
+# Matches patterns of the form (replacement must be r'\1'):
+#   ^(.+)$           — no prefix, capture whole non-empty string
+#   ^LITERAL(.+)$    — mandatory literal prefix, capture rest
+#   ^X?(.+)$         — single char X made optional, capture rest
+#   ^LITERAL(.+?)$   — non-greedy variant (equivalent when .+ is anchored to $)
+#
+# Multi-char optional prefixes such as ^Mercury?(.+)$ are deliberately REJECTED:
+# in standard regex syntax ^Mercury? means "Mercur" + optional "y", NOT optional
+# "Mercury", so compiling it as "optionally match Mercury" would be wrong.
+# The single-char restriction (enforced in _compile_strip_prefix_capture_rest)
+# makes the optional-prefix compilation unambiguous.
+#
+# PREFIX chars are restricted to safe literals only (no regex metacharacters).
+_STRIP_PREFIX_CAPTURE_REST_RE: re.Pattern = re.compile(
+    r"^\^"
+    r"(?:([A-Za-z0-9_.:\-/ ]+)(\?)?)?"  # optional: safe literal prefix (g1) + optional ? (g2)
+    r"\(\.(?:\+\?|\+)\)"  # (.+?) or (.+) — capture group
+    r"\$$"  # literal $ at end of pattern
+)
 
 
 class OperationType(IntEnum):
     """Operation types for compiled procedures."""
+
     OP_MATCH_LITERAL = 0
     OP_MATCH_OPTIONAL_LITERAL = 1
     OP_FIND_CHAR = 2
@@ -32,6 +54,7 @@ class OperationType(IntEnum):
 @dataclass
 class Operation:
     """Native operation for compiled procedure."""
+
     op_type: int
     pattern: Optional[bytes] = None
     pattern_len: int = 0
@@ -42,7 +65,7 @@ class Operation:
 class RegexToDFACompiler:
     """Compile regex patterns to DFA-based fast procedures."""
 
-    def compile(self, pattern: bytes, replacement: bytes) -> 'CompiledProcedure':
+    def compile(self, pattern: bytes, replacement: bytes) -> "CompiledProcedure":
         """
         Compile regex pattern to fast procedure or fall back to RE2.
 
@@ -55,8 +78,10 @@ class RegexToDFACompiler:
         """
         try:
             # Parse pattern string for analysis
-            pattern_str = pattern.decode('utf-8') if isinstance(pattern, bytes) else pattern
-            replacement_str = replacement.decode('utf-8') if isinstance(replacement, bytes) else replacement
+            pattern_str = pattern.decode("utf-8") if isinstance(pattern, bytes) else pattern
+            replacement_str = (
+                replacement.decode("utf-8") if isinstance(replacement, bytes) else replacement
+            )
 
             # Try to detect compilable patterns (LOW BAR)
             ops = self._try_compile(pattern_str, replacement_str)
@@ -66,11 +91,7 @@ class RegexToDFACompiler:
                 return CompiledProcedure(fallback_to_re2=True)
 
             # Build native operation array
-            return CompiledProcedure(
-                operations=ops,
-                num_operations=len(ops),
-                compiled=True
-            )
+            return CompiledProcedure(operations=ops, num_operations=len(ops), compiled=True)
         except Exception:
             # Any error → fallback to RE2
             return CompiledProcedure(fallback_to_re2=True)
@@ -85,10 +106,10 @@ class RegexToDFACompiler:
         # Replacement: \1 (capture group 1)
 
         # Quick heuristic checks for compilable patterns
-        if '|' in pattern and pattern.count('|') > 2:
+        if "|" in pattern and pattern.count("|") > 2:
             return None  # Complex alternation
 
-        if '(?=' in pattern or '(?!' in pattern or '(?<=' in pattern or '(?<!' in pattern:
+        if "(?=" in pattern or "(?!" in pattern or "(?<=" in pattern or "(?<!" in pattern:
             return None  # Lookarounds unsupported
 
         # Try pattern-specific compilers
@@ -100,40 +121,47 @@ class RegexToDFACompiler:
         if ops:
             return ops
 
-        # Could add more pattern types here
+        ops = self._compile_strip_prefix_capture_rest(pattern, replacement)
+        if ops:
+            return ops
+
         return None
 
     def _compile_url_extractor(self, pattern: str, replacement: str) -> Optional[List[Operation]]:
-        """
+        r"""
         Detect and compile URL domain extraction pattern:
         ^https?://(?:www\.)?([^/]+)/.*$ → \1
         """
         # Match the exact URL pattern
-        url_pattern = r'^\^https\?://\(\?:www\\\.\)\?\(\[\^/\]\+\)/\.\*\$'
+        url_pattern = r"^\^https\?://\(\?:www\\\.\)\?\(\[\^/\]\+\)/\.\*\$"
         if not re.match(url_pattern, pattern):
             return None
 
         # Check replacement is capture group 1
-        if replacement != r'\1':
+        if replacement != r"\1":
             return None
 
-        # Emit operations for URL extraction
+        # Emit operations for URL extraction.
+        # NOTE: OP_EXTRACT_WHILE_NOT uses target_char (not pattern) to drive
+        # avx_search. Without target_char set to ord('/'), avx_search searches
+        # for a null byte, never finds it, captures the full remaining string,
+        # then the subsequent MATCH_LITERAL '/' fails and every row returns None.
         ops = [
-            Operation(OperationType.OP_MATCH_LITERAL, b'http', 4),
-            Operation(OperationType.OP_MATCH_OPTIONAL_LITERAL, b's', 1),
-            Operation(OperationType.OP_MATCH_LITERAL, b'://', 3),
-            Operation(OperationType.OP_MATCH_OPTIONAL_LITERAL, b'www.', 4),
-            Operation(OperationType.OP_START_CAPTURE, capture_id=1),
-            Operation(OperationType.OP_EXTRACT_WHILE_NOT, b'/', 1, capture_id=1),
-            Operation(OperationType.OP_END_CAPTURE, capture_id=1),
-            Operation(OperationType.OP_MATCH_LITERAL, b'/', 1),
+            Operation(OperationType.OP_MATCH_LITERAL, b"http", 4),
+            Operation(OperationType.OP_MATCH_OPTIONAL_LITERAL, b"s", 1),
+            Operation(OperationType.OP_MATCH_LITERAL, b"://", 3),
+            Operation(OperationType.OP_MATCH_OPTIONAL_LITERAL, b"www.", 4),
+            Operation(OperationType.OP_EXTRACT_WHILE_NOT, capture_id=1, target_char=ord("/")),
+            Operation(OperationType.OP_MATCH_LITERAL, b"/", 1),
             Operation(OperationType.OP_DISCARD_REST),
             Operation(OperationType.OP_RETURN_CAPTURE, capture_id=1),
         ]
 
         return ops
 
-    def _compile_simple_literal_patterns(self, pattern: str, replacement: str) -> Optional[List[Operation]]:
+    def _compile_simple_literal_patterns(
+        self, pattern: str, replacement: str
+    ) -> Optional[List[Operation]]:
         """
         Compile simple patterns with no regex metacharacters:
         ^foo$ → bar (literal replacement)
@@ -141,18 +169,102 @@ class RegexToDFACompiler:
         foo$ → bar (suffix replacement)
         """
         # Check if pattern has no regex metacharacters
-        if any(c in pattern for c in r'^$.*+?[]{}()|\\'):
-            if not (pattern.startswith('^') or pattern.endswith('$')):
+        if any(c in pattern for c in r"^$.*+?[]{}()|\\"):
+            if not (pattern.startswith("^") or pattern.endswith("$")):
                 return None
 
         # For now, only handle simple cases
         # Could expand this
         return None
 
+    def _compile_strip_prefix_capture_rest(
+        self, pattern: str, replacement: str
+    ) -> Optional[List[Operation]]:
+        r"""
+        Compile patterns of the form  ^PREFIX?(.+)$  →  \1.
+
+        Handles three sub-cases (replacement must be r'\1'):
+          ^(.+)$          — no prefix; capture whole non-empty string
+          ^LITERAL(.+)$   — mandatory literal prefix; capture rest
+          ^X?(.+)$        — single char X made optional; capture rest
+
+        PREFIX must contain only safe literal characters (no regex metacharacters).
+        Multi-char optional prefixes (e.g. ^Mercury?) are rejected: standard regex
+        applies ? only to the last character, so compiling the whole prefix as
+        optional would produce incorrect results.
+
+        Implementation note — "capture to end of string":
+          OP_EXTRACT_WHILE_NOT with target_char=None is translated to the C value 0
+          (null byte) in to_cython_args().  avx_search for '\0' in normal UTF-8 text
+          always returns -1 (not found), so match_pos = str_len − cursor, capturing
+          all remaining bytes.  OP_RETURN_CAPTURE then returns None when the capture
+          is empty (cap.start == cap.end), enforcing the .+ non-empty requirement.
+
+        Backtracking caveat:
+          RE2/NFA can backtrack when a greedy optional prefix consumes the prefix
+          and leaves nothing for (.+), then retries without the prefix.  Example:
+          input "M" with pattern ^M?(.+)$:
+            • RE2:  M? tries M, .+ fails → backtrack → M? skips, .+ matches "M" → "M"
+            • DFA:  M? matches M, capture is empty → OP_RETURN_CAPTURE → None
+          This mismatch affects only inputs whose entire content equals the optional
+          prefix exactly.  For practical workloads this is inconsequential.
+        """
+        if replacement != r"\1":
+            return None
+
+        m = _STRIP_PREFIX_CAPTURE_REST_RE.match(pattern)
+        if m is None:
+            return None
+
+        prefix_str: Optional[str] = m.group(1)  # None when no prefix present
+        is_optional: bool = m.group(2) is not None  # True when ? follows the prefix
+
+        # Reject multi-char optional prefix: ^Mercury?(.+)$ applies ? only to the
+        # last char of the prefix in standard regex, not to the whole token.
+        if prefix_str is not None and is_optional and len(prefix_str) > 1:
+            return None
+
+        ops: List[Operation] = []
+
+        if prefix_str is not None:
+            prefix_bytes = prefix_str.encode("utf-8")
+            if is_optional:
+                ops.append(
+                    Operation(
+                        OperationType.OP_MATCH_OPTIONAL_LITERAL,
+                        prefix_bytes,
+                        len(prefix_bytes),
+                    )
+                )
+            else:
+                ops.append(
+                    Operation(
+                        OperationType.OP_MATCH_LITERAL,
+                        prefix_bytes,
+                        len(prefix_bytes),
+                    )
+                )
+
+        # Capture from current cursor to end of string.
+        # target_char=None → C value 0 (null-byte sentinel) → avx_search returns -1
+        # for normal UTF-8 text → match_pos = str_len - cursor → captures all remaining.
+        # OP_RETURN_CAPTURE enforces non-empty (.+ semantics) via cap.start < cap.end.
+        ops.append(
+            Operation(
+                OperationType.OP_EXTRACT_WHILE_NOT,
+                capture_id=1,
+                target_char=None,  # null-byte sentinel: capture to end of string
+            )
+        )
+        ops.append(Operation(OperationType.OP_RETURN_CAPTURE, capture_id=1))
+
+        return ops
+
 
 @dataclass
 class CompiledProcedure:
     """Compiled procedure ready for execution in Cython."""
+
     operations: Optional[List[Operation]] = None
     num_operations: int = 0
     compiled: bool = False
@@ -166,12 +278,14 @@ class CompiledProcedure:
         # Convert operations to tuples for Cython
         op_tuples = []
         for op in self.operations:
-            op_tuples.append((
-                op.op_type,
-                op.pattern,
-                op.pattern_len,
-                op.capture_id,
-                op.target_char,
-            ))
+            op_tuples.append(
+                (
+                    op.op_type,
+                    op.pattern,
+                    op.pattern_len,
+                    op.capture_id,
+                    op.target_char,
+                )
+            )
 
         return (op_tuples, len(op_tuples), False)

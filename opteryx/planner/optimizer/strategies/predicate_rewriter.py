@@ -41,27 +41,19 @@ a = ANY(z) AND b = ANY(z) AND c = ANY(z)    → z @>> (a, b, c)
 """
 
 import re
-from typing import Callable
-from typing import Dict
+from typing import Callable, Dict
 
-from opteryx.expression import ExpressionColumn
-from opteryx.expression import NodeType
-from opteryx.expression import format_expression
-from opteryx.models import Node
-from opteryx.models import QueryTelemetry
-from opteryx.planner.binder.operator_map import determine_type
-from opteryx.planner.logical_planner import LogicalPlan
-from opteryx.planner.logical_planner import LogicalPlanNode
-from opteryx.planner.logical_planner import LogicalPlanStepType
-from opteryx.utils.dates import add_single_unit
-from opteryx.utils.dates import parse_iso
-from opteryx.utils.dates import truncate_single
-from opteryx.utils.sql import sql_like_to_regex
 from orso.schema import ConstantColumn
 from orso.types import OrsoTypes
 
-from .optimization_strategy import OptimizationStrategy
-from .optimization_strategy import OptimizerContext
+from opteryx.expression import ExpressionColumn, NodeType, format_expression
+from opteryx.models import Node, QueryTelemetry
+from opteryx.planner.binder.operator_map import determine_type
+from opteryx.planner.logical_planner import LogicalPlan, LogicalPlanNode, LogicalPlanStepType
+from opteryx.utils.dates import add_single_unit, parse_iso, truncate_single
+from opteryx.utils.sql import sql_like_to_regex
+
+from .optimization_strategy import OptimizationStrategy, OptimizerContext
 
 # fmt: off
 IN_REWRITES = {"InList": "Eq", "NotInList": "NotEq"}
@@ -621,6 +613,58 @@ def _rewrite_function(function, telemetry: QueryTelemetry):
             # Best-effort: if rebinding fails, leave original binding intact.
             pass
 
+    # Special-case: try to rewrite REGEXP_REPLACE(...) to internal _DFA_REPLACE(...)
+    # when pattern and replacement are literal and the pattern is compilable.
+    if function.value == "REGEXP_REPLACE":
+        # Expect signature: REGEXP_REPLACE(input, pattern, replacement)
+        try:
+            if len(function.parameters) >= 3:
+                pat_node = function.parameters[1]
+                repl_node = function.parameters[2]
+                # Only consider literal pattern and replacement
+                if (
+                    pat_node.node_type == NodeType.LITERAL
+                    and repl_node.node_type == NodeType.LITERAL
+                ):
+                    # Convert literal values to bytes for compiler
+                    pat_val = pat_node.value
+                    repl_val = repl_node.value
+                    if isinstance(pat_val, str):
+                        pat_bytes = pat_val.encode("utf-8")
+                    elif isinstance(pat_val, (bytes, bytearray)):
+                        pat_bytes = bytes(pat_val)
+                    else:
+                        pat_bytes = None
+
+                    if isinstance(repl_val, str):
+                        repl_bytes = repl_val.encode("utf-8")
+                    elif isinstance(repl_val, (bytes, bytearray)):
+                        repl_bytes = bytes(repl_val)
+                    else:
+                        repl_bytes = None
+
+                    if pat_bytes is not None and repl_bytes is not None:
+                        # Try to detect compilable pattern using the DFA compiler.
+                        # Best-effort: if anything goes wrong, do not rewrite.
+                        try:
+                            from opteryx.expression.functions.regex_compiler import (
+                                RegexToDFACompiler,
+                            )
+
+                            compiler = RegexToDFACompiler()
+                            proc = compiler.compile(pat_bytes, repl_bytes)
+                            if not proc.fallback_to_re2:
+                                # Pattern is compilable — rewrite to private fast-path.
+                                function.value = "_DFA_REPLACE"
+                                _rebind_function_ref()
+                                return function
+                        except Exception:
+                            # If compiler isn't available or errors, skip rewrite.
+                            pass
+        except Exception:
+            # Defensive: do not allow rewrite to raise.
+            pass
+
     if function.value == "_CASE":
         # CASE WHEN x IS NULL THEN y ELSE x END → IFNULL(x, y)
         if len(function.parameters) == 2 and function.parameters[0].parameters[0].value == "IsNull":
@@ -709,6 +753,15 @@ def _rewrite_function(function, telemetry: QueryTelemetry):
 
 
 class PredicateRewriteStrategy(OptimizationStrategy):
+    def _rewrite_expression_list(self, expressions, telemetry):
+        if not expressions:
+            return expressions
+
+        rewritten = []
+        for expr in expressions:
+            rewritten.append(_rewrite_predicate(expr, telemetry))
+        return rewritten
+
     def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:
         if not context.optimized_plan:
             context.optimized_plan = context.pre_optimized_tree.copy()  # type: ignore
@@ -718,11 +771,16 @@ class PredicateRewriteStrategy(OptimizationStrategy):
             context.optimized_plan[context.node_id] = node
 
         if node.node_type == LogicalPlanStepType.Project:
-            new_columns = []
-            for column in node.columns:
-                new_column = _rewrite_predicate(column, self.telemetry)
-                new_columns.append(new_column)
-            node.columns = new_columns
+            node.columns = self._rewrite_expression_list(node.columns, self.telemetry)
+            context.optimized_plan[context.node_id] = node
+
+        if node.node_type in {LogicalPlanStepType.Aggregate, LogicalPlanStepType.AggregateAndGroup}:
+            if getattr(node, "groups", None):
+                node.groups = self._rewrite_expression_list(node.groups, self.telemetry)
+            if getattr(node, "aggregates", None):
+                node.aggregates = self._rewrite_expression_list(node.aggregates, self.telemetry)
+            if getattr(node, "projection", None):
+                node.projection = self._rewrite_expression_list(node.projection, self.telemetry)
             context.optimized_plan[context.node_id] = node
 
         return context

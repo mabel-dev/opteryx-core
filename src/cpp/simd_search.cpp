@@ -33,22 +33,35 @@ static int simd_search_substring_scalar(const char* data, size_t length, const c
 #if defined(__AVX2__)
 static int simd_search_substring_avx2(const char* data, size_t length, const char* pattern, size_t pattern_len) {
     if (pattern_len == 0 || pattern_len > 16) return -1;
-    __m128i pat = _mm_loadu_si128(reinterpret_cast<const __m128i*>(pattern));
+
+    // Broadcast the first byte of the pattern into a 256-bit vector.
+    // Scan 32 bytes at a time for first-byte candidates (O(N/32) SIMD ops),
+    // then confirm each candidate with memcmp.  This replaces the original
+    // sliding-window loop which advanced by 1 each iteration (O(N) SIMD ops).
+    const __m256i first_vec = _mm256_set1_epi8(static_cast<char>(pattern[0]));
     size_t i = 0;
-    for (; i + 16 <= length; ++i) {
-        __m128i chunk = _mm_loadu_si128(reinterpret_cast<const __m128i*>(data + i));
-        __m128i cmp = _mm_cmpeq_epi8(chunk, pat);
-        int mask = _mm_movemask_epi8(cmp);
-        if (mask == ((1 << pattern_len) - 1)) {
-            if (memcmp(data + i, pattern, pattern_len) == 0) {
-                return static_cast<int>(i);
+
+    for (; i + 32 <= length; i += 32) {
+        const __m256i chunk = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(data + i));
+        const __m256i cmp   = _mm256_cmpeq_epi8(chunk, first_vec);
+        // movemask gives 1 bit per byte: bit k set → data[i+k] == pattern[0].
+        uint32_t mask = static_cast<uint32_t>(_mm256_movemask_epi8(cmp));
+
+        while (mask) {
+            const int    bit = __builtin_ctz(mask);
+            const size_t pos = i + static_cast<size_t>(bit);
+            if (pos + pattern_len <= length &&
+                memcmp(data + pos, pattern, pattern_len) == 0) {
+                return static_cast<int>(pos);
             }
+            mask &= mask - 1;  // clear lowest set bit
         }
     }
-    for (; i + pattern_len <= length; ++i) {
-        if (memcmp(data + i, pattern, pattern_len) == 0) {
+
+    // Scalar tail: fewer than 32 bytes remain.
+    for (; i + pattern_len <= length; i++) {
+        if (memcmp(data + i, pattern, pattern_len) == 0)
             return static_cast<int>(i);
-        }
     }
     return -1;
 }
@@ -56,8 +69,62 @@ static int simd_search_substring_avx2(const char* data, size_t length, const cha
 
 #if defined(__ARM_NEON) || defined(__ARM_NEON__)
 static int simd_search_substring_neon(const char* data, size_t length, const char* pattern, size_t pattern_len) {
-    // For simplicity we use scalar substring search on NEON path for now
-    return simd_search_substring_scalar(data, length, pattern, pattern_len);
+    if (pattern_len == 0 || pattern_len > 16) return -1;
+
+    // Broadcast the first byte of the pattern into a NEON vector.
+    // We scan 16 bytes at a time for first-byte candidates, then confirm
+    // the full pattern with memcmp.  This gives O(N/16) NEON operations
+    // plus O(hits) memcmp calls — much better than a scalar sliding window.
+    const uint8x16_t first_vec = vdupq_n_u8(static_cast<uint8_t>(pattern[0]));
+    size_t i = 0;
+
+    for (; i + 16 <= length; i += 16) {
+        // Load 16 bytes of the haystack and compare each byte to pattern[0].
+        const uint8x16_t chunk = vld1q_u8(reinterpret_cast<const uint8_t*>(data + i));
+        const uint8x16_t cmp   = vceqq_u8(chunk, first_vec);
+
+        // Reinterpret the 16-byte comparison mask as two 64-bit words.
+        // Each byte of cmp is 0xFF (match) or 0x00 (no match), so in the
+        // 64-bit view a matching byte contributes 8 set bits.
+        uint64_t lo = vgetq_lane_u64(vreinterpretq_u64_u8(cmp), 0);
+        uint64_t hi = vgetq_lane_u64(vreinterpretq_u64_u8(cmp), 1);
+
+        // Fast-skip chunks with no first-byte hits.
+        if ((lo | hi) == 0) continue;
+
+        // Iterate over every first-byte hit in the low 8 bytes.
+        while (lo) {
+            // __builtin_ctzll always returns a multiple of 8 here because
+            // matching bytes are 0xFF (8 trailing zeros from the preceding
+            // 0x00 byte boundary).
+            const int    bit = __builtin_ctzll(lo);
+            const size_t pos = i + static_cast<size_t>(bit >> 3);
+            if (pos + pattern_len <= length &&
+                memcmp(data + pos, pattern, pattern_len) == 0) {
+                return static_cast<int>(pos);
+            }
+            // Clear this byte's bits so the next iteration finds the next hit.
+            lo &= ~(static_cast<uint64_t>(0xFF) << bit);
+        }
+
+        // Iterate over every first-byte hit in the high 8 bytes.
+        while (hi) {
+            const int    bit = __builtin_ctzll(hi);
+            const size_t pos = i + 8 + static_cast<size_t>(bit >> 3);
+            if (pos + pattern_len <= length &&
+                memcmp(data + pos, pattern, pattern_len) == 0) {
+                return static_cast<int>(pos);
+            }
+            hi &= ~(static_cast<uint64_t>(0xFF) << bit);
+        }
+    }
+
+    // Scalar tail: fewer than 16 bytes remain.
+    for (; i + pattern_len <= length; i++) {
+        if (memcmp(data + i, pattern, pattern_len) == 0)
+            return static_cast<int>(i);
+    }
+    return -1;
 }
 #endif
 
@@ -97,14 +164,11 @@ int neon_search(const char* data, size_t length, char target) {
         uint8x16_t chunk = vld1q_u8(reinterpret_cast<const uint8_t*>(data + i));
         // Compare each byte to the target.
         uint8x16_t cmp = vceqq_u8(chunk, target_vec);
-        // Store the comparison results into an array.
-        uint8_t mask[16];
-        vst1q_u8(mask, cmp);
-        for (int j = 0; j < 16; j++) {
-            if (mask[j] == 0xFF) {
-                return static_cast<int>(i + j);
-            }
-        }
+        // Extract two 64-bit lanes; ctzll finds the first matching byte in 2 comparisons.
+        uint64_t lo = vgetq_lane_u64(vreinterpretq_u64_u8(cmp), 0);
+        uint64_t hi = vgetq_lane_u64(vreinterpretq_u64_u8(cmp), 1);
+        if (lo != 0) return static_cast<int>(i + __builtin_ctzll(lo) / 8);
+        if (hi != 0) return static_cast<int>(i + 8 + __builtin_ctzll(hi) / 8);
     }
     // Process any leftover bytes.
     for (; i < length; i++) {
