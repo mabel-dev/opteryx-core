@@ -1261,7 +1261,8 @@ def _builtin_text_extended_functions() -> list[FunctionDefinition]:
                 ParameterSpec(name="replacement", type_family="string"),
             ),
             summary="(internal) DFA-compiled regex replace fast-path. Patterns may fall back to RE2.",
-            cost=0.1,
+            engine="draken",
+            cost=5.0,
         ),
         _make(
             "_GET_STRING",
