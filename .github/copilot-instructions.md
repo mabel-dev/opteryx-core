@@ -1,10 +1,26 @@
-- Always prefer failure over silent degradation.
+- Always prefer failure over silent degradation
+- The execution engine is Cython/C++ glued together with Python
 - Do not generate Python fallback implementations for Cython code.
-- If Cython compilation would fail, return a compile-time error rather than adding runtime fallbacks.
-- Never duplicate logic in Python and Cython unless explicitly requested.
-- Performance > convenience. This is a performance-focused codebase, and we prioritize performance even if it means less convenient APIs, partially duplicated code or more complex code.
-- No dynamic dispatch in hot paths - use static dispatch and explicit specialization.
-- Do not gate imports behind try/except, failing at import time if a required dependency is missing rather than silently degrading functionality.
-- The user is the architect of the system and should be involved in design decisions. This is a collaborative process, and the user should be empowered to make informed decisions about the codebase.
+- Never duplicate logic in Python and Cython unless explicitly requested
+- Performance > convenience. This is a performance-focused codebase, and we prioritize performance even if it means less convenient APIs, partially duplicated code or more complex code
+- No dynamic dispatch in hot paths - use static dispatch and explicit specialization
+- Do not gate imports behind try/except, failing at import time if a required dependency is missing rather than silently degrading functionality
+- The user is the architect of the system and should be involved in design decisions. This is a collaborative process, and the user should be empowered to make informed decisions about the codebase
+- We are actively eradicating the following libraries:
+  - pyarrow
+  - numpy
+  - abseil
+  - minio
+- Documents live in the docs/ folder
+- Tests live in the tests/ folder
+- sratch code lives in the scratch/ folder
+- We own the Opteryx code, the Mabel (draken, rugo and carchar) code, and Orso
+- We develop on ARM Mac, our primary execution environment is x86 GCP Cloud Run
+- We use 'make' commands to shortcut common processes:
+  - make compile - full recompile
+  - make c - quick recompile
+  - make test - full regression suite
+  - make t - quick regression suite
+  - make b - run current test query (runs brace.py)
 
-Everytime you break one of these rules, a kitten dies. Please follow these rules to keep the kittens alive, they're counting on you.
+Everytime you break one of these rules, a fairy loses it wings. Please follow these rules to keep the fairies flying, they're counting on you.

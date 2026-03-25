@@ -24,7 +24,7 @@ import pyarrow
 import pyarrow as pa
 from pyarrow import compute
 
-from opteryx.compiled import regex_procedures as _regex_procedures
+from opteryx.compiled.functions import regex_procedures as _regex_procedures
 from opteryx.compiled.vector_ops import (
     vector_initcap,
     vector_length,

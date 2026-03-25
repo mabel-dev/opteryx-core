@@ -8,10 +8,8 @@ authors = [{name='Justin Joyce', email='justin.joyce@joocer.com'}]
 maintainers = [{name='Justin Joyce', email='justin.joyce@joocer.com'}]
 dependencies = [
     'aiohttp==3.13.*',
-    'minio==7.2.20',
     'numpy==2.4.*',
     'orso==0.0.*',
-    'psutil==7.2.*',
     'pyarrow==23.0.*',
     'requests==2.32.*'
 ]

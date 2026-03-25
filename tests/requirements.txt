@@ -26,6 +26,5 @@ openpyxl
 setuptools_rust
 
 aiohttp
-psutil
 
 pydantic==2.11.10

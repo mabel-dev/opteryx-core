@@ -6,8 +6,7 @@
 import json
 import typing
 from os import environ
-from typing import Optional
-from typing import Union
+from typing import Optional, Union
 
 
 def memory_allocation_calculation(allocation: Union[float, int]) -> int:
@@ -23,13 +22,12 @@ def memory_allocation_calculation(allocation: Union[float, int]) -> int:
         int: Memory size in bytes to be allocated.
     """
 
-    # Import psutil lazily to avoid paying the import cost at module import time.
-    # Use a small helper so tests or callers that need the value will trigger the
-    # import only when this function is called.
+    # Use the compiled platform extension directly. Fail loudly if not present.
     def _get_total_memory_bytes() -> int:
-        import psutil
+        from opteryx.compiled import platform as _platform  # type: ignore
 
-        return psutil.virtual_memory().total
+        # Use physical RAM as the total memory reference
+        return int(_platform.physical_memory_total_bytes())
 
     total_memory = _get_total_memory_bytes()
     if 0 < allocation < 1:  # Treat as a percentage
@@ -44,14 +42,14 @@ def system_gigabytes() -> int:
     """
     Get the total system memory in gigabytes.
 
-    This imports psutil lazily to avoid paying the cost at module import time.
+    This uses the compiled platform extension lazily to avoid paying the cost at module import time.
 
     Returns:
         int: Total system memory in gigabytes.
     """
-    import psutil
+    from opteryx.compiled import platform as _platform  # type: ignore
 
-    return psutil.virtual_memory().total // (1024 * 1024 * 1024)
+    return int(_platform.physical_memory_total_bytes()) // (1024 * 1024 * 1024)
 
 
 def get(key: str, default: Optional[typing.Any] = None) -> Optional[typing.Any]:

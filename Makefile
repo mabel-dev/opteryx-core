@@ -82,7 +82,7 @@ lint: check-python ## Run all linting tools
 	$(call print_blue,"Sorting imports...")
 	@$(PYTHON) -m isort .
 	$(call print_blue,"Formatting code...")
-	@$(PYTHON) -m ruff format $(SRC_DIR) 
+	@$(PYTHON) -m ruff format $(SRC_DIR)
 	$(call print_green,"Linting complete!")
 
 format: ## Format code only

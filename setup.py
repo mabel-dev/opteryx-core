@@ -202,8 +202,9 @@ with open(f"{LIBRARY}/__version__.py", "r", encoding="UTF8") as v:
 with open("README.md", "r", encoding="UTF8") as f:
     long_description = f.read()
 
+    # Helper for draken extensions
 
-# Helper for draken extensions
+
 def make_draken_extension(module_path, source_file, language="c++", depends=None):
     if depends is None:
         depends = ["third_party/mabel/draken/core/buffers.h"]
@@ -514,13 +515,25 @@ extensions = [
         extra_compile_args=CPP_FLAGS,
         extra_link_args=LD_EXTRA,
     ),
-    # Isolated DFA regex executor (kept out of consolidated vector_ops.pyx)
+    # DFA regex executor — lives in compiled/functions alongside other string kernels
     Extension(
-        "opteryx.compiled.regex_procedures",
+        "opteryx.compiled.functions.regex_procedures",
         sources=[
-            "opteryx/compiled/vector_ops/regex_procedures.pyx",
+            "opteryx/compiled/functions/regex_procedures.pyx",
             "src/cpp/simd_search.cpp",
             "src/cpp/cpu_features.cpp",
+        ],
+        include_dirs=include_dirs,
+        language="c++",
+        extra_compile_args=CPP_FLAGS,
+        extra_link_args=LD_EXTRA,
+    ),
+    # Vector-level DFA replacement — mirrors vector_regex_replace calling convention,
+    # handles compilation caching and RE2 fallback internally
+    Extension(
+        "opteryx.compiled.vector_ops.vector_dfa_replace",
+        sources=[
+            "opteryx/compiled/vector_ops/vector_dfa_replace.pyx",
         ],
         include_dirs=include_dirs,
         language="c++",
@@ -532,16 +545,17 @@ extensions = [
         sources=["opteryx/compiled/functions/timestamp.pyx"],
         extra_compile_args=C_FLAGS,
     ),
+    # Platform extension - exposes OS information without psutil dependency
     Extension(
-        "opteryx.compiled.simd_probe",
+        "opteryx.compiled.platform",
         sources=[
-            "opteryx/compiled/simd_probe.pyx",
-            "src/cpp/simd_env.cpp",
-            "src/cpp/cpu_features.cpp",
+            "opteryx/compiled/platform.pyx",
+            "src/cpp/platform.cpp",
         ],
         include_dirs=include_dirs,
         language="c++",
         extra_compile_args=CPP_FLAGS,
+        extra_link_args=LD_EXTRA,
     ),
     Extension(
         "opteryx.compiled.structures.hash_table",
@@ -747,6 +761,7 @@ extensions = [
         "opteryx.compiled.aggregations.kernels.count_distinct",
         sources=[
             "opteryx/compiled/aggregations/kernels/count_distinct.pyx",
+            "src/cpp/cpu_features.cpp",
         ],
         include_dirs=include_dirs,
         language="c++",
@@ -1007,6 +1022,7 @@ extensions.append(
         "opteryx.nanobind.carchar_native",
         sources=[
             "src/cpp/carchar_native.cpp",
+            "src/cpp/regex_compiler_native.cpp",
             "src/cpp/cpu_features.cpp",
             "third_party/nanobind/src/nb_combined.cpp",
         ],
