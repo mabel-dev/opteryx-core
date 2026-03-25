@@ -5,10 +5,6 @@ These filesystems implement the pyarrow.fs.FileSystem interface but use
 Opteryx's memory-view-based readers and stream wrappers for optimal performance.
 """
 
-from opteryx.connectors.io_systems.gcs_filesystem import OpteryxGcsFileSystem
-from opteryx.connectors.io_systems.local_filesystem import OpteryxLocalFileSystem
-from opteryx.connectors.io_systems.s3_filesystem import OpteryxS3FileSystem
-
 __all__ = [
     "OpteryxLocalFileSystem",
     "OpteryxGcsFileSystem",
@@ -39,11 +35,11 @@ def create_filesystem(protocol: str):
         >>> # fs is an OpteryxGcsFileSystem instance
     """
     protocol_map = {
-        "gs": OpteryxGcsFileSystem,
-        "gcs": OpteryxGcsFileSystem,
-        "s3": OpteryxS3FileSystem,
-        "file": OpteryxLocalFileSystem,
-        "": OpteryxLocalFileSystem,  # No protocol = local file
+        "gs": "OpteryxGcsFileSystem",
+        "gcs": "OpteryxGcsFileSystem",
+        "s3": "OpteryxS3FileSystem",
+        "file": "OpteryxLocalFileSystem",
+        "": "OpteryxLocalFileSystem",  # No protocol = local file
     }
 
     if protocol not in protocol_map:
@@ -52,5 +48,23 @@ def create_filesystem(protocol: str):
             f"Supported protocols: {list(protocol_map.keys())}"
         )
 
-    filesystem_class = protocol_map[protocol]
+    filesystem_class_name = protocol_map[protocol]
+    filesystem_class = __getattr__(filesystem_class_name)
     return filesystem_class()
+
+
+def __getattr__(file_system: str):
+    """Lazy load connector classes on first access."""
+    if file_system == "OpteryxGcsFileSystem":
+        from opteryx.connectors.io_systems.gcs_filesystem import OpteryxGcsFileSystem
+
+        return OpteryxGcsFileSystem
+    if file_system == "OpteryxLocalFileSystem":
+        from opteryx.connectors.io_systems.local_filesystem import OpteryxLocalFileSystem
+
+        return OpteryxLocalFileSystem
+    if file_system == "OpteryxS3FileSystem":
+        from opteryx.connectors.io_systems.s3_filesystem import OpteryxS3FileSystem
+
+        return OpteryxS3FileSystem
+    raise AttributeError(f"module {__name__} has no attribute {file_system}")

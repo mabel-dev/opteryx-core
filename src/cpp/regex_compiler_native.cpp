@@ -191,6 +191,15 @@ static bool translate_re2_regexp_to_ops(re2::Regexp* r, std::vector<OpDesc> &out
     flatten_concat(root, parts);
     if (parts.size() < 2) return false; // at minimum should have anchors (begin, end)
 
+    // DEBUG: Log the parts for debugging
+    const char* debug_pattern = std::getenv("DEBUG_REGEX_COMPILER");
+    if (debug_pattern) {
+        fprintf(stderr, "[DEBUG] Pattern has %zu parts:\n", parts.size());
+        for (size_t pi = 0; pi < parts.size(); ++pi) {
+            fprintf(stderr, "  [%zu] op=%d %s\n", pi, parts[pi]->op(), parts[pi]->ToString().c_str());
+        }
+    }
+
     // Anchors: first must be BeginText/BeginLine, last must be EndText/EndLine
     auto is_begin = [](re2::Regexp* x) {
         return x->op() == re2::kRegexpBeginText || x->op() == re2::kRegexpBeginLine;
@@ -198,7 +207,10 @@ static bool translate_re2_regexp_to_ops(re2::Regexp* r, std::vector<OpDesc> &out
     auto is_end = [](re2::Regexp* x) {
         return x->op() == re2::kRegexpEndText || x->op() == re2::kRegexpEndLine;
     };
-    if (!is_begin(parts.front()) || !is_end(parts.back())) return false;
+    if (!is_begin(parts.front()) || !is_end(parts.back())) {
+        if (debug_pattern) fprintf(stderr, "[DEBUG] FAIL: anchors not at start/end\n");
+        return false;
+    }
 
     // Process middle nodes (between anchors)
     size_t i = 1;
@@ -207,11 +219,18 @@ static bool translate_re2_regexp_to_ops(re2::Regexp* r, std::vector<OpDesc> &out
 
     while (i < end_idx) {
         re2::Regexp* node = parts[i];
+        if (debug_pattern) {
+            fprintf(stderr, "[DEBUG] Processing part[%zu] op=%d %s capture_emitted=%d\n", 
+                    i, node->op(), node->ToString().c_str(), capture_emitted);
+        }
 
         // Literal or literal string
         if (node->op() == re2::kRegexpLiteral || node->op() == re2::kRegexpLiteralString) {
             std::string lit;
-            if (!literal_bytes_from_node(node, lit)) return false;
+            if (!literal_bytes_from_node(node, lit)) {
+                if (debug_pattern) fprintf(stderr, "[DEBUG] FAIL: literal_bytes_from_node failed\n");
+                return false;
+            }
             OpDesc o{};
             o.op_type = OP_MATCH_LITERAL;
             o.pattern = std::move(lit);
@@ -226,7 +245,10 @@ static bool translate_re2_regexp_to_ops(re2::Regexp* r, std::vector<OpDesc> &out
         // Optional literal (quest)
         if (node->op() == re2::kRegexpQuest) {
             std::string lit;
-            if (!optional_literal_from_node(node, lit)) return false;
+            if (!optional_literal_from_node(node, lit)) {
+                if (debug_pattern) fprintf(stderr, "[DEBUG] FAIL: optional_literal_from_node failed\n");
+                return false;
+            }
             OpDesc o{};
             o.op_type = OP_MATCH_OPTIONAL_LITERAL;
             o.pattern = std::move(lit);
@@ -269,17 +291,27 @@ static bool translate_re2_regexp_to_ops(re2::Regexp* r, std::vector<OpDesc> &out
                 ++i;
                 continue;
             }
+            if (debug_pattern) fprintf(stderr, "[DEBUG] FAIL: Star/Repeat child not AnyChar\n");
             return false;
         }
 
         // Capturing group (cap >= 0). Only support group 1 and exactly once.
         if (node->op() == re2::kRegexpCapture && node->cap() >= 0) {
             int capid = node->cap();
-            if (capid != 1) return false;
-            if (capture_emitted) return false;
+            if (capid != 1) {
+                if (debug_pattern) fprintf(stderr, "[DEBUG] FAIL: capture group id=%d (not 1)\n", capid);
+                return false;
+            }
+            if (capture_emitted) {
+                if (debug_pattern) fprintf(stderr, "[DEBUG] FAIL: capture already emitted\n");
+                return false;
+            }
             // compile its content
             auto res = compile_capture_content(node);
-            if (!res.first) return false;
+            if (!res.first) {
+                if (debug_pattern) fprintf(stderr, "[DEBUG] FAIL: compile_capture_content failed\n");
+                return false;
+            }
             int target = res.second; // -1 => capture to end; >=0 excluded char
             OpDesc o{};
             o.op_type = OP_EXTRACT_WHILE_NOT;
@@ -293,25 +325,27 @@ static bool translate_re2_regexp_to_ops(re2::Regexp* r, std::vector<OpDesc> &out
             continue;
         }
 
-        // Tail discard: Star or Repeat with AnyChar child and positioned right before end anchor
-        if ((node->op() == re2::kRegexpStar || node->op() == re2::kRegexpRepeat) ) {
-            // get child
-            if (node->nsub() < 1) return false;
-            re2::Regexp* child = node->sub()[0];
-            if (child->op() == re2::kRegexpAnyChar || child->op() == re2::kRegexpAnyByte) {
-                // Only accept if this node is the final element before the end anchor
-                if (i + 1 != end_idx) return false;
-                OpDesc o{};
-                o.op_type = OP_DISCARD_REST;
-                o.pattern = std::string();
-                o.pattern_len = 0;
-                o.capture_id = -1;
-                o.target_char = -1;
-                out_ops.push_back(o);
-                ++i;
-                continue;
+        // Tail discard: Star or Repeat positioned right before end anchor
+        // We accept any Star/Repeat here since in the context of replacement,
+        // we're just discarding everything after the capture. This handles patterns like:
+        //   ^prefix([^/]+)/.*$  -> extract until '/', match '/', discard rest
+        //   ^([^/]+).*$         -> extract everything, discard rest
+        //   ^([^/]+)[a-z]*$     -> extract capture, discard rest (even if [a-z]* only matches some chars)
+        if ((node->op() == re2::kRegexpStar || node->op() == re2::kRegexpRepeat)) {
+            // Only accept if this node is the final element before the end anchor
+            if (i + 1 != end_idx) {
+                if (debug_pattern) fprintf(stderr, "[DEBUG] FAIL: Star/Repeat not at end (i=%zu, end_idx=%zu)\n", i, end_idx);
+                return false;
             }
-            return false;
+            OpDesc o{};
+            o.op_type = OP_DISCARD_REST;
+            o.pattern = std::string();
+            o.pattern_len = 0;
+            o.capture_id = -1;
+            o.target_char = -1;
+            out_ops.push_back(o);
+            ++i;
+            continue;
         }
 
         // Single Dot/AnyChar not allowed except inside capture as handled above
@@ -321,13 +355,20 @@ static bool translate_re2_regexp_to_ops(re2::Regexp* r, std::vector<OpDesc> &out
         }
 
         // Character classes (non-capturing) — not supported except inside + capture handled earlier
-        if (node->op() == re2::kRegexpCharClass) return false;
+        if (node->op() == re2::kRegexpCharClass) {
+            if (debug_pattern) fprintf(stderr, "[DEBUG] FAIL: standalone CharClass not supported\n");
+            return false;
+        }
 
         // Anything else is unsupported
+        if (debug_pattern) fprintf(stderr, "[DEBUG] FAIL: unsupported op type %d\n", node->op());
         return false;
     }
 
-    if (!capture_emitted) return false;
+    if (!capture_emitted) {
+        if (debug_pattern) fprintf(stderr, "[DEBUG] FAIL: no capture group emitted\n");
+        return false;
+    }
 
     // Append OP_RETURN_CAPTURE
     OpDesc ret{};
@@ -341,7 +382,7 @@ static bool translate_re2_regexp_to_ops(re2::Regexp* r, std::vector<OpDesc> &out
     return true;
 }
 
-NB_MODULE(regex_compiler_native, m) {
+NB_MODULE(_regex_compiler_native, m) {
     m.def("compile_regex", [](const std::string &pattern, const std::string &replacement) {
         // Parse pattern using RE2 parser to validate syntax.
         re2::RegexpStatus status;

@@ -14,17 +14,20 @@ from __future__ import annotations
 
 import time
 
-from orso.types import OrsoTypes
-
-from opteryx import EMPTY, EOS
 from opteryx.draken.morsels.morsel import Morsel
 from opteryx.draken.vectors.scalar_constructors import from_scalar as constant_from_scalar
-from opteryx.exceptions import InvalidFunctionParameterError, UnsupportedSyntaxError
-from opteryx.expression import NodeType, get_all_nodes_of_type
+from opteryx.exceptions import InvalidFunctionParameterError
+from opteryx.exceptions import UnsupportedSyntaxError
+from opteryx.expression import NodeType
+from opteryx.expression import get_all_nodes_of_type
 from opteryx.expression.evaluator import evaluate_and_append_draken
 from opteryx.models import QueryProperties
 from opteryx.operators.aggregate_helpers import extract_evaluations
 from opteryx.operators.shuffle import AggregationSpec
+from orso.types import OrsoTypes
+
+from opteryx import EMPTY
+from opteryx import EOS
 
 from . import BasePlanNode
 

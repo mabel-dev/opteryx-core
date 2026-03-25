@@ -6,7 +6,8 @@
 import json
 import typing
 from os import environ
-from typing import Optional, Union
+from typing import Optional
+from typing import Union
 
 
 def memory_allocation_calculation(allocation: Union[float, int]) -> int:
