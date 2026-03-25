@@ -1249,9 +1249,19 @@ def _builtin_text_extended_functions() -> list[FunctionDefinition]:
                 ParameterSpec(name="pattern", type_family="string"),
                 ParameterSpec(name="replacement", type_family="string"),
             ),
-            cost=30.0,
-            engine="draken",
             summary="Replace regex matches.",
+        ),
+        _make(
+            "_DFA_REPLACE",
+            string_functions._dfa_replace,
+            OrsoTypes.BLOB,
+            (
+                _s,
+                ParameterSpec(name="pattern", type_family="string"),
+                ParameterSpec(name="replacement", type_family="string"),
+            ),
+            summary="(internal) DFA-compiled regex replace fast-path. Patterns may fall back to RE2.",
+            cost=0.1,
         ),
         _make(
             "_GET_STRING",

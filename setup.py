@@ -9,9 +9,7 @@ import sys
 
 import numpy
 from Cython.Build import cythonize
-from setuptools import Extension
-from setuptools import find_packages
-from setuptools import setup
+from setuptools import Extension, find_packages, setup
 from setuptools.command.build_ext import build_ext as build_ext_orig
 from setuptools_rust import RustExtension
 
@@ -509,6 +507,19 @@ extensions = [
             "src/cpp/simd_strings_extension.cpp",
             "src/cpp/simd_search.cpp",
             "src/cpp/simd_string_ops.cpp",
+            "src/cpp/cpu_features.cpp",
+        ],
+        include_dirs=include_dirs,
+        language="c++",
+        extra_compile_args=CPP_FLAGS,
+        extra_link_args=LD_EXTRA,
+    ),
+    # Isolated DFA regex executor (kept out of consolidated vector_ops.pyx)
+    Extension(
+        "opteryx.compiled.regex_procedures",
+        sources=[
+            "opteryx/compiled/vector_ops/regex_procedures.pyx",
+            "src/cpp/simd_search.cpp",
             "src/cpp/cpu_features.cpp",
         ],
         include_dirs=include_dirs,
