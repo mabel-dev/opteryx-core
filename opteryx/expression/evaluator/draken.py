@@ -693,7 +693,7 @@ def _dict_compare(op: str, vec, right):
 
 def _constant_compare(op: str, vec, right):
     from opteryx.compiled.draken.vectors.bool_vector import BoolVector
-    from opteryx.expression.ops import _coerce_in_list_values
+    from opteryx.expression.operations.fastpath_constant import _coerce_in_list_values
 
     if right is None:
         return BoolVector(len(vec))
@@ -1288,7 +1288,7 @@ def evaluate_draken(node, morsel):
         if not hasattr(left, "null_count") and not hasattr(right, "null_count"):
             import pyarrow as pa
             from opteryx.compiled.draken.vectors.bool_vector import BoolVector
-            from opteryx.expression.ops import filter_operations
+            from opteryx.expression.operations import filter_operations
 
             scalar_result = filter_operations(
                 pa.array([left]),

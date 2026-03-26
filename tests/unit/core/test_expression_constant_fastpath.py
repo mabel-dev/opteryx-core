@@ -10,7 +10,7 @@ from opteryx.compiled.draken.vectors.integer_vector import IntegerVector
 from opteryx.compiled.draken.vectors.scalar_constructors import from_scalar
 from opteryx.compiled.draken.vectors.string_vector import StringVector
 
-from opteryx.expression.ops import (
+from opteryx.expression.operations import (
     _inner_filter_operations,
     get_dict_expr_telemetry,
     reset_dict_expr_telemetry,
