@@ -17,7 +17,7 @@ sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
 from opteryx.compiled.io import morsel_to_json_rows
 from opteryx.compiled.io import morsel_to_json_strings
-from opteryx.draken.morsels.morsel import Morsel
+from opteryx.compiled.draken.morsels.morsel import Morsel
 
 
 def _measure(fn, repeat: int = 5):

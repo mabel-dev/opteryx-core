@@ -369,7 +369,7 @@ class _HybridEmbeddingProvider:
         row_vectors = rerank_embeddings[1:]
 
         try:
-            from opteryx.nanobind import vector_search
+            from opteryx.compiled.nanobind import vector_search
 
             rerank_scores = numpy.asarray(
                 vector_search.score_cosine(query_vector, row_vectors),
@@ -396,7 +396,7 @@ class _HybridEmbeddingProvider:
 
 class _MiniLMNativeEmbeddingProvider:
     def __init__(self):
-        from opteryx.nanobind import minilm_native
+        from opteryx.compiled.nanobind import minilm_native
 
         model_dir = (
             Path(__file__).resolve().parent.parent / "third_party" / "models" / "all-MiniLM-L6-v2"

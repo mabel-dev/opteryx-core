@@ -1,7 +1,7 @@
 # cython: language_level=3
 
 from libc.stdint cimport int64_t, uint32_t
-from opteryx.draken.core.buffers cimport DictAccessor
+from opteryx.compiled.draken.core.buffers cimport DictAccessor
 
 cdef uint32_t _dict_read_code(const DictAccessor* ptr, Py_ssize_t row_idx) noexcept nogil
 cdef int64_t _read_dictionary_fixed_key(

@@ -20,9 +20,9 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from opteryx.draken import Morsel
-from opteryx.draken.storage import read_morsel
-from opteryx.draken.storage import write_morsel
+from opteryx.compiled.draken import Morsel
+from opteryx.compiled.draken.storage import read_morsel
+from opteryx.compiled.draken.storage import write_morsel
 
 
 def _median_ms(values_ns):

@@ -129,8 +129,8 @@ def MapAccessOp(array, key):
         )
 
     if isinstance(first_element, (list, pyarrow.ListScalar, numpy.ndarray)):
+        from opteryx.compiled.draken.interop.arrow import vector_from_arrow
         from opteryx.compiled.vector_ops import vector_get_element
-        from opteryx.draken.interop.arrow import vector_from_arrow
 
         pa_arr = pyarrow.array(
             [r if not isinstance(r, pyarrow.ListScalar) else r.as_py() for r in array]
@@ -189,7 +189,7 @@ def _ip_containment(left: List[Optional[str]], right: List[str]) -> List[Optiona
     try:
         normalized_left = [_normalize_ip(v) for v in left]
         import pyarrow as _pyarrow
-        from opteryx.draken.interop.arrow import vector_from_arrow as _vector_from_arrow
+        from opteryx.compiled.draken.interop.arrow import vector_from_arrow as _vector_from_arrow
 
         arr = _pyarrow.array(normalized_left, type=_pyarrow.string())
         cidr_str = right if isinstance(right, str) else str(right[0])

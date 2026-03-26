@@ -24,13 +24,13 @@
             "third_party/mabel/draken"
         ],
         "language": "c++",
-        "name": "opteryx.draken.compiled.maskops",
+        "name": "opteryx.compiled.draken.compiled.maskops",
         "sources": [
             "third_party/mabel/draken/compiled/maskops.pyx",
             "src/cpp/simd_bitops.cpp"
         ]
     },
-    "module_name": "opteryx.draken.compiled.maskops"
+    "module_name": "opteryx.compiled.draken.compiled.maskops"
 }
 END: Cython Metadata */
 
@@ -2717,14 +2717,14 @@ static int __Pyx_State_RemoveModule(void*);
 
 /* Module declarations from "libc.stdlib" */
 
-/* Module declarations from "opteryx.draken.compiled.maskops" */
+/* Module declarations from "opteryx.compiled.draken.compiled.maskops" */
 /* #### Code section: typeinfo ### */
 /* #### Code section: before_global_var ### */
-#define __Pyx_MODULE_NAME "opteryx.draken.compiled.maskops"
+#define __Pyx_MODULE_NAME "opteryx.compiled.draken.compiled.maskops"
 extern int __pyx_module_is_main_opteryx__draken__compiled__maskops;
 int __pyx_module_is_main_opteryx__draken__compiled__maskops = 0;
 
-/* Implementation of "opteryx.draken.compiled.maskops" */
+/* Implementation of "opteryx.compiled.draken.compiled.maskops" */
 /* #### Code section: global_var ### */
 /* #### Code section: string_decls ### */
 /* #### Code section: decls ### */
@@ -2988,7 +2988,7 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   for (Py_ssize_t __pyx_temp=0; __pyx_temp < (Py_ssize_t)(sizeof(values)/sizeof(values[0])); ++__pyx_temp) {
     Py_XDECREF(values[__pyx_temp]);
   }
-  __Pyx_AddTraceback("opteryx.draken.compiled.maskops.and_mask", __pyx_clineno, __pyx_lineno, __pyx_filename);
+  __Pyx_AddTraceback("opteryx.compiled.draken.compiled.maskops.and_mask", __pyx_clineno, __pyx_lineno, __pyx_filename);
   __Pyx_RefNannyFinishContext();
   return NULL;
   __pyx_L4_argument_unpacking_done:;
@@ -3177,7 +3177,7 @@ static PyObject *__pyx_pf_7opteryx_6draken_8compiled_7maskops_and_mask(CYTHON_UN
   #else
   __Pyx_TraceReturnValue(NULL, 0, 0, __PYX_ERR(0, 23, __pyx_L1_error));
   #endif
-  __Pyx_AddTraceback("opteryx.draken.compiled.maskops.and_mask", __pyx_clineno, __pyx_lineno, __pyx_filename);
+  __Pyx_AddTraceback("opteryx.compiled.draken.compiled.maskops.and_mask", __pyx_clineno, __pyx_lineno, __pyx_filename);
   __pyx_r = NULL;
   __pyx_L0:;
   __Pyx_XDECREF(__pyx_v_py_out);
@@ -3283,7 +3283,7 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   for (Py_ssize_t __pyx_temp=0; __pyx_temp < (Py_ssize_t)(sizeof(values)/sizeof(values[0])); ++__pyx_temp) {
     Py_XDECREF(values[__pyx_temp]);
   }
-  __Pyx_AddTraceback("opteryx.draken.compiled.maskops.or_mask", __pyx_clineno, __pyx_lineno, __pyx_filename);
+  __Pyx_AddTraceback("opteryx.compiled.draken.compiled.maskops.or_mask", __pyx_clineno, __pyx_lineno, __pyx_filename);
   __Pyx_RefNannyFinishContext();
   return NULL;
   __pyx_L4_argument_unpacking_done:;
@@ -3472,7 +3472,7 @@ static PyObject *__pyx_pf_7opteryx_6draken_8compiled_7maskops_2or_mask(CYTHON_UN
   #else
   __Pyx_TraceReturnValue(NULL, 0, 0, __PYX_ERR(0, 44, __pyx_L1_error));
   #endif
-  __Pyx_AddTraceback("opteryx.draken.compiled.maskops.or_mask", __pyx_clineno, __pyx_lineno, __pyx_filename);
+  __Pyx_AddTraceback("opteryx.compiled.draken.compiled.maskops.or_mask", __pyx_clineno, __pyx_lineno, __pyx_filename);
   __pyx_r = NULL;
   __pyx_L0:;
   __Pyx_XDECREF(__pyx_v_py_out);
@@ -3578,7 +3578,7 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   for (Py_ssize_t __pyx_temp=0; __pyx_temp < (Py_ssize_t)(sizeof(values)/sizeof(values[0])); ++__pyx_temp) {
     Py_XDECREF(values[__pyx_temp]);
   }
-  __Pyx_AddTraceback("opteryx.draken.compiled.maskops.xor_mask", __pyx_clineno, __pyx_lineno, __pyx_filename);
+  __Pyx_AddTraceback("opteryx.compiled.draken.compiled.maskops.xor_mask", __pyx_clineno, __pyx_lineno, __pyx_filename);
   __Pyx_RefNannyFinishContext();
   return NULL;
   __pyx_L4_argument_unpacking_done:;
@@ -3767,7 +3767,7 @@ static PyObject *__pyx_pf_7opteryx_6draken_8compiled_7maskops_4xor_mask(CYTHON_U
   #else
   __Pyx_TraceReturnValue(NULL, 0, 0, __PYX_ERR(0, 65, __pyx_L1_error));
   #endif
-  __Pyx_AddTraceback("opteryx.draken.compiled.maskops.xor_mask", __pyx_clineno, __pyx_lineno, __pyx_filename);
+  __Pyx_AddTraceback("opteryx.compiled.draken.compiled.maskops.xor_mask", __pyx_clineno, __pyx_lineno, __pyx_filename);
   __pyx_r = NULL;
   __pyx_L0:;
   __Pyx_XDECREF(__pyx_v_py_out);
@@ -3865,7 +3865,7 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   for (Py_ssize_t __pyx_temp=0; __pyx_temp < (Py_ssize_t)(sizeof(values)/sizeof(values[0])); ++__pyx_temp) {
     Py_XDECREF(values[__pyx_temp]);
   }
-  __Pyx_AddTraceback("opteryx.draken.compiled.maskops.not_mask", __pyx_clineno, __pyx_lineno, __pyx_filename);
+  __Pyx_AddTraceback("opteryx.compiled.draken.compiled.maskops.not_mask", __pyx_clineno, __pyx_lineno, __pyx_filename);
   __Pyx_RefNannyFinishContext();
   return NULL;
   __pyx_L4_argument_unpacking_done:;
@@ -4037,7 +4037,7 @@ static PyObject *__pyx_pf_7opteryx_6draken_8compiled_7maskops_6not_mask(CYTHON_U
   #else
   __Pyx_TraceReturnValue(NULL, 0, 0, __PYX_ERR(0, 86, __pyx_L1_error));
   #endif
-  __Pyx_AddTraceback("opteryx.draken.compiled.maskops.not_mask", __pyx_clineno, __pyx_lineno, __pyx_filename);
+  __Pyx_AddTraceback("opteryx.compiled.draken.compiled.maskops.not_mask", __pyx_clineno, __pyx_lineno, __pyx_filename);
   __pyx_r = NULL;
   __pyx_L0:;
   __Pyx_XDECREF(__pyx_v_py_out);
@@ -4135,7 +4135,7 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   for (Py_ssize_t __pyx_temp=0; __pyx_temp < (Py_ssize_t)(sizeof(values)/sizeof(values[0])); ++__pyx_temp) {
     Py_XDECREF(values[__pyx_temp]);
   }
-  __Pyx_AddTraceback("opteryx.draken.compiled.maskops.popcount_mask", __pyx_clineno, __pyx_lineno, __pyx_filename);
+  __Pyx_AddTraceback("opteryx.compiled.draken.compiled.maskops.popcount_mask", __pyx_clineno, __pyx_lineno, __pyx_filename);
   __Pyx_RefNannyFinishContext();
   return NULL;
   __pyx_L4_argument_unpacking_done:;
@@ -4221,7 +4221,7 @@ static PyObject *__pyx_pf_7opteryx_6draken_8compiled_7maskops_8popcount_mask(CYT
   #else
   __Pyx_TraceReturnValue(NULL, 0, 0, __PYX_ERR(0, 106, __pyx_L1_error));
   #endif
-  __Pyx_AddTraceback("opteryx.draken.compiled.maskops.popcount_mask", __pyx_clineno, __pyx_lineno, __pyx_filename);
+  __Pyx_AddTraceback("opteryx.compiled.draken.compiled.maskops.popcount_mask", __pyx_clineno, __pyx_lineno, __pyx_filename);
   __pyx_r = NULL;
   __pyx_L0:;
   __Pyx_XGIVEREF(__pyx_r);
@@ -4334,7 +4334,7 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   for (Py_ssize_t __pyx_temp=0; __pyx_temp < (Py_ssize_t)(sizeof(values)/sizeof(values[0])); ++__pyx_temp) {
     Py_XDECREF(values[__pyx_temp]);
   }
-  __Pyx_AddTraceback("opteryx.draken.compiled.maskops.select_mask", __pyx_clineno, __pyx_lineno, __pyx_filename);
+  __Pyx_AddTraceback("opteryx.compiled.draken.compiled.maskops.select_mask", __pyx_clineno, __pyx_lineno, __pyx_filename);
   __Pyx_RefNannyFinishContext();
   return NULL;
   __pyx_L4_argument_unpacking_done:;
@@ -4539,7 +4539,7 @@ static PyObject *__pyx_pf_7opteryx_6draken_8compiled_7maskops_10select_mask(CYTH
   #else
   __Pyx_TraceReturnValue(NULL, 0, 0, __PYX_ERR(0, 115, __pyx_L1_error));
   #endif
-  __Pyx_AddTraceback("opteryx.draken.compiled.maskops.select_mask", __pyx_clineno, __pyx_lineno, __pyx_filename);
+  __Pyx_AddTraceback("opteryx.compiled.draken.compiled.maskops.select_mask", __pyx_clineno, __pyx_lineno, __pyx_filename);
   __pyx_r = NULL;
   __pyx_L0:;
   __Pyx_XDECREF(__pyx_v_py_out);
@@ -4879,8 +4879,8 @@ __Pyx_RefNannySetupContext("PyInit_maskops", 0);
   }
   {
     PyObject *modules = PyImport_GetModuleDict(); if (unlikely(!modules)) __PYX_ERR(0, 1, __pyx_L1_error)
-    if (!PyDict_GetItemString(modules, "opteryx.draken.compiled.maskops")) {
-      if (unlikely((PyDict_SetItemString(modules, "opteryx.draken.compiled.maskops", __pyx_m) < 0))) __PYX_ERR(0, 1, __pyx_L1_error)
+    if (!PyDict_GetItemString(modules, "opteryx.compiled.draken.compiled.maskops")) {
+      if (unlikely((PyDict_SetItemString(modules, "opteryx.compiled.draken.compiled.maskops", __pyx_m) < 0))) __PYX_ERR(0, 1, __pyx_L1_error)
     }
   }
   /*--- Builtin init code ---*/
@@ -5017,7 +5017,7 @@ __Pyx_RefNannySetupContext("PyInit_maskops", 0);
   __Pyx_TraceExceptionUnwind(0, 0);
   if (__pyx_m) {
     if (__pyx_mstate->__pyx_d && stringtab_initialized) {
-      __Pyx_AddTraceback("init opteryx.draken.compiled.maskops", __pyx_clineno, __pyx_lineno, __pyx_filename);
+      __Pyx_AddTraceback("init opteryx.compiled.draken.compiled.maskops", __pyx_clineno, __pyx_lineno, __pyx_filename);
     }
     #if !CYTHON_USE_MODULE_STATE
     Py_CLEAR(__pyx_m);
@@ -5031,7 +5031,7 @@ __Pyx_RefNannySetupContext("PyInit_maskops", 0);
     }
     #endif
   } else if (!PyErr_Occurred()) {
-    PyErr_SetString(PyExc_ImportError, "init opteryx.draken.compiled.maskops");
+    PyErr_SetString(PyExc_ImportError, "init opteryx.compiled.draken.compiled.maskops");
   }
   __pyx_L0:;
   __Pyx_RefNannyFinishContext();
@@ -5088,7 +5088,7 @@ const char* const cstring = "x\332\255PMo\0231\020%(\210B\204\324HTT\342\342JE\2
     if (likely(bytes)); else { Py_DECREF(data); __PYX_ERR(0, 1, __pyx_L1_error) }
     #endif
     #else /* compression: none (859 bytes) */
-const char* const bytes = "?Note that Cython is deliberately stricter than PEP-484 and rejects subclasses of builtin types. If you need to pass subclasses then set the 'annotation_typing' directive to False.add_notethird_party/mabel/draken/compiled/maskops.pyx__Pyx_PyDict_NextRefaand_maskasyncio.coroutinesbcline_in_traceback__func___is_coroutineitems__main__mask__module__n__name__not_maskopteryx.draken.compiled.maskopsor_maskoutpapbpmaskpoppopcount_maskpy_out__qualname__select_mask__set_name__setdefault__test__valuesxor_mask\200\001\360\020\000\005\030\220|\2408\2501\330\004\030\230\013\2406\250\021\250!\330\004\007\200t\2103\210a\330\010\t\340\004\021\220\021\220%\220t\2301\340\004\r\210S\220\002\220!\330\004\010\210\001\210\021\330\004\013\2105\220\001\220\021\200\001\360\020\000\005\030\220|\2408\2501\330\004\027\220|\2408\2501\330\004\030\230\013\2406\250\021\250!\330\004\007\200t\2103\210a\330\010\t\340\004\020\220\001\220\025\220d\230$\230a\340\004\r\210S\220\002\220!\330\004\010\210\001\210\021\330\004\013\2105\220\001\220\021\200\001\360\020\000\005\030\220|\2408\2501\330\004\027\220|\2408\2501\330\004\030\230\013\2406\250\021\250!\330\004\007\200t\2103\210a\330\010\t\340\004\021\220\021\220%\220t\2304\230q\340\004\r\210S\220\002\220!\330\004\010\210\001\210\021\330\004\013\2105\220\001\220\021\200\001\360\n\000\005\030\220|\2408\2501\330\004\013\210=\230\001\230\024\230Q\200\001\360\n\000\005\033\230,\240h\250a\330\004\027\220|\2408\2501\330\004\027\220|\2408\2501\330\004\030\230\013\2406\250\021\250!\330\004\007\200t\2103\210a\330\010\t\340\004\025\220Q\220e\2307\240$\240d\250!\340\004\r\210S\220\002\220!\330\004\010\210\001\210\021\330\004\013\2105\220\001\220\021";
+const char* const bytes = "?Note that Cython is deliberately stricter than PEP-484 and rejects subclasses of builtin types. If you need to pass subclasses then set the 'annotation_typing' directive to False.add_notethird_party/mabel/draken/compiled/maskops.pyx__Pyx_PyDict_NextRefaand_maskasyncio.coroutinesbcline_in_traceback__func___is_coroutineitems__main__mask__module__n__name__not_maskopteryx.compiled.draken.compiled.maskopsor_maskoutpapbpmaskpoppopcount_maskpy_out__qualname__select_mask__set_name__setdefault__test__valuesxor_mask\200\001\360\020\000\005\030\220|\2408\2501\330\004\030\230\013\2406\250\021\250!\330\004\007\200t\2103\210a\330\010\t\340\004\021\220\021\220%\220t\2301\340\004\r\210S\220\002\220!\330\004\010\210\001\210\021\330\004\013\2105\220\001\220\021\200\001\360\020\000\005\030\220|\2408\2501\330\004\027\220|\2408\2501\330\004\030\230\013\2406\250\021\250!\330\004\007\200t\2103\210a\330\010\t\340\004\020\220\001\220\025\220d\230$\230a\340\004\r\210S\220\002\220!\330\004\010\210\001\210\021\330\004\013\2105\220\001\220\021\200\001\360\020\000\005\030\220|\2408\2501\330\004\027\220|\2408\2501\330\004\030\230\013\2406\250\021\250!\330\004\007\200t\2103\210a\330\010\t\340\004\021\220\021\220%\220t\2304\230q\340\004\r\210S\220\002\220!\330\004\010\210\001\210\021\330\004\013\2105\220\001\220\021\200\001\360\n\000\005\030\220|\2408\2501\330\004\013\210=\230\001\230\024\230Q\200\001\360\n\000\005\033\230,\240h\250a\330\004\027\220|\2408\2501\330\004\027\220|\2408\2501\330\004\030\230\013\2406\250\021\250!\330\004\007\200t\2103\210a\330\010\t\340\004\025\220Q\220e\2307\240$\240d\250!\340\004\r\210S\220\002\220!\330\004\010\210\001\210\021\330\004\013\2105\220\001\220\021";
     PyObject *data = NULL;
     CYTHON_UNUSED_VAR(__Pyx_DecompressString);
     #endif

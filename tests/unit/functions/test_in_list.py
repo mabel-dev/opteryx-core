@@ -13,8 +13,9 @@ import pytest
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
+from opteryx.compiled.draken.interop.arrow import vector_from_arrow, vector_from_sequence
+
 from opteryx.compiled.vector_ops import vector_in_list
-from opteryx.draken.interop.arrow import vector_from_sequence, vector_from_arrow
 
 
 def _vec(values):
@@ -138,12 +139,14 @@ class TestListInListString:
 class TestListInListTypeError:
     def test_arrow_array_raises(self):
         import pyarrow as pa
+
         arr = pa.array([1, 2, 3], type=pa.int64())
         with pytest.raises(TypeError):
             vector_in_list(arr, {1})
 
     def test_numpy_raises(self):
         import numpy as np
+
         arr = np.array([1, 2, 3])
         with pytest.raises(TypeError):
             vector_in_list(arr, {1})

@@ -22,7 +22,7 @@ the first valid row for each state.
 
 from libc.stdint cimport int64_t, uint8_t
 
-from opteryx.draken.core.buffers cimport DictAccessor, DrakenFixedBuffer
+from opteryx.compiled.draken.core.buffers cimport DictAccessor, DrakenFixedBuffer
 from opteryx.compiled.aggregations.kernels.utils cimport _bitmap_is_valid
 from opteryx.compiled.aggregations.kernels.utils cimport _read_integer_value
 

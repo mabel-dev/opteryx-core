@@ -242,12 +242,12 @@ def _cast_to_binary_representation(
         return format_double_func(arr)
 
     if arr.dtype == numpy.int64:
-        from opteryx.draken.interop.arrow import vector_from_arrow
+        from opteryx.compiled.draken.interop.arrow import vector_from_arrow
 
         return vector_cast_int64_func(vector_from_arrow(pyarrow.array(arr))).to_arrow()
 
     if arr.dtype == numpy.uint64:
-        from opteryx.draken.interop.arrow import vector_from_arrow
+        from opteryx.compiled.draken.interop.arrow import vector_from_arrow
 
         return vector_cast_uint64_func(
             vector_from_arrow(pyarrow.array(arr.view(numpy.int64)))
@@ -341,19 +341,19 @@ def cast_to_int(arr, *args):
         arr = arr.to_numpy(False)
     if numpy.issubdtype(arr.dtype, numpy.object_):
         if isinstance(arr[0], str):
-            from opteryx.draken.interop.arrow import vector_from_arrow
+            from opteryx.compiled.draken.interop.arrow import vector_from_arrow
 
             return vector_cast_ascii_to_int(
                 vector_from_arrow(pyarrow.array(arr, type=pyarrow.string()))
             ).to_arrow()
         elif isinstance(arr[0], bytes):
-            from opteryx.draken.interop.arrow import vector_from_arrow
+            from opteryx.compiled.draken.interop.arrow import vector_from_arrow
 
             return vector_cast_bytes_to_int(
                 vector_from_arrow(pyarrow.array(arr, type=pyarrow.binary()))
             ).to_arrow()
     if numpy.issubdtype(arr.dtype, numpy.str_):
-        from opteryx.draken.interop.arrow import vector_from_arrow
+        from opteryx.compiled.draken.interop.arrow import vector_from_arrow
 
         return vector_cast_ascii_to_int(
             vector_from_arrow(pyarrow.array(arr.astype(object), type=pyarrow.string()))

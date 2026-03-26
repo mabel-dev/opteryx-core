@@ -6,7 +6,7 @@
 # cython: wraparound=False
 # cython: boundscheck=False
 
-from opteryx.draken.vectors.array_vector cimport ArrayVector
+from opteryx.compiled.draken.vectors.array_vector cimport ArrayVector
 
 
 cpdef list vector_get_element(ArrayVector vec, int key):

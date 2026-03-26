@@ -39,7 +39,7 @@ bytes pairs; 64 entries covers all realistic query workloads.
 
 import functools
 
-from opteryx.draken.vectors.string_vector cimport StringVector
+from opteryx.compiled.draken.vectors.string_vector cimport StringVector
 
 
 # ---------------------------------------------------------------------------

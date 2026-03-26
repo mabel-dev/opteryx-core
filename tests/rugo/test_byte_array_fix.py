@@ -1,16 +1,17 @@
 """
 Test demonstrating that byte arrays are kept as raw binary (bytes), not UTF-8 strings.
 """
+
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-import opteryx.rugo.jsonl as jsonl
+import opteryx.compiled.rugo.jsonl as jsonl
 
-print("="*70)
+print("=" * 70)
 print("BYTE ARRAY HANDLING - KEEPING BINARY DATA AS BYTES")
-print("="*70)
+print("=" * 70)
 
 # Test 1: Array of byte-like strings (e.g., base64, binary data)
 print("\n1. ARRAY OF BYTE-LIKE STRINGS")
@@ -23,7 +24,9 @@ print(f"Schema: {schema1[1]}")  # data column
 print(f"Row 0: {result1['columns'][1][0]}")
 print(f"Row 1: {result1['columns'][1][1]}")
 print(f"✓ Element type: {type(result1['columns'][1][0][0])}")
-print(f"✓ All elements are bytes: {all(isinstance(v, bytes) for row in result1['columns'][1] for v in row)}")
+print(
+    f"✓ All elements are bytes: {all(isinstance(v, bytes) for row in result1['columns'][1] for v in row)}"
+)
 
 # Test 2: Nested arrays of byte strings
 print("\n2. NESTED ARRAYS OF BYTE STRINGS")
@@ -60,10 +63,10 @@ print(f"Value: {result4['columns'][1][0]}")
 print(f"✓ Type: {type(result4['columns'][1][0])}")
 print("✓ Object kept as binary JSONB, not parsed!")
 
-print("\n" + "="*70)
+print("\n" + "=" * 70)
 print("SUMMARY:")
 print("✓ Arrays of strings → arrays of bytes (not UTF-8 decoded)")
-print("✓ String columns → bytes (not UTF-8 decoded)")  
+print("✓ String columns → bytes (not UTF-8 decoded)")
 print("✓ Objects → JSONB bytes (not parsed to dict)")
 print("✓ Strings starting with '[' NOT mis-parsed as arrays")
-print("="*70)
+print("=" * 70)

@@ -5,7 +5,7 @@ import pyarrow as pa
 sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 
 from opteryx.compiled.vector_ops import vector_anyop_gt
-from opteryx.draken.interop.arrow import vector_from_arrow
+from opteryx.compiled.draken.interop.arrow import vector_from_arrow
 
 def _test_gt_comparison(literal, test_value, expected_result, _type=pa.string()):
     """

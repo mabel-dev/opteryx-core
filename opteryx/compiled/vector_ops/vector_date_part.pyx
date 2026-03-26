@@ -31,10 +31,10 @@ from libc.stdint cimport int64_t
 from libc.stddef cimport size_t
 from cpython.array cimport array, clone
 
-from opteryx.draken.core.buffers cimport DictAccessor
-from opteryx.draken.vectors.timestamp_vector cimport TimestampVector
-from opteryx.draken.vectors.int64_vector cimport Int64Vector, from_packed_dict as int64_from_packed_dict, from_sequence as int64_from_sequence
-from opteryx.draken.vectors.vector cimport Vector
+from opteryx.compiled.draken.core.buffers cimport DictAccessor
+from opteryx.compiled.draken.vectors.timestamp_vector cimport TimestampVector
+from opteryx.compiled.draken.vectors.int64_vector cimport Int64Vector, from_packed_dict as int64_from_packed_dict, from_sequence as int64_from_sequence
+from opteryx.compiled.draken.vectors.vector cimport Vector
 
 # ---------------------------------------------------------------------------
 # SIMD-accelerated kernels for minute / hour / second extraction.

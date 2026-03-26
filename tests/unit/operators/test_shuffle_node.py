@@ -1,10 +1,10 @@
 from uuid import uuid4
 
 import pyarrow as pa
+from opteryx.compiled.draken.morsels.morsel import Morsel
+from opteryx.compiled.draken.vectors.int64_vector import Int64Vector
 
 from opteryx import EOS
-from opteryx.draken.morsels.morsel import Morsel
-from opteryx.draken.vectors.int64_vector import Int64Vector
 from opteryx.managers.kvstores import create_kv_store
 from opteryx.models import QueryProperties
 from opteryx.operators.shuffle import BinStore

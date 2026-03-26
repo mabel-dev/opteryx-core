@@ -1,7 +1,7 @@
 # cython: language_level=3
 
 from libc.stdint cimport int64_t, uint8_t
-from opteryx.draken.core.buffers cimport DictAccessor, DrakenFixedBuffer
+from opteryx.compiled.draken.core.buffers cimport DictAccessor, DrakenFixedBuffer
 
 cdef void sum_i64_accumulate(
     int64_t* i64_state,

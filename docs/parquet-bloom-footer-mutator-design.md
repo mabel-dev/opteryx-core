@@ -475,7 +475,7 @@ That planner/reader integration should be a second design and a second change.
 Suggested Python API:
 
 ```python
-from opteryx.rugo import parquet
+from opteryx.compiled.rugo import parquet
 
 parquet.add_bloom_filters(
     "dataset.parquet",

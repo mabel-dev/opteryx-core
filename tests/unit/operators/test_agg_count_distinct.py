@@ -8,7 +8,7 @@ import sys
 sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 
 import pyarrow as pa
-from opteryx.nanobind.carchar_native import CarcharSet
+from opteryx.compiled.nanobind.carchar_native import CarcharSet
 
 import opteryx
 import opteryx.compiled.aggregations.scalar_kernels as count_distinct_module  # type: ignore[attr-defined]

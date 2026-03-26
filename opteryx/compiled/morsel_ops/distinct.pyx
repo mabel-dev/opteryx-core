@@ -24,7 +24,7 @@ from libc.string cimport memset, memcpy
 from libc.stdint cimport int32_t, uint64_t
 from libc.stddef cimport size_t
 
-from opteryx.draken.morsels.morsel cimport Morsel
+from opteryx.compiled.draken.morsels.morsel cimport Morsel
 from opteryx.compiled.structures.carchar_set cimport CarcharSet, CarcharSetWrapper
 
 

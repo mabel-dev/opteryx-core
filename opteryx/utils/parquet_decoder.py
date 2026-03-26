@@ -11,14 +11,14 @@ from typing import Optional
 from typing import Tuple
 from typing import Union
 
-import opteryx.rugo.parquet as parquet_meta
+import opteryx.compiled.rugo.parquet as parquet_meta
 import pyarrow
+from opteryx.compiled.rugo.converters.orso import rugo_to_orso_schema
 from opteryx.compiled.structures.memory_view_stream import MemoryViewStream
 from opteryx.connectors.capabilities import PredicatePushable
 from opteryx.expression import NodeType
 from opteryx.expression import get_all_nodes_of_type
 from opteryx.models import Node
-from opteryx.rugo.converters.orso import rugo_to_orso_schema
 from orso.tools import random_string
 from pyarrow import parquet
 

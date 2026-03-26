@@ -22,16 +22,17 @@ import pyarrow as pa
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
-from opteryx.draken import Morsel
-from opteryx.draken.storage import read_morsel
-from opteryx.draken.storage import write_morsel
+from opteryx.compiled.draken import Morsel
+from opteryx.compiled.draken.storage import read_morsel, write_morsel
 
 
 def _median_ms(samples_ns: list[int]) -> float:
     return statistics.median(samples_ns) / 1_000_000.0
 
 
-def _build_tables(rows: int, key_cardinality: int, value_cardinality: int) -> tuple[pa.Table, pa.Table]:
+def _build_tables(
+    rows: int, key_cardinality: int, value_cardinality: int
+) -> tuple[pa.Table, pa.Table]:
     key_dictionary = pa.array([f"k{i:05d}" for i in range(key_cardinality)], type=pa.string())
     value_dictionary = pa.array([f"v{i:05d}" for i in range(value_cardinality)], type=pa.string())
     key_indices = [i % key_cardinality for i in range(rows)]
@@ -40,8 +41,12 @@ def _build_tables(rows: int, key_cardinality: int, value_cardinality: int) -> tu
 
     dictionary_table = pa.table(
         {
-            "k": pa.DictionaryArray.from_arrays(pa.array(key_indices, type=pa.int32()), key_dictionary),
-            "v": pa.DictionaryArray.from_arrays(pa.array(value_indices, type=pa.int32()), value_dictionary),
+            "k": pa.DictionaryArray.from_arrays(
+                pa.array(key_indices, type=pa.int32()), key_dictionary
+            ),
+            "v": pa.DictionaryArray.from_arrays(
+                pa.array(value_indices, type=pa.int32()), value_dictionary
+            ),
             "m": pa.array(metric_values, type=pa.float64()),
         }
     )
@@ -80,7 +85,9 @@ def _measure_spill_io(morsel: Morsel, codec: str, repeat: int) -> tuple[float, f
     return _median_ms(write_samples_ns), _median_ms(read_samples_ns), int(statistics.median(sizes))
 
 
-def benchmark_spill(rows: int, key_cardinalities: tuple[int, ...], value_cardinality: int, codec: str, repeat: int):
+def benchmark_spill(
+    rows: int, key_cardinalities: tuple[int, ...], value_cardinality: int, codec: str, repeat: int
+):
     print("=" * 122)
     print("Dictionary Spill Benchmark (DRKM write/read + size)")
     print("=" * 122)
@@ -90,7 +97,9 @@ def benchmark_spill(rows: int, key_cardinalities: tuple[int, ...], value_cardina
     )
 
     for key_cardinality in key_cardinalities:
-        dictionary_table, materialized_table = _build_tables(rows, key_cardinality, value_cardinality)
+        dictionary_table, materialized_table = _build_tables(
+            rows, key_cardinality, value_cardinality
+        )
         dictionary_morsel = Morsel.from_arrow(dictionary_table)
         materialized_morsel = Morsel.from_arrow(materialized_table)
 

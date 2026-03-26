@@ -8,6 +8,7 @@ Performance benchmark: parquet decoders (PyArrow vs fastparquet vs rugo placehol
 This file is intended as a benchmark (printed output) and not as a regression assertion.
 Run with: pytest -q tests/performance/benchmarks/bench_parquet_decoders_compare.py
 """
+
 import os
 import sys
 
@@ -20,10 +21,10 @@ import os
 import time
 from typing import List
 
+import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
-import numpy as np
 
 DATASET_GLOB = os.path.join("testdata", "tpch", "lineitem", "*.parquet")
 
@@ -36,6 +37,7 @@ def _get_parquet_files() -> List[str]:
 def _read_with_pyarrow(files: List[str]) -> int:
     """Read all files with PyArrow, forced to single thread for like-for-like comparison."""
     import pyarrow as pa
+
     pa.set_cpu_count(1)
     pa.set_io_thread_count(1)
     total_rows = 0
@@ -76,7 +78,7 @@ def _read_with_fastparquet(files: List[str]):
 
             # open the underlying file for this row-group and decode into `assign`
             filename = pf.row_group_filename(rg)
-            with pf.open(filename, 'rb') as fh:
+            with pf.open(filename, "rb") as fh:
                 core.read_row_group(
                     fh,
                     rg,
@@ -104,7 +106,7 @@ def _read_with_rugo(files: List[str]) -> int:
     Requires `opteryx.compiled.io.disk_reader.read_file_mmap()` for I/O (no fallback).
     Uses memoryview to avoid a bytes copy on the hot path.
     """
-    import opteryx.rugo.parquet as rp
+    import opteryx.compiled.rugo.parquet as rp
     from opteryx.compiled.io.disk_reader import read_file_mmap as _disk_read_mmap
     from opteryx.compiled.io.disk_reader import unmap_memory as _unmap
 
@@ -155,11 +157,13 @@ def test_parquet_decode_pyarrow_vs_fastparquet_prints():
     print("PyArrow read: ")
     for i, t in enumerate(arrow_times, 1):
         print(f"  Iter {i}: {t:.4f}s")
-    print(f"  → rows: {rows_arrow:,d}, avg: {arrow_avg:.4f}s, min: {min(arrow_times):.4f}s, max: {max(arrow_times):.4f}s\n")
+    print(
+        f"  → rows: {rows_arrow:,d}, avg: {arrow_avg:.4f}s, min: {min(arrow_times):.4f}s, max: {max(arrow_times):.4f}s\n"
+    )
 
     # Rugo decode (use compiled disk_reader; expect this may fail to fully decode)
     try:
-        import opteryx.rugo.parquet as rp
+        import opteryx.compiled.rugo.parquet as rp
     except Exception:
         print("rugo.parquet not available — skipping rugo decode measurements\n")
     else:
@@ -170,11 +174,14 @@ def test_parquet_decode_pyarrow_vs_fastparquet_prints():
             print("rugo read: ")
             for i, t in enumerate(rugo_times, 1):
                 print(f"  Iter {i}: {t:.4f}s")
-            print(f"  → rows: {rows_rugo:,d}, avg: {rugo_avg:.4f}s, min: {min(rugo_times):.4f}s, max: {max(rugo_times):.4f}s\n")
+            print(
+                f"  → rows: {rows_rugo:,d}, avg: {rugo_avg:.4f}s, min: {min(rugo_times):.4f}s, max: {max(rugo_times):.4f}s\n"
+            )
 
             # verification pass: ensure rugo actually decoded column data for each file
             from opteryx.compiled.io.disk_reader import read_file_mmap as _disk_read_mmap
             from opteryx.compiled.io.disk_reader import unmap_memory as _unmap
+
             for f in files:
                 mm = _disk_read_mmap(f)
                 res = rp.read_parquet(memoryview(mm))
@@ -208,14 +215,16 @@ def test_parquet_decode_pyarrow_vs_fastparquet_prints():
     print("fastparquet read: ")
     for i, t in enumerate(fp_times, 1):
         print(f"  Iter {i}: {t:.4f}s")
-    print(f"  → rows: {rows_fp:,d}, avg: {fp_avg:.4f}s, min: {min(fp_times):.4f}s, max: {max(fp_times):.4f}s\n")
+    print(
+        f"  → rows: {rows_fp:,d}, avg: {fp_avg:.4f}s, min: {min(fp_times):.4f}s, max: {max(fp_times):.4f}s\n"
+    )
 
     # Summary
     ratio = fp_avg / arrow_avg if arrow_avg > 0 else float("inf")
     print("Summary:")
     print(f"  PyArrow avg:     {arrow_avg:.4f}s")
     if rugo_avg is not None:
-        print(f"  rugo   avg:      {rugo_avg:.4f}s  (rugo / pyarrow = {rugo_avg/arrow_avg:.2f}x)")
+        print(f"  rugo   avg:      {rugo_avg:.4f}s  (rugo / pyarrow = {rugo_avg / arrow_avg:.2f}x)")
     print(f"  fastparquet avg: {fp_avg:.4f}s")
     print(f"  fastparquet / pyarrow = {ratio:.2f}x\n")
 
@@ -281,7 +290,7 @@ def _metadata_with_rugo(files: List[str]) -> tuple:
     REQUIRE compiled `disk_reader.read_file()` — do NOT fall back to Python I/O.
     Returns tuple: (total_rows, sorted_unique_column_names)
     """
-    import opteryx.rugo.parquet as parquet_meta  # local rugo metadata reader
+    import opteryx.compiled.rugo.parquet as parquet_meta  # local rugo metadata reader
 
     # REQUIRE a compiled disk_reader that supports memory-mapping
     try:
@@ -309,6 +318,7 @@ def _metadata_with_rugo(files: List[str]) -> tuple:
         # explicitly unmap to avoid resource leak
         try:
             from opteryx.compiled.io.disk_reader import unmap_memory as _unmap
+
             _unmap(mm)
         except Exception:
             pass
@@ -335,7 +345,9 @@ def test_parquet_metadata_readers_prints():
     print("PyArrow metadata read:")
     for i, t in enumerate(arrow_times, 1):
         print(f"  Iter {i}: {t:.4f}s")
-    print(f"  → rows(metadata): {rows_arrow:,d}, cols: {cols_arrow}, avg: {arrow_avg:.4f}s, min: {min(arrow_times):.4f}s, max: {max(arrow_times):.4f}s\n")
+    print(
+        f"  → rows(metadata): {rows_arrow:,d}, cols: {cols_arrow}, avg: {arrow_avg:.4f}s, min: {min(arrow_times):.4f}s, max: {max(arrow_times):.4f}s\n"
+    )
 
     # fastparquet (optional)
     try:
@@ -352,11 +364,13 @@ def test_parquet_metadata_readers_prints():
         print("fastparquet metadata read:")
         for i, t in enumerate(fp_times, 1):
             print(f"  Iter {i}: {t:.4f}s")
-        print(f"  → rows(metadata): {rows_fp:,d}, cols: {cols_fp}, avg: {fp_avg:.4f}s, min: {min(fp_times):.4f}s, max: {max(fp_times):.4f}s\n")
+        print(
+            f"  → rows(metadata): {rows_fp:,d}, cols: {cols_fp}, avg: {fp_avg:.4f}s, min: {min(fp_times):.4f}s, max: {max(fp_times):.4f}s\n"
+        )
 
     # Rugo metadata (schema-only)
     try:
-        import opteryx.rugo.parquet as _tmp  # ensure importable
+        import opteryx.compiled.rugo.parquet as _tmp  # ensure importable
     except Exception:
         print("rugo parquet metadata reader not available — skipping rugo metadata measurements\n")
         rows_rugo = None
@@ -369,15 +383,19 @@ def test_parquet_metadata_readers_prints():
         print("rugo metadata read (schema-only):")
         for i, t in enumerate(rugo_times, 1):
             print(f"  Iter {i}: {t:.4f}s")
-        print(f"  → rows(metadata): {rows_rugo:,d}, cols: {cols_rugo}, avg: {rugo_avg:.4f}s, min: {min(rugo_times):.4f}s, max: {max(rugo_times):.4f}s\n")
+        print(
+            f"  → rows(metadata): {rows_rugo:,d}, cols: {cols_rugo}, avg: {rugo_avg:.4f}s, min: {min(rugo_times):.4f}s, max: {max(rugo_times):.4f}s\n"
+        )
 
     # Summary — show available comparisons
     print("Metadata Summary:")
     print(f"  PyArrow avg:     {arrow_avg:.4f}s")
     if fp_avg is not None:
-        print(f"  fastparquet avg: {fp_avg:.4f}s  (fastparquet / pyarrow = {fp_avg/arrow_avg:.2f}x)")
+        print(
+            f"  fastparquet avg: {fp_avg:.4f}s  (fastparquet / pyarrow = {fp_avg / arrow_avg:.2f}x)"
+        )
     if rugo_avg is not None:
-        print(f"  rugo   avg:      {rugo_avg:.4f}s  (rugo / pyarrow = {rugo_avg/arrow_avg:.2f}x)")
+        print(f"  rugo   avg:      {rugo_avg:.4f}s  (rugo / pyarrow = {rugo_avg / arrow_avg:.2f}x)")
     print()
 
 

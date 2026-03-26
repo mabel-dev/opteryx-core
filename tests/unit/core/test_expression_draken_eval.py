@@ -11,8 +11,8 @@ sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 import opteryx
 from orso.types import OrsoTypes
 
-from opteryx.draken.morsels.morsel import Morsel
-from opteryx.draken.vectors.arrow_vector import ArrowVector
+from opteryx.compiled.draken.morsels.morsel import Morsel
+from opteryx.compiled.draken.vectors.arrow_vector import ArrowVector
 from opteryx.expression import NodeType
 from opteryx.expression import evaluate_and_append
 from opteryx.expression.evaluator import evaluate_and_append_draken

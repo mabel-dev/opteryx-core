@@ -17,10 +17,10 @@ cimport cython
 from libc.stdlib cimport malloc, free
 from libc.string cimport memset
 
-from opteryx.draken.interop.arrow cimport vector_from_arrow
-from opteryx.draken.vectors.vector cimport Vector
+from opteryx.compiled.draken.interop.arrow cimport vector_from_arrow
+from opteryx.compiled.draken.vectors.vector cimport Vector
 
-from opteryx.nanobind.carchar_native import CarcharSet
+from opteryx.compiled.nanobind.carchar_native import CarcharSet
 import pyarrow
 
 

@@ -6,7 +6,7 @@ to measure the impact of SIMD optimization.
 """
 import time
 import pyarrow as pa
-from opteryx.draken.vectors.string_vector import StringVector
+from opteryx.compiled.draken.vectors.string_vector import StringVector
 
 
 def benchmark_case_insensitive_equals():

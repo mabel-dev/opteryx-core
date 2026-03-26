@@ -10,7 +10,7 @@ from libc.stdint cimport int64_t, uint64_t, int32_t
 
 from opteryx.compiled.structures.buffers cimport IntBuffer, Int32Buffer
 from opteryx.compiled.structures.carchar_set cimport CarcharSetWrapper
-from opteryx.draken.morsels.morsel cimport Morsel
+from opteryx.compiled.draken.morsels.morsel cimport Morsel
 
 
 cpdef tuple distinct(Morsel morsel, CarcharSetWrapper seen_hashes=None, list columns=None):

@@ -12,9 +12,9 @@ import numpy
 cimport numpy
 numpy.import_array()
 
-from opteryx.draken.vectors.array_vector cimport ArrayVector
-from opteryx.draken.vectors.int64_vector cimport Int64Vector, from_sequence as int64_from_sequence
-from opteryx.draken.core.buffers cimport DrakenArrayBuffer
+from opteryx.compiled.draken.vectors.array_vector cimport ArrayVector
+from opteryx.compiled.draken.vectors.int64_vector cimport Int64Vector, from_sequence as int64_from_sequence
+from opteryx.compiled.draken.core.buffers cimport DrakenArrayBuffer
 
 
 cpdef Int64Vector vector_length(ArrayVector vec):

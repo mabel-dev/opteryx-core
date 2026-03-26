@@ -260,7 +260,7 @@ def date_trunc(truncate_to, date_values) -> numpy.ndarray:
     elif not pyarrow.types.is_timestamp(value_type):
         date_values = compute.cast(date_values, pyarrow.timestamp("us"))
 
+    from opteryx.compiled.draken.interop.arrow import vector_from_arrow
     from opteryx.compiled.vector_ops import vector_date_trunc
-    from opteryx.draken.interop.arrow import vector_from_arrow
 
     return vector_date_trunc(truncate_to, vector_from_arrow(date_values)).to_arrow()

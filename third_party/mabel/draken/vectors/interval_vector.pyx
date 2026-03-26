@@ -35,18 +35,18 @@ from libc.stdlib cimport free
 from libc.stdlib cimport malloc
 from libc.string cimport memset
 
-from opteryx.draken.core.buffers cimport DrakenFixedBuffer
-from opteryx.draken.core.buffers cimport DRAKEN_INTERVAL
-from opteryx.draken.core.buffers cimport DRAKEN_TIMESTAMP64
-from opteryx.draken.core.fixed_vector cimport alloc_fixed_buffer
-from opteryx.draken.core.fixed_vector cimport buf_dtype
-from opteryx.draken.core.fixed_vector cimport buf_itemsize
-from opteryx.draken.core.fixed_vector cimport buf_length
-from opteryx.draken.core.fixed_vector cimport free_fixed_buffer
-from opteryx.draken.vectors.bool_vector cimport BoolVector
-from opteryx.draken.vectors.bool_vector cimport bool_vector_from_bits
-from opteryx.draken.vectors.timestamp_vector cimport TimestampVector
-from opteryx.draken.vectors.vector cimport MIX_HASH_CONSTANT, NULL_HASH, Vector, mix_hash, simd_mix_hash
+from opteryx.compiled.draken.core.buffers cimport DrakenFixedBuffer
+from opteryx.compiled.draken.core.buffers cimport DRAKEN_INTERVAL
+from opteryx.compiled.draken.core.buffers cimport DRAKEN_TIMESTAMP64
+from opteryx.compiled.draken.core.fixed_vector cimport alloc_fixed_buffer
+from opteryx.compiled.draken.core.fixed_vector cimport buf_dtype
+from opteryx.compiled.draken.core.fixed_vector cimport buf_itemsize
+from opteryx.compiled.draken.core.fixed_vector cimport buf_length
+from opteryx.compiled.draken.core.fixed_vector cimport free_fixed_buffer
+from opteryx.compiled.draken.vectors.bool_vector cimport BoolVector
+from opteryx.compiled.draken.vectors.bool_vector cimport bool_vector_from_bits
+from opteryx.compiled.draken.vectors.timestamp_vector cimport TimestampVector
+from opteryx.compiled.draken.vectors.vector cimport MIX_HASH_CONSTANT, NULL_HASH, Vector, mix_hash, simd_mix_hash
 
 DEF INTERVAL_HASH_CHUNK = 512
 

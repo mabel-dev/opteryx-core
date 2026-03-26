@@ -21,26 +21,26 @@ from libc.stdlib cimport malloc
 from libc.stdlib cimport realloc
 from libc.string cimport memcpy
 
-from opteryx.draken.core.buffers cimport DRAKEN_BOOL
-from opteryx.draken.core.buffers cimport DRAKEN_FLOAT64
-from opteryx.draken.core.buffers cimport DRAKEN_INT8
-from opteryx.draken.core.buffers cimport DRAKEN_INT16
-from opteryx.draken.core.buffers cimport DRAKEN_INT32
-from opteryx.draken.core.buffers cimport DRAKEN_INT64
-from opteryx.draken.core.buffers cimport DRAKEN_STRING
-from opteryx.draken.core.buffers cimport DRAKEN_ENCODING_CONSTANT
-from opteryx.draken.core.buffers cimport DRAKEN_ENCODING_DICTIONARY
-from opteryx.draken.core.buffers cimport ConstAccessor
-from opteryx.draken.core.buffers cimport DrakenConstantStringPayload
-from opteryx.draken.core.buffers cimport DrakenFixedBuffer
-from opteryx.draken.morsels.morsel cimport Morsel
-from opteryx.draken.vectors.bool_vector cimport BoolVector
-from opteryx.draken.vectors.float64_vector cimport Float64Vector
-from opteryx.draken.vectors.int64_vector cimport Int64Vector
-from opteryx.draken.vectors.integer_vector cimport IntegerVector
-from opteryx.draken.vectors.string_vector cimport StringVector
-from opteryx.draken.vectors.string_vector cimport StringVectorBuilder
-from opteryx.draken.vectors.string_vector cimport _StringVectorView
+from opteryx.compiled.draken.core.buffers cimport DRAKEN_BOOL
+from opteryx.compiled.draken.core.buffers cimport DRAKEN_FLOAT64
+from opteryx.compiled.draken.core.buffers cimport DRAKEN_INT8
+from opteryx.compiled.draken.core.buffers cimport DRAKEN_INT16
+from opteryx.compiled.draken.core.buffers cimport DRAKEN_INT32
+from opteryx.compiled.draken.core.buffers cimport DRAKEN_INT64
+from opteryx.compiled.draken.core.buffers cimport DRAKEN_STRING
+from opteryx.compiled.draken.core.buffers cimport DRAKEN_ENCODING_CONSTANT
+from opteryx.compiled.draken.core.buffers cimport DRAKEN_ENCODING_DICTIONARY
+from opteryx.compiled.draken.core.buffers cimport ConstAccessor
+from opteryx.compiled.draken.core.buffers cimport DrakenConstantStringPayload
+from opteryx.compiled.draken.core.buffers cimport DrakenFixedBuffer
+from opteryx.compiled.draken.morsels.morsel cimport Morsel
+from opteryx.compiled.draken.vectors.bool_vector cimport BoolVector
+from opteryx.compiled.draken.vectors.float64_vector cimport Float64Vector
+from opteryx.compiled.draken.vectors.int64_vector cimport Int64Vector
+from opteryx.compiled.draken.vectors.integer_vector cimport IntegerVector
+from opteryx.compiled.draken.vectors.string_vector cimport StringVector
+from opteryx.compiled.draken.vectors.string_vector cimport StringVectorBuilder
+from opteryx.compiled.draken.vectors.string_vector cimport _StringVectorView
 
 
 cdef enum EncoderKind:

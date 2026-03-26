@@ -29,16 +29,16 @@ from libc.stdint cimport uint8_t
 from libc.stdlib cimport malloc
 from libc.string cimport memset, memcpy
 
-from opteryx.draken.core.buffers cimport ConstAccessor, DrakenFixedBuffer
-from opteryx.draken.core.buffers cimport DRAKEN_TIME32
-from opteryx.draken.core.buffers cimport DRAKEN_TIME64
-from opteryx.draken.core.buffers cimport DRAKEN_ENCODING_CONSTANT
-from opteryx.draken.core.fixed_vector cimport alloc_fixed_buffer
-from opteryx.draken.core.fixed_vector cimport buf_dtype
-from opteryx.draken.core.fixed_vector cimport buf_itemsize
-from opteryx.draken.core.fixed_vector cimport buf_length
-from opteryx.draken.core.fixed_vector cimport free_fixed_buffer
-from opteryx.draken.vectors.vector cimport MIX_HASH_CONSTANT, Vector, NULL_HASH, mix_hash, simd_mix_hash
+from opteryx.compiled.draken.core.buffers cimport ConstAccessor, DrakenFixedBuffer
+from opteryx.compiled.draken.core.buffers cimport DRAKEN_TIME32
+from opteryx.compiled.draken.core.buffers cimport DRAKEN_TIME64
+from opteryx.compiled.draken.core.buffers cimport DRAKEN_ENCODING_CONSTANT
+from opteryx.compiled.draken.core.fixed_vector cimport alloc_fixed_buffer
+from opteryx.compiled.draken.core.fixed_vector cimport buf_dtype
+from opteryx.compiled.draken.core.fixed_vector cimport buf_itemsize
+from opteryx.compiled.draken.core.fixed_vector cimport buf_length
+from opteryx.compiled.draken.core.fixed_vector cimport free_fixed_buffer
+from opteryx.compiled.draken.vectors.vector cimport MIX_HASH_CONSTANT, Vector, NULL_HASH, mix_hash, simd_mix_hash
 
 DEF TIME32_HASH_CHUNK = 1024
 
@@ -187,7 +187,7 @@ cdef class TimeVector(Vector):
             if self._const_is_null:
                 return pa.nulls(self.ptr.length, type=pa.time32('s'))
             return pa.array([<int32_t>self._const_value] * self.ptr.length, type=pa.time32('s'))
-        
+
         cdef size_t nbytes = buf_length(self.ptr) * buf_itemsize(self.ptr)
         addr = <intptr_t> self.ptr.data
         data_buf = pa.foreign_buffer(addr, nbytes, base=self)
@@ -542,7 +542,7 @@ cdef TimeVector from_arrow(object array):
             "TimeVector.from_arrow expects a dense time32/time64 Arrow array; "
             "use TimeVector.from_dict for dictionary input"
         )
-    
+
     cdef bint is_time64 = pa.types.is_time64(array.type)
     cdef TimeVector vec = TimeVector(0, is_time64, True)   # wrap=True: no alloc
     vec.ptr = <DrakenFixedBuffer*> malloc(sizeof(DrakenFixedBuffer))
@@ -584,19 +584,19 @@ cdef TimeVector from_arrow(object array):
             n_bytes = (vec.ptr.length + 7) // 8
             new_bitmap = PyBytes_FromStringAndSize(NULL, n_bytes)
             dst_bitmap = <uint8_t*> PyBytes_AS_STRING(new_bitmap)
-            
+
             byte_offset = offset >> 3
             bit_offset = offset & 7
             src_bitmap = <uint8_t*> nb_addr + byte_offset
-            
+
             shift_down = bit_offset
             shift_up = 8 - bit_offset
-            
+
             for i in range(n_bytes):
                 val = src_bitmap[i] >> shift_down
                 val |= (src_bitmap[i+1] << shift_up)
                 dst_bitmap[i] = val
-                
+
             vec.ptr.null_bitmap = dst_bitmap
             vec._arrow_null_buf = new_bitmap # Keep alive
     else:

@@ -8,7 +8,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 import pyarrow as pa
 
-import opteryx.draken as draken
+import opteryx.compiled.draken as draken
 from opteryx.compiled.table_ops.distinct import distinct
 
 

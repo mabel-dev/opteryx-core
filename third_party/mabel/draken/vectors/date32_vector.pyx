@@ -31,16 +31,16 @@ from libc.stdint cimport uint64_t
 from libc.stdint cimport uint8_t
 from libc.stdlib cimport malloc
 
-from opteryx.draken.core.buffers cimport ConstAccessor, DrakenFixedBuffer
-from opteryx.draken.core.buffers cimport DRAKEN_DATE32
-from opteryx.draken.core.buffers cimport DRAKEN_ENCODING_CONSTANT
-from opteryx.draken.core.fixed_vector cimport alloc_fixed_buffer
-from opteryx.draken.core.fixed_vector cimport buf_dtype
-from opteryx.draken.core.fixed_vector cimport buf_itemsize
-from opteryx.draken.core.fixed_vector cimport buf_length
-from opteryx.draken.core.fixed_vector cimport free_fixed_buffer
-from opteryx.draken.vectors.vector cimport MIX_HASH_CONSTANT, Vector, NULL_HASH, mix_hash, simd_mix_hash
-from opteryx.draken.vectors.bool_vector cimport BoolVector
+from opteryx.compiled.draken.core.buffers cimport ConstAccessor, DrakenFixedBuffer
+from opteryx.compiled.draken.core.buffers cimport DRAKEN_DATE32
+from opteryx.compiled.draken.core.buffers cimport DRAKEN_ENCODING_CONSTANT
+from opteryx.compiled.draken.core.fixed_vector cimport alloc_fixed_buffer
+from opteryx.compiled.draken.core.fixed_vector cimport buf_dtype
+from opteryx.compiled.draken.core.fixed_vector cimport buf_itemsize
+from opteryx.compiled.draken.core.fixed_vector cimport buf_length
+from opteryx.compiled.draken.core.fixed_vector cimport free_fixed_buffer
+from opteryx.compiled.draken.vectors.vector cimport MIX_HASH_CONSTANT, Vector, NULL_HASH, mix_hash, simd_mix_hash
+from opteryx.compiled.draken.vectors.bool_vector cimport BoolVector
 
 cdef extern from "simd_hash.h":
     void simd_scale_date32(const int32_t* src, int64_t* dest, size_t count) nogil

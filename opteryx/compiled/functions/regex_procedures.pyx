@@ -33,6 +33,11 @@ Fix
 
   • All SIMD search helpers are declared nogil; _run_procedure is
     noexcept nogil so the compiler can inline and optimise freely.
+
+Further optimisations:
+  • Stack allocation of ops array for small programs (≤16 ops).
+  • __builtin_expect hints for branch prediction.
+  • (Future) direct builder field access to eliminate cpdef method overhead.
 """
 
 from libc.stddef cimport size_t
@@ -47,9 +52,14 @@ cdef extern from "stdlib.h":
     void *malloc(size_t size) nogil
     void  free(void *ptr)     nogil
 
-from opteryx.draken.vectors.string_vector cimport StringVector, StringVectorBuilder
-from opteryx.draken.vectors import string_vector as string_vector_module
-from opteryx.draken.core.buffers cimport DrakenVarBuffer
+cdef extern from "<stddef.h>":
+    int __builtin_expect(long exp, long c) nogil
+    # define likely(x)   __builtin_expect(!!(x), 1)
+    # define unlikely(x) __builtin_expect(!!(x), 0)
+
+from opteryx.compiled.draken.vectors.string_vector cimport StringVector, StringVectorBuilder
+from opteryx.compiled.draken.vectors import string_vector as string_vector_module
+from opteryx.compiled.draken.core.buffers cimport DrakenVarBuffer
 
 cdef extern from "simd_search.h":
     int simd_search_substring(
@@ -102,12 +112,12 @@ ctypedef struct ProcResult:
 # Core procedure executor — pure C, no Python objects in the hot path
 # ---------------------------------------------------------------------------
 
-cdef ProcResult _run_procedure(
+cdef inline ProcResult _run_procedure(
     const char *str_data,
     size_t      str_len,
     Operation  *ops,
     Py_ssize_t  num_ops,
-):
+) nogil:
     """
     Execute compiled procedure on a single string.  No Python objects created.
 
@@ -269,8 +279,9 @@ cpdef StringVector execute_regex_procedure(
     cdef DrakenVarBuffer    *ptr = data.ptr
     cdef Py_ssize_t          n   = ptr.length
     cdef Py_ssize_t          i, j
-    cdef StringVectorBuilder builder        # typed → C-level dispatch for append_*
+    cdef StringVectorBuilder builder
     cdef Operation          *ops     = NULL
+    cdef Operation           ops_stack[16]   # stack‑allocated for small programs
     cdef Py_ssize_t          ops_len = 0
     cdef ProcResult          proc_result
     cdef int32_t             start, end
@@ -280,9 +291,13 @@ cpdef StringVector execute_regex_procedure(
         return data
 
     ops_len = len(operations)
-    ops = <Operation *>malloc(ops_len * sizeof(Operation))
-    if ops == NULL:
-        raise MemoryError("regex_procedures: failed to allocate ops array")
+    # Use stack allocation if the number of operations fits, otherwise heap.
+    if ops_len <= 16:
+        ops = ops_stack
+    else:
+        ops = <Operation *>malloc(ops_len * sizeof(Operation))
+        if ops == NULL:
+            raise MemoryError("regex_procedures: failed to allocate ops array")
 
     try:
         # ------------------------------------------------------------------
@@ -306,9 +321,12 @@ cpdef StringVector execute_regex_procedure(
             ops[j].target_char = <char>(op_tuple[4] if op_tuple[4] is not None else 0)
 
         # builder typed as StringVectorBuilder: cpdef methods (append_bytes,
-        # append_null) dispatch to their C implementations — no Python call.
+        # append_null) dispatch directly to their C implementations — no Python call.
         builder = string_vector_module.StringVectorBuilder.with_estimate(n, 50)
 
+        # ------------------------------------------------------------------
+        # Main processing loop – per‑row
+        # ------------------------------------------------------------------
         for i in range(n):
             # Arrow null-bitmap: bit == 0 → null value.
             if ptr.null_bitmap != NULL and not ((ptr.null_bitmap[i >> 3] >> (i & 7)) & 1):
@@ -325,14 +343,14 @@ cpdef StringVector execute_regex_procedure(
                 ops_len,
             )
 
-            if proc_result.data == NULL:
+            if __builtin_expect(proc_result.data == NULL, 0):  # null is unlikely
                 builder.append_null()
             else:
-                # Direct C call: no PyBytes_FromString, no null-scan, no boxing.
                 builder.append_bytes(proc_result.data, proc_result.length)
 
         return builder.finish()
 
     finally:
-        if ops != NULL:
+        # Only free if we used heap allocation.
+        if ops != NULL and ops != ops_stack:
             free(<void *>ops)

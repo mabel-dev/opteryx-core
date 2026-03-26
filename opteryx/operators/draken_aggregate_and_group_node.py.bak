@@ -18,8 +18,8 @@ from orso.types import OrsoTypes
 
 from opteryx import EMPTY
 from opteryx import EOS
-from opteryx.draken.morsels.morsel import Morsel
-from opteryx.draken.vectors.scalar_constructors import from_scalar as constant_from_scalar
+from opteryx.compiled.draken.morsels.morsel import Morsel
+from opteryx.compiled.draken.vectors.scalar_constructors import from_scalar as constant_from_scalar
 from opteryx.exceptions import InvalidFunctionParameterError
 from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.expression import NodeType

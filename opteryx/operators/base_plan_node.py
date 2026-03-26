@@ -11,7 +11,7 @@ from typing import Union
 
 import pyarrow
 import pyarrow.compute as pc
-from opteryx.draken import Morsel
+from opteryx.compiled.draken import Morsel
 from opteryx.expression import NodeType
 from opteryx.expression import get_all_nodes_of_type
 from opteryx.tracing.event_recorder import record_event as _trace_record

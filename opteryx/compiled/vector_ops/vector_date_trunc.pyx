@@ -10,7 +10,7 @@ from libc.stdint cimport int64_t
 from cpython.array cimport array, clone
 import pyarrow as pa
 
-from opteryx.draken.vectors.timestamp_vector cimport TimestampVector, from_arrow as ts_from_arrow
+from opteryx.compiled.draken.vectors.timestamp_vector cimport TimestampVector, from_arrow as ts_from_arrow
 
 # Constants
 cdef const int64_t SECONDS_PER_MINUTE = 60

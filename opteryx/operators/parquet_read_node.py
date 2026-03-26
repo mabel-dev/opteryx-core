@@ -34,7 +34,7 @@ from typing import Generator
 
 import numpy
 import pyarrow
-from opteryx.draken.morsels.morsel import Morsel
+from opteryx.compiled.draken.morsels.morsel import Morsel
 from opteryx.expression import NodeType
 from opteryx.expression import get_all_nodes_of_type
 from opteryx.models import Node

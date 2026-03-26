@@ -170,7 +170,7 @@ def _read_footer_payload(
 def _parse_footer_envelope(path: str, envelope: bytes, footer_bytes: int) -> dict:
     """Parse a footer envelope with rugo and return metadata dict."""
     try:
-        from opteryx.rugo import parquet as rugo_parquet
+        from opteryx.compiled.rugo import parquet as rugo_parquet
     except ImportError:
         raise RuntimeError(
             "rugo.parquet is required but not available. "
@@ -281,7 +281,7 @@ def fetch_columns(
 
     if decoder is None:
         try:
-            from opteryx.rugo import parquet as rugo_parquet
+            from opteryx.compiled.rugo import parquet as rugo_parquet
 
             decoder = rugo_parquet.decode_column_from_chunk
         except ImportError:
@@ -334,7 +334,7 @@ def fetch_columns(
     _pages_skipped_before: int = 0
     _pages_decoded_before: int = 0
     if row_mask is not None and misses:
-        from opteryx.rugo import parquet as _rugo_parquet
+        from opteryx.compiled.rugo import parquet as _rugo_parquet
 
         _tel_before = _rugo_parquet.get_telemetry()
         _pages_skipped_before = _tel_before.get("parquet_pages_skipped", 0)
@@ -463,7 +463,7 @@ def fetch_columns(
     result_dict["__cache_column_hits__"] = cache_hits
     result_dict["__cache_column_misses__"] = cache_misses
     if row_mask is not None:
-        from opteryx.rugo import parquet as _rugo_parquet
+        from opteryx.compiled.rugo import parquet as _rugo_parquet
 
         _tel_after = _rugo_parquet.get_telemetry()
         result_dict["__pages_skipped__"] = (
@@ -770,7 +770,7 @@ def _resolve_decoder(decoder: Optional[Any]) -> Any:
     if decoder is not None:
         return decoder
     try:
-        from opteryx.rugo import parquet as rugo_parquet
+        from opteryx.compiled.rugo import parquet as rugo_parquet
     except ImportError:
         raise RuntimeError(
             "rugo.parquet is required but not available. "

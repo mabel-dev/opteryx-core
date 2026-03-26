@@ -9,7 +9,7 @@
 //   RUGO_TEL_ACCUM(rugo_tel::decompress_s, t0);
 //
 // Usage (Cython):
-//   import opteryx.rugo.parquet as rp
+//   import opteryx.compiled.rugo.parquet as rp
 //   rp.reset_cpp_telemetry()
 //   ... run workload ...
 //   t = rp.get_cpp_telemetry()   # dict with keys below

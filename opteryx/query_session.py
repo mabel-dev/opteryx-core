@@ -370,7 +370,7 @@ class Session(DataFrame):
         The query engine emits Draken morsels. This method converts them to PyArrow.
         Vectors handle their own type conversions (e.g., IntervalVector → month_day_nano_interval).
         """
-        from opteryx.draken.morsels.morsel import Morsel
+        from opteryx.compiled.draken.morsels.morsel import Morsel
 
         self._ensure_open()
         if self._tracing_enabled:
@@ -680,7 +680,7 @@ class Session(DataFrame):
             return
 
         # Handle Draken morsels or iterables of morsels/tables
-        from opteryx.draken.morsels.morsel import Morsel
+        from opteryx.compiled.draken.morsels.morsel import Morsel
 
         items = result_data
         last_item = None
@@ -816,7 +816,7 @@ class Session(DataFrame):
         This is a *Draken-native* API: it avoids converting morsels to Arrow (or
         any other intermediate format) except when absolutely required.
         """
-        from opteryx.draken.morsels.morsel import Morsel
+        from opteryx.compiled.draken.morsels.morsel import Morsel
 
         _DRAKEN_TO_ORSO = {
             1: OrsoTypes.INTEGER,  # INT8

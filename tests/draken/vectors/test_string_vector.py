@@ -4,7 +4,7 @@ import ctypes
 import pyarrow as pa
 import pytest
 
-from opteryx.draken.vectors import string_vector as string_vector_module
+from opteryx.compiled.draken.vectors import string_vector as string_vector_module
 
 StringVectorBuilder = string_vector_module.StringVectorBuilder  # type: ignore[attr-defined]
 

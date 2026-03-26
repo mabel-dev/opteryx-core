@@ -1,21 +1,28 @@
 import os
 import sys
+
 import pyarrow as pa
 
 sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 
+from opteryx.compiled.draken.interop.arrow import vector_from_arrow
+
 from opteryx.compiled.vector_ops import vector_anyop_lt
-from opteryx.draken.interop.arrow import vector_from_arrow
+
 
 def _test_comparison(literal, test_value, expected_result, _type=pa.string()):
     array = vector_from_arrow(pa.array([[test_value]], type=pa.list_(_type)))
     result = vector_anyop_lt(literal, array).to_pylist()
-    assert result == [expected_result], f"Expected {literal} < {test_value} to be {expected_result}, got {result[0]}"
+    assert result == [expected_result], (
+        f"Expected {literal} < {test_value} to be {expected_result}, got {result[0]}"
+    )
+
 
 def test_basic_comparison_strings():
     _test_comparison("b", "a", 0)  # b < a -> False
     _test_comparison("a", "b", 1)  # a < b -> True
     _test_comparison("a", "a", 0)  # a < a -> False
+
 
 def test_basic_comparison_ints():
     # Integer comparisons
@@ -24,6 +31,7 @@ def test_basic_comparison_ints():
     _test_comparison(1, 1, 0, pa.int64())  # 1 < 1 -> False
     _test_comparison(-1, -2, 0, pa.int64())  # -1 < -2 -> False
     _test_comparison(0, -1, 0, pa.int64())  # 0 < -1 -> False
+
 
 if __name__ == "__main__":  # pragma: no cover
     from tests import run_tests

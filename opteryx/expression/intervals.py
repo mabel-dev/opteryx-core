@@ -95,7 +95,7 @@ def _interval_rows_from_values(values) -> List[Optional[Tuple[int, int]]]:
     if isinstance(values, pyarrow.Array):
         # Fast-path when Draken can directly decode Arrow interval layouts.
         try:
-            from opteryx.draken.interop.arrow import vector_from_arrow
+            from opteryx.compiled.draken.interop.arrow import vector_from_arrow
 
             vector = vector_from_arrow(values)
             if vector.__class__.__name__ == "IntervalVector":
@@ -121,7 +121,7 @@ def _interval_rows_from_values(values) -> List[Optional[Tuple[int, int]]]:
 
 
 def _as_interval_vector(values):
-    from opteryx.draken.interop.arrow import vector_from_arrow
+    from opteryx.compiled.draken.interop.arrow import vector_from_arrow
 
     if values.__class__.__name__ == "IntervalVector":
         return values

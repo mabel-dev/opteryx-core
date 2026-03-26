@@ -21,8 +21,7 @@ import numpy
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
-from opteryx.nanobind import vector_search
-
+from opteryx.compiled.nanobind import vector_search
 
 DEFAULT_ROWS = (1_000, 10_000, 100_000, 1_000_000)
 
@@ -37,7 +36,9 @@ def _measure_ms(fn, repeat: int) -> tuple[float, float]:
     return min(samples), statistics.mean(samples)
 
 
-def _build_workload(rows: int, dims: int, seed: int) -> tuple[numpy.ndarray, numpy.ndarray, numpy.ndarray]:
+def _build_workload(
+    rows: int, dims: int, seed: int
+) -> tuple[numpy.ndarray, numpy.ndarray, numpy.ndarray]:
     rng = numpy.random.default_rng(seed)
     query = rng.standard_normal(size=dims, dtype=numpy.float32)
     vectors = rng.standard_normal(size=(rows, dims), dtype=numpy.float32)

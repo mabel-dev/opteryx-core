@@ -19,7 +19,7 @@ This node doesn't do any calculations, it is a pure Projection.
 
 from collections.abc import Iterable
 
-from opteryx.draken.morsels.morsel import Morsel
+from opteryx.compiled.draken.morsels.morsel import Morsel
 from opteryx.exceptions import AmbiguousIdentifierError
 from opteryx.exceptions import InvalidInternalStateError
 from opteryx.models import QueryProperties
@@ -87,7 +87,7 @@ class ExitNode(BasePlanNode):
         if morsel == EOS:
             if not self.at_least_one:
                 # Return empty Draken morsel with correct schema
-                from opteryx.draken.interop.arrow import vector_from_sequence
+                from opteryx.compiled.draken.interop.arrow import vector_from_sequence
 
                 # Create empty vectors with correct types
                 vectors = []

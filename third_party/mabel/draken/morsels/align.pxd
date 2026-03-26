@@ -1,5 +1,5 @@
 from libc.stdint cimport int32_t
-from opteryx.draken.morsels.morsel cimport Morsel
+from opteryx.compiled.draken.morsels.morsel cimport Morsel
 
 
 cpdef Morsel align_tables(

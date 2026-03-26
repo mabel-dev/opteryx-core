@@ -8,17 +8,17 @@
 
 from libc.stddef cimport size_t
 
-from opteryx.draken.core.buffers cimport DRAKEN_BOOL
-from opteryx.draken.core.buffers cimport DRAKEN_DATE32
-from opteryx.draken.core.buffers cimport DRAKEN_FLOAT64
-from opteryx.draken.core.buffers cimport DRAKEN_INT8
-from opteryx.draken.core.buffers cimport DRAKEN_INT16
-from opteryx.draken.core.buffers cimport DRAKEN_INT32
-from opteryx.draken.core.buffers cimport DRAKEN_INT64
-from opteryx.draken.core.buffers cimport DRAKEN_STRING
-from opteryx.draken.core.buffers cimport DRAKEN_TIME32
-from opteryx.draken.core.buffers cimport DRAKEN_TIME64
-from opteryx.draken.core.buffers cimport DRAKEN_TIMESTAMP64
+from opteryx.compiled.draken.core.buffers cimport DRAKEN_BOOL
+from opteryx.compiled.draken.core.buffers cimport DRAKEN_DATE32
+from opteryx.compiled.draken.core.buffers cimport DRAKEN_FLOAT64
+from opteryx.compiled.draken.core.buffers cimport DRAKEN_INT8
+from opteryx.compiled.draken.core.buffers cimport DRAKEN_INT16
+from opteryx.compiled.draken.core.buffers cimport DRAKEN_INT32
+from opteryx.compiled.draken.core.buffers cimport DRAKEN_INT64
+from opteryx.compiled.draken.core.buffers cimport DRAKEN_STRING
+from opteryx.compiled.draken.core.buffers cimport DRAKEN_TIME32
+from opteryx.compiled.draken.core.buffers cimport DRAKEN_TIME64
+from opteryx.compiled.draken.core.buffers cimport DRAKEN_TIMESTAMP64
 
 
 cdef inline object _coerce_literal_bytes(object literal):
@@ -127,7 +127,7 @@ cdef object _typed_constant_from_scalar(object value, size_t length, object dtyp
         dtype_name = ""
 
     if dtype in (DRAKEN_BOOL,) or dtype_name in ("bool", "boolean"):
-        from opteryx.draken.vectors.bool_vector import BoolVector
+        from opteryx.compiled.draken.vectors.bool_vector import BoolVector
 
         return BoolVector.from_constant(False if is_null else scalar, length, is_null=is_null)
 
@@ -139,17 +139,17 @@ cdef object _typed_constant_from_scalar(object value, size_t length, object dtyp
         "uint16",
         "uint32",
     ):
-        from opteryx.draken.vectors.integer_vector import IntegerVector
+        from opteryx.compiled.draken.vectors.integer_vector import IntegerVector
 
         return IntegerVector.from_constant(0 if is_null else scalar, length, is_null=is_null)
 
     if dtype in (DRAKEN_INT64,) or dtype_name in ("int64", "uint64"):
-        from opteryx.draken.vectors.int64_vector import Int64Vector
+        from opteryx.compiled.draken.vectors.int64_vector import Int64Vector
 
         return Int64Vector.from_constant(0 if is_null else scalar, length, is_null=is_null)
 
     if dtype in (DRAKEN_FLOAT64,) or dtype_name in ("float", "float32", "float64", "double"):
-        from opteryx.draken.vectors.float64_vector import Float64Vector
+        from opteryx.compiled.draken.vectors.float64_vector import Float64Vector
 
         return Float64Vector.from_constant(0.0 if is_null else scalar, length, is_null=is_null)
 
@@ -161,7 +161,7 @@ cdef object _typed_constant_from_scalar(object value, size_t length, object dtyp
         "varchar",
         "blob",
     ):
-        from opteryx.draken.vectors.string_vector import StringVector
+        from opteryx.compiled.draken.vectors.string_vector import StringVector
 
         return StringVector.from_constant(b"" if is_null else scalar, length, is_null=is_null)
 
@@ -170,19 +170,19 @@ cdef object _typed_constant_from_scalar(object value, size_t length, object dtyp
 
         if dtype is not None and not isinstance(dtype, str):
             if pa.types.is_boolean(dtype):
-                from opteryx.draken.vectors.bool_vector import BoolVector
+                from opteryx.compiled.draken.vectors.bool_vector import BoolVector
 
                 return BoolVector.from_constant(False if is_null else scalar, length, is_null=is_null)
             if pa.types.is_integer(dtype):
                 if pa.types.is_int64(dtype) or pa.types.is_uint64(dtype):
-                    from opteryx.draken.vectors.int64_vector import Int64Vector
+                    from opteryx.compiled.draken.vectors.int64_vector import Int64Vector
 
                     return Int64Vector.from_constant(0 if is_null else scalar, length, is_null=is_null)
-                from opteryx.draken.vectors.integer_vector import IntegerVector
+                from opteryx.compiled.draken.vectors.integer_vector import IntegerVector
 
                 return IntegerVector.from_constant(0 if is_null else scalar, length, is_null=is_null)
             if pa.types.is_floating(dtype):
-                from opteryx.draken.vectors.float64_vector import Float64Vector
+                from opteryx.compiled.draken.vectors.float64_vector import Float64Vector
 
                 return Float64Vector.from_constant(0.0 if is_null else scalar, length, is_null=is_null)
             if (
@@ -191,17 +191,17 @@ cdef object _typed_constant_from_scalar(object value, size_t length, object dtyp
                 or pa.types.is_binary(dtype)
                 or pa.types.is_large_binary(dtype)
             ):
-                from opteryx.draken.vectors.string_vector import StringVector
+                from opteryx.compiled.draken.vectors.string_vector import StringVector
 
                 return StringVector.from_constant(b"" if is_null else scalar, length, is_null=is_null)
             if pa.types.is_date32(dtype):
-                from opteryx.draken.vectors.date32_vector import Date32Vector
+                from opteryx.compiled.draken.vectors.date32_vector import Date32Vector
 
                 if not is_null:
                     scalar = pa.array([scalar], type=pa.date32()).cast(pa.int32())[0].as_py()
                 return Date32Vector.from_constant(0 if is_null else scalar, length, is_null=is_null)
             if pa.types.is_timestamp(dtype):
-                from opteryx.draken.vectors.timestamp_vector import TimestampVector
+                from opteryx.compiled.draken.vectors.timestamp_vector import TimestampVector
 
                 timestamp_type = dtype
                 if not is_null:
@@ -213,7 +213,7 @@ cdef object _typed_constant_from_scalar(object value, size_t length, object dtyp
                     timestamp_unit=timestamp_type.unit,
                 )
             if pa.types.is_time32(dtype) or pa.types.is_time64(dtype):
-                from opteryx.draken.vectors.time_vector import TimeVector
+                from opteryx.compiled.draken.vectors.time_vector import TimeVector
 
                 time_type = dtype
                 is_time64 = pa.types.is_time64(time_type)
@@ -231,19 +231,19 @@ cdef object _typed_constant_from_scalar(object value, size_t length, object dtyp
 
     if dtype is None:
         if isinstance(scalar, bool):
-            from opteryx.draken.vectors.bool_vector import BoolVector
+            from opteryx.compiled.draken.vectors.bool_vector import BoolVector
 
             return BoolVector.from_constant(False if is_null else scalar, length, is_null=is_null)
         if isinstance(scalar, int):
-            from opteryx.draken.vectors.int64_vector import Int64Vector
+            from opteryx.compiled.draken.vectors.int64_vector import Int64Vector
 
             return Int64Vector.from_constant(0 if is_null else scalar, length, is_null=is_null)
         if isinstance(scalar, float):
-            from opteryx.draken.vectors.float64_vector import Float64Vector
+            from opteryx.compiled.draken.vectors.float64_vector import Float64Vector
 
             return Float64Vector.from_constant(0.0 if is_null else scalar, length, is_null=is_null)
         if isinstance(scalar, (bytes, str)):
-            from opteryx.draken.vectors.string_vector import StringVector
+            from opteryx.compiled.draken.vectors.string_vector import StringVector
 
             return StringVector.from_constant(b"" if is_null else scalar, length, is_null=is_null)
 

@@ -147,7 +147,7 @@ cpdef object build_side_carchar_map(
 
     compute_row_hashes(relation, join_columns, row_hashes)
 
-    import opteryx.nanobind.carchar_native as carchar_native
+    import opteryx.compiled.nanobind.carchar_native as carchar_native
 
     ht = carchar_native.CarcharJoinEngine(
         int(non_null_indices.shape[0]),

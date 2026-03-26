@@ -13,12 +13,12 @@ from libc.string cimport memset
 import numpy
 cimport numpy
 
-from opteryx.draken.core.buffers cimport DictAccessor
-from opteryx.draken.vectors.bool_vector cimport BoolVector
-from opteryx.draken.vectors.string_vector cimport StringVector
-from opteryx.draken.vectors.string_vector cimport _StringVectorCIterator
-from opteryx.draken.vectors.string_vector cimport StringElement
-from opteryx.draken.vectors.vector cimport Vector
+from opteryx.compiled.draken.core.buffers cimport DictAccessor
+from opteryx.compiled.draken.vectors.bool_vector cimport BoolVector
+from opteryx.compiled.draken.vectors.string_vector cimport StringVector
+from opteryx.compiled.draken.vectors.string_vector cimport _StringVectorCIterator
+from opteryx.compiled.draken.vectors.string_vector cimport StringElement
+from opteryx.compiled.draken.vectors.vector cimport Vector
 
 numpy.import_array()
 
@@ -121,7 +121,7 @@ cdef BoolVector _vector_match_against_string_vector(
     row_vectors = embedded[1:]
 
     try:
-        from opteryx.nanobind import vector_search
+        from opteryx.compiled.nanobind import vector_search
 
         scores_arr = numpy.asarray(
             vector_search.score_cosine(query_vector, row_vectors), dtype=numpy.float32

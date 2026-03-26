@@ -174,8 +174,8 @@ cdef class _BufferCleanup:
         else:
             free(self.ptr)
 
-from opteryx.draken.vectors.string_vector cimport StringVector
-from opteryx.draken.core.buffers cimport DrakenVarBuffer
+from opteryx.compiled.draken.vectors.string_vector cimport StringVector
+from opteryx.compiled.draken.core.buffers cimport DrakenVarBuffer
 
 cpdef object vector_split(StringVector vec, char delimiter):
     """

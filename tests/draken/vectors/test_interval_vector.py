@@ -2,10 +2,10 @@
 
 import datetime
 
-import pytest
 import pyarrow as pa
+import pytest
 
-from opteryx.draken import Vector
+from opteryx.compiled.draken import Vector
 
 MICROSECONDS_PER_DAY = 24 * 60 * 60 * 1_000_000
 _MONTH_INTERVAL_FACTORY = getattr(pa, "month_interval", None)
@@ -127,12 +127,14 @@ def test_month_interval_normalization():
     assert vec.to_pylist() == [(3, 0), None, (-1, 0)]
 
 
-@pytest.mark.skipif(DAY_TIME_INTERVAL_TYPE is None, reason="PyArrow build lacks day_time interval type")
+@pytest.mark.skipif(
+    DAY_TIME_INTERVAL_TYPE is None, reason="PyArrow build lacks day_time interval type"
+)
 def test_day_time_interval_normalization():
     arr = pa.array(
         [
             (0, 5_000),  # 5 seconds
-            (1, 0),      # 1 day
+            (1, 0),  # 1 day
             None,
         ],
         type=DAY_TIME_INTERVAL_TYPE,

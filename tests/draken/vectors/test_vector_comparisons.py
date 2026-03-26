@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 import pyarrow as pa
 import pytest
 
-from opteryx.draken import Vector
+from opteryx.compiled.draken import Vector
 
 
 class TestInt64VectorComparisons:

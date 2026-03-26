@@ -6,7 +6,7 @@
 # cython: infer_types=True
 
 from libc.stdint cimport int64_t, uint8_t
-from opteryx.draken.core.buffers cimport DictAccessor, DrakenFixedBuffer
+from opteryx.compiled.draken.core.buffers cimport DictAccessor, DrakenFixedBuffer
 from opteryx.compiled.aggregations.kernels.utils cimport _bitmap_is_valid, _read_integer_value
 from opteryx.compiled.aggregations.vector_readers cimport (
     _dict_accessor_read_float_value,

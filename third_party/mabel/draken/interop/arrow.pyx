@@ -21,48 +21,48 @@ from libc.stdlib cimport free
 from libc.stdlib cimport malloc
 from libc.stdint cimport int64_t, uint8_t
 
-from opteryx.draken.core.buffers cimport DrakenFixedBuffer
-from opteryx.draken.core.buffers cimport DrakenType
-from opteryx.draken.interop.arrow_c_data_interface cimport ARROW_FLAG_NULLABLE
-from opteryx.draken.interop.arrow_c_data_interface cimport ArrowArray
-from opteryx.draken.interop.arrow_c_data_interface cimport ArrowSchema
-from opteryx.draken.vectors.bool_vector cimport from_arrow as bool_from_arrow
-from opteryx.draken.vectors.float64_vector cimport from_arrow as float64_from_arrow
-from opteryx.draken.vectors.int64_vector cimport from_arrow as int64_from_arrow
-from opteryx.draken.vectors.integer_vector cimport from_arrow as integer_from_arrow
-from opteryx.draken.vectors.string_vector cimport from_arrow as string_from_arrow
-from opteryx.draken.vectors.string_vector cimport from_arrow_struct as string_from_arrow_struct
-from opteryx.draken.vectors.date32_vector cimport from_arrow as date32_from_arrow
-from opteryx.draken.vectors.timestamp_vector cimport from_arrow as timestamp_from_arrow
-from opteryx.draken.vectors.time_vector cimport from_arrow as time_from_arrow
-from opteryx.draken.vectors.interval_vector cimport (
+from opteryx.compiled.draken.core.buffers cimport DrakenFixedBuffer
+from opteryx.compiled.draken.core.buffers cimport DrakenType
+from opteryx.compiled.draken.interop.arrow_c_data_interface cimport ARROW_FLAG_NULLABLE
+from opteryx.compiled.draken.interop.arrow_c_data_interface cimport ArrowArray
+from opteryx.compiled.draken.interop.arrow_c_data_interface cimport ArrowSchema
+from opteryx.compiled.draken.vectors.bool_vector cimport from_arrow as bool_from_arrow
+from opteryx.compiled.draken.vectors.float64_vector cimport from_arrow as float64_from_arrow
+from opteryx.compiled.draken.vectors.int64_vector cimport from_arrow as int64_from_arrow
+from opteryx.compiled.draken.vectors.integer_vector cimport from_arrow as integer_from_arrow
+from opteryx.compiled.draken.vectors.string_vector cimport from_arrow as string_from_arrow
+from opteryx.compiled.draken.vectors.string_vector cimport from_arrow_struct as string_from_arrow_struct
+from opteryx.compiled.draken.vectors.date32_vector cimport from_arrow as date32_from_arrow
+from opteryx.compiled.draken.vectors.timestamp_vector cimport from_arrow as timestamp_from_arrow
+from opteryx.compiled.draken.vectors.time_vector cimport from_arrow as time_from_arrow
+from opteryx.compiled.draken.vectors.interval_vector cimport (
     from_arrow_interval as interval_from_arrow_interval,
 )
-from opteryx.draken.vectors.interval_vector cimport (
+from opteryx.compiled.draken.vectors.interval_vector cimport (
     from_arrow_binary as interval_from_arrow_binary,
 )
-from opteryx.draken.vectors.array_vector cimport from_arrow as array_from_arrow
-from opteryx.draken.vectors.vector_vector cimport from_arrow as vector_from_arrow_vector
+from opteryx.compiled.draken.vectors.array_vector cimport from_arrow as array_from_arrow
+from opteryx.compiled.draken.vectors.vector_vector cimport from_arrow as vector_from_arrow_vector
 
-from opteryx.draken.vectors.arrow_vector import from_arrow as arrow_from_arrow
-from opteryx.draken.vectors.int64_vector cimport Int64Vector
-from opteryx.draken.vectors.int64_vector cimport from_sequence as int64_from_sequence
-from opteryx.draken.vectors.float64_vector cimport Float64Vector
-from opteryx.draken.vectors.float64_vector cimport from_sequence as float64_from_sequence
-from opteryx.draken.vectors.bool_vector cimport BoolVector
-from opteryx.draken.vectors.bool_vector cimport from_sequence as bool_from_sequence
-from opteryx.draken.vectors.scalar_constructors cimport from_sequence as constant_from_sequence
+from opteryx.compiled.draken.vectors.arrow_vector import from_arrow as arrow_from_arrow
+from opteryx.compiled.draken.vectors.int64_vector cimport Int64Vector
+from opteryx.compiled.draken.vectors.int64_vector cimport from_sequence as int64_from_sequence
+from opteryx.compiled.draken.vectors.float64_vector cimport Float64Vector
+from opteryx.compiled.draken.vectors.float64_vector cimport from_sequence as float64_from_sequence
+from opteryx.compiled.draken.vectors.bool_vector cimport BoolVector
+from opteryx.compiled.draken.vectors.bool_vector cimport from_sequence as bool_from_sequence
+from opteryx.compiled.draken.vectors.scalar_constructors cimport from_sequence as constant_from_sequence
 
 cdef object _typed_constant_from_arrow_value(object value_type, object value, Py_ssize_t length, bint is_null):
     import pyarrow as pa
-    from opteryx.draken.vectors.bool_vector import BoolVector
-    from opteryx.draken.vectors.date32_vector import Date32Vector
-    from opteryx.draken.vectors.float64_vector import Float64Vector
-    from opteryx.draken.vectors.int64_vector import Int64Vector
-    from opteryx.draken.vectors.integer_vector import IntegerVector
-    from opteryx.draken.vectors.string_vector import StringVector
-    from opteryx.draken.vectors.time_vector import TimeVector
-    from opteryx.draken.vectors.timestamp_vector import TimestampVector
+    from opteryx.compiled.draken.vectors.bool_vector import BoolVector
+    from opteryx.compiled.draken.vectors.date32_vector import Date32Vector
+    from opteryx.compiled.draken.vectors.float64_vector import Float64Vector
+    from opteryx.compiled.draken.vectors.int64_vector import Int64Vector
+    from opteryx.compiled.draken.vectors.integer_vector import IntegerVector
+    from opteryx.compiled.draken.vectors.string_vector import StringVector
+    from opteryx.compiled.draken.vectors.time_vector import TimeVector
+    from opteryx.compiled.draken.vectors.timestamp_vector import TimestampVector
 
     if pa.types.is_int64(value_type):
         return Int64Vector.from_constant(value, length, is_null=is_null)
@@ -199,7 +199,7 @@ cpdef object vector_from_arrow(object array):
     cdef object const_vec = None
     cdef bint uniform_lengths
     cdef object dimension = None
-    
+
     # Handle chunked arrays: single chunk is OK, multiple chunks not supported
     if hasattr(array, "num_chunks"):
         num_chunks = array.num_chunks
@@ -295,17 +295,17 @@ cpdef object vector_from_arrow(object array):
 cpdef object vector_from_sequence(object data, object dtype=None):
     """
     Create a Draken Vector from a typed memoryview or Python sequence.
-    
+
     For fixed-width numeric/boolean types, accepts typed memoryviews for zero-copy wrapping.
     Falls back to Arrow conversion for other types (including varchar/varbinary).
-    
+
     Args:
         data: int64[::1], double[::1], uint8[::1] (bool), or Python sequence
         dtype: Optional type hint (for future use)
-    
+
     Returns:
         Vector: Appropriate Draken Vector subclass
-    
+
     Note:
         For varchar/varbinary types, use pa.array() + vector_from_arrow() instead.
         This function is optimized for fixed-width numeric types only.
@@ -314,7 +314,7 @@ cpdef object vector_from_sequence(object data, object dtype=None):
     cdef double[::1] float64_view
     cdef uint8_t[::1] bool_view
     import pyarrow as pa
-    
+
     # Check if it's a typed memoryview by attempting casts
     try:
         # Try int64 memoryview
@@ -322,21 +322,21 @@ cpdef object vector_from_sequence(object data, object dtype=None):
         return int64_from_sequence(int64_view)
     except (TypeError, ValueError, BufferError):
         pass
-    
+
     try:
         # Try float64 memoryview
         float64_view = data
         return float64_from_sequence(float64_view)
     except (TypeError, ValueError, BufferError):
         pass
-    
+
     try:
         # Try bool/uint8 memoryview
         bool_view = data
         return bool_from_sequence(bool_view)
     except (TypeError, ValueError, BufferError):
         pass
-    
+
     # Constant path for Python sequences (avoid materializing full repeated payloads).
     const_vec = constant_from_sequence(data, dtype)
     if const_vec is not None:
@@ -354,7 +354,7 @@ cpdef DrakenType arrow_type_to_draken(object dtype):
     Raises TypeError if unsupported.
     """
     import pyarrow as pa
-    
+
     if pa.types.is_int8(dtype):
         return DrakenType.DRAKEN_INT8
     elif pa.types.is_int16(dtype):

@@ -9,7 +9,7 @@ Cython code that imports from Draken.
 
 The specific issue this addresses:
 - Draken's wheel was missing draken/core/buffers.pxd
-- This file is needed for: from opteryx.draken.core.buffers cimport DrakenVarBuffer
+- This file is needed for: from opteryx.compiled.draken.core.buffers cimport DrakenVarBuffer
 - Which is required by string_vector.pxd for _StringVectorCIterator
 """
 
@@ -107,8 +107,8 @@ def main():
     print("Cause: draken/core/buffers.pxd was missing from wheel")
     print()
     print("Required import chain:")
-    print("  1. Opteryx code: from opteryx.draken.vectors.string_vector cimport _StringVectorCIterator")
-    print("  2. string_vector.pxd: from opteryx.draken.core.buffers cimport DrakenVarBuffer")
+    print("  1. Opteryx code: from opteryx.compiled.draken.vectors.string_vector cimport _StringVectorCIterator")
+    print("  2. string_vector.pxd: from opteryx.compiled.draken.core.buffers cimport DrakenVarBuffer")
     print("  3. buffers.pxd must exist in wheel!")
     print()
     print("Verification:")

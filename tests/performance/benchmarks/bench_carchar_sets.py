@@ -34,11 +34,9 @@ import pyarrow as pa
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
 
-import opteryx.draken as draken
+import opteryx.compiled.draken as draken
 
-
-
-DEFAULT_CPP_MODULE = "opteryx.nanobind.carchar_native"
+DEFAULT_CPP_MODULE = "opteryx.compiled.nanobind.carchar_native"
 
 
 def _measure_ms(fn, repeat: int) -> tuple[float, float]:
@@ -60,7 +58,7 @@ def _build_workload(
     hit_ratio: float,
 ):
     """Create workload using draken Morsels.
-    
+
     Returns:
         tuple: (build_hashes, probe_hashes) as uint64 arrays from draken hashing
     """
@@ -75,35 +73,35 @@ def _build_workload(
         unique_keys = max(1, int(round(rows * (1.0 - dup_ratio))))
     unique_keys = min(unique_keys, rows)
     rng = numpy.random.default_rng(seed)
-    
+
     # Create build dataset as Arrow table
     base_values = rng.integers(0, 2**31 - 1, size=unique_keys, dtype=numpy.int64)
     build_values = numpy.empty(rows, dtype=numpy.int64)
     for i in range(rows):
         build_values[i] = base_values[i % unique_keys]
     rng.shuffle(build_values)
-    
+
     # Convert to draken Morsel and compute hashes
-    build_table = pa.table({'key': build_values})
+    build_table = pa.table({"key": build_values})
     build_morsel = draken.Morsel.from_arrow(build_table)
     build_hashes = numpy.array(build_morsel.hash())
-    
+
     # Create probe dataset with configurable hit/miss ratio
     hit_count = int(round(probe_count * hit_ratio))
     miss_count = probe_count - hit_count
     hit_positions = rng.integers(0, rows, size=hit_count, dtype=numpy.int64)
     hit_probes = build_values[hit_positions]
-    
+
     # Miss probes use different key space (won't collide with builds)
     miss_values = rng.integers(2**31, 2**32 - 1, size=miss_count, dtype=numpy.int64)
     probe_values = numpy.concatenate((hit_probes, miss_values))
     rng.shuffle(probe_values)
-    
+
     # Convert probes to draken Morsel and compute hashes
-    probe_table = pa.table({'key': probe_values})
+    probe_table = pa.table({"key": probe_values})
     probe_morsel = draken.Morsel.from_arrow(probe_table)
     probe_hashes = numpy.array(probe_morsel.hash())
-    
+
     return build_hashes, probe_hashes
 
 
@@ -139,7 +137,9 @@ class AbseilSetAdapter:
         module = importlib.import_module("opteryx.third_party.abseil.containers")
         cls = getattr(module, "FlatHashSet", None)
         if cls is None:
-            raise AttributeError("opteryx.third_party.abseil.containers does not export FlatHashSet")
+            raise AttributeError(
+                "opteryx.third_party.abseil.containers does not export FlatHashSet"
+            )
         self._cls = cls
 
     def build(self, hashes: numpy.ndarray):
@@ -355,7 +355,9 @@ def benchmark_sweep(
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Benchmark CarcharSet vs Abseil FlatHashSet vs Python set")
+    parser = argparse.ArgumentParser(
+        description="Benchmark CarcharSet vs Abseil FlatHashSet vs Python set"
+    )
     parser.add_argument("--rows", type=int, default=500_000)
     parser.add_argument("--unique-keys", type=int, default=250_000)
     parser.add_argument("--probe-count", type=int, default=250_000)

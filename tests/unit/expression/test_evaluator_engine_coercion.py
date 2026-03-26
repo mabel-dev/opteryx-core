@@ -2,7 +2,7 @@ import pyarrow as pa
 import numpy as np
 from types import SimpleNamespace
 
-from opteryx.draken.vectors.vector import Vector
+from opteryx.compiled.draken.vectors.vector import Vector
 from opteryx.expression.evaluator import apply_bounded_function
 
 

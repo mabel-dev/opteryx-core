@@ -258,7 +258,7 @@ def make_draken_extension(module_path, source_file, language="c++", depends=None
             sources.append(s)
 
     return Extension(
-        name=f"opteryx.draken.{module_path}",
+        name=f"opteryx.compiled.draken.{module_path}",
         sources=sources,
         include_dirs=include_dirs,
         extra_compile_args=CPP_FLAGS if language == "c++" else C_FLAGS,
@@ -430,7 +430,7 @@ extensions = [
     ),
     # File format readers
     Extension(
-        "opteryx.rugo.parquet",
+        "opteryx.compiled.rugo.parquet",
         sources=(
             [
                 "third_party/mabel/rugo/parquet/parquet_reader.pyx",
@@ -460,7 +460,7 @@ extensions = [
         extra_link_args=parquet_link_args + LD_EXTRA,
     ),
     Extension(
-        "opteryx.rugo.jsonl",
+        "opteryx.compiled.rugo.jsonl",
         sources=[
             "third_party/mabel/rugo/jsonl/jsonl_reader.pyx",
             "third_party/mabel/rugo/jsonl/decode.cpp",
@@ -487,7 +487,7 @@ extensions = [
     make_draken_extension("vectors.int64_vector", "vectors/int64_vector.pyx", language="c++"),
     make_draken_extension("vectors.integer_vector", "vectors/integer_vector.pyx", language="c++"),
     Extension(
-        "opteryx.draken.vectors.string_vector",
+        "opteryx.compiled.draken.vectors.string_vector",
         sources=[
             "third_party/mabel/draken/vectors/string_vector.pyx",
             "src/cpp/simd_hash.cpp",
@@ -507,7 +507,7 @@ extensions = [
     make_draken_extension("storage.morsel_io", "storage/morsel_io.pyx"),
     # Pre-generated C module for morsels.align (Cython-generated C source)
     Extension(
-        "opteryx.draken.morsels.align",
+        "opteryx.compiled.draken.morsels.align",
         sources=["third_party/mabel/draken/morsels/align.pyx"],
         include_dirs=include_dirs,
         extra_compile_args=C_FLAGS,
@@ -515,9 +515,9 @@ extensions = [
     ),
     # Hash API shim used by a few draken helpers (Cython wrapper)
     Extension(
-        "opteryx.draken.vectors._hash_api",
+        "opteryx.compiled.draken.vectors._hash_api",
         sources=[
-            "opteryx/draken/vectors/_hash_api.pyx",
+            "opteryx/compiled/draken/vectors/_hash_api.pyx",
             "src/cpp/simd_hash.cpp",
             "src/cpp/cpu_features.cpp",
         ],
@@ -1002,7 +1002,7 @@ if not (
 
 extensions.append(
     Extension(
-        "opteryx.nanobind.vector_length",
+        "opteryx.compiled.nanobind.vector_length",
         sources=[
             "src/cpp/vector_length_native.cpp",
             "third_party/nanobind/src/nb_combined.cpp",
@@ -1068,7 +1068,7 @@ extensions.append(
 
 extensions.append(
     Extension(
-        "opteryx.nanobind.carchar_native",
+        "opteryx.compiled.nanobind.carchar_native",
         sources=[
             "src/cpp/carchar_native.cpp",
             "third_party/nanobind/src/nb_combined.cpp",
@@ -1121,7 +1121,7 @@ extensions.append(
 
 extensions.append(
     Extension(
-        "opteryx.nanobind.vector_search",
+        "opteryx.compiled.nanobind.vector_search",
         sources=[
             "src/cpp/vector_search_native.cpp",
             "third_party/nanobind/src/nb_combined.cpp",
@@ -1140,7 +1140,7 @@ extensions.append(
 
 extensions.append(
     Extension(
-        "opteryx.nanobind.usearch_native",
+        "opteryx.compiled.nanobind.usearch_native",
         sources=[
             "src/cpp/usearch_native.cpp",
             "third_party/nanobind/src/nb_combined.cpp",
@@ -1210,7 +1210,7 @@ if _ort_include and _ort_lib and os.path.exists(_ort_include) and os.path.exists
 
     extensions.append(
         Extension(
-            "opteryx.nanobind.minilm_native",
+            "opteryx.compiled.nanobind.minilm_native",
             sources=[
                 "src/cpp/minilm_native.cpp",
                 "third_party/nanobind/src/nb_combined.cpp",

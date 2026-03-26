@@ -8,8 +8,8 @@
 
 from libc.time cimport time
 
-from opteryx.draken.vectors.string_vector cimport StringVector
-from opteryx.draken.vectors import string_vector as string_vector_module
+from opteryx.compiled.draken.vectors.string_vector cimport StringVector
+from opteryx.compiled.draken.vectors import string_vector as string_vector_module
 
 
 cdef bytes _ALPHABET = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_/"

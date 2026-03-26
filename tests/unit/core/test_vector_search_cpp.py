@@ -1,8 +1,7 @@
 import numpy
 import pytest
 
-
-vector_search = pytest.importorskip("opteryx.nanobind.vector_search")
+vector_search = pytest.importorskip("opteryx.compiled.nanobind.vector_search")
 
 
 def _reference_exact_search(query_vector, row_ids, vectors, k):

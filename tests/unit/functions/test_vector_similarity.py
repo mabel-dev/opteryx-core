@@ -13,22 +13,21 @@ import pytest
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
+from opteryx.compiled.draken.vectors.string_vector import StringVector
+
 import opteryx
+from opteryx.compiled.draken import Morsel
 from opteryx.connectors import DiskConnector
-from opteryx.draken import Morsel
-from opteryx.draken.vectors.string_vector import StringVector
-from opteryx.embeddings import create_hybrid_embedding_provider
-from opteryx.embeddings import create_static_embedding_provider
-from opteryx.embeddings import embed_text_matrix
-from opteryx.embeddings import embed_text_values
-from opteryx.exceptions import FunctionExecutionError
-from opteryx.exceptions import UnsupportedSyntaxError
-from opteryx.operators.heap_sort_node import HeapSortNode
-
+from opteryx.embeddings import (
+    create_hybrid_embedding_provider,
+    create_static_embedding_provider,
+    embed_text_matrix,
+    embed_text_values,
+)
+from opteryx.exceptions import FunctionExecutionError, UnsupportedSyntaxError
 from opteryx.expression.functions.implementations.text import match_against
-from opteryx.expression.functions.implementations.utility import cosine_distance
-from opteryx.expression.functions.implementations.utility import cosine_similarity
-
+from opteryx.expression.functions.implementations.utility import cosine_distance, cosine_similarity
+from opteryx.operators.heap_sort_node import HeapSortNode
 
 
 def _make_vector_parquet_dataset() -> str:
@@ -59,7 +58,7 @@ def _default_minilm_available() -> bool:
     if not (model_dir / "model.onnx").exists() or not (model_dir / "vocab.txt").exists():
         return False
     try:
-        from opteryx.nanobind import minilm_native  # noqa: F401
+        from opteryx.compiled.nanobind import minilm_native  # noqa: F401
     except ImportError:
         return False
     return True
@@ -260,7 +259,10 @@ def test_match_against_accepts_scalar_literal_in_draken_style_call_shape():
     opteryx.register_embedding_provider(FakeEmbeddingProvider())
     try:
         rows = numpy.array(
-            ["LC-18A, Cape Canaveral AFS, Florida, USA", "Site 1/5, Baikonur Cosmodrome, Kazakhstan"],
+            [
+                "LC-18A, Cape Canaveral AFS, Florida, USA",
+                "Site 1/5, Baikonur Cosmodrome, Kazakhstan",
+            ],
             dtype=object,
         )
 
@@ -565,7 +567,10 @@ def test_match_against_via_sql_uses_semantic_embedding_threshold():
             ORDER BY label
             """
         )
-        labels = [value.decode("utf8") if isinstance(value, bytes) else value for value in result["label"].to_pylist()]
+        labels = [
+            value.decode("utf8") if isinstance(value, bytes) else value
+            for value in result["label"].to_pylist()
+        ]
         assert labels == ["mars"]
     finally:
         session.close()
@@ -573,12 +578,14 @@ def test_match_against_via_sql_uses_semantic_embedding_threshold():
 
 
 def test_vector_order_by_limit_can_route_through_usearch_via_sql():
-    import opteryx.nanobind as nanobind_pkg
+    import opteryx.compiled.nanobind as nanobind_pkg
 
     calls = {"created": 0, "add_batch": 0, "search": 0}
 
     class FakeIndex:
-        def __init__(self, dimensions, capacity=0, metric="cos", expansion_add=0, expansion_search=0):
+        def __init__(
+            self, dimensions, capacity=0, metric="cos", expansion_add=0, expansion_search=0
+        ):
             calls["created"] += 1
             assert dimensions == 2
             assert metric == "cos"
@@ -595,13 +602,15 @@ def test_vector_order_by_limit_can_route_through_usearch_via_sql():
             assert exact is False
             return [0, 1], [0.0, 0.29289323]
 
-    with mock.patch.object(HeapSortNode, "_USEARCH_ENABLED", True), mock.patch.object(
-        HeapSortNode, "_USEARCH_MIN_ROWS", 1
-    ), mock.patch.object(
-        nanobind_pkg,
-        "usearch_native",
-        types.SimpleNamespace(UsearchIndex=FakeIndex),
-        create=True,
+    with (
+        mock.patch.object(HeapSortNode, "_USEARCH_ENABLED", True),
+        mock.patch.object(HeapSortNode, "_USEARCH_MIN_ROWS", 1),
+        mock.patch.object(
+            nanobind_pkg,
+            "usearch_native",
+            types.SimpleNamespace(UsearchIndex=FakeIndex),
+            create=True,
+        ),
     ):
         session = opteryx.session()
         try:
@@ -619,15 +628,22 @@ def test_vector_order_by_limit_can_route_through_usearch_via_sql():
                 """
             )
 
-            labels = [value.decode("utf8") if isinstance(value, bytes) else value for value in result["label"].to_pylist()]
+            labels = [
+                value.decode("utf8") if isinstance(value, bytes) else value
+                for value in result["label"].to_pylist()
+            ]
             assert labels == ["match", "diagonal"]
             assert calls["created"] >= 1
             assert calls["add_batch"] >= 1
             assert calls["search"] >= 1
 
             operations = session.telemetry.get("operations", {})
-            usearch_hits = sum(op.get("feature_vector_topk_usearch", 0) for op in operations.values())
-            usearch_rows = sum(op.get("vector_topk_usearch_rows_indexed", 0) for op in operations.values())
+            usearch_hits = sum(
+                op.get("feature_vector_topk_usearch", 0) for op in operations.values()
+            )
+            usearch_rows = sum(
+                op.get("vector_topk_usearch_rows_indexed", 0) for op in operations.values()
+            )
             assert usearch_hits >= 1
             assert usearch_rows >= 3
         finally:
@@ -635,7 +651,7 @@ def test_vector_order_by_limit_can_route_through_usearch_via_sql():
 
 
 def test_vector_order_by_limit_can_use_embed_query_vector():
-    import opteryx.nanobind as nanobind_pkg
+    import opteryx.compiled.nanobind as nanobind_pkg
 
     calls = {"created": 0, "add_batch": 0, "search": 0}
 
@@ -645,7 +661,9 @@ def test_vector_order_by_limit_can_use_embed_query_vector():
             return [1.0, 0.0]
 
     class FakeIndex:
-        def __init__(self, dimensions, capacity=0, metric="cos", expansion_add=0, expansion_search=0):
+        def __init__(
+            self, dimensions, capacity=0, metric="cos", expansion_add=0, expansion_search=0
+        ):
             calls["created"] += 1
             assert dimensions == 2
             assert metric == "cos"
@@ -664,13 +682,15 @@ def test_vector_order_by_limit_can_use_embed_query_vector():
 
     opteryx.register_embedding_provider(FakeEmbeddingProvider())
     try:
-        with mock.patch.object(HeapSortNode, "_USEARCH_ENABLED", True), mock.patch.object(
-            HeapSortNode, "_USEARCH_MIN_ROWS", 1
-        ), mock.patch.object(
-            nanobind_pkg,
-            "usearch_native",
-            types.SimpleNamespace(UsearchIndex=FakeIndex),
-            create=True,
+        with (
+            mock.patch.object(HeapSortNode, "_USEARCH_ENABLED", True),
+            mock.patch.object(HeapSortNode, "_USEARCH_MIN_ROWS", 1),
+            mock.patch.object(
+                nanobind_pkg,
+                "usearch_native",
+                types.SimpleNamespace(UsearchIndex=FakeIndex),
+                create=True,
+            ),
         ):
             session = opteryx.session()
             try:
@@ -703,13 +723,15 @@ def test_vector_order_by_limit_can_use_embed_query_vector():
 
 
 def test_vector_order_by_limit_only_indexes_filtered_candidates():
-    import opteryx.nanobind as nanobind_pkg
+    import opteryx.compiled.nanobind as nanobind_pkg
 
     calls = {"created": 0, "add_batch": 0, "search": 0}
     batches = []
 
     class FakeIndex:
-        def __init__(self, dimensions, capacity=0, metric="cos", expansion_add=0, expansion_search=0):
+        def __init__(
+            self, dimensions, capacity=0, metric="cos", expansion_add=0, expansion_search=0
+        ):
             calls["created"] += 1
             assert dimensions == 2
             assert metric == "cos"
@@ -726,13 +748,15 @@ def test_vector_order_by_limit_only_indexes_filtered_candidates():
             assert exact is False
             return [0, 1], [0.0, 0.29289323]
 
-    with mock.patch.object(HeapSortNode, "_USEARCH_ENABLED", True), mock.patch.object(
-        HeapSortNode, "_USEARCH_MIN_ROWS", 1
-    ), mock.patch.object(
-        nanobind_pkg,
-        "usearch_native",
-        types.SimpleNamespace(UsearchIndex=FakeIndex),
-        create=True,
+    with (
+        mock.patch.object(HeapSortNode, "_USEARCH_ENABLED", True),
+        mock.patch.object(HeapSortNode, "_USEARCH_MIN_ROWS", 1),
+        mock.patch.object(
+            nanobind_pkg,
+            "usearch_native",
+            types.SimpleNamespace(UsearchIndex=FakeIndex),
+            create=True,
+        ),
     ):
         session = opteryx.session()
         try:
@@ -752,7 +776,10 @@ def test_vector_order_by_limit_only_indexes_filtered_candidates():
                 """
             )
 
-            labels = [value.decode("utf8") if isinstance(value, bytes) else value for value in result["label"].to_pylist()]
+            labels = [
+                value.decode("utf8") if isinstance(value, bytes) else value
+                for value in result["label"].to_pylist()
+            ]
             assert labels == ["match", "diagonal"]
             assert calls["created"] >= 1
             assert calls["add_batch"] >= 1
@@ -761,8 +788,12 @@ def test_vector_order_by_limit_only_indexes_filtered_candidates():
             assert all([0.0, -1.0] not in vectors for _, vectors in batches)
 
             operations = session.telemetry.get("operations", {})
-            candidate_rows = sum(op.get("vector_topk_candidate_rows", 0) for op in operations.values())
-            usearch_rows = sum(op.get("vector_topk_usearch_rows_indexed", 0) for op in operations.values())
+            candidate_rows = sum(
+                op.get("vector_topk_candidate_rows", 0) for op in operations.values()
+            )
+            usearch_rows = sum(
+                op.get("vector_topk_usearch_rows_indexed", 0) for op in operations.values()
+            )
             assert candidate_rows >= 3
             assert usearch_rows >= 3
         finally:
@@ -770,13 +801,15 @@ def test_vector_order_by_limit_only_indexes_filtered_candidates():
 
 
 def test_vector_order_by_limit_can_scan_parquet_backed_vector_column():
-    import opteryx.nanobind as nanobind_pkg
+    import opteryx.compiled.nanobind as nanobind_pkg
 
     calls = {"created": 0, "search": 0}
     dataset_name = _make_vector_parquet_dataset()
 
     class FakeIndex:
-        def __init__(self, dimensions, capacity=0, metric="cos", expansion_add=0, expansion_search=0):
+        def __init__(
+            self, dimensions, capacity=0, metric="cos", expansion_add=0, expansion_search=0
+        ):
             calls["created"] += 1
             assert dimensions == 2
             assert metric == "cos"
@@ -795,13 +828,15 @@ def test_vector_order_by_limit_can_scan_parquet_backed_vector_column():
 
     opteryx.register_workspace("testdata", DiskConnector)
 
-    with mock.patch.object(HeapSortNode, "_USEARCH_ENABLED", True), mock.patch.object(
-        HeapSortNode, "_USEARCH_MIN_ROWS", 1
-    ), mock.patch.object(
-        nanobind_pkg,
-        "usearch_native",
-        types.SimpleNamespace(UsearchIndex=FakeIndex),
-        create=True,
+    with (
+        mock.patch.object(HeapSortNode, "_USEARCH_ENABLED", True),
+        mock.patch.object(HeapSortNode, "_USEARCH_MIN_ROWS", 1),
+        mock.patch.object(
+            nanobind_pkg,
+            "usearch_native",
+            types.SimpleNamespace(UsearchIndex=FakeIndex),
+            create=True,
+        ),
     ):
         session = opteryx.session()
         try:
@@ -824,14 +859,17 @@ def test_vector_order_by_limit_can_scan_parquet_backed_vector_column():
             assert calls["search"] >= 1
 
             operations = session.telemetry.get("operations", {})
-            usearch_hits = sum(op.get("feature_vector_topk_usearch", 0) for op in operations.values())
-            candidate_rows = sum(op.get("vector_topk_candidate_rows", 0) for op in operations.values())
+            usearch_hits = sum(
+                op.get("feature_vector_topk_usearch", 0) for op in operations.values()
+            )
+            candidate_rows = sum(
+                op.get("vector_topk_candidate_rows", 0) for op in operations.values()
+            )
             assert usearch_hits >= 1
             assert candidate_rows >= 3
         finally:
             session.close()
             _drop_vector_parquet_dataset(dataset_name)
-
 
 
 if __name__ == "__main__":  # pragma: no cover

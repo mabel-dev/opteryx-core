@@ -9,6 +9,7 @@ and reports pass / fail / skip for two test categories:
 Failures are non-fatal: the full suite runs regardless of individual errors.
 Exit code is 1 if any test failed.
 """
+
 import sys
 import traceback
 from pathlib import Path
@@ -17,7 +18,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-import opteryx.rugo.parquet as rp
+import opteryx.compiled.rugo.parquet as rp
 
 PARQUET_DIR = REPO_ROOT / "testdata" / "parquet_tests"
 
@@ -25,9 +26,9 @@ PARQUET_DIR = REPO_ROOT / "testdata" / "parquet_tests"
 # Result tracking
 # ──────────────────────────────────────────────────────────────────────────────
 
-PASS   = "PASS"
-FAIL   = "FAIL"
-SKIP   = "SKIP"
+PASS = "PASS"
+FAIL = "FAIL"
+SKIP = "SKIP"
 
 results = []  # list of (category, filename, status, detail)
 
@@ -45,6 +46,7 @@ def record(category, filename, status, detail=""):
 # Per-file tests
 # ──────────────────────────────────────────────────────────────────────────────
 
+
 def test_metadata(path: Path, raw: bytes) -> None:
     """Attempt to read metadata; fail if an exception is raised or result is empty."""
     try:
@@ -57,7 +59,7 @@ def test_metadata(path: Path, raw: bytes) -> None:
         record("METADATA", path.name, FAIL, "read_metadata_from_bytes returned None")
         return
 
-    num_rg   = len(meta.get("row_groups", []))
+    num_rg = len(meta.get("row_groups", []))
     num_cols = len(meta.get("schema", []))
     record("METADATA", path.name, PASS, f"{num_rg} row-group(s), {num_cols} schema field(s)")
 
@@ -72,7 +74,9 @@ def test_data(path: Path, raw: bytes) -> None:
     try:
         decodable = rp.can_decode_from_memory(raw)
     except Exception as exc:
-        record("DATA", path.name, FAIL, f"can_decode_from_memory raised {type(exc).__name__}: {exc}")
+        record(
+            "DATA", path.name, FAIL, f"can_decode_from_memory raised {type(exc).__name__}: {exc}"
+        )
         return
 
     if not decodable:
@@ -103,13 +107,18 @@ def test_data(path: Path, raw: bytes) -> None:
     col_summary = ", ".join(col_names[:5])
     if len(col_names) > 5:
         col_summary += " …"
-    record("DATA", path.name, PASS,
-           f"{len(morsels)} row-group(s), {rows:,} row(s), {cols} column(s): {col_summary}")
+    record(
+        "DATA",
+        path.name,
+        PASS,
+        f"{len(morsels)} row-group(s), {rows:,} row(s), {cols} column(s): {col_summary}",
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Main
 # ──────────────────────────────────────────────────────────────────────────────
+
 
 def main() -> int:
     files = sorted(PARQUET_DIR.glob("*.parquet"))
@@ -134,12 +143,12 @@ def main() -> int:
     for _, _, status, _ in results:
         counts[status] += 1
 
-    print(f"\n{'─'*60}")
+    print(f"\n{'─' * 60}")
     print(f"  Total  : {len(results)}")
     print(f"  Passed : {counts[PASS]}")
     print(f"  Failed : {counts[FAIL]}")
     print(f"  Skipped: {counts[SKIP]}")
-    print(f"{'─'*60}")
+    print(f"{'─' * 60}")
 
     if counts[FAIL]:
         print("\nFailed tests:")

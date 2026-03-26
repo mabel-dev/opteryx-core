@@ -16,8 +16,8 @@ from typing import Iterable
 from typing import Optional
 from typing import Tuple
 
+from opteryx.compiled.draken.morsels.morsel import Morsel
 from opteryx.connectors import TableType
-from opteryx.draken.morsels.morsel import Morsel
 from opteryx.exceptions import DatasetNotFoundError
 from opteryx.models import QueryTelemetry
 from orso.schema import RelationSchema

@@ -9,9 +9,9 @@
 from libc.stdint cimport uint8_t, uint32_t, int8_t, int32_t
 from libc.string cimport memset
 
-from opteryx.draken.vectors.string_vector cimport StringVector
-from opteryx.draken.vectors.bool_vector cimport BoolVector
-from opteryx.draken.core.buffers cimport DrakenVarBuffer
+from opteryx.compiled.draken.vectors.string_vector cimport StringVector
+from opteryx.compiled.draken.vectors.bool_vector cimport BoolVector
+from opteryx.compiled.draken.core.buffers cimport DrakenVarBuffer
 
 
 cdef inline int parse_ip_to_int(const char* ip, size_t length, uint32_t* out) nogil:

@@ -9,12 +9,12 @@ sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
 from opteryx.compiled.vector_ops import vector_iif
 from opteryx.expression.evaluator import apply_bounded_function
-from opteryx.draken.vectors.float64_vector import Float64Vector
-from opteryx.draken.vectors.string_vector import StringVector
-from opteryx.draken.vectors.vector import Vector
+from opteryx.compiled.draken.vectors.float64_vector import Float64Vector
+from opteryx.compiled.draken.vectors.string_vector import StringVector
+from opteryx.compiled.draken.vectors.vector import Vector
 
 
-from opteryx.draken.vectors.scalar_constructors import from_scalar
+from opteryx.compiled.draken.vectors.scalar_constructors import from_scalar
 
 
 def test_vector_iif_treats_null_condition_as_false():

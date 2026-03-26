@@ -126,11 +126,11 @@ Create **compiled Cython vector_ops** for temporal extraction, similar to existi
 from libc.stdint cimport int64_t, int32_t, uint8_t, uint16_t, uint32_t
 from cpython.array cimport array, clone
 
-from opteryx.draken.vectors.timestamp_vector cimport TimestampVector
-from opteryx.draken.vectors.int64_vector cimport Int64Vector
-from opteryx.draken.vectors.int32_vector cimport Int32Vector
-from opteryx.draken.vectors.dictionary_vector cimport DictionaryVector
-from opteryx.draken.core.buffers cimport DrakenFixedBuffer
+from opteryx.compiled.draken.vectors.timestamp_vector cimport TimestampVector
+from opteryx.compiled.draken.vectors.int64_vector cimport Int64Vector
+from opteryx.compiled.draken.vectors.int32_vector cimport Int32Vector
+from opteryx.compiled.draken.vectors.dictionary_vector cimport DictionaryVector
+from opteryx.compiled.draken.core.buffers cimport DrakenFixedBuffer
 
 import numpy
 cimport numpy
@@ -497,7 +497,7 @@ def date_part(part, arr):
     Fast path: Draken vectors → vector_ops (compiled Cython)
     Slow path: Arrow arrays → Arrow compute kernels (fallback)
     """
-    from opteryx.draken.vectors import (
+    from opteryx.compiled.draken.vectors import (
         TimestampVector, Int64Vector, DictionaryVector
     )
     
@@ -744,7 +744,7 @@ Test compiled vector_ops directly (faster than integration tests):
 def test_extract_minute_fast_timestamp_vector():
     """Test compiled extract_minute_fast() on TimestampVector."""
     from opteryx.compiled.vector_ops import extract_minute_fast
-    from opteryx.draken.vectors.timestamp_vector import TimestampVector
+    from opteryx.compiled.draken.vectors.timestamp_vector import TimestampVector
     import numpy
     
     # Microseconds: 2024-01-15 14:30:45, 14:31:12, 14:32:58
@@ -765,7 +765,7 @@ def test_extract_minute_fast_timestamp_vector():
 def test_extract_hour_fast_multiple_units():
     """Test extract_hour_fast() with different timestamp units."""
     from opteryx.compiled.vector_ops import extract_hour_fast
-    from opteryx.draken.vectors.timestamp_vector import TimestampVector
+    from opteryx.compiled.draken.vectors.timestamp_vector import TimestampVector
     import numpy
     
     # Test microseconds
@@ -786,7 +786,7 @@ def test_extract_hour_fast_multiple_units():
 def test_extract_minute_from_int64_precision_detection():
     """Test automatic precision detection for Int64Vector."""
     from opteryx.compiled.vector_ops import extract_minute_from_int64
-    from opteryx.draken.vectors.int64_vector import Int64Vector
+    from opteryx.compiled.draken.vectors.int64_vector import Int64Vector
     import numpy
     
     # 2024-01-15 14:30:00 in different precisions
@@ -806,7 +806,7 @@ def test_extract_minute_from_int64_precision_detection():
 def test_extract_minute_from_dictionary_performance():
     """Test dictionary extraction is O(V) not O(N)."""
     from opteryx.compiled.vector_ops import extract_minute_from_dictionary
-    from opteryx.draken.vectors.dictionary_vector import DictionaryVector
+    from opteryx.compiled.draken.vectors.dictionary_vector import DictionaryVector
     import numpy
     import time
     
@@ -833,7 +833,7 @@ def test_extract_minute_from_dictionary_performance():
 def test_loop_unrolling_benefit():
     """Verify loop unrolling provides speedup."""
     from opteryx.compiled.vector_ops import extract_minute_fast
-    from opteryx.draken.vectors.timestamp_vector import TimestampVector
+    from opteryx.compiled.draken.vectors.timestamp_vector import TimestampVector
     import numpy
     import time
     
@@ -923,7 +923,7 @@ def test_mixed_extraction_functions():
 def test_compiled_vs_arrow_speedup():
     """Measure speedup of compiled path vs Arrow fallback."""
     from opteryx.compiled.vector_ops import extract_minute_fast
-    from opteryx.draken.vectors.timestamp_vector import TimestampVector
+    from opteryx.compiled.draken.vectors.timestamp_vector import TimestampVector
     import pyarrow
     import pyarrow.compute
     import numpy
