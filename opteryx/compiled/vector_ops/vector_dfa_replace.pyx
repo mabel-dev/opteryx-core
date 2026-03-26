@@ -59,7 +59,7 @@ def _get_dfa_ops(pattern: bytes, replacement: bytes):
     cache key is the raw bytes from the caller; normalisation is transparent.
     """
     from opteryx.expression.functions.implementations.text import _normalise_replacement
-    from opteryx.expression.functions.regex_compiler import RegexToDFACompiler
+    from opteryx.utils.regex_compiler import RegexToDFACompiler
 
     norm = _normalise_replacement(replacement)
     proc = RegexToDFACompiler().compile(pattern, norm)

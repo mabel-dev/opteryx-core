@@ -9,29 +9,32 @@ from typing import List
 import numpy
 import pyarrow
 import pyarrow as pa
+from pyarrow import compute
+
 from opteryx.compiled.functions import regex_procedures as _regex_procedures
-from opteryx.compiled.vector_ops import vector_initcap
-from opteryx.compiled.vector_ops import vector_length
-from opteryx.compiled.vector_ops import vector_ltrim
-from opteryx.compiled.vector_ops import vector_match_against
-from opteryx.compiled.vector_ops import vector_md5
-from opteryx.compiled.vector_ops import vector_replace
-from opteryx.compiled.vector_ops import vector_reverse
-from opteryx.compiled.vector_ops import vector_rtrim
-from opteryx.compiled.vector_ops import vector_sha1
-from opteryx.compiled.vector_ops import vector_sha256
-from opteryx.compiled.vector_ops import vector_sha512
-from opteryx.compiled.vector_ops import vector_soundex
-from opteryx.compiled.vector_ops import vector_string_length
-from opteryx.compiled.vector_ops import vector_string_slice_left
-from opteryx.compiled.vector_ops import vector_string_slice_right
-from opteryx.compiled.vector_ops import vector_trim
+from opteryx.compiled.vector_ops import (
+    vector_initcap,
+    vector_length,
+    vector_ltrim,
+    vector_match_against,
+    vector_md5,
+    vector_replace,
+    vector_reverse,
+    vector_rtrim,
+    vector_sha1,
+    vector_sha256,
+    vector_sha512,
+    vector_soundex,
+    vector_string_length,
+    vector_string_slice_left,
+    vector_string_slice_right,
+    vector_trim,
+)
 from opteryx.draken.vectors.string_vector import StringVector
 from opteryx.draken.vectors.string_vector import lowercase as string_vector_lowercase
 from opteryx.draken.vectors.string_vector import uppercase as string_vector_uppercase
 from opteryx.embeddings import get_embedding_provider
 from opteryx.exceptions import InvalidFunctionParameterError
-from pyarrow import compute
 
 """Text and encoding function kernels.
 
@@ -496,7 +499,7 @@ def _get_dfa_ops(pattern: bytes, replacement: bytes):
     Returns the (ops, ops_len, fallback_flag) triple from
     CompiledProcedure.to_cython_args(), or (None, 0, True) on any error.
     """
-    from opteryx.expression.functions.regex_compiler import RegexToDFACompiler
+    from opteryx.utils.regex_compiler import RegexToDFACompiler
 
     try:
         compiler = RegexToDFACompiler()

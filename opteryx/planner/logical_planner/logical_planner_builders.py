@@ -11,29 +11,26 @@ a function and a reference to it in the dictionary.
 
 import datetime
 import warnings
-from typing import List
-from typing import Optional
+from typing import List, Optional
 
 import numpy
-from opteryx.exceptions import ArrayWithMixedTypesError
-from opteryx.exceptions import SqlError
-from opteryx.exceptions import UnsupportedSyntaxError
-from opteryx.expression import NodeType
-from opteryx.expression import format_expression
-from opteryx.expression.binary_operators import binary_operations
-from opteryx.expression.intervals import MICROSECONDS_PER_DAY
-from opteryx.expression.intervals import MICROSECONDS_PER_HOUR
-from opteryx.expression.intervals import MICROSECONDS_PER_MINUTE
-from opteryx.expression.intervals import MICROSECONDS_PER_SECOND
-from opteryx.expression.operator_catalog import get_operator_node_type
-from opteryx.models import LogicalColumn
-from opteryx.models import Node
-from opteryx.utils import dates
-from opteryx.utils import suggest_alternative
 from orso.types import OrsoTypes
 
-from opteryx import functions
 from opteryx import operators
+from opteryx.exceptions import ArrayWithMixedTypesError, SqlError, UnsupportedSyntaxError
+from opteryx.expression import NodeType, format_expression
+from opteryx.expression.binary_operators import binary_operations
+from opteryx.expression.functions.compat import functions as _list_functions
+from opteryx.expression.functions.compat import is_function as _is_function
+from opteryx.expression.intervals import (
+    MICROSECONDS_PER_DAY,
+    MICROSECONDS_PER_HOUR,
+    MICROSECONDS_PER_MINUTE,
+    MICROSECONDS_PER_SECOND,
+)
+from opteryx.expression.operator_catalog import get_operator_node_type
+from opteryx.models import LogicalColumn, Node
+from opteryx.utils import dates, suggest_alternative
 
 # Epoch constants for converting datetime literals to Draken-native integers.
 # DATE literals are stored as int (days since epoch, fits int32).
@@ -764,7 +761,7 @@ def function(branch, alias: Optional[List[str]] = None, key=None):
     if func == "MATCH_AGAINST" or func.startswith("_"):
         raise UnsupportedSyntaxError(f"`{func}` is internal. Use documented SQL syntax instead.")
 
-    if functions.is_function(func):
+    if _is_function(func):
         node_type = NodeType.FUNCTION
         if filter_condition is not None:
             raise UnsupportedSyntaxError("Filters are not supported with function calls.")
@@ -804,7 +801,7 @@ def function(branch, alias: Optional[List[str]] = None, key=None):
                 alias=alias,
             )
 
-        likely_match = suggest_alternative(func, operators.aggregators() + functions.functions())
+        likely_match = suggest_alternative(func, operators.aggregators() + _list_functions())
         if likely_match is None:
             raise UnsupportedSyntaxError(f"Unknown function or aggregate '{func}'")
         raise FunctionNotFoundError(
@@ -925,8 +922,7 @@ def json_access(branch, alias: Optional[List[str]] = None, key=None):
     identifier_node = build(branch["value"])
     key_node = build(branch["path"]["path"][0]["Bracket"]["key"])
 
-    from opteryx.exceptions import IncorrectTypeError
-    from opteryx.exceptions import UnsupportedSyntaxError
+    from opteryx.exceptions import IncorrectTypeError, UnsupportedSyntaxError
 
     if key_node.node_type == NodeType.IDENTIFIER:
         raise UnsupportedSyntaxError(

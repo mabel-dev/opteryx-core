@@ -144,7 +144,7 @@ def test_re2_list_regex_replace_strings():
 
 def test_dfa_compiler_url_pattern_is_compilable():
     """URL domain extraction pattern must be recognized as compilable (not fallback)."""
-    from opteryx.expression.functions.regex_compiler import RegexToDFACompiler
+    from opteryx.utils.regex_compiler import RegexToDFACompiler
 
     compiler = RegexToDFACompiler()
     proc = compiler.compile(
@@ -159,7 +159,7 @@ def test_dfa_compiler_url_pattern_is_compilable():
 
 def test_dfa_compiler_url_pattern_extract_while_not_has_target_char():
     """EXTRACT_WHILE_NOT must carry target_char=ord('/') — not 0 (null byte)."""
-    from opteryx.expression.functions.regex_compiler import OperationType, RegexToDFACompiler
+    from opteryx.utils.regex_compiler import OperationType, RegexToDFACompiler
 
     compiler = RegexToDFACompiler()
     proc = compiler.compile(
@@ -180,7 +180,7 @@ def test_dfa_compiler_url_pattern_extract_while_not_has_target_char():
 
 def test_dfa_compiler_to_cython_args_preserves_target_char():
     """to_cython_args() tuple[4] must carry target_char=ord('/') for EXTRACT_WHILE_NOT."""
-    from opteryx.expression.functions.regex_compiler import OperationType, RegexToDFACompiler
+    from opteryx.utils.regex_compiler import OperationType, RegexToDFACompiler
 
     compiler = RegexToDFACompiler()
     proc = compiler.compile(
@@ -205,7 +205,7 @@ def test_dfa_compiler_to_cython_args_preserves_target_char():
 
 def test_dfa_compiler_unsupported_pattern_falls_back():
     """Patterns the DFA compiler cannot handle must report fallback_to_re2=True."""
-    from opteryx.expression.functions.regex_compiler import RegexToDFACompiler
+    from opteryx.utils.regex_compiler import RegexToDFACompiler
 
     compiler = RegexToDFACompiler()
 
@@ -550,7 +550,7 @@ def test_dfa_replace_double_backslash_extracts_domains():
 def test_dfa_replace_double_backslash_dfa_fast_path_engaged():
     """After normalisation, r'\\\\1' (SQL double-backslash) must engage the DFA fast-path."""
     from opteryx.expression.functions.implementations.text import _normalise_replacement
-    from opteryx.expression.functions.regex_compiler import RegexToDFACompiler
+    from opteryx.utils.regex_compiler import RegexToDFACompiler
 
     pattern = b"^https?://(?:www\\.)?([^/]+)/.*$"
     repl_two_bs = b"\\\\1"  # SQL r'\\1' form
@@ -572,7 +572,7 @@ def test_dfa_replace_double_backslash_dfa_fast_path_engaged():
 
 def test_dfa_compiler_strip_prefix_no_prefix_compiles():
     """^(.+)$ with \\1 replacement must compile to the DFA fast-path."""
-    from opteryx.expression.functions.regex_compiler import RegexToDFACompiler
+    from opteryx.utils.regex_compiler import RegexToDFACompiler
 
     compiler = RegexToDFACompiler()
     proc = compiler.compile(b"^(.+)$", b"\\1")
@@ -582,7 +582,7 @@ def test_dfa_compiler_strip_prefix_no_prefix_compiles():
 
 def test_dfa_compiler_strip_prefix_optional_single_char_compiles():
     """^M?(.+)$ with \\1 replacement must compile to the DFA fast-path."""
-    from opteryx.expression.functions.regex_compiler import RegexToDFACompiler
+    from opteryx.utils.regex_compiler import RegexToDFACompiler
 
     compiler = RegexToDFACompiler()
     proc = compiler.compile(b"^M?(.+)$", b"\\1")
@@ -592,7 +592,7 @@ def test_dfa_compiler_strip_prefix_optional_single_char_compiles():
 
 def test_dfa_compiler_strip_prefix_mandatory_prefix_compiles():
     """^Mercury(.+)$ with \\1 replacement must compile to the DFA fast-path."""
-    from opteryx.expression.functions.regex_compiler import RegexToDFACompiler
+    from opteryx.utils.regex_compiler import RegexToDFACompiler
 
     compiler = RegexToDFACompiler()
     proc = compiler.compile(b"^Mercury(.+)$", b"\\1")
@@ -602,7 +602,7 @@ def test_dfa_compiler_strip_prefix_mandatory_prefix_compiles():
 
 def test_dfa_compiler_strip_prefix_multi_char_optional_rejected():
     """^Mercury?(.+)$ must fall back: ? applies only to the last char 'y', not the whole word."""
-    from opteryx.expression.functions.regex_compiler import RegexToDFACompiler
+    from opteryx.utils.regex_compiler import RegexToDFACompiler
 
     compiler = RegexToDFACompiler()
     proc = compiler.compile(b"^Mercury?(.+)$", b"\\1")
@@ -613,7 +613,7 @@ def test_dfa_compiler_strip_prefix_multi_char_optional_rejected():
 
 def test_dfa_compiler_strip_prefix_wrong_replacement_rejected():
     """^M?(.+)$ with a non-\\1 replacement must fall back to RE2."""
-    from opteryx.expression.functions.regex_compiler import RegexToDFACompiler
+    from opteryx.utils.regex_compiler import RegexToDFACompiler
 
     compiler = RegexToDFACompiler()
     proc = compiler.compile(b"^M?(.+)$", b"REPLACED")
@@ -714,7 +714,7 @@ def test_dfa_replace_strip_prefix_no_prefix_identity():
 
 def test_dfa_replace_strip_prefix_non_greedy_variant_compiles():
     """^M?(.+?)$ (non-greedy) must also compile — equivalent to (.+) when anchored to $."""
-    from opteryx.expression.functions.regex_compiler import RegexToDFACompiler
+    from opteryx.utils.regex_compiler import RegexToDFACompiler
 
     compiler = RegexToDFACompiler()
     proc = compiler.compile(b"^M?(.+?)$", b"\\1")

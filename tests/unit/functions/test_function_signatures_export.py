@@ -1,7 +1,8 @@
 import json
 from pathlib import Path
 
-from opteryx.functions.signatures import export_function_signatures
+from opteryx.expression.functions.signatures import export_function_signatures
+
 from opteryx.expression.functions import catalog as function_catalog_module
 
 
@@ -11,7 +12,8 @@ def test_function_signatures_json_matches_catalog_export():
     function_catalog_module._CATALOG = None
 
     signatures_path = (
-        Path(__file__).resolve().parents[3] / "opteryx/functions/function_signatures.json"
+        Path(__file__).resolve().parents[3]
+        / "opteryx/expression/functions/function_signatures.json"
     )
 
     expected = export_function_signatures()
