@@ -38,7 +38,8 @@ def _constant_scalar(value):
 
 def round1(values):
     """ROUND(values)"""
-    from opteryx.compiled.vector_ops import vector_round, vector_round_constant
+    from opteryx.compiled.vector_ops import vector_round
+    from opteryx.compiled.vector_ops import vector_round_constant
 
     if _is_constant_like(values):
         return vector_round_constant(values, 0)
@@ -47,7 +48,8 @@ def round1(values):
 
 def round2(values, digits):
     """ROUND(values, digits)"""
-    from opteryx.compiled.vector_ops import vector_round_constant, vector_round_digits
+    from opteryx.compiled.vector_ops import vector_round_constant
+    from opteryx.compiled.vector_ops import vector_round_digits
 
     if _is_constant_like(digits):
         scalar = _constant_scalar(digits)

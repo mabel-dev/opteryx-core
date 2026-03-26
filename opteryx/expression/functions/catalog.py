@@ -5,11 +5,16 @@ kernels, and metadata."""
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Literal, Optional, Tuple
+from typing import Any
+from typing import Callable
+from typing import Dict
+from typing import Literal
+from typing import Optional
+from typing import Tuple
 
+from opteryx.vector_types import is_numeric_vector_type
+from opteryx.vector_types import resolve_node_type
 from orso.types import OrsoTypes
-
-from opteryx.vector_types import is_numeric_vector_type, resolve_node_type
 
 Node = Any  # AST node type (duck-typed; no import to avoid circular deps)
 
@@ -168,7 +173,7 @@ class FunctionCatalog:
 
     def _load_builtin_functions(self) -> None:
         """Load all builtin function definitions into the catalog."""
-        from opteryx.expression.functions.native_function_registrar import get_builtin_functions
+        from opteryx.expression.functions.registrar import get_builtin_functions
 
         for func_def in get_builtin_functions():
             self.register(func_def)

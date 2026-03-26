@@ -1,0 +1,248 @@
+from __future__ import annotations
+
+from typing import List
+
+# Local implementation imports (kept as late imports inside function if heavy)
+from opteryx.compiled.vector_ops import vector_iif as _vector_iif
+from opteryx.expression.functions import FunctionDefinition
+from opteryx.expression.functions import FunctionOverload
+from opteryx.expression.functions import KernelSpec
+from opteryx.expression.functions import LifecycleSpec
+from opteryx.expression.functions import ParameterSpec
+from opteryx.expression.functions import ReturnSpec
+from opteryx.expression.functions.compat import _coalesce
+from opteryx.expression.functions.compat import select_values
+from opteryx.expression.functions.implementations.logical import (
+    array_contains as _lf_array_contains,
+)
+from opteryx.expression.functions.implementations.logical import if_null as _lf_if_null
+from opteryx.expression.functions.implementations.logical import null_if as _lf_null_if
+from opteryx.expression.functions.implementations.utility import (
+    cosine_similarity as _lf_cosine_similarity,
+)
+from opteryx.expression.functions.implementations.utility import humanize as _lf_humanize
+from opteryx.expression.functions.implementations.utility import (
+    jsonb_object_keys as _lf_jsonb_object_keys,
+)
+
+# Local helpers provided by registrar package
+from opteryx.expression.functions.registrar import _case_return_type
+from opteryx.expression.functions.registrar import _coalesce_return_type
+from orso.types import OrsoTypes
+
+
+def get_builtin_logical_functions() -> List[FunctionDefinition]:
+    """
+    Logical and control-flow function registrar entries.
+
+    Provides:
+      - COALESCE (variadic, resolver-based return)
+      - IFNULL / IFNOTNULL
+      - NULLIF
+      - IIF (vectorized conditional)
+      - _PASSTHRU (utility, for tests/compat)
+      - _CASE (variadic CASE expression)
+    """
+
+    # Small adapter object bundling kernels implemented elsewhere
+    class other_functions:
+        array_contains = staticmethod(_lf_array_contains)
+        if_null = staticmethod(_lf_if_null)
+        null_if = staticmethod(_lf_null_if)
+        cosine_similarity = staticmethod(_lf_cosine_similarity)
+        humanize = staticmethod(_lf_humanize)
+        jsonb_object_keys = staticmethod(_lf_jsonb_object_keys)
+
+    _coalesce_kernel = _coalesce
+    _iif_kernel = _vector_iif
+    _case_kernel = select_values
+
+    _variadic_any = (
+        ParameterSpec(name="arg0", type_family="any"),
+        ParameterSpec(name="args", type_family="any", variadic=True, optional=True),
+    )
+
+    return [
+        FunctionDefinition(
+            name="COALESCE",
+            aliases=(),
+            category="logical",
+            volatility="immutable",
+            deterministic=True,
+            lifecycle=LifecycleSpec(status="active"),
+            summary="Return first non-null argument.",
+            documentation="Returns the first non-null value from the list of arguments.",
+            overloads=(
+                FunctionOverload(
+                    id="COALESCE_variadic",
+                    parameters=_variadic_any,
+                    return_spec=ReturnSpec(mode="resolver", resolver=_coalesce_return_type),
+                    kernel=KernelSpec(
+                        engine="arrow",
+                        id="default",
+                        callable_ref=_coalesce_kernel,
+                        null_policy="passthru",
+                        cost_us_per_million=15852.0,
+                    ),
+                ),
+            ),
+        ),
+        FunctionDefinition(
+            name="IFNULL",
+            aliases=(),
+            category="logical",
+            volatility="immutable",
+            deterministic=True,
+            lifecycle=LifecycleSpec(status="active"),
+            summary="Return value if not null, else default.",
+            documentation="Returns first argument if not null, otherwise returns second argument.",
+            overloads=(
+                FunctionOverload(
+                    id="IFNULL_1",
+                    parameters=(
+                        ParameterSpec(name="value", type_family="any"),
+                        ParameterSpec(name="default", type_family="any"),
+                    ),
+                    return_spec=ReturnSpec(mode="resolver", resolver=_coalesce_return_type),
+                    kernel=KernelSpec(
+                        engine="arrow",
+                        id="default",
+                        callable_ref=other_functions.if_null,
+                        null_policy="passthru",
+                        cost_us_per_million=1.53,
+                    ),
+                ),
+            ),
+        ),
+        FunctionDefinition(
+            name="IFNOTNULL",
+            aliases=(),
+            category="logical",
+            volatility="immutable",
+            deterministic=True,
+            lifecycle=LifecycleSpec(status="active"),
+            summary="Return second argument if first is not null.",
+            documentation="Returns second argument if first argument is not null, otherwise null.",
+            overloads=(
+                FunctionOverload(
+                    id="IFNOTNULL_1",
+                    parameters=(
+                        ParameterSpec(name="value", type_family="any"),
+                        ParameterSpec(name="result", type_family="any"),
+                    ),
+                    return_spec=ReturnSpec(mode="resolver", resolver=_coalesce_return_type),
+                    kernel=KernelSpec(
+                        engine="arrow",
+                        id="default",
+                        callable_ref=other_functions.if_null,  # same kernel, semantics handled by evaluator
+                        null_policy="passthru",
+                        cost_us_per_million=0.74,
+                    ),
+                ),
+            ),
+        ),
+        FunctionDefinition(
+            name="NULLIF",
+            aliases=(),
+            category="logical",
+            volatility="immutable",
+            deterministic=True,
+            lifecycle=LifecycleSpec(status="active"),
+            summary="Return null if equal, else first value.",
+            documentation="Returns null if arguments are equal, otherwise returns first argument.",
+            overloads=(
+                FunctionOverload(
+                    id="NULLIF_1",
+                    parameters=(
+                        ParameterSpec(name="value", type_family="any"),
+                        ParameterSpec(name="compare", type_family="any"),
+                    ),
+                    return_spec=ReturnSpec(mode="same_as_arg", arg_index=0),
+                    kernel=KernelSpec(
+                        engine="arrow",
+                        id="default",
+                        callable_ref=other_functions.null_if,
+                        cost_us_per_million=0.72,
+                    ),
+                ),
+            ),
+        ),
+        FunctionDefinition(
+            name="IIF",
+            aliases=(),
+            category="logical",
+            volatility="immutable",
+            deterministic=True,
+            lifecycle=LifecycleSpec(status="active"),
+            summary="Inline if: return second or third arg based on condition.",
+            documentation="Returns second argument if condition is true, otherwise third argument.",
+            overloads=(
+                FunctionOverload(
+                    id="IIF_1",
+                    parameters=(
+                        ParameterSpec(name="condition", type_family="boolean"),
+                        ParameterSpec(name="true_value", type_family="any"),
+                        ParameterSpec(name="false_value", type_family="any"),
+                    ),
+                    return_spec=ReturnSpec(mode="same_as_arg", arg_index=1),
+                    kernel=KernelSpec(
+                        engine="draken",
+                        id="default",
+                        callable_ref=_iif_kernel,
+                        null_policy="bypass",
+                        cost_us_per_million=1.38,
+                    ),
+                ),
+            ),
+        ),
+        FunctionDefinition(
+            name="_PASSTHRU",
+            aliases=(),
+            category="logical",
+            volatility="immutable",
+            deterministic=True,
+            lifecycle=LifecycleSpec(status="active"),
+            summary="Return input unchanged.",
+            documentation="Returns the input value unchanged. Used for testing and compatibility.",
+            overloads=(
+                FunctionOverload(
+                    id="_PASSTHRU_1",
+                    parameters=(ParameterSpec(name="value", type_family="any"),),
+                    return_spec=ReturnSpec(mode="same_as_arg", arg_index=0),
+                    kernel=KernelSpec(
+                        engine="arrow",
+                        id="default",
+                        callable_ref=lambda x: x,
+                        cost_us_per_million=0.28,
+                    ),
+                ),
+            ),
+        ),
+        FunctionDefinition(
+            name="_CASE",
+            aliases=(),
+            category="logical",
+            volatility="immutable",
+            deterministic=True,
+            lifecycle=LifecycleSpec(status="active"),
+            summary="Conditional value selection.",
+            documentation="Returns a value based on conditional expressions.",
+            overloads=(
+                FunctionOverload(
+                    id="_CASE_variadic",
+                    parameters=_variadic_any,
+                    return_spec=ReturnSpec(mode="resolver", resolver=_case_return_type),
+                    kernel=KernelSpec(
+                        engine="arrow",
+                        id="default",
+                        callable_ref=_case_kernel,
+                        null_policy="passthru",
+                        cost_us_per_million=1.04,
+                    ),
+                ),
+            ),
+        ),
+    ]
+
+
+__all__ = ["get_builtin_logical_functions"]

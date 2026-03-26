@@ -15,7 +15,7 @@ sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 import opteryx
 from opteryx.expression.evaluator import apply_bounded_function
 from opteryx.expression.functions.compat import fixed_value_function
-from opteryx.expression.functions.native_function_registrar import get_builtin_functions
+from opteryx.expression.functions.registrar import get_builtin_functions
 
 ROW_COUNT = 3
 TEMPORAL_VALUES = pyarrow.array(
