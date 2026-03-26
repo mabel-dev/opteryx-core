@@ -3,7 +3,8 @@
 # See the License at http://www.apache.org/licenses/LICENSE-2.0
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
-"""Temporal function kernels.
+"""
+Temporal function kernels.
 
 Includes:
 - Date/time functions: TRUNC, TIME_BUCKET, DATEDIFF, TIMEDIFF, EXTRACT, DATE_FORMAT
@@ -16,9 +17,9 @@ import datetime
 
 import numpy
 import pyarrow
-from opteryx.exceptions import InvalidFunctionParameterError
-from opteryx.exceptions import InvalidInternalStateError
 from pyarrow import compute
+
+from opteryx.exceptions import InvalidFunctionParameterError, InvalidInternalStateError
 
 
 def convert_int64_array_to_pyarrow_datetime(values: numpy.ndarray) -> pyarrow.Array:
@@ -123,15 +124,17 @@ def date_part(part, arr):
         vector_type = arr.__class__.__name__
 
     if vector_type == "TimestampVector":
-        from opteryx.compiled.vector_ops.function_definitions import vector_datepart_day
-        from opteryx.compiled.vector_ops.function_definitions import vector_datepart_dayofweek
-        from opteryx.compiled.vector_ops.function_definitions import vector_datepart_dayofyear
-        from opteryx.compiled.vector_ops.function_definitions import vector_datepart_hour
-        from opteryx.compiled.vector_ops.function_definitions import vector_datepart_minute
-        from opteryx.compiled.vector_ops.function_definitions import vector_datepart_month
-        from opteryx.compiled.vector_ops.function_definitions import vector_datepart_quarter
-        from opteryx.compiled.vector_ops.function_definitions import vector_datepart_second
-        from opteryx.compiled.vector_ops.function_definitions import vector_datepart_year
+        from opteryx.compiled.vector_ops.function_definitions import (
+            vector_datepart_day,
+            vector_datepart_dayofweek,
+            vector_datepart_dayofyear,
+            vector_datepart_hour,
+            vector_datepart_minute,
+            vector_datepart_month,
+            vector_datepart_quarter,
+            vector_datepart_second,
+            vector_datepart_year,
+        )
 
         if part == b"minute":
             return vector_datepart_minute(arr).to_arrow()
@@ -160,15 +163,17 @@ def date_part(part, arr):
         )
 
     if vector_type == "Int64Vector":
-        from opteryx.compiled.vector_ops.function_definitions import vector_datepart_day_i64
-        from opteryx.compiled.vector_ops.function_definitions import vector_datepart_dayofweek_i64
-        from opteryx.compiled.vector_ops.function_definitions import vector_datepart_dayofyear_i64
-        from opteryx.compiled.vector_ops.function_definitions import vector_datepart_hour_i64
-        from opteryx.compiled.vector_ops.function_definitions import vector_datepart_minute_i64
-        from opteryx.compiled.vector_ops.function_definitions import vector_datepart_month_i64
-        from opteryx.compiled.vector_ops.function_definitions import vector_datepart_quarter_i64
-        from opteryx.compiled.vector_ops.function_definitions import vector_datepart_second_i64
-        from opteryx.compiled.vector_ops.function_definitions import vector_datepart_year_i64
+        from opteryx.compiled.vector_ops.function_definitions import (
+            vector_datepart_day_i64,
+            vector_datepart_dayofweek_i64,
+            vector_datepart_dayofyear_i64,
+            vector_datepart_hour_i64,
+            vector_datepart_minute_i64,
+            vector_datepart_month_i64,
+            vector_datepart_quarter_i64,
+            vector_datepart_second_i64,
+            vector_datepart_year_i64,
+        )
 
         if part == b"minute":
             return vector_datepart_minute_i64(arr).to_arrow()
