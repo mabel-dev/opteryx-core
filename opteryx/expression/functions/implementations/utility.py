@@ -3,7 +3,8 @@
 # See the License at http://www.apache.org/licenses/LICENSE-2.0
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
-"""Utility function kernels.
+"""
+Utility function kernels.
 
 Includes:
 - Array operations: ARRAY_CONTAINS, ARRAY_CONTAINS_ANY, ARRAY_CONTAINS_ALL
@@ -18,9 +19,8 @@ Includes:
 
 import numpy
 import pyarrow
-from opteryx.embeddings import embed_text_matrix
-from opteryx.embeddings import embed_text_values
-from opteryx.embeddings import get_embedding_provider
+
+from opteryx.embeddings import embed_text_matrix, embed_text_values, get_embedding_provider
 from opteryx.third_party.tktech import csimdjson as simdjson
 
 
