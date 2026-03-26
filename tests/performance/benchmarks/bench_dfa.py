@@ -124,7 +124,7 @@ from opteryx.expression.functions.implementations.text import (
     _normalise_replacement,
     regex_replace,
 )
-from opteryx.expression.functions.regex_compiler import RegexToDFACompiler
+from opteryx.utils.regex_compiler import RegexToDFACompiler
 
 vector_regex_replace = getattr(_vops, "vector_regex_replace")
 
@@ -205,7 +205,7 @@ def _l0_compile_and_args():
 
 def _l0_imports_compile_args():
     from opteryx.compiled import regex_procedures as _rp2  # noqa: F401
-    from opteryx.expression.functions.regex_compiler import RegexToDFACompiler as _C
+    from opteryx.utils.regex_compiler import RegexToDFACompiler as _C
 
     c = _C()
     p = c.compile(PATTERN_BYTES, _normed_repl)

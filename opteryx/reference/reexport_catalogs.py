@@ -8,7 +8,7 @@ from pathlib import Path
 
 if __package__ in {None, ""}:
     sys.path.insert(1, str(Path(__file__).resolve().parents[2]))
-    from opteryx.functions.signatures import write_function_signatures
+    from opteryx.expression.functions.signatures import write_function_signatures
     from opteryx.reference.aggregate_catalog import write_aggregate_catalog
     from opteryx.reference.clauses_catalog import write_clauses_catalog
     from opteryx.reference.joins_catalog import write_joins_catalog
@@ -16,7 +16,7 @@ if __package__ in {None, ""}:
     from opteryx.reference.type_catalog import write_type_catalog
     from opteryx.reference.unary_ops_catalog import write_unary_ops_catalog
 else:
-    from opteryx.functions.signatures import write_function_signatures
+    from opteryx.expression.functions.signatures import write_function_signatures
 
     from .aggregate_catalog import write_aggregate_catalog
     from .clauses_catalog import write_clauses_catalog
@@ -36,7 +36,7 @@ def reexport_reference_catalogs(base_path: str | Path | None = None) -> dict[str
         "operators": root / "opteryx/reference/operators.json",
         "unary_ops": root / "opteryx/reference/unary_ops.json",
         "types": root / "opteryx/reference/types.json",
-        "functions": root / "opteryx/functions/function_signatures.json",
+        "functions": root / "opteryx/expression/functions/function_signatures.json",
     }
 
     for output_path in output_paths.values():

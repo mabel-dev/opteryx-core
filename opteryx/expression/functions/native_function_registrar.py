@@ -14,13 +14,75 @@ The implementations themselves are in:
         utility.py
 """
 
-from opteryx.expression.functions import FunctionDefinition
-from opteryx.expression.functions import FunctionOverload
-from opteryx.expression.functions import KernelSpec
-from opteryx.expression.functions import LifecycleSpec
-from opteryx.expression.functions import ParameterSpec
-from opteryx.expression.functions import ReturnSpec
 from orso.types import OrsoTypes
+
+from opteryx.expression.functions import (
+    FunctionDefinition,
+    FunctionOverload,
+    KernelSpec,
+    LifecycleSpec,
+    ParameterSpec,
+    ReturnSpec,
+)
+
+
+def _module_make(
+    name,
+    callable_ref,
+    ret,
+    params,
+    *,
+    aliases=(),
+    category="misc",
+    volatility="immutable",
+    deterministic=True,
+    lifecycle=None,
+    summary="",
+    documentation=None,
+    engine="arrow",
+    id_suffix="default",
+    null_policy="compress",
+    cost=1.0,
+):
+    """
+    Centralized helper to construct a FunctionDefinition with a single-overload
+    default layout. Callers may pass additional metadata (category, volatility,
+    etc) to specialise the returned definition.
+
+    Parameters mirror the most common fields used by the previous per-group
+    _make helpers. The `id_suffix` is used to set the kernel overload id
+    (f\"{name}_{id_suffix}\").
+    """
+    if lifecycle is None:
+        lifecycle = LifecycleSpec(status="active")
+
+    doc = documentation or summary or name
+    overload_id = f"{name}_{id_suffix}" if id_suffix else f"{name}_default"
+
+    return FunctionDefinition(
+        name=name,
+        aliases=aliases,
+        category=category,
+        volatility=volatility,
+        deterministic=deterministic,
+        lifecycle=lifecycle,
+        summary=summary or name,
+        documentation=doc,
+        overloads=(
+            FunctionOverload(
+                id=overload_id,
+                parameters=params,
+                return_spec=ReturnSpec(mode="fixed", fixed_type=ret),
+                kernel=KernelSpec(
+                    engine=engine,
+                    id=id_suffix or "default",
+                    callable_ref=callable_ref,
+                    null_policy=null_policy,
+                    cost_us_per_million=cost,
+                ),
+            ),
+        ),
+    )
 
 
 def _builtin_text_functions() -> list[FunctionDefinition]:
@@ -30,14 +92,17 @@ def _builtin_text_functions() -> list[FunctionDefinition]:
     from opteryx.compiled.vector_ops import vector_concat_ws_array as _vector_concat_ws_cython
     from opteryx.compiled.vector_ops import vector_regex_replace as _vector_regex_replace_cython
     from opteryx.expression.functions.implementations import text as string_functions
-    from opteryx.expression.functions.implementations.text import to_lower
-    from opteryx.expression.functions.implementations.text import to_upper
-    from opteryx.expression.functions.implementations.text import vector_lengther
+    from opteryx.expression.functions.implementations.text import (
+        to_lower,
+        to_upper,
+        vector_lengther,
+    )
 
     def _concat_kernel(arr):
         """CONCAT(array_col): join all string elements of each row, no separator."""
         import numpy as _np
         import pyarrow as _pa
+
         from opteryx.draken.interop.arrow import vector_from_arrow as _vfa
         from opteryx.draken.vectors.array_vector import ArrayVector as _AV
 
@@ -222,8 +287,9 @@ def _builtin_text_functions() -> list[FunctionDefinition]:
 
 def _builtin_arithmetic_functions() -> list[FunctionDefinition]:
     """Arithmetic and numeric functions."""
-    from opteryx.expression.functions.implementations import arithmetic as number_functions
     from pyarrow import compute
+
+    from opteryx.expression.functions.implementations import arithmetic as number_functions
 
     return [
         FunctionDefinition(
@@ -419,18 +485,19 @@ def _builtin_logical_functions() -> list[FunctionDefinition]:
     """Logical and control flow functions."""
     # fmt: off
     from opteryx.compiled.vector_ops import vector_iif as _vector_iif
+    from opteryx.expression.functions.compat import _coalesce, select_values
     from opteryx.expression.functions.implementations.logical import (
-        array_contains as _lf_array_contains,)
+        array_contains as _lf_array_contains,
+    )
     from opteryx.expression.functions.implementations.logical import if_null as _lf_if_null
     from opteryx.expression.functions.implementations.logical import null_if as _lf_null_if
     from opteryx.expression.functions.implementations.utility import (
-        cosine_similarity as _lf_cosine_similarity,)
+        cosine_similarity as _lf_cosine_similarity,
+    )
     from opteryx.expression.functions.implementations.utility import humanize as _lf_humanize
     from opteryx.expression.functions.implementations.utility import (
-        jsonb_object_keys as _lf_jsonb_object_keys,)
-    from opteryx.functions import _coalesce
-    from opteryx.functions import select_values
-
+        jsonb_object_keys as _lf_jsonb_object_keys,
+    )
     # fmt: on
 
     class other_functions:
@@ -651,27 +718,24 @@ def _builtin_constant_functions() -> list[FunctionDefinition]:
     """
     _noop = lambda: None  # noqa: E731 — never called at runtime
 
-    def _make(name, return_type, aliases=(), summary=""):
-        return FunctionDefinition(
-            name=name,
-            aliases=aliases,
-            category="constant",
-            volatility="stable",
-            deterministic=False,
-            lifecycle=LifecycleSpec(status="active"),
-            summary=summary,
-            documentation=summary,
-            overloads=(
-                FunctionOverload(
-                    id=f"{name}_0",
-                    parameters=(),
-                    return_spec=ReturnSpec(mode="fixed", fixed_type=return_type),
-                    kernel=KernelSpec(
-                        engine="arrow", id="constant", callable_ref=_noop, cost_us_per_million=0.1
-                    ),
-                ),
-            ),
-        )
+    # Use module-level factory with constant-specific defaults.
+    _make = lambda name, return_type, aliases=(), summary="": _module_make(
+        name=name,
+        callable_ref=_noop,
+        ret=return_type,
+        params=(),
+        aliases=aliases,
+        category="constant",
+        volatility="stable",
+        deterministic=False,
+        lifecycle=LifecycleSpec(status="active"),
+        engine="arrow",
+        id_suffix="constant",
+        null_policy="compress",
+        cost=0.1,
+        summary=summary,
+        documentation=summary,
+    )
 
     # fmt: off
     return [
@@ -754,8 +818,9 @@ def _builtin_temporal_extra_functions() -> list[FunctionDefinition]:
 def _builtin_utility_functions() -> list[FunctionDefinition]:
     """Utility functions: array ops, subscript, element access."""
     import numpy
-    from opteryx.functions import _iterate_single_parameter as _isingle
-    from opteryx.functions import _sort as _sort_factory
+
+    from opteryx.expression.functions.compat import _iterate_single_parameter as _isingle
+    from opteryx.expression.functions.compat import _sort as _sort_factory
 
     _greatest_kernel = _isingle(numpy.nanmax)
     _least_kernel = _isingle(numpy.nanmin)
@@ -906,25 +971,28 @@ def _builtin_utility_functions() -> list[FunctionDefinition]:
 
 def _builtin_text_extended_functions() -> list[FunctionDefinition]:
     """Remaining string/text functions not in the core text group."""
+    from pyarrow import compute
+
     from opteryx.compiled.vector_ops import vector_concat_ws_array as _vector_concat_ws_cython
     from opteryx.compiled.vector_ops import vector_ltrim as _vector_ltrim
     from opteryx.compiled.vector_ops import vector_rtrim as _vector_rtrim
     from opteryx.compiled.vector_ops import vector_trim as _vector_trim
+    from opteryx.expression.functions.compat import _get_string, _iterate_double_parameter_swapped
     from opteryx.expression.functions.implementations import text as string_functions
-    from opteryx.functions import _get_string
-    from opteryx.functions import _initcap
-    from opteryx.functions import _iterate_double_parameter_swapped
-    from opteryx.functions import _replace
-    from opteryx.functions import _reverse
-    from opteryx.functions import _soundex
-    from opteryx.functions import _string_slice_left
-    from opteryx.functions import _string_slice_right
-    from pyarrow import compute
+    from opteryx.expression.functions.implementations.text import (
+        _initcap,
+        _replace,
+        _reverse,
+        _soundex,
+        _string_slice_left,
+        _string_slice_right,
+    )
 
     def _concat_ws_kernel(sep, arr):
         """CONCAT_WS(sep, array_col): join elements with separator."""
         import numpy as _np
         import pyarrow as _pa
+
         from opteryx.draken.interop.arrow import vector_from_arrow as _vfa
         from opteryx.draken.vectors.array_vector import ArrayVector as _AV
 
@@ -971,6 +1039,7 @@ def _builtin_text_extended_functions() -> list[FunctionDefinition]:
         relative to SQL order (needle first, haystack second)."""
         import numpy as _np
         import pyarrow as _pa
+
         from opteryx.draken.interop.arrow import vector_from_arrow as _vfa
         from opteryx.draken.vectors.string_vector import StringVector as _SV
 
@@ -1004,42 +1073,28 @@ def _builtin_text_extended_functions() -> list[FunctionDefinition]:
 
         return _vector_position_cython(haystack_vec, needle_arr).to_arrow()
 
-    def _make(
-        name,
-        callable_ref,
-        ret,
-        params,
-        aliases=(),
-        cost=5.0,
-        null_policy="compress",
-        engine="arrow",
-        summary="",
-        doc="",
-    ):
-        return FunctionDefinition(
-            name=name,
-            aliases=aliases,
-            category="text",
-            volatility="immutable",
-            deterministic=True,
-            lifecycle=LifecycleSpec(status="active"),
-            summary=summary or name,
-            documentation=doc or summary or name,
-            overloads=(
-                FunctionOverload(
-                    id=f"{name}_default",
-                    parameters=params,
-                    return_spec=ReturnSpec(mode="fixed", fixed_type=ret),
-                    kernel=KernelSpec(
-                        engine=engine,
-                        id="default",
-                        callable_ref=callable_ref,
-                        null_policy=null_policy,
-                        cost_us_per_million=cost,
-                    ),
-                ),
-            ),
+    # Text group: delegate to module-level factory with group defaults.
+    _make = (
+        lambda name, callable_ref, ret, params, aliases=(), cost=5.0, null_policy="compress", engine="arrow", summary="", doc="": (
+            _module_make(
+                name=name,
+                callable_ref=callable_ref,
+                ret=ret,
+                params=params,
+                aliases=aliases,
+                category="text",
+                volatility="immutable",
+                deterministic=True,
+                lifecycle=LifecycleSpec(status="active"),
+                engine=engine,
+                id_suffix="default",
+                null_policy=null_policy,
+                cost=cost,
+                summary=summary,
+                documentation=doc or summary or name,
+            )
         )
+    )
 
     _s = ParameterSpec(name="str", type_family="string")
     _n = ParameterSpec(name="n", type_family="integer")
@@ -1265,13 +1320,10 @@ def _builtin_text_extended_functions() -> list[FunctionDefinition]:
 
 def _builtin_hash_encoding_functions() -> list[FunctionDefinition]:
     """Hash, encoding, and random-generation functions."""
+    from opteryx.expression.functions.compat import _iterate_single_parameter as _isingle
     from opteryx.expression.functions.implementations import arithmetic as number_functions
     from opteryx.expression.functions.implementations import text as string_functions
-    from opteryx.functions import _iterate_single_parameter as _isingle
-    from opteryx.functions import _md5
-    from opteryx.functions import _sha1
-    from opteryx.functions import _sha256
-    from opteryx.functions import _sha512
+    from opteryx.expression.functions.implementations.text import _md5, _sha1, _sha256, _sha512
     from opteryx.third_party.cyan4973.xxhash import hash_bytes
 
     _hash_kernel = _isingle(lambda x: hex(hash_bytes(str(x).encode()))[2:])
@@ -1282,41 +1334,28 @@ def _builtin_hash_encoding_functions() -> list[FunctionDefinition]:
     _hex_enc_kernel = _isingle(string_functions.get_hex_encode)
     _hex_dec_kernel = _isingle(string_functions.get_hex_decode)
 
-    def _make(
-        name,
-        callable_ref,
-        ret,
-        params,
-        aliases=(),
-        cost=10.0,
-        volatility="immutable",
-        null_policy="compress",
-        summary="",
-    ):
-        return FunctionDefinition(
-            name=name,
-            aliases=aliases,
-            category="hash_encoding",
-            volatility=volatility,
-            deterministic=volatility == "immutable",
-            lifecycle=LifecycleSpec(status="active"),
-            summary=summary or name,
-            documentation=summary or name,
-            overloads=(
-                FunctionOverload(
-                    id=f"{name}_default",
-                    parameters=params,
-                    return_spec=ReturnSpec(mode="fixed", fixed_type=ret),
-                    kernel=KernelSpec(
-                        engine="arrow",
-                        id="default",
-                        callable_ref=callable_ref,
-                        null_policy=null_policy,
-                        cost_us_per_million=cost,
-                    ),
-                ),
-            ),
+    # Hash/encoding group: delegate to module-level factory; preserve volatility toggle.
+    _make = (
+        lambda name, callable_ref, ret, params, aliases=(), cost=10.0, volatility="immutable", null_policy="compress", summary="": (
+            _module_make(
+                name=name,
+                callable_ref=callable_ref,
+                ret=ret,
+                params=params,
+                aliases=aliases,
+                category="hash_encoding",
+                volatility=volatility,
+                deterministic=(volatility == "immutable"),
+                lifecycle=LifecycleSpec(status="active"),
+                engine="arrow",
+                id_suffix="default",
+                null_policy=null_policy,
+                cost=cost,
+                summary=summary,
+                documentation=summary or name,
+            )
         )
+    )
 
     _any = ParameterSpec(name="val", type_family="any")
     _n = ParameterSpec(name="n", type_family="integer")
@@ -1476,24 +1515,29 @@ def _builtin_hash_encoding_functions() -> list[FunctionDefinition]:
 def _builtin_array_misc_functions() -> list[FunctionDefinition]:
     """Array membership tests and miscellaneous column-level functions."""
     # fmt: off
-    from opteryx.compiled.vector_ops import vector_contains_all
-    from opteryx.compiled.vector_ops import vector_contains_any
+    from opteryx.compiled.vector_ops import vector_contains_all, vector_contains_any
     from opteryx.expression.functions.implementations.logical import if_null as _of_if_null
     from opteryx.expression.functions.implementations.logical import null_if as _of_null_if
     from opteryx.expression.functions.implementations.utility import (
-        array_contains as _of_array_contains,)
+        array_contains as _of_array_contains,
+    )
     from opteryx.expression.functions.implementations.utility import (
-        array_contains_all as _of_array_contains_all,)
+        array_contains_all as _of_array_contains_all,
+    )
     from opteryx.expression.functions.implementations.utility import (
-        array_contains_any as _of_array_contains_any,)
+        array_contains_any as _of_array_contains_any,
+    )
     from opteryx.expression.functions.implementations.utility import (
-        cosine_distance as _of_cosine_distance,)
+        cosine_distance as _of_cosine_distance,
+    )
     from opteryx.expression.functions.implementations.utility import (
-        cosine_similarity as _of_cosine_similarity,)
+        cosine_similarity as _of_cosine_similarity,
+    )
     from opteryx.expression.functions.implementations.utility import embed as _of_embed
     from opteryx.expression.functions.implementations.utility import humanize as _of_humanize
     from opteryx.expression.functions.implementations.utility import (
-        jsonb_object_keys as _of_jsonb_object_keys,)
+        jsonb_object_keys as _of_jsonb_object_keys,
+    )
 
     # fmt: on
 
@@ -1509,33 +1553,28 @@ def _builtin_array_misc_functions() -> list[FunctionDefinition]:
         humanize = staticmethod(_of_humanize)
         jsonb_object_keys = staticmethod(_of_jsonb_object_keys)
 
-    def _make(
-        name, callable_ref, ret, params, aliases=(), cost=8.0, null_policy="compress", summary=""
-    ):
-        return FunctionDefinition(
-            name=name,
-            aliases=aliases,
-            category="array",
-            volatility="immutable",
-            deterministic=True,
-            lifecycle=LifecycleSpec(status="active"),
-            summary=summary or name,
-            documentation=summary or name,
-            overloads=(
-                FunctionOverload(
-                    id=f"{name}_default",
-                    parameters=params,
-                    return_spec=ReturnSpec(mode="fixed", fixed_type=ret),
-                    kernel=KernelSpec(
-                        engine="arrow",
-                        id="default",
-                        callable_ref=callable_ref,
-                        null_policy=null_policy,
-                        cost_us_per_million=cost,
-                    ),
-                ),
-            ),
+    # Array/misc group: delegate to module-level factory with array defaults.
+    _make = (
+        lambda name, callable_ref, ret, params, aliases=(), cost=8.0, null_policy="compress", summary="": (
+            _module_make(
+                name=name,
+                callable_ref=callable_ref,
+                ret=ret,
+                params=params,
+                aliases=aliases,
+                category="array",
+                volatility="immutable",
+                deterministic=True,
+                lifecycle=LifecycleSpec(status="active"),
+                engine="arrow",
+                id_suffix="default",
+                null_policy=null_policy,
+                cost=cost,
+                summary=summary,
+                documentation=summary or name,
+            )
         )
+    )
 
     _arr = ParameterSpec(name="arr", type_family="array")
     _item = ParameterSpec(name="item", type_family="any")
@@ -1701,37 +1740,33 @@ def _builtin_array_misc_functions() -> list[FunctionDefinition]:
 
 def _builtin_arithmetic_extended_functions() -> list[FunctionDefinition]:
     """Numeric functions not in the core arithmetic group."""
-    from opteryx.expression.functions.implementations import arithmetic as number_functions
-    from opteryx.expression.functions.implementations import temporal as date_functions
     from pyarrow import compute
 
-    def _make(
-        name, callable_ref, ret, params, aliases=(), cost=2.0, null_policy="compress", summary=""
-    ):
-        return FunctionDefinition(
-            name=name,
-            aliases=aliases,
-            category="arithmetic",
-            volatility="immutable",
-            deterministic=True,
-            lifecycle=LifecycleSpec(status="active"),
-            summary=summary or name,
-            documentation=summary or name,
-            overloads=(
-                FunctionOverload(
-                    id=f"{name}_default",
-                    parameters=params,
-                    return_spec=ReturnSpec(mode="fixed", fixed_type=ret),
-                    kernel=KernelSpec(
-                        engine="arrow",
-                        id="default",
-                        callable_ref=callable_ref,
-                        null_policy=null_policy,
-                        cost_us_per_million=cost,
-                    ),
-                ),
-            ),
+    from opteryx.expression.functions.implementations import arithmetic as number_functions
+    from opteryx.expression.functions.implementations import temporal as date_functions
+
+    # Arithmetic-extended group: central factory with arithmetic defaults.
+    _make = (
+        lambda name, callable_ref, ret, params, aliases=(), cost=2.0, null_policy="compress", summary="": (
+            _module_make(
+                name=name,
+                callable_ref=callable_ref,
+                ret=ret,
+                params=params,
+                aliases=aliases,
+                category="arithmetic",
+                volatility="immutable",
+                deterministic=True,
+                lifecycle=LifecycleSpec(status="active"),
+                engine="arrow",
+                id_suffix="default",
+                null_policy=null_policy,
+                cost=cost,
+                summary=summary,
+                documentation=summary or name,
+            )
         )
+    )
 
     _num = ParameterSpec(name="num", type_family="numeric")
     _temporal_value = ParameterSpec(name="value", type_family="any")
@@ -1811,33 +1846,28 @@ def _builtin_temporal_functions() -> list[FunctionDefinition]:
     """Full temporal function set."""
     from opteryx.expression.functions.implementations import temporal as date_functions
 
-    def _make(
-        name, callable_ref, ret, params, aliases=(), cost=4.0, null_policy="compress", summary=""
-    ):
-        return FunctionDefinition(
-            name=name,
-            aliases=aliases,
-            category="temporal",
-            volatility="immutable",
-            deterministic=True,
-            lifecycle=LifecycleSpec(status="active"),
-            summary=summary or name,
-            documentation=summary or name,
-            overloads=(
-                FunctionOverload(
-                    id=f"{name}_default",
-                    parameters=params,
-                    return_spec=ReturnSpec(mode="fixed", fixed_type=ret),
-                    kernel=KernelSpec(
-                        engine="arrow",
-                        id="default",
-                        callable_ref=callable_ref,
-                        null_policy=null_policy,
-                        cost_us_per_million=cost,
-                    ),
-                ),
-            ),
+    # Temporal group: central factory with temporal defaults.
+    _make = (
+        lambda name, callable_ref, ret, params, aliases=(), cost=4.0, null_policy="compress", summary="": (
+            _module_make(
+                name=name,
+                callable_ref=callable_ref,
+                ret=ret,
+                params=params,
+                aliases=aliases,
+                category="temporal",
+                volatility="immutable",
+                deterministic=True,
+                lifecycle=LifecycleSpec(status="active"),
+                engine="arrow",
+                id_suffix="default",
+                null_policy=null_policy,
+                cost=cost,
+                summary=summary,
+                documentation=summary or name,
+            )
         )
+    )
 
     _part = ParameterSpec(name="part", type_family="string", constant_only=True)
     _date = ParameterSpec(name="date", type_family="temporal")

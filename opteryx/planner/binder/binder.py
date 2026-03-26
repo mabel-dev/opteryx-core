@@ -6,27 +6,24 @@
 
 import copy
 from contextlib import suppress
-from typing import Any
-from typing import Dict
-from typing import Optional
-from typing import Tuple
+from typing import Any, Dict, Optional, Tuple
 
-from opteryx.exceptions import AmbiguousIdentifierError
-from opteryx.exceptions import ColumnNotFoundError
-from opteryx.exceptions import IncompatibleTypesError
-from opteryx.exceptions import InvalidInternalStateError
-from opteryx.exceptions import UnexpectedDatasetReferenceError
+from orso.schema import ConstantColumn, FlatColumn, FunctionColumn, RelationSchema
+from orso.types import OrsoTypes
+
+from opteryx.exceptions import (
+    AmbiguousIdentifierError,
+    ColumnNotFoundError,
+    IncompatibleTypesError,
+    InvalidInternalStateError,
+    UnexpectedDatasetReferenceError,
+)
 from opteryx.expression import NodeType
 from opteryx.expression.functions import get_catalog as _get_function_catalog
-from opteryx.functions import fixed_value_function
+from opteryx.expression.functions.compat import fixed_value_function
 from opteryx.models import Node
 from opteryx.planner.binder.binding_context import BindingContext
 from opteryx.planner.binder.operator_map import determine_type
-from orso.schema import ConstantColumn
-from orso.schema import FlatColumn
-from orso.schema import FunctionColumn
-from orso.schema import RelationSchema
-from orso.types import OrsoTypes
 
 
 def merge_schemas(*schemas: Dict[str, RelationSchema]) -> Dict[str, RelationSchema]:
@@ -215,9 +212,7 @@ def inner_binder(node: Node, context: BindingContext) -> Tuple[Node, Any]:
     (executing comparisons).
     """
     # Import relevant classes and functions
-    from opteryx.expression import ExpressionColumn
-    from opteryx.expression import format_expression
-    from opteryx.expression import get_all_nodes_of_type
+    from opteryx.expression import ExpressionColumn, format_expression, get_all_nodes_of_type
 
     # Retrieve the node type for further processing.
     node_type = node.node_type

@@ -41,27 +41,19 @@ a = ANY(z) AND b = ANY(z) AND c = ANY(z)    → z @>> (a, b, c)
 """
 
 import re
-from typing import Callable
-from typing import Dict
+from typing import Callable, Dict
 
-from opteryx.expression import ExpressionColumn
-from opteryx.expression import NodeType
-from opteryx.expression import format_expression
-from opteryx.models import Node
-from opteryx.models import QueryTelemetry
-from opteryx.planner.binder.operator_map import determine_type
-from opteryx.planner.logical_planner import LogicalPlan
-from opteryx.planner.logical_planner import LogicalPlanNode
-from opteryx.planner.logical_planner import LogicalPlanStepType
-from opteryx.utils.dates import add_single_unit
-from opteryx.utils.dates import parse_iso
-from opteryx.utils.dates import truncate_single
-from opteryx.utils.sql import sql_like_to_regex
 from orso.schema import ConstantColumn
 from orso.types import OrsoTypes
 
-from .optimization_strategy import OptimizationStrategy
-from .optimization_strategy import OptimizerContext
+from opteryx.expression import ExpressionColumn, NodeType, format_expression
+from opteryx.models import Node, QueryTelemetry
+from opteryx.planner.binder.operator_map import determine_type
+from opteryx.planner.logical_planner import LogicalPlan, LogicalPlanNode, LogicalPlanStepType
+from opteryx.utils.dates import add_single_unit, parse_iso, truncate_single
+from opteryx.utils.sql import sql_like_to_regex
+
+from .optimization_strategy import OptimizationStrategy, OptimizerContext
 
 # fmt: off
 IN_REWRITES = {"InList": "Eq", "NotInList": "NotEq"}
@@ -655,7 +647,7 @@ def _rewrite_function(function, telemetry: QueryTelemetry):
                         # Try to detect compilable pattern using the DFA compiler.
                         # Best-effort: if anything goes wrong, do not rewrite.
                         try:
-                            from opteryx.expression.functions.regex_compiler import (
+                            from opteryx.utils.regex_compiler import (
                                 RegexToDFACompiler,
                             )
 

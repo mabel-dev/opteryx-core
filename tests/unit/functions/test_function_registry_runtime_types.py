@@ -8,16 +8,14 @@ import numpy
 import pyarrow
 import pytest
 from orso.schema import FlatColumn
-from orso.types import PYTHON_TO_ORSO_MAP
-from orso.types import OrsoTypes
+from orso.types import PYTHON_TO_ORSO_MAP, OrsoTypes
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
 import opteryx
 from opteryx.expression.evaluator import apply_bounded_function
+from opteryx.expression.functions.compat import fixed_value_function
 from opteryx.expression.functions.native_function_registrar import get_builtin_functions
-from opteryx.functions import fixed_value_function
-
 
 ROW_COUNT = 3
 TEMPORAL_VALUES = pyarrow.array(
@@ -98,15 +96,14 @@ _OVERRIDE_ARGUMENTS: dict[tuple[str, str], object] = {
     # CONCAT/CONCAT_WS expect an array-of-arrays (one list-of-strings per row)
     ("CONCAT", "str1"): numpy.array([["alpha", "1"], ["beta", "2"], ["gamma", "3"]], dtype=object),
     ("CONCAT_WS", "sep"): "-",
-    ("CONCAT_WS", "str1"): numpy.array([["alpha", "1"], ["beta", "2"], ["gamma", "3"]], dtype=object),
-
+    ("CONCAT_WS", "str1"): numpy.array(
+        [["alpha", "1"], ["beta", "2"], ["gamma", "3"]], dtype=object
+    ),
     # ASCII expects single-character strings.
     ("ASCII", "str"): numpy.array(["a", "b", "c"], dtype=object),
-
     # For RANDOM/NORMAL the kernel expects a scalar row count (not a vector).
     ("RANDOM", "n"): ROW_COUNT,
     ("NORMAL", "n"): ROW_COUNT,
-
     ("ROUND", "precision"): 2,
     ("POWER", "exp"): numpy.array([2.0, 2.0, 2.0], dtype=numpy.float64),
     ("TIME_BUCKET", "magnitude"): numpy.array([1], dtype=numpy.int64),
@@ -116,14 +113,12 @@ _OVERRIDE_ARGUMENTS: dict[tuple[str, str], object] = {
     ("RTRIM", "chars"): ["a"],
     ("LPAD", "fill"): ["x"],
     ("RPAD", "fill"): ["x"],
-    ("SPLIT", "delimiter"): [","] ,
+    ("SPLIT", "delimiter"): [","],
     ("SPLIT", "limit"): [2],
-
     # parameter name is "blob" for these decoding functions
     ("BASE64_DECODE", "blob"): VALID_BASE64,
     ("BASE85_DECODE", "blob"): VALID_BASE85,
     ("HEX_DECODE", "blob"): VALID_HEX,
-
     ("ARRAY_CONTAINS", "item"): 1,
     ("ARRAY_CONTAINS_ANY", "items"): [1, 5],
     ("ARRAY_CONTAINS_ALL", "items"): [1, 5],
@@ -331,7 +326,9 @@ def _execute_case(function_def, overload):
     return expected, _infer_logical_type(result)
 
 
-@pytest.mark.filterwarnings("ignore:no explicit representation of timezones available for np.datetime64")
+@pytest.mark.filterwarnings(
+    "ignore:no explicit representation of timezones available for np.datetime64"
+)
 @pytest.mark.parametrize(("function_def", "overload"), FUNCTION_CASES, ids=CASE_IDS)
 def test_registered_function_overloads_return_compatible_types(function_def, overload):
     expected, actual = _execute_case(function_def, overload)
