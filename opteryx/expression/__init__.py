@@ -24,7 +24,7 @@ from opteryx.exceptions import IncorrectTypeError
 from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.expression.binary_operators import binary_operations
 from opteryx.expression.evaluator import apply_bounded_function
-from opteryx.expression.ops import filter_operations
+from opteryx.expression.operations import filter_operations
 from opteryx.expression.unary_operations import UNARY_OPERATIONS
 from opteryx.models import LogicalColumn
 from opteryx.models import Node

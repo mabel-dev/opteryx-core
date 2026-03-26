@@ -30,7 +30,7 @@ from opteryx.compiled.draken.storage.morsel_io import write_morsel
 from opteryx.compiled.draken.vectors.scalar_constructors import from_scalar as constant_from_scalar
 from opteryx.operators.group_state_store import ShuffleGroupByOperationV2
 
-from opteryx.expression.ops import filter_operations
+from opteryx.expression.operations import filter_operations
 from opteryx.operators.shuffle import AggregationSpec
 
 

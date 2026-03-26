@@ -18,7 +18,7 @@ import pyarrow as pa
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
-from opteryx.expression.ops import _inner_filter_operations
+from opteryx.expression.operations import _inner_filter_operations
 
 
 def _measure(fn, repeat: int = 8):
