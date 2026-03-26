@@ -165,8 +165,8 @@ cpdef BoolVector match_like_bmh(StringVector vec, str pattern):
 All conversions must create a BoolVector result. Reference pattern:
 
 ```cython
-from opteryx.draken.vectors.bool_vector cimport BoolVector
-from opteryx.draken.interop.arrow cimport vector_from_arrow
+from opteryx.compiled.draken.vectors.bool_vector cimport BoolVector
+from opteryx.compiled.draken.interop.arrow cimport vector_from_arrow
 
 # Option 1: Build from numpy array (intermediate step)
 import pyarrow as pa

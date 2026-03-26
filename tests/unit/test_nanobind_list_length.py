@@ -1,7 +1,8 @@
 import numpy as np
 import pyarrow as pa
+from opteryx.compiled.nanobind.vector_length import offsets_to_lengths as offsets_to_lengths_native
+
 from opteryx.compiled.vector_ops import vector_length
-from opteryx.nanobind.vector_length import offsets_to_lengths as offsets_to_lengths_native
 
 
 def test_offsets_to_lengths_matches_numpy():

@@ -9,7 +9,7 @@ import sys
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
-from opteryx.draken.morsels.morsel import Morsel
+from opteryx.compiled.draken.morsels.morsel import Morsel
 from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.operators.shuffle import AggregationSpec
 from opteryx.operators.shuffle import ShuffleGroupByOperation
@@ -1032,8 +1032,8 @@ def test_phase1_v2_single_timestamp_key_uses_compiled_carchar_mode():
 
 def test_phase1_v2_constant_key_uses_compiled_constant_mode():
     try:
-        from opteryx.draken.interop.arrow import vector_from_arrow
-        from opteryx.draken.vectors.scalar_constructors import from_scalar as constant_from_scalar
+        from opteryx.compiled.draken.interop.arrow import vector_from_arrow
+        from opteryx.compiled.draken.vectors.scalar_constructors import from_scalar as constant_from_scalar
         from opteryx.operators.group_state_store import ShuffleGroupByOperationV2
     except ImportError:
         return

@@ -9,14 +9,14 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 import pytest
 import pyarrow as pa
 from array import array
-import opteryx.draken as draken
-from opteryx.draken.vectors._hash_api import hash_into as hash_into_vector
-from opteryx.draken.vectors.arrow_vector import ArrowVector
+import opteryx.compiled.draken as draken
+from opteryx.compiled.draken.vectors._hash_api import hash_into as hash_into_vector
+from opteryx.compiled.draken.vectors.arrow_vector import ArrowVector
 
 try:
-    from opteryx.draken.vectors.vector import MIX_HASH_CONSTANT  # type: ignore[attr-defined]
+    from opteryx.compiled.draken.vectors.vector import MIX_HASH_CONSTANT  # type: ignore[attr-defined]
 except (ImportError, AttributeError):
-    from opteryx.draken.vectors.arrow_vector import MIX_HASH_CONSTANT
+    from opteryx.compiled.draken.vectors.arrow_vector import MIX_HASH_CONSTANT
 
 
 def _hash_view_to_list(buffer):

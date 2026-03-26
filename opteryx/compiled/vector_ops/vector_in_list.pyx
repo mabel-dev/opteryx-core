@@ -14,11 +14,11 @@ import numpy
 cimport numpy
 numpy.import_array()
 
-from opteryx.draken.vectors.vector cimport Vector
-from opteryx.draken.vectors.int64_vector cimport Int64Vector
-from opteryx.draken.vectors.string_vector cimport StringVector
-from opteryx.draken.vectors.bool_vector cimport BoolVector
-from opteryx.draken.core.buffers cimport DrakenVarBuffer
+from opteryx.compiled.draken.vectors.vector cimport Vector
+from opteryx.compiled.draken.vectors.int64_vector cimport Int64Vector
+from opteryx.compiled.draken.vectors.string_vector cimport StringVector
+from opteryx.compiled.draken.vectors.bool_vector cimport BoolVector
+from opteryx.compiled.draken.core.buffers cimport DrakenVarBuffer
 
 cdef BoolVector vector_in_list_int64_vector(Int64Vector vec, set values):
     cdef Py_ssize_t i, n = vec.ptr.length

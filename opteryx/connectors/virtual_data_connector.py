@@ -16,9 +16,9 @@ import importlib
 import typing
 from typing import Tuple
 
+from opteryx.compiled.draken.morsels.morsel import Morsel
 from opteryx.connectors.base.base_connector import BaseConnector
 from opteryx.connectors.base.base_connector import BaseTable
-from opteryx.draken.morsels.morsel import Morsel
 from opteryx.exceptions import DatasetNotFoundError
 from orso.schema import RelationSchema
 

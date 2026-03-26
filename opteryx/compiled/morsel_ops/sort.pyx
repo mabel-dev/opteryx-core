@@ -37,7 +37,7 @@ from cpython.mem cimport PyMem_Malloc, PyMem_Free
 from libc.stdint cimport int8_t, int16_t, int32_t, int64_t, uint8_t, uint16_t, uint32_t, uint64_t
 from libc.string cimport memset, memcpy, memcmp
 
-from opteryx.draken.core.buffers cimport (
+from opteryx.compiled.draken.core.buffers cimport (
     DictAccessor,
     DrakenVarBuffer,
     DrakenType,
@@ -54,7 +54,7 @@ from opteryx.draken.core.buffers cimport (
     DRAKEN_TIME32,
     DRAKEN_TIME64,
 )
-from opteryx.draken.vectors.string_vector cimport StringVector
+from opteryx.compiled.draken.vectors.string_vector cimport StringVector
 from opteryx.compiled.aggregations.vector_readers cimport (
     _vector_dict_accessor,
     _dict_read_code,

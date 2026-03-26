@@ -3,11 +3,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
+import opteryx.compiled.rugo.parquet as rp
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
-
-import opteryx.rugo.parquet as rp
 
 DRAKEN_ENCODING_CONSTANT = 3
 

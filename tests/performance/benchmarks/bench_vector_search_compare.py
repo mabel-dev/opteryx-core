@@ -19,8 +19,8 @@ import numpy
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
-usearch_native = importlib.import_module("opteryx.nanobind.usearch_native")
-vector_search = importlib.import_module("opteryx.nanobind.vector_search")
+usearch_native = importlib.import_module("opteryx.compiled.nanobind.usearch_native")
+vector_search = importlib.import_module("opteryx.compiled.nanobind.vector_search")
 
 
 DEFAULT_ROWS = (1_000, 5_000, 10_000, 50_000, 100_000)

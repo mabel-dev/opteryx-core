@@ -17,8 +17,8 @@ import time
 from numbers import Integral
 from typing import Generator
 
-from opteryx.draken.interop.arrow import vector_from_sequence
-from opteryx.draken.morsels.morsel import Morsel
+from opteryx.compiled.draken.interop.arrow import vector_from_sequence
+from opteryx.compiled.draken.morsels.morsel import Morsel
 from opteryx.exceptions import SqlError
 from opteryx.expression import NodeType
 from opteryx.models import QueryProperties

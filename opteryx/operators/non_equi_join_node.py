@@ -22,9 +22,9 @@ Supported comparisons:
 
 import numpy
 import pyarrow
+from opteryx.compiled.draken import Morsel
+from opteryx.compiled.draken import align_tables
 from opteryx.compiled.joins import non_equi_nested_loop_join
-from opteryx.draken import Morsel
-from opteryx.draken import align_tables
 from opteryx.models import QueryProperties
 from pyarrow import Table
 

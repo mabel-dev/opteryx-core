@@ -19,7 +19,7 @@ import pytest
 import pyarrow as pa
 import pyarrow.compute as pc
 
-from opteryx.draken import Vector
+from opteryx.compiled.draken import Vector
 
 TESTS = [
     # Boolean: count trues

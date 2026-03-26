@@ -85,23 +85,23 @@ from libcpp.string cimport string
 from libcpp.vector cimport vector
 
 # Import Draken vector types and components
-from opteryx.draken.vectors.int64_vector cimport (
+from opteryx.compiled.draken.vectors.int64_vector cimport (
     Int64Vector,
     from_dict as int64_from_dict,
     from_dict_nullable as int64_from_dict_nullable,
 )
-from opteryx.draken.vectors.float64_vector cimport (
+from opteryx.compiled.draken.vectors.float64_vector cimport (
     Float64Vector,
     from_dict as float64_from_dict,
     from_dict_nullable as float64_from_dict_nullable,
 )
-from opteryx.draken.vectors.string_vector cimport (
+from opteryx.compiled.draken.vectors.string_vector cimport (
     StringVector,
     StringVectorBuilder,
     from_dict_buffers as string_from_dict_buffers,
 )
-from opteryx.draken.vectors.bool_vector cimport BoolVector, bool_vector_from_bits
-from opteryx.draken.core.buffers cimport (
+from opteryx.compiled.draken.vectors.bool_vector cimport BoolVector, bool_vector_from_bits
+from opteryx.compiled.draken.core.buffers cimport (
     DRAKEN_FLOAT32,
     DRAKEN_FLOAT64,
     DRAKEN_INT32,
@@ -109,9 +109,9 @@ from opteryx.draken.core.buffers cimport (
     DRAKEN_STRING,
     DrakenVarBuffer,
 )
-from opteryx.draken.vectors.array_vector cimport ArrayVector, array_vector_from_parts
-from opteryx.draken.vectors.vector cimport Vector
-from opteryx.draken.morsels.morsel cimport Morsel
+from opteryx.compiled.draken.vectors.array_vector cimport ArrayVector, array_vector_from_parts
+from opteryx.compiled.draken.vectors.vector cimport Vector
+from opteryx.compiled.draken.morsels.morsel cimport Morsel
 
 
 # --- value decoder ---

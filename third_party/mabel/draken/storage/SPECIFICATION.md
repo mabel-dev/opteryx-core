@@ -1,7 +1,7 @@
 # DRKM File Format Specification
 
 This document describes the **DRKM** (Draken Morsel) container format used by
-`opteryx.draken.storage.morsel_io` for serializing and deserializing
+`opteryx.compiled.draken.storage.morsel_io` for serializing and deserializing
 `Morsel` objects.  Its primary purpose is to support the high‑throughput,
 Draken‑native spill/replay scenario that motivated the original design, but
 nothing in the layout inherently forbids other applications; consumers are

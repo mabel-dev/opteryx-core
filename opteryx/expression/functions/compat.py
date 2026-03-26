@@ -31,41 +31,39 @@ import time
 
 import numpy
 import pyarrow
-from pyarrow import ArrowNotImplementedError, compute
-
-import opteryx
 
 # Import compiled vector ops dynamically inside call sites to avoid static
 # analyzer / import-time resolution issues in environments without the
 # compiled extension available. Callers should prefer the compiled kernels
 # at runtime; this keeps the top-level import surface lightweight.
-from opteryx.exceptions import FunctionExecutionError, IncorrectTypeError
-from opteryx.expression.casts import (
-    cast,
-    cast_to_blob,
-    cast_to_double,
-    cast_to_int,
-    cast_to_varchar,
-    try_cast,
-)
-from opteryx.expression.functions.implementations.text import (
-    _initcap,
-    _md5,
-    _replace,
-    _reverse,
-    _sha1,
-    _sha256,
-    _sha512,
-    _soundex,
-    _string_slice_left,
-    _string_slice_right,
-    to_lower,
-    to_upper,
-    vector_lengther,
-)
+from opteryx.exceptions import FunctionExecutionError
+from opteryx.exceptions import IncorrectTypeError
+from opteryx.expression.casts import cast
+from opteryx.expression.casts import cast_to_blob
+from opteryx.expression.casts import cast_to_double
+from opteryx.expression.casts import cast_to_int
+from opteryx.expression.casts import cast_to_varchar
+from opteryx.expression.casts import try_cast
+from opteryx.expression.functions.implementations.text import _initcap
+from opteryx.expression.functions.implementations.text import _md5
+from opteryx.expression.functions.implementations.text import _replace
+from opteryx.expression.functions.implementations.text import _reverse
+from opteryx.expression.functions.implementations.text import _sha1
+from opteryx.expression.functions.implementations.text import _sha256
+from opteryx.expression.functions.implementations.text import _sha512
+from opteryx.expression.functions.implementations.text import _soundex
+from opteryx.expression.functions.implementations.text import _string_slice_left
+from opteryx.expression.functions.implementations.text import _string_slice_right
+from opteryx.expression.functions.implementations.text import to_lower
+from opteryx.expression.functions.implementations.text import to_upper
+from opteryx.expression.functions.implementations.text import vector_lengther
 from opteryx.third_party.cyan4973.xxhash import hash_bytes
 from opteryx.utils import dates
 from opteryx.utils.json_compat import dumps as json_dumps
+from pyarrow import ArrowNotImplementedError
+from pyarrow import compute
+
+import opteryx
 
 # to_lower, to_upper imported from opteryx.expression.functions.implementations.text
 

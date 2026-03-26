@@ -5,7 +5,7 @@
 # because kernel files are separate compilation units and must be self-contained.
 
 from libc.stdint cimport int8_t, int16_t, int32_t, int64_t, uint8_t
-from opteryx.draken.core.buffers cimport DrakenFixedBuffer
+from opteryx.compiled.draken.core.buffers cimport DrakenFixedBuffer
 
 
 cdef inline bint _bitmap_is_valid(const uint8_t* bitmap, Py_ssize_t index) noexcept nogil:

@@ -26,18 +26,18 @@ from libc.stdint cimport int32_t, int8_t, intptr_t, uint16_t, uint32_t, uint64_t
 from libc.stdlib cimport free, malloc
 from libc.math cimport isinf, isnan, llround
 
-from opteryx.draken.core.buffers cimport ConstAccessor
-from opteryx.draken.core.buffers cimport DictAccessor
-from opteryx.draken.core.buffers cimport DRAKEN_ENCODING_DENSE
-from opteryx.draken.core.buffers cimport DRAKEN_ENCODING_CONSTANT
-from opteryx.draken.core.buffers cimport DRAKEN_ENCODING_DICTIONARY
-from opteryx.draken.core.buffers cimport DrakenFixedBuffer
-from opteryx.draken.core.buffers cimport DrakenVarBuffer
-from opteryx.draken.core.buffers cimport DRAKEN_FLOAT64
-from opteryx.draken.core.fixed_vector cimport alloc_fixed_buffer, buf_dtype, buf_itemsize, buf_length, free_fixed_buffer
-from opteryx.draken.core.var_vector cimport alloc_var_buffer, free_var_buffer
-from opteryx.draken.vectors.vector cimport MIX_HASH_CONSTANT, Vector, NULL_HASH, mix_hash, simd_mix_hash
-from opteryx.draken.vectors.bool_vector cimport BoolVector
+from opteryx.compiled.draken.core.buffers cimport ConstAccessor
+from opteryx.compiled.draken.core.buffers cimport DictAccessor
+from opteryx.compiled.draken.core.buffers cimport DRAKEN_ENCODING_DENSE
+from opteryx.compiled.draken.core.buffers cimport DRAKEN_ENCODING_CONSTANT
+from opteryx.compiled.draken.core.buffers cimport DRAKEN_ENCODING_DICTIONARY
+from opteryx.compiled.draken.core.buffers cimport DrakenFixedBuffer
+from opteryx.compiled.draken.core.buffers cimport DrakenVarBuffer
+from opteryx.compiled.draken.core.buffers cimport DRAKEN_FLOAT64
+from opteryx.compiled.draken.core.fixed_vector cimport alloc_fixed_buffer, buf_dtype, buf_itemsize, buf_length, free_fixed_buffer
+from opteryx.compiled.draken.core.var_vector cimport alloc_var_buffer, free_var_buffer
+from opteryx.compiled.draken.vectors.vector cimport MIX_HASH_CONSTANT, Vector, NULL_HASH, mix_hash, simd_mix_hash
+from opteryx.compiled.draken.vectors.bool_vector cimport BoolVector
 
 DEF FLOAT64_HASH_CHUNK = 1024
 

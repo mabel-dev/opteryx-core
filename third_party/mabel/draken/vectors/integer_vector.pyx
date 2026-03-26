@@ -27,13 +27,13 @@ from libc.stdint cimport (
 from libc.stdlib cimport malloc
 from libc.string cimport memset
 
-from opteryx.draken.core.buffers cimport DrakenFixedBuffer, DrakenType
-from opteryx.draken.core.buffers cimport DRAKEN_INT8, DRAKEN_INT16, DRAKEN_INT32
-from opteryx.draken.core.buffers cimport ConstAccessor, DRAKEN_ENCODING_CONSTANT
-from opteryx.draken.core.fixed_vector cimport (
+from opteryx.compiled.draken.core.buffers cimport DrakenFixedBuffer, DrakenType
+from opteryx.compiled.draken.core.buffers cimport DRAKEN_INT8, DRAKEN_INT16, DRAKEN_INT32
+from opteryx.compiled.draken.core.buffers cimport ConstAccessor, DRAKEN_ENCODING_CONSTANT
+from opteryx.compiled.draken.core.fixed_vector cimport (
     alloc_fixed_buffer, buf_dtype, buf_itemsize, buf_length, free_fixed_buffer,
 )
-from opteryx.draken.vectors.vector cimport MIX_HASH_CONSTANT, NULL_HASH, Vector, mix_hash, simd_mix_hash
+from opteryx.compiled.draken.vectors.vector cimport MIX_HASH_CONSTANT, NULL_HASH, Vector, mix_hash, simd_mix_hash
 
 DEF INTEGER_HASH_CHUNK = 1024
 

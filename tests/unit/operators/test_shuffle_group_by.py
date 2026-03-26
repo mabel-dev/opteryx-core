@@ -1,11 +1,13 @@
 import pyarrow as pa
+from opteryx.compiled.draken.morsels.morsel import Morsel
 
 from opteryx import EOS
-from opteryx.draken.morsels.morsel import Morsel
 from opteryx.models import QueryProperties
-from opteryx.operators.shuffle import AggregationSpec
-from opteryx.operators.shuffle import ShuffleGroupByOperation
-from opteryx.operators.shuffle import group_by_post_shuffle
+from opteryx.operators.shuffle import (
+    AggregationSpec,
+    ShuffleGroupByOperation,
+    group_by_post_shuffle,
+)
 from opteryx.operators.shuffle_node import ShuffleNode
 
 

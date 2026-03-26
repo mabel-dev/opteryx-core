@@ -28,8 +28,8 @@ from opteryx.compiled.vector_ops.function_definitions import vector_datepart_mon
 from opteryx.compiled.vector_ops.function_definitions import vector_datepart_quarter_i64
 from opteryx.compiled.vector_ops.function_definitions import vector_datepart_second_i64
 from opteryx.compiled.vector_ops.function_definitions import vector_datepart_year_i64
-from opteryx.draken.vectors.arrow_vector import ArrowVector
-from opteryx.draken.vectors.int64_vector import Int64Vector
+from opteryx.compiled.draken.vectors.arrow_vector import ArrowVector
+from opteryx.compiled.draken.vectors.int64_vector import Int64Vector
 from opteryx.expression.functions.implementations.temporal import date_part
 from opteryx.operators.group_state_store import DRAKEN_ENCODING_DICTIONARY
 

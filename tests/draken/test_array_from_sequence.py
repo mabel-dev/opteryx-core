@@ -6,7 +6,7 @@ import os
 sys.path.insert(0, os.path.dirname(__file__))
 
 try:
-    from opteryx.draken.interop.arrow import vector_from_sequence
+    from opteryx.compiled.draken.interop.arrow import vector_from_sequence
     import pyarrow as pa
     
     print("Testing ArrayVector.from_sequence...")

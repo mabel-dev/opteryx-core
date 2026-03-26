@@ -9,7 +9,7 @@ from opteryx.exceptions import FunctionExecutionError
 
 
 def _is_draken_vector(value) -> bool:
-    return value.__class__.__module__.startswith("opteryx.draken.vectors.")
+    return value.__class__.__module__.startswith("opteryx.compiled.draken.vectors.")
 
 
 def _coerce_param_for_kernel(p, pa):
@@ -30,7 +30,7 @@ def _coerce_param_for_draken(p):
         return p
 
     if isinstance(p, (_pa.Array, _pa.ChunkedArray)):
-        from opteryx.draken.interop.arrow import vector_from_arrow
+        from opteryx.compiled.draken.interop.arrow import vector_from_arrow
 
         return vector_from_arrow(p)
 
@@ -51,7 +51,7 @@ def _coerce_param_for_draken(p):
         pass
 
     if isinstance(p, (list, tuple)):
-        from opteryx.draken.interop.arrow import vector_from_sequence
+        from opteryx.compiled.draken.interop.arrow import vector_from_sequence
 
         try:
             return vector_from_sequence(p)
@@ -64,7 +64,7 @@ def _coerce_param_for_draken(p):
                 function=None,
             )
 
-    from opteryx.draken.vectors.scalar_constructors import from_scalar as _const_scalar
+    from opteryx.compiled.draken.vectors.scalar_constructors import from_scalar as _const_scalar
 
     if isinstance(p, (bool, int, float, str, bytes, type(None))):
         vec = _const_scalar(p, 1)

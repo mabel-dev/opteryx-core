@@ -1,7 +1,7 @@
 """Test for subscript access returning None for null values (GitHub Issue)."""
 import pyarrow as pa
-from opteryx.draken import Vector
-from opteryx.draken.vectors import string_vector as string_vector_module
+from opteryx.compiled.draken import Vector
+from opteryx.compiled.draken.vectors import string_vector as string_vector_module
 
 StringVectorBuilder = string_vector_module.StringVectorBuilder  # type: ignore[attr-defined]
 

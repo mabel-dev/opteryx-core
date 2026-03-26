@@ -6,17 +6,16 @@ from functools import cmp_to_key
 import numpy
 import pyarrow as pa
 import pytest
-from orso.schema import ConstantColumn
-from orso.schema import FlatColumn
-from orso.schema import FunctionColumn
+from orso.schema import ConstantColumn, FlatColumn, FunctionColumn
 from orso.types import OrsoTypes
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
+from opteryx.compiled.draken.morsels.morsel import Morsel
+from opteryx.compiled.draken.vectors.int64_vector import Int64Vector
+from opteryx.compiled.draken.vectors.string_vector import StringVector
+
 from opteryx import EOS
-from opteryx.draken.morsels.morsel import Morsel
-from opteryx.draken.vectors.int64_vector import Int64Vector
-from opteryx.draken.vectors.string_vector import StringVector
 from opteryx.expression import NodeType
 from opteryx.expression.functions import get_catalog
 from opteryx.models import Node
@@ -72,7 +71,10 @@ def _vector_order_node(function_name, source_name="embedding", query_vector=None
     node = Node(
         NodeType.FUNCTION,
         value=function_name,
-        parameters=[_identifier(source_name, element_type=OrsoTypes.DOUBLE), _literal_array(query_vector)],
+        parameters=[
+            _identifier(source_name, element_type=OrsoTypes.DOUBLE),
+            _literal_array(query_vector),
+        ],
         schema_column=schema_column,
     )
     node.function_ref = get_catalog().resolve(function_name, node.parameters)
@@ -278,7 +280,7 @@ def test_heap_sort_execute_merges_chunked_top_n_before_eos():
 
 
 def test_top_n_vector_similarity_uses_native_scoring_path():
-    pytest.importorskip("opteryx.nanobind.vector_search")
+    pytest.importorskip("opteryx.compiled.nanobind.vector_search")
 
     morsel = Morsel.from_arrow(
         pa.table(
@@ -305,7 +307,7 @@ def test_top_n_vector_similarity_uses_native_scoring_path():
 
 
 def test_top_n_vector_similarity_prefers_exact_native_topk(monkeypatch):
-    import opteryx.nanobind as nanobind_pkg
+    import opteryx.compiled.nanobind as nanobind_pkg
 
     calls = {"exact": 0, "score": 0}
 
@@ -357,7 +359,7 @@ def test_top_n_vector_similarity_prefers_exact_native_topk(monkeypatch):
 
 
 def test_top_n_vector_distance_uses_native_scoring_path():
-    pytest.importorskip("opteryx.nanobind.vector_search")
+    pytest.importorskip("opteryx.compiled.nanobind.vector_search")
 
     morsel = Morsel.from_arrow(
         pa.table(
@@ -383,7 +385,7 @@ def test_top_n_vector_distance_uses_native_scoring_path():
 
 
 def test_top_n_vector_similarity_partial_selection_handles_non_nearest_order(monkeypatch):
-    import opteryx.nanobind as nanobind_pkg
+    import opteryx.compiled.nanobind as nanobind_pkg
 
     calls = {"score": 0}
 
@@ -442,12 +444,14 @@ def test_sort_node_evaluates_functional_vector_order_by():
 
 
 def test_top_n_vector_similarity_can_route_through_usearch(monkeypatch):
-    import opteryx.nanobind as nanobind_pkg
+    import opteryx.compiled.nanobind as nanobind_pkg
 
     calls = {"created": 0, "add_batch": 0, "search": 0}
 
     class FakeIndex:
-        def __init__(self, dimensions, capacity=0, metric="cos", expansion_add=0, expansion_search=0):
+        def __init__(
+            self, dimensions, capacity=0, metric="cos", expansion_add=0, expansion_search=0
+        ):
             calls["created"] += 1
             assert dimensions == 2
             assert metric == "cos"

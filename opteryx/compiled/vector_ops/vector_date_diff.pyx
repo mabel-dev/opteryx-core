@@ -8,9 +8,9 @@
 
 from libc.stdint cimport int64_t, uint8_t
 
-from opteryx.draken.vectors.timestamp_vector cimport TimestampVector
-from opteryx.draken.vectors.int64_vector cimport Int64Vector, from_sequence as int64_from_sequence
-from opteryx.draken.core.buffers cimport DrakenFixedBuffer
+from opteryx.compiled.draken.vectors.timestamp_vector cimport TimestampVector
+from opteryx.compiled.draken.vectors.int64_vector cimport Int64Vector, from_sequence as int64_from_sequence
+from opteryx.compiled.draken.core.buffers cimport DrakenFixedBuffer
 
 import numpy
 cimport numpy

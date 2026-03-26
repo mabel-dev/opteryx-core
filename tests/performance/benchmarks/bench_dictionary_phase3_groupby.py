@@ -18,8 +18,9 @@ import pyarrow as pa
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
-from opteryx.draken.morsels.morsel import Morsel
+from opteryx.compiled.draken.morsels.morsel import Morsel
 from opteryx.operators.group_state_store import ShuffleGroupByOperationV2
+
 from opteryx.operators.shuffle import AggregationSpec
 
 
@@ -77,7 +78,9 @@ def _build_dictionary_table(rows: int, key_cardinality: int, value_cardinality: 
     return pa.table({"k": key, "v": value})
 
 
-def benchmark_group_by(rows: int = 300_000, key_cardinalities=(64, 1024, 8192), value_cardinality: int = 256):
+def benchmark_group_by(
+    rows: int = 300_000, key_cardinalities=(64, 1024, 8192), value_cardinality: int = 256
+):
     print("=" * 96)
     print("Dictionary Group-By Benchmark (COUNT(*) and COUNT(DISTINCT))")
     print("=" * 96)

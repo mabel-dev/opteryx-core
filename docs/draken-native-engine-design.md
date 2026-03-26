@@ -75,7 +75,7 @@
 **LimitNode** (limit_node.py):
 ```diff
 - import pyarrow
-+ from opteryx.draken.morsels.morsel import Morsel
++ from opteryx.compiled.draken.morsels.morsel import Morsel
 
   def execute(self, morsel: Morsel, **kwargs) -> Morsel:
 -     morsel = self.ensure_arrow_table(morsel)

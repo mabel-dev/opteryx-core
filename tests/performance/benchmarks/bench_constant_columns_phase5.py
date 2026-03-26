@@ -24,12 +24,13 @@ from orso.types import OrsoTypes
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
-from opteryx.draken.interop.arrow import vector_from_arrow
-from opteryx.draken.morsels.morsel import Morsel
-from opteryx.draken.storage.morsel_io import write_morsel
-from opteryx.draken.vectors.scalar_constructors import from_scalar as constant_from_scalar
-from opteryx.expression.ops import filter_operations
+from opteryx.compiled.draken.interop.arrow import vector_from_arrow
+from opteryx.compiled.draken.morsels.morsel import Morsel
+from opteryx.compiled.draken.storage.morsel_io import write_morsel
+from opteryx.compiled.draken.vectors.scalar_constructors import from_scalar as constant_from_scalar
 from opteryx.operators.group_state_store import ShuffleGroupByOperationV2
+
+from opteryx.expression.ops import filter_operations
 from opteryx.operators.shuffle import AggregationSpec
 
 
@@ -140,7 +141,9 @@ def _run_case_subprocess(case: str, rows: int, repeat: int) -> dict:
 
 def benchmark(rows: int = 250_000, repeat: int = 5):
     print("=" * 130)
-    print("Phase 5 Constant-Column Benchmark (group-by + predicate + spill, constant vs materialized)")
+    print(
+        "Phase 5 Constant-Column Benchmark (group-by + predicate + spill, constant vs materialized)"
+    )
     print("=" * 130)
     print(
         f"{'case':<14}  {'rows':>10}  {'groupby(ms)':>12}  {'predicate(ms)':>14}"

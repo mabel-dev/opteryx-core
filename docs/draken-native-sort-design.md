@@ -36,7 +36,7 @@ This document is intended to be practical for Opteryx/Draken implementers: it re
 
 ## Draken primitives you must use
 
-### Morsel (`opteryx.draken.morsels.morsel.Morsel`)
+### Morsel (`opteryx.compiled.draken.morsels.morsel.Morsel`)
 
 A `Morsel` is the fundamental batch unit in the engine. Key properties/methods:
 
@@ -47,7 +47,7 @@ A `Morsel` is the fundamental batch unit in the engine. Key properties/methods:
 
 A Draken-native sort operator should accept `Morsel` objects as input/output and use `morsel.take(permutation)` to apply the sort.
 
-### Vector (`opteryx.draken.vectors.vector.Vector`)
+### Vector (`opteryx.compiled.draken.vectors.vector.Vector`)
 
 Each column in a `Morsel` is a `Vector`. For sorting, the relevant APIs are:
 

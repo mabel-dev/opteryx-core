@@ -2,10 +2,10 @@ from array import array
 
 import pyarrow as pa
 
-from opteryx.draken import Morsel
-from opteryx.draken import Vector
-from opteryx.draken.vectors.array_vector import ArrayVector
-from opteryx.draken.vectors.vector_vector import VectorVector
+from opteryx.compiled.draken import Morsel
+from opteryx.compiled.draken import Vector
+from opteryx.compiled.draken.vectors.array_vector import ArrayVector
+from opteryx.compiled.draken.vectors.vector_vector import VectorVector
 
 
 def test_fixed_size_numeric_lists_promote_to_vectorvector():

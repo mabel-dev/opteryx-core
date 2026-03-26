@@ -14,8 +14,8 @@ from __future__ import annotations
 
 import time
 
-from opteryx.draken.morsels.morsel import Morsel
-from opteryx.draken.vectors.scalar_constructors import from_scalar as constant_from_scalar
+from opteryx.compiled.draken.morsels.morsel import Morsel
+from opteryx.compiled.draken.vectors.scalar_constructors import from_scalar as constant_from_scalar
 from opteryx.exceptions import InvalidFunctionParameterError
 from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.expression import NodeType

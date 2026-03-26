@@ -33,21 +33,21 @@ from libc.stdint cimport uint64_t
 from libc.stdint cimport uint8_t
 from libc.stdlib cimport free, malloc
 
-from opteryx.draken.core.buffers cimport ConstAccessor
-from opteryx.draken.core.buffers cimport DictAccessor
-from opteryx.draken.core.buffers cimport DRAKEN_ENCODING_DENSE
-from opteryx.draken.core.buffers cimport DRAKEN_ENCODING_CONSTANT
-from opteryx.draken.core.buffers cimport DRAKEN_ENCODING_DICTIONARY
-from opteryx.draken.core.buffers cimport DrakenFixedBuffer
-from opteryx.draken.core.buffers cimport DrakenVarBuffer
-from opteryx.draken.core.buffers cimport DRAKEN_INT64
-from opteryx.draken.core.fixed_vector cimport alloc_fixed_buffer
-from opteryx.draken.core.fixed_vector cimport buf_dtype
-from opteryx.draken.core.fixed_vector cimport buf_itemsize
-from opteryx.draken.core.fixed_vector cimport buf_length
-from opteryx.draken.core.fixed_vector cimport free_fixed_buffer
-from opteryx.draken.core.var_vector cimport alloc_var_buffer, free_var_buffer
-from opteryx.draken.vectors.vector cimport (
+from opteryx.compiled.draken.core.buffers cimport ConstAccessor
+from opteryx.compiled.draken.core.buffers cimport DictAccessor
+from opteryx.compiled.draken.core.buffers cimport DRAKEN_ENCODING_DENSE
+from opteryx.compiled.draken.core.buffers cimport DRAKEN_ENCODING_CONSTANT
+from opteryx.compiled.draken.core.buffers cimport DRAKEN_ENCODING_DICTIONARY
+from opteryx.compiled.draken.core.buffers cimport DrakenFixedBuffer
+from opteryx.compiled.draken.core.buffers cimport DrakenVarBuffer
+from opteryx.compiled.draken.core.buffers cimport DRAKEN_INT64
+from opteryx.compiled.draken.core.fixed_vector cimport alloc_fixed_buffer
+from opteryx.compiled.draken.core.fixed_vector cimport buf_dtype
+from opteryx.compiled.draken.core.fixed_vector cimport buf_itemsize
+from opteryx.compiled.draken.core.fixed_vector cimport buf_length
+from opteryx.compiled.draken.core.fixed_vector cimport free_fixed_buffer
+from opteryx.compiled.draken.core.var_vector cimport alloc_var_buffer, free_var_buffer
+from opteryx.compiled.draken.vectors.vector cimport (
     MIX_HASH_CONSTANT,
     NULL_HASH,
     Vector,
@@ -55,7 +55,7 @@ from opteryx.draken.vectors.vector cimport (
     simd_mix_hash,
 )
 
-from opteryx.draken.vectors.bool_vector cimport BoolVector
+from opteryx.compiled.draken.vectors.bool_vector cimport BoolVector
 
 
 cdef inline uint8_t _dict_code_width_for_size(Py_ssize_t dict_size) noexcept:
@@ -925,7 +925,7 @@ cdef Int64Vector from_arrow(object array):
 
     if bufs[0] is not None:
         nb_addr = bufs[0].address
-        
+
         if offset % 8 == 0:
             vec.ptr.null_bitmap = (<uint8_t*> nb_addr) + (offset >> 3)
         else:
@@ -934,14 +934,14 @@ cdef Int64Vector from_arrow(object array):
             new_bitmap_bytes = PyBytes_FromStringAndSize(NULL, nb_size)
             dst_bitmap = <uint8_t*> PyBytes_AS_STRING(new_bitmap_bytes)
             memset(dst_bitmap, 0, nb_size)
-            
+
             src_bitmap = <uint8_t*> nb_addr
-            
+
             # Copy bits shifting them
             for i in range(len(array)):
                 if (src_bitmap[(offset + i) >> 3] >> ((offset + i) & 7)) & 1:
                     dst_bitmap[i >> 3] |= (1 << (i & 7))
-            
+
             vec.ptr.null_bitmap = dst_bitmap
             vec._arrow_null_buf = new_bitmap_bytes
     else:
@@ -1083,10 +1083,10 @@ cdef Int64Vector from_packed_dict(
 cdef Int64Vector from_sequence(int64_t[::1] data):
     """
     Create Int64Vector from a typed int64 memoryview (zero-copy).
-    
+
     Args:
         data: int64_t[::1] memoryview (C-contiguous)
-    
+
     Returns:
         Int64Vector wrapping the memoryview data
     """

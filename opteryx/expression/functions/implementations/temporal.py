@@ -75,8 +75,12 @@ def date_part(part, arr):
     Unsupported dateparts: week, isoweek, isoyear, decade, century, epoch, julian, date,
                            millisecond, microsecond, nanosecond (require implementation)
     """
-    # Normalize part name early
-    part = (part[0] if not isinstance(part, str) else part).lower()  # [#325]
+    # Normalise part to lowercase bytes — draken delivers bytes, arrow delivers str.
+    # Encode str to bytes so all comparisons below use a single type.
+    part = part[0] if not isinstance(part, (str, bytes, bytearray)) else part
+    if isinstance(part, str):
+        part = part.encode("utf-8")
+    part = part.lower()  # [#325]
 
     # Handle NumPy arrays that are integer timestamps
     if isinstance(arr, numpy.ndarray):
@@ -89,7 +93,7 @@ def date_part(part, arr):
 
     # Convert PyArrow arrays to Draken vectors
     if isinstance(arr, (pyarrow.Array, pyarrow.ChunkedArray)):
-        from opteryx.draken.interop.arrow import vector_from_arrow
+        from opteryx.compiled.draken.interop.arrow import vector_from_arrow
 
         arr = vector_from_arrow(arr)
 
@@ -100,7 +104,7 @@ def date_part(part, arr):
         "Int64Vector",
         "Date32Vector",
     ):
-        from opteryx.draken.interop.arrow import vector_from_arrow
+        from opteryx.compiled.draken.interop.arrow import vector_from_arrow
 
         arrow_arr = arr.to_arrow()
         if pyarrow.types.is_date32(arrow_arr.type) or pyarrow.types.is_date64(arrow_arr.type):
@@ -111,7 +115,7 @@ def date_part(part, arr):
             vector_type = arr.__class__.__name__
 
     if vector_type == "Date32Vector":
-        from opteryx.draken.interop.arrow import vector_from_arrow
+        from opteryx.compiled.draken.interop.arrow import vector_from_arrow
 
         # Reuse the existing timestamp kernels by interpreting date32 values
         # as midnight UTC timestamps.
@@ -129,30 +133,30 @@ def date_part(part, arr):
         from opteryx.compiled.vector_ops.function_definitions import vector_datepart_second
         from opteryx.compiled.vector_ops.function_definitions import vector_datepart_year
 
-        if part == "minute":
+        if part == b"minute":
             return vector_datepart_minute(arr).to_arrow()
-        elif part == "hour":
+        elif part == b"hour":
             return vector_datepart_hour(arr).to_arrow()
-        elif part in ("second", "seconds"):
+        elif part in (b"second", b"seconds"):
             return vector_datepart_second(arr).to_arrow()
-        elif part == "year":
+        elif part == b"year":
             return vector_datepart_year(arr).to_arrow()
-        elif part == "month":
+        elif part == b"month":
             return vector_datepart_month(arr).to_arrow()
-        elif part == "day":
+        elif part == b"day":
             return vector_datepart_day(arr).to_arrow()
-        elif part in ("dayofweek", "dow"):
+        elif part in (b"dayofweek", b"dow"):
             return vector_datepart_dayofweek(arr).to_arrow()
-        elif part in ("dayofyear", "doy"):
+        elif part in (b"dayofyear", b"doy"):
             return vector_datepart_dayofyear(arr).to_arrow()
-        elif part == "quarter":
+        elif part == b"quarter":
             return vector_datepart_quarter(arr).to_arrow()
 
         # Unsupported datepart for TimestampVector - raise error instead of falling back
         raise InvalidFunctionParameterError(
-            f"EXTRACT({part.upper()}) is not yet supported. "
+            f"EXTRACT({part.decode().upper()}) is not yet supported. "
             f"Supported parts: minute, hour, second, year, month, day, dayofweek, dayofyear, quarter. "
-            f"To add {part.upper()}, implement vector_datepart_{part}() in vector_ops/vector_date_part.pyx"
+            f"To add {part.decode().upper()}, implement vector_datepart_{part.decode()}() in vector_ops/vector_date_part.pyx"
         )
 
     if vector_type == "Int64Vector":
@@ -166,35 +170,35 @@ def date_part(part, arr):
         from opteryx.compiled.vector_ops.function_definitions import vector_datepart_second_i64
         from opteryx.compiled.vector_ops.function_definitions import vector_datepart_year_i64
 
-        if part == "minute":
+        if part == b"minute":
             return vector_datepart_minute_i64(arr).to_arrow()
-        elif part == "hour":
+        elif part == b"hour":
             return vector_datepart_hour_i64(arr).to_arrow()
-        elif part in ("second", "seconds"):
+        elif part in (b"second", b"seconds"):
             return vector_datepart_second_i64(arr).to_arrow()
-        elif part == "year":
+        elif part == b"year":
             return vector_datepart_year_i64(arr).to_arrow()
-        elif part == "month":
+        elif part == b"month":
             return vector_datepart_month_i64(arr).to_arrow()
-        elif part == "day":
+        elif part == b"day":
             return vector_datepart_day_i64(arr).to_arrow()
-        elif part in ("dayofweek", "dow"):
+        elif part in (b"dayofweek", b"dow"):
             return vector_datepart_dayofweek_i64(arr).to_arrow()
-        elif part in ("dayofyear", "doy"):
+        elif part in (b"dayofyear", b"doy"):
             return vector_datepart_dayofyear_i64(arr).to_arrow()
-        elif part == "quarter":
+        elif part == b"quarter":
             return vector_datepart_quarter_i64(arr).to_arrow()
 
         # Unsupported datepart for Int64Vector - raise error instead of falling back
         raise InvalidFunctionParameterError(
-            f"EXTRACT({part.upper()}) is not yet supported for int64 timestamps. "
+            f"EXTRACT({part.decode().upper()}) is not yet supported for int64 timestamps. "
             f"Supported parts: minute, hour, second, year, month, day, dayofweek, dayofyear, quarter. "
-            f"To add {part.upper()}, implement vector_datepart_{part}_i64() in vector_ops/vector_date_part.pyx"
+            f"To add {part.decode().upper()}, implement vector_datepart_{part.decode()}_i64() in vector_ops/vector_date_part.pyx"
         )
 
     # --- NO FALLBACK: Raise error for unsupported input types ---
     raise InvalidFunctionParameterError(
-        f"EXTRACT({part.upper()}) expects TimestampVector or Int64Vector input, "
+        f"EXTRACT({part.decode().upper()}) expects TimestampVector or Int64Vector input, "
         f"got {vector_type}. No fallback available."
     )
 
@@ -217,8 +221,8 @@ def date_diff(part, start, end):
     All inputs are normalised to pyarrow timestamp[us] arrays first so that
     no numpy datetime64 intermediates are needed.
     """
+    from opteryx.compiled.draken.interop.arrow import vector_from_arrow as _vfa
     from opteryx.compiled.vector_ops import vector_date_diff
-    from opteryx.draken.interop.arrow import vector_from_arrow as _vfa
 
     arrow_extractors = {
         "months": compute.month_interval_between,

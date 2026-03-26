@@ -26,16 +26,16 @@ from libc.stdint cimport int32_t, intptr_t, uint8_t, uint64_t, int64_t, uint32_t
 from libc.string cimport memcpy, memset, memcmp
 from libc.stdlib cimport malloc, realloc, free
 
-from opteryx.draken.core.buffers cimport ConstAccessor
-from opteryx.draken.core.buffers cimport DictAccessor
-from opteryx.draken.core.buffers cimport DRAKEN_ENCODING_DENSE
-from opteryx.draken.core.buffers cimport DRAKEN_ENCODING_CONSTANT
-from opteryx.draken.core.buffers cimport DRAKEN_ENCODING_DICTIONARY
-from opteryx.draken.core.buffers cimport DrakenVarBuffer
-from opteryx.draken.core.buffers cimport DrakenConstantStringPayload
-from opteryx.draken.core.buffers cimport DRAKEN_STRING
-from opteryx.draken.core.var_vector cimport alloc_var_buffer, buf_dtype, free_var_buffer
-from opteryx.draken.vectors.array_vector cimport ArrayVector, DrakenArrayBuffer
+from opteryx.compiled.draken.core.buffers cimport ConstAccessor
+from opteryx.compiled.draken.core.buffers cimport DictAccessor
+from opteryx.compiled.draken.core.buffers cimport DRAKEN_ENCODING_DENSE
+from opteryx.compiled.draken.core.buffers cimport DRAKEN_ENCODING_CONSTANT
+from opteryx.compiled.draken.core.buffers cimport DRAKEN_ENCODING_DICTIONARY
+from opteryx.compiled.draken.core.buffers cimport DrakenVarBuffer
+from opteryx.compiled.draken.core.buffers cimport DrakenConstantStringPayload
+from opteryx.compiled.draken.core.buffers cimport DRAKEN_STRING
+from opteryx.compiled.draken.core.var_vector cimport alloc_var_buffer, buf_dtype, free_var_buffer
+from opteryx.compiled.draken.vectors.array_vector cimport ArrayVector, DrakenArrayBuffer
 
 cdef extern from "xxhash.h":
     uint64_t XXH3_64bits(const void* input, size_t length) nogil
@@ -62,8 +62,8 @@ cdef extern from *:
     """
     void PREFETCH(const void* addr) nogil
 
-from opteryx.draken.vectors.vector cimport MIX_HASH_CONSTANT, Vector, NULL_HASH, mix_hash, simd_mix_hash
-from opteryx.draken.vectors.bool_vector cimport BoolVector
+from opteryx.compiled.draken.vectors.vector cimport MIX_HASH_CONSTANT, Vector, NULL_HASH, mix_hash, simd_mix_hash
+from opteryx.compiled.draken.vectors.bool_vector cimport BoolVector
 
 DEF STRING_HASH_CHUNK = 256
 
@@ -597,7 +597,7 @@ cdef class StringVector(Vector):
                 [PyBytes_FromStringAndSize(<char*>self._const_value.data, self._const_value.length)] * self.ptr.length,
                 type=pa.binary(),
             )
-        
+
         cdef DrakenVarBuffer* ptr = self.ptr
         cdef size_t n = ptr.length
 
@@ -781,17 +781,17 @@ cdef class StringVector(Vector):
         cdef Py_ssize_t val_len = len(value)
         cdef int32_t start, end, str_len
         cdef Py_ssize_t i
-        
+
         # Process in chunks for better cache performance
         for i in range(n):
             # Check null first (most likely to fail)
             if nb_ptr != NULL and ((nb_ptr[i >> 3] >> (i & 7)) & 1) == 0:
                 continue
-            
+
             start = ptr.offsets[i]
             end = ptr.offsets[i + 1]
             str_len = end - start
-            
+
             # Length check before expensive memcmp
             if str_len != val_len:
                 continue
@@ -1426,7 +1426,7 @@ cdef class StringVector(Vector):
                             scratch[j] = _short_string_hash(data + start, str_len)
                         else:
                             scratch[j] = XXH3_64bits(data + start, str_len)
-                
+
                 simd_mix_hash(dst + i, scratch_ptr, <size_t> block)
                 i += block
 
@@ -1863,11 +1863,11 @@ cdef class StringVectorBuilder:
         cdef bytes value
         cdef char* val_ptr
         cdef Py_ssize_t val_len
-        
+
         for i in range(n):
             if self._next_index >= self._length:
                 raise IndexError("Cannot append beyond builder length")
-                
+
             value = values[i]
             if value is None:
                 self._set_null(self._next_index)
@@ -2012,7 +2012,7 @@ cdef class StringVectorBuilder:
         else:
             while new_cap < self._offset + to_add:
                 new_cap = new_cap * 2
-        
+
         cdef uint8_t* new_data
         if self._data == NULL:
             new_data = <uint8_t*> malloc(new_cap)
@@ -2020,7 +2020,7 @@ cdef class StringVectorBuilder:
             new_data = <uint8_t*> realloc(self._ptr.data, new_cap)
         if new_data == NULL:
             raise MemoryError()
-        
+
         # Update cached pointers
         self._ptr.data = new_data
         self._data = <char*>new_data
@@ -2101,7 +2101,7 @@ cdef StringVector from_arrow(object array):
 
     if bufs[0] is not None:
         nb_addr = bufs[0].address
-        
+
         if offset % 8 == 0:
             vec.ptr.null_bitmap = (<uint8_t*> nb_addr) + (offset >> 3)
         else:
@@ -2110,11 +2110,11 @@ cdef StringVector from_arrow(object array):
             new_bitmap_bytes = PyBytes_FromStringAndSize(NULL, nb_size)
             dst_bitmap = <uint8_t*> PyBytes_AS_STRING(new_bitmap_bytes)
             # memset(dst_bitmap, 0, nb_size) # Not needed as we overwrite
-            
+
             src_bitmap = <uint8_t*> nb_addr
-            
+
             copy_bitmap_shifted(src_bitmap, dst_bitmap, offset, len(array))
-            
+
             vec.ptr.null_bitmap = dst_bitmap
             vec._arrow_null_buf = new_bitmap_bytes
     else:
@@ -2475,7 +2475,7 @@ cdef void copy_bitmap_shifted(uint8_t* src, uint8_t* dst, Py_ssize_t offset, Py_
     cdef int shift = offset & 7
     cdef Py_ssize_t byte_offset = offset >> 3
     cdef Py_ssize_t num_bytes = (length + 7) // 8
-    
+
     if shift == 0:
         memcpy(dst, src + byte_offset, num_bytes)
         return
@@ -2483,12 +2483,12 @@ cdef void copy_bitmap_shifted(uint8_t* src, uint8_t* dst, Py_ssize_t offset, Py_
     # Process all bytes except the last one
     for i in range(num_bytes - 1):
         dst[i] = (src[byte_offset + i] >> shift) | (src[byte_offset + i + 1] << (8 - shift))
-        
+
     # Handle the last byte
     i = num_bytes - 1
     cdef Py_ssize_t last_bit_index = offset + length - 1
     cdef Py_ssize_t last_byte_index = last_bit_index >> 3
-    
+
     if last_byte_index > (byte_offset + i):
         dst[i] = (src[byte_offset + i] >> shift) | (src[byte_offset + i + 1] << (8 - shift))
     else:
@@ -2646,7 +2646,7 @@ cpdef object split_single_char(StringVector input, char delimiter):
     """
     Fast SIMD-based split for single-character delimiter.
     Returns an ArrayVector where each element is an array of strings.
-    
+
     Uses SIMD to find all delimiter positions (AVX2 on x86, NEON on ARM),
     then builds output in a single pass with dynamic allocation.
     """
@@ -2658,52 +2658,52 @@ cpdef object split_single_char(StringVector input, char delimiter):
     cdef size_t i, j
     cdef int32_t start, end
     cdef size_t delim_pos
-    
+
     # Find all delimiter positions in the entire buffer using SIMD
     cdef vector[size_t] delim_positions = simd_find_all(data, total_bytes, delimiter)
     cdef size_t num_delims = delim_positions.size()
-    
+
     # Pre-allocate with upper bounds (worst case: every delimiter creates a segment)
     # This eliminates the counting pass
     cdef size_t max_segments = total_bytes + n  # Worst case: every byte is delimiter + 1 per string
     cdef size_t output_capacity = total_bytes  # Worst case: no delimiters removed
-    
+
     # Create child StringVector with max possible segments
     cdef StringVector child_vec = StringVector(max_segments)
     cdef DrakenVarBuffer* child_ptr = child_vec.ptr
-    
+
     # Allocate cache-aligned output buffer (64-byte aligned for optimal SIMD performance)
     cdef size_t alignment = 64
     cdef size_t aligned_size = output_capacity + alignment
     cdef void* raw_buffer = PyMem_Malloc(aligned_size)
     if raw_buffer == NULL:
         raise MemoryError()
-    
+
     # Align to 64-byte boundary (cache line)
     cdef uintptr_t addr = <uintptr_t>raw_buffer
     cdef uintptr_t aligned_addr = (addr + alignment - 1) & ~(alignment - 1)
     child_ptr.data = <uint8_t*>aligned_addr
-    
+
     # Create ArrayVector
     cdef ArrayVector result = ArrayVector.__new__(ArrayVector)
     cdef DrakenArrayBuffer* arr_ptr = <DrakenArrayBuffer*>malloc(sizeof(DrakenArrayBuffer))
     if arr_ptr == NULL:
         raise MemoryError()
-    
+
     arr_ptr.offsets = <int32_t*>PyMem_Malloc((n + 1) * sizeof(int32_t))
     if arr_ptr.offsets == NULL:
         raise MemoryError()
     arr_ptr.offsets[0] = 0
-    
+
     arr_ptr.null_bitmap = NULL
     arr_ptr.length = n
     arr_ptr.values = NULL
     arr_ptr.value_type = DRAKEN_STRING
-    
+
     result.ptr = arr_ptr
     result.owns_offsets = True
     result.owns_null_bitmap = False
-    
+
     # Single pass: copy data and build offsets
     cdef char* child_data = <char*>child_ptr.data
     cdef size_t read_pos = 0
@@ -2712,23 +2712,23 @@ cpdef object split_single_char(StringVector input, char delimiter):
     cdef size_t seg_len
     cdef size_t next_delim_pos
     cdef size_t delim_idx = 0
-    
+
     # Process each input string
     for i in range(n):
         start = in_offsets[i]
         end = in_offsets[i + 1]
-        
+
         # Skip delimiters before this string
         while delim_idx < num_delims and delim_positions[delim_idx] < start:
             delim_idx += 1
-        
+
         # Process this string's segments
         read_pos = start
-        
+
         # Handle each delimiter within this string
         while delim_idx < num_delims and delim_positions[delim_idx] < end:
             next_delim_pos = delim_positions[delim_idx]
-            
+
             # Copy segment up to delimiter
             child_ptr.offsets[segment_idx] = write_pos
             seg_len = next_delim_pos - read_pos
@@ -2740,11 +2740,11 @@ cpdef object split_single_char(StringVector input, char delimiter):
                 else:
                     memcpy(child_data + write_pos, data + read_pos, seg_len)
                 write_pos += seg_len
-            
+
             segment_idx += 1
             read_pos = next_delim_pos + 1  # Skip delimiter
             delim_idx += 1
-        
+
         # Copy final segment (after last delimiter or whole string if no delimiters)
         child_ptr.offsets[segment_idx] = write_pos
         seg_len = end - read_pos
@@ -2756,17 +2756,17 @@ cpdef object split_single_char(StringVector input, char delimiter):
             else:
                 memcpy(child_data + write_pos, data + read_pos, seg_len)
             write_pos += seg_len
-        
+
         segment_idx += 1
-        
+
         # Set array offset for this row
         arr_ptr.offsets[i + 1] = segment_idx
-    
+
     # Set actual segment count and final offsets
     child_ptr.length = segment_idx
     child_ptr.offsets[segment_idx] = write_pos
-    
+
     # Attach child vector to ArrayVector
     result._child = child_vec
-    
+
     return result

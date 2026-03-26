@@ -9,8 +9,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../../.."))
 
 import numpy as np
 import pyarrow as pa
-from opteryx.draken import Morsel
-from opteryx.draken import align_tables, align_tables_pyarray
+from opteryx.compiled.draken import Morsel
+from opteryx.compiled.draken import align_tables, align_tables_pyarray
 from opteryx.operators.group_state_store import DRAKEN_ENCODING_DICTIONARY
 
 

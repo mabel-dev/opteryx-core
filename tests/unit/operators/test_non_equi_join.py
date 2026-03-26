@@ -22,7 +22,7 @@ def test_non_equi_join_greater_than():
     """Test non-equi join with greater than comparison"""
     import pyarrow as pa
     from opteryx.compiled.joins import non_equi_nested_loop_join
-    from opteryx.draken import Morsel
+    from opteryx.compiled.draken import Morsel
 
     # Create test tables
     left = pa.table({"id": [1, 2, 3, 4], "value": [10, 20, 30, 40]})
@@ -63,7 +63,7 @@ def test_non_equi_join_not_equals():
     """Test non-equi join with not equals comparison"""
     import pyarrow as pa
     from opteryx.compiled.joins import non_equi_nested_loop_join
-    from opteryx.draken import Morsel
+    from opteryx.compiled.draken import Morsel
 
     # Create test tables
     left = pa.table({"id": [1, 2, 3], "color": ["red", "blue", "green"]})
@@ -89,7 +89,7 @@ def test_non_equi_join_less_than():
     """Test non-equi join with less than comparison"""
     import pyarrow as pa
     from opteryx.compiled.joins import non_equi_nested_loop_join
-    from opteryx.draken import Morsel
+    from opteryx.compiled.draken import Morsel
 
     # Create test tables
     left = pa.table({"id": [1, 2, 3, 4], "value": [10, 20, 30, 40]})
@@ -112,7 +112,7 @@ def test_non_equi_join_less_than_or_equals():
     """Test non-equi join with less than or equals comparison"""
     import pyarrow as pa
     from opteryx.compiled.joins import non_equi_nested_loop_join
-    from opteryx.draken import Morsel
+    from opteryx.compiled.draken import Morsel
 
     # Create test tables
     left = pa.table({"id": [1, 2, 3], "value": [10, 20, 30]})
@@ -135,7 +135,7 @@ def test_non_equi_join_greater_than_or_equals():
     """Test non-equi join with greater than or equals comparison"""
     import pyarrow as pa
     from opteryx.compiled.joins import non_equi_nested_loop_join
-    from opteryx.draken import Morsel
+    from opteryx.compiled.draken import Morsel
 
     # Create test tables
     left = pa.table({"id": [1, 2, 3], "value": [10, 20, 30]})
@@ -158,7 +158,7 @@ def test_non_equi_join_with_nulls():
     """Test that non-equi join handles nulls correctly"""
     import pyarrow as pa
     from opteryx.compiled.joins import non_equi_nested_loop_join
-    from opteryx.draken import Morsel
+    from opteryx.compiled.draken import Morsel
 
     # Create test tables with nulls
     left = pa.table({"id": [1, 2, 3, 4], "value": [10, None, 30, 40]})

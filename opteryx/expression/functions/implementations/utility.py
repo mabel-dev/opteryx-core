@@ -105,8 +105,8 @@ def _coerce_text_scalar(value):
 
 
 def _as_text_vector(values):
-    from opteryx.draken.interop.arrow import vector_from_arrow
-    from opteryx.draken.vectors.string_vector import StringVector
+    from opteryx.compiled.draken.interop.arrow import vector_from_arrow
+    from opteryx.compiled.draken.vectors.string_vector import StringVector
 
     if isinstance(values, StringVector):
         return values
@@ -195,7 +195,7 @@ def _score_numeric_vectors(left_rows, right_rows):
             return scores.tolist()
 
         try:
-            from opteryx.nanobind import vector_search
+            from opteryx.compiled.nanobind import vector_search
 
             valid_scores = numpy.asarray(
                 vector_search.score_cosine(query_vector, dense_vectors), dtype=numpy.float32
@@ -286,7 +286,7 @@ def _cosine_similarity_text(arr, val):
     row_vectors = embedded[1:]
 
     try:
-        from opteryx.nanobind import vector_search
+        from opteryx.compiled.nanobind import vector_search
 
         scores = numpy.asarray(
             vector_search.score_cosine(query_vector, row_vectors), dtype=numpy.float32

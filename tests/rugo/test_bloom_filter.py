@@ -8,7 +8,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 import pytest
 
-from opteryx.rugo import parquet
+from opteryx.compiled.rugo import parquet
 
 DATASET = Path("testdata/parquet_tests/data_index_bloom_encoding_stats.parquet")
 
@@ -40,6 +40,7 @@ def test_bloom_filter_validates_offset():
         parquet.test_bloom_filter(DATASET, -1, length, "Hello")
     with pytest.raises(ValueError):
         parquet.test_bloom_filter(DATASET, None, length, "Hello")
+
 
 if __name__ == "__main__":
     pytest.main([__file__])

@@ -9,32 +9,29 @@ from typing import List
 import numpy
 import pyarrow
 import pyarrow as pa
-from pyarrow import compute
-
+from opteryx.compiled.draken.vectors.string_vector import StringVector
+from opteryx.compiled.draken.vectors.string_vector import lowercase as string_vector_lowercase
+from opteryx.compiled.draken.vectors.string_vector import uppercase as string_vector_uppercase
 from opteryx.compiled.functions import regex_procedures as _regex_procedures
-from opteryx.compiled.vector_ops import (
-    vector_initcap,
-    vector_length,
-    vector_ltrim,
-    vector_match_against,
-    vector_md5,
-    vector_replace,
-    vector_reverse,
-    vector_rtrim,
-    vector_sha1,
-    vector_sha256,
-    vector_sha512,
-    vector_soundex,
-    vector_string_length,
-    vector_string_slice_left,
-    vector_string_slice_right,
-    vector_trim,
-)
-from opteryx.draken.vectors.string_vector import StringVector
-from opteryx.draken.vectors.string_vector import lowercase as string_vector_lowercase
-from opteryx.draken.vectors.string_vector import uppercase as string_vector_uppercase
+from opteryx.compiled.vector_ops import vector_initcap
+from opteryx.compiled.vector_ops import vector_length
+from opteryx.compiled.vector_ops import vector_ltrim
+from opteryx.compiled.vector_ops import vector_match_against
+from opteryx.compiled.vector_ops import vector_md5
+from opteryx.compiled.vector_ops import vector_replace
+from opteryx.compiled.vector_ops import vector_reverse
+from opteryx.compiled.vector_ops import vector_rtrim
+from opteryx.compiled.vector_ops import vector_sha1
+from opteryx.compiled.vector_ops import vector_sha256
+from opteryx.compiled.vector_ops import vector_sha512
+from opteryx.compiled.vector_ops import vector_soundex
+from opteryx.compiled.vector_ops import vector_string_length
+from opteryx.compiled.vector_ops import vector_string_slice_left
+from opteryx.compiled.vector_ops import vector_string_slice_right
+from opteryx.compiled.vector_ops import vector_trim
 from opteryx.embeddings import get_embedding_provider
 from opteryx.exceptions import InvalidFunctionParameterError
+from pyarrow import compute
 
 """Text and encoding function kernels.
 
@@ -56,14 +53,12 @@ Includes:
 
 def to_lower(arr):
     """Fast lowercase using buffer-level SIMD operations."""
-    vec = _as_string_vector(arr)
-    return string_vector_lowercase(vec).to_arrow()
+    return string_vector_lowercase(_as_string_vector(arr))
 
 
 def to_upper(arr):
     """Fast uppercase using buffer-level SIMD operations."""
-    vec = _as_string_vector(arr)
-    return string_vector_uppercase(vec).to_arrow()
+    return string_vector_uppercase(_as_string_vector(arr))
 
 
 def vector_lengther(arr):
@@ -73,9 +68,15 @@ def vector_lengther(arr):
     computes lengths by looking at the internal offsets buffer.  No Arrow
     compute kernels are used at all, and dictionary inputs are handled by the
     vector conversion step.
+
+    NOTE: Registered as engine="arrow" intentionally. The compiled kernel
+    `vector_string_length` does not propagate nulls — null positions return 0.
+    The Arrow null-reapplication below (compute.if_else) is load-bearing
+    for correctness. Fix: implement null-aware length in the Draken kernel,
+    then switch registration to engine="draken" and remove the Arrow postpass.
     """
 
-    from opteryx.draken.vectors.string_vector import StringVector
+    from opteryx.compiled.draken.vectors.string_vector import StringVector
 
     if arr.__class__.__name__ in ("ArrayVector", "VectorVector"):
         return vector_length(arr).to_arrow()
@@ -83,7 +84,7 @@ def vector_lengther(arr):
     arrow_arr = _as_arrow_string_array(arr)
 
     if pyarrow.types.is_list(arrow_arr.type) or pyarrow.types.is_large_list(arrow_arr.type):
-        from opteryx.draken.interop.arrow import vector_from_arrow
+        from opteryx.compiled.draken.interop.arrow import vector_from_arrow
 
         return vector_length(vector_from_arrow(arrow_arr)).to_arrow()
 
@@ -98,94 +99,58 @@ def vector_lengther(arr):
 
 
 def _initcap(arr):
-    from opteryx.draken.vectors.string_vector import StringVector
-
-    if isinstance(arr, StringVector):
-        return vector_initcap(arr).to_arrow()
-    return vector_initcap(_as_string_vector(arr)).to_arrow()
+    return vector_initcap(_as_string_vector(arr))
 
 
 def _reverse(arr):
-    from opteryx.draken.vectors.string_vector import StringVector
-
-    if isinstance(arr, StringVector):
-        return vector_reverse(arr).to_arrow()
-    return vector_reverse(_as_string_vector(arr)).to_arrow()
+    return vector_reverse(_as_string_vector(arr))
 
 
 def _soundex(arr):
-    from opteryx.draken.vectors.string_vector import StringVector
-
-    if isinstance(arr, StringVector):
-        return vector_soundex(arr).to_arrow()
-    return vector_soundex(_as_string_vector(arr)).to_arrow()
+    return vector_soundex(_as_string_vector(arr))
 
 
 def _md5(arr):
-    from opteryx.draken.vectors.string_vector import StringVector
-
-    if isinstance(arr, StringVector):
-        return vector_md5(arr).to_arrow()
-    return vector_md5(_as_string_vector(arr)).to_arrow()
+    return vector_md5(_as_string_vector(arr))
 
 
 def _sha1(arr):
-    from opteryx.draken.vectors.string_vector import StringVector
-
-    if isinstance(arr, StringVector):
-        return vector_sha1(arr).to_arrow()
-    return vector_sha1(_as_string_vector(arr)).to_arrow()
+    return vector_sha1(_as_string_vector(arr))
 
 
 def _sha256(arr):
-    from opteryx.draken.vectors.string_vector import StringVector
-
-    if isinstance(arr, StringVector):
-        return vector_sha256(arr).to_arrow()
-    return vector_sha256(_as_string_vector(arr)).to_arrow()
+    return vector_sha256(_as_string_vector(arr))
 
 
 def _sha512(arr):
-    from opteryx.draken.vectors.string_vector import StringVector
-
-    if isinstance(arr, StringVector):
-        return vector_sha512(arr).to_arrow()
-    return vector_sha512(_as_string_vector(arr)).to_arrow()
+    return vector_sha512(_as_string_vector(arr))
 
 
 def _replace(data, search, replace_val):
-    from opteryx.draken.vectors.string_vector import StringVector
-
-    data_vec = data if isinstance(data, StringVector) else _as_string_vector(data)
-    if isinstance(search, numpy.ndarray):
+    # scalar args arrive as numpy arrays (arrow engine) or Draken constant vectors (draken engine)
+    if hasattr(search, "__len__") and not isinstance(search, (str, bytes)):
         search = search[0]
-    if isinstance(replace_val, numpy.ndarray):
+    if hasattr(replace_val, "__len__") and not isinstance(replace_val, (str, bytes)):
         replace_val = replace_val[0]
     if isinstance(search, str):
         search = search.encode("utf-8")
     if isinstance(replace_val, str):
         replace_val = replace_val.encode("utf-8")
-    return vector_replace(data_vec, search, replace_val).to_arrow()
+    return vector_replace(_as_string_vector(data), search, replace_val)
 
 
 def _string_slice_left(arr, length):
-    from opteryx.draken.vectors.string_vector import StringVector
-
-    if isinstance(length, numpy.ndarray):
+    # length arrives as numpy array or Draken constant vector
+    if hasattr(length, "__len__") and not isinstance(length, (str, bytes)):
         length = int(length[0])
-    if isinstance(arr, StringVector):
-        return vector_string_slice_left(arr, length).to_arrow()
-    return vector_string_slice_left(_as_string_vector(arr), length).to_arrow()
+    return vector_string_slice_left(_as_string_vector(arr), length)
 
 
 def _string_slice_right(arr, length):
-    from opteryx.draken.vectors.string_vector import StringVector
-
-    if isinstance(length, numpy.ndarray):
+    # length arrives as numpy array or Draken constant vector
+    if hasattr(length, "__len__") and not isinstance(length, (str, bytes)):
         length = int(length[0])
-    if isinstance(arr, StringVector):
-        return vector_string_slice_right(arr, length).to_arrow()
-    return vector_string_slice_right(_as_string_vector(arr), length).to_arrow()
+    return vector_string_slice_right(_as_string_vector(arr), length)
 
 
 # ---------------------------------------------------------------------------
@@ -240,7 +205,7 @@ def _is_string_fastpath_vector(value) -> bool:
 
 
 def _as_match_vector(arr):
-    from opteryx.draken.interop.arrow import vector_from_arrow
+    from opteryx.compiled.draken.interop.arrow import vector_from_arrow
 
     if _is_string_fastpath_vector(arr):
         return arr
@@ -409,25 +374,7 @@ def position(string, sub):
 def levenshtein(a, b):
     from opteryx.compiled.vector_ops import vector_levenshtein
 
-    if hasattr(a, "to_numpy"):
-        a = a.to_numpy(zero_copy_only=False)
-    if hasattr(b, "to_numpy"):
-        b = b.to_numpy(zero_copy_only=False)
-
-    if not isinstance(a, pyarrow.Array):
-        if not isinstance(a, numpy.ndarray):
-            a = numpy.array(a, dtype=object)
-        elif a.dtype.kind in ["U", "S"]:
-            a = a.astype(object)
-        a = pyarrow.array(a)
-    if not isinstance(b, pyarrow.Array):
-        if not isinstance(b, numpy.ndarray):
-            b = numpy.array(b, dtype=object)
-        elif b.dtype.kind in ["U", "S"]:
-            b = b.astype(object)
-        b = pyarrow.array(b)
-
-    return vector_levenshtein(_as_string_vector(a), _as_string_vector(b)).to_arrow()
+    return vector_levenshtein(_as_string_vector(a), _as_string_vector(b))
 
 
 def to_char(arr) -> List[str]:
@@ -484,7 +431,7 @@ def match_against(arr, val):
         provider,
         query_text,
         _MATCH_AGAINST_MIN_SCORE,
-    ).to_arrow()
+    )
 
 
 @functools.lru_cache(maxsize=64)

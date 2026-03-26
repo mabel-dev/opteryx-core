@@ -15,18 +15,18 @@ from libc.string cimport memset
 from libcpp.string cimport string
 from libcpp.vector cimport vector
 
-from opteryx.draken.morsels.morsel cimport Morsel
+from opteryx.compiled.draken.morsels.morsel cimport Morsel
 from opteryx.compiled.aggregations.key_codec cimport decode_multi_key_record
 from opteryx.compiled.aggregations.key_codec cimport decode_single_encoded_key_record
 from opteryx.compiled.aggregations.key_codec cimport decode_single_fixed_key_record
-from opteryx.draken.interop.arrow import vector_from_sequence
-from opteryx.draken.vectors.date32_vector cimport Date32Vector
-from opteryx.draken.vectors.float64_vector cimport Float64Vector
-from opteryx.draken.vectors.int64_vector cimport Int64Vector
-from opteryx.draken.vectors.string_vector cimport StringVectorBuilder
-from opteryx.draken.vectors.time_vector cimport TimeVector
-from opteryx.draken.vectors.timestamp_vector cimport TimestampVector
-from opteryx.draken.vectors.vector cimport Vector
+from opteryx.compiled.draken.interop.arrow import vector_from_sequence
+from opteryx.compiled.draken.vectors.date32_vector cimport Date32Vector
+from opteryx.compiled.draken.vectors.float64_vector cimport Float64Vector
+from opteryx.compiled.draken.vectors.int64_vector cimport Int64Vector
+from opteryx.compiled.draken.vectors.string_vector cimport StringVectorBuilder
+from opteryx.compiled.draken.vectors.time_vector cimport TimeVector
+from opteryx.compiled.draken.vectors.timestamp_vector cimport TimestampVector
+from opteryx.compiled.draken.vectors.vector cimport Vector
 
 
 cdef int KEY_MULTI_FIXED_INT = 1

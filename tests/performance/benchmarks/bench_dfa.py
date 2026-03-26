@@ -114,7 +114,7 @@ REPL_SQL_ARR = numpy.array([REPL_SQL_FORM], dtype=object)
 # Import everything we'll benchmark
 # ---------------------------------------------------------------------------
 
-from opteryx.draken.vectors.string_vector import StringVector
+from opteryx.compiled.draken.vectors.string_vector import StringVector
 
 from opteryx.compiled import regex_procedures as _rp
 from opteryx.compiled import vector_ops as _vops

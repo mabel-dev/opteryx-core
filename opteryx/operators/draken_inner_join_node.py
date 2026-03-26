@@ -19,10 +19,10 @@ from __future__ import annotations
 import time
 from threading import Lock
 
+from opteryx.compiled.draken import Morsel
 from opteryx.compiled.joins import build_side_carchar_morsel_map
 from opteryx.compiled.joins import get_last_draken_inner_join_metrics
 from opteryx.compiled.joins import inner_join_carchar_morsel_aligned
-from opteryx.draken import Morsel
 from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.expression import NodeType
 from opteryx.expression import get_all_nodes_of_type

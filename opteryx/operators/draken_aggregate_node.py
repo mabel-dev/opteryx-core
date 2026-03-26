@@ -19,14 +19,14 @@ from opteryx.compiled.aggregations.scalar_kernels import ApproximateCountState
 from opteryx.compiled.aggregations.scalar_kernels import ApproximatePercentileState
 from opteryx.compiled.aggregations.scalar_kernels import approximate_count_draken
 from opteryx.compiled.aggregations.scalar_kernels import approximate_percentile_draken
-from opteryx.draken.interop.arrow import vector_from_sequence
-from opteryx.draken.morsels.morsel import Morsel
+from opteryx.compiled.draken.interop.arrow import vector_from_sequence
+from opteryx.compiled.draken.morsels.morsel import Morsel
+from opteryx.compiled.nanobind.carchar_native import CarcharSet
 from opteryx.exceptions import InvalidFunctionParameterError
 from opteryx.expression import NodeType
 from opteryx.expression import get_all_nodes_of_type
 from opteryx.expression.evaluator import evaluate_and_append_draken
 from opteryx.models import QueryProperties
-from opteryx.nanobind.carchar_native import CarcharSet
 from opteryx.operators.aggregate_helpers import extract_evaluations
 
 from opteryx import EOS

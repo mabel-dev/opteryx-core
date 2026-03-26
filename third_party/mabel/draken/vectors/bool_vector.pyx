@@ -23,11 +23,11 @@ from libc.string cimport memcpy, memset
 from libc.stdint cimport int32_t, int8_t, intptr_t, uint64_t, uint8_t, int64_t
 from libc.stdlib cimport malloc, free
 
-from opteryx.draken.core.buffers cimport ConstAccessor, DrakenFixedBuffer
-from opteryx.draken.core.buffers cimport DRAKEN_BOOL
-from opteryx.draken.core.buffers cimport DRAKEN_ENCODING_CONSTANT
-from opteryx.draken.core.fixed_vector cimport alloc_fixed_buffer, buf_dtype, buf_length, free_fixed_buffer
-from opteryx.draken.vectors.vector cimport MIX_HASH_CONSTANT, Vector, NULL_HASH, mix_hash, simd_mix_hash
+from opteryx.compiled.draken.core.buffers cimport ConstAccessor, DrakenFixedBuffer
+from opteryx.compiled.draken.core.buffers cimport DRAKEN_BOOL
+from opteryx.compiled.draken.core.buffers cimport DRAKEN_ENCODING_CONSTANT
+from opteryx.compiled.draken.core.fixed_vector cimport alloc_fixed_buffer, buf_dtype, buf_length, free_fixed_buffer
+from opteryx.compiled.draken.vectors.vector cimport MIX_HASH_CONSTANT, Vector, NULL_HASH, mix_hash, simd_mix_hash
 
 cdef const uint64_t TRUE_HASH = <uint64_t>0x4f112caa54efa882
 cdef const uint64_t FALSE_HASH = <uint64_t>0xc2fd8b2343f83ce7
@@ -130,7 +130,7 @@ cdef class BoolVector(Vector):
             if self._const_is_null:
                 return pa.nulls(self.ptr.length, type=pa.bool_())
             return pa.array([bool(self._const_value)] * self.ptr.length, type=pa.bool_())
-        
+
         cdef size_t nbytes = (buf_length(self.ptr) + 7) >> 3
         addr = <intptr_t> self.ptr.data
         data_buf = pa.foreign_buffer(addr, nbytes, base=self)
@@ -720,14 +720,14 @@ cdef BoolVector from_arrow(object array):
         new_data_bytes = PyBytes_FromStringAndSize(NULL, nbytes)
         dst_data = <uint8_t*> PyBytes_AS_STRING(new_data_bytes)
         memset(dst_data, 0, nbytes)
-        
+
         src_data = <uint8_t*> base_ptr
-        
+
         # Copy bits shifting them
         for i in range(len(array)):
             if (src_data[(offset + i) >> 3] >> ((offset + i) & 7)) & 1:
                 dst_data[i >> 3] |= (1 << (i & 7))
-        
+
         vec.ptr.data = <void*> dst_data
         vec._arrow_data_buf = new_data_bytes
 
@@ -738,7 +738,7 @@ cdef BoolVector from_arrow(object array):
 
     if bufs[0] is not None:
         nb_addr = bufs[0].address
-        
+
         if offset % 8 == 0:
             vec.ptr.null_bitmap = (<uint8_t*> nb_addr) + (offset >> 3)
         else:
@@ -747,13 +747,13 @@ cdef BoolVector from_arrow(object array):
             new_bitmap_bytes = PyBytes_FromStringAndSize(NULL, nbytes)
             dst_bitmap = <uint8_t*> PyBytes_AS_STRING(new_bitmap_bytes)
             memset(dst_bitmap, 0, nbytes)
-            
+
             src_bitmap = <uint8_t*> nb_addr
-            
+
             for i in range(len(array)):
                 if (src_bitmap[(offset + i) >> 3] >> ((offset + i) & 7)) & 1:
                     dst_bitmap[i >> 3] |= (1 << (i & 7))
-            
+
             vec.ptr.null_bitmap = dst_bitmap
             vec._arrow_null_buf = new_bitmap_bytes
     else:
@@ -765,13 +765,13 @@ cdef BoolVector from_arrow(object array):
 cdef BoolVector from_sequence(uint8_t[::1] data):
     """
     Create BoolVector from a typed uint8 memoryview (zero-copy, bit-packed).
-    
+
     Args:
         data: uint8_t[::1] memoryview (C-contiguous, bit-packed: 8 bools per byte)
-    
+
     Returns:
         BoolVector wrapping the memoryview data
-    
+
     Note:
         Input data should be bit-packed (8 boolean values per byte).
         The length will be inferred as data.shape[0] * 8.

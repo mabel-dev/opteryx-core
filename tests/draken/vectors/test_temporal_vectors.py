@@ -21,13 +21,13 @@ import pytest
 import pyarrow as pa
 import pyarrow.compute as pc
 
-from opteryx.draken import Vector
-from opteryx.draken.vectors.date32_vector import Date32Vector
-from opteryx.draken.vectors.float64_vector import Float64Vector
-from opteryx.draken.vectors.int64_vector import Int64Vector
-from opteryx.draken.vectors.integer_vector import IntegerVector
-from opteryx.draken.vectors.time_vector import TimeVector
-from opteryx.draken.vectors.timestamp_vector import TimestampVector
+from opteryx.compiled.draken import Vector
+from opteryx.compiled.draken.vectors.date32_vector import Date32Vector
+from opteryx.compiled.draken.vectors.float64_vector import Float64Vector
+from opteryx.compiled.draken.vectors.int64_vector import Int64Vector
+from opteryx.compiled.draken.vectors.integer_vector import IntegerVector
+from opteryx.compiled.draken.vectors.time_vector import TimeVector
+from opteryx.compiled.draken.vectors.timestamp_vector import TimestampVector
 
 
 def test_date32_vector():

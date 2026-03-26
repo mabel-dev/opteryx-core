@@ -201,13 +201,13 @@ class DrakenDictionaryAggregateCollector:
         Collect from a DictionaryVector using fast dictionary-aware logic.
         
         Args:
-            dict_vec: opteryx.draken.vectors.DictionaryVector instance
+            dict_vec: opteryx.compiled.draken.vectors.DictionaryVector instance
             
         Raises:
             ValueError: If dictionary values are not numeric
             TypeError: If input is not a DictionaryVector
         """
-        from opteryx.draken.vectors.dictionary_vector import DictionaryVector
+        from opteryx.compiled.draken.vectors.dictionary_vector import DictionaryVector
         
         if not isinstance(dict_vec, DictionaryVector):
             raise TypeError(f"Expected DictionaryVector, got {type(dict_vec).__name__}")
@@ -456,8 +456,8 @@ def __init__(self, properties: QueryProperties, **parameters):
 
 ```python
 def execute(self, morsel, **kwargs):
-    from opteryx.draken.morsels.morsel import Morsel
-    from opteryx.draken.vectors.dictionary_vector import DictionaryVector
+    from opteryx.compiled.draken.morsels.morsel import Morsel
+    from opteryx.compiled.draken.vectors.dictionary_vector import DictionaryVector
     
     # Ensure we have Morsel for dictionary fast path detection
     if not isinstance(morsel, Morsel):
@@ -590,7 +590,7 @@ All failures are **explicit** and **logged** (if telemetry enabled), then fall b
 ```python
 def test_dictionary_collector_sum_basic():
     """Test SUM on small dictionary array"""
-    from opteryx.draken.vectors.dictionary_vector import DictionaryVector
+    from opteryx.compiled.draken.vectors.dictionary_vector import DictionaryVector
     
     # Create dictionary: values=[10, 20, 30], indices=[0, 1, 0, 2, 1, 0]
     # Expected SUM = 10*3 + 20*2 + 30*1 = 100

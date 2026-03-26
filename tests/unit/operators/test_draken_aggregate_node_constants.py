@@ -4,13 +4,16 @@ from types import SimpleNamespace
 
 sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 
-from opteryx.draken.vectors.integer_vector import IntegerVector
-from opteryx.draken.vectors.string_vector import StringVector
+from opteryx.compiled.draken.vectors.integer_vector import IntegerVector
+from opteryx.compiled.draken.vectors.string_vector import StringVector
+
 from opteryx.expression import NodeType
-from opteryx.operators.draken_aggregate_node import _DrakenAggregateCollector
-from opteryx.operators.draken_aggregate_node import _vector_max
-from opteryx.operators.draken_aggregate_node import _vector_min
-from opteryx.operators.draken_aggregate_node import _vector_sum
+from opteryx.operators.draken_aggregate_node import (
+    _DrakenAggregateCollector,
+    _vector_max,
+    _vector_min,
+    _vector_sum,
+)
 
 
 def _identifier_parameter(identity="value"):

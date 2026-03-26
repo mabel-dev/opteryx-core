@@ -4,8 +4,8 @@ import sys
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
 from opteryx.compiled.aggregations.group_by_engine import CarcharGroupStateEngine
-from opteryx.draken.morsels.morsel import Morsel
-from opteryx.draken.vectors.int64_vector import Int64Vector
+from opteryx.compiled.draken.morsels.morsel import Morsel
+from opteryx.compiled.draken.vectors.int64_vector import Int64Vector
 
 
 def _rows_by_key(rows, key_name):

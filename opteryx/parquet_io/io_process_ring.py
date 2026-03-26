@@ -36,10 +36,10 @@ from typing import Iterator
 from typing import List
 from typing import Optional
 
+from opteryx.compiled.draken.morsels.morsel import Morsel
+from opteryx.compiled.draken.storage import read_morsel
+from opteryx.compiled.draken.storage import write_morsel
 from opteryx.connectors.io_systems import create_filesystem
-from opteryx.draken.morsels.morsel import Morsel
-from opteryx.draken.storage import read_morsel
-from opteryx.draken.storage import write_morsel
 from opteryx.parquet_io.cache import InMemoryParquetCache
 from opteryx.parquet_io.predicates import row_group_may_satisfy
 
@@ -444,7 +444,7 @@ def _column_chunk_range(col_stats: dict) -> tuple[int, int]:
 
 def _resolve_decoder() -> Any:
     try:
-        from opteryx.rugo import parquet as rugo_parquet
+        from opteryx.compiled.rugo import parquet as rugo_parquet
     except ImportError:
         raise RuntimeError(
             "rugo.parquet is required but not available. "

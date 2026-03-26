@@ -115,7 +115,7 @@ def _normalize_typed_constant_compare_value(scalar, value):
 
 
 def _typed_constant_fastpath(arr, operator, value):
-    from opteryx.draken.vectors.bool_vector import BoolVector
+    from opteryx.compiled.draken.vectors.bool_vector import BoolVector
 
     scalar = _typed_constant_scalar(arr)
     value = _normalize_typed_constant_compare_value(scalar, value)
@@ -252,7 +252,7 @@ def _dictionary_vector(arr):
         arr = arr.chunk(0)
 
     if isinstance(arr, pyarrow.DictionaryArray):
-        from opteryx.draken.interop.arrow import vector_from_arrow
+        from opteryx.compiled.draken.interop.arrow import vector_from_arrow
 
         vec = vector_from_arrow(arr)
         if _has_dictionary_fastpath_ops(vec):
@@ -619,7 +619,7 @@ def _inner_filter_operations(arr, operator, value):
                 _record_dict_hit()
                 return fast
             raise RuntimeError("Dictionary fastpath failed for `InList`.")
-        from opteryx.draken.interop.arrow import vector_from_arrow
+        from opteryx.compiled.draken.interop.arrow import vector_from_arrow
 
         to_pylist = getattr(value, "to_pylist", None)
         if to_pylist is not None:
@@ -648,7 +648,7 @@ def _inner_filter_operations(arr, operator, value):
                 _record_dict_hit()
                 return fast
             raise RuntimeError("Dictionary fastpath failed for `NotInList`.")
-        from opteryx.draken.interop.arrow import vector_from_arrow
+        from opteryx.compiled.draken.interop.arrow import vector_from_arrow
 
         to_pylist = getattr(value, "to_pylist", None)
         if to_pylist is not None:

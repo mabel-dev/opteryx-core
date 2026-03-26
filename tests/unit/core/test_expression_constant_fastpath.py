@@ -6,12 +6,15 @@ import pytest
 
 sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 
-from opteryx.draken.vectors.scalar_constructors import from_scalar
-from opteryx.draken.vectors.integer_vector import IntegerVector
-from opteryx.draken.vectors.string_vector import StringVector
-from opteryx.expression.ops import _inner_filter_operations
-from opteryx.expression.ops import get_dict_expr_telemetry
-from opteryx.expression.ops import reset_dict_expr_telemetry
+from opteryx.compiled.draken.vectors.integer_vector import IntegerVector
+from opteryx.compiled.draken.vectors.scalar_constructors import from_scalar
+from opteryx.compiled.draken.vectors.string_vector import StringVector
+
+from opteryx.expression.ops import (
+    _inner_filter_operations,
+    get_dict_expr_telemetry,
+    reset_dict_expr_telemetry,
+)
 
 
 def _as_list(result):

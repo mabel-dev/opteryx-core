@@ -22,8 +22,8 @@ types (Int64Vector, StringVector, etc.) implement.
 from libc.stdint cimport uint64_t, int64_t, uint8_t
 from cpython.mem cimport PyMem_Calloc
 
-from opteryx.draken.core.buffers cimport ConstAccessor, DictAccessor, DrakenEncoding, DRAKEN_ENCODING_DENSE
-from opteryx.draken.interop.arrow cimport vector_from_arrow
+from opteryx.compiled.draken.core.buffers cimport ConstAccessor, DictAccessor, DrakenEncoding, DRAKEN_ENCODING_DENSE
+from opteryx.compiled.draken.interop.arrow cimport vector_from_arrow
 from opteryx.compiled.structures.relation_statistics cimport to_int
 
 cdef const uint64_t MIX_HASH_CONSTANT = <uint64_t>0x9e3779b97f4a7c15ULL

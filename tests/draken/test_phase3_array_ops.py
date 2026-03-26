@@ -20,15 +20,14 @@ import pytest
 
 sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 
+from opteryx.compiled.draken.interop.arrow import vector_from_arrow, vector_from_sequence
+from opteryx.compiled.draken.morsels.morsel import Morsel
 from orso.schema import FlatColumn
 from orso.types import OrsoTypes
 
-from opteryx.draken.interop.arrow import vector_from_arrow, vector_from_sequence
-from opteryx.draken.morsels.morsel import Morsel
-from opteryx.expression.evaluator import draken_compare, evaluate_draken
 from opteryx.expression import NodeType
+from opteryx.expression.evaluator import draken_compare, evaluate_draken
 from opteryx.models import Node
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -50,9 +49,7 @@ def _array_vec_str(rows):
 
 def _dict_vec_float(values):
     """Create a float input from dictionary-encoded Arrow data."""
-    return vector_from_arrow(
-        pa.array(values, type=pa.float64()).dictionary_encode()
-    )
+    return vector_from_arrow(pa.array(values, type=pa.float64()).dictionary_encode())
 
 
 def _morsel(col_identity: str, vec):
@@ -384,6 +381,6 @@ class TestAtQuestion:
         assert bv_to_list(result) == [False]
 
     def test_empty_object(self):
-        col = _str_vec([b'{}', b'{"a":1}'])
+        col = _str_vec([b"{}", b'{"a":1}'])
         result = draken_compare("AtQuestion", col, "a")
         assert bv_to_list(result) == [False, True]

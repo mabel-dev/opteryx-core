@@ -9,8 +9,8 @@
 from libc.stdint cimport uint8_t
 from libc.string cimport memset
 
-from opteryx.draken.vectors.array_vector cimport ArrayVector
-from opteryx.draken.vectors.bool_vector cimport BoolVector
+from opteryx.compiled.draken.vectors.array_vector cimport ArrayVector
+from opteryx.compiled.draken.vectors.bool_vector cimport BoolVector
 
 
 cpdef BoolVector vector_allop_neq(object literal, ArrayVector vec):

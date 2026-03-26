@@ -29,15 +29,15 @@ from libc.stdint cimport int32_t, int8_t, intptr_t, uint8_t, uint64_t
 from libc.stdlib cimport free, malloc
 from libc.string cimport memcpy, memset
 
-from opteryx.draken.core.buffers cimport (
+from opteryx.compiled.draken.core.buffers cimport (
     DrakenArrayBuffer,
     DRAKEN_ARRAY,
     DRAKEN_NON_NATIVE,
     DRAKEN_STRING,
 )
-from opteryx.draken.vectors.string_vector cimport StringVector
-from opteryx.draken.interop.arrow cimport arrow_type_to_draken, vector_from_arrow, vector_from_sequence
-from opteryx.draken.vectors.vector cimport (
+from opteryx.compiled.draken.vectors.string_vector cimport StringVector
+from opteryx.compiled.draken.interop.arrow cimport arrow_type_to_draken, vector_from_arrow, vector_from_sequence
+from opteryx.compiled.draken.vectors.vector cimport (
     MIX_HASH_CONSTANT,
     NULL_HASH,
     Vector,
@@ -437,19 +437,19 @@ cdef ArrayVector from_arrow(object array):
             n_bytes = (vec.ptr.length + 7) // 8
             new_bitmap = PyBytes_FromStringAndSize(NULL, n_bytes)
             dst_bitmap = <uint8_t*> PyBytes_AS_STRING(new_bitmap)
-            
+
             byte_offset = offset >> 3
             bit_offset = offset & 7
             src_bitmap = <uint8_t*> null_addr + byte_offset
-            
+
             shift_down = bit_offset
             shift_up = 8 - bit_offset
-            
+
             for i in range(n_bytes):
                 val = src_bitmap[i] >> shift_down
                 val |= (src_bitmap[i+1] << shift_up)
                 dst_bitmap[i] = val
-                
+
             vec.ptr.null_bitmap = dst_bitmap
             vec._arrow_null_buf = new_bitmap # Keep alive
     else:

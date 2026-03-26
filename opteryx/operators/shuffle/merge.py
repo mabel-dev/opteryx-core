@@ -13,8 +13,8 @@ from typing import Iterable
 from typing import Iterator
 from typing import Sequence
 
-from opteryx.draken.interop.arrow import vector_from_sequence
-from opteryx.draken.morsels.morsel import Morsel
+from opteryx.compiled.draken.interop.arrow import vector_from_sequence
+from opteryx.compiled.draken.morsels.morsel import Morsel
 
 
 def _normalize_column_name(column: str | bytes) -> bytes:

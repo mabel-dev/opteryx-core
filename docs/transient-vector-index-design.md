@@ -682,7 +682,7 @@ Deliverables:
 
 Current implementation status:
 
-1. native nanobind module added as `opteryx.nanobind.vector_search`
+1. native nanobind module added as `opteryx.compiled.nanobind.vector_search`
 2. exact cosine top-k entry point added as `exact_search_cosine`
 3. focused correctness tests added for ordering, zero-vector handling, and
    dimension mismatch
@@ -730,7 +730,7 @@ Deliverables:
 Current implementation status:
 
 1. vendored `USearch` added under `third_party/usearch`
-2. native nanobind wrapper added as `opteryx.nanobind.usearch_native`
+2. native nanobind wrapper added as `opteryx.compiled.nanobind.usearch_native`
 3. initial API supports constructor, reserve, add, add_batch, search, size,
    capacity, dimensions, and memory_usage
 4. focused unit tests compare `USearch` exact search to the Stage 2 exact

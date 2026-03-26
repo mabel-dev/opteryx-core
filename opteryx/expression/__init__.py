@@ -109,27 +109,27 @@ def _typed_constant_vector(value, length: int, schema_column):
     is_null = value is None
 
     if target_type == OrsoTypes.BOOLEAN:
-        from opteryx.draken.vectors.bool_vector import BoolVector
+        from opteryx.compiled.draken.vectors.bool_vector import BoolVector
 
         return BoolVector.from_constant(False if is_null else value, length, is_null=is_null)
 
     if target_type == OrsoTypes.INTEGER:
-        from opteryx.draken.vectors.integer_vector import IntegerVector
+        from opteryx.compiled.draken.vectors.integer_vector import IntegerVector
 
         return IntegerVector.from_constant(0 if is_null else value, length, is_null=is_null)
 
     if target_type == OrsoTypes.DOUBLE:
-        from opteryx.draken.vectors.float64_vector import Float64Vector
+        from opteryx.compiled.draken.vectors.float64_vector import Float64Vector
 
         return Float64Vector.from_constant(0.0 if is_null else value, length, is_null=is_null)
 
     if target_type in (OrsoTypes.VARCHAR, OrsoTypes.BLOB):
-        from opteryx.draken.vectors.string_vector import StringVector
+        from opteryx.compiled.draken.vectors.string_vector import StringVector
 
         return StringVector.from_constant(b"" if is_null else value, length, is_null=is_null)
 
     if target_type == OrsoTypes.DATE:
-        from opteryx.draken.vectors.date32_vector import Date32Vector
+        from opteryx.compiled.draken.vectors.date32_vector import Date32Vector
 
         if not is_null:
             if isinstance(value, datetime.datetime):
@@ -145,7 +145,7 @@ def _typed_constant_vector(value, length: int, schema_column):
         return Date32Vector.from_constant(0 if is_null else value, length, is_null=is_null)
 
     if target_type == OrsoTypes.TIMESTAMP:
-        from opteryx.draken.vectors.timestamp_vector import TimestampVector
+        from opteryx.compiled.draken.vectors.timestamp_vector import TimestampVector
 
         timestamp_type = (
             arrow_type if pyarrow.types.is_timestamp(arrow_type) else pyarrow.timestamp("us")
@@ -161,7 +161,7 @@ def _typed_constant_vector(value, length: int, schema_column):
         )
 
     if target_type == OrsoTypes.TIME:
-        from opteryx.draken.vectors.time_vector import TimeVector
+        from opteryx.compiled.draken.vectors.time_vector import TimeVector
 
         is_time64 = bool(arrow_type and pyarrow.types.is_time64(arrow_type))
         time_type = arrow_type or pyarrow.time64("us")
@@ -661,7 +661,7 @@ def _evaluate_and_append_arrow(expressions, table: Table):
             OrsoTypes.DATE,
             OrsoTypes.TIMESTAMP,
         ):
-            from opteryx.draken.vectors.scalar_constructors import (
+            from opteryx.compiled.draken.vectors.scalar_constructors import (
                 from_scalar as constant_from_scalar,
             )
 
@@ -707,7 +707,7 @@ def _evaluate_and_append_arrow(expressions, table: Table):
                         new_column = pyarrow.array(new_column)
                     else:
                         # Use Draken's vector_from_sequence for efficient array construction
-                        from opteryx.draken.interop.arrow import vector_from_sequence
+                        from opteryx.compiled.draken.interop.arrow import vector_from_sequence
 
                         # Convert numpy arrays to lists to avoid dimension issues
                         if hasattr(new_column, "tolist"):
@@ -744,9 +744,11 @@ def _evaluate_and_append_morsel(expressions, morsel):
     back to Arrow evaluation for the remaining expressions, then convert back
     to a Morsel.
     """
-    from opteryx.draken.interop.arrow import vector_from_arrow
-    from opteryx.draken.morsels.morsel import Morsel
-    from opteryx.draken.vectors.scalar_constructors import from_scalar as constant_from_scalar
+    from opteryx.compiled.draken.interop.arrow import vector_from_arrow
+    from opteryx.compiled.draken.morsels.morsel import Morsel
+    from opteryx.compiled.draken.vectors.scalar_constructors import (
+        from_scalar as constant_from_scalar,
+    )
 
     prioritized_expressions = prioritize_evaluation(expressions)
     names = list(morsel.column_names)

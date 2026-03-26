@@ -1,11 +1,9 @@
 import pyarrow as pa
+from opteryx.compiled.draken.morsels.morsel import Morsel
 
 from opteryx import EOS
-from opteryx.draken.morsels.morsel import Morsel
 from opteryx.models import QueryProperties
-from opteryx.operators.shuffle import ShuffleMergeOperation
-from opteryx.operators.shuffle import ShuffleMergeSortOperation
-from opteryx.operators.shuffle import SortKey
+from opteryx.operators.shuffle import ShuffleMergeOperation, ShuffleMergeSortOperation, SortKey
 from opteryx.operators.shuffle_node import ShuffleNode
 
 

@@ -6,14 +6,14 @@
 # cython: wraparound=False
 # cython: boundscheck=False
 
-from opteryx.draken.vectors.string_vector cimport StringVector
-from opteryx.draken.vectors import string_vector as string_vector_module
-from opteryx.draken.core.buffers cimport ConstAccessor
-from opteryx.draken.core.buffers cimport DrakenConstantStringPayload
-from opteryx.draken.core.buffers cimport DrakenVarBuffer
+from opteryx.compiled.draken.vectors.string_vector cimport StringVector
+from opteryx.compiled.draken.vectors import string_vector as string_vector_module
+from opteryx.compiled.draken.core.buffers cimport ConstAccessor
+from opteryx.compiled.draken.core.buffers cimport DrakenConstantStringPayload
+from opteryx.compiled.draken.core.buffers cimport DrakenVarBuffer
 from libc.stdint cimport int32_t, uint8_t
 from cpython.bytes cimport PyBytes_FromStringAndSize
-from opteryx.draken.core.buffers cimport DRAKEN_ENCODING_CONSTANT
+from opteryx.compiled.draken.core.buffers cimport DRAKEN_ENCODING_CONSTANT
 
 
 # ----------------------------------------------------------------------

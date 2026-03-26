@@ -14,8 +14,8 @@ that performs column renames.
 
 from collections.abc import Iterable
 
-from opteryx.draken.encoding import DRAKEN_ENCODING_CONSTANT
-from opteryx.draken.morsels.morsel import Morsel
+from opteryx.compiled.draken.encoding import DRAKEN_ENCODING_CONSTANT
+from opteryx.compiled.draken.morsels.morsel import Morsel
 from opteryx.expression import NodeType
 from opteryx.expression import evaluate_and_append
 from opteryx.models import QueryProperties

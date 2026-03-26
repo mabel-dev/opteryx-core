@@ -21,10 +21,10 @@ from libc.stddef cimport size_t
 from libc.stdint cimport int32_t, intptr_t, uint8_t
 from libc.stdlib cimport free, malloc
 
-from opteryx.draken.core.buffers cimport DrakenArrayBuffer, DRAKEN_NON_NATIVE
-from opteryx.draken.interop.arrow cimport arrow_type_to_draken, vector_from_arrow
-from opteryx.draken.vectors.array_vector cimport ArrayVector
-from opteryx.draken.vectors.vector cimport Vector
+from opteryx.compiled.draken.core.buffers cimport DrakenArrayBuffer, DRAKEN_NON_NATIVE
+from opteryx.compiled.draken.interop.arrow cimport arrow_type_to_draken, vector_from_arrow
+from opteryx.compiled.draken.vectors.array_vector cimport ArrayVector
+from opteryx.compiled.draken.vectors.vector cimport Vector
 
 
 cdef inline DrakenArrayBuffer* _alloc_array_buffer() except *:

@@ -7,8 +7,7 @@ from tests.performance.benchmarks.python_carchar_reference import (
     CarcharJoinIndex as PythonCarcharJoinIndex,
 )
 
-
-cpp_carchar = pytest.importorskip("opteryx.nanobind.carchar_native")
+cpp_carchar = pytest.importorskip("opteryx.compiled.nanobind.carchar_native")
 
 
 def test_cpp_carchar_join_index_matches_python_duplicate_rows():

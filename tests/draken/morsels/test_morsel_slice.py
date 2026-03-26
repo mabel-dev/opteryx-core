@@ -10,7 +10,7 @@ import pytest
 import pyarrow as pa
 import numpy as np
 
-from opteryx.draken.morsels.morsel import Morsel
+from opteryx.compiled.draken.morsels.morsel import Morsel
 
 
 def test_slice_basic():

@@ -36,9 +36,9 @@ from libc.stdint cimport int32_t, uint8_t, uint64_t
 from libc.string cimport memchr, memcpy, memset
 import platform
 
-from opteryx.draken.vectors.string_vector cimport StringVector
-from opteryx.draken.vectors.bool_vector cimport BoolVector
-from opteryx.draken.core.buffers cimport DrakenVarBuffer
+from opteryx.compiled.draken.vectors.string_vector cimport StringVector
+from opteryx.compiled.draken.vectors.bool_vector cimport BoolVector
+from opteryx.compiled.draken.core.buffers cimport DrakenVarBuffer
 
 
 cdef extern from "string.h":

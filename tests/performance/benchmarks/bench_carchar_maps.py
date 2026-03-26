@@ -15,7 +15,7 @@ Miss probes are intentionally not benchmarked for Abseil because the current
 Run with:
     python tests/performance/benchmarks/bench_carchar_maps.py
     python tests/performance/benchmarks/bench_carchar_maps.py --rows 500000 --repeat 7
-    python tests/performance/benchmarks/bench_carchar_maps.py --cpp-module opteryx.nanobind.carchar_native
+    python tests/performance/benchmarks/bench_carchar_maps.py --cpp-module opteryx.compiled.nanobind.carchar_native
 """
 
 from __future__ import annotations
@@ -35,10 +35,7 @@ sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
 from opteryx.third_party.abseil.containers import FlatHashMap
 
-
-DEFAULT_CPP_MODULES = (
-    "opteryx.nanobind.carchar_native",
-)
+DEFAULT_CPP_MODULES = ("opteryx.compiled.nanobind.carchar_native",)
 DEFAULT_LOCALITY_SWEEP_ROWS = (500, 2_000, 8_000, 32_000, 128_000, 300_000, 500_000)
 
 
@@ -158,7 +155,10 @@ class CppCarcharAdapter(_Adapter):
 
     def build(self, keys: numpy.ndarray):
         try:
-            if self._probe_load_factor is not None and self._index_cls.__name__ == "CarcharJoinEngine":
+            if (
+                self._probe_load_factor is not None
+                and self._index_cls.__name__ == "CarcharJoinEngine"
+            ):
                 index = self._index_cls(len(keys), 0, 0.80, self._probe_load_factor)
             else:
                 index = self._index_cls(len(keys))
@@ -178,7 +178,9 @@ class CppCarcharAdapter(_Adapter):
                 elif hasattr(index, "insert"):
                     index.insert(int(key), row_id)
                 else:
-                    raise AttributeError("compiled Carchar index must provide insert_row() or insert()")
+                    raise AttributeError(
+                        "compiled Carchar index must provide insert_row() or insert()"
+                    )
         if hasattr(index, "seal"):
             index.seal()
         return index
@@ -217,7 +219,9 @@ class CppCarcharAdapter(_Adapter):
             info["index_size"] = getattr(stats, "size", None)
             info["capacity"] = getattr(stats, "capacity", None)
             info["bytes_estimate"] = getattr(stats, "bytes_estimate", None)
-            info["average_lookup_probe_length"] = getattr(stats, "average_lookup_probe_length", None)
+            info["average_lookup_probe_length"] = getattr(
+                stats, "average_lookup_probe_length", None
+            )
             info["max_lookup_probe_length"] = getattr(stats, "max_lookup_probe_length", None)
             return info
         if hasattr(index, "size"):
@@ -460,7 +464,9 @@ def benchmark_locality_sweep(
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Benchmark Abseil and native C++ Carchar hash maps")
+    parser = argparse.ArgumentParser(
+        description="Benchmark Abseil and native C++ Carchar hash maps"
+    )
     parser.add_argument("--rows", type=int, default=300_000)
     parser.add_argument("--probe-count", type=int, default=100_000)
     parser.add_argument("--repeat", type=int, default=5)

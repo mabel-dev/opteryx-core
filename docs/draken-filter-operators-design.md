@@ -142,7 +142,7 @@ Node dispatch:
 
 AND short-circuit: after evaluating left child, call `BoolVector.any()` — if all false, skip right child evaluation entirely.
 
-**Decision:** Evaluator lives at `opteryx/expression/evaluator/` — `apply_bounded_function` already lives there and it is the intended home for the new implementation. The dead reference to `opteryx.draken.evaluators.evaluator` in `opteryx/draken/__init__.py` is removed in Phase 1.
+**Decision:** Evaluator lives at `opteryx/expression/evaluator/` — `apply_bounded_function` already lives there and it is the intended home for the new implementation. The dead reference to `opteryx.compiled.draken.evaluators.evaluator` in `opteryx/draken/__init__.py` is removed in Phase 1.
 
 ### 5) Filter Operator Kernel Dispatcher
 
@@ -367,7 +367,7 @@ Target file: `opteryx/expression/evaluator/__init__.py` (extend; `apply_bounded_
 
 #### 1.4 — Dead reference cleanup
 
-- [x] Removed import/reference to `opteryx.draken.evaluators.evaluator` from `opteryx/draken/__init__.py`
+- [x] Removed import/reference to `opteryx.compiled.draken.evaluators.evaluator` from `opteryx/draken/__init__.py`
 - [x] Removed `opteryx/draken/evaluators/` directory entirely — expression.py and __init__.py were dead code; no production imports remained
 - [x] Removed `tests/draken/test_evaluator.py` — all 12 failing tests were ImportError on the dead `evaluate` symbol
 - [x] Removed `tests/draken/performance/perftest_compiled_evaluator_benchmark.py` — also referenced dead evaluator
@@ -677,6 +677,6 @@ When all connectors yield Morsels, `FilterNode` routes everything through the Dr
 
 ## Existing Gaps Already Known
 
-1. ~~`opteryx/draken/__init__.py` references `opteryx.draken.evaluators.evaluator` — module does not exist.~~ **Resolved in Phase 1.4** — dead import removed.
+1. ~~`opteryx/draken/__init__.py` references `opteryx.compiled.draken.evaluators.evaluator` — module does not exist.~~ **Resolved in Phase 1.4** — dead import removed.
 2. `opteryx/draken/evaluators/expression.py` still exists. Audit in Phase 1.4 (second checkbox) whether this is referenced anywhere and remove if dead.
 3. Several tests/benchmarks in `tests/draken/*` assume evaluator APIs that are currently incomplete. These will pass once Phase 2.4 integration is complete and the feature flag is enabled.

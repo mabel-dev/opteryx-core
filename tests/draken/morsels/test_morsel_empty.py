@@ -1,6 +1,5 @@
 import pyarrow as pa
-
-from opteryx.draken.morsels.morsel import Morsel
+from opteryx.compiled.draken.morsels.morsel import Morsel
 
 
 def _make_table():

@@ -24,7 +24,9 @@ from typing import Tuple
 from opteryx.expression.functions.implementations.text import _normalise_replacement
 
 # Import the datatypes used by the rest of the Python codepath.
-from opteryx.utils.regex_compiler import CompiledProcedure, Operation, OperationType
+from opteryx.utils.regex_compiler import CompiledProcedure
+from opteryx.utils.regex_compiler import Operation
+from opteryx.utils.regex_compiler import OperationType
 
 # Try to import the native binding that will be built into the compiled functions
 # package. If it is not available, the compiler will always fall back to RE2.

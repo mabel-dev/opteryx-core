@@ -10,8 +10,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from opteryx.compiled.aggregations.scalar_kernels import ArrayAggState
-from opteryx.draken.interop.arrow import vector_from_sequence
-from opteryx.draken.morsels.morsel import Morsel
+from opteryx.compiled.draken.interop.arrow import vector_from_sequence
+from opteryx.compiled.draken.morsels.morsel import Morsel
 
 _UNSET = object()
 

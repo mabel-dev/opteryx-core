@@ -13,8 +13,8 @@ from libc.string cimport memset
 
 cimport cython
 
-from opteryx.draken.interop.arrow cimport vector_from_arrow
-from opteryx.draken.vectors.vector cimport Vector
+from opteryx.compiled.draken.interop.arrow cimport vector_from_arrow
+from opteryx.compiled.draken.vectors.vector cimport Vector
 from opteryx.third_party.cyan4973.xxhash cimport hash_bytes
 import pyarrow
 import struct

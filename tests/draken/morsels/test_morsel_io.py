@@ -8,20 +8,20 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
-from opteryx.draken import Morsel
-from opteryx.draken.vectors.scalar_constructors import from_scalar as constant_from_scalar
+from opteryx.compiled.draken import Morsel
+from opteryx.compiled.draken.vectors.scalar_constructors import from_scalar as constant_from_scalar
 
 
-mio = pytest.importorskip("opteryx.draken.storage.morsel_io")
-from opteryx.draken.storage.morsel_io import DrakenMorselStorageError
-from opteryx.draken.storage.morsel_io import read_morsel
-from opteryx.draken.storage.morsel_io import write_morsel
-from opteryx.draken.vectors.date32_vector import Date32Vector
-from opteryx.draken.vectors.float64_vector import Float64Vector
-from opteryx.draken.vectors.int64_vector import Int64Vector
-from opteryx.draken.vectors.string_vector import StringVector
-from opteryx.draken.vectors.time_vector import TimeVector
-from opteryx.draken.vectors.timestamp_vector import TimestampVector
+mio = pytest.importorskip("opteryx.compiled.draken.storage.morsel_io")
+from opteryx.compiled.draken.storage.morsel_io import DrakenMorselStorageError
+from opteryx.compiled.draken.storage.morsel_io import read_morsel
+from opteryx.compiled.draken.storage.morsel_io import write_morsel
+from opteryx.compiled.draken.vectors.date32_vector import Date32Vector
+from opteryx.compiled.draken.vectors.float64_vector import Float64Vector
+from opteryx.compiled.draken.vectors.int64_vector import Int64Vector
+from opteryx.compiled.draken.vectors.string_vector import StringVector
+from opteryx.compiled.draken.vectors.time_vector import TimeVector
+from opteryx.compiled.draken.vectors.timestamp_vector import TimestampVector
 
 
 DRAKEN_ENCODING_CONSTANT = 3

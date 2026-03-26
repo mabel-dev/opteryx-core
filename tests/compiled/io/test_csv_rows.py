@@ -13,9 +13,9 @@ if not hasattr(cio, "morsel_to_csv_rows") or not hasattr(cio, "morsel_to_csv_str
 
 from opteryx.compiled.io import morsel_to_csv_rows
 from opteryx.compiled.io import morsel_to_csv_strings
-from opteryx.draken.morsels.morsel import Morsel
-from opteryx.draken.vectors.int64_vector import Int64Vector
-from opteryx.draken.vectors.string_vector import StringVector
+from opteryx.compiled.draken.morsels.morsel import Morsel
+from opteryx.compiled.draken.vectors.int64_vector import Int64Vector
+from opteryx.compiled.draken.vectors.string_vector import StringVector
 
 
 def test_morsel_to_csv_strings_basic_scalars():

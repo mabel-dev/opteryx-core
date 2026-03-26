@@ -29,7 +29,7 @@ from libc.string cimport memcpy, memset, strlen
 from libc.stdint cimport int32_t, int64_t, uint8_t
 from libc.stdint cimport uint64_t
 
-from opteryx.draken.core.buffers cimport (
+from opteryx.compiled.draken.core.buffers cimport (
     DrakenFixedBuffer,
     DrakenMorsel,
     DrakenType,
@@ -52,18 +52,18 @@ from opteryx.draken.core.buffers cimport (
     DRAKEN_TIME64,
     DRAKEN_TIMESTAMP64,
 )
-from opteryx.draken.vectors.vector cimport Vector
-from opteryx.draken.vectors.bool_vector cimport BoolVector
-from opteryx.draken.vectors.date32_vector cimport Date32Vector
-from opteryx.draken.vectors.float64_vector cimport Float64Vector
-from opteryx.draken.vectors.int64_vector cimport Int64Vector
-from opteryx.draken.vectors.integer_vector cimport IntegerVector
-from opteryx.draken.vectors.interval_vector cimport IntervalVector
-from opteryx.draken.vectors.string_vector cimport StringVector
-from opteryx.draken.vectors.time_vector cimport TimeVector
-from opteryx.draken.vectors.timestamp_vector cimport TimestampVector
-from opteryx.draken.interop.arrow cimport vector_from_arrow
-from opteryx.draken.interop.arrow cimport vector_from_sequence
+from opteryx.compiled.draken.vectors.vector cimport Vector
+from opteryx.compiled.draken.vectors.bool_vector cimport BoolVector
+from opteryx.compiled.draken.vectors.date32_vector cimport Date32Vector
+from opteryx.compiled.draken.vectors.float64_vector cimport Float64Vector
+from opteryx.compiled.draken.vectors.int64_vector cimport Int64Vector
+from opteryx.compiled.draken.vectors.integer_vector cimport IntegerVector
+from opteryx.compiled.draken.vectors.interval_vector cimport IntervalVector
+from opteryx.compiled.draken.vectors.string_vector cimport StringVector
+from opteryx.compiled.draken.vectors.time_vector cimport TimeVector
+from opteryx.compiled.draken.vectors.timestamp_vector cimport TimestampVector
+from opteryx.compiled.draken.interop.arrow cimport vector_from_arrow
+from opteryx.compiled.draken.interop.arrow cimport vector_from_sequence
 
 # Python helper: int subclass for DrakenType enum debugging
 cdef class DrakenTypeInt(int):

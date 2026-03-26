@@ -1,6 +1,6 @@
 import pyarrow
 
-from opteryx.draken.morsels.morsel import Morsel
+from opteryx.compiled.draken.morsels.morsel import Morsel
 from opteryx.parquet_io.io_process_ring import _build_row_group_from_payload
 from opteryx.parquet_io.io_process_ring import _serialize_morsel
 from opteryx.parquet_io.io_process_ring import _slice_and_serialize

@@ -10,8 +10,8 @@ from libc.stdint cimport uint8_t
 from libc.string cimport memset
 from libc.stdlib cimport malloc, free
 
-from opteryx.draken.vectors.array_vector cimport ArrayVector
-from opteryx.draken.vectors.bool_vector cimport BoolVector
+from opteryx.compiled.draken.vectors.array_vector cimport ArrayVector
+from opteryx.compiled.draken.vectors.bool_vector cimport BoolVector
 
 
 cpdef BoolVector vector_anyop_like(object literal, ArrayVector column):

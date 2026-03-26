@@ -18,7 +18,7 @@ from collections import defaultdict
 from typing import Generator
 
 import pyarrow
-from opteryx.draken.morsels.morsel import Morsel
+from opteryx.compiled.draken.morsels.morsel import Morsel
 from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.models import QueryProperties
 from opteryx.utils.json_compat import dumps as json_dumps

@@ -13,9 +13,9 @@ from cpython.bytes cimport PyBytes_AsStringAndSize
 from libcpp.string cimport string
 from libcpp.unordered_map cimport unordered_map
 
-from opteryx.draken.vectors.string_vector cimport StringVector
-from opteryx.draken.vectors import string_vector as string_vector_module
-from opteryx.draken.core.buffers cimport DrakenVarBuffer
+from opteryx.compiled.draken.vectors.string_vector cimport StringVector
+from opteryx.compiled.draken.vectors import string_vector as string_vector_module
+from opteryx.compiled.draken.core.buffers cimport DrakenVarBuffer
 
 cdef extern from "re2/stringpiece.h" namespace "re2":
     cdef cppclass StringPiece:

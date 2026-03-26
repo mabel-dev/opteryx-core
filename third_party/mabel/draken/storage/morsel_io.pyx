@@ -36,45 +36,45 @@ from libc.stdlib cimport malloc
 from libc.string cimport memcpy
 from libc.string cimport memset
 
-from opteryx.draken.core.buffers cimport DrakenFixedBuffer
-from opteryx.draken.core.buffers cimport DrakenDictionaryBuffer
-from opteryx.draken.core.buffers cimport DrakenConstantBuffer
-from opteryx.draken.core.buffers cimport DrakenConstantStringPayload
-from opteryx.draken.core.buffers cimport DrakenType
-from opteryx.draken.core.buffers cimport DrakenVarBuffer
-from opteryx.draken.core.buffers cimport ConstAccessor
-from opteryx.draken.core.buffers cimport DictAccessor
-from opteryx.draken.core.buffers cimport DRAKEN_BOOL
-from opteryx.draken.core.buffers cimport DRAKEN_DATE32
-from opteryx.draken.core.buffers cimport DRAKEN_DICTIONARY
-from opteryx.draken.core.buffers cimport DRAKEN_ENCODING_CONSTANT
-from opteryx.draken.core.buffers cimport DRAKEN_ENCODING_DICTIONARY
-from opteryx.draken.core.buffers cimport DRAKEN_FLOAT32
-from opteryx.draken.core.buffers cimport DRAKEN_FLOAT64
-from opteryx.draken.core.buffers cimport DRAKEN_INT8
-from opteryx.draken.core.buffers cimport DRAKEN_INT16
-from opteryx.draken.core.buffers cimport DRAKEN_INT32
-from opteryx.draken.core.buffers cimport DRAKEN_INT64
-from opteryx.draken.core.buffers cimport DRAKEN_INTERVAL
-from opteryx.draken.core.buffers cimport DRAKEN_STRING
-from opteryx.draken.core.buffers cimport DRAKEN_TIME32
-from opteryx.draken.core.buffers cimport DRAKEN_TIME64
-from opteryx.draken.core.buffers cimport DRAKEN_TIMESTAMP64
-from opteryx.draken.morsels.morsel cimport Morsel
-from opteryx.draken.vectors.bool_vector cimport BoolVector
-from opteryx.draken.vectors.date32_vector cimport Date32Vector
-from opteryx.draken.vectors.float64_vector cimport Float64Vector
-from opteryx.draken.vectors.float64_vector cimport from_packed_dict as float64_from_packed_dict
-from opteryx.draken.vectors.int64_vector cimport Int64Vector
-from opteryx.draken.vectors.int64_vector cimport from_packed_dict as int64_from_packed_dict
-from opteryx.draken.vectors.integer_vector cimport IntegerVector
-from opteryx.draken.vectors.interval_vector cimport IntervalVector
-from opteryx.draken.vectors.string_vector cimport StringVector
-from opteryx.draken.vectors.string_vector cimport StringVectorBuilder
-from opteryx.draken.vectors.string_vector cimport from_dict_buffers as string_from_dict_buffers
-from opteryx.draken.vectors.time_vector cimport TimeVector
-from opteryx.draken.vectors.timestamp_vector cimport TimestampVector
-from opteryx.draken.vectors.vector cimport Vector
+from opteryx.compiled.draken.core.buffers cimport DrakenFixedBuffer
+from opteryx.compiled.draken.core.buffers cimport DrakenDictionaryBuffer
+from opteryx.compiled.draken.core.buffers cimport DrakenConstantBuffer
+from opteryx.compiled.draken.core.buffers cimport DrakenConstantStringPayload
+from opteryx.compiled.draken.core.buffers cimport DrakenType
+from opteryx.compiled.draken.core.buffers cimport DrakenVarBuffer
+from opteryx.compiled.draken.core.buffers cimport ConstAccessor
+from opteryx.compiled.draken.core.buffers cimport DictAccessor
+from opteryx.compiled.draken.core.buffers cimport DRAKEN_BOOL
+from opteryx.compiled.draken.core.buffers cimport DRAKEN_DATE32
+from opteryx.compiled.draken.core.buffers cimport DRAKEN_DICTIONARY
+from opteryx.compiled.draken.core.buffers cimport DRAKEN_ENCODING_CONSTANT
+from opteryx.compiled.draken.core.buffers cimport DRAKEN_ENCODING_DICTIONARY
+from opteryx.compiled.draken.core.buffers cimport DRAKEN_FLOAT32
+from opteryx.compiled.draken.core.buffers cimport DRAKEN_FLOAT64
+from opteryx.compiled.draken.core.buffers cimport DRAKEN_INT8
+from opteryx.compiled.draken.core.buffers cimport DRAKEN_INT16
+from opteryx.compiled.draken.core.buffers cimport DRAKEN_INT32
+from opteryx.compiled.draken.core.buffers cimport DRAKEN_INT64
+from opteryx.compiled.draken.core.buffers cimport DRAKEN_INTERVAL
+from opteryx.compiled.draken.core.buffers cimport DRAKEN_STRING
+from opteryx.compiled.draken.core.buffers cimport DRAKEN_TIME32
+from opteryx.compiled.draken.core.buffers cimport DRAKEN_TIME64
+from opteryx.compiled.draken.core.buffers cimport DRAKEN_TIMESTAMP64
+from opteryx.compiled.draken.morsels.morsel cimport Morsel
+from opteryx.compiled.draken.vectors.bool_vector cimport BoolVector
+from opteryx.compiled.draken.vectors.date32_vector cimport Date32Vector
+from opteryx.compiled.draken.vectors.float64_vector cimport Float64Vector
+from opteryx.compiled.draken.vectors.float64_vector cimport from_packed_dict as float64_from_packed_dict
+from opteryx.compiled.draken.vectors.int64_vector cimport Int64Vector
+from opteryx.compiled.draken.vectors.int64_vector cimport from_packed_dict as int64_from_packed_dict
+from opteryx.compiled.draken.vectors.integer_vector cimport IntegerVector
+from opteryx.compiled.draken.vectors.interval_vector cimport IntervalVector
+from opteryx.compiled.draken.vectors.string_vector cimport StringVector
+from opteryx.compiled.draken.vectors.string_vector cimport StringVectorBuilder
+from opteryx.compiled.draken.vectors.string_vector cimport from_dict_buffers as string_from_dict_buffers
+from opteryx.compiled.draken.vectors.time_vector cimport TimeVector
+from opteryx.compiled.draken.vectors.timestamp_vector cimport TimestampVector
+from opteryx.compiled.draken.vectors.vector cimport Vector
 from opteryx.third_party.cyan4973.xxhash cimport cy_xxhash3_64
 from opteryx.third_party.cyan4973.xxhash cimport hash_bytes
 

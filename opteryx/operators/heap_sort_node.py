@@ -22,8 +22,8 @@ from functools import cmp_to_key
 
 import numpy
 import pyarrow
-from opteryx.draken.interop.arrow import vector_from_sequence
-from opteryx.draken.morsels.morsel import Morsel
+from opteryx.compiled.draken.interop.arrow import vector_from_sequence
+from opteryx.compiled.draken.morsels.morsel import Morsel
 from opteryx.exceptions import ColumnNotFoundError
 from opteryx.expression import NodeType
 from opteryx.expression import evaluate_and_append
@@ -541,7 +541,7 @@ class HeapSortNode(BasePlanNode):
             and nearest_neighbor_order
         ):
             try:
-                from opteryx.nanobind import usearch_native
+                from opteryx.compiled.nanobind import usearch_native
 
                 index = usearch_native.UsearchIndex(
                     dimensions=query_vector.shape[0],
@@ -567,7 +567,7 @@ class HeapSortNode(BasePlanNode):
                 pass
 
         try:
-            from opteryx.nanobind import vector_search
+            from opteryx.compiled.nanobind import vector_search
 
             if nearest_neighbor_order:
                 found_ids, _ = vector_search.exact_search_cosine(

@@ -1,9 +1,8 @@
 import numpy
 import pytest
 
-
-vector_search = pytest.importorskip("opteryx.nanobind.vector_search")
-usearch_native = pytest.importorskip("opteryx.nanobind.usearch_native")
+vector_search = pytest.importorskip("opteryx.compiled.nanobind.vector_search")
+usearch_native = pytest.importorskip("opteryx.compiled.nanobind.usearch_native")
 
 
 def test_usearch_exact_matches_exact_baseline():
