@@ -1,17 +1,16 @@
-"""Public evaluator API.
+"""Expression evaluation engines for Draken and Arrow vectors."""
 
-This package keeps a stable import surface while moving implementation into
-named submodules.
-"""
+# Main evaluation API
+from .evaluation import evaluate_draken
+from .evaluation import evaluate_and_append_draken
+from .comparisons import draken_compare
 
-from .draken import draken_compare
-from .draken import evaluate_and_append_draken
-from .draken import evaluate_draken
+# Function execution
 from .function_execution import apply_bounded_function
 
 __all__ = [
-    "apply_bounded_function",
-    "draken_compare",
-    "evaluate_and_append_draken",
     "evaluate_draken",
+    "evaluate_and_append_draken",
+    "draken_compare",
+    "apply_bounded_function",
 ]
