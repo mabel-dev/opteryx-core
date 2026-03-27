@@ -10,7 +10,8 @@ sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 
 from orso.schema import RelationSchema
 
-from opteryx.planner.binder.binder_visitor import BinderVisitor, BindingContext
+from opteryx.planner.binder.common import BinderVisitor
+from opteryx.planner.binder.binding_context import BindingContext
 from opteryx.planner.logical_planner import LogicalPlan, LogicalPlanNode, LogicalPlanStepType
 
 

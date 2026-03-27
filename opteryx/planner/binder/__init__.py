@@ -53,7 +53,7 @@ The Binder performs these activities:
 
 from opteryx.exceptions import InvalidInternalStateError
 from opteryx.models import Node
-from opteryx.planner.binder.binder_visitor import BinderVisitor
+from opteryx.planner.binder.common import BinderVisitor
 from opteryx.planner.binder.binding_context import BindingContext
 from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner import LogicalPlanStepType

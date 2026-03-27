@@ -29,7 +29,7 @@ from opteryx.expression import format_expression
 from opteryx.expression import get_all_nodes_of_type
 from opteryx.expression.formatter import ExpressionColumn
 from opteryx.models import Node
-from opteryx.planner.binder.binder_visitor import extract_join_fields
+from opteryx.planner.binder.common import extract_join_fields
 from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner import LogicalPlanNode
 from opteryx.planner.logical_planner import LogicalPlanStepType

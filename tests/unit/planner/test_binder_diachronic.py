@@ -2,7 +2,8 @@ import datetime
 from orso.schema import RelationSchema, FlatColumn
 from orso.types import OrsoTypes
 
-from opteryx.planner.binder.binder_visitor import BinderVisitor, BindingContext
+from opteryx.planner.binder.common import BinderVisitor
+from opteryx.planner.binder.binding_context import BindingContext
 from opteryx.models import Node
 from opteryx.connectors.capabilities import Diachronic
 
