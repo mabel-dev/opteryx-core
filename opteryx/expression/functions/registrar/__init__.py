@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import pyarrow
 from opteryx.expression.functions import FunctionDefinition
 from opteryx.expression.functions import FunctionOverload
 from opteryx.expression.functions import KernelSpec
@@ -26,6 +27,47 @@ from opteryx.expression.functions import LifecycleSpec
 from opteryx.expression.functions import ParameterSpec
 from opteryx.expression.functions import ReturnSpec
 from orso.types import OrsoTypes
+
+
+# Kernel decorators for common iteration patterns
+def _iterate_single_parameter(func):
+    """Decorator for functions that iterate over a single array parameter."""
+
+    def _inner(array):
+        return pyarrow.array(list(map(func, array)))
+
+    return _inner
+
+
+def _sort(func):
+    """Decorator for sort/ordering functions that process arrays."""
+
+    def _inner(array):
+        return pyarrow.array([func(item) for item in array])
+
+    return _inner
+
+
+def _iterate_double_parameter(func):
+    """For functions called FUNCTION(field, literal)."""
+
+    def _inner(array, literal):
+        if isinstance(array, str):
+            array = [array]
+        return pyarrow.array(func(item, literal[index]) for index, item in enumerate(array))
+
+    return _inner
+
+
+def _iterate_double_parameter_swapped(func):
+    """For functions called FUNCTION(literal, field) when planner supplies (literal_values, field_values)."""
+
+    def _inner(array, literal):
+        if isinstance(array, str):
+            array = [array]
+        return pyarrow.array(func(literal[index], item) for index, item in enumerate(array))
+
+    return _inner
 
 
 def _make(
@@ -209,9 +251,13 @@ def get_builtin_functions() -> list[FunctionDefinition]:
 
 # Re-export helpers for domain modules to use
 __all__ = [
-    "_make",
-    "_coalesce_return_type",
     "_case_return_type",
+    "_coalesce_return_type",
     "_datepart_return_type",
+    "_iterate_double_parameter",
+    "_iterate_double_parameter_swapped",
+    "_iterate_single_parameter",
+    "_make",
+    "_sort",
     "get_builtin_functions",
 ]

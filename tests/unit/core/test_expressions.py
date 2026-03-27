@@ -11,8 +11,8 @@ from orso.schema import ConstantColumn, FunctionColumn
 from orso.types import OrsoTypes
 
 import opteryx
-import opteryx.virtual_datasets
 from opteryx.expression import NodeType, evaluate
+from opteryx.managers import virtual_datasets
 from opteryx.models import Node, QueryTelemetry
 
 stats = QueryTelemetry()
@@ -43,7 +43,7 @@ LITERALS = [
 
 @pytest.mark.parametrize("node_type, value_type, value", LITERALS)
 def test_literals(node_type, value_type, value):
-    planets = opteryx.virtual_datasets.planets.read()
+    planets = virtual_datasets.planets.read()
 
     schema_column = ConstantColumn(name="test", value=value, type=value_type)
 
@@ -54,6 +54,8 @@ def test_literals(node_type, value_type, value):
     else:
         assert values.shape == (1,), values.shape
         assert type(values[0]) == numpy.ndarray, values[0]
+
+
 #    assert len(values) == planets.num_rows, f"{len(values)} != {planets.num_rows}"
 
 
@@ -67,7 +69,7 @@ def test_logical_expressions():
     illogical from a user perspective but technically correct.
     """
 
-    planets = opteryx.virtual_datasets.planets.read()
+    planets = virtual_datasets.planets.read()
 
     true = Node(
         NodeType.LITERAL,
@@ -158,9 +160,9 @@ def test_logical_expressions():
 
 
 def test_reading_identifiers():
-    planets = opteryx.virtual_datasets.planets.read()
+    planets = virtual_datasets.planets.read()
 
-    name_column = opteryx.virtual_datasets.planets.schema().find_column("name")
+    name_column = virtual_datasets.planets.schema().find_column("name")
     name_column.identity = name_column.name
     assert name_column is not None
     names_node = Node(
@@ -183,7 +185,7 @@ def test_reading_identifiers():
         "Venus",
     ], sorted(names)
 
-    gravity_column = opteryx.virtual_datasets.planets.schema().find_column("gravity")
+    gravity_column = virtual_datasets.planets.schema().find_column("gravity")
     gravity_column.identity = gravity_column.name
     assert gravity_column is not None
     gravity_node = Node(
@@ -207,9 +209,9 @@ def test_reading_identifiers():
 
 
 def test_function_operations():
-    planets = opteryx.virtual_datasets.planets.read()
+    planets = virtual_datasets.planets.read()
 
-    name_column = opteryx.virtual_datasets.planets.schema().find_column("name")
+    name_column = virtual_datasets.planets.schema().find_column("name")
     name_column.identity = name_column.name
     assert name_column is not None
     names_node = Node(
@@ -226,7 +228,7 @@ def test_function_operations():
         schema_column=FunctionColumn(name="add", type=OrsoTypes.VARCHAR),
     )
 
-    gravity_column = opteryx.virtual_datasets.planets.schema().find_column("gravity")
+    gravity_column = virtual_datasets.planets.schema().find_column("gravity")
     gravity_column.identity = gravity_column.name
     assert gravity_column is not None
     gravity_node = Node(
@@ -298,7 +300,7 @@ def test_function_operations():
 
 
 def test_compound_expressions():
-    planets = opteryx.virtual_datasets.planets.read()
+    planets = virtual_datasets.planets.read()
 
     eight = Node(
         NodeType.LITERAL,
@@ -341,9 +343,9 @@ def test_compound_expressions():
 def test_functions():
     from opteryx.expression.functions import get_catalog
 
-    planets = opteryx.virtual_datasets.planets.read()
+    planets = virtual_datasets.planets.read()
 
-    gravity_column = opteryx.virtual_datasets.planets.schema().find_column("gravity")
+    gravity_column = virtual_datasets.planets.schema().find_column("gravity")
     gravity_column.identity = gravity_column.name
     assert gravity_column is not None
     gravity_node = Node(

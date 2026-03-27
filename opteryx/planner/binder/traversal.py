@@ -6,8 +6,8 @@
 from typing import Tuple
 
 from opteryx.models import Node
-from opteryx.planner.binder.binding_context import BindingContext
 from opteryx.planner.binder.binder import merge_schemas
+from opteryx.planner.binder.binding_context import BindingContext
 from opteryx.planner.logical_planner import LogicalPlan
 
 

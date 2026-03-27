@@ -18,9 +18,8 @@ from orso.tools import random_int, random_string
 from orso.types import OrsoTypes
 
 import opteryx
-from opteryx.utils.formatter import format_sql
-
 from opteryx.models import QueryTelemetry
+from opteryx.utils.formatter import format_sql
 
 
 def random_value(t):
@@ -60,11 +59,25 @@ def generate_condition(table, columns):
         where_operator = random.choice(["==", "<>", "=", "!=", "<", "<=", ">", ">="])
         where_value = f"{str(random_value(where_column.type))}"
     else:
-        return f"{table}.{where_column.name} BETWEEN {str(random_value(where_column.type))} AND {str(random_value(where_column.type))}" 
+        return f"{table}.{where_column.name} BETWEEN {str(random_value(where_column.type))} AND {str(random_value(where_column.type))}"
     return f"{table}.{where_column.name} {where_operator} {where_value}"
 
+
 def generate_random_sql_join(columns1, table1, columns2, table2) -> str:
-    join_type = random.choice(["JOIN", "INNER JOIN", "LEFT JOIN", "LEFT OUTER JOIN", "RIGHT JOIN", "FULL OUTER JOIN", "LEFT ANTI JOIN", "LEFT SEMI JOIN", "ANTI JOIN", "SEMI JOIN"])
+    join_type = random.choice(
+        [
+            "JOIN",
+            "INNER JOIN",
+            "LEFT JOIN",
+            "LEFT OUTER JOIN",
+            "RIGHT JOIN",
+            "FULL OUTER JOIN",
+            "LEFT ANTI JOIN",
+            "LEFT SEMI JOIN",
+            "ANTI JOIN",
+            "SEMI JOIN",
+        ]
+    )
 
     last_value = -1
     this_value = random.random()
@@ -76,7 +89,10 @@ def generate_random_sql_join(columns1, table1, columns2, table2) -> str:
 
         left_column = columns1[random.choice(range(len(columns1)))]
         right_column = columns2[random.choice(range(len(columns2)))]
-        while left_column.type != right_column.type or left_column.type in (OrsoTypes.ARRAY, OrsoTypes.STRUCT):
+        while left_column.type != right_column.type or left_column.type in (
+            OrsoTypes.ARRAY,
+            OrsoTypes.STRUCT,
+        ):
             left_column = columns1[random.choice(range(len(columns1)))]
             right_column = columns2[random.choice(range(len(columns2)))]
 
@@ -88,11 +104,13 @@ def generate_random_sql_join(columns1, table1, columns2, table2) -> str:
     if join_type in ("LEFT ANTI JOIN", "LEFT SEMI JOIN", "ANTI JOIN", "SEMI JOIN"):
         selected_columns = [f"{table1}.{col.name}" for col in columns1 if random.random() < 0.2]
     else:
-        selected_columns = [f"{table1}.{col.name}" for col in columns1 if random.random() < 0.2] + [f"{table2}.{col.name}" for col in columns2 if random.random() < 0.2]
+        selected_columns = [f"{table1}.{col.name}" for col in columns1 if random.random() < 0.2] + [
+            f"{table2}.{col.name}" for col in columns2 if random.random() < 0.2
+        ]
     if len(selected_columns) == 0:
         selected_columns = ["*"]
     select_clause = "SELECT " + ", ".join(selected_columns)
-    
+
     where_clause = "--"
     # Generate a WHERE clause with 70% chance
     if random.random() < 0.3:
@@ -103,12 +121,15 @@ def generate_random_sql_join(columns1, table1, columns2, table2) -> str:
         while random.random() < 0.1:
             linking_condition = random.choice(["AND", "OR", "AND NOT"])
             where_clause += f" {linking_condition} {generate_condition(table1, columns1)}"
-    
-    if join_type not in ("LEFT ANTI JOIN", "LEFT SEMI JOIN", "ANTI JOIN", "SEMI JOIN") and random.random() < 0.3:
+
+    if (
+        join_type not in ("LEFT ANTI JOIN", "LEFT SEMI JOIN", "ANTI JOIN", "SEMI JOIN")
+        and random.random() < 0.3
+    ):
         if where_clause == "--":
             where_clause = " WHERE "
         else:
-            where_clause += f' {random.choice(["AND", "OR", "AND NOT"])} '
+            where_clause += f" {random.choice(['AND', 'OR', 'AND NOT'])} "
         where_clause += generate_condition(table2, columns2)
         # add an abitrary number of additional conditions
         while random.random() < 0.1:
@@ -116,19 +137,22 @@ def generate_random_sql_join(columns1, table1, columns2, table2) -> str:
             where_clause += f" {linking_condition} {generate_condition(table2, columns2)}"
 
     query = f"{select_clause} FROM {table1} {join_type} {table2} ON {join_condition} {where_clause}"
-    
+
     return query
 
-from opteryx import virtual_datasets
+
+from opteryx.managers import virtual_datasets
+
 # Tables to use for fuzzing
 _tables_cache = None
+
 
 def get_tables():
     """Lazy initialization of tables to avoid expensive setup during test collection"""
     global _tables_cache
     if _tables_cache is not None:
         return _tables_cache
-    
+
     _tables_cache = [
         {
             "name": virtual_datasets.planets.schema().name,
@@ -149,14 +173,18 @@ def get_tables():
     ]
     return _tables_cache
 
+
 # Keep old TABLES reference for compatibility but make it lazy
 class LazyTables:
     def __getitem__(self, key):
         return get_tables()[key]
+
     def __iter__(self):
         return iter(get_tables())
+
     def __len__(self):
         return len(get_tables())
+
 
 TABLES = LazyTables()
 
@@ -173,7 +201,9 @@ def test_sql_fuzzing_join(i):
     table2 = TABLES[random.choice(range(len(TABLES)))]
     while table1 == table2:
         table2 = TABLES[random.choice(range(len(TABLES)))]
-    statement = generate_random_sql_join(table1["fields"], table1["name"], table2["fields"], table2["name"])
+    statement = generate_random_sql_join(
+        table1["fields"], table1["name"], table2["fields"], table2["name"]
+    )
     formatted_statement = format_sql(statement)
 
     print(formatted_statement)
@@ -182,12 +212,14 @@ def test_sql_fuzzing_join(i):
     try:
         res = opteryx.query(statement)
         execution_time = time.time() - start_time  # Measure execution time
-        print(f"Shape: {res.shape}, Execution Time: {execution_time:.2f} seconds, Seed: {seed} ({i})")
+        print(
+            f"Shape: {res.shape}, Execution Time: {execution_time:.2f} seconds, Seed: {seed} ({i})"
+        )
         # Additional success criteria checks can be added here
     except Exception as e:
         import traceback
 
-        print(f"\033[0;31mError in Test Cycle {i+1} Seed: {seed} \033[0m: {e}")
+        print(f"\033[0;31mError in Test Cycle {i + 1} Seed: {seed} \033[0m: {e}")
         print(traceback.print_exc())
         # Log failing statement and error for analysis
         raise e
@@ -195,7 +227,6 @@ def test_sql_fuzzing_join(i):
 
 
 if __name__ == "__main__":  # pragma: no cover
-
     for i in range(TEST_CYCLES):
         test_sql_fuzzing_join(i)
 

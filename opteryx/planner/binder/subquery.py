@@ -5,6 +5,7 @@
 
 from typing import Tuple
 
+from opteryx.managers.virtual_datasets import derived
 from opteryx.models import Node
 from opteryx.planner.binder.binding_context import BindingContext
 from orso.schema import RelationSchema
@@ -20,6 +21,7 @@ def visit_comment(self, node: Node, context: BindingContext) -> Tuple[Node, Bind
     """
     from opteryx.connectors import connector_factory
     from opteryx.managers.permissions import can_perform_action
+    from opteryx.managers.virtual_datasets import derived
 
     # Get connector gateway (cached by prefix)
     node.connector = connector_factory(node.object_name, telemetry=context.telemetry)
@@ -38,6 +40,7 @@ def visit_comment(self, node: Node, context: BindingContext) -> Tuple[Node, Bind
 
 def visit_subquery(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
     from opteryx.planner.binder.project import visit_exit
+
     node, context = visit_exit(self, node, context)
 
     # Extract the column names to check for duplicates
@@ -90,8 +93,6 @@ def visit_subquery(self, node: Node, context: BindingContext) -> Tuple[Node, Bin
     context.relations[node.alias] = "subquery"
 
     schema = RelationSchema(name=node.alias, columns=columns)
-
-    from opteryx.virtual_datasets import derived
 
     context.schemas = {"$derived": derived.schema(), node.alias: schema}
     context.relations[node.alias] = "subquery"

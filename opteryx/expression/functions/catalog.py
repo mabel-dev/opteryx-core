@@ -42,7 +42,7 @@ class ResolvedArg:
 
 
 @dataclass(frozen=True)
-class BindingContext:
+class FunctionResolutionContext:
     """Runtime environment for type resolution and overload matching."""
 
     schema: Dict[str, OrsoTypes]  # available column types
@@ -202,7 +202,7 @@ class FunctionCatalog:
         self,
         name: str,
         arg_nodes: list[Node],
-        context: Optional[BindingContext] = None,
+        context: Optional[FunctionResolutionContext] = None,
     ) -> Optional[ResolvedFunction]:
         """Resolve a function call to a specific overload with inferred return type.
 
@@ -512,3 +512,16 @@ def get_catalog() -> FunctionCatalog:
     if _CATALOG is None:
         _CATALOG = FunctionCatalog()
     return _CATALOG
+
+
+def is_function(name: str) -> bool:
+    """Check if the given name is a valid function name."""
+    upper_name = name.upper()
+    if upper_name.startswith("_"):
+        return False
+    return get_catalog().get_definition(upper_name) is not None
+
+
+def functions() -> list[str]:
+    """Return a list of all available function names."""
+    return [f.name for f in get_catalog().list_functions() if not f.name.startswith("_")]

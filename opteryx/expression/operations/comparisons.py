@@ -2,13 +2,10 @@
 
 import numpy
 import pyarrow
-from pyarrow import compute
-
-from opteryx.expression.operations.fastpath_dictionary import (
-    dictionary_fastpath,
-    has_dictionary_candidate,
-)
+from opteryx.expression.operations.fastpath_dictionary import dictionary_fastpath
+from opteryx.expression.operations.fastpath_dictionary import has_dictionary_candidate
 from opteryx.expression.operations.fastpath_telemetry import record_dict_fastpath_hit
+from pyarrow import compute
 
 
 def equal(arr, value, dict_candidate=False):

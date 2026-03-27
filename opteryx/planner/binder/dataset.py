@@ -170,9 +170,7 @@ def visit_function_dataset(
                 column_type = str(column_type).upper()
                 if column_type in special_handling:
                     actual_type, disposition = special_handling[column_type]
-                    schema_column = FlatColumn(
-                        name=name, type=actual_type, disposition=disposition
-                    )
+                    schema_column = FlatColumn(name=name, type=actual_type, disposition=disposition)
                 else:
                     schema_column = FlatColumn(name=name, type=column_type)
                 columns.append(
@@ -286,8 +284,6 @@ def visit_scan(self, node: Node, context: BindingContext) -> Tuple[Node, Binding
     except Exception as e:
         from opteryx.exceptions import DatasetReadError
 
-        raise DatasetReadError(
-            f"Cannot read information for dataset '{node.relation}': {e}"
-        ) from e
+        raise DatasetReadError(f"Cannot read information for dataset '{node.relation}': {e}") from e
 
     return node, context

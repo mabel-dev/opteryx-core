@@ -21,8 +21,8 @@ def get_builtin_utility_functions() -> List[FunctionDefinition]:
     """
     # Local imports to avoid heavy imports at module import time
     import numpy
-    from opteryx.expression.functions.compat import _iterate_single_parameter as _isingle
-    from opteryx.expression.functions.compat import _sort as _sort_factory
+    from opteryx.expression.functions.registrar import _iterate_single_parameter as _isingle
+    from opteryx.expression.functions.registrar import _sort as _sort_factory
 
     _greatest_kernel = _isingle(numpy.nanmax)
     _least_kernel = _isingle(numpy.nanmin)

@@ -10,10 +10,10 @@ from opteryx.expression import NodeType
 from opteryx.expression import get_all_nodes_of_type
 from opteryx.models import Node
 from opteryx.planner.binder.binder import inner_binder
+from opteryx.planner.binder.binding_context import BindingContext
 from opteryx.planner.binder.common import convert_using_to_on
 from opteryx.planner.binder.common import extract_join_fields
 from opteryx.planner.binder.common import get_mismatched_condition_column_types
-from opteryx.planner.binder.binding_context import BindingContext
 from orso.schema import RelationSchema
 from orso.tools import random_string
 from orso.types import OrsoTypes
@@ -67,9 +67,7 @@ def visit_join(self, node: Node, context: BindingContext) -> Tuple[Node, Binding
             for relation_name in node.right_relation_names
             for col in context.schemas[relation_name].column_names
         ]
-        node.using = [
-            Node("temp", value=n) for n in set(left_columns).intersection(right_columns)
-        ]
+        node.using = [Node("temp", value=n) for n in set(left_columns).intersection(right_columns)]
         node.type = "inner"
     # Handle 'using' by converting to a an 'on'
     if node.using:
@@ -81,9 +79,7 @@ def visit_join(self, node: Node, context: BindingContext) -> Tuple[Node, Binding
     if node.on:
         # All conditions have been mapped to 'on' conditions
         comparisons = get_all_nodes_of_type(node.on, (NodeType.COMPARISON_OPERATOR,))
-        if not all(
-            com.value in ("Eq", "NotEq", "Lt", "Gt", "LtEq", "GtEq") for com in comparisons
-        ):
+        if not all(com.value in ("Eq", "NotEq", "Lt", "Gt", "LtEq", "GtEq") for com in comparisons):
             from opteryx.exceptions import UnsupportedSyntaxError
 
             raise UnsupportedSyntaxError("Only JOINs with equals comparisons supported.")
@@ -103,8 +99,7 @@ def visit_join(self, node: Node, context: BindingContext) -> Tuple[Node, Binding
             raise IncompatibleTypesError(**mismatches)
 
         if any(
-            com.left.schema_column.type == OrsoTypes.DECIMAL
-            and com.value not in ("Eq", "NotEq")
+            com.left.schema_column.type == OrsoTypes.DECIMAL and com.value not in ("Eq", "NotEq")
             for com in comparisons
         ):
             from opteryx.exceptions import UnsupportedSyntaxError

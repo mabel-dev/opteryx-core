@@ -11,18 +11,18 @@ zstandard, etc.), so we lazily load those modules on first access.
 """
 
 _MODULES = {
-    "derived": "opteryx.virtual_datasets.derived_data",
-    "no_table": "opteryx.virtual_datasets.no_table_data",
-    "planets": "opteryx.virtual_datasets.planet_data",
-    "variables": "opteryx.virtual_datasets.variables_data",
-    "user": "opteryx.virtual_datasets.user",
+    "derived": "opteryx.managers.virtual_datasets.derived_data",
+    "no_table": "opteryx.managers.virtual_datasets.no_table_data",
+    "planets": "opteryx.managers.virtual_datasets.planet_data",
+    "variables": "opteryx.managers.virtual_datasets.variables_data",
+    "user": "opteryx.managers.virtual_datasets.user",
 }
 
 
 def __getattr__(name: str):
     """Lazily import and return submodules like `planets`, `missions`, etc.
 
-    This allows code to reference `opteryx.virtual_datasets.planets` without
+    This allows code to reference `opteryx.managers.virtual_datasets.planets` without
     importing pyarrow until the dataset module is actually used.
     """
     if name in _MODULES:

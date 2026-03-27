@@ -41,6 +41,7 @@ def visit_union(self, node: Node, context: BindingContext) -> Tuple[Node, Bindin
         node.columns = columns
 
     from opteryx.planner.binder.project import visit_exit
+
     node, context = visit_exit(self, node, context)
     return node, context
 
@@ -65,9 +66,7 @@ def visit_unnest(self, node: Node, context: BindingContext) -> Tuple[Node, Bindi
             schema_column=schema_column,
         )
         # create the schema for the unnested column
-        context.schemas[unnest_schema] = RelationSchema(
-            name=unnest_schema, columns=[schema_column]
-        )
+        context.schemas[unnest_schema] = RelationSchema(name=unnest_schema, columns=[schema_column])
         # reference the new column in the node
         node.columns.append(node.unnest_target)
     else:
@@ -109,9 +108,7 @@ def visit_unnest(self, node: Node, context: BindingContext) -> Tuple[Node, Bindi
         )
 
         # create the schema for the unnested column
-        context.schemas[unnest_schema] = RelationSchema(
-            name=unnest_schema, columns=[schema_column]
-        )
+        context.schemas[unnest_schema] = RelationSchema(name=unnest_schema, columns=[schema_column])
 
         # reference the new column in the node
         node.columns.append(node.unnest_target)

@@ -1,13 +1,10 @@
 """List operations (InList, NotInList)."""
 
 import pyarrow
-
 from opteryx.compiled import vector_ops
 from opteryx.expression.operations.fastpath_constant import _coerce_in_list_values
-from opteryx.expression.operations.fastpath_dictionary import (
-    dictionary_fastpath,
-    has_dictionary_candidate,
-)
+from opteryx.expression.operations.fastpath_dictionary import dictionary_fastpath
+from opteryx.expression.operations.fastpath_dictionary import has_dictionary_candidate
 from opteryx.expression.operations.fastpath_telemetry import record_dict_fastpath_hit
 
 

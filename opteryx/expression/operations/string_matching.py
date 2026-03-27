@@ -2,14 +2,11 @@
 
 import numpy
 import pyarrow
-from pyarrow import compute
-
 from opteryx.compiled import vector_ops
-from opteryx.expression.operations.fastpath_dictionary import (
-    dictionary_fastpath,
-    has_dictionary_candidate,
-)
+from opteryx.expression.operations.fastpath_dictionary import dictionary_fastpath
+from opteryx.expression.operations.fastpath_dictionary import has_dictionary_candidate
 from opteryx.expression.operations.fastpath_telemetry import record_dict_fastpath_hit
+from pyarrow import compute
 
 
 def like(arr, value, dict_candidate=False):
@@ -44,9 +41,7 @@ def ilike(arr, value, dict_candidate=False):
             return fast
         raise RuntimeError("Dictionary fastpath failed for `ILike`.")
     return (
-        compute.match_like(arr, value, ignore_case=True)
-        .to_numpy(False)
-        .astype(dtype=numpy.bool_)
+        compute.match_like(arr, value, ignore_case=True).to_numpy(False).astype(dtype=numpy.bool_)
     )
 
 

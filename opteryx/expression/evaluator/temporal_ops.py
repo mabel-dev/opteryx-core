@@ -1,7 +1,6 @@
 """Temporal (date/timestamp/interval) comparison operations."""
 
 import datetime
-import decimal
 
 import numpy
 import pyarrow as _pa
@@ -9,28 +8,25 @@ from opteryx.exceptions import ColumnReferencedBeforeEvaluationError
 
 from .function_execution import _is_draken_vector
 from .function_execution import apply_bounded_function
-from .type_coercion import (
-    _coerce_date32,
-    _coerce_date32_set,
-    _coerce_float,
-    _coerce_float_set,
-    _coerce_int64,
-    _coerce_int64_set,
-    _coerce_interval,
-    _coerce_str,
-    _coerce_str_set,
-    _coerce_temporal_scalar_for_arrow,
-    _coerce_timestamp,
-    _coerce_timestamp_set,
-    _constant_scalar_value,
-    _dictionary_arrow_type,
-    _dictionary_compare_vector,
-    _is_dictionary_encoded_vector,
-    _is_constant_vector_like,
-    _is_dictionary_encoded_vector,
-    _is_null_as_boolvector,
-    _is_typed_constant_encoded_vector,
-)
+from .type_coercion import _coerce_date32
+from .type_coercion import _coerce_date32_set
+from .type_coercion import _coerce_float
+from .type_coercion import _coerce_float_set
+from .type_coercion import _coerce_int64
+from .type_coercion import _coerce_int64_set
+from .type_coercion import _coerce_interval
+from .type_coercion import _coerce_str
+from .type_coercion import _coerce_str_set
+from .type_coercion import _coerce_temporal_scalar_for_arrow
+from .type_coercion import _coerce_timestamp
+from .type_coercion import _coerce_timestamp_set
+from .type_coercion import _constant_scalar_value
+from .type_coercion import _dictionary_arrow_type
+from .type_coercion import _dictionary_compare_vector
+from .type_coercion import _is_constant_vector_like
+from .type_coercion import _is_dictionary_encoded_vector
+from .type_coercion import _is_null_as_boolvector
+from .type_coercion import _is_typed_constant_encoded_vector
 
 _EPOCH_DATE = datetime.date(1970, 1, 1)
 _EPOCH_DATETIME = datetime.datetime(1970, 1, 1)
@@ -44,6 +40,7 @@ _NEGATED_OPS = {
     "NotInStr": "InStr",
     "NotIInStr": "IInStr",
 }
+
 
 def _int64_temporal_compare(op: str, vec, right, temporal_type):
     from opteryx.compiled.draken.vectors.bool_vector import BoolVector
@@ -89,7 +86,6 @@ def _int64_temporal_compare(op: str, vec, right, temporal_type):
     if op == "InList":
         return vec.in_list(value_set)
     raise NotImplementedError(f"Int64Vector temporal: unsupported op {op!r}")
-
 
 
 def _timestamp_compare(op: str, vec, right):
@@ -142,7 +138,6 @@ def _timestamp_compare(op: str, vec, right):
     raise NotImplementedError(f"TimestampVector: unsupported op {op!r}")
 
 
-
 def _date32_compare(op: str, vec, right):
     from opteryx.compiled.draken.vectors.bool_vector import BoolVector
 
@@ -187,7 +182,6 @@ def _date32_compare(op: str, vec, right):
     raise NotImplementedError(f"Date32Vector: unsupported op {op!r}")
 
 
-
 def _interval_compare(op: str, vec, right):
     from opteryx.compiled.draken.vectors.bool_vector import BoolVector
 
@@ -206,7 +200,6 @@ def _interval_compare(op: str, vec, right):
     if op == "GtEq":
         return vec.greater_than_or_equals(literal)
     raise NotImplementedError(f"IntervalVector: unsupported op {op!r}")
-
 
 
 def _date_minus_date_draken(left_vec, right_vec):
@@ -239,7 +232,6 @@ def _date_minus_date_draken(left_vec, right_vec):
     return vector_from_arrow(_intervals_to_month_day_nano(rows))
 
 
-
 def _date_interval_op_draken(left_vec, right_vec, op):
     from opteryx.expression.intervals import _as_interval_vector
 
@@ -251,5 +243,3 @@ def _date_interval_op_draken(left_vec, right_vec, op):
         date_vec, interval_vec = right_vec, _as_interval_vector(left_vec)
 
     return interval_vec.apply_to_temporal(date_vec, signum)
-
-

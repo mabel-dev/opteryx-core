@@ -75,9 +75,6 @@ ignore = ["SIM105"]
 "opteryx/managers/expression/ops.py" = ["SIM118"]
 "**/third_party/**" = ["SIM115", "SIM110", "SIM109", "SIM108", "SIM105", "SIM103", "SIM102"]
 
-[tool.setuptools.package-data]
-"opteryx.virtual_datasets" = ["*.zst"]
-"opteryx_core.virtual_datasets" = ["*.zst"]
 
 [tool.coverage.run]
 branch = true

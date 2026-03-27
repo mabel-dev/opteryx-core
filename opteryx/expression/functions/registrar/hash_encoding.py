@@ -12,13 +12,13 @@ def get_builtin_hash_encoding_functions() -> list[FunctionDefinition]:
     """Hash, encoding, and random-generation functions."""
 
     # Local imports to avoid top-level import cycles and to keep costs lazy.
-    from opteryx.expression.functions.compat import _iterate_single_parameter as _isingle
     from opteryx.expression.functions.implementations import arithmetic as number_functions
     from opteryx.expression.functions.implementations import text as string_functions
     from opteryx.expression.functions.implementations.text import _md5
     from opteryx.expression.functions.implementations.text import _sha1
     from opteryx.expression.functions.implementations.text import _sha256
     from opteryx.expression.functions.implementations.text import _sha512
+    from opteryx.expression.functions.registrar import _iterate_single_parameter as _isingle
     from opteryx.third_party.cyan4973.xxhash import hash_bytes
 
     # Small wrapper kernels for single-argument stringification/encoding paths.
