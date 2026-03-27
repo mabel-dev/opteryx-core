@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import List
 
+import numpy
+
 # Local implementation imports (kept as late imports inside function if heavy)
 from opteryx.compiled.vector_ops import vector_iif as _vector_iif
 from opteryx.expression.functions import FunctionDefinition
@@ -10,8 +12,6 @@ from opteryx.expression.functions import KernelSpec
 from opteryx.expression.functions import LifecycleSpec
 from opteryx.expression.functions import ParameterSpec
 from opteryx.expression.functions import ReturnSpec
-from opteryx.expression.functions.compat import _coalesce
-from opteryx.expression.functions.compat import select_values
 from opteryx.expression.functions.implementations.logical import (
     array_contains as _lf_array_contains,
 )
@@ -29,6 +29,102 @@ from opteryx.expression.functions.implementations.utility import (
 from opteryx.expression.functions.registrar import _case_return_type
 from opteryx.expression.functions.registrar import _coalesce_return_type
 from orso.types import OrsoTypes
+
+
+def _coalesce(*arrays):
+    """
+    Element-wise coalesce function for multiple numpy arrays.
+    Selects the first non-None item in each row across the input arrays.
+
+    Parameters:
+        arrays: tuple of numpy arrays
+
+    Returns:
+        numpy array with coalesced values
+    """
+    # Start with an array full of None values
+    result = numpy.array(arrays[0], dtype=object)
+
+    mask = result == None
+
+    for arr in arrays[1:]:
+        mask = numpy.array([None if value != value else value for value in result]) == None
+        numpy.copyto(result, arr, where=mask)
+
+    return result
+
+
+def select_values(boolean_arrays, value_arrays):
+    """
+    Build a result array based on boolean conditions and corresponding value arrays.
+
+    Parameters:
+    - boolean_arrays: List[np.ndarray], list of boolean arrays representing conditions.
+    - value_arrays: List[np.ndarray], list of arrays with values corresponding to each condition.
+
+    Returns:
+    - np.ndarray: Result array with selected values or False where no condition is met.
+    """
+
+    def _to_numpy_condition(values, target_length):
+        if hasattr(values, "to_numpy"):
+            arr = values.to_numpy(zero_copy_only=False)
+        elif hasattr(values, "to_pylist"):
+            arr = numpy.asarray(values.to_pylist(), dtype=object)
+        elif isinstance(values, (list, tuple, numpy.ndarray)):
+            arr = numpy.asarray(values)
+        else:
+            arr = numpy.full(target_length, bool(values), dtype=bool)
+
+        if arr.shape == ():
+            arr = numpy.full(target_length, bool(arr.item()), dtype=bool)
+        elif len(arr) == 1 and target_length != 1:
+            arr = numpy.full(target_length, bool(arr[0]), dtype=bool)
+        return arr.astype(bool, copy=False)
+
+    def _to_numpy_values(values, target_length):
+        if hasattr(values, "to_numpy"):
+            arr = values.to_numpy(zero_copy_only=False)
+        elif hasattr(values, "to_pylist"):
+            arr = numpy.asarray(values.to_pylist(), dtype=object)
+        elif isinstance(values, numpy.ndarray):
+            arr = values
+        elif isinstance(values, (list, tuple)):
+            arr = numpy.asarray(values, dtype=object)
+        else:
+            arr = numpy.full(target_length, values, dtype=object)
+
+        if arr.shape == ():
+            arr = numpy.full(target_length, arr.item(), dtype=object)
+        elif len(arr) == 1 and target_length != 1:
+            arr = numpy.full(target_length, arr[0], dtype=object)
+        return arr
+
+    # Ensure the input lists are not empty and have the same length
+    if not boolean_arrays or not value_arrays or len(boolean_arrays) != len(value_arrays):
+        raise ValueError("Input lists must be non-empty and of the same length.")
+
+    first_condition = boolean_arrays[0]
+    if hasattr(first_condition, "__len__"):
+        target_length = len(first_condition)
+    elif hasattr(first_condition, "to_pylist"):
+        target_length = len(first_condition.to_pylist())
+    else:
+        target_length = 1
+
+    # Initialize the result array with False, assuming no condition will be met
+    result = numpy.full(target_length, None, dtype=object)
+
+    # Iterate over pairs of boolean and value arrays
+    for condition, values in zip(reversed(boolean_arrays), reversed(value_arrays)):
+        # Update the result array where the condition is True
+        numpy.putmask(
+            result,
+            _to_numpy_condition(condition, target_length),
+            _to_numpy_values(values, target_length),
+        )
+
+    return result
 
 
 def get_builtin_logical_functions() -> List[FunctionDefinition]:

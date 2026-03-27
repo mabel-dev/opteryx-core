@@ -15,30 +15,23 @@ Main entry points:
 
 import numpy
 import pyarrow
-from orso.types import OrsoTypes
-
 from opteryx.expression.operations import array_ops
 from opteryx.expression.operations import comparisons
 from opteryx.expression.operations import list_ops
 from opteryx.expression.operations import special_ops
 from opteryx.expression.operations import string_matching
-from opteryx.expression.operations.fastpath_constant import (
-    constant_fastpath,
-    has_constant_candidate,
-    supports_constant_fastpath,
-)
-from opteryx.expression.operations.fastpath_dictionary import (
-    has_dictionary_candidate,
-    supports_dictionary_fastpath,
-    supports_dictionary_numeric_fastpath,
-)
-from opteryx.expression.operations.fastpath_telemetry import (
-    get_fastpath_telemetry,
-    record_constant_fastpath_fallback,
-    record_constant_fastpath_hit,
-    reset_fastpath_telemetry,
-)
+from opteryx.expression.operations.fastpath_constant import constant_fastpath
+from opteryx.expression.operations.fastpath_constant import has_constant_candidate
+from opteryx.expression.operations.fastpath_constant import supports_constant_fastpath
+from opteryx.expression.operations.fastpath_dictionary import has_dictionary_candidate
+from opteryx.expression.operations.fastpath_dictionary import supports_dictionary_fastpath
+from opteryx.expression.operations.fastpath_dictionary import supports_dictionary_numeric_fastpath
+from opteryx.expression.operations.fastpath_telemetry import get_fastpath_telemetry
+from opteryx.expression.operations.fastpath_telemetry import record_constant_fastpath_fallback
+from opteryx.expression.operations.fastpath_telemetry import record_constant_fastpath_hit
+from opteryx.expression.operations.fastpath_telemetry import reset_fastpath_telemetry
 from opteryx.expression.operations.type_coercion import to_temporal_array
+from orso.types import OrsoTypes
 
 # Operators that should skip null compression during filtering
 _SKIP_COMPRESSION_OPS = frozenset(
@@ -212,15 +205,14 @@ def _inner_filter_operations(arr, operator, value):
 
     dict_candidate = has_dictionary_candidate(raw_arr)
     constant_candidate = has_constant_candidate(raw_arr)
-    numeric_dict_candidate = (
-        dict_candidate
-        and supports_dictionary_numeric_fastpath(operator)
-    )
+    numeric_dict_candidate = dict_candidate and supports_dictionary_numeric_fastpath(operator)
 
     # Constant-encoded fastpath
     if constant_candidate:
         if not supports_constant_fastpath(operator):
-            raise NotImplementedError(f"Constant motor path does not support operator `{operator}`.")
+            raise NotImplementedError(
+                f"Constant motor path does not support operator `{operator}`."
+            )
 
         fast = constant_fastpath(raw_arr, operator, value)
         if fast is not None:
@@ -230,7 +222,9 @@ def _inner_filter_operations(arr, operator, value):
         raise RuntimeError(f"Constant fastpath failed for `{operator}`.")
 
     # Convert to Arrow if needed for regular operations
-    if hasattr(raw_arr, "to_arrow") and not isinstance(raw_arr, (pyarrow.Array, pyarrow.ChunkedArray)):
+    if hasattr(raw_arr, "to_arrow") and not isinstance(
+        raw_arr, (pyarrow.Array, pyarrow.ChunkedArray)
+    ):
         arr = raw_arr.to_arrow()
     else:
         arr = raw_arr

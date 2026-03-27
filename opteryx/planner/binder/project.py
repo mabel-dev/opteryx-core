@@ -7,12 +7,12 @@ from typing import Tuple
 
 from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.expression import NodeType
+from opteryx.managers.virtual_datasets import derived
 from opteryx.models import LogicalColumn
 from opteryx.models import Node
 from opteryx.planner.binder.binder import inner_binder
 from opteryx.planner.binder.binder import merge_schemas
 from opteryx.planner.binder.binding_context import BindingContext
-from opteryx.virtual_datasets import derived
 from orso.schema import RelationSchema
 
 
@@ -56,9 +56,7 @@ def visit_exit(self, node: Node, context: BindingContext) -> Tuple[Node, Binding
         identities.append(new_col.schema_column.identity)
 
     for select_column in (
-        col
-        for col in node.columns
-        if col.node_type == NodeType.WILDCARD and col.value is not None
+        col for col in node.columns if col.node_type == NodeType.WILDCARD and col.value is not None
     ):
         for column in context.schemas[select_column.value[0]].columns:
             # new_col, _ = inner_binder(column, context)
@@ -129,9 +127,8 @@ def visit_project(self, node: Node, context: BindingContext) -> Tuple[Node, Bind
             if len(except_columns) > 0:
                 from opteryx.exceptions import ColumnNotFoundError
 
-                message = (
-                    f"EXCEPT references mulitple columns that cannot be found - "
-                    + ", ".join(f"'{c}'" for c in except_columns)
+                message = f"EXCEPT references mulitple columns that cannot be found - " + ", ".join(
+                    f"'{c}'" for c in except_columns
                 )
 
                 if len(except_columns) == 1:
@@ -244,8 +241,6 @@ def visit_project(self, node: Node, context: BindingContext) -> Tuple[Node, Bind
     # update the columns attribute, preserving order
     bound_columns = {c.schema_column.identity: c for c in columns}
     node.columns = [bound_columns[c.schema_column.identity] for c in node.columns]
-    node.order_by_columns = [
-        bound_columns[c.schema_column.identity] for c in node.order_by_columns
-    ]
+    node.order_by_columns = [bound_columns[c.schema_column.identity] for c in node.order_by_columns]
 
     return node, context

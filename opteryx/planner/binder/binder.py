@@ -18,7 +18,7 @@ from opteryx.exceptions import InvalidInternalStateError
 from opteryx.exceptions import UnexpectedDatasetReferenceError
 from opteryx.expression import NodeType
 from opteryx.expression.functions import get_catalog as _get_function_catalog
-from opteryx.expression.functions.compat import fixed_value_function
+from opteryx.expression.functions.registrar.constant import fixed_value_function
 from opteryx.models import Node
 from opteryx.planner.binder.binding_context import BindingContext
 from opteryx.planner.binder.operator_map import determine_type
@@ -460,7 +460,7 @@ def inner_binder(node: Node, context: BindingContext) -> Tuple[Node, Any]:
             schemas["$derived"].columns.append(schema_column)
         else:
             # fmt:off
-            from opteryx.planner.binder.binder_visitor import get_mismatched_condition_column_types
+            from opteryx.planner.binder.common import get_mismatched_condition_column_types
 
             # fmt:on
             mismatches = get_mismatched_condition_column_types(node, relaxed=True)

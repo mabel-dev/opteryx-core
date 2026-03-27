@@ -11,9 +11,7 @@ from opteryx.models import Node
 from opteryx.planner.binder.binding_context import BindingContext
 
 
-def visit_show_columns(
-    self, node: Node, context: BindingContext
-) -> Tuple[Node, BindingContext]:
+def visit_show_columns(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
     node.schema = context.schemas[node.relation]
     node.columns = []
     for schema_column in node.schema.columns:

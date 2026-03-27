@@ -8,9 +8,9 @@ from dataclasses import dataclass
 from typing import Any
 from typing import Dict
 
+from opteryx.managers.virtual_datasets import derived
 from opteryx.models import ExecutionContext
 from opteryx.models import QueryTelemetry
-from opteryx.virtual_datasets import derived
 
 
 @dataclass

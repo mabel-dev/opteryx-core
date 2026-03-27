@@ -23,12 +23,12 @@ from opteryx.exceptions import DatasetNotFoundError
 from orso.schema import RelationSchema
 
 WELL_KNOWN_DATASETS = {
-    "$planets": ("opteryx.virtual_datasets.planet_data", True),
-    "$variables": ("opteryx.virtual_datasets.variables_data", True),
-    "$derived": ("opteryx.virtual_datasets.derived_data", False),
-    "$no_table": ("opteryx.virtual_datasets.no_table_data", False),
-    "$telemetry": ("opteryx.virtual_datasets.telemetry", True),
-    "$user": ("opteryx.virtual_datasets.user", True),
+    "$planets": ("opteryx.managers.virtual_datasets.planet_data", True),
+    "$variables": ("opteryx.managers.virtual_datasets.variables_data", True),
+    "$derived": ("opteryx.managers.virtual_datasets.derived_data", False),
+    "$no_table": ("opteryx.managers.virtual_datasets.no_table_data", False),
+    "$telemetry": ("opteryx.managers.virtual_datasets.telemetry", True),
+    "$user": ("opteryx.managers.virtual_datasets.user", True),
 }
 
 

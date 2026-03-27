@@ -21,8 +21,8 @@ from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.expression import NodeType
 from opteryx.expression import format_expression
 from opteryx.expression.binary_operators import binary_operations
-from opteryx.expression.functions.compat import functions as _list_functions
-from opteryx.expression.functions.compat import is_function as _is_function
+from opteryx.expression.functions import functions as _list_functions
+from opteryx.expression.functions import is_function as _is_function
 from opteryx.expression.intervals import MICROSECONDS_PER_DAY
 from opteryx.expression.intervals import MICROSECONDS_PER_HOUR
 from opteryx.expression.intervals import MICROSECONDS_PER_MINUTE
@@ -200,15 +200,15 @@ def _evaluate_timetravel_expression(node, apply_interval_literal_to_now: bool = 
             parameter_values.append(_as_function_parameter_array(value, value_type))
 
         try:
+            from opteryx.expression.functions import FunctionResolutionContext
             from opteryx.expression.functions import get_catalog as _get_catalog
-            from opteryx.expression.functions.catalog import BindingContext
 
             _catalog = _get_catalog()
             _func_def = _catalog.get_definition(node.value)
             if _func_def is None or not _func_def.overloads:
                 raise UnsupportedSyntaxError(f"Unknown function '{node.value}'.")
             resolved = _catalog.resolve(
-                node.value, node.parameters, BindingContext(schema={}, bound_args={})
+                node.value, node.parameters, FunctionResolutionContext(schema={}, bound_args={})
             )
             if resolved is None:
                 raise UnsupportedSyntaxError(f"Unknown function '{node.value}'.")

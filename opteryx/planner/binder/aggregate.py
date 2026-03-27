@@ -8,10 +8,10 @@ from typing import Tuple
 from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.expression import NodeType
 from opteryx.expression import get_all_nodes_of_type
+from opteryx.managers.virtual_datasets import derived
 from opteryx.models import Node
 from opteryx.planner.binder.binder import inner_binder
 from opteryx.planner.binder.binding_context import BindingContext
-from opteryx.virtual_datasets import derived
 
 
 def visit_aggregate_and_group(
@@ -67,9 +67,7 @@ def visit_aggregate_and_group(
     columns_to_keep = columns_to_keep.union(all_identifiers)
 
     for name, schema in list(context.schemas.items()):
-        schema_columns = [
-            column for column in schema.columns if column.identity in columns_to_keep
-        ]
+        schema_columns = [column for column in schema.columns if column.identity in columns_to_keep]
         if schema_columns:
             context.schemas[name].columns = schema_columns
         else:
@@ -82,13 +80,9 @@ def visit_aggregate_and_group(
             )
         if array_agg.order:
             if len(array_agg.order) > 1:
-                raise UnsupportedSyntaxError(
-                    "ARRAY_AGG can only ORDER BY the aggregated column."
-                )
+                raise UnsupportedSyntaxError("ARRAY_AGG can only ORDER BY the aggregated column.")
             if array_agg.order[0][0].current_name != array_agg.parameters[0].current_name:
-                raise UnsupportedSyntaxError(
-                    "ARRAY_AGG can only ORDER BY the aggregated column."
-                )
+                raise UnsupportedSyntaxError("ARRAY_AGG can only ORDER BY the aggregated column.")
 
     # we should always have a derived schema
     if "$derived" not in context.schemas:
@@ -110,6 +104,7 @@ def visit_distinct(self, node: Node, context: BindingContext) -> Tuple[Node, Bin
         # Bind the local columns to physical columns
         node.on, group_contexts = zip(*(inner_binder(col, context) for col in node.on))
         from opteryx.planner.binder.binder import merge_schemas
+
         context.schemas = merge_schemas(*[ctx.schemas for ctx in group_contexts])
         node.columns = get_all_nodes_of_type(node.on, (NodeType.IDENTIFIER,))
 

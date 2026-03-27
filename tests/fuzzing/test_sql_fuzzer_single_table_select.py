@@ -20,7 +20,9 @@ from orso.tools import random_string
 from orso.types import OrsoTypes
 
 import opteryx
+from opteryx.managers import virtual_datasets
 from opteryx.utils.formatter import format_sql
+
 
 def random_value(t):
     if t == OrsoTypes.VARCHAR:
@@ -59,14 +61,15 @@ def generate_condition(columns):
         where_operator = random.choice(["==", "<>", "=", "!=", "<", "<=", ">", ">="])
         where_value = f"{str(random_value(where_column.type))}"
     else:
-        return f"{where_column.name} BETWEEN {str(random_value(where_column.type))} AND {str(random_value(where_column.type))}" 
+        return f"{where_column.name} BETWEEN {str(random_value(where_column.type))} AND {str(random_value(where_column.type))}"
     return f"{where_column.name} {where_operator} {where_value}"
-
 
 
 def generate_random_sql_select(columns, table):
     # Generate a list of column names to select
-    column_list = list(set(random.choices(range(len(columns)), k=max(int(random.random() * len(columns)), 1))))
+    column_list = list(
+        set(random.choices(range(len(columns)), k=max(int(random.random() * len(columns)), 1)))
+    )
     column_list = [columns[i] for i in column_list]
     agg_column = None
     is_count_star = False
@@ -77,9 +80,19 @@ def generate_random_sql_select(columns, table):
         distinct = "DISTINCT " if random.random() < 0.1 else ""
         agg_func = random.choice(["MIN", "MAX", "SUM", "AVG", "COUNT", "COUNT_DISTINCT"])
         agg_column = columns[random.choice(range(len(columns)))]
-        while agg_func in ("SUM", "AVG") and agg_column.type in (OrsoTypes.ARRAY, OrsoTypes.STRUCT, OrsoTypes.VARCHAR, OrsoTypes.BLOB, OrsoTypes.TIMESTAMP, OrsoTypes.DATE):
+        while agg_func in ("SUM", "AVG") and agg_column.type in (
+            OrsoTypes.ARRAY,
+            OrsoTypes.STRUCT,
+            OrsoTypes.VARCHAR,
+            OrsoTypes.BLOB,
+            OrsoTypes.TIMESTAMP,
+            OrsoTypes.DATE,
+        ):
             agg_column = columns[random.choice(range(len(columns)))]
-        while agg_func in ("MIN", "MAX", "COUNT_DISTINCT", "COUNT") and agg_column.type in (OrsoTypes.ARRAY, OrsoTypes.STRUCT):
+        while agg_func in ("MIN", "MAX", "COUNT_DISTINCT", "COUNT") and agg_column.type in (
+            OrsoTypes.ARRAY,
+            OrsoTypes.STRUCT,
+        ):
             agg_column = columns[random.choice(range(len(columns)))]
         select_clause = "SELECT " + distinct + agg_func + "(" + agg_column.name + ")"
 
@@ -118,17 +131,17 @@ def generate_random_sql_select(columns, table):
         select_clause = select_clause + " LIMIT " + str(int(random.random() * 10))
     return select_clause
 
-from opteryx import virtual_datasets
 
 # Tables to use for fuzzing
 _tables_cache = None
+
 
 def get_tables():
     """Lazy initialization of tables to avoid expensive setup during test collection"""
     global _tables_cache
     if _tables_cache is not None:
         return _tables_cache
-    
+
     _tables_cache = [
         {
             "name": virtual_datasets.planets.schema().name,
@@ -137,14 +150,18 @@ def get_tables():
     ]
     return _tables_cache
 
+
 # Keep old TABLES reference for compatibility but make it lazy
 class LazyTables:
     def __getitem__(self, key):
         return get_tables()[key]
+
     def __iter__(self):
         return iter(get_tables())
+
     def __len__(self):
         return len(get_tables())
+
 
 TABLES = LazyTables()
 
@@ -176,14 +193,14 @@ def test_sql_fuzzing_single_table(i):
     except Exception as e:
         import traceback
 
-        print(f"\033[0;31mError in Test Cycle {i+1}\033[0m: {e}")
+        print(f"\033[0;31mError in Test Cycle {i + 1}\033[0m: {e}")
         print(traceback.print_exc())
         # Log failing statement and error for analysis
         raise e
     print()
 
-if __name__ == "__main__":  # pragma: no cover
 
+if __name__ == "__main__":  # pragma: no cover
     for i in range(TEST_CYCLES):
         test_sql_fuzzing_single_table(i)
 

@@ -1,7 +1,6 @@
 """Draken comparison operations."""
 
 import datetime
-import decimal
 
 import numpy
 import pyarrow as _pa
@@ -9,28 +8,26 @@ from opteryx.exceptions import ColumnReferencedBeforeEvaluationError
 
 from .function_execution import _is_draken_vector
 from .function_execution import apply_bounded_function
-from .type_coercion import (
-    _coerce_date32,
-    _coerce_date32_set,
-    _coerce_float,
-    _coerce_float_set,
-    _coerce_int64,
-    _coerce_int64_set,
-    _coerce_interval,
-    _coerce_str,
-    _coerce_str_set,
-    _coerce_temporal_scalar_for_arrow,
-    _coerce_timestamp,
-    _coerce_timestamp_set,
-    _constant_scalar_value,
-    _dictionary_arrow_type,
-    _dictionary_compare_vector,
-    _is_dictionary_encoded_vector,
-    _is_constant_vector_like,
-    _is_dictionary_encoded_vector,
-    _is_null_as_boolvector,
-    _is_typed_constant_encoded_vector,
-)
+from .string_ops import _string_compare
+from .type_coercion import _coerce_date32
+from .type_coercion import _coerce_date32_set
+from .type_coercion import _coerce_float
+from .type_coercion import _coerce_float_set
+from .type_coercion import _coerce_int64
+from .type_coercion import _coerce_int64_set
+from .type_coercion import _coerce_interval
+from .type_coercion import _coerce_str
+from .type_coercion import _coerce_str_set
+from .type_coercion import _coerce_temporal_scalar_for_arrow
+from .type_coercion import _coerce_timestamp
+from .type_coercion import _coerce_timestamp_set
+from .type_coercion import _constant_scalar_value
+from .type_coercion import _dictionary_arrow_type
+from .type_coercion import _dictionary_compare_vector
+from .type_coercion import _is_constant_vector_like
+from .type_coercion import _is_dictionary_encoded_vector
+from .type_coercion import _is_null_as_boolvector
+from .type_coercion import _is_typed_constant_encoded_vector
 
 _EPOCH_DATE = datetime.date(1970, 1, 1)
 _EPOCH_DATETIME = datetime.datetime(1970, 1, 1)
@@ -44,6 +41,7 @@ _NEGATED_OPS = {
     "NotInStr": "InStr",
     "NotIInStr": "IInStr",
 }
+
 
 def _int64_compare(op: str, vec, right):
     from opteryx.compiled.draken.vectors.bool_vector import BoolVector
@@ -89,7 +87,6 @@ def _int64_compare(op: str, vec, right):
     raise NotImplementedError(f"Int64Vector: unsupported op {op!r}")
 
 
-
 def _float64_compare(op: str, vec, right):
     from opteryx.compiled.draken.vectors.bool_vector import BoolVector
 
@@ -126,7 +123,6 @@ def _float64_compare(op: str, vec, right):
     if op == "InList":
         return vec.in_list(value_set)
     raise NotImplementedError(f"Float64Vector: unsupported op {op!r}")
-
 
 
 def _dict_compare(op: str, vec, right):
@@ -237,7 +233,6 @@ def _dict_compare(op: str, vec, right):
     raise NotImplementedError(f"dictionary-encoded vector: unsupported op {op!r}")
 
 
-
 def _constant_compare(op: str, vec, right):
     from opteryx.compiled.draken.vectors.bool_vector import BoolVector
     from opteryx.expression.operations.fastpath_constant import _coerce_in_list_values
@@ -273,7 +268,6 @@ _ARROW_COMPARE_OPS = {
 }
 
 
-
 def _arrow_vector_compare(op: str, vec, right):
     import pyarrow as pa
     import pyarrow.compute as pc
@@ -305,7 +299,6 @@ def _arrow_vector_compare(op: str, vec, right):
         right = scalar
     bool_arr = getattr(pc, pc_op)(arr, right)
     return BoolVector.from_arrow(bool_arr)
-
 
 
 def draken_compare(op: str, left, right, left_schema_type=None, right_schema_type=None):
@@ -509,5 +502,3 @@ def draken_compare(op: str, left, right, left_schema_type=None, right_schema_typ
 
 _DATE_TYPES = frozenset(("Date32Vector", "TimestampVector"))
 _INTERVAL_TYPES = frozenset(("IntervalVector",))
-
-
