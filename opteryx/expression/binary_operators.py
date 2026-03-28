@@ -34,7 +34,7 @@ def ArrowOp(documents, elements) -> pyarrow.Array:
 
     # Function to extract value from a document
     def extract(doc: bytes, elem: Union[bytes, str]) -> Any:
-        value = parser.parse(doc).get(elem)  # type:ignore
+        value = parser.parse(doc).get(elem)  # type: ignore
         if hasattr(value, "as_list"):
             return value.as_list()
         if hasattr(value, "as_dict"):
@@ -63,9 +63,9 @@ def LongArrowOp(documents, elements) -> pyarrow.Array:
         documents = documents.to_numpy(zero_copy_only=False)
 
     def extract(doc: bytes, elem: Union[bytes, str]) -> bytes:
-        value = parser.parse(doc).get(elem)  # type:ignore
+        value = parser.parse(doc).get(elem)  # type: ignore
         if hasattr(value, "mini"):
-            return value.mini  # type:ignore
+            return value.mini  # type: ignore
         return None if value is None else str(value).encode()
 
     try:
@@ -105,9 +105,11 @@ def MapAccessOp(array, key):
     if isinstance(first_element, str):
         return pyarrow.array(
             [
-                None
-                if value is None
-                else (value[index] if -len(value) <= index < len(value) else None)
+                (
+                    None
+                    if value is None
+                    else (value[index] if -len(value) <= index < len(value) else None)
+                )
                 for value in array
             ],
             type=pyarrow.string(),
@@ -116,12 +118,14 @@ def MapAccessOp(array, key):
     if isinstance(first_element, (bytes, bytearray, memoryview)):
         return pyarrow.array(
             [
-                None
-                if value is None
-                else (
-                    bytes(value)[index : index + 1]
-                    if -len(bytes(value)) <= index < len(bytes(value))
-                    else None
+                (
+                    None
+                    if value is None
+                    else (
+                        bytes(value)[index : index + 1]
+                        if -len(bytes(value)) <= index < len(bytes(value))
+                        else None
+                    )
                 )
                 for value in array
             ],

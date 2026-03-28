@@ -180,7 +180,7 @@ class FunctionDatasetNode(ReaderNode):
     def execute(self, morsel, **kwargs) -> Generator:
         try:
             start_time = time.time_ns()
-            result_morsel = DATASET_FUNCTIONS[self.function](**self.parameters)  # type:ignore
+            result_morsel = DATASET_FUNCTIONS[self.function](**self.parameters)  # type: ignore
             self.readings["time_evaluate_dataset"] += time.time_ns() - start_time
         except TypeError as err:  # pragma: no cover
             if str(err).startswith("_unnest() takes 2"):

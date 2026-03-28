@@ -12,8 +12,8 @@ from typing import Literal
 from typing import Optional
 from typing import Tuple
 
-from opteryx.vector_types import is_numeric_vector_type
-from opteryx.vector_types import resolve_node_type
+from opteryx.vectors.vector_types import is_numeric_vector_type
+from opteryx.vectors.vector_types import resolve_node_type
 from orso.types import OrsoTypes
 
 Node = Any  # AST node type (duck-typed; no import to avoid circular deps)

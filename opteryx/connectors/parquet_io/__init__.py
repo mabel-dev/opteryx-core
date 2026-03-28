@@ -18,7 +18,7 @@ Usage
 ::
 
     from opteryx.connectors.io_systems.local_filesystem import OpteryxLocalFileSystem
-    from opteryx.parquet_io import fetch_columns
+    from opteryx.connectors.parquet_io import fetch_columns
 
     fs = OpteryxLocalFileSystem()
 
@@ -28,14 +28,14 @@ Usage
     # columns is a dict: {"user_id": Vector, "revenue": Vector}
 """
 
-from opteryx.parquet_io.cache import InMemoryParquetCache
-from opteryx.parquet_io.cache import ParquetCache
-from opteryx.parquet_io.predicates import extract_predicate_stats
-from opteryx.parquet_io.predicates import row_group_may_satisfy
-from opteryx.parquet_io.reader import ListColumnError
-from opteryx.parquet_io.reader import fetch_columns
-from opteryx.parquet_io.reader import fetch_footer
-from opteryx.parquet_io.reader import iter_row_groups
+from opteryx.connectors.parquet_io.cache import InMemoryParquetCache
+from opteryx.connectors.parquet_io.cache import ParquetCache
+from opteryx.connectors.parquet_io.predicates import extract_predicate_stats
+from opteryx.connectors.parquet_io.predicates import row_group_may_satisfy
+from opteryx.connectors.parquet_io.reader import ListColumnError
+from opteryx.connectors.parquet_io.reader import fetch_columns
+from opteryx.connectors.parquet_io.reader import fetch_footer
+from opteryx.connectors.parquet_io.reader import iter_row_groups
 
 __all__ = [
     "fetch_footer",

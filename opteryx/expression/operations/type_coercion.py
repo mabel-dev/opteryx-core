@@ -46,9 +46,12 @@ def to_temporal_array(values, source_type, target_type):
                 ):
                     return pyarrow.array(
                         [
-                            None
-                            if v is None
-                            else _dt.datetime(1970, 1, 1) + _dt.timedelta(days=int(v) // 1_000_000)
+                            (
+                                None
+                                if v is None
+                                else _dt.datetime(1970, 1, 1)
+                                + _dt.timedelta(days=int(v) // 1_000_000)
+                            )
                             for v in raw_values
                         ],
                         type=pyarrow.timestamp("us"),

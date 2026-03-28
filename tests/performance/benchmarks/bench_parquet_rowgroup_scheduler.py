@@ -20,9 +20,9 @@ sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 import pytest
 
 from opteryx.connectors.io_systems.local_filesystem import OpteryxLocalFileSystem
-from opteryx.parquet_io import InMemoryParquetCache
-from opteryx.parquet_io import fetch_footer
-from opteryx.parquet_io import reader
+from opteryx.connectors.parquet_io import InMemoryParquetCache
+from opteryx.connectors.parquet_io import fetch_footer
+from opteryx.connectors.parquet_io import reader
 
 
 DATASET_GLOBS = [

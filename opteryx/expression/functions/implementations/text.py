@@ -29,8 +29,8 @@ from opteryx.compiled.vector_ops import vector_string_length
 from opteryx.compiled.vector_ops import vector_string_slice_left
 from opteryx.compiled.vector_ops import vector_string_slice_right
 from opteryx.compiled.vector_ops import vector_trim
-from opteryx.embeddings import get_embedding_provider
 from opteryx.exceptions import InvalidFunctionParameterError
+from opteryx.vectors.embeddings import get_embedding_provider
 from pyarrow import compute
 
 """Text and encoding function kernels.

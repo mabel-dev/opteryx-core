@@ -28,8 +28,8 @@ from opteryx.planner.logical_planner import logical_planner_builders
 from opteryx.planner.logical_planner.logical_planner_rewriter import decompose_aggregates
 from opteryx.third_party.travers import Graph
 from opteryx.utils import dnf
-from opteryx.vector_types import get_vector_source_identifier
-from opteryx.vector_types import node_is_vector_query_expression
+from opteryx.vectors.vector_types import get_vector_source_identifier
+from opteryx.vectors.vector_types import node_is_vector_query_expression
 from orso.tools import random_string
 from orso.types import OrsoTypes
 

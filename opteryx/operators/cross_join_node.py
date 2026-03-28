@@ -158,7 +158,7 @@ class CrossJoinNode(JoinNode):
 
         if join_leg == "right":
             if morsel == EOS:
-                right_table = pyarrow.concat_tables(self.right_buffer, promote_options="none")  # type:ignore
+                right_table = pyarrow.concat_tables(self.right_buffer, promote_options="none")  # type: ignore
                 self.right_buffer = None
                 yield from _cross_join(self.left_relation, right_table)
                 yield EOS

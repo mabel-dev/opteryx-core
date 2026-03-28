@@ -6,6 +6,7 @@ import numpy
 import pyarrow as _pa
 from opteryx.exceptions import ColumnReferencedBeforeEvaluationError
 
+from .arithmetic import _eval_binary_op_draken
 from .comparisons import draken_compare
 from .function_execution import _is_draken_vector
 from .function_execution import apply_bounded_function

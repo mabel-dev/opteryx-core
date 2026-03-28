@@ -35,15 +35,15 @@ from typing import Generator
 import numpy
 import pyarrow
 from opteryx.compiled.draken.morsels.morsel import Morsel
+from opteryx.connectors.parquet_io import InMemoryParquetCache
+from opteryx.connectors.parquet_io import fetch_columns
+from opteryx.connectors.parquet_io import fetch_footer
+from opteryx.connectors.parquet_io import iter_row_groups
+from opteryx.connectors.parquet_io.predicates import extract_predicate_stats
 from opteryx.expression import NodeType
 from opteryx.expression import get_all_nodes_of_type
 from opteryx.models import Node
 from opteryx.models import QueryProperties
-from opteryx.parquet_io import InMemoryParquetCache
-from opteryx.parquet_io import fetch_columns
-from opteryx.parquet_io import fetch_footer
-from opteryx.parquet_io import iter_row_groups
-from opteryx.parquet_io.predicates import extract_predicate_stats
 from opteryx.utils.parquet_decoder import parquet_decoder
 from orso.schema import convert_orso_schema_to_arrow_schema
 from orso.tools import random_string

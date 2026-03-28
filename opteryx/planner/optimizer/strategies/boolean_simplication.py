@@ -268,9 +268,11 @@ def update_expression_tree(node: LogicalPlanNode, telemetry: QueryTelemetry):
     node.right = None if node.right is None else update_expression_tree(node.right, telemetry)
     if node.parameters:
         node.parameters = [
-            parameter
-            if not isinstance(parameter, Node)
-            else update_expression_tree(parameter, telemetry)
+            (
+                parameter
+                if not isinstance(parameter, Node)
+                else update_expression_tree(parameter, telemetry)
+            )
             for parameter in node.parameters
         ]
 

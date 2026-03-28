@@ -6,8 +6,12 @@ import numpy
 import pyarrow as _pa
 from opteryx.exceptions import ColumnReferencedBeforeEvaluationError
 
+from .comparisons import _DATE_TYPES
+from .comparisons import _INTERVAL_TYPES
 from .function_execution import _is_draken_vector
 from .function_execution import apply_bounded_function
+from .temporal_ops import _date_interval_op_draken
+from .temporal_ops import _date_minus_date_draken
 from .type_coercion import _coerce_date32
 from .type_coercion import _coerce_date32_set
 from .type_coercion import _coerce_float
@@ -43,6 +47,8 @@ _NEGATED_OPS = {
 
 
 def _eval_binary_op_draken(node, morsel):
+    from .evaluation import _eval_value
+
     op = node.value
     left = _eval_value(node.left, morsel)
     right = _eval_value(node.right, morsel)

@@ -122,7 +122,6 @@ from .sort_node import SortNode  # order by selected columns
 from .shuffle_node import ShuffleNode  # hash shuffle partitioning
 from .union_node import UnionNode
 
-
 __all__ = [
     "BasePlanNode",
     "JoinNode",

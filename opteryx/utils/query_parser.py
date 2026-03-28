@@ -305,11 +305,15 @@ def parse_query_info(sql: str) -> Dict[str, Any]:
         "is_read": query_type in reader_actions,
         "is_mutation": query_type in mutation_actions,
         "is_ddl": query_type in ddl_actions,
-        "permission_required": "owner"
-        if query_type in ddl_actions
-        else "writer"
-        if query_type in mutation_actions
-        else "reader"
-        if query_type in reader_actions
-        else "denied",
+        "permission_required": (
+            "owner"
+            if query_type in ddl_actions
+            else (
+                "writer"
+                if query_type in mutation_actions
+                else "reader"
+                if query_type in reader_actions
+                else "denied"
+            )
+        ),
     }
