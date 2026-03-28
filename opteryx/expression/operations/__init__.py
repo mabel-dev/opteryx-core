@@ -221,6 +221,42 @@ def _inner_filter_operations(arr, operator, value):
         record_constant_fastpath_fallback()
         raise RuntimeError(f"Constant fastpath failed for `{operator}`.")
 
+    # InStr fast path: use StringVector.contains() directly, bypassing Arrow conversion.
+    # Handles dict-encoded, dense Draken, and Arrow arrays uniformly.
+    if operator in ("InStr", "NotInStr", "IInStr", "NotIInStr"):
+        from opteryx.compiled.draken.interop.arrow import vector_from_arrow
+        from opteryx.expression.operations.fastpath_dictionary import dictionary_fastpath
+        from opteryx.expression.operations.fastpath_telemetry import record_dict_fastpath_hit
+
+        ignore_case = operator in ("IInStr", "NotIInStr")
+        negate = operator in ("NotInStr", "NotIInStr")
+        raw_value = value[0] if hasattr(value, "__len__") and len(value) == 1 else value
+        if isinstance(raw_value, bytes):
+            needle = raw_value
+        else:
+            needle = str(raw_value).encode("utf-8")
+
+        if dict_candidate:
+            fast = dictionary_fastpath(raw_arr, operator, raw_value)
+            if fast is not None:
+                record_dict_fastpath_hit()
+                return fast
+
+        # Convert to StringVector if needed
+        if hasattr(raw_arr, "contains"):
+            vec = raw_arr
+        elif hasattr(raw_arr, "to_arrow"):
+            vec = vector_from_arrow(raw_arr.to_arrow())
+        elif isinstance(raw_arr, (pyarrow.Array, pyarrow.ChunkedArray)):
+            vec = vector_from_arrow(raw_arr)
+        else:
+            vec = vector_from_arrow(pyarrow.array(list(raw_arr), type=pyarrow.string()))
+
+        result = vec.contains(needle, ignore_case)
+        if negate:
+            result = result.not_vector()
+        return result
+
     # Convert to Arrow if needed for regular operations
     if hasattr(raw_arr, "to_arrow") and not isinstance(
         raw_arr, (pyarrow.Array, pyarrow.ChunkedArray)
@@ -250,14 +286,6 @@ def _inner_filter_operations(arr, operator, value):
         return list_ops.in_list(arr, value, dict_candidate)
     if operator == "NotInList":
         return list_ops.not_in_list(arr, value, dict_candidate)
-    if operator == "InStr":
-        return string_matching.in_string(arr, value)
-    if operator == "NotInStr":
-        return string_matching.not_in_string(arr, value)
-    if operator == "IInStr":
-        return string_matching.in_string_case_insensitive(arr, value)
-    if operator == "NotIInStr":
-        return string_matching.not_in_string_case_insensitive(arr, value)
     if operator == "Like":
         return string_matching.like(arr, value, dict_candidate)
     if operator == "NotLike":

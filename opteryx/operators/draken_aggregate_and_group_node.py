@@ -165,7 +165,7 @@ class DrakenAggregateAndGroupNode(BasePlanNode):
         )
 
         # Store HAVING condition if provided by optimizer
-        self._having_condition = parameters.get("having_condition", None)
+        self._having_condition = parameters.get("having_condition")
 
     @property
     def config(self):  # pragma: no cover

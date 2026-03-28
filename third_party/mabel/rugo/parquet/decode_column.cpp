@@ -218,17 +218,31 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
 
         RUGO_TEL_START(_dp_t0);
         if (result.type == "int32") {
+          int32_t safe_count = std::min(dict_size, (int32_t)((dict_end - dict_data_ptr) / 4));
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+          result.dict_int32_values.resize(safe_count);
+          std::memcpy(result.dict_int32_values.data(), dict_data_ptr, safe_count * sizeof(int32_t));
+          dict_data_ptr += safe_count * 4;
+#else
           result.dict_int32_values.reserve(dict_size);
-          for (int32_t i = 0; i < dict_size && dict_data_ptr + 4 <= dict_end; i++) {
+          for (int32_t i = 0; i < safe_count; i++) {
             result.dict_int32_values.push_back(ReadLE32(dict_data_ptr));
             dict_data_ptr += 4;
           }
+#endif
         } else if (result.type == "int64") {
+          int32_t safe_count = std::min(dict_size, (int32_t)((dict_end - dict_data_ptr) / 8));
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+          result.dict_int64_values.resize(safe_count);
+          std::memcpy(result.dict_int64_values.data(), dict_data_ptr, safe_count * sizeof(int64_t));
+          dict_data_ptr += safe_count * 8;
+#else
           result.dict_int64_values.reserve(dict_size);
-          for (int32_t i = 0; i < dict_size && dict_data_ptr + 8 <= dict_end; i++) {
+          for (int32_t i = 0; i < safe_count; i++) {
             result.dict_int64_values.push_back(ReadLE64(dict_data_ptr));
             dict_data_ptr += 8;
           }
+#endif
         } else if (result.type == "byte_array") {
           // Build a flat arena: one allocation for all dict string bytes,
           // plus offset/length arrays — no per-entry std::string heap alloc.
@@ -247,17 +261,31 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
             dict_data_ptr += length;
           }
         } else if (result.type == "float32") {
+          int32_t safe_count = std::min(dict_size, (int32_t)((dict_end - dict_data_ptr) / 4));
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+          result.dict_float32_values.resize(safe_count);
+          std::memcpy(result.dict_float32_values.data(), dict_data_ptr, safe_count * sizeof(float));
+          dict_data_ptr += safe_count * 4;
+#else
           result.dict_float32_values.reserve(dict_size);
-          for (int32_t i = 0; i < dict_size && dict_data_ptr + 4 <= dict_end; i++) {
+          for (int32_t i = 0; i < safe_count; i++) {
             result.dict_float32_values.push_back(ReadFloat32(dict_data_ptr));
             dict_data_ptr += 4;
           }
+#endif
         } else if (result.type == "float64") {
+          int32_t safe_count = std::min(dict_size, (int32_t)((dict_end - dict_data_ptr) / 8));
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+          result.dict_float64_values.resize(safe_count);
+          std::memcpy(result.dict_float64_values.data(), dict_data_ptr, safe_count * sizeof(double));
+          dict_data_ptr += safe_count * 8;
+#else
           result.dict_float64_values.reserve(dict_size);
-          for (int32_t i = 0; i < dict_size && dict_data_ptr + 8 <= dict_end; i++) {
+          for (int32_t i = 0; i < safe_count; i++) {
             result.dict_float64_values.push_back(ReadFloat64(dict_data_ptr));
             dict_data_ptr += 8;
           }
+#endif
         }
         RUGO_TEL_ACCUM(rugo_tel::dict_parse_s, _dp_t0);
       }
@@ -319,6 +347,26 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
     std::unordered_map<uint32_t, int32_t> float32_dict_map;
     std::unordered_map<uint64_t, int32_t> float64_dict_map;
 
+    // ── Tier 1A: Pre-reserve output vectors ────────────────────────────
+    // total_needed is known from column metadata; reserve once to eliminate
+    // incremental reallocation across pages.
+    if (total_needed > 0) {
+      const size_t tn = static_cast<size_t>(total_needed);
+      if (dict_size > 0) {
+        result.dict_indices.reserve(tn);
+      } else if (result.type == "int32") {
+        result.int32_values.reserve(tn);
+      } else if (result.type == "int64") {
+        result.int64_values.reserve(tn);
+      } else if (result.type == "float32") {
+        result.float32_values.reserve(tn);
+      } else if (result.type == "float64") {
+        result.float64_values.reserve(tn);
+      } else if (result.type == "boolean") {
+        result.boolean_values.reserve(tn);
+      }
+    }
+
     int32_t page_row_offset = 0;
     std::vector<uint8_t> decoded_row_mask;
     if (row_mask != nullptr) {
@@ -352,9 +400,20 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
 
       // ── Row-mask page skipping ──────────────────────────────────────
       if (row_mask != nullptr) {
+        // Tier 1D: Word-at-a-time scan for any selected row in this page.
+        const uint8_t* mp = row_mask + page_row_offset;
+        const size_t pv = static_cast<size_t>(page_values);
         bool any_selected = false;
-        for (int32_t _i = 0; _i < page_values && !any_selected; ++_i) {
-          if (row_mask[page_row_offset + _i]) any_selected = true;
+        size_t si = 0;
+        for (; si + 8 <= pv; si += 8) {
+          uint64_t w;
+          std::memcpy(&w, mp + si, 8);
+          if (w) { any_selected = true; break; }
+        }
+        if (!any_selected) {
+          for (; si < pv; ++si) {
+            if (mp[si]) { any_selected = true; break; }
+          }
         }
         if (!any_selected) {
           // No selected rows in this page: skip decompression entirely.
@@ -364,10 +423,10 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
           ++result.pages_skipped;
           continue;
         }
-        // Page has selections: record which of its rows are wanted.
-        for (int32_t _i = 0; _i < page_values; ++_i) {
-          decoded_row_mask.push_back(row_mask[page_row_offset + _i]);
-        }
+        // Tier 1E: Bulk copy mask bytes instead of per-element push_back.
+        size_t old_sz = decoded_row_mask.size();
+        decoded_row_mask.resize(old_sz + pv);
+        std::memcpy(decoded_row_mask.data() + old_sz, mp, pv);
         page_row_offset += page_values;
       }
       // ────────────────────────────────────────────────────────────────
@@ -500,13 +559,29 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
           if (decoded != present_count) return result; }
 
         RUGO_TEL_START(_vx_t0);
+
+        // ── Tier 1B helper: batch bounds-check + insert for dict indices ──
+        // Hoists the per-element range check into a single min/max scan
+        // (auto-vectorizable), then uses bulk insert instead of push_back.
+        auto batch_append_dict_indices = [&](const std::vector<int32_t>& idx_vec,
+                                             int32_t dict_sz) -> bool {
+          if (idx_vec.empty()) return true;
+          int32_t lo = idx_vec[0], hi = idx_vec[0];
+          for (size_t i = 1; i < idx_vec.size(); ++i) {
+            int32_t v = idx_vec[i];
+            if (v < lo) lo = v;
+            if (v > hi) hi = v;
+          }
+          if (lo < 0 || hi >= dict_sz) return false;
+          result.dict_indices.insert(result.dict_indices.end(),
+                                     idx_vec.begin(), idx_vec.end());
+          return true;
+        };
+
         if (result.type == "int32") {
           if (int32_dict_mode) {
-            result.dict_indices.reserve(result.dict_indices.size() + indices.size());
-            for (int32_t idx : indices) {
-              if (idx < 0 || idx >= (int32_t)result.dict_int32_values.size()) return result;
-              result.dict_indices.push_back(idx);
-            }
+            if (!batch_append_dict_indices(indices, (int32_t)result.dict_int32_values.size()))
+              return result;
           } else {
             int32_t n = (int32_t)indices.size();
             if (result.ext_int32) {
@@ -530,11 +605,8 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
           }
         } else if (result.type == "int64") {
           if (int64_dict_mode) {
-            result.dict_indices.reserve(result.dict_indices.size() + indices.size());
-            for (int32_t idx : indices) {
-              if (idx < 0 || idx >= (int32_t)result.dict_int64_values.size()) return result;
-              result.dict_indices.push_back(idx);
-            }
+            if (!batch_append_dict_indices(indices, (int32_t)result.dict_int64_values.size()))
+              return result;
           } else {
             int32_t n = (int32_t)indices.size();
             if (result.ext_int64) {
@@ -558,18 +630,12 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
           }
         } else if (result.type == "byte_array") {
           // Store raw indices; arena dict is already in result.string_dict_*.
-          result.dict_indices.reserve(result.dict_indices.size() + indices.size());
-          for (int32_t idx : indices) {
-            if (idx < 0 || idx >= (int32_t)result.string_dict_lens.size()) return result;
-            result.dict_indices.push_back(idx);
-          }
+          if (!batch_append_dict_indices(indices, (int32_t)result.string_dict_lens.size()))
+            return result;
         } else if (result.type == "float32") {
           if (float32_dict_mode) {
-            result.dict_indices.reserve(result.dict_indices.size() + indices.size());
-            for (int32_t idx : indices) {
-              if (idx < 0 || idx >= (int32_t)result.dict_float32_values.size()) return result;
-              result.dict_indices.push_back(idx);
-            }
+            if (!batch_append_dict_indices(indices, (int32_t)result.dict_float32_values.size()))
+              return result;
           } else {
             int32_t n = (int32_t)indices.size();
             if (result.ext_float32) {
@@ -593,11 +659,8 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
           }
         } else if (result.type == "float64") {
           if (float64_dict_mode) {
-            result.dict_indices.reserve(result.dict_indices.size() + indices.size());
-            for (int32_t idx : indices) {
-              if (idx < 0 || idx >= (int32_t)result.dict_float64_values.size()) return result;
-              result.dict_indices.push_back(idx);
-            }
+            if (!batch_append_dict_indices(indices, (int32_t)result.dict_float64_values.size()))
+              return result;
           } else {
             int32_t n = (int32_t)indices.size();
             if (result.ext_float64) {
@@ -658,12 +721,17 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
               std::copy(page_ints.begin(), page_ints.end(), result.ext_int32 + result.ext_written);
               result.ext_written += (int32_t)page_ints.size();
             } else {
+              int32_t safe_count = std::min(present_count, (int32_t)((data_end - data_ptr) / 4));
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+              std::memcpy(result.ext_int32 + result.ext_written, data_ptr, safe_count * sizeof(int32_t));
+#else
               int32_t* edst = result.ext_int32 + result.ext_written;
-              for (int32_t i = 0; i < present_count && data_ptr + 4 <= data_end; i++) {
-                *edst++ = ReadLE32(data_ptr);
-                data_ptr += 4;
+              for (int32_t i = 0; i < safe_count; i++) {
+                *edst++ = ReadLE32(data_ptr + i * 4);
               }
-              result.ext_written += present_count;
+#endif
+              data_ptr += safe_count * 4;
+              result.ext_written += safe_count;
             }
           } else {
             if (page_encoding == 4) {
@@ -674,10 +742,19 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
               result.int32_values.insert(result.int32_values.end(),
                                           page_ints.begin(), page_ints.end());
             } else {
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+              // LE bulk copy: on-disk int32 LE layout matches in-memory layout.
+              int32_t safe_count = std::min(present_count, (int32_t)((data_end - data_ptr) / 4));
+              size_t old_sz = result.int32_values.size();
+              result.int32_values.resize(old_sz + safe_count);
+              std::memcpy(result.int32_values.data() + old_sz, data_ptr, safe_count * sizeof(int32_t));
+              data_ptr += safe_count * 4;
+#else
               for (int32_t i = 0; i < present_count && data_ptr + 4 <= data_end; i++) {
                 result.int32_values.push_back(ReadLE32(data_ptr));
                 data_ptr += 4;
               }
+#endif
             }
           }
         } else if (result.type == "int64") {
@@ -712,12 +789,17 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
               std::copy(page_ints.begin(), page_ints.end(), result.ext_int64 + result.ext_written);
               result.ext_written += (int32_t)page_ints.size();
             } else {
+              int32_t safe_count = std::min(present_count, (int32_t)((data_end - data_ptr) / 8));
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+              std::memcpy(result.ext_int64 + result.ext_written, data_ptr, safe_count * sizeof(int64_t));
+#else
               int64_t* edst = result.ext_int64 + result.ext_written;
-              for (int32_t i = 0; i < present_count && data_ptr + 8 <= data_end; i++) {
-                *edst++ = ReadLE64(data_ptr);
-                data_ptr += 8;
+              for (int32_t i = 0; i < safe_count; i++) {
+                *edst++ = ReadLE64(data_ptr + i * 8);
               }
-              result.ext_written += present_count;
+#endif
+              data_ptr += safe_count * 8;
+              result.ext_written += safe_count;
             }
           } else {
             if (page_encoding == 4) {
@@ -728,10 +810,18 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
               result.int64_values.insert(result.int64_values.end(),
                                           page_ints.begin(), page_ints.end());
             } else {
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+              int32_t safe_count = std::min(present_count, (int32_t)((data_end - data_ptr) / 8));
+              size_t old_sz = result.int64_values.size();
+              result.int64_values.resize(old_sz + safe_count);
+              std::memcpy(result.int64_values.data() + old_sz, data_ptr, safe_count * sizeof(int64_t));
+              data_ptr += safe_count * 8;
+#else
               for (int32_t i = 0; i < present_count && data_ptr + 8 <= data_end; i++) {
                 result.int64_values.push_back(ReadLE64(data_ptr));
                 data_ptr += 8;
               }
+#endif
             }
           }
         } else if (result.type == "byte_array") {
@@ -830,17 +920,30 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
               result.dict_indices.push_back(code);
             }
           } else if (result.ext_float32) {
+            int32_t safe_count = std::min(present_count, (int32_t)((data_end - data_ptr) / 4));
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+            std::memcpy(result.ext_float32 + result.ext_written, data_ptr, safe_count * sizeof(float));
+#else
             float* edst = result.ext_float32 + result.ext_written;
-            for (int32_t i = 0; i < present_count && data_ptr + 4 <= data_end; i++) {
-              *edst++ = ReadFloat32(data_ptr);
-              data_ptr += 4;
+            for (int32_t i = 0; i < safe_count; i++) {
+              *edst++ = ReadFloat32(data_ptr + i * 4);
             }
-            result.ext_written += present_count;
+#endif
+            data_ptr += safe_count * 4;
+            result.ext_written += safe_count;
           } else {
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+            int32_t safe_count = std::min(present_count, (int32_t)((data_end - data_ptr) / 4));
+            size_t old_sz = result.float32_values.size();
+            result.float32_values.resize(old_sz + safe_count);
+            std::memcpy(result.float32_values.data() + old_sz, data_ptr, safe_count * sizeof(float));
+            data_ptr += safe_count * 4;
+#else
             for (int32_t i = 0; i < present_count && data_ptr + 4 <= data_end; i++) {
               result.float32_values.push_back(ReadFloat32(data_ptr));
               data_ptr += 4;
             }
+#endif
           }
         } else if (result.type == "float64") {
           if (float64_dict_mode) {
@@ -867,17 +970,30 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
               result.dict_indices.push_back(code);
             }
           } else if (result.ext_float64) {
+            int32_t safe_count = std::min(present_count, (int32_t)((data_end - data_ptr) / 8));
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+            std::memcpy(result.ext_float64 + result.ext_written, data_ptr, safe_count * sizeof(double));
+#else
             double* edst = result.ext_float64 + result.ext_written;
-            for (int32_t i = 0; i < present_count && data_ptr + 8 <= data_end; i++) {
-              *edst++ = ReadFloat64(data_ptr);
-              data_ptr += 8;
+            for (int32_t i = 0; i < safe_count; i++) {
+              *edst++ = ReadFloat64(data_ptr + i * 8);
             }
-            result.ext_written += present_count;
+#endif
+            data_ptr += safe_count * 8;
+            result.ext_written += safe_count;
           } else {
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+            int32_t safe_count = std::min(present_count, (int32_t)((data_end - data_ptr) / 8));
+            size_t old_sz = result.float64_values.size();
+            result.float64_values.resize(old_sz + safe_count);
+            std::memcpy(result.float64_values.data() + old_sz, data_ptr, safe_count * sizeof(double));
+            data_ptr += safe_count * 8;
+#else
             for (int32_t i = 0; i < present_count && data_ptr + 8 <= data_end; i++) {
               result.float64_values.push_back(ReadFloat64(data_ptr));
               data_ptr += 8;
             }
+#endif
           }
         }
       }
@@ -892,6 +1008,7 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
     // If a row_mask was supplied, filter all accumulated output vectors down
     // to only the K selected rows.  Pages with zero selections were already
     // skipped above; here we handle partial selections within decoded pages.
+    RUGO_TEL_START(_mf_t0);
     if (row_mask != nullptr && !decoded_row_mask.empty()) {
       const int32_t total_decoded = (int32_t)decoded_row_mask.size();
       int32_t K = 0;
@@ -1002,6 +1119,7 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
       total_collected = K;
     }
     // ── End post-loop row-mask filter ──────────────────────────────────────
+    RUGO_TEL_ACCUM(rugo_tel::mask_filter_s, _mf_t0);
 
     result.num_rows = total_collected;
 
@@ -1029,6 +1147,7 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
     result.def_levels = all_def_levels;  // keep a copy; move would invalidate the loop below
 
     // Build validity bitmap from accumulated definition levels.
+    { RUGO_TEL_START(_vb_t0);
     if (!all_def_levels.empty()) {
       int32_t total_rows = (int32_t)all_def_levels.size();
       int32_t bitmap_bytes = (total_rows + 7) / 8;
@@ -1036,12 +1155,12 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
 
       int32_t max_def = target_col->max_definition_level;
       for (int32_t i = 0; i < total_rows; i++) {
-        // Validity: 1 if def_level == max_definition_level (value present), 0 otherwise (null)
         if (all_def_levels[i] == max_def) {
           result.valid_bits[i / 8] |= (1 << (i % 8));
         }
       }
     }
+    RUGO_TEL_ACCUM(rugo_tel::validity_bmp_s, _vb_t0); }
 
     // Success: all expected values collected (or at least some, if total unknown).
     if (total_needed > 0) {
