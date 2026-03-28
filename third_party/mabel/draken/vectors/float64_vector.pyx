@@ -197,7 +197,7 @@ cdef class Float64Vector(Vector):
             free_fixed_buffer(self.ptr, True)
             self.ptr = NULL
 
-    cdef DictAccessor* dict_accessor(self) noexcept nogil:
+    cdef DictAccessor* dict_accessor(self) noexcept:
         if self._dict_values == NULL or self._dict_codes == NULL or self.ptr == NULL:
             return NULL
         self._dict_accessor.codes = self._dict_codes

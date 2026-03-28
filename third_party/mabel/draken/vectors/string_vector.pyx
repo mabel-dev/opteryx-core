@@ -644,7 +644,7 @@ cdef class StringVector(Vector):
             free(self.ptr)
             self.ptr = NULL
 
-    cdef DictAccessor* dict_accessor(self) noexcept nogil:
+    cdef DictAccessor* dict_accessor(self) noexcept:
         if self._dict_values == NULL or self._dict_codes == NULL or self.ptr == NULL:
             return NULL
         self._dict_accessor.codes = self._dict_codes
@@ -1603,14 +1603,15 @@ cdef class StringVector(Vector):
                 i += block
             return 0
 
-        # Dictionary-encoded path: hash k unique entries once, scatter by code
-        if self._encoding == DRAKEN_ENCODING_DICTIONARY:
+        # Dictionary-encoded path: gather accessor details under the GIL, then hash/scatter nogil.
+        with gil:
             da = self.dict_accessor()
             dict_values_buf = da.dict_values
             dict_size = <Py_ssize_t>dict_values_buf.length
             dict_codes = da.codes
             dict_code_width = da.code_width
             dict_row_nulls = da.row_nulls
+        if self._encoding == DRAKEN_ENCODING_DICTIONARY:
 
             # Hash each dictionary entry
             data = <const uint8_t*>dict_values_buf.data

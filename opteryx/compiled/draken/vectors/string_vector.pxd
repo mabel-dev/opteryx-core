@@ -115,7 +115,7 @@ cdef class StringVectorBuilder:
     cpdef void set_null(self, Py_ssize_t index)
     cpdef void set_validity_mask(self, const uint8_t[::1] mask)
     cpdef StringVector finish(self)
-    
+
     # Private methods
     cdef void _append_with_ptr(self, Py_ssize_t index, const char* src, Py_ssize_t length) except *
     cdef void _set_null(self, Py_ssize_t index) except *
