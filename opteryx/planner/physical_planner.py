@@ -46,7 +46,7 @@ def create_physical_plan(logical_plan, query_properties) -> PhysicalPlan:
                 **{
                     k: v
                     for k, v in node_config.items()
-                    if k in ("aggregates", "groups", "projection", "all_relations")
+                    if k in ("aggregates", "groups", "projection", "all_relations", "having_condition")
                 },
             )
         elif node_type == LogicalPlanStepType.Distinct:

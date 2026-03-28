@@ -164,6 +164,9 @@ class DrakenAggregateAndGroupNode(BasePlanNode):
             aggregations=self._normalized_aggregations,
         )
 
+        # Store HAVING condition if provided by optimizer
+        self._having_condition = parameters.get("having_condition", None)
+
     @property
     def config(self):  # pragma: no cover
         from opteryx.expression import format_expression
@@ -371,6 +374,13 @@ class DrakenAggregateAndGroupNode(BasePlanNode):
         )
         self._accumulate_engine_reading_delta(pre_engine_snapshot)
 
+    def _apply_having_filter(self, morsel):
+        """Apply HAVING filter to a finalized morsel."""
+        from opteryx.expression.evaluator import evaluate_draken
+
+        mask = evaluate_draken(self._having_condition, morsel)
+        return morsel.filter_mask(mask)
+
     def _finalize_groupby(self):
         pre_engine_snapshot = self._engine_reading_snapshot()
         readings = getattr(self._groupby_engine, "readings", None) or {}
@@ -384,6 +394,11 @@ class DrakenAggregateAndGroupNode(BasePlanNode):
         st = time.monotonic_ns()
         emitted = 0
         for result in self._groupby_engine.finalize_morsels(chunk_size=CHUNK_SIZE):
+            # Apply HAVING filter if provided by optimizer
+            if self._having_condition is not None:
+                result = self._apply_having_filter(result)
+                if result.num_rows == 0:
+                    continue
             emitted += 1
             yield self._postprocess_finalized_morsel(result)
         finalize_total_ns = time.monotonic_ns() - st
