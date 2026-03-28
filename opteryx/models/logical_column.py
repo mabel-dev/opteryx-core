@@ -72,9 +72,9 @@ class LogicalColumn:
             source_connector=self.source_connector,
             source=self.source,
             alias=self.alias,
-            schema_column=None
-            if self.schema_column is None
-            else self.schema_column.to_flatcolumn(),
+            schema_column=(
+                None if self.schema_column is None else self.schema_column.to_flatcolumn()
+            ),
         )
 
     def __repr__(self) -> str:

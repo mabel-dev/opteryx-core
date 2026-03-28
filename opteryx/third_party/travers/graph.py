@@ -249,7 +249,7 @@ class Graph(object):
             if neighbor not in visited:
                 child = self.depth_first_search(neighbor, visited, depth + 1)
                 child["relationship"] = relationship
-                tree["children"].append(child)  # type:ignore
+                tree["children"].append(child)  # type: ignore
 
         return tree
 
@@ -407,7 +407,7 @@ class Graph(object):
             # wire up the old incoming and outgoing nodes, cartesian style
             for out_nid in out_going:
                 for in_nid in in_coming:
-                    self.add_edge(in_nid[0], out_nid[1], in_nid[2])  # type:ignore
+                    self.add_edge(in_nid[0], out_nid[1], in_nid[2])  # type: ignore
 
             self._cached_edges = None
 
@@ -473,7 +473,7 @@ class Graph(object):
         Convert a travers graph to a NetworkX graph
         """
         try:
-            import networkx as nx  # type:ignore
+            import networkx as nx  # type: ignore
         except ImportError as err:  # pragma: no cover
             raise MissingDependencyError(err.name) from err
 

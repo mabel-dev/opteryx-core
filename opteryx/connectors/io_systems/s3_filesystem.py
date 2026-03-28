@@ -208,7 +208,7 @@ class OpteryxS3FileSystem:
         self.region = region
 
         try:
-            from minio import Minio  # type:ignore
+            from minio import Minio  # type: ignore
         except ImportError as err:  # pragma: no cover
             raise MissingDependencyError(err.name) from err
 

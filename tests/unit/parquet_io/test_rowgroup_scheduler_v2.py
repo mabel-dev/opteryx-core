@@ -7,8 +7,8 @@ from copy import deepcopy
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
-from opteryx.parquet_io import reader
-from opteryx.parquet_io.cache import InMemoryParquetCache
+from opteryx.connectors.parquet_io import reader
+from opteryx.connectors.parquet_io.cache import InMemoryParquetCache
 
 
 def _build_footers(paths, rowgroups, columns):
@@ -468,7 +468,7 @@ def test_scheduler_v2_early_close_cancels_pending_work(monkeypatch):
 
 def test_iter_row_groups_prefers_local_serial_reader_over_io_process_ring(monkeypatch):
     import opteryx.config as cfg
-    import opteryx.parquet_io.io_process_ring as io_ring
+    import opteryx.connectors.parquet_io.io_process_ring as io_ring
 
     rows = [{"__path__": "x.parquet", "__row_group__": 0, "c0": (1, 1)}]
 
@@ -497,7 +497,7 @@ def test_iter_row_groups_prefers_local_serial_reader_over_io_process_ring(monkey
 
 def test_iter_row_groups_uses_io_process_ring_when_serial_reader_disabled(monkeypatch):
     import opteryx.config as cfg
-    import opteryx.parquet_io.io_process_ring as io_ring
+    import opteryx.connectors.parquet_io.io_process_ring as io_ring
 
     rows = [{"__path__": "x.parquet", "__row_group__": 0, "c0": (1, 1)}]
 

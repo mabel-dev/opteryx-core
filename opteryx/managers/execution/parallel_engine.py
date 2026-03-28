@@ -140,9 +140,10 @@ def execute(
 
     # Special case handling for explain/show/set queries
     if isinstance(head_node, ExplainNode):
-        return explain(
-            plan, analyze=head_node.analyze, _format=head_node.format
-        ), ResultType.TABULAR
+        return (
+            explain(plan, analyze=head_node.analyze, _format=head_node.format),
+            ResultType.TABULAR,
+        )
 
     if isinstance(head_node, SetVariableNode):
         return head_node(None), ResultType.NON_TABULAR

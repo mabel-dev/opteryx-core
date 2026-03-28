@@ -40,8 +40,8 @@ from opteryx.compiled.draken.morsels.morsel import Morsel
 from opteryx.compiled.draken.storage import read_morsel
 from opteryx.compiled.draken.storage import write_morsel
 from opteryx.connectors.io_systems import create_filesystem
-from opteryx.parquet_io.cache import InMemoryParquetCache
-from opteryx.parquet_io.predicates import row_group_may_satisfy
+from opteryx.connectors.parquet_io.cache import InMemoryParquetCache
+from opteryx.connectors.parquet_io.predicates import row_group_may_satisfy
 
 from opteryx import config as _cfg
 
@@ -782,8 +782,8 @@ def _io_worker(
             decode_pending: deque[tuple[tuple[int, int], _IOColumnWork, bytes]] = deque()
 
             try:
-                from opteryx.parquet_io.reader import _parse_footer_envelope
-                from opteryx.parquet_io.reader import _read_footer_payload
+                from opteryx.connectors.parquet_io.reader import _parse_footer_envelope
+                from opteryx.connectors.parquet_io.reader import _read_footer_payload
                 from opteryx.tracing import record_event
 
                 from opteryx import config as _trace_cfg

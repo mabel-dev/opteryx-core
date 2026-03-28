@@ -295,7 +295,7 @@ def prioritize_evaluation(expressions):
 
 
 def _inner_evaluate(root: Node, table: Table):
-    node_type = root.node_type  # type:ignore
+    node_type = root.node_type  # type: ignore
 
     if node_type == NodeType.DNF:
         return evaluate_dnf(root.parameters, table)
@@ -357,10 +357,10 @@ def _inner_evaluate(root: Node, table: Table):
             shape=table.num_rows,
             fill_value=root.value,
             dtype=literal_type,
-        )  # type:ignore
+        )  # type: ignore
 
     # BOOLEAN OPERATORS
-    if node_type & LOGICAL_TYPE == LOGICAL_TYPE:  # type:ignore
+    if node_type & LOGICAL_TYPE == LOGICAL_TYPE:  # type: ignore
         if node_type == NodeType.OR:
             return short_cut_or(root, table)
         if node_type == NodeType.AND:
@@ -389,7 +389,7 @@ def _inner_evaluate(root: Node, table: Table):
                 else:
                     right = pyarrow.array(right, type=pyarrow.bool_())
 
-            return LOGICAL_OPERATIONS[node_type](left, right)  # type:ignore
+            return LOGICAL_OPERATIONS[node_type](left, right)  # type: ignore
 
         if node_type == NodeType.NOT:
             centre = (
@@ -411,7 +411,7 @@ def _inner_evaluate(root: Node, table: Table):
             return pyarrow.compute.invert(centre)
 
     # INTERAL IDENTIFIERS
-    if node_type & INTERNAL_TYPE == INTERNAL_TYPE:  # type:ignore
+    if node_type & INTERNAL_TYPE == INTERNAL_TYPE:  # type: ignore
         if node_type == NodeType.FUNCTION:
             if root.value == "_PASSTHRU":
                 # PASSTHRU is an optimizer-created identity wrapper (no function_ref).

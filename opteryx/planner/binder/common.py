@@ -7,42 +7,51 @@
 
 import re
 from functools import lru_cache
-from typing import List, Set, Tuple
+from typing import List
+from typing import Set
+from typing import Tuple
 
-from orso.schema import ConstantColumn, FlatColumn, RelationSchema
-from orso.tools import random_string
-from orso.types import OrsoTypes
-
-from opteryx.exceptions import (
-    AmbiguousDatasetError,
-    InvalidFunctionParameterError,
-    UnsupportedSyntaxError,
-)
-from opteryx.expression import NodeType, get_all_nodes_of_type
+from opteryx.exceptions import AmbiguousDatasetError
+from opteryx.exceptions import InvalidFunctionParameterError
+from opteryx.exceptions import UnsupportedSyntaxError
+from opteryx.expression import NodeType
+from opteryx.expression import get_all_nodes_of_type
 from opteryx.managers.virtual_datasets import derived
-from opteryx.models import LogicalColumn, Node
+from opteryx.models import LogicalColumn
+from opteryx.models import Node
 
 # Import handler functions from modular packages
-from opteryx.planner.binder.aggregate import visit_aggregate_and_group, visit_distinct
-from opteryx.planner.binder.binder import inner_binder, merge_schemas
+from opteryx.planner.binder.aggregate import visit_aggregate_and_group
+from opteryx.planner.binder.aggregate import visit_distinct
+from opteryx.planner.binder.binder import inner_binder
+from opteryx.planner.binder.binder import merge_schemas
 from opteryx.planner.binder.binding_context import BindingContext
-from opteryx.planner.binder.dataset import visit_function_dataset, visit_scan
+from opteryx.planner.binder.dataset import visit_function_dataset
+from opteryx.planner.binder.dataset import visit_scan
 from opteryx.planner.binder.filter import visit_filter
 
 # Lazily import visit_join inside the delegation method to avoid circular imports.
 # from opteryx.planner.binder.join import visit_join
 from opteryx.planner.binder.order import visit_order
-from opteryx.planner.binder.project import visit_exit, visit_project
-from opteryx.planner.binder.set_ops import visit_set, visit_union, visit_unnest
-from opteryx.planner.binder.subquery import visit_comment, visit_subquery
-from opteryx.planner.binder.traversal import post_bind, traverse
-from opteryx.planner.binder.view import (
-    visit_alter_view,
-    visit_create_view,
-    visit_drop_view,
-    visit_show_columns,
-)
+from opteryx.planner.binder.project import visit_exit
+from opteryx.planner.binder.project import visit_project
+from opteryx.planner.binder.set_ops import visit_set
+from opteryx.planner.binder.set_ops import visit_union
+from opteryx.planner.binder.set_ops import visit_unnest
+from opteryx.planner.binder.subquery import visit_comment
+from opteryx.planner.binder.subquery import visit_subquery
+from opteryx.planner.binder.traversal import post_bind
+from opteryx.planner.binder.traversal import traverse
+from opteryx.planner.binder.view import visit_alter_view
+from opteryx.planner.binder.view import visit_create_view
+from opteryx.planner.binder.view import visit_drop_view
+from opteryx.planner.binder.view import visit_show_columns
 from opteryx.planner.logical_planner import LogicalPlan
+from orso.schema import ConstantColumn
+from orso.schema import FlatColumn
+from orso.schema import RelationSchema
+from orso.tools import random_string
+from orso.types import OrsoTypes
 
 CAMEL_TO_SNAKE = re.compile(r"(?<!^)(?=[A-Z])")
 
@@ -292,7 +301,7 @@ class BinderVisitor:
             Tuple[Node, Dict]
             The node and context after binding.
         """
-        node_type = node.node_type.name  # type:ignore
+        node_type = node.node_type.name  # type: ignore
         visit_method_name = node_type_to_method_name(node_type)
         visit_method = getattr(self, visit_method_name, None)
         if visit_method is None:

@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from array import array
 import time
-import sys
 import numpy
 
 from opteryx.compiled.structures.carchar_set cimport CarcharSetWrapper
@@ -48,7 +47,6 @@ from opteryx.compiled.draken.vectors.int64_vector cimport Int64Vector
 from opteryx.compiled.draken.vectors.integer_vector cimport IntegerVector
 from opteryx.compiled.draken.vectors.date32_vector cimport Date32Vector
 from opteryx.compiled.draken.vectors.string_vector cimport StringVector
-from opteryx.compiled.draken.vectors.string_vector cimport StringVectorBuilder
 from opteryx.compiled.draken.vectors.time_vector cimport TimeVector
 from opteryx.compiled.draken.vectors.timestamp_vector cimport TimestampVector
 from opteryx.compiled.draken.vectors.vector cimport Vector

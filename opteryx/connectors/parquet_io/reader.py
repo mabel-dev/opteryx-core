@@ -44,9 +44,9 @@ from typing import List
 from typing import Optional
 from typing import Tuple
 
-from opteryx.parquet_io.cache import InMemoryParquetCache
-from opteryx.parquet_io.cache import ParquetCache
-from opteryx.parquet_io.predicates import row_group_may_satisfy
+from opteryx.connectors.parquet_io.cache import InMemoryParquetCache
+from opteryx.connectors.parquet_io.cache import ParquetCache
+from opteryx.connectors.parquet_io.predicates import row_group_may_satisfy
 
 
 class ListColumnError(ValueError):
@@ -1815,7 +1815,7 @@ def iter_row_groups(
         return
 
     if features.io_process_rowgroup_ring:
-        from opteryx.parquet_io.io_process_ring import iter_row_groups_io_process_v2
+        from opteryx.connectors.parquet_io.io_process_ring import iter_row_groups_io_process_v2
 
         yield from _yield_with_scan_strategy(
             iter_row_groups_io_process_v2(

@@ -28,9 +28,9 @@ from opteryx.exceptions import ColumnNotFoundError
 from opteryx.expression import NodeType
 from opteryx.expression import evaluate_and_append
 from opteryx.models import QueryProperties
-from opteryx.vector_types import get_vector_source_identifier
-from opteryx.vector_types import node_is_numeric_vector
-from opteryx.vector_types import node_is_vector_query_expression
+from opteryx.vectors.vector_types import get_vector_source_identifier
+from opteryx.vectors.vector_types import node_is_numeric_vector
+from opteryx.vectors.vector_types import node_is_vector_query_expression
 
 from opteryx import EOS
 
@@ -621,7 +621,7 @@ class HeapSortNode(BasePlanNode):
             and len(query_node.parameters) == 1
             and query_node.parameters[0].node_type == NodeType.LITERAL
         ):
-            from opteryx.embeddings import embed_text_matrix
+            from opteryx.vectors.embeddings import embed_text_matrix
 
             embedded = embed_text_matrix([query_node.parameters[0].value])
             if embedded.size == 0:

@@ -429,9 +429,9 @@ class Manifest:
             "file_count": self.get_file_count(),
             "record_count": self.get_record_count(),
             "total_size_bytes": self.get_total_size(),
-            "avg_file_size": self.get_total_size() / self.get_file_count()
-            if self.get_file_count() > 0
-            else 0,
+            "avg_file_size": (
+                self.get_total_size() / self.get_file_count() if self.get_file_count() > 0 else 0
+            ),
             "files_with_bounds": sum(1 for f in self.files if f.lower_bounds or f.upper_bounds),
             "files_with_k_hashes": sum(1 for f in self.files if f.min_k_hashes),
             "files_with_histograms": sum(1 for f in self.files if f.histogram_counts),

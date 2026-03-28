@@ -6,8 +6,7 @@ from .builder import Query
 
 def test_query_simple():
     query = Query().SELECT("select").FROM("from").JOIN("join").WHERE("where")
-    assert str(query) == dedent(
-        """\
+    assert str(query) == dedent("""\
         SELECT
             select
         FROM
@@ -16,8 +15,7 @@ def test_query_simple():
             join
         WHERE
             where
-        """
-    )
+        """)
 
 
 def test_query_complicated():
@@ -60,8 +58,7 @@ def test_query_complicated():
         .SELECT()
         .SELECT_DISTINCT()
     )
-    assert str(query) == dedent(
-        """\
+    assert str(query) == dedent("""\
         WITH
             (
                 first cte
@@ -102,19 +99,16 @@ def test_query_complicated():
             third
         LIMIT
             limit
-        """
-    )
+        """)
 
 
 def test_query_init():
     query = Query({"(": ["one", "two", "three"], ")": [""]}, {"(": "OR"})
-    assert str(query) == dedent(
-        """\
+    assert str(query) == dedent("""\
         (
             one OR
             two OR
             three
         )
 
-        """
-    )
+        """)

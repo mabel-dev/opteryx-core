@@ -237,17 +237,19 @@ def _evaluate_timetravel_expression(node, apply_interval_literal_to_now: bool = 
                 left_type in (OrsoTypes.DATE, OrsoTypes.TIMESTAMP)
                 and right_type == OrsoTypes.INTERVAL
             ):
-                return _apply_interval_scalar(
-                    left_value, left_type, right_value, node.value
-                ), OrsoTypes.TIMESTAMP
+                return (
+                    _apply_interval_scalar(left_value, left_type, right_value, node.value),
+                    OrsoTypes.TIMESTAMP,
+                )
             if left_type == OrsoTypes.INTERVAL and right_type in (
                 OrsoTypes.DATE,
                 OrsoTypes.TIMESTAMP,
             ):
                 # interval +/- date is effectively the same as date +/- interval
-                return _apply_interval_scalar(
-                    right_value, right_type, left_value, node.value
-                ), OrsoTypes.TIMESTAMP
+                return (
+                    _apply_interval_scalar(right_value, right_type, left_value, node.value),
+                    OrsoTypes.TIMESTAMP,
+                )
 
         left = _as_binary_operand_array(left_value, left_type)
         right = _as_binary_operand_array(right_value, right_type)

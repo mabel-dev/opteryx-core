@@ -19,10 +19,10 @@ Includes:
 
 import numpy
 import pyarrow
-from opteryx.embeddings import embed_text_matrix
-from opteryx.embeddings import embed_text_values
-from opteryx.embeddings import get_embedding_provider
 from opteryx.third_party.tktech import csimdjson as simdjson
+from opteryx.vectors.embeddings import embed_text_matrix
+from opteryx.vectors.embeddings import embed_text_values
+from opteryx.vectors.embeddings import get_embedding_provider
 
 
 def _sequence_rows(values):
@@ -425,9 +425,11 @@ def array_contains_any(arr, val):
     rows = _sequence_rows(arr)
     return pyarrow.array(
         [
-            False
-            if row is None
-            else bool(set(_normalize_array_row(row) or []).intersection(needles))
+            (
+                False
+                if row is None
+                else bool(set(_normalize_array_row(row) or []).intersection(needles))
+            )
             for row in rows
         ],
         type=pyarrow.bool_(),
