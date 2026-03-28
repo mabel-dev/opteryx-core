@@ -7,7 +7,7 @@
 # cython: boundscheck=False
 
 from libc.stddef cimport size_t
-from libc.stdint cimport int32_t, uint8_t
+from libc.stdint cimport int32_t
 from cpython.bytes cimport PyBytes_AsStringAndSize
 
 from libcpp.string cimport string

@@ -12,7 +12,7 @@ from cpython.mem cimport PyMem_Malloc, PyMem_Free
 
 
 from libc.stddef cimport size_t
-from libc.stdint cimport int32_t, int64_t, uint32_t, uint64_t
+from libc.stdint cimport int32_t, int64_t, uint64_t
 from libcpp.utility cimport pair
 from libcpp.vector cimport vector
 
@@ -22,8 +22,7 @@ from opteryx.compiled.structures.bloom_filter cimport BloomFilter, create_bloom_
 from opteryx.compiled.draken.morsels.align cimport align_tables
 from opteryx.compiled.draken.morsels.morsel cimport Morsel
 from opteryx.compiled.draken.vectors.vector cimport NULL_HASH
-
-
+from time import perf_counter_ns
 
 
 cdef extern from "carchar.hpp" namespace "opteryx::carchar":

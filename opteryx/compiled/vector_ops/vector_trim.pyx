@@ -186,7 +186,7 @@ cpdef StringVector vector_trim(StringVector vec, object chars=None):
             continue
 
         start = ptr.offsets[i]
-        end   = ptr.offsets[i + 1]
+        end = ptr.offsets[i + 1]
         data_ptr = <uint8_t*>ptr.data + start
         length = end - start
 
@@ -269,7 +269,7 @@ cpdef StringVector vector_ltrim(StringVector vec, object chars=None):
             continue
 
         start = ptr.offsets[i]
-        end   = ptr.offsets[i + 1]
+        end = ptr.offsets[i + 1]
         data_ptr = <uint8_t*>ptr.data + start
         length = end - start
 
@@ -345,7 +345,7 @@ cpdef StringVector vector_rtrim(StringVector vec, object chars=None):
             continue
 
         start = ptr.offsets[i]
-        end   = ptr.offsets[i + 1]
+        end = ptr.offsets[i + 1]
         data_ptr = <uint8_t*>ptr.data + start
         length = end - start
 

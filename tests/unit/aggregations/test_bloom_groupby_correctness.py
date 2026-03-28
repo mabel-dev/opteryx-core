@@ -42,10 +42,7 @@ def _groupby_result_as_dict(morsel_or_table) -> dict:
         return {}
 
     # Convert Morsel to PyArrow Table if needed
-    if hasattr(morsel_or_table, "to_arrow"):
-        table = morsel_or_table.to_arrow()
-    else:
-        table = morsel_or_table
+    table = morsel_or_table.to_arrow() if hasattr(morsel_or_table, "to_arrow") else morsel_or_table
 
     if len(table) == 0:
         return {}

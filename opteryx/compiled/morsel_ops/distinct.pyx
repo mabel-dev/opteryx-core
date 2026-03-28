@@ -46,10 +46,10 @@ def distinct(Morsel morsel, CarcharSetWrapper seen_hashes, list columns=None):
     cdef Py_ssize_t n = morsel.ptr.num_rows
     cdef CarcharSet* cs = seen_hashes._ptr
     cdef uint64_t* hashes_ptr = NULL
-    cdef int32_t*  idx_buf   = NULL
-    cdef int32_t*  col_indices = NULL
-    cdef int32_t   n_cols = 0
-    cdef size_t    count
+    cdef int32_t* idx_buf = NULL
+    cdef int32_t* col_indices = NULL
+    cdef int32_t n_cols = 0
+    cdef size_t count
     cdef bint had_fallback
     cdef uint64_t[::1] py_hashes
 
