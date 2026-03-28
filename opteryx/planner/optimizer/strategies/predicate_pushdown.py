@@ -83,19 +83,23 @@ class PredicatePushdownStrategy(OptimizationStrategy):
             self._inline_project_alias_predicates(node, context)
             # collect predicates we can probably push
             # A predicate is pushable if:
-            # - It references at least one relation
-            # - It has no aggregations
-            # - It's a simple comparison (not a complex nested expression)
+            # - It's a HAVING predicate (has aggregators), OR
+            # - It references at least one relation, has no aggregations, and is a simple comparison
             has_agg = get_all_nodes_of_type(node.condition, (NodeType.AGGREGATOR,))
             identifiers = get_all_nodes_of_type(node.condition, (NodeType.IDENTIFIER,))
 
-            # Allow pushdown if: references relations AND no aggregators AND (has identifiers OR is a simple literal comparison)
+            # Allow pushdown if:
+            # 1. Has aggregators (HAVING clause) - will be pushed into aggregate
+            # 2. OR: references relations AND no aggregators AND simple comparison (regular predicate)
             is_simple_comparison = (
                 node.condition.node_type == NodeType.COMPARISON_OPERATOR
                 and len(identifiers) >= 1  # At least one column reference
             )
 
-            if len(node.relations) > 0 and not has_agg and is_simple_comparison:
+            is_having_predicate = bool(has_agg)
+            is_regular_pushable = len(node.relations) > 0 and not has_agg and is_simple_comparison
+
+            if is_having_predicate or is_regular_pushable:
                 # record where the node was, so we can put it back
                 node.nid = context.node_id
                 node.plan_path = context.optimized_plan.trace_to_root(context.node_id)
@@ -168,6 +172,67 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                 else:
                     remaining_predicates.append(predicate)
             context.collected_predicates = remaining_predicates
+
+        elif node.node_type == LogicalPlanStepType.AggregateAndGroup:
+            # Handle HAVING predicates (filters with aggregators) by attaching to the aggregate node
+            remaining_predicates = []
+            having_predicates = []
+            for predicate in context.collected_predicates:
+                has_agg = get_all_nodes_of_type(predicate.condition, (NodeType.AGGREGATOR,))
+                if has_agg:
+                    # This is a HAVING predicate — push into the aggregate
+                    having_predicates.append(predicate)
+                else:
+                    remaining_predicates.append(predicate)
+
+            # Attach HAVING predicates to the aggregate node
+            if having_predicates:
+                conditions = [p.condition for p in having_predicates]
+
+                # Combine multiple HAVING conditions with AND
+                combined = conditions[0]
+                for cond in conditions[1:]:
+                    from opteryx.models import Node
+                    and_node = Node(node_type=NodeType.AND)
+                    and_node.left = combined
+                    and_node.right = cond
+                    combined = and_node
+
+                # Extract all aggregator nodes from the HAVING condition
+                # and add them to the aggregate node if not already present
+                aggregators_in_having = get_all_nodes_of_type(combined, (NodeType.AGGREGATOR,))
+                existing_aggregates = list(node.aggregates or [])
+
+                # Check which aggregators from HAVING are not already in the aggregates list
+                for agg in aggregators_in_having:
+                    # Check if this aggregator is already in the list by comparing their structure
+                    is_duplicate = any(
+                        format_expression(agg) == format_expression(existing_agg)
+                        for existing_agg in existing_aggregates
+                    )
+                    if not is_duplicate:
+                        # Add this aggregator to the list of aggregates
+                        existing_aggregates.append(agg)
+
+                # Add the having_condition to node properties and update the node
+                node_properties = dict(node.properties)
+                node_properties["having_condition"] = combined
+                # Update aggregates list with any new aggregators from HAVING
+                if len(existing_aggregates) > len(node.aggregates or []):
+                    node_properties["aggregates"] = existing_aggregates
+
+                context.optimized_plan.add_node(context.node_id, LogicalPlanNode(**node_properties))
+
+                # Remove the Filter nodes from the plan
+                for predicate in having_predicates:
+                    context.optimized_plan.remove_node(predicate.nid, heal=True)
+                    self.telemetry.optimization_predicate_pushdown += 1
+            else:
+                context.optimized_plan.add_node(context.node_id, LogicalPlanNode(**node.properties))
+
+            context.collected_predicates = remaining_predicates
+            if context.last_nid:
+                context.optimized_plan.add_edge(context.node_id, context.last_nid)
 
         elif node.node_type == LogicalPlanStepType.Join:
 

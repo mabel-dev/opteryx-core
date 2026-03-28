@@ -119,7 +119,10 @@ def render_unnest(node: LogicalPlanNode) -> str:
 
 @register_render(LogicalPlanStepType.AggregateAndGroup)
 def render_aggregate_and_group(node: LogicalPlanNode) -> str:
-    return f"AGGREGATE [{', '.join(format_expression(col) for col in node.aggregates)}] GROUP BY [{', '.join(format_expression(col) for col in node.groups)}]"
+    result = f"AGGREGATE [{', '.join(format_expression(col) for col in node.aggregates)}] GROUP BY [{', '.join(format_expression(col) for col in node.groups)}]"
+    if hasattr(node, 'having_condition') and node.having_condition is not None:
+        result += f" ({format_expression(node.having_condition)})"
+    return result
 
 
 @register_render(LogicalPlanStepType.FunctionDataset)
