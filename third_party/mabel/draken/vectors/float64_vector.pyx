@@ -197,7 +197,7 @@ cdef class Float64Vector(Vector):
             free_fixed_buffer(self.ptr, True)
             self.ptr = NULL
 
-    cdef DictAccessor* dict_accessor(self) noexcept:
+    cdef DictAccessor* dict_accessor(self) noexcept nogil:
         if self._dict_values == NULL or self._dict_codes == NULL or self.ptr == NULL:
             return NULL
         self._dict_accessor.codes = self._dict_codes
@@ -292,7 +292,7 @@ cdef class Float64Vector(Vector):
             if self._const_is_null:
                 return pa.nulls(self.ptr.length, type=pa.float64())
             return pa.array([self._const_value] * self.ptr.length, type=pa.float64())
-        
+
         cdef size_t nbytes = buf_length(self.ptr) * sizeof(double)
         addr = <intptr_t> self.ptr.data
         data_buf = pa.foreign_buffer(addr, nbytes, base=self)
@@ -782,12 +782,6 @@ cdef class Float64Vector(Vector):
         if offset < 0 or offset + n > out_buf.shape[0]:
             raise ValueError("Float64Vector.hash_into: output buffer too small")
 
-        if self._has_const:
-            value = NULL_HASH if self._const_is_null else (<uint64_t*>&self._const_value)[0]
-            for i in range(n):
-                out_buf[offset + i] = mix_hash(out_buf[offset + i], value)
-            return
-
         cdef double* data = <double*> ptr.data
         cdef uint64_t* bits = <uint64_t*> data
         cdef uint64_t* dst = &out_buf[offset]
@@ -796,7 +790,20 @@ cdef class Float64Vector(Vector):
         cdef uint64_t[FLOAT64_HASH_CHUNK] scratch
         cdef uint64_t* scratch_ptr = <uint64_t*> scratch
 
-        # Use shared MIX_HASH_CONSTANT directly; no need to pass it in.
+        if self._has_const:
+            value = NULL_HASH if self._const_is_null else (<uint64_t*>&self._const_value)[0]
+            for j in range(FLOAT64_HASH_CHUNK):
+                scratch[j] = value
+            i = 0
+            while i < n:
+                block = n - i
+                if block > FLOAT64_HASH_CHUNK:
+                    block = FLOAT64_HASH_CHUNK
+                simd_mix_hash(dst + i, scratch_ptr, <size_t>block)
+                i += block
+            return
+
+        cdef uint64_t is_valid
         if has_nulls:
             i = 0
             while i < n:
@@ -804,10 +811,8 @@ cdef class Float64Vector(Vector):
                 if block > FLOAT64_HASH_CHUNK:
                     block = FLOAT64_HASH_CHUNK
                 for j in range(block):
-                    if null_bitmap[(i + j) >> 3] & (1 << ((i + j) & 7)):
-                        scratch[j] = bits[i + j]
-                    else:
-                        scratch[j] = NULL_HASH
+                    is_valid = (null_bitmap[(i + j) >> 3] >> ((i + j) & 7)) & 1
+                    scratch[j] = (bits[i + j] * is_valid) | (NULL_HASH * (1 - is_valid))
                 simd_mix_hash(dst + i, scratch_ptr, <size_t> block)
                 i += block
         else:
@@ -817,23 +822,30 @@ cdef class Float64Vector(Vector):
     cdef bint c_hash_into(self, uint64_t* out, Py_ssize_t n) noexcept nogil:
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef Py_ssize_t i, j, block
-        cdef uint64_t value
+        cdef uint64_t value, is_valid
+        cdef uint64_t[FLOAT64_HASH_CHUNK] scratch
+        cdef uint64_t* scratch_ptr = <uint64_t*> scratch
 
         if n == 0:
             return 0
 
         if self._has_const:
             value = NULL_HASH if self._const_is_null else (<uint64_t*>&self._const_value)[0]
-            for i in range(n):
-                out[i] = mix_hash(out[i], value)
+            for j in range(FLOAT64_HASH_CHUNK):
+                scratch[j] = value
+            i = 0
+            while i < n:
+                block = n - i
+                if block > FLOAT64_HASH_CHUNK:
+                    block = FLOAT64_HASH_CHUNK
+                simd_mix_hash(out + i, scratch_ptr, <size_t>block)
+                i += block
             return 0
 
         cdef double* data = <double*> ptr.data
         cdef uint64_t* bits = <uint64_t*> data
         cdef uint8_t* null_bitmap = ptr.null_bitmap
         cdef bint has_nulls = null_bitmap != NULL
-        cdef uint64_t[FLOAT64_HASH_CHUNK] scratch
-        cdef uint64_t* scratch_ptr = <uint64_t*> scratch
 
         if has_nulls:
             i = 0
@@ -842,10 +854,8 @@ cdef class Float64Vector(Vector):
                 if block > FLOAT64_HASH_CHUNK:
                     block = FLOAT64_HASH_CHUNK
                 for j in range(block):
-                    if null_bitmap[(i + j) >> 3] & (1 << ((i + j) & 7)):
-                        scratch[j] = bits[i + j]
-                    else:
-                        scratch[j] = NULL_HASH
+                    is_valid = (null_bitmap[(i + j) >> 3] >> ((i + j) & 7)) & 1
+                    scratch[j] = (bits[i + j] * is_valid) | (NULL_HASH * (1 - is_valid))
                 simd_mix_hash(out + i, scratch_ptr, <size_t> block)
                 i += block
         else:
@@ -985,7 +995,7 @@ cdef Float64Vector from_arrow(object array):
 
     if bufs[0] is not None:
         nb_addr = bufs[0].address
-        
+
         if offset % 8 == 0:
             vec.ptr.null_bitmap = (<uint8_t*> nb_addr) + (offset >> 3)
         else:
@@ -994,14 +1004,14 @@ cdef Float64Vector from_arrow(object array):
             new_bitmap_bytes = PyBytes_FromStringAndSize(NULL, nb_size)
             dst_bitmap = <uint8_t*> PyBytes_AS_STRING(new_bitmap_bytes)
             memset(dst_bitmap, 0, nb_size)
-            
+
             src_bitmap = <uint8_t*> nb_addr
-            
+
             # Copy bits shifting them
             for i in range(len(array)):
                 if (src_bitmap[(offset + i) >> 3] >> ((offset + i) & 7)) & 1:
                     dst_bitmap[i >> 3] |= (1 << (i & 7))
-            
+
             vec.ptr.null_bitmap = dst_bitmap
             vec._arrow_null_buf = new_bitmap_bytes
     else:
@@ -1143,10 +1153,10 @@ cdef Float64Vector from_packed_dict(
 cdef Float64Vector from_sequence(double[::1] data):
     """
     Create Float64Vector from a typed double memoryview (zero-copy).
-    
+
     Args:
         data: double[::1] memoryview (C-contiguous)
-    
+
     Returns:
         Float64Vector wrapping the memoryview data
     """

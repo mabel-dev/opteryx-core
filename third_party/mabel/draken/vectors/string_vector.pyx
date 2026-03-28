@@ -59,8 +59,22 @@ cdef extern from *:
     #else
     #define PREFETCH(addr)
     #endif
+
+    #if defined(__GNUC__) || defined(__clang__)
+    #define BSWAP64(x) __builtin_bswap64(x)
+    #elif defined(_MSC_VER)
+    #include <intrin.h>
+    #define BSWAP64(x) _byteswap_uint64(x)
+    #else
+    static inline uint64_t BSWAP64(uint64_t x) {
+        x = ((x & 0x00FF00FF00FF00FFULL) << 8) | ((x & 0xFF00FF00FF00FF00ULL) >> 8);
+        x = ((x & 0x0000FFFF0000FFFFULL) << 16) | ((x & 0xFFFF0000FFFF0000ULL) >> 16);
+        return (x << 32) | (x >> 32);
+    }
+    #endif
     """
     void PREFETCH(const void* addr) nogil
+    uint64_t BSWAP64(uint64_t x) nogil
 
 from opteryx.compiled.draken.vectors.vector cimport MIX_HASH_CONSTANT, Vector, NULL_HASH, mix_hash, simd_mix_hash
 from opteryx.compiled.draken.vectors.bool_vector cimport BoolVector
@@ -324,25 +338,143 @@ cdef bint _sv_sql_like_match(
     return pi == pattern_len
 
 
+cdef inline void _build_bmh_skip_table(
+    const uint8_t* needle,
+    Py_ssize_t ndl_len,
+    unsigned char* skip
+) noexcept nogil:
+    """Build Boyer-Moore-Horspool skip table."""
+    cdef Py_ssize_t i
+    # Initialize all entries to pattern length
+    for i in range(256):
+        skip[i] = <unsigned char>ndl_len
+    # Set skip values for characters in pattern
+    if ndl_len >= 2:
+        for i in range(ndl_len - 1):
+            skip[needle[i]] = <unsigned char>(ndl_len - i - 1)
+
+
+cdef inline bint _bmh_search_cs(
+    const uint8_t* haystack,
+    Py_ssize_t hay_len,
+    const uint8_t* needle,
+    Py_ssize_t ndl_len,
+    unsigned char* skip
+) noexcept nogil:
+    """Boyer-Moore-Horspool case-sensitive search."""
+    cdef Py_ssize_t i = 0
+    cdef Py_ssize_t tail_index
+    cdef Py_ssize_t end_index = hay_len - ndl_len
+    cdef uint8_t last_char = needle[ndl_len - 1]
+    cdef uint8_t tail_char
+    cdef Py_ssize_t j
+
+    if ndl_len == 0:
+        return True
+    if hay_len < ndl_len:
+        return False
+
+    # Single character fast path
+    if ndl_len == 1:
+        for i in range(hay_len):
+            if haystack[i] == needle[0]:
+                return True
+        return False
+
+    while i <= end_index:
+        tail_index = i + ndl_len - 1
+        tail_char = haystack[tail_index]
+
+        # Check if last character matches
+        if tail_char == last_char:
+            # Check if first character also matches
+            if haystack[i] == needle[0]:
+                # Full comparison - optimized for short needles
+                j = 1
+                while j < ndl_len and haystack[i + j] == needle[j]:
+                    j += 1
+                if j == ndl_len:
+                    return True
+
+        # Skip using precomputed table
+        i += skip[tail_char]
+
+    return False
+
+
 cdef bint _sv_contains_cs(
     const uint8_t* haystack,
     Py_ssize_t hay_len,
     const uint8_t* needle,
     Py_ssize_t ndl_len,
 ) noexcept nogil:
-    """Case-sensitive substring search."""
-    cdef Py_ssize_t i, j
+    """Case-sensitive substring search using Boyer-Moore-Horspool."""
+    cdef unsigned char skip[256]
+    _build_bmh_skip_table(needle, ndl_len, skip)
+    return _bmh_search_cs(haystack, hay_len, needle, ndl_len, skip)
+
+
+cdef inline bint _bmh_search_ci(
+    const uint8_t* haystack,
+    Py_ssize_t hay_len,
+    const uint8_t* needle_lower,
+    Py_ssize_t ndl_len,
+) noexcept nogil:
+    """Boyer-Moore-Horspool case-insensitive search.
+
+    needle_lower: Pattern already lowercased.
+    """
+    cdef unsigned char skip[256]
+    cdef Py_ssize_t i = 0
+    cdef Py_ssize_t tail_index
+    cdef Py_ssize_t end_index = hay_len - ndl_len
+    cdef uint8_t last_char = needle_lower[ndl_len - 1]
+    cdef uint8_t tail_char_lower
+    cdef Py_ssize_t j
+    cdef Py_ssize_t pos
+
     if ndl_len == 0:
         return True
-    if ndl_len > hay_len:
+    if hay_len < ndl_len:
         return False
-    for i in range(hay_len - ndl_len + 1):
-        if haystack[i] == needle[0]:
-            j = 1
-            while j < ndl_len and haystack[i + j] == needle[j]:
-                j += 1
-            if j == ndl_len:
+
+    # Build skip table with case-insensitive variants
+    for i in range(256):
+        skip[i] = <unsigned char>ndl_len
+
+    if ndl_len >= 2:
+        for i in range(ndl_len - 1):
+            skip[needle_lower[i]] = <unsigned char>(ndl_len - i - 1)
+            # Add uppercase variant to skip table
+            if needle_lower[i] >= 97 and needle_lower[i] <= 122:
+                skip[needle_lower[i] - 32] = <unsigned char>(ndl_len - i - 1)
+
+    # Single character fast path
+    if ndl_len == 1:
+        for i in range(hay_len):
+            if _sv_ascii_lower(haystack[i]) == needle_lower[0]:
                 return True
+        return False
+
+    i = 0
+    while i <= end_index:
+        tail_index = i + ndl_len - 1
+        tail_char_lower = _sv_ascii_lower(haystack[tail_index])
+
+        # Check if last character matches (case-insensitive)
+        if tail_char_lower == last_char:
+            # Check if first character matches
+            if _sv_ascii_lower(haystack[i]) == needle_lower[0]:
+                # Full comparison
+                j = 1
+                while j < ndl_len and _sv_ascii_lower(haystack[i + j]) == needle_lower[j]:
+                    j += 1
+                if j == ndl_len:
+                    return True
+
+        # Skip using precomputed table
+        i += skip[<unsigned char>haystack[tail_index]]
+
     return False
 
 
@@ -352,20 +484,11 @@ cdef bint _sv_contains_ci(
     const uint8_t* needle_lower,
     Py_ssize_t ndl_len,
 ) noexcept nogil:
-    """Case-insensitive substring search; needle_lower must already be lowercased."""
-    cdef Py_ssize_t i, j
-    if ndl_len == 0:
-        return True
-    if ndl_len > hay_len:
-        return False
-    for i in range(hay_len - ndl_len + 1):
-        if _sv_ascii_lower(haystack[i]) == needle_lower[0]:
-            j = 1
-            while j < ndl_len and _sv_ascii_lower(haystack[i + j]) == needle_lower[j]:
-                j += 1
-            if j == ndl_len:
-                return True
-    return False
+    """Case-insensitive substring search using Boyer-Moore-Horspool.
+
+    needle_lower: Pattern must already be lowercased.
+    """
+    return _bmh_search_ci(haystack, hay_len, needle_lower, ndl_len)
 
 
 cdef class StringVector(Vector):
@@ -521,7 +644,7 @@ cdef class StringVector(Vector):
             free(self.ptr)
             self.ptr = NULL
 
-    cdef DictAccessor* dict_accessor(self) noexcept:
+    cdef DictAccessor* dict_accessor(self) noexcept nogil:
         if self._dict_values == NULL or self._dict_codes == NULL or self.ptr == NULL:
             return NULL
         self._dict_accessor.codes = self._dict_codes
@@ -1364,13 +1487,24 @@ cdef class StringVector(Vector):
         cdef DrakenVarBuffer* ptr = self.ptr
         cdef Py_ssize_t n = ptr.length
         cdef uint64_t value
-        cdef Py_ssize_t i
+        cdef Py_ssize_t i, j, block
+        cdef uint8_t byte
+        cdef size_t str_len
+        cdef int32_t start, end
+        cdef Py_ssize_t idx
 
         if n == 0:
             return
 
         if offset < 0 or offset + n > out_buf.shape[0]:
             raise ValueError("StringVector.hash_into: output buffer too small")
+
+        cdef const uint8_t* data = <const uint8_t*> ptr.data
+        cdef int32_t* offsets = ptr.offsets
+        cdef uint8_t* nb_ptr = ptr.null_bitmap
+        cdef uint64_t* dst = &out_buf[offset]
+        cdef uint64_t[STRING_HASH_CHUNK] scratch
+        cdef uint64_t* scratch_ptr = <uint64_t*> scratch
 
         if self._has_const:
             if self._const_is_null:
@@ -1380,21 +1514,16 @@ cdef class StringVector(Vector):
                     value = _short_string_hash(<const uint8_t*>self._const_value.data, <size_t>self._const_value.length)
                 else:
                     value = XXH3_64bits(<const void*>self._const_value.data, <size_t>self._const_value.length)
-            for i in range(n):
-                out_buf[offset + i] = mix_hash(out_buf[offset + i], value)
+            for j in range(STRING_HASH_CHUNK):
+                scratch[j] = value
+            i = 0
+            while i < n:
+                block = n - i
+                if block > STRING_HASH_CHUNK:
+                    block = STRING_HASH_CHUNK
+                simd_mix_hash(dst + i, scratch_ptr, <size_t>block)
+                i += block
             return
-
-        cdef const uint8_t* data = <const uint8_t*> ptr.data
-        cdef int32_t* offsets = ptr.offsets
-        cdef uint8_t* nb_ptr = ptr.null_bitmap
-        cdef Py_ssize_t j
-        cdef uint8_t byte
-        cdef size_t str_len
-        cdef int32_t start, end
-        cdef uint64_t* dst = &out_buf[offset]
-        cdef uint64_t[STRING_HASH_CHUNK] scratch
-        cdef uint64_t* scratch_ptr = <uint64_t*> scratch
-        cdef Py_ssize_t idx
 
         i = 0
         with nogil:
@@ -1433,7 +1562,24 @@ cdef class StringVector(Vector):
     cdef bint c_hash_into(self, uint64_t* out, Py_ssize_t n) noexcept nogil:
         cdef DrakenVarBuffer* ptr = self.ptr
         cdef uint64_t value
-        cdef Py_ssize_t i
+        cdef Py_ssize_t i, j, block
+        cdef uint8_t byte
+        cdef size_t str_len
+        cdef int32_t start, end
+        cdef Py_ssize_t idx
+        cdef uint64_t[STRING_HASH_CHUNK] scratch
+        cdef uint64_t* scratch_ptr = <uint64_t*> scratch
+        cdef uint32_t code
+        cdef Py_ssize_t dict_size, dict_idx
+        cdef uint64_t[256] dict_hashes
+        cdef DictAccessor* da
+        cdef const uint8_t* dict_codes
+        cdef uint8_t dict_code_width
+        cdef uint8_t* dict_row_nulls
+        cdef DrakenVarBuffer* dict_values_buf
+        cdef const uint8_t* data
+        cdef int32_t* offsets
+        cdef uint8_t* nb_ptr
 
         if n == 0:
             return 0
@@ -1446,20 +1592,66 @@ cdef class StringVector(Vector):
                     value = _short_string_hash(<const uint8_t*>self._const_value.data, <size_t>self._const_value.length)
                 else:
                     value = XXH3_64bits(<const void*>self._const_value.data, <size_t>self._const_value.length)
-            for i in range(n):
-                out[i] = mix_hash(out[i], value)
+            for i in range(STRING_HASH_CHUNK):
+                scratch[i] = value
+            i = 0
+            while i < n:
+                block = n - i
+                if block > STRING_HASH_CHUNK:
+                    block = STRING_HASH_CHUNK
+                simd_mix_hash(out + i, scratch_ptr, <size_t>block)
+                i += block
             return 0
 
-        cdef const uint8_t* data = <const uint8_t*> ptr.data
-        cdef int32_t* offsets = ptr.offsets
-        cdef uint8_t* nb_ptr = ptr.null_bitmap
-        cdef Py_ssize_t j, block
-        cdef uint8_t byte
-        cdef size_t str_len
-        cdef int32_t start, end
-        cdef uint64_t[STRING_HASH_CHUNK] scratch
-        cdef uint64_t* scratch_ptr = <uint64_t*> scratch
-        cdef Py_ssize_t idx
+        # Dictionary-encoded path: hash k unique entries once, scatter by code
+        if self._encoding == DRAKEN_ENCODING_DICTIONARY:
+            da = self.dict_accessor()
+            dict_values_buf = da.dict_values
+            dict_size = <Py_ssize_t>dict_values_buf.length
+            dict_codes = da.codes
+            dict_code_width = da.code_width
+            dict_row_nulls = da.row_nulls
+
+            # Hash each dictionary entry
+            data = <const uint8_t*>dict_values_buf.data
+            for dict_idx in range(dict_size):
+                # Get the dictionary value at dict_idx
+                start = dict_values_buf.offsets[dict_idx]
+                end = dict_values_buf.offsets[dict_idx + 1]
+                str_len = <size_t>(end - start)
+                if str_len <= 16:
+                    dict_hashes[dict_idx] = _short_string_hash(data + start, str_len)
+                else:
+                    dict_hashes[dict_idx] = XXH3_64bits(<const void*>(data + start), str_len)
+
+            # Scatter hashes by code index
+            i = 0
+            while i < n:
+                block = n - i
+                if block > STRING_HASH_CHUNK:
+                    block = STRING_HASH_CHUNK
+
+                if dict_row_nulls != NULL:
+                    for j in range(block):
+                        idx = i + j
+                        byte = dict_row_nulls[idx >> 3]
+                        if ((byte >> (idx & 7)) & 1) == 0:
+                            scratch[j] = NULL_HASH
+                        else:
+                            code = _read_packed_code(dict_codes, dict_code_width, idx)
+                            scratch[j] = dict_hashes[code]
+                else:
+                    for j in range(block):
+                        code = _read_packed_code(dict_codes, dict_code_width, i + j)
+                        scratch[j] = dict_hashes[code]
+
+                simd_mix_hash(out + i, scratch_ptr, <size_t>block)
+                i += block
+            return 0
+
+        data = <const uint8_t*> ptr.data
+        offsets = ptr.offsets
+        nb_ptr = ptr.null_bitmap
 
         i = 0
         while i < n:
@@ -1521,9 +1713,8 @@ cdef class StringVector(Vector):
                 if copy_len > 7:
                     copy_len = 7
                 acc = <uint64_t>0
-                for j in range(copy_len):
-                    acc = (acc << 8) | (<uint64_t>(<uint8_t>((<char*>self._const_value.data)[j])))
-                acc = acc << (<uint64_t>(8 * (7 - copy_len)))
+                memcpy(&acc, <const void*>self._const_value.data, <size_t>copy_len)
+                acc = BSWAP64(acc)
                 for i in range(n):
                     out_buf[offset + i] = <int64_t>acc
             return
@@ -1539,9 +1730,8 @@ cdef class StringVector(Vector):
             if copy_len > 7:
                 copy_len = 7
             acc = <uint64_t>0
-            for j in range(copy_len):
-                acc = (acc << 8) | (<uint64_t>(<uint8_t>base[start + j]))
-            acc = acc << (<uint64_t>(8 * (7 - copy_len)))
+            memcpy(&acc, <const void*>(base + start), <size_t>copy_len)
+            acc = BSWAP64(acc)
             out_buf[offset + i] = <int64_t>acc
 
     cpdef StringVector take(self, int32_t[::1] indices):

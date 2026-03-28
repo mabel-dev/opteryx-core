@@ -528,10 +528,21 @@ cdef class TimestampVector(Vector):
         cdef uint64_t* dst = &out_buf[offset]
         cdef bint has_nulls = ptr.null_bitmap != NULL
 
+        cdef uint64_t* as_uint64 = <uint64_t*> data
+        cdef uint64_t[TIMESTAMP_HASH_CHUNK] scratch
+        cdef uint64_t* scratch_ptr = <uint64_t*> scratch
+
         if self._has_const:
             value = NULL_HASH if self._const_is_null else <uint64_t>self._const_value
-            for i in range(n):
-                out_buf[offset + i] = mix_hash(out_buf[offset + i], value)
+            for j in range(TIMESTAMP_HASH_CHUNK):
+                scratch[j] = value
+            i = 0
+            while i < n:
+                block = n - i
+                if block > TIMESTAMP_HASH_CHUNK:
+                    block = TIMESTAMP_HASH_CHUNK
+                simd_mix_hash(dst + i, scratch_ptr, <size_t>block)
+                i += block
             return
 
         if n == 0:
@@ -539,25 +550,21 @@ cdef class TimestampVector(Vector):
 
         if offset < 0 or offset + n > out_buf.shape[0]:
             raise ValueError("TimestampVector.hash_into: output buffer too small")
-        cdef uint64_t* as_uint64 = <uint64_t*> data
-        cdef uint64_t[TIMESTAMP_HASH_CHUNK] scratch
-        cdef uint64_t* scratch_ptr = <uint64_t*> scratch
 
         # Use shared MIX_HASH_CONSTANT directly; no need to pass it in.
         if not has_nulls:
             simd_mix_hash(dst, as_uint64, <size_t> n)
             return
 
+        cdef uint64_t is_valid
         i = 0
         while i < n:
             block = n - i
             if block > TIMESTAMP_HASH_CHUNK:
                 block = TIMESTAMP_HASH_CHUNK
             for j in range(block):
-                if _bitmap_is_valid(ptr.null_bitmap, i + j, self.null_bit_offset):
-                    scratch[j] = as_uint64[i + j]
-                else:
-                    scratch[j] = NULL_HASH
+                is_valid = <uint64_t>_bitmap_is_valid(ptr.null_bitmap, i + j, self.null_bit_offset)
+                scratch[j] = (as_uint64[i + j] * is_valid) | (NULL_HASH * (1 - is_valid))
             simd_mix_hash(dst + i, scratch_ptr, <size_t> block)
             i += block
 
@@ -565,21 +572,27 @@ cdef class TimestampVector(Vector):
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef int64_t* data = <int64_t*> ptr.data
         cdef Py_ssize_t i, j, block
-        cdef uint64_t value
+        cdef uint64_t value, is_valid
         cdef bint has_nulls = ptr.null_bitmap != NULL
+        cdef uint64_t* as_uint64 = <uint64_t*> data
+        cdef uint64_t[TIMESTAMP_HASH_CHUNK] scratch
+        cdef uint64_t* scratch_ptr = <uint64_t*> scratch
 
         if self._has_const:
             value = NULL_HASH if self._const_is_null else <uint64_t>self._const_value
-            for i in range(n):
-                out[i] = mix_hash(out[i], value)
+            for j in range(TIMESTAMP_HASH_CHUNK):
+                scratch[j] = value
+            i = 0
+            while i < n:
+                block = n - i
+                if block > TIMESTAMP_HASH_CHUNK:
+                    block = TIMESTAMP_HASH_CHUNK
+                simd_mix_hash(out + i, scratch_ptr, <size_t>block)
+                i += block
             return 0
 
         if n == 0:
             return 0
-
-        cdef uint64_t* as_uint64 = <uint64_t*> data
-        cdef uint64_t[TIMESTAMP_HASH_CHUNK] scratch
-        cdef uint64_t* scratch_ptr = <uint64_t*> scratch
 
         if not has_nulls:
             simd_mix_hash(out, as_uint64, <size_t> n)
@@ -591,10 +604,8 @@ cdef class TimestampVector(Vector):
             if block > TIMESTAMP_HASH_CHUNK:
                 block = TIMESTAMP_HASH_CHUNK
             for j in range(block):
-                if _bitmap_is_valid(ptr.null_bitmap, i + j, self.null_bit_offset):
-                    scratch[j] = as_uint64[i + j]
-                else:
-                    scratch[j] = NULL_HASH
+                is_valid = <uint64_t>_bitmap_is_valid(ptr.null_bitmap, i + j, self.null_bit_offset)
+                scratch[j] = (as_uint64[i + j] * is_valid) | (NULL_HASH * (1 - is_valid))
             simd_mix_hash(out + i, scratch_ptr, <size_t> block)
             i += block
         return 0

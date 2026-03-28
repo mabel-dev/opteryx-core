@@ -474,8 +474,15 @@ cdef class Date32Vector(Vector):
 
         if self._has_const:
             value = NULL_HASH if self._const_is_null else <uint64_t><int64_t>self._const_value
-            for i in range(n):
-                out_buf[offset + i] = mix_hash(out_buf[offset + i], value)
+            for j in range(DATE32_HASH_CHUNK):
+                scratch[j] = value
+            i = 0
+            while i < n:
+                block = n - i
+                if block > DATE32_HASH_CHUNK:
+                    block = DATE32_HASH_CHUNK
+                simd_mix_hash(dst + i, scratch_ptr, <size_t>block)
+                i += block
             return
 
         if n == 0:
@@ -484,29 +491,19 @@ cdef class Date32Vector(Vector):
         if offset < 0 or offset + n > out_buf.shape[0]:
             raise ValueError("Date32Vector.hash_into: output buffer too small")
 
-
-        if not has_nulls:
-            i = 0
-            while i < n:
-                block = n - i
-                if block > DATE32_HASH_CHUNK:
-                    block = DATE32_HASH_CHUNK
-                for j in range(block):
-                    scratch[j] = <uint64_t>(<int64_t> data[i + j])
-                simd_mix_hash(dst + i, scratch_ptr, <size_t> block)
-                i += block
-            return
-
+        cdef uint64_t is_valid
         i = 0
         while i < n:
             block = n - i
             if block > DATE32_HASH_CHUNK:
                 block = DATE32_HASH_CHUNK
-            for j in range(block):
-                if (null_bitmap[(i + j) >> 3] >> ((i + j) & 7)) & 1:
+            if has_nulls:
+                for j in range(block):
+                    is_valid = (null_bitmap[(i + j) >> 3] >> ((i + j) & 7)) & 1
+                    scratch[j] = (<uint64_t>(<int64_t> data[i + j]) * is_valid) | (NULL_HASH * (1 - is_valid))
+            else:
+                for j in range(block):
                     scratch[j] = <uint64_t>(<int64_t> data[i + j])
-                else:
-                    scratch[j] = NULL_HASH
             simd_mix_hash(dst + i, scratch_ptr, <size_t> block)
             i += block
 
@@ -524,35 +521,33 @@ cdef class Date32Vector(Vector):
 
         if self._has_const:
             value = NULL_HASH if self._const_is_null else <uint64_t><int64_t>self._const_value
-            for i in range(n):
-                out[i] = mix_hash(out[i], value)
-            return 0
-
-        if n == 0:
-            return 0
-
-        if not has_nulls:
+            for j in range(DATE32_HASH_CHUNK):
+                scratch[j] = value
             i = 0
             while i < n:
                 block = n - i
                 if block > DATE32_HASH_CHUNK:
                     block = DATE32_HASH_CHUNK
-                for j in range(block):
-                    scratch[j] = <uint64_t>(<int64_t> data[i + j])
-                simd_mix_hash(out + i, scratch_ptr, <size_t> block)
+                simd_mix_hash(out + i, scratch_ptr, <size_t>block)
                 i += block
             return 0
 
+        if n == 0:
+            return 0
+
+        cdef uint64_t is_valid
         i = 0
         while i < n:
             block = n - i
             if block > DATE32_HASH_CHUNK:
                 block = DATE32_HASH_CHUNK
-            for j in range(block):
-                if (null_bitmap[(i + j) >> 3] >> ((i + j) & 7)) & 1:
+            if has_nulls:
+                for j in range(block):
+                    is_valid = (null_bitmap[(i + j) >> 3] >> ((i + j) & 7)) & 1
+                    scratch[j] = (<uint64_t>(<int64_t> data[i + j]) * is_valid) | (NULL_HASH * (1 - is_valid))
+            else:
+                for j in range(block):
                     scratch[j] = <uint64_t>(<int64_t> data[i + j])
-                else:
-                    scratch[j] = NULL_HASH
             simd_mix_hash(out + i, scratch_ptr, <size_t> block)
             i += block
         return 0
