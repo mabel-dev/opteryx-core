@@ -106,18 +106,31 @@ static void simd_mix_hash_neon(uint64_t* dest, const uint64_t* values, std::size
         return;
     }
 
-    const std::size_t stride = 2;
     const uint64x2_t const_vec = vdupq_n_u64(MIX_HASH_CONSTANT);
+    const uint64x2_t one_vec = vdupq_n_u64(1);
     std::size_t i = 0;
-    for (; i + stride <= count; i += stride) {
+    // Process 4 elements (2 NEON pairs) per iteration to hide latency.
+    for (; i + 4 <= count; i += 4) {
+        uint64x2_t d0 = vld1q_u64(dest + i);
+        uint64x2_t d1 = vld1q_u64(dest + i + 2);
+        uint64x2_t v0 = vld1q_u64(values + i);
+        uint64x2_t v1 = vld1q_u64(values + i + 2);
+        uint64x2_t m0 = veorq_u64(d0, v0);
+        uint64x2_t m1 = veorq_u64(d1, v1);
+        m0 = vaddq_u64(mullo_u64(m0, const_vec), one_vec);
+        m1 = vaddq_u64(mullo_u64(m1, const_vec), one_vec);
+        m0 = veorq_u64(m0, vshrq_n_u64(m0, 32));
+        m1 = veorq_u64(m1, vshrq_n_u64(m1, 32));
+        vst1q_u64(dest + i, m0);
+        vst1q_u64(dest + i + 2, m1);
+    }
+    // Handle remaining pair.
+    for (; i + 2 <= count; i += 2) {
         uint64x2_t dst_vec = vld1q_u64(dest + i);
         uint64x2_t val_vec = vld1q_u64(values + i);
         uint64x2_t mixed = veorq_u64(dst_vec, val_vec);
-        uint64x2_t product = mullo_u64(mixed, const_vec);
-        product = vaddq_u64(product, vdupq_n_u64(1));
-        uint64x2_t shifted = vshrq_n_u64(product, 32);
-        uint64x2_t combined = veorq_u64(product, shifted);
-        vst1q_u64(dest + i, combined);
+        uint64x2_t product = vaddq_u64(mullo_u64(mixed, const_vec), one_vec);
+        vst1q_u64(dest + i, veorq_u64(product, vshrq_n_u64(product, 32)));
     }
     if (i < count) {
         scalar_mix(dest + i, values + i, count - i);
@@ -177,6 +190,18 @@ static void simd_scale_date32_avx2(const int32_t* src, int64_t* dest, std::size_
 static void simd_scale_date32_neon(const int32_t* src, int64_t* dest, std::size_t count) {
     const uint64x2_t scale_vec = vdupq_n_u64(static_cast<uint64_t>(DATE32_SCALE));
     std::size_t i = 0;
+    // Process 4 elements (2 NEON pairs) per iteration.
+    for (; i + 4 <= count; i += 4) {
+        int32x2_t s0 = vld1_s32(src + i);
+        int32x2_t s1 = vld1_s32(src + i + 2);
+        int64x2_t w0 = vmovl_s32(s0);
+        int64x2_t w1 = vmovl_s32(s1);
+        uint64x2_t r0 = mullo_u64(vreinterpretq_u64_s64(w0), scale_vec);
+        uint64x2_t r1 = mullo_u64(vreinterpretq_u64_s64(w1), scale_vec);
+        vst1q_s64(dest + i, vreinterpretq_s64_u64(r0));
+        vst1q_s64(dest + i + 2, vreinterpretq_s64_u64(r1));
+    }
+    // Handle remaining pair.
     for (; i + 2 <= count; i += 2) {
         int32x2_t src_vec = vld1_s32(src + i);
         int64x2_t widened = vmovl_s32(src_vec);

@@ -219,7 +219,7 @@ cdef class Int64Vector(Vector):
             free_fixed_buffer(self.ptr, True)
             self.ptr = NULL
 
-    cdef DictAccessor* dict_accessor(self) noexcept:
+    cdef DictAccessor* dict_accessor(self) noexcept nogil:
         if self._dict_values == NULL or self._dict_codes == NULL or self.ptr == NULL:
             return NULL
         self._dict_accessor.codes = self._dict_codes
@@ -766,8 +766,8 @@ cdef class Int64Vector(Vector):
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef Py_ssize_t n = ptr.length
         cdef uint64_t* dst_base
-        cdef Py_ssize_t i
-        cdef uint64_t value
+        cdef Py_ssize_t i, j, block
+        cdef uint64_t value, is_valid
         cdef uint8_t byte
 
         if n == 0:
@@ -777,42 +777,63 @@ cdef class Int64Vector(Vector):
             raise ValueError("Int64Vector.hash_into: output buffer too small")
         dst_base = &out_buf[0]
 
-        if self._has_const:
-            value = NULL_HASH if self._const_is_null else <uint64_t>self._const_value
-            for i in range(n):
-                dst_base[offset + i] = mix_hash(dst_base[offset + i], value)
-            return
-
         cdef int64_t* data = <int64_t*> ptr.data
         cdef uint64_t* dst = dst_base + offset
         cdef uint64_t* as_uint64 = <uint64_t*> data
         cdef uint8_t* null_bitmap = ptr.null_bitmap
         cdef bint has_nulls = null_bitmap != NULL
+        cdef uint64_t[1024] scratch
+        cdef uint64_t* scratch_ptr = <uint64_t*> scratch
+
+        if self._has_const:
+            value = NULL_HASH if self._const_is_null else <uint64_t>self._const_value
+            for j in range(1024):
+                scratch[j] = value
+            i = 0
+            while i < n:
+                block = n - i
+                if block > 1024:
+                    block = 1024
+                simd_mix_hash(dst + i, scratch_ptr, <size_t>block)
+                i += block
+            return
 
         if has_nulls:
-            for i in range(n):
-                byte = null_bitmap[i >> 3]
-                if byte & (1 << (i & 7)):
-                    value = <uint64_t> data[i]
-                else:
-                    value = NULL_HASH
-                dst[i] = mix_hash(dst[i], value)
+            i = 0
+            while i < n:
+                block = n - i
+                if block > 1024:
+                    block = 1024
+                for j in range(block):
+                    is_valid = (null_bitmap[(i + j) >> 3] >> ((i + j) & 7)) & 1
+                    scratch[j] = (as_uint64[i + j] * is_valid) | (NULL_HASH * (1 - is_valid))
+                simd_mix_hash(dst + i, scratch_ptr, <size_t>block)
+                i += block
         else:
             simd_mix_hash(dst, as_uint64, <size_t>n)
 
     cdef bint c_hash_into(self, uint64_t* out, Py_ssize_t n) noexcept nogil:
         cdef DrakenFixedBuffer* ptr = self.ptr
-        cdef Py_ssize_t i
-        cdef uint64_t value
+        cdef Py_ssize_t i, j, block
+        cdef uint64_t value, is_valid
         cdef uint8_t byte
+        cdef uint64_t[1024] scratch
+        cdef uint64_t* scratch_ptr = <uint64_t*> scratch
 
         if n == 0:
             return 0
 
         if self._has_const:
             value = NULL_HASH if self._const_is_null else <uint64_t>self._const_value
-            for i in range(n):
-                out[i] = mix_hash(out[i], value)
+            for j in range(1024):
+                scratch[j] = value
+            i = 0
+            while i < n:
+                block = n - i
+                if block > 1024:
+                    block = 1024
+                simd_mix_hash(out + i, scratch_ptr, <size_t>block)
+                i += block
             return 0
 
         cdef int64_t* data = <int64_t*> ptr.data
@@ -821,13 +842,16 @@ cdef class Int64Vector(Vector):
         cdef bint has_nulls = null_bitmap != NULL
 
         if has_nulls:
-            for i in range(n):
-                byte = null_bitmap[i >> 3]
-                if byte & (1 << (i & 7)):
-                    value = <uint64_t> data[i]
-                else:
-                    value = NULL_HASH
-                out[i] = mix_hash(out[i], value)
+            i = 0
+            while i < n:
+                block = n - i
+                if block > 1024:
+                    block = 1024
+                for j in range(block):
+                    is_valid = (null_bitmap[(i + j) >> 3] >> ((i + j) & 7)) & 1
+                    scratch[j] = (as_uint64[i + j] * is_valid) | (NULL_HASH * (1 - is_valid))
+                simd_mix_hash(out + i, scratch_ptr, <size_t>block)
+                i += block
         else:
             simd_mix_hash(out, as_uint64, <size_t>n)
         return 0
