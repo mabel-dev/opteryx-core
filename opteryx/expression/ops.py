@@ -287,6 +287,10 @@ def _dictionary_fastpath(arr, operator, value):
         if operator == "NotInList":
             result = result.not_vector()
         return result
+    if operator in ("Like", "NotLike", "ILike", "NotILike", "RLike", "NotRLike"):
+        from opteryx.expression.evaluator.type_coercion import _coerce_str
+
+        value = _coerce_str(value)
     if operator in ("Like", "NotLike"):
         result = vec.like(value, False)
         if operator == "NotLike":

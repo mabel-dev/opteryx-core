@@ -1,0 +1,142 @@
+{
+  "dense/short/1-char/cs": {
+    "best_ms": 4.770834,
+    "avg_ms": 4.790319666666667,
+    "rows_per_sec": 104803478.80475406
+  },
+  "dense/short/1-char/ci": {
+    "best_ms": 5.209542,
+    "avg_ms": 5.239763666666667,
+    "rows_per_sec": 95977727.02475573
+  },
+  "dense/short/4-char/cs": {
+    "best_ms": 6.067625,
+    "avg_ms": 6.197472333333333,
+    "rows_per_sec": 82404565.21291281
+  },
+  "dense/short/4-char/ci": {
+    "best_ms": 7.19575,
+    "avg_ms": 7.230736,
+    "rows_per_sec": 69485460.16745996
+  },
+  "dense/short/16-char/cs": {
+    "best_ms": 2.798042,
+    "avg_ms": 2.809625,
+    "rows_per_sec": 178696388.40303326
+  },
+  "dense/short/16-char/ci": {
+    "best_ms": 3.667833,
+    "avg_ms": 3.6933469999999997,
+    "rows_per_sec": 136320274.12371284
+  },
+  "dense/medium/1-char/cs": {
+    "best_ms": 7.25925,
+    "avg_ms": 7.406875,
+    "rows_per_sec": 68877638.87453938
+  },
+  "dense/medium/1-char/ci": {
+    "best_ms": 7.905334,
+    "avg_ms": 7.939666666666667,
+    "rows_per_sec": 63248434.53799675
+  },
+  "dense/medium/4-char/cs": {
+    "best_ms": 23.768917,
+    "avg_ms": 24.019917,
+    "rows_per_sec": 21035876.392685458
+  },
+  "dense/medium/4-char/ci": {
+    "best_ms": 24.229167,
+    "avg_ms": 24.84165266666667,
+    "rows_per_sec": 20636285.184711467
+  },
+  "dense/medium/16-char/cs": {
+    "best_ms": 7.957667,
+    "avg_ms": 8.005694666666667,
+    "rows_per_sec": 62832485.953483604
+  },
+  "dense/medium/16-char/ci": {
+    "best_ms": 10.023333,
+    "avg_ms": 10.180861,
+    "rows_per_sec": 49883606.580765106
+  },
+  "dense/long/1-char/cs": {
+    "best_ms": 7.887875,
+    "avg_ms": 8.146236,
+    "rows_per_sec": 63388428.442387834
+  },
+  "dense/long/1-char/ci": {
+    "best_ms": 8.596334,
+    "avg_ms": 8.722069666666666,
+    "rows_per_sec": 58164329.11983178
+  },
+  "dense/long/4-char/cs": {
+    "best_ms": 89.700208,
+    "avg_ms": 90.48825000000001,
+    "rows_per_sec": 5574123.083415816
+  },
+  "dense/long/4-char/ci": {
+    "best_ms": 92.308875,
+    "avg_ms": 93.10169466666667,
+    "rows_per_sec": 5416597.26651419
+  },
+  "dense/long/16-char/cs": {
+    "best_ms": 29.514167,
+    "avg_ms": 30.514333333333333,
+    "rows_per_sec": 16941016.834390074
+  },
+  "dense/long/16-char/ci": {
+    "best_ms": 30.22275,
+    "avg_ms": 31.06127766666667,
+    "rows_per_sec": 16543828.7382849
+  },
+  "dense/medium/4-char/cs/nulls": {
+    "best_ms": 21.358875,
+    "avg_ms": 21.463403,
+    "rows_per_sec": 23409472.64310503
+  },
+  "dense/medium/4-char/ci/nulls": {
+    "best_ms": 22.943,
+    "avg_ms": 23.297,
+    "rows_per_sec": 21793139.519679204
+  },
+  "dict/10-entries/4-char/cs": {
+    "best_ms": 15.852917,
+    "avg_ms": 16.232000333333332,
+    "rows_per_sec": 31539936.78261231
+  },
+  "dict/10-entries/4-char/ci": {
+    "best_ms": 16.7685,
+    "avg_ms": 16.891583333333333,
+    "rows_per_sec": 29817813.16158273
+  },
+  "dict/100-entries/4-char/cs": {
+    "best_ms": 13.572416,
+    "avg_ms": 13.606486,
+    "rows_per_sec": 36839424.90415855
+  },
+  "dict/100-entries/4-char/ci": {
+    "best_ms": 15.936917,
+    "avg_ms": 16.103083333333334,
+    "rows_per_sec": 31373696.681735873
+  },
+  "dict/1000-entries/4-char/cs": {
+    "best_ms": 14.690458,
+    "avg_ms": 14.93068,
+    "rows_per_sec": 34035698.54663483
+  },
+  "dict/1000-entries/4-char/ci": {
+    "best_ms": 15.842,
+    "avg_ms": 15.884472,
+    "rows_per_sec": 31561671.50612296
+  },
+  "constant/64B/4-char/cs": {
+    "best_ms": 0.00075,
+    "avg_ms": 0.0007916666666666666,
+    "rows_per_sec": 666666666666.6666
+  },
+  "constant/64B/4-char/ci": {
+    "best_ms": 0.000667,
+    "avg_ms": 0.0007639999999999999,
+    "rows_per_sec": 749625187406.297
+  }
+}

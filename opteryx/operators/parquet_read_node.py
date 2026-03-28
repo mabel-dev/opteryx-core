@@ -70,6 +70,163 @@ class ParquetReadNode(ReaderNode):
         ReaderNode.__init__(self, properties=properties, **parameters)
         self.predicates = parameters.get("predicates")
         self._parquet_files_seen: set = set()
+        self._predicate_function_nodes_cached = None  # Cache to avoid AST walking per row group
+        self._compiled_predicate_dispatcher = None  # Phase 2: Compiled predicate dispatcher
+
+    def _analyze_predicate_type(self, predicate_root):
+        """Analyze predicate structure to determine if it can be compiled.
+
+        Returns a descriptor tuple:
+        - ("int64_scalar", column_name, operator, scalar_value) for simple int64 comparisons
+        - ("float64_scalar", column_name, operator, scalar_value) for float comparisons
+        - ("complex_expression", predicate_root) for complex/unsupported predicates
+        - None if unable to analyze
+        """
+        if predicate_root is None:
+            return None
+
+        # Check if it's a simple binary comparison
+        if (
+            not hasattr(predicate_root, "node_type")
+            or predicate_root.node_type != NodeType.COMPARISON_OPERATOR
+        ):
+            return ("complex_expression", predicate_root)
+
+        left = getattr(predicate_root, "left", None)
+        right = getattr(predicate_root, "right", None)
+        operator = getattr(predicate_root, "operator", None)
+
+        if left is None or right is None or operator is None:
+            return ("complex_expression", predicate_root)
+
+        # Pattern: Column <op> Scalar
+        if hasattr(left, "__class__") and left.__class__.__name__ == "Identifier":
+            if hasattr(right, "value") and not hasattr(right, "name"):
+                right_value = right.value
+                if isinstance(right_value, int):
+                    return ("int64_scalar", left.name, operator, right_value)
+                elif isinstance(right_value, float):
+                    return ("float64_scalar", left.name, operator, right_value)
+
+        # Pattern: Scalar <op> Column (commute operator)
+        if hasattr(right, "__class__") and right.__class__.__name__ == "Identifier":
+            if hasattr(left, "value") and not hasattr(left, "name"):
+                left_value = left.value
+                if isinstance(left_value, int):
+                    # Commute the operator for reverse comparison
+                    commuted_op = self._commute_operator(operator)
+                    return ("int64_scalar", right.name, commuted_op, left_value)
+                elif isinstance(left_value, float):
+                    commuted_op = self._commute_operator(operator)
+                    return ("float64_scalar", right.name, commuted_op, left_value)
+
+        # Fall back to complex expression
+        return ("complex_expression", predicate_root)
+
+    @staticmethod
+    def _commute_operator(op: str) -> str:
+        """Commute comparison operators (e.g., a < b becomes b > a)."""
+        commute_map = {
+            "Lt": "Gt",
+            "Gt": "Lt",
+            "LtEq": "GtEq",
+            "GtEq": "LtEq",
+            "Eq": "Eq",
+            "NotEq": "NotEq",
+        }
+        return commute_map.get(op, op)
+
+    def _compile_predicate_dispatcher(self, predicate_root):
+        """Generate a specialized predicate evaluation function.
+
+        Returns a callable: morsel -> BoolVector mask
+
+        This moves the dispatch decision from per-row-group evaluation time to
+        initialization time, eliminating branches from the hot loop.
+        """
+        if predicate_root is None:
+            # No predicate, return identity mask
+            return None
+
+        pred_type = self._analyze_predicate_type(predicate_root)
+
+        if pred_type is None:
+            # Can't analyze, fall back to generic
+            return None
+
+        if pred_type[0] == "int64_scalar":
+            # Compile specialized dispatcher for int64 <op> scalar
+            column_name, operator, scalar_value = pred_type[1:4]
+            return self._compile_int64_scalar_dispatcher(column_name, operator, scalar_value)
+        elif pred_type[0] == "float64_scalar":
+            # Compile specialized dispatcher for float64 <op> scalar
+            column_name, operator, scalar_value = pred_type[1:4]
+            return self._compile_float64_scalar_dispatcher(column_name, operator, scalar_value)
+
+        # Fall back to None for generic path
+        return None
+
+    @staticmethod
+    def _compile_int64_scalar_dispatcher(column_name: str, operator: str, scalar_value: int):
+        """Generate specialized function for: int64_column <op> constant
+
+        Example for Q02 (AdvEngineID <> 0):
+          Generated function calls vec.not_equals(0) directly, no dispatch.
+        """
+        # Map SQL operators to Draken vector methods
+        op_map = {
+            "Eq": "equals",
+            "NotEq": "not_equals",
+            "Lt": "less_than",
+            "Gt": "greater_than",
+            "LtEq": "less_than_or_equals",
+            "GtEq": "greater_than_or_equals",
+        }
+
+        if operator not in op_map:
+            # Can't compile this operator, will use generic fallback
+            return None
+
+        method_name = op_map[operator]
+
+        # Generate the specialized function
+        def specialized_dispatcher(morsel):
+            try:
+                vec = morsel.column(column_name)
+                # Direct call to Draken method - NO dispatch, NO branches!
+                return getattr(vec, method_name)(scalar_value)
+            except (KeyError, AttributeError, TypeError):
+                # Column not available or type mismatch, this shouldn't happen
+                # but we handle it gracefully by returning None (no mask)
+                return None
+
+        return specialized_dispatcher
+
+    @staticmethod
+    def _compile_float64_scalar_dispatcher(column_name: str, operator: str, scalar_value: float):
+        """Generate specialized function for: float64_column <op> constant"""
+        op_map = {
+            "Eq": "equals",
+            "NotEq": "not_equals",
+            "Lt": "less_than",
+            "Gt": "greater_than",
+            "LtEq": "less_than_or_equals",
+            "GtEq": "greater_than_or_equals",
+        }
+
+        if operator not in op_map:
+            return None
+
+        method_name = op_map[operator]
+
+        def specialized_dispatcher(morsel):
+            try:
+                vec = morsel.column(column_name)
+                return getattr(vec, method_name)(scalar_value)
+            except (KeyError, AttributeError, TypeError):
+                return None
+
+        return specialized_dispatcher
 
     @property
     def name(self) -> str:  # pragma: no cover
@@ -210,11 +367,19 @@ class ParquetReadNode(ReaderNode):
 
         rows_before_filter = morsel.num_rows
 
-        function_nodes = get_all_nodes_of_type(predicate_root, select_nodes=(NodeType.FUNCTION,))
+        # >> Use cached function nodes instead of recalculating (AST walk is O(n) in predicate size)
+        # Pre-computed in execute() to avoid 281 redundant AST walks for ClickBench queries
+        function_nodes = self._predicate_function_nodes_cached or []
         if function_nodes:
             morsel = evaluate_and_append_draken(function_nodes, morsel)
 
-        mask = evaluate_draken(predicate_root, morsel)
+        # >> Phase 2: Use compiled predicate dispatcher if available (no dynamic dispatch!)
+        # Compilation happens once at init, then reused for all 281 row groups
+        if self._compiled_predicate_dispatcher:
+            mask = self._compiled_predicate_dispatcher(morsel)
+        else:
+            mask = evaluate_draken(predicate_root, morsel)
+
         filtered = morsel.filter_mask(mask)
         if filtered.num_rows == 0:
             return morsel.slice(0, 0), rows_before_filter, 0
@@ -412,6 +577,20 @@ class ParquetReadNode(ReaderNode):
         ]
         output_identity_order = [column.identity for column in output_schema.columns]
         predicate_root = self._compose_predicates(self.predicates or [])
+
+        # >> OPTIMIZATION: Pre-compute function nodes once instead of per row group
+        # This avoids AST walking (O(n) in predicate size) for every row group
+        # For queries like Q02 with 281 row groups, this saves significant time
+        if self._predicate_function_nodes_cached is None and predicate_root:
+            self._predicate_function_nodes_cached = get_all_nodes_of_type(
+                predicate_root, select_nodes=(NodeType.FUNCTION,)
+            )
+
+        # >> Phase 2 OPTIMIZATION: Compile predicate dispatcher once at init time
+        # Instead of dynamic dispatch for every row group, compile to specialized function
+        # For Q02, reduces from 281 × 30+ branches to 281 × lambda calls
+        if self._compiled_predicate_dispatcher is None and predicate_root:
+            self._compiled_predicate_dispatcher = self._compile_predicate_dispatcher(predicate_root)
 
         # ── Two-pass late materialization column split ────────────────────────
         # pass1_column_names: filter columns only — fetched for every row group.

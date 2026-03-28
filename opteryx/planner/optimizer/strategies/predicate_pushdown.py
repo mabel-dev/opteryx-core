@@ -193,6 +193,7 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                 combined = conditions[0]
                 for cond in conditions[1:]:
                     from opteryx.models import Node
+
                     and_node = Node(node_type=NodeType.AND)
                     and_node.left = combined
                     and_node.right = cond

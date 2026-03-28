@@ -63,12 +63,6 @@ def _int64_compare(op: str, vec, right):
         if fn is None:
             raise NotImplementedError(f"Int64Vector vector-vector: unsupported op {op!r}")
         return fn(right)
-    elif right.__class__.__name__ == "Float64Vector":
-        import pyarrow as pa
-        from opteryx.compiled.draken.interop.arrow import vector_from_arrow
-
-        float_vec = vector_from_arrow(vec.to_arrow().cast(pa.float64()))
-        return _float64_compare(op, float_vec, right)
     else:
         value = _coerce_int64(right)
 
@@ -84,6 +78,15 @@ def _int64_compare(op: str, vec, right):
         return vec.greater_than_or_equals(value)
     if op == "InList":
         return vec.in_list(value_set)
+
+    # Fallback for edge cases like Float64Vector comparison (not in hot path for ClickBench)
+    if right.__class__.__name__ == "Float64Vector":
+        import pyarrow as pa
+        from opteryx.compiled.draken.interop.arrow import vector_from_arrow
+
+        float_vec = vector_from_arrow(vec.to_arrow().cast(pa.float64()))
+        return _float64_compare(op, float_vec, right)
+
     raise NotImplementedError(f"Int64Vector: unsupported op {op!r}")
 
 
@@ -220,6 +223,8 @@ def _dict_compare(op: str, vec, right):
         return vec.greater_than_or_equals(right)
     if op == "InList":
         return vec.in_list(value_list)
+    if op in ("Like", "ILike", "RLike", "InStr", "IInStr"):
+        right = _coerce_str(right)
     if op == "Like":
         return vec.like(right, False)
     if op == "ILike":

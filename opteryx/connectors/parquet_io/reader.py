@@ -1071,13 +1071,21 @@ def _iter_row_groups_local_serial(
         meta = footers[path]
         row_groups = meta.get("row_groups", [])
 
+        # Pre-compute column name to index mapping once per file
+        # to avoid rebuilding the dict for every row group
+        column_name_to_idx: Dict[str, int] = {}
+        if row_groups:
+            first_rg_cols = row_groups[0]["columns"]
+            for idx, col in enumerate(first_rg_cols):
+                column_name_to_idx[col["name"]] = idx
+
         for rg_idx, rg_meta in enumerate(row_groups):
             if predicates and not row_group_may_satisfy(rg_meta, predicates):
                 rg_pruned_total += 1
                 continue
 
             rowgroup_start_ns = time.monotonic_ns()
-            name_to_stats: Dict[str, dict] = {col["name"]: col for col in rg_meta["columns"]}
+            rg_columns = rg_meta["columns"]
             row_group: Dict[str, Any] = {}
             bytes_fetched = 0
             range_request_count = 0
@@ -1103,12 +1111,13 @@ def _iter_row_groups_local_serial(
                 record_event("decode_start", **kwargs)
 
             for col_name in column_names:
-                col_stats = name_to_stats.get(col_name)
-                if col_stats is None:
+                col_idx = column_name_to_idx.get(col_name)
+                if col_idx is None:
                     raise KeyError(
                         f"Column '{col_name}' not found in row group {rg_idx}. "
-                        f"Available columns: {list(name_to_stats.keys())}"
+                        f"Available columns: {list(column_name_to_idx.keys())}"
                     )
+                col_stats = rg_columns[col_idx]
 
                 cached = cache.get_column(path, rg_idx, col_name)
                 if cached is not None:

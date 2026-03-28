@@ -196,8 +196,10 @@ class HeapSortNode(BasePlanNode):
             values = morsel.column(column_name.encode()).to_pylist()
             reverse = self._is_descending(direction)
 
-            non_null = [i for i in indices if values[i] is not None]
-            nulls = [i for i in indices if values[i] is None]
+            non_null = []
+            nulls = []
+            for i in indices:
+                (nulls if values[i] is None else non_null).append(i)
             non_null.sort(key=lambda i: values[i], reverse=reverse)
             indices = non_null + nulls
         return indices
@@ -208,41 +210,22 @@ class HeapSortNode(BasePlanNode):
 
         names = morsel.column_names
         py_materialize_types = {"StringVector", "ArrayVector", "VectorVector"}
-        if len(row_indices) <= 4096:
-            selection = numpy.asarray(row_indices, dtype=numpy.int32)
-            vectors = []
-            for name in names:
-                vector = morsel.column(name)
-                use_python_materialization = (
-                    vector.__class__.__name__ in py_materialize_types
-                    or not hasattr(vector, "take")
-                    or getattr(vector, "dictionary_size", 0) > 0
-                )
-                if use_python_materialization:
-                    values = vector.to_pylist()
-                    vectors.append(
-                        vector_from_sequence([values[row_index] for row_index in row_indices])
-                    )
-                else:
-                    vectors.append(vector.take(selection))
-            return Morsel.from_vectors(names, vectors)
-
         selection = numpy.asarray(row_indices, dtype=numpy.int32)
         vectors = []
         for name in names:
-            vec = morsel.column(name)
+            vector = morsel.column(name)
             use_python_materialization = (
-                vec.__class__.__name__ in py_materialize_types
-                or not hasattr(vec, "take")
-                or getattr(vec, "dictionary_size", 0) > 0
+                vector.__class__.__name__ in py_materialize_types
+                or not hasattr(vector, "take")
+                or getattr(vector, "dictionary_size", 0) > 0
             )
             if use_python_materialization:
-                values = vec.to_pylist()
+                values = vector.to_pylist()
                 vectors.append(
                     vector_from_sequence([values[row_index] for row_index in row_indices])
                 )
             else:
-                vectors.append(vec.take(selection))
+                vectors.append(vector.take(selection))
         return Morsel.from_vectors(names, vectors)
 
     def _sort_morsel(self, morsel: Morsel) -> Morsel:
@@ -356,8 +339,10 @@ class HeapSortNode(BasePlanNode):
             return fast_path
 
         values = vector.to_pylist()
-        non_null_indices = [i for i, value in enumerate(values) if value is not None]
-        null_indices = [i for i, value in enumerate(values) if value is None]
+        non_null_indices = []
+        null_indices = []
+        for i, value in enumerate(values):
+            (null_indices if value is None else non_null_indices).append(i)
         take_count = min(k, len(non_null_indices))
 
         if descending:

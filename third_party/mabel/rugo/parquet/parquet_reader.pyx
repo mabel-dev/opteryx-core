@@ -57,6 +57,8 @@ cdef extern from "telemetry.hpp" namespace "rugo_tel":
     double dict_parse_s
     double rle_s
     double val_expand_s
+    double mask_filter_s
+    double validity_bmp_s
     long long calls
     void reset() nogil
 
@@ -69,12 +71,14 @@ def reset_cpp_telemetry():
 def get_cpp_telemetry():
     """Return a dict with C++ phase timing (seconds) since last reset."""
     return {
-        "metadata_s":    metadata_s,
-        "decompress_s":  decompress_s,
-        "dict_parse_s":  dict_parse_s,
-        "rle_s":         rle_s,
-        "val_expand_s":  val_expand_s,
-        "calls":         calls,
+        "metadata_s":      metadata_s,
+        "decompress_s":    decompress_s,
+        "dict_parse_s":    dict_parse_s,
+        "rle_s":           rle_s,
+        "val_expand_s":    val_expand_s,
+        "mask_filter_s":   mask_filter_s,
+        "validity_bmp_s":  validity_bmp_s,
+        "calls":           calls,
     }
 
 cimport parquet_reader
