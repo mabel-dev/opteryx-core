@@ -1603,14 +1603,12 @@ cdef class StringVector(Vector):
                 i += block
             return 0
 
-        # Dictionary-encoded path: gather accessor details under the GIL, then hash/scatter nogil.
-        with gil:
-            da = self.dict_accessor()
-            dict_values_buf = da.dict_values
-            dict_size = <Py_ssize_t>dict_values_buf.length
-            dict_codes = da.codes
-            dict_code_width = da.code_width
-            dict_row_nulls = da.row_nulls
+        # Dictionary-encoded path: access member variables directly (no GIL needed)
+        dict_values_buf = self._dict_values
+        dict_size = <Py_ssize_t>dict_values_buf.length
+        dict_codes = self._dict_codes
+        dict_code_width = self._dict_code_width
+        dict_row_nulls = self.ptr.null_bitmap
         if self._encoding == DRAKEN_ENCODING_DICTIONARY:
 
             # Hash each dictionary entry

@@ -61,11 +61,14 @@ def distinct(Morsel morsel, CarcharSetWrapper seen_hashes, list columns=None):
     if col_indices == NULL:
         raise MemoryError()
 
-    # ── Allocate hash buffer — malloc is sufficient; c_hash writes every slot ─
+    # ── Allocate hash buffer — c_hash requires pre-zeroed buffer for simd_mix_hash ─
     hashes_ptr = <uint64_t*>malloc(<size_t>n * sizeof(uint64_t))
     if hashes_ptr == NULL:
         free(col_indices)
         raise MemoryError()
+
+    # ── Zero the buffer before hashing (required by c_hash_into which uses simd_mix_hash) ─
+    memset(hashes_ptr, 0, <size_t>n * sizeof(uint64_t))
 
     # ── Pre-allocate index buffer (worst case: all rows are new) ─────────────
     idx_buf = <int32_t*>malloc(<size_t>n * sizeof(int32_t))
