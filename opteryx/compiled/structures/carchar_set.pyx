@@ -29,7 +29,7 @@ Design notes
   operation a single-instruction call boundary with no exception-table overhead.
 """
 
-from libc.stdint cimport int32_t, int64_t, uint64_t, uint8_t
+from libc.stdint cimport int32_t, int64_t, uint64_t
 from libc.stddef cimport size_t
 
 

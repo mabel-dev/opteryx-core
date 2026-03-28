@@ -9,7 +9,6 @@ from libc.stdint cimport int8_t, int16_t, int32_t, int64_t, uint8_t, uint16_t, u
 
 from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.compiled.draken.core.buffers cimport DictAccessor
-from opteryx.compiled.draken.core.buffers cimport DrakenDictionaryBuffer
 from opteryx.compiled.draken.core.buffers cimport DrakenVarBuffer
 from opteryx.compiled.draken.core.buffers cimport DRAKEN_BOOL
 from opteryx.compiled.draken.core.buffers cimport DRAKEN_DATE32
@@ -27,7 +26,6 @@ from opteryx.compiled.draken.vectors.float64_vector cimport Float64Vector
 from opteryx.compiled.draken.vectors.int64_vector cimport Int64Vector
 from opteryx.compiled.draken.vectors.integer_vector cimport IntegerVector
 from opteryx.compiled.draken.vectors.string_vector cimport StringVector
-from opteryx.compiled.draken.vectors.vector cimport Vector
 
 
 cdef int KEY_MULTI_ENCODED_STRING = 6

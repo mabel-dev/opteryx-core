@@ -41,7 +41,7 @@ Further optimisations:
 """
 
 from libc.stddef cimport size_t
-from libc.stdint cimport int32_t, uint8_t
+from libc.stdint cimport int32_t
 
 cdef extern from "string.h":
     int   memcmp(const void *s1, const void *s2, size_t n) nogil
@@ -72,15 +72,15 @@ cdef extern from "simd_search.h":
 # ---------------------------------------------------------------------------
 
 cdef enum OperationType:
-    OP_MATCH_LITERAL         = 0
+    OP_MATCH_LITERAL = 0
     OP_MATCH_OPTIONAL_LITERAL = 1
-    OP_FIND_CHAR             = 2
-    OP_EXTRACT_UNTIL_CHAR    = 3
-    OP_EXTRACT_WHILE_NOT     = 4
-    OP_START_CAPTURE         = 5
-    OP_END_CAPTURE           = 6
-    OP_DISCARD_REST          = 7
-    OP_RETURN_CAPTURE        = 8
+    OP_FIND_CHAR = 2
+    OP_EXTRACT_UNTIL_CHAR = 3
+    OP_EXTRACT_WHILE_NOT = 4
+    OP_START_CAPTURE = 5
+    OP_END_CAPTURE = 6
+    OP_DISCARD_REST = 7
+    OP_RETURN_CAPTURE = 8
 
 
 # ---------------------------------------------------------------------------
@@ -114,9 +114,9 @@ ctypedef struct ProcResult:
 
 cdef inline ProcResult _run_procedure(
     const char *str_data,
-    size_t      str_len,
-    Operation  *ops,
-    Py_ssize_t  num_ops,
+    size_t str_len,
+    Operation *ops,
+    Py_ssize_t num_ops,
 ) nogil:
     """
     Execute compiled procedure on a single string.  No Python objects created.
@@ -128,21 +128,21 @@ cdef inline ProcResult _run_procedure(
     (one-or-more) contract via the cap.start < cap.end guard.
     """
     cdef ProcResult result
-    result.data   = NULL
+    result.data = NULL
     result.length = 0
 
-    cdef size_t     cursor = 0
-    cdef Py_ssize_t pc     = 0
-    cdef Capture    captures[10]
-    cdef int        match_pos
-    cdef size_t     k
-    cdef Operation  op
-    cdef Capture    cap
+    cdef size_t cursor = 0
+    cdef Py_ssize_t pc = 0
+    cdef Capture captures[10]
+    cdef int match_pos
+    cdef size_t k
+    cdef Operation op
+    cdef Capture cap
     cdef const char *found   # reusable pointer for memchr results
 
     for k in range(10):
         captures[k].start = 0
-        captures[k].end   = 0
+        captures[k].end = 0
 
     while pc < num_ops:
         op = ops[pc]
@@ -231,7 +231,7 @@ cdef inline ProcResult _run_procedure(
             if op.capture_id >= 0:
                 cap = captures[op.capture_id]
                 if cap.start < cap.end:
-                    result.data   = str_data + cap.start
+                    result.data = str_data + cap.start
                     result.length = <Py_ssize_t>(cap.end - cap.start)
             return result   # always terminates here (result.data may still be NULL)
 
@@ -276,16 +276,16 @@ cpdef StringVector execute_regex_procedure(
     StringVector
         Per-row results.  Rows with no match (or null input) are null.
     """
-    cdef DrakenVarBuffer    *ptr = data.ptr
-    cdef Py_ssize_t          n   = ptr.length
-    cdef Py_ssize_t          i, j
+    cdef DrakenVarBuffer *ptr = data.ptr
+    cdef Py_ssize_t n = ptr.length
+    cdef Py_ssize_t i, j
     cdef StringVectorBuilder builder
-    cdef Operation          *ops     = NULL
-    cdef Operation           ops_stack[16]   # stack‑allocated for small programs
-    cdef Py_ssize_t          ops_len = 0
-    cdef ProcResult          proc_result
-    cdef int32_t             start, end
-    cdef object              op_tuple
+    cdef Operation *ops = NULL
+    cdef Operation ops_stack[16]   # stack‑allocated for small programs
+    cdef Py_ssize_t ops_len = 0
+    cdef ProcResult proc_result
+    cdef int32_t start, end
+    cdef object op_tuple
 
     if fallback_to_re2 or operations is None or len(operations) == 0:
         return data
@@ -311,13 +311,13 @@ cpdef StringVector execute_regex_procedure(
             ops[j].op_type = <int>op_tuple[0]
 
             if op_tuple[1] is not None:
-                ops[j].pattern     = <const char *>op_tuple[1]
+                ops[j].pattern = <const char *>op_tuple[1]
                 ops[j].pattern_len = <size_t>len(op_tuple[1])
             else:
-                ops[j].pattern     = NULL
+                ops[j].pattern = NULL
                 ops[j].pattern_len = 0
 
-            ops[j].capture_id  = <int>op_tuple[3]
+            ops[j].capture_id = <int>op_tuple[3]
             ops[j].target_char = <char>(op_tuple[4] if op_tuple[4] is not None else 0)
 
         # builder typed as StringVectorBuilder: cpdef methods (append_bytes,
@@ -334,7 +334,7 @@ cpdef StringVector execute_regex_procedure(
                 continue
 
             start = ptr.offsets[i]
-            end   = ptr.offsets[i + 1]
+            end = ptr.offsets[i + 1]
 
             proc_result = _run_procedure(
                 <const char *>ptr.data + start,

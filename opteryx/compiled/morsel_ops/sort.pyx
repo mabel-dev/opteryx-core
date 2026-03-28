@@ -35,7 +35,7 @@ from array import array
 
 from cpython.mem cimport PyMem_Malloc, PyMem_Free
 from libc.stdint cimport int8_t, int16_t, int32_t, int64_t, uint8_t, uint16_t, uint32_t, uint64_t
-from libc.string cimport memset, memcpy, memcmp
+from libc.string cimport memset, memcpy
 
 from opteryx.compiled.draken.core.buffers cimport (
     DictAccessor,
@@ -195,7 +195,9 @@ cdef void _radix_sort(
             dst[count[byte_val]] = src[i]
             count[byte_val] += 1
 
-        sw = src; src = dst; dst = sw
+        sw = src
+        src = dst
+        dst = sw
 
     # If an odd number of passes ran, the result ended up in tmp; copy back.
     if src != perm:
@@ -252,7 +254,7 @@ cdef void _tiebreak_strings(
 #   DESC: flip sign bit then all bits  key ^ 0x7FFF_FFFF_FFFF_FFFF
 #         → same effect but inverted order
 
-cdef inline uint64_t _asc_xor  = <uint64_t>0x8000000000000000ULL
+cdef inline uint64_t _asc_xor = <uint64_t>0x8000000000000000ULL
 cdef inline uint64_t _desc_xor = <uint64_t>0x7FFFFFFFFFFFFFFFULL
 
 
@@ -329,8 +331,8 @@ cdef uint32_t* _build_numeric_dict_remap(
 
     # Build an array of (sortable_int64_key, original_code) pairs.
     cdef int64_t* sort_keys = <int64_t*>PyMem_Malloc(D * sizeof(int64_t))
-    cdef uint32_t* order    = <uint32_t*>PyMem_Malloc(D * sizeof(uint32_t))
-    cdef uint32_t* remap    = <uint32_t*>PyMem_Malloc(D * sizeof(uint32_t))
+    cdef uint32_t* order = <uint32_t*>PyMem_Malloc(D * sizeof(uint32_t))
+    cdef uint32_t* remap = <uint32_t*>PyMem_Malloc(D * sizeof(uint32_t))
 
     if sort_keys == NULL or order == NULL or remap == NULL:
         PyMem_Free(sort_keys)
@@ -376,10 +378,10 @@ cdef uint32_t* _build_string_dict_remap(
     if D == 0:
         return NULL
 
-    cdef const char* data    = <const char*>dv.data
-    cdef int32_t* offsets    = dv.offsets
-    cdef uint32_t* order     = <uint32_t*>PyMem_Malloc(D * sizeof(uint32_t))
-    cdef uint32_t* remap     = <uint32_t*>PyMem_Malloc(D * sizeof(uint32_t))
+    cdef const char* data = <const char*>dv.data
+    cdef int32_t* offsets = dv.offsets
+    cdef uint32_t* order = <uint32_t*>PyMem_Malloc(D * sizeof(uint32_t))
+    cdef uint32_t* remap = <uint32_t*>PyMem_Malloc(D * sizeof(uint32_t))
 
     if order == NULL or remap == NULL:
         PyMem_Free(order)
@@ -434,8 +436,8 @@ def morsel_sort(morsel, list column_names, list ascending):
     # Allocate all three C buffers once; reuse keys across every column.
     # perm and tmp swap roles each radix pass; keys is overwritten per column.
     cdef uint32_t* perm_buf = <uint32_t*> PyMem_Malloc(n * sizeof(uint32_t))
-    cdef uint32_t* tmp_buf  = <uint32_t*> PyMem_Malloc(n * sizeof(uint32_t))
-    cdef uint64_t* keys     = <uint64_t*> PyMem_Malloc(n * sizeof(uint64_t))
+    cdef uint32_t* tmp_buf = <uint32_t*> PyMem_Malloc(n * sizeof(uint32_t))
+    cdef uint64_t* keys = <uint64_t*> PyMem_Malloc(n * sizeof(uint64_t))
     if perm_buf == NULL or tmp_buf == NULL or keys == NULL:
         PyMem_Free(perm_buf)
         PyMem_Free(tmp_buf)

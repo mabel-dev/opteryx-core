@@ -10,12 +10,11 @@
 # MIN, MAX, AVG, ANY_VALUE, and ARRAY_AGG-style object outputs.
 
 from libc.stdint cimport int32_t, int64_t, uint8_t
-from libc.stdlib cimport malloc, free
+from libc.stdlib cimport malloc
 from libc.string cimport memset
 from libcpp.string cimport string
 from libcpp.vector cimport vector
 
-from opteryx.compiled.draken.morsels.morsel cimport Morsel
 from opteryx.compiled.aggregations.key_codec cimport decode_multi_key_record
 from opteryx.compiled.aggregations.key_codec cimport decode_single_encoded_key_record
 from opteryx.compiled.aggregations.key_codec cimport decode_single_fixed_key_record
@@ -26,7 +25,6 @@ from opteryx.compiled.draken.vectors.int64_vector cimport Int64Vector
 from opteryx.compiled.draken.vectors.string_vector cimport StringVectorBuilder
 from opteryx.compiled.draken.vectors.time_vector cimport TimeVector
 from opteryx.compiled.draken.vectors.timestamp_vector cimport TimestampVector
-from opteryx.compiled.draken.vectors.vector cimport Vector
 
 
 cdef int KEY_MULTI_FIXED_INT = 1
@@ -466,7 +464,7 @@ cdef object build_object_state_vector(
             builder.append_bytes(
                 <const char*> &object_state_bytes[object_state_starts[state_index]],
                 object_state_lengths[state_index],
-        )
+                )
     return builder.finish()
 
 
