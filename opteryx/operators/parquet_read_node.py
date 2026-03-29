@@ -26,7 +26,6 @@ between I/O and decode across all files and row groups simultaneously.
 
 from __future__ import annotations
 
-import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import as_completed

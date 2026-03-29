@@ -183,8 +183,7 @@ class OpteryxGcsFileSystem:
         # Fan out HEAD requests in parallel; preserve caller's path order.
         infos: List["FileInfo"] = [None] * len(paths)  # type: ignore[assignment]
         futures = [
-            _GCS_RANGE_POOL.submit(_head_one, idx, path, bearer)
-            for idx, path in enumerate(paths)
+            _GCS_RANGE_POOL.submit(_head_one, idx, path, bearer) for idx, path in enumerate(paths)
         ]
         for fut in as_completed(futures):
             idx, info = fut.result()

@@ -474,8 +474,7 @@ def fetch_columns(
         else:
             # Multiple columns: decode in parallel via dedicated CPU pool.
             decode_futures = {
-                _DECODE_POOL.submit(_decode_one, cn, rb): cn
-                for cn, rb in zip(misses, raw_buffers)
+                _DECODE_POOL.submit(_decode_one, cn, rb): cn for cn, rb in zip(misses, raw_buffers)
             }
             for fut in as_completed(decode_futures):
                 cn = decode_futures[fut]
@@ -1288,9 +1287,7 @@ def _iter_row_groups_local_serial(
                 row_group[col_name] = decoded
             else:
                 # Multiple columns: decode in parallel — each decode is nogil.
-                def _decode_serial_one(
-                    col_name: str, col_stats: dict, raw_bytes: bytes
-                ) -> tuple:
+                def _decode_serial_one(col_name: str, col_stats: dict, raw_bytes: bytes) -> tuple:
                     if trace_enabled:
                         _kw = {
                             "file_id": path,
