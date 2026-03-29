@@ -485,6 +485,185 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
       decoded_row_mask.reserve(total_needed > 0 ? (size_t)total_needed : 65536u);
     }
 
+    // ── Tier 3: Parallel page decode ──────────────────────────────────────
+    // For non-nullable, non-dict, non-nested, fixed-width columns with more
+    // than 2 pages, pre-scan → pre-allocate → parallel decompress + decode.
+    // This path is strictly additive: falls back to sequential on any error,
+    // or when the column doesn't meet the eligibility criteria.
+    //
+    // Eligible types:
+    //   - dict_size == 0          (no dictionary; no interning, pages independent)
+    //   - max_definition_level == 0 (non-nullable; no def-level decode needed)
+    //   - max_repetition_level == 0 (non-nested; no rep-level decode needed)
+    //   - row_mask == nullptr      (no filtering; post-loop filter stays simple)
+    //   - type in {int32,int64,float32,float64} (fixed-width; bulk copy per page)
+    //   - page_count > 2           (not worth the overhead for 1-2 pages)
+
+    bool used_parallel_path = false;
+
+    {
+      const bool tier3_eligible = (
+          dict_size == 0 &&
+          target_col->max_definition_level == 0 &&
+          target_col->max_repetition_level == 0 &&
+          row_mask == nullptr &&
+          (result.type == "int32" || result.type == "int64" ||
+           result.type == "float32" || result.type == "float64")
+      );
+
+      if (tier3_eligible) {
+        // Phase 1: Pre-scan (cheap: parses page headers only, no decompression)
+        RUGO_TEL_START(_ps_t0);
+        std::vector<PageTask> page_tasks;
+        page_tasks.reserve(64);
+        const int32_t prescan_total = PreScanPages(cursor, chunk_limit, nullptr, page_tasks);
+        RUGO_TEL_ACCUM(rugo_tel::prescan_s, _ps_t0);
+
+        if (page_tasks.size() > 2 && prescan_total > 0) {
+          // Phase 2: Pre-allocate output buffers exactly (no growth during decode)
+          // For ext_* paths (Tier 4A), the buffer is pre-allocated by the caller.
+          const bool has_ext = (result.ext_int32 != nullptr || result.ext_int64 != nullptr ||
+                                result.ext_float32 != nullptr || result.ext_float64 != nullptr);
+          if (!has_ext) {
+            const size_t tn = (size_t)prescan_total;
+            if      (result.type == "int32")   result.int32_values.resize(tn);
+            else if (result.type == "int64")   result.int64_values.resize(tn);
+            else if (result.type == "float32") result.float32_values.resize(tn);
+            else if (result.type == "float64") result.float64_values.resize(tn);
+          }
+
+          // Phase 3: Dispatch pages to thread pool
+          // Pool size: capped at 8 to avoid excessive thread creation overhead.
+          // Each task owns its decompression buffer (no sharing needed).
+          const int hw_raw = (int)std::thread::hardware_concurrency();
+          const size_t hw = (size_t)(hw_raw > 0 ? hw_raw : 2);
+          const size_t pool_size = std::min({page_tasks.size(), hw, (size_t)8});
+          PageDecodePool pool(pool_size);
+
+          std::atomic<bool>    any_error{false};
+          std::atomic<int32_t> decoded_count{0};
+
+          // Snapshot read-only state for thread-safe lambda capture
+          const std::string col_type  = result.type;
+          const int32_t     col_codec = target_col->codec;
+          int64_t*  xint64   = result.ext_int64;
+          double*   xfloat64 = result.ext_float64;
+          int32_t*  xint32   = result.ext_int32;
+          float*    xfloat32 = result.ext_float32;
+          // Pointers to pre-allocated internal vectors (resized above; stable address)
+          int32_t* ivec_i32  = result.int32_values.empty()   ? nullptr : result.int32_values.data();
+          int64_t* ivec_i64  = result.int64_values.empty()   ? nullptr : result.int64_values.data();
+          float*   ivec_f32  = result.float32_values.empty() ? nullptr : result.float32_values.data();
+          double*  ivec_f64  = result.float64_values.empty() ? nullptr : result.float64_values.data();
+
+          RUGO_TEL_START(_pp_t0);
+          for (const PageTask& ptask : page_tasks) {
+            if (ptask.skip_page) { ++result.pages_skipped; continue; }
+
+            pool.push_task([ptask, col_type, col_codec,
+                            xint64, xfloat64, xint32, xfloat32,
+                            ivec_i32, ivec_i64, ivec_f32, ivec_f64,
+                            &any_error, &decoded_count]() {
+              if (any_error.load(std::memory_order_relaxed)) return;
+
+              // Per-task decompression buffer (each task owns this — no sharing)
+              std::vector<uint8_t> decomp_buf;
+              const uint8_t* dp;
+              size_t         ds;
+
+              if (col_codec == 0) {
+                dp = ptask.compressed_data;
+                ds = ptask.compressed_size;
+              } else {
+                try {
+                  auto codec = rugo::compression::CodecFromInt(col_codec);
+                  rugo::compression::DecompressInto(
+                      ptask.compressed_data, ptask.compressed_size,
+                      ptask.uncompressed_size, codec, decomp_buf);
+                  dp = decomp_buf.data();
+                  ds = decomp_buf.size();
+                } catch (...) {
+                  any_error.store(true, std::memory_order_relaxed);
+                  return;
+                }
+              }
+
+              const int32_t nv  = ptask.num_values;
+              const size_t  off = (size_t)ptask.out_offset;
+              const uint8_t* dend = dp + ds;
+
+              if (col_type == "int32") {
+                int32_t* dst = xint32 ? (xint32 + off) : (ivec_i32 + off);
+                if (ptask.encoding == 4) {  // DELTA
+                  std::vector<int32_t> tmp;
+                  if (DecodeDeltaBinaryPacked(dp, ds, nv, tmp) != nv) {
+                    any_error.store(true, std::memory_order_relaxed); return;
+                  }
+                  std::copy(tmp.begin(), tmp.end(), dst);
+                } else {
+                  int32_t safe = std::min(nv, (int32_t)((dend - dp) / 4));
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+                  std::memcpy(dst, dp, (size_t)safe * sizeof(int32_t));
+#else
+                  for (int32_t i = 0; i < safe; i++) dst[i] = ReadLE32(dp + i * 4);
+#endif
+                }
+              } else if (col_type == "int64") {
+                int64_t* dst = xint64 ? (xint64 + off) : (ivec_i64 + off);
+                if (ptask.encoding == 4) {  // DELTA
+                  std::vector<int64_t> tmp;
+                  if (DecodeDeltaBinaryPacked(dp, ds, nv, tmp) != nv) {
+                    any_error.store(true, std::memory_order_relaxed); return;
+                  }
+                  std::copy(tmp.begin(), tmp.end(), dst);
+                } else {
+                  int32_t safe = std::min(nv, (int32_t)((dend - dp) / 8));
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+                  std::memcpy(dst, dp, (size_t)safe * sizeof(int64_t));
+#else
+                  for (int32_t i = 0; i < safe; i++) dst[i] = ReadLE64(dp + i * 8);
+#endif
+                }
+              } else if (col_type == "float32") {
+                float* dst = xfloat32 ? (xfloat32 + off) : (ivec_f32 + off);
+                int32_t safe = std::min(nv, (int32_t)((dend - dp) / 4));
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+                std::memcpy(dst, dp, (size_t)safe * sizeof(float));
+#else
+                for (int32_t i = 0; i < safe; i++) dst[i] = ReadFloat32(dp + i * 4);
+#endif
+              } else if (col_type == "float64") {
+                double* dst = xfloat64 ? (xfloat64 + off) : (ivec_f64 + off);
+                int32_t safe = std::min(nv, (int32_t)((dend - dp) / 8));
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+                std::memcpy(dst, dp, (size_t)safe * sizeof(double));
+#else
+                for (int32_t i = 0; i < safe; i++) dst[i] = ReadFloat64(dp + i * 8);
+#endif
+              }
+
+              decoded_count.fetch_add(1, std::memory_order_relaxed);
+            });
+          }
+
+          pool.wait_for_tasks();
+          RUGO_TEL_ACCUM(rugo_tel::page_parallel_s, _pp_t0);
+
+          if (!any_error.load()) {
+            total_collected = prescan_total;
+            result.pages_decoded += decoded_count.load();
+            if (has_ext) {
+              result.ext_written = prescan_total;
+            }
+            used_parallel_path = true;
+          }
+          // If any_error: used_parallel_path stays false → fall through to sequential recovery
+        }
+      }
+    }  // end Tier 3 parallel scope
+
+    if (!used_parallel_path) {
+    // ── Sequential page loop ──────────────────────────────────────────────
     while (cursor < chunk_limit &&
            (total_needed <= 0 || total_collected < total_needed)) {
 
@@ -1180,6 +1359,7 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
       total_collected += page_values;
       cursor = compressed_data + compressed_size;
     }  // end page loop
+    }  // end if (!used_parallel_path) [sequential fallback]
 
     const int32_t total_rows_all_pages = total_collected;
 
