@@ -745,6 +745,11 @@ def _io_worker(
         thread_name_prefix="io-ring-decode",
     )
 
+    # Filesystem cache: reuse instances across scans so that HTTP sessions
+    # (and their underlying TCP connections) survive between queries.
+    # For GCS, this preserves keep-alive connections, saving ~RTT per scan.
+    _filesystem_by_protocol: Dict[str, Any] = {}
+
     event_q.put({"type": _EVENT_IO_READY})
 
     try:
@@ -839,7 +844,9 @@ def _io_worker(
                 target_slice_bytes = int(command["target_slice_bytes"])
 
                 protocol = _resolve_protocol(paths, connector)
-                filesystem = create_filesystem(protocol)
+                if protocol not in _filesystem_by_protocol:
+                    _filesystem_by_protocol[protocol] = create_filesystem(protocol)
+                filesystem = _filesystem_by_protocol[protocol]
                 decoder_fn = _resolve_decoder()
 
                 unique_paths = list(dict.fromkeys(paths))
