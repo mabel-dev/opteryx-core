@@ -89,6 +89,15 @@ _DECODE_POOL: ThreadPoolExecutor = ThreadPoolExecutor(
     thread_name_prefix="parquet-decode",
 )
 
+# Large-capacity IO pool for the v2 scheduler which issues up to
+# PARQUET_GLOBAL_RANGE_READERS (default 64) concurrent range reads.
+# _RANGE_POOL (32 workers) is not enough; a second module-level pool
+# avoids per-query thread creation for the common case.
+_RANGE_POOL_V2: ThreadPoolExecutor = ThreadPoolExecutor(
+    max_workers=max(64, _RANGE_POOL._max_workers),
+    thread_name_prefix="parquet-io-v2",
+)
+
 
 def _read_footer_payload(
     filesystem: Any,
@@ -1372,9 +1381,14 @@ def _iter_row_groups_v2(
     read_pool: ThreadPoolExecutor
     local_read_pool = False
     required_workers = max(max_workers, global_ranges_cap)
-    if max_workers == 16 and required_workers <= 32:
+    if required_workers <= _RANGE_POOL._max_workers:
         read_pool = _RANGE_POOL
+    elif required_workers <= _RANGE_POOL_V2._max_workers:
+        # Common case with default config (PARQUET_GLOBAL_RANGE_READERS=64):
+        # use the shared v2 pool instead of creating a per-query pool.
+        read_pool = _RANGE_POOL_V2
     else:
+        # Unusual: caller requested more workers than either shared pool.
         read_pool = ThreadPoolExecutor(
             max_workers=required_workers, thread_name_prefix="parquet-io-v2-local"
         )
