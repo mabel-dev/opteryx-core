@@ -18,7 +18,16 @@ from typing import Union
 from opteryx.exceptions import DatasetReadError
 from opteryx.exceptions import MissingDependencyError
 
-_MAX_PARALLEL_RANGE_READS = 32
+# GCS range-read pool.
+#
+# With the v2 scheduler running up to 64 row-group tasks concurrently
+# (PARQUET_GLOBAL_RANGE_READERS=64), and each row-group task internally
+# fanning out N column ranges to this pool, we need substantially more than
+# 32 workers to avoid excessive queuing.  128 workers keeps 64 row-group tasks
+# busy even on wide-column projections while staying well within OS thread
+# limits.  Each worker is blocked on network I/O (GIL released), so real
+# parallelism scales with the worker count.
+_MAX_PARALLEL_RANGE_READS = 128
 
 # Module-level thread pool for intra-read_ranges parallelism.
 # Reused across calls to avoid per-call thread creation/destruction overhead.
@@ -112,9 +121,12 @@ class OpteryxGcsFileSystem:
             request = Request()
             self.client_credentials.refresh(request)
 
-        # Create a HTTP connection session to reduce effort for each fetch
+        # Create a HTTP connection session to reduce effort for each fetch.
+        # pool_maxsize must be at least _MAX_PARALLEL_RANGE_READS so that
+        # concurrent range-read workers don't block waiting for a free
+        # connection slot.  pool_connections=1 (one pool for storage.googleapis.com).
         self.session = requests.session()
-        adapter = HTTPAdapter(pool_connections=100, pool_maxsize=100)
+        adapter = HTTPAdapter(pool_connections=1, pool_maxsize=_MAX_PARALLEL_RANGE_READS + 16)
         self.session.mount("https://", adapter)
 
     @property

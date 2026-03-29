@@ -12,7 +12,7 @@ from concurrent.futures import as_completed
 from typing import List
 from typing import Tuple
 
-_MAX_PARALLEL_RANGE_READS = 32
+_MAX_PARALLEL_RANGE_READS = 64
 
 # Module-level thread pool for intra-read_ranges parallelism.
 # Reused across calls to avoid per-call thread creation/destruction overhead.
