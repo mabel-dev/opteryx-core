@@ -26,6 +26,7 @@ between I/O and decode across all files and row groups simultaneously.
 
 from __future__ import annotations
 
+import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import as_completed
@@ -56,6 +57,14 @@ from .read_node import normalize_morsel
 from .read_node import struct_to_jsonb
 
 _DATA_FORMAT = "arrow,draken"
+
+# Module-level pool for parallel footer prefetch — reused across queries to avoid
+# per-query thread creation/destruction overhead.  Footer reads are I/O-bound
+# (two small range reads per file), so threads scale well past cpu_count().
+_FOOTER_POOL: ThreadPoolExecutor = ThreadPoolExecutor(
+    max_workers=64,
+    thread_name_prefix="parquet-footer-prefetch",
+)
 
 
 class ParquetReadNode(ReaderNode):
@@ -734,25 +743,20 @@ class ParquetReadNode(ReaderNode):
         prefetched_footers: dict[str, dict] = {}
 
         unique_blob_paths = list(dict.fromkeys(blob_paths))
-        footer_workers = max(1, int(config.PARQUET_PREFETCH_FOOTER_WORKERS))
         if unique_blob_paths:
-            with ThreadPoolExecutor(
-                max_workers=min(footer_workers, len(unique_blob_paths)),
-                thread_name_prefix="parquet-footer-prefetch",
-            ) as footer_pool:
-                future_to_path = {
-                    footer_pool.submit(
-                        fetch_footer,
-                        filesystem,
-                        blob_name,
-                        None,
-                        file_sizes.get(blob_name),
-                    ): blob_name
-                    for blob_name in unique_blob_paths
-                }
-                for future in as_completed(future_to_path):
-                    blob_name = future_to_path[future]
-                    prefetched_footers[blob_name] = future.result()
+            future_to_path = {
+                _FOOTER_POOL.submit(
+                    fetch_footer,
+                    filesystem,
+                    blob_name,
+                    None,
+                    file_sizes.get(blob_name),
+                ): blob_name
+                for blob_name in unique_blob_paths
+            }
+            for future in as_completed(future_to_path):
+                blob_name = future_to_path[future]
+                prefetched_footers[blob_name] = future.result()
 
         for blob_name in blob_paths:
             footer = prefetched_footers[blob_name]
