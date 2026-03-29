@@ -1252,7 +1252,10 @@ def _iter_row_groups_local_serial(
 
                     decoded_inputs.append((col_name, col_stats, raw_bytes))
 
-            for col_name, col_stats, raw_bytes in decoded_inputs:
+            decode_start_ns = time.monotonic_ns()
+            if len(decoded_inputs) == 1:
+                # Single column: skip pool overhead.
+                col_name, col_stats, raw_bytes = decoded_inputs[0]
                 if trace_enabled:
                     kwargs = {
                         "file_id": path,
@@ -1264,16 +1267,12 @@ def _iter_row_groups_local_serial(
                         kwargs["connector"] = connector
                     record_event("decode_start", **kwargs)
 
-                decode_start_ns = time.monotonic_ns()
                 decoded = decoder_fn(raw_bytes, col_stats)
-                decode_elapsed_ns = time.monotonic_ns() - decode_start_ns
-                time_decode_columns_ns += decode_elapsed_ns
                 if decoded is None:
                     raise RuntimeError(
                         f"Decoder returned None for column '{path}:{rg_idx}:{col_name}' "
                         f"(codec={col_stats.get('compression_codec')}, encodings={col_stats.get('encodings')})"
                     )
-
                 if trace_enabled:
                     kwargs = {
                         "file_id": path,
@@ -1284,9 +1283,50 @@ def _iter_row_groups_local_serial(
                     if connector:
                         kwargs["connector"] = connector
                     record_event("decode_complete", **kwargs)
-
                 cache.set_column(path, rg_idx, col_name, decoded)
                 row_group[col_name] = decoded
+            else:
+                # Multiple columns: decode in parallel — each decode is nogil.
+                def _decode_serial_one(
+                    col_name: str, col_stats: dict, raw_bytes: bytes
+                ) -> tuple:
+                    if trace_enabled:
+                        _kw = {
+                            "file_id": path,
+                            "component": "column",
+                            "rg_idx": rg_idx,
+                            "column": col_name,
+                        }
+                        if connector:
+                            _kw["connector"] = connector
+                        record_event("decode_start", **_kw)
+                    result = decoder_fn(raw_bytes, col_stats)
+                    if result is None:
+                        raise RuntimeError(
+                            f"Decoder returned None for column '{path}:{rg_idx}:{col_name}' "
+                            f"(codec={col_stats.get('compression_codec')}, encodings={col_stats.get('encodings')})"
+                        )
+                    if trace_enabled:
+                        _kw = {
+                            "file_id": path,
+                            "component": "column",
+                            "rg_idx": rg_idx,
+                            "column": col_name,
+                        }
+                        if connector:
+                            _kw["connector"] = connector
+                        record_event("decode_complete", **_kw)
+                    return col_name, result
+
+                decode_futs = {
+                    _DECODE_POOL.submit(_decode_serial_one, cn, cs, rb): cn
+                    for cn, cs, rb in decoded_inputs
+                }
+                for fut in as_completed(decode_futs):
+                    cn, decoded = fut.result()
+                    cache.set_column(path, rg_idx, cn, decoded)
+                    row_group[cn] = decoded
+            time_decode_columns_ns = time.monotonic_ns() - decode_start_ns
 
             completed_ns = time.monotonic_ns()
             if first_rowgroup_emit_ns is None:
