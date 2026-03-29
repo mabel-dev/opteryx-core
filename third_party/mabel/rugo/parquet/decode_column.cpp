@@ -13,6 +13,8 @@
 #include "metadata.hpp"
 #include "telemetry.hpp"
 #include "simd_gather.hpp"
+#include "simd_compact.hpp"
+#include "type_widening.hpp"
 #include <algorithm>
 #include <cstring>
 #include <iostream>
@@ -1087,43 +1089,53 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
             (target_col->max_definition_level > 0 && !all_def_levels.empty());
 
         if (!has_nulls) {
-          // Non-nullable: one value per row — simple mask filter on each vector.
-          auto filt_i32 = [&](std::vector<int32_t>& v) {
-            if (v.empty()) return;
+          // Non-nullable: one value per row — use SIMD-accelerated compaction.
+          const size_t mask_len = std::min((size_t)total_decoded, decoded_row_mask.size());
+
+          // Filter int32_values using SIMD compact
+          if (!result.int32_values.empty()) {
             std::vector<int32_t> o; o.reserve(K);
-            for (int32_t i = 0; i < (int32_t)v.size() && i < total_decoded; ++i)
-              if (decoded_row_mask[i]) o.push_back(v[i]);
-            v = std::move(o);
-          };
-          auto filt_i64 = [&](std::vector<int64_t>& v) {
-            if (v.empty()) return;
+            parquet_simd::compact_int32(result.int32_values.data(), decoded_row_mask.data(),
+                                        std::min((size_t)result.int32_values.size(), mask_len), o);
+            result.int32_values = std::move(o);
+          }
+
+          // Filter int64_values using SIMD compact
+          if (!result.int64_values.empty()) {
             std::vector<int64_t> o; o.reserve(K);
-            for (int32_t i = 0; i < (int32_t)v.size() && i < total_decoded; ++i)
-              if (decoded_row_mask[i]) o.push_back(v[i]);
-            v = std::move(o);
-          };
-          auto filt_f32 = [&](std::vector<float>& v) {
-            if (v.empty()) return;
+            parquet_simd::compact_int64(result.int64_values.data(), decoded_row_mask.data(),
+                                        std::min((size_t)result.int64_values.size(), mask_len), o);
+            result.int64_values = std::move(o);
+          }
+
+          // Filter float32_values using SIMD compact
+          if (!result.float32_values.empty()) {
             std::vector<float> o; o.reserve(K);
-            for (int32_t i = 0; i < (int32_t)v.size() && i < total_decoded; ++i)
-              if (decoded_row_mask[i]) o.push_back(v[i]);
-            v = std::move(o);
-          };
-          auto filt_f64 = [&](std::vector<double>& v) {
-            if (v.empty()) return;
+            parquet_simd::compact_float32(result.float32_values.data(), decoded_row_mask.data(),
+                                          std::min((size_t)result.float32_values.size(), mask_len), o);
+            result.float32_values = std::move(o);
+          }
+
+          // Filter float64_values using SIMD compact
+          if (!result.float64_values.empty()) {
             std::vector<double> o; o.reserve(K);
-            for (int32_t i = 0; i < (int32_t)v.size() && i < total_decoded; ++i)
-              if (decoded_row_mask[i]) o.push_back(v[i]);
-            v = std::move(o);
-          };
-          filt_i32(result.int32_values);
-          filt_i64(result.int64_values);
-          filt_f32(result.float32_values);
-          filt_f64(result.float64_values);
-          filt_i32(result.dict_indices);
+            parquet_simd::compact_float64(result.float64_values.data(), decoded_row_mask.data(),
+                                          std::min((size_t)result.float64_values.size(), mask_len), o);
+            result.float64_values = std::move(o);
+          }
+
+          // Filter dict_indices using SIMD compact
+          if (!result.dict_indices.empty()) {
+            std::vector<int32_t> o; o.reserve(K);
+            parquet_simd::compact_int32(result.dict_indices.data(), decoded_row_mask.data(),
+                                        std::min((size_t)result.dict_indices.size(), mask_len), o);
+            result.dict_indices = std::move(o);
+          }
+
+          // Filter boolean_values using scalar compact (treat uint8_t as int32_t via memcpy)
           if (!result.boolean_values.empty()) {
             std::vector<uint8_t> o; o.reserve(K);
-            for (int32_t i = 0; i < (int32_t)result.boolean_values.size() && i < total_decoded; ++i)
+            for (size_t i = 0; i < std::min((size_t)result.boolean_values.size(), mask_len); ++i)
               if (decoded_row_mask[i]) o.push_back(result.boolean_values[i]);
             result.boolean_values = std::move(o);
           }
@@ -1179,8 +1191,9 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
         // Filter def_levels to selected rows (valid_bits is built from this below).
         if (!all_def_levels.empty()) {
           std::vector<int32_t> od; od.reserve(K);
-          for (int32_t i = 0; i < total_decoded && i < (int32_t)all_def_levels.size(); ++i)
-            if (decoded_row_mask[i]) od.push_back(all_def_levels[i]);
+          const size_t mask_len = std::min((size_t)total_decoded, decoded_row_mask.size());
+          parquet_simd::compact_int32(all_def_levels.data(), decoded_row_mask.data(),
+                                      std::min((size_t)all_def_levels.size(), mask_len), od);
           all_def_levels = std::move(od);
         }
       }

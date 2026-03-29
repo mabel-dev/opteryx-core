@@ -89,6 +89,11 @@ from libc.string cimport memcpy, memset
 from libcpp.string cimport string
 from libcpp.vector cimport vector
 
+# Type widening C wrappers (Tier 2C SIMD acceleration)
+cdef extern from "type_widening_wrappers.hpp":
+    void rugo_widen_int32_to_int64(const int32_t* src, int64_t* dst, size_t count) nogil
+    void rugo_widen_float32_to_float64(const float* src, double* dst, size_t count) nogil
+
 # Import Draken vector types and components
 from opteryx.compiled.draken.vectors.int64_vector cimport (
     Int64Vector,
@@ -616,14 +621,17 @@ cdef Float64Vector _make_float64_from_float32_vector(
         memcpy(nb, decoded_col.valid_bits.data(), nb_bytes)
         vec.ptr.null_bitmap = nb
     else:
-        for i in range(num_rows):
-            if dict_mode:
+        if dict_mode:
+            # Dictionary mode: need to gather dict values (not SIMD-friendly, use scalar)
+            for i in range(num_rows):
                 code = decoded_col.dict_indices[i]
                 if code < 0 or code >= decoded_col.dict_float32_values.size():
                     raise ValueError(f"dictionary index out of bounds at row {i}: {code}")
                 dst[i] = <double>decoded_col.dict_float32_values[code]
-            else:
-                dst[i] = <double>decoded_col.float32_values[i]
+        else:
+            # Dense case: use SIMD-accelerated type widening (Tier 2C)
+            # rugo_widen_float32_to_float64 uses AVX2 instructions when available
+            rugo_widen_float32_to_float64(decoded_col.float32_values.data(), dst, <size_t>num_rows)
     return vec
 
 
@@ -638,6 +646,7 @@ cdef Int64Vector _make_int32_as_int64_vector(
     cdef uint8_t* nb
 
     if decoded_col.valid_bits.size() > 0:
+        # Sparse case: iterate valid_bits and widen selected values
         for i in range(num_rows):
             if (decoded_col.valid_bits[i >> 3] >> (i & 7)) & 1:
                 dst[i] = <int64_t> decoded_col.int32_values[val_idx]
@@ -651,8 +660,9 @@ cdef Int64Vector _make_int32_as_int64_vector(
         memcpy(nb, decoded_col.valid_bits.data(), nb_bytes)
         vec.ptr.null_bitmap = nb
     else:
-        for i in range(num_rows):
-            dst[i] = <int64_t> decoded_col.int32_values[i]
+        # Dense case: use SIMD-accelerated type widening (Tier 2C)
+        # rugo_widen_int32_to_int64 uses AVX2 instructions when available
+        rugo_widen_int32_to_int64(decoded_col.int32_values.data(), dst, <size_t>num_rows)
 
     return vec
 
