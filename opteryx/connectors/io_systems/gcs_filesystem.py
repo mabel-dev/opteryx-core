@@ -192,6 +192,11 @@ class OpteryxGcsFileSystem:
         if not ranges:
             return []
 
+        # Capture a single valid bearer token for this entire read_ranges call.
+        # Using _bearer once here (rather than inside each _fetch closure) avoids
+        # N redundant validity checks and string allocations across pool workers.
+        bearer = self._bearer
+
         # Avoid threadpool overhead for trivial calls.
         if len(ranges) == 1:
             offset, length = ranges[0]
@@ -199,7 +204,7 @@ class OpteryxGcsFileSystem:
             response = self.session.get(
                 url,
                 headers={
-                    "Authorization": self._bearer,
+                    "Authorization": bearer,
                     "Range": f"bytes={offset}-{end}",
                 },
                 timeout=30,
@@ -208,7 +213,6 @@ class OpteryxGcsFileSystem:
 
         # Range requests are network-bound; issue a small bounded fanout and
         # preserve the caller's range order in the output list.
-        worker_count = min(_MAX_PARALLEL_RANGE_READS, len(ranges))
         result: List[bytes] = [b""] * len(ranges)
 
         def _fetch(idx: int, offset: int, length: int) -> Tuple[int, bytes]:
@@ -216,7 +220,7 @@ class OpteryxGcsFileSystem:
             response = self.session.get(
                 url,
                 headers={
-                    "Authorization": self._bearer,
+                    "Authorization": bearer,
                     "Range": f"bytes={offset}-{end}",
                 },
                 timeout=30,
