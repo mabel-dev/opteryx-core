@@ -18,7 +18,7 @@ Instead of downloading whole blobs into a shared-memory ring, this node:
 
 The filesystem layer is taken directly from the connector (every catalog-backed
 connector already exposes ``self.filesystem``), so this node works identically
-for local disk, GCS, and S3.
+for local disk and GCS.
 
 Row groups are yielded in completion order — the thread pool handles overlap
 between I/O and decode across all files and row groups simultaneously.

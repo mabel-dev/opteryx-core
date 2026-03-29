@@ -326,8 +326,7 @@ class OpteryxLocalFileSystem:
         """
         if columns or filters:
             raise NotImplementedError(
-                "Column projection and filtering are only supported for S3/MinIO storage. "
-                "Use S3 Select for remote filtering."
+                "Column projection and filtering are not supported for local filesystem reads."
             )
         return MemoryMappedFile(path)
 

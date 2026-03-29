@@ -88,7 +88,7 @@ def parse_connector_targets(
     value: typing.Any, default: Optional[typing.Iterable[str]] = None
 ) -> frozenset[str]:
     """
-    Parse a connector selector string such as ``LOCAL,S3`` into uppercase tokens.
+    Parse a connector selector string such as ``LOCAL,GCS`` into uppercase tokens.
     """
     if value is None:
         value = default
