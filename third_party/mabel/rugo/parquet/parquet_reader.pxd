@@ -143,3 +143,8 @@ cdef extern from "decode.hpp":
     DecodedColumn DecodeColumnFromMemory(const uint8_t* data, size_t size, const string& column_name, const RowGroupStats& row_group, int row_group_index, int64_t* ext_int64, double* ext_float64, int32_t* ext_int32, float* ext_float32) nogil
     DecodedTable ReadParquet(const uint8_t* data, size_t size, const vector[string]& column_names) nogil
     DecodedTable ReadParquet(const uint8_t* data, size_t size) nogil
+
+cdef extern from "type_widening.hpp" namespace "parquet_simd":
+    # SIMD-accelerated type widening functions
+    void widen_int32_to_int64(const int32_t* src, int64_t* dst, size_t count) nogil
+    void widen_float32_to_float64(const float* src, double* dst, size_t count) nogil
