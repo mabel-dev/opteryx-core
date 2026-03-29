@@ -12,14 +12,12 @@ from opteryx.managers.kvstores.layered_kv_store import LayeredKeyValueStore
 from opteryx.managers.kvstores.memory_kv_store import MemoryPoolKeyValueStore
 from opteryx.managers.kvstores.memory_kv_store import list_memory_pools
 from opteryx.managers.kvstores.null_cache import NullCache
-from opteryx.managers.kvstores.s3_kv_store import S3KeyValueStore
 from opteryx.managers.kvstores.scoped_kv_store import ScopedKeyValueStore
 from opteryx.managers.kvstores.valkey import ValkeyCache
 
 __all__ = [
     "BaseKeyValueStore",
     "FileKeyValueStore",
-    "S3KeyValueStore",
     "GCSKeyValueStore",
     "MemoryPoolKeyValueStore",
     "LayeredKeyValueStore",

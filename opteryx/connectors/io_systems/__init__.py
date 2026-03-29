@@ -8,7 +8,6 @@ Opteryx's memory-view-based readers and stream wrappers for optimal performance.
 __all__ = [
     "OpteryxLocalFileSystem",
     "OpteryxGcsFileSystem",
-    "OpteryxS3FileSystem",
     "create_filesystem",
 ]
 
@@ -21,7 +20,7 @@ def create_filesystem(protocol: str):
     This enables generic execution that works across all storage types.
 
     Args:
-        protocol: Protocol string from file path (e.g., "gs", "s3", "file")
+        protocol: Protocol string from file path (e.g., "gs", "file")
 
     Returns:
         Appropriate filesystem instance
@@ -37,7 +36,6 @@ def create_filesystem(protocol: str):
     protocol_map = {
         "gs": "OpteryxGcsFileSystem",
         "gcs": "OpteryxGcsFileSystem",
-        "s3": "OpteryxS3FileSystem",
         "file": "OpteryxLocalFileSystem",
         "": "OpteryxLocalFileSystem",  # No protocol = local file
     }
@@ -63,8 +61,4 @@ def __getattr__(file_system: str):
         from opteryx.connectors.io_systems.local_filesystem import OpteryxLocalFileSystem
 
         return OpteryxLocalFileSystem
-    if file_system == "OpteryxS3FileSystem":
-        from opteryx.connectors.io_systems.s3_filesystem import OpteryxS3FileSystem
-
-        return OpteryxS3FileSystem
     raise AttributeError(f"module {__name__} has no attribute {file_system}")

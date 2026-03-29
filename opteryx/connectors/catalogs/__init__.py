@@ -17,7 +17,6 @@ Key characteristics:
 """
 
 from opteryx.connectors.catalogs.gcs_catalog import GcsCatalog
-from opteryx.connectors.catalogs.local_catalog import LocalFileCatalog
-from opteryx.connectors.catalogs.s3_catalog import S3Catalog
+from opteryx.connectors.catalogs.local_catalog import LocalOpteryxCatalog
 
-__all__ = ["LocalFileCatalog", "GcsCatalog", "S3Catalog"]
+__all__ = ["LocalOpteryxCatalog", "GcsCatalog"]

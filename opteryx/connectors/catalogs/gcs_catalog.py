@@ -9,11 +9,11 @@ GCS Catalog Shim
 Provides an OpteryxCatalog-compatible catalog interface over Google Cloud Storage.
 """
 
-from opteryx.connectors.catalogs.local_catalog import LocalFileCatalog
+from opteryx.connectors.catalogs.local_catalog import LocalOpteryxCatalog
 from opteryx.connectors.io_systems import OpteryxGcsFileSystem
 
 
-class GcsCatalog(LocalFileCatalog):
+class GcsCatalog(LocalOpteryxCatalog):
     """
     Read-only OpteryxCatalog-compatible shim for Google Cloud Storage.
 
