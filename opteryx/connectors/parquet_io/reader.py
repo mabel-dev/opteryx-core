@@ -80,12 +80,13 @@ _RANGE_POOL: ThreadPoolExecutor = ThreadPoolExecutor(
     thread_name_prefix="parquet-io",
 )
 
-# CPU-bound decode pool — one worker per physical core.
-# Each column decode calls into C++ (nogil), so threads run truly in parallel.
+# CPU-bound decode pool — one worker per physical core (no artificial cap).
+# Each column decode calls into C++ (nogil), so threads run truly in parallel
+# across all available cores.
 # Kept separate from _RANGE_POOL to avoid deadlocks when row-group tasks
 # (submitted to _RANGE_POOL) try to submit per-column decode tasks.
 _DECODE_POOL: ThreadPoolExecutor = ThreadPoolExecutor(
-    max_workers=min(8, os.cpu_count() or 4),
+    max_workers=os.cpu_count() or 4,
     thread_name_prefix="parquet-decode",
 )
 
