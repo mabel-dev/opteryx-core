@@ -121,6 +121,14 @@ struct PageTask {
   uint8_t        def_bit_width;    // Computed from definition levels (if present)
   int32_t        page_row_offset;  // Offset into row_mask (for filtering)
   int32_t        out_offset;       // Where this page's values start in output vectors
+  bool           skip_page = false; // Set to true if row_mask indicates no selected rows
+};
+
+// Decompression result for a single page (used in parallel decompression)
+struct PageDecompressed {
+  int page_index;
+  std::vector<uint8_t> data;  // Decompressed data for this page
+  bool success = true;         // Set to false if decompression failed
 };
 
 }  // namespace
@@ -134,9 +142,11 @@ struct PageTask {
 int32_t PreScanPages(
     const uint8_t* cursor,
     const uint8_t* chunk_limit,
+    const uint8_t* row_mask,
     std::vector<PageTask>& pages_out)
 {
   int32_t total_values = 0;
+  int32_t page_row_offset = 0;
 
   while (cursor < chunk_limit) {
     // Parse page header
@@ -162,6 +172,28 @@ int32_t PreScanPages(
     size_t avail = (size_t)(chunk_limit - compressed_data);
     if (compressed_size > avail) compressed_size = avail;
 
+    // Check row_mask: determine if page should be skipped (Tier 1D)
+    bool should_skip = false;
+    if (row_mask != nullptr) {
+      const uint8_t* mp = row_mask + page_row_offset;
+      const size_t pv = static_cast<size_t>(page_values);
+      bool any_selected = false;
+
+      // Word-at-a-time scan (8 bytes at once)
+      size_t si = 0;
+      for (; si + 8 <= pv; si += 8) {
+        uint64_t w;
+        std::memcpy(&w, mp + si, 8);
+        if (w) { any_selected = true; break; }
+      }
+      if (!any_selected) {
+        for (; si < pv; ++si) {
+          if (mp[si]) { any_selected = true; break; }
+        }
+      }
+      should_skip = !any_selected;
+    }
+
     // Record this page's metadata for later parallel decoding
     PageTask task;
     task.compressed_data = compressed_data;
@@ -169,11 +201,13 @@ int32_t PreScanPages(
     task.uncompressed_size = page_header.uncompressed_page_size;
     task.num_values = page_values;
     task.encoding = page_header.encoding;
-    task.page_row_offset = total_values;
+    task.page_row_offset = page_row_offset;
     task.out_offset = total_values;
+    task.skip_page = should_skip;
     pages_out.push_back(task);
 
     total_values += page_values;
+    page_row_offset += page_values;
     cursor = compressed_data + compressed_size;
   }
 
