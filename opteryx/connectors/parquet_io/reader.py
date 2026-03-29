@@ -1380,9 +1380,10 @@ def _iter_row_groups_v2(
         )
         local_read_pool = True
 
-    decode_pool = ThreadPoolExecutor(
-        max_workers=max(decode_workers, 1), thread_name_prefix="parquet-decode-v2-local"
-    )
+    # Reuse the module-level decode pool — CPU-bound decode work shouldn't
+    # exceed the number of physical cores.  Per-query pool creation also adds
+    # thread startup latency for every query.
+    decode_pool = _DECODE_POOL
 
     read_futures: Dict[Future, Tuple[int, int]] = {}
     decode_futures: Dict[Future, Tuple[int, int]] = {}
@@ -1813,7 +1814,7 @@ def _iter_row_groups_v2(
             fut.cancel()
         if local_read_pool:
             read_pool.shutdown(wait=False, cancel_futures=True)
-        decode_pool.shutdown(wait=False, cancel_futures=True)
+        # decode_pool is the shared _DECODE_POOL — do NOT shut it down.
 
 
 def iter_row_groups(
