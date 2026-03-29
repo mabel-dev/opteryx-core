@@ -15,6 +15,7 @@
 #include "simd_gather.hpp"
 #include "simd_compact.hpp"
 #include "type_widening.hpp"
+#include "thread_pool.hpp"
 #include <algorithm>
 #include <cstring>
 #include <iostream>
@@ -103,7 +104,81 @@ inline uint64_t Float64Bits(double value) {
   return bits;
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// Tier 3A: Page-parallel decode structures
+// ─────────────────────────────────────────────────────────────────────────
+
+// PageTask captures metadata for a single data page, used for parallel decoding.
+// During pre-scan phase, we collect these without decoding.
+// Then in parallel phase, each task decodes its own page independently.
+struct PageTask {
+  const uint8_t* compressed_data;  // Points into file_data
+  size_t         compressed_size;
+  uint32_t       uncompressed_size;
+  int32_t        num_values;       // page_header.num_values
+  int32_t        encoding;         // page_header.encoding
+  uint8_t        rep_bit_width;    // Computed from repetition levels (if present)
+  uint8_t        def_bit_width;    // Computed from definition levels (if present)
+  int32_t        page_row_offset;  // Offset into row_mask (for filtering)
+  int32_t        out_offset;       // Where this page's values start in output vectors
+};
+
 }  // namespace
+
+// ---------------------------------------------------------------------------
+// Pre-Scan Helper (Tier 3A)
+// ---------------------------------------------------------------------------
+// Walk through all pages and collect metadata without decoding.
+// Returns total number of values across all data pages.
+
+int32_t PreScanPages(
+    const uint8_t* cursor,
+    const uint8_t* chunk_limit,
+    std::vector<PageTask>& pages_out)
+{
+  int32_t total_values = 0;
+
+  while (cursor < chunk_limit) {
+    // Parse page header
+    TInput header_in{cursor, chunk_limit};
+    PageHeader page_header = ParsePageHeader(header_in);
+    size_t header_size = (size_t)(header_in.p - cursor);
+
+    // Skip dictionary pages (already loaded)
+    if (page_header.page_type == 2) {
+      cursor += header_size + (size_t)page_header.compressed_page_size;
+      continue;
+    }
+
+    // Stop at non-data pages
+    if (page_header.page_type != 0) break;
+
+    int32_t page_values = page_header.num_values;
+    if (page_values <= 0) break;
+
+    // Locate compressed payload
+    const uint8_t* compressed_data = cursor + header_size;
+    size_t compressed_size = (size_t)page_header.compressed_page_size;
+    size_t avail = (size_t)(chunk_limit - compressed_data);
+    if (compressed_size > avail) compressed_size = avail;
+
+    // Record this page's metadata for later parallel decoding
+    PageTask task;
+    task.compressed_data = compressed_data;
+    task.compressed_size = compressed_size;
+    task.uncompressed_size = page_header.uncompressed_page_size;
+    task.num_values = page_values;
+    task.encoding = page_header.encoding;
+    task.page_row_offset = total_values;
+    task.out_offset = total_values;
+    pages_out.push_back(task);
+
+    total_values += page_values;
+    cursor = compressed_data + compressed_size;
+  }
+
+  return total_values;
+}
 
 // ---------------------------------------------------------------------------
 // DecodeColumnFromChunk (internal)
