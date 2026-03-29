@@ -12,6 +12,7 @@
 #include "compression.hpp"
 #include "metadata.hpp"
 #include "telemetry.hpp"
+#include "simd_gather.hpp"
 #include <algorithm>
 #include <cstring>
 #include <iostream>
@@ -578,29 +579,90 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
           return true;
         };
 
+        // ── Tier 2A helper: validate indices then SIMD gather ──
+        // Validates all indices upfront (min/max scan), then uses SIMD gather
+        // if available, with scalar fallback.
+        auto validate_and_gather_int32 = [&](const std::vector<int32_t>& idx_vec,
+                                             std::vector<int32_t>& result_vec) -> bool {
+          if (idx_vec.empty()) return true;
+          int32_t lo = idx_vec[0], hi = idx_vec[0];
+          for (size_t i = 1; i < idx_vec.size(); ++i) {
+            int32_t v = idx_vec[i];
+            if (v < lo) lo = v;
+            if (v > hi) hi = v;
+          }
+          if (lo < 0 || hi >= (int32_t)result.dict_int32_values.size()) return false;
+          parquet_simd::gather_int32(result.dict_int32_values.data(), idx_vec.data(), idx_vec.size(), result_vec);
+          return true;
+        };
+
+        auto validate_and_gather_int64 = [&](const std::vector<int32_t>& idx_vec,
+                                             std::vector<int64_t>& result_vec) -> bool {
+          if (idx_vec.empty()) return true;
+          int32_t lo = idx_vec[0], hi = idx_vec[0];
+          for (size_t i = 1; i < idx_vec.size(); ++i) {
+            int32_t v = idx_vec[i];
+            if (v < lo) lo = v;
+            if (v > hi) hi = v;
+          }
+          if (lo < 0 || hi >= (int32_t)result.dict_int64_values.size()) return false;
+          parquet_simd::gather_int64(result.dict_int64_values.data(), idx_vec.data(), idx_vec.size(), result_vec);
+          return true;
+        };
+
+        auto validate_and_gather_float32 = [&](const std::vector<int32_t>& idx_vec,
+                                               std::vector<float>& result_vec) -> bool {
+          if (idx_vec.empty()) return true;
+          int32_t lo = idx_vec[0], hi = idx_vec[0];
+          for (size_t i = 1; i < idx_vec.size(); ++i) {
+            int32_t v = idx_vec[i];
+            if (v < lo) lo = v;
+            if (v > hi) hi = v;
+          }
+          if (lo < 0 || hi >= (int32_t)result.dict_float32_values.size()) return false;
+          parquet_simd::gather_float32(result.dict_float32_values.data(), idx_vec.data(), idx_vec.size(), result_vec);
+          return true;
+        };
+
+        auto validate_and_gather_float64 = [&](const std::vector<int32_t>& idx_vec,
+                                               std::vector<double>& result_vec) -> bool {
+          if (idx_vec.empty()) return true;
+          int32_t lo = idx_vec[0], hi = idx_vec[0];
+          for (size_t i = 1; i < idx_vec.size(); ++i) {
+            int32_t v = idx_vec[i];
+            if (v < lo) lo = v;
+            if (v > hi) hi = v;
+          }
+          if (lo < 0 || hi >= (int32_t)result.dict_float64_values.size()) return false;
+          parquet_simd::gather_float64(result.dict_float64_values.data(), idx_vec.data(), idx_vec.size(), result_vec);
+          return true;
+        };
+
         if (result.type == "int32") {
           if (int32_dict_mode) {
             if (!batch_append_dict_indices(indices, (int32_t)result.dict_int32_values.size()))
               return result;
           } else {
-            int32_t n = (int32_t)indices.size();
             if (result.ext_int32) {
-              int32_t* edst = result.ext_int32 + result.ext_written;
-              for (int32_t i = 0; i < n; ++i) {
-                int32_t idx = indices[i];
-                if (idx < 0 || idx >= (int32_t)result.dict_int32_values.size()) return result;
-                edst[i] = result.dict_int32_values[idx];
+              // Validate indices then gather into ext_int32
+              int32_t lo = indices.empty() ? 0 : indices[0];
+              int32_t hi = lo;
+              for (int32_t idx : indices) {
+                if (idx < lo) lo = idx;
+                if (idx > hi) hi = idx;
+              }
+              if (lo < 0 || hi >= (int32_t)result.dict_int32_values.size()) return result;
+
+              // Direct gather into ext buffer (Tier 4A optimization)
+              size_t n = indices.size();
+              for (size_t i = 0; i < n; ++i) {
+                result.ext_int32[result.ext_written + i] = result.dict_int32_values[indices[i]];
               }
               result.ext_written += n;
             } else {
-              size_t old_sz = result.int32_values.size();
-              result.int32_values.resize(old_sz + n);
-              int32_t* dst = result.int32_values.data() + old_sz;
-              for (int32_t i = 0; i < n; ++i) {
-                int32_t idx = indices[i];
-                if (idx < 0 || idx >= (int32_t)result.dict_int32_values.size()) return result;
-                dst[i] = result.dict_int32_values[idx];
-              }
+              // SIMD gather into result.int32_values
+              if (!validate_and_gather_int32(indices, result.int32_values))
+                return result;
             }
           }
         } else if (result.type == "int64") {
@@ -608,24 +670,26 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
             if (!batch_append_dict_indices(indices, (int32_t)result.dict_int64_values.size()))
               return result;
           } else {
-            int32_t n = (int32_t)indices.size();
             if (result.ext_int64) {
-              int64_t* edst = result.ext_int64 + result.ext_written;
-              for (int32_t i = 0; i < n; ++i) {
-                int32_t idx = indices[i];
-                if (idx < 0 || idx >= (int32_t)result.dict_int64_values.size()) return result;
-                edst[i] = result.dict_int64_values[idx];
+              // Validate indices then gather into ext_int64
+              int32_t lo = indices.empty() ? 0 : indices[0];
+              int32_t hi = lo;
+              for (int32_t idx : indices) {
+                if (idx < lo) lo = idx;
+                if (idx > hi) hi = idx;
+              }
+              if (lo < 0 || hi >= (int32_t)result.dict_int64_values.size()) return result;
+
+              // Direct gather into ext buffer (Tier 4A optimization)
+              size_t n = indices.size();
+              for (size_t i = 0; i < n; ++i) {
+                result.ext_int64[result.ext_written + i] = result.dict_int64_values[indices[i]];
               }
               result.ext_written += n;
             } else {
-              size_t old_sz = result.int64_values.size();
-              result.int64_values.resize(old_sz + n);
-              int64_t* dst = result.int64_values.data() + old_sz;
-              for (int32_t i = 0; i < n; ++i) {
-                int32_t idx = indices[i];
-                if (idx < 0 || idx >= (int32_t)result.dict_int64_values.size()) return result;
-                dst[i] = result.dict_int64_values[idx];
-              }
+              // SIMD gather into result.int64_values
+              if (!validate_and_gather_int64(indices, result.int64_values))
+                return result;
             }
           }
         } else if (result.type == "byte_array") {
@@ -637,24 +701,26 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
             if (!batch_append_dict_indices(indices, (int32_t)result.dict_float32_values.size()))
               return result;
           } else {
-            int32_t n = (int32_t)indices.size();
             if (result.ext_float32) {
-              float* edst = result.ext_float32 + result.ext_written;
-              for (int32_t i = 0; i < n; ++i) {
-                int32_t idx = indices[i];
-                if (idx < 0 || idx >= (int32_t)result.dict_float32_values.size()) return result;
-                edst[i] = result.dict_float32_values[idx];
+              // Validate indices then gather into ext_float32
+              int32_t lo = indices.empty() ? 0 : indices[0];
+              int32_t hi = lo;
+              for (int32_t idx : indices) {
+                if (idx < lo) lo = idx;
+                if (idx > hi) hi = idx;
+              }
+              if (lo < 0 || hi >= (int32_t)result.dict_float32_values.size()) return result;
+
+              // Direct gather into ext buffer (Tier 4A optimization)
+              size_t n = indices.size();
+              for (size_t i = 0; i < n; ++i) {
+                result.ext_float32[result.ext_written + i] = result.dict_float32_values[indices[i]];
               }
               result.ext_written += n;
             } else {
-              size_t old_sz = result.float32_values.size();
-              result.float32_values.resize(old_sz + n);
-              float* dst = result.float32_values.data() + old_sz;
-              for (int32_t i = 0; i < n; ++i) {
-                int32_t idx = indices[i];
-                if (idx < 0 || idx >= (int32_t)result.dict_float32_values.size()) return result;
-                dst[i] = result.dict_float32_values[idx];
-              }
+              // SIMD gather into result.float32_values
+              if (!validate_and_gather_float32(indices, result.float32_values))
+                return result;
             }
           }
         } else if (result.type == "float64") {
@@ -662,24 +728,26 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
             if (!batch_append_dict_indices(indices, (int32_t)result.dict_float64_values.size()))
               return result;
           } else {
-            int32_t n = (int32_t)indices.size();
             if (result.ext_float64) {
-              double* edst = result.ext_float64 + result.ext_written;
-              for (int32_t i = 0; i < n; ++i) {
-                int32_t idx = indices[i];
-                if (idx < 0 || idx >= (int32_t)result.dict_float64_values.size()) return result;
-                edst[i] = result.dict_float64_values[idx];
+              // Validate indices then gather into ext_float64
+              int32_t lo = indices.empty() ? 0 : indices[0];
+              int32_t hi = lo;
+              for (int32_t idx : indices) {
+                if (idx < lo) lo = idx;
+                if (idx > hi) hi = idx;
+              }
+              if (lo < 0 || hi >= (int32_t)result.dict_float64_values.size()) return result;
+
+              // Direct gather into ext buffer (Tier 4A optimization)
+              size_t n = indices.size();
+              for (size_t i = 0; i < n; ++i) {
+                result.ext_float64[result.ext_written + i] = result.dict_float64_values[indices[i]];
               }
               result.ext_written += n;
             } else {
-              size_t old_sz = result.float64_values.size();
-              result.float64_values.resize(old_sz + n);
-              double* dst = result.float64_values.data() + old_sz;
-              for (int32_t i = 0; i < n; ++i) {
-                int32_t idx = indices[i];
-                if (idx < 0 || idx >= (int32_t)result.dict_float64_values.size()) return result;
-                dst[i] = result.dict_float64_values[idx];
-              }
+              // SIMD gather into result.float64_values
+              if (!validate_and_gather_float64(indices, result.float64_values))
+                return result;
             }
           }
         }
