@@ -846,6 +846,9 @@ def _io_worker(
                 footers: Dict[str, dict] = {}
                 footer_fetch_ns: Dict[str, int] = {}
 
+                # Fetch footer payloads in parallel (pure IO), then parse on
+                # this thread (rugo C++ parse must not cross thread boundaries).
+                _footer_io_futures: Dict[Future, str] = {}
                 for p in unique_paths:
                     prefetch_meta = prefetched_footers.get(p)
                     if prefetch_meta is not None:
@@ -856,13 +859,17 @@ def _io_worker(
                     if not isinstance(known_size, int) or known_size <= 0:
                         known_size = None
                     if known_size is None:
-                        envelope, footer_bytes, fetch_ns = _read_footer_payload(
-                            filesystem, p, connector=connector
+                        fut = _persistent_read_pool.submit(
+                            _read_footer_payload, filesystem, p, connector=connector
                         )
                     else:
-                        envelope, footer_bytes, fetch_ns = _read_footer_payload(
-                            filesystem, p, known_size, connector
+                        fut = _persistent_read_pool.submit(
+                            _read_footer_payload, filesystem, p, known_size, connector
                         )
+                    _footer_io_futures[fut] = p
+
+                for fut, p in _footer_io_futures.items():
+                    envelope, footer_bytes, fetch_ns = fut.result()
                     parse_start_ns = time.monotonic_ns()
                     meta = _parse_footer_envelope(p, envelope, footer_bytes)
                     parse_ns = time.monotonic_ns() - parse_start_ns
