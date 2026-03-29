@@ -7,6 +7,7 @@ stream wrappers for high-performance GCS access.
 
 import io
 import os
+import threading
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import as_completed
@@ -104,6 +105,7 @@ class OpteryxGcsFileSystem:
         # Get GCS credentials
         self.client_credentials = get_storage_credentials()
         self._Request = Request  # stash for token refresh
+        self._token_lock = threading.Lock()  # serialize concurrent token refreshes
 
         # Cache access tokens for accessing GCS
         if not self.client_credentials.valid:
@@ -117,9 +119,17 @@ class OpteryxGcsFileSystem:
 
     @property
     def _bearer(self) -> str:
-        """Return a valid Bearer token, refreshing if the credential has expired."""
+        """Return a valid Bearer token, refreshing if the credential has expired.
+
+        Uses a lock to ensure only one thread refreshes at a time — the 32-worker
+        range-read pool can call this concurrently at token expiry boundaries.
+        """
         if not self.client_credentials.valid:
-            self.client_credentials.refresh(self._Request())
+            with self._token_lock:
+                # Double-checked locking: re-test after acquiring the lock in case
+                # another thread already refreshed while we were waiting.
+                if not self.client_credentials.valid:
+                    self.client_credentials.refresh(self._Request())
         return f"Bearer {self.client_credentials.token}"
 
     def get_file_info(self, paths: Union[str, List[str]]):
@@ -268,9 +278,13 @@ class OpteryxGcsFileSystem:
         return total
 
     def _refresh_credentials(self) -> None:
-        """Synchronous credential refresh — safe to call from ``asyncio.to_thread``."""
-        # Forces a refresh; subsequent calls to self._bearer will use the new token.
-        self.client_credentials.refresh(self._Request())
+        """Synchronous credential refresh — safe to call from ``asyncio.to_thread``.
+
+        Acquires the token lock to prevent concurrent refreshes when called
+        alongside parallel _bearer accesses from the range-read pool.
+        """
+        with self._token_lock:
+            self.client_credentials.refresh(self._Request())
 
     async def async_stream_to(
         self,
