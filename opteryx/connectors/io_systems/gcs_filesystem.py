@@ -142,30 +142,41 @@ class OpteryxGcsFileSystem:
         if single_path:
             paths = [paths]
 
-        infos = []
-        for path in paths:
-            from opteryx.utils import paths as path_utils
+        from opteryx.utils import paths as path_utils
 
-            # Strip gs:// prefix so get_parts sees "bucket/folder/file.parquet"
-            # (read_ranges does the same normalisation)
+        def _head_one(idx: int, path: str, bearer: str) -> Tuple[int, "FileInfo"]:
             norm_path = path[5:] if path.startswith("gs://") else path
             bucket, _, _, _ = path_utils.get_parts(norm_path)
             object_full_path = urllib.parse.quote(norm_path[(len(bucket) + 1) :], safe="")
             url = f"https://storage.googleapis.com/{bucket}/{object_full_path}"
-
-            # Use HEAD request to check if object exists and get size
             response = self.session.head(
                 url,
-                headers={"Authorization": self._bearer},
+                headers={"Authorization": bearer},
                 timeout=10,
             )
-
             if response.status_code == 200:
                 size = int(response.headers.get("content-length", 0))
-                info = FileInfo(path=path, type=FileType.File, size=size)
+                return idx, FileInfo(path=path, type=FileType.File, size=size)
             else:
-                info = FileInfo(path=path, type=FileType.NotFound)
-            infos.append(info)
+                return idx, FileInfo(path=path, type=FileType.NotFound)
+
+        # Capture a single valid bearer token for this batch.
+        bearer = self._bearer
+
+        # Fast path: avoid pool overhead for the common single-path case.
+        if len(paths) == 1:
+            _, info = _head_one(0, paths[0], bearer)
+            return info if single_path else [info]
+
+        # Fan out HEAD requests in parallel; preserve caller's path order.
+        infos: List["FileInfo"] = [None] * len(paths)  # type: ignore[assignment]
+        futures = [
+            _GCS_RANGE_POOL.submit(_head_one, idx, path, bearer)
+            for idx, path in enumerate(paths)
+        ]
+        for fut in as_completed(futures):
+            idx, info = fut.result()
+            infos[idx] = info
 
         return infos[0] if single_path else infos
 

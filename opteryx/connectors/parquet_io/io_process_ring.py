@@ -24,6 +24,7 @@ from collections import deque
 from concurrent.futures import FIRST_COMPLETED
 from concurrent.futures import Future
 from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import as_completed
 from concurrent.futures import wait
 from dataclasses import dataclass
 from multiprocessing import Event
@@ -875,7 +876,8 @@ def _io_worker(
                         )
                     _footer_io_futures[fut] = p
 
-                for fut, p in _footer_io_futures.items():
+                for fut in as_completed(_footer_io_futures):
+                    p = _footer_io_futures[fut]
                     envelope, footer_bytes, fetch_ns = fut.result()
                     parse_start_ns = time.monotonic_ns()
                     meta = _parse_footer_envelope(p, envelope, footer_bytes)
