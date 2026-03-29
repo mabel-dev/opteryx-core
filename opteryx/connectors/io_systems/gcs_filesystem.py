@@ -103,17 +103,24 @@ class OpteryxGcsFileSystem:
 
         # Get GCS credentials
         self.client_credentials = get_storage_credentials()
+        self._Request = Request  # stash for token refresh
 
         # Cache access tokens for accessing GCS
         if not self.client_credentials.valid:
             request = Request()
             self.client_credentials.refresh(request)
-        self.access_token = self.client_credentials.token
 
         # Create a HTTP connection session to reduce effort for each fetch
         self.session = requests.session()
         adapter = HTTPAdapter(pool_connections=100, pool_maxsize=100)
         self.session.mount("https://", adapter)
+
+    @property
+    def _bearer(self) -> str:
+        """Return a valid Bearer token, refreshing if the credential has expired."""
+        if not self.client_credentials.valid:
+            self.client_credentials.refresh(self._Request())
+        return f"Bearer {self.client_credentials.token}"
 
     def get_file_info(self, paths: Union[str, List[str]]):
         """Get info about GCS objects."""
@@ -139,7 +146,7 @@ class OpteryxGcsFileSystem:
             # Use HEAD request to check if object exists and get size
             response = self.session.head(
                 url,
-                headers={"Authorization": f"Bearer {self.access_token}"},
+                headers={"Authorization": self._bearer},
                 timeout=10,
             )
 
@@ -182,7 +189,7 @@ class OpteryxGcsFileSystem:
             response = self.session.get(
                 url,
                 headers={
-                    "Authorization": f"Bearer {self.access_token}",
+                    "Authorization": self._bearer,
                     "Range": f"bytes={offset}-{end}",
                 },
                 timeout=30,
@@ -199,7 +206,7 @@ class OpteryxGcsFileSystem:
             response = self.session.get(
                 url,
                 headers={
-                    "Authorization": f"Bearer {self.access_token}",
+                    "Authorization": self._bearer,
                     "Range": f"bytes={offset}-{end}",
                 },
                 timeout=30,
@@ -240,20 +247,13 @@ class OpteryxGcsFileSystem:
         if path.startswith("gs://"):
             path = path[5:]
 
-        # Refresh the credential token if it has expired.
-        if not self.client_credentials.valid:
-            from google.auth.transport.requests import Request
-
-            self.client_credentials.refresh(Request())
-            self.access_token = self.client_credentials.token
-
         bucket, _, _, _ = paths.get_parts(path)
         object_full_path = urllib.parse.quote(path[(len(bucket) + 1) :], safe="")
         url = f"https://storage.googleapis.com/{bucket}/{object_full_path}"
 
         response = self.session.get(
             url,
-            headers={"Authorization": f"Bearer {self.access_token}", "Accept-Encoding": "identity"},
+            headers={"Authorization": self._bearer, "Accept-Encoding": "identity"},
             timeout=30,
             stream=True,
         )
@@ -269,10 +269,8 @@ class OpteryxGcsFileSystem:
 
     def _refresh_credentials(self) -> None:
         """Synchronous credential refresh — safe to call from ``asyncio.to_thread``."""
-        from google.auth.transport.requests import Request
-
-        self.client_credentials.refresh(Request())
-        self.access_token = self.client_credentials.token
+        # Forces a refresh; subsequent calls to self._bearer will use the new token.
+        self.client_credentials.refresh(self._Request())
 
     async def async_stream_to(
         self,
@@ -312,7 +310,7 @@ class OpteryxGcsFileSystem:
         url = f"https://storage.googleapis.com/{bucket}/{object_full_path}"
 
         headers = {
-            "Authorization": f"Bearer {self.access_token}",
+            "Authorization": self._bearer,
             "Accept-Encoding": "identity",
         }
 
@@ -335,10 +333,12 @@ class OpteryxGcsFileSystem:
         """
         if columns or filters:
             raise NotImplementedError(
-                "Column projection and filtering are only supported for S3/MinIO storage. "
-                "Use S3 Select for remote filtering."
+                "Column projection and filtering are not supported for GCS open_input_stream/file. "
+                "Use fetch_columns() for column-selective reads."
             )
-        return GcsFile(path, self.session, self.access_token)
+        # Ensure token is fresh before handing it to GcsFile (which reads immediately).
+        _ = self._bearer
+        return GcsFile(path, self.session, self.client_credentials.token)
 
     def open_input_file(self, path: str, columns=None, filters=None):
         """Open a GCS object for random access reading.
@@ -350,7 +350,9 @@ class OpteryxGcsFileSystem:
         """
         if columns or filters:
             raise NotImplementedError(
-                "Column projection and filtering are only supported for S3/MinIO storage. "
-                "Use S3 Select for remote filtering."
+                "Column projection and filtering are not supported for GCS open_input_stream/file. "
+                "Use fetch_columns() for column-selective reads."
             )
-        return GcsFile(path, self.session, self.access_token)
+        # Ensure token is fresh before handing it to GcsFile (which reads immediately).
+        _ = self._bearer
+        return GcsFile(path, self.session, self.client_credentials.token)
