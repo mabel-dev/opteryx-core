@@ -1,96 +1,99 @@
 #pragma once
-// Minimal fixed-size thread pool with a work-stealing-free FIFO queue.
-//
-// Workers are created once at construction and live until destruction.
-// Task submission is a queue-push + condvar notify — no OS thread creation
-// per task, unlike std::async(std::launch::async).
-//
-// Usage:
-//   ThreadPool pool(4);
-//   auto fut = pool.submit([]() -> DecodedColumn { ... });
-//   DecodedColumn col = fut.get();
 
-#include <condition_variable>
 #include <functional>
-#include <future>
-#include <mutex>
 #include <queue>
 #include <thread>
+#include <mutex>
+#include <condition_variable>
 #include <vector>
+#include <memory>
+#include <atomic>
 
-class ThreadPool {
-public:
-    explicit ThreadPool(std::size_t n) : stop_(false) {
-        workers_.reserve(n);
-        for (std::size_t i = 0; i < n; ++i) {
-            workers_.emplace_back([this] { worker_loop(); });
-        }
-    }
+// Simple thread pool for page-level parallelism in parquet decoding.
+//
+// Design: Work queue with bounded thread pool.
+// - Task push via queue (protected by mutex)
+// - Blocking wait for all tasks to complete
+// - Thread-safe destruction (joins all worker threads)
+//
+// Usage:
+//   PageDecodePool pool(4);  // Create 4 worker threads
+//   for (const auto& page : pages) {
+//       pool.push_task([&]() { decode_single_page(page); });
+//   }
+//   pool.wait_for_tasks();  // Block until all complete
+//
+// Note: This is a functional implementation. For production, consider:
+// - BS::thread_pool for work-stealing and NUMA awareness
+// - Lock-free queue to reduce contention
+// - Better work distribution heuristics
 
-    ~ThreadPool() {
-        {
-            std::unique_lock<std::mutex> lk(mu_);
-            stop_ = true;
-        }
-        cv_.notify_all();
-        for (auto& t : workers_) t.join();
-    }
-
-    // Non-copyable, non-movable (threads hold a pointer to *this)
-    ThreadPool(const ThreadPool&)            = delete;
-    ThreadPool& operator=(const ThreadPool&) = delete;
-
-    // Submit a callable, get back a future for its return value.
-    template<class F>
-    auto submit(F&& f) -> std::future<std::invoke_result_t<F>> {
-        using R = std::invoke_result_t<F>;
-        auto task = std::make_shared<std::packaged_task<R()>>(std::forward<F>(f));
-        std::future<R> fut = task->get_future();
-        {
-            std::unique_lock<std::mutex> lk(mu_);
-            tasks_.emplace([task]() { (*task)(); });
-        }
-        cv_.notify_one();
-        return fut;
-    }
-
-    std::size_t size() const { return workers_.size(); }
-
+class SimpleThreadPool {
 private:
+    using Task = std::function<void()>;
+
+    std::vector<std::thread> workers;
+    std::queue<Task> task_queue;
+    std::mutex queue_mutex;
+    std::condition_variable cv_work;
+    std::condition_variable cv_done;
+    std::atomic<bool> shutdown{false};
+    std::atomic<int> active_tasks{0};
+
     void worker_loop() {
-        for (;;) {
-            std::function<void()> task;
+        while (!shutdown) {
+            Task task;
             {
-                std::unique_lock<std::mutex> lk(mu_);
-                cv_.wait(lk, [this] { return stop_ || !tasks_.empty(); });
-                if (stop_ && tasks_.empty()) return;
-                task = std::move(tasks_.front());
-                tasks_.pop();
+                std::unique_lock<std::mutex> lock(queue_mutex);
+                cv_work.wait(lock, [this]() { return !task_queue.empty() || shutdown; });
+                if (shutdown && task_queue.empty()) break;
+                if (!task_queue.empty()) {
+                    task = std::move(task_queue.front());
+                    task_queue.pop();
+                    active_tasks++;
+                }
             }
-            task();
+            if (task) {
+                task();
+                if (--active_tasks == 0) {
+                    cv_done.notify_all();
+                }
+            }
         }
     }
 
-    std::vector<std::thread>          workers_;
-    std::queue<std::function<void()>> tasks_;
-    std::mutex                        mu_;
-    std::condition_variable           cv_;
-    bool                              stop_;
+public:
+    explicit SimpleThreadPool(size_t num_threads) {
+        for (size_t i = 0; i < num_threads; ++i) {
+            workers.emplace_back([this]() { worker_loop(); });
+        }
+    }
+
+    ~SimpleThreadPool() {
+        shutdown = true;
+        cv_work.notify_all();
+        for (auto& worker : workers) {
+            if (worker.joinable()) worker.join();
+        }
+    }
+
+    // Push a task to the work queue
+    void push_task(Task&& task) {
+        {
+            std::unique_lock<std::mutex> lock(queue_mutex);
+            task_queue.push(std::move(task));
+        }
+        cv_work.notify_one();
+    }
+
+    // Block until all tasks are complete and no tasks are queued
+    void wait_for_tasks() {
+        std::unique_lock<std::mutex> lock(queue_mutex);
+        cv_done.wait(lock, [this]() { return task_queue.empty() && active_tasks == 0; });
+    }
+
+    size_t num_workers() const { return workers.size(); }
 };
 
-// ---------------------------------------------------------------------------
-// Process-lifetime pool accessor.
-//
-// The pool is created once (on first call) with hardware_concurrency() workers
-// and reused for the lifetime of the process.  Workers are idle (sleeping on
-// the condvar) when there is no work, so they have zero CPU cost at rest.
-//
-// Returns nullptr when the caller requests serial (num_threads <= 1).
-// ---------------------------------------------------------------------------
-inline ThreadPool* rugo_get_pool(int num_threads) {
-    if (num_threads <= 1) return nullptr;
-    static ThreadPool pool(std::thread::hardware_concurrency()
-                               ? std::thread::hardware_concurrency()
-                               : 4);
-    return &pool;
-}
+// Alias for easier adoption
+using PageDecodePool = SimpleThreadPool;
