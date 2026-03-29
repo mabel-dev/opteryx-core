@@ -439,6 +439,7 @@ extensions = [
                 "third_party/mabel/rugo/parquet/decode_page.cpp",
                 "third_party/mabel/rugo/parquet/decode_column.cpp",
                 "third_party/mabel/rugo/parquet/decode.cpp",
+                "third_party/mabel/rugo/parquet/page_value_decoder.cpp",
                 "third_party/mabel/rugo/parquet/compression.cpp",
                 "third_party/mabel/rugo/parquet/bloom_filter.cpp",
                 "src/cpp/cpu_features.cpp",

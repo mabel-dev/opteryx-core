@@ -139,6 +139,8 @@ cdef extern from "decode.hpp":
     # New memory-based functions
     DecodedColumn DecodeColumnFromChunk(const uint8_t* data, size_t size, const ColumnStats* col) nogil
     DecodedColumn DecodeColumnFromChunk(const uint8_t* data, size_t size, const ColumnStats* col, const uint8_t* row_mask) nogil
+    DecodedColumn DecodeColumnFromChunk(const uint8_t* data, size_t size, const ColumnStats* col, int64_t* ext_int64, double* ext_float64, int32_t* ext_int32, float* ext_float32) nogil
+    DecodedColumn DecodeColumnFromChunk(const uint8_t* data, size_t size, const ColumnStats* col, int64_t* ext_int64, double* ext_float64, int32_t* ext_int32, float* ext_float32, const uint8_t* row_mask) nogil
     DecodedColumn DecodeColumnFromMemory(const uint8_t* data, size_t size, const string& column_name, const RowGroupStats& row_group, int row_group_index) nogil
     DecodedColumn DecodeColumnFromMemory(const uint8_t* data, size_t size, const string& column_name, const RowGroupStats& row_group, int row_group_index, int64_t* ext_int64, double* ext_float64, int32_t* ext_int32, float* ext_float32) nogil
     DecodedTable ReadParquet(const uint8_t* data, size_t size, const vector[string]& column_names) nogil
