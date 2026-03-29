@@ -14,6 +14,13 @@ from typing import Tuple
 
 _MAX_PARALLEL_RANGE_READS = 32
 
+# Module-level thread pool for intra-read_ranges parallelism.
+# Reused across calls to avoid per-call thread creation/destruction overhead.
+_LOCAL_RANGE_POOL: ThreadPoolExecutor = ThreadPoolExecutor(
+    max_workers=_MAX_PARALLEL_RANGE_READS,
+    thread_name_prefix="local-range",
+)
+
 
 class MemoryMappedFile:
     """
@@ -252,16 +259,13 @@ class OpteryxLocalFileSystem:
             def _read_one(idx: int, offset: int, length: int) -> Tuple[int, bytes]:
                 return idx, os.pread(fd, length, offset)
 
-            with ThreadPoolExecutor(
-                max_workers=worker_count, thread_name_prefix="local-range"
-            ) as pool:
-                futures = [
-                    pool.submit(_read_one, idx, offset, length)
-                    for idx, (offset, length) in enumerate(ranges)
-                ]
-                for fut in as_completed(futures):
-                    idx, chunk = fut.result()
-                    result[idx] = chunk
+            futures = [
+                _LOCAL_RANGE_POOL.submit(_read_one, idx, offset, length)
+                for idx, (offset, length) in enumerate(ranges)
+            ]
+            for fut in as_completed(futures):
+                idx, chunk = fut.result()
+                result[idx] = chunk
 
             return result
         finally:
