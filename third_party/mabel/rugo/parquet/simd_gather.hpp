@@ -50,6 +50,7 @@ static inline void gather_int32_scalar(
 }
 
 #ifdef __AVX2__
+static_assert(sizeof(long long) == 8, "Expected 64-bit long long for AVX2 gather base pointer");
 // AVX2: _mm256_i32gather_epi32 gathers 8 int32 values per instruction
 // Note: indices must be valid; no bounds checking at SIMD level
 static inline void gather_int32_avx2(
@@ -148,7 +149,7 @@ static inline void gather_int64_avx2(
 
         // Gather 4 int64 values from dict using the indices
         // Scale factor = 8 (sizeof(int64_t))
-        __m256i vals = _mm256_i64gather_epi64(dict, idx64, 8);
+        __m256i vals = _mm256_i64gather_epi64((const long long*)dict, idx64, 8);
 
         // Store 4 gathered values to output
         _mm256_storeu_si256((__m256i*)(dst + i * 4), vals);
@@ -293,7 +294,7 @@ static inline void gather_float64_avx2(
         __m128i idx32 = _mm_loadu_si128((__m128i*)(indices + i * 4));
         __m256i idx64 = _mm256_cvtepi32_epi64(idx32);
         // Gather as int64, reinterpret as double
-        __m256i vals_int = _mm256_i64gather_epi64((const int64_t*)dict, idx64, 8);
+        __m256i vals_int = _mm256_i64gather_epi64((const long long*)dict, idx64, 8);
         __m256d vals_double = _mm256_castsi256_pd(vals_int);
         _mm256_storeu_pd(dst + i * 4, vals_double);
     }
