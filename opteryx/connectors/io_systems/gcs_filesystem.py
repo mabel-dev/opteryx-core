@@ -19,6 +19,13 @@ from opteryx.exceptions import MissingDependencyError
 
 _MAX_PARALLEL_RANGE_READS = 32
 
+# Module-level thread pool for intra-read_ranges parallelism.
+# Reused across calls to avoid per-call thread creation/destruction overhead.
+_GCS_RANGE_POOL: ThreadPoolExecutor = ThreadPoolExecutor(
+    max_workers=_MAX_PARALLEL_RANGE_READS,
+    thread_name_prefix="gcs-range",
+)
+
 
 def get_storage_credentials():
     """Get GCS credentials - copied from gcp_cloudstorage_connector."""
@@ -199,14 +206,13 @@ class OpteryxGcsFileSystem:
             )
             return idx, response.content
 
-        with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="gcs-range") as pool:
-            futures = [
-                pool.submit(_fetch, idx, offset, length)
-                for idx, (offset, length) in enumerate(ranges)
-            ]
-            for fut in as_completed(futures):
-                idx, chunk = fut.result()
-                result[idx] = chunk
+        futures = [
+            _GCS_RANGE_POOL.submit(_fetch, idx, offset, length)
+            for idx, (offset, length) in enumerate(ranges)
+        ]
+        for fut in as_completed(futures):
+            idx, chunk = fut.result()
+            result[idx] = chunk
 
         return result
 
