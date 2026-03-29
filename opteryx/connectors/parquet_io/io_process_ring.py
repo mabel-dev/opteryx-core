@@ -419,8 +419,6 @@ def _connector_to_protocol(connector: Optional[str]) -> str:
     norm = connector.strip().lower()
     if norm in ("gcs", "gs"):
         return "gs"
-    if norm in ("s3", "minio"):
-        return "s3"
     if norm in ("file", "local", "filesystem"):
         return "file"
     return norm

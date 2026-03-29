@@ -22,7 +22,7 @@ is responsible for:
 Connector Types:
 
 Core Connectors:
-- FileSystemConnector: Generic filesystem access (local, S3, GCS)
+- FileSystemConnector: Generic filesystem access (local, GCS)
 - OpteryxConnector: Opteryx table format
 
 Special Connectors:
@@ -32,7 +32,6 @@ Special Connectors:
 Legacy Compatibility:
 The following names are supported for backward compatibility and map to FileSystemConnector:
 - DiskConnector: Local file system access
-- AwsS3Connector: Amazon S3 storage
 - GcpCloudStorageConnector: Google Cloud Storage
 
 Lazy Loading:
@@ -49,7 +48,7 @@ Usage Patterns:
    opteryx.register_workspace("my_prefix", my_connector_instance)
 
 3. Query Usage:
-   opteryx.query("SELECT * FROM s3://bucket/file.parquet")
+   opteryx.query("SELECT * FROM gs://bucket/file.parquet")
 
 Connector Development:
 1. Inherit from BaseConnector
@@ -116,12 +115,10 @@ __all__ = (
     # Factory functions for filesystem connectors
     "create_local_connector",
     "create_gcs_connector",
-    "create_s3_connector",
     # Utilities
     "set_default_connector",
     "TableType",
     # Legacy names (backward compatibility) - map to factories
-    "AwsS3Connector",
     "DiskConnector",
     "GcpCloudStorageConnector",
 )
@@ -201,25 +198,6 @@ def create_gcs_connector(bucket=None, **kwargs):
 
     filesystem = OpteryxGcsFileSystem(bucket=bucket, **kwargs)
     return FileSystemConnector(filesystem=filesystem, storage_type="GCS", **kwargs)
-
-
-def create_s3_connector(bucket=None, region=None, **kwargs):
-    """
-    Create a FileSystemConnector for S3/MinIO storage.
-
-    Args:
-        bucket: S3 bucket name (optional)
-        region: AWS region (optional)
-        **kwargs: Additional parameters passed to FileSystemConnector
-
-    Returns:
-        FileSystemConnector configured for S3
-    """
-    from opteryx.connectors.filesystem_connector import FileSystemConnector
-    from opteryx.connectors.io_systems import OpteryxS3FileSystem
-
-    filesystem = OpteryxS3FileSystem(bucket=bucket, region=region, **kwargs)
-    return FileSystemConnector(filesystem=filesystem, storage_type="S3", **kwargs)
 
 
 def known_prefix(prefix) -> bool:
@@ -317,14 +295,6 @@ def connector_factory(dataset, telemetry, **config):
             connector_instance = FileSystemConnector(
                 filesystem=filesystem, storage_type="GCS", telemetry=telemetry, **connector_entry
             )
-        elif connector == "AwsS3Connector":
-            from opteryx.connectors.filesystem_connector import FileSystemConnector
-            from opteryx.connectors.io_systems import OpteryxS3FileSystem
-
-            filesystem = OpteryxS3FileSystem(**connector_entry)
-            connector_instance = FileSystemConnector(
-                filesystem=filesystem, storage_type="S3", telemetry=telemetry, **connector_entry
-            )
         else:
             # Unknown string connector - try __getattr__
             connector_class = __getattr__(connector)
@@ -333,7 +303,7 @@ def connector_factory(dataset, telemetry, **config):
         # Connector is a class, instantiate directly
         connector_instance = connector(telemetry=telemetry, **connector_entry)
     elif callable(connector):
-        # Connector is a factory function (like create_local_connector, create_s3_connector, etc.)
+        # Connector is a factory function (like create_local_connector, create_gcs_connector, etc.)
         connector_instance = connector(telemetry=telemetry, **connector_entry)
     else:
         raise ValueError(f"Invalid connector type: {type(connector)}")
@@ -360,9 +330,6 @@ def __getattr__(connector_name: str):
     if connector_name == "GcpCloudStorageConnector":
         # Return FileSystemConnector with GCS filesystem
         return create_gcs_connector
-    if connector_name == "AwsS3Connector":
-        # Return FileSystemConnector with S3 filesystem
-        return create_s3_connector
     if connector_name == "DiskConnector":
         # Return FileSystemConnector with local filesystem
         return create_local_connector

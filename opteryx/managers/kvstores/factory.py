@@ -19,7 +19,6 @@ from opteryx.managers.kvstores.layered_kv_store import LayeredKeyValueStore
 from opteryx.managers.kvstores.memory_kv_store import MemoryPoolKeyValueStore
 from opteryx.managers.kvstores.memory_kv_store import ensure_memory_pool
 from opteryx.managers.kvstores.null_cache import NullCache
-from opteryx.managers.kvstores.s3_kv_store import S3KeyValueStore
 from opteryx.managers.kvstores.scoped_kv_store import ScopedKeyValueStore
 from opteryx.managers.kvstores.valkey import ValkeyCache
 
@@ -120,8 +119,6 @@ def _create_single_store(
 
     if scheme in ("file", ""):
         return FileKeyValueStore(location, key_prefix=key_prefix, **kwargs)
-    if scheme in ("s3", "minio"):
-        return S3KeyValueStore(location, key_prefix=key_prefix, **kwargs)
     if scheme in ("gs", "gcs"):
         return GCSKeyValueStore(location, key_prefix=key_prefix, **kwargs)
     if scheme == "valkey":
@@ -253,7 +250,6 @@ def create_kv_store(
 
     Accepts:
     - file:///path or /path
-    - s3://bucket[/prefix]
     - gs://bucket[/prefix]
     - valkey://connection
     - memory://pool-name
