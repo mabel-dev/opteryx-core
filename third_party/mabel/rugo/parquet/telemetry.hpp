@@ -22,6 +22,8 @@ namespace rugo_tel {
 inline thread_local double metadata_s      = 0.0;  // ReadParquetMetadataFromBuffer
 inline thread_local double decompress_s    = 0.0;  // ZSTD DecompressData (dict + data pages)
 inline thread_local double dict_parse_s    = 0.0;  // dict value parsing (type-specific loops)
+inline thread_local double prescan_s       = 0.0;  // Tier 3B: page pre-scan metadata collection
+inline thread_local double page_parallel_s = 0.0;  // Tier 3B: parallel page decoding
 inline thread_local double rle_s           = 0.0;  // RLE/bit-packed index decode
 inline thread_local double val_expand_s    = 0.0;  // index→value expansion
 inline thread_local double mask_filter_s   = 0.0;  // post-loop row-mask filter
@@ -29,14 +31,16 @@ inline thread_local double validity_bmp_s  = 0.0;  // validity bitmap constructi
 inline thread_local long long calls        = 0;    // DecodeColumnFromChunk calls
 
 inline void reset() {
-    metadata_s     = 0.0;
-    decompress_s   = 0.0;
-    dict_parse_s   = 0.0;
-    rle_s          = 0.0;
-    val_expand_s   = 0.0;
-    mask_filter_s  = 0.0;
-    validity_bmp_s = 0.0;
-    calls          = 0;
+    metadata_s      = 0.0;
+    decompress_s    = 0.0;
+    dict_parse_s    = 0.0;
+    prescan_s       = 0.0;
+    page_parallel_s = 0.0;
+    rle_s           = 0.0;
+    val_expand_s    = 0.0;
+    mask_filter_s   = 0.0;
+    validity_bmp_s  = 0.0;
+    calls           = 0;
 }
 
 using Clock = std::chrono::steady_clock;

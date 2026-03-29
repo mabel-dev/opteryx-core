@@ -11,6 +11,7 @@ import datetime
 import os
 import struct
 import time as _time
+import numpy as np
 import opteryx.config as _opteryx_config
 from array import array as pyarray
 from cpython.bytes cimport PyBytes_FromStringAndSize
@@ -1730,6 +1731,20 @@ def decode_column_from_chunk(chunk_bytes, col_stats, row_mask=None):
     cdef const uint8_t[::1] mask_view
     cdef const uint8_t* mask_ptr = NULL
 
+    # Tier 4A: External buffer arrays for zero-copy decoding
+    cdef object ext_int64_array = None
+    cdef object ext_int32_array = None
+    cdef object ext_float64_array = None
+    cdef object ext_float32_array = None
+    cdef int64_t[::1] ext_int64_view
+    cdef int32_t[::1] ext_int32_view
+    cdef double[::1] ext_float64_view
+    cdef float[::1] ext_float32_view
+    cdef int64_t* ext_int64_ptr = NULL
+    cdef int32_t* ext_int32_ptr = NULL
+    cdef double* ext_float64_ptr = NULL
+    cdef float* ext_float32_ptr = NULL
+
     if isinstance(chunk_bytes, (bytes, bytearray)):
         mem_view = memoryview(chunk_bytes).cast('B')
     elif isinstance(chunk_bytes, memoryview):
@@ -1796,11 +1811,62 @@ def decode_column_from_chunk(chunk_bytes, col_stats, row_mask=None):
         mask_view = row_mask  # expects a contiguous numpy uint8 array
         mask_ptr = &mask_view[0]
 
+    # ─────────────────────────────────────────────────────────────────────────
+    # ── Tier 4A: Zero-copy external buffer path ─────────────────────────────
+    # ─────────────────────────────────────────────────────────────────────────
+    # For non-nullable, non-dictionary columns with fixed-width types,
+    # pre-allocate NumPy arrays and pass their pointers to DecodeColumnFromChunk.
+    # This eliminates an extra memcpy in the value expansion phase.
+
+    # Detect non-nullable (max_definition_level == 0), non-dictionary columns
+    is_non_nullable = cpp_col.max_definition_level == 0
+    has_encodings = not cpp_col.encodings.empty()
+    has_dict = False
+    if has_encodings and (cpp_col.encodings[0] == 2 or cpp_col.encodings[0] == 8):
+        has_dict = True  # PLAIN_DICTIONARY=2 or RLE_DICTIONARY=8
+
+    # Pre-allocate external buffers for non-nullable, non-dict fixed-width columns
+    # cpp_col.physical_type is a C++ std::string; decode it to Python string
+    try:
+        if cpp_col.physical_type.length() > 0:
+            phys_type = cpp_col.physical_type.decode('utf-8')
+        else:
+            phys_type = ''
+    except:
+        phys_type = ''
+
+    if is_non_nullable and not has_dict and cpp_col.num_values > 0:
+        try:
+            if phys_type == 'INT64':
+                ext_int64_array = np.empty(cpp_col.num_values, dtype=np.int64)
+                ext_int64_view = ext_int64_array
+                ext_int64_ptr = &ext_int64_view[0]
+            elif phys_type == 'DOUBLE':
+                ext_float64_array = np.empty(cpp_col.num_values, dtype=np.float64)
+                ext_float64_view = ext_float64_array
+                ext_float64_ptr = &ext_float64_view[0]
+            elif phys_type == 'INT32':
+                ext_int32_array = np.empty(cpp_col.num_values, dtype=np.int32)
+                ext_int32_view = ext_int32_array
+                ext_int32_ptr = &ext_int32_view[0]
+            elif phys_type == 'FLOAT':
+                ext_float32_array = np.empty(cpp_col.num_values, dtype=np.float32)
+                ext_float32_view = ext_float32_array
+                ext_float32_ptr = &ext_float32_view[0]
+        except Exception:
+            # If pre-allocation fails, fall back to internal vectors (pointers remain NULL)
+            pass
+
     with nogil:
         if mask_ptr != NULL:
-            result = parquet_reader.DecodeColumnFromChunk(&mem_view[0], size, &cpp_col, mask_ptr)
+            result = parquet_reader.DecodeColumnFromChunk(&mem_view[0], size, &cpp_col,
+                                                         ext_int64_ptr, ext_float64_ptr,
+                                                         ext_int32_ptr, ext_float32_ptr,
+                                                         mask_ptr)
         else:
-            result = parquet_reader.DecodeColumnFromChunk(&mem_view[0], size, &cpp_col)
+            result = parquet_reader.DecodeColumnFromChunk(&mem_view[0], size, &cpp_col,
+                                                         ext_int64_ptr, ext_float64_ptr,
+                                                         ext_int32_ptr, ext_float32_ptr)
 
     if mask_ptr != NULL:
         _TEL["parquet_pages_skipped"] += <int32_t>result.pages_skipped
@@ -1811,6 +1877,38 @@ def decode_column_from_chunk(chunk_bytes, col_stats, row_mask=None):
 
     col_type = result.type.decode("utf-8")
     num_rows = <int32_t>result.num_rows
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # ── Tier 4A: Zero-copy direct conversion ─────────────────────────────────
+    # If external buffers were used (ext_written > 0), create vectors directly
+    # from the pre-allocated NumPy arrays without copying.
+    # ─────────────────────────────────────────────────────────────────────────
+
+    if result.ext_written > 0:
+        # External buffer was used — create vector directly from NumPy array
+        _TEL["cython_int64_s"] += 0  # No conversion time (zero-copy)
+        _TEL["cython_float_s"] += 0
+
+        if col_type == "int32" and ext_int32_ptr != NULL:
+            # int32 values were written to ext_int32; convert to vector
+            from opteryx.compiled.draken.vectors import Int64Vector
+            # Slice to actual written size in case pre-allocation was larger
+            return Int64Vector.from_numpy(ext_int32_array[:result.ext_written].astype(np.int64))
+
+        elif col_type == "int64" and ext_int64_ptr != NULL:
+            # int64 values written directly to ext buffer
+            from opteryx.compiled.draken.vectors import Int64Vector
+            return Int64Vector.from_numpy(ext_int64_array[:result.ext_written])
+
+        elif col_type == "float32" and ext_float32_ptr != NULL:
+            # float32 written; convert to Float64Vector
+            from opteryx.compiled.draken.vectors import Float64Vector
+            return Float64Vector.from_numpy(ext_float32_array[:result.ext_written].astype(np.float64))
+
+        elif col_type == "float64" and ext_float64_ptr != NULL:
+            # float64 written directly
+            from opteryx.compiled.draken.vectors import Float64Vector
+            return Float64Vector.from_numpy(ext_float64_array[:result.ext_written])
 
     # Convert C++ DecodedColumn to Draken Vector using the same logic as read_parquet()
     if col_type == "int32":
