@@ -26,6 +26,7 @@ The unit of work yielded to downstream operators is one row group:
 from __future__ import annotations
 
 import heapq
+import os
 import struct
 import time
 from collections import deque
@@ -77,6 +78,15 @@ _LOCAL_SERIAL_COMBINE_READ_RATIO = 0.5
 _RANGE_POOL: ThreadPoolExecutor = ThreadPoolExecutor(
     max_workers=32,
     thread_name_prefix="parquet-io",
+)
+
+# CPU-bound decode pool — one worker per physical core.
+# Each column decode calls into C++ (nogil), so threads run truly in parallel.
+# Kept separate from _RANGE_POOL to avoid deadlocks when row-group tasks
+# (submitted to _RANGE_POOL) try to submit per-column decode tasks.
+_DECODE_POOL: ThreadPoolExecutor = ThreadPoolExecutor(
+    max_workers=min(8, os.cpu_count() or 4),
+    thread_name_prefix="parquet-decode",
 )
 
 
@@ -399,47 +409,33 @@ def fetch_columns(
                 kwargs["connector"] = connector
             record_event("download_complete", **kwargs)
 
-        # Decode each chunk and populate cache
-        for col_name, raw_bytes in zip(misses, raw_buffers):
-            col_stats = name_to_stats[col_name]
-
-            # record per-column decode events
-            from opteryx.tracing import record_event
-
-            from opteryx import config as _cfg
-
+        # Decode each chunk in parallel — columns are independent and the
+        # C++ decoder releases the GIL, so true multi-core parallelism applies.
+        def _decode_one(col_name: str, raw_bytes: bytes) -> tuple:
+            _col_stats = name_to_stats[col_name]
             if _cfg.OPTERYX_TRACE:
-                kwargs = {
+                _kwargs = {
                     "file_id": path,
                     "component": "column",
                     "rg_idx": rg_idx,
                     "column": col_name,
                 }
                 if connector:
-                    kwargs["connector"] = connector
-                record_event("decode_start", **kwargs)
-
-            try:
-                decode_start_ns = time.monotonic_ns()
-                decoded = (
-                    decoder(raw_bytes, col_stats)
-                    if row_mask is None
-                    else decoder(raw_bytes, col_stats, row_mask)
-                )
-                time_decode_columns_ns += time.monotonic_ns() - decode_start_ns
-                if decoded is None:
-                    raise RuntimeError(
-                        f"Decoder returned None for column '{col_name}' "
-                        f"(codec={col_stats.get('compression_codec')}, "
-                        f"encodings={col_stats.get('encodings')})"
-                    )
-            except Exception as e:
+                    _kwargs["connector"] = connector
+                record_event("decode_start", **_kwargs)
+            decoded = (
+                decoder(raw_bytes, _col_stats)
+                if row_mask is None
+                else decoder(raw_bytes, _col_stats, row_mask)
+            )
+            if decoded is None:
                 raise RuntimeError(
-                    f"Failed to decode column '{path}:{rg_idx}:{col_name}': {e}"
-                ) from e
-
+                    f"Decoder returned None for column '{col_name}' "
+                    f"(codec={_col_stats.get('compression_codec')}, "
+                    f"encodings={_col_stats.get('encodings')})"
+                )
             if _cfg.OPTERYX_TRACE:
-                kwargs = {
+                _kwargs = {
                     "file_id": path,
                     "component": "column",
                     "rg_idx": rg_idx,
@@ -447,12 +443,43 @@ def fetch_columns(
                     "rows_decoded": getattr(decoded, "num_rows", None) or 0,
                 }
                 if connector:
-                    kwargs["connector"] = connector
-                record_event("decode_complete", **kwargs)
+                    _kwargs["connector"] = connector
+                record_event("decode_complete", **_kwargs)
+            return col_name, decoded
 
-            # Cache and add to results
+        decode_start_ns = time.monotonic_ns()
+        if len(misses) == 1:
+            # Single column: skip pool overhead.
+            col_name = misses[0]
+            try:
+                col_name, decoded = _decode_one(col_name, raw_buffers[0])
+            except RuntimeError:
+                raise
+            except Exception as e:
+                raise RuntimeError(
+                    f"Failed to decode column '{path}:{rg_idx}:{col_name}': {e}"
+                ) from e
             cache.set_column(path, rg_idx, col_name, decoded)
             results[col_name] = decoded
+        else:
+            # Multiple columns: decode in parallel via dedicated CPU pool.
+            decode_futures = {
+                _DECODE_POOL.submit(_decode_one, cn, rb): cn
+                for cn, rb in zip(misses, raw_buffers)
+            }
+            for fut in as_completed(decode_futures):
+                cn = decode_futures[fut]
+                try:
+                    cn, decoded = fut.result()
+                except RuntimeError:
+                    raise
+                except Exception as e:
+                    raise RuntimeError(
+                        f"Failed to decode column '{path}:{rg_idx}:{cn}': {e}"
+                    ) from e
+                cache.set_column(path, rg_idx, cn, decoded)
+                results[cn] = decoded
+        time_decode_columns_ns = time.monotonic_ns() - decode_start_ns
 
     result_dict = {col_name: results[col_name] for col_name in column_names}
     result_dict["__bytes_fetched__"] = bytes_fetched
