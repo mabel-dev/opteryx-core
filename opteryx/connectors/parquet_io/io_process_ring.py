@@ -730,6 +730,21 @@ def _io_worker(
     ring = _SharedMemoryRing(
         slot_bytes=slot_bytes, slot_count=slot_count, name=shm_name, create=False
     )
+
+    # Create persistent thread pools once at subprocess startup and reuse them
+    # across all scans.  Per-scan creation/destruction of 64+ threads adds
+    # measurable latency for high-frequency short queries.
+    _worker_read_pool_size = max(1, int(_cfg.PARQUET_GLOBAL_RANGE_READERS))
+    _worker_decode_pool_size = max(1, int(_cfg.PARQUET_DECODE_WORKERS))
+    _persistent_read_pool = ThreadPoolExecutor(
+        max_workers=_worker_read_pool_size,
+        thread_name_prefix="io-ring-read",
+    )
+    _persistent_decode_pool = ThreadPoolExecutor(
+        max_workers=_worker_decode_pool_size,
+        thread_name_prefix="io-ring-decode",
+    )
+
     event_q.put({"type": _EVENT_IO_READY})
 
     try:
@@ -773,8 +788,8 @@ def _io_worker(
             metrics_lock = threading.Lock()
             next_transfer_id = [0]
             emitter: Optional[threading.Thread] = None
-            read_pool: Optional[ThreadPoolExecutor] = None
-            decode_pool: Optional[ThreadPoolExecutor] = None
+            read_pool: ThreadPoolExecutor = _persistent_read_pool
+            decode_pool: ThreadPoolExecutor = _persistent_decode_pool
             read_futures: Dict[Future, tuple[tuple[int, int], _IOColumnWork]] = {}
             decode_futures: Dict[Future, tuple[tuple[int, int], _IOColumnWork]] = {}
             decode_pending: deque[tuple[tuple[int, int], _IOColumnWork, bytes]] = deque()
@@ -908,8 +923,7 @@ def _io_worker(
                 )
                 emitter.start()
 
-                read_pool = ThreadPoolExecutor(max_workers=max(max_workers, global_ranges_cap))
-                decode_pool = ThreadPoolExecutor(max_workers=max(decode_workers, 1))
+                # Pools are persistent (created at subprocess startup); no per-scan creation.
 
                 def _ready_buffer_depth() -> int:
                     return len(ready_backlog) + ready_queue.qsize()
@@ -1288,14 +1302,12 @@ def _io_worker(
                 metrics.pop("transfer_payload_sizes", None)
                 event_q.put({"type": _EVENT_SCAN_COMPLETE, "cancelled": True, "metrics": metrics})
             finally:
+                # Cancel in-flight futures; do NOT shut down the persistent pools
+                # since they are reused across all scans in this subprocess.
                 for fut in list(read_futures):
                     fut.cancel()
                 for fut in list(decode_futures):
                     fut.cancel()
-                if read_pool is not None:
-                    read_pool.shutdown(wait=False, cancel_futures=True)
-                if decode_pool is not None:
-                    decode_pool.shutdown(wait=False, cancel_futures=True)
     finally:
         ring.close()
 
