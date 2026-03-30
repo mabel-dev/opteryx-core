@@ -112,7 +112,17 @@ class OpteryxGcsFileSystem:
             from opteryx.compiled.http_client import HttpClient
         except (ImportError, AttributeError) as err:  # pragma: no cover
             name = getattr(err, "name", None) or str(err)
-            raise MissingDependencyError(name) from err
+            error_msg = (
+                f"{name}\n\n"
+                "The HTTP client extension (libcurl-based) is not available. "
+                "This is required for GCS filesystem support.\n\n"
+                "To enable GCS support, ensure OpenSSL development headers are installed:\n"
+                "  - macOS: brew install openssl\n"
+                "  - Ubuntu/Debian: apt-get install libssl-dev\n"
+                "  - RHEL/CentOS/Fedora: yum install openssl-devel\n\n"
+                "Then rebuild with: python setup.py build_ext --inplace"
+            )
+            raise MissingDependencyError(error_msg) from err
 
         # Get GCS credentials
         self.client_credentials = get_storage_credentials()
