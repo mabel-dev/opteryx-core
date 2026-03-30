@@ -10,8 +10,7 @@ dependencies = [
     'aiohttp==3.13.*',
     'numpy==2.4.*',
     'orso==0.0.*',
-    'pyarrow==23.0.*',
-    'requests==2.32.*'
+    'pyarrow==23.0.*'
 ]
 
 [project.urls]

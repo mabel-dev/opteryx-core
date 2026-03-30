@@ -1,6 +1,5 @@
 types-orjson
 types-PyYAML
-types-requests
 
 coverage
 hypothesis
@@ -13,7 +12,6 @@ pycln
 jellyfish
 
 valkey
-requests
 rich
 
 protobuf

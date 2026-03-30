@@ -207,11 +207,9 @@ def download_file(url: str, path: str):  # pragma: no cover
     Returns:
         None
     """
-    import requests
+    import urllib.request
 
-    response = requests.get(url)
-    with open(path, "wb") as f:
-        f.write(response.content)
+    urllib.request.urlretrieve(url, path)
     print(f"Saved downloaded contents to {path}")
 
 
