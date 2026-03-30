@@ -19,10 +19,6 @@ jobs:
           - runner-python: "3.13"
             pybuild: "3.13"
             manylinux_image: "quay.io/pypa/manylinux2014_x86_64"
-          - runner-python: "3.13"
-            pybuild: "3.14t"
-            # use GHCR manylinux image (public) for 3.14t
-            manylinux_image: "ghcr.io/pypa/manylinux/manylinux_2_31_x86_64"
     runs-on: ubuntu-latest
     steps:
       - name: Set up Python (runner)
@@ -143,18 +139,6 @@ jobs:
           name: dist-linux-3.13
           path: dist-linux-3.13
       - run: mv -v dist-linux-3.13/* dist/
-
-      - name: Stage linux 3.14t
-        uses: actions/download-artifact@v4.1.7
-        with:
-          name: dist-linux-3.14t
-          path: dist-linux-3.14t
-      - run: |
-          if [ -d dist-linux-3.14t ]; then
-            mv -v dist-linux-3.14t/* dist/
-          else
-            echo "dist-linux-3.14t artifact not found; skipping"
-          fi
 
       - name: Publish distribution 📦 to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
