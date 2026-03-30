@@ -55,8 +55,7 @@ class build_ext(build_ext_orig):
     def build_extensions(self):
         if self.compiler and ".S" not in self.compiler.src_extensions:
             self.compiler.src_extensions.append(".S")
-        # Build vendored libcurl before extensions
-        build_vendored_libcurl()
+        # libcurl is already built at module initialization time
         super().build_extensions()
 
     def build_extension(self, ext):
@@ -121,6 +120,20 @@ def build_vendored_libcurl():
 
     # Configure curl as static library with minimal dependencies
     print(f"Building vendored libcurl from {curl_src}...")
+
+    # Try to find OpenSSL installation
+    openssl_prefix = None
+    import shutil
+    pkg_config_path = shutil.which("pkg-config")
+    if pkg_config_path:
+        result = subprocess.run(["pkg-config", "--variable=libdir", "openssl"],
+                              capture_output=True, text=True)
+        if result.returncode == 0:
+            openssl_lib = result.stdout.strip()
+            if openssl_lib:
+                openssl_prefix = os.path.dirname(openssl_lib)
+                print(f"  Found OpenSSL at: {openssl_prefix}")
+
     configure_cmd = [
         os.path.join(curl_src, "configure"),
         f"--prefix={curl_build}",
@@ -144,6 +157,10 @@ def build_vendored_libcurl():
         "--disable-dict",
         "--disable-debug",
     ]
+
+    # Add OpenSSL path if found
+    if openssl_prefix:
+        configure_cmd.append(f"--with-openssl={openssl_prefix}")
 
     try:
         print(f"  Running: {' '.join(configure_cmd)}")
@@ -999,9 +1016,14 @@ extensions = [
     # HTTP Client (libcurl-based HTTP with connection pooling and Range request support)
 ]
 
+# Build libcurl first, before checking if http_client extension should be added
+if "clean" not in [arg.lower() for arg in sys.argv[1:] if arg and not arg.startswith("-")]:
+    _libcurl_path = build_vendored_libcurl()
+else:
+    _libcurl_path = None
+
 # HTTP client extension (optional, only if libcurl available)
-_libcurl_path = os.path.join(os.path.dirname(__file__), "build", "curl", "lib", ".libs", "libcurl.a")
-if os.path.exists(_libcurl_path):
+if _libcurl_path and os.path.exists(_libcurl_path):
     extensions.append(
         Extension(
             name="opteryx.compiled.http_client",
@@ -1020,11 +1042,12 @@ if os.path.exists(_libcurl_path):
         )
     )
 else:
-    print("Warning: libcurl not found. HTTP client extension will not be built.")
-    print("  To build with HTTP support, ensure OpenSSL development headers are installed:")
-    print("  - macOS: brew install openssl")
-    print("  - Ubuntu/Debian: apt-get install libssl-dev")
-    print("  - RHEL/CentOS/Fedora: yum install openssl-devel")
+    if "clean" not in [arg.lower() for arg in sys.argv[1:] if arg and not arg.startswith("-")]:
+        print("Warning: libcurl not found. HTTP client extension will not be built.")
+        print("  To build with HTTP support, ensure OpenSSL development headers are installed:")
+        print("  - macOS: brew install openssl")
+        print("  - Ubuntu/Debian: apt-get install libssl-dev")
+        print("  - RHEL/CentOS/Fedora: yum install openssl-devel")
 
 
 # Auto-generate consolidated modules
