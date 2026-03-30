@@ -66,7 +66,7 @@ class GcsFile(io.BytesIO):
     Reads the entire object into memory on open for maximum performance.
     """
 
-    def __init__(self, path: str, session, access_token):
+    def __init__(self, path: str, http_client, access_token):
         """Initialize GCS file by reading entire object."""
         from opteryx.utils import paths
 
@@ -78,17 +78,16 @@ class GcsFile(io.BytesIO):
         object_full_path = urllib.parse.quote(path[(len(bucket) + 1) :], safe="")
         url = f"https://storage.googleapis.com/{bucket}/{object_full_path}"
 
-        response = session.get(
-            url,
-            headers={"Authorization": f"Bearer {access_token}", "Accept-Encoding": "identity"},
-            timeout=30,
-        )
-
-        if response.status_code != 200:
-            raise DatasetReadError(f"Unable to read '{path}' - {response.status_code}")
+        try:
+            data = http_client.get(
+                url,
+                headers={"Authorization": f"Bearer {access_token}", "Accept-Encoding": "identity"},
+            )
+        except RuntimeError as err:
+            raise DatasetReadError(f"Unable to read '{path}' - {err}") from err
 
         # Initialize BytesIO with the content
-        super().__init__(response.content)
+        super().__init__(data)
 
     @property
     def memoryview(self):
@@ -101,7 +100,7 @@ class OpteryxGcsFileSystem:
     Custom GCS filesystem using direct HTTP API for optimal performance.
 
     Uses direct GCS JSON API calls for 10% better performance than SDK,
-    with connection pooling for efficiency. Provides Arrow-compatible
+    with libcurl connection pooling for efficiency. Provides Arrow-compatible
     filesystem interface via duck typing.
     """
 
@@ -109,9 +108,8 @@ class OpteryxGcsFileSystem:
         self.bucket = bucket
 
         try:
-            import requests
             from google.auth.transport.requests import Request
-            from requests.adapters import HTTPAdapter
+            from opteryx.compiled.http_client import HttpClient
         except (ImportError, AttributeError) as err:  # pragma: no cover
             name = getattr(err, "name", None) or str(err)
             raise MissingDependencyError(name) from err
@@ -126,13 +124,11 @@ class OpteryxGcsFileSystem:
             request = Request()
             self.client_credentials.refresh(request)
 
-        # Create a HTTP connection session to reduce effort for each fetch.
+        # Create HTTP client with connection pooling via libcurl CURLM.
         # pool_maxsize must be at least _MAX_PARALLEL_RANGE_READS so that
-        # concurrent range-read workers don't block waiting for a free
-        # connection slot.  pool_connections=1 (one pool for storage.googleapis.com).
-        self.session = requests.session()
-        adapter = HTTPAdapter(pool_connections=1, pool_maxsize=_MAX_PARALLEL_RANGE_READS + 16)
-        self.session.mount("https://", adapter)
+        # concurrent range-read workers don't block waiting for a free connection.
+        # 128 workers handles 64 concurrent row-group tasks efficiently.
+        self.http_client = HttpClient(max_connections=_MAX_PARALLEL_RANGE_READS + 16, timeout_ms=60000)
 
     @property
     def _bearer(self) -> str:
@@ -166,15 +162,15 @@ class OpteryxGcsFileSystem:
             bucket, _, _, _ = path_utils.get_parts(norm_path)
             object_full_path = urllib.parse.quote(norm_path[(len(bucket) + 1) :], safe="")
             url = f"https://storage.googleapis.com/{bucket}/{object_full_path}"
-            response = self.session.head(
-                url,
-                headers={"Authorization": bearer},
-                timeout=10,
-            )
-            if response.status_code == 200:
-                size = int(response.headers.get("content-length", 0))
+            try:
+                headers = self.http_client.head(
+                    url,
+                    headers={"Authorization": bearer},
+                )
+                # HEAD succeeded (http_client raises RuntimeError on error)
+                size = int(headers.get("content-length", 0))
                 return idx, FileInfo(path=path, type=FileType.File, size=size)
-            else:
+            except Exception:
                 return idx, FileInfo(path=path, type=FileType.NotFound)
 
         # Capture a single valid bearer token for this batch.
@@ -228,15 +224,17 @@ class OpteryxGcsFileSystem:
         if len(ranges) == 1:
             offset, length = ranges[0]
             end = offset + length - 1
-            response = self.session.get(
-                url,
-                headers={
-                    "Authorization": bearer,
-                    "Range": f"bytes={offset}-{end}",
-                },
-                timeout=30,
-            )
-            return [response.content]
+            try:
+                data = self.http_client.get(
+                    url,
+                    headers={
+                        "Authorization": bearer,
+                        "Range": f"bytes={offset}-{end}",
+                    },
+                )
+                return [data]
+            except RuntimeError as err:
+                raise DatasetReadError(f"Unable to read '{path}' - {err}") from err
 
         # Range requests are network-bound; issue a small bounded fanout and
         # preserve the caller's range order in the output list.
@@ -244,15 +242,17 @@ class OpteryxGcsFileSystem:
 
         def _fetch(idx: int, offset: int, length: int) -> Tuple[int, bytes]:
             end = offset + length - 1
-            response = self.session.get(
-                url,
-                headers={
-                    "Authorization": bearer,
-                    "Range": f"bytes={offset}-{end}",
-                },
-                timeout=30,
-            )
-            return idx, response.content
+            try:
+                data = self.http_client.get(
+                    url,
+                    headers={
+                        "Authorization": bearer,
+                        "Range": f"bytes={offset}-{end}",
+                    },
+                )
+                return idx, data
+            except RuntimeError as err:
+                raise DatasetReadError(f"Unable to read '{path}' - {err}") from err
 
         futures = [
             _GCS_RANGE_POOL.submit(_fetch, idx, offset, length)
@@ -292,18 +292,18 @@ class OpteryxGcsFileSystem:
         object_full_path = urllib.parse.quote(path[(len(bucket) + 1) :], safe="")
         url = f"https://storage.googleapis.com/{bucket}/{object_full_path}"
 
-        response = self.session.get(
-            url,
-            headers={"Authorization": self._bearer, "Accept-Encoding": "identity"},
-            timeout=30,
-            stream=True,
-        )
-
-        if response.status_code != 200:
-            raise DatasetReadError(f"Unable to read '{path}' - {response.status_code}")
+        try:
+            data = self.http_client.get(
+                url,
+                headers={"Authorization": self._bearer, "Accept-Encoding": "identity"},
+            )
+        except RuntimeError as err:
+            raise DatasetReadError(f"Unable to read '{path}' - {err}") from err
 
         total = 0
-        for chunk in response.iter_content(chunk_size=chunk_size):
+        # Write in chunks to match streaming API
+        for i in range(0, len(data), chunk_size):
+            chunk = data[i : i + chunk_size]
             sink.write(chunk)
             total += len(chunk)
         return total
@@ -383,7 +383,7 @@ class OpteryxGcsFileSystem:
             )
         # Ensure token is fresh before handing it to GcsFile (which reads immediately).
         _ = self._bearer
-        return GcsFile(path, self.session, self.client_credentials.token)
+        return GcsFile(path, self.http_client, self.client_credentials.token)
 
     def open_input_file(self, path: str, columns=None, filters=None):
         """Open a GCS object for random access reading.
@@ -400,4 +400,4 @@ class OpteryxGcsFileSystem:
             )
         # Ensure token is fresh before handing it to GcsFile (which reads immediately).
         _ = self._bearer
-        return GcsFile(path, self.session, self.client_credentials.token)
+        return GcsFile(path, self.http_client, self.client_credentials.token)

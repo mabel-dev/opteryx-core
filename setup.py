@@ -907,6 +907,18 @@ extensions = [
         extra_compile_args=["-O3", "-std=c++17"] + WARNING_FLAGS,
         language="c++",
     ),
+    # HTTP Client (libcurl-based HTTP with connection pooling and Range request support)
+    Extension(
+        name="opteryx.compiled.http_client",
+        sources=[
+            "opteryx/compiled/http_client.pyx",
+            "src/cpp/http_client.cpp",
+        ],
+        include_dirs=include_dirs,
+        extra_compile_args=["-O3", "-std=c++17"] + WARNING_FLAGS,
+        extra_link_args=["-lcurl"],
+        language="c++",
+    ),
 ]
 
 

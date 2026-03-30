@@ -118,30 +118,6 @@ def visit_function_dataset(
             column.origin = [node.relation_name]
         node.columns = columns
         node.schema = schema
-        node.relation_name = node.alias
-        node.url = node.args[0].value
-
-        import requests
-        from opteryx.utils.parquet_decoder import parquet_decoder
-
-        if not str(node.url).lower().endswith(".parquet"):
-            raise UnsupportedSyntaxError("HTTP dataset constructor only supports Parquet.")
-        response = requests.get(node.url, timeout=60)
-
-        response.raise_for_status()
-        row_count, column_count, raw_bytes, data = parquet_decoder(
-            response.content, force_read=True
-        )
-
-        schema = RelationSchema(
-            name=node.relation_name,
-            columns=[FlatColumn.from_arrow(field) for field in data.schema],
-        )
-
-        context.schemas[node.relation_name] = schema
-
-        node.data = data
-        node.schema = schema
     elif node.function == "FAKE":
         from orso.schema import ColumnDisposition
 

@@ -59,10 +59,10 @@ class OpteryxHttpFileSystem:
     """HTTP(S) filesystem using HTTP Range requests for partial file access.
 
     Supports both sync and async operations:
-    - Sync: read_ranges(), stream_to() use requests library with optimized pooling
+    - Sync: read_ranges(), stream_to() use libcurl with native connection pooling
     - Async: async_stream_to() uses caller-provided aiohttp.ClientSession
 
-    Standalone implementation with no external dependencies beyond requests/aiohttp.
+    Standalone implementation with no external pip dependencies (libcurl via C extension).
     """
 
     def __init__(self, base_url: str = "", **kwargs):
@@ -75,22 +75,15 @@ class OpteryxHttpFileSystem:
         self.base_url = base_url.rstrip("/") if base_url else ""
 
         try:
-            import requests
-            from requests.adapters import HTTPAdapter
+            from opteryx.compiled.http_client import HttpClient
         except (ImportError, AttributeError) as err:  # pragma: no cover
             name = getattr(err, "name", None) or str(err)
             raise MissingDependencyError(name) from err
 
-        # Create a HTTP connection session to reduce overhead for each fetch.
-        # Aggressive pool config: 128 max connections (96 workers + 32 buffer)
-        # pool_connections=1: single pool for host (multi-host would need refactoring)
-        self.session = requests.Session()
-        adapter = HTTPAdapter(
-            pool_connections=1,
-            pool_maxsize=128,  # 96 workers + 32 buffer
-        )
-        self.session.mount("http://", adapter)
-        self.session.mount("https://", adapter)
+        # Create HTTP client with connection pooling via libcurl CURLM.
+        # Aggressive config: 128 max connections (96 workers + 32 buffer)
+        # Timeout: 60 seconds for overall request
+        self.http_client = HttpClient(max_connections=128, timeout_ms=60000)
         self._lock = threading.Lock()
 
     def _normalize_url(self, path: str) -> str:
@@ -130,12 +123,10 @@ class OpteryxHttpFileSystem:
         def _head_one(idx: int, path: str) -> Tuple[int, FileInfo]:
             url = self._normalize_url(path)
             try:
-                response = self.session.head(url, timeout=10)
-                if response.status_code == 200:
-                    size = int(response.headers.get("content-length", 0))
-                    return idx, FileInfo(path=path, type=FileType.File, size=size)
-                else:
-                    return idx, FileInfo(path=path, type=FileType.NotFound)
+                headers = self.http_client.head(url)
+                # HTTP HEAD succeeded (http_client raises RuntimeError on error)
+                size = int(headers.get("content-length", 0))
+                return idx, FileInfo(path=path, type=FileType.File, size=size)
             except Exception:
                 return idx, FileInfo(path=path, type=FileType.NotFound)
 
@@ -171,27 +162,27 @@ class OpteryxHttpFileSystem:
         # Avoid thread pool overhead for single range
         if len(ranges) == 1:
             offset, length = ranges[0]
-            response = self.session.get(
-                url,
-                headers={"Range": f"bytes={offset}-{offset + length - 1}"},
-                timeout=30,
-            )
-            if response.status_code not in (200, 206):
-                raise DatasetReadError(f"Unable to read '{path}' - {response.status_code}")
-            return [response.content]
+            try:
+                data = self.http_client.get(
+                    url,
+                    headers={"Range": f"bytes={offset}-{offset + length - 1}"},
+                )
+                return [data]
+            except RuntimeError as err:
+                raise DatasetReadError(f"Unable to read '{path}' - {err}") from err
 
         # Parallel range reads; preserve output order
         result: List[bytes] = [b""] * len(ranges)
 
         def _fetch(idx: int, offset: int, length: int) -> Tuple[int, bytes]:
-            response = self.session.get(
-                url,
-                headers={"Range": f"bytes={offset}-{offset + length - 1}"},
-                timeout=30,
-            )
-            if response.status_code not in (200, 206):
-                raise DatasetReadError(f"Unable to read '{path}' - {response.status_code}")
-            return idx, response.content
+            try:
+                data = self.http_client.get(
+                    url,
+                    headers={"Range": f"bytes={offset}-{offset + length - 1}"},
+                )
+                return idx, data
+            except RuntimeError as err:
+                raise DatasetReadError(f"Unable to read '{path}' - {err}") from err
 
         futures = [
             _HTTP_RANGE_POOL.submit(_fetch, idx, offset, length)
@@ -217,13 +208,15 @@ class OpteryxHttpFileSystem:
             Total bytes written to sink
         """
         url = self._normalize_url(path)
-        response = self.session.get(url, stream=True, timeout=30)
-
-        if response.status_code != 200:
-            raise DatasetReadError(f"Unable to read '{path}' - {response.status_code}")
+        try:
+            data = self.http_client.get(url)
+        except RuntimeError as err:
+            raise DatasetReadError(f"Unable to read '{path}' - {err}") from err
 
         total = 0
-        for chunk in response.iter_content(chunk_size=chunk_size):
+        # Write in chunks to match streaming API
+        for i in range(0, len(data), chunk_size):
+            chunk = data[i : i + chunk_size]
             sink.write(chunk)
             total += len(chunk)
         return total
