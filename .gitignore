@@ -238,3 +238,8 @@ third_party/mabel/draken/storage/morsel_io.c*
 opteryx/third_party/lz4/lz4.c
 third_party/mabel/draken/vectors/*_vector.c*
 third_party/mabel/draken/vectors/scalar_constructors.cpp
+
+# Claude Code temporary files and worktrees
+.claude/
+!.claude/launch.json
+!.claude/scheduled_tasks.json
