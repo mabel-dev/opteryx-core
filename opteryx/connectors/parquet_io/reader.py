@@ -32,7 +32,6 @@ import time
 from collections import deque
 from concurrent.futures import FIRST_COMPLETED
 from concurrent.futures import Future
-from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import as_completed
 from concurrent.futures import wait
 from dataclasses import dataclass
@@ -48,6 +47,11 @@ from typing import Tuple
 from opteryx.connectors.parquet_io.cache import InMemoryParquetCache
 from opteryx.connectors.parquet_io.cache import ParquetCache
 from opteryx.connectors.parquet_io.predicates import row_group_may_satisfy
+from opteryx.connectors.parquet_io.thread_pool_manager import (
+    get_decode_pool,
+    get_range_pool,
+    LazyPoolProxy,
+)
 
 
 class ListColumnError(ValueError):
@@ -73,31 +77,43 @@ _RANGE_COALESCE_MAX_GAP_BYTES = 64
 _RANGE_COALESCE_MAX_SPAN_BYTES = 32 * 1024 * 1024
 _LOCAL_SERIAL_COMBINE_READ_RATIO = 0.5
 
-# Module-level thread pool shared across all queries (I/O bound; GIL released
-# on socket/disk reads so real parallelism is achieved).
-_RANGE_POOL: ThreadPoolExecutor = ThreadPoolExecutor(
-    max_workers=32,
-    thread_name_prefix="parquet-io",
-)
+# Module-level thread pools shared across all queries.
+# These are lazy-initialized via thread_pool_manager to support both
+# C++ and Python backends with automatic fallback.
 
-# CPU-bound decode pool — one worker per physical core (no artificial cap).
-# Each column decode calls into C++ (nogil), so threads run truly in parallel
-# across all available cores.
-# Kept separate from _RANGE_POOL to avoid deadlocks when row-group tasks
-# (submitted to _RANGE_POOL) try to submit per-column decode tasks.
-_DECODE_POOL: ThreadPoolExecutor = ThreadPoolExecutor(
-    max_workers=os.cpu_count() or 4,
-    thread_name_prefix="parquet-decode",
-)
+def _get_range_pool():
+    """Get the range read pool (32 workers for v1 scheduler)."""
+    return get_range_pool(name="parquet-range", max_workers=32)
 
-# Large-capacity IO pool for the v2 scheduler which issues up to
-# PARQUET_GLOBAL_RANGE_READERS (default 64) concurrent range reads.
-# _RANGE_POOL (32 workers) is not enough; a second module-level pool
-# avoids per-query thread creation for the common case.
-_RANGE_POOL_V2: ThreadPoolExecutor = ThreadPoolExecutor(
-    max_workers=max(64, _RANGE_POOL._max_workers),
-    thread_name_prefix="parquet-io-v2",
-)
+
+def _get_decode_pool():
+    """Get the decode pool (cpu_count workers for column decoding).
+
+    CPU-bound decode pool — one worker per physical core (no artificial cap).
+    Each column decode calls into C++ (nogil), so threads run truly in parallel
+    across all available cores.
+    Kept separate from _RANGE_POOL to avoid deadlocks when row-group tasks
+    (submitted to _RANGE_POOL) try to submit per-column decode tasks.
+    """
+    return get_decode_pool(max_workers=os.cpu_count() or 4)
+
+
+def _get_range_pool_v2():
+    """Get the large-capacity IO pool for v2 scheduler (64 workers).
+
+    The v2 scheduler issues up to PARQUET_GLOBAL_RANGE_READERS (default 64)
+    concurrent range reads. _RANGE_POOL (32 workers) is not enough; a separate
+    pool avoids per-query thread creation for the common case.
+    """
+    return get_range_pool(name="parquet-range-v2", max_workers=64)
+
+
+# Module-level thread pools: lazy proxies that always defer to thread_pool_manager cache.
+# This ensures that even if pools are shut down (e.g., in tests), the proxies will
+# get the fresh recreated pool from the cache on next access.
+_RANGE_POOL = LazyPoolProxy(_get_range_pool)
+_DECODE_POOL = LazyPoolProxy(_get_decode_pool)
+_RANGE_POOL_V2 = LazyPoolProxy(_get_range_pool_v2)
 
 
 def _read_footer_payload(
@@ -1416,19 +1432,21 @@ def _iter_row_groups_v2(
     footer_fetch_ns: Dict[str, int] = {}
     footer_futures: Dict[Future, str] = {}
 
-    read_pool: ThreadPoolExecutor
     local_read_pool = False
     required_workers = max(max_workers, global_ranges_cap)
-    if required_workers <= _RANGE_POOL._max_workers:
+    if required_workers <= 32:  # _RANGE_POOL size
         read_pool = _RANGE_POOL
-    elif required_workers <= _RANGE_POOL_V2._max_workers:
+    elif required_workers <= 64:  # _RANGE_POOL_V2 size
         # Common case with default config (PARQUET_GLOBAL_RANGE_READERS=64):
         # use the shared v2 pool instead of creating a per-query pool.
         read_pool = _RANGE_POOL_V2
     else:
         # Unusual: caller requested more workers than either shared pool.
-        read_pool = ThreadPoolExecutor(
-            max_workers=required_workers, thread_name_prefix="parquet-io-v2-local"
+        # Create a local pool via the manager
+        from opteryx.connectors.parquet_io.thread_pool_manager import create_thread_pool
+        read_pool = create_thread_pool(
+            name="parquet-io-local",
+            max_workers=required_workers
         )
         local_read_pool = True
 
