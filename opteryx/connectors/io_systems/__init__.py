@@ -8,6 +8,7 @@ Opteryx's memory-view-based readers and stream wrappers for optimal performance.
 __all__ = [
     "OpteryxLocalFileSystem",
     "OpteryxGcsFileSystem",
+    "OpteryxHttpFileSystem",
     "create_filesystem",
 ]
 
@@ -36,6 +37,8 @@ def create_filesystem(protocol: str):
     protocol_map = {
         "gs": "OpteryxGcsFileSystem",
         "gcs": "OpteryxGcsFileSystem",
+        "http": "OpteryxHttpFileSystem",
+        "https": "OpteryxHttpFileSystem",
         "file": "OpteryxLocalFileSystem",
         "": "OpteryxLocalFileSystem",  # No protocol = local file
     }
@@ -61,4 +64,8 @@ def __getattr__(file_system: str):
         from opteryx.connectors.io_systems.local_filesystem import OpteryxLocalFileSystem
 
         return OpteryxLocalFileSystem
+    if file_system == "OpteryxHttpFileSystem":
+        from opteryx.connectors.io_systems.http_filesystem import OpteryxHttpFileSystem
+
+        return OpteryxHttpFileSystem
     raise AttributeError(f"module {__name__} has no attribute {file_system}")
