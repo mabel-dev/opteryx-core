@@ -21,6 +21,7 @@
 #include <map>
 #include <memory>
 #include <cstring>
+#include <stdexcept>
 
 /**
  * Response buffer for capturing HTTP response data.
