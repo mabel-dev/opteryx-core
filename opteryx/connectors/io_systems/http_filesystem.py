@@ -278,14 +278,14 @@ class OpteryxHttpFileSystem:
             )
 
         url = self._normalize_url(path)
-        response = self.session.get(url, timeout=30)
-
-        if response.status_code != 200:
-            raise DatasetReadError(f"Unable to read '{path}' - {response.status_code}")
+        try:
+            data = self.http_client.get(url)
+        except RuntimeError as err:
+            raise DatasetReadError(f"Unable to read '{path}' - {err}") from err
 
         # Wrap content in BytesIO and attach memoryview for Arrow compatibility
-        bio = io.BytesIO(response.content)
-        bio.memoryview = memoryview(response.content)  # type: ignore[attr-defined]
+        bio = io.BytesIO(data)
+        bio.memoryview = memoryview(data)  # type: ignore[attr-defined]
         return bio
 
     def open_input_file(self, path: str, columns=None, filters=None):

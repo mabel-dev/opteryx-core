@@ -15,10 +15,10 @@ from opteryx.exceptions import DatasetReadError
 class TestOpteryxHttpFileSystem:
     """Tests for OpteryxHttpFileSystem."""
 
-    def test_init_creates_session(self):
-        """Test filesystem initialization creates HTTP session."""
+    def test_init_creates_http_client(self):
+        """Test filesystem initialization creates HTTP client."""
         fs = OpteryxHttpFileSystem()
-        assert fs.session is not None
+        assert fs.http_client is not None
         assert fs.base_url == ""
 
     def test_init_with_base_url(self):
@@ -54,10 +54,9 @@ class TestOpteryxHttpFileSystem:
         """Test get_file_info with single path."""
         fs = OpteryxHttpFileSystem()
 
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.headers = {"content-length": "1024"}
-        fs.session.head = Mock(return_value=mock_response)
+        # Replace with mock http_client
+        fs.http_client = Mock()
+        fs.http_client.head = Mock(return_value={"content-length": "1024"})
 
         info = fs.get_file_info("https://example.com/file.bin")
 
@@ -69,9 +68,9 @@ class TestOpteryxHttpFileSystem:
         """Test get_file_info when file not found."""
         fs = OpteryxHttpFileSystem()
 
-        mock_response = Mock()
-        mock_response.status_code = 404
-        fs.session.head = Mock(return_value=mock_response)
+        # Replace with mock http_client
+        fs.http_client = Mock()
+        fs.http_client.head = Mock(side_effect=RuntimeError("404 Not Found"))
 
         info = fs.get_file_info("https://example.com/notfound.bin")
 
@@ -82,16 +81,15 @@ class TestOpteryxHttpFileSystem:
         """Test read_ranges with single byte range."""
         fs = OpteryxHttpFileSystem()
 
-        mock_response = Mock()
-        mock_response.status_code = 206
-        mock_response.content = b"test_data"
-        fs.session.get = Mock(return_value=mock_response)
+        # Replace with mock http_client
+        fs.http_client = Mock()
+        fs.http_client.get = Mock(return_value=b"test_data")
 
         result = fs.read_ranges("https://example.com/file.bin", [(0, 9)])
 
         assert result == [b"test_data"]
-        fs.session.get.assert_called_once()
-        call_args = fs.session.get.call_args
+        fs.http_client.get.assert_called_once()
+        call_args = fs.http_client.get.call_args
         assert "Range" in call_args[1]["headers"]
         assert call_args[1]["headers"]["Range"] == "bytes=0-8"
 
@@ -99,28 +97,24 @@ class TestOpteryxHttpFileSystem:
         """Test read_ranges with multiple byte ranges."""
         fs = OpteryxHttpFileSystem()
 
-        # Mock multiple responses
-        responses = [
-            Mock(status_code=206, content=b"chunk1"),
-            Mock(status_code=206, content=b"chunk2"),
-            Mock(status_code=206, content=b"chunk3"),
-        ]
-        fs.session.get = Mock(side_effect=responses)
+        # Replace with mock http_client
+        fs.http_client = Mock()
+        fs.http_client.get = Mock(return_value=b"chunk")
 
-        ranges = [(0, 6), (100, 6), (200, 6)]
+        ranges = [(0, 5), (100, 5), (200, 5)]
         result = fs.read_ranges("https://example.com/file.bin", ranges)
 
         assert len(result) == 3
-        # Results may not be in order due to thread pool, but should contain all chunks
-        assert set(result) == {b"chunk1", b"chunk2", b"chunk3"}
+        # All chunks should be b"chunk"
+        assert all(chunk == b"chunk" for chunk in result)
 
     def test_read_ranges_error(self):
         """Test read_ranges raises on HTTP error."""
         fs = OpteryxHttpFileSystem()
 
-        mock_response = Mock()
-        mock_response.status_code = 404
-        fs.session.get = Mock(return_value=mock_response)
+        # Replace with mock http_client
+        fs.http_client = Mock()
+        fs.http_client.get = Mock(side_effect=RuntimeError("HTTP error"))
 
         with pytest.raises(DatasetReadError):
             fs.read_ranges("https://example.com/file.bin", [(0, 100)])
@@ -129,26 +123,26 @@ class TestOpteryxHttpFileSystem:
         """Test stream_to with chunked reading."""
         fs = OpteryxHttpFileSystem()
 
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.iter_content = Mock(return_value=[b"chunk1", b"chunk2", b"chunk3"])
-        fs.session.get = Mock(return_value=mock_response)
+        # Replace with mock http_client
+        full_data = b"chunk1chunk2chunk3"
+        fs.http_client = Mock()
+        fs.http_client.get = Mock(return_value=full_data)
 
         sink = Mock()
         sink.write = Mock(return_value=None)
 
-        total = fs.stream_to("https://example.com/file.bin", sink)
+        total = fs.stream_to("https://example.com/file.bin", sink, chunk_size=6)
 
-        assert total == 18  # len(b"chunk1") + len(b"chunk2") + len(b"chunk3")
+        assert total == 18  # len(full_data)
         assert sink.write.call_count == 3
 
     def test_stream_to_error(self):
         """Test stream_to raises on HTTP error."""
         fs = OpteryxHttpFileSystem()
 
-        mock_response = Mock()
-        mock_response.status_code = 404
-        fs.session.get = Mock(return_value=mock_response)
+        # Replace with mock http_client
+        fs.http_client = Mock()
+        fs.http_client.get = Mock(side_effect=RuntimeError("HTTP error"))
 
         sink = Mock()
         with pytest.raises(DatasetReadError):
@@ -172,10 +166,9 @@ class TestOpteryxHttpFileSystem:
         """Test open_input_stream returns BytesIO."""
         fs = OpteryxHttpFileSystem()
 
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.content = b"file_content"
-        fs.session.get = Mock(return_value=mock_response)
+        # Replace with mock http_client
+        fs.http_client = Mock()
+        fs.http_client.get = Mock(return_value=b"file_content")
 
         stream = fs.open_input_stream("https://example.com/file.bin")
 
@@ -200,10 +193,9 @@ class TestOpteryxHttpFileSystem:
         """Test open_input_file returns BytesIO."""
         fs = OpteryxHttpFileSystem()
 
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.content = b"file_content"
-        fs.session.get = Mock(return_value=mock_response)
+        # Replace with mock http_client
+        fs.http_client = Mock()
+        fs.http_client.get = Mock(return_value=b"file_content")
 
         file_obj = fs.open_input_file("https://example.com/file.bin")
 
@@ -214,9 +206,9 @@ class TestOpteryxHttpFileSystem:
         """Test open_input_stream raises on HTTP error."""
         fs = OpteryxHttpFileSystem()
 
-        mock_response = Mock()
-        mock_response.status_code = 404
-        fs.session.get = Mock(return_value=mock_response)
+        # Replace with mock http_client
+        fs.http_client = Mock()
+        fs.http_client.get = Mock(side_effect=RuntimeError("HTTP error"))
 
         with pytest.raises(DatasetReadError):
             fs.open_input_stream("https://example.com/file.bin")
