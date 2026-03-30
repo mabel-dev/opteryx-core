@@ -11,10 +11,8 @@ from concurrent.futures import as_completed
 from typing import List
 from typing import Tuple
 
-from opteryx.connectors.parquet_io.thread_pool_manager import (
-    get_filesystem_pool,
-    LazyPoolProxy,
-)
+from opteryx.connectors.parquet_io.thread_pool_manager import LazyPoolProxy
+from opteryx.connectors.parquet_io.thread_pool_manager import get_filesystem_pool
 
 _MAX_PARALLEL_RANGE_READS = 64
 

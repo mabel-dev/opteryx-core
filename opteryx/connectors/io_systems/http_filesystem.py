@@ -10,18 +10,20 @@ import urllib.parse
 from concurrent.futures import as_completed
 from dataclasses import dataclass
 from enum import Enum
-from typing import List, Optional, Tuple, Union
+from typing import List
+from typing import Tuple
+from typing import Union
 
-from opteryx.connectors.parquet_io.thread_pool_manager import (
-    get_filesystem_pool,
-    LazyPoolProxy,
-)
+from opteryx.connectors.parquet_io.thread_pool_manager import LazyPoolProxy
+from opteryx.connectors.parquet_io.thread_pool_manager import get_filesystem_pool
 from opteryx.exceptions import DatasetReadError
 from opteryx.exceptions import MissingDependencyError
+
 
 # File type enumeration (minimal, no Arrow dependency)
 class FileType(Enum):
     """File type enumeration."""
+
     File = "file"
     Directory = "directory"
     NotFound = "not_found"
@@ -30,6 +32,7 @@ class FileType(Enum):
 @dataclass
 class FileInfo:
     """File metadata container (standalone, no Arrow dependency)."""
+
     path: str
     type: FileType
     size: int = 0
@@ -143,9 +146,7 @@ class OpteryxHttpFileSystem:
 
         # Parallel HEAD requests; preserve caller's path order
         infos: List[FileInfo] = [None] * len(paths)  # type: ignore[assignment]
-        futures = [
-            _HTTP_RANGE_POOL.submit(_head_one, idx, path) for idx, path in enumerate(paths)
-        ]
+        futures = [_HTTP_RANGE_POOL.submit(_head_one, idx, path) for idx, path in enumerate(paths)]
         for fut in as_completed(futures):
             idx, info = fut.result()
             infos[idx] = info

@@ -899,7 +899,7 @@ extensions = [
         language="c++",
         extra_compile_args=CPP_FLAGS,
     ),
-    # Thread pool (C++ BS::thread_pool wrapper via Cython)
+    # Thread pool (Cython wrapper for Python ThreadPoolExecutor)
     Extension(
         name="opteryx.compiled.thread_pool",
         sources=["opteryx/compiled/thread_pool.pyx"],
