@@ -126,7 +126,7 @@ def build_vendored_libcurl():
         f"--prefix={curl_build}",
         "--disable-shared",
         "--enable-static",
-        "--without-ssl",  # Disable SSL (use system OpenSSL if needed)
+        "--with-openssl",  # Enable SSL/TLS via OpenSSL for HTTPS support
         "--without-zlib",
         "--without-libpsl",
         "--without-libidn2",
@@ -973,7 +973,7 @@ extensions = [
     ),
     # HTTP Client (libcurl-based HTTP with connection pooling and Range request support)
     # Links against vendored static libcurl
-    Extension(
+    (lambda: Extension(
         name="opteryx.compiled.http_client",
         sources=[
             "opteryx/compiled/http_client.pyx",
@@ -981,11 +981,13 @@ extensions = [
         ],
         include_dirs=include_dirs + ["third_party/curl/include"],
         extra_compile_args=["-O3", "-std=c++17"] + WARNING_FLAGS,
-        extra_link_args=[
+        extra_link_args=(lambda: [
             os.path.join("build", "curl", "lib", ".libs", "libcurl.a"),
-        ] + ([] if is_win() else ["-lm"]),  # Link math library on non-Windows
+            "-lssl",  # OpenSSL SSL library
+            "-lcrypto",  # OpenSSL crypto library
+        ] + ([] if is_win() else ["-lm"]))(),  # Link math library on non-Windows
         language="c++",
-    ),
+    ))(),
 ]
 
 
