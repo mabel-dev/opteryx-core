@@ -7,19 +7,27 @@ and stream wrappers for high-performance local file access.
 
 import datetime
 import os
-from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import as_completed
 from typing import List
 from typing import Tuple
 
+from opteryx.connectors.parquet_io.thread_pool_manager import (
+    get_filesystem_pool,
+    LazyPoolProxy,
+)
+
 _MAX_PARALLEL_RANGE_READS = 64
 
-# Module-level thread pool for intra-read_ranges parallelism.
-# Reused across calls to avoid per-call thread creation/destruction overhead.
-_LOCAL_RANGE_POOL: ThreadPoolExecutor = ThreadPoolExecutor(
-    max_workers=_MAX_PARALLEL_RANGE_READS,
-    thread_name_prefix="local-range",
-)
+
+def _get_local_range_pool():
+    """Get local range-read pool via thread_pool_manager."""
+    return get_filesystem_pool(protocol="local", max_workers=_MAX_PARALLEL_RANGE_READS)
+
+
+# Module-level thread pool proxy: lazy wrapper that always defers to thread_pool_manager cache.
+# This ensures that even if pools are shut down (e.g., in tests), the proxy will
+# get the fresh recreated pool from the cache on next access.
+_LOCAL_RANGE_POOL = LazyPoolProxy(_get_local_range_pool)
 
 
 class MemoryMappedFile:

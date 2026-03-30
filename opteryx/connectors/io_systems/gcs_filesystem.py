@@ -9,12 +9,15 @@ import io
 import os
 import threading
 import urllib.parse
-from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import as_completed
 from typing import List
 from typing import Tuple
 from typing import Union
 
+from opteryx.connectors.parquet_io.thread_pool_manager import (
+    get_filesystem_pool,
+    LazyPoolProxy,
+)
 from opteryx.exceptions import DatasetReadError
 from opteryx.exceptions import MissingDependencyError
 
@@ -29,12 +32,16 @@ from opteryx.exceptions import MissingDependencyError
 # parallelism scales with the worker count.
 _MAX_PARALLEL_RANGE_READS = 128
 
-# Module-level thread pool for intra-read_ranges parallelism.
-# Reused across calls to avoid per-call thread creation/destruction overhead.
-_GCS_RANGE_POOL: ThreadPoolExecutor = ThreadPoolExecutor(
-    max_workers=_MAX_PARALLEL_RANGE_READS,
-    thread_name_prefix="gcs-range",
-)
+
+def _get_gcs_range_pool():
+    """Get GCS range-read pool via thread_pool_manager."""
+    return get_filesystem_pool(protocol="gcs", max_workers=_MAX_PARALLEL_RANGE_READS)
+
+
+# Module-level thread pool proxy: lazy wrapper that always defers to thread_pool_manager cache.
+# This ensures that even if pools are shut down (e.g., in tests), the proxy will
+# get the fresh recreated pool from the cache on next access.
+_GCS_RANGE_POOL = LazyPoolProxy(_get_gcs_range_pool)
 
 
 def get_storage_credentials():

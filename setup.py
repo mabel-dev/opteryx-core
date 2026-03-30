@@ -223,6 +223,7 @@ include_dirs = [
     "third_party/alantsd",
     "third_party/nanobind",
     "third_party/crypto",
+    "third_party/bshoshany",
 ]
 
 # Common SIMD / environment C++ sources used by multiple extensions
@@ -897,6 +898,14 @@ extensions = [
         include_dirs=include_dirs,
         language="c++",
         extra_compile_args=CPP_FLAGS,
+    ),
+    # Thread pool (C++ BS::thread_pool wrapper via Cython)
+    Extension(
+        name="opteryx.compiled.thread_pool",
+        sources=["opteryx/compiled/thread_pool.pyx"],
+        include_dirs=include_dirs,
+        extra_compile_args=["-O3", "-std=c++17"] + WARNING_FLAGS,
+        language="c++",
     ),
 ]
 

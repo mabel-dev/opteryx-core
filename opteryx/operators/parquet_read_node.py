@@ -27,7 +27,6 @@ between I/O and decode across all files and row groups simultaneously.
 from __future__ import annotations
 
 import time
-from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import as_completed
 from copy import deepcopy
 from typing import Generator
@@ -40,6 +39,10 @@ from opteryx.connectors.parquet_io import fetch_columns
 from opteryx.connectors.parquet_io import fetch_footer
 from opteryx.connectors.parquet_io import iter_row_groups
 from opteryx.connectors.parquet_io.predicates import extract_predicate_stats
+from opteryx.connectors.parquet_io.thread_pool_manager import (
+    get_footer_pool,
+    LazyPoolProxy,
+)
 from opteryx.expression import NodeType
 from opteryx.expression import get_all_nodes_of_type
 from opteryx.models import Node
@@ -57,13 +60,18 @@ from .read_node import struct_to_jsonb
 
 _DATA_FORMAT = "arrow,draken"
 
-# Module-level pool for parallel footer prefetch — reused across queries to avoid
-# per-query thread creation/destruction overhead.  Footer reads are I/O-bound
-# (two small range reads per file), so threads scale well past cpu_count().
-_FOOTER_POOL: ThreadPoolExecutor = ThreadPoolExecutor(
-    max_workers=64,
-    thread_name_prefix="parquet-footer-prefetch",
-)
+
+def _get_footer_pool():
+    """Get footer prefetch pool via thread_pool_manager."""
+    return get_footer_pool(max_workers=64)
+
+
+# Module-level pool proxy: lazy wrapper that always defers to thread_pool_manager cache.
+# This ensures that even if pools are shut down (e.g., in tests), the proxy will
+# get the fresh recreated pool from the cache on next access.
+# Footer reads are I/O-bound (two small range reads per file), so threads scale well
+# past cpu_count().
+_FOOTER_POOL = LazyPoolProxy(_get_footer_pool)
 
 
 class ParquetReadNode(ReaderNode):
