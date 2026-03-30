@@ -14,6 +14,7 @@
 #include "telemetry.hpp"
 #include "simd_gather.hpp"
 #include "simd_compact.hpp"
+#include "simd_validity_bitmap.hpp"
 #include "type_widening.hpp"
 #include "thread_pool.hpp"
 #include <algorithm>
@@ -1516,19 +1517,13 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
     result.rep_levels = std::move(all_rep_levels);
     result.def_levels = all_def_levels;  // keep a copy; move would invalidate the loop below
 
-    // Build validity bitmap from accumulated definition levels.
+    // Build validity bitmap from accumulated definition levels (Tier 2D: SIMD-accelerated).
     { RUGO_TEL_START(_vb_t0);
     if (!all_def_levels.empty()) {
       int32_t total_rows = (int32_t)all_def_levels.size();
-      int32_t bitmap_bytes = (total_rows + 7) / 8;
-      result.valid_bits.resize(bitmap_bytes, 0);
-
       int32_t max_def = target_col->max_definition_level;
-      for (int32_t i = 0; i < total_rows; i++) {
-        if (all_def_levels[i] == max_def) {
-          result.valid_bits[i / 8] |= (1 << (i % 8));
-        }
-      }
+      // Use SIMD-accelerated bitmap building (AVX2: 8 rows/iteration, scalar fallback)
+      parquet_simd::build_validity_bitmap(all_def_levels.data(), total_rows, max_def, result.valid_bits);
     }
     RUGO_TEL_ACCUM(rugo_tel::validity_bmp_s, _vb_t0); }
 
