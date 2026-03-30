@@ -32,8 +32,8 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
-          # libssl-dev/pkg-config for libcrypto, libcurl4-openssl-dev for HTTP client
-          sudo apt-get install -y libssl-dev pkg-config libcurl4-openssl-dev
+          # We only need libssl-dev/pkg-config for libcrypto and build tooling
+          sudo apt-get install -y libssl-dev pkg-config
         
       - name: Install Requirements
         run: |

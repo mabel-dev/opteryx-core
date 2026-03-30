@@ -23,11 +23,6 @@ jobs:
           python-version: '3.11'
           architecture: x64
 
-      - name: Install system packages (Ubuntu)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libssl-dev pkg-config libcurl4-openssl-dev
-
       - name: Install Requirements
         run: |
           python -m pip install --upgrade pip uv
