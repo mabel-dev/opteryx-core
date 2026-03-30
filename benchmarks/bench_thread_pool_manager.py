@@ -8,17 +8,16 @@ Measures:
 3. Concurrent throughput
 """
 
-import time
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor
+
 
 # Benchmark pool creation overhead (cached vs non-cached)
 def bench_pool_creation():
     """Measure pool creation and reuse efficiency."""
-    from opteryx.connectors.parquet_io.thread_pool_manager import (
-        get_range_pool,
-        get_decode_pool,
-    )
+    from opteryx.connectors.parquet_io.thread_pool_manager import get_decode_pool
+    from opteryx.connectors.parquet_io.thread_pool_manager import get_range_pool
 
     print("\n=== Pool Creation & Caching ===")
 
@@ -112,10 +111,8 @@ def bench_concurrent_throughput():
 
 def bench_lazy_pool_proxy():
     """Measure LazyPoolProxy overhead."""
-    from opteryx.connectors.parquet_io.thread_pool_manager import (
-        LazyPoolProxy,
-        get_range_pool,
-    )
+    from opteryx.connectors.parquet_io.thread_pool_manager import LazyPoolProxy
+    from opteryx.connectors.parquet_io.thread_pool_manager import get_range_pool
 
     print("\n=== LazyPoolProxy Overhead ===")
 

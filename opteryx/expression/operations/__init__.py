@@ -231,10 +231,7 @@ def _inner_filter_operations(arr, operator, value):
         ignore_case = operator in ("IInStr", "NotIInStr")
         negate = operator in ("NotInStr", "NotIInStr")
         raw_value = value[0] if hasattr(value, "__len__") and len(value) == 1 else value
-        if isinstance(raw_value, bytes):
-            needle = raw_value
-        else:
-            needle = str(raw_value).encode("utf-8")
+        needle = raw_value if isinstance(raw_value, bytes) else str(raw_value).encode("utf-8")
 
         if dict_candidate:
             fast = dictionary_fastpath(raw_arr, operator, raw_value)

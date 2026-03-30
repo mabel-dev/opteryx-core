@@ -47,11 +47,9 @@ from typing import Tuple
 from opteryx.connectors.parquet_io.cache import InMemoryParquetCache
 from opteryx.connectors.parquet_io.cache import ParquetCache
 from opteryx.connectors.parquet_io.predicates import row_group_may_satisfy
-from opteryx.connectors.parquet_io.thread_pool_manager import (
-    get_decode_pool,
-    get_range_pool,
-    LazyPoolProxy,
-)
+from opteryx.connectors.parquet_io.thread_pool_manager import LazyPoolProxy
+from opteryx.connectors.parquet_io.thread_pool_manager import get_decode_pool
+from opteryx.connectors.parquet_io.thread_pool_manager import get_range_pool
 
 
 class ListColumnError(ValueError):
@@ -80,6 +78,7 @@ _LOCAL_SERIAL_COMBINE_READ_RATIO = 0.5
 # Module-level thread pools shared across all queries.
 # These are lazy-initialized via thread_pool_manager to support both
 # C++ and Python backends with automatic fallback.
+
 
 def _get_range_pool():
     """Get the range read pool (32 workers for v1 scheduler)."""
@@ -1444,10 +1443,8 @@ def _iter_row_groups_v2(
         # Unusual: caller requested more workers than either shared pool.
         # Create a local pool via the manager
         from opteryx.connectors.parquet_io.thread_pool_manager import create_thread_pool
-        read_pool = create_thread_pool(
-            name="parquet-io-local",
-            max_workers=required_workers
-        )
+
+        read_pool = create_thread_pool(name="parquet-io-local", max_workers=required_workers)
         local_read_pool = True
 
     # Reuse the module-level decode pool — CPU-bound decode work shouldn't

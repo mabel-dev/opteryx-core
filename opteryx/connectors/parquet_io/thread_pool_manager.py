@@ -9,11 +9,10 @@ This module manages all global thread pools used across Opteryx:
 - Footer prefetch pools
 """
 
+import logging
 import os
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
-
-import logging
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +23,7 @@ _cpp_thread_pool_available = False
 if _USE_CPP_POOL.lower() in ("auto", "1", "true"):
     try:
         from opteryx.compiled.thread_pool import CppThreadPool
+
         _cpp_thread_pool_available = True
         logger.info("Using C++ BS::thread_pool for parquet I/O (lock-free, work-stealing)")
     except (ImportError, AttributeError) as e:
@@ -150,18 +150,19 @@ class LazyPoolProxy:
     def name(self) -> str:
         """Get pool name from current pool."""
         pool = self._getter_fn()
-        return getattr(pool, 'name', 'lazy-pool')
+        return getattr(pool, "name", "lazy-pool")
 
     @property
     def max_workers(self) -> int:
         """Get max workers from current pool."""
         pool = self._getter_fn()
-        return getattr(pool, 'max_workers', 0)
+        return getattr(pool, "max_workers", 0)
 
 
 # Global pool instances (created on demand)
 _pools: dict[str, Optional[ThreadPool]] = {}
 _pool_lock = None
+
 
 def _get_or_create_pool(name: str, max_workers: int) -> ThreadPool:
     """Get or create a thread pool by name.
@@ -179,13 +180,16 @@ def _get_or_create_pool(name: str, max_workers: int) -> ThreadPool:
     global _pool_lock
     if _pool_lock is None:
         import threading
+
         _pool_lock = threading.Lock()
 
     with _pool_lock:
         if name not in _pools or _pools[name] is None:
             _pools[name] = create_thread_pool(name, max_workers)
-            logger.debug(f"Created thread pool '{name}' with {max_workers} workers "
-                        f"(backend: {'C++' if _cpp_thread_pool_available else 'Python'})")
+            logger.debug(
+                f"Created thread pool '{name}' with {max_workers} workers "
+                f"(backend: {'C++' if _cpp_thread_pool_available else 'Python'})"
+            )
         return _pools[name]
 
 
@@ -200,6 +204,7 @@ def get_decode_pool(max_workers: Optional[int] = None) -> ThreadPool:
     """
     if max_workers is None:
         import os
+
         max_workers = os.cpu_count() or 4
 
     return _get_or_create_pool("parquet-decode", max_workers)

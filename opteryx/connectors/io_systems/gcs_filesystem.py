@@ -14,10 +14,8 @@ from typing import List
 from typing import Tuple
 from typing import Union
 
-from opteryx.connectors.parquet_io.thread_pool_manager import (
-    get_filesystem_pool,
-    LazyPoolProxy,
-)
+from opteryx.connectors.parquet_io.thread_pool_manager import LazyPoolProxy
+from opteryx.connectors.parquet_io.thread_pool_manager import get_filesystem_pool
 from opteryx.exceptions import DatasetReadError
 from opteryx.exceptions import MissingDependencyError
 

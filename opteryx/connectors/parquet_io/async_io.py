@@ -10,7 +10,10 @@ from __future__ import annotations
 
 import asyncio
 import io
-from typing import Any, List, Optional, Tuple
+from typing import Any
+from typing import List
+from typing import Optional
+from typing import Tuple
 
 from opteryx import config as _cfg
 
@@ -44,7 +47,9 @@ async def async_read_column_task(
         Dict with keys: raw_bytes, bytes_fetched, bytes_requested, read_ns, queue_wait_ns, task_total_ns
     """
     import time
+
     from opteryx.tracing import record_event
+
     from opteryx import config as _trace_cfg
 
     task_start_ns = time.monotonic_ns()

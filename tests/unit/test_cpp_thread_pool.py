@@ -7,7 +7,6 @@ exception handling, and compatibility with ThreadPoolExecutor interface.
 import concurrent.futures
 import pytest
 import time
-from unittest import mock
 
 from opteryx.compiled.thread_pool import CppThreadPool
 from opteryx.connectors.parquet_io.thread_pool_manager import (

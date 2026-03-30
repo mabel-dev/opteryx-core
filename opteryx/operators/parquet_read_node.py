@@ -39,10 +39,8 @@ from opteryx.connectors.parquet_io import fetch_columns
 from opteryx.connectors.parquet_io import fetch_footer
 from opteryx.connectors.parquet_io import iter_row_groups
 from opteryx.connectors.parquet_io.predicates import extract_predicate_stats
-from opteryx.connectors.parquet_io.thread_pool_manager import (
-    get_footer_pool,
-    LazyPoolProxy,
-)
+from opteryx.connectors.parquet_io.thread_pool_manager import LazyPoolProxy
+from opteryx.connectors.parquet_io.thread_pool_manager import get_footer_pool
 from opteryx.expression import NodeType
 from opteryx.expression import get_all_nodes_of_type
 from opteryx.models import Node
@@ -116,25 +114,33 @@ class ParquetReadNode(ReaderNode):
             return ("complex_expression", predicate_root)
 
         # Pattern: Column <op> Scalar
-        if hasattr(left, "__class__") and left.__class__.__name__ == "Identifier":
-            if hasattr(right, "value") and not hasattr(right, "name"):
-                right_value = right.value
-                if isinstance(right_value, int):
-                    return ("int64_scalar", left.name, operator, right_value)
-                elif isinstance(right_value, float):
-                    return ("float64_scalar", left.name, operator, right_value)
+        if (
+            hasattr(left, "__class__")
+            and left.__class__.__name__ == "Identifier"
+            and hasattr(right, "value")
+            and not hasattr(right, "name")
+        ):
+            right_value = right.value
+            if isinstance(right_value, int):
+                return ("int64_scalar", left.name, operator, right_value)
+            elif isinstance(right_value, float):
+                return ("float64_scalar", left.name, operator, right_value)
 
         # Pattern: Scalar <op> Column (commute operator)
-        if hasattr(right, "__class__") and right.__class__.__name__ == "Identifier":
-            if hasattr(left, "value") and not hasattr(left, "name"):
-                left_value = left.value
-                if isinstance(left_value, int):
-                    # Commute the operator for reverse comparison
-                    commuted_op = self._commute_operator(operator)
-                    return ("int64_scalar", right.name, commuted_op, left_value)
-                elif isinstance(left_value, float):
-                    commuted_op = self._commute_operator(operator)
-                    return ("float64_scalar", right.name, commuted_op, left_value)
+        if (
+            hasattr(right, "__class__")
+            and right.__class__.__name__ == "Identifier"
+            and hasattr(left, "value")
+            and not hasattr(left, "name")
+        ):
+            left_value = left.value
+            if isinstance(left_value, int):
+                # Commute the operator for reverse comparison
+                commuted_op = self._commute_operator(operator)
+                return ("int64_scalar", right.name, commuted_op, left_value)
+            elif isinstance(left_value, float):
+                commuted_op = self._commute_operator(operator)
+                return ("float64_scalar", right.name, commuted_op, left_value)
 
         # Fall back to complex expression
         return ("complex_expression", predicate_root)

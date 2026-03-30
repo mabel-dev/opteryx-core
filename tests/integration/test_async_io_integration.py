@@ -1,7 +1,6 @@
 """Integration tests for async I/O module with parquet reading."""
 
 import asyncio
-import io
 import pytest
 from unittest.mock import MagicMock
 

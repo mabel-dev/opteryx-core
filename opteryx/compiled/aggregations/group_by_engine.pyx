@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from array import array
 import time
-import numpy
 
 from opteryx.compiled.structures.carchar_set cimport CarcharSetWrapper
 from opteryx.compiled.structures.bloom_filter cimport BloomFilter
@@ -62,8 +61,6 @@ from opteryx.compiled.aggregations.vector_readers cimport _dict_accessor_key_kin
 from opteryx.compiled.aggregations.vector_readers cimport _dict_accessor_read_float_value
 from opteryx.compiled.aggregations.vector_readers cimport _dict_accessor_read_int_value
 from opteryx.compiled.aggregations.vector_readers cimport _dict_accessor_value_kind
-from opteryx.compiled.aggregations.vector_readers cimport _extract_stringlike_key
-from opteryx.compiled.aggregations.vector_readers cimport _read_dictionary_fixed_key
 from opteryx.compiled.aggregations.vector_readers cimport _dict_read_code
 from opteryx.compiled.aggregations.vector_readers cimport _vector_dict_accessor
 from opteryx.compiled.aggregations.vector_readers cimport _vector_value_dict_accessor
@@ -74,7 +71,6 @@ from opteryx.compiled.aggregations.group_by_finalize cimport build_native_object
 from opteryx.compiled.aggregations.group_by_finalize cimport build_object_state_vector
 from opteryx.compiled.aggregations.group_by_finalize cimport build_finalize_key_vectors
 from opteryx.compiled.aggregations.group_by_finalize cimport build_finalize_object_aggregate_vector
-from opteryx.compiled.aggregations.group_by_finalize cimport build_finalize_multi_object_aggregate_vector
 from opteryx.compiled.aggregations.group_by_finalize cimport build_finalize_scalar_aggregate_vector
 from opteryx.compiled.aggregations.group_by_finalize cimport build_finalize_multi_aggregate_vectors
 from opteryx.compiled.aggregations.group_by_finalize cimport build_constant_groupby_vectors
@@ -128,7 +124,6 @@ from opteryx.compiled.aggregations.kernels.min_max_var cimport minmax_var_multi_
 cdef void _ingest_constant_distinct(object self, Morsel morsel, object value_vector, Py_ssize_t row_count):
     cdef Py_ssize_t row_idx
     cdef DrakenFixedBuffer* value_ptr
-    cdef int64_t* value_i64_data
     cdef uint8_t* value_nulls
     cdef uint64_t[::1] value_hashes
 
@@ -158,7 +153,6 @@ cdef void _ingest_constant_distinct(object self, Morsel morsel, object value_vec
         if _bitmap_is_valid(value_nulls, row_idx) and (<CarcharSetWrapper> self._constant_distinct_set).insert(value_hashes[row_idx]):
             self._constant_count += 1
 
-
 cdef void _ingest_constant_const_accessor(
     object self,
     Morsel morsel,
@@ -167,9 +161,6 @@ cdef void _ingest_constant_const_accessor(
     Py_ssize_t row_count,
 ):
     cdef object value_obj
-    cdef uint64_t[::1] value_hashes
-    cdef double val_decoded_f64
-    cdef int64_t val_decoded_i64
 
     if self._agg_mode == 2:
         if value_const_accessor.is_null == 0:
@@ -237,16 +228,11 @@ cdef void _ingest_constant_const_accessor(
     elif self._agg_mode == 7:
         _ingest_constant_distinct(self, morsel, value_vector, row_count)
 
-
 cdef void _ingest_constant_vector_values(object self, object value_vector, Py_ssize_t row_count):
     cdef Py_ssize_t row_idx
     cdef DrakenFixedBuffer* value_ptr
-    cdef int64_t* value_i64_data
-    cdef double* value_f64_data
     cdef uint8_t* value_nulls
     cdef DictAccessor* value_dict_accessor = NULL
-    cdef double val_decoded_f64
-    cdef int64_t val_decoded_i64
 
     if isinstance(value_vector, Float64Vector):
         value_ptr = (<Float64Vector> value_vector).ptr
@@ -357,7 +343,6 @@ cdef void _ingest_constant_vector_values(object self, object value_vector, Py_ss
                 self._constant_avg_sum += val_decoded_i64
                 self._constant_avg_count += 1
 
-
 cdef void ingest_constant_mode(object self, Morsel morsel) except *:
     cdef Py_ssize_t row_count = morsel.num_rows
     cdef object value_vector
@@ -379,7 +364,6 @@ cdef void ingest_constant_mode(object self, Morsel morsel) except *:
         return
 
     _ingest_constant_vector_values(self, value_vector, row_count)
-
 
 # --- groupby telemetry (inlined from groupby_telemetry.pyx) ---
 
@@ -417,54 +401,40 @@ cdef void initialize_groupby_readings(object self, object key_store_limit_bytes)
         "time_groupby_accumulate_ns": 0,
     }
 
-
 cdef inline void record_finalize_backend_time(object self, long long started_ns) noexcept:
     self._readings["time_groupby_finalize_backend_ns"] += time.monotonic_ns() - started_ns
-
 
 cdef inline void record_finalize_rows_to_vectors_time(object self, long long started_ns) noexcept:
     self._readings["time_groupby_finalize_rows_to_vectors_ns"] += time.monotonic_ns() - started_ns
 
-
 cdef inline void record_finalize_morsel_build_time(object self, long long started_ns) noexcept:
     self._readings["time_groupby_finalize_morsel_build_ns"] += time.monotonic_ns() - started_ns
 
-
-cdef inline void record_finalize_rows_count(object self, Py_ssize_t rows) noexcept:
     self._readings["groupby_finalize_rows_count"] += rows
-
 
 cdef inline void record_finalize_chunk_emitted(object self) noexcept:
     self._readings["groupby_finalize_chunks_emitted"] += 1
 
-
 cdef inline void record_finalize_fast_path_hit(object self) noexcept:
     self._readings["groupby_finalize_fast_path_hits"] += 1
-
 
 cdef inline void record_feature_groupby_engine_carchar(object self) noexcept:
     self._readings["feature_groupby_engine_carchar"] += 1
 
-
 cdef inline void record_feature_groupby_engine_constant(object self) noexcept:
     self._readings["feature_groupby_engine_constant"] += 1
-
 
 cdef inline void record_feature_groupby_engine_multi_key_fixed(object self) noexcept:
     self._readings["feature_groupby_engine_multi_key_fixed"] += 1
 
-
 cdef inline void record_feature_groupby_engine_multi_key_object(object self) noexcept:
     self._readings["feature_groupby_engine_multi_key_object"] += 1
-
 
 cdef inline void record_dict_groupby_fastpath_hit(object self) noexcept:
     self._readings["draken_dict_groupby_fastpath_hits"] += 1
 
-
 cdef inline void record_groupby_key_store_bytes(object self, size_t key_store_bytes) noexcept:
     self._readings["groupby_key_store_bytes"] = key_store_bytes
-
 
 cdef inline void record_constant_groupby_vector(object self, object vec) noexcept:
     if _is_constant_like_vector(vec):
@@ -472,10 +442,8 @@ cdef inline void record_constant_groupby_vector(object self, object vec) noexcep
     else:
         self._readings["draken_constant_groupby_output_vector_fallbacks"] += 1
 
-
 cdef inline void record_ingest_state_assign_time(object self, long long started_ns) noexcept:
     self._readings["time_groupby_ingest_state_assign_ns"] += time.monotonic_ns() - started_ns
-
 
 cdef inline void record_ingest_hit_miss_counts(
     object self,
@@ -485,18 +453,14 @@ cdef inline void record_ingest_hit_miss_counts(
     self._readings["groupby_ingest_hits"] += hits
     self._readings["groupby_ingest_misses"] += misses
 
-
 cdef inline void record_groupby_hash_time(object self, long long started_ns) noexcept:
     self._readings["time_groupby_hash_ns"] += time.monotonic_ns() - started_ns
-
 
 cdef inline void record_groupby_reserve_time(object self, long long started_ns) noexcept:
     self._readings["time_groupby_reserve_ns"] += time.monotonic_ns() - started_ns
 
-
 cdef inline void record_groupby_accumulate_time(object self, long long started_ns) noexcept:
     self._readings["time_groupby_accumulate_ns"] += time.monotonic_ns() - started_ns
-
 
 cdef inline void record_bloom_stats(
     object self,
@@ -508,8 +472,6 @@ cdef inline void record_bloom_stats(
     self._readings["groupby_bloom_skips"] += skips
     self._readings["groupby_bloom_false_positives"] += fps
 
-
-
 cdef extern from "carchar_index.hpp" namespace "opteryx::carchar":
     cdef cppclass CarcharIndex:
         CarcharIndex(size_t initial_capacity, double load_factor) except +
@@ -517,7 +479,6 @@ cdef extern from "carchar_index.hpp" namespace "opteryx::carchar":
         size_t size() const
         bint lookup_fast(uint64_t key, int64_t& payload_ref_out) const
         size_t insert_new(uint64_t key, int64_t payload_ref) except +
-
 
 cdef int MODE_UNINITIALIZED = 0
 cdef int MODE_CARCHAR = 2
@@ -549,16 +510,13 @@ cdef int KEY_MULTI_FIXED_TIME64 = 4
 cdef int KEY_MULTI_FIXED_TIMESTAMP64 = 5
 cdef int KEY_MULTI_ENCODED_STRING = 6
 
-
 cdef inline bint _bitmap_is_valid(uint8_t* bitmap, Py_ssize_t index) noexcept:
     if bitmap == NULL:
         return True
     return ((bitmap[index >> 3] >> (index & 7)) & 1) != 0
 
-
 cdef inline void _bitmap_set_valid(uint8_t* bitmap, Py_ssize_t index) noexcept:
     bitmap[index >> 3] |= <uint8_t>(1 << (index & 7))
-
 
 cdef inline int64_t _read_integer_value(DrakenFixedBuffer* ptr, Py_ssize_t index) noexcept:
     if ptr.itemsize == 1:
@@ -569,14 +527,12 @@ cdef inline int64_t _read_integer_value(DrakenFixedBuffer* ptr, Py_ssize_t index
         return (<int*> ptr.data)[index]
     return (<int64_t*> ptr.data)[index]
 
-
 cdef inline uint32_t _read_dictionary_code(DrakenDictionaryBuffer* ptr, Py_ssize_t index) noexcept:
     if ptr.code_width == 1:
         return (<uint8_t*> ptr.codes)[index]
     if ptr.code_width == 2:
         return (<uint16_t*> ptr.codes)[index]
     return (<uint32_t*> ptr.codes)[index]
-
 
 cdef inline int64_t _dictionary_type_to_key_kind(int dict_type) noexcept:
     if (
@@ -599,20 +555,16 @@ cdef inline int64_t _dictionary_type_to_key_kind(int dict_type) noexcept:
         return KEY_MULTI_ENCODED_STRING
     return 0
 
-
 cdef inline ConstAccessor* _vector_const_accessor(object vec) noexcept:
     if isinstance(vec, Vector):
         return (<Vector> vec).const_accessor()
     return NULL
 
-
 cdef inline bint _is_constant_like_vector(object vec) noexcept:
     return _vector_const_accessor(vec) != NULL
 
-
 cdef inline bint _const_accessor_is_null(ConstAccessor* accessor) noexcept:
     return accessor == NULL or accessor.is_null != 0
-
 
 cdef object _const_accessor_scalar(ConstAccessor* accessor):
     cdef DrakenConstantStringPayload* payload
@@ -638,12 +590,10 @@ cdef object _const_accessor_scalar(ConstAccessor* accessor):
         return PyBytes_FromStringAndSize(<const char*>payload.data, payload.length)
     return None
 
-
 cdef inline uint8_t* _vector_null_bitmap(object vec) noexcept:
     if isinstance(vec, Vector):
         return (<Vector> vec).null_bitmap_ptr()
     return NULL
-
 
 cdef inline uint8_t* _alloc_valid_bitmap(Py_ssize_t length) except NULL:
     cdef Py_ssize_t nbytes
@@ -658,7 +608,6 @@ cdef inline uint8_t* _alloc_valid_bitmap(Py_ssize_t length) except NULL:
         raise MemoryError()
     memset(bitmap, 0, nbytes)
     return bitmap
-
 
 cdef class CarcharGroupStateEngine:
     cdef list _group_by_columns
@@ -806,7 +755,6 @@ cdef class CarcharGroupStateEngine:
             return <Py_ssize_t>(self._key_payload_offsets.size() - 1)
         return <Py_ssize_t> self._group_key_values.size()
 
-    cdef inline Py_ssize_t _multi_offset(self, int64_t state_index, Py_ssize_t agg_idx) noexcept:
         return <Py_ssize_t>state_index * self._multi_agg_count + agg_idx
 
     cdef object _debug_key_payload_value(self, Py_ssize_t state_index):
@@ -838,7 +786,6 @@ cdef class CarcharGroupStateEngine:
             self._single_key_kind,
         )
 
-    cdef inline bint _agg_output_is_float(self, Py_ssize_t agg_idx) noexcept:
         if self._multi_agg_count > 0:
             return (
                 self._multi_agg_modes[agg_idx] == AGG_AVG
@@ -849,7 +796,6 @@ cdef class CarcharGroupStateEngine:
             )
         return self._agg_mode == AGG_AVG or self._value_kind in (VALUE_FLOAT64, VALUE_DICT_FLOAT64)
 
-    cdef inline bint _agg_output_is_object(self, Py_ssize_t agg_idx) noexcept:
         if self._multi_agg_count > 0:
             return (
                 self._multi_value_kinds[agg_idx] == VALUE_OBJECT
@@ -874,7 +820,6 @@ cdef class CarcharGroupStateEngine:
         Py_ssize_t right_len,
     ) noexcept:
         cdef Py_ssize_t shared = left_len if left_len < right_len else right_len
-        cdef int cmp = 0
         if shared > 0:
             cmp = memcmp(left_ptr, <const char*> right_ptr, <size_t> shared)
             if cmp != 0:
@@ -912,7 +857,6 @@ cdef class CarcharGroupStateEngine:
     cdef inline uint8_t* _value_null_bitmap(self, object value_vector):
         return _vector_null_bitmap(value_vector)
 
-    cdef inline void _init_multi_fixed_key_columns(self, Py_ssize_t key_count):
         cdef Py_ssize_t idx
         self._multi_group_key_values.clear()
         self._multi_group_key_valid.clear()
@@ -920,7 +864,6 @@ cdef class CarcharGroupStateEngine:
             self._multi_group_key_values.push_back(vector[int64_t]())
             self._multi_group_key_valid.push_back(vector[int64_t]())
 
-    cdef inline void _init_multi_encoded_key_columns(self, Py_ssize_t key_count):
         cdef Py_ssize_t idx
         self._multi_encoded_key_bytes.clear()
         self._multi_encoded_key_offsets.clear()
@@ -1026,7 +969,6 @@ cdef class CarcharGroupStateEngine:
         int64_t valid_flag,
     ) except *:
         cdef Py_ssize_t idx
-        cdef int32_t next_offset = self._multi_encoded_key_offsets[key_idx][
             self._multi_encoded_key_offsets[key_idx].size() - 1
         ]
 
@@ -1127,7 +1069,6 @@ cdef class CarcharGroupStateEngine:
         list key_nulls,
         Py_ssize_t row_idx,
     ) except *:
-        cdef Py_ssize_t key_idx
         cdef DrakenFixedBuffer* key_ptr
         cdef uint8_t* key_null_bitmap
         cdef int64_t key_value
@@ -1160,7 +1101,6 @@ cdef class CarcharGroupStateEngine:
         list key_vectors,
         Py_ssize_t row_idx,
     ) except *:
-        cdef Py_ssize_t key_idx
         cdef int64_t key_kind
         cdef int64_t key_valid_flag
         cdef int64_t key_value
@@ -1227,7 +1167,6 @@ cdef class CarcharGroupStateEngine:
         cdef object value_vector
         cdef tuple aggregation
         cdef ConstAccessor* key_const_accessor = NULL
-        cdef Py_ssize_t agg_idx
         cdef int64_t key_kind
         cdef bint stringlike_key_vector = False
         cdef DictAccessor* dict_accessor = NULL
@@ -2363,7 +2302,6 @@ cdef class CarcharGroupStateEngine:
     ) except *:
         cdef int64_t payload_ref = -1
         cdef size_t key_store_bytes
-        cdef Py_ssize_t agg_idx
 
         if self._bloom_might_contain(row_hash) and self._index.lookup_fast(row_hash, payload_ref):
             return payload_ref
@@ -2415,7 +2353,6 @@ cdef class CarcharGroupStateEngine:
     ) except *:
         cdef int64_t payload_ref = -1
         cdef size_t key_store_bytes
-        cdef Py_ssize_t agg_idx
 
         if self._bloom_might_contain(row_hash) and self._index.lookup_fast(row_hash, payload_ref):
             return payload_ref
@@ -2472,7 +2409,6 @@ cdef class CarcharGroupStateEngine:
     ) except *:
         cdef int64_t payload_ref = -1
         cdef size_t key_store_bytes
-        cdef Py_ssize_t agg_idx
 
         if self._bloom_might_contain(row_hash) and self._index.lookup_fast(row_hash, payload_ref):
             return payload_ref
@@ -2524,7 +2460,6 @@ cdef class CarcharGroupStateEngine:
     ) except *:
         cdef int64_t payload_ref = -1
         cdef size_t key_store_bytes
-        cdef Py_ssize_t agg_idx
 
         if self._bloom_might_contain(row_hash) and self._index.lookup_fast(row_hash, payload_ref):
             return payload_ref
@@ -2582,7 +2517,6 @@ cdef class CarcharGroupStateEngine:
         """
         cdef int64_t payload_ref = <int64_t> self._state_count()
         cdef size_t key_store_bytes
-        cdef Py_ssize_t agg_idx
         self._index.insert_new(row_hash, payload_ref)
         self._append_single_fixed_payload_key(key_value, key_valid_flag)
         self._object_state.append(None)
@@ -2636,7 +2570,6 @@ cdef class CarcharGroupStateEngine:
         """
         cdef int64_t payload_ref = <int64_t> self._state_count()
         cdef size_t key_store_bytes
-        cdef Py_ssize_t agg_idx
         self._index.insert_new(row_hash, payload_ref)
         self._append_single_payload_key(data_ptr, data_len, key_valid_flag)
         self._object_state.append(None)
@@ -2686,7 +2619,6 @@ cdef class CarcharGroupStateEngine:
         """
         cdef int64_t payload_ref = <int64_t> self._state_count()
         cdef size_t key_store_bytes
-        cdef Py_ssize_t agg_idx
         self._index.insert_new(row_hash, payload_ref)
         self._append_multi_payload_key(key_vectors, row_idx)
         key_store_bytes = <size_t> self._key_payload_bytes.size()
@@ -2735,11 +2667,8 @@ cdef class CarcharGroupStateEngine:
                 start,
                 stop,
             )
-        cdef Py_ssize_t key_count = len(self._group_by_columns)
-        cdef Py_ssize_t key_idx
         cdef Py_ssize_t row_idx
         cdef Py_ssize_t length = stop - start
-        cdef object key_vec
         cdef Int64Vector key_vec_i64
         cdef Date32Vector key_vec_d32
         cdef TimeVector key_vec_t32
@@ -2748,7 +2677,6 @@ cdef class CarcharGroupStateEngine:
         cdef int64_t* key_data_i64
         cdef int32_t* key_data_i32
         cdef uint8_t* key_nulls
-        cdef list vectors = []
         cdef bint needs_key_nulls
         cdef int64_t key_kind
 
@@ -2867,7 +2795,6 @@ cdef class CarcharGroupStateEngine:
         # Same type dispatch as the single-agg path, but targets
         # _multi_distinct_sets / _multi_counts and carries multi_agg_count +
         # agg_idx through to the kernel for the offset formula.
-        cdef object value_vector = morsel.column(self._multi_value_columns[agg_idx])
         cdef uint8_t* value_nulls = _vector_null_bitmap(value_vector)
         cdef DrakenFixedBuffer* value_ptr
         cdef uint64_t* temp_hashes = NULL
@@ -3022,7 +2949,6 @@ cdef class CarcharGroupStateEngine:
         """
         ANY_VALUE accumulation for variable-width (string/object) values — multi-agg path.
         """
-        cdef object value_vector = morsel.column(self._multi_value_columns[agg_idx])
         cdef uint8_t* value_nulls = self._value_null_bitmap(value_vector)
         cdef Py_ssize_t row_idx
         cdef Py_ssize_t offset
@@ -3128,7 +3054,6 @@ cdef class CarcharGroupStateEngine:
         cdef const char* data_ptr = NULL
         cdef Py_ssize_t data_len = 0
         cdef int64_t valid_flag
-        cdef int cmp
         cdef bytes const_bytes_obj
         cdef const char** values_data = NULL
         cdef Py_ssize_t* values_lens = NULL
@@ -3228,16 +3153,13 @@ cdef class CarcharGroupStateEngine:
         Py_ssize_t row_count,
         Py_ssize_t agg_idx,
     ) except *:
-        cdef object value_vector = morsel.column(self._multi_value_columns[agg_idx])
         cdef uint8_t* value_nulls = self._value_null_bitmap(value_vector)
         cdef Py_ssize_t row_idx
         cdef Py_ssize_t offset
         cdef object value_obj
-        cdef int64_t agg_mode = self._multi_agg_modes[agg_idx]
         cdef const char* data_ptr = NULL
         cdef Py_ssize_t data_len = 0
         cdef int64_t valid_flag
-        cdef int cmp
         cdef bytes const_bytes_obj
         cdef const char** mv_values_data = NULL
         cdef Py_ssize_t* mv_values_lens = NULL
@@ -3338,8 +3260,6 @@ cdef class CarcharGroupStateEngine:
         cdef int64_t key_valid_flag
         cdef object value_vector
         cdef DrakenFixedBuffer* value_ptr
-        cdef int64_t* value_i64_data
-        cdef double* value_f64_data
         cdef uint8_t* value_nulls
         cdef int64_t* state_indices = NULL
         cdef Py_ssize_t local_hits = 0, local_misses = 0
@@ -3536,8 +3456,6 @@ cdef class CarcharGroupStateEngine:
         cdef int64_t key_valid_flag
         cdef object value_vector
         cdef DrakenFixedBuffer* value_ptr
-        cdef int64_t* value_i64_data
-        cdef double* value_f64_data
         cdef uint8_t* value_nulls
         cdef int64_t* state_indices = NULL
         cdef Py_ssize_t local_hits = 0, local_misses = 0
@@ -3747,8 +3665,6 @@ cdef class CarcharGroupStateEngine:
         cdef int64_t key_valid_flag
         cdef object value_vector
         cdef DrakenFixedBuffer* value_ptr
-        cdef int64_t* value_i64_data
-        cdef double* value_f64_data
         cdef uint8_t* value_nulls
         cdef int64_t* state_indices = NULL
         cdef Py_ssize_t local_hits = 0, local_misses = 0
@@ -3898,15 +3814,11 @@ cdef class CarcharGroupStateEngine:
         cdef int64_t state_index
         cdef int64_t key_value
         cdef int64_t key_valid_flag
-        cdef Py_ssize_t agg_idx
         cdef Py_ssize_t offset
         cdef int64_t agg_mode
         cdef object value_vector
         cdef DrakenFixedBuffer* value_ptr
-        cdef int64_t* value_i64_data
-        cdef double* value_f64_data
         cdef uint8_t* value_nulls
-        cdef int64_t value_i64
         cdef Py_ssize_t local_hits = 0, local_misses = 0
         cdef Py_ssize_t local_bloom_checks = 0, local_bloom_skips = 0, local_bloom_fps = 0
 
@@ -4128,15 +4040,11 @@ cdef class CarcharGroupStateEngine:
         cdef int64_t state_index
         cdef int64_t key_value
         cdef int64_t key_valid_flag
-        cdef Py_ssize_t agg_idx
         cdef Py_ssize_t offset
         cdef int64_t agg_mode
         cdef object value_vector
         cdef DrakenFixedBuffer* value_ptr
-        cdef int64_t* value_i64_data
-        cdef double* value_f64_data
         cdef uint8_t* value_nulls
-        cdef int64_t value_i64
         cdef Py_ssize_t local_hits = 0, local_misses = 0
         cdef Py_ssize_t local_bloom_checks = 0, local_bloom_skips = 0, local_bloom_fps = 0
 
@@ -4289,15 +4197,11 @@ cdef class CarcharGroupStateEngine:
         cdef Py_ssize_t row_count = morsel.num_rows
         cdef int64_t* state_indices = NULL
         cdef int64_t state_index
-        cdef Py_ssize_t agg_idx
         cdef Py_ssize_t offset
         cdef int64_t agg_mode
         cdef object value_vector
         cdef DrakenFixedBuffer* value_ptr
-        cdef int64_t* value_i64_data
-        cdef double* value_f64_data
         cdef uint8_t* value_nulls
-        cdef int64_t value_i64
         cdef list key_ptrs = []
         cdef list key_nulls = []
         cdef bytes group_name
@@ -4467,11 +4371,8 @@ cdef class CarcharGroupStateEngine:
         cdef object group_vector
         cdef object value_vector
         cdef DrakenFixedBuffer* value_ptr
-        cdef int64_t* value_i64_data
-        cdef double* value_f64_data
         cdef uint8_t* value_nulls
         cdef int64_t* state_indices = NULL
-        cdef int64_t value_i64
 
         for group_name in self._group_by_columns:
             group_vector = morsel.column(group_name)
@@ -4757,18 +4658,12 @@ cdef class CarcharGroupStateEngine:
         cdef Py_ssize_t row_count = morsel.num_rows
         cdef int64_t* state_indices = NULL
         cdef int64_t state_index
-        cdef Py_ssize_t agg_idx
         cdef Py_ssize_t offset
         cdef int64_t agg_mode
         cdef object value_vector
         cdef DrakenFixedBuffer* value_ptr
-        cdef int64_t* value_i64_data
-        cdef double* value_f64_data
         cdef uint8_t* value_nulls
         cdef DictAccessor* value_dict_accessor = NULL
-        cdef double val_decoded_f64
-        cdef int64_t val_decoded_i64
-        cdef int64_t value_i64
         cdef const char* key_data_ptr = NULL
         cdef Py_ssize_t key_data_len = 0
         cdef int64_t key_valid_flag
@@ -5006,12 +4901,8 @@ cdef class CarcharGroupStateEngine:
         cdef int64_t key_kind = _dict_accessor_key_kind(_vector_dict_accessor(key_vector))
         cdef object value_vector
         cdef DrakenFixedBuffer* value_ptr
-        cdef int64_t* value_i64_data
-        cdef double* value_f64_data
         cdef uint8_t* value_nulls
         cdef DictAccessor* value_dict_accessor = NULL
-        cdef double val_decoded_f64
-        cdef int64_t val_decoded_i64
         cdef Py_ssize_t local_bloom_checks = 0
         cdef Py_ssize_t local_bloom_skips = 0
         cdef Py_ssize_t local_bloom_fps = 0
@@ -5252,10 +5143,7 @@ cdef class CarcharGroupStateEngine:
         cdef bytes group_name
         cdef object value_vector
         cdef DrakenFixedBuffer* value_ptr
-        cdef int64_t* value_i64_data
-        cdef double* value_f64_data
         cdef uint8_t* value_nulls
-        cdef int64_t value_i64
         cdef const char* key_data_ptr = NULL
         cdef Py_ssize_t key_data_len = 0
         cdef int64_t key_valid_flag
@@ -5464,15 +5352,11 @@ cdef class CarcharGroupStateEngine:
         cdef Py_ssize_t row_count = morsel.num_rows
         cdef int64_t* state_indices = NULL
         cdef int64_t state_index
-        cdef Py_ssize_t agg_idx
         cdef Py_ssize_t offset
         cdef int64_t agg_mode
         cdef object value_vector
         cdef DrakenFixedBuffer* value_ptr
-        cdef int64_t* value_i64_data
-        cdef double* value_f64_data
         cdef uint8_t* value_nulls
-        cdef int64_t value_i64
         cdef list key_vectors = []
         cdef bytes group_name
         cdef const char* key_data_ptr = NULL
@@ -5845,7 +5729,6 @@ cdef class CarcharGroupStateEngine:
             stop,
         )
 
-    cdef object _build_native_object_vector(self, list values):
         return build_native_object_vector(values)
 
     cdef object _build_object_state_vector(self, Py_ssize_t start, Py_ssize_t stop):
@@ -5858,7 +5741,6 @@ cdef class CarcharGroupStateEngine:
             stop,
         )
 
-    cdef object _build_multi_object_state_vector(self, Py_ssize_t start, Py_ssize_t stop, Py_ssize_t agg_idx):
         return build_multi_object_state_vector(
             self._multi_object_state_bytes,
             self._multi_object_state_starts,
@@ -5871,12 +5753,7 @@ cdef class CarcharGroupStateEngine:
         )
 
     cdef Morsel _empty_morsel(self):
-        cdef list names = self._output_names()
-        cdef list vectors
-        cdef Py_ssize_t agg_count = len(self._aggregations)
-        cdef Py_ssize_t key_count = len(self._group_by_columns)
         cdef Py_ssize_t idx
-        cdef list values
 
         if self._mode == MODE_UNINITIALIZED:
             if key_count == 0:
@@ -5908,7 +5785,6 @@ cdef class CarcharGroupStateEngine:
 
     cpdef object debug_dump(self):
         cdef Py_ssize_t idx
-        cdef Py_ssize_t agg_idx
         cdef list out = []
         cdef object key_values
         cdef object key_valids
@@ -5956,22 +5832,16 @@ cdef class CarcharGroupStateEngine:
 
     cdef Morsel _build_chunk_morsel(self, Py_ssize_t start, Py_ssize_t stop):
         cdef Py_ssize_t length = stop - start
-        cdef list names = self._output_names()
-        cdef object key_vec
         cdef list key_vectors = []
         cdef Int64Vector key_vec_i64
         cdef int64_t* key_data = NULL
         cdef Int64Vector agg_i64
         cdef Float64Vector agg_f64
-        cdef int64_t* agg_i64_data
-        cdef double* agg_f64_data
         cdef uint8_t* key_nulls = NULL
-        cdef uint8_t* agg_nulls = NULL
         cdef Py_ssize_t i
         cdef Py_ssize_t state_index
         cdef bint needs_key_nulls = False
         cdef bint needs_agg_nulls = False
-        cdef list agg_objects
         cdef object agg_object_vec
 
         if self._agg_mode in (AGG_SUM, AGG_MIN, AGG_MAX, AGG_ANY_VALUE):
@@ -6090,15 +5960,12 @@ cdef class CarcharGroupStateEngine:
 
     cdef Morsel _build_chunk_morsel_multi(self, Py_ssize_t start, Py_ssize_t stop):
         cdef Py_ssize_t length = stop - start
-        cdef list names = self._output_names()
-        cdef object key_vec
         cdef list key_vectors = []
         cdef Int64Vector key_vec_i64
         cdef int64_t* key_data = NULL
         cdef uint8_t* key_nulls = NULL
         cdef Py_ssize_t state_index
         cdef bint needs_key_nulls = False
-        cdef list vectors
 
         if self._multi_key_fixed_mode:
             key_vectors = self._build_multi_fixed_key_vectors(start, stop)
@@ -6196,7 +6063,6 @@ cdef class CarcharGroupStateEngine:
     cpdef object finalize_fast_columns(self):
         cdef Py_ssize_t n
         cdef Py_ssize_t idx
-        cdef object keys
         cdef object values_q
         cdef object values_d
         cdef int64_t[::1] key_view
@@ -6301,9 +6167,6 @@ cdef class CarcharGroupStateEngine:
         return None
 
     cpdef object finalize_fast_columns_chunked(self, Py_ssize_t chunk_size=65536):
-        cdef object fast_columns
-        cdef object keys
-        cdef object values
         cdef Py_ssize_t total
         cdef Py_ssize_t start
         cdef Py_ssize_t stop
@@ -6333,30 +6196,12 @@ cdef class CarcharGroupStateEngine:
         return self._empty_morsel()
 
     def finalize_morsels(self, Py_ssize_t chunk_size=65536):
-        cdef object fast_chunks
-        cdef object fast_columns
-        cdef object rows
-        cdef list names
-        cdef object keys
-        cdef object values
-        cdef object key_vec
-        cdef list vectors
         cdef Py_ssize_t total
         cdef Py_ssize_t start
         cdef Py_ssize_t stop
         cdef object morsel
-        cdef long long backend_st
         cdef long long vector_st
         cdef long long morsel_st
-        cdef Py_ssize_t row_idx
-        cdef Py_ssize_t agg_idx
-        cdef Py_ssize_t key_idx
-        cdef Py_ssize_t agg_count
-        cdef Py_ssize_t key_count
-        cdef list output_values
-        cdef list key_outputs
-        cdef object key
-        cdef object finalized_values
         cdef object agg_value
         cdef object agg_vec
         cdef object key_value
