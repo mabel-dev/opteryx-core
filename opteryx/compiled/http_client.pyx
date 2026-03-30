@@ -20,7 +20,8 @@ from cpython.ref cimport PyObject
 from cpython.bytes cimport PyBytes_FromStringAndSize
 from libc.stdint cimport int64_t
 
-# C declarations for libcurl HTTP client
+# C declarations for vendored libcurl HTTP client
+# Linked against third_party/curl/lib/.libs/libcurl.a (see setup.py)
 cdef extern from "http_client.h":
     PyObject* http_client_new(int max_connections, long timeout_ms)
     PyObject* http_client_get(PyObject* client_capsule, const char* url, PyObject* headers)

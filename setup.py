@@ -55,6 +55,8 @@ class build_ext(build_ext_orig):
     def build_extensions(self):
         if self.compiler and ".S" not in self.compiler.src_extensions:
             self.compiler.src_extensions.append(".S")
+        # Build vendored libcurl before extensions
+        build_vendored_libcurl()
         super().build_extensions()
 
     def build_extension(self, ext):
@@ -95,6 +97,68 @@ def is_win():
 
 def is_linux():
     return platform.system() == "Linux"
+
+
+# Build vendored libcurl as static library
+def build_vendored_libcurl():
+    """Build vendored libcurl as a static library for http_client extension."""
+    import subprocess
+
+    curl_src = os.path.join(os.path.dirname(__file__), "third_party", "curl")
+    curl_build = os.path.join(os.path.dirname(__file__), "build", "curl")
+
+    if not os.path.exists(curl_src):
+        print("Warning: vendored curl source not found, skipping libcurl build")
+        return None
+
+    # Skip if already built
+    libcurl_a = os.path.join(curl_build, "lib", ".libs", "libcurl.a")
+    if os.path.exists(libcurl_a):
+        print(f"Using cached libcurl: {libcurl_a}")
+        return libcurl_a
+
+    os.makedirs(curl_build, exist_ok=True)
+
+    # Configure curl as static library with minimal dependencies
+    print(f"Building vendored libcurl from {curl_src}...")
+    configure_cmd = [
+        os.path.join(curl_src, "configure"),
+        f"--prefix={curl_build}",
+        "--disable-shared",
+        "--enable-static",
+        "--without-ssl",  # Disable SSL (use system OpenSSL if needed)
+        "--without-zlib",
+        "--without-libpsl",
+        "--without-libidn2",
+        "--disable-ftp",
+        "--disable-file",
+        "--disable-ldap",
+        "--disable-ldaps",
+        "--disable-rtsp",
+        "--disable-telnet",
+        "--disable-tftp",
+        "--disable-pop3",
+        "--disable-imap",
+        "--disable-smtp",
+        "--disable-gopher",
+        "--disable-dict",
+        "--disable-debug",
+    ]
+
+    try:
+        subprocess.run(configure_cmd, cwd=curl_build, check=True, capture_output=True)
+        subprocess.run(["make", "-j", str(os.cpu_count() or 1)], cwd=curl_build, check=True, capture_output=True)
+        subprocess.run(["make", "install"], cwd=curl_build, check=True, capture_output=True)
+
+        if os.path.exists(libcurl_a):
+            print(f"Successfully built libcurl: {libcurl_a}")
+            return libcurl_a
+        else:
+            print("Warning: libcurl.a not found after build")
+            return None
+    except subprocess.CalledProcessError as e:
+        print(f"Warning: Failed to build vendored libcurl: {e}")
+        return None
 
 
 # Skip extension building for clean command
@@ -908,15 +972,18 @@ extensions = [
         language="c++",
     ),
     # HTTP Client (libcurl-based HTTP with connection pooling and Range request support)
+    # Links against vendored static libcurl
     Extension(
         name="opteryx.compiled.http_client",
         sources=[
             "opteryx/compiled/http_client.pyx",
             "src/cpp/http_client.cpp",
         ],
-        include_dirs=include_dirs,
+        include_dirs=include_dirs + ["third_party/curl/include"],
         extra_compile_args=["-O3", "-std=c++17"] + WARNING_FLAGS,
-        extra_link_args=["-lcurl"],
+        extra_link_args=[
+            os.path.join("build", "curl", "lib", ".libs", "libcurl.a"),
+        ] + ([] if is_win() else ["-lm"]),  # Link math library on non-Windows
         language="c++",
     ),
 ]
