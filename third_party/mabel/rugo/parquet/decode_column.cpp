@@ -533,16 +533,23 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
             else if (result.type == "float64") result.float64_values.resize(tn);
           }
 
-          // Phase 3: Dispatch pages to thread pool
-          // Pool size: capped at 8 to avoid excessive thread creation overhead.
-          // Each task owns its decompression buffer (no sharing needed).
-          const int hw_raw = (int)std::thread::hardware_concurrency();
-          const size_t hw = (size_t)(hw_raw > 0 ? hw_raw : 2);
-          const size_t pool_size = std::min({page_tasks.size(), hw, (size_t)8});
-          PageDecodePool pool(pool_size);
+          // Phase 3: Dispatch pages to module-level thread pool.
+          // Module-level pool is created once and reused across all calls —
+          // eliminates per-column thread creation overhead.
+          // All hardware threads used; no artificial cap.
+          PageDecodePool& pool = rugo_pool::get_page_decode_pool();
 
           std::atomic<bool>    any_error{false};
           std::atomic<int32_t> decoded_count{0};
+
+          // Per-batch completion tracking.
+          // Shared pool requires batch-scoped sync — cannot use pool's global wait
+          // as multiple callers may submit concurrently to the same pool.
+          int32_t active_task_count = 0;
+          for (const auto& pt : page_tasks) { if (!pt.skip_page) ++active_task_count; }
+          std::atomic<int32_t> batch_remaining{active_task_count};
+          std::mutex batch_mutex;
+          std::condition_variable batch_cv;
 
           // Snapshot read-only state for thread-safe lambda capture
           const std::string col_type  = result.type;
@@ -564,8 +571,9 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
             pool.push_task([ptask, col_type, col_codec,
                             xint64, xfloat64, xint32, xfloat32,
                             ivec_i32, ivec_i64, ivec_f32, ivec_f64,
-                            &any_error, &decoded_count]() {
-              if (any_error.load(std::memory_order_relaxed)) return;
+                            &any_error, &decoded_count,
+                            &batch_remaining, &batch_cv]() {
+              if (!any_error.load(std::memory_order_relaxed)) {
 
               // Per-task decompression buffer (each task owns this — no sharing)
               std::vector<uint8_t> decomp_buf;
@@ -585,6 +593,7 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
                   ds = decomp_buf.size();
                 } catch (...) {
                   any_error.store(true, std::memory_order_relaxed);
+                  if (batch_remaining.fetch_sub(1, std::memory_order_acq_rel) == 1) batch_cv.notify_one();
                   return;
                 }
               }
@@ -598,7 +607,9 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
                 if (ptask.encoding == 4) {  // DELTA
                   std::vector<int32_t> tmp;
                   if (DecodeDeltaBinaryPacked(dp, ds, nv, tmp) != nv) {
-                    any_error.store(true, std::memory_order_relaxed); return;
+                    any_error.store(true, std::memory_order_relaxed);
+                    if (batch_remaining.fetch_sub(1, std::memory_order_acq_rel) == 1) batch_cv.notify_one();
+                    return;
                   }
                   std::copy(tmp.begin(), tmp.end(), dst);
                 } else {
@@ -614,7 +625,9 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
                 if (ptask.encoding == 4) {  // DELTA
                   std::vector<int64_t> tmp;
                   if (DecodeDeltaBinaryPacked(dp, ds, nv, tmp) != nv) {
-                    any_error.store(true, std::memory_order_relaxed); return;
+                    any_error.store(true, std::memory_order_relaxed);
+                    if (batch_remaining.fetch_sub(1, std::memory_order_acq_rel) == 1) batch_cv.notify_one();
+                    return;
                   }
                   std::copy(tmp.begin(), tmp.end(), dst);
                 } else {
@@ -644,10 +657,22 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
               }
 
               decoded_count.fetch_add(1, std::memory_order_relaxed);
+              } // end if !any_error
+
+              // Signal this task complete — notify if last in batch
+              if (batch_remaining.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+                batch_cv.notify_one();
+              }
             });
           }
 
-          pool.wait_for_tasks();
+          // Wait for this batch specifically (not all pool tasks)
+          if (active_task_count > 0) {
+            std::unique_lock<std::mutex> lock(batch_mutex);
+            batch_cv.wait(lock, [&batch_remaining]() {
+              return batch_remaining.load(std::memory_order_acquire) == 0;
+            });
+          }
           RUGO_TEL_ACCUM(rugo_tel::page_parallel_s, _pp_t0);
 
           if (!any_error.load()) {

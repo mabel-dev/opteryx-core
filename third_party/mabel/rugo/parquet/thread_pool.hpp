@@ -97,3 +97,25 @@ public:
 
 // Alias for easier adoption
 using PageDecodePool = SimpleThreadPool;
+
+// ---------------------------------------------------------------------------
+// Module-level pool for page-parallel decoding.
+//
+// Created once on first use (lazy init via call_once); never destroyed.
+// Avoids the expensive thread creation/join overhead of per-call pools.
+// Thread count: all hardware threads (no artificial cap).
+// ---------------------------------------------------------------------------
+namespace rugo_pool {
+
+inline PageDecodePool& get_page_decode_pool() {
+    static std::once_flag init_flag;
+    static PageDecodePool* pool = nullptr;
+    std::call_once(init_flag, []() {
+        int hw = (int)std::thread::hardware_concurrency();
+        int num_threads = (hw > 0) ? hw : 4;
+        pool = new PageDecodePool((size_t)num_threads);
+    });
+    return *pool;
+}
+
+} // namespace rugo_pool
