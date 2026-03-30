@@ -146,18 +146,43 @@ def build_vendored_libcurl():
     ]
 
     try:
-        subprocess.run(configure_cmd, cwd=curl_build, check=True, capture_output=True)
-        subprocess.run(["make", "-j", str(os.cpu_count() or 1)], cwd=curl_build, check=True, capture_output=True)
-        subprocess.run(["make", "install"], cwd=curl_build, check=True, capture_output=True)
+        print(f"  Running: {' '.join(configure_cmd)}")
+        result = subprocess.run(configure_cmd, cwd=curl_build, check=False, capture_output=True, text=True)
+        if result.returncode != 0:
+            print(f"  Configure failed with code {result.returncode}")
+            print(f"  STDOUT: {result.stdout[-500:]}")  # Last 500 chars
+            print(f"  STDERR: {result.stderr[-500:]}")
+            return None
+
+        print("  Running: make")
+        result = subprocess.run(["make", "-j", str(os.cpu_count() or 1)], cwd=curl_build, check=False, capture_output=True, text=True)
+        if result.returncode != 0:
+            print(f"  Make failed with code {result.returncode}")
+            print(f"  STDERR: {result.stderr[-500:]}")
+            return None
+
+        print("  Running: make install")
+        result = subprocess.run(["make", "install"], cwd=curl_build, check=False, capture_output=True, text=True)
+        if result.returncode != 0:
+            print(f"  Make install failed with code {result.returncode}")
+            print(f"  STDERR: {result.stderr[-500:]}")
+            return None
 
         if os.path.exists(libcurl_a):
             print(f"Successfully built libcurl: {libcurl_a}")
             return libcurl_a
         else:
-            print("Warning: libcurl.a not found after build")
+            print(f"Warning: libcurl.a not found at {libcurl_a}")
+            # Check what files were created
+            import glob
+            lib_files = glob.glob(os.path.join(curl_build, "**", "*.a"), recursive=True)
+            if lib_files:
+                print(f"  Found .a files: {lib_files}")
             return None
-    except subprocess.CalledProcessError as e:
-        print(f"Warning: Failed to build vendored libcurl: {e}")
+    except Exception as e:
+        print(f"Warning: Exception during libcurl build: {e}")
+        import traceback
+        traceback.print_exc()
         return None
 
 
@@ -972,23 +997,34 @@ extensions = [
         language="c++",
     ),
     # HTTP Client (libcurl-based HTTP with connection pooling and Range request support)
-    # Links against vendored static libcurl
-    (lambda: Extension(
-        name="opteryx.compiled.http_client",
-        sources=[
-            "opteryx/compiled/http_client.pyx",
-            "src/cpp/http_client.cpp",
-        ],
-        include_dirs=include_dirs + ["third_party/curl/include"],
-        extra_compile_args=["-O3", "-std=c++17"] + WARNING_FLAGS,
-        extra_link_args=(lambda: [
-            os.path.join("build", "curl", "lib", ".libs", "libcurl.a"),
-            "-lssl",  # OpenSSL SSL library
-            "-lcrypto",  # OpenSSL crypto library
-        ] + ([] if is_win() else ["-lm"]))(),  # Link math library on non-Windows
-        language="c++",
-    ))(),
 ]
+
+# HTTP client extension (optional, only if libcurl available)
+_libcurl_path = os.path.join(os.path.dirname(__file__), "build", "curl", "lib", ".libs", "libcurl.a")
+if os.path.exists(_libcurl_path):
+    extensions.append(
+        Extension(
+            name="opteryx.compiled.http_client",
+            sources=[
+                "opteryx/compiled/http_client.pyx",
+                "src/cpp/http_client.cpp",
+            ],
+            include_dirs=include_dirs + ["third_party/curl/include"],
+            extra_compile_args=["-O3", "-std=c++17"] + WARNING_FLAGS,
+            extra_link_args=[
+                _libcurl_path,
+                "-lssl",  # OpenSSL SSL library
+                "-lcrypto",  # OpenSSL crypto library
+            ] + ([] if is_win() else ["-lm"]),  # Link math library on non-Windows
+            language="c++",
+        )
+    )
+else:
+    print("Warning: libcurl not found. HTTP client extension will not be built.")
+    print("  To build with HTTP support, ensure OpenSSL development headers are installed:")
+    print("  - macOS: brew install openssl")
+    print("  - Ubuntu/Debian: apt-get install libssl-dev")
+    print("  - RHEL/CentOS/Fedora: yum install openssl-devel")
 
 
 # Auto-generate consolidated modules
