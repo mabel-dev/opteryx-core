@@ -4,7 +4,6 @@ Provides efficient byte-range reads and async streaming support for HTTP/HTTPS U
 Standalone implementation with no Arrow/PyArrow dependencies.
 """
 
-import threading
 import urllib.parse
 from concurrent.futures import as_completed
 from dataclasses import dataclass
@@ -37,15 +36,16 @@ class FileInfo:
     size: int = 0
 
 
-# HTTP range-read pool.
-# Module-level reuse avoids per-call thread creation/destruction overhead.
-# Aggressive config: 96 workers, 32 buffer slots = 128 total
-_MAX_PARALLEL_RANGE_READS = 96
+# HTTP HEAD-request pool.
+# Used only by get_file_info() for parallel HEAD requests when checking
+# multiple paths at once. Range reads use get_many() which runs all transfers
+# concurrently inside C++ with no Python thread overhead.
+_MAX_PARALLEL_HEAD_REQUESTS = 16
 
 
-def _get_http_range_pool():
-    """Get HTTP range-read pool via thread_pool_manager."""
-    return get_filesystem_pool(protocol="http", max_workers=_MAX_PARALLEL_RANGE_READS)
+def _get_http_head_pool():
+    """Get HTTP HEAD-request pool via thread_pool_manager."""
+    return get_filesystem_pool(protocol="http", max_workers=_MAX_PARALLEL_HEAD_REQUESTS)
 
 
 class _FileBuffer:
@@ -73,7 +73,7 @@ class _FileBuffer:
 # Module-level thread pool proxy: lazy wrapper that always defers to thread_pool_manager cache.
 # This ensures that even if pools are shut down (e.g., in tests), the proxy will
 # get the fresh recreated pool from the cache on next access.
-_HTTP_RANGE_POOL = LazyPoolProxy(_get_http_range_pool)
+_HTTP_HEAD_POOL = LazyPoolProxy(_get_http_head_pool)
 
 
 class OpteryxHttpFileSystem:
@@ -104,11 +104,12 @@ class OpteryxHttpFileSystem:
                 "The build system should have failed if it couldn't be built."
             ) from err
 
-        # Create HTTP client with connection pooling via libcurl CURLM.
-        # Aggressive config: 128 max connections (96 workers + 32 buffer)
-        # Timeout: 60 seconds for overall request
+        # Create HTTP client. max_connections caps per-host concurrent connections
+        # inside each get_many() call's local CURLM event loop, and sets the
+        # connection cache size (CURLMOPT_MAXCONNECTS). 128 ensures no column is
+        # queued behind another even for very wide projections across many
+        # simultaneously in-flight row groups.
         self.http_client = HttpClient(max_connections=128, timeout_ms=60000)
-        self._lock = threading.Lock()
 
     def _normalize_url(self, path: str) -> str:
         """Convert path to full HTTP URL.
@@ -161,7 +162,7 @@ class OpteryxHttpFileSystem:
 
         # Parallel HEAD requests; preserve caller's path order
         infos: List[FileInfo] = [None] * len(paths)  # type: ignore[assignment]
-        futures = [_HTTP_RANGE_POOL.submit(_head_one, idx, path) for idx, path in enumerate(paths)]
+        futures = [_HTTP_HEAD_POOL.submit(_head_one, idx, path) for idx, path in enumerate(paths)]
         for fut in as_completed(futures):
             idx, info = fut.result()
             infos[idx] = info
@@ -170,6 +171,10 @@ class OpteryxHttpFileSystem:
 
     def read_ranges(self, path: str, ranges: List[Tuple[int, int]]) -> List[bytes]:
         """Read multiple byte ranges from HTTP resource using Range requests.
+
+        All ranges are fetched concurrently via a single get_many() call.
+        The C++ CURLM event loop handles all transfers on one thread with the
+        GIL released — no Python thread-pool overhead.
 
         Args:
             path: HTTP(S) URL or relative path (requires base_url if relative)
@@ -183,40 +188,15 @@ class OpteryxHttpFileSystem:
 
         url = self._normalize_url(path)
 
-        # Avoid thread pool overhead for single range
-        if len(ranges) == 1:
-            offset, length = ranges[0]
-            try:
-                data = self.http_client.get(
-                    url,
-                    headers={"Range": f"bytes={offset}-{offset + length - 1}"},
-                )
-                return [data]
-            except RuntimeError as err:
-                raise DatasetReadError(f"Unable to read '{path}' - {err}") from err
-
-        # Parallel range reads; preserve output order
-        result: List[bytes] = [b""] * len(ranges)
-
-        def _fetch(idx: int, offset: int, length: int) -> Tuple[int, bytes]:
-            try:
-                data = self.http_client.get(
-                    url,
-                    headers={"Range": f"bytes={offset}-{offset + length - 1}"},
-                )
-                return idx, data
-            except RuntimeError as err:
-                raise DatasetReadError(f"Unable to read '{path}' - {err}") from err
-
-        futures = [
-            _HTTP_RANGE_POOL.submit(_fetch, idx, offset, length)
-            for idx, (offset, length) in enumerate(ranges)
+        requests = [
+            (url, {"Range": f"bytes={offset}-{offset + length - 1}"})
+            for offset, length in ranges
         ]
-        for fut in as_completed(futures):
-            idx, chunk = fut.result()
-            result[idx] = chunk
 
-        return result
+        try:
+            return self.http_client.get_many(requests)
+        except RuntimeError as err:
+            raise DatasetReadError(f"Unable to read '{path}' - {err}") from err
 
     def stream_to(self, path: str, sink, chunk_size: int = 1 << 20) -> int:
         """Stream HTTP resource into sink without intermediate buffer.

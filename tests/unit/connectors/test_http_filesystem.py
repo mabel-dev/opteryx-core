@@ -83,15 +83,16 @@ class TestOpteryxHttpFileSystem:
 
         # Replace with mock http_client
         fs.http_client = Mock()
-        fs.http_client.get = Mock(return_value=b"test_data")
+        fs.http_client.get_many = Mock(return_value=[b"test_data"])
 
         result = fs.read_ranges("https://example.com/file.bin", [(0, 9)])
 
         assert result == [b"test_data"]
-        fs.http_client.get.assert_called_once()
-        call_args = fs.http_client.get.call_args
-        assert "Range" in call_args[1]["headers"]
-        assert call_args[1]["headers"]["Range"] == "bytes=0-8"
+        fs.http_client.get_many.assert_called_once()
+        call_args = fs.http_client.get_many.call_args
+        requests = call_args[0][0]  # first positional arg = list of (url, headers)
+        assert len(requests) == 1
+        assert requests[0][1]["Range"] == "bytes=0-8"
 
     def test_read_ranges_multiple_ranges(self):
         """Test read_ranges with multiple byte ranges."""
@@ -99,7 +100,7 @@ class TestOpteryxHttpFileSystem:
 
         # Replace with mock http_client
         fs.http_client = Mock()
-        fs.http_client.get = Mock(return_value=b"chunk")
+        fs.http_client.get_many = Mock(return_value=[b"chunk", b"chunk", b"chunk"])
 
         ranges = [(0, 5), (100, 5), (200, 5)]
         result = fs.read_ranges("https://example.com/file.bin", ranges)
@@ -107,6 +108,11 @@ class TestOpteryxHttpFileSystem:
         assert len(result) == 3
         # All chunks should be b"chunk"
         assert all(chunk == b"chunk" for chunk in result)
+        # All three ranges passed to get_many
+        fs.http_client.get_many.assert_called_once()
+        call_args = fs.http_client.get_many.call_args
+        requests = call_args[0][0]
+        assert len(requests) == 3
 
     def test_read_ranges_error(self):
         """Test read_ranges raises on HTTP error."""
@@ -114,7 +120,7 @@ class TestOpteryxHttpFileSystem:
 
         # Replace with mock http_client
         fs.http_client = Mock()
-        fs.http_client.get = Mock(side_effect=RuntimeError("HTTP error"))
+        fs.http_client.get_many = Mock(side_effect=RuntimeError("HTTP error"))
 
         with pytest.raises(DatasetReadError):
             fs.read_ranges("https://example.com/file.bin", [(0, 100)])
