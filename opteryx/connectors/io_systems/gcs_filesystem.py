@@ -18,27 +18,25 @@ from opteryx.connectors.parquet_io.thread_pool_manager import get_filesystem_poo
 from opteryx.exceptions import DatasetReadError
 from opteryx.exceptions import MissingDependencyError
 
-# GCS range-read pool.
+# GCS HEAD-request pool.
 #
-# With the v2 scheduler running up to 64 row-group tasks concurrently
-# (PARQUET_GLOBAL_RANGE_READERS=64), and each row-group task internally
-# fanning out N column ranges to this pool, we need substantially more than
-# 32 workers to avoid excessive queuing.  128 workers keeps 64 row-group tasks
-# busy even on wide-column projections while staying well within OS thread
-# limits.  Each worker is blocked on network I/O (GIL released), so real
-# parallelism scales with the worker count.
-_MAX_PARALLEL_RANGE_READS = 128
+# Used only by get_file_info() for parallel HEAD requests when checking
+# multiple paths at once. Range reads (read_ranges) use get_many() which
+# runs all transfers concurrently inside C++ with no Python thread overhead.
+# 16 workers is sufficient for the small batches of path-existence checks
+# that get_file_info() is called with.
+_MAX_PARALLEL_HEAD_REQUESTS = 16
 
 
-def _get_gcs_range_pool():
-    """Get GCS range-read pool via thread_pool_manager."""
-    return get_filesystem_pool(protocol="gcs", max_workers=_MAX_PARALLEL_RANGE_READS)
+def _get_gcs_head_pool():
+    """Get GCS HEAD-request pool via thread_pool_manager."""
+    return get_filesystem_pool(protocol="gcs", max_workers=_MAX_PARALLEL_HEAD_REQUESTS)
 
 
 # Module-level thread pool proxy: lazy wrapper that always defers to thread_pool_manager cache.
 # This ensures that even if pools are shut down (e.g., in tests), the proxy will
 # get the fresh recreated pool from the cache on next access.
-_GCS_RANGE_POOL = LazyPoolProxy(_get_gcs_range_pool)
+_GCS_HEAD_POOL = LazyPoolProxy(_get_gcs_head_pool)
 
 
 def get_storage_credentials():
@@ -130,18 +128,20 @@ class OpteryxGcsFileSystem:
             request = Request()
             self.client_credentials.refresh(request)
 
-        # Create HTTP client with connection pooling via libcurl CURLM.
-        # pool_maxsize must be at least _MAX_PARALLEL_RANGE_READS so that
-        # concurrent range-read workers don't block waiting for a free connection.
-        # 128 workers handles 64 concurrent row-group tasks efficiently.
-        self.http_client = HttpClient(max_connections=_MAX_PARALLEL_RANGE_READS + 16, timeout_ms=60000)
+        # Create HTTP client. max_connections caps per-host concurrent connections
+        # inside each get_many() call's local CURLM event loop, and sets the
+        # connection cache size (CURLMOPT_MAXCONNECTS). With PARQUET_ROWGROUPS_IN_FLIGHT=24
+        # row groups simultaneously in flight, each with its own CURLM instance,
+        # total peak GCS connections = 24 × n_projected_columns. 128 ensures
+        # no column is queued behind another even for very wide projections.
+        self.http_client = HttpClient(max_connections=128, timeout_ms=60000)
 
     @property
     def _bearer(self) -> str:
         """Return a valid Bearer token, refreshing if the credential has expired.
 
-        Uses a lock to ensure only one thread refreshes at a time — the 32-worker
-        range-read pool can call this concurrently at token expiry boundaries.
+        Uses a lock to ensure only one thread refreshes at a time — concurrent
+        get_file_info() HEAD requests can hit this concurrently at token expiry.
         """
         if not self.client_credentials.valid:
             with self._token_lock:
@@ -190,7 +190,7 @@ class OpteryxGcsFileSystem:
         # Fan out HEAD requests in parallel; preserve caller's path order.
         infos: List["FileInfo"] = [None] * len(paths)  # type: ignore[assignment]
         futures = [
-            _GCS_RANGE_POOL.submit(_head_one, idx, path, bearer) for idx, path in enumerate(paths)
+            _GCS_HEAD_POOL.submit(_head_one, idx, path, bearer) for idx, path in enumerate(paths)
         ]
         for fut in as_completed(futures):
             idx, info = fut.result()
@@ -201,6 +201,10 @@ class OpteryxGcsFileSystem:
     def read_ranges(self, path: str, ranges: List[Tuple[int, int]]) -> List[bytes]:
         """Read multiple byte ranges from a GCS object using HTTP range requests.
 
+        All ranges are fetched concurrently via a single get_many() call.
+        The C++ CURLM event loop handles all transfers on one thread with the
+        GIL released — no Python thread-pool overhead.
+
         Args:
             path: GCS object path, with or without the ``gs://`` prefix.
             ranges: List of (offset, length) tuples specifying byte ranges to read.
@@ -208,6 +212,9 @@ class OpteryxGcsFileSystem:
         Returns:
             List of byte buffers in the same order as ranges.
         """
+        if not ranges:
+            return []
+
         # Normalize path
         if path.startswith("gs://"):
             path = path[5:]
@@ -218,57 +225,18 @@ class OpteryxGcsFileSystem:
         object_full_path = urllib.parse.quote(path[(len(bucket) + 1) :], safe="")
         url = f"https://storage.googleapis.com/{bucket}/{object_full_path}"
 
-        if not ranges:
-            return []
-
-        # Capture a single valid bearer token for this entire read_ranges call.
-        # Using _bearer once here (rather than inside each _fetch closure) avoids
-        # N redundant validity checks and string allocations across pool workers.
+        # Capture a single valid bearer token for the entire batch.
         bearer = self._bearer
 
-        # Avoid threadpool overhead for trivial calls.
-        if len(ranges) == 1:
-            offset, length = ranges[0]
-            end = offset + length - 1
-            try:
-                data = self.http_client.get(
-                    url,
-                    headers={
-                        "Authorization": bearer,
-                        "Range": f"bytes={offset}-{end}",
-                    },
-                )
-                return [data]
-            except RuntimeError as err:
-                raise DatasetReadError(f"Unable to read '{path}' - {err}") from err
-
-        # Range requests are network-bound; issue a small bounded fanout and
-        # preserve the caller's range order in the output list.
-        result: List[bytes] = [b""] * len(ranges)
-
-        def _fetch(idx: int, offset: int, length: int) -> Tuple[int, bytes]:
-            end = offset + length - 1
-            try:
-                data = self.http_client.get(
-                    url,
-                    headers={
-                        "Authorization": bearer,
-                        "Range": f"bytes={offset}-{end}",
-                    },
-                )
-                return idx, data
-            except RuntimeError as err:
-                raise DatasetReadError(f"Unable to read '{path}' - {err}") from err
-
-        futures = [
-            _GCS_RANGE_POOL.submit(_fetch, idx, offset, length)
-            for idx, (offset, length) in enumerate(ranges)
+        requests = [
+            (url, {"Authorization": bearer, "Range": f"bytes={offset}-{offset + length - 1}"})
+            for offset, length in ranges
         ]
-        for fut in as_completed(futures):
-            idx, chunk = fut.result()
-            result[idx] = chunk
 
-        return result
+        try:
+            return self.http_client.get_many(requests)
+        except RuntimeError as err:
+            raise DatasetReadError(f"Unable to read '{path}' - {err}") from err
 
     def stream_to(self, path: str, sink, chunk_size: int = 1 << 20) -> int:
         """Stream a GCS object directly into *sink* without an intermediate buffer.
