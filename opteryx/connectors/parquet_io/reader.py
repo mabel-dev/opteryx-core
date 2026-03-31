@@ -894,12 +894,18 @@ def _split_coalesced_buffers(
     merged_buffers: List[bytes],
     merged_parts: List[List[Tuple[int, int, int]]],
     expected_parts: int,
-) -> List[bytes]:
-    """Expand coalesced range buffers back into the original range order."""
-    expanded: List[bytes] = [b""] * expected_parts
+) -> List[memoryview]:
+    """Expand coalesced range buffers back into the original range order.
+
+    Returns memoryview slices rather than bytes slices — the slice is zero-copy
+    because it references the merged buffer directly. The merged buffer stays
+    alive as long as any slice view holds a reference to it.
+    """
+    expanded: List[memoryview] = [memoryview(b"")] * expected_parts
     for buffer, parts in zip(merged_buffers, merged_parts):
+        mv = memoryview(buffer)
         for original_idx, rel_offset, length in parts:
-            expanded[original_idx] = buffer[rel_offset : rel_offset + length]
+            expanded[original_idx] = mv[rel_offset : rel_offset + length]
     return expanded
 
 

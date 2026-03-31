@@ -4,7 +4,6 @@ Provides efficient byte-range reads and async streaming support for HTTP/HTTPS U
 Standalone implementation with no Arrow/PyArrow dependencies.
 """
 
-import io
 import threading
 import urllib.parse
 from concurrent.futures import as_completed
@@ -47,6 +46,28 @@ _MAX_PARALLEL_RANGE_READS = 96
 def _get_http_range_pool():
     """Get HTTP range-read pool via thread_pool_manager."""
     return get_filesystem_pool(protocol="http", max_workers=_MAX_PARALLEL_RANGE_READS)
+
+
+class _FileBuffer:
+    """Lightweight file-like wrapper around a bytes object.
+
+    Holds the raw bytes and exposes a zero-copy memoryview for Arrow/rugo.
+    Avoids the unnecessary copy that io.BytesIO(data) would introduce —
+    BytesIO copies bytes into its own internal buffer, but callers only
+    ever access `.memoryview` here.
+    """
+
+    __slots__ = ("_data",)
+
+    def __init__(self, data: bytes) -> None:
+        self._data = data
+
+    @property
+    def memoryview(self) -> memoryview:
+        return memoryview(self._data)
+
+    def close(self) -> None:
+        self._data = b""
 
 
 # Module-level thread pool proxy: lazy wrapper that always defers to thread_pool_manager cache.
@@ -216,12 +237,11 @@ class OpteryxHttpFileSystem:
         except RuntimeError as err:
             raise DatasetReadError(f"Unable to read '{path}' - {err}") from err
 
+        mv = memoryview(data)
         total = 0
-        # Write in chunks to match streaming API
         for i in range(0, len(data), chunk_size):
-            chunk = data[i : i + chunk_size]
-            sink.write(chunk)
-            total += len(chunk)
+            sink.write(mv[i : i + chunk_size])
+            total += chunk_size if i + chunk_size <= len(data) else len(data) - i
         return total
 
     async def async_stream_to(
@@ -286,10 +306,7 @@ class OpteryxHttpFileSystem:
         except RuntimeError as err:
             raise DatasetReadError(f"Unable to read '{path}' - {err}") from err
 
-        # Wrap content in BytesIO and attach memoryview for Arrow compatibility
-        bio = io.BytesIO(data)
-        bio.memoryview = memoryview(data)  # type: ignore[attr-defined]
-        return bio
+        return _FileBuffer(data)
 
     def open_input_file(self, path: str, columns=None, filters=None):
         """Open HTTP resource for random access reading.

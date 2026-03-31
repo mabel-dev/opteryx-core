@@ -1040,7 +1040,7 @@ if not _skip_build:
                 "opteryx/compiled/http_client.pyx",
                 "src/cpp/http_client.cpp",
             ],
-            include_dirs=include_dirs + ["third_party/curl/include"],
+            include_dirs=include_dirs + ["src/cpp", "third_party/curl/include"],
             extra_compile_args=["-O3", "-std=c++17"] + WARNING_FLAGS,
             extra_link_args=[
                 _libcurl_path,
