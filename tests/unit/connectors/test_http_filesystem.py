@@ -172,8 +172,8 @@ class TestOpteryxHttpFileSystem:
 
         stream = fs.open_input_stream("https://example.com/file.bin")
 
-        assert isinstance(stream, io.BytesIO)
-        assert stream.read() == b"file_content"
+        assert hasattr(stream, "memoryview")
+        assert bytes(stream.memoryview) == b"file_content"
 
     def test_open_input_stream_no_projection(self):
         """Test open_input_stream rejects column projection."""
@@ -199,8 +199,8 @@ class TestOpteryxHttpFileSystem:
 
         file_obj = fs.open_input_file("https://example.com/file.bin")
 
-        assert isinstance(file_obj, io.BytesIO)
-        assert file_obj.read() == b"file_content"
+        assert hasattr(file_obj, "memoryview")
+        assert bytes(file_obj.memoryview) == b"file_content"
 
     def test_open_input_stream_error(self):
         """Test open_input_stream raises on HTTP error."""

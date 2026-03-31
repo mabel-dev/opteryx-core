@@ -5,7 +5,6 @@ This implements pyarrow.fs.FileSystem interface but uses Opteryx's
 stream wrappers for high-performance GCS access.
 """
 
-import io
 import os
 import threading
 import urllib.parse
@@ -59,12 +58,16 @@ def get_storage_credentials():
     return storage_client._credentials
 
 
-class GcsFile(io.BytesIO):
+class GcsFile:
     """
     File-like wrapper for GCS objects.
 
     Reads the entire object into memory on open for maximum performance.
+    Holds the raw bytes directly rather than copying into a BytesIO buffer —
+    callers only ever access `.memoryview`, so the BytesIO copy was waste.
     """
+
+    __slots__ = ("_data",)
 
     def __init__(self, path: str, http_client, access_token):
         """Initialize GCS file by reading entire object."""
@@ -79,20 +82,20 @@ class GcsFile(io.BytesIO):
         url = f"https://storage.googleapis.com/{bucket}/{object_full_path}"
 
         try:
-            data = http_client.get(
+            self._data = http_client.get(
                 url,
                 headers={"Authorization": f"Bearer {access_token}", "Accept-Encoding": "identity"},
             )
         except RuntimeError as err:
             raise DatasetReadError(f"Unable to read '{path}' - {err}") from err
 
-        # Initialize BytesIO with the content
-        super().__init__(data)
-
     @property
     def memoryview(self):
-        """Return a memoryview of the file content."""
-        return memoryview(self.getbuffer())
+        """Return a zero-copy memoryview of the file content."""
+        return memoryview(self._data)
+
+    def close(self) -> None:
+        self._data = b""
 
 
 class OpteryxGcsFileSystem:
@@ -303,12 +306,11 @@ class OpteryxGcsFileSystem:
         except RuntimeError as err:
             raise DatasetReadError(f"Unable to read '{path}' - {err}") from err
 
+        mv = memoryview(data)
         total = 0
-        # Write in chunks to match streaming API
         for i in range(0, len(data), chunk_size):
-            chunk = data[i : i + chunk_size]
-            sink.write(chunk)
-            total += len(chunk)
+            sink.write(mv[i : i + chunk_size])
+            total += chunk_size if i + chunk_size <= len(data) else len(data) - i
         return total
 
     def _refresh_credentials(self) -> None:
