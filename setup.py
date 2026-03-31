@@ -121,18 +121,16 @@ def build_vendored_libcurl():
     # Configure curl as static library with minimal dependencies
     print(f"Building vendored libcurl from {curl_src}...")
 
-    # Try to find OpenSSL installation
+    # Try to find OpenSSL prefix via pkg-config
+    # --with-openssl expects the install prefix (e.g. /usr), not the lib dir
     openssl_prefix = None
     import shutil
-    pkg_config_path = shutil.which("pkg-config")
-    if pkg_config_path:
-        result = subprocess.run(["pkg-config", "--variable=libdir", "openssl"],
+    if shutil.which("pkg-config"):
+        result = subprocess.run(["pkg-config", "--variable=prefix", "openssl"],
                               capture_output=True, text=True)
-        if result.returncode == 0:
-            openssl_lib = result.stdout.strip()
-            if openssl_lib:
-                openssl_prefix = os.path.dirname(openssl_lib)
-                print(f"  Found OpenSSL at: {openssl_prefix}")
+        if result.returncode == 0 and result.stdout.strip():
+            openssl_prefix = result.stdout.strip()
+            print(f"  Found OpenSSL at: {openssl_prefix}")
 
     configure_cmd = [
         os.path.join(curl_src, "configure"),
@@ -1017,8 +1015,11 @@ extensions = [
 ]
 
 # Build libcurl first - REQUIRED for http_client extension
+# Skip for sdist (source distribution packaging) and clean - no compilation needed
+_build_commands = {"build", "build_ext", "install", "bdist_wheel", "bdist", "develop"}
+_skip_build = not any(arg.lower() in _build_commands for arg in sys.argv[1:] if arg and not arg.startswith("-"))
 _libcurl_path = None
-if "clean" not in [arg.lower() for arg in sys.argv[1:] if arg and not arg.startswith("-")]:
+if not _skip_build:
     _libcurl_path = build_vendored_libcurl()
 
     if not _libcurl_path or not os.path.exists(_libcurl_path):
