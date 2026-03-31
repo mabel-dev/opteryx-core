@@ -23,9 +23,9 @@ from libc.stdint cimport int64_t
 # C declarations for vendored libcurl HTTP client
 # Linked against third_party/curl/lib/.libs/libcurl.a (see setup.py)
 cdef extern from "http_client.h":
-    PyObject* http_client_new(int max_connections, long timeout_ms)
-    PyObject* http_client_get(PyObject* client_capsule, const char* url, PyObject* headers)
-    PyObject* http_client_head(PyObject* client_capsule, const char* url)
+    PyObject* http_client_new(int max_connections, long timeout_ms) except NULL
+    PyObject* http_client_get(PyObject* client_capsule, const char* url, PyObject* headers) except NULL
+    PyObject* http_client_head(PyObject* client_capsule, const char* url) except NULL
     void http_client_delete(PyObject* client_capsule)
 
 
@@ -96,13 +96,8 @@ cdef class HttpClient:
         cdef PyObject* c_headers = <PyObject*>headers if headers is not None else NULL
 
         # Call C function with Python GIL held
+        # except NULL declaration above means Cython auto-propagates any C-set exception
         result = http_client_get(self._client, c_url, c_headers)
-
-        if result == NULL:
-            # Error was set in C code, let Python exception propagate
-            raise RuntimeError("HTTP GET failed")
-
-        # result is already a Python bytes object (PyBytes_FromStringAndSize)
         return <object>result
 
     def head(self, str url):
@@ -125,12 +120,8 @@ cdef class HttpClient:
         cdef PyObject* result
 
         # Call C function with Python GIL held
+        # except NULL declaration above means Cython auto-propagates any C-set exception
         result = http_client_head(self._client, c_url)
-
-        if result == NULL:
-            raise RuntimeError("HTTP HEAD failed")
-
-        # result is already a Python dict (PyDict_New populated with headers)
         return <object>result
 
     def close(self):
