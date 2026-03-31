@@ -1016,14 +1016,22 @@ extensions = [
     # HTTP Client (libcurl-based HTTP with connection pooling and Range request support)
 ]
 
-# Build libcurl first, before checking if http_client extension should be added
+# Build libcurl first - REQUIRED for http_client extension
+_libcurl_path = None
 if "clean" not in [arg.lower() for arg in sys.argv[1:] if arg and not arg.startswith("-")]:
     _libcurl_path = build_vendored_libcurl()
-else:
-    _libcurl_path = None
 
-# HTTP client extension (optional, only if libcurl available)
-if _libcurl_path and os.path.exists(_libcurl_path):
+    if not _libcurl_path or not os.path.exists(_libcurl_path):
+        raise RuntimeError(
+            f"Failed to build vendored libcurl. HTTP client extension is REQUIRED.\n\n"
+            "Ensure OpenSSL development headers are installed:\n"
+            "  - macOS: brew install openssl\n"
+            "  - Ubuntu/Debian: apt-get install libssl-dev\n"
+            "  - RHEL/CentOS/Fedora: yum install openssl-devel\n\n"
+            "Then rebuild with: python setup.py build_ext --inplace"
+        )
+
+    # HTTP client extension - MANDATORY (only add if not cleaning)
     extensions.append(
         Extension(
             name="opteryx.compiled.http_client",
@@ -1041,13 +1049,6 @@ if _libcurl_path and os.path.exists(_libcurl_path):
             language="c++",
         )
     )
-else:
-    if "clean" not in [arg.lower() for arg in sys.argv[1:] if arg and not arg.startswith("-")]:
-        print("Warning: libcurl not found. HTTP client extension will not be built.")
-        print("  To build with HTTP support, ensure OpenSSL development headers are installed:")
-        print("  - macOS: brew install openssl")
-        print("  - Ubuntu/Debian: apt-get install libssl-dev")
-        print("  - RHEL/CentOS/Fedora: yum install openssl-devel")
 
 
 # Auto-generate consolidated modules
