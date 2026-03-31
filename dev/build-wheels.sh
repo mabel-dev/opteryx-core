@@ -63,11 +63,15 @@ for whl in dist/*.whl; do
     [ -f "$whl" ] || continue
     echo "Processing wheel: $whl"
     
+    # libonnxruntime is a user-level dependency (installed via onnxruntime pip package),
+    # not something to vendor into the wheel. Exclude it from bundling.
+    AUDITWHEEL_EXCLUDES="--exclude libonnxruntime.so.1"
+
     if [ "$IS_FREE_THREADED" = true ]; then
         echo "  -> Free-threaded build detected"
-        
-        auditwheel repair "$whl" -w dist/
-        
+
+        auditwheel repair "$whl" -w dist/ $AUDITWHEEL_EXCLUDES
+
         # Rename the repaired wheel to restore the 't' suffix in ABI tag
         # PyArrow format: cp314-cp314t (no 't' on first, 't' on second)
         repaired=$(ls -t dist/*manylinux*.whl 2>/dev/null | head -n1)
@@ -83,7 +87,7 @@ for whl in dist/*.whl; do
         fi
     else
         echo "  -> Standard build"
-        auditwheel repair "$whl" -w dist/
+        auditwheel repair "$whl" -w dist/ $AUDITWHEEL_EXCLUDES
     fi
 done
 
