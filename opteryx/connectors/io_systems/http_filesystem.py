@@ -77,18 +77,11 @@ class OpteryxHttpFileSystem:
         try:
             from opteryx.compiled.http_client import HttpClient
         except (ImportError, AttributeError) as err:  # pragma: no cover
-            name = getattr(err, "name", None) or str(err)
-            error_msg = (
-                f"{name}\n\n"
-                "The HTTP client extension (libcurl-based) is not available. "
-                "This is required for HTTP filesystem support.\n\n"
-                "To enable HTTP support, ensure OpenSSL development headers are installed:\n"
-                "  - macOS: brew install openssl\n"
-                "  - Ubuntu/Debian: apt-get install libssl-dev\n"
-                "  - RHEL/CentOS/Fedora: yum install openssl-devel\n\n"
-                "Then rebuild with: python setup.py build_ext --inplace"
-            )
-            raise MissingDependencyError(error_msg) from err
+            raise RuntimeError(
+                f"HTTP client extension import failed: {err}\n\n"
+                "This should not happen - http_client is a required extension. "
+                "The build system should have failed if it couldn't be built."
+            ) from err
 
         # Create HTTP client with connection pooling via libcurl CURLM.
         # Aggressive config: 128 max connections (96 workers + 32 buffer)
