@@ -606,7 +606,6 @@ def _emit_loop(
     metrics: dict,
     metrics_lock: threading.Lock,
     next_transfer_id: List[int],
-    emitter_backlog: Optional[deque] = None,
 ) -> None:
     try:
         while True:
@@ -742,24 +741,12 @@ def _emit_loop(
                         "slice_count": payload_entry["slice_count"],
                         "row_group_meta": transfer_meta,
                     }
-                    # Non-blocking emit: try queue first, backlog if full to avoid stalling frame writes.
+                    # Put event in queue with timeout to handle back-pressure gracefully.
                     try:
-                        event_q.put_nowait(event)
+                        event_q.put(event, timeout=0.1)
                     except queue.Full:
-                        if emitter_backlog is not None:
-                            emitter_backlog.append(event)
-                        else:
-                            event_q.put(event)  # Fallback to blocking if no backlog.
-
-            # Drain emitter backlog if queue has capacity (after processing all fragments for this state).
-            if emitter_backlog:
-                while emitter_backlog and not cancel_event.is_set():
-                    buffered_event = emitter_backlog.popleft()
-                    try:
-                        event_q.put_nowait(buffered_event)
-                    except queue.Full:
-                        emitter_backlog.appendleft(buffered_event)  # Put it back if queue fills again
-                        break
+                        # Timeout waiting to put event; continue and let main process handle backlog
+                        pass
     except Exception as err:
         error_event = {
             "type": _EVENT_TRANSFER_ERROR,
@@ -767,12 +754,10 @@ def _emit_loop(
             "traceback": traceback.format_exc(),
         }
         try:
-            event_q.put_nowait(error_event)
+            event_q.put(error_event, timeout=0.1)
         except queue.Full:
-            if emitter_backlog is not None:
-                emitter_backlog.append(error_event)
-            else:
-                event_q.put(error_event)  # Fallback to blocking.
+            # If queue is still full on error, log and continue—main process will handle timeout
+            pass
         cancel_event.set()
 
 
@@ -973,7 +958,6 @@ def _io_worker(
                 decode_futures.clear()
                 decode_pending.clear()
                 ready_backlog: deque[_IORowGroupState] = deque()
-                emitter_backlog: deque = deque()  # Non-blocking event buffering for emit loop.
                 reads_in_flight = 0
                 scan_start_ns = time.monotonic_ns()
                 first_completion_emitted = False
@@ -991,7 +975,6 @@ def _io_worker(
                         "metrics": metrics,
                         "metrics_lock": metrics_lock,
                         "next_transfer_id": next_transfer_id,
-                        "emitter_backlog": emitter_backlog,
                     },
                     daemon=True,
                 )
