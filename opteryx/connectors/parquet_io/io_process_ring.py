@@ -1010,22 +1010,6 @@ def _io_worker(
                             )
                     return moved
 
-                def _flush_emitter_backlog() -> int:
-                    """Drain pending events from emitter backlog to event queue.
-
-                    Called by main process to unblock emitter thread when queue has capacity.
-                    """
-                    moved = 0
-                    while emitter_backlog and not cancel_event.is_set():
-                        event = emitter_backlog[0]
-                        try:
-                            event_q.put_nowait(event)
-                        except queue.Full:
-                            break
-                        emitter_backlog.popleft()
-                        moved += 1
-                    return moved
-
                 def _admit_rowgroups() -> None:
                     nonlocal first_rowgroup_key
                     if cancel_event.is_set():
@@ -1477,6 +1461,22 @@ def iter_row_groups_io_process_v2(
                 "prefetched_footers": prefetched_footers,
             }
         )
+
+        def _flush_emitter_backlog() -> int:
+            """Drain pending events from emitter backlog to event queue.
+
+            Called by main process to unblock emitter thread when queue has capacity.
+            """
+            moved = 0
+            while emitter_backlog and not cancel_event.is_set():
+                event = emitter_backlog[0]
+                try:
+                    event_q.put_nowait(event)
+                except queue.Full:
+                    break
+                emitter_backlog.popleft()
+                moved += 1
+            return moved
 
         scan_complete = False
         while True:
