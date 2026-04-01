@@ -60,7 +60,7 @@ FLAG_ERROR = 1 << 2
 
 # Header layout (packed at slot start). Keep compact; slot header budget is 256 bytes.
 _SLOT_STATE_STRUCT = struct.Struct("<I")
-_SLOT_FRAME_STRUCT = struct.Struct("<IIQQIIIIIIIQQ")
+_SLOT_FRAME_STRUCT = struct.Struct("<IIQQIIIIIIQQ")
 
 _EVENT_IO_READY = "io_ready"
 _EVENT_FRAME_READY = "frame_ready"
@@ -180,6 +180,7 @@ class _SharedMemoryRing:
         total_bytes = self.slot_bytes * self.slot_count
         self.shm = SharedMemory(name=name, create=create, size=total_bytes)
         self.buf = self.shm.buf
+        self.next_free_hint = 0  # Round-robin hint for slot discovery.
 
     @property
     def name(self) -> str:
@@ -211,13 +212,19 @@ class _SharedMemoryRing:
         return state
 
     def claim_free_slot(self, cancel_event: Event) -> tuple[int, int, int]:
-        """Return (slot_id, waited_ns, wait_events)."""
+        """Return (slot_id, waited_ns, wait_events).
+
+        Uses round-robin hint to reduce average scanning time from O(n) to O(1).
+        """
         waited_ns = 0
         wait_events = 0
         while True:
-            for slot_id in range(self.slot_count):
+            # Round-robin: start from next_free_hint, wrap around if needed.
+            for i in range(self.slot_count):
+                slot_id = (self.next_free_hint + i) % self.slot_count
                 if self.read_state(slot_id) == FREE:
                     self.write_state(slot_id, WRITING)
+                    self.next_free_hint = (slot_id + 1) % self.slot_count
                     return slot_id, waited_ns, wait_events
             wait_events += 1
             block_start = time.monotonic_ns()
@@ -245,7 +252,6 @@ class _SharedMemoryRing:
             raise ValueError(
                 f"frame payload {payload_len} exceeds slot payload capacity {self.payload_bytes}"
             )
-        payload_crc = zlib.crc32(payload) & 0xFFFFFFFF
 
         base = self._slot_offset(slot_id)
         struct.pack_into(
@@ -262,7 +268,6 @@ class _SharedMemoryRing:
             fragment_count,
             rows_in_slice,
             payload_len,
-            payload_crc,
             query_id_hash,
             0,
         )
@@ -284,7 +289,6 @@ class _SharedMemoryRing:
             fragment_count,
             rows_in_slice,
             payload_len,
-            payload_crc,
             query_id_hash,
             _,
         ) = fields
@@ -294,10 +298,6 @@ class _SharedMemoryRing:
 
         payload_off = base + self.header_bytes
         payload = bytes(self.buf[payload_off : payload_off + payload_len])
-        if (zlib.crc32(payload) & 0xFFFFFFFF) != payload_crc:
-            raise RuntimeError(
-                f"CRC mismatch for slot {slot_id} transfer={transfer_id} fragment={fragment_index}"
-            )
 
         header = {
             "flags": flags,
@@ -309,7 +309,6 @@ class _SharedMemoryRing:
             "fragment_count": fragment_count,
             "rows_in_slice": rows_in_slice,
             "payload_bytes": payload_len,
-            "payload_crc32": payload_crc,
             "query_id_hash": query_id_hash,
         }
         return header, payload
@@ -358,8 +357,8 @@ def _slice_and_serialize(
             serialize_ns,
         )
 
-    # Too fragmented: derive deterministic row slices and retry until each
-    # slice transfer is under fragment cap (or one-row slices remain).
+    # Too fragmented: derive deterministic row slices using measured compression ratio.
+    # Avoid re-serialization by using actual payload size to estimate bytes/row.
     rows_total = morsel.num_rows
     if rows_total <= 1:
         return (
@@ -375,12 +374,30 @@ def _slice_and_serialize(
             serialize_ns,
         )
 
-    est_rows_per_slice = max(1, int((target_slice_bytes * rows_total) / max(1, len(payload))))
-    rows_per_slice = min(rows_total, max(1, est_rows_per_slice))
+    # Measured bytes/row from full morsel serialization.
+    # Use this to pre-calculate ideal slice size before serializing slices.
+    bytes_per_row = len(payload) / max(1, rows_total)
+
+    # Target: fragments_per_slice <= max_fragments_per_transfer
+    # max_bytes_per_slice = max_fragments_per_transfer * slot_payload_bytes
+    # rows_per_slice = max_bytes_per_slice / bytes_per_row
+    max_bytes_per_slice = max_fragments_per_transfer * slot_payload_bytes
+    ideal_rows_per_slice = max(1, int(max_bytes_per_slice / bytes_per_row))
+
+    # Apply target_slice_bytes as additional constraint.
+    if target_slice_bytes > 0:
+        target_rows_per_slice = max(1, int((target_slice_bytes / bytes_per_row)))
+        ideal_rows_per_slice = min(ideal_rows_per_slice, target_rows_per_slice)
+
+    # Conservative: reduce by 20% to account for compression variation per slice.
+    rows_per_slice = max(1, int(ideal_rows_per_slice * 0.8))
     if rows_per_slice >= rows_total:
         rows_per_slice = max(1, rows_total // 2)
 
-    while True:
+    # Single pass: serialize slices with pre-calculated size.
+    # If any slice exceeds max_fragments, fall back to smaller size.
+    max_retry = 3  # Limit retry depth to avoid pathological cases.
+    for _ in range(max_retry):
         serialized: List[tuple[int, bytes, int]] = []
         total_serialize_ns = 0
         too_fragmented = False
