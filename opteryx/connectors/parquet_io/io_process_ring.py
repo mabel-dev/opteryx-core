@@ -201,7 +201,7 @@ class _SharedMemoryRing:
         for slot_id in range(self.slot_count):
             self.write_state(slot_id, FREE)
         # Initialize bitmap: all slots are FREE (value 0).
-        self.free_slot_bitmap[:] = 0
+        self.free_slot_bitmap = bytearray(self.slot_count)
 
     def _slot_offset(self, slot_id: int) -> int:
         return slot_id * self.slot_bytes
