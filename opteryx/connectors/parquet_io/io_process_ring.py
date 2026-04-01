@@ -750,6 +750,16 @@ def _emit_loop(
                             emitter_backlog.append(event)
                         else:
                             event_q.put(event)  # Fallback to blocking if no backlog.
+
+            # Drain emitter backlog if queue has capacity (after processing all fragments for this state).
+            if emitter_backlog:
+                while emitter_backlog and not cancel_event.is_set():
+                    buffered_event = emitter_backlog.popleft()
+                    try:
+                        event_q.put_nowait(buffered_event)
+                    except queue.Full:
+                        emitter_backlog.appendleft(buffered_event)  # Put it back if queue fills again
+                        break
     except Exception as err:
         error_event = {
             "type": _EVENT_TRANSFER_ERROR,
@@ -1462,22 +1472,6 @@ def iter_row_groups_io_process_v2(
             }
         )
 
-        def _flush_emitter_backlog() -> int:
-            """Drain pending events from emitter backlog to event queue.
-
-            Called by main process to unblock emitter thread when queue has capacity.
-            """
-            moved = 0
-            while emitter_backlog and not cancel_event.is_set():
-                event = emitter_backlog[0]
-                try:
-                    event_q.put_nowait(event)
-                except queue.Full:
-                    break
-                emitter_backlog.popleft()
-                moved += 1
-            return moved
-
         scan_complete = False
         while True:
             if scan_complete and not assemblies:
@@ -1505,13 +1499,12 @@ def iter_row_groups_io_process_v2(
             try:
                 event = event_q.get(timeout=poll_timeout_s)
             except queue.Empty:
-                # Queue empty: drain emitter backlog and retry.
-                _flush_emitter_backlog()
+                # Queue empty: emitter backlog is drained by emit_loop in worker.
                 consumer_empty_wait_events += 1
                 consumer_empty_wait_ns += int(poll_timeout_s * 1_000_000_000)
                 if scan_complete and not assemblies:
                     break
-                if not worker.is_alive() and event_q.empty() and not emitter_backlog:
+                if not worker.is_alive() and event_q.empty():
                     break
                 continue
 
