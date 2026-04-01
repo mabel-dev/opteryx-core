@@ -180,7 +180,9 @@ class _SharedMemoryRing:
         total_bytes = self.slot_bytes * self.slot_count
         self.shm = SharedMemory(name=name, create=create, size=total_bytes)
         self.buf = self.shm.buf
-        self.next_free_hint = 0  # Round-robin hint for slot discovery.
+        # Bitmap for fast free-slot discovery: one byte per slot (0=FREE, non-zero=IN_USE).
+        # Local cache (worker process only), synced with actual slot states on demand.
+        self.free_slot_bitmap = bytearray(slot_count)
 
     @property
     def name(self) -> str:
@@ -198,6 +200,8 @@ class _SharedMemoryRing:
     def initialize_free(self) -> None:
         for slot_id in range(self.slot_count):
             self.write_state(slot_id, FREE)
+        # Initialize bitmap: all slots are FREE (value 0).
+        self.free_slot_bitmap[:] = 0
 
     def _slot_offset(self, slot_id: int) -> int:
         return slot_id * self.slot_bytes
@@ -211,21 +215,34 @@ class _SharedMemoryRing:
         )
         return state
 
+    def _find_free_slot_from_bitmap(self) -> int | None:
+        """Find first free slot using bitmap, with fallback to actual state verification.
+
+        Returns slot_id if found, None if no free slots in bitmap.
+        """
+        for slot_id in range(self.slot_count):
+            if self.free_slot_bitmap[slot_id] == 0:
+                # Bitmap says free; verify with actual state (bitmap may lag).
+                if self.read_state(slot_id) == FREE:
+                    return slot_id
+                else:
+                    # Bitmap was stale; mark as in-use and continue.
+                    self.free_slot_bitmap[slot_id] = 1
+        return None
+
     def claim_free_slot(self, cancel_event: Event) -> tuple[int, int, int]:
         """Return (slot_id, waited_ns, wait_events).
 
-        Uses round-robin hint to reduce average scanning time from O(n) to O(1).
+        Uses bitmap for O(1) free-slot discovery on typical workloads.
         """
         waited_ns = 0
         wait_events = 0
         while True:
-            # Round-robin: start from next_free_hint, wrap around if needed.
-            for i in range(self.slot_count):
-                slot_id = (self.next_free_hint + i) % self.slot_count
-                if self.read_state(slot_id) == FREE:
-                    self.write_state(slot_id, WRITING)
-                    self.next_free_hint = (slot_id + 1) % self.slot_count
-                    return slot_id, waited_ns, wait_events
+            slot_id = self._find_free_slot_from_bitmap()
+            if slot_id is not None:
+                self.write_state(slot_id, WRITING)
+                self.free_slot_bitmap[slot_id] = 1  # Mark as in-use.
+                return slot_id, waited_ns, wait_events
             wait_events += 1
             block_start = time.monotonic_ns()
             if cancel_event.wait(timeout=0.001):
