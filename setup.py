@@ -1220,6 +1220,19 @@ extensions.append(
 
 extensions.append(
     Extension(
+        "opteryx.compiled.io.process_ring",
+        sources=[
+            "opteryx/compiled/io/process_ring.pyx",
+        ],
+        include_dirs=include_dirs,
+        extra_compile_args=C_FLAGS,  # Pure C, no C++ needed
+        extra_link_args=LD_EXTRA,
+        language="c",
+    )
+)
+
+extensions.append(
+    Extension(
         "opteryx.compiled.nanobind.carchar_native",
         sources=[
             "src/cpp/carchar_native.cpp",
