@@ -606,6 +606,7 @@ def _emit_loop(
     metrics: dict,
     metrics_lock: threading.Lock,
     next_transfer_id: List[int],
+    emitter_backlog: Optional[deque] = None,
 ) -> None:
     try:
         while True:
@@ -730,27 +731,38 @@ def _emit_loop(
                         flags=flags,
                         payload=fragment_payload,
                     )
-                    event_q.put(
-                        {
-                            "type": _EVENT_FRAME_READY,
-                            "slot_id": slot_id,
-                            "transfer_id": transfer_id,
-                            "fragment_index": fragment_index,
-                            "fragment_count": fragment_count,
-                            "rows_in_slice": payload_entry["rows_in_slice"],
-                            "slice_index": payload_entry["slice_index"],
-                            "slice_count": payload_entry["slice_count"],
-                            "row_group_meta": transfer_meta,
-                        }
-                    )
+                    event = {
+                        "type": _EVENT_FRAME_READY,
+                        "slot_id": slot_id,
+                        "transfer_id": transfer_id,
+                        "fragment_index": fragment_index,
+                        "fragment_count": fragment_count,
+                        "rows_in_slice": payload_entry["rows_in_slice"],
+                        "slice_index": payload_entry["slice_index"],
+                        "slice_count": payload_entry["slice_count"],
+                        "row_group_meta": transfer_meta,
+                    }
+                    # Non-blocking emit: try queue first, backlog if full to avoid stalling frame writes.
+                    try:
+                        event_q.put_nowait(event)
+                    except queue.Full:
+                        if emitter_backlog is not None:
+                            emitter_backlog.append(event)
+                        else:
+                            event_q.put(event)  # Fallback to blocking if no backlog.
     except Exception as err:
-        event_q.put(
-            {
-                "type": _EVENT_TRANSFER_ERROR,
-                "message": str(err),
-                "traceback": traceback.format_exc(),
-            }
-        )
+        error_event = {
+            "type": _EVENT_TRANSFER_ERROR,
+            "message": str(err),
+            "traceback": traceback.format_exc(),
+        }
+        try:
+            event_q.put_nowait(error_event)
+        except queue.Full:
+            if emitter_backlog is not None:
+                emitter_backlog.append(error_event)
+            else:
+                event_q.put(error_event)  # Fallback to blocking.
         cancel_event.set()
 
 
@@ -951,6 +963,7 @@ def _io_worker(
                 decode_futures.clear()
                 decode_pending.clear()
                 ready_backlog: deque[_IORowGroupState] = deque()
+                emitter_backlog: deque = deque()  # Non-blocking event buffering for emit loop.
                 reads_in_flight = 0
                 scan_start_ns = time.monotonic_ns()
                 first_completion_emitted = False
@@ -968,6 +981,7 @@ def _io_worker(
                         "metrics": metrics,
                         "metrics_lock": metrics_lock,
                         "next_transfer_id": next_transfer_id,
+                        "emitter_backlog": emitter_backlog,
                     },
                     daemon=True,
                 )
@@ -994,6 +1008,22 @@ def _io_worker(
                                 metrics["io_transfer_ready_backlog_peak"],
                                 _ready_buffer_depth(),
                             )
+                    return moved
+
+                def _flush_emitter_backlog() -> int:
+                    """Drain pending events from emitter backlog to event queue.
+
+                    Called by main process to unblock emitter thread when queue has capacity.
+                    """
+                    moved = 0
+                    while emitter_backlog and not cancel_event.is_set():
+                        event = emitter_backlog[0]
+                        try:
+                            event_q.put_nowait(event)
+                        except queue.Full:
+                            break
+                        emitter_backlog.popleft()
+                        moved += 1
                     return moved
 
                 def _admit_rowgroups() -> None:
@@ -1475,11 +1505,13 @@ def iter_row_groups_io_process_v2(
             try:
                 event = event_q.get(timeout=poll_timeout_s)
             except queue.Empty:
+                # Queue empty: drain emitter backlog and retry.
+                _flush_emitter_backlog()
                 consumer_empty_wait_events += 1
                 consumer_empty_wait_ns += int(poll_timeout_s * 1_000_000_000)
                 if scan_complete and not assemblies:
                     break
-                if not worker.is_alive() and event_q.empty():
+                if not worker.is_alive() and event_q.empty() and not emitter_backlog:
                     break
                 continue
 
