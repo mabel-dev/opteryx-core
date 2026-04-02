@@ -24,17 +24,11 @@ from opteryx.models import QueryProperties
 from opteryx import EOS
 
 from . import BasePlanNode
-from opteryx.operators.catalog import OperatorCategory, ParallelStrategy
 
 _DATA_FORMAT = "draken"
 
 
 class ProjectionNode(BasePlanNode):
-    category = OperatorCategory.PROJECT
-    is_stateless = True
-    parallel_strategy = ParallelStrategy.MULTI_THREAD
-    logical_node_type = 'Project'
-    is_stateless = True
 
     def __init__(self, properties: QueryProperties, **parameters):
         """

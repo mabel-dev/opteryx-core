@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from array import array
 import time
-import numpy
 
 from opteryx.compiled.structures.carchar_set cimport CarcharSetWrapper
 from opteryx.compiled.structures.bloom_filter cimport BloomFilter
@@ -62,8 +61,6 @@ from opteryx.compiled.aggregations.vector_readers cimport _dict_accessor_key_kin
 from opteryx.compiled.aggregations.vector_readers cimport _dict_accessor_read_float_value
 from opteryx.compiled.aggregations.vector_readers cimport _dict_accessor_read_int_value
 from opteryx.compiled.aggregations.vector_readers cimport _dict_accessor_value_kind
-from opteryx.compiled.aggregations.vector_readers cimport _extract_stringlike_key
-from opteryx.compiled.aggregations.vector_readers cimport _read_dictionary_fixed_key
 from opteryx.compiled.aggregations.vector_readers cimport _dict_read_code
 from opteryx.compiled.aggregations.vector_readers cimport _vector_dict_accessor
 from opteryx.compiled.aggregations.vector_readers cimport _vector_value_dict_accessor
@@ -74,7 +71,6 @@ from opteryx.compiled.aggregations.group_by_finalize cimport build_native_object
 from opteryx.compiled.aggregations.group_by_finalize cimport build_object_state_vector
 from opteryx.compiled.aggregations.group_by_finalize cimport build_finalize_key_vectors
 from opteryx.compiled.aggregations.group_by_finalize cimport build_finalize_object_aggregate_vector
-from opteryx.compiled.aggregations.group_by_finalize cimport build_finalize_multi_object_aggregate_vector
 from opteryx.compiled.aggregations.group_by_finalize cimport build_finalize_scalar_aggregate_vector
 from opteryx.compiled.aggregations.group_by_finalize cimport build_finalize_multi_aggregate_vectors
 from opteryx.compiled.aggregations.group_by_finalize cimport build_constant_groupby_vectors
@@ -167,7 +163,6 @@ cdef void _ingest_constant_const_accessor(
     Py_ssize_t row_count,
 ):
     cdef object value_obj
-    cdef uint64_t[::1] value_hashes
     cdef double val_decoded_f64
     cdef int64_t val_decoded_i64
 
@@ -507,7 +502,6 @@ cdef inline void record_bloom_stats(
     self._readings["groupby_bloom_checks"] += checks
     self._readings["groupby_bloom_skips"] += skips
     self._readings["groupby_bloom_false_positives"] += fps
-
 
 
 cdef extern from "carchar_index.hpp" namespace "opteryx::carchar":
@@ -3128,7 +3122,6 @@ cdef class CarcharGroupStateEngine:
         cdef const char* data_ptr = NULL
         cdef Py_ssize_t data_len = 0
         cdef int64_t valid_flag
-        cdef int cmp
         cdef bytes const_bytes_obj
         cdef const char** values_data = NULL
         cdef Py_ssize_t* values_lens = NULL
@@ -3237,7 +3230,6 @@ cdef class CarcharGroupStateEngine:
         cdef const char* data_ptr = NULL
         cdef Py_ssize_t data_len = 0
         cdef int64_t valid_flag
-        cdef int cmp
         cdef bytes const_bytes_obj
         cdef const char** mv_values_data = NULL
         cdef Py_ssize_t* mv_values_lens = NULL
@@ -3338,8 +3330,6 @@ cdef class CarcharGroupStateEngine:
         cdef int64_t key_valid_flag
         cdef object value_vector
         cdef DrakenFixedBuffer* value_ptr
-        cdef int64_t* value_i64_data
-        cdef double* value_f64_data
         cdef uint8_t* value_nulls
         cdef int64_t* state_indices = NULL
         cdef Py_ssize_t local_hits = 0, local_misses = 0
@@ -3536,8 +3526,6 @@ cdef class CarcharGroupStateEngine:
         cdef int64_t key_valid_flag
         cdef object value_vector
         cdef DrakenFixedBuffer* value_ptr
-        cdef int64_t* value_i64_data
-        cdef double* value_f64_data
         cdef uint8_t* value_nulls
         cdef int64_t* state_indices = NULL
         cdef Py_ssize_t local_hits = 0, local_misses = 0
@@ -3747,8 +3735,6 @@ cdef class CarcharGroupStateEngine:
         cdef int64_t key_valid_flag
         cdef object value_vector
         cdef DrakenFixedBuffer* value_ptr
-        cdef int64_t* value_i64_data
-        cdef double* value_f64_data
         cdef uint8_t* value_nulls
         cdef int64_t* state_indices = NULL
         cdef Py_ssize_t local_hits = 0, local_misses = 0
@@ -3903,10 +3889,7 @@ cdef class CarcharGroupStateEngine:
         cdef int64_t agg_mode
         cdef object value_vector
         cdef DrakenFixedBuffer* value_ptr
-        cdef int64_t* value_i64_data
-        cdef double* value_f64_data
         cdef uint8_t* value_nulls
-        cdef int64_t value_i64
         cdef Py_ssize_t local_hits = 0, local_misses = 0
         cdef Py_ssize_t local_bloom_checks = 0, local_bloom_skips = 0, local_bloom_fps = 0
 
@@ -4058,7 +4041,6 @@ cdef class CarcharGroupStateEngine:
                 value_vector = morsel.column(self._multi_value_columns[agg_idx])
                 if isinstance(value_vector, Float64Vector):
                     value_ptr = (<Float64Vector> value_vector).ptr
-                    value_f64_data = <double*> value_ptr.data
                     value_nulls = <uint8_t*> value_ptr.null_bitmap
                     for row_idx in range(row_count):
                         if not _bitmap_is_valid(value_nulls, row_idx):
@@ -4072,7 +4054,6 @@ cdef class CarcharGroupStateEngine:
 
                 if isinstance(value_vector, Int64Vector):
                     value_ptr = (<Int64Vector> value_vector).ptr
-                    value_i64_data = <int64_t*> value_ptr.data
                     value_nulls = <uint8_t*> value_ptr.null_bitmap
                     for row_idx in range(row_count):
                         if not _bitmap_is_valid(value_nulls, row_idx):
@@ -4133,10 +4114,7 @@ cdef class CarcharGroupStateEngine:
         cdef int64_t agg_mode
         cdef object value_vector
         cdef DrakenFixedBuffer* value_ptr
-        cdef int64_t* value_i64_data
-        cdef double* value_f64_data
         cdef uint8_t* value_nulls
-        cdef int64_t value_i64
         cdef Py_ssize_t local_hits = 0, local_misses = 0
         cdef Py_ssize_t local_bloom_checks = 0, local_bloom_skips = 0, local_bloom_fps = 0
 
@@ -4249,7 +4227,6 @@ cdef class CarcharGroupStateEngine:
                 value_vector = morsel.column(self._multi_value_columns[agg_idx])
                 if isinstance(value_vector, Float64Vector):
                     value_ptr = (<Float64Vector> value_vector).ptr
-                    value_f64_data = <double*> value_ptr.data
                     value_nulls = <uint8_t*> value_ptr.null_bitmap
                     for row_idx in range(row_count):
                         if not _bitmap_is_valid(value_nulls, row_idx):
@@ -4261,7 +4238,6 @@ cdef class CarcharGroupStateEngine:
 
                 if isinstance(value_vector, Int64Vector):
                     value_ptr = (<Int64Vector> value_vector).ptr
-                    value_i64_data = <int64_t*> value_ptr.data
                     value_nulls = <uint8_t*> value_ptr.null_bitmap
                     for row_idx in range(row_count):
                         if not _bitmap_is_valid(value_nulls, row_idx):
@@ -4294,10 +4270,7 @@ cdef class CarcharGroupStateEngine:
         cdef int64_t agg_mode
         cdef object value_vector
         cdef DrakenFixedBuffer* value_ptr
-        cdef int64_t* value_i64_data
-        cdef double* value_f64_data
         cdef uint8_t* value_nulls
-        cdef int64_t value_i64
         cdef list key_ptrs = []
         cdef list key_nulls = []
         cdef bytes group_name
@@ -4422,7 +4395,6 @@ cdef class CarcharGroupStateEngine:
                 value_vector = morsel.column(self._multi_value_columns[agg_idx])
                 if isinstance(value_vector, Float64Vector):
                     value_ptr = (<Float64Vector> value_vector).ptr
-                    value_f64_data = <double*> value_ptr.data
                     value_nulls = <uint8_t*> value_ptr.null_bitmap
                     for row_idx in range(row_count):
                         if not _bitmap_is_valid(value_nulls, row_idx):
@@ -4434,7 +4406,6 @@ cdef class CarcharGroupStateEngine:
 
                 if isinstance(value_vector, Int64Vector):
                     value_ptr = (<Int64Vector> value_vector).ptr
-                    value_i64_data = <int64_t*> value_ptr.data
                     value_nulls = <uint8_t*> value_ptr.null_bitmap
                     for row_idx in range(row_count):
                         if not _bitmap_is_valid(value_nulls, row_idx):
@@ -4467,11 +4438,8 @@ cdef class CarcharGroupStateEngine:
         cdef object group_vector
         cdef object value_vector
         cdef DrakenFixedBuffer* value_ptr
-        cdef int64_t* value_i64_data
-        cdef double* value_f64_data
         cdef uint8_t* value_nulls
         cdef int64_t* state_indices = NULL
-        cdef int64_t value_i64
 
         for group_name in self._group_by_columns:
             group_vector = morsel.column(group_name)
@@ -4711,7 +4679,6 @@ cdef class CarcharGroupStateEngine:
 
         if isinstance(value_vector, Float64Vector):
             value_ptr = (<Float64Vector> value_vector).ptr
-            value_f64_data = <double*> value_ptr.data
             value_nulls = <uint8_t*> value_ptr.null_bitmap
             for row_idx in range(row_count):
                 state_index = -1
@@ -4726,7 +4693,6 @@ cdef class CarcharGroupStateEngine:
 
         if isinstance(value_vector, Int64Vector):
             value_ptr = (<Int64Vector> value_vector).ptr
-            value_i64_data = <int64_t*> value_ptr.data
             value_nulls = <uint8_t*> value_ptr.null_bitmap
             for row_idx in range(row_count):
                 state_index = -1
@@ -4762,13 +4728,8 @@ cdef class CarcharGroupStateEngine:
         cdef int64_t agg_mode
         cdef object value_vector
         cdef DrakenFixedBuffer* value_ptr
-        cdef int64_t* value_i64_data
-        cdef double* value_f64_data
         cdef uint8_t* value_nulls
         cdef DictAccessor* value_dict_accessor = NULL
-        cdef double val_decoded_f64
-        cdef int64_t val_decoded_i64
-        cdef int64_t value_i64
         cdef const char* key_data_ptr = NULL
         cdef Py_ssize_t key_data_len = 0
         cdef int64_t key_valid_flag
@@ -4937,7 +4898,6 @@ cdef class CarcharGroupStateEngine:
                 value_vector = morsel.column(self._multi_value_columns[agg_idx])
                 if isinstance(value_vector, Float64Vector):
                     value_ptr = (<Float64Vector> value_vector).ptr
-                    value_f64_data = <double*> value_ptr.data
                     value_nulls = <uint8_t*> value_ptr.null_bitmap
                     for row_idx in range(row_count):
                         if not _bitmap_is_valid(value_nulls, row_idx):
@@ -4949,7 +4909,6 @@ cdef class CarcharGroupStateEngine:
 
                 if isinstance(value_vector, Int64Vector):
                     value_ptr = (<Int64Vector> value_vector).ptr
-                    value_i64_data = <int64_t*> value_ptr.data
                     value_nulls = <uint8_t*> value_ptr.null_bitmap
                     for row_idx in range(row_count):
                         if not _bitmap_is_valid(value_nulls, row_idx):
@@ -4967,7 +4926,6 @@ cdef class CarcharGroupStateEngine:
                             if not _bitmap_is_valid(value_nulls, row_idx):
                                 continue
                             offset = self._multi_offset(state_indices[row_idx], agg_idx)
-                            val_decoded_f64 = _dict_accessor_read_float_value(value_dict_accessor, row_idx)
                             if agg_mode == AGG_COUNT_VALUE:
                                 self._multi_counts[offset] = self._multi_counts[offset] + 1
                         continue
@@ -4976,7 +4934,6 @@ cdef class CarcharGroupStateEngine:
                             if not _bitmap_is_valid(value_nulls, row_idx):
                                 continue
                             offset = self._multi_offset(state_indices[row_idx], agg_idx)
-                            val_decoded_i64 = _dict_accessor_read_int_value(value_dict_accessor, row_idx)
                             if agg_mode == AGG_COUNT_VALUE:
                                 self._multi_counts[offset] = self._multi_counts[offset] + 1
                         continue
@@ -5006,12 +4963,8 @@ cdef class CarcharGroupStateEngine:
         cdef int64_t key_kind = _dict_accessor_key_kind(_vector_dict_accessor(key_vector))
         cdef object value_vector
         cdef DrakenFixedBuffer* value_ptr
-        cdef int64_t* value_i64_data
-        cdef double* value_f64_data
         cdef uint8_t* value_nulls
         cdef DictAccessor* value_dict_accessor = NULL
-        cdef double val_decoded_f64
-        cdef int64_t val_decoded_i64
         cdef Py_ssize_t local_bloom_checks = 0
         cdef Py_ssize_t local_bloom_skips = 0
         cdef Py_ssize_t local_bloom_fps = 0
@@ -5206,7 +5159,6 @@ cdef class CarcharGroupStateEngine:
             value_vector = morsel.column(self._value_column)
             if isinstance(value_vector, Float64Vector):
                 value_ptr = (<Float64Vector> value_vector).ptr
-                value_f64_data = <double*> value_ptr.data
                 value_nulls = <uint8_t*> value_ptr.null_bitmap
                 for row_idx in range(row_count):
                     state_index = state_indices[row_idx]
@@ -5217,7 +5169,6 @@ cdef class CarcharGroupStateEngine:
 
             if isinstance(value_vector, Int64Vector):
                 value_ptr = (<Int64Vector> value_vector).ptr
-                value_i64_data = <int64_t*> value_ptr.data
                 value_nulls = <uint8_t*> value_ptr.null_bitmap
                 for row_idx in range(row_count):
                     state_index = state_indices[row_idx]
@@ -5252,10 +5203,7 @@ cdef class CarcharGroupStateEngine:
         cdef bytes group_name
         cdef object value_vector
         cdef DrakenFixedBuffer* value_ptr
-        cdef int64_t* value_i64_data
-        cdef double* value_f64_data
         cdef uint8_t* value_nulls
-        cdef int64_t value_i64
         cdef const char* key_data_ptr = NULL
         cdef Py_ssize_t key_data_len = 0
         cdef int64_t key_valid_flag
@@ -5413,7 +5361,6 @@ cdef class CarcharGroupStateEngine:
             value_vector = morsel.column(self._value_column)
             if isinstance(value_vector, Float64Vector):
                 value_ptr = (<Float64Vector> value_vector).ptr
-                value_f64_data = <double*> value_ptr.data
                 value_nulls = <uint8_t*> value_ptr.null_bitmap
                 for row_idx in range(row_count):
                     state_index = state_indices[row_idx]
@@ -5425,7 +5372,6 @@ cdef class CarcharGroupStateEngine:
 
             if isinstance(value_vector, Int64Vector):
                 value_ptr = (<Int64Vector> value_vector).ptr
-                value_i64_data = <int64_t*> value_ptr.data
                 value_nulls = <uint8_t*> value_ptr.null_bitmap
                 for row_idx in range(row_count):
                     state_index = state_indices[row_idx]
@@ -5469,10 +5415,7 @@ cdef class CarcharGroupStateEngine:
         cdef int64_t agg_mode
         cdef object value_vector
         cdef DrakenFixedBuffer* value_ptr
-        cdef int64_t* value_i64_data
-        cdef double* value_f64_data
         cdef uint8_t* value_nulls
-        cdef int64_t value_i64
         cdef list key_vectors = []
         cdef bytes group_name
         cdef const char* key_data_ptr = NULL
@@ -5687,7 +5630,6 @@ cdef class CarcharGroupStateEngine:
                 value_vector = morsel.column(self._multi_value_columns[agg_idx])
                 if isinstance(value_vector, Float64Vector):
                     value_ptr = (<Float64Vector> value_vector).ptr
-                    value_f64_data = <double*> value_ptr.data
                     value_nulls = <uint8_t*> value_ptr.null_bitmap
                     for row_idx in range(row_count):
                         if not _bitmap_is_valid(value_nulls, row_idx):
@@ -5699,7 +5641,6 @@ cdef class CarcharGroupStateEngine:
 
                 if isinstance(value_vector, Int64Vector):
                     value_ptr = (<Int64Vector> value_vector).ptr
-                    value_i64_data = <int64_t*> value_ptr.data
                     value_nulls = <uint8_t*> value_ptr.null_bitmap
                     for row_idx in range(row_count):
                         if not _bitmap_is_valid(value_nulls, row_idx):
@@ -5963,15 +5904,11 @@ cdef class CarcharGroupStateEngine:
         cdef int64_t* key_data = NULL
         cdef Int64Vector agg_i64
         cdef Float64Vector agg_f64
-        cdef int64_t* agg_i64_data
-        cdef double* agg_f64_data
         cdef uint8_t* key_nulls = NULL
-        cdef uint8_t* agg_nulls = NULL
         cdef Py_ssize_t i
         cdef Py_ssize_t state_index
         cdef bint needs_key_nulls = False
         cdef bint needs_agg_nulls = False
-        cdef list agg_objects
         cdef object agg_object_vec
 
         if self._agg_mode in (AGG_SUM, AGG_MIN, AGG_MAX, AGG_ANY_VALUE):
@@ -6333,30 +6270,12 @@ cdef class CarcharGroupStateEngine:
         return self._empty_morsel()
 
     def finalize_morsels(self, Py_ssize_t chunk_size=65536):
-        cdef object fast_chunks
-        cdef object fast_columns
-        cdef object rows
-        cdef list names
-        cdef object keys
-        cdef object values
-        cdef object key_vec
-        cdef list vectors
         cdef Py_ssize_t total
         cdef Py_ssize_t start
         cdef Py_ssize_t stop
         cdef object morsel
-        cdef long long backend_st
         cdef long long vector_st
         cdef long long morsel_st
-        cdef Py_ssize_t row_idx
-        cdef Py_ssize_t agg_idx
-        cdef Py_ssize_t key_idx
-        cdef Py_ssize_t agg_count
-        cdef Py_ssize_t key_count
-        cdef list output_values
-        cdef list key_outputs
-        cdef object key
-        cdef object finalized_values
         cdef object agg_value
         cdef object agg_vec
         cdef object key_value

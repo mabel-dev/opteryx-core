@@ -20,14 +20,11 @@ from opteryx.operators.shuffle.partitioning import select_num_bins_from_rows
 from opteryx import EOS
 
 from . import BasePlanNode
-from opteryx.operators.catalog import OperatorCategory, ParallelStrategy
 
 _DATA_FORMAT = "draken"
 
 
 class ShuffleNode(BasePlanNode):
-    category = OperatorCategory.SET_OP
-    parallel_strategy = ParallelStrategy.SINGLE_THREAD
     def __init__(self, properties: QueryProperties, **parameters):
         super().__init__(properties=properties, **parameters)
 

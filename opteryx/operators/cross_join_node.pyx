@@ -23,7 +23,6 @@ from opteryx.models import QueryProperties
 from opteryx import EOS
 
 from . import JoinNode
-from opteryx.operators.catalog import OperatorCategory, ParallelStrategy
 
 _DATA_FORMAT = "arrow"
 
@@ -112,10 +111,6 @@ def _cross_join(left_morsel, right):
 
 
 class CrossJoinNode(JoinNode):
-    category = OperatorCategory.JOIN
-    is_join = True
-    parallel_strategy = ParallelStrategy.SINGLE_THREAD
-    is_pipeline_breaking = True
     """
     Implements a SQL CROSS JOIN
     """

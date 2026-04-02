@@ -32,7 +32,6 @@ from pyarrow import Table
 from opteryx import EOS
 
 from . import JoinNode
-from opteryx.operators.catalog import OperatorCategory, ParallelStrategy
 
 _DATA_FORMAT = "arrow,draken"
 
@@ -41,10 +40,6 @@ _DATA_FORMAT = "arrow,draken"
 
 
 class NonEquiJoinNode(JoinNode):
-    category = OperatorCategory.JOIN
-    is_join = True
-    parallel_strategy = ParallelStrategy.SINGLE_THREAD
-    is_pipeline_breaking = True
     """
     Implements non-equi joins using nested loop algorithm with draken.
     """

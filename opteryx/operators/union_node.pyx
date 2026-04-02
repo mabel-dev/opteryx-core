@@ -15,15 +15,11 @@ from opteryx.models import QueryProperties
 from opteryx import EOS
 
 from . import BasePlanNode
-from opteryx.operators.catalog import OperatorCategory, ParallelStrategy
 
 _DATA_FORMAT = "arrow,draken"
 
 
 class UnionNode(BasePlanNode):
-    category = OperatorCategory.SET_OP
-    parallel_strategy = ParallelStrategy.SINGLE_THREAD
-    logical_node_type = 'Union'
     def __init__(self, properties: QueryProperties, **parameters):
         BasePlanNode.__init__(self, properties=properties, **parameters)
         self.columns = parameters.get("columns", [])

@@ -30,7 +30,6 @@ from opteryx.utils.arrow import align_tables
 from opteryx import EOS
 
 from . import JoinNode
-from opteryx.operators.catalog import OperatorCategory, ParallelStrategy
 
 _DATA_FORMAT = "arrow"
 
@@ -161,10 +160,6 @@ def full_join(
 
 
 class OuterJoinNode(JoinNode):
-    category = OperatorCategory.JOIN
-    is_join = True
-    parallel_strategy = ParallelStrategy.SINGLE_THREAD
-    is_pipeline_breaking = True
     def __init__(self, properties: QueryProperties, **parameters):
         # Ensure `join_type` exists before the base initializer accesses `self.name`
         self.join_type = parameters["type"]

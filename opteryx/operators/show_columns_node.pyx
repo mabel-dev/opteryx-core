@@ -16,7 +16,6 @@ import pyarrow
 from opteryx.models import QueryProperties
 
 from . import BasePlanNode
-from opteryx.operators.catalog import OperatorCategory, ParallelStrategy
 
 _DATA_FORMAT = "arrow"
 
@@ -48,10 +47,6 @@ def _simple_collector(schema):
 
 
 class ShowColumnsNode(BasePlanNode):
-    category = OperatorCategory.DDL
-    is_not_explained = True
-    parallel_strategy = ParallelStrategy.SINGLE_THREAD
-    logical_node_type = 'ShowColumns'
     def __init__(self, properties: QueryProperties, **parameters):
         BasePlanNode.__init__(self, properties=properties, **parameters)
         self._full = parameters.get("full")

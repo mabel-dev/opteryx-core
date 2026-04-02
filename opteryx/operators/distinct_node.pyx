@@ -18,16 +18,11 @@ from opteryx.models import QueryProperties
 from opteryx import EOS
 
 from . import BasePlanNode
-from opteryx.operators.catalog import OperatorCategory, ParallelStrategy
 
 _DATA_FORMAT = "arrow,draken"
 
 
 class DistinctNode(BasePlanNode):
-    category = OperatorCategory.SET_OP
-    parallel_strategy = ParallelStrategy.SINGLE_THREAD
-    is_pipeline_breaking = True
-    logical_node_type = 'Distinct'
     def __init__(self, properties: QueryProperties, **parameters):
         BasePlanNode.__init__(self, properties=properties, **parameters)
         self._distinct_on = parameters.get("on")

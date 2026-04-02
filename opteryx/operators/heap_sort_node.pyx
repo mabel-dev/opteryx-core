@@ -20,7 +20,6 @@ from opteryx.vectors.vector_types import node_is_vector_query_expression
 from opteryx import EOS
 
 from . import BasePlanNode
-from opteryx.operators.catalog import OperatorCategory, ParallelStrategy
 
 # you may not use this file except in compliance with the License.
 # See the License at http://www.apache.org/licenses/LICENSE-2.0
@@ -44,10 +43,6 @@ _DATA_FORMAT = "arrow,draken"
 
 
 class HeapSortNode(BasePlanNode):
-    category = OperatorCategory.SORT
-    parallel_strategy = ParallelStrategy.SINGLE_THREAD
-    is_pipeline_breaking = True
-    logical_node_type = 'HeapSort'
     _NULL_COMPRESSED = numpy.iinfo(numpy.int64).min
     _USEARCH_ENABLED = False
     _USEARCH_MIN_ROWS = 2048

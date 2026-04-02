@@ -21,7 +21,7 @@
 #
 # SPDX-License-Identifier: curl
 #
-""" A telnet server which negotiates"""
+"""A telnet server which negotiates"""
 
 from __future__ import absolute_import
 from __future__ import division
@@ -76,9 +76,8 @@ def telnetserver(options):
 
 
 class NegotiatingTelnetHandler(socketserver.BaseRequestHandler):
-    """Handler class for Telnet connections.
+    """Handler class for Telnet connections."""
 
-    """
     def handle(self):
         """
         Negotiates options before reading data.
@@ -93,20 +92,20 @@ class NegotiatingTelnetHandler(socketserver.BaseRequestHandler):
             neg.send_wont("NAWS")
 
             # Get the data passed through the negotiator
-            data = neg.recv(4*1024)
+            data = neg.recv(4 * 1024)
             log.debug("Incoming data: %r", data)
 
-            if VERIFIED_REQ.encode('utf-8') in data:
+            if VERIFIED_REQ.encode("utf-8") in data:
                 log.debug("Received verification request from test framework")
                 pid = os.getpid()
                 # see tests/server/util.c function write_pidfile
                 if os.name == "nt":
                     pid += 65536
                 response = VERIFIED_RSP.format(pid=pid)
-                response_data = response.encode('utf-8')
+                response_data = response.encode("utf-8")
             else:
                 log.debug("Received normal request - echoing back")
-                response_data = data.decode('utf-8').strip().encode('utf-8')
+                response_data = data.decode("utf-8").strip().encode("utf-8")
 
             if response_data:
                 log.debug("Sending %r", response_data)
@@ -115,7 +114,7 @@ class NegotiatingTelnetHandler(socketserver.BaseRequestHandler):
             # put some effort into making a clean socket shutdown
             # that does not give the client ECONNRESET
             self.request.settimeout(0.1)
-            self.request.recv(4*1024)
+            self.request.recv(4 * 1024)
             self.request.shutdown(socket.SHUT_RDWR)
 
         except IOError:
@@ -161,9 +160,7 @@ class Negotiator(object):
                     self.handle_option(byte_int)
                 else:
                     # Received an unexpected byte. Stop negotiations
-                    log.error("Unexpected byte %s in state %s",
-                              byte_int,
-                              self.state)
+                    log.error("Unexpected byte %s in state %s", byte_int, self.state)
                     self.state = self.NO_NEG
 
         return buffer
@@ -181,8 +178,7 @@ class Negotiator(object):
 
     def start_neg(self, byte_int):
         # In a negotiation.
-        log.debug("In negotiation (%s)",
-                  NegTokens.from_val(byte_int))
+        log.debug("In negotiation (%s)", NegTokens.from_val(byte_int))
 
         if byte_int == NegTokens.WILL:
             # Client is confirming they are willing to do an option
@@ -203,17 +199,17 @@ class Negotiator(object):
             self.state = self.DONT
         else:
             # Received an unexpected byte. Stop negotiations
-            log.error("Unexpected byte %s in state %s",
-                      byte_int,
-                      self.state)
+            log.error("Unexpected byte %s in state %s", byte_int, self.state)
             self.state = self.NO_NEG
 
     def handle_option(self, byte_int):
-        if byte_int in [NegOptions.BINARY,
-                        NegOptions.CHARSET,
-                        NegOptions.SUPPRESS_GO_AHEAD,
-                        NegOptions.NAWS,
-                        NegOptions.NEW_ENVIRON]:
+        if byte_int in [
+            NegOptions.BINARY,
+            NegOptions.CHARSET,
+            NegOptions.SUPPRESS_GO_AHEAD,
+            NegOptions.NAWS,
+            NegOptions.NEW_ENVIRON,
+        ]:
             log.debug("Option: %s", NegOptions.from_val(byte_int))
 
             # No further negotiation of this option needed. Reset the state.
@@ -221,9 +217,7 @@ class Negotiator(object):
 
         else:
             # Received an unexpected byte. Stop negotiations
-            log.error("Unexpected byte %s in state %s",
-                      byte_int,
-                      self.state)
+            log.error("Unexpected byte %s in state %s", byte_int, self.state)
             self.state = self.NO_NEG
 
     def send_message(self, message_ints):
@@ -258,7 +252,7 @@ class NegBase(object):
 
     @classmethod
     def from_val(cls, val):
-        for k in cls.__dict__.keys():
+        for k in cls.__dict__:
             if getattr(cls, k) == val:
                 return k
 
@@ -299,18 +293,13 @@ class NegOptions(NegBase):
 def get_options():
     parser = argparse.ArgumentParser()
 
-    parser.add_argument("--port", action="store", default=9019,
-                        type=int, help="port to listen on")
-    parser.add_argument("--verbose", action="store", type=int, default=0,
-                        help="verbose output")
-    parser.add_argument("--pidfile", action="store",
-                        help="file name for the PID")
-    parser.add_argument("--logfile", action="store",
-                        help="file name for the log")
+    parser.add_argument("--port", action="store", default=9019, type=int, help="port to listen on")
+    parser.add_argument("--verbose", action="store", type=int, default=0, help="verbose output")
+    parser.add_argument("--pidfile", action="store", help="file name for the PID")
+    parser.add_argument("--logfile", action="store", help="file name for the log")
     parser.add_argument("--srcdir", action="store", help="test directory")
     parser.add_argument("--id", action="store", help="server ID")
-    parser.add_argument("--ipv4", action="store_true", default=0,
-                        help="IPv4 flag")
+    parser.add_argument("--ipv4", action="store_true", default=0, help="IPv4 flag")
 
     return parser.parse_args()
 
@@ -322,9 +311,9 @@ def setup_logging(options):
     root_logger = logging.getLogger()
     add_stdout = False
 
-    formatter = logging.Formatter("%(asctime)s %(levelname)-5.5s "
-                                  "[{ident}] %(message)s"
-                                  .format(ident=IDENT))
+    formatter = logging.Formatter(
+        "%(asctime)s %(levelname)-5.5s [{ident}] %(message)s".format(ident=IDENT)
+    )
 
     # Write out to a logfile
     if options.logfile:
@@ -352,6 +341,7 @@ def setup_logging(options):
 
 class ScriptRC(object):
     """Enum for script return codes"""
+
     SUCCESS = 0
     FAILURE = 1
     EXCEPTION = 2
@@ -361,7 +351,7 @@ class ScriptException(Exception):
     pass
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     # Get the options from the user.
     options = get_options()
 

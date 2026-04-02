@@ -6,25 +6,29 @@
 """
 Operator catalog — centralized registry of static metadata for relational operators.
 
-This module provides a single source of truth for operator properties (category,
-parallelism strategy, etc.) needed by the executor to make scheduling decisions.
+All operator metadata (category, parallelism strategy, dispatch mapping, etc.) lives
+here. Operator classes themselves remain clean — they only carry the runtime flags
+needed directly by the engine (is_scan, is_join, is_stateless, is_not_explained).
 
 Usage:
     from opteryx.operators.catalog import get_registry, OperatorCategory
 
     registry = get_registry()
     metadata = registry.get(FilterNode)
-    all_operators = registry.list()
+    node = registry.create('Filter', query_properties, **config)
 """
 
 from dataclasses import dataclass
 from enum import Enum
 from threading import RLock
-from typing import Dict, Optional, Type
+from typing import Dict  # noqa: F401 (Optional used in get() return type)
+from typing import Optional
+from typing import Type
 
 
 class OperatorCategory(Enum):
     """Classification of operator types for visualization and scheduling."""
+
     SCAN = "scan"
     JOIN = "join"
     FILTER = "filter"
@@ -39,6 +43,7 @@ class OperatorCategory(Enum):
 
 class ParallelStrategy(Enum):
     """Intended execution strategy for an operator."""
+
     SINGLE_THREAD = "single_thread"
     MULTI_THREAD = "multi_thread"
     ASYNC = "async"
@@ -47,6 +52,8 @@ class ParallelStrategy(Enum):
 @dataclass(frozen=True)
 class OperatorMetadata:
     """Static metadata about an operator class."""
+
+    name: str
     operator_class: Type
     category: OperatorCategory
     parallel_strategy: ParallelStrategy = ParallelStrategy.SINGLE_THREAD
@@ -64,122 +71,313 @@ class OperatorRegistry:
 
     def __init__(self):
         self._metadata: Dict[Type, OperatorMetadata] = {}
-        self._dispatch_table: Dict = {}  # LogicalPlanStepType -> operator class
+        self._by_name: Dict[str, OperatorMetadata] = {}
         self._lock = RLock()
 
-    def register(self, operator_class: Type, **metadata_kwargs) -> None:
-        """
-        Register an operator class with its metadata.
-
-        Args:
-            operator_class: The operator class (subclass of BasePlanNode)
-            **metadata_kwargs: Metadata fields (category, parallel_strategy, etc.)
-
-        Raises:
-            ValueError: If category is missing or invalid.
-        """
+    def register(
+        self,
+        operator_class: Type,
+        *,
+        name: str,
+        category: OperatorCategory,
+        parallel_strategy: ParallelStrategy = ParallelStrategy.SINGLE_THREAD,
+        is_pipeline_breaking: bool = False,
+        is_join: bool = False,
+        is_scan: bool = False,
+        is_stateless: bool = False,
+        is_not_explained: bool = False,
+        target_queue_depth: int = 0,
+        batch_size: int = 2048,
+    ) -> None:
+        """Register an operator class with its metadata."""
         with self._lock:
-            # Validate required fields
-            if "category" not in metadata_kwargs:
-                raise ValueError(f"{operator_class.__name__} must define `category`")
-
-            category = metadata_kwargs["category"]
-            if not isinstance(category, OperatorCategory):
-                raise ValueError(
-                    f"{operator_class.__name__}.category must be OperatorCategory, "
-                    f"got {type(category)}"
-                )
-
-            # Extract optional fields with defaults
-            parallel_strategy = metadata_kwargs.get(
-                "parallel_strategy", ParallelStrategy.SINGLE_THREAD
-            )
-            logical_node_type = metadata_kwargs.get("logical_node_type", None)
-
-            # Create metadata instance
             metadata = OperatorMetadata(
+                name=name,
                 operator_class=operator_class,
                 category=category,
                 parallel_strategy=parallel_strategy,
-                is_pipeline_breaking=metadata_kwargs.get("is_pipeline_breaking", False),
-                is_join=metadata_kwargs.get("is_join", False),
-                is_scan=metadata_kwargs.get("is_scan", False),
-                is_stateless=metadata_kwargs.get("is_stateless", False),
-                is_not_explained=metadata_kwargs.get("is_not_explained", False),
-                target_queue_depth=metadata_kwargs.get("target_queue_depth", 0),
-                batch_size=metadata_kwargs.get("batch_size", 2048),
+                is_pipeline_breaking=is_pipeline_breaking,
+                is_join=is_join,
+                is_scan=is_scan,
+                is_stateless=is_stateless,
+                is_not_explained=is_not_explained,
+                target_queue_depth=target_queue_depth,
+                batch_size=batch_size,
             )
-
-            # Store metadata
             self._metadata[operator_class] = metadata
-
-            # Register in dispatch table if logical_node_type provided
-            if logical_node_type is not None:
-                if logical_node_type in self._dispatch_table:
-                    existing = self._dispatch_table[logical_node_type]
-                    raise ValueError(
-                        f"Multiple operators for {logical_node_type}: "
-                        f"{existing.__name__} and {operator_class.__name__}"
-                    )
-                self._dispatch_table[logical_node_type] = operator_class
+            self._by_name[name] = metadata
 
     def get(self, operator_class: Type) -> Optional[OperatorMetadata]:
-        """
-        Get metadata for an operator class.
-
-        Args:
-            operator_class: The operator class
-
-        Returns:
-            OperatorMetadata if registered, None otherwise.
-        """
+        """Get metadata for an operator class."""
         with self._lock:
             return self._metadata.get(operator_class)
+
+    def get_by_name(self, name: str) -> Optional[OperatorMetadata]:
+        """Get metadata by registered name."""
+        with self._lock:
+            return self._by_name.get(name)
+
+    def create(self, name: str, properties, **kwargs):
+        """Instantiate an operator by its registered name."""
+        with self._lock:
+            meta = self._by_name.get(name)
+        if meta is None:
+            raise KeyError(f"No operator registered with name '{name}'")
+        return meta.operator_class(properties, **kwargs)
 
     def list(self) -> list:
         """List all registered operator classes."""
         with self._lock:
             return list(self._metadata.keys())
 
-    def dispatch(self, logical_node_type, query_properties, **node_config):
-        """
-        Factory method to instantiate an operator from a logical plan node type.
 
-        Args:
-            logical_node_type: LogicalPlanStepType enum value
-            query_properties: QueryProperties object
-            **node_config: Configuration dict from logical plan node
+# ---------------------------------------------------------------------------
+# Global singleton
+# ---------------------------------------------------------------------------
 
-        Returns:
-            Instantiated operator (BasePlanNode subclass)
-
-        Raises:
-            ValueError: If logical_node_type has no registered operator
-        """
-        # Convert enum to string name if needed
-        node_type_key = logical_node_type.name if hasattr(logical_node_type, 'name') else str(logical_node_type)
-
-        with self._lock:
-            operator_class = self._dispatch_table.get(node_type_key)
-
-        if operator_class is None:
-            raise ValueError(
-                f"No operator registered for logical node type {logical_node_type}"
-            )
-
-        return operator_class(properties=query_properties, **node_config)
-
-
-# Global singleton registry
 _global_registry: Optional[OperatorRegistry] = None
 _registry_lock = RLock()
 
 
+def _build_registry() -> OperatorRegistry:
+    """Explicitly register every operator with its metadata. No magic."""
+    # Local imports to avoid circular dependencies at module load time.
+    from opteryx.operators.cross_join_node import CrossJoinNode
+    from opteryx.operators.distinct_node import DistinctNode
+    from opteryx.operators.draken_aggregate_and_group_node import DrakenAggregateAndGroupNode
+    from opteryx.operators.draken_aggregate_node import DrakenAggregateNode
+    from opteryx.operators.draken_inner_join_node import DrakenInnerJoinNode
+    from opteryx.operators.exit_node import ExitNode
+    from opteryx.operators.explain_node import ExplainNode
+    from opteryx.operators.filter_join_node import FilterJoinNode
+    from opteryx.operators.filter_node import FilterNode
+    from opteryx.operators.function_dataset_node import FunctionDatasetNode
+    from opteryx.operators.heap_sort_node import HeapSortNode
+    from opteryx.operators.limit_node import LimitNode
+    from opteryx.operators.nested_loop_join_node import NestedLoopJoinNode
+    from opteryx.operators.non_equi_join_node import NonEquiJoinNode
+    from opteryx.operators.null_reader_node import NullReaderNode
+    from opteryx.operators.outer_join_node import OuterJoinNode
+    from opteryx.operators.parquet_read_node import ParquetReadNode
+    from opteryx.operators.projection_node import ProjectionNode
+    from opteryx.operators.read_node import ReaderNode
+    from opteryx.operators.set_variable_node import SetVariableNode
+    from opteryx.operators.show_columns_node import ShowColumnsNode
+    from opteryx.operators.show_create_node import ShowCreateNode
+    from opteryx.operators.show_value_node import ShowValueNode
+    from opteryx.operators.shuffle_node import ShuffleNode
+    from opteryx.operators.sort_node import SortNode
+    from opteryx.operators.table_management_node import TableManagementNode
+    from opteryx.operators.union_node import UnionNode
+    from opteryx.operators.unnest_join_node import UnnestJoinNode
+    from opteryx.operators.view_management_node import ViewManagementNode
+
+    r = OperatorRegistry()
+
+    # -- Scan operators -------------------------------------------------------
+    r.register(
+        ReaderNode,
+        name="Reader",
+        category=OperatorCategory.SCAN,
+        parallel_strategy=ParallelStrategy.MULTI_THREAD,
+        is_scan=True,
+    )
+    r.register(
+        ParquetReadNode,
+        name="Parquet Reader",
+        category=OperatorCategory.SCAN,
+        parallel_strategy=ParallelStrategy.MULTI_THREAD,
+        is_scan=True,
+    )
+    r.register(
+        NullReaderNode,
+        name="Null Reader",
+        category=OperatorCategory.SCAN,
+        is_scan=True,
+    )
+    r.register(
+        FunctionDatasetNode,
+        name="Function Dataset",
+        category=OperatorCategory.SCAN,
+        is_scan=True,
+    )
+
+    # -- Filter / project operators -------------------------------------------
+    r.register(
+        FilterNode,
+        name="Filter",
+        category=OperatorCategory.FILTER,
+        parallel_strategy=ParallelStrategy.MULTI_THREAD,
+        is_stateless=True,
+    )
+    r.register(
+        ProjectionNode,
+        name="Projection",
+        category=OperatorCategory.PROJECT,
+        parallel_strategy=ParallelStrategy.MULTI_THREAD,
+        is_stateless=True,
+    )
+    r.register(
+        DistinctNode,
+        name="Distinct",
+        category=OperatorCategory.SET_OP,
+        is_pipeline_breaking=True,
+    )
+
+    # -- Aggregate operators --------------------------------------------------
+    r.register(
+        DrakenAggregateNode,
+        name="Aggregate",
+        category=OperatorCategory.AGGREGATE,
+        is_pipeline_breaking=True,
+    )
+    r.register(
+        DrakenAggregateAndGroupNode,
+        name="Aggregate and Group",
+        category=OperatorCategory.AGGREGATE,
+        is_pipeline_breaking=True,
+    )
+
+    # -- Sort / limit operators -----------------------------------------------
+    r.register(
+        SortNode,
+        name="Sort",
+        category=OperatorCategory.SORT,
+        is_pipeline_breaking=True,
+    )
+    r.register(
+        HeapSortNode,
+        name="Heap Sort",
+        category=OperatorCategory.SORT,
+        is_pipeline_breaking=True,
+    )
+    r.register(
+        LimitNode,
+        name="Limit",
+        category=OperatorCategory.LIMIT,
+    )
+
+    # -- Set operations -------------------------------------------------------
+    r.register(
+        UnionNode,
+        name="Union",
+        category=OperatorCategory.SET_OP,
+        is_pipeline_breaking=True,
+    )
+    r.register(
+        ShuffleNode,
+        name="Shuffle",
+        category=OperatorCategory.SET_OP,
+        is_pipeline_breaking=True,
+    )
+
+    # -- Join operators -------------------------------------------------------
+    r.register(
+        DrakenInnerJoinNode,
+        name="Inner Join",
+        category=OperatorCategory.JOIN,
+        is_join=True,
+        is_pipeline_breaking=True,
+    )
+    r.register(
+        OuterJoinNode,
+        name="Outer Join",
+        category=OperatorCategory.JOIN,
+        is_join=True,
+        is_pipeline_breaking=True,
+    )
+    r.register(
+        CrossJoinNode,
+        name="Cross Join",
+        category=OperatorCategory.JOIN,
+        is_join=True,
+        is_pipeline_breaking=True,
+    )
+    r.register(
+        NestedLoopJoinNode,
+        name="Nested Loop Join",
+        category=OperatorCategory.JOIN,
+        is_join=True,
+        is_pipeline_breaking=True,
+    )
+    r.register(
+        FilterJoinNode,
+        name="Filter Join",
+        category=OperatorCategory.JOIN,
+        is_join=True,
+        is_pipeline_breaking=True,
+    )
+    r.register(
+        NonEquiJoinNode,
+        name="Non Equi Join",
+        category=OperatorCategory.JOIN,
+        is_join=True,
+        is_pipeline_breaking=True,
+    )
+    r.register(
+        UnnestJoinNode,
+        name="Unnest Join",
+        category=OperatorCategory.JOIN,
+        is_join=True,
+    )
+
+    # -- DDL / control operators ----------------------------------------------
+    r.register(
+        ExitNode,
+        name="Exit",
+        category=OperatorCategory.IO,
+    )
+    r.register(
+        ExplainNode,
+        name="Explain",
+        category=OperatorCategory.DDL,
+        is_not_explained=True,
+    )
+    r.register(
+        SetVariableNode,
+        name="Set Variable",
+        category=OperatorCategory.DDL,
+        is_not_explained=True,
+    )
+    r.register(
+        ShowColumnsNode,
+        name="Show Columns",
+        category=OperatorCategory.DDL,
+        is_not_explained=True,
+    )
+    r.register(
+        ShowCreateNode,
+        name="Show Create",
+        category=OperatorCategory.DDL,
+        is_not_explained=True,
+    )
+    r.register(
+        ShowValueNode,
+        name="Show Value",
+        category=OperatorCategory.DDL,
+        is_not_explained=True,
+    )
+    r.register(
+        TableManagementNode,
+        name="Table Management",
+        category=OperatorCategory.DDL,
+        is_not_explained=True,
+    )
+    r.register(
+        ViewManagementNode,
+        name="View Management",
+        category=OperatorCategory.DDL,
+        is_not_explained=True,
+    )
+
+    return r
+
+
 def get_registry() -> OperatorRegistry:
-    """Get the global operator registry singleton."""
+    """Get the global operator registry singleton, building it on first call."""
     global _global_registry
     if _global_registry is None:
         with _registry_lock:
             if _global_registry is None:
-                _global_registry = OperatorRegistry()
+                _global_registry = _build_registry()
     return _global_registry

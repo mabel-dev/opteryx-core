@@ -23,7 +23,6 @@ from orso.schema import convert_orso_schema_to_arrow_schema
 from opteryx import EOS
 
 from . import BasePlanNode
-from opteryx.operators.catalog import OperatorCategory, ParallelStrategy
 
 _DATA_FORMAT = "arrow"
 
@@ -32,9 +31,6 @@ logger = logging.getLogger(__name__)
 
 
 class NullReaderNode(BasePlanNode):  # pragma: no cover
-    category = OperatorCategory.SCAN
-    is_scan = True
-    parallel_strategy = ParallelStrategy.SINGLE_THREAD
     """
     Returns an empty table with the correct schema.
 

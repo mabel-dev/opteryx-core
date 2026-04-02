@@ -27,45 +27,11 @@ END = object()
 
 
 class BasePlanNode:
-    # Class-level metadata (set by subclasses, collected by __init_subclass__)
-    category = None  # Must be set by subclasses (OperatorCategory)
-    parallel_strategy = None  # Optional: ParallelStrategy (defaults to SINGLE_THREAD)
-    is_pipeline_breaking: bool = False
+    # Class-level defaults — overridden per-instance from catalog in __init__.
     is_join: bool = False
     is_scan: bool = False
     is_not_explained: bool = False
     is_stateless: bool = False
-    target_queue_depth: int = 0
-    batch_size: int = 2048
-    logical_node_type = None  # Optional: LogicalPlanStepType (for dispatch)
-
-    def __init_subclass__(cls, **kwargs):
-        """Auto-register operator subclass in the catalog when class is defined."""
-        super().__init_subclass__(**kwargs)
-
-        # Only register concrete operators with category defined (not intermediate base classes)
-        if cls.__module__.startswith("opteryx.operators.") and cls.category is not None:
-            from opteryx.operators.catalog import get_registry
-
-            # Collect metadata from class attributes
-            metadata_kwargs = {
-                "category": cls.category,
-                "parallel_strategy": cls.parallel_strategy,
-                "is_pipeline_breaking": cls.is_pipeline_breaking,
-                "is_join": cls.is_join,
-                "is_scan": cls.is_scan,
-                "is_stateless": cls.is_stateless,
-                "is_not_explained": cls.is_not_explained,
-                "target_queue_depth": cls.target_queue_depth,
-                "batch_size": cls.batch_size,
-            }
-
-            # Only add logical_node_type if set (optional for dispatch)
-            if cls.logical_node_type is not None:
-                metadata_kwargs["logical_node_type"] = cls.logical_node_type
-
-            # Register in global catalog
-            get_registry().register(cls, **metadata_kwargs)
 
     def __init__(self, *, properties, **parameters):
         """
@@ -76,6 +42,7 @@ class BasePlanNode:
         """
         from opteryx.models import QueryProperties
         from opteryx.models import QueryTelemetry
+        from opteryx.operators.catalog import get_registry
 
         self.properties: QueryProperties = properties
         self.telemetry: QueryTelemetry = QueryTelemetry(properties.query_id)
@@ -93,6 +60,14 @@ class BasePlanNode:
         self._empty_morsel_cache = None
 
         self.readings = defaultdict(int)
+
+        # Populate runtime flags from the catalog (single source of truth).
+        _meta = get_registry().get(self.__class__)
+        if _meta is not None:
+            self.is_scan = _meta.is_scan
+            self.is_join = _meta.is_join
+            self.is_stateless = _meta.is_stateless
+            self.is_not_explained = _meta.is_not_explained
 
     @property
     def config(self) -> str:

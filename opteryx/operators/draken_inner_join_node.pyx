@@ -35,16 +35,11 @@ from opteryx import EOS
 from opteryx import config
 
 from . import JoinNode
-from opteryx.operators.catalog import OperatorCategory, ParallelStrategy
 
 _DATA_FORMAT = "draken"
 
 
 class DrakenInnerJoinNode(JoinNode):
-    category = OperatorCategory.JOIN
-    is_join = True
-    parallel_strategy = ParallelStrategy.SINGLE_THREAD
-    is_pipeline_breaking = True
     join_type = "inner"
 
     def __init__(self, properties: QueryProperties, **parameters):

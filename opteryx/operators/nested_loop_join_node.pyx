@@ -33,16 +33,11 @@ from pyarrow import Table
 from opteryx import EOS
 
 from . import JoinNode
-from opteryx.operators.catalog import OperatorCategory, ParallelStrategy
 
 _DATA_FORMAT = "arrow"
 
 
 class NestedLoopJoinNode(JoinNode):
-    category = OperatorCategory.JOIN
-    is_join = True
-    parallel_strategy = ParallelStrategy.SINGLE_THREAD
-    is_pipeline_breaking = True
     join_type = "nested_loop"
 
     def __init__(self, properties: QueryProperties, **parameters):

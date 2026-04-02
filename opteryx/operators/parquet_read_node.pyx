@@ -55,7 +55,6 @@ from opteryx import config
 from .read_node import ReaderNode
 from .read_node import normalize_morsel
 from .read_node import struct_to_jsonb
-from opteryx.operators.catalog import OperatorCategory, ParallelStrategy
 
 _DATA_FORMAT = "arrow,draken"
 
@@ -74,9 +73,6 @@ _FOOTER_POOL = LazyPoolProxy(_get_footer_pool)
 
 
 class ParquetReadNode(ReaderNode):
-    category = OperatorCategory.SCAN
-    is_scan = True
-    parallel_strategy = ParallelStrategy.MULTI_THREAD
     """Read node backed by column-chunk range reads via ``parquet_io``.
 
     Activated for filesystem-backed connectors (GCS, S3, local) when the

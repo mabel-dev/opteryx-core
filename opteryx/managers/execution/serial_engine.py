@@ -28,12 +28,12 @@ from opteryx import EOS
 def execute(
     plan: PhysicalPlan, head_node: str = None, telemetry: QueryTelemetry = None
 ) -> Tuple[Generator[pyarrow.Table, Any, Any], ResultType]:
-    from opteryx.operators import ExplainNode
-    from opteryx.operators import SetVariableNode
-    from opteryx.operators import ShowCreateNode
-    from opteryx.operators import ShowValueNode
-    from opteryx.operators import TableManagementNode
-    from opteryx.operators import ViewManagementNode
+    from opteryx.operators.explain_node import ExplainNode
+    from opteryx.operators.set_variable_node import SetVariableNode
+    from opteryx.operators.show_create_node import ShowCreateNode
+    from opteryx.operators.show_value_node import ShowValueNode
+    from opteryx.operators.table_management_node import TableManagementNode
+    from opteryx.operators.view_management_node import ViewManagementNode
 
     # Retrieve the tail of the query plan, which should ideally be a single head node
     head_nodes = list(set(plan.get_exit_points()))
@@ -78,16 +78,18 @@ def execute(
 def explain(
     plan: PhysicalPlan, analyze: bool, _format: str
 ) -> Generator[pyarrow.Table, None, None]:
-    from opteryx import operators
+    from opteryx.operators.base_plan_node import BasePlanNode
+    from opteryx.operators.exit_node import ExitNode
+    from opteryx.operators.explain_node import ExplainNode
 
     def _inner_explain(node, depth):
         incoming_operators = plan.ingoing_edges(node)
         for operator_name in incoming_operators:
             operator = plan[operator_name[0]]
-            if isinstance(operator, (operators.ExitNode, operators.ExplainNode)):  # Skip ExitNode
+            if isinstance(operator, (ExitNode, ExplainNode)):  # Skip ExitNode
                 yield from _inner_explain(operator_name[0], depth)
                 continue
-            elif isinstance(operator, operators.BasePlanNode):
+            elif isinstance(operator, BasePlanNode):
                 record = {
                     "identity": operator.identity,
                     "tree": depth,
@@ -137,9 +139,7 @@ def explain(
     yield table
 
 
-def process_node(
-    plan: PhysicalPlan, nid: str, morsel: pyarrow.Table
-) -> Generator:
+def process_node(plan: PhysicalPlan, nid: str, morsel: pyarrow.Table) -> Generator:
     node = plan[nid]
 
     if node.is_scan:

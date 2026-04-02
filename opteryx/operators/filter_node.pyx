@@ -20,17 +20,11 @@ from opteryx.models import QueryProperties
 from opteryx import EOS
 
 from . import BasePlanNode
-from opteryx.operators.catalog import OperatorCategory, ParallelStrategy
 
 _DATA_FORMAT = "draken"
 
 
 class FilterNode(BasePlanNode):
-    category = OperatorCategory.FILTER
-    is_stateless = True
-    parallel_strategy = ParallelStrategy.MULTI_THREAD
-    logical_node_type = 'Filter'
-    is_stateless = True
 
     def __init__(self, properties: QueryProperties, **parameters):
         BasePlanNode.__init__(self, properties=properties, **parameters)
