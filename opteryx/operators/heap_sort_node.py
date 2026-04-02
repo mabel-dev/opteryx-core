@@ -1,4 +1,26 @@
+import heapq
+from collections.abc import Iterable
+from functools import cmp_to_key
+
+import numpy
+import pyarrow
+from opteryx.compiled.draken.interop.arrow import vector_from_sequence
+from opteryx.compiled.draken.morsels.morsel import Morsel
+from opteryx.exceptions import ColumnNotFoundError
+from opteryx.expression import NodeType
+from opteryx.expression import evaluate_and_append
+from opteryx.models import QueryProperties
+
 # Licensed under the Apache License, Version 2.0 (the "License");
+from opteryx.tracing.event_recorder import record_event as _trace_record
+from opteryx.vectors.vector_types import get_vector_source_identifier
+from opteryx.vectors.vector_types import node_is_numeric_vector
+from opteryx.vectors.vector_types import node_is_vector_query_expression
+
+from opteryx import EOS
+
+from . import BasePlanNode
+
 # you may not use this file except in compliance with the License.
 # See the License at http://www.apache.org/licenses/LICENSE-2.0
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
@@ -16,25 +38,6 @@ This is faster, particularly when working with large datasets even though we're 
 sorting smaller chunks over and over again.
 """
 
-import heapq
-from collections.abc import Iterable
-from functools import cmp_to_key
-
-import numpy
-import pyarrow
-from opteryx.compiled.draken.interop.arrow import vector_from_sequence
-from opteryx.compiled.draken.morsels.morsel import Morsel
-from opteryx.exceptions import ColumnNotFoundError
-from opteryx.expression import NodeType
-from opteryx.expression import evaluate_and_append
-from opteryx.models import QueryProperties
-from opteryx.vectors.vector_types import get_vector_source_identifier
-from opteryx.vectors.vector_types import node_is_numeric_vector
-from opteryx.vectors.vector_types import node_is_vector_query_expression
-
-from opteryx import EOS
-
-from . import BasePlanNode
 
 _DATA_FORMAT = "arrow,draken"
 
@@ -168,6 +171,18 @@ class HeapSortNode(BasePlanNode):
         elif isinstance(morsel, Iterable):
             morsels = morsel
         else:  # pragma: no cover
+            # Emit execution timing for each call to this operator.
+            _trace_record(
+                "operator_execute",
+                operator_name=self.name,
+                operator_id=self.identity,
+                duration_ns=0,
+                rows_in=getattr(morsel, "num_rows", 0) if morsel is not EOS else 0,
+                rows_out=getattr(self.table, "num_rows", 0) if self.table is not None else 0,
+                produced_rows=bool(
+                    self.table is not None and getattr(self.table, "num_rows", 0) > 0
+                ),
+            )
             yield None
             return
 

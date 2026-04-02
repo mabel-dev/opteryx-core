@@ -193,6 +193,9 @@ all: clean dev-install lint mypy test compile ## Run complete development workfl
 
 check-all: lint mypy test coverage ## Run all checks without compilation
 
+waterfall: ## Run IO waterfall profiler (usage: make waterfall ARGS="trace scratch/io_trace.jsonl")
+	@PYTHONPATH=dev $(PYTHON) -m io_waterfall $(ARGS)
+
 loc: ## Count LOC for production code only (excludes tests)
 	$(call print_blue,'Counting LOC for production files (excluding tests)')
 	@$(PYTHON) dev/count_loc_basic.py --exclude build,temp,third_party,dev,scratch,tests --ext py,pyx,c,cpp,cc,cxx,h,hpp --per-file

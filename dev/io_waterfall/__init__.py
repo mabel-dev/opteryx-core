@@ -15,18 +15,18 @@ IO trace files from Opteryx queries. It includes:
 
 Usage:
     # Generate chart from trace file
-    python -m opteryx.tools.io_waterfall trace /path/to/trace.jsonl
+    PYTHONPATH=dev python -m io_waterfall trace /path/to/trace.jsonl
 
     # View statistics
-    python -m opteryx.tools.io_waterfall stats /path/to/trace.jsonl
+    PYTHONPATH=dev python -m io_waterfall stats /path/to/trace.jsonl
 
     # Programmatic access
-    from opteryx.tools.io_waterfall import TraceReader, generate_waterfall_html
+    from io_waterfall import TraceReader, generate_waterfall_html
     reader = TraceReader("trace.jsonl")
     html_path = generate_waterfall_html("trace.jsonl")
 """
 
-from opteryx.tools.io_waterfall.generator import generate_waterfall_html
-from opteryx.tools.io_waterfall.reader import TraceReader
+from .generator import generate_waterfall_html
+from .reader import TraceReader
 
 __all__ = ["TraceReader", "generate_waterfall_html"]

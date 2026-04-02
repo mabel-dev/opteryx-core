@@ -1,5 +1,6 @@
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
+# You may not use this file except in compliance with the License.
 # See the License at http://www.apache.org/licenses/LICENSE-2.0
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
@@ -7,6 +8,7 @@
 This module provides the execution engine for processing physical plans in a serial manner.
 """
 
+import time
 from typing import Any
 from typing import Generator
 from typing import Optional
@@ -17,6 +19,9 @@ from opteryx.constants import ResultType
 from opteryx.exceptions import InvalidInternalStateError
 from opteryx.models import PhysicalPlan
 from opteryx.models import QueryTelemetry
+from opteryx.tracing.event_recorder import trace_operator_completed
+from opteryx.tracing.event_recorder import trace_operator_finished
+from opteryx.tracing.event_recorder import trace_operator_started
 
 from opteryx import EOS
 
@@ -61,7 +66,6 @@ def execute(
         return head_node(None, None), ResultType.TABULAR
 
     def inner_execute(plan: PhysicalPlan) -> Generator:
-        # Get the pump nodes from the plan and execute them in order
         pump_nodes = [(nid, node) for nid, node in plan.depth_first_search_flat() if node.is_scan]
         for pump_nid, pump_instance in pump_nodes:
             for morsel in pump_instance(None, None):
@@ -144,13 +148,47 @@ def process_node(
             results = process_node(plan, child, morsel, leg)
             yield from (result for result in results if result is not None)
     else:
+        rows_in = getattr(morsel, "num_rows", 0) if morsel is not None else 0
+        start_ns = time.monotonic_ns()
+
+        trace_operator_started(
+            operator_name=node.name,
+            operator_id=node.identity,
+            rows_in=rows_in,
+            rows_out=0,
+            produced_rows=False,
+        )
+
         results = node(morsel, join_leg)
+        rows_out = 0
+        produced_rows = False
+
         if results is None:
+            trace_operator_finished(
+                operator_name=node.name,
+                operator_id=node.identity,
+                duration_ns=time.monotonic_ns() - start_ns,
+                rows_in=rows_in,
+                rows_out=0,
+                produced_rows=False,
+            )
             yield None
             return
+
         for result in (result for result in results if result is not None):
+            rows_out = getattr(result, "num_rows", 0)
+            produced_rows = produced_rows or rows_out > 0
             children = plan.outgoing_edges(nid)
             if len(children) == 0 and result != EOS:
                 yield result
             for _, child, leg in children:
                 yield from process_node(plan, child, result, leg)
+
+        trace_operator_finished(
+            operator_name=node.name,
+            operator_id=node.identity,
+            duration_ns=time.monotonic_ns() - start_ns,
+            rows_in=rows_in,
+            rows_out=rows_out,
+            produced_rows=produced_rows,
+        )

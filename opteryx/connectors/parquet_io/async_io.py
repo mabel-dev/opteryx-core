@@ -103,7 +103,34 @@ async def async_read_column_task(
             "column": column_name,
             "bytes_received": bytes_fetched,
         }
+        if connector:
+            kwargs["connector"] = connector
         record_event("download_complete", **kwargs)
+
+    # trace: buffer phase
+    if _trace_cfg.OPTERYX_TRACE:
+        kwargs = {
+            "file_id": path,
+            "component": "columns",
+            "rg_idx": rg_idx,
+            "column": column_name,
+            "bytes": bytes_fetched,
+        }
+        if connector:
+            kwargs["connector"] = connector
+        record_event("buffer_start", **kwargs)
+
+    # In async path, buffer is minimal (immediate decode follows)
+    if _trace_cfg.OPTERYX_TRACE:
+        kwargs = {
+            "file_id": path,
+            "component": "columns",
+            "rg_idx": rg_idx,
+            "column": column_name,
+        }
+        if connector:
+            kwargs["connector"] = connector
+        record_event("buffer_complete", **kwargs)
 
     return {
         "name": column_name,

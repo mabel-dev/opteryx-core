@@ -1,46 +1,66 @@
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
-# See the License at http://www.apache.org/licenses/LICENSE-2.0
+# You may obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
 """
-Event recording system for IO tracing.
+Event recording system for tracing.
 
 This module provides the public API for recording trace events. When tracing is enabled
 (OPTERYX_TRACE=1), events are queued for asynchronous writing to disk. When disabled,
 all calls are no-ops with zero overhead.
+
+The helpers in this module intentionally expose semantic trace phases rather than
+implementation details so the trace stream can be used for profiling, bottleneck
+analysis, and waterfall visualizations.
 """
+
+from __future__ import annotations
 
 import atexit
 import threading
 import time
 from typing import Optional
+from typing import TypedDict
 
-from opteryx.tracing.ring_buffer import RingBuffer
+# ---------------------------------------------------------------------------
+# Global state
+# ---------------------------------------------------------------------------
 
-# Thread-local storage for ring buffers - one per thread
 _thread_local = threading.local()
-
-# Global event store (always populated when tracing is enabled).
-# This allows clients to inspect or persist events without writing to a file.
 _global_events: list[dict] = []
 _global_lock = threading.Lock()
-
-# Global trace writer instance (initialized lazily)
 _trace_writer: Optional["TraceWriter"] = None
 _writer_lock = threading.Lock()
-
-# When a session is active we remember its ID here so that events can
-# be automatically tagged without callers needing to pass it explicitly.
-# The value is pushed by :class:`opteryx.query_session.Session` and cleared
-# on close; the simplest policy is globally scoped.  In the uncommon case
-# of concurrent sessions in the same process the last-started session will
-# win, which is acceptable for our current use cases.
 _current_session_id: Optional[str] = None
 
 
-def _get_thread_buffer() -> RingBuffer:
+class TraceEvent(TypedDict, total=False):
+    type: str
+    timestamp: float
+    session_id: str
+    file_id: str
+    component: str
+    rg_idx: int
+    column: str
+    operator_name: str
+    operator_id: str
+    phase: str
+    rows_in: int
+    rows_out: int
+    bytes_received: int
+    duration_ns: int
+    produced_rows: bool
+    columns: list[str]
+    ranges: int
+    rows_decoded: int
+    bytes: int
+
+
+def _get_thread_buffer():
     """Get or create the thread-local ring buffer for this thread."""
+    from opteryx.tracing.ring_buffer import RingBuffer
+
     if not hasattr(_thread_local, "buffer"):
         _thread_local.buffer = RingBuffer(max_events=10000)
     return _thread_local.buffer
@@ -49,13 +69,9 @@ def _get_thread_buffer() -> RingBuffer:
 def _get_trace_writer() -> Optional["TraceWriter"]:
     """Return a writer if one has been explicitly installed.
 
-    The default policy for the engine is **not** to write trace events to a
-    file; they are collected in memory and surfaced via :meth:`Session.trace`.
-    A custom writer could be installed programmatically if needed, but the
-    core engine will never create one.
+    The default policy for the engine is not to write trace events to a file;
+    they are collected in memory and surfaced via Session.trace().
     """
-    # always return None by default; keep the variable around for tests or
-    # future user-installed writers
     return None
 
 
@@ -63,11 +79,9 @@ def record_event(event_type: str, **kwargs) -> None:
     """
     Record a trace event.
 
-    When tracing is enabled (OPTERYX_TRACE=1), the event is queued for writing.
-    When tracing is disabled, this is a no-op with minimal overhead.
-    Thread-safe: writes directly to the writer's queue which is a thread.Queue.
+    When tracing is enabled (OPTERYX_TRACE=1), the event is stored in-memory for
+    later inspection and optional export.
     """
-    # Import here to avoid circular dependency and check at call time
     import random
 
     from opteryx import config
@@ -75,28 +89,75 @@ def record_event(event_type: str, **kwargs) -> None:
     if not config.OPTERYX_TRACE:
         return
 
-    # sampling logic: if the caller supplied a file_id and the random draw is
-    # above the configured sample rate, skip the event entirely.  (We don't
-    # want to pay the cost of building the event object or queueing it.)
     file_id = kwargs.get("file_id")
     if file_id and random.random() > config.OPTERYX_TRACE_SAMPLE_RATE:
         return
 
-    # Create event with timestamp
-    event = {"type": event_type, "timestamp": time.perf_counter(), **kwargs}
+    event: TraceEvent = {"type": event_type, "timestamp": time.perf_counter(), **kwargs}
 
-    # automatically decorate with session id if caller omitted it
     if "session_id" not in event and _current_session_id is not None:
         event["session_id"] = _current_session_id
 
-    # record to global list for later retrieval
     with _global_lock:
         _global_events.append(event)
 
-    # Write directly to the thread-safe writer queue if a file sink exists.
     writer = _get_trace_writer()
     if writer:
         writer.enqueue_events([event])
+
+
+# ---------------------------------------------------------------------------
+# Semantic trace helpers
+# ---------------------------------------------------------------------------
+
+
+def trace_io_started(**kwargs) -> None:
+    record_event("download_start", **kwargs)
+
+
+def trace_io_completed(**kwargs) -> None:
+    record_event("download_complete", **kwargs)
+
+
+def trace_buffer_started(**kwargs) -> None:
+    record_event("buffer_start", **kwargs)
+
+
+def trace_buffer_completed(**kwargs) -> None:
+    record_event("buffer_complete", **kwargs)
+
+
+def trace_row_group_buffered(**kwargs) -> None:
+    record_event("buffer_complete", component="rowgroup", **kwargs)
+
+
+def trace_column_buffered(**kwargs) -> None:
+    record_event("buffer_complete", component="column", **kwargs)
+
+
+def trace_decode_started(**kwargs) -> None:
+    record_event("decode_start", **kwargs)
+
+
+def trace_decode_completed(**kwargs) -> None:
+    record_event("decode_complete", **kwargs)
+
+
+def trace_operator_started(**kwargs) -> None:
+    record_event("operator_execute", phase="start", **kwargs)
+
+
+def trace_operator_completed(**kwargs) -> None:
+    record_event("operator_execute", phase="finish", **kwargs)
+
+
+# Backward-compatible aliases used by some call sites.
+trace_operator_finished = trace_operator_completed
+
+
+# ---------------------------------------------------------------------------
+# Buffer / writer management
+# ---------------------------------------------------------------------------
 
 
 def _flush_thread_buffer() -> None:
@@ -114,11 +175,7 @@ def flush_all() -> list[dict]:
     """
     Flush all pending events and return the global event list.
 
-    If a trace writer is active (i.e. file logging is enabled) the writer will
-    be flushed and closed.  In all cases the current contents of the global
-    event list are returned so callers can inspect or persist them.  The list
-    is *not* cleared automatically; callers may call ``reset()`` if they wish to
-    discard old events.
+    If a trace writer is active, it will be flushed and closed first.
     """
     global _trace_writer
     writer = _trace_writer
@@ -132,18 +189,15 @@ def flush_all() -> list[dict]:
 
 
 def reset() -> None:
-    """Reset the tracing system (for testing)."""
+    """Reset the tracing system for testing."""
     global _trace_writer
 
-    # Clear thread-local buffer
     if hasattr(_thread_local, "buffer"):
         _thread_local.buffer.clear()
 
-    # Clear global event list
     with _global_lock:
         _global_events.clear()
 
-    # Writer is unused by default, but close if someone installed one
     if _trace_writer:
         try:
             _trace_writer.close()
@@ -165,5 +219,4 @@ def _cleanup_on_exit() -> None:
             pass
 
 
-# Register cleanup handler to ensure trace files are written even if sessions aren't explicitly closed
 atexit.register(_cleanup_on_exit)

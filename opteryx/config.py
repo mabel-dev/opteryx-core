@@ -251,6 +251,22 @@ read completion and decode submission.  Replaces PARQUET_READ_DECODE_BUFFER_CAP.
 Default = PARQUET_GLOBAL_RANGE_READERS * 2 so downloads run two full waves
 ahead of the decode pool without unbounded memory accumulation."""
 
+PARQUET_READ_QUEUE_CAP: int = int(get("OPTERYX_PARQUET_READ_QUEUE_CAP", 64))
+"""Maximum in-flight column range reads for io_process_ring read dispatch queue."""
+
+PARQUET_DECODE_QUEUE_CAP: int = int(get("OPTERYX_PARQUET_DECODE_QUEUE_CAP", 128))
+"""Maximum pending/in-flight decode tasks for io_process_ring decode dispatch queue."""
+
+OPTERYX_TRACK_CODEC_METRICS: bool = str(get("OPTERYX_TRACK_CODEC_METRICS", "1")) != "0"
+"""Enable codec performance tracking for cost-aware dispatch.
+
+When enabled, records actual decode times per compression codec and uses
+those measurements to order column dispatch. This improves queue depth
+distribution and reduces p99 latency.
+
+Disable with: OPTERYX_TRACK_CODEC_METRICS=0
+"""
+
 PARQUET_SMALL_FILE_THRESHOLD: int = int(get("PARQUET_SMALL_FILE_THRESHOLD", 4 * 1024 * 1024))
 """Files whose known size does not exceed this value (bytes) are fetched in a
 single whole-file read rather than per-column range requests (§3)."""

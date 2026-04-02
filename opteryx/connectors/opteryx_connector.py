@@ -167,35 +167,29 @@ class OpteryxTable(Diachronic, PredicatePushable):
 
         # Build Manifest from catalog table.scan()
         # scan() returns an iterable of DataFile objects
-        try:
-            # Get file list from catalog via table.scan()
-            scan = self.table.scan(snapshot_id=self.snapshot_id)
+        scan = self.table.scan(snapshot_id=self.snapshot_id)
 
-            # Build FileEntry for each file
-            file_entries = []
-            protocols = set()
+        # Build FileEntry for each file
+        file_entries = []
+        protocols = set()
 
-            for data_file in scan:
-                file_entry = FileEntry.from_datafile(data_file)
-                file_entries.append(file_entry)
+        for data_file in scan:
+            file_entry = FileEntry.from_datafile(data_file)
+            file_entries.append(file_entry)
 
-                # Extract protocol for validation (gs://, s3://, file://)
-                if "://" in file_entry.file_path:
-                    protocol = file_entry.file_path.split("://")[0]
-                    protocols.add(protocol)
+            # Extract protocol for validation (gs://, s3://, file://)
+            if "://" in file_entry.file_path:
+                protocol = file_entry.file_path.split("://")[0]
+                protocols.add(protocol)
 
-            # Validate all files use same protocol
-            if len(protocols) > 1:
-                raise DatasetReadError(
-                    f"Mixed protocols in manifest: {protocols}. All files must use the same protocol."
-                )
+        # Validate all files use same protocol
+        if len(protocols) > 1:
+            raise DatasetReadError(
+                f"Mixed protocols in manifest: {protocols}. All files must use the same protocol."
+            )
 
-            # Create Manifest with files and schema
-            self.manifest = Manifest(files=file_entries, schema=self.schema)
-
-        except Exception as e:
-            # Fallback: create empty Manifest if scan fails
-            self.manifest = Manifest(files=[], schema=self.schema)
+        # Create Manifest with files and schema
+        self.manifest = Manifest(files=file_entries, schema=self.schema)
 
         return self.schema, self.manifest
 

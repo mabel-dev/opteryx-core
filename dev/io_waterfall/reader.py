@@ -142,6 +142,11 @@ class TraceReader:
             elif event_type == "download_complete":
                 timeline["download_complete"] = event.get("timestamp")
                 timeline["bytes_received"] = event.get("bytes_received") or 0
+            elif event_type == "buffer_start":
+                if "buffer_start" not in timeline:
+                    timeline["buffer_start"] = event.get("timestamp")
+            elif event_type == "buffer_complete":
+                timeline["buffer_complete"] = event.get("timestamp")
             elif event_type == "decode_start":
                 timeline["decode_start"] = event.get("timestamp")
             elif event_type == "decode_complete":
@@ -236,6 +241,8 @@ class TraceReader:
                 "label": self._operation_label(file_id, component, rg_idx, column),
                 "download_start": None,
                 "download_complete": None,
+                "buffer_start": None,
+                "buffer_complete": None,
                 "decode_start": None,
                 "decode_complete": None,
                 "bytes_received": 0,
@@ -251,12 +258,19 @@ class TraceReader:
             if event_type not in {
                 "download_start",
                 "download_complete",
+                "buffer_start",
+                "buffer_complete",
                 "decode_start",
                 "decode_complete",
             }:
                 continue
 
-            phase = "download" if event_type.startswith("download_") else "decode"
+            if event_type.startswith("download_"):
+                phase = "download"
+            elif event_type.startswith("buffer_"):
+                phase = "buffer"
+            else:
+                phase = "decode"
             key = self._operation_key(event, phase)
             if key[0] is None:
                 continue
@@ -299,6 +313,30 @@ class TraceReader:
                 pending_decode[key].append(idx)
                 continue
 
+            if event_type == "buffer_start":
+                idx = None
+                for candidate in reversed(operations_by_key.get(key, [])):
+                    row = operations[candidate]
+                    if row["buffer_start"] is None and row["download_complete"] is not None:
+                        idx = candidate
+                        break
+                if idx is None:
+                    idx = new_operation(key)
+                operations[idx]["buffer_start"] = event.get("timestamp")
+                continue
+
+            if event_type == "buffer_complete":
+                idx = None
+                for candidate in reversed(operations_by_key.get(key, [])):
+                    row = operations[candidate]
+                    if row["buffer_start"] is not None and row["buffer_complete"] is None:
+                        idx = candidate
+                        break
+                if idx is None:
+                    idx = new_operation(key)
+                operations[idx]["buffer_complete"] = event.get("timestamp")
+                continue
+
             # decode_complete
             idx = pending_decode[key].popleft() if pending_decode[key] else None
             if idx is None:
@@ -337,26 +375,48 @@ class TraceReader:
         total_duration = (t_end - t0) if (t0 is not None and t_end is not None) else None
 
         ops: List[Dict[str, Any]] = []
+        pending: Dict[str, Dict[str, Any]] = {}
+
         for e in events:
             if e["type"] != "operator_execute":
                 continue
-            ts_end = e["timestamp"]
-            dur_ns = e.get("duration_ns", 0) or 0
-            dur_s = dur_ns / 1e9
-            ts_start = ts_end - dur_s
-            ts_start_rel = ts_start - t0 if t0 is not None else ts_start
-            ts_end_rel = ts_end - t0 if t0 is not None else ts_end
-            ops.append(
-                {
-                    "operator_name": e.get("operator_name", "unknown"),
-                    "operator_id": e.get("operator_id", ""),
-                    "wall_start": ts_start_rel,
-                    "wall_end": ts_end_rel,
-                    "rows_out": e.get("rows_out", 0) or 0,
-                    "duration_ns": dur_ns,
-                    "produced_rows": e.get("produced_rows", True),
+
+            oid = e.get("operator_id", "")
+            phase = e.get("phase")
+            name = e.get("operator_name", "unknown")
+            ts = e["timestamp"]
+
+            if phase == "start":
+                pending[oid] = {
+                    "operator_name": name,
+                    "operator_id": oid,
+                    "wall_start": ts - t0 if t0 is not None else ts,
+                    "wall_end": ts - t0 if t0 is not None else ts,
+                    "rows_out": 0,
+                    "duration_ns": 0,
+                    "produced_rows": False,
                 }
-            )
+                continue
+
+            row = pending.pop(oid, None)
+            if row is None:
+                row = {
+                    "operator_name": name,
+                    "operator_id": oid,
+                    "wall_start": ts - t0 if t0 is not None else ts,
+                    "wall_end": ts - t0 if t0 is not None else ts,
+                    "rows_out": 0,
+                    "duration_ns": 0,
+                    "produced_rows": False,
+                }
+
+            row["wall_end"] = ts - t0 if t0 is not None else ts
+            row["rows_out"] = e.get("rows_out", 0) or 0
+            row["duration_ns"] = e.get("duration_ns", 0) or 0
+            row["produced_rows"] = e.get("produced_rows", True)
+            ops.append(row)
+
+        ops.sort(key=lambda row: (row.get("wall_start", 0), row.get("operator_name", "")))
         return ops, t0, total_duration
 
     def operator_profiles(self) -> List[Dict[str, Any]]:

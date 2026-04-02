@@ -227,7 +227,10 @@ std::vector<uint8_t> HttpClient::get(
 // head() — thread-safe HEAD via curl_easy_perform()
 // ---------------------------------------------------------------------------
 
-std::map<std::string, std::string> HttpClient::head(const std::string& url) {
+std::map<std::string, std::string> HttpClient::head(
+    const std::string& url,
+    const std::map<std::string, std::string>& headers)
+{
     CURL* easy = curl_easy_init();
     if (!easy) throw std::runtime_error("curl_easy_init() failed");
 
@@ -244,12 +247,28 @@ std::map<std::string, std::string> HttpClient::head(const std::string& url) {
     configure_ssl(easy);
     configure_share(easy);
 
+    // Build custom header list
+    struct curl_slist* hlist = nullptr;
+    for (const auto& kv : headers) {
+        std::string line = kv.first + ": " + kv.second;
+        hlist = curl_slist_append(hlist, line.c_str());
+    }
+    if (hlist) curl_easy_setopt(easy, CURLOPT_HTTPHEADER, hlist);
+
     CURLcode res = curl_easy_perform(easy);
+
+    long http_code = 0;
+    curl_easy_getinfo(easy, CURLINFO_RESPONSE_CODE, &http_code);
+    curl_slist_free_all(hlist);
     curl_easy_cleanup(easy);
 
     if (res != CURLE_OK) {
         throw std::runtime_error(
             std::string("CURL error: ") + curl_easy_strerror(res));
+    }
+    if (http_code >= 400) {
+        throw std::runtime_error(
+            std::string("HTTP ") + std::to_string(http_code) + ": " + url);
     }
 
     return parse_headers(buf.headers_raw);

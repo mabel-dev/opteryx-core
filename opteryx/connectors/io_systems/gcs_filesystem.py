@@ -168,16 +168,12 @@ class OpteryxGcsFileSystem:
             bucket, _, _, _ = path_utils.get_parts(norm_path)
             object_full_path = urllib.parse.quote(norm_path[(len(bucket) + 1) :], safe="")
             url = f"https://storage.googleapis.com/{bucket}/{object_full_path}"
-            try:
-                headers = self.http_client.head(
-                    url,
-                    headers={"Authorization": bearer},
-                )
-                # HEAD succeeded (http_client raises RuntimeError on error)
-                size = int(headers.get("content-length", 0))
-                return idx, FileInfo(path=path, type=FileType.File, size=size)
-            except Exception:
-                return idx, FileInfo(path=path, type=FileType.NotFound)
+            headers = self.http_client.head(
+                url,
+                headers={"Authorization": bearer},
+            )
+            size = int(headers.get("content-length", 0))
+            return idx, FileInfo(path=path, type=FileType.File, size=size)
 
         # Capture a single valid bearer token for this batch.
         bearer = self._bearer
