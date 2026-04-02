@@ -13,6 +13,7 @@ morsels.  Dictionary-encoded columns are ORDER BY-correct (codes are remapped to
 value rank before sorting, with AVX2/NEON SIMD acceleration for uint8 codes).
 """
 
+from typing import Generator, Optional
 from opteryx.compiled.draken.morsels.morsel import Morsel
 from opteryx.compiled.morsel_ops.sort import morsel_sort
 from opteryx.exceptions import ColumnNotFoundError
@@ -24,11 +25,16 @@ from orso.types import OrsoTypes
 from opteryx import EOS
 
 from . import BasePlanNode
+from opteryx.operators.catalog import OperatorCategory, ParallelStrategy
 
 _DATA_FORMAT = "draken"
 
 
 class SortNode(BasePlanNode):
+    category = OperatorCategory.SORT
+    parallel_strategy = ParallelStrategy.SINGLE_THREAD
+    is_pipeline_breaking = True
+    logical_node_type = 'Order'
     def __init__(self, properties: QueryProperties, **parameters):
         BasePlanNode.__init__(self, properties=properties, **parameters)
         self.order_by = parameters.get("order_by", [])
@@ -42,7 +48,7 @@ class SortNode(BasePlanNode):
     def name(self):  # pragma: no cover
         return "Sort"
 
-    def execute(self, morsel, **kwargs):
+    def execute(self, morsel):
         morsel = self.ensure_draken_morsel(morsel)
 
         if morsel is not EOS:

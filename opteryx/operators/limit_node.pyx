@@ -11,6 +11,7 @@ This is a SQL Query Execution Plan Node.
 This Node performs the LIMIT and the OFFSET steps
 """
 
+from typing import Generator, Optional
 from collections.abc import Iterable
 
 from opteryx.compiled.draken.morsels.morsel import Morsel
@@ -19,11 +20,15 @@ from opteryx.models import QueryProperties
 from opteryx import EOS
 
 from . import BasePlanNode
+from opteryx.operators.catalog import OperatorCategory, ParallelStrategy
 
 _DATA_FORMAT = "draken"
 
 
 class LimitNode(BasePlanNode):
+    category = OperatorCategory.LIMIT
+    parallel_strategy = ParallelStrategy.SINGLE_THREAD
+    logical_node_type = 'Limit'
     def __init__(self, properties: QueryProperties, **parameters):
         BasePlanNode.__init__(self, properties=properties, **parameters)
         self.limit = parameters.get("limit", float("inf"))
@@ -40,7 +45,7 @@ class LimitNode(BasePlanNode):
     def config(self):  # pragma: no cover
         return str(self.limit) + " OFFSET " + str(self.offset)
 
-    def execute(self, morsel: Morsel, **kwargs) -> Morsel:
+    def execute(self, morsel):
         morsel = self.ensure_draken_morsel(morsel)
 
         if morsel == EOS:

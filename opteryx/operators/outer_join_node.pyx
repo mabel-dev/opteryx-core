@@ -30,6 +30,7 @@ from opteryx.utils.arrow import align_tables
 from opteryx import EOS
 
 from . import JoinNode
+from opteryx.operators.catalog import OperatorCategory, ParallelStrategy
 
 _DATA_FORMAT = "arrow"
 
@@ -160,6 +161,10 @@ def full_join(
 
 
 class OuterJoinNode(JoinNode):
+    category = OperatorCategory.JOIN
+    is_join = True
+    parallel_strategy = ParallelStrategy.SINGLE_THREAD
+    is_pipeline_breaking = True
     def __init__(self, properties: QueryProperties, **parameters):
         # Ensure `join_type` exists before the base initializer accesses `self.name`
         self.join_type = parameters["type"]
@@ -184,6 +189,7 @@ class OuterJoinNode(JoinNode):
         self.left_seen_rows = set()
 
         self.filter_index = None
+        self._build_phase = True
 
     @property
     def name(self):  # pragma: no cover
@@ -199,11 +205,12 @@ class OuterJoinNode(JoinNode):
             return f"{self.join_type.upper()} JOIN (USING {','.join(map(format_expression, self.using))})"
         return f"{self.join_type.upper()}"
 
-    def execute(self, morsel: pyarrow.Table, join_leg: str) -> pyarrow.Table:
+    def execute(self, morsel):
         morsel = self.ensure_arrow_table(morsel)
 
-        if join_leg == "left":
+        if self._build_phase:
             if morsel == EOS:
+                self._build_phase = False
                 self.left_relation = pyarrow.concat_tables(self.left_buffer, promote_options="none")
                 self.left_buffer.clear()
                 self.left_relation = self._apply_join_key_casts(self.left_relation, is_left=True)
@@ -228,7 +235,7 @@ class OuterJoinNode(JoinNode):
             yield None
             return
 
-        if join_leg == "right":
+        else:
             if morsel == EOS:
                 right_relation = pyarrow.concat_tables(self.right_buffer, promote_options="none")
                 self.right_buffer.clear()

@@ -1,4 +1,5 @@
 from opteryx.models import PhysicalPlan
+from opteryx.operators.catalog import OperatorCategory, get_registry
 
 
 def plan_to_mermaid(plan: PhysicalPlan, stats: list = None) -> str:
@@ -54,14 +55,34 @@ def plan_to_mermaid(plan: PhysicalPlan, stats: list = None) -> str:
         for stat in stats:
             node_stats[stat["identity"]] = stat
 
-    # Helper function to get logical node type (same as in cursor._get_plan_dict)
+    # Helper function to get logical node type using catalog category or name heuristics
     def _get_logical_node_type(node):
         try:
+            # First, try to use catalog metadata for reliable type detection
+            registry = get_registry()
+            metadata = registry.get(node.__class__)
+            if metadata:
+                category = metadata.category
+                category_map = {
+                    OperatorCategory.SCAN: "ReadRel",
+                    OperatorCategory.JOIN: "JoinRel",
+                    OperatorCategory.AGGREGATE: "AggregateRel",
+                    OperatorCategory.PROJECT: "ProjectRel",
+                    OperatorCategory.FILTER: "FilterRel",
+                    OperatorCategory.LIMIT: "LimitRel",
+                    OperatorCategory.SORT: "SortRel",
+                    OperatorCategory.SET_OP: "UnionRel",
+                    OperatorCategory.DDL: "DDLRel",
+                    OperatorCategory.IO: "IRel",
+                }
+                return category_map.get(category)
+
+            # Fall back to name-based heuristics for operators not in catalog
             if getattr(node, "is_scan", False):
                 return "ReadRel"
             if getattr(node, "is_join", False):
                 return "JoinRel"
-            # fall back to name-based heuristics
+
             candidate = getattr(node, "name", None) or getattr(node, "node_type", None)
             if candidate is None:
                 return None

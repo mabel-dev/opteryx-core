@@ -13,8 +13,9 @@ This node is deliberately narrower than the legacy Arrow-first inner join:
 Unsupported shapes fail in the physical planner rather than adding more
 Arrow conversions here.
 """
-
 from __future__ import annotations
+
+from typing import Generator, Optional
 
 import time
 from threading import Lock
@@ -34,11 +35,16 @@ from opteryx import EOS
 from opteryx import config
 
 from . import JoinNode
+from opteryx.operators.catalog import OperatorCategory, ParallelStrategy
 
 _DATA_FORMAT = "draken"
 
 
 class DrakenInnerJoinNode(JoinNode):
+    category = OperatorCategory.JOIN
+    is_join = True
+    parallel_strategy = ParallelStrategy.SINGLE_THREAD
+    is_pipeline_breaking = True
     join_type = "inner"
 
     def __init__(self, properties: QueryProperties, **parameters):
@@ -55,6 +61,7 @@ class DrakenInnerJoinNode(JoinNode):
         self.left_hash = None
         self.left_is_empty = False
         self.lock = Lock()
+        self._build_phase = True
         self.carchar_probe_load_factor = float(
             config.get("FEATURE_CARCHAR_PROBE_LOAD_FACTOR", 0.35)
         )
@@ -170,10 +177,11 @@ class DrakenInnerJoinNode(JoinNode):
     def _append_left_morsel(self, morsel: Morsel) -> None:
         self.left_morsels.append(morsel)
 
-    def execute(self, morsel, join_leg: str):
+    def execute(self, morsel):
         with self.lock:
-            if join_leg == "left":
+            if self._build_phase:
                 if morsel == EOS:
+                    self._build_phase = False
                     if not self.left_morsels:
                         self.left_is_empty = True
                         yield None
@@ -261,7 +269,7 @@ class DrakenInnerJoinNode(JoinNode):
                 yield None
                 return
 
-            if join_leg == "right":
+            else:
                 if morsel == EOS:
                     yield EOS
                     return

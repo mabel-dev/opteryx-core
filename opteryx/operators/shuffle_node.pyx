@@ -20,11 +20,14 @@ from opteryx.operators.shuffle.partitioning import select_num_bins_from_rows
 from opteryx import EOS
 
 from . import BasePlanNode
+from opteryx.operators.catalog import OperatorCategory, ParallelStrategy
 
 _DATA_FORMAT = "draken"
 
 
 class ShuffleNode(BasePlanNode):
+    category = OperatorCategory.SET_OP
+    parallel_strategy = ParallelStrategy.SINGLE_THREAD
     def __init__(self, properties: QueryProperties, **parameters):
         super().__init__(properties=properties, **parameters)
 
@@ -303,9 +306,8 @@ class ShuffleNode(BasePlanNode):
                 yield morsel
         self.readings["shuffle_chunks_out"] += emitted
 
-    def execute(self, morsel, **kwargs):
+    def execute(self, morsel):
         morsel = self.ensure_draken_morsel(morsel)
-        _ = kwargs
 
         if morsel is EOS:
             for result in self._drain():

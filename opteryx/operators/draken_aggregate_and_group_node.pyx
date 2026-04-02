@@ -9,8 +9,9 @@ Draken-native grouped aggregation node.
 This node keeps existing planner/expression behavior but executes the grouped
 aggregation kernel using the compiled Draken backend.
 """
-
 from __future__ import annotations
+
+from typing import Generator, Optional
 
 import time
 
@@ -30,6 +31,7 @@ from opteryx import EMPTY
 from opteryx import EOS
 
 from . import BasePlanNode
+from opteryx.operators.catalog import OperatorCategory, ParallelStrategy
 
 _DATA_FORMAT = "draken"
 
@@ -73,6 +75,10 @@ def create_groupby_engine(group_by_columns, aggregations):
 
 
 class DrakenAggregateAndGroupNode(BasePlanNode):
+    category = OperatorCategory.AGGREGATE
+    parallel_strategy = ParallelStrategy.SINGLE_THREAD
+    is_pipeline_breaking = True
+    logical_node_type = 'AggregateAndGroup'
     ENGINE_READING_KEYS = (
         "feature_groupby_engine_carchar",
         "feature_groupby_engine_constant",
@@ -415,8 +421,7 @@ class DrakenAggregateAndGroupNode(BasePlanNode):
             emitted=emitted,
         )
 
-    def execute(self, morsel, **kwargs):
-        _ = kwargs
+    def execute(self, morsel):
 
         draken = self.ensure_draken_morsel(morsel)
 

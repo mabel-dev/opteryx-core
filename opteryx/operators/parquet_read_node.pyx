@@ -55,6 +55,7 @@ from opteryx import config
 from .read_node import ReaderNode
 from .read_node import normalize_morsel
 from .read_node import struct_to_jsonb
+from opteryx.operators.catalog import OperatorCategory, ParallelStrategy
 
 _DATA_FORMAT = "arrow,draken"
 
@@ -73,6 +74,9 @@ _FOOTER_POOL = LazyPoolProxy(_get_footer_pool)
 
 
 class ParquetReadNode(ReaderNode):
+    category = OperatorCategory.SCAN
+    is_scan = True
+    parallel_strategy = ParallelStrategy.MULTI_THREAD
     """Read node backed by column-chunk range reads via ``parquet_io``.
 
     Activated for filesystem-backed connectors (GCS, S3, local) when the
@@ -149,12 +153,12 @@ class ParquetReadNode(ReaderNode):
     def _commute_operator(op: str) -> str:
         """Commute comparison operators (e.g., a < b becomes b > a)."""
         commute_map = {
-            "Lt": "Gt",
-            "Gt": "Lt",
-            "LtEq": "GtEq",
-            "GtEq": "LtEq",
-            "Eq": "Eq",
-            "NotEq": "NotEq",
+            "Lt",
+            "Gt",
+            "LtEq",
+            "GtEq",
+            "Eq",
+            "NotEq",
         }
         return commute_map.get(op, op)
 
@@ -197,12 +201,12 @@ class ParquetReadNode(ReaderNode):
         """
         # Map SQL operators to Draken vector methods
         op_map = {
-            "Eq": "equals",
-            "NotEq": "not_equals",
-            "Lt": "less_than",
-            "Gt": "greater_than",
-            "LtEq": "less_than_or_equals",
-            "GtEq": "greater_than_or_equals",
+            "Eq",
+            "NotEq",
+            "Lt",
+            "Gt",
+            "LtEq",
+            "GtEq",
         }
 
         if operator not in op_map:
@@ -228,12 +232,12 @@ class ParquetReadNode(ReaderNode):
     def _compile_float64_scalar_dispatcher(column_name: str, operator: str, scalar_value: float):
         """Generate specialized function for: float64_column <op> constant"""
         op_map = {
-            "Eq": "equals",
-            "NotEq": "not_equals",
-            "Lt": "less_than",
-            "Gt": "greater_than",
-            "LtEq": "less_than_or_equals",
-            "GtEq": "greater_than_or_equals",
+            "Eq",
+            "NotEq",
+            "Lt",
+            "Gt",
+            "LtEq",
+            "GtEq",
         }
 
         if operator not in op_map:
@@ -572,7 +576,7 @@ class ParquetReadNode(ReaderNode):
                 [pyarrow.array([]) for _ in output_arrow_schema], schema=output_arrow_schema
             )
 
-    def execute(self, morsel, **kwargs) -> Generator:
+    def execute(self, morsel):
         if morsel == EOS:
             yield None
             return

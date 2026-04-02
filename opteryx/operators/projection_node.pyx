@@ -12,6 +12,7 @@ This Node eliminates columns that are not needed in a Relation. This is also the
 that performs column renames.
 """
 
+from typing import Generator, Optional
 from collections.abc import Iterable
 
 from opteryx.compiled.draken.encoding import DRAKEN_ENCODING_CONSTANT
@@ -23,11 +24,16 @@ from opteryx.models import QueryProperties
 from opteryx import EOS
 
 from . import BasePlanNode
+from opteryx.operators.catalog import OperatorCategory, ParallelStrategy
 
 _DATA_FORMAT = "draken"
 
 
 class ProjectionNode(BasePlanNode):
+    category = OperatorCategory.PROJECT
+    is_stateless = True
+    parallel_strategy = ParallelStrategy.MULTI_THREAD
+    logical_node_type = 'Project'
     is_stateless = True
 
     def __init__(self, properties: QueryProperties, **parameters):
@@ -81,7 +87,7 @@ class ProjectionNode(BasePlanNode):
             self.readings["draken_constant_columns_emitted"] += emitted
         return morsel.select(self.projection)
 
-    def execute(self, morsel: Morsel, **kwargs) -> Morsel:
+    def execute(self, morsel):
         if morsel == EOS:
             yield EOS
             return

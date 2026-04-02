@@ -18,6 +18,7 @@ This is a toy implementation, whilst it is used in production payloads we're pla
 milliseconds of performance difference between this and a hash join.
 """
 
+from typing import Generator, Optional
 import time
 
 import numpy
@@ -32,11 +33,16 @@ from pyarrow import Table
 from opteryx import EOS
 
 from . import JoinNode
+from opteryx.operators.catalog import OperatorCategory, ParallelStrategy
 
 _DATA_FORMAT = "arrow"
 
 
 class NestedLoopJoinNode(JoinNode):
+    category = OperatorCategory.JOIN
+    is_join = True
+    parallel_strategy = ParallelStrategy.SINGLE_THREAD
+    is_pipeline_breaking = True
     join_type = "nested_loop"
 
     def __init__(self, properties: QueryProperties, **parameters):
@@ -49,6 +55,7 @@ class NestedLoopJoinNode(JoinNode):
         self.left_buffer = []
 
         self.left_filter = None  # bloom filter for the left relation
+        self._build_phase = True
 
     @property
     def name(self):  # pragma: no cover
@@ -81,11 +88,12 @@ class NestedLoopJoinNode(JoinNode):
             return table
         return table.filter(mask)
 
-    def execute(self, morsel: Table, join_leg: str) -> Table:
+    def execute(self, morsel):
         morsel = self.ensure_arrow_table(morsel)
 
-        if join_leg == "left":
+        if self._build_phase:
             if morsel == EOS:
+                self._build_phase = False
                 self.left_relation = pyarrow.concat_tables(self.left_buffer, promote_options="none")
                 self.left_buffer.clear()
                 self.left_relation = self._apply_join_key_casts(self.left_relation, is_left=True)
@@ -104,7 +112,7 @@ class NestedLoopJoinNode(JoinNode):
             yield None
             return
 
-        if join_leg == "right":
+        else:
             if morsel == EOS:
                 yield EOS
                 return

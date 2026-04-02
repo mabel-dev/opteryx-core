@@ -11,17 +11,23 @@ This is a SQL Query Execution Plan Node.
 This Node eliminates duplicate records.
 """
 
+from typing import Generator, Optional
 from opteryx.compiled.draken import Morsel
 from opteryx.models import QueryProperties
 
 from opteryx import EOS
 
 from . import BasePlanNode
+from opteryx.operators.catalog import OperatorCategory, ParallelStrategy
 
 _DATA_FORMAT = "arrow,draken"
 
 
 class DistinctNode(BasePlanNode):
+    category = OperatorCategory.SET_OP
+    parallel_strategy = ParallelStrategy.SINGLE_THREAD
+    is_pipeline_breaking = True
+    logical_node_type = 'Distinct'
     def __init__(self, properties: QueryProperties, **parameters):
         BasePlanNode.__init__(self, properties=properties, **parameters)
         self._distinct_on = parameters.get("on")
@@ -41,7 +47,7 @@ class DistinctNode(BasePlanNode):
     def name(self):  # pragma: no cover
         return "Distinction"
 
-    def execute(self, morsel, **kwargs):
+    def execute(self, morsel):
         from opteryx.compiled.morsel_ops.distinct import distinct
         from opteryx.compiled.structures.carchar_set import CarcharSetWrapper
 
@@ -64,7 +70,7 @@ class DistinctNode(BasePlanNode):
             if isinstance(converted, pyarrow.Table):
                 converted = Morsel.iter_from_arrow(converted)
             for sub_morsel in converted if hasattr(converted, "__iter__") else [converted]:
-                yield from self.execute(sub_morsel, **kwargs)
+                yield from self.execute(sub_morsel)
             return
 
         for chunk in [morsel]:

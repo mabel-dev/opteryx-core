@@ -10,8 +10,9 @@ This operator stays on Draken morsels end-to-end. It does not route through the
 grouped carchar backend and it does not delegate execution to the Arrow-based
 simple aggregate operator.
 """
-
 from __future__ import annotations
+
+from typing import Generator, Optional
 
 import time
 
@@ -32,6 +33,7 @@ from opteryx.operators.aggregate_helpers import extract_evaluations
 from opteryx import EOS
 
 from . import BasePlanNode
+from opteryx.operators.catalog import OperatorCategory, ParallelStrategy
 
 _DATA_FORMAT = "draken"
 _DRAKEN_ENCODING_CONSTANT = 3
@@ -303,6 +305,10 @@ class _DrakenAggregateCollector:
 
 
 class DrakenAggregateNode(BasePlanNode):
+    category = OperatorCategory.AGGREGATE
+    parallel_strategy = ParallelStrategy.SINGLE_THREAD
+    is_pipeline_breaking = True
+    logical_node_type = 'Aggregate'
     def __init__(self, properties: QueryProperties, **parameters):
         super().__init__(properties=properties, **parameters)
 
@@ -351,8 +357,7 @@ class DrakenAggregateNode(BasePlanNode):
 
         return Morsel.from_vectors(names, vectors)
 
-    def execute(self, morsel, **kwargs):
-        _ = kwargs
+    def execute(self, morsel):
         draken = self.ensure_draken_morsel(morsel)
 
         if draken == EOS:

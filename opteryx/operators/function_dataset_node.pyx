@@ -26,6 +26,7 @@ from opteryx.utils import series
 from orso.types import OrsoTypes
 
 from .read_node import ReaderNode
+from opteryx.operators.catalog import OperatorCategory, ParallelStrategy
 
 _DATA_FORMAT = "draken"
 _EPOCH_DATE = datetime.date(1970, 1, 1)
@@ -144,6 +145,10 @@ DATASET_FUNCTIONS = {
 
 
 class FunctionDatasetNode(ReaderNode):
+    category = OperatorCategory.SCAN
+    is_scan = True
+    parallel_strategy = ParallelStrategy.SINGLE_THREAD
+    logical_node_type = 'FunctionDataset'
     def __init__(self, properties: QueryProperties, **parameters):
         """
         The Blob Reader Node is responsible for reading the relevant blobs
@@ -177,7 +182,7 @@ class FunctionDatasetNode(ReaderNode):
     def can_push_selection(self):
         return False
 
-    def execute(self, morsel, **kwargs) -> Generator:
+    def execute(self, morsel) -> Generator:
         try:
             start_time = time.time_ns()
             result_morsel = DATASET_FUNCTIONS[self.function](**self.parameters)  # type: ignore

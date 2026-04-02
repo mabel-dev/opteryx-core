@@ -8,6 +8,7 @@ from opteryx.exceptions import InvalidInternalStateError
 from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.models import PhysicalPlan
 from opteryx.planner.logical_planner import LogicalPlanStepType
+from opteryx.operators.catalog import get_registry
 
 from opteryx import operators
 
@@ -50,17 +51,17 @@ def create_physical_plan(logical_plan, query_properties) -> PhysicalPlan:
                 },
             )
         elif node_type == LogicalPlanStepType.Distinct:
-            node = operators.DistinctNode(query_properties, **node_config)
+            node = get_registry().dispatch(node_type, query_properties, **node_config)
         elif node_type == LogicalPlanStepType.Exit:
-            node = operators.ExitNode(query_properties, **node_config)
+            node = get_registry().dispatch(node_type, query_properties, **node_config)
         elif node_type == LogicalPlanStepType.Explain:
-            node = operators.ExplainNode(query_properties, **node_config)
+            node = get_registry().dispatch(node_type, query_properties, **node_config)
         elif node_type == LogicalPlanStepType.Filter:
             node = operators.FilterNode(query_properties, filter=node_config["condition"], **{k:v for k,v in node_config.items() if k in ("all_relations",)})
         elif node_type == LogicalPlanStepType.FunctionDataset:
-            node = operators.FunctionDatasetNode(query_properties, **node_config)
+            node = get_registry().dispatch(node_type, query_properties, **node_config)
         elif node_type == LogicalPlanStepType.HeapSort:
-            node = operators.HeapSortNode(query_properties, **node_config)
+            node = get_registry().dispatch(node_type, query_properties, **node_config)
         elif node_type == LogicalPlanStepType.Join:
             if node_config.get("type") == "inner":
                 # INNER JOIN, NATURAL JOIN
@@ -89,9 +90,9 @@ def create_physical_plan(logical_plan, query_properties) -> PhysicalPlan:
                 # We don't support other JOIN types, e.g. RIGHT SEMI, RIGHT ANTI
                 raise InvalidInternalStateError(f"Unsupported JOIN type '{node_config.get('type')}'")
         elif node_type == LogicalPlanStepType.Limit:
-            node = operators.LimitNode(query_properties, **{k:v for k,v in node_config.items() if k in ("limit", "offset", "all_relations")})
+            node = get_registry().dispatch(node_type, query_properties, **{k:v for k,v in node_config.items() if k in ("limit", "offset", "all_relations")})
         elif node_type == LogicalPlanStepType.Order:
-            node = operators.SortNode(query_properties, **{k:v for k,v in node_config.items() if k in ("order_by", "all_relations")})
+            node = get_registry().dispatch(node_type, query_properties, **{k:v for k,v in node_config.items() if k in ("order_by", "all_relations")})
         elif node_type == LogicalPlanStepType.Project:
             node = operators.ProjectionNode(
                 query_properties,
@@ -119,7 +120,7 @@ def create_physical_plan(logical_plan, query_properties) -> PhysicalPlan:
                     "Only Parquet scans are supported. Non-parquet external scan paths have been removed."
                 )
         elif node_type == LogicalPlanStepType.Set:
-            node = operators.SetVariableNode(query_properties, **node_config)
+            node = get_registry().dispatch(node_type, query_properties, **node_config)
         elif node_type == LogicalPlanStepType.Show:
             if node_config["object_type"] == "VARIABLE":
                 node = operators.ShowValueNode(query_properties, kind=node_config["items"][1], value=node_config["items"][1], **node_config)
@@ -137,13 +138,13 @@ def create_physical_plan(logical_plan, query_properties) -> PhysicalPlan:
             # Drop view(s) (view management)
             node = operators.ViewManagementNode(query_properties, action="drop_view", **node_config)
         elif node_type == LogicalPlanStepType.ShowColumns:
-            node = operators.ShowColumnsNode(query_properties, **node_config)
+            node = get_registry().dispatch(node_type, query_properties, **node_config)
         elif node_type == LogicalPlanStepType.Union:
-            node = operators.UnionNode(query_properties, **node_config)
+            node = get_registry().dispatch(node_type, query_properties, **node_config)
         elif node_type == LogicalPlanStepType.Unnest:
             node = operators.UnnestJoinNode(query_properties, **node_config)
         elif node_type == LogicalPlanStepType.Analyze:
-            node = operators.TableManagementNode(query_properties, action="analyze_table", **node_config)
+            node = get_registry().dispatch(node_type, query_properties, **node_config)
         elif node_type == LogicalPlanStepType.Comment:
             # COMMENT ON VIEW/TABLE/EXTENSION - use ViewManagementNode with 'comment' action
             node = operators.ViewManagementNode(query_properties, action="comment", **node_config)

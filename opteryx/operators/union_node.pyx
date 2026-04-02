@@ -9,16 +9,21 @@ Union Node
 This is a SQL Query Execution Plan Node.
 """
 
+from typing import Generator, Optional
 from opteryx.models import QueryProperties
 
 from opteryx import EOS
 
 from . import BasePlanNode
+from opteryx.operators.catalog import OperatorCategory, ParallelStrategy
 
 _DATA_FORMAT = "arrow,draken"
 
 
 class UnionNode(BasePlanNode):
+    category = OperatorCategory.SET_OP
+    parallel_strategy = ParallelStrategy.SINGLE_THREAD
+    logical_node_type = 'Union'
     def __init__(self, properties: QueryProperties, **parameters):
         BasePlanNode.__init__(self, properties=properties, **parameters)
         self.columns = parameters.get("columns", [])
@@ -34,7 +39,7 @@ class UnionNode(BasePlanNode):
     def config(self):  # pragma: no cover
         return ""
 
-    def execute(self, morsel, **kwargs):
+    def execute(self, morsel):
         """
         Union needs to ensure the column names are the same and that
         coercible types are coerced.

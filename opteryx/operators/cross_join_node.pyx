@@ -14,6 +14,7 @@ here rather than calling the join() functions
 Note: CROSS JOIN UNNEST is implemented by the UnnestJoinNode
 """
 
+from typing import Generator, Optional
 import numpy
 import pyarrow
 from opteryx.compiled.structures.carchar_set import CarcharSetWrapper
@@ -22,6 +23,7 @@ from opteryx.models import QueryProperties
 from opteryx import EOS
 
 from . import JoinNode
+from opteryx.operators.catalog import OperatorCategory, ParallelStrategy
 
 _DATA_FORMAT = "arrow"
 
@@ -110,6 +112,10 @@ def _cross_join(left_morsel, right):
 
 
 class CrossJoinNode(JoinNode):
+    category = OperatorCategory.JOIN
+    is_join = True
+    parallel_strategy = ParallelStrategy.SINGLE_THREAD
+    is_pipeline_breaking = True
     """
     Implements a SQL CROSS JOIN
     """
@@ -131,6 +137,7 @@ class CrossJoinNode(JoinNode):
         self.hash_set = CarcharSetWrapper()
 
         self.continue_executing = True
+        self._build_phase = True
 
     @property
     def name(self):  # pragma: no cover
@@ -140,15 +147,16 @@ class CrossJoinNode(JoinNode):
     def config(self):  # pragma: no cover
         return f"CROSS JOIN"
 
-    def execute(self, morsel: pyarrow.Table, join_leg: str) -> pyarrow.Table:
+    def execute(self, morsel):
         morsel = self.ensure_arrow_table(morsel)
 
         if not self.continue_executing:
             yield None
             return
 
-        if join_leg == "left":
+        if self._build_phase:
             if morsel == EOS:
+                self._build_phase = False
                 self.left_relation = pyarrow.concat_tables(self.left_buffer, promote_options="none")
                 self.left_buffer.clear()
             else:
@@ -156,7 +164,7 @@ class CrossJoinNode(JoinNode):
             yield None
             return
 
-        if join_leg == "right":
+        else:
             if morsel == EOS:
                 right_table = pyarrow.concat_tables(self.right_buffer, promote_options="none")  # type: ignore
                 self.right_buffer = None

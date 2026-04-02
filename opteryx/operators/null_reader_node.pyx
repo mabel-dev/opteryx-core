@@ -23,6 +23,7 @@ from orso.schema import convert_orso_schema_to_arrow_schema
 from opteryx import EOS
 
 from . import BasePlanNode
+from opteryx.operators.catalog import OperatorCategory, ParallelStrategy
 
 _DATA_FORMAT = "arrow"
 
@@ -31,6 +32,9 @@ logger = logging.getLogger(__name__)
 
 
 class NullReaderNode(BasePlanNode):  # pragma: no cover
+    category = OperatorCategory.SCAN
+    is_scan = True
+    parallel_strategy = ParallelStrategy.SINGLE_THREAD
     """
     Returns an empty table with the correct schema.
 
@@ -44,7 +48,7 @@ class NullReaderNode(BasePlanNode):  # pragma: no cover
         self.relations = parameters.get("relations", [])
         self.schema = parameters.get("schema")
 
-    def execute(self, morsel, **_kwargs) -> Generator:
+    def execute(self, morsel):
         """Return empty table with correct schema."""
         if morsel == EOS:
             yield None
