@@ -66,11 +66,15 @@ public:
      *
      * Uses curl_easy_perform() — each call has its own CURL* easy handle.
      *
-     * @param url  URL to query
+     * @param url     URL to query
+     * @param headers Optional request headers (e.g. Authorization)
      * @return Response headers map (lower-case keys)
-     * @throws std::runtime_error on network error or timeout
+     * @throws std::runtime_error on network error, timeout, or HTTP 4xx/5xx
      */
-    std::map<std::string, std::string> head(const std::string& url);
+    std::map<std::string, std::string> head(
+        const std::string& url,
+        const std::map<std::string, std::string>& headers = {}
+    );
 
     /**
      * Perform multiple HTTP GET requests concurrently (single-threaded CURLM).

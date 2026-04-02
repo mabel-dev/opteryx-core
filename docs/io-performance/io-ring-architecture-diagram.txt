@@ -1,0 +1,311 @@
+================================================================================
+                    IO PROCESS RING ARCHITECTURE
+                     Performance Bottleneck Map
+================================================================================
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ EXEC PROCESS (Query Execution)                                              │
+│                                                                             │
+│  Consumer Thread: Poll ready_queue, deserialize Morsels, execute operators │
+│                                                                             │
+│                    IPC: event_q FrameReady                                  │
+│                    ⚠️  BOTTLENECK #5: Lock contention                       │
+│                    multiprocessing.Queue.put() overhead                     │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │ SHARED MEMORY RING: 64 × 32 MiB slots = 2 GiB                      │   │
+│  │                                                                     │   │
+│  │ Slot States:                                                        │   │
+│  │   FREE ◄── Consumer returns after deserialize                       │   │
+│  │    ↑                                                               │   │
+│  │   READING ◄── Consumer marks before deserialize                     │   │
+│  │    ↑                                                               │   │
+│  │   READY ◄── Producer writes frame header + payload                 │   │
+│  │    ↑                                                               │   │
+│  │   WRITING ◄── Producer claims from FREE                            │   │
+│  │                                                                     │   │
+│  │ Free Slot Discovery:                                               │   │
+│  │ ⚠️  BOTTLENECK #1: O(n) BITMAP SCAN (3-7% overhead)                │   │
+│  │                                                                     │   │
+│  │   claim_free_slot():                                                │   │
+│  │     for slot_id in range(64):           # Full scan every time!    │   │
+│  │       if free_slot_bitmap[slot_id] == 0:                           │   │
+│  │         if read_state(slot_id) == FREE:  # Cross-process IPC read  │   │
+│  │           write_state(slot_id, WRITING)                            │   │
+│  │           return slot_id                                           │   │
+│  │                                                                     │   │
+│  │   Problem: No hint, full scan each time                            │   │
+│  │   - Avg iterations with 50% fill: 32 (should be ~8)                │   │
+│  │   - State verifications: 16 (slow, 100-200 ns each)                │   │
+│  │   - Total per claim: 1-2 µs                                        │   │
+│  │   - 8000 claims per query: 8-16 ms overhead                        │   │
+│  │                                                                     │   │
+│  │   Fix: Add _last_free_hint for cyclic scanning → 3-5% gain        │   │
+│  │                                                                     │   │
+│  │ Frame Header (256 byte header, 33 MB payload):                      │   │
+│  │   state|flags|transfer_id|file_id_hash|row_group_index|           │   │
+│  │   slice_index|fragment_index|fragment_count|rows_in_slice|         │   │
+│  │   payload_len|query_id_hash|reserved                               │   │
+│  │                                                                     │   │
+│  │ ⚠️  BOTTLENECK #5: STRUCT PACKING (2-3% overhead)                  │   │
+│  │   struct.pack_into("<IIQQIIIIIIQQ", ..., 13 fields)                │   │
+│  │   - Python struct module: ~500 ns per pack                          │   │
+│  │   - 8000 frames × 500 ns = 4 ms overhead                           │   │
+│  │   - Cython version available but unused                            │   │
+│  │                                                                     │   │
+│  │   Fix: Use process_ring.pyx::FastSharedMemoryRing → 1-2% gain     │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ IO PROCESS (Worker Subprocess)                                              │
+│                                                                             │
+│ ┌─────────────────────────────────────────────────────────────────────────┐ │
+│ │ ORCHESTRATOR LOOP (_io_worker)                                         │ │
+│ │                                                                         │ │
+│ │ 1. Fetch Parquet Footers (in parallel via read_pool)                   │ │
+│ │                                                                         │ │
+│ │ 2. SCHEDULER: _admit_rowgroups()                                       │ │
+│ │    ⚠️  BOTTLENECK #3: ADMISSION POLICY (5-8% latency variance)         │ │
+│ │                                                                         │ │
+│ │    while len(active_states) < active_target:  # Gap-based threshold   │ │
+│ │      # Admit all pending rowgroups when threshold crossed             │ │
+│ │      # Problem: Bursty admission, fairness issues                      │ │
+│ │                                                                         │ │
+│ │    Issues:                                                              │ │
+│ │    - Hysteresis loop (admit all at once when threshold crossed)        │ │
+│ │    - No backpressure (ready_queue can backlog without slowing admit)   │ │
+│ │    - Round-robin per-file but greedy global dispatch                   │ │
+│ │    - Ignores in-flight bytes (can have 10 GB of pending reads)         │ │
+│ │                                                                         │ │
+│ │    Fix: Soft admission curve + read queue depth check → 2-3% gain    │ │
+│ │                                                                         │ │
+│ │ 3. DISPATCHER: _pick_dispatch_state() + _dispatch_columns()            │ │
+│ │    ⚠️  BOTTLENECK #3B: DISPATCH ORDERING (2-4% overhead)               │ │
+│ │                                                                         │ │
+│ │    candidates = [(column_size, -admitted_ns, key, state)              │ │
+│ │                  for key, state in active_states.items()]              │ │
+│ │    candidates.sort(reverse=True)  # Sort by SIZE                      │ │
+│ │                                                                         │ │
+│ │    Problem: Size ≠ decode time                                         │ │
+│ │    - 100 MB GZIP-compressed takes longer than 200 MB uncompressed     │ │
+│ │    - Codec not considered: snappy (1x), gzip (1.5x), zstd (1.2x)      │ │
+│ │    - Per-file fairness not enforced                                    │ │
+│ │                                                                         │ │
+│ │    Fix: Sort by decode_cost (size × codec_factor) → 2-3% gain        │ │
+│ │                                                                         │ │
+│ │ 4. PRODUCER: _emit_loop() ─────────────────────────────────────────┐   │ │
+│ │    │                                                               │   │ │
+│ │    ├─ Get completed rowgroup from ready_queue                     │   │ │
+│ │    │                                                               │   │ │
+│ │    ├─ CREATE MORSEL & SERIALIZE                                   │   │ │
+│ │    │  morsel = Morsel.from_vectors(column_order, vectors)         │   │ │
+│ │    │  payload, serialize_ns = _serialize_morsel(morsel)           │   │ │
+│ │    │  ⚠️  BOTTLENECK #2: SERIALIZATION OVERHEAD (6-10%)            │   │ │
+│ │    │                                                               │   │ │
+│ │    │  Problem: Full morsel serialized BEFORE slicing decision      │   │ │
+│ │    │                                                               │   │ │
+│ │    │  Scenario: 100M row group with 8 columns                      │   │ │
+│ │    │  - Serialize full: 100M rows × 50 ns/row = 5 ms             │   │ │
+│ │    │  - Check fragments: ceil(len(payload) / slot_size) = 12     │   │ │
+│ │    │  - Too many! (max is 8)                                      │   │ │
+│ │    │  - Retry 1: estimate bytes_per_row, slice, re-serialize     │   │ │
+│ │    │    each slice: 2 re-serializations = 10 ms                  │   │ │
+│ │    │  - Still too fragmented? Retry 2 with smaller slices         │   │ │
+│ │    │    4 re-serializations = 20 ms                              │   │ │
+│ │    │  - Total: 5 + 10 + 20 = 35 ms instead of 5 ms (7x!)         │   │ │
+│ │    │                                                               │   │ │
+│ │    │  Fix: Estimate size from Parquet footer BEFORE serializing   │   │ │
+│ │    │       Decide slice size upfront, no retry loop → 3-5% gain  │   │ │
+│ │    │                                                               │   │ │
+│ │    ├─ PER FRAGMENT (typically 8 fragments for 10 MB rowgroup)     │   │ │
+│ │    │  for fragment_index in range(fragment_count):                │   │ │
+│ │    │                                                               │   │ │
+│ │    │    1. Claim FREE slot from ring                              │   │ │
+│ │    │       ⚠️  BOTTLENECK #1 (see above) → 1 µs                  │   │ │
+│ │    │                                                               │   │ │
+│ │    │    2. Pack frame header to shared memory                      │   │ │
+│ │    │       ⚠️  BOTTLENECK #5 (see above) → 500 ns                │   │ │
+│ │    │                                                               │   │ │
+│ │    │    3. Write payload to slot                                  │   │ │
+│ │    │       memcpy: 33 MB / num_fragments ≈ 1 ms                   │   │ │
+│ │    │                                                               │   │ │
+│ │    │    4. Emit FrameReady event to event_q                       │   │ │
+│ │    │       event_q.put(event, timeout=0.1)                        │   │ │
+│ │    │       ⚠️  BOTTLENECK #5: Queue lock → 500 ns                │   │ │
+│ │    │                                                               │   │ │
+│ │    ├─ UPDATE METRICS                                              │   │ │
+│ │    │  ⚠️  BOTTLENECK #4: METRICS LOCK CONTENTION (2-4%)           │   │ │
+│ │    │                                                               │   │ │
+│ │    │  with metrics_lock:  # Lock inside hot loop!                │   │ │
+│ │    │    metrics["io_serialize_ns"] += serialize_ns                │   │ │
+│ │    │    metrics["io_ring_producer_full_wait_ns"] += wait_ns       │   │ │
+│ │    │    metrics["io_transfer_fragment_counts"].append(...)        │   │ │
+│ │    │    # ... many more updates ...                               │   │ │
+│ │    │                                                               │   │ │
+│ │    │  Problem: 8000+ lock acquisitions per query                  │   │ │
+│ │    │  - Each acquisition: 100-500 ns under contention             │   │ │
+│ │    │  - Total: 0.8-4.0 ms overhead per query (1-4%)              │   │ │
+│ │    │  - Worse on small queries (can be 5-10% of runtime)          │   │ │
+│ │    │                                                               │   │ │
+│ │    │  Fix: Thread-local metrics aggregation (lock only at end)    │   │ │
+│ │    │       → 1-3% gain (especially on small queries)              │   │ │
+│ │    │                                                               │   │ │
+│ │    └─────────────────────────────────────────────────────────────┘   │ │
+│ │                                                                         │ │
+│ └─────────────────────────────────────────────────────────────────────────┘ │
+│                                                                             │
+│ THREAD POOLS (Persistent across all queries in subprocess):                │
+│                                                                             │
+│ ┌──────────────────────┐    ┌──────────────────────┐                       │
+│ │ Read Pool (32)       │    │ Decode Pool (cpu_cnt)│                       │
+│ │                      │    │                      │                       │
+│ │ _read_column_task()  │    │ _decode_column_task()│                       │
+│ │ - read_ranges() from │    │ - Decode bytes via   │                       │
+│ │   FS (GCS/local/http)│    │   rugo.parquet       │                       │
+│ │ - Return raw bytes   │    │ - Return Draken col  │                       │
+│ │                      │    │                      │                       │
+│ │ Tracked in:          │    │ Tracked in:          │                       │
+│ │ read_futures: Dict   │    │ decode_futures: Dict │                       │
+│ │ reads_in_flight: int │    │ decode_pending: Q    │                       │
+│ └──────────────────────┘    └──────────────────────┘                       │
+│          │                            │                                    │
+│          └────────────┬────────────────┘                                   │
+│                       │                                                    │
+│                       ▼                                                    │
+│         ┌─────────────────────────┐                                        │
+│         │ ready_queue (capacity=2)│                                        │
+│         │                         │                                        │
+│         │ ⚠️  BOTTLENECK #3C:      │                                        │
+│         │     Small cap (2)       │                                        │
+│         │     causes head-of-line │                                        │
+│         │     blocking of emitter │                                        │
+│         │                         │                                        │
+│         │ Fix: Increase to 8-16   │                                        │
+│         │      → 1-2% gain        │                                        │
+│         └─────────────────────────┘                                        │
+│                       │                                                    │
+│                       └──────────► _emit_loop() (separate thread)          │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+================================================================================
+                          BOTTLENECK SUMMARY TABLE
+================================================================================
+
+ID  | Issue                           | Location      | Code Impact | Fix Impact
+───┼─────────────────────────────────┼──────────────┼────────────┼──────────
+ 1  | Bitmap O(n) scan free slots     | L218-231     | 3-7%       | +3-5%
+    | No hint tracking, 64 iterations | Free slot    |            | hint
+    | each claim                      | discovery    |            |
+───┼─────────────────────────────────┼──────────────┼────────────┼──────────
+ 2  | Full morsel serialize before    | L342-448     | 6-10%      | +3-5%
+    | slicing decision, retry loop    | _slice_and_  |            | lazy
+    | causes re-serialization         | serialize()  |            | sizing
+───┼─────────────────────────────────┼──────────────┼────────────┼──────────
+ 3  | Scheduler admission hysteresis, | L1006-1144   | 5-8%       | +2-3%
+    | dispatch sort by size not cost, | _admit/      |            | cost +
+    | small ready_queue cap           | dispatch()   |            | fair
+───┼─────────────────────────────────┼──────────────┼────────────┼──────────
+ 4  | Metrics lock contention         | L636-667     | 2-4%       | +1-3%
+    | 8000+ acquisitions per query    | _emit_loop() |            | thread-
+    | inside hot path                 |              |            | local
+───┼─────────────────────────────────┼──────────────┼────────────┼──────────
+ 5  | Struct packing + event queue    | L252-293     | 2-3%       | +1-2%
+    | Python struct module, IPC queue | write_frame  |            | Cython
+    | lock contention                 | + event_q    |            |
+───┴─────────────────────────────────┴──────────────┴────────────┴──────────
+
+TOTAL: 18-32% combined overhead → 10-20% gain with all fixes
+
+================================================================================
+                           OPTIMIZATION ROADMAP
+================================================================================
+
+PHASE 1 (Week 1): Quick Wins — 7 hours, 10-15% gain, LOW RISK
+────────────────────────────────────────────────────────────
+
+1.1. Add bitmap hint (1h)
+     io_process_ring.py:218-231
+     Result: 3-5% gain
+
+1.2. Predictive slice sizing (2h)
+     io_process_ring.py:342-448
+     Result: 3-4% gain
+
+1.3. Column cost estimation (1.5h)
+     io_process_ring.py:1086-1106
+     Result: 2-3% gain
+
+1.4. Thread-local metrics (1h)
+     io_process_ring.py:636-667
+     Result: 1-3% gain (more on small queries)
+
+1.5. Read queue backpressure (1.5h)
+     io_process_ring.py:1006-1084
+     Result: 1-2% gain
+
+Phase 1 Subtotal: 10-17% gain, all low-risk, straightforward changes
+
+
+PHASE 2 (Week 2-3): Medium Effort — 10 hours, 5-8% additional gain
+──────────────────────────────────────────────────────────────
+
+2.1. Integrate Cython FastSharedMemoryRing (3h)
+     Already in process_ring.pyx but unused
+     Result: 2-3% gain
+
+2.2. File-aware dispatch fairness (2h)
+     io_process_ring.py:1086-1144
+     Result: 1-2% gain
+
+2.3. Increase ready_queue_cap (0.5h)
+     config.py: 2 → 8
+     Result: 1-2% gain
+
+2.4. Other Phase 2 improvements (4.5h)
+     Result: 1-2% gain
+
+Phase 2 Subtotal: 5-9% additional gain, medium risk, more complex
+
+
+PHASE 3 (If needed): Complex Improvements — 4-8 weeks, 10-15% gain
+───────────────────────────────────────────────────────────────
+
+3.1. Slice cache with per-table compression ratios
+3.2. Adaptive range coalescing (from generic parquet analysis)
+3.3. Parallel column decoding (from generic parquet analysis)
+
+Phase 3 Subtotal: 10-15% additional gain, but targets generic parquet,
+                   not ring-specific optimizations
+
+
+TOTAL POTENTIAL: 25-40% throughput improvement
+    - Phase 1 alone: 10-17% (LOW RISK, start here!)
+    - Phase 1+2: 15-25%
+    - All phases: 25-40%
+
+================================================================================
+                            KEY DECISIONS
+================================================================================
+
+Before implementation, architect should decide:
+
+1. Accept 1-2% metrics reporting latency (thread-local aggregation)
+   for 2-3% throughput gain?
+   → RECOMMENDED: Yes
+
+2. Increase ready_queue_cap from 2 to 8?
+   Extra memory: 64 MB
+   Extra stability: Yes
+   → RECOMMENDED: Yes
+
+3. Defer Phases 2-3 to focus on Phase 1 first?
+   → RECOMMENDED: Yes, measure after Phase 1
+
+4. Run on feature branch or main?
+   → RECOMMENDED: Feature branch for easier rollback
+
+================================================================================

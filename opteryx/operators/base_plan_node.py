@@ -132,6 +132,17 @@ class BasePlanNode:
         at_least_one = False
         _call_total_ns = 0
 
+        _trace_record(
+            "operator_execute",
+            operator_name=self.name,
+            operator_id=self.identity,
+            phase="start",
+            duration_ns=0,
+            rows_in=num_rows,
+            rows_out=0,
+            produced_rows=False,
+        )
+
         while True:
             try:
                 start_time = time.monotonic_ns()
@@ -149,6 +160,7 @@ class BasePlanNode:
                         "operator_execute",
                         operator_name=self.name,
                         operator_id=self.identity,
+                        phase="finish",
                         duration_ns=execution_time,
                         rows_in=num_rows,
                         rows_out=0,
@@ -180,6 +192,7 @@ class BasePlanNode:
                             "operator_execute",
                             operator_name=self.name,
                             operator_id=self.identity,
+                            phase="finish",
                             duration_ns=execution_time,
                             rows_in=num_rows,
                             rows_out=result_num_rows,

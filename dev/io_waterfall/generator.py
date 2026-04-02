@@ -14,7 +14,7 @@ import json
 from pathlib import Path
 from typing import Optional
 
-from opteryx.tools.io_waterfall.reader import TraceReader
+from .reader import TraceReader
 
 
 def generate_waterfall_html(trace_file: str, output_file: Optional[str] = None) -> str:
@@ -88,7 +88,14 @@ def _build_echarts_config(operations: list, metadata: dict) -> dict:
     # Find time boundaries (seconds)
     all_times = []
     for timeline in operations:
-        for key in ["download_start", "download_complete", "decode_start", "decode_complete"]:
+        for key in [
+            "download_start",
+            "download_complete",
+            "buffer_start",
+            "buffer_complete",
+            "decode_start",
+            "decode_complete",
+        ]:
             if timeline.get(key) is not None:
                 all_times.append(timeline[key])
 
@@ -109,10 +116,14 @@ def _build_echarts_config(operations: list, metadata: dict) -> dict:
     for i, tl in enumerate(operations):
         dl_start = t(tl.get("download_start"))
         dl_end = t(tl.get("download_complete"))
-        dec_start = t(tl.get("decode_start"))
-        dec_end = t(tl.get("decode_complete"))
-        buf_start = dl_end
-        buf_end = dec_start
+        buf_start = t(tl.get("buffer_start")) if tl.get("buffer_start") is not None else dl_end
+        buf_end = (
+            t(tl.get("buffer_complete")) if tl.get("buffer_complete") is not None else buf_start
+        )
+        dec_start = t(tl.get("decode_start")) if tl.get("decode_start") is not None else buf_end
+        dec_end = (
+            t(tl.get("decode_complete")) if tl.get("decode_complete") is not None else dec_start
+        )
         rows = tl.get("rows_decoded", 0) or 0
         series_data.append(
             [

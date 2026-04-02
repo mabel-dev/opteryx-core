@@ -27,6 +27,7 @@ from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import as_completed
 from concurrent.futures import wait
 from dataclasses import dataclass
+from dataclasses import field
 from multiprocessing import Event
 from multiprocessing import Queue
 from multiprocessing import get_context
@@ -83,6 +84,59 @@ def _percentile(values: List[int], q: float) -> int:
     ordered = sorted(values)
     idx = max(0, min(len(ordered) - 1, int(round((len(ordered) - 1) * q))))
     return int(ordered[idx])
+
+
+@dataclass
+class _CodecMetrics:
+    """Track average decode cost per compression codec."""
+
+    codec_name: str
+    samples: deque = field(default_factory=lambda: deque(maxlen=100))
+    avg_ns_per_byte: float = 0.0
+
+
+def _record_decode_cost(
+    codec_metrics: Dict[str, _CodecMetrics],
+    codec: str,
+    raw_bytes: int,
+    decode_ns: int,
+) -> None:
+    """Record actual decode cost for a codec."""
+    if not codec:
+        codec = "UNKNOWN"
+    if codec not in codec_metrics:
+        codec_metrics[codec] = _CodecMetrics(codec_name=codec)
+
+    metrics = codec_metrics[codec]
+    if raw_bytes > 0:
+        ns_per_byte = decode_ns / raw_bytes
+        metrics.samples.append(ns_per_byte)
+        if len(metrics.samples) >= 10:
+            metrics.avg_ns_per_byte = sum(metrics.samples) / len(metrics.samples)
+
+
+def _estimate_decode_cost(
+    codec_metrics: Dict[str, _CodecMetrics],
+    codec: str,
+    raw_bytes: int,
+) -> int:
+    """Estimate decode time based on codec history."""
+    codec_defaults = {
+        "SNAPPY": 100,
+        "GZIP": 1000,
+        "LZ4": 50,
+        "ZSTD": 200,
+        "PLAIN": 10,
+        "RLE": 20,
+        "DELTA": 30,
+    }
+
+    if codec in codec_metrics and codec_metrics[codec].avg_ns_per_byte > 0:
+        rate = codec_metrics[codec].avg_ns_per_byte
+    else:
+        rate = codec_defaults.get(codec, 100)
+
+    return int(raw_bytes * rate)
 
 
 def _decode_column_name(name: bytes | str) -> str:
@@ -183,6 +237,8 @@ class _SharedMemoryRing:
         # Bitmap for fast free-slot discovery: one byte per slot (0=FREE, non-zero=IN_USE).
         # Local cache (worker process only), synced with actual slot states on demand.
         self.free_slot_bitmap = bytearray(slot_count)
+        # Cursor for round-robin slot discovery (O(1) typical case).
+        self.free_slot_cursor = 0
 
     @property
     def name(self) -> str:
@@ -202,6 +258,8 @@ class _SharedMemoryRing:
             self.write_state(slot_id, FREE)
         # Initialize bitmap: all slots are FREE (value 0).
         self.free_slot_bitmap = bytearray(self.slot_count)
+        # Reset cursor for round-robin discovery.
+        self.free_slot_cursor = 0
 
     def _slot_offset(self, slot_id: int) -> int:
         return slot_id * self.slot_bytes
@@ -216,14 +274,20 @@ class _SharedMemoryRing:
         return state
 
     def _find_free_slot_from_bitmap(self) -> int | None:
-        """Find first free slot using bitmap, with fallback to actual state verification.
+        """Find first free slot using cursor-based round-robin scan with bitmap.
 
+        Typical case: O(1) on first check (hits recently freed slot).
+        Worst case: O(n) if ring completely full (same as before).
         Returns slot_id if found, None if no free slots in bitmap.
         """
-        for slot_id in range(self.slot_count):
+        start_pos = self.free_slot_cursor
+        for offset in range(self.slot_count):
+            slot_id = (start_pos + offset) % self.slot_count
             if self.free_slot_bitmap[slot_id] == 0:
                 # Bitmap says free; verify with actual state (bitmap may lag).
                 if self.read_state(slot_id) == FREE:
+                    # Found free slot; advance cursor for next search.
+                    self.free_slot_cursor = (slot_id + 1) % self.slot_count
                     return slot_id
                 else:
                     # Bitmap was stale; mark as in-use and continue.
@@ -544,6 +608,8 @@ def _decode_column_task(
     decoder: Any,
     submitted_ns: int,
     connector: Optional[str] = None,
+    codec_metrics: Optional[Dict[str, _CodecMetrics]] = None,
+    scan_codec_metrics: Optional[Dict[str, _CodecMetrics]] = None,
 ) -> dict:
     from opteryx.tracing import record_event
 
@@ -583,6 +649,14 @@ def _decode_column_task(
         if connector:
             kwargs["connector"] = connector
         record_event("decode_complete", **kwargs)
+
+    # Record decode cost for cost-aware dispatch ordering
+    if _cfg.OPTERYX_TRACK_CODEC_METRICS:
+        codec = work.stats.get("compression_codec", "PLAIN")
+        if codec_metrics is not None:
+            _record_decode_cost(codec_metrics, codec, len(raw_bytes), decode_ns)
+        if scan_codec_metrics is not None:
+            _record_decode_cost(scan_codec_metrics, codec, len(raw_bytes), decode_ns)
 
     return {
         "name": work.name,
@@ -792,6 +866,10 @@ def _io_worker(
     # For GCS, this preserves keep-alive connections, saving ~RTT per scan.
     _filesystem_by_protocol: Dict[str, Any] = {}
 
+    # Codec metrics: track decode cost per compression codec across all scans
+    # to enable cost-aware dispatch ordering
+    codec_metrics: Dict[str, _CodecMetrics] = {}
+
     event_q.put({"type": _EVENT_IO_READY})
 
     try:
@@ -828,6 +906,9 @@ def _io_worker(
                 "transfer_payload_sizes": [],
             }
 
+            # Per-scan codec metrics for cost-aware dispatch
+            scan_codec_metrics: Dict[str, _CodecMetrics] = {}
+
             ready_queue_cap = max(2, int(_cfg.PARQUET_READY_ROWGROUP_QUEUE_CAP))
             ready_queue: "queue.Queue[_IORowGroupState | None]" = queue.Queue(
                 maxsize=ready_queue_cap
@@ -862,7 +943,10 @@ def _io_worker(
                 rowgroups_in_flight_cap = max(1, int(_cfg.PARQUET_ROWGROUPS_IN_FLIGHT))
                 rowgroups_per_file_cap = max(1, int(_cfg.PARQUET_ROWGROUPS_PER_FILE_IN_FLIGHT))
                 decode_workers = max(1, int(_cfg.PARQUET_DECODE_WORKERS))
-                decode_buffer_cap = max(global_ranges_cap, int(_cfg.PARQUET_READ_DECODE_BUFFER_CAP))
+                read_queue_cap = max(1, int(_cfg.PARQUET_READ_QUEUE_CAP or global_ranges_cap))
+                decode_queue_cap = max(
+                    read_queue_cap * 2, int(_cfg.PARQUET_DECODE_QUEUE_CAP or (read_queue_cap * 2))
+                )
 
                 active_target_default = max(1, int(_cfg.PARQUET_ACTIVE_ROWGROUPS_TARGET))
                 warm_start_ops = max(0, int(_cfg.PARQUET_WARM_START_OPS))
@@ -925,6 +1009,16 @@ def _io_worker(
                     parse_ns = time.monotonic_ns() - parse_start_ns
                     footers[p] = meta
                     footer_fetch_ns[p] = fetch_ns + parse_ns
+
+                    # Emit file_discovered event after footer is successfully parsed
+                    if _trace_cfg.OPTERYX_TRACE:
+                        file_kwargs = {"file_id": p}
+                        if connector:
+                            file_kwargs["connector"] = connector
+                        # file_size is optional metadata
+                        if file_sizes and p in file_sizes and file_sizes[p] > 0:
+                            file_kwargs["size_bytes"] = file_sizes[p]
+                        record_event("file_discovered", **file_kwargs)
 
                 file_states: Dict[int, _IOFileState] = {}
                 file_rr: deque[int] = deque()
@@ -1084,35 +1178,46 @@ def _io_worker(
                             )
 
                 def _pick_dispatch_state() -> Optional[tuple[tuple[int, int], _IORowGroupState]]:
+                    """Pick next row group to dispatch, using cost-aware ordering.
+
+                    Prioritizes by estimated decode cost (cost = size * codec_rate),
+                    then by size (tie-breaker), then by admission order (oldest first).
+
+                    This reduces queue depth variance by processing hard problems early.
+                    """
                     nonlocal warm_start_remaining
+
+                    # Warm-start: prioritize first row group
                     if warm_start_remaining > 0 and first_rowgroup_key in active_states:
                         first_state = active_states[first_rowgroup_key]
                         if first_state.pending_columns and first_state.in_flight < per_rowgroup_cap:
                             warm_start_remaining -= 1
                             return first_rowgroup_key, first_state
 
-                    candidates: List[tuple[int, int, tuple[int, int], _IORowGroupState]] = []
+                    # Build candidates with cost estimates
+                    candidates = []
                     for key, state in active_states.items():
-                        if not state.pending_columns:
+                        if not state.pending_columns or state.in_flight >= per_rowgroup_cap:
                             continue
-                        if state.in_flight >= per_rowgroup_cap:
-                            continue
-                        largest = state.pending_columns[0].length
-                        candidates.append((largest, -state.admitted_ns, key, state))
+
+                        col = state.pending_columns[0]
+                        codec = col.stats.get("compression_codec", "PLAIN")
+                        cost = _estimate_decode_cost(scan_codec_metrics, codec, col.length)
+
+                        candidates.append((cost, col.length, -state.admitted_ns, key, state))
+
                     if not candidates:
                         return None
-                    candidates.sort(reverse=True, key=lambda item: (item[0], item[1]))
-                    _, _, key, state = candidates[0]
+
+                    # Sort by cost (highest first to prioritize fast ones)
+                    candidates.sort(reverse=True, key=lambda x: (x[0], x[1], x[2]))
+                    _, _, _, key, state = candidates[0]
                     return key, state
 
                 def _dispatch_columns() -> int:
                     nonlocal reads_in_flight
                     dispatched = 0
-                    while (
-                        reads_in_flight < global_ranges_cap
-                        and not cancel_event.is_set()
-                        and (len(decode_pending) + len(decode_futures)) < decode_buffer_cap
-                    ):
+                    while reads_in_flight < read_queue_cap and not cancel_event.is_set():
                         picked = _pick_dispatch_state()
                         if picked is None:
                             break
@@ -1146,14 +1251,27 @@ def _io_worker(
                 def _dispatch_decodes() -> int:
                     dispatched = 0
                     while (
-                        decode_pending
-                        and len(decode_futures) < decode_workers
+                        len(decode_pending) + len(decode_futures) < decode_queue_cap
+                        and decode_pending
                         and not cancel_event.is_set()
                     ):
                         key, work, raw_bytes = decode_pending.popleft()
                         state = active_states.get(key)
                         if state is None:
                             continue
+
+                        # Emit buffer_complete event when buffered data is about to be decoded
+                        if _trace_cfg.OPTERYX_TRACE:
+                            buf_kwargs = {
+                                "file_id": state.path,
+                                "component": "column",
+                                "rg_idx": state.rg_idx,
+                                "column": work.name,
+                            }
+                            if connector:
+                                buf_kwargs["connector"] = connector
+                            record_event("buffer_complete", **buf_kwargs)
+
                         submit_ns = time.monotonic_ns()
                         if not state.decode_started and _trace_cfg.OPTERYX_TRACE:
                             kwargs = {
@@ -1176,6 +1294,8 @@ def _io_worker(
                             decoder_fn,
                             submit_ns,
                             connector,
+                            codec_metrics,
+                            scan_codec_metrics,
                         )
                         decode_futures[fut] = (key, work)
                         dispatched += 1
@@ -1269,6 +1389,20 @@ def _io_worker(
                             state.read_ns += result["read_ns"]
                             state.queue_wait_ns += result["queue_wait_ns"]
                             state.task_total_ns += result["task_total_ns"]
+
+                            # Emit buffer_start event when column is queued for decode
+                            if _trace_cfg.OPTERYX_TRACE:
+                                buf_kwargs = {
+                                    "file_id": state.path,
+                                    "component": "column",
+                                    "rg_idx": state.rg_idx,
+                                    "column": work.name,
+                                    "bytes": len(result["raw_bytes"]),
+                                }
+                                if connector:
+                                    buf_kwargs["connector"] = connector
+                                record_event("buffer_start", **buf_kwargs)
+
                             decode_pending.append((key, work, result["raw_bytes"]))
                             continue
 

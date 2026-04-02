@@ -7,23 +7,23 @@
 CLI tool for generating waterfall charts from IO traces.
 
 Usage:
-    python -m opteryx.tools.io_waterfall <trace_file> [--output OUTPUT]
-    python -m opteryx.tools.io_waterfall stats <trace_file>
+    PYTHONPATH=dev python -m io_waterfall <trace_file> [--output OUTPUT]
+    PYTHONPATH=dev python -m io_waterfall stats <trace_file>
 """
 
 import argparse
 import sys
 from pathlib import Path
 
-from opteryx.tools.io_waterfall.generator import generate_waterfall_html
-from opteryx.tools.io_waterfall.reader import TraceReader
+from .generator import generate_waterfall_html
+from .reader import TraceReader
 
 
 def main():
     """Main entry point for the CLI."""
     parser = argparse.ArgumentParser(
         description="Generate waterfall charts from IO trace files",
-        prog="python -m opteryx.tools.io_waterfall",
+        prog="PYTHONPATH=dev python -m io_waterfall",
     )
 
     subparsers = parser.add_subparsers(dest="command", help="Command to run")

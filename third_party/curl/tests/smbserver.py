@@ -23,8 +23,10 @@
 #
 """Server for testing SMB"""
 
-from __future__ import (absolute_import, division, print_function,
-                        unicode_literals)
+from __future__ import absolute_import
+from __future__ import division
+from __future__ import print_function
+from __future__ import unicode_literals
 
 import argparse
 import logging
@@ -34,8 +36,15 @@ import sys
 import tempfile
 import threading
 
+from impacket import smb as imp_smb
+from impacket import smbserver as imp_smbserver
+from impacket.nt_errors import STATUS_ACCESS_DENIED
+from impacket.nt_errors import STATUS_NO_SUCH_FILE
+from impacket.nt_errors import STATUS_SUCCESS
+
 # Import our curl test data helper
-from util import ClosingFileHandler, TestData
+from util import ClosingFileHandler
+from util import TestData
 
 if sys.version_info.major >= 3:
     import configparser
@@ -49,10 +58,6 @@ except ImportError:
     sys.stderr.write('Python package impacket needs to be installed!\n')
     sys.stderr.write('Use pip or your package manager to install it.\n')
     sys.exit(1)
-from impacket import smb as imp_smb
-from impacket import smbserver as imp_smbserver
-from impacket.nt_errors import (STATUS_ACCESS_DENIED, STATUS_NO_SUCH_FILE,
-                                STATUS_SUCCESS)
 
 log = logging.getLogger(__name__)
 SERVER_MAGIC = "SERVER_MAGIC"

@@ -138,9 +138,9 @@ class TraceWriter:
                 except Exception:
                     pass
                 print(f"[TRACE] View waterfall chart:")
-                print(f"[TRACE]   python -m opteryx.tools.io_waterfall trace {self.output_file}")
+                print(f"[TRACE]   PYTHONPATH=dev python -m io_waterfall trace {self.output_file}")
                 print(f"[TRACE] View statistics:")
-                print(f"[TRACE]   python -m opteryx.tools.io_waterfall stats {self.output_file}")
+                print(f"[TRACE]   PYTHONPATH=dev python -m io_waterfall stats {self.output_file}")
             else:
                 print(f"[TRACE] Trace file written: {self.output_file} (no IO events recorded)")
 

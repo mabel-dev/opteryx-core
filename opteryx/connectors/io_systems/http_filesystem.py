@@ -189,8 +189,7 @@ class OpteryxHttpFileSystem:
         url = self._normalize_url(path)
 
         requests = [
-            (url, {"Range": f"bytes={offset}-{offset + length - 1}"})
-            for offset, length in ranges
+            (url, {"Range": f"bytes={offset}-{offset + length - 1}"}) for offset, length in ranges
         ]
 
         try:

@@ -9,6 +9,7 @@ This module provides the execution engine for processing physical plans with an 
 
 import concurrent.futures
 import logging
+import time
 from typing import Any
 from typing import Callable
 from typing import Generator
@@ -20,6 +21,7 @@ from opteryx.constants import ResultType
 from opteryx.exceptions import InvalidInternalStateError
 from opteryx.models import PhysicalPlan
 from opteryx.models import QueryTelemetry
+from opteryx.tracing.event_recorder import record_event as _trace_record
 from opteryx.utils.free_threading import is_free_threading_available
 
 from opteryx import EOS
@@ -35,7 +37,7 @@ FREE_THREADING_AVAILABLE = is_free_threading_available()
 
 
 class ExecutionContext:
-    """Encapsulates execution state, thread pool, and async task tracking."""
+    """Encapsulates execution state, thread pool, async task tracking, and tracing."""
 
     def __init__(self, num_workers: int = 2):
         self.use_threading = FREE_THREADING_AVAILABLE
@@ -49,20 +51,12 @@ class ExecutionContext:
     def submit_task(
         self, node: Callable, morsel: Optional[pyarrow.Table], join_leg: Optional[str], nid: str
     ) -> None:
-        """Submit a task for execution in the thread pool.
-
-        Args:
-            node: Callable node to execute
-            morsel: Data batch to process
-            join_leg: Join identifier if this is part of a join
-            nid: Unique node identifier in the plan
-        """
+        """Submit a task for execution in the thread pool."""
         if self.use_threading:
             future = self.thread_pool.submit(node, morsel, join_leg)
             self.futures[future] = (nid, join_leg)
         else:
-            # Without free-threading, execute synchronously
-            # Store the result with a dummy future object
+
             class DummyFuture:
                 def __init__(self, result):
                     self._result = result
@@ -102,10 +96,8 @@ class ExecutionContext:
                     for result in results:
                         if result is not None:
                             for _, child, leg in plan.outgoing_edges(nid):
-                                # Only process stateful nodes immediately
                                 node = plan[child]
                                 if node.is_stateless:
-                                    # Queue up stateless nodes
                                     self.submit_task(node, result, leg, child)
                                 else:
                                     yield from process_node(plan, child, result, leg, self)
@@ -156,7 +148,6 @@ def execute(
     def inner_execute(plan: PhysicalPlan) -> Generator:
         """Runs the plan in a hybrid execution model (serial + async)."""
         try:
-            # Start processing scan nodes first
             pump_nodes = [
                 (nid, node) for nid, node in plan.depth_first_search_flat() if node.is_scan
             ]
@@ -166,7 +157,6 @@ def execute(
                         yield from process_node(plan, pump_nid, morsel, None, context)
                 yield from process_node(plan, pump_nid, EOS, None, context)
 
-            # Process async tasks until completion
             yield from context.process_async_tasks(plan)
 
         finally:
@@ -186,18 +176,46 @@ def process_node(
     node = plan[nid]
 
     if node.is_scan:
-        # Process scan nodes normally
         for _, child, leg in plan.outgoing_edges(nid):
             results = process_node(plan, child, morsel, leg, context)
             yield from (result for result in results if result is not None)
     else:
         if node.is_stateless:
-            # Submit stateless nodes for parallel processing
+            start_ns = time.monotonic_ns()
+            _trace_record(
+                "operator_execute",
+                operator_name=node.name,
+                operator_id=node.identity,
+                phase="start",
+                duration_ns=0,
+                rows_in=getattr(morsel, "num_rows", 0),
+                rows_out=0,
+                produced_rows=False,
+            )
             context.submit_task(node, morsel, join_leg, nid)
-            # Process any completed tasks
             yield from context.process_async_tasks(plan)
+            _trace_record(
+                "operator_execute",
+                operator_name=node.name,
+                operator_id=node.identity,
+                phase="finish",
+                duration_ns=time.monotonic_ns() - start_ns,
+                rows_in=getattr(morsel, "num_rows", 0),
+                rows_out=0,
+                produced_rows=False,
+            )
         else:
-            # Process stateful nodes serially
+            start_ns = time.monotonic_ns()
+            _trace_record(
+                "operator_execute",
+                operator_name=node.name,
+                operator_id=node.identity,
+                phase="start",
+                duration_ns=0,
+                rows_in=getattr(morsel, "num_rows", 0),
+                rows_out=0,
+                produced_rows=False,
+            )
             results = node(morsel, join_leg)
             if results is not None:
                 for result in results:
@@ -207,6 +225,20 @@ def process_node(
                             yield result
                         for _, child, leg in children:
                             yield from process_node(plan, child, result, leg, context)
+            _trace_record(
+                "operator_execute",
+                operator_name=node.name,
+                operator_id=node.identity,
+                phase="finish",
+                duration_ns=time.monotonic_ns() - start_ns,
+                rows_in=getattr(morsel, "num_rows", 0),
+                rows_out=getattr(result, "num_rows", 0)
+                if "result" in locals() and result is not None
+                else 0,
+                produced_rows="result" in locals()
+                and result is not None
+                and getattr(result, "num_rows", 0) > 0,
+            )
 
 
 def event_loop(plan: PhysicalPlan) -> Generator:

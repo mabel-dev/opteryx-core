@@ -1,6 +1,5 @@
 """Unit tests for OpteryxHttpFileSystem."""
 
-import io
 import pytest
 from unittest.mock import Mock, patch, MagicMock
 
