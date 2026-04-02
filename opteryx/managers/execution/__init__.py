@@ -8,7 +8,6 @@ from opteryx.utils.free_threading import is_free_threading_available
 
 from opteryx import config
 
-from .parallel_engine import execute as parallel_execute
 from .serial_engine import ResultType
 from .serial_engine import execute as serial_execute
 
@@ -53,11 +52,7 @@ def execute(plan, telemetry):
     plan.label_join_legs()
 
     # Use parallel engine if free-threading is available, otherwise use serial
-    if ENABLE_FREE_THREADING and is_free_threading_available():
-        # DEBUG: print("\033[38;2;255;184;108mUsing parallel execution engine.\033[0m")
-        results, result_type = parallel_execute(plan, telemetry=telemetry)
-    else:
-        results, result_type = serial_execute(plan, telemetry=telemetry)
+    results, result_type = serial_execute(plan, telemetry=telemetry)
 
     if result_type == ResultType.TABULAR:
         return _with_optional_gc_disabled(results), result_type

@@ -7,10 +7,8 @@
 from opteryx.exceptions import InvalidInternalStateError
 from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.models import PhysicalPlan
-from opteryx.planner.logical_planner import LogicalPlanStepType
 from opteryx.operators.catalog import get_registry
-
-from opteryx import operators
+from opteryx.planner.logical_planner import LogicalPlanStepType
 
 
 def _manifest_is_all_parquet(manifest) -> bool:
@@ -25,76 +23,86 @@ def _manifest_is_all_parquet(manifest) -> bool:
 
 def create_physical_plan(logical_plan, query_properties) -> PhysicalPlan:
     plan = PhysicalPlan()
+    registry = get_registry()
 
     for nid, logical_node in logical_plan.nodes(data=True):
         node_type = logical_node.node_type
         node_config = logical_node.properties
-        node: operators.BasePlanNode = None
+        node = None
 
         # fmt: off
         if node_type == LogicalPlanStepType.Aggregate:
-            node = operators.DrakenAggregateNode(
+            node = registry.create(
+                "Aggregate",
                 query_properties,
-                **{
-                    k: v
-                    for k, v in node_config.items()
-                    if k in ("aggregates", "all_relations")
-                },
+                **{k: v for k, v in node_config.items() if k in ("aggregates", "all_relations")},
             )
         elif node_type == LogicalPlanStepType.AggregateAndGroup:
-            node = operators.DrakenAggregateAndGroupNode(
+            node = registry.create(
+                "Aggregate and Group",
                 query_properties,
-                **{
-                    k: v
-                    for k, v in node_config.items()
-                    if k in ("aggregates", "groups", "projection", "all_relations", "having_condition")
-                },
+                **{k: v for k, v in node_config.items() if k in ("aggregates", "groups", "projection", "all_relations", "having_condition")},
             )
         elif node_type == LogicalPlanStepType.Distinct:
-            node = get_registry().dispatch(node_type, query_properties, **node_config)
+            node = registry.create("Distinct", query_properties, **node_config)
         elif node_type == LogicalPlanStepType.Exit:
-            node = get_registry().dispatch(node_type, query_properties, **node_config)
+            node = registry.create("Exit", query_properties, **node_config)
         elif node_type == LogicalPlanStepType.Explain:
-            node = get_registry().dispatch(node_type, query_properties, **node_config)
+            node = registry.create("Explain", query_properties, **node_config)
         elif node_type == LogicalPlanStepType.Filter:
-            node = operators.FilterNode(query_properties, filter=node_config["condition"], **{k:v for k,v in node_config.items() if k in ("all_relations",)})
+            node = registry.create(
+                "Filter",
+                query_properties,
+                filter=node_config["condition"],
+                **{k: v for k, v in node_config.items() if k in ("all_relations",)},
+            )
         elif node_type == LogicalPlanStepType.FunctionDataset:
-            node = get_registry().dispatch(node_type, query_properties, **node_config)
+            node = registry.create("Function Dataset", query_properties, **node_config)
         elif node_type == LogicalPlanStepType.HeapSort:
-            node = get_registry().dispatch(node_type, query_properties, **node_config)
+            node = registry.create("Heap Sort", query_properties, **node_config)
         elif node_type == LogicalPlanStepType.Join:
             if node_config.get("type") == "inner":
                 # INNER JOIN, NATURAL JOIN
-                if operators.DrakenInnerJoinNode.supports(**node_config):
-                    node = operators.DrakenInnerJoinNode(query_properties, **node_config)
+                from opteryx.operators.draken_inner_join_node import DrakenInnerJoinNode
+                if DrakenInnerJoinNode.supports(**node_config):
+                    node = registry.create("Inner Join", query_properties, **node_config)
                 else:
                     raise UnsupportedSyntaxError(
                         "Draken inner join does not support this query shape"
                     )
             elif node_config.get("type") == "nested loop":
                 # NESTED LOOP JOIN (INNER JOIN)
-                node = operators.NestedLoopJoinNode(query_properties, **node_config)
+                node = registry.create("Nested Loop Join", query_properties, **node_config)
             elif node_config.get("type") == "non equi":
                 # NON-EQUI JOIN (!=, >, >=, <, <=)
-                node = operators.NonEquiJoinNode(query_properties, **node_config)
+                node = registry.create("Non Equi Join", query_properties, **node_config)
             elif node_config.get("type") in ("left outer", "full outer", "right outer"):
                 # LEFT JOIN, RIGHT JOIN, FULL JOIN
-                node = operators.OuterJoinNode(query_properties, **node_config)
+                node = registry.create("Outer Join", query_properties, **node_config)
             elif node_config.get("type") == "cross join":
                 # CROSS JOIN, CROSS JOIN UNNEST
-                node = operators.CrossJoinNode(query_properties, **node_config)
+                node = registry.create("Cross Join", query_properties, **node_config)
             elif node_config.get("type") in ("left anti", "left semi"):
                 # LEFT SEMI, LEFT ANTI JOIN
-                node = operators.FilterJoinNode(query_properties, **node_config)
+                node = registry.create("Filter Join", query_properties, **node_config)
             else:
                 # We don't support other JOIN types, e.g. RIGHT SEMI, RIGHT ANTI
                 raise InvalidInternalStateError(f"Unsupported JOIN type '{node_config.get('type')}'")
         elif node_type == LogicalPlanStepType.Limit:
-            node = get_registry().dispatch(node_type, query_properties, **{k:v for k,v in node_config.items() if k in ("limit", "offset", "all_relations")})
+            node = registry.create(
+                "Limit",
+                query_properties,
+                **{k: v for k, v in node_config.items() if k in ("limit", "offset", "all_relations")},
+            )
         elif node_type == LogicalPlanStepType.Order:
-            node = get_registry().dispatch(node_type, query_properties, **{k:v for k,v in node_config.items() if k in ("order_by", "all_relations")})
+            node = registry.create(
+                "Sort",
+                query_properties,
+                **{k: v for k, v in node_config.items() if k in ("order_by", "all_relations")},
+            )
         elif node_type == LogicalPlanStepType.Project:
-            node = operators.ProjectionNode(
+            node = registry.create(
+                "Projection",
                 query_properties,
                 projection=logical_node.columns,
                 order_by_columns=getattr(logical_node, "order_by_columns", []),
@@ -105,49 +113,46 @@ def create_physical_plan(logical_plan, query_properties) -> PhysicalPlan:
             if connector == "__null__":
                 # This is a Scan marked for empty result (contradictory predicates)
                 # Use NullReaderNode to return empty table with correct schema
-                node = operators.NullReaderNode(query_properties, **node_config)
+                node = registry.create("Null Reader", query_properties, **node_config)
             elif connector and _manifest_is_all_parquet(node_config.get("manifest")):
                 # Column-chunk range-read path: footer-first planning, per-row-group morsels.
                 # Works for any connector (local, GCS, S3, Opteryx catalog) — filesystem
                 # is resolved from file-path protocol inside ParquetReadNode if not provided
                 # directly by the connector.
-                node = operators.ParquetReadNode(query_properties, **node_config)
+                node = registry.create("Parquet Reader", query_properties, **node_config)
             elif connector and getattr(connector, "interal_only", False):
                 # Internal virtual datasets (for example $no_table) do not use file manifests.
-                node = operators.ReaderNode(properties=query_properties, **node_config)
+                node = registry.create("Reader", query_properties, **node_config)
             else:
                 raise UnsupportedSyntaxError(
                     "Only Parquet scans are supported. Non-parquet external scan paths have been removed."
                 )
         elif node_type == LogicalPlanStepType.Set:
-            node = get_registry().dispatch(node_type, query_properties, **node_config)
+            node = registry.create("Set Variable", query_properties, **node_config)
         elif node_type == LogicalPlanStepType.Show:
             if node_config["object_type"] == "VARIABLE":
-                node = operators.ShowValueNode(query_properties, kind=node_config["items"][1], value=node_config["items"][1], **node_config)
+                node = registry.create("Show Value", query_properties, kind=node_config["items"][1], value=node_config["items"][1], **node_config)
             elif node_config["object_type"] == "VIEW":
-                node = operators.ShowCreateNode(query_properties, **node_config)
+                node = registry.create("Show Create", query_properties, **node_config)
             else:
                 raise UnsupportedSyntaxError(f"Unsupported SHOW type '{node_config['object_type']}'")
         elif node_type == LogicalPlanStepType.CreateView:
-            # Create view definition (view management)
-            node = operators.ViewManagementNode(query_properties, action="create_view", **node_config)
+            node = registry.create("View Management", query_properties, action="create_view", **node_config)
         elif node_type == LogicalPlanStepType.AlterView:
-            # Alter view definition (view management)
-            node = operators.ViewManagementNode(query_properties, action="alter_view", **node_config)
+            node = registry.create("View Management", query_properties, action="alter_view", **node_config)
         elif node_type == LogicalPlanStepType.DropView:
-            # Drop view(s) (view management)
-            node = operators.ViewManagementNode(query_properties, action="drop_view", **node_config)
+            node = registry.create("View Management", query_properties, action="drop_view", **node_config)
         elif node_type == LogicalPlanStepType.ShowColumns:
-            node = get_registry().dispatch(node_type, query_properties, **node_config)
+            node = registry.create("Show Columns", query_properties, **node_config)
         elif node_type == LogicalPlanStepType.Union:
-            node = get_registry().dispatch(node_type, query_properties, **node_config)
+            node = registry.create("Union", query_properties, **node_config)
         elif node_type == LogicalPlanStepType.Unnest:
-            node = operators.UnnestJoinNode(query_properties, **node_config)
+            node = registry.create("Unnest Join", query_properties, **node_config)
         elif node_type == LogicalPlanStepType.Analyze:
-            node = get_registry().dispatch(node_type, query_properties, **node_config)
+            node = registry.create("Table Management", query_properties, **node_config)
         elif node_type == LogicalPlanStepType.Comment:
             # COMMENT ON VIEW/TABLE/EXTENSION - use ViewManagementNode with 'comment' action
-            node = operators.ViewManagementNode(query_properties, action="comment", **node_config)
+            node = registry.create("View Management", query_properties, action="comment", **node_config)
         else:  # pragma: no cover
             raise InvalidInternalStateError(
                 f"Unexpected logical node encountered during physical planning: {node_type.name}"

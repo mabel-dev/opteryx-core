@@ -18,16 +18,11 @@ from opteryx.models import QueryProperties
 from opteryx import EOS
 
 from . import ReaderNode
-from opteryx.operators.catalog import OperatorCategory, ParallelStrategy
 
 _DATA_FORMAT = "arrow"
 
 
 class ShowValueNode(ReaderNode):
-    category = OperatorCategory.DDL
-    is_not_explained = True
-    parallel_strategy = ParallelStrategy.SINGLE_THREAD
-    logical_node_type = 'Show'
     def __init__(self, properties: QueryProperties, **parameters):
         ReaderNode.__init__(self, properties=properties, **parameters)
 

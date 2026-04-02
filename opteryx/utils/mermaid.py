@@ -1,5 +1,6 @@
 from opteryx.models import PhysicalPlan
-from opteryx.operators.catalog import OperatorCategory, get_registry
+from opteryx.operators.catalog import OperatorCategory
+from opteryx.operators.catalog import get_registry
 
 
 def plan_to_mermaid(plan: PhysicalPlan, stats: list = None) -> str:

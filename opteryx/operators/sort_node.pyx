@@ -25,16 +25,11 @@ from orso.types import OrsoTypes
 from opteryx import EOS
 
 from . import BasePlanNode
-from opteryx.operators.catalog import OperatorCategory, ParallelStrategy
 
 _DATA_FORMAT = "draken"
 
 
 class SortNode(BasePlanNode):
-    category = OperatorCategory.SORT
-    parallel_strategy = ParallelStrategy.SINGLE_THREAD
-    is_pipeline_breaking = True
-    logical_node_type = 'Order'
     def __init__(self, properties: QueryProperties, **parameters):
         BasePlanNode.__init__(self, properties=properties, **parameters)
         self.order_by = parameters.get("order_by", [])

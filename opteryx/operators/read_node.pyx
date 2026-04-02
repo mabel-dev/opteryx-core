@@ -28,7 +28,6 @@ from orso.schema import convert_orso_schema_to_arrow_schema
 from opteryx import EOS
 
 from . import BasePlanNode
-from opteryx.operators.catalog import OperatorCategory, ParallelStrategy
 
 _DATA_FORMAT = "arrow,draken"
 
@@ -163,9 +162,6 @@ def merge_schemas(
 
 
 class ReaderNode(BasePlanNode):
-    category = OperatorCategory.SCAN
-    is_scan = True
-    parallel_strategy = ParallelStrategy.MULTI_THREAD
 
     def __init__(self, properties: QueryProperties, **parameters):
         BasePlanNode.__init__(self, properties=properties, **parameters)

@@ -26,15 +26,11 @@ from opteryx.models import QueryProperties
 from opteryx import EOS
 
 from . import JoinNode
-from opteryx.operators.catalog import OperatorCategory, ParallelStrategy
 
 _DATA_FORMAT = "arrow"
 
 
 class FilterJoinNode(JoinNode):
-    category = OperatorCategory.FILTER
-    is_join = True
-    parallel_strategy = ParallelStrategy.SINGLE_THREAD
     def __init__(self, properties: QueryProperties, **parameters):
         # Ensure `join_type` exists before the base initializer accesses `self.name`
         self.join_type = parameters["type"]

@@ -13,18 +13,6 @@ Expected performance: 25-40% improvement over pure Python.
 
 import struct
 import threading
-import time
-from collections import deque
-from libc.string cimport memcpy
-from cpython.bytes cimport PyBytes_FromStringAndSize
-
-cimport cython
-from cython.parallel cimport prange
-
-# Python imports for multiprocessing primitives and data structures
-import queue as _queue_module
-from multiprocessing import Event as MPEvent
-
 
 # Struct format for frame headers (pre-compiled for speed)
 cdef object _SLOT_FRAME_STRUCT = struct.Struct("<IIQQIIIIIIQQ")
@@ -90,7 +78,7 @@ cdef class FastSharedMemoryRing:
 
         Returns slot_id if found, raises RuntimeError if cancelled.
         """
-        cdef int slot_id, i
+        cdef int i
         cdef int state
 
         while True:

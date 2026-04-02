@@ -15,17 +15,11 @@ from typing import Generator, Optional
 from opteryx.models import QueryProperties
 
 from . import BasePlanNode
-from opteryx.operators.catalog import OperatorCategory, ParallelStrategy
 
 _DATA_FORMAT = "arrow,draken"
 
 
 class ExplainNode(BasePlanNode):
-    category = OperatorCategory.DDL
-    is_not_explained = True
-    parallel_strategy = ParallelStrategy.SINGLE_THREAD
-    logical_node_type = 'Explain'
-    is_not_explained = True
 
     def __init__(self, properties: QueryProperties, **parameters):
         BasePlanNode.__init__(self, properties=properties, **parameters)

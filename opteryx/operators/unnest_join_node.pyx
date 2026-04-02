@@ -27,7 +27,6 @@ from orso.schema import FlatColumn
 from opteryx import EOS
 
 from . import BasePlanNode
-from opteryx.operators.catalog import OperatorCategory, ParallelStrategy
 
 _DATA_FORMAT = "arrow"
 
@@ -218,15 +217,10 @@ def _cross_join_unnest_literal(
 
 
 class UnnestJoinNode(BasePlanNode):
-    category = OperatorCategory.JOIN
-    is_join = True
-    parallel_strategy = ParallelStrategy.SINGLE_THREAD
-    is_pipeline_breaking = True
     """
     Implements CROSS JOIN UNNEST
     """
 
-    is_stateless = True
 
     def __init__(self, properties: QueryProperties, **parameters):
         BasePlanNode.__init__(self, properties=properties, **parameters)

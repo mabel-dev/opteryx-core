@@ -28,17 +28,11 @@ from opteryx.models import QueryProperties
 from opteryx import EOS
 
 from . import BasePlanNode
-from opteryx.operators.catalog import OperatorCategory, ParallelStrategy
 
 _DATA_FORMAT = "draken"
 
 
 class ExitNode(BasePlanNode):
-    category = OperatorCategory.DDL
-    is_not_explained = True
-    parallel_strategy = ParallelStrategy.SINGLE_THREAD
-    logical_node_type = 'Exit'
-    is_not_explained = True
 
     def __init__(self, properties: QueryProperties, **parameters):
         BasePlanNode.__init__(self, properties=properties, **parameters)

@@ -31,7 +31,6 @@ from opteryx import EMPTY
 from opteryx import EOS
 
 from . import BasePlanNode
-from opteryx.operators.catalog import OperatorCategory, ParallelStrategy
 
 _DATA_FORMAT = "draken"
 
@@ -75,10 +74,6 @@ def create_groupby_engine(group_by_columns, aggregations):
 
 
 class DrakenAggregateAndGroupNode(BasePlanNode):
-    category = OperatorCategory.AGGREGATE
-    parallel_strategy = ParallelStrategy.SINGLE_THREAD
-    is_pipeline_breaking = True
-    logical_node_type = 'AggregateAndGroup'
     ENGINE_READING_KEYS = (
         "feature_groupby_engine_carchar",
         "feature_groupby_engine_constant",
