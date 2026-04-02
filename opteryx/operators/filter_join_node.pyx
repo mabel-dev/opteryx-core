@@ -13,6 +13,7 @@ These joins are used to filter rows from the left table based on the
 presence or absence of matching rows in the right table.
 """
 
+from typing import Generator, Optional
 import time
 
 import pyarrow
@@ -25,11 +26,15 @@ from opteryx.models import QueryProperties
 from opteryx import EOS
 
 from . import JoinNode
+from opteryx.operators.catalog import OperatorCategory, ParallelStrategy
 
 _DATA_FORMAT = "arrow"
 
 
 class FilterJoinNode(JoinNode):
+    category = OperatorCategory.FILTER
+    is_join = True
+    parallel_strategy = ParallelStrategy.SINGLE_THREAD
     def __init__(self, properties: QueryProperties, **parameters):
         # Ensure `join_type` exists before the base initializer accesses `self.name`
         self.join_type = parameters["type"]
@@ -44,6 +49,7 @@ class FilterJoinNode(JoinNode):
         self.right_readers = parameters.get("right_readers")
 
         self.right_hash_set = CarcharSetWrapper()
+        self._build_phase = True  # right side arrives first (plan reverses semi/anti joins)
 
     @property
     def name(self):  # pragma: no cover
@@ -59,10 +65,22 @@ class FilterJoinNode(JoinNode):
             return f"{self.join_type.upper()} JOIN (USING {','.join(map(format_expression, self.using))})"
         return f"{self.join_type.upper()}"
 
-    def execute(self, morsel: pyarrow.Table, join_leg: str) -> pyarrow.Table:
+    def execute(self, morsel):
         morsel = self.ensure_arrow_table(morsel)
 
-        if join_leg == "left":
+        if self._build_phase:
+            # Build phase: right side arrives first due to plan ordering for semi/anti joins
+            if morsel == EOS:
+                self._build_phase = False
+                yield None
+            else:
+                morsel = self._apply_join_key_casts(morsel, is_left=False)
+                start = time.monotonic_ns()
+                self.right_hash_set = filter_join_set(morsel, self.right_columns, self.right_hash_set)
+                self.readings["time_build_filter_hash_table"] += time.monotonic_ns() - start
+                yield None
+        else:
+            # Probe phase: left side
             if morsel == EOS:
                 yield EOS
             else:
@@ -73,12 +91,6 @@ class FilterJoinNode(JoinNode):
                     join_columns=self.left_columns,
                     seen_hashes=self.right_hash_set,
                 )
-        if join_leg == "right" and morsel != EOS:
-            morsel = self._apply_join_key_casts(morsel, is_left=False)
-            start = time.monotonic_ns()
-            self.right_hash_set = filter_join_set(morsel, self.right_columns, self.right_hash_set)
-            self.readings["time_build_filter_hash_table"] += time.monotonic_ns() - start
-            yield None
 
 
 providers = {

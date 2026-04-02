@@ -27,10 +27,45 @@ END = object()
 
 
 class BasePlanNode:
+    # Class-level metadata (set by subclasses, collected by __init_subclass__)
+    category = None  # Must be set by subclasses (OperatorCategory)
+    parallel_strategy = None  # Optional: ParallelStrategy (defaults to SINGLE_THREAD)
+    is_pipeline_breaking: bool = False
     is_join: bool = False
     is_scan: bool = False
     is_not_explained: bool = False
     is_stateless: bool = False
+    target_queue_depth: int = 0
+    batch_size: int = 2048
+    logical_node_type = None  # Optional: LogicalPlanStepType (for dispatch)
+
+    def __init_subclass__(cls, **kwargs):
+        """Auto-register operator subclass in the catalog when class is defined."""
+        super().__init_subclass__(**kwargs)
+
+        # Only register concrete operators with category defined (not intermediate base classes)
+        if cls.__module__.startswith("opteryx.operators.") and cls.category is not None:
+            from opteryx.operators.catalog import get_registry
+
+            # Collect metadata from class attributes
+            metadata_kwargs = {
+                "category": cls.category,
+                "parallel_strategy": cls.parallel_strategy,
+                "is_pipeline_breaking": cls.is_pipeline_breaking,
+                "is_join": cls.is_join,
+                "is_scan": cls.is_scan,
+                "is_stateless": cls.is_stateless,
+                "is_not_explained": cls.is_not_explained,
+                "target_queue_depth": cls.target_queue_depth,
+                "batch_size": cls.batch_size,
+            }
+
+            # Only add logical_node_type if set (optional for dispatch)
+            if cls.logical_node_type is not None:
+                metadata_kwargs["logical_node_type"] = cls.logical_node_type
+
+            # Register in global catalog
+            get_registry().register(cls, **metadata_kwargs)
 
     def __init__(self, *, properties, **parameters):
         """
@@ -111,64 +146,75 @@ class BasePlanNode:
             return Morsel.iter_from_arrow(table)
         return table
 
-    def __call__(self, morsel: pyarrow.Table, join_leg: str) -> Optional[pyarrow.Table]:
+    def __call__(self, morsel: pyarrow.Table) -> Optional[pyarrow.Table]:
         # Cache frequently accessed attributes
         telemetry = self.telemetry
         time_stat_key = self._time_stat_key
         is_scan = self.is_scan
 
         # Process input metrics
-        num_rows = 0
+        input_rows = 0
+        input_bytes = 0
         if hasattr(morsel, "num_rows"):
-            num_rows = morsel.num_rows
-            nbytes = morsel.nbytes
-            self.records_in += num_rows
-            self.bytes_in += nbytes
+            input_rows = morsel.num_rows
+            input_bytes = morsel.nbytes
+            self.records_in += input_rows
+            self.bytes_in += input_bytes
             self.calls += 1
 
+        # Get operator category for tracing (may be None for unregistered operators)
+        operator_category = getattr(self.__class__, "category", None)
+        category_value = operator_category.value if operator_category else None
+
         # Set up execution
-        generator = self.execute(morsel, join_leg=join_leg)
+        generator = self.execute(morsel)
         empty_morsel = None
         at_least_one = False
-        _call_total_ns = 0
-
-        _trace_record(
-            "operator_execute",
-            operator_name=self.name,
-            operator_id=self.identity,
-            phase="start",
-            duration_ns=0,
-            rows_in=num_rows,
-            rows_out=0,
-            produced_rows=False,
-        )
+        morsel_index = 0
 
         while True:
             try:
                 start_time = time.monotonic_ns()
                 result = next(generator, END)
                 execution_time = time.monotonic_ns() - start_time
-                _call_total_ns += execution_time
 
                 self.execution_time += execution_time
                 telemetry.increase(time_stat_key, execution_time)
 
                 if result == EMPTY:
-                    # Node absorbed a morsel but produced nothing — record for
-                    # telemetry and dead-end here; nothing goes downstream.
+                    # Node absorbed a morsel but produced nothing.
+                    # Record trace event for this empty morsel.
                     _trace_record(
                         "operator_execute",
                         operator_name=self.name,
                         operator_id=self.identity,
-                        phase="finish",
-                        duration_ns=execution_time,
-                        rows_in=num_rows,
+                        operator_category=category_value,
+                        morsel_index=morsel_index,
+                        rows_in=input_rows,
                         rows_out=0,
-                        produced_rows=False,
+                        bytes_in=input_bytes,
+                        bytes_out=0,
+                        duration_ns=execution_time,
+                        produced_output=False,
                     )
+                    morsel_index += 1
                     continue
 
                 if result == END:
+                    # End of generator stream. Record final marker.
+                    _trace_record(
+                        "operator_execute",
+                        operator_name=self.name,
+                        operator_id=self.identity,
+                        operator_category=category_value,
+                        morsel_index=-1,  # -1 signals end-of-stream
+                        rows_in=0,
+                        rows_out=0,
+                        bytes_in=0,
+                        bytes_out=0,
+                        duration_ns=0,
+                        produced_output=False,
+                    )
                     if not at_least_one and empty_morsel is not None:
                         yield empty_morsel
                     break
@@ -176,40 +222,78 @@ class BasePlanNode:
                 if is_scan:
                     self.calls += 1
 
-                # Optimized attribute checking
+                # Optimized attribute checking for table-like results
+                output_rows = 0
+                output_bytes = 0
                 try:
-                    result_num_rows = result.num_rows
-                    result_nbytes = result.nbytes
-                    self.records_out += result_num_rows
-                    self.bytes_out += result_nbytes
+                    output_rows = result.num_rows
+                    output_bytes = result.nbytes
+                    self.records_out += output_rows
+                    self.bytes_out += output_bytes
 
                     if empty_morsel is None:
                         empty_morsel = result.slice(0, 0)
 
-                    if result_num_rows > 0:
+                    # Emit trace event for this morsel
+                    produced_output = output_rows > 0
+                    _trace_record(
+                        "operator_execute",
+                        operator_name=self.name,
+                        operator_id=self.identity,
+                        operator_category=category_value,
+                        morsel_index=morsel_index,
+                        rows_in=input_rows,
+                        rows_out=output_rows,
+                        bytes_in=input_bytes,
+                        bytes_out=output_bytes,
+                        duration_ns=execution_time,
+                        produced_output=produced_output,
+                    )
+
+                    if output_rows > 0:
                         at_least_one = True
-                        _trace_record(
-                            "operator_execute",
-                            operator_name=self.name,
-                            operator_id=self.identity,
-                            phase="finish",
-                            duration_ns=execution_time,
-                            rows_in=num_rows,
-                            rows_out=result_num_rows,
-                            produced_rows=True,
-                        )
                         yield result
+                        morsel_index += 1
                         continue
                     else:
                         telemetry.dead_ended_empty_morsels += 1
                 except AttributeError:
-                    # Not a table-like object
-                    pass
+                    # Not a table-like object — emit trace with unknown bytes
+                    _trace_record(
+                        "operator_execute",
+                        operator_name=self.name,
+                        operator_id=self.identity,
+                        operator_category=category_value,
+                        morsel_index=morsel_index,
+                        rows_in=input_rows,
+                        rows_out=0,
+                        bytes_in=input_bytes,
+                        bytes_out=0,
+                        duration_ns=execution_time,
+                        produced_output=True,
+                    )
 
                 at_least_one = True
                 yield result
+                morsel_index += 1
 
             except Exception as err:
+                # Record error event before re-raising
+                _trace_record(
+                    "operator_execute",
+                    operator_name=self.name,
+                    operator_id=self.identity,
+                    operator_category=category_value,
+                    morsel_index=morsel_index,
+                    error=err.__class__.__name__,
+                    error_message=str(err),
+                    rows_in=input_rows,
+                    rows_out=0,
+                    bytes_in=input_bytes,
+                    bytes_out=0,
+                    duration_ns=0,
+                    produced_output=False,
+                )
                 raise err
 
     def sensors(self):

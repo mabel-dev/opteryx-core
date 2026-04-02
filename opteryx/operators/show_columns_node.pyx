@@ -11,10 +11,12 @@ This is a SQL Query Execution Plan Node.
 Gives information about a dataset's columns
 """
 
+from typing import Generator, Optional
 import pyarrow
 from opteryx.models import QueryProperties
 
 from . import BasePlanNode
+from opteryx.operators.catalog import OperatorCategory, ParallelStrategy
 
 _DATA_FORMAT = "arrow"
 
@@ -46,6 +48,10 @@ def _simple_collector(schema):
 
 
 class ShowColumnsNode(BasePlanNode):
+    category = OperatorCategory.DDL
+    is_not_explained = True
+    parallel_strategy = ParallelStrategy.SINGLE_THREAD
+    logical_node_type = 'ShowColumns'
     def __init__(self, properties: QueryProperties, **parameters):
         BasePlanNode.__init__(self, properties=properties, **parameters)
         self._full = parameters.get("full")
@@ -69,7 +75,7 @@ class ShowColumnsNode(BasePlanNode):
         dic["name"] = renames[dic["name"]]
         return dic
 
-    def execute(self, morsel: pyarrow.Table, **kwargs) -> pyarrow.Table:
+    def execute(self, morsel):
         if self.seen:
             yield None
             return

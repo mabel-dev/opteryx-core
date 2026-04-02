@@ -9,17 +9,22 @@ Show Create Node
 This is a SQL Query Execution Plan Node.
 """
 
+from typing import Generator, Optional
 import pyarrow
 from opteryx.exceptions import DatasetNotFoundError
 from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.models import QueryProperties
 
 from . import BasePlanNode
+from opteryx.operators.catalog import OperatorCategory, ParallelStrategy
 
 _DATA_FORMAT = "arrow"
 
 
 class ShowCreateNode(BasePlanNode):
+    category = OperatorCategory.DDL
+    is_not_explained = True
+    parallel_strategy = ParallelStrategy.SINGLE_THREAD
     def __init__(self, properties: QueryProperties, **parameters):
         BasePlanNode.__init__(self, properties=properties, **parameters)
 
@@ -34,7 +39,7 @@ class ShowCreateNode(BasePlanNode):
     def config(self):  # pragma: no cover
         return ""
 
-    def execute(self, morsel: pyarrow.Table, **kwargs) -> pyarrow.Table:
+    def execute(self, morsel):
         if self.object_type == "VIEW":
             from opteryx.planner.views import is_view
             from opteryx.planner.views import view_as_sql

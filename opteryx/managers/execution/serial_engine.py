@@ -11,7 +11,6 @@ This module provides the execution engine for processing physical plans in a ser
 import time
 from typing import Any
 from typing import Generator
-from typing import Optional
 from typing import Tuple
 
 import pyarrow
@@ -63,15 +62,15 @@ def execute(
         return head_node(None), ResultType.NON_TABULAR
     if isinstance(head_node, (ShowValueNode, ShowCreateNode)):
         # There's no execution plan to execute, just return the result
-        return head_node(None, None), ResultType.TABULAR
+        return head_node(None), ResultType.TABULAR
 
     def inner_execute(plan: PhysicalPlan) -> Generator:
         pump_nodes = [(nid, node) for nid, node in plan.depth_first_search_flat() if node.is_scan]
         for pump_nid, pump_instance in pump_nodes:
-            for morsel in pump_instance(None, None):
+            for morsel in pump_instance(None):
                 if morsel is not None:
-                    yield from process_node(plan, pump_nid, morsel, None)
-            yield from process_node(plan, pump_nid, EOS, None)
+                    yield from process_node(plan, pump_nid, morsel)
+            yield from process_node(plan, pump_nid, EOS)
 
     return inner_execute(plan), ResultType.TABULAR
 
@@ -139,13 +138,13 @@ def explain(
 
 
 def process_node(
-    plan: PhysicalPlan, nid: str, morsel: pyarrow.Table, join_leg: Optional[str]
+    plan: PhysicalPlan, nid: str, morsel: pyarrow.Table
 ) -> Generator:
     node = plan[nid]
 
     if node.is_scan:
-        for _, child, leg in plan.outgoing_edges(nid):
-            results = process_node(plan, child, morsel, leg)
+        for _, child, _ in plan.outgoing_edges(nid):
+            results = process_node(plan, child, morsel)
             yield from (result for result in results if result is not None)
     else:
         rows_in = getattr(morsel, "num_rows", 0) if morsel is not None else 0
@@ -159,7 +158,7 @@ def process_node(
             produced_rows=False,
         )
 
-        results = node(morsel, join_leg)
+        results = node(morsel)
         rows_out = 0
         produced_rows = False
 
@@ -181,8 +180,8 @@ def process_node(
             children = plan.outgoing_edges(nid)
             if len(children) == 0 and result != EOS:
                 yield result
-            for _, child, leg in children:
-                yield from process_node(plan, child, result, leg)
+            for _, child, _ in children:
+                yield from process_node(plan, child, result)
 
         trace_operator_finished(
             operator_name=node.name,

@@ -81,6 +81,11 @@ Performance Considerations:
 """
 
 from .base_plan_node import BasePlanNode, JoinNode  # isort: skip
+from .catalog import (  # Operator metadata and registry
+    OperatorCategory,
+    ParallelStrategy,
+    get_registry,
+)
 
 from .aggregate_helpers import AGGREGATORS
 from .draken_aggregate_node import DrakenAggregateNode
@@ -125,6 +130,9 @@ from .union_node import UnionNode
 __all__ = [
     "BasePlanNode",
     "JoinNode",
+    "OperatorCategory",
+    "ParallelStrategy",
+    "get_registry",
     "DrakenAggregateNode",
     "DrakenAggregateAndGroupNode",
     "AGGREGATORS",

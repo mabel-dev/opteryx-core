@@ -9,16 +9,22 @@ Set Variables Node
 This is a SQL Query Execution Plan Node.
 """
 
+from typing import Generator, Optional
 from opteryx.constants import QueryStatus
 from opteryx.models import NonTabularResult
 from opteryx.models import QueryProperties
 
 from . import BasePlanNode
+from opteryx.operators.catalog import OperatorCategory, ParallelStrategy
 
 _DATA_FORMAT = "arrow,draken"
 
 
 class SetVariableNode(BasePlanNode):
+    category = OperatorCategory.DDL
+    is_not_explained = True
+    parallel_strategy = ParallelStrategy.SINGLE_THREAD
+    logical_node_type = 'Set'
     def __init__(self, properties: QueryProperties, **parameters):
         BasePlanNode.__init__(self, properties=properties, **parameters)
 

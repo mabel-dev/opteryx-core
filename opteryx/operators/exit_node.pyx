@@ -17,6 +17,7 @@ This does two things that the projection node doesn't do:
 This node doesn't do any calculations, it is a pure Projection.
 """
 
+from typing import Generator, Optional
 from collections.abc import Iterable
 
 from opteryx.compiled.draken.morsels.morsel import Morsel
@@ -27,11 +28,16 @@ from opteryx.models import QueryProperties
 from opteryx import EOS
 
 from . import BasePlanNode
+from opteryx.operators.catalog import OperatorCategory, ParallelStrategy
 
 _DATA_FORMAT = "draken"
 
 
 class ExitNode(BasePlanNode):
+    category = OperatorCategory.DDL
+    is_not_explained = True
+    parallel_strategy = ParallelStrategy.SINGLE_THREAD
+    logical_node_type = 'Exit'
     is_not_explained = True
 
     def __init__(self, properties: QueryProperties, **parameters):
@@ -74,7 +80,7 @@ class ExitNode(BasePlanNode):
     def name(self):  # pragma: no cover
         return "Exit"
 
-    def execute(self, morsel, **kwargs):
+    def execute(self, morsel):
         """Execute exit node: Draken-native column projection.
 
         The query engine (motor) is Draken-native throughout. Exit node formats results

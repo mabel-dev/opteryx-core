@@ -20,6 +20,7 @@ Supported comparisons:
 - LESS THAN OR EQUAL (<=)
 """
 
+from typing import Generator, Optional
 import numpy
 import pyarrow
 from opteryx.compiled.draken import Morsel
@@ -31,6 +32,7 @@ from pyarrow import Table
 from opteryx import EOS
 
 from . import JoinNode
+from opteryx.operators.catalog import OperatorCategory, ParallelStrategy
 
 _DATA_FORMAT = "arrow,draken"
 
@@ -39,6 +41,10 @@ _DATA_FORMAT = "arrow,draken"
 
 
 class NonEquiJoinNode(JoinNode):
+    category = OperatorCategory.JOIN
+    is_join = True
+    parallel_strategy = ParallelStrategy.SINGLE_THREAD
+    is_pipeline_breaking = True
     """
     Implements non-equi joins using nested loop algorithm with draken.
     """
@@ -55,6 +61,7 @@ class NonEquiJoinNode(JoinNode):
         self.left_relation = None
         self.left_morsel = None
         self.left_buffer = []
+        self._build_phase = True
 
         # Validate comparison operator
         valid_ops = [
@@ -74,20 +81,21 @@ class NonEquiJoinNode(JoinNode):
     @property
     def config(self):  # pragma: no cover
         op_symbols = {
-            "not_equals": "!=",
-            "greater_than": ">",
-            "greater_than_or_equals": ">=",
-            "less_than": "<",
-            "less_than_or_equals": "<=",
+            "not_equals",
+            "greater_than",
+            "greater_than_or_equals",
+            "less_than",
+            "less_than_or_equals",
         }
         op_symbol = op_symbols.get(self.comparison_op, self.comparison_op)
         return f"{self.left_column} {op_symbol} {self.right_column}"
 
-    def execute(self, morsel: Table, join_leg: str) -> Table:
+    def execute(self, morsel):
         morsel = self.ensure_arrow_table(morsel)
 
-        if join_leg == "left":
+        if self._build_phase:
             if morsel == EOS:
+                self._build_phase = False
                 self.left_relation = pyarrow.concat_tables(self.left_buffer, promote_options="none")
                 self.left_buffer.clear()
                 self.left_morsel = Morsel.from_arrow(self.left_relation)
@@ -96,7 +104,7 @@ class NonEquiJoinNode(JoinNode):
             yield None
             return
 
-        if join_leg == "right":
+        else:
             if morsel == EOS:
                 yield EOS
                 return

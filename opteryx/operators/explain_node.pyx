@@ -11,14 +11,20 @@ This is a SQL Query Execution Plan Node.
 This writes out a query plan
 """
 
+from typing import Generator, Optional
 from opteryx.models import QueryProperties
 
 from . import BasePlanNode
+from opteryx.operators.catalog import OperatorCategory, ParallelStrategy
 
 _DATA_FORMAT = "arrow,draken"
 
 
 class ExplainNode(BasePlanNode):
+    category = OperatorCategory.DDL
+    is_not_explained = True
+    parallel_strategy = ParallelStrategy.SINGLE_THREAD
+    logical_node_type = 'Explain'
     is_not_explained = True
 
     def __init__(self, properties: QueryProperties, **parameters):
@@ -35,6 +41,6 @@ class ExplainNode(BasePlanNode):
     def config(self):
         return ""
 
-    def execute(self, morsel, **kwargs):
+    def execute(self, morsel):
         if self._query_plan:
             yield self._query_plan.explain(self.analyze)
