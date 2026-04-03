@@ -30,11 +30,11 @@ from opteryx.expression.intervals import MICROSECONDS_PER_SECOND
 from opteryx.expression.operator_catalog import get_operator_node_type
 from opteryx.models import LogicalColumn
 from opteryx.models import Node
+from opteryx.operators.aggregate_helpers import aggregator_names
+from opteryx.operators.aggregate_helpers import is_aggregator
 from opteryx.utils import dates
 from opteryx.utils import suggest_alternative
 from orso.types import OrsoTypes
-
-from opteryx import operators
 
 # Epoch constants for converting datetime literals to Draken-native integers.
 # DATE literals are stored as int (days since epoch, fits int32).
@@ -771,7 +771,7 @@ def function(branch, alias: Optional[List[str]] = None, key=None):
         node_type = NodeType.FUNCTION
         if filter_condition is not None:
             raise UnsupportedSyntaxError("Filters are not supported with function calls.")
-    elif operators.is_aggregator(func):
+    elif is_aggregator(func):
         node_type = NodeType.AGGREGATOR
         if filter_condition is not None:
             if func != "COUNT":
@@ -807,7 +807,7 @@ def function(branch, alias: Optional[List[str]] = None, key=None):
                 alias=alias,
             )
 
-        likely_match = suggest_alternative(func, operators.aggregators() + _list_functions())
+        likely_match = suggest_alternative(func, aggregator_names() + _list_functions())
         if likely_match is None:
             raise UnsupportedSyntaxError(f"Unknown function or aggregate '{func}'")
         raise FunctionNotFoundError(

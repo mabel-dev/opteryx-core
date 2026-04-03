@@ -12,20 +12,26 @@ Gives information about a dataset's columns
 """
 
 from typing import Generator, Optional
-import pyarrow
+from opteryx.compiled.draken.interop.arrow import vector_from_sequence
+from opteryx.compiled.draken.morsels.morsel import Morsel
 from opteryx.models import QueryProperties
+from orso.types import OrsoTypes
 
 from . import BasePlanNode
 
-_DATA_FORMAT = "arrow"
+_DATA_FORMAT = "draken"
 
 
 def _simple_collector(schema):
     """
-    We've been given the schema, so just translate to a table
+    We've been given the schema, so just translate to a Draken morsel
     """
 
-    buffer = []
+    names = []
+    types = []
+    nullables = []
+    aliases = []
+
     for column in schema.columns:
         type_label = str(column.type)
         if column.length is not None:
@@ -35,15 +41,19 @@ def _simple_collector(schema):
         if column.element_type is not None and str(column.type) == "ARRAY":
             type_label += f"<{column.element_type}>"
 
-        new_row = {
-            "name": column.name,
-            "type": type_label,
-            "nullable": column.nullable,
-            "aliases": column.aliases,
-        }
-        buffer.append(new_row)
+        names.append(column.name)
+        types.append(type_label)
+        nullables.append(column.nullable)
+        aliases.append(column.aliases)
 
-    return pyarrow.Table.from_pylist(buffer)
+    vectors = [
+        vector_from_sequence(names, dtype=OrsoTypes.VARCHAR),
+        vector_from_sequence(types, dtype=OrsoTypes.VARCHAR),
+        vector_from_sequence(nullables, dtype=OrsoTypes.BOOLEAN),
+        vector_from_sequence(aliases, dtype=OrsoTypes.VARCHAR),
+    ]
+
+    return Morsel.from_vectors(["name", "type", "nullable", "aliases"], vectors)
 
 
 class ShowColumnsNode(BasePlanNode):

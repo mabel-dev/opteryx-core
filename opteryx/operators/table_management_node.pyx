@@ -17,7 +17,7 @@ from opteryx.models import QueryProperties
 
 from . import BasePlanNode
 
-_DATA_FORMAT = "arrow,draken"
+_DATA_FORMAT = "none"
 
 
 class TableManagementNode(BasePlanNode):

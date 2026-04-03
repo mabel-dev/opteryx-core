@@ -5,9 +5,7 @@
 
 from __future__ import annotations
 
-from opteryx.compiled.structures.shuffle_partition import (
-    row_indexes_by_bin_flat as _row_indexes_by_bin_flat,
-)
+from opteryx.compiled.structures.shuffle_partition import row_indexes_by_bin_flat
 
 _ALLOWED_BIN_COUNTS = (1, 2, 4, 8, 16)
 
@@ -43,5 +41,5 @@ def row_indexes_by_bin(hashes, num_bins: int, shift_bits: int = 0) -> list[list[
     if shift_bits < 0:
         raise ValueError("shift_bits must be zero or positive")
 
-    flat, offsets = _row_indexes_by_bin_flat(hashes, num_bins, shift_bits)
+    flat, offsets = row_indexes_by_bin_flat(hashes, num_bins, shift_bits)
     return [list(flat[offsets[bin_id] : offsets[bin_id + 1]]) for bin_id in range(num_bins)]

@@ -221,7 +221,6 @@ class UnnestJoinNode(BasePlanNode):
     Implements CROSS JOIN UNNEST
     """
 
-
     def __init__(self, properties: QueryProperties, **parameters):
         BasePlanNode.__init__(self, properties=properties, **parameters)
 

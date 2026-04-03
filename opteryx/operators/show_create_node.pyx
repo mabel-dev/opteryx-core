@@ -10,14 +10,16 @@ This is a SQL Query Execution Plan Node.
 """
 
 from typing import Generator, Optional
-import pyarrow
+from opteryx.compiled.draken.interop.arrow import vector_from_sequence
+from opteryx.compiled.draken.morsels.morsel import Morsel
 from opteryx.exceptions import DatasetNotFoundError
 from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.models import QueryProperties
+from orso.types import OrsoTypes
 
 from . import BasePlanNode
 
-_DATA_FORMAT = "arrow"
+_DATA_FORMAT = "draken"
 
 
 class ShowCreateNode(BasePlanNode):
@@ -43,9 +45,12 @@ class ShowCreateNode(BasePlanNode):
             if is_view(self.object_name):
                 print("SHOW CREATE VIEW", self.object_name)
                 view_sql = view_as_sql(self.object_name)
-                buffer = [{self.object_name: view_sql}]
-                table = pyarrow.Table.from_pylist(buffer)
-                yield table
+                vectors = [
+                    vector_from_sequence([self.object_name], dtype=OrsoTypes.VARCHAR),
+                    vector_from_sequence([view_sql], dtype=OrsoTypes.VARCHAR),
+                ]
+                morsel = Morsel.from_vectors([self.object_name, "create_statement"], vectors)
+                yield morsel
                 return
 
             raise DatasetNotFoundError(dataset=self.object_name, connector="VIEW")

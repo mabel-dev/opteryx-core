@@ -11,15 +11,17 @@ This is a SQL Query Execution Plan Node.
 
 from typing import Generator
 
-import pyarrow
+from opteryx.compiled.draken.interop.arrow import vector_from_sequence
+from opteryx.compiled.draken.morsels.morsel import Morsel
 from opteryx.exceptions import SqlError
 from opteryx.models import QueryProperties
+from orso.types import OrsoTypes
 
 from opteryx import EOS
 
 from . import ReaderNode
 
-_DATA_FORMAT = "arrow"
+_DATA_FORMAT = "draken"
 
 
 class ShowValueNode(ReaderNode):
@@ -45,6 +47,9 @@ class ShowValueNode(ReaderNode):
         return ""
 
     def execute(self, morsel):
-        buffer = [{"name": self.key, "value": str(self.value)}]
-        table = pyarrow.Table.from_pylist(buffer)
-        yield table
+        vectors = [
+            vector_from_sequence([self.key], dtype=OrsoTypes.VARCHAR),
+            vector_from_sequence([str(self.value)], dtype=OrsoTypes.VARCHAR),
+        ]
+        morsel = Morsel.from_vectors(["name", "value"], vectors)
+        yield morsel
