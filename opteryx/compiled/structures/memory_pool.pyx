@@ -20,7 +20,7 @@ Features:
 - Level 1 and Level 2 compaction to reduce fragmentation.
 - Thread safety via RLock.
 - Debug mode for detailed statistics and diagnostics.
-- Supports zero-copy reads and buffer-based commits for compatibility with numpy, memoryview, and PyArrow.
+- Supports zero-copy reads and buffer-based commits for compatibility with memoryview and buffers.
 
 """
 
@@ -28,8 +28,10 @@ from libc.stdlib cimport malloc, free, realloc
 from libc.string cimport memcpy, memmove
 from cpython.bytes cimport PyBytes_AsString, PyBytes_FromStringAndSize
 from cpython.buffer cimport PyBUF_SIMPLE, PyObject_GetBuffer, PyBuffer_Release, Py_buffer
-from threading import RLock
 from libcpp.vector cimport vector
+from libcpp.unordered_map cimport unordered_map
+from cython.operator cimport dereference, preincrement
+from threading import RLock
 from libc.stdint cimport int64_t, uintptr_t
 
 import os
@@ -43,6 +45,13 @@ cdef struct MemorySegment:
     int64_t ref_id
     bint is_free
 
+cdef struct SegmentMetadata:
+    # C++ struct for fast metadata access without Python dicts
+    int64_t start
+    int64_t length
+    int64_t latches
+    int64_t orig_length
+
 cdef inline int64_t _align_size(int64_t size, int64_t alignment=8):
     """Align size to the specified boundary for better memory access patterns."""
     return (size + alignment - 1) & ~(alignment - 1)
@@ -53,12 +62,11 @@ cdef class MemoryPool:
         public int64_t size
         public int64_t used_size
         public vector[MemorySegment] segments
-        public dict used_segments  # public view: ref_id -> {'start','length','latches','orig_length'}
-        cdef dict _used_start_map  # internal: ref_id -> segment.start (or -1 for zero-length)
+        unordered_map[int64_t, SegmentMetadata] c_metadata  # C++ map: ref_id -> metadata
         public str name
         public int64_t commits, failed_commits, reads, read_locks
         public int64_t l1_compaction, l2_compaction, releases, resizes
-        object lock
+        object lock  # Python RLock (Cython has issues with C++ mutex embedding)
         int64_t next_ref_id
         int64_t alignment
         bint auto_resize
@@ -89,8 +97,7 @@ cdef class MemoryPool:
         self.segments.push_back(initial_segment)
 
         self.name = name
-        self.used_segments = {}
-        self._used_start_map = {}
+        # C++ structures are auto-initialized
         self.lock = RLock()
 
         # Initialize statistics
@@ -204,11 +211,17 @@ cdef class MemoryPool:
         cdef MemorySegment seg
         cdef int64_t original_start
         cdef dict start_to_ref = {}
-        cdef object ref, info
+        cdef int64_t ref_id
+        cdef SegmentMetadata metadata
+        cdef unordered_map[int64_t, SegmentMetadata].iterator it
 
         # Build mapping from original start -> ref so we can update refs after moves
-        for ref, info in self.used_segments.items():
-            start_to_ref[info["start"]] = ref
+        it = self.c_metadata.begin()
+        while it != self.c_metadata.end():
+            ref_id = dereference(it).first
+            metadata = dereference(it).second
+            start_to_ref[metadata.start] = ref_id
+            preincrement(it)
 
         # Iterate original segments in order and move unlatched segments leftwards
         for i in range(self.segments.size()):
@@ -231,10 +244,11 @@ cdef class MemoryPool:
                 new_segments.push_back(seg)
                 # Update mapping if present (start remains same)
                 if original_start in start_to_ref:
-                    ref = start_to_ref[original_start]
-                    self._used_start_map[ref] = seg.start
-                    if ref in self.used_segments:
-                        self.used_segments[ref]["start"] = seg.start
+                    ref_id = start_to_ref[original_start]
+                    if self.c_metadata.find(ref_id) != self.c_metadata.end():
+                        metadata = self.c_metadata[ref_id]
+                        metadata.start = seg.start
+                        self.c_metadata[ref_id] = metadata
             else:
                 # Move this unlatched segment to current_pos if needed
                 if seg.start != current_pos:
@@ -245,10 +259,11 @@ cdef class MemoryPool:
 
                 # Update mapping for this moved segment
                 if original_start in start_to_ref:
-                    ref = start_to_ref[original_start]
-                    self._used_start_map[ref] = seg.start
-                    if ref in self.used_segments:
-                        self.used_segments[ref]["start"] = seg.start
+                    ref_id = start_to_ref[original_start]
+                    if self.c_metadata.find(ref_id) != self.c_metadata.end():
+                        metadata = self.c_metadata[ref_id]
+                        metadata.start = seg.start
+                        self.c_metadata[ref_id] = metadata
 
                 current_pos += seg.length
 
@@ -294,6 +309,7 @@ cdef class MemoryPool:
         cdef Py_buffer view
         cdef char* raw_ptr
         cdef int64_t aligned_size
+        cdef SegmentMetadata metadata
 
         self.next_ref_id += 1
 
@@ -309,9 +325,12 @@ cdef class MemoryPool:
 
         if len_data == 0:
             with self.lock:
-                self._used_start_map[ref_id] = -1  # Special marker for zero-length data
-                # public view entry for tests
-                self.used_segments[ref_id] = {"start": 0, "length": 0, "latches": 0}
+                # Store metadata for zero-length data
+                metadata.start = -1
+                metadata.length = 0
+                metadata.latches = 0
+                metadata.orig_length = 0
+                self.c_metadata[ref_id] = metadata
                 self.commits += 1
             return ref_id
 
@@ -361,6 +380,12 @@ cdef class MemoryPool:
             new_segment.latches = 0
             new_segment.is_free = False
 
+            # Store metadata in C++ map
+            metadata.start = new_segment.start
+            metadata.length = new_segment.length
+            metadata.latches = 0
+            metadata.orig_length = len_data
+
             # Update or replace the free segment
             if segment.length > aligned_size:
                 # Split the segment
@@ -368,13 +393,11 @@ cdef class MemoryPool:
                 segment.length -= aligned_size
                 self.segments[segment_index] = segment
                 self.segments.insert(self.segments.begin() + segment_index, new_segment)
-                self._used_start_map[ref_id] = new_segment.start
-                self.used_segments[ref_id] = {"start": new_segment.start, "length": new_segment.length, "latches": 0, "orig_length": len_data}
+                self.c_metadata[ref_id] = metadata
             else:
                 # Exact fit or very close (due to alignment)
                 self.segments[segment_index] = new_segment
-                self._used_start_map[ref_id] = new_segment.start
-                self.used_segments[ref_id] = {"start": new_segment.start, "length": new_segment.length, "latches": 0, "orig_length": len_data}
+                self.c_metadata[ref_id] = metadata
 
             # Copy data
             memcpy(self.pool + new_segment.start, raw_ptr, len_data)
@@ -398,6 +421,7 @@ cdef class MemoryPool:
         cdef MemorySegment segment, new_segment
         cdef int64_t new_size
         cdef MemorySegment additional_space
+        cdef SegmentMetadata metadata
 
         with self.lock:
             segment_index = self._find_best_fit_segment(aligned_size)
@@ -437,17 +461,21 @@ cdef class MemoryPool:
             new_segment.latches = 1
             new_segment.is_free = False
 
+            # Store metadata
+            metadata.start = new_segment.start
+            metadata.length = new_segment.length
+            metadata.latches = 1
+            metadata.orig_length = 0
+
             if segment.length > aligned_size:
                 segment.start += aligned_size
                 segment.length -= aligned_size
                 self.segments[segment_index] = segment
                 self.segments.insert(self.segments.begin() + segment_index, new_segment)
-                self._used_start_map[self.next_ref_id] = new_segment.start
-                self.used_segments[self.next_ref_id] = {"start": new_segment.start, "length": new_segment.length, "latches": 1, "orig_length": 0}
+                self.c_metadata[self.next_ref_id] = metadata
             else:
                 self.segments[segment_index] = new_segment
-                self._used_start_map[self.next_ref_id] = new_segment.start
-                self.used_segments[self.next_ref_id] = {"start": new_segment.start, "length": new_segment.length, "latches": 1, "orig_length": 0}
+                self.c_metadata[self.next_ref_id] = metadata
 
             ptr_val = <uintptr_t>(self.pool + new_segment.start)
             cap = new_segment.length
@@ -464,22 +492,22 @@ cdef class MemoryPool:
         length and unlatching the segment so readers can access it."""
         cdef int64_t segment_index
         cdef MemorySegment segment
+        cdef SegmentMetadata metadata
 
         with self.lock:
-            if ref_id not in self._used_start_map:
+            if self.c_metadata.find(ref_id) == self.c_metadata.end():
                 raise ValueError(f"Invalid reference ID - {ref_id}.")
 
-            start = self._used_start_map[ref_id]
-            # update public view
-            if ref_id in self.used_segments:
-                self.used_segments[ref_id]["orig_length"] = actual_length
+            metadata = self.c_metadata[ref_id]
+            metadata.orig_length = actual_length
 
-            if start == -1:
+            if metadata.start == -1:
+                self.c_metadata[ref_id] = metadata
                 return
 
             segment_index = -1
             for i in range(self.segments.size()):
-                if not self.segments[i].is_free and self.segments[i].start == start:
+                if not self.segments[i].is_free and self.segments[i].start == metadata.start:
                     segment_index = i
                     break
 
@@ -490,23 +518,25 @@ cdef class MemoryPool:
             # unlatch the segment (writer finished)
             if segment.latches > 0:
                 segment.latches -= 1
+                metadata.latches = segment.latches
             self.segments[segment_index] = segment
-            if ref_id in self.used_segments:
-                self.used_segments[ref_id]["latches"] = segment.latches
+            self.c_metadata[ref_id] = metadata
 
     cpdef read(self, int64_t ref_id, bint zero_copy=False, bint latch=False):
         cdef int64_t segment_index
         cdef MemorySegment segment
         cdef char* char_ptr = <char*>self.pool
+        cdef SegmentMetadata metadata
+        cdef int64_t orig_len
 
         with self.lock:
-            if ref_id not in self._used_start_map:
+            if self.c_metadata.find(ref_id) == self.c_metadata.end():
                 raise ValueError("Invalid reference ID.")
 
-            start = self._used_start_map[ref_id]
+            metadata = self.c_metadata[ref_id]
 
             # Handle zero-length data
-            if start == -1:
+            if metadata.start == -1:
                 if zero_copy:
                     return memoryview(b'')
                 else:
@@ -515,7 +545,7 @@ cdef class MemoryPool:
             # find segment index by start
             segment_index = -1
             for i in range(self.segments.size()):
-                if not self.segments[i].is_free and self.segments[i].start == start:
+                if not self.segments[i].is_free and self.segments[i].start == metadata.start:
                     segment_index = i
                     break
 
@@ -528,12 +558,13 @@ cdef class MemoryPool:
             if latch:
                 segment.latches += 1
                 self.segments[segment_index] = segment
-                # update public view
-                self.used_segments[ref_id]["latches"] = segment.latches
+                # update metadata
+                metadata.latches = segment.latches
+                self.c_metadata[ref_id] = metadata
                 self.read_locks += 1
 
             # Return only the original data length
-            orig_len = self.used_segments[ref_id].get("orig_length", segment.length)
+            orig_len = metadata.orig_length if metadata.orig_length > 0 else segment.length
             if zero_copy:
                 return memoryview(<char[:orig_len]>(char_ptr + segment.start))
             else:
@@ -542,19 +573,21 @@ cdef class MemoryPool:
     cpdef unlatch(self, int64_t ref_id):
         cdef int64_t segment_index
         cdef MemorySegment segment
+        cdef SegmentMetadata metadata
 
         with self.lock:
-            if ref_id not in self._used_start_map:
+            if self.c_metadata.find(ref_id) == self.c_metadata.end():
                 raise ValueError(f"Invalid reference ID - {ref_id}.")
 
-            start = self._used_start_map[ref_id]
-            if start == -1:  # Zero-length data
+            metadata = self.c_metadata[ref_id]
+
+            if metadata.start == -1:  # Zero-length data
                 return
 
             # find segment index
             segment_index = -1
             for i in range(self.segments.size()):
-                if not self.segments[i].is_free and self.segments[i].start == start:
+                if not self.segments[i].is_free and self.segments[i].start == metadata.start:
                     segment_index = i
                     break
             if segment_index == -1:
@@ -566,30 +599,30 @@ cdef class MemoryPool:
 
             segment.latches -= 1
             self.segments[segment_index] = segment
-            # update public view
-            self.used_segments[ref_id]["latches"] = segment.latches
+            # update metadata
+            metadata.latches = segment.latches
+            self.c_metadata[ref_id] = metadata
 
     cpdef release(self, int64_t ref_id):
         cdef int64_t segment_index
         cdef MemorySegment segment
+        cdef SegmentMetadata metadata
 
         with self.lock:
-            if ref_id not in self._used_start_map:
+            if self.c_metadata.find(ref_id) == self.c_metadata.end():
                 raise ValueError(f"Invalid reference ID - {ref_id}.")
 
             self.releases += 1
-            start = self._used_start_map.pop(ref_id)
-            # remove public view
-            if ref_id in self.used_segments:
-                del self.used_segments[ref_id]
+            metadata = self.c_metadata[ref_id]
+            self.c_metadata.erase(ref_id)
 
-            if start == -1:  # Zero-length data
+            if metadata.start == -1:  # Zero-length data
                 return
 
             # find segment index by start
             segment_index = -1
             for i in range(self.segments.size()):
-                if not self.segments[i].is_free and self.segments[i].start == start:
+                if not self.segments[i].is_free and self.segments[i].start == metadata.start:
                     segment_index = i
                     break
 
@@ -669,6 +702,30 @@ cdef class MemoryPool:
         return info
 
     @property
+    def used_segments(self):
+        """Return a dict of used segments for backward compatibility with tests.
+        This is lazily generated from the C++ metadata map on access."""
+        cdef dict out = {}
+        cdef int64_t ref_id
+        cdef SegmentMetadata metadata
+        cdef unordered_map[int64_t, SegmentMetadata].iterator it
+
+        with self.lock:
+            # Iterate through all metadata entries using proper C++ iterator
+            it = self.c_metadata.begin()
+            while it != self.c_metadata.end():
+                ref_id = dereference(it).first
+                metadata = dereference(it).second
+                out[ref_id] = {
+                    "start": metadata.start,
+                    "length": metadata.length,
+                    "latches": metadata.latches,
+                    "orig_length": metadata.orig_length
+                }
+                preincrement(it)
+        return out
+
+    @property
     def free_segments(self):
         """Return a list of free segments as dictionaries for tests."""
         cdef list out = []
@@ -690,13 +747,19 @@ cdef class MemoryPool:
         cdef list _ordered
         cdef int64_t i
         cdef MemorySegment seg
-        cdef object ref, info
+        cdef int64_t ref_id
+        cdef SegmentMetadata metadata
+        cdef unordered_map[int64_t, SegmentMetadata].iterator it
 
         with self.lock:
-            # Build list of refs ordered by their current start without using a lambda
+            # Build list of refs ordered by their current start
             _ordered = []
-            for ref, info in self.used_segments.items():
-                _ordered.append((info["start"], ref))
+            it = self.c_metadata.begin()
+            while it != self.c_metadata.end():
+                ref_id = dereference(it).first
+                metadata = dereference(it).second
+                _ordered.append((metadata.start, ref_id))
+                preincrement(it)
             _ordered.sort()
             ordered_refs = [t[1] for t in _ordered]
 
@@ -709,8 +772,9 @@ cdef class MemoryPool:
                 seg = self.segments[i]
                 if not seg.is_free:
                     if idx < len(ordered_refs):
-                        ref = ordered_refs[idx]
-                        self._used_start_map[ref] = seg.start
-                        if ref in self.used_segments:
-                            self.used_segments[ref]["start"] = seg.start
+                        ref_id = ordered_refs[idx]
+                        if self.c_metadata.find(ref_id) != self.c_metadata.end():
+                            metadata = self.c_metadata[ref_id]
+                            metadata.start = seg.start
+                            self.c_metadata[ref_id] = metadata
                         idx += 1

@@ -45,7 +45,6 @@ class LimitNode(BasePlanNode):
         morsel = self.ensure_draken_morsel(morsel)
 
         if morsel == EOS:
-            yield EOS
             return
 
         # Handle both single Morsel and Iterable of Morsels (from streaming)

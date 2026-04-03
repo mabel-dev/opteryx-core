@@ -101,7 +101,6 @@ class NonEquiJoinNode(JoinNode):
 
         else:
             if morsel == EOS:
-                yield EOS
                 return
 
             if morsel is EOS:

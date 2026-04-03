@@ -8,7 +8,6 @@
 This module provides the execution engine for processing physical plans in a serial manner.
 """
 
-import time
 from typing import Any
 from typing import Generator
 from typing import Tuple
@@ -18,9 +17,6 @@ from opteryx.constants import ResultType
 from opteryx.exceptions import InvalidInternalStateError
 from opteryx.models import PhysicalPlan
 from opteryx.models import QueryTelemetry
-from opteryx.tracing.event_recorder import trace_operator_completed
-from opteryx.tracing.event_recorder import trace_operator_finished
-from opteryx.tracing.event_recorder import trace_operator_started
 
 from opteryx import EOS
 
@@ -147,47 +143,24 @@ def process_node(plan: PhysicalPlan, nid: str, morsel: pyarrow.Table) -> Generat
             results = process_node(plan, child, morsel)
             yield from (result for result in results if result is not None)
     else:
-        rows_in = getattr(morsel, "num_rows", 0) if morsel is not None else 0
-        start_ns = time.monotonic_ns()
-
-        trace_operator_started(
-            operator_name=node.name,
-            operator_id=node.identity,
-            rows_in=rows_in,
-            rows_out=0,
-            produced_rows=False,
-        )
-
         results = node(morsel)
-        rows_out = 0
-        produced_rows = False
 
         if results is None:
-            trace_operator_finished(
-                operator_name=node.name,
-                operator_id=node.identity,
-                duration_ns=time.monotonic_ns() - start_ns,
-                rows_in=rows_in,
-                rows_out=0,
-                produced_rows=False,
-            )
             yield None
+            # If input was EOS, propagate it downstream even if node produced nothing
+            if morsel is EOS:
+                for _, child, _ in plan.outgoing_edges(nid):
+                    yield from process_node(plan, child, EOS)
             return
 
         for result in (result for result in results if result is not None):
-            rows_out = getattr(result, "num_rows", 0)
-            produced_rows = produced_rows or rows_out > 0
             children = plan.outgoing_edges(nid)
             if len(children) == 0 and result != EOS:
                 yield result
             for _, child, _ in children:
                 yield from process_node(plan, child, result)
 
-        trace_operator_finished(
-            operator_name=node.name,
-            operator_id=node.identity,
-            duration_ns=time.monotonic_ns() - start_ns,
-            rows_in=rows_in,
-            rows_out=rows_out,
-            produced_rows=produced_rows,
-        )
+        # After all results processed, if input was EOS, propagate EOS downstream
+        if morsel is EOS:
+            for _, child, _ in plan.outgoing_edges(nid):
+                yield from process_node(plan, child, EOS)

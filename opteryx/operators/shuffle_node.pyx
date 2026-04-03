@@ -311,7 +311,6 @@ class ShuffleNode(BasePlanNode):
                 yield result
             self._cleanup_spill_scope()
             self._reset_buffers()
-            yield EOS
             return
 
         if isinstance(morsel, Morsel):

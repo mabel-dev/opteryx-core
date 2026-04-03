@@ -78,15 +78,14 @@ class FilterJoinNode(JoinNode):
         else:
             # Probe phase: left side
             if morsel == EOS:
-                yield EOS
-            else:
-                morsel = self._apply_join_key_casts(morsel, is_left=True)
-                join_provider = providers.get(self.join_type)
-                yield join_provider(
-                    relation=morsel,
-                    join_columns=self.left_columns,
-                    seen_hashes=self.right_hash_set,
-                )
+                return
+            morsel = self._apply_join_key_casts(morsel, is_left=True)
+            join_provider = providers.get(self.join_type)
+            yield join_provider(
+                relation=morsel,
+                join_columns=self.left_columns,
+                seen_hashes=self.right_hash_set,
+            )
 
 
 providers = {

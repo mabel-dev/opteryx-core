@@ -180,7 +180,7 @@ class DrakenInnerJoinNode(JoinNode):
                     if not self.left_morsels:
                         self.left_is_empty = True
                         yield None
-                        return
+                    return
 
                     start = time.monotonic_ns()
                     self.left_morsel = Morsel.combine(self.left_morsels)
@@ -266,7 +266,6 @@ class DrakenInnerJoinNode(JoinNode):
 
             else:
                 if morsel == EOS:
-                    yield EOS
                     return
 
                 if self.left_is_empty:

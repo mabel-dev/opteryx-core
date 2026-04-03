@@ -84,12 +84,8 @@ def _trace_decode_completed(**kwargs) -> None:
     _trace(event_type="decode_complete", **kwargs)
 
 
-def _trace_operator_started(**kwargs) -> None:
-    _trace(event_type="operator_execute", phase="start", **kwargs)
-
-
-def _trace_operator_completed(**kwargs) -> None:
-    _trace(event_type="operator_execute", phase="finish", **kwargs)
+def _trace_rowgroup_fetched(**kwargs) -> None:
+    _trace(event_type="rowgroup_fetch", **kwargs)
 
 
 def _resolve_decoder(decoder: Optional[Any]) -> Any:
@@ -574,11 +570,6 @@ def iter_row_groups(
             if predicates and not row_group_may_satisfy(rg_meta, predicates):
                 continue
 
-            if trace_enabled:
-                _trace_operator_started(
-                    file_id=path, component="rowgroup", rg_idx=rg_idx, connector=connector
-                )
-
             row_group = fetch_columns(
                 filesystem,
                 path,
@@ -591,9 +582,11 @@ def iter_row_groups(
             row_group["__path__"] = path
             row_group["__row_group__"] = rg_idx
             row_group["__parquet_scan_strategy__"] = "reader"
-            yield row_group
 
             if trace_enabled:
-                _trace_operator_completed(
-                    file_id=path, component="rowgroup", rg_idx=rg_idx, connector=connector
+                rows_fetched = len(row_group) if isinstance(row_group, dict) else getattr(row_group, "num_rows", 0)
+                _trace_rowgroup_fetched(
+                    file_id=path, rg_idx=rg_idx, connector=connector, rows_out=rows_fetched
                 )
+
+            yield row_group

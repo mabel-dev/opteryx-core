@@ -422,7 +422,6 @@ class DrakenAggregateAndGroupNode(BasePlanNode):
 
         if draken == EOS:
             yield from self._finalize_groupby()
-            yield EOS
             return
 
         ingest_start = time.monotonic_ns()

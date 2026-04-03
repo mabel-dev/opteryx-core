@@ -199,3 +199,7 @@ waterfall: ## Run IO waterfall profiler (usage: make waterfall ARGS="trace scrat
 loc: ## Count LOC for production code only (excludes tests)
 	$(call print_blue,'Counting LOC for production files (excluding tests)')
 	@$(PYTHON) dev/count_loc_basic.py --exclude build,temp,third_party,dev,scratch,tests --ext py,pyx,c,cpp,cc,cxx,h,hpp --per-file
+
+edge-executor: check-python compile ## Test edge-based executor with real physical plan
+	$(call print_blue,"Testing EdgeBasedExecutor with real Opteryx plan...")
+	@$(PYTHON) scratch/test_edge_executor_real.py

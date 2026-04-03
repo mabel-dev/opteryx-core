@@ -48,7 +48,6 @@ class FilterNode(BasePlanNode):
         from opteryx.expression.evaluator import evaluate_draken
 
         if morsel is EOS:
-            yield EOS
             return
 
         if not isinstance(morsel, Morsel):

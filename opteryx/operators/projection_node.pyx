@@ -83,7 +83,6 @@ class ProjectionNode(BasePlanNode):
 
     def execute(self, morsel):
         if morsel == EOS:
-            yield EOS
             return
 
         # Draken-native execution: ensure all inputs are morsels

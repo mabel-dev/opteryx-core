@@ -50,14 +50,12 @@ class DistinctNode(BasePlanNode):
             self._hash_set = CarcharSetWrapper()
 
         if morsel == EOS:
-            yield EOS
             return
 
         if not isinstance(morsel, Morsel):
             # e.g. Arrow Table produced by UnionNode — convert to Morsel
             converted = self.ensure_draken_morsel(morsel)
             if converted is EOS:
-                yield EOS
                 return
             # iter_from_arrow returns a generator; process each chunk
             import pyarrow

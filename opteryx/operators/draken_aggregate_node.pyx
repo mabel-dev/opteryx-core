@@ -357,7 +357,6 @@ class DrakenAggregateNode(BasePlanNode):
 
         if draken == EOS:
             yield self._finalize_morsel()
-            yield EOS
             return
 
         ingest_start = time.monotonic_ns()

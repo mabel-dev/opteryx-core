@@ -45,16 +45,21 @@ class TraceEvent(TypedDict, total=False):
     column: str
     operator_name: str
     operator_id: str
-    phase: str
+    operator_category: str
     rows_in: int
     rows_out: int
-    bytes_received: int
+    bytes_in: int
+    bytes_out: int
     duration_ns: int
-    produced_rows: bool
+    morsel_index: int
+    produced_output: bool
+    error: str
+    error_message: str
     columns: list[str]
     ranges: int
     rows_decoded: int
     bytes: int
+    connector: str
 
 
 def _get_thread_buffer():
@@ -143,16 +148,6 @@ def trace_decode_completed(**kwargs) -> None:
     record_event("decode_complete", **kwargs)
 
 
-def trace_operator_started(**kwargs) -> None:
-    record_event("operator_execute", phase="start", **kwargs)
-
-
-def trace_operator_completed(**kwargs) -> None:
-    record_event("operator_execute", phase="finish", **kwargs)
-
-
-# Backward-compatible aliases used by some call sites.
-trace_operator_finished = trace_operator_completed
 
 
 # ---------------------------------------------------------------------------

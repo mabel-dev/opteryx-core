@@ -43,7 +43,6 @@ class UnionNode(BasePlanNode):
         morsel = self.ensure_arrow_table(morsel)
 
         if morsel == EOS and self.seen_first_eos:
-            yield EOS
             return
         elif morsel == EOS:
             self.seen_first_eos = True
