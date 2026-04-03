@@ -8,7 +8,7 @@
 from opteryx.expression import NodeType
 from opteryx.expression import get_all_nodes_of_type
 
-AGGREGATORS = {
+AGGREGATORS: dict = {
     "APPROX_COUNT_DISTINCT": "approx_count_distinct",
     "APPROX_PERCENTILE": "approx_percentile",
     "ARRAY_AGG": "hash_list",
@@ -20,6 +20,14 @@ AGGREGATORS = {
     "ANY_VALUE": "any_value",
     "SUM": "sum",
 }
+
+
+def is_aggregator(name: str) -> bool:
+    return name in AGGREGATORS
+
+
+def aggregator_names() -> list:
+    return list(AGGREGATORS.keys())
 
 
 def extract_evaluations(aggregates):
