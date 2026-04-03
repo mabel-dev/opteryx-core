@@ -261,7 +261,6 @@ class UnnestJoinNode(BasePlanNode):
         morsel = self.ensure_arrow_table(morsel)
 
         if morsel == EOS:
-            yield EOS
             return
         if isinstance(self._unnest_column.value, tuple):
             yield from _cross_join_unnest_literal(

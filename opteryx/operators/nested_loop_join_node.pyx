@@ -109,7 +109,6 @@ class NestedLoopJoinNode(JoinNode):
 
         else:
             if morsel == EOS:
-                yield EOS
                 return
 
             if self.left_relation.num_rows == 0 or morsel.num_rows == 0:

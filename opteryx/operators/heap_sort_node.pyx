@@ -144,7 +144,6 @@ class HeapSortNode(BasePlanNode):
 
         if morsel is EOS:
             if self.table is None and not self._chunk_buffer:
-                yield EOS
                 return
 
             if self.limit and self.limit > 0 and self.mapped_order:
@@ -162,7 +161,6 @@ class HeapSortNode(BasePlanNode):
                 self.table = self._sort_morsel(self.table)
 
             yield self.table
-            yield EOS
             return
 
         if isinstance(morsel, Morsel):

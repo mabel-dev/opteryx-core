@@ -98,7 +98,6 @@ class ExitNode(BasePlanNode):
                 morsel = Morsel.from_vectors(self.final_names, vectors)
                 yield morsel
 
-            yield EOS
             return
 
         # Handle both single Morsel and Iterable of Morsels (from streaming)

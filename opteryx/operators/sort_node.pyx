@@ -53,7 +53,6 @@ class SortNode(BasePlanNode):
             return
 
         if not self._morsels:
-            yield EOS
             return
 
         combined = Morsel.combine(self._morsels)
@@ -90,4 +89,3 @@ class SortNode(BasePlanNode):
         combined.take(list(perm))
 
         yield combined
-        yield EOS

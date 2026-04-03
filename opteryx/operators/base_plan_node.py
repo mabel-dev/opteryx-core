@@ -58,6 +58,7 @@ class BasePlanNode:
 
         self._time_stat_key = f"time_{self.name.lower().replace(' ', '_')}"
         self._empty_morsel_cache = None
+        self._morsel_index = 0
 
         self.readings = defaultdict(int)
 
@@ -145,7 +146,6 @@ class BasePlanNode:
         generator = self.execute(morsel)
         empty_morsel = None
         at_least_one = False
-        morsel_index = 0
 
         while True:
             try:
@@ -164,7 +164,7 @@ class BasePlanNode:
                         operator_name=self.name,
                         operator_id=self.identity,
                         operator_category=category_value,
-                        morsel_index=morsel_index,
+                        morsel_index=self._morsel_index,
                         rows_in=input_rows,
                         rows_out=0,
                         bytes_in=input_bytes,
@@ -172,7 +172,7 @@ class BasePlanNode:
                         duration_ns=execution_time,
                         produced_output=False,
                     )
-                    morsel_index += 1
+                    self._morsel_index += 1
                     continue
 
                 if result == END:
@@ -216,7 +216,7 @@ class BasePlanNode:
                         operator_name=self.name,
                         operator_id=self.identity,
                         operator_category=category_value,
-                        morsel_index=morsel_index,
+                        morsel_index=self._morsel_index,
                         rows_in=input_rows,
                         rows_out=output_rows,
                         bytes_in=input_bytes,
@@ -228,7 +228,7 @@ class BasePlanNode:
                     if output_rows > 0:
                         at_least_one = True
                         yield result
-                        morsel_index += 1
+                        self._morsel_index += 1
                         continue
                     else:
                         telemetry.dead_ended_empty_morsels += 1
@@ -239,7 +239,7 @@ class BasePlanNode:
                         operator_name=self.name,
                         operator_id=self.identity,
                         operator_category=category_value,
-                        morsel_index=morsel_index,
+                        morsel_index=self._morsel_index,
                         rows_in=input_rows,
                         rows_out=0,
                         bytes_in=input_bytes,
@@ -250,7 +250,7 @@ class BasePlanNode:
 
                 at_least_one = True
                 yield result
-                morsel_index += 1
+                self._morsel_index += 1
 
             except Exception as err:
                 # Record error event before re-raising
@@ -259,7 +259,7 @@ class BasePlanNode:
                     operator_name=self.name,
                     operator_id=self.identity,
                     operator_category=category_value,
-                    morsel_index=morsel_index,
+                    morsel_index=self._morsel_index,
                     error=err.__class__.__name__,
                     error_message=str(err),
                     rows_in=input_rows,

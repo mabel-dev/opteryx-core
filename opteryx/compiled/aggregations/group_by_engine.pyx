@@ -3321,6 +3321,8 @@ cdef class CarcharGroupStateEngine:
                 self._multi_seen[offset] = 1
 
     cdef void _ingest_fixed_width_key(self, Morsel morsel, DrakenFixedBuffer* key_ptr):
+        if key_ptr == NULL:
+            raise ValueError("key_ptr is NULL in _ingest_fixed_width_key")
         cdef uint8_t* key_nulls = <uint8_t*> key_ptr.null_bitmap
         cdef Py_ssize_t row_idx
         cdef Py_ssize_t row_count = morsel.num_rows
@@ -3515,9 +3517,9 @@ cdef class CarcharGroupStateEngine:
                 free(state_indices)
 
     cdef void _ingest_int64_key(self, Morsel morsel, Int64Vector key_vector):
-        cdef DrakenFixedBuffer* key_ptr = key_vector.ptr
-        cdef int64_t* key_data = <int64_t*> key_ptr.data
-        cdef uint8_t* key_nulls = <uint8_t*> key_ptr.null_bitmap
+        cdef DrakenFixedBuffer* key_ptr
+        cdef int64_t* key_data
+        cdef uint8_t* key_nulls
         cdef Py_ssize_t row_idx
         cdef Py_ssize_t row_count = morsel.num_rows
         cdef int64_t state_index
@@ -3556,6 +3558,13 @@ cdef class CarcharGroupStateEngine:
                         self._constant_object_state = value_obj
                     self._constant_seen = 1
             return
+
+        # Check for NULL pointer before dereferencing
+        key_ptr = key_vector.ptr
+        if key_ptr == NULL:
+            raise ValueError("key_vector.ptr is NULL in _ingest_int64_key")
+        key_data = <int64_t*> key_ptr.data
+        key_nulls = <uint8_t*> key_ptr.null_bitmap
 
         t_hash_start = time.monotonic_ns()
         row_hashes = morsel.hash([self._group_column])
@@ -3725,8 +3734,8 @@ cdef class CarcharGroupStateEngine:
                 free(state_indices)
 
     cdef void _ingest_integer_key(self, Morsel morsel, IntegerVector key_vector):
-        cdef DrakenFixedBuffer* key_ptr = key_vector.ptr
-        cdef uint8_t* key_nulls = <uint8_t*> key_ptr.null_bitmap
+        cdef DrakenFixedBuffer* key_ptr
+        cdef uint8_t* key_nulls
         cdef Py_ssize_t row_idx
         cdef Py_ssize_t row_count = morsel.num_rows
         cdef int64_t state_index
@@ -3741,6 +3750,12 @@ cdef class CarcharGroupStateEngine:
         cdef Py_ssize_t local_bloom_checks = 0, local_bloom_skips = 0, local_bloom_fps = 0
         cdef long long t_hash_start, t_state_assign_start, t_accum_start
         cdef uint64_t[::1] row_hashes
+
+        # Check for NULL pointer before dereferencing
+        key_ptr = key_vector.ptr
+        if key_ptr == NULL:
+            raise ValueError("key_vector.ptr is NULL in _ingest_integer_key")
+        key_nulls = <uint8_t*> key_ptr.null_bitmap
 
         t_hash_start = time.monotonic_ns()
         row_hashes = morsel.hash([self._group_column])
@@ -3874,10 +3889,9 @@ cdef class CarcharGroupStateEngine:
                 free(state_indices)
 
     cdef void _ingest_int64_key_multi(self, Morsel morsel, Int64Vector key_vector) except *:
-        cdef uint64_t[::1] row_hashes = morsel.hash([self._group_column])
-        cdef DrakenFixedBuffer* key_ptr = key_vector.ptr
-        cdef int64_t* key_data = <int64_t*> key_ptr.data
-        cdef uint8_t* key_nulls = <uint8_t*> key_ptr.null_bitmap
+        cdef DrakenFixedBuffer* key_ptr
+        cdef int64_t* key_data
+        cdef uint8_t* key_nulls
         cdef Py_ssize_t row_idx
         cdef Py_ssize_t row_count = morsel.num_rows
         cdef int64_t* state_indices = NULL
@@ -3892,10 +3906,18 @@ cdef class CarcharGroupStateEngine:
         cdef uint8_t* value_nulls
         cdef Py_ssize_t local_hits = 0, local_misses = 0
         cdef Py_ssize_t local_bloom_checks = 0, local_bloom_skips = 0, local_bloom_fps = 0
+        cdef uint64_t[::1] row_hashes
 
+        print(f"DEBUG: Using _ingest_int64_key_multi with {row_count} rows")
+
+        row_hashes = morsel.hash([self._group_column])
         state_indices = <int64_t*> malloc(row_count * sizeof(int64_t))
         if state_indices == NULL and row_count > 0:
             raise MemoryError()
+
+        key_ptr = key_vector.ptr
+        key_data = <int64_t*> key_ptr.data
+        key_nulls = <uint8_t*> key_ptr.null_bitmap
 
         try:
             for row_idx in range(row_count):
@@ -3929,6 +3951,25 @@ cdef class CarcharGroupStateEngine:
 
                 if agg_mode == AGG_SUM:
                     value_vector = morsel.column(self._multi_value_columns[agg_idx])
+                    value_const_accessor = _vector_const_accessor(value_vector)
+                    if value_const_accessor != NULL:
+                        if _const_accessor_is_null(value_const_accessor):
+                            continue
+                        # For non-null constant values, add to all states
+                        if self._multi_value_kinds[agg_idx] == VALUE_FLOAT64:
+                            const_f64_val = (<double*>value_const_accessor.value_ptr)[0]
+                            for row_idx in range(row_count):
+                                offset = self._multi_offset(state_indices[row_idx], agg_idx)
+                                self._multi_f64_state[offset] = self._multi_f64_state[offset] + const_f64_val
+                                self._multi_seen[offset] = 1
+                        elif self._multi_value_kinds[agg_idx] == VALUE_INT64:
+                            const_i64_val = (<int64_t*>value_const_accessor.value_ptr)[0]
+                            for row_idx in range(row_count):
+                                offset = self._multi_offset(state_indices[row_idx], agg_idx)
+                                self._multi_i64_state[offset] = self._multi_i64_state[offset] + const_i64_val
+                                self._multi_seen[offset] = 1
+                        continue
+
                     if isinstance(value_vector, Float64Vector):
                         value_ptr = (<Float64Vector> value_vector).ptr
                         sum_f64_multi_accumulate(
@@ -3966,6 +4007,35 @@ cdef class CarcharGroupStateEngine:
 
                 if agg_mode in (AGG_MIN, AGG_MAX):
                     value_vector = morsel.column(self._multi_value_columns[agg_idx])
+                    value_const_accessor = _vector_const_accessor(value_vector)
+                    if value_const_accessor != NULL:
+                        if _const_accessor_is_null(value_const_accessor):
+                            continue
+                        # For non-null constant values, initialize or update states
+                        if self._multi_value_kinds[agg_idx] == VALUE_FLOAT64:
+                            const_f64_val = (<double*>value_const_accessor.value_ptr)[0]
+                            for row_idx in range(row_count):
+                                offset = self._multi_offset(state_indices[row_idx], agg_idx)
+                                if self._multi_seen[offset] == 0:
+                                    self._multi_f64_state[offset] = const_f64_val
+                                    self._multi_seen[offset] = 1
+                                elif agg_mode == AGG_MIN and const_f64_val < self._multi_f64_state[offset]:
+                                    self._multi_f64_state[offset] = const_f64_val
+                                elif agg_mode == AGG_MAX and const_f64_val > self._multi_f64_state[offset]:
+                                    self._multi_f64_state[offset] = const_f64_val
+                        elif self._multi_value_kinds[agg_idx] == VALUE_INT64:
+                            const_i64_val = (<int64_t*>value_const_accessor.value_ptr)[0]
+                            for row_idx in range(row_count):
+                                offset = self._multi_offset(state_indices[row_idx], agg_idx)
+                                if self._multi_seen[offset] == 0:
+                                    self._multi_i64_state[offset] = const_i64_val
+                                    self._multi_seen[offset] = 1
+                                elif agg_mode == AGG_MIN and const_i64_val < self._multi_i64_state[offset]:
+                                    self._multi_i64_state[offset] = const_i64_val
+                                elif agg_mode == AGG_MAX and const_i64_val > self._multi_i64_state[offset]:
+                                    self._multi_i64_state[offset] = const_i64_val
+                        continue
+
                     if isinstance(value_vector, Float64Vector):
                         value_ptr = (<Float64Vector> value_vector).ptr
                         minmax_f64_multi_accumulate(
@@ -4003,6 +4073,25 @@ cdef class CarcharGroupStateEngine:
 
                 if agg_mode == AGG_AVG:
                     value_vector = morsel.column(self._multi_value_columns[agg_idx])
+                    value_const_accessor = _vector_const_accessor(value_vector)
+                    if value_const_accessor != NULL:
+                        if _const_accessor_is_null(value_const_accessor):
+                            continue
+                        # For non-null constant values, accumulate sum and count
+                        if self._multi_value_kinds[agg_idx] == VALUE_FLOAT64:
+                            const_f64_val = (<double*>value_const_accessor.value_ptr)[0]
+                            for row_idx in range(row_count):
+                                offset = self._multi_offset(state_indices[row_idx], agg_idx)
+                                self._multi_avg_sums[offset] = self._multi_avg_sums[offset] + const_f64_val
+                                self._multi_avg_counts[offset] = self._multi_avg_counts[offset] + 1
+                        elif self._multi_value_kinds[agg_idx] == VALUE_INT64:
+                            const_i64_val = (<int64_t*>value_const_accessor.value_ptr)[0]
+                            for row_idx in range(row_count):
+                                offset = self._multi_offset(state_indices[row_idx], agg_idx)
+                                self._multi_avg_sums[offset] = self._multi_avg_sums[offset] + <double>const_i64_val
+                                self._multi_avg_counts[offset] = self._multi_avg_counts[offset] + 1
+                        continue
+
                     if isinstance(value_vector, Float64Vector):
                         value_ptr = (<Float64Vector> value_vector).ptr
                         avg_f64_multi_accumulate(
@@ -4085,6 +4174,17 @@ cdef class CarcharGroupStateEngine:
                                 self._multi_counts[offset] = self._multi_counts[offset] + 1
                         continue
 
+                # Check for constant vector accessor for the fallback COUNT_VALUE path
+                value_const_accessor = _vector_const_accessor(value_vector)
+                if value_const_accessor != NULL:
+                    # For constant vectors, if not null, increment count for all rows
+                    if not _const_accessor_is_null(value_const_accessor):
+                        if agg_mode == AGG_COUNT_VALUE:
+                            for row_idx in range(row_count):
+                                offset = self._multi_offset(state_indices[row_idx], agg_idx)
+                                self._multi_counts[offset] = self._multi_counts[offset] + 1
+                    continue
+
                 value_ptr = (<IntegerVector> value_vector).ptr
                 value_nulls = <uint8_t*> value_ptr.null_bitmap
                 for row_idx in range(row_count):
@@ -4100,9 +4200,8 @@ cdef class CarcharGroupStateEngine:
                 free(state_indices)
 
     cdef void _ingest_integer_key_multi(self, Morsel morsel, IntegerVector key_vector) except *:
-        cdef uint64_t[::1] row_hashes = morsel.hash([self._group_column])
-        cdef DrakenFixedBuffer* key_ptr = key_vector.ptr
-        cdef uint8_t* key_nulls = <uint8_t*> key_ptr.null_bitmap
+        cdef DrakenFixedBuffer* key_ptr
+        cdef uint8_t* key_nulls
         cdef Py_ssize_t row_idx
         cdef Py_ssize_t row_count = morsel.num_rows
         cdef int64_t* state_indices = NULL
@@ -4117,11 +4216,23 @@ cdef class CarcharGroupStateEngine:
         cdef uint8_t* value_nulls
         cdef Py_ssize_t local_hits = 0, local_misses = 0
         cdef Py_ssize_t local_bloom_checks = 0, local_bloom_skips = 0, local_bloom_fps = 0
+        cdef uint64_t[::1] row_hashes
+
+        print(f"DEBUG [_ingest_integer_key_multi] Entry: row_count will be {morsel.num_rows}")
+        row_hashes = morsel.hash([self._group_column])
+        print(f"DEBUG [_ingest_integer_key_multi] Computed row_hashes")
 
         state_indices = <int64_t*> malloc(row_count * sizeof(int64_t))
         if state_indices == NULL and row_count > 0:
             raise MemoryError()
 
+        # Check for NULL pointer before dereferencing
+        key_ptr = key_vector.ptr
+        if key_ptr == NULL:
+            raise ValueError("key_vector.ptr is NULL in _ingest_integer_key_multi")
+        key_nulls = <uint8_t*> key_ptr.null_bitmap
+
+        print(f"DEBUG: Using _ingest_integer_key_multi with {row_count} rows")
         try:
             for row_idx in range(row_count):
                 state_index = -1
@@ -4154,6 +4265,25 @@ cdef class CarcharGroupStateEngine:
 
                 if agg_mode == AGG_SUM:
                     value_vector = morsel.column(self._multi_value_columns[agg_idx])
+                    value_const_accessor = _vector_const_accessor(value_vector)
+                    if value_const_accessor != NULL:
+                        if _const_accessor_is_null(value_const_accessor):
+                            continue
+                        # For non-null constant values, add to all states
+                        if self._multi_value_kinds[agg_idx] == VALUE_FLOAT64:
+                            const_f64_val = (<double*>value_const_accessor.value_ptr)[0]
+                            for row_idx in range(row_count):
+                                offset = self._multi_offset(state_indices[row_idx], agg_idx)
+                                self._multi_f64_state[offset] = self._multi_f64_state[offset] + const_f64_val
+                                self._multi_seen[offset] = 1
+                        elif self._multi_value_kinds[agg_idx] == VALUE_INT64:
+                            const_i64_val = (<int64_t*>value_const_accessor.value_ptr)[0]
+                            for row_idx in range(row_count):
+                                offset = self._multi_offset(state_indices[row_idx], agg_idx)
+                                self._multi_i64_state[offset] = self._multi_i64_state[offset] + const_i64_val
+                                self._multi_seen[offset] = 1
+                        continue
+
                     if isinstance(value_vector, Float64Vector):
                         value_ptr = (<Float64Vector> value_vector).ptr
                         sum_f64_multi_accumulate(
@@ -4178,6 +4308,35 @@ cdef class CarcharGroupStateEngine:
 
                 if agg_mode in (AGG_MIN, AGG_MAX):
                     value_vector = morsel.column(self._multi_value_columns[agg_idx])
+                    value_const_accessor = _vector_const_accessor(value_vector)
+                    if value_const_accessor != NULL:
+                        if _const_accessor_is_null(value_const_accessor):
+                            continue
+                        # For non-null constant values, initialize or update states
+                        if self._multi_value_kinds[agg_idx] == VALUE_FLOAT64:
+                            const_f64_val = (<double*>value_const_accessor.value_ptr)[0]
+                            for row_idx in range(row_count):
+                                offset = self._multi_offset(state_indices[row_idx], agg_idx)
+                                if self._multi_seen[offset] == 0:
+                                    self._multi_f64_state[offset] = const_f64_val
+                                    self._multi_seen[offset] = 1
+                                elif agg_mode == AGG_MIN and const_f64_val < self._multi_f64_state[offset]:
+                                    self._multi_f64_state[offset] = const_f64_val
+                                elif agg_mode == AGG_MAX and const_f64_val > self._multi_f64_state[offset]:
+                                    self._multi_f64_state[offset] = const_f64_val
+                        elif self._multi_value_kinds[agg_idx] == VALUE_INT64:
+                            const_i64_val = (<int64_t*>value_const_accessor.value_ptr)[0]
+                            for row_idx in range(row_count):
+                                offset = self._multi_offset(state_indices[row_idx], agg_idx)
+                                if self._multi_seen[offset] == 0:
+                                    self._multi_i64_state[offset] = const_i64_val
+                                    self._multi_seen[offset] = 1
+                                elif agg_mode == AGG_MIN and const_i64_val < self._multi_i64_state[offset]:
+                                    self._multi_i64_state[offset] = const_i64_val
+                                elif agg_mode == AGG_MAX and const_i64_val > self._multi_i64_state[offset]:
+                                    self._multi_i64_state[offset] = const_i64_val
+                        continue
+
                     if isinstance(value_vector, Float64Vector):
                         value_ptr = (<Float64Vector> value_vector).ptr
                         minmax_f64_multi_accumulate(
@@ -4202,6 +4361,25 @@ cdef class CarcharGroupStateEngine:
 
                 if agg_mode == AGG_AVG:
                     value_vector = morsel.column(self._multi_value_columns[agg_idx])
+                    value_const_accessor = _vector_const_accessor(value_vector)
+                    if value_const_accessor != NULL:
+                        if _const_accessor_is_null(value_const_accessor):
+                            continue
+                        # For non-null constant values, accumulate sum and count
+                        if self._multi_value_kinds[agg_idx] == VALUE_FLOAT64:
+                            const_f64_val = (<double*>value_const_accessor.value_ptr)[0]
+                            for row_idx in range(row_count):
+                                offset = self._multi_offset(state_indices[row_idx], agg_idx)
+                                self._multi_avg_sums[offset] = self._multi_avg_sums[offset] + const_f64_val
+                                self._multi_avg_counts[offset] = self._multi_avg_counts[offset] + 1
+                        elif self._multi_value_kinds[agg_idx] == VALUE_INT64:
+                            const_i64_val = (<int64_t*>value_const_accessor.value_ptr)[0]
+                            for row_idx in range(row_count):
+                                offset = self._multi_offset(state_indices[row_idx], agg_idx)
+                                self._multi_avg_sums[offset] = self._multi_avg_sums[offset] + <double>const_i64_val
+                                self._multi_avg_counts[offset] = self._multi_avg_counts[offset] + 1
+                        continue
+
                     if isinstance(value_vector, Float64Vector):
                         value_ptr = (<Float64Vector> value_vector).ptr
                         avg_f64_multi_accumulate(
@@ -4276,23 +4454,40 @@ cdef class CarcharGroupStateEngine:
         cdef bytes group_name
         cdef object group_vector
 
+        print(f"DEBUG: Using _ingest_multi_fixed_key with {row_count} rows")
+        cdef DrakenFixedBuffer* vec_ptr
         for group_name in self._group_by_columns:
             group_vector = morsel.column(group_name)
             if isinstance(group_vector, Int64Vector):
-                key_ptrs.append(<size_t> (<Int64Vector> group_vector).ptr)
-                key_nulls.append(<size_t> <uint8_t*> (<Int64Vector> group_vector).ptr.null_bitmap)
+                vec_ptr = (<Int64Vector> group_vector).ptr
+                if vec_ptr == NULL:
+                    raise ValueError(f"vector ptr is NULL for group column {group_name}")
+                key_ptrs.append(<size_t> vec_ptr)
+                key_nulls.append(<size_t> <uint8_t*> vec_ptr.null_bitmap)
             elif isinstance(group_vector, Date32Vector):
-                key_ptrs.append(<size_t> (<Date32Vector> group_vector).ptr)
-                key_nulls.append(<size_t> <uint8_t*> (<Date32Vector> group_vector).ptr.null_bitmap)
+                vec_ptr = (<Date32Vector> group_vector).ptr
+                if vec_ptr == NULL:
+                    raise ValueError(f"vector ptr is NULL for group column {group_name}")
+                key_ptrs.append(<size_t> vec_ptr)
+                key_nulls.append(<size_t> <uint8_t*> vec_ptr.null_bitmap)
             elif isinstance(group_vector, TimeVector):
-                key_ptrs.append(<size_t> (<TimeVector> group_vector).ptr)
-                key_nulls.append(<size_t> <uint8_t*> (<TimeVector> group_vector).ptr.null_bitmap)
+                vec_ptr = (<TimeVector> group_vector).ptr
+                if vec_ptr == NULL:
+                    raise ValueError(f"vector ptr is NULL for group column {group_name}")
+                key_ptrs.append(<size_t> vec_ptr)
+                key_nulls.append(<size_t> <uint8_t*> vec_ptr.null_bitmap)
             elif isinstance(group_vector, TimestampVector):
-                key_ptrs.append(<size_t> (<TimestampVector> group_vector).ptr)
-                key_nulls.append(<size_t> <uint8_t*> (<TimestampVector> group_vector).ptr.null_bitmap)
+                vec_ptr = (<TimestampVector> group_vector).ptr
+                if vec_ptr == NULL:
+                    raise ValueError(f"vector ptr is NULL for group column {group_name}")
+                key_ptrs.append(<size_t> vec_ptr)
+                key_nulls.append(<size_t> <uint8_t*> vec_ptr.null_bitmap)
             else:
-                key_ptrs.append(<size_t> (<IntegerVector> group_vector).ptr)
-                key_nulls.append(<size_t> <uint8_t*> (<IntegerVector> group_vector).ptr.null_bitmap)
+                vec_ptr = (<IntegerVector> group_vector).ptr
+                if vec_ptr == NULL:
+                    raise ValueError(f"vector ptr is NULL for group column {group_name}")
+                key_ptrs.append(<size_t> vec_ptr)
+                key_nulls.append(<size_t> <uint8_t*> vec_ptr.null_bitmap)
 
         state_indices = <int64_t*> malloc(row_count * sizeof(int64_t))
         if state_indices == NULL and row_count > 0:
@@ -4322,6 +4517,25 @@ cdef class CarcharGroupStateEngine:
 
                 if agg_mode == AGG_SUM:
                     value_vector = morsel.column(self._multi_value_columns[agg_idx])
+                    value_const_accessor = _vector_const_accessor(value_vector)
+                    if value_const_accessor != NULL:
+                        if _const_accessor_is_null(value_const_accessor):
+                            continue
+                        # For non-null constant values, add to all states
+                        if self._multi_value_kinds[agg_idx] == VALUE_FLOAT64:
+                            const_f64_val = (<double*>value_const_accessor.value_ptr)[0]
+                            for row_idx in range(row_count):
+                                offset = self._multi_offset(state_indices[row_idx], agg_idx)
+                                self._multi_f64_state[offset] = self._multi_f64_state[offset] + const_f64_val
+                                self._multi_seen[offset] = 1
+                        elif self._multi_value_kinds[agg_idx] == VALUE_INT64:
+                            const_i64_val = (<int64_t*>value_const_accessor.value_ptr)[0]
+                            for row_idx in range(row_count):
+                                offset = self._multi_offset(state_indices[row_idx], agg_idx)
+                                self._multi_i64_state[offset] = self._multi_i64_state[offset] + const_i64_val
+                                self._multi_seen[offset] = 1
+                        continue
+
                     if isinstance(value_vector, Float64Vector):
                         value_ptr = (<Float64Vector> value_vector).ptr
                         sum_f64_multi_accumulate(
@@ -4346,6 +4560,35 @@ cdef class CarcharGroupStateEngine:
 
                 if agg_mode in (AGG_MIN, AGG_MAX):
                     value_vector = morsel.column(self._multi_value_columns[agg_idx])
+                    value_const_accessor = _vector_const_accessor(value_vector)
+                    if value_const_accessor != NULL:
+                        if _const_accessor_is_null(value_const_accessor):
+                            continue
+                        # For non-null constant values, initialize or update states
+                        if self._multi_value_kinds[agg_idx] == VALUE_FLOAT64:
+                            const_f64_val = (<double*>value_const_accessor.value_ptr)[0]
+                            for row_idx in range(row_count):
+                                offset = self._multi_offset(state_indices[row_idx], agg_idx)
+                                if self._multi_seen[offset] == 0:
+                                    self._multi_f64_state[offset] = const_f64_val
+                                    self._multi_seen[offset] = 1
+                                elif agg_mode == AGG_MIN and const_f64_val < self._multi_f64_state[offset]:
+                                    self._multi_f64_state[offset] = const_f64_val
+                                elif agg_mode == AGG_MAX and const_f64_val > self._multi_f64_state[offset]:
+                                    self._multi_f64_state[offset] = const_f64_val
+                        elif self._multi_value_kinds[agg_idx] == VALUE_INT64:
+                            const_i64_val = (<int64_t*>value_const_accessor.value_ptr)[0]
+                            for row_idx in range(row_count):
+                                offset = self._multi_offset(state_indices[row_idx], agg_idx)
+                                if self._multi_seen[offset] == 0:
+                                    self._multi_i64_state[offset] = const_i64_val
+                                    self._multi_seen[offset] = 1
+                                elif agg_mode == AGG_MIN and const_i64_val < self._multi_i64_state[offset]:
+                                    self._multi_i64_state[offset] = const_i64_val
+                                elif agg_mode == AGG_MAX and const_i64_val > self._multi_i64_state[offset]:
+                                    self._multi_i64_state[offset] = const_i64_val
+                        continue
+
                     if isinstance(value_vector, Float64Vector):
                         value_ptr = (<Float64Vector> value_vector).ptr
                         minmax_f64_multi_accumulate(
@@ -4370,6 +4613,25 @@ cdef class CarcharGroupStateEngine:
 
                 if agg_mode == AGG_AVG:
                     value_vector = morsel.column(self._multi_value_columns[agg_idx])
+                    value_const_accessor = _vector_const_accessor(value_vector)
+                    if value_const_accessor != NULL:
+                        if _const_accessor_is_null(value_const_accessor):
+                            continue
+                        # For non-null constant values, accumulate sum and count
+                        if self._multi_value_kinds[agg_idx] == VALUE_FLOAT64:
+                            const_f64_val = (<double*>value_const_accessor.value_ptr)[0]
+                            for row_idx in range(row_count):
+                                offset = self._multi_offset(state_indices[row_idx], agg_idx)
+                                self._multi_avg_sums[offset] = self._multi_avg_sums[offset] + const_f64_val
+                                self._multi_avg_counts[offset] = self._multi_avg_counts[offset] + 1
+                        elif self._multi_value_kinds[agg_idx] == VALUE_INT64:
+                            const_i64_val = (<int64_t*>value_const_accessor.value_ptr)[0]
+                            for row_idx in range(row_count):
+                                offset = self._multi_offset(state_indices[row_idx], agg_idx)
+                                self._multi_avg_sums[offset] = self._multi_avg_sums[offset] + <double>const_i64_val
+                                self._multi_avg_counts[offset] = self._multi_avg_counts[offset] + 1
+                        continue
+
                     if isinstance(value_vector, Float64Vector):
                         value_ptr = (<Float64Vector> value_vector).ptr
                         avg_f64_multi_accumulate(
@@ -4441,23 +4703,39 @@ cdef class CarcharGroupStateEngine:
         cdef uint8_t* value_nulls
         cdef int64_t* state_indices = NULL
 
+        cdef DrakenFixedBuffer* vec_ptr
         for group_name in self._group_by_columns:
             group_vector = morsel.column(group_name)
             if isinstance(group_vector, Int64Vector):
-                key_ptrs.append(<size_t> (<Int64Vector> group_vector).ptr)
-                key_nulls.append(<size_t> <uint8_t*> (<Int64Vector> group_vector).ptr.null_bitmap)
+                vec_ptr = (<Int64Vector> group_vector).ptr
+                if vec_ptr == NULL:
+                    raise ValueError(f"vector ptr is NULL for group column {group_name}")
+                key_ptrs.append(<size_t> vec_ptr)
+                key_nulls.append(<size_t> <uint8_t*> vec_ptr.null_bitmap)
             elif isinstance(group_vector, Date32Vector):
-                key_ptrs.append(<size_t> (<Date32Vector> group_vector).ptr)
-                key_nulls.append(<size_t> <uint8_t*> (<Date32Vector> group_vector).ptr.null_bitmap)
+                vec_ptr = (<Date32Vector> group_vector).ptr
+                if vec_ptr == NULL:
+                    raise ValueError(f"vector ptr is NULL for group column {group_name}")
+                key_ptrs.append(<size_t> vec_ptr)
+                key_nulls.append(<size_t> <uint8_t*> vec_ptr.null_bitmap)
             elif isinstance(group_vector, TimeVector):
-                key_ptrs.append(<size_t> (<TimeVector> group_vector).ptr)
-                key_nulls.append(<size_t> <uint8_t*> (<TimeVector> group_vector).ptr.null_bitmap)
+                vec_ptr = (<TimeVector> group_vector).ptr
+                if vec_ptr == NULL:
+                    raise ValueError(f"vector ptr is NULL for group column {group_name}")
+                key_ptrs.append(<size_t> vec_ptr)
+                key_nulls.append(<size_t> <uint8_t*> vec_ptr.null_bitmap)
             elif isinstance(group_vector, TimestampVector):
-                key_ptrs.append(<size_t> (<TimestampVector> group_vector).ptr)
-                key_nulls.append(<size_t> <uint8_t*> (<TimestampVector> group_vector).ptr.null_bitmap)
+                vec_ptr = (<TimestampVector> group_vector).ptr
+                if vec_ptr == NULL:
+                    raise ValueError(f"vector ptr is NULL for group column {group_name}")
+                key_ptrs.append(<size_t> vec_ptr)
+                key_nulls.append(<size_t> <uint8_t*> vec_ptr.null_bitmap)
             else:
-                key_ptrs.append(<size_t> (<IntegerVector> group_vector).ptr)
-                key_nulls.append(<size_t> <uint8_t*> (<IntegerVector> group_vector).ptr.null_bitmap)
+                vec_ptr = (<IntegerVector> group_vector).ptr
+                if vec_ptr == NULL:
+                    raise ValueError(f"vector ptr is NULL for group column {group_name}")
+                key_ptrs.append(<size_t> vec_ptr)
+                key_nulls.append(<size_t> <uint8_t*> vec_ptr.null_bitmap)
 
         if self._agg_mode == AGG_COUNT_STAR:
             state_indices = <int64_t*> malloc(row_count * sizeof(int64_t))

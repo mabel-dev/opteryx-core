@@ -164,7 +164,6 @@ class CrossJoinNode(JoinNode):
                 right_table = pyarrow.concat_tables(self.right_buffer, promote_options="none")  # type: ignore
                 self.right_buffer = None
                 yield from _cross_join(self.left_relation, right_table)
-                yield EOS
             else:
                 self.right_buffer.append(morsel)
                 yield None

@@ -716,7 +716,11 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
         compressed_size = avail;
 
       // ── Row-mask page skipping ──────────────────────────────────────
-      if (row_mask != nullptr) {
+      // LIST columns (max_repetition_level > 0) skip this block: the caller
+      // supplies a per-logical-row mask, but page_values counts physical slots.
+      // Applying a per-slot mask to a per-row buffer reads past its end.
+      // Logical-row masking for LIST columns is applied post-loop instead.
+      if (row_mask != nullptr && target_col->max_repetition_level == 0) {
         // Tier 1D: Word-at-a-time scan for any selected row in this page.
         const uint8_t* mp = row_mask + page_row_offset;
         const size_t pv = static_cast<size_t>(page_values);
@@ -1513,6 +1517,50 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
         }
       }
       total_collected = K;
+    } else if (row_mask != nullptr && target_col->max_repetition_level > 0) {
+      // LIST column: input row_mask is per-logical-row; apply by walking rep_levels.
+      // rep_level == 0 marks the start of each new logical row.
+      const int32_t max_def_lvl = target_col->max_definition_level;
+
+      std::vector<int32_t> new_rep, new_def;
+      std::vector<std::string> new_strings;
+      std::vector<int32_t> new_dict_indices;
+      const bool use_strings = !result.string_values.empty();
+      const bool use_dicts   = !result.dict_indices.empty();
+
+      int32_t logical_row = -1;
+      bool     selected   = false;
+      int32_t  value_idx  = 0;
+      int32_t  out_rows   = 0;
+
+      for (size_t i = 0; i < all_rep_levels.size(); ++i) {
+        if (all_rep_levels[i] == 0) {
+          ++logical_row;
+          selected = (row_mask[logical_row] != 0);
+          if (selected) ++out_rows;
+        }
+        const bool is_value = (!all_def_levels.empty() &&
+                               i < all_def_levels.size() &&
+                               all_def_levels[i] == max_def_lvl);
+        if (selected) {
+          new_rep.push_back(all_rep_levels[i]);
+          if (i < all_def_levels.size())
+            new_def.push_back(all_def_levels[i]);
+          if (is_value) {
+            if (use_strings && value_idx < (int32_t)result.string_values.size())
+              new_strings.push_back(std::move(result.string_values[value_idx]));
+            if (use_dicts && value_idx < (int32_t)result.dict_indices.size())
+              new_dict_indices.push_back(result.dict_indices[value_idx]);
+          }
+        }
+        if (is_value) ++value_idx;
+      }
+
+      all_rep_levels = std::move(new_rep);
+      all_def_levels = std::move(new_def);
+      if (use_strings) result.string_values = std::move(new_strings);
+      if (use_dicts)   result.dict_indices   = std::move(new_dict_indices);
+      total_collected = out_rows;
     }
     // ── End post-loop row-mask filter ──────────────────────────────────────
     RUGO_TEL_ACCUM(rugo_tel::mask_filter_s, _mf_t0);

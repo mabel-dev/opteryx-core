@@ -253,8 +253,7 @@ class OuterJoinNode(JoinNode):
                         keep_columns = [c for c in candidates if c in result_table.schema.names]
                         result_table = result_table.select(keep_columns)
                     yield result_table
-                yield EOS
-
+                
             else:
                 self.right_buffer.append(morsel)
                 yield None
