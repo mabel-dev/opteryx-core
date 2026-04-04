@@ -721,6 +721,7 @@ cdef class CarcharGroupStateEngine:
     cdef list _multi_distinct_sets
     cdef vector[uint8_t] _key_payload_bytes
     cdef vector[int64_t] _key_payload_offsets
+    cdef public object _debug_last_finalize_stage
 
     cdef BloomFilter _groupby_bloom          # None until second morsel; never reset after creation
     cdef vector[uint64_t] _bloom_hashes      # hash of each new state during first morsel
@@ -748,6 +749,7 @@ cdef class CarcharGroupStateEngine:
         self._multi_value_columns = []
         self._multi_distinct_sets = []
         self._index = NULL
+        self._debug_last_finalize_stage = None
         self._groupby_bloom = None
         self._use_bloom = False
         self._constant_key_scalar = None
@@ -1115,13 +1117,15 @@ cdef class CarcharGroupStateEngine:
         ):
             raise RuntimeError("failed to serialize fixed group key record")
 
-    cdef inline void _append_multi_fixed_payload_key(
+
+
+    cdef inline void _append_multi_fixed_payload_key_from_vectors(
         self,
-        list key_ptrs,
-        list key_nulls,
+        list key_vectors,
         Py_ssize_t row_idx,
     ) except *:
         cdef Py_ssize_t key_idx
+        cdef object key_vector
         cdef DrakenFixedBuffer* key_ptr
         cdef uint8_t* key_null_bitmap
         cdef int64_t key_value
@@ -1131,9 +1135,26 @@ cdef class CarcharGroupStateEngine:
         cdef vector[string] encoded_values
         cdef vector[int64_t] encoded_valids
 
-        for key_idx in range(len(key_ptrs)):
-            key_ptr = <DrakenFixedBuffer*> <size_t> key_ptrs[key_idx]
-            key_null_bitmap = <uint8_t*> <size_t> key_nulls[key_idx]
+        for key_idx in range(len(key_vectors)):
+            key_vector = key_vectors[key_idx]
+
+            # Extract pointer and null bitmap based on actual vector type
+            if isinstance(key_vector, Int64Vector):
+                key_ptr = (<Int64Vector> key_vector).ptr
+                key_null_bitmap = <uint8_t*> key_ptr.null_bitmap
+            elif isinstance(key_vector, Date32Vector):
+                key_ptr = (<Date32Vector> key_vector).ptr
+                key_null_bitmap = <uint8_t*> key_ptr.null_bitmap
+            elif isinstance(key_vector, TimeVector):
+                key_ptr = (<TimeVector> key_vector).ptr
+                key_null_bitmap = <uint8_t*> key_ptr.null_bitmap
+            elif isinstance(key_vector, TimestampVector):
+                key_ptr = (<TimestampVector> key_vector).ptr
+                key_null_bitmap = <uint8_t*> key_ptr.null_bitmap
+            else:
+                key_ptr = (<IntegerVector> key_vector).ptr
+                key_null_bitmap = <uint8_t*> key_ptr.null_bitmap
+
             key_valid_flag = 1 if _bitmap_is_valid(key_null_bitmap, row_idx) else 0
             key_value = _read_integer_value(key_ptr, row_idx) if key_valid_flag != 0 else 0
             fixed_values.push_back(key_value)
@@ -1272,8 +1293,9 @@ cdef class CarcharGroupStateEngine:
                         self._init_legacy_backend()
                         return
                     self._multi_group_key_kinds.push_back(key_kind)
-                    self._use_object_keys = True
-                    self._multi_key_object_mode = True
+                    if key_kind == KEY_MULTI_ENCODED_STRING:
+                        self._use_object_keys = True
+                        self._multi_key_object_mode = True
                     continue
                 self._init_legacy_backend()
                 return
@@ -2364,7 +2386,8 @@ cdef class CarcharGroupStateEngine:
 
         payload_ref = <int64_t> self._state_count()
         self._index.insert_new(row_hash, payload_ref)
-        self._append_single_fixed_payload_key(key_value, key_valid_flag)
+        self._group_key_values.push_back(key_value)
+        self._group_key_valid.push_back(key_valid_flag)
         self._object_state.append(None)
         self._object_state_starts.push_back(0)
         self._object_state_lengths.push_back(0)
@@ -2404,8 +2427,8 @@ cdef class CarcharGroupStateEngine:
         self._bloom_record_new_state(row_hash)
         return payload_ref
 
-    cdef inline int64_t _find_or_insert_multi_fixed_state(
-        self, uint64_t row_hash, list key_ptrs, list key_nulls, Py_ssize_t row_idx
+    cdef inline int64_t _find_or_insert_multi_fixed_state_from_vectors(
+        self, uint64_t row_hash, list key_vectors, Py_ssize_t row_idx
     ) except *:
         cdef int64_t payload_ref = -1
         cdef size_t key_store_bytes
@@ -2416,7 +2439,7 @@ cdef class CarcharGroupStateEngine:
 
         payload_ref = <int64_t> self._state_count()
         self._index.insert_new(row_hash, payload_ref)
-        self._append_multi_fixed_payload_key(key_ptrs, key_nulls, row_idx)
+        self._append_multi_fixed_payload_key_from_vectors(key_vectors, row_idx)
 
         self._object_state.append(None)
         self._object_state_starts.push_back(0)
@@ -2456,6 +2479,8 @@ cdef class CarcharGroupStateEngine:
 
         self._bloom_record_new_state(row_hash)
         return payload_ref
+
+
 
     cdef inline int64_t _find_or_insert_encoded_state(
         self,
@@ -2578,7 +2603,8 @@ cdef class CarcharGroupStateEngine:
         cdef size_t key_store_bytes
         cdef Py_ssize_t agg_idx
         self._index.insert_new(row_hash, payload_ref)
-        self._append_single_fixed_payload_key(key_value, key_valid_flag)
+        self._group_key_values.push_back(key_value)
+        self._group_key_valid.push_back(key_valid_flag)
         self._object_state.append(None)
         self._object_state_starts.push_back(0)
         self._object_state_lengths.push_back(0)
@@ -2721,6 +2747,8 @@ cdef class CarcharGroupStateEngine:
         return payload_ref
 
     cdef list _build_multi_fixed_key_vectors(self, Py_ssize_t start, Py_ssize_t stop):
+        if stop < start:
+            raise RuntimeError(f"invalid multi-fixed finalize range: start={start}, stop={stop}")
         if <Py_ssize_t> self._key_payload_offsets.size() >= stop + 1:
             return build_payload_multi_key_vectors(
                 self._key_payload_bytes,
@@ -2746,13 +2774,46 @@ cdef class CarcharGroupStateEngine:
         cdef bint needs_key_nulls
         cdef int64_t key_kind
 
+        if key_count == 0:
+            raise RuntimeError("multi-fixed finalize requested with empty group-by schema")
+        if <Py_ssize_t> self._multi_group_key_values.size() != key_count:
+            raise RuntimeError(
+                f"multi-fixed finalize value store/key schema mismatch: "
+                f"{self._multi_group_key_values.size()} value columns for {key_count} keys"
+            )
+        if <Py_ssize_t> self._multi_group_key_valid.size() != key_count:
+            raise RuntimeError(
+                f"multi-fixed finalize validity store/key schema mismatch: "
+                f"{self._multi_group_key_valid.size()} validity columns for {key_count} keys"
+            )
+        if <Py_ssize_t> self._multi_group_key_kinds.size() != key_count:
+            raise RuntimeError(
+                f"multi-fixed finalize key-kind/schema mismatch: "
+                f"{self._multi_group_key_kinds.size()} key kinds for {key_count} keys"
+            )
+
         for key_idx in range(key_count):
+            if <Py_ssize_t> self._multi_group_key_values[key_idx].size() < stop:
+                raise RuntimeError(
+                    f"multi-fixed finalize value store shorter than finalize range for key {key_idx}: "
+                    f"have {self._multi_group_key_values[key_idx].size()} rows, need {stop}"
+                )
+            if <Py_ssize_t> self._multi_group_key_valid[key_idx].size() < stop:
+                raise RuntimeError(
+                    f"multi-fixed finalize validity store shorter than finalize range for key {key_idx}: "
+                    f"have {self._multi_group_key_valid[key_idx].size()} rows, need {stop}"
+                )
+
             needs_key_nulls = False
             for row_idx in range(start, stop):
                 if self._multi_group_key_valid[key_idx][row_idx] == 0:
                     needs_key_nulls = True
                     break
             key_kind = self._multi_group_key_kinds[key_idx]
+            if not self._is_multi_fixed_kind(key_kind):
+                raise RuntimeError(
+                    f"multi-fixed finalize encountered non-fixed key kind {key_kind} at key {key_idx}"
+                )
             if key_kind == KEY_MULTI_FIXED_DATE32:
                 key_vec_d32 = Date32Vector(length)
                 key_vec = key_vec_d32
@@ -2776,6 +2837,8 @@ cdef class CarcharGroupStateEngine:
             key_nulls = NULL
             if needs_key_nulls:
                 key_nulls = _alloc_valid_bitmap(length)
+                if key_nulls == NULL:
+                    raise MemoryError("failed to allocate multi-fixed finalize null bitmap")
                 if key_kind == KEY_MULTI_FIXED_DATE32:
                     key_vec_d32.ptr.null_bitmap = key_nulls
                 elif key_kind == KEY_MULTI_FIXED_TIME32:
@@ -2793,7 +2856,14 @@ cdef class CarcharGroupStateEngine:
                     key_data_i64[row_idx] = self._multi_group_key_values[key_idx][start + row_idx]
                 if key_nulls != NULL and self._multi_group_key_valid[key_idx][start + row_idx] != 0:
                     _bitmap_set_valid(key_nulls, row_idx)
+            if key_vec is None:
+                raise RuntimeError(f"multi-fixed finalize produced None vector for key {key_idx}")
             vectors.append(key_vec)
+
+        if len(vectors) != key_count:
+            raise RuntimeError(
+                f"multi-fixed finalize produced {len(vectors)} vectors for {key_count} keys"
+            )
         return vectors
 
     cdef void _ingest_count_distinct_for_states(
@@ -4633,48 +4703,15 @@ cdef class CarcharGroupStateEngine:
         cdef object value_vector
         cdef DrakenFixedBuffer* value_ptr
         cdef uint8_t* value_nulls
-        cdef list key_ptrs = []
-        cdef list key_nulls = []
+        cdef list key_vectors = []
         cdef bytes group_name
         cdef object group_vector
         cdef uint64_t[::1] row_hashes
 
-        print(f"[TRACE] Entered _ingest_multi_fixed_key_multi, row_count={row_count}, computing row_hashes...")
         row_hashes = morsel.hash(self._group_by_columns)
-        print(f"DEBUG: Using _ingest_multi_fixed_key with {row_count} rows")
-        cdef DrakenFixedBuffer* vec_ptr
         for group_name in self._group_by_columns:
             group_vector = morsel.column(group_name)
-            if isinstance(group_vector, Int64Vector):
-                vec_ptr = (<Int64Vector> group_vector).ptr
-                if vec_ptr == NULL:
-                    raise ValueError(f"vector ptr is NULL for group column {group_name}")
-                key_ptrs.append(<size_t> vec_ptr)
-                key_nulls.append(<size_t> <uint8_t*> vec_ptr.null_bitmap)
-            elif isinstance(group_vector, Date32Vector):
-                vec_ptr = (<Date32Vector> group_vector).ptr
-                if vec_ptr == NULL:
-                    raise ValueError(f"vector ptr is NULL for group column {group_name}")
-                key_ptrs.append(<size_t> vec_ptr)
-                key_nulls.append(<size_t> <uint8_t*> vec_ptr.null_bitmap)
-            elif isinstance(group_vector, TimeVector):
-                vec_ptr = (<TimeVector> group_vector).ptr
-                if vec_ptr == NULL:
-                    raise ValueError(f"vector ptr is NULL for group column {group_name}")
-                key_ptrs.append(<size_t> vec_ptr)
-                key_nulls.append(<size_t> <uint8_t*> vec_ptr.null_bitmap)
-            elif isinstance(group_vector, TimestampVector):
-                vec_ptr = (<TimestampVector> group_vector).ptr
-                if vec_ptr == NULL:
-                    raise ValueError(f"vector ptr is NULL for group column {group_name}")
-                key_ptrs.append(<size_t> vec_ptr)
-                key_nulls.append(<size_t> <uint8_t*> vec_ptr.null_bitmap)
-            else:
-                vec_ptr = (<IntegerVector> group_vector).ptr
-                if vec_ptr == NULL:
-                    raise ValueError(f"vector ptr is NULL for group column {group_name}")
-                key_ptrs.append(<size_t> vec_ptr)
-                key_nulls.append(<size_t> <uint8_t*> vec_ptr.null_bitmap)
+            key_vectors.append(group_vector)
 
         state_indices = <int64_t*> malloc(row_count * sizeof(int64_t))
         if state_indices == NULL and row_count > 0:
@@ -4686,10 +4723,9 @@ cdef class CarcharGroupStateEngine:
                 if self._index.lookup_fast(row_hashes[row_idx], state_index):
                     state_indices[row_idx] = state_index
                     continue
-                state_indices[row_idx] = self._find_or_insert_multi_fixed_state(
+                state_indices[row_idx] = self._find_or_insert_multi_fixed_state_from_vectors(
                     row_hashes[row_idx],
-                    key_ptrs,
-                    key_nulls,
+                    key_vectors,
                     row_idx,
                 )
 
@@ -4881,8 +4917,7 @@ cdef class CarcharGroupStateEngine:
         cdef Py_ssize_t row_idx
         cdef Py_ssize_t row_count = morsel.num_rows
         cdef int64_t state_index
-        cdef list key_ptrs = []
-        cdef list key_nulls = []
+        cdef list key_vectors = []
         cdef bytes group_name
         cdef object group_vector
         cdef object value_vector
@@ -4890,39 +4925,9 @@ cdef class CarcharGroupStateEngine:
         cdef uint8_t* value_nulls
         cdef int64_t* state_indices = NULL
 
-        cdef DrakenFixedBuffer* vec_ptr
         for group_name in self._group_by_columns:
             group_vector = morsel.column(group_name)
-            if isinstance(group_vector, Int64Vector):
-                vec_ptr = (<Int64Vector> group_vector).ptr
-                if vec_ptr == NULL:
-                    raise ValueError(f"vector ptr is NULL for group column {group_name}")
-                key_ptrs.append(<size_t> vec_ptr)
-                key_nulls.append(<size_t> <uint8_t*> vec_ptr.null_bitmap)
-            elif isinstance(group_vector, Date32Vector):
-                vec_ptr = (<Date32Vector> group_vector).ptr
-                if vec_ptr == NULL:
-                    raise ValueError(f"vector ptr is NULL for group column {group_name}")
-                key_ptrs.append(<size_t> vec_ptr)
-                key_nulls.append(<size_t> <uint8_t*> vec_ptr.null_bitmap)
-            elif isinstance(group_vector, TimeVector):
-                vec_ptr = (<TimeVector> group_vector).ptr
-                if vec_ptr == NULL:
-                    raise ValueError(f"vector ptr is NULL for group column {group_name}")
-                key_ptrs.append(<size_t> vec_ptr)
-                key_nulls.append(<size_t> <uint8_t*> vec_ptr.null_bitmap)
-            elif isinstance(group_vector, TimestampVector):
-                vec_ptr = (<TimestampVector> group_vector).ptr
-                if vec_ptr == NULL:
-                    raise ValueError(f"vector ptr is NULL for group column {group_name}")
-                key_ptrs.append(<size_t> vec_ptr)
-                key_nulls.append(<size_t> <uint8_t*> vec_ptr.null_bitmap)
-            else:
-                vec_ptr = (<IntegerVector> group_vector).ptr
-                if vec_ptr == NULL:
-                    raise ValueError(f"vector ptr is NULL for group column {group_name}")
-                key_ptrs.append(<size_t> vec_ptr)
-                key_nulls.append(<size_t> <uint8_t*> vec_ptr.null_bitmap)
+            key_vectors.append(group_vector)
 
         if self._agg_mode == AGG_COUNT_STAR:
             state_indices = <int64_t*> malloc(row_count * sizeof(int64_t))
@@ -4932,8 +4937,8 @@ cdef class CarcharGroupStateEngine:
                 for row_idx in range(row_count):
                     state_index = -1
                     if not self._index.lookup_fast(row_hashes[row_idx], state_index):
-                        state_index = self._find_or_insert_multi_fixed_state(
-                            row_hashes[row_idx], key_ptrs, key_nulls, row_idx
+                        state_index = self._find_or_insert_multi_fixed_state_from_vectors(
+                            row_hashes[row_idx], key_vectors, row_idx
                         )
                     state_indices[row_idx] = state_index
                 count_star_accumulate(self._counts.data(), state_indices, row_count)
@@ -4951,8 +4956,8 @@ cdef class CarcharGroupStateEngine:
                     if self._index.lookup_fast(row_hashes[row_idx], state_index):
                         state_indices[row_idx] = state_index
                     else:
-                        state_indices[row_idx] = self._find_or_insert_multi_fixed_state(
-                            row_hashes[row_idx], key_ptrs, key_nulls, row_idx
+                        state_indices[row_idx] = self._find_or_insert_multi_fixed_state_from_vectors(
+                            row_hashes[row_idx], key_vectors, row_idx
                         )
                 self._ingest_count_distinct_for_states(morsel, state_indices, row_count)
             finally:
@@ -4968,8 +4973,8 @@ cdef class CarcharGroupStateEngine:
                 for row_idx in range(row_count):
                     state_index = -1
                     if not self._index.lookup_fast(row_hashes[row_idx], state_index):
-                        state_index = self._find_or_insert_multi_fixed_state(
-                            row_hashes[row_idx], key_ptrs, key_nulls, row_idx
+                        state_index = self._find_or_insert_multi_fixed_state_from_vectors(
+                            row_hashes[row_idx], key_vectors, row_idx
                         )
                     state_indices[row_idx] = state_index
                 value_vector = morsel.column(self._value_column)
@@ -5005,8 +5010,8 @@ cdef class CarcharGroupStateEngine:
                     if self._index.lookup_fast(row_hashes[row_idx], state_index):
                         state_indices[row_idx] = state_index
                     else:
-                        state_indices[row_idx] = self._find_or_insert_multi_fixed_state(
-                            row_hashes[row_idx], key_ptrs, key_nulls, row_idx
+                        state_indices[row_idx] = self._find_or_insert_multi_fixed_state_from_vectors(
+                            row_hashes[row_idx], key_vectors, row_idx
                         )
                 self._ingest_any_value_var_for_states(morsel, state_indices, row_count)
             finally:
@@ -5024,8 +5029,8 @@ cdef class CarcharGroupStateEngine:
                     if self._index.lookup_fast(row_hashes[row_idx], state_index):
                         state_indices[row_idx] = state_index
                     else:
-                        state_indices[row_idx] = self._find_or_insert_multi_fixed_state(
-                            row_hashes[row_idx], key_ptrs, key_nulls, row_idx
+                        state_indices[row_idx] = self._find_or_insert_multi_fixed_state_from_vectors(
+                            row_hashes[row_idx], key_vectors, row_idx
                         )
                 self._ingest_object_minmax_for_states(morsel, state_indices, row_count)
             finally:
@@ -5041,8 +5046,8 @@ cdef class CarcharGroupStateEngine:
                 for row_idx in range(row_count):
                     state_index = -1
                     if not self._index.lookup_fast(row_hashes[row_idx], state_index):
-                        state_index = self._find_or_insert_multi_fixed_state(
-                            row_hashes[row_idx], key_ptrs, key_nulls, row_idx
+                        state_index = self._find_or_insert_multi_fixed_state_from_vectors(
+                            row_hashes[row_idx], key_vectors, row_idx
                         )
                     state_indices[row_idx] = state_index
                 if isinstance(value_vector, Float64Vector):
@@ -5074,8 +5079,8 @@ cdef class CarcharGroupStateEngine:
                 for row_idx in range(row_count):
                     state_index = -1
                     if not self._index.lookup_fast(row_hashes[row_idx], state_index):
-                        state_index = self._find_or_insert_multi_fixed_state(
-                            row_hashes[row_idx], key_ptrs, key_nulls, row_idx
+                        state_index = self._find_or_insert_multi_fixed_state_from_vectors(
+                            row_hashes[row_idx], key_vectors, row_idx
                         )
                     state_indices[row_idx] = state_index
                 if isinstance(value_vector, Float64Vector):
@@ -5107,8 +5112,8 @@ cdef class CarcharGroupStateEngine:
                 for row_idx in range(row_count):
                     state_index = -1
                     if not self._index.lookup_fast(row_hashes[row_idx], state_index):
-                        state_index = self._find_or_insert_multi_fixed_state(
-                            row_hashes[row_idx], key_ptrs, key_nulls, row_idx
+                        state_index = self._find_or_insert_multi_fixed_state_from_vectors(
+                            row_hashes[row_idx], key_vectors, row_idx
                         )
                     state_indices[row_idx] = state_index
                 if isinstance(value_vector, Float64Vector):
@@ -5148,8 +5153,8 @@ cdef class CarcharGroupStateEngine:
             for row_idx in range(row_count):
                 state_index = -1
                 if not self._index.lookup_fast(row_hashes[row_idx], state_index):
-                    state_index = self._find_or_insert_multi_fixed_state(
-                        row_hashes[row_idx], key_ptrs, key_nulls, row_idx
+                    state_index = self._find_or_insert_multi_fixed_state_from_vectors(
+                        row_hashes[row_idx], key_vectors, row_idx
                     )
                 if self._agg_mode == AGG_COUNT_VALUE:
                     if _bitmap_is_valid(value_nulls, row_idx):
@@ -5162,8 +5167,8 @@ cdef class CarcharGroupStateEngine:
             for row_idx in range(row_count):
                 state_index = -1
                 if not self._index.lookup_fast(row_hashes[row_idx], state_index):
-                    state_index = self._find_or_insert_multi_fixed_state(
-                        row_hashes[row_idx], key_ptrs, key_nulls, row_idx
+                    state_index = self._find_or_insert_multi_fixed_state_from_vectors(
+                        row_hashes[row_idx], key_vectors, row_idx
                     )
                 if self._agg_mode == AGG_COUNT_VALUE:
                     if _bitmap_is_valid(value_nulls, row_idx):
@@ -5175,8 +5180,8 @@ cdef class CarcharGroupStateEngine:
         for row_idx in range(row_count):
             state_index = -1
             if not self._index.lookup_fast(row_hashes[row_idx], state_index):
-                state_index = self._find_or_insert_multi_fixed_state(
-                    row_hashes[row_idx], key_ptrs, key_nulls, row_idx
+                state_index = self._find_or_insert_multi_fixed_state_from_vectors(
+                    row_hashes[row_idx], key_vectors, row_idx
                 )
             if self._agg_mode == AGG_COUNT_VALUE:
                 if _bitmap_is_valid(value_nulls, row_idx):
@@ -5204,10 +5209,8 @@ cdef class CarcharGroupStateEngine:
         cdef uint64_t[::1] row_hashes
         cdef int64_t key_kind
 
-        print(f"[TRACE] Entered _ingest_dictionary_key_multi, row_count={row_count}, computing row_hashes...")
-        row_hashes = morsel.hash([self._group_column])
+        row_hashes = morsel.hash(self._group_by_columns)
         key_kind = _dict_accessor_key_kind(_vector_dict_accessor(key_vector))
-        print(f"[TRACE] _ingest_dictionary_key_multi: row_hashes computed, key_kind={key_kind}")
 
         state_indices = <int64_t*> malloc(row_count * sizeof(int64_t))
         if state_indices == NULL and row_count > 0:
@@ -5258,7 +5261,6 @@ cdef class CarcharGroupStateEngine:
                     value_vector = morsel.column(self._multi_value_columns[agg_idx])
                     value_const_accessor = _vector_const_accessor(value_vector)
                     if value_const_accessor != NULL:
-                        print(f"DEBUG: Detected ConstAccessor for AGG_SUM in _ingest_dictionary_key_multi aggregate {agg_idx}")
                         if _const_accessor_is_null(value_const_accessor):
                             continue
                         # For non-null constant values, add to all states
@@ -5315,7 +5317,6 @@ cdef class CarcharGroupStateEngine:
                     value_vector = morsel.column(self._multi_value_columns[agg_idx])
                     value_const_accessor = _vector_const_accessor(value_vector)
                     if value_const_accessor != NULL:
-                        print(f"DEBUG: Detected ConstAccessor for AGG_MIN/MAX in _ingest_dictionary_key_multi aggregate {agg_idx}")
                         if _const_accessor_is_null(value_const_accessor):
                             continue
                         # For non-null constant values, initialize or update states
@@ -5382,7 +5383,6 @@ cdef class CarcharGroupStateEngine:
                     value_vector = morsel.column(self._multi_value_columns[agg_idx])
                     value_const_accessor = _vector_const_accessor(value_vector)
                     if value_const_accessor != NULL:
-                        print(f"DEBUG: Detected ConstAccessor for AGG_AVG in _ingest_dictionary_key_multi aggregate {agg_idx}")
                         if _const_accessor_is_null(value_const_accessor):
                             continue
                         # For non-null constant values, accumulate sum and count
@@ -5981,11 +5981,8 @@ cdef class CarcharGroupStateEngine:
         cdef long long t_hash_start
         cdef long long t_accum_start
 
-        print(f"[TRACE] Entered _ingest_object_key_multi, row_count={row_count}, key_vector type: {type(key_vector).__name__ if key_vector else 'None'}")
         t_hash_start = time.monotonic_ns()
-        print(f"[TRACE] _ingest_object_key_multi: computing row_hashes with {len(self._group_by_columns)} group columns...")
         row_hashes = morsel.hash(self._group_by_columns)
-        print(f"[TRACE] _ingest_object_key_multi: row_hashes computed successfully")
         record_groupby_hash_time(self, t_hash_start)
 
         if self._multi_key_object_mode:
@@ -6342,19 +6339,20 @@ cdef class CarcharGroupStateEngine:
                 self._ingest_multi_fixed_key_multi(morsel)
             elif self._multi_key_object_mode:
                 self._ingest_object_key_multi(morsel, None)
-            elif (
-                key_dict_accessor != NULL
-                and self._is_multi_fixed_kind(_dict_accessor_key_kind(key_dict_accessor))
-            ):
-                self._ingest_dictionary_key_multi(morsel, key_vector)
+            elif key_dict_accessor != NULL:
+                if len(self._group_by_columns) > 1:
+                    if self._is_multi_fixed_kind(_dict_accessor_key_kind(key_dict_accessor)):
+                        self._ingest_multi_fixed_key_multi(morsel)
+                    else:
+                        self._ingest_object_key_multi(morsel, None)
+                else:
+                    self._ingest_dictionary_key_multi(morsel, key_vector)
             elif self._use_object_keys:
                 self._ingest_object_key_multi(morsel, key_vector)
             elif isinstance(key_vector, Int64Vector):
                 self._ingest_int64_key_multi(morsel, <Int64Vector> key_vector)
             elif isinstance(key_vector, IntegerVector):
                 self._ingest_integer_key_multi(morsel, <IntegerVector> key_vector)
-            elif key_dict_accessor != NULL:
-                self._ingest_dictionary_key_multi(morsel, key_vector)
             elif isinstance(key_vector, StringVector):
                 self._ingest_object_key_multi(morsel, key_vector)
             else:
@@ -6673,9 +6671,21 @@ cdef class CarcharGroupStateEngine:
         cdef Py_ssize_t state_index
         cdef bint needs_key_nulls = False
         cdef list vectors
+        cdef Py_ssize_t key_idx
+        cdef Py_ssize_t expected_total_vectors
+        cdef object output_name
+        cdef object output_vector
+        cdef bint expected_object_output
+        cdef bint expected_float_output
+
+        self._debug_last_finalize_stage = f"_build_chunk_morsel_multi enter start={start} stop={stop}"
 
         if self._multi_key_fixed_mode:
+            self._debug_last_finalize_stage = f"_build_chunk_morsel_multi before _build_multi_fixed_key_vectors start={start} stop={stop}"
             key_vectors = self._build_multi_fixed_key_vectors(start, stop)
+            self._debug_last_finalize_stage = f"_build_chunk_morsel_multi after _build_multi_fixed_key_vectors start={start} stop={stop}"
+            if key_vectors is None:
+                raise RuntimeError("multi-key fixed finalize returned None key vector list")
         elif <Py_ssize_t> self._group_key_valid.size() >= stop:
             # Legacy non-Carchar path: _group_key_valid is directly populated.
             for state_index in range(start, stop):
@@ -6689,12 +6699,20 @@ cdef class CarcharGroupStateEngine:
         # is never reached in Carchar mode (the elif condition is True there).
 
         if self._multi_key_fixed_mode:
-            pass
+            if len(key_vectors) != len(self._group_by_columns):
+                raise RuntimeError(
+                    f"multi-key fixed finalize produced {len(key_vectors)} key vectors for "
+                    f"{len(self._group_by_columns)} group columns"
+                )
+            for key_vec in key_vectors:
+                if key_vec is None:
+                    raise RuntimeError("multi-key fixed finalize returned None key vector")
         elif (
             not self._multi_key_object_mode
             and self._is_multi_fixed_kind(self._single_key_kind)
             and (<Py_ssize_t> self._key_payload_offsets.size() >= stop + 1 or self._encoded_key_valid.size() == 0)
         ):
+            self._debug_last_finalize_stage = f"_build_chunk_morsel_multi before build_finalize_single_key_vector start={start} stop={stop}"
             key_vec = build_finalize_single_key_vector(
                 self._key_payload_bytes,
                 self._key_payload_offsets,
@@ -6704,7 +6722,16 @@ cdef class CarcharGroupStateEngine:
                 start,
                 stop,
             )
-        elif self._use_object_keys:
+            self._debug_last_finalize_stage = f"_build_chunk_morsel_multi after build_finalize_single_key_vector start={start} stop={stop}"
+            if key_vec is None:
+                raise RuntimeError("single-key finalize returned None key vector")
+        elif self._use_object_keys or len(self._group_by_columns) > 1:
+            if <Py_ssize_t> self._key_payload_offsets.size() < stop + 1:
+                raise RuntimeError(
+                    f"multi-key finalize missing payload offsets for rows {start}:{stop}; "
+                    f"have {self._key_payload_offsets.size()} offsets"
+                )
+            self._debug_last_finalize_stage = f"_build_chunk_morsel_multi before build_finalize_key_vectors start={start} stop={stop}"
             key_vectors = build_finalize_key_vectors(
                 self._key_payload_bytes,
                 self._key_payload_offsets,
@@ -6716,7 +6743,17 @@ cdef class CarcharGroupStateEngine:
                 start,
                 stop,
             )
+            self._debug_last_finalize_stage = f"_build_chunk_morsel_multi after build_finalize_key_vectors start={start} stop={stop}"
+            if key_vectors is None:
+                raise RuntimeError("multi-key finalize returned None key vector list")
+            if len(key_vectors) != len(self._group_by_columns):
+                raise RuntimeError(
+                    f"multi-key finalize produced {len(key_vectors)} key vectors for "
+                    f"{len(self._group_by_columns)} group columns"
+                )
             key_vec = key_vectors[0]
+            if key_vec is None:
+                raise RuntimeError("multi-key finalize returned None first key vector")
         else:
             key_vec_i64 = Int64Vector(length)
             key_vec = key_vec_i64
@@ -6731,6 +6768,7 @@ cdef class CarcharGroupStateEngine:
                 if key_nulls != NULL and self._group_key_valid[state_index] != 0:
                     _bitmap_set_valid(key_nulls, i)
 
+        self._debug_last_finalize_stage = f"_build_chunk_morsel_multi before build_finalize_multi_aggregate_vectors start={start} stop={stop}"
         vectors = build_finalize_multi_aggregate_vectors(
             self._multi_agg_modes,
             self._multi_value_kinds,
@@ -6748,13 +6786,39 @@ cdef class CarcharGroupStateEngine:
             start,
             stop,
         )
+        self._debug_last_finalize_stage = f"_build_chunk_morsel_multi after build_finalize_multi_aggregate_vectors start={start} stop={stop}"
+        if vectors is None:
+            raise RuntimeError("multi-aggregate finalize returned None aggregate vector list")
+        if len(vectors) != self._multi_agg_count:
+            raise RuntimeError(
+                f"multi-aggregate finalize produced {len(vectors)} aggregate vectors for "
+                f"{self._multi_agg_count} aggregates"
+            )
 
         if self._multi_key_fixed_mode:
+            if len(key_vectors) == 0:
+                raise RuntimeError("multi-key fixed finalize produced empty key vector list")
             vectors.extend(key_vectors)
         elif self._use_object_keys and self._multi_key_object_mode:
+            if len(key_vectors) == 0:
+                raise RuntimeError("multi-key object finalize produced empty key vector list")
+            vectors.extend(key_vectors)
+        elif len(self._group_by_columns) > 1:
+            if len(key_vectors) == 0:
+                raise RuntimeError("multi-key finalize produced empty key vector list")
             vectors.extend(key_vectors)
         else:
+            if key_vec is None:
+                raise RuntimeError("single-key finalize produced None key vector before morsel construction")
             vectors.append(key_vec)
+
+        expected_total_vectors = self._multi_agg_count + len(self._group_by_columns)
+        if len(vectors) != expected_total_vectors:
+            raise RuntimeError(
+                f"multi-key finalize produced {len(vectors)} total vectors for "
+                f"{self._multi_agg_count} aggregates and {len(self._group_by_columns)} group columns; "
+                f"expected {expected_total_vectors}"
+            )
 
         # Defensive check: ensure names and vectors match
         if len(names) != len(vectors):
@@ -6765,6 +6829,119 @@ cdef class CarcharGroupStateEngine:
                 f"Group columns: {len(self._group_by_columns)}"
             )
 
+        for key_idx in range(self._multi_agg_count):
+            output_vector = vectors[key_idx]
+            if output_vector is None:
+                raise RuntimeError(
+                    f"multi-key finalize has None aggregate vector at output index {key_idx}"
+                )
+            output_name = names[key_idx]
+            if output_name != self._aggregations[key_idx][0]:
+                raise RuntimeError(
+                    f"multi-key finalize aggregate output order mismatch at index {key_idx}: "
+                    f"name {output_name!r} does not match aggregation alias "
+                    f"{self._aggregations[key_idx][0]!r}"
+                )
+            expected_object_output = self._agg_output_is_object(key_idx)
+            expected_float_output = self._agg_output_is_float(key_idx)
+            if expected_object_output:
+                if not isinstance(output_vector, StringVector):
+                    raise RuntimeError(
+                        f"multi-key finalize aggregate output type mismatch at index {key_idx}: "
+                        f"expected StringVector-compatible object output, got "
+                        f"{type(output_vector).__name__}"
+                    )
+            elif expected_float_output:
+                if not isinstance(output_vector, Float64Vector):
+                    raise RuntimeError(
+                        f"multi-key finalize aggregate output type mismatch at index {key_idx}: "
+                        f"expected Float64Vector, got {type(output_vector).__name__}"
+                    )
+            else:
+                if not isinstance(output_vector, Int64Vector):
+                    raise RuntimeError(
+                        f"multi-key finalize aggregate output type mismatch at index {key_idx}: "
+                        f"expected Int64Vector, got {type(output_vector).__name__}"
+                    )
+
+        for key_idx in range(len(self._group_by_columns)):
+            output_vector = vectors[self._multi_agg_count + key_idx]
+            if output_vector is None:
+                raise RuntimeError(
+                    f"multi-key finalize has None key vector at output index "
+                    f"{self._multi_agg_count + key_idx}"
+                )
+            output_name = names[self._multi_agg_count + key_idx]
+            if output_name != self._group_by_columns[key_idx].decode("utf-8"):
+                raise RuntimeError(
+                    f"multi-key finalize key output order mismatch at index {key_idx}: "
+                    f"name {output_name!r} does not match group-by column "
+                    f"{self._group_by_columns[key_idx].decode('utf-8')!r}"
+                )
+            if self._multi_key_fixed_mode:
+                if self._multi_group_key_kinds[key_idx] == KEY_MULTI_FIXED_DATE32:
+                    if not isinstance(output_vector, Date32Vector):
+                        raise RuntimeError(
+                            f"multi-key finalize key output type mismatch at index {key_idx}: "
+                            f"expected Date32Vector, got {type(output_vector).__name__}"
+                        )
+                elif self._multi_group_key_kinds[key_idx] == KEY_MULTI_FIXED_TIME32:
+                    if not isinstance(output_vector, TimeVector) or (<TimeVector> output_vector).is_time64:
+                        raise RuntimeError(
+                            f"multi-key finalize key output type mismatch at index {key_idx}: "
+                            f"expected TimeVector(time32), got {type(output_vector).__name__}"
+                        )
+                elif self._multi_group_key_kinds[key_idx] == KEY_MULTI_FIXED_TIME64:
+                    if not isinstance(output_vector, TimeVector) or not (<TimeVector> output_vector).is_time64:
+                        raise RuntimeError(
+                            f"multi-key finalize key output type mismatch at index {key_idx}: "
+                            f"expected TimeVector(time64), got {type(output_vector).__name__}"
+                        )
+                elif self._multi_group_key_kinds[key_idx] == KEY_MULTI_FIXED_TIMESTAMP64:
+                    if not isinstance(output_vector, TimestampVector):
+                        raise RuntimeError(
+                            f"multi-key finalize key output type mismatch at index {key_idx}: "
+                            f"expected TimestampVector, got {type(output_vector).__name__}"
+                        )
+                elif self._multi_group_key_kinds[key_idx] == KEY_MULTI_FIXED_INT:
+                    if not isinstance(output_vector, Int64Vector):
+                        raise RuntimeError(
+                            f"multi-key finalize key output type mismatch at index {key_idx}: "
+                            f"expected Int64Vector, got {type(output_vector).__name__}"
+                        )
+                else:
+                    raise RuntimeError(
+                        f"multi-key finalize encountered unsupported fixed key kind "
+                        f"{self._multi_group_key_kinds[key_idx]} at index {key_idx}"
+                    )
+            else:
+                if not isinstance(output_vector, StringVector):
+                    raise RuntimeError(
+                        f"multi-key finalize key output type mismatch at index {key_idx}: "
+                        f"expected StringVector-compatible encoded/object key output, got "
+                        f"{type(output_vector).__name__}"
+                    )
+
+        if len(self._group_by_columns) > 1:
+            if len(vectors) < len(self._group_by_columns):
+                raise RuntimeError(
+                    f"multi-key finalize built only {len(vectors)} total vectors for "
+                    f"{len(self._group_by_columns)} group columns"
+                )
+            if len(vectors) != len(names):
+                raise RuntimeError(
+                    f"multi-key finalize vector/name mismatch before morsel construction: "
+                    f"{len(vectors)} vectors vs {len(names)} names"
+                )
+            for key_vec in vectors[self._multi_agg_count:]:
+                if key_vec is None:
+                    raise RuntimeError("multi-key finalize has None key vector in morsel payload")
+
+        self._debug_last_finalize_stage = f"_build_chunk_morsel_multi before Morsel.from_vectors start={start} stop={stop}"
+        self._debug_last_finalize_stage = (
+            f"_build_chunk_morsel_multi native morsel construction call start={start} "
+            f"stop={stop}"
+        )
         return Morsel.from_vectors(names, vectors)
 
     cpdef object finalize_fast_columns(self):
@@ -6917,6 +7094,7 @@ cdef class CarcharGroupStateEngine:
         cdef object agg_vec
         cdef object key_value
         cdef object key_out_vec
+        cdef bint building_multi_chunk
 
         if chunk_size <= 0:
             raise ValueError("chunk_size must be positive")
@@ -6980,10 +7158,17 @@ cdef class CarcharGroupStateEngine:
         for start in range(0, total, chunk_size):
             stop = min(total, start + chunk_size)
             vector_st = time.monotonic_ns()
-            if self._multi_agg_count > 0:
+            building_multi_chunk = self._multi_agg_count > 0
+            if building_multi_chunk:
+                self._debug_last_finalize_stage = f"before _build_chunk_morsel_multi start={start} stop={stop}"
                 morsel = self._build_chunk_morsel_multi(start, stop)
+                self._debug_last_finalize_stage = f"after _build_chunk_morsel_multi start={start} stop={stop}"
             else:
+                self._debug_last_finalize_stage = f"before _build_chunk_morsel start={start} stop={stop}"
                 morsel = self._build_chunk_morsel(start, stop)
+                self._debug_last_finalize_stage = f"after _build_chunk_morsel start={start} stop={stop}"
             record_finalize_rows_to_vectors_time(self, vector_st)
             record_finalize_chunk_emitted(self)
+            self._debug_last_finalize_stage = f"before yield start={start} stop={stop}"
             yield morsel
+            self._debug_last_finalize_stage = f"after yield start={start} stop={stop}"

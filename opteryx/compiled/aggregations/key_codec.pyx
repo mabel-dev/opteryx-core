@@ -2,13 +2,13 @@
 # cython: boundscheck=False
 # cython: wraparound=False
 
-"""Native zpp_bits record serialization for grouped aggregation keys."""
+"""Schema-driven native group-key record serialization for grouped aggregation keys."""
 
 import struct
 
 from cpython.bytes cimport PyBytes_FromStringAndSize
 from libc.stddef cimport size_t
-from libc.stdint cimport int64_t, uint8_t
+from libc.stdint cimport int32_t, int64_t, uint8_t
 from libcpp.string cimport string
 from libcpp.vector cimport vector
 
@@ -21,7 +21,7 @@ cdef int KEY_MULTI_FIXED_TIMESTAMP64 = 5
 cdef int KEY_MULTI_ENCODED_STRING = 6
 
 
-cdef extern from "zpp_key_codec.hpp" namespace "opteryx::zpp_key_codec":
+cdef extern from "group_key_codec.hpp" namespace "opteryx::group_key_codec":
     bint append_single_fixed_record(
         vector[uint8_t]& payload_bytes,
         vector[int64_t]& payload_offsets,
@@ -148,6 +148,45 @@ cdef bint decode_multi_key_record(
     vector[string]& encoded_values,
     vector[int64_t]& encoded_valids,
 ) except *:
+    cdef Py_ssize_t available_offsets = <Py_ssize_t> payload_offsets.size()
+
+    if state_index < 0:
+        raise RuntimeError(f"invalid multi-key payload state index: {state_index}")
+
+    if available_offsets < 2:
+        raise RuntimeError(
+            f"multi-key payload offsets too short: have {available_offsets} offsets"
+        )
+
+    if state_index + 1 >= available_offsets:
+        raise RuntimeError(
+            f"multi-key payload state index {state_index} out of range for "
+            f"{available_offsets} offsets"
+        )
+
+    if payload_offsets[state_index] > payload_offsets[state_index + 1]:
+        raise RuntimeError(
+            f"multi-key payload offsets are not monotonic at state {state_index}: "
+            f"{payload_offsets[state_index]} > {payload_offsets[state_index + 1]}"
+        )
+
+    if fixed_values.size() != fixed_valids.size():
+        raise RuntimeError(
+            f"multi-key decode fixed buffer mismatch at state {state_index}: "
+            f"{fixed_values.size()} values vs {fixed_valids.size()} valids"
+        )
+
+    if encoded_values.size() != encoded_valids.size():
+        raise RuntimeError(
+            f"multi-key decode encoded buffer mismatch at state {state_index}: "
+            f"{encoded_values.size()} values vs {encoded_valids.size()} valids"
+        )
+
+    if fixed_values.size() == 0 and encoded_values.size() == 0:
+        raise RuntimeError(
+            f"multi-key decode requires pre-sized output buffers at state {state_index}"
+        )
+
     return decode_multi_record(
         payload_bytes,
         payload_offsets,
@@ -197,12 +236,57 @@ cpdef tuple decode_multi_payload_keys(
     cdef bytes raw_bytes
     cdef Py_ssize_t fixed_idx = 0
     cdef Py_ssize_t encoded_idx = 0
+    cdef Py_ssize_t expected_keys = len(multi_key_kinds)
+    cdef Py_ssize_t expected_fixed_count = 0
+    cdef Py_ssize_t expected_encoded_count = 0
+    cdef Py_ssize_t available_offsets = <Py_ssize_t> payload_offsets.size()
     cdef vector[int64_t] fixed_values
     cdef vector[int64_t] fixed_valids
     cdef vector[string] encoded_values
     cdef vector[int64_t] encoded_valids
     cdef list key_values = []
     cdef list key_valids = []
+
+    if state_index < 0:
+        raise RuntimeError(f"invalid multi-key payload state index: {state_index}")
+
+    if expected_keys == 0:
+        raise RuntimeError("cannot decode multi-key payload with empty key schema")
+
+    if available_offsets < 2:
+        raise RuntimeError(
+            f"multi-key payload offsets too short: have {available_offsets} offsets"
+        )
+
+    if state_index + 1 >= available_offsets:
+        raise RuntimeError(
+            f"multi-key payload state index {state_index} out of range for "
+            f"{available_offsets} offsets"
+        )
+
+    if payload_offsets[state_index] > payload_offsets[state_index + 1]:
+        raise RuntimeError(
+            f"multi-key payload offsets are not monotonic at state {state_index}: "
+            f"{payload_offsets[state_index]} > {payload_offsets[state_index + 1]}"
+        )
+
+    for key_idx in range(expected_keys):
+        key_kind = <int64_t> multi_key_kinds[key_idx]
+        if (
+            key_kind == KEY_MULTI_FIXED_INT
+            or key_kind == KEY_MULTI_FIXED_DATE32
+            or key_kind == KEY_MULTI_FIXED_TIME32
+            or key_kind == KEY_MULTI_FIXED_TIME64
+            or key_kind == KEY_MULTI_FIXED_TIMESTAMP64
+        ):
+            expected_fixed_count += 1
+        else:
+            expected_encoded_count += 1
+
+    fixed_values.resize(expected_fixed_count)
+    fixed_valids.resize(expected_fixed_count)
+    encoded_values.resize(expected_encoded_count)
+    encoded_valids.resize(expected_encoded_count)
 
     if not decode_multi_key_record(
         payload_bytes,
@@ -215,7 +299,19 @@ cpdef tuple decode_multi_payload_keys(
     ):
         raise RuntimeError("failed to decode multi-key payload")
 
-    for key_idx in range(len(multi_key_kinds)):
+    if fixed_values.size() != fixed_valids.size():
+        raise RuntimeError(
+            f"decoded multi-key fixed payload/value mismatch: "
+            f"{fixed_values.size()} values vs {fixed_valids.size()} valids"
+        )
+
+    if encoded_values.size() != encoded_valids.size():
+        raise RuntimeError(
+            f"decoded multi-key encoded payload/value mismatch: "
+            f"{encoded_values.size()} values vs {encoded_valids.size()} valids"
+        )
+
+    for key_idx in range(expected_keys):
         key_kind = <int64_t> multi_key_kinds[key_idx]
         if (
             key_kind == KEY_MULTI_FIXED_INT
@@ -240,10 +336,181 @@ cpdef tuple decode_multi_payload_keys(
                     encoded_values[encoded_idx].data(),
                     encoded_values[encoded_idx].size(),
                 )
+                if raw_bytes is None:
+                    raise RuntimeError(
+                        f"failed to materialize encoded key bytes at state {state_index}, "
+                        f"encoded index {encoded_idx}"
+                    )
                 key_values.append(raw_bytes.decode("utf-8"))
             encoded_idx += 1
 
+    if fixed_idx != <Py_ssize_t> fixed_values.size():
+        raise RuntimeError(
+            f"decoded fixed key payload longer than key schema: "
+            f"consumed {fixed_idx} of {fixed_values.size()} values"
+        )
+
+    if encoded_idx != <Py_ssize_t> encoded_values.size():
+        raise RuntimeError(
+            f"decoded encoded key payload longer than key schema: "
+            f"consumed {encoded_idx} of {encoded_values.size()} values"
+        )
+
+    if len(key_values) != expected_keys or len(key_valids) != expected_keys:
+        raise RuntimeError(
+            f"decoded multi-key payload length mismatch: "
+            f"{len(key_values)} values, {len(key_valids)} valids, "
+            f"expected {expected_keys}"
+        )
+
     return tuple(key_values), tuple(key_valids)
+
+
+cpdef tuple smoke_test_native_single_fixed_key_codec():
+    cdef vector[uint8_t] payload_bytes
+    cdef vector[int64_t] payload_offsets
+    cdef int64_t decoded_value
+    cdef int64_t decoded_valid_flag
+
+    payload_offsets.push_back(0)
+
+    if not append_single_fixed_key_record(
+        payload_bytes,
+        payload_offsets,
+        123456789,
+        1,
+    ):
+        raise RuntimeError("native single fixed key codec smoke test append failed")
+
+    if not decode_single_fixed_key_record(
+        payload_bytes,
+        payload_offsets,
+        0,
+        &decoded_value,
+        &decoded_valid_flag,
+    ):
+        raise RuntimeError("native single fixed key codec smoke test decode failed")
+
+    return (
+        decoded_value,
+        decoded_valid_flag,
+        [payload_offsets[idx] for idx in range(payload_offsets.size())],
+        [payload_bytes[idx] for idx in range(payload_bytes.size())],
+    )
+
+
+cpdef tuple smoke_test_native_single_encoded_key_codec():
+    cdef vector[uint8_t] payload_bytes
+    cdef vector[int64_t] payload_offsets
+    cdef int64_t decoded_valid_flag
+    cdef string decoded_value
+    cdef bytes raw_bytes
+
+    payload_offsets.push_back(0)
+
+    if not append_single_encoded_key_record(
+        payload_bytes,
+        payload_offsets,
+        b"hello",
+        5,
+        1,
+    ):
+        raise RuntimeError("native single encoded key codec smoke test append failed")
+
+    if not decode_single_encoded_key_record(
+        payload_bytes,
+        payload_offsets,
+        0,
+        decoded_value,
+        &decoded_valid_flag,
+    ):
+        raise RuntimeError("native single encoded key codec smoke test decode failed")
+
+    raw_bytes = <bytes> PyBytes_FromStringAndSize(decoded_value.data(), decoded_value.size())
+
+    return (
+        raw_bytes.decode("utf-8"),
+        decoded_valid_flag,
+        [payload_offsets[idx] for idx in range(payload_offsets.size())],
+        [payload_bytes[idx] for idx in range(payload_bytes.size())],
+    )
+
+
+cpdef tuple smoke_test_native_group_key_codec():
+    cdef vector[uint8_t] payload_bytes
+    cdef vector[int64_t] payload_offsets
+    cdef vector[int64_t] fixed_values
+    cdef vector[int64_t] fixed_valids
+    cdef vector[string] encoded_values
+    cdef vector[int64_t] encoded_valids
+    cdef vector[int64_t] decoded_fixed_values
+    cdef vector[int64_t] decoded_fixed_valids
+    cdef vector[string] decoded_encoded_values
+    cdef vector[int64_t] decoded_encoded_valids
+    cdef bytes raw_bytes
+    cdef string encoded_value
+    cdef list decoded_strings = []
+    cdef Py_ssize_t idx
+
+    payload_offsets.push_back(0)
+
+    fixed_values.push_back(123456789)
+    fixed_valids.push_back(1)
+    fixed_values.push_back(0)
+    fixed_valids.push_back(0)
+
+    encoded_value.assign(b"hello", 5)
+    encoded_values.push_back(encoded_value)
+    encoded_valids.push_back(1)
+
+    encoded_value.clear()
+    encoded_values.push_back(encoded_value)
+    encoded_valids.push_back(0)
+
+    if not append_multi_key_record(
+        payload_bytes,
+        payload_offsets,
+        fixed_values,
+        fixed_valids,
+        encoded_values,
+        encoded_valids,
+    ):
+        raise RuntimeError("native group-key codec smoke test append failed")
+
+    decoded_fixed_values.resize(2)
+    decoded_fixed_valids.resize(2)
+    decoded_encoded_values.resize(2)
+    decoded_encoded_valids.resize(2)
+
+    if not decode_multi_key_record(
+        payload_bytes,
+        payload_offsets,
+        0,
+        decoded_fixed_values,
+        decoded_fixed_valids,
+        decoded_encoded_values,
+        decoded_encoded_valids,
+    ):
+        raise RuntimeError("native group-key codec smoke test decode failed")
+
+    for idx in range(decoded_encoded_values.size()):
+        if decoded_encoded_valids[idx] == 0:
+            decoded_strings.append(None)
+        else:
+            raw_bytes = <bytes> PyBytes_FromStringAndSize(
+                decoded_encoded_values[idx].data(),
+                decoded_encoded_values[idx].size(),
+            )
+            decoded_strings.append(raw_bytes.decode("utf-8"))
+
+    return (
+        [decoded_fixed_values[idx] for idx in range(decoded_fixed_values.size())],
+        [decoded_fixed_valids[idx] for idx in range(decoded_fixed_valids.size())],
+        decoded_strings,
+        [decoded_encoded_valids[idx] for idx in range(decoded_encoded_valids.size())],
+        [payload_offsets[idx] for idx in range(payload_offsets.size())],
+        [payload_bytes[idx] for idx in range(payload_bytes.size())],
+    )
 
 
 cpdef bytes serialize_key_components(list components):
