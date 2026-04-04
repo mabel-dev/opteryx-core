@@ -3,14 +3,9 @@ Convert rugo parquet metadata schemas to orso RelationSchema format.
 """
 
 import re
-from typing import Any
-from typing import Dict
-from typing import Iterable
-from typing import List
-from typing import Optional
+from typing import Any, Dict, Iterable, List, Optional
 
-from orso.schema import FlatColumn
-from orso.schema import RelationSchema
+from orso.schema import FlatColumn, RelationSchema
 from orso.types import OrsoTypes
 
 ORSO_TYPE_ALIASES = {
@@ -41,6 +36,10 @@ PARQUET_LOGICAL_TYPE_MAP = {
     "binary": OrsoTypes.BLOB,
     "byte_array": OrsoTypes.BLOB,
     "fixed_len_byte_array": OrsoTypes.BLOB,
+    "uint_8": OrsoTypes.INTEGER,
+    "uint_16": OrsoTypes.INTEGER,
+    "uint_32": OrsoTypes.INTEGER,
+    "uint_64": OrsoTypes.INTEGER,
 }
 
 PARQUET_LOGICAL_COMPLEX_PREFIXES = {

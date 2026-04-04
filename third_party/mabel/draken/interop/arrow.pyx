@@ -66,6 +66,9 @@ cdef object _typed_constant_from_arrow_value(object value_type, object value, Py
 
     if pa.types.is_int64(value_type):
         return Int64Vector.from_constant(value, length, is_null=is_null)
+    if pa.types.is_uint64(value_type):
+        # Treat uint64 constant as int64 (reinterpret bits as signed)
+        return Int64Vector.from_constant(value, length, is_null=is_null)
     if pa.types.is_int8(value_type) or pa.types.is_int16(value_type) or pa.types.is_int32(value_type):
         return IntegerVector.from_constant(value, length, is_null=is_null)
     if pa.types.is_float32(value_type) or pa.types.is_float64(value_type):
@@ -227,6 +230,11 @@ cpdef object vector_from_arrow(object array):
         return vector_from_arrow(pa.array(array.to_pylist(), type=pa_type.value_type))
     if pa_type.equals(pa.int64()):
         return int64_from_arrow(array)
+    if pa_type.equals(pa.uint64()):
+        # Treat uint64 as int64: reinterpret the 64-bit values as signed.
+        # Values > 2^63-1 become negative when cast to int64, but this works
+        # correctly for hashing and aggregation (including COUNT DISTINCT).
+        return int64_from_arrow(array.cast(pa.int64()))
     if (
         pa_type.equals(pa.int8())
         or pa_type.equals(pa.int16())
@@ -363,6 +371,9 @@ cpdef DrakenType arrow_type_to_draken(object dtype):
         return DrakenType.DRAKEN_INT32
     elif pa.types.is_int64(dtype):
         return DrakenType.DRAKEN_INT64
+    elif pa.types.is_uint64(dtype):
+        # Treat uint64 as int64 (reinterpret bits as signed)
+        return DrakenType.DRAKEN_INT64
     elif pa.types.is_float32(dtype):
         return DrakenType.DRAKEN_FLOAT32
     elif pa.types.is_float64(dtype):
@@ -385,6 +396,7 @@ cpdef DrakenType arrow_type_to_draken(object dtype):
             or pa.types.is_int16(dtype.value_type)
             or pa.types.is_int32(dtype.value_type)
             or pa.types.is_int64(dtype.value_type)
+            or pa.types.is_uint64(dtype.value_type)
             or pa.types.is_float32(dtype.value_type)
             or pa.types.is_float64(dtype.value_type)
         ):

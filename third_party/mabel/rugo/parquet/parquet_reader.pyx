@@ -1660,7 +1660,13 @@ def decode_column_from_chunk_to_python(chunk_bytes, col_stats):
         return None
 
     cdef str col_type = result.type.decode("utf-8")
+    cdef str col_logical = col_stats.get('logical_type') or ''
     cdef int32_t num_rows = <int32_t>result.num_rows
+
+    # Handle uint64: physical_type is "int64" but logical_type is "UINT_64"
+    # Treat as int64 (reinterpret the bits for aggregation)
+    if col_type == "int64" and col_logical.upper() == "UINT_64":
+        col_type = "int64"  # Reinterpret 64-bit unsigned as signed
 
     if col_type == "int32":
         if _should_emit_constant_vector(result, num_rows):
@@ -1832,7 +1838,13 @@ def decode_column_from_chunk(chunk_bytes, col_stats, row_mask=None):
         return None
 
     col_type = result.type.decode("utf-8")
+    col_logical = col_stats.get('logical_type') or ''
     num_rows = <int32_t>result.num_rows
+
+    # Handle uint64: physical_type is "int64" but logical_type is "UINT_64"
+    # Treat as int64 (reinterpret the bits for aggregation)
+    if col_type == "int64" and col_logical.upper() == "UINT_64":
+        col_type = "int64"  # Reinterpret 64-bit unsigned as signed
 
     # Convert C++ DecodedColumn to Draken Vector using the same logic as read_parquet()
     if col_type == "int32":

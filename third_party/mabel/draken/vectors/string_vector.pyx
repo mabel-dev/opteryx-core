@@ -223,7 +223,7 @@ cdef void _attach_dictionary_storage_from_buffers(
     if dict_size > 0:
         for i in range(dict_size):
             dict_values.offsets[i] = dict_offsets[i]
-        dict_values.offsets[dict_size] = dict_offsets[dict_size]
+        dict_values.offsets[dict_size] = <int32_t>arena_size
     if arena_size > 0:
         memcpy(dict_values.data, <const void*>&arena_bytes[0], <size_t>arena_size)
 
@@ -1500,7 +1500,7 @@ cdef class StringVector(Vector):
         cdef const uint8_t* dict_codes
         cdef uint8_t dict_code_width
         cdef uint8_t* dict_row_nulls
-        cdef uint64_t[256] dict_hashes
+        cdef uint64_t* dict_hashes_ptr = NULL
         cdef const uint8_t* data
         cdef uint32_t code
         cdef const uint8_t* dense_data
@@ -1541,42 +1541,48 @@ cdef class StringVector(Vector):
         dict_row_nulls = self.ptr.null_bitmap
 
         if self._encoding == DRAKEN_ENCODING_DICTIONARY:
-            # Hash each dictionary entry
-            data = <const uint8_t*>dict_values_buf.data
-            for dict_idx in range(dict_size):
-                # Get the dictionary value at dict_idx
-                start = dict_values_buf.offsets[dict_idx]
-                end = dict_values_buf.offsets[dict_idx + 1]
-                str_len = <size_t>(end - start)
-                if str_len <= 16:
-                    dict_hashes[dict_idx] = _short_string_hash(data + start, str_len)
-                else:
-                    dict_hashes[dict_idx] = XXH3_64bits(<const void*>(data + start), str_len)
+            dict_hashes_ptr = <uint64_t*>malloc(dict_size * sizeof(uint64_t))
+            if dict_hashes_ptr == NULL:
+                raise MemoryError("StringVector.hash_into: cannot allocate dict hash buffer")
+            try:
+                # Hash each dictionary entry
+                data = <const uint8_t*>dict_values_buf.data
+                for dict_idx in range(dict_size):
+                    # Get the dictionary value at dict_idx
+                    start = dict_values_buf.offsets[dict_idx]
+                    end = dict_values_buf.offsets[dict_idx + 1]
+                    str_len = <size_t>(end - start)
+                    if str_len <= 16:
+                        dict_hashes_ptr[dict_idx] = _short_string_hash(data + start, str_len)
+                    else:
+                        dict_hashes_ptr[dict_idx] = XXH3_64bits(<const void*>(data + start), str_len)
 
-            # Scatter hashes by code index
-            dst = &out_buf[offset]
-            i = 0
-            while i < n:
-                block = n - i
-                if block > STRING_HASH_CHUNK:
-                    block = STRING_HASH_CHUNK
+                # Scatter hashes by code index
+                dst = &out_buf[offset]
+                i = 0
+                while i < n:
+                    block = n - i
+                    if block > STRING_HASH_CHUNK:
+                        block = STRING_HASH_CHUNK
 
-                if dict_row_nulls != NULL:
-                    for j in range(block):
-                        idx = i + j
-                        byte = dict_row_nulls[idx >> 3]
-                        if ((byte >> (idx & 7)) & 1) == 0:
-                            scratch[j] = NULL_HASH
-                        else:
-                            code = _read_packed_code(dict_codes, dict_code_width, idx)
-                            scratch[j] = dict_hashes[code]
-                else:
-                    for j in range(block):
-                        code = _read_packed_code(dict_codes, dict_code_width, i + j)
-                        scratch[j] = dict_hashes[code]
+                    if dict_row_nulls != NULL:
+                        for j in range(block):
+                            idx = i + j
+                            byte = dict_row_nulls[idx >> 3]
+                            if ((byte >> (idx & 7)) & 1) == 0:
+                                scratch[j] = NULL_HASH
+                            else:
+                                code = _read_packed_code(dict_codes, dict_code_width, idx)
+                                scratch[j] = dict_hashes_ptr[code]
+                    else:
+                        for j in range(block):
+                            code = _read_packed_code(dict_codes, dict_code_width, i + j)
+                            scratch[j] = dict_hashes_ptr[code]
 
-                simd_mix_hash(dst + i, scratch_ptr, <size_t>block)
-                i += block
+                    simd_mix_hash(dst + i, scratch_ptr, <size_t>block)
+                    i += block
+            finally:
+                free(dict_hashes_ptr)
             return
 
         # Dense (non-dictionary, non-constant) path
@@ -1631,7 +1637,7 @@ cdef class StringVector(Vector):
         cdef uint64_t* scratch_ptr = <uint64_t*> scratch
         cdef uint32_t code
         cdef Py_ssize_t dict_size, dict_idx
-        cdef uint64_t[256] dict_hashes
+        cdef uint64_t* dict_hashes_ptr = NULL
         cdef DictAccessor* da
         cdef const uint8_t* dict_codes
         cdef uint8_t dict_code_width
@@ -1677,6 +1683,10 @@ cdef class StringVector(Vector):
             dict_code_width = self._dict_code_width
             dict_row_nulls = self.ptr.null_bitmap
 
+            dict_hashes_ptr = <uint64_t*>malloc(dict_size * sizeof(uint64_t))
+            if dict_hashes_ptr == NULL:
+                return 1  # OOM, fall back to Python hash
+
             # Hash each dictionary entry
             data = <const uint8_t*>dict_values_buf.data
             for dict_idx in range(dict_size):
@@ -1685,9 +1695,9 @@ cdef class StringVector(Vector):
                 end = dict_values_buf.offsets[dict_idx + 1]
                 str_len = <size_t>(end - start)
                 if str_len <= 16:
-                    dict_hashes[dict_idx] = _short_string_hash(data + start, str_len)
+                    dict_hashes_ptr[dict_idx] = _short_string_hash(data + start, str_len)
                 else:
-                    dict_hashes[dict_idx] = XXH3_64bits(<const void*>(data + start), str_len)
+                    dict_hashes_ptr[dict_idx] = XXH3_64bits(<const void*>(data + start), str_len)
 
             # Scatter hashes by code index
             i = 0
@@ -1704,14 +1714,15 @@ cdef class StringVector(Vector):
                             scratch[j] = NULL_HASH
                         else:
                             code = _read_packed_code(dict_codes, dict_code_width, idx)
-                            scratch[j] = dict_hashes[code]
+                            scratch[j] = dict_hashes_ptr[code]
                 else:
                     for j in range(block):
                         code = _read_packed_code(dict_codes, dict_code_width, i + j)
-                        scratch[j] = dict_hashes[code]
+                        scratch[j] = dict_hashes_ptr[code]
 
                 simd_mix_hash(out + i, scratch_ptr, <size_t>block)
                 i += block
+            free(dict_hashes_ptr)
             return 0
 
         # Dense (non-dictionary, non-constant) path
