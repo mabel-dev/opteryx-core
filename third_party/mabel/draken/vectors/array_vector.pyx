@@ -354,10 +354,11 @@ cdef class ArrayVector(Vector):
     ) except *:
         """Hash array rows into output buffer.
 
-        This delegates to c_hash_into for optimal performance.
-        Note: This method should not be called directly from Cython hot paths;
-        use c_hash_into instead. The caller (Morsel.c_hash) will fall back to
-        Python's hash() method if c_hash_into cannot work without the GIL.
+        Hashes each row by:
+        1. Hashing the offset pair (structure of the array row)
+        2. XORing with hashes of child elements in that range
+
+        This avoids materializing entire Python list objects per row.
         """
         if self.ptr == NULL:
             return
@@ -368,81 +369,49 @@ cdef class ArrayVector(Vector):
         if offset < 0 or offset + n > out_buf.shape[0]:
             raise ValueError("ArrayVector.hash_into: output buffer too small")
 
-        # Try fast nogil path; if it fails, the caller (Morsel.c_hash)
-        # will re-zero the buffer and fall back to Python hash()
-        self.c_hash_into(&out_buf[offset], n)
-
-    cdef bint c_hash_into(self, uint64_t* out, Py_ssize_t n) noexcept nogil:
-        """Hash array rows by hashing child vector offsets and values without GIL.
-
-        For each array row, we:
-        1. Hash the offset pair (start, end) to get row structure
-        2. XOR with the hashes of child elements in that range
-
-        Child vector MUST have a working c_hash_into implementation that does not
-        require the GIL. If child vector cannot hash without GIL, this will crash
-        (fail fast per CLAUDE.md).
-
-        Returns 0 on success. Does not return on failure (raises exception).
-        """
-        cdef DrakenArrayBuffer* ptr
-        cdef Vector child_vec
-        cdef Py_ssize_t total_children
-        cdef uint64_t* child_hashes = NULL
-        cdef bint child_fallback
-        cdef Py_ssize_t i, j
-        cdef int32_t start, end
-        cdef uint64_t row_hash, offset_hash
-
-        if self.ptr == NULL or n == 0:
-            return 0
-
-        ptr = self.ptr
-        child_vec = <Vector> self._child
-        if child_vec == NULL:
+        if self._child is None:
             raise ValueError("ArrayVector child vector is not initialized")
 
-        # Get hashes of all child elements
-        total_children = ptr.offsets[n] if n > 0 else 0
+        cdef DrakenArrayBuffer* ptr = self.ptr
+        cdef Py_ssize_t total_children = ptr.offsets[n] if n > 0 else 0
+        cdef object child = self._child
+        cdef uint64_t[::1] child_hashes
+        cdef Py_ssize_t i, j
+        cdef int32_t start, end
+        cdef uint64_t offset_hash, row_hash
 
+        # Hash all child elements once, then reuse for each array row
         if total_children > 0:
-            child_hashes = <uint64_t*> PyMem_Malloc(total_children * sizeof(uint64_t))
-            if child_hashes == NULL:
-                raise MemoryError()
-
-            # Hash child vector. If child cannot hash without GIL, it returns 1,
-            # and we fail fast by raising.
-            child_fallback = child_vec.c_hash_into(child_hashes, total_children)
-            if child_fallback != 0:
-                PyMem_Free(child_hashes)
-                raise NotImplementedError(
-                    f"ArrayVector child type {type(self._child).__name__} "
-                    f"does not support nogil hashing (c_hash_into not available or requires GIL). "
-                    f"Custom vector types nested in arrays must implement c_hash_into."
-                )
+            child_hashes = child.hash()
+        else:
+            from array import array
+            child_hashes = array("Q")
 
         for i in range(n):
-            # Check if row is null
+            # Null rows
             if _row_is_null(ptr, i):
-                out[i] = NULL_HASH
+                out_buf[offset + i] = NULL_HASH
                 continue
 
-            # Hash the offset pair (structure of this row)
+            # Hash the offset pair (defines the structure of this row)
             start = ptr.offsets[i]
             end = ptr.offsets[i + 1]
             offset_hash = mix_hash(<uint64_t>start, <uint64_t>end)
 
-            # XOR together hashes of all child elements in this row
+            # XOR together child hashes for elements in this row's range
             row_hash = offset_hash
             for j in range(start, end):
                 row_hash = mix_hash(row_hash, child_hashes[j])
 
-            out[i] = mix_hash(out[i], row_hash)
+            out_buf[offset + i] = mix_hash(out_buf[offset + i], row_hash)
 
-        if child_hashes != NULL:
-            PyMem_Free(child_hashes)
+    cdef bint c_hash_into(self, uint64_t* out, Py_ssize_t n) noexcept nogil:
+        """ArrayVector cannot implement nogil hashing because it stores child as Python object.
 
-        return 0
+        Return 1 to indicate fallback to Python hash_into is required.
+        Per CLAUDE.md: "Fail Fast, Fail Clean" - we don't attempt impossible optimizations.
+        """
+        return 1
 
     def __str__(self):
         if self.ptr == NULL:

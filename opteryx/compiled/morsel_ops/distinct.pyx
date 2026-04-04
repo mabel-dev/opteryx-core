@@ -49,6 +49,7 @@ def distinct(Morsel morsel, CarcharSetWrapper seen_hashes, list columns=None):
     cdef int32_t n_cols = 0
     cdef size_t count
     cdef bint hash_requires_gil
+    cdef uint64_t[::1] py_hashes
 
     if n == 0:
         return
@@ -80,9 +81,14 @@ def distinct(Morsel morsel, CarcharSetWrapper seen_hashes, list columns=None):
             hash_requires_gil = morsel.c_hash(hashes_ptr, col_indices, n_cols, n)
 
         if hash_requires_gil:
-            # c_hash() should never fail for supported types.
-            # If a column type cannot hash without GIL, that's a bug in the vector implementation.
-            raise RuntimeError("DISTINCT operation failed: column type cannot hash without GIL. All vector types must support nogil hashing for performance-critical operations.")
+            # At least one column (e.g. ArrayVector) couldn't hash without GIL.
+            # Re-zero and redo via the Python hash() path, then continue nogil.
+            memset(hashes_ptr, 0, <size_t>n * sizeof(uint64_t))
+            if columns is None:
+                py_hashes = morsel.hash()
+            else:
+                py_hashes = morsel.hash(columns=columns)
+            memcpy(hashes_ptr, &py_hashes[0], <size_t>n * sizeof(uint64_t))
 
         with nogil:
             count = cs.mark_new_indices_32(hashes_ptr, idx_buf, <size_t>n)
