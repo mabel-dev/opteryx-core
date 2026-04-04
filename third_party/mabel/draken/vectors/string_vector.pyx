@@ -1492,19 +1492,26 @@ cdef class StringVector(Vector):
         cdef size_t str_len
         cdef int32_t start, end
         cdef Py_ssize_t idx
+        cdef uint64_t[STRING_HASH_CHUNK] scratch
+        cdef uint64_t* scratch_ptr = <uint64_t*> scratch
+        cdef uint64_t* dst
+        cdef DrakenVarBuffer* dict_values_buf
+        cdef Py_ssize_t dict_size
+        cdef const uint8_t* dict_codes
+        cdef uint8_t dict_code_width
+        cdef uint8_t* dict_row_nulls
+        cdef uint64_t[256] dict_hashes
+        cdef const uint8_t* data
+        cdef uint32_t code
+        cdef const uint8_t* dense_data
+        cdef int32_t* offsets
+        cdef uint8_t* nb_ptr
 
         if n == 0:
             return
 
         if offset < 0 or offset + n > out_buf.shape[0]:
             raise ValueError("StringVector.hash_into: output buffer too small")
-
-        cdef const uint8_t* data = <const uint8_t*> ptr.data
-        cdef int32_t* offsets = ptr.offsets
-        cdef uint8_t* nb_ptr = ptr.null_bitmap
-        cdef uint64_t* dst = &out_buf[offset]
-        cdef uint64_t[STRING_HASH_CHUNK] scratch
-        cdef uint64_t* scratch_ptr = <uint64_t*> scratch
 
         if self._has_const:
             if self._const_is_null:
@@ -1516,6 +1523,7 @@ cdef class StringVector(Vector):
                     value = XXH3_64bits(<const void*>self._const_value.data, <size_t>self._const_value.length)
             for j in range(STRING_HASH_CHUNK):
                 scratch[j] = value
+            dst = &out_buf[offset]
             i = 0
             while i < n:
                 block = n - i
@@ -1524,6 +1532,58 @@ cdef class StringVector(Vector):
                 simd_mix_hash(dst + i, scratch_ptr, <size_t>block)
                 i += block
             return
+
+        # Dictionary-encoded path
+        dict_values_buf = self._dict_values
+        dict_size = <Py_ssize_t>dict_values_buf.length
+        dict_codes = self._dict_codes
+        dict_code_width = self._dict_code_width
+        dict_row_nulls = self.ptr.null_bitmap
+
+        if self._encoding == DRAKEN_ENCODING_DICTIONARY:
+            # Hash each dictionary entry
+            data = <const uint8_t*>dict_values_buf.data
+            for dict_idx in range(dict_size):
+                # Get the dictionary value at dict_idx
+                start = dict_values_buf.offsets[dict_idx]
+                end = dict_values_buf.offsets[dict_idx + 1]
+                str_len = <size_t>(end - start)
+                if str_len <= 16:
+                    dict_hashes[dict_idx] = _short_string_hash(data + start, str_len)
+                else:
+                    dict_hashes[dict_idx] = XXH3_64bits(<const void*>(data + start), str_len)
+
+            # Scatter hashes by code index
+            dst = &out_buf[offset]
+            i = 0
+            while i < n:
+                block = n - i
+                if block > STRING_HASH_CHUNK:
+                    block = STRING_HASH_CHUNK
+
+                if dict_row_nulls != NULL:
+                    for j in range(block):
+                        idx = i + j
+                        byte = dict_row_nulls[idx >> 3]
+                        if ((byte >> (idx & 7)) & 1) == 0:
+                            scratch[j] = NULL_HASH
+                        else:
+                            code = _read_packed_code(dict_codes, dict_code_width, idx)
+                            scratch[j] = dict_hashes[code]
+                else:
+                    for j in range(block):
+                        code = _read_packed_code(dict_codes, dict_code_width, i + j)
+                        scratch[j] = dict_hashes[code]
+
+                simd_mix_hash(dst + i, scratch_ptr, <size_t>block)
+                i += block
+            return
+
+        # Dense (non-dictionary, non-constant) path
+        dense_data = <const uint8_t*> ptr.data
+        offsets = ptr.offsets
+        nb_ptr = ptr.null_bitmap
+        dst = &out_buf[offset]
 
         i = 0
         with nogil:
@@ -1543,18 +1603,18 @@ cdef class StringVector(Vector):
                         end = offsets[idx + 1]
                         str_len = <size_t>(end - start)
                         if str_len <= 16:
-                            scratch[j] = _short_string_hash(data + start, str_len)
+                            scratch[j] = _short_string_hash(dense_data + start, str_len)
                         else:
-                            scratch[j] = XXH3_64bits(data + start, str_len)
+                            scratch[j] = XXH3_64bits(dense_data + start, str_len)
                 else:
                     for j in range(block):
                         start = offsets[i + j]
                         end = offsets[i + j + 1]
                         str_len = <size_t>(end - start)
                         if str_len <= 16:
-                            scratch[j] = _short_string_hash(data + start, str_len)
+                            scratch[j] = _short_string_hash(dense_data + start, str_len)
                         else:
-                            scratch[j] = XXH3_64bits(data + start, str_len)
+                            scratch[j] = XXH3_64bits(dense_data + start, str_len)
 
                 simd_mix_hash(dst + i, scratch_ptr, <size_t> block)
                 i += block
@@ -1603,13 +1663,19 @@ cdef class StringVector(Vector):
                 i += block
             return 0
 
-        # Dictionary-encoded path: access member variables directly (no GIL needed)
-        dict_values_buf = self._dict_values
-        dict_size = <Py_ssize_t>dict_values_buf.length
-        dict_codes = self._dict_codes
-        dict_code_width = self._dict_code_width
-        dict_row_nulls = self.ptr.null_bitmap
+        # Check encoding first before accessing any structures
         if self._encoding == DRAKEN_ENCODING_DICTIONARY:
+            # Dictionary-encoded path: access member variables directly (no GIL needed)
+            dict_values_buf = self._dict_values
+            # Validate dictionary structures before dereferencing
+            if dict_values_buf == NULL or dict_values_buf.data == NULL:
+                return 1  # Fall back to Python hash
+            dict_size = <Py_ssize_t>dict_values_buf.length
+            dict_codes = self._dict_codes
+            if dict_codes == NULL:
+                return 1  # Fall back to Python hash
+            dict_code_width = self._dict_code_width
+            dict_row_nulls = self.ptr.null_bitmap
 
             # Hash each dictionary entry
             data = <const uint8_t*>dict_values_buf.data
@@ -1647,6 +1713,11 @@ cdef class StringVector(Vector):
                 simd_mix_hash(out + i, scratch_ptr, <size_t>block)
                 i += block
             return 0
+
+        # Dense (non-dictionary, non-constant) path
+        # Validate that we have valid data and offset structures
+        if ptr.data == NULL or ptr.offsets == NULL:
+            return 1  # Fall back to Python hash
 
         data = <const uint8_t*> ptr.data
         offsets = ptr.offsets

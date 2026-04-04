@@ -301,6 +301,7 @@ def get_jsonl_schema(data, sample_size=25):
 
 
 def _has_string_leaf(x):
+    """Check if any leaf in a nested list is a string (recursive check)."""
     if isinstance(x, list):
         for y in x:
             if _has_string_leaf(y):
@@ -310,6 +311,7 @@ def _has_string_leaf(x):
 
 
 def _convert_str_leaves_to_bytes(obj):
+    """Convert all string leaves in a nested list to bytes (in-place)."""
     if isinstance(obj, list):
         for idx in range(len(obj)):
             v = obj[idx]
@@ -317,6 +319,25 @@ def _convert_str_leaves_to_bytes(obj):
                 obj[idx] = v.encode('utf-8')
             elif isinstance(v, list):
                 _convert_str_leaves_to_bytes(v)
+
+
+cdef object _infer_array_elem_type(object first_value):
+    """Infer element type from first parsed array (None if mixed/strings)."""
+    if not isinstance(first_value, list):
+        return None
+    if len(first_value) == 0:
+        return 'unknown'
+    # Check first element to infer type
+    first_elem = first_value[0]
+    if isinstance(first_elem, str):
+        return 'string'
+    if isinstance(first_elem, (int, float)):
+        return 'numeric'
+    if isinstance(first_elem, bool):
+        return 'bool'
+    if isinstance(first_elem, list):
+        return 'nested'
+    return None
 
 
 cdef Int64Vector _build_int64_vector(JsonlColumn* col, size_t n):
@@ -397,44 +418,76 @@ cdef StringVector _build_string_vector(JsonlColumn* col, size_t n):
 cdef ArrayVector _build_array_vector(
         JsonlColumn* col, size_t n, object col_type,
         bint parse_objects):
+    """Build ArrayVector from JSONL column.
+
+    Infers element type from first non-null row to avoid isinstance() in hot loop.
+    """
     cdef size_t j
     cdef PyObject* o_ptr
-    o = None
+    cdef object o
+
     elem_type = None
     if col_type.startswith('array<') and col_type.endswith('>'):
         elem_type = col_type[6:-1]
+
     py_list = []
+    inferred_type = None
+    type_detection_done = False
+
     for j in range(n):
         if col.null_mask[j]:
             py_list.append(None)
             continue
+
         raw = col.string_values[j]
         if raw.size() == 0:
             py_list.append([])
             continue
+
+        # Try fast C JSON parser first
         o_ptr = ParseJsonSliceToPyObject(
             <const uint8_t*>raw.data(), raw.size(), parse_objects)
+
         if o_ptr != NULL:
             o = <object>o_ptr
-            if isinstance(o, list):
-                if elem_type == 'bytes':
+            # Infer element type from first successful parse (outside hot path)
+            if not type_detection_done:
+                inferred_type = _infer_array_elem_type(o)
+                type_detection_done = True
+
+            # Apply conversions based on detected type (no isinstance in loop)
+            if elem_type == 'bytes' or inferred_type == 'string':
+                _convert_str_leaves_to_bytes(o)
+            elif elem_type is None and inferred_type is None:
+                # Mixed/unknown type detected; scan this one element
+                if _has_string_leaf(o):
                     _convert_str_leaves_to_bytes(o)
-                elif elem_type is None and _has_string_leaf(o):
-                    _convert_str_leaves_to_bytes(o)
+
             py_list.append(o)
         else:
+            # C parser failed; clear error and try Python fallback
             if PyErr_Occurred():
                 PyErr_Clear()
+
+            # Parse fallback (no exception handling in hot path; just succeed or append raw)
+            parsed = None
             try:
                 parsed = _parse_array_from_bytes(raw)
-                if isinstance(parsed, list):
-                    if elem_type == 'bytes':
-                        _convert_str_leaves_to_bytes(parsed)
-                    elif elem_type is None and _has_string_leaf(parsed):
+            except Exception:
+                parsed = None
+
+            if parsed is not None:
+                # Apply type-based conversions (no isinstance in loop)
+                if elem_type == 'bytes' or inferred_type == 'string':
+                    _convert_str_leaves_to_bytes(parsed)
+                elif elem_type is None and inferred_type is None:
+                    if _has_string_leaf(parsed):
                         _convert_str_leaves_to_bytes(parsed)
                 py_list.append(parsed)
-            except Exception:
+            else:
+                # Fallback: append raw bytes as string
                 py_list.append(raw.decode('utf-8'))
+
     return array_from_sequence(py_list)
 
 

@@ -1885,9 +1885,13 @@ cdef class Morsel:
 
         out must be pre-zeroed (calloc).  col_indices must be pre-validated.
         Returns 0 if all columns hashed successfully.
-        Returns 1 if any column could not hash without the GIL (e.g. ArrayVector);
+        Returns 1 if any column could not hash without the GIL (unknown vector types);
         in that case the buffer contains only partial results and the caller
         should re-zero and fall back to the Python hash() path.
+
+        Note: Standard vector types (Int64Vector, StringVector, ArrayVector, etc.)
+        all implement c_hash_into and do not require GIL. Custom vector types that
+        do not implement c_hash_into will cause this method to return 1.
         """
         cdef int32_t i
         cdef bint had_fallback = 0
