@@ -395,13 +395,42 @@ class DrakenAggregateAndGroupNode(BasePlanNode):
         st = time.monotonic_ns()
         emitted = 0
         for result in self._groupby_engine.finalize_morsels(chunk_size=CHUNK_SIZE):
+            if result is None:
+                raise RuntimeError("group-by finalize emitted None morsel")
+            if not hasattr(result, "num_rows"):
+                raise RuntimeError(
+                    f"group-by finalize emitted non-morsel result of type {type(result)}"
+                )
+
             # Apply HAVING filter if provided by optimizer
             if self._having_condition is not None:
                 result = self._apply_having_filter(result)
+                if result is None:
+                    raise RuntimeError("group-by HAVING filter returned None morsel")
+                if not hasattr(result, "num_rows"):
+                    raise RuntimeError(
+                        f"group-by HAVING filter returned non-morsel result of type {type(result)}"
+                    )
                 if result.num_rows == 0:
                     continue
+
             emitted += 1
-            yield self._postprocess_finalized_morsel(result)
+
+            if emitted == 1:
+                if result.column_names is None:
+                    raise RuntimeError("group-by finalize emitted morsel with no column names")
+                if len(result.column_names) == 0:
+                    raise RuntimeError("group-by finalize emitted morsel with zero columns")
+
+            postprocessed = self._postprocess_finalized_morsel(result)
+            if postprocessed is None:
+                raise RuntimeError("group-by postprocess returned None morsel")
+            if not hasattr(postprocessed, "num_rows"):
+                raise RuntimeError(
+                    f"group-by postprocess returned non-morsel result of type {type(postprocessed)}"
+                )
+
+            yield postprocessed
         finalize_total_ns = time.monotonic_ns() - st
 
         self._record_finalize_metrics(

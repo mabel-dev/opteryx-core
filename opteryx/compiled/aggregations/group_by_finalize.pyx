@@ -134,6 +134,9 @@ cdef object build_single_fixed_key_vector(
     cdef int64_t valid_flag
     cdef int64_t key_value
 
+    if stop < start:
+        raise RuntimeError(f"invalid single fixed finalize range: start={start}, stop={stop}")
+
     if <Py_ssize_t> key_payload_offsets.size() >= stop + 1:
         for row_idx in range(start, stop):
             if not decode_single_fixed_key_record(
@@ -148,6 +151,10 @@ cdef object build_single_fixed_key_vector(
             raise RuntimeError("single-key fixed value store shorter than finalize range")
         if <Py_ssize_t> group_key_valid.size() < stop:
             raise RuntimeError("single-key fixed validity store shorter than finalize range")
+        if single_key_kind != KEY_MULTI_FIXED_INT:
+            raise RuntimeError(
+                f"single-key fixed finalize missing payload offsets for non-int64 key kind {single_key_kind}"
+            )
         for row_idx in range(start, stop):
             if group_key_valid[row_idx] == 0:
                 needs_key_nulls = True
@@ -172,6 +179,14 @@ cdef object build_single_fixed_key_vector(
             ):
                 raise RuntimeError("failed to decode fixed key payload")
         else:
+            if <Py_ssize_t> group_key_values.size() < start + row_idx + 1:
+                raise RuntimeError(
+                    f"single-key fixed value store shorter than finalize row {start + row_idx}"
+                )
+            if <Py_ssize_t> group_key_valid.size() < start + row_idx + 1:
+                raise RuntimeError(
+                    f"single-key fixed validity store shorter than finalize row {start + row_idx}"
+                )
             valid_flag = 1 if group_key_valid[start + row_idx] != 0 else 0
             key_value = group_key_values[start + row_idx]
         key_data_i64[row_idx] = key_value
@@ -199,13 +214,14 @@ cdef list build_payload_multi_key_vectors(
     cdef int64_t key_kind
     cdef Py_ssize_t fixed_idx
     cdef Py_ssize_t encoded_idx
+    cdef Py_ssize_t expected_fixed_count = 0
+    cdef Py_ssize_t expected_encoded_count = 0
     cdef list vectors = [None] * key_count
     cdef list builders = [None] * key_count
     cdef list total_bytes = [0] * key_count
     cdef list needs_nulls = [False] * key_count
-    cdef list fixed_ptrs = [0] * key_count
-    cdef list fixed_null_ptrs = [0] * key_count
     cdef object key_vec
+    cdef object fixed_vector
     cdef Int64Vector key_vec_i64
     cdef Date32Vector key_vec_d32
     cdef TimeVector key_vec_t32
@@ -213,13 +229,40 @@ cdef list build_payload_multi_key_vectors(
     cdef TimestampVector key_vec_ts
     cdef StringVectorBuilder builder
     cdef uint8_t* key_nulls = NULL
+    cdef int64_t* key_data_i64 = NULL
+    cdef int32_t* key_data_i32 = NULL
+    cdef uint8_t* key_null_bitmap = NULL
     cdef vector[int64_t] fixed_values
     cdef vector[int64_t] fixed_valids
     cdef vector[string] encoded_values
     cdef vector[int64_t] encoded_valids
 
+    if stop < start:
+        raise RuntimeError(f"invalid multi-key finalize range: start={start}, stop={stop}")
+
+    if key_count == 0:
+        raise RuntimeError("multi-key finalize requested with empty key schema")
+
+    if key_count != len(vectors) or key_count != len(builders):
+        raise RuntimeError(
+            f"multi-key finalize internal key vector builder mismatch: "
+            f"{key_count} keys, {len(vectors)} vectors, {len(builders)} builders"
+        )
+
     if <Py_ssize_t> key_payload_offsets.size() < stop + 1:
         raise RuntimeError("encoded key payload offsets shorter than finalize range")
+
+    for key_idx in range(key_count):
+        key_kind = <int64_t> multi_group_key_kinds[key_idx]
+        if _is_multi_fixed_kind(key_kind):
+            expected_fixed_count += 1
+        else:
+            expected_encoded_count += 1
+
+    fixed_values.resize(expected_fixed_count)
+    fixed_valids.resize(expected_fixed_count)
+    encoded_values.resize(expected_encoded_count)
+    encoded_valids.resize(expected_encoded_count)
 
     for row_idx in range(start, stop):
         if not decode_multi_key_record(
@@ -232,6 +275,26 @@ cdef list build_payload_multi_key_vectors(
             encoded_valids,
         ):
             raise RuntimeError("failed to decode multi-key payload")
+        if <Py_ssize_t> fixed_values.size() != expected_fixed_count:
+            raise RuntimeError(
+                f"decoded fixed key payload count mismatch at row {row_idx}: "
+                f"{fixed_values.size()} values for {expected_fixed_count} fixed keys"
+            )
+        if <Py_ssize_t> fixed_valids.size() != expected_fixed_count:
+            raise RuntimeError(
+                f"decoded fixed key validity count mismatch at row {row_idx}: "
+                f"{fixed_valids.size()} valids for {expected_fixed_count} fixed keys"
+            )
+        if <Py_ssize_t> encoded_values.size() != expected_encoded_count:
+            raise RuntimeError(
+                f"decoded encoded key payload count mismatch at row {row_idx}: "
+                f"{encoded_values.size()} values for {expected_encoded_count} encoded keys"
+            )
+        if <Py_ssize_t> encoded_valids.size() != expected_encoded_count:
+            raise RuntimeError(
+                f"decoded encoded key validity count mismatch at row {row_idx}: "
+                f"{encoded_valids.size()} valids for {expected_encoded_count} encoded keys"
+            )
         fixed_idx = 0
         encoded_idx = 0
         for key_idx in range(key_count):
@@ -250,6 +313,16 @@ cdef list build_payload_multi_key_vectors(
                 else:
                     total_bytes[key_idx] = total_bytes[key_idx] + encoded_values[encoded_idx].size()
                 encoded_idx += 1
+        if fixed_idx != expected_fixed_count:
+            raise RuntimeError(
+                f"decoded fixed key payload schema walk mismatch at row {row_idx}: "
+                f"consumed {fixed_idx} of {expected_fixed_count} fixed keys"
+            )
+        if encoded_idx != expected_encoded_count:
+            raise RuntimeError(
+                f"decoded encoded key payload schema walk mismatch at row {row_idx}: "
+                f"consumed {encoded_idx} of {expected_encoded_count} encoded keys"
+            )
 
     for key_idx in range(key_count):
         key_kind = <int64_t> multi_group_key_kinds[key_idx]
@@ -257,43 +330,33 @@ cdef list build_payload_multi_key_vectors(
             if key_kind == KEY_MULTI_FIXED_DATE32:
                 key_vec_d32 = Date32Vector(length)
                 key_vec = key_vec_d32
-                fixed_ptrs[key_idx] = <size_t> key_vec_d32.ptr.data
                 if needs_nulls[key_idx]:
                     key_nulls = _alloc_valid_bitmap(length)
                     key_vec_d32.ptr.null_bitmap = key_nulls
-                    fixed_null_ptrs[key_idx] = <size_t> key_nulls
             elif key_kind == KEY_MULTI_FIXED_TIME32:
                 key_vec_t32 = TimeVector(length, is_time64=False)
                 key_vec = key_vec_t32
-                fixed_ptrs[key_idx] = <size_t> key_vec_t32.ptr.data
                 if needs_nulls[key_idx]:
                     key_nulls = _alloc_valid_bitmap(length)
                     key_vec_t32.ptr.null_bitmap = key_nulls
-                    fixed_null_ptrs[key_idx] = <size_t> key_nulls
             elif key_kind == KEY_MULTI_FIXED_TIME64:
                 key_vec_t64 = TimeVector(length, is_time64=True)
                 key_vec = key_vec_t64
-                fixed_ptrs[key_idx] = <size_t> key_vec_t64.ptr.data
                 if needs_nulls[key_idx]:
                     key_nulls = _alloc_valid_bitmap(length)
                     key_vec_t64.ptr.null_bitmap = key_nulls
-                    fixed_null_ptrs[key_idx] = <size_t> key_nulls
             elif key_kind == KEY_MULTI_FIXED_TIMESTAMP64:
                 key_vec_ts = TimestampVector(length)
                 key_vec = key_vec_ts
-                fixed_ptrs[key_idx] = <size_t> key_vec_ts.ptr.data
                 if needs_nulls[key_idx]:
                     key_nulls = _alloc_valid_bitmap(length)
                     key_vec_ts.ptr.null_bitmap = key_nulls
-                    fixed_null_ptrs[key_idx] = <size_t> key_nulls
             else:
                 key_vec_i64 = Int64Vector(length)
                 key_vec = key_vec_i64
-                fixed_ptrs[key_idx] = <size_t> key_vec_i64.ptr.data
                 if needs_nulls[key_idx]:
                     key_nulls = _alloc_valid_bitmap(length)
                     key_vec_i64.ptr.null_bitmap = key_nulls
-                    fixed_null_ptrs[key_idx] = <size_t> key_nulls
             vectors[key_idx] = key_vec
         else:
             builders[key_idx] = StringVectorBuilder.with_counts(length, total_bytes[key_idx])
@@ -309,6 +372,26 @@ cdef list build_payload_multi_key_vectors(
             encoded_valids,
         ):
             raise RuntimeError("failed to decode multi-key payload")
+        if <Py_ssize_t> fixed_values.size() != expected_fixed_count:
+            raise RuntimeError(
+                f"decoded fixed key payload count mismatch at output row {row_idx}: "
+                f"{fixed_values.size()} values for {expected_fixed_count} fixed keys"
+            )
+        if <Py_ssize_t> fixed_valids.size() != expected_fixed_count:
+            raise RuntimeError(
+                f"decoded fixed key validity count mismatch at output row {row_idx}: "
+                f"{fixed_valids.size()} valids for {expected_fixed_count} fixed keys"
+            )
+        if <Py_ssize_t> encoded_values.size() != expected_encoded_count:
+            raise RuntimeError(
+                f"decoded encoded key payload count mismatch at output row {row_idx}: "
+                f"{encoded_values.size()} values for {expected_encoded_count} encoded keys"
+            )
+        if <Py_ssize_t> encoded_valids.size() != expected_encoded_count:
+            raise RuntimeError(
+                f"decoded encoded key validity count mismatch at output row {row_idx}: "
+                f"{encoded_valids.size()} valids for {expected_encoded_count} encoded keys"
+            )
         fixed_idx = 0
         encoded_idx = 0
         for key_idx in range(key_count):
@@ -316,17 +399,42 @@ cdef list build_payload_multi_key_vectors(
             if _is_multi_fixed_kind(key_kind):
                 if fixed_idx >= <Py_ssize_t> fixed_values.size():
                     raise RuntimeError("decoded fixed key payload shorter than key schema")
-                if key_kind == KEY_MULTI_FIXED_DATE32 or key_kind == KEY_MULTI_FIXED_TIME32:
-                    (<int32_t*> <size_t> fixed_ptrs[key_idx])[row_idx] = <int32_t> fixed_values[fixed_idx]
+                fixed_vector = vectors[key_idx]
+                if fixed_vector is None:
+                    raise RuntimeError(
+                        f"fixed key vector {key_idx} is None during finalize reconstruction"
+                    )
+                if key_kind == KEY_MULTI_FIXED_DATE32:
+                    key_data_i32 = <int32_t*> (<Date32Vector> fixed_vector).ptr.data
+                    key_null_bitmap = <uint8_t*> (<Date32Vector> fixed_vector).ptr.null_bitmap
+                    key_data_i32[row_idx] = <int32_t> fixed_values[fixed_idx]
+                elif key_kind == KEY_MULTI_FIXED_TIME32:
+                    key_data_i32 = <int32_t*> (<TimeVector> fixed_vector).ptr.data
+                    key_null_bitmap = <uint8_t*> (<TimeVector> fixed_vector).ptr.null_bitmap
+                    key_data_i32[row_idx] = <int32_t> fixed_values[fixed_idx]
+                elif key_kind == KEY_MULTI_FIXED_TIME64:
+                    key_data_i64 = <int64_t*> (<TimeVector> fixed_vector).ptr.data
+                    key_null_bitmap = <uint8_t*> (<TimeVector> fixed_vector).ptr.null_bitmap
+                    key_data_i64[row_idx] = fixed_values[fixed_idx]
+                elif key_kind == KEY_MULTI_FIXED_TIMESTAMP64:
+                    key_data_i64 = <int64_t*> (<TimestampVector> fixed_vector).ptr.data
+                    key_null_bitmap = <uint8_t*> (<TimestampVector> fixed_vector).ptr.null_bitmap
+                    key_data_i64[row_idx] = fixed_values[fixed_idx]
                 else:
-                    (<int64_t*> <size_t> fixed_ptrs[key_idx])[row_idx] = fixed_values[fixed_idx]
-                if fixed_null_ptrs[key_idx] != 0 and fixed_valids[fixed_idx] != 0:
-                    _bitmap_set_valid(<uint8_t*> <size_t> fixed_null_ptrs[key_idx], row_idx)
+                    key_data_i64 = <int64_t*> (<Int64Vector> fixed_vector).ptr.data
+                    key_null_bitmap = <uint8_t*> (<Int64Vector> fixed_vector).ptr.null_bitmap
+                    key_data_i64[row_idx] = fixed_values[fixed_idx]
+                if key_null_bitmap != NULL and fixed_valids[fixed_idx] != 0:
+                    _bitmap_set_valid(key_null_bitmap, row_idx)
                 fixed_idx += 1
             else:
                 if encoded_idx >= <Py_ssize_t> encoded_values.size():
                     raise RuntimeError("decoded encoded key payload shorter than key schema")
                 builder = builders[key_idx]
+                if builder is None:
+                    raise RuntimeError(
+                        f"encoded key builder {key_idx} is None during finalize reconstruction"
+                    )
                 if encoded_valids[encoded_idx] == 0:
                     builder.append_null()
                 elif encoded_values[encoded_idx].size() > 0:
@@ -337,10 +445,28 @@ cdef list build_payload_multi_key_vectors(
                 else:
                     builder.append_bytes(NULL, 0)
                 encoded_idx += 1
+        if fixed_idx != expected_fixed_count:
+            raise RuntimeError(
+                f"decoded fixed key payload schema walk mismatch at output row {row_idx}: "
+                f"consumed {fixed_idx} of {expected_fixed_count} fixed keys"
+            )
+        if encoded_idx != expected_encoded_count:
+            raise RuntimeError(
+                f"decoded encoded key payload schema walk mismatch at output row {row_idx}: "
+                f"consumed {encoded_idx} of {expected_encoded_count} encoded keys"
+            )
 
     for key_idx in range(key_count):
         if not _is_multi_fixed_kind(<int64_t> multi_group_key_kinds[key_idx]):
+            if builders[key_idx] is None:
+                raise RuntimeError(
+                    f"encoded key builder {key_idx} was never initialized during finalize"
+                )
             vectors[key_idx] = builders[key_idx].finish()
+        if vectors[key_idx] is None:
+            raise RuntimeError(
+                f"finalize produced None vector for key {key_idx} of {key_count}"
+            )
 
     return vectors
 
@@ -360,6 +486,9 @@ cdef object build_encoded_key_vector(
     cdef int64_t valid_flag
     cdef StringVectorBuilder builder
     cdef string raw_value
+
+    if stop < start:
+        raise RuntimeError(f"invalid encoded key finalize range: start={start}, stop={stop}")
 
     if <Py_ssize_t> key_payload_offsets.size() < stop + 1:
         raise RuntimeError("encoded key payload offsets shorter than finalize range")
@@ -448,12 +577,47 @@ cdef object build_object_state_vector(
     cdef Py_ssize_t length = stop - start
     cdef Py_ssize_t total_bytes = 0
     cdef Py_ssize_t state_index
+    cdef int32_t start_offset
+    cdef int32_t data_length
     cdef StringVectorBuilder builder
+
+    if stop < start:
+        raise RuntimeError(f"invalid object aggregate finalize range: start={start}, stop={stop}")
+    if <Py_ssize_t> seen.size() < stop:
+        raise RuntimeError(
+            f"object aggregate seen store shorter than finalize range: "
+            f"have {seen.size()} entries, need {stop}"
+        )
+    if <Py_ssize_t> object_state_starts.size() < stop:
+        raise RuntimeError(
+            f"object aggregate start store shorter than finalize range: "
+            f"have {object_state_starts.size()} entries, need {stop}"
+        )
+    if <Py_ssize_t> object_state_lengths.size() < stop:
+        raise RuntimeError(
+            f"object aggregate length store shorter than finalize range: "
+            f"have {object_state_lengths.size()} entries, need {stop}"
+        )
 
     for row_idx in range(length):
         state_index = start + row_idx
         if seen[state_index] != 0:
-            total_bytes += object_state_lengths[state_index]
+            start_offset = object_state_starts[state_index]
+            data_length = object_state_lengths[state_index]
+            if start_offset < 0:
+                raise RuntimeError(
+                    f"object aggregate start offset is negative at state {state_index}: {start_offset}"
+                )
+            if data_length < 0:
+                raise RuntimeError(
+                    f"object aggregate length is negative at state {state_index}: {data_length}"
+                )
+            if start_offset + data_length > <int32_t> object_state_bytes.size():
+                raise RuntimeError(
+                    f"object aggregate payload exceeds byte store at state {state_index}: "
+                    f"start={start_offset}, length={data_length}, bytes={object_state_bytes.size()}"
+                )
+            total_bytes += data_length
 
     builder = StringVectorBuilder.with_counts(length, total_bytes)
     for row_idx in range(length):
@@ -461,9 +625,14 @@ cdef object build_object_state_vector(
         if seen[state_index] == 0:
             builder.append_null()
         else:
-            builder.append_bytes(
-                <const char*> &object_state_bytes[object_state_starts[state_index]],
-                object_state_lengths[state_index],
+            start_offset = object_state_starts[state_index]
+            data_length = object_state_lengths[state_index]
+            if data_length == 0:
+                builder.append_bytes(NULL, 0)
+            else:
+                builder.append_bytes(
+                    <const char*> &object_state_bytes[start_offset],
+                    data_length,
                 )
     return builder.finish()
 
@@ -485,8 +654,26 @@ cdef list build_finalize_key_vectors(
 ):
     cdef list vectors
     cdef object built_vec
+    cdef Py_ssize_t expected_keys = len(multi_group_key_kinds)
+    cdef Py_ssize_t available_offsets = <Py_ssize_t> key_payload_offsets.size()
 
-    if len(multi_group_key_kinds) <= 1 and not multi_key_object_mode:
+    if stop < start:
+        raise RuntimeError(f"invalid finalize key vector range: start={start}, stop={stop}")
+
+    if expected_keys > 1 and multi_key_object_mode:
+        raise RuntimeError(
+            "multi-key object-mode finalize should not route through payload key vector reconstruction"
+        )
+
+    if available_offsets < stop + 1:
+        raise RuntimeError(
+            f"finalize key payload offsets too short for rows {start}:{stop}; "
+            f"have {available_offsets} offsets"
+        )
+
+    if expected_keys <= 1 and not multi_key_object_mode:
+        if expected_keys == 0 and single_key_kind == KEY_MULTI_FIXED_INT:
+            raise RuntimeError("single-key finalize requested without key schema")
         if single_key_kind == KEY_MULTI_ENCODED_STRING:
             built_vec = build_encoded_key_vector(
                 key_payload_bytes,
@@ -504,7 +691,12 @@ cdef list build_finalize_key_vectors(
                 start,
                 stop,
             )
+        if built_vec is None:
+            raise RuntimeError("single-key finalize returned None key vector")
         return [built_vec]
+
+    if expected_keys == 0:
+        raise RuntimeError("multi-key finalize requested with empty key schema")
 
     vectors = build_payload_multi_key_vectors(
         key_payload_bytes,
@@ -513,6 +705,13 @@ cdef list build_finalize_key_vectors(
         start,
         stop,
     )
+    if vectors is None:
+        raise RuntimeError("multi-key finalize returned None key vector list")
+    if len(vectors) != expected_keys:
+        raise RuntimeError(
+            f"multi-key finalize produced {len(vectors)} key vectors for "
+            f"{expected_keys} key kinds"
+        )
     return vectors
 
 
@@ -538,6 +737,9 @@ cdef object build_finalize_single_key_vector(
     cdef uint8_t* key_nulls = NULL
     cdef bint needs_key_nulls = False
 
+    if stop < start:
+        raise RuntimeError(f"invalid finalize single-key range: start={start}, stop={stop}")
+
     if single_key_kind == KEY_MULTI_ENCODED_STRING:
         return build_encoded_key_vector(
             key_payload_bytes,
@@ -555,6 +757,11 @@ cdef object build_finalize_single_key_vector(
             start,
             stop,
         )
+
+    if <Py_ssize_t> group_key_values.size() < stop:
+        raise RuntimeError("single-key direct value store shorter than finalize range")
+    if <Py_ssize_t> group_key_valid.size() < stop:
+        raise RuntimeError("single-key direct validity store shorter than finalize range")
 
     for row_idx in range(start, stop):
         if group_key_valid[row_idx] == 0:
@@ -593,6 +800,16 @@ cdef object build_finalize_object_aggregate_vector(
     cdef Py_ssize_t state_index
     cdef list agg_objects
 
+    if stop < start:
+        raise RuntimeError(
+            f"invalid object aggregate finalize range: start={start}, stop={stop}"
+        )
+    if <Py_ssize_t> seen.size() < stop:
+        raise RuntimeError(
+            f"object aggregate seen store shorter than finalize range: "
+            f"have {seen.size()} entries, need {stop}"
+        )
+
     if object_state_lengths.size() == seen.size():
         return build_object_state_vector(
             object_state_bytes,
@@ -601,6 +818,12 @@ cdef object build_finalize_object_aggregate_vector(
             seen,
             start,
             stop,
+        )
+
+    if len(object_state) < stop:
+        raise RuntimeError(
+            f"object aggregate object store shorter than finalize range: "
+            f"have {len(object_state)} entries, need {stop}"
         )
 
     agg_objects = []
@@ -630,8 +853,39 @@ cdef object build_finalize_multi_object_aggregate_vector(
     cdef Py_ssize_t state_index
     cdef Py_ssize_t offset
     cdef list agg_objects
+    cdef Py_ssize_t expected_flat_size
+
+    if stop < start:
+        raise RuntimeError(
+            f"invalid multi-object aggregate finalize range: start={start}, stop={stop}"
+        )
+    if multi_agg_count <= 0:
+        raise RuntimeError(
+            f"invalid multi-object aggregate count for finalize: {multi_agg_count}"
+        )
+    if agg_idx < 0 or agg_idx >= multi_agg_count:
+        raise RuntimeError(
+            f"multi-object aggregate index {agg_idx} out of range for {multi_agg_count} aggregates"
+        )
+
+    expected_flat_size = stop * multi_agg_count
 
     if multi_object_state_lengths.size() == multi_seen.size():
+        if <Py_ssize_t> multi_seen.size() < expected_flat_size:
+            raise RuntimeError(
+                f"multi-object aggregate seen store shorter than finalize range: "
+                f"have {multi_seen.size()} entries, need {expected_flat_size}"
+            )
+        if <Py_ssize_t> multi_object_state_starts.size() < expected_flat_size:
+            raise RuntimeError(
+                f"multi-object aggregate start store shorter than finalize range: "
+                f"have {multi_object_state_starts.size()} entries, need {expected_flat_size}"
+            )
+        if <Py_ssize_t> multi_object_state_lengths.size() < expected_flat_size:
+            raise RuntimeError(
+                f"multi-object aggregate length store shorter than finalize range: "
+                f"have {multi_object_state_lengths.size()} entries, need {expected_flat_size}"
+            )
         return build_multi_object_state_vector(
             multi_object_state_bytes,
             multi_object_state_starts,
@@ -641,6 +895,17 @@ cdef object build_finalize_multi_object_aggregate_vector(
             agg_idx,
             start,
             stop,
+        )
+
+    if <Py_ssize_t> multi_seen.size() < expected_flat_size:
+        raise RuntimeError(
+            f"multi-object aggregate seen store shorter than finalize range: "
+            f"have {multi_seen.size()} entries, need {expected_flat_size}"
+        )
+    if len(multi_object_state) < expected_flat_size:
+        raise RuntimeError(
+            f"multi-object aggregate object store shorter than finalize range: "
+            f"have {len(multi_object_state)} entries, need {expected_flat_size}"
         )
 
     agg_objects = []
@@ -680,7 +945,68 @@ cdef object build_finalize_scalar_aggregate_vector(
     cdef double* agg_f64_data
     cdef uint8_t* agg_nulls = NULL
 
-    if agg_mode in (AGG_SUM, AGG_MIN, AGG_MAX):
+    if stop < start:
+        raise RuntimeError(
+            f"invalid scalar aggregate finalize range: start={start}, stop={stop}"
+        )
+
+    if agg_mode in (AGG_COUNT_STAR, AGG_COUNT_VALUE, AGG_COUNT_DISTINCT):
+        if <Py_ssize_t> counts.size() < stop:
+            raise RuntimeError(
+                f"count aggregate store shorter than finalize range: "
+                f"have {counts.size()} entries, need {stop}"
+            )
+    elif agg_mode in (AGG_SUM, AGG_MIN, AGG_MAX):
+        if output_is_float:
+            if <Py_ssize_t> f64_state.size() < stop:
+                raise RuntimeError(
+                    f"float aggregate state shorter than finalize range: "
+                    f"have {f64_state.size()} entries, need {stop}"
+                )
+        else:
+            if <Py_ssize_t> i64_state.size() < stop:
+                raise RuntimeError(
+                    f"int aggregate state shorter than finalize range: "
+                    f"have {i64_state.size()} entries, need {stop}"
+                )
+        if <Py_ssize_t> seen.size() < stop:
+            raise RuntimeError(
+                f"seen aggregate store shorter than finalize range: "
+                f"have {seen.size()} entries, need {stop}"
+            )
+    elif agg_mode == AGG_AVG:
+        if <Py_ssize_t> avg_sums.size() < stop:
+            raise RuntimeError(
+                f"avg sum store shorter than finalize range: "
+                f"have {avg_sums.size()} entries, need {stop}"
+            )
+        if <Py_ssize_t> avg_counts.size() < stop:
+            raise RuntimeError(
+                f"avg count store shorter than finalize range: "
+                f"have {avg_counts.size()} entries, need {stop}"
+            )
+    elif agg_mode == AGG_ANY_VALUE:
+        if output_is_float:
+            if <Py_ssize_t> f64_state.size() < stop:
+                raise RuntimeError(
+                    f"float aggregate state shorter than finalize range: "
+                    f"have {f64_state.size()} entries, need {stop}"
+                )
+        else:
+            if <Py_ssize_t> i64_state.size() < stop:
+                raise RuntimeError(
+                    f"int aggregate state shorter than finalize range: "
+                    f"have {i64_state.size()} entries, need {stop}"
+                )
+        if <Py_ssize_t> seen.size() < stop:
+            raise RuntimeError(
+                f"seen aggregate store shorter than finalize range: "
+                f"have {seen.size()} entries, need {stop}"
+            )
+    else:
+        raise RuntimeError(f"unsupported scalar aggregate finalize mode: {agg_mode}")
+
+    if agg_mode in (AGG_SUM, AGG_MIN, AGG_MAX, AGG_ANY_VALUE):
         for row_idx in range(length):
             state_index = start + row_idx
             if seen[state_index] == 0:
@@ -698,6 +1024,8 @@ cdef object build_finalize_scalar_aggregate_vector(
         agg_f64_data = <double*> agg_f64.ptr.data
         if needs_nulls:
             agg_nulls = _alloc_valid_bitmap(length)
+            if agg_nulls == NULL:
+                raise MemoryError("failed to allocate scalar aggregate null bitmap")
             agg_f64.ptr.null_bitmap = agg_nulls
 
         for row_idx in range(length):
@@ -706,7 +1034,7 @@ cdef object build_finalize_scalar_aggregate_vector(
                 agg_f64_data[row_idx] = <double> counts[state_index]
                 if agg_nulls != NULL:
                     _bitmap_set_valid(agg_nulls, row_idx)
-            elif agg_mode in (AGG_SUM, AGG_MIN, AGG_MAX):
+            elif agg_mode in (AGG_SUM, AGG_MIN, AGG_MAX, AGG_ANY_VALUE):
                 agg_f64_data[row_idx] = f64_state[state_index]
                 if agg_nulls != NULL and seen[state_index] != 0:
                     _bitmap_set_valid(agg_nulls, row_idx)
@@ -723,6 +1051,8 @@ cdef object build_finalize_scalar_aggregate_vector(
     agg_i64_data = <int64_t*> agg_i64.ptr.data
     if needs_nulls:
         agg_nulls = _alloc_valid_bitmap(length)
+        if agg_nulls == NULL:
+            raise MemoryError("failed to allocate scalar aggregate null bitmap")
         agg_i64.ptr.null_bitmap = agg_nulls
 
     for row_idx in range(length):
@@ -765,6 +1095,60 @@ cdef object build_finalize_multi_scalar_aggregate_vector(
     cdef int64_t* agg_i64_data
     cdef double* agg_f64_data
     cdef uint8_t* agg_nulls = NULL
+    cdef Py_ssize_t expected_flat_size
+
+    if stop < start:
+        raise RuntimeError(
+            f"invalid multi-scalar aggregate finalize range: start={start}, stop={stop}"
+        )
+    if multi_agg_count <= 0:
+        raise RuntimeError(
+            f"invalid multi-scalar aggregate count for finalize: {multi_agg_count}"
+        )
+    if agg_idx < 0 or agg_idx >= multi_agg_count:
+        raise RuntimeError(
+            f"multi-scalar aggregate index {agg_idx} out of range for {multi_agg_count} aggregates"
+        )
+
+    expected_flat_size = stop * multi_agg_count
+
+    if agg_mode in (AGG_COUNT_STAR, AGG_COUNT_VALUE, AGG_COUNT_DISTINCT):
+        if <Py_ssize_t> multi_counts.size() < expected_flat_size:
+            raise RuntimeError(
+                f"multi-count aggregate store shorter than finalize range: "
+                f"have {multi_counts.size()} entries, need {expected_flat_size}"
+            )
+    elif agg_mode in (AGG_SUM, AGG_MIN, AGG_MAX):
+        if output_is_float:
+            if <Py_ssize_t> multi_f64_state.size() < expected_flat_size:
+                raise RuntimeError(
+                    f"multi-f64 aggregate state shorter than finalize range: "
+                    f"have {multi_f64_state.size()} entries, need {expected_flat_size}"
+                )
+        else:
+            if <Py_ssize_t> multi_i64_state.size() < expected_flat_size:
+                raise RuntimeError(
+                    f"multi-i64 aggregate state shorter than finalize range: "
+                    f"have {multi_i64_state.size()} entries, need {expected_flat_size}"
+                )
+        if <Py_ssize_t> multi_seen.size() < expected_flat_size:
+            raise RuntimeError(
+                f"multi-seen aggregate store shorter than finalize range: "
+                f"have {multi_seen.size()} entries, need {expected_flat_size}"
+            )
+    elif agg_mode == AGG_AVG:
+        if <Py_ssize_t> multi_avg_sums.size() < expected_flat_size:
+            raise RuntimeError(
+                f"multi-avg sum store shorter than finalize range: "
+                f"have {multi_avg_sums.size()} entries, need {expected_flat_size}"
+            )
+        if <Py_ssize_t> multi_avg_counts.size() < expected_flat_size:
+            raise RuntimeError(
+                f"multi-avg count store shorter than finalize range: "
+                f"have {multi_avg_counts.size()} entries, need {expected_flat_size}"
+            )
+    else:
+        raise RuntimeError(f"unsupported multi-aggregate finalize mode: {agg_mode}")
 
     if agg_mode in (AGG_SUM, AGG_MIN, AGG_MAX):
         for row_idx in range(length):
@@ -786,6 +1170,8 @@ cdef object build_finalize_multi_scalar_aggregate_vector(
         agg_f64_data = <double*> agg_f64.ptr.data
         if needs_nulls:
             agg_nulls = _alloc_valid_bitmap(length)
+            if agg_nulls == NULL:
+                raise MemoryError("failed to allocate multi-scalar aggregate null bitmap")
             agg_f64.ptr.null_bitmap = agg_nulls
 
         for row_idx in range(length):
@@ -812,6 +1198,8 @@ cdef object build_finalize_multi_scalar_aggregate_vector(
     agg_i64_data = <int64_t*> agg_i64.ptr.data
     if needs_nulls:
         agg_nulls = _alloc_valid_bitmap(length)
+        if agg_nulls == NULL:
+            raise MemoryError("failed to allocate multi-scalar aggregate null bitmap")
         agg_i64.ptr.null_bitmap = agg_nulls
 
     for row_idx in range(length):
@@ -855,6 +1243,25 @@ cdef list build_finalize_multi_aggregate_vectors(
     cdef int64_t agg_value_kind
     cdef list vectors = []
 
+    if stop < start:
+        raise RuntimeError(
+            f"invalid multi-aggregate finalize range: start={start}, stop={stop}"
+        )
+    if multi_agg_count < 0:
+        raise RuntimeError(
+            f"invalid multi-aggregate count for finalize: {multi_agg_count}"
+        )
+    if <Py_ssize_t> multi_agg_modes.size() < multi_agg_count:
+        raise RuntimeError(
+            f"multi-aggregate mode store shorter than aggregate count: "
+            f"have {multi_agg_modes.size()} modes, need {multi_agg_count}"
+        )
+    if <Py_ssize_t> multi_value_kinds.size() < multi_agg_count:
+        raise RuntimeError(
+            f"multi-aggregate value-kind store shorter than aggregate count: "
+            f"have {multi_value_kinds.size()} kinds, need {multi_agg_count}"
+        )
+
     for agg_idx in range(multi_agg_count):
         agg_mode = multi_agg_modes[agg_idx]
         agg_value_kind = multi_value_kinds[agg_idx]
@@ -890,6 +1297,18 @@ cdef list build_finalize_multi_aggregate_vectors(
                 stop,
             )
         )
+
+    if len(vectors) != multi_agg_count:
+        raise RuntimeError(
+            f"multi-aggregate finalize produced {len(vectors)} vectors for "
+            f"{multi_agg_count} aggregates"
+        )
+
+    for agg_idx in range(len(vectors)):
+        if vectors[agg_idx] is None:
+            raise RuntimeError(
+                f"multi-aggregate finalize produced None vector at aggregate {agg_idx}"
+            )
 
     return vectors
 

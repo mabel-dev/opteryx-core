@@ -120,7 +120,7 @@ Dead code (never imported in production):
    acceptable. A `.hpp` / `.cpp` implementation that Cython wraps via `cdef
    extern` is better — it removes Cython overhead entirely and is fully
    optimisable by the compiler. Infrastructure already does this:
-   `zpp_key_codec.hpp`, `carchar_index.hpp`. New kernel loops should follow
+   `carchar_index.hpp`, `group_key_codec.hpp`. New kernel loops should follow
    the same pattern when performance justifies it.
 
 6. **The engine orchestration has no Python.** The `ingest()` and
