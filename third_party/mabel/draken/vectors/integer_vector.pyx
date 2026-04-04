@@ -446,6 +446,15 @@ cdef IntegerVector from_arrow(object array):
     elif pa_type.equals(pa.int16()):
         dtype = DRAKEN_INT16
         itemsize = 2
+    elif pa_type.equals(pa.uint8()):
+        dtype = DRAKEN_INT8
+        itemsize = 1
+    elif pa_type.equals(pa.uint16()):
+        dtype = DRAKEN_INT16
+        itemsize = 2
+    elif pa_type.equals(pa.uint32()):
+        dtype = DRAKEN_INT32
+        itemsize = 4
     else:
         dtype = DRAKEN_INT32
         itemsize = 4
