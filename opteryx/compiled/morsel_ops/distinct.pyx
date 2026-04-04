@@ -12,11 +12,9 @@ Carchar-backed DISTINCT for Draken Morsels.
 
     distinct(morsel, seen_hashes, columns=None)
 
-Filters the morsel IN PLACE.  For column types that support nogil hashing
-(all fixed-width numeric, bool, date/time, string), the entire pipeline —
-hash → CarcharSet probe → branchless index scatter — runs in a single
-nogil block.  ArrayVector columns (rare) fall back to the Python hash()
-path, after which mark_new and scatter still run nogil.
+Filters the morsel IN PLACE.  The entire pipeline — hash → CarcharSet probe →
+branchless index scatter — runs in a single nogil block. All column types MUST
+support nogil hashing via c_hash_into(). No Python fallback is permitted.
 """
 
 from libc.stdlib cimport malloc, free
@@ -50,8 +48,7 @@ def distinct(Morsel morsel, CarcharSetWrapper seen_hashes, list columns=None):
     cdef int32_t* col_indices = NULL
     cdef int32_t n_cols = 0
     cdef size_t count
-    cdef bint had_fallback
-    cdef uint64_t[::1] py_hashes
+    cdef bint hash_requires_gil
 
     if n == 0:
         return
@@ -80,17 +77,12 @@ def distinct(Morsel morsel, CarcharSetWrapper seen_hashes, list columns=None):
     try:
         # ── Fast path: hash + probe in one nogil block ────────────────────────
         with nogil:
-            had_fallback = morsel.c_hash(hashes_ptr, col_indices, n_cols, n)
+            hash_requires_gil = morsel.c_hash(hashes_ptr, col_indices, n_cols, n)
 
-        if had_fallback:
-            # At least one column (e.g. ArrayVector) couldn't hash without GIL.
-            # Re-zero and redo via the Python hash() path, then continue nogil.
-            memset(hashes_ptr, 0, <size_t>n * sizeof(uint64_t))
-            if columns is None:
-                py_hashes = morsel.hash()
-            else:
-                py_hashes = morsel.hash(columns=columns)
-            memcpy(hashes_ptr, &py_hashes[0], <size_t>n * sizeof(uint64_t))
+        if hash_requires_gil:
+            # c_hash() should never fail for supported types.
+            # If a column type cannot hash without GIL, that's a bug in the vector implementation.
+            raise RuntimeError("DISTINCT operation failed: column type cannot hash without GIL. All vector types must support nogil hashing for performance-critical operations.")
 
         with nogil:
             count = cs.mark_new_indices_32(hashes_ptr, idx_buf, <size_t>n)

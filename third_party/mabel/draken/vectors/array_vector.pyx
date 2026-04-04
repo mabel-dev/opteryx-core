@@ -41,9 +41,9 @@ from opteryx.compiled.draken.vectors.vector cimport (
     MIX_HASH_CONSTANT,
     NULL_HASH,
     Vector,
+    mix_hash,
     simd_mix_hash,
 )
-from opteryx.third_party.cyan4973.xxhash import hash_bytes
 
 DEF ARRAY_HASH_CHUNK = 64
 
@@ -352,6 +352,13 @@ cdef class ArrayVector(Vector):
         uint64_t[::1] out_buf,
         Py_ssize_t offset=0
     ) except *:
+        """Hash array rows into output buffer.
+
+        This delegates to c_hash_into for optimal performance.
+        Note: This method should not be called directly from Cython hot paths;
+        use c_hash_into instead. The caller (Morsel.c_hash) will fall back to
+        Python's hash() method if c_hash_into cannot work without the GIL.
+        """
         if self.ptr == NULL:
             return
 
@@ -361,31 +368,81 @@ cdef class ArrayVector(Vector):
         if offset < 0 or offset + n > out_buf.shape[0]:
             raise ValueError("ArrayVector.hash_into: output buffer too small")
 
-        cdef Py_ssize_t block
-        cdef Py_ssize_t j
-        cdef Py_ssize_t idx
-        cdef uint64_t[ARRAY_HASH_CHUNK] scratch
-        cdef uint64_t* scratch_ptr = <uint64_t*> scratch
-        cdef Py_ssize_t i
-        cdef object value
-        cdef object encoded
+        # Try fast nogil path; if it fails, the caller (Morsel.c_hash)
+        # will re-zero the buffer and fall back to Python hash()
+        self.c_hash_into(&out_buf[offset], n)
 
-        i = 0
-        while i < n:
-            block = n - i
-            if block > ARRAY_HASH_CHUNK:
-                block = ARRAY_HASH_CHUNK
-            for j in range(block):
-                idx = i + j
-                if _row_is_null(self.ptr, idx):
-                    scratch[j] = NULL_HASH
-                    continue
-                value = self._materialize_row(idx)
-                encoded = repr(value).encode("utf-8")
-                scratch[j] = hash_bytes(encoded)
+    cdef bint c_hash_into(self, uint64_t* out, Py_ssize_t n) noexcept nogil:
+        """Hash array rows by hashing child vector offsets and values without GIL.
 
-            simd_mix_hash(&out_buf[offset + i], scratch_ptr, <size_t> block)
-            i += block
+        For each array row, we:
+        1. Hash the offset pair (start, end) to get row structure
+        2. XOR with the hashes of child elements in that range
+
+        Child vector MUST have a working c_hash_into implementation that does not
+        require the GIL. If child vector cannot hash without GIL, this will crash
+        (fail fast per CLAUDE.md).
+
+        Returns 0 on success. Does not return on failure (raises exception).
+        """
+        cdef DrakenArrayBuffer* ptr
+        cdef Vector child_vec
+        cdef Py_ssize_t total_children
+        cdef uint64_t* child_hashes = NULL
+        cdef bint child_fallback
+        cdef Py_ssize_t i, j
+        cdef int32_t start, end
+        cdef uint64_t row_hash, offset_hash
+
+        if self.ptr == NULL or n == 0:
+            return 0
+
+        ptr = self.ptr
+        child_vec = <Vector> self._child
+        if child_vec == NULL:
+            raise ValueError("ArrayVector child vector is not initialized")
+
+        # Get hashes of all child elements
+        total_children = ptr.offsets[n] if n > 0 else 0
+
+        if total_children > 0:
+            child_hashes = <uint64_t*> PyMem_Malloc(total_children * sizeof(uint64_t))
+            if child_hashes == NULL:
+                raise MemoryError()
+
+            # Hash child vector. If child cannot hash without GIL, it returns 1,
+            # and we fail fast by raising.
+            child_fallback = child_vec.c_hash_into(child_hashes, total_children)
+            if child_fallback != 0:
+                PyMem_Free(child_hashes)
+                raise NotImplementedError(
+                    f"ArrayVector child type {type(self._child).__name__} "
+                    f"does not support nogil hashing (c_hash_into not available or requires GIL). "
+                    f"Custom vector types nested in arrays must implement c_hash_into."
+                )
+
+        for i in range(n):
+            # Check if row is null
+            if _row_is_null(ptr, i):
+                out[i] = NULL_HASH
+                continue
+
+            # Hash the offset pair (structure of this row)
+            start = ptr.offsets[i]
+            end = ptr.offsets[i + 1]
+            offset_hash = mix_hash(<uint64_t>start, <uint64_t>end)
+
+            # XOR together hashes of all child elements in this row
+            row_hash = offset_hash
+            for j in range(start, end):
+                row_hash = mix_hash(row_hash, child_hashes[j])
+
+            out[i] = mix_hash(out[i], row_hash)
+
+        if child_hashes != NULL:
+            PyMem_Free(child_hashes)
+
+        return 0
 
     def __str__(self):
         if self.ptr == NULL:

@@ -147,6 +147,12 @@ class DrakenMorselCorruptionError(DrakenMorselStorageError):
 
 _codec_tls = threading.local()
 
+# Module-level cache for codec function pointers (set on first load, never changes)
+_lz4_decompress_into_fn = None
+_zstd_decompress_into_fn = None
+_lz4_loaded = False
+_zstd_loaded = False
+
 
 def _codec_name_to_id(codec_name: str) -> int:
     c = codec_name.lower().strip()
@@ -170,21 +176,31 @@ def _codec_id_to_name(codec_id: int) -> str:
 
 
 def _load_lz4():
-    module = getattr(_codec_tls, "lz4_module", None)
-    if module is None:
+    global _lz4_decompress_into_fn, _lz4_loaded
+    if _lz4_loaded:
+        return _lz4_decompress_into_fn is not None
+    _lz4_loaded = True
+
+    try:
         from opteryx.third_party.lz4 import lz4 as lz4_module
-        _codec_tls.lz4_module = lz4_module
-        module = lz4_module
-    return module
+        _lz4_decompress_into_fn = getattr(lz4_module, "decompress_into", None)
+    except ImportError:
+        _lz4_decompress_into_fn = None
+    return _lz4_decompress_into_fn is not None
 
 
 def _load_zstd():
-    module = getattr(_codec_tls, "zstd_module", None)
-    if module is None:
+    global _zstd_decompress_into_fn, _zstd_loaded
+    if _zstd_loaded:
+        return _zstd_decompress_into_fn is not None
+    _zstd_loaded = True
+
+    try:
         from opteryx.third_party.facebook import zstd as zstd_module
-        _codec_tls.zstd_module = zstd_module
-        module = zstd_module
-    return module
+        _zstd_decompress_into_fn = getattr(zstd_module, "decompress_into", None)
+    except ImportError:
+        _zstd_decompress_into_fn = None
+    return _zstd_decompress_into_fn is not None
 
 
 def _compress_payload(object payload, int codec_id, int zstd_level):
@@ -265,8 +281,6 @@ cdef inline void _write_ptr_payload(object handle, const void* ptr, Py_ssize_t l
 
 
 cdef inline void _decompress_into_ptr(bytes compressed, int codec_id, int expected_len, void* dst):
-    cdef object lz4
-    cdef object zstd
     cdef object decompress_into_fn
     cdef object dst_view
     cdef bytes payload
@@ -288,12 +302,15 @@ cdef inline void _decompress_into_ptr(bytes compressed, int codec_id, int expect
         return
 
     if codec_id == CODEC_LZ4:
-        lz4 = _load_lz4()
-        decompress_into_fn = getattr(lz4, "decompress_into", None)
-        if decompress_into_fn is not None:
+        # Load codec module on first use (caches function pointer in module-level variable)
+        if not _lz4_loaded:
+            _load_lz4()
+        # Use pre-cached function pointer (no getattr in hot path)
+        if _lz4_decompress_into_fn is not None:
             dst_view = PyMemoryView_FromMemory(<char*>dst, expected_len, PyBUF_WRITE)
-            decompress_into_fn(compressed, dst_view, expected_len)
+            _lz4_decompress_into_fn(compressed, dst_view, expected_len)
             return
+        # Fallback: decompress to bytes, then copy
         payload = _decompress_payload(compressed, codec_id, expected_len)
         if len(payload) != expected_len:
             raise DrakenMorselCorruptionError(
@@ -304,12 +321,15 @@ cdef inline void _decompress_into_ptr(bytes compressed, int codec_id, int expect
         return
 
     if codec_id == CODEC_ZSTD:
-        zstd = _load_zstd()
-        decompress_into_fn = getattr(zstd, "decompress_into", None)
-        if decompress_into_fn is not None:
+        # Load codec module on first use (caches function pointer in module-level variable)
+        if not _zstd_loaded:
+            _load_zstd()
+        # Use pre-cached function pointer (no getattr in hot path)
+        if _zstd_decompress_into_fn is not None:
             dst_view = PyMemoryView_FromMemory(<char*>dst, expected_len, PyBUF_WRITE)
-            decompress_into_fn(compressed, dst_view, expected_len)
+            _zstd_decompress_into_fn(compressed, dst_view, expected_len)
             return
+        # Fallback: decompress to bytes, then copy
         payload = _decompress_payload(compressed, codec_id, expected_len)
         if len(payload) != expected_len:
             raise DrakenMorselCorruptionError(

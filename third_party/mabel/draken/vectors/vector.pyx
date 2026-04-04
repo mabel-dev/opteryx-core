@@ -128,9 +128,9 @@ cdef class Vector:
 
         If a concrete vector implements its own `compress_into`, that will be
         invoked. Otherwise we fall back to a generic implementation that
-        iterates Python values and uses `to_int` from
-        `opteryx.compiled.structures.relation_statistics` to map each value
-        to an int64, writing into `out_buf` (starting at `offset`).
+        iterates Python values one-at-a-time (not materializing the full list)
+        and uses `to_int` from `opteryx.compiled.structures.relation_statistics`
+        to map each value to an int64, writing into `out_buf` (starting at `offset`).
         """
         cdef object py_self = <object> self
         # Check for Python override (or per-concrete-class override)
@@ -145,15 +145,12 @@ cdef class Vector:
         if out_buf.shape[0] - offset < n:
             raise ValueError(f"output buffer too small")
 
+        # Iterate one item at a time without materializing full list
         cdef Py_ssize_t i
-        try:
-            vals = self.to_pylist()
-        except Exception:
-            # Fallback: try iterating
-            vals = [self[i] for i in range(n)]
-
+        cdef object item
         for i in range(n):
-            out_buf[offset + i] = <int64_t>to_int(vals[i])
+            item = self[i]
+            out_buf[offset + i] = <int64_t>to_int(item)
 
     cpdef int64_t[::1] compress(self):
         """Allocate an int64 buffer, call `compress`, and return the buffer.
