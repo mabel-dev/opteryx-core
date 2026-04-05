@@ -1228,6 +1228,420 @@ cdef object build_finalize_multi_scalar_aggregate_vector(
 # The coordinator and engine still decide key-vector shape, but this helper owns
 # the repeated aggregate-state to output-vector mapping for SQL surfaces like
 # COUNT, SUM, MIN, MAX, AVG, and object-valued MIN/MAX variants.
+# Per-aggregate finalize helpers. Each handles a specific aggregate type by directly
+# accessing the per-aggregate state vectors without the offset math of flattened state.
+
+cdef object build_finalize_multi_count_per_aggregate(
+    object agg_state,
+    Py_ssize_t start,
+    Py_ssize_t stop,
+):
+    """Finalize COUNT aggregate from per-aggregate state."""
+    cdef PerAggregateCountState state = <PerAggregateCountState> agg_state
+    cdef Py_ssize_t length = stop - start
+    cdef Py_ssize_t idx
+    cdef Int64Vector result
+    cdef int64_t* result_data
+
+    if <Py_ssize_t> state.counts.size() < stop:
+        raise RuntimeError(
+            f"count per-aggregate state shorter than finalize range: "
+            f"have {state.counts.size()} entries, need {stop}"
+        )
+
+    result = Int64Vector(length)
+    result_data = <int64_t*> result.ptr.data
+
+    for idx in range(length):
+        result_data[idx] = state.counts[start + idx]
+
+    return result
+
+
+cdef object build_finalize_multi_sum_int64_per_aggregate(
+    object agg_state,
+    Py_ssize_t start,
+    Py_ssize_t stop,
+):
+    """Finalize SUM(int64) aggregate from per-aggregate state."""
+    cdef PerAggregateSumInt64State state = <PerAggregateSumInt64State> agg_state
+    cdef Py_ssize_t length = stop - start
+    cdef Py_ssize_t idx
+    cdef bint needs_nulls = False
+    cdef Int64Vector result
+    cdef int64_t* result_data
+    cdef uint8_t* result_nulls = NULL
+
+    if <Py_ssize_t> state.values.size() < stop:
+        raise RuntimeError(
+            f"sum int64 per-aggregate state shorter than finalize range: "
+            f"have {state.values.size()} entries, need {stop}"
+        )
+    if <Py_ssize_t> state.seen.size() < stop:
+        raise RuntimeError(
+            f"sum int64 per-aggregate seen shorter than finalize range: "
+            f"have {state.seen.size()} entries, need {stop}"
+        )
+
+    # Check if any values are null
+    for idx in range(length):
+        if state.seen[start + idx] == 0:
+            needs_nulls = True
+            break
+
+    result = Int64Vector(length)
+    result_data = <int64_t*> result.ptr.data
+    if needs_nulls:
+        result_nulls = _alloc_valid_bitmap(length)
+        if result_nulls == NULL:
+            raise MemoryError("failed to allocate sum int64 per-aggregate null bitmap")
+        result.ptr.null_bitmap = result_nulls
+
+    for idx in range(length):
+        result_data[idx] = state.values[start + idx]
+        if result_nulls != NULL and state.seen[start + idx] != 0:
+            _bitmap_set_valid(result_nulls, idx)
+
+    return result
+
+
+cdef object build_finalize_multi_sum_float64_per_aggregate(
+    object agg_state,
+    Py_ssize_t start,
+    Py_ssize_t stop,
+):
+    """Finalize SUM(float64) aggregate from per-aggregate state."""
+    cdef PerAggregateSumFloat64State state = <PerAggregateSumFloat64State> agg_state
+    cdef Py_ssize_t length = stop - start
+    cdef Py_ssize_t idx
+    cdef bint needs_nulls = False
+    cdef Float64Vector result
+    cdef double* result_data
+    cdef uint8_t* result_nulls = NULL
+
+    if <Py_ssize_t> state.values.size() < stop:
+        raise RuntimeError(
+            f"sum float64 per-aggregate state shorter than finalize range: "
+            f"have {state.values.size()} entries, need {stop}"
+        )
+    if <Py_ssize_t> state.seen.size() < stop:
+        raise RuntimeError(
+            f"sum float64 per-aggregate seen shorter than finalize range: "
+            f"have {state.seen.size()} entries, need {stop}"
+        )
+
+    # Check if any values are null
+    for idx in range(length):
+        if state.seen[start + idx] == 0:
+            needs_nulls = True
+            break
+
+    result = Float64Vector(length)
+    result_data = <double*> result.ptr.data
+    if needs_nulls:
+        result_nulls = _alloc_valid_bitmap(length)
+        if result_nulls == NULL:
+            raise MemoryError("failed to allocate sum float64 per-aggregate null bitmap")
+        result.ptr.null_bitmap = result_nulls
+
+    for idx in range(length):
+        result_data[idx] = state.values[start + idx]
+        if result_nulls != NULL and state.seen[start + idx] != 0:
+            _bitmap_set_valid(result_nulls, idx)
+
+    return result
+
+
+cdef object build_finalize_multi_minmax_int64_per_aggregate(
+    object agg_state,
+    Py_ssize_t start,
+    Py_ssize_t stop,
+):
+    """Finalize MIN/MAX(int64) aggregate from per-aggregate state."""
+    cdef PerAggregateMinMaxInt64State state = <PerAggregateMinMaxInt64State> agg_state
+    cdef Py_ssize_t length = stop - start
+    cdef Py_ssize_t idx
+    cdef bint needs_nulls = False
+    cdef Int64Vector result
+    cdef int64_t* result_data
+    cdef uint8_t* result_nulls = NULL
+
+    if <Py_ssize_t> state.values.size() < stop:
+        raise RuntimeError(
+            f"minmax int64 per-aggregate state shorter than finalize range: "
+            f"have {state.values.size()} entries, need {stop}"
+        )
+    if <Py_ssize_t> state.seen.size() < stop:
+        raise RuntimeError(
+            f"minmax int64 per-aggregate seen shorter than finalize range: "
+            f"have {state.seen.size()} entries, need {stop}"
+        )
+
+    # Check if any values are null
+    for idx in range(length):
+        if state.seen[start + idx] == 0:
+            needs_nulls = True
+            break
+
+    result = Int64Vector(length)
+    result_data = <int64_t*> result.ptr.data
+    if needs_nulls:
+        result_nulls = _alloc_valid_bitmap(length)
+        if result_nulls == NULL:
+            raise MemoryError("failed to allocate minmax int64 per-aggregate null bitmap")
+        result.ptr.null_bitmap = result_nulls
+
+    for idx in range(length):
+        result_data[idx] = state.values[start + idx]
+        if result_nulls != NULL and state.seen[start + idx] != 0:
+            _bitmap_set_valid(result_nulls, idx)
+
+    return result
+
+
+cdef object build_finalize_multi_minmax_float64_per_aggregate(
+    object agg_state,
+    Py_ssize_t start,
+    Py_ssize_t stop,
+):
+    """Finalize MIN/MAX(float64) aggregate from per-aggregate state."""
+    cdef PerAggregateMinMaxFloat64State state = <PerAggregateMinMaxFloat64State> agg_state
+    cdef Py_ssize_t length = stop - start
+    cdef Py_ssize_t idx
+    cdef bint needs_nulls = False
+    cdef Float64Vector result
+    cdef double* result_data
+    cdef uint8_t* result_nulls = NULL
+
+    if <Py_ssize_t> state.values.size() < stop:
+        raise RuntimeError(
+            f"minmax float64 per-aggregate state shorter than finalize range: "
+            f"have {state.values.size()} entries, need {stop}"
+        )
+    if <Py_ssize_t> state.seen.size() < stop:
+        raise RuntimeError(
+            f"minmax float64 per-aggregate seen shorter than finalize range: "
+            f"have {state.seen.size()} entries, need {stop}"
+        )
+
+    # Check if any values are null
+    for idx in range(length):
+        if state.seen[start + idx] == 0:
+            needs_nulls = True
+            break
+
+    result = Float64Vector(length)
+    result_data = <double*> result.ptr.data
+    if needs_nulls:
+        result_nulls = _alloc_valid_bitmap(length)
+        if result_nulls == NULL:
+            raise MemoryError("failed to allocate minmax float64 per-aggregate null bitmap")
+        result.ptr.null_bitmap = result_nulls
+
+    for idx in range(length):
+        result_data[idx] = state.values[start + idx]
+        if result_nulls != NULL and state.seen[start + idx] != 0:
+            _bitmap_set_valid(result_nulls, idx)
+
+    return result
+
+
+cdef object build_finalize_multi_avg_int64_per_aggregate(
+    object agg_state,
+    Py_ssize_t start,
+    Py_ssize_t stop,
+):
+    """Finalize AVG(int64) aggregate from per-aggregate state."""
+    cdef PerAggregateAvgInt64State state = <PerAggregateAvgInt64State> agg_state
+    cdef Py_ssize_t length = stop - start
+    cdef Py_ssize_t idx
+    cdef bint needs_nulls = False
+    cdef Float64Vector result
+    cdef double* result_data
+    cdef uint8_t* result_nulls = NULL
+
+    if <Py_ssize_t> state.sums.size() < stop:
+        raise RuntimeError(
+            f"avg int64 per-aggregate sums shorter than finalize range: "
+            f"have {state.sums.size()} entries, need {stop}"
+        )
+    if <Py_ssize_t> state.counts.size() < stop:
+        raise RuntimeError(
+            f"avg int64 per-aggregate counts shorter than finalize range: "
+            f"have {state.counts.size()} entries, need {stop}"
+        )
+
+    # Check if any values are null
+    for idx in range(length):
+        if state.counts[start + idx] == 0:
+            needs_nulls = True
+            break
+
+    result = Float64Vector(length)
+    result_data = <double*> result.ptr.data
+    if needs_nulls:
+        result_nulls = _alloc_valid_bitmap(length)
+        if result_nulls == NULL:
+            raise MemoryError("failed to allocate avg int64 per-aggregate null bitmap")
+        result.ptr.null_bitmap = result_nulls
+
+    for idx in range(length):
+        if state.counts[start + idx] == 0:
+            result_data[idx] = 0.0
+        else:
+            result_data[idx] = state.sums[start + idx] / state.counts[start + idx]
+        if result_nulls != NULL and state.counts[start + idx] != 0:
+            _bitmap_set_valid(result_nulls, idx)
+
+    return result
+
+
+cdef object build_finalize_multi_avg_float64_per_aggregate(
+    object agg_state,
+    Py_ssize_t start,
+    Py_ssize_t stop,
+):
+    """Finalize AVG(float64) aggregate from per-aggregate state."""
+    cdef PerAggregateAvgFloat64State state = <PerAggregateAvgFloat64State> agg_state
+    cdef Py_ssize_t length = stop - start
+    cdef Py_ssize_t idx
+    cdef bint needs_nulls = False
+    cdef Float64Vector result
+    cdef double* result_data
+    cdef uint8_t* result_nulls = NULL
+
+    if <Py_ssize_t> state.sums.size() < stop:
+        raise RuntimeError(
+            f"avg float64 per-aggregate sums shorter than finalize range: "
+            f"have {state.sums.size()} entries, need {stop}"
+        )
+    if <Py_ssize_t> state.counts.size() < stop:
+        raise RuntimeError(
+            f"avg float64 per-aggregate counts shorter than finalize range: "
+            f"have {state.counts.size()} entries, need {stop}"
+        )
+
+    # Check if any values are null
+    for idx in range(length):
+        if state.counts[start + idx] == 0:
+            needs_nulls = True
+            break
+
+    result = Float64Vector(length)
+    result_data = <double*> result.ptr.data
+    if needs_nulls:
+        result_nulls = _alloc_valid_bitmap(length)
+        if result_nulls == NULL:
+            raise MemoryError("failed to allocate avg float64 per-aggregate null bitmap")
+        result.ptr.null_bitmap = result_nulls
+
+    for idx in range(length):
+        if state.counts[start + idx] == 0:
+            result_data[idx] = 0.0
+        else:
+            result_data[idx] = state.sums[start + idx] / state.counts[start + idx]
+        if result_nulls != NULL and state.counts[start + idx] != 0:
+            _bitmap_set_valid(result_nulls, idx)
+
+    return result
+
+
+cdef list build_finalize_multi_aggregate_vectors_per_aggregate(
+    list per_aggregate_states,
+    vector[int64_t]& multi_agg_modes,
+    vector[int64_t]& multi_value_kinds,
+    vector[int64_t]& multi_counts,
+    vector[int64_t]& multi_i64_state,
+    vector[double]& multi_f64_state,
+    vector[int64_t]& multi_seen,
+    vector[double]& multi_avg_sums,
+    vector[int64_t]& multi_avg_counts,
+    vector[uint8_t]& multi_object_state_bytes,
+    vector[int32_t]& multi_object_state_starts,
+    vector[int32_t]& multi_object_state_lengths,
+    list multi_object_state,
+    Py_ssize_t multi_agg_count,
+    Py_ssize_t start,
+    Py_ssize_t stop,
+):
+    """Finalize using per-aggregate state objects."""
+    cdef Py_ssize_t agg_idx
+    cdef object agg_state
+    cdef int64_t agg_mode
+    cdef int64_t agg_value_kind
+    cdef list vectors = []
+
+    if stop < start:
+        raise RuntimeError(
+            f"invalid multi-aggregate per-state finalize range: start={start}, stop={stop}"
+        )
+    if multi_agg_count <= 0:
+        raise RuntimeError(
+            f"invalid multi-aggregate count for per-state finalize: {multi_agg_count}"
+        )
+    if len(per_aggregate_states) < multi_agg_count:
+        raise RuntimeError(
+            f"per-aggregate states list has {len(per_aggregate_states)} entries, "
+            f"need {multi_agg_count}"
+        )
+
+    for agg_idx in range(multi_agg_count):
+        agg_state = per_aggregate_states[agg_idx]
+        agg_mode = multi_agg_modes[agg_idx]
+        agg_value_kind = multi_value_kinds[agg_idx]
+
+        # Fall back to flattened path for object aggregates or missing per-aggregate state
+        if agg_state is None or (agg_value_kind == VALUE_OBJECT and agg_mode in (AGG_MIN, AGG_MAX)):
+            vectors.append(
+                build_finalize_multi_object_aggregate_vector(
+                    multi_object_state_bytes,
+                    multi_object_state_starts,
+                    multi_object_state_lengths,
+                    multi_seen,
+                    multi_object_state,
+                    multi_agg_count,
+                    agg_idx,
+                    start,
+                    stop,
+                )
+            )
+            continue
+
+        # Dispatch to appropriate per-aggregate finalize helper based on state type
+        if isinstance(agg_state, PerAggregateCountState):
+            vectors.append(build_finalize_multi_count_per_aggregate(agg_state, start, stop))
+        elif isinstance(agg_state, PerAggregateSumInt64State):
+            vectors.append(build_finalize_multi_sum_int64_per_aggregate(agg_state, start, stop))
+        elif isinstance(agg_state, PerAggregateSumFloat64State):
+            vectors.append(build_finalize_multi_sum_float64_per_aggregate(agg_state, start, stop))
+        elif isinstance(agg_state, PerAggregateMinMaxInt64State):
+            vectors.append(build_finalize_multi_minmax_int64_per_aggregate(agg_state, start, stop))
+        elif isinstance(agg_state, PerAggregateMinMaxFloat64State):
+            vectors.append(build_finalize_multi_minmax_float64_per_aggregate(agg_state, start, stop))
+        elif isinstance(agg_state, PerAggregateAvgInt64State):
+            vectors.append(build_finalize_multi_avg_int64_per_aggregate(agg_state, start, stop))
+        elif isinstance(agg_state, PerAggregateAvgFloat64State):
+            vectors.append(build_finalize_multi_avg_float64_per_aggregate(agg_state, start, stop))
+        else:
+            raise RuntimeError(
+                f"unsupported per-aggregate state type: {type(agg_state).__name__}"
+            )
+
+    if len(vectors) != multi_agg_count:
+        raise RuntimeError(
+            f"multi-aggregate per-state finalize produced {len(vectors)} vectors for "
+            f"{multi_agg_count} aggregates"
+        )
+
+    for agg_idx in range(len(vectors)):
+        if vectors[agg_idx] is None:
+            raise RuntimeError(
+                f"multi-aggregate per-state finalize produced None vector at aggregate {agg_idx}"
+            )
+
+    return vectors
+
+
 cdef list build_finalize_multi_aggregate_vectors(
     vector[int64_t]& multi_agg_modes,
     vector[int64_t]& multi_value_kinds,
@@ -1244,6 +1658,7 @@ cdef list build_finalize_multi_aggregate_vectors(
     Py_ssize_t multi_agg_count,
     Py_ssize_t start,
     Py_ssize_t stop,
+    list per_agg_states,
 ):
     cdef Py_ssize_t agg_idx
     cdef int64_t agg_mode
@@ -1267,6 +1682,27 @@ cdef list build_finalize_multi_aggregate_vectors(
         raise RuntimeError(
             f"multi-aggregate value-kind store shorter than aggregate count: "
             f"have {multi_value_kinds.size()} kinds, need {multi_agg_count}"
+        )
+
+    # If per-aggregate states are provided, use the per-aggregate finalize path
+    if per_agg_states is not None and len(per_agg_states) > 0:
+        return build_finalize_multi_aggregate_vectors_per_aggregate(
+            per_agg_states,
+            multi_agg_modes,
+            multi_value_kinds,
+            multi_counts,
+            multi_i64_state,
+            multi_f64_state,
+            multi_seen,
+            multi_avg_sums,
+            multi_avg_counts,
+            multi_object_state_bytes,
+            multi_object_state_starts,
+            multi_object_state_lengths,
+            multi_object_state,
+            multi_agg_count,
+            start,
+            stop,
         )
 
     for agg_idx in range(multi_agg_count):
