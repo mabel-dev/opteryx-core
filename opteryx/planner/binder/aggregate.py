@@ -6,8 +6,7 @@
 from typing import Tuple
 
 from opteryx.exceptions import UnsupportedSyntaxError
-from opteryx.expression import NodeType
-from opteryx.expression import get_all_nodes_of_type
+from opteryx.expression import NodeType, get_all_nodes_of_type
 from opteryx.managers.virtual_datasets import derived
 from opteryx.models import Node
 from opteryx.planner.binder.binder import inner_binder
@@ -83,6 +82,12 @@ def visit_aggregate_and_group(
                 raise UnsupportedSyntaxError("ARRAY_AGG can only ORDER BY the aggregated column.")
             if array_agg.order[0][0].current_name != array_agg.parameters[0].current_name:
                 raise UnsupportedSyntaxError("ARRAY_AGG can only ORDER BY the aggregated column.")
+
+    for any_value in [agg for agg in tmp_aggregates if agg.value == "ANY_VALUE"]:
+        if not node.groups:
+            raise UnsupportedSyntaxError(
+                "ANY_VALUE requires a GROUP BY clause, and cannot GROUP BY a literal value."
+            )
 
     # we should always have a derived schema
     if "$derived" not in context.schemas:

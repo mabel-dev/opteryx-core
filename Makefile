@@ -128,9 +128,18 @@ q:
 	@clear
 	@$(PYTHON) tests/integration/sql_battery/test_shapes_basic.py
 
- b: check-python
+b: check-python
 	@clear || true
 	@$(PYTHON) scratch/brace.py
+
+g:
+	@$(PYTHON) tests/groupby_combo_generator_resilient.py --config tests/groupby_combo_tests_config.json
+
+gv:
+	@$(PYTHON) tests/groupby_combo_generator_resilient.py --config tests/groupby_combo_tests_config.json --verbose
+
+go:
+	@$(PYTHON) tests/groupby_combo_generator_resilient.py --config tests/groupby_combo_tests_config.json --output /tmp/groupby_results.json
 
 clickbench:
 	@clear

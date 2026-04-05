@@ -15,6 +15,13 @@ from libc.string cimport memset
 from libcpp.string cimport string
 from libcpp.vector cimport vector
 
+from opteryx.compiled.aggregations.aggregations_state_classes cimport PerAggregateCountState
+from opteryx.compiled.aggregations.aggregations_state_classes cimport PerAggregateSumInt64State
+from opteryx.compiled.aggregations.aggregations_state_classes cimport PerAggregateSumFloat64State
+from opteryx.compiled.aggregations.aggregations_state_classes cimport PerAggregateMinMaxInt64State
+from opteryx.compiled.aggregations.aggregations_state_classes cimport PerAggregateMinMaxFloat64State
+from opteryx.compiled.aggregations.aggregations_state_classes cimport PerAggregateAvgInt64State
+from opteryx.compiled.aggregations.aggregations_state_classes cimport PerAggregateAvgFloat64State
 from opteryx.compiled.aggregations.key_codec cimport decode_multi_key_record
 from opteryx.compiled.aggregations.key_codec cimport decode_single_encoded_key_record
 from opteryx.compiled.aggregations.key_codec cimport decode_single_fixed_key_record

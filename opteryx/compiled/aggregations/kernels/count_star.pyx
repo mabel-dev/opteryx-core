@@ -6,6 +6,7 @@
 # cython: infer_types=True
 
 from libc.stdint cimport int64_t
+from opteryx.compiled.aggregations.aggregations_state_classes cimport PerAggregateCountState
 
 
 cdef void count_star_accumulate(
@@ -45,3 +46,23 @@ cdef void count_star_multi_accumulate(
     for i in range(row_count):
         offset = state_indices[i] * multi_agg_count + agg_idx
         multi_counts[offset] += 1
+
+
+cdef void count_star_multi_accumulate_per_aggregate(
+    object state_obj,
+    const int64_t* state_indices,
+    Py_ssize_t row_count,
+) noexcept:
+    """
+    Increment counts in PerAggregateCountState for every group index.
+
+    For each row i in [0, row_count):
+      counts[state_indices[i]] += 1
+
+    Called by multi-aggregate inner loops with per-aggregate state objects.
+    No offset math needed — direct indexing by state_index.
+    """
+    cdef Py_ssize_t i
+    cdef int64_t* counts = (<PerAggregateCountState>state_obj).counts.data()
+    for i in range(row_count):
+        counts[state_indices[i]] += 1

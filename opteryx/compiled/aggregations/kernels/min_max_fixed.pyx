@@ -12,6 +12,10 @@ from opteryx.compiled.aggregations.vector_readers cimport (
     _dict_accessor_read_float_value,
     _dict_accessor_read_int_value,
 )
+from opteryx.compiled.aggregations.aggregations_state_classes cimport (
+    PerAggregateMinMaxInt64State,
+    PerAggregateMinMaxFloat64State,
+)
 
 
 cdef void minmax_f64_accumulate(
@@ -365,3 +369,205 @@ cdef void minmax_integer_multi_accumulate(
                 if multi_seen[offset] == 0 or val > multi_i64_state[offset]:
                     multi_i64_state[offset] = val
                 multi_seen[offset] = 1
+
+
+cdef void minmax_f64_multi_accumulate_per_aggregate(
+    object state_obj,
+    const int64_t* state_indices,
+    const double* values,
+    const uint8_t* value_nulls,
+    Py_ssize_t row_count,
+    bint is_min,
+) noexcept:
+    """
+    Accumulate MIN or MAX for a plain float64 value column using per-aggregate state object.
+
+    For each row i in [0, row_count):
+      if valid: compare values[i] against values[state_indices[i]],
+      updating if is_min ? val < state : val > state.  Marks seen[sidx]=1 on first write.
+
+    Direct indexing by state_index without offset math.
+    """
+    cdef Py_ssize_t i
+    cdef int64_t sidx
+    cdef double val
+    cdef double* values_ptr = (<PerAggregateMinMaxFloat64State>state_obj).values.data()
+    cdef int64_t* seen_ptr = (<PerAggregateMinMaxFloat64State>state_obj).seen.data()
+    if is_min:
+        for i in range(row_count):
+            if _bitmap_is_valid(value_nulls, i):
+                sidx = state_indices[i]
+                val = values[i]
+                if seen_ptr[sidx] == 0 or val < values_ptr[sidx]:
+                    values_ptr[sidx] = val
+                seen_ptr[sidx] = 1
+    else:
+        for i in range(row_count):
+            if _bitmap_is_valid(value_nulls, i):
+                sidx = state_indices[i]
+                val = values[i]
+                if seen_ptr[sidx] == 0 or val > values_ptr[sidx]:
+                    values_ptr[sidx] = val
+                seen_ptr[sidx] = 1
+
+
+cdef void minmax_f64_multi_accumulate_from_dict_per_aggregate(
+    object state_obj,
+    const int64_t* state_indices,
+    DictAccessor* accessor,
+    Py_ssize_t row_count,
+    bint is_min,
+) except *:
+    """
+    Accumulate MIN or MAX from a dictionary-encoded float64 value column using per-aggregate state object.
+
+    For each row i in [0, row_count):
+      if valid: compare dict_value[i] against values[state_indices[i]],
+      updating if is_min ? val < state : val > state.  Marks seen[sidx]=1 on first write.
+
+    Not nogil because _dict_accessor_read_float_value is except*.
+    Direct indexing by state_index without offset math.
+    """
+    cdef Py_ssize_t i
+    cdef int64_t sidx
+    cdef double val
+    cdef uint8_t* value_nulls = accessor.row_nulls
+    cdef double* values_ptr = (<PerAggregateMinMaxFloat64State>state_obj).values.data()
+    cdef int64_t* seen_ptr = (<PerAggregateMinMaxFloat64State>state_obj).seen.data()
+    if is_min:
+        for i in range(row_count):
+            if _bitmap_is_valid(value_nulls, i):
+                val = _dict_accessor_read_float_value(accessor, i)
+                sidx = state_indices[i]
+                if seen_ptr[sidx] == 0 or val < values_ptr[sidx]:
+                    values_ptr[sidx] = val
+                seen_ptr[sidx] = 1
+    else:
+        for i in range(row_count):
+            if _bitmap_is_valid(value_nulls, i):
+                val = _dict_accessor_read_float_value(accessor, i)
+                sidx = state_indices[i]
+                if seen_ptr[sidx] == 0 or val > values_ptr[sidx]:
+                    values_ptr[sidx] = val
+                seen_ptr[sidx] = 1
+
+
+cdef void minmax_i64_multi_accumulate_per_aggregate(
+    object state_obj,
+    const int64_t* state_indices,
+    const int64_t* values,
+    const uint8_t* value_nulls,
+    Py_ssize_t row_count,
+    bint is_min,
+) noexcept:
+    """
+    Accumulate MIN or MAX for a plain int64 value column using per-aggregate state object.
+
+    For each row i in [0, row_count):
+      if valid: compare values[i] against values[state_indices[i]],
+      updating if is_min ? val < state : val > state.  Marks seen[sidx]=1 on first write.
+
+    Direct indexing by state_index without offset math.
+    """
+    cdef Py_ssize_t i
+    cdef int64_t sidx
+    cdef int64_t val
+    cdef int64_t* values_ptr = (<PerAggregateMinMaxInt64State>state_obj).values.data()
+    cdef int64_t* seen_ptr = (<PerAggregateMinMaxInt64State>state_obj).seen.data()
+    if is_min:
+        for i in range(row_count):
+            if _bitmap_is_valid(value_nulls, i):
+                sidx = state_indices[i]
+                val = values[i]
+                if seen_ptr[sidx] == 0 or val < values_ptr[sidx]:
+                    values_ptr[sidx] = val
+                seen_ptr[sidx] = 1
+    else:
+        for i in range(row_count):
+            if _bitmap_is_valid(value_nulls, i):
+                sidx = state_indices[i]
+                val = values[i]
+                if seen_ptr[sidx] == 0 or val > values_ptr[sidx]:
+                    values_ptr[sidx] = val
+                seen_ptr[sidx] = 1
+
+
+cdef void minmax_i64_multi_accumulate_from_dict_per_aggregate(
+    object state_obj,
+    const int64_t* state_indices,
+    DictAccessor* accessor,
+    Py_ssize_t row_count,
+    bint is_min,
+) except *:
+    """
+    Accumulate MIN or MAX from a dictionary-encoded int64 value column using per-aggregate state object.
+
+    For each row i in [0, row_count):
+      if valid: compare dict_value[i] against values[state_indices[i]],
+      updating if is_min ? val < state : val > state.  Marks seen[sidx]=1 on first write.
+
+    Not nogil because _dict_accessor_read_int_value is except*.
+    Direct indexing by state_index without offset math.
+    """
+    cdef Py_ssize_t i
+    cdef int64_t sidx
+    cdef int64_t val
+    cdef uint8_t* value_nulls = accessor.row_nulls
+    cdef int64_t* values_ptr = (<PerAggregateMinMaxInt64State>state_obj).values.data()
+    cdef int64_t* seen_ptr = (<PerAggregateMinMaxInt64State>state_obj).seen.data()
+    if is_min:
+        for i in range(row_count):
+            if _bitmap_is_valid(value_nulls, i):
+                val = _dict_accessor_read_int_value(accessor, i)
+                sidx = state_indices[i]
+                if seen_ptr[sidx] == 0 or val < values_ptr[sidx]:
+                    values_ptr[sidx] = val
+                seen_ptr[sidx] = 1
+    else:
+        for i in range(row_count):
+            if _bitmap_is_valid(value_nulls, i):
+                val = _dict_accessor_read_int_value(accessor, i)
+                sidx = state_indices[i]
+                if seen_ptr[sidx] == 0 or val > values_ptr[sidx]:
+                    values_ptr[sidx] = val
+                seen_ptr[sidx] = 1
+
+
+cdef void minmax_integer_multi_accumulate_per_aggregate(
+    object state_obj,
+    const int64_t* state_indices,
+    DrakenFixedBuffer* value_ptr,
+    Py_ssize_t row_count,
+    bint is_min,
+) noexcept:
+    """
+    Accumulate MIN or MAX for a generic integer value column (int8/16/32/64) using per-aggregate state object.
+
+    For each row i in [0, row_count):
+      if valid: compare read_value[i] against values[state_indices[i]],
+      updating if is_min ? val < state : val > state.  Marks seen[sidx]=1 on first write.
+
+    Direct indexing by state_index without offset math.
+    """
+    cdef Py_ssize_t i
+    cdef int64_t sidx
+    cdef int64_t val
+    cdef uint8_t* value_nulls = <uint8_t*> value_ptr.null_bitmap
+    cdef int64_t* values_ptr = (<PerAggregateMinMaxInt64State>state_obj).values.data()
+    cdef int64_t* seen_ptr = (<PerAggregateMinMaxInt64State>state_obj).seen.data()
+    if is_min:
+        for i in range(row_count):
+            if _bitmap_is_valid(value_nulls, i):
+                val = _read_integer_value(value_ptr, i)
+                sidx = state_indices[i]
+                if seen_ptr[sidx] == 0 or val < values_ptr[sidx]:
+                    values_ptr[sidx] = val
+                seen_ptr[sidx] = 1
+    else:
+        for i in range(row_count):
+            if _bitmap_is_valid(value_nulls, i):
+                val = _read_integer_value(value_ptr, i)
+                sidx = state_indices[i]
+                if seen_ptr[sidx] == 0 or val > values_ptr[sidx]:
+                    values_ptr[sidx] = val
+                seen_ptr[sidx] = 1

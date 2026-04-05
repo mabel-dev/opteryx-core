@@ -104,6 +104,9 @@ testpaths = ["tests"]
 # `rugo` folder (example/debug scripts) because several files there run
 # at import time and are not intended as pytest tests.
 norecursedirs = ["scratch", ".*", "build", "dist", "tmp", "third_party", "rugo"]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+]
 
 [project.optional-dependencies]
 # Optional groups for development and testing. CI can install these with

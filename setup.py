@@ -10,9 +10,7 @@ import threading
 
 import numpy
 from Cython.Build import cythonize
-from setuptools import Extension
-from setuptools import find_packages
-from setuptools import setup
+from setuptools import Extension, find_packages, setup
 from setuptools.command.build_ext import build_ext as build_ext_orig
 from setuptools_rust import RustExtension
 
@@ -125,9 +123,11 @@ def build_vendored_libcurl():
     # --with-openssl expects the install prefix (e.g. /usr), not the lib dir
     openssl_prefix = None
     import shutil
+
     if shutil.which("pkg-config"):
-        result = subprocess.run(["pkg-config", "--variable=prefix", "openssl"],
-                              capture_output=True, text=True)
+        result = subprocess.run(
+            ["pkg-config", "--variable=prefix", "openssl"], capture_output=True, text=True
+        )
         if result.returncode == 0 and result.stdout.strip():
             openssl_prefix = result.stdout.strip()
             print(f"  Found OpenSSL at: {openssl_prefix}")
@@ -162,7 +162,9 @@ def build_vendored_libcurl():
 
     try:
         print(f"  Running: {' '.join(configure_cmd)}")
-        result = subprocess.run(configure_cmd, cwd=curl_build, check=False, capture_output=True, text=True)
+        result = subprocess.run(
+            configure_cmd, cwd=curl_build, check=False, capture_output=True, text=True
+        )
         if result.returncode != 0:
             print(f"  Configure failed with code {result.returncode}")
             print(f"  STDOUT: {result.stdout[-500:]}")  # Last 500 chars
@@ -170,14 +172,22 @@ def build_vendored_libcurl():
             return None
 
         print("  Running: make")
-        result = subprocess.run(["make", "-j", str(os.cpu_count() or 1)], cwd=curl_build, check=False, capture_output=True, text=True)
+        result = subprocess.run(
+            ["make", "-j", str(os.cpu_count() or 1)],
+            cwd=curl_build,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
         if result.returncode != 0:
             print(f"  Make failed with code {result.returncode}")
             print(f"  STDERR: {result.stderr[-500:]}")
             return None
 
         print("  Running: make install")
-        result = subprocess.run(["make", "install"], cwd=curl_build, check=False, capture_output=True, text=True)
+        result = subprocess.run(
+            ["make", "install"], cwd=curl_build, check=False, capture_output=True, text=True
+        )
         if result.returncode != 0:
             print(f"  Make install failed with code {result.returncode}")
             print(f"  STDERR: {result.stderr[-500:]}")
@@ -190,6 +200,7 @@ def build_vendored_libcurl():
             print(f"Warning: libcurl.a not found at {libcurl_a}")
             # Check what files were created
             import glob
+
             lib_files = glob.glob(os.path.join(curl_build, "**", "*.a"), recursive=True)
             if lib_files:
                 print(f"  Found .a files: {lib_files}")
@@ -197,6 +208,7 @@ def build_vendored_libcurl():
     except Exception as e:
         print(f"Warning: Exception during libcurl build: {e}")
         import traceback
+
         traceback.print_exc()
         return None
 
@@ -832,6 +844,33 @@ extensions = [
         extra_compile_args=CPP_FLAGS,
     ),
     Extension(
+        "opteryx.compiled.aggregations.group_by_key_helpers",
+        sources=[
+            "opteryx/compiled/aggregations/group_by_key_helpers.pyx",
+        ],
+        include_dirs=include_dirs,
+        language="c++",
+        extra_compile_args=CPP_FLAGS,
+    ),
+    Extension(
+        "opteryx.compiled.aggregations.group_by_telemetry",
+        sources=[
+            "opteryx/compiled/aggregations/group_by_telemetry.pyx",
+        ],
+        include_dirs=include_dirs,
+        language="c++",
+        extra_compile_args=CPP_FLAGS,
+    ),
+    Extension(
+        "opteryx.compiled.aggregations.group_by_state",
+        sources=[
+            "opteryx/compiled/aggregations/group_by_state.pyx",
+        ],
+        include_dirs=include_dirs,
+        language="c++",
+        extra_compile_args=CPP_FLAGS,
+    ),
+    Extension(
         "opteryx.compiled.aggregations.kernels.count_star",
         sources=[
             "opteryx/compiled/aggregations/kernels/count_star.pyx",
@@ -1192,7 +1231,9 @@ extensions = [
 # Build libcurl first - REQUIRED for http_client extension
 # Skip for sdist (source distribution packaging) and clean - no compilation needed
 _build_commands = {"build", "build_ext", "install", "bdist_wheel", "bdist", "develop"}
-_skip_build = not any(arg.lower() in _build_commands for arg in sys.argv[1:] if arg and not arg.startswith("-"))
+_skip_build = not any(
+    arg.lower() in _build_commands for arg in sys.argv[1:] if arg and not arg.startswith("-")
+)
 _libcurl_path = None
 if not _skip_build:
     _libcurl_path = build_vendored_libcurl()
@@ -1221,7 +1262,8 @@ if not _skip_build:
                 _libcurl_path,
                 "-lssl",  # OpenSSL SSL library
                 "-lcrypto",  # OpenSSL crypto library
-            ] + ([] if is_win() else ["-lm"]),  # Link math library on non-Windows
+            ]
+            + ([] if is_win() else ["-lm"]),  # Link math library on non-Windows
             language="c++",
         )
     )

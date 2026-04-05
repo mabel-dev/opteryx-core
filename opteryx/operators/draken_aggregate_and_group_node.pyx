@@ -433,6 +433,14 @@ class DrakenAggregateAndGroupNode(BasePlanNode):
             yield postprocessed
         finalize_total_ns = time.monotonic_ns() - st
 
+        if emitted == 0 and self._groupby_engine is not None:
+            readings = getattr(self._groupby_engine, "readings", None) or {}
+            finalized_rows = readings.get("groupby_finalize_rows_count", 0) - pre_rows_count
+            if finalized_rows > 0:
+                raise RuntimeError(
+                    "group-by finalize emitted zero morsels for non-empty grouped input"
+                )
+
         self._record_finalize_metrics(
             pre_engine_snapshot=pre_engine_snapshot,
             pre_backend_ns=pre_backend_ns,
