@@ -136,6 +136,16 @@ cdef object build_finalize_multi_avg_float64_per_aggregate(
     Py_ssize_t start,
     Py_ssize_t stop,
 )
+cdef object build_finalize_multi_anyvalue_per_aggregate(
+    object agg_state,
+    Py_ssize_t start,
+    Py_ssize_t stop,
+)
+cdef object build_finalize_multi_count_distinct_per_aggregate(
+    object agg_state,
+    Py_ssize_t start,
+    Py_ssize_t stop,
+)
 cdef list build_finalize_multi_aggregate_vectors_per_aggregate(
     list per_aggregate_states,
     vector[int64_t]& multi_agg_modes,

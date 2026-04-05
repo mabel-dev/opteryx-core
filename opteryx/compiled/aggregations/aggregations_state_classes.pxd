@@ -1,7 +1,7 @@
 # cython: language_level=3
 
 from libcpp.vector cimport vector
-from libc.stdint cimport int64_t
+from libc.stdint cimport int64_t, uint8_t, int32_t
 
 
 cdef class PerAggregateNumericState:
@@ -49,4 +49,26 @@ cdef class PerAggregateAvgInt64State(PerAggregateNumericState):
 cdef class PerAggregateAvgFloat64State(PerAggregateNumericState):
     """Per-aggregate state for AVG(float64) aggregates"""
     cdef public vector[double] sums
+    cdef public vector[int64_t] counts
+
+
+cdef class PerAggregateObjectState:
+    """Base class for object per-aggregate state (ANY_VALUE, COUNT(DISTINCT), string MIN/MAX)"""
+    cdef public int agg_idx
+    cdef public int agg_mode
+    cdef public int value_kind
+
+
+cdef class PerAggregateAnyValueState(PerAggregateObjectState):
+    """Per-aggregate state for ANY_VALUE and object-based MIN/MAX aggregates"""
+    cdef public list object_values
+    cdef public vector[uint8_t] object_bytes
+    cdef public vector[int32_t] object_starts
+    cdef public vector[int32_t] object_lengths
+    cdef public vector[int64_t] seen
+
+
+cdef class PerAggregateCountDistinctState(PerAggregateObjectState):
+    """Per-aggregate state for COUNT(DISTINCT) aggregates"""
+    cdef public list distinct_sets
     cdef public vector[int64_t] counts

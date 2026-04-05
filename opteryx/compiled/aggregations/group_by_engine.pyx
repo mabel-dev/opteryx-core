@@ -12,7 +12,7 @@ import time
 
 from opteryx.compiled.structures.carchar_set cimport CarcharSetWrapper
 from opteryx.compiled.structures.bloom_filter cimport BloomFilter
-from opteryx.compiled.aggregations.aggregations_state_classes cimport PerAggregateCountState, PerAggregateSumInt64State, PerAggregateSumFloat64State, PerAggregateMinMaxInt64State, PerAggregateMinMaxFloat64State, PerAggregateAvgInt64State, PerAggregateAvgFloat64State
+from opteryx.compiled.aggregations.aggregations_state_classes cimport PerAggregateCountState, PerAggregateSumInt64State, PerAggregateSumFloat64State, PerAggregateMinMaxInt64State, PerAggregateMinMaxFloat64State, PerAggregateAvgInt64State, PerAggregateAvgFloat64State, PerAggregateObjectState, PerAggregateAnyValueState, PerAggregateCountDistinctState
 
 from cpython.bytes cimport PyBytes_FromStringAndSize
 from libc.stddef cimport size_t
@@ -82,7 +82,6 @@ from opteryx.compiled.aggregations.group_by_state cimport _insert_encoded_state_
 from opteryx.compiled.aggregations.group_by_state cimport _insert_fixed_state_known_miss
 from opteryx.compiled.aggregations.group_by_state cimport _insert_multi_encoded_state_known_miss
 from opteryx.compiled.aggregations.group_by_state cimport _maybe_init_bloom
-from opteryx.compiled.aggregations.group_by_state cimport _multi_offset
 from opteryx.compiled.aggregations.group_by_state cimport _state_count
 from opteryx.compiled.aggregations.group_by_telemetry cimport initialize_groupby_readings
 from opteryx.compiled.aggregations.group_by_telemetry cimport record_bloom_stats
@@ -696,9 +695,6 @@ cdef class CarcharGroupStateEngine:
         self._object_state_starts.clear()
         self._object_state_lengths.clear()
         self._distinct_sets = []
-        self._multi_object_state = []
-        self._multi_object_state_starts.clear()
-        self._multi_object_state_lengths.clear()
         self._per_aggregate_states = []
         self._encoded_key_offsets.push_back(0)
         self._key_payload_offsets.push_back(0)
@@ -818,17 +814,7 @@ cdef class CarcharGroupStateEngine:
         for idx in range(data_len):
             self._object_state_bytes.push_back(<uint8_t> data_ptr[idx])
 
-    cdef inline void _store_multi_object_state_bytes(
-        self,
-        Py_ssize_t offset,
-        const char* data_ptr,
-        Py_ssize_t data_len,
-    ) noexcept:
-        cdef Py_ssize_t idx
-        self._multi_object_state_starts[offset] = <int32_t> self._multi_object_state_bytes.size()
-        self._multi_object_state_lengths[offset] = <int32_t> data_len
-        for idx in range(data_len):
-            self._multi_object_state_bytes.push_back(<uint8_t> data_ptr[idx])
+
 
     cdef inline uint8_t* _value_null_bitmap(self, object value_vector):
         return _vector_null_bitmap(value_vector)
@@ -1217,8 +1203,6 @@ cdef class CarcharGroupStateEngine:
             self._single_key_kind = KEY_MULTI_ENCODED_STRING
 
             if len(self._aggregations) > 1:
-                self._multi_value_columns = []
-                self._multi_distinct_sets = []
                 self._multi_agg_modes.clear()
                 self._multi_value_kinds.clear()
 
@@ -1475,8 +1459,6 @@ cdef class CarcharGroupStateEngine:
             return
         elif _vector_dict_accessor(key_vector) != NULL and len(self._aggregations) > 1:
             self._single_key_kind = key_kind
-            self._multi_value_columns = []
-            self._multi_distinct_sets = []
             self._multi_agg_modes.clear()
             self._multi_value_kinds.clear()
 
@@ -1729,15 +1711,10 @@ cdef class CarcharGroupStateEngine:
         self._object_state_bytes.clear()
         self._object_state_starts.clear()
         self._object_state_lengths.clear()
-        self._multi_object_state_bytes.clear()
-        self._multi_object_state_starts.clear()
-        self._multi_object_state_lengths.clear()
         self._key_payload_bytes.clear()
         self._key_payload_offsets.clear()
         self._key_payload_offsets.push_back(0)
         self._multi_group_key_kinds.clear()
-        self._multi_value_columns = []
-        self._multi_distinct_sets = []
         self._multi_agg_modes.clear()
         self._multi_value_kinds.clear()
         fn = self._aggregations[0][1]
@@ -2031,6 +2008,18 @@ cdef class CarcharGroupStateEngine:
                     state_obj.agg_mode = agg_mode
                     state_obj.value_kind = value_kind
                     self._per_aggregate_states.append(state_obj)
+            elif agg_mode == AGG_ANY_VALUE:
+                state_obj = PerAggregateAnyValueState()
+                state_obj.agg_idx = agg_idx
+                state_obj.agg_mode = agg_mode
+                state_obj.value_kind = value_kind
+                self._per_aggregate_states.append(state_obj)
+            elif agg_mode == AGG_COUNT_DISTINCT:
+                state_obj = PerAggregateCountDistinctState()
+                state_obj.agg_idx = agg_idx
+                state_obj.agg_mode = agg_mode
+                state_obj.value_kind = value_kind
+                self._per_aggregate_states.append(state_obj)
             else:
                 self._per_aggregate_states.append(None)
 
@@ -2078,6 +2067,22 @@ cdef class CarcharGroupStateEngine:
                 while state_obj.sums.size() < new_group_count:
                     state_obj.sums.push_back(0.0)
                     state_obj.counts.push_back(0)
+            elif isinstance(state_obj, PerAggregateAnyValueState):
+                # Grow seen vector and associated storage for per-group object state
+                while state_obj.seen.size() < new_group_count:
+                    state_obj.seen.push_back(0)
+                    state_obj.object_starts.push_back(-1)
+                    state_obj.object_lengths.push_back(0)
+                # Ensure object_values list matches new_group_count
+                while len(state_obj.object_values) < new_group_count:
+                    state_obj.object_values.append(None)
+            elif isinstance(state_obj, PerAggregateCountDistinctState):
+                # Grow counts vector and associated storage for distinct sets
+                while state_obj.counts.size() < new_group_count:
+                    state_obj.counts.push_back(0)
+                # Ensure distinct_sets list matches new_group_count
+                while len(state_obj.distinct_sets) < new_group_count:
+                    state_obj.distinct_sets.append(set())
 
     cdef object _get_per_aggregate_state(self, Py_ssize_t agg_idx):
         """Fetch per-aggregate state object for the given aggregate index.
@@ -2232,6 +2237,11 @@ cdef class CarcharGroupStateEngine:
         cdef uint64_t* temp_hashes = NULL
         cdef uint64_t[::1] hash_view
         cdef Py_ssize_t row_idx
+        cdef int64_t state_index
+        cdef uint64_t value_hash
+
+        # Fetch per-aggregate state if available
+        cdef object per_agg_state = self._get_per_aggregate_state(0)
 
         if isinstance(value_vector, Int64Vector):
             value_ptr = (<Int64Vector> value_vector).ptr
@@ -2241,6 +2251,14 @@ cdef class CarcharGroupStateEngine:
                 value_nulls,
                 state_indices, row_count,
             )
+            # Populate per-aggregate state if available
+            if per_agg_state is not None:
+                for row_idx in range(row_count):
+                    if _bitmap_is_valid(value_nulls, row_idx):
+                        state_index = state_indices[row_idx]
+                        value_hash = (<uint64_t*> value_ptr.data)[row_idx]
+                        (<PerAggregateCountDistinctState> per_agg_state).distinct_sets[state_index].add(value_hash)
+                        (<PerAggregateCountDistinctState> per_agg_state).counts[state_index] = len((<PerAggregateCountDistinctState> per_agg_state).distinct_sets[state_index])
             return
 
         if isinstance(value_vector, IntegerVector):
@@ -2256,6 +2274,13 @@ cdef class CarcharGroupStateEngine:
                     temp_hashes, value_nulls,
                     state_indices, row_count,
                 )
+                # Populate per-aggregate state if available
+                if per_agg_state is not None:
+                    for row_idx in range(row_count):
+                        if _bitmap_is_valid(value_nulls, row_idx):
+                            state_index = state_indices[row_idx]
+                            (<PerAggregateCountDistinctState> per_agg_state).distinct_sets[state_index].add(temp_hashes[row_idx])
+                            (<PerAggregateCountDistinctState> per_agg_state).counts[state_index] = len((<PerAggregateCountDistinctState> per_agg_state).distinct_sets[state_index])
             finally:
                 free(temp_hashes)
             return
@@ -2270,6 +2295,13 @@ cdef class CarcharGroupStateEngine:
             value_nulls,
             state_indices, row_count,
         )
+        # Populate per-aggregate state if available
+        if per_agg_state is not None:
+            for row_idx in range(row_count):
+                if _bitmap_is_valid(value_nulls, row_idx):
+                    state_index = state_indices[row_idx]
+                    (<PerAggregateCountDistinctState> per_agg_state).distinct_sets[state_index].add(hash_view[row_idx])
+                    (<PerAggregateCountDistinctState> per_agg_state).counts[state_index] = len((<PerAggregateCountDistinctState> per_agg_state).distinct_sets[state_index])
 
     cdef void _ingest_count_distinct_multi_for_states(
         self,
@@ -2287,6 +2319,11 @@ cdef class CarcharGroupStateEngine:
         cdef uint64_t* temp_hashes = NULL
         cdef uint64_t[::1] hash_view
         cdef Py_ssize_t row_idx
+        cdef int64_t state_index
+        cdef uint64_t value_hash
+
+        # Fetch per-aggregate state if available
+        cdef object per_agg_state = self._get_per_aggregate_state(agg_idx)
 
         if isinstance(value_vector, Int64Vector):
             value_ptr = (<Int64Vector> value_vector).ptr
@@ -2296,6 +2333,14 @@ cdef class CarcharGroupStateEngine:
                 value_nulls,
                 state_indices, row_count, self._multi_agg_count, agg_idx,
             )
+            # Populate per-aggregate state if available
+            if per_agg_state is not None:
+                for row_idx in range(row_count):
+                    if _bitmap_is_valid(value_nulls, row_idx):
+                        state_index = state_indices[row_idx]
+                        value_hash = (<uint64_t*> value_ptr.data)[row_idx]
+                        (<PerAggregateCountDistinctState> per_agg_state).distinct_sets[state_index].add(value_hash)
+                        (<PerAggregateCountDistinctState> per_agg_state).counts[state_index] = len((<PerAggregateCountDistinctState> per_agg_state).distinct_sets[state_index])
             return
 
         if isinstance(value_vector, IntegerVector):
@@ -2311,6 +2356,14 @@ cdef class CarcharGroupStateEngine:
                     temp_hashes, value_nulls,
                     state_indices, row_count, self._multi_agg_count, agg_idx,
                 )
+                # Populate per-aggregate state if available
+                if per_agg_state is not None:
+                    for row_idx in range(row_count):
+                        if _bitmap_is_valid(value_nulls, row_idx):
+                            state_index = state_indices[row_idx]
+                            value_hash = temp_hashes[row_idx]
+                            (<PerAggregateCountDistinctState> per_agg_state).distinct_sets[state_index].add(value_hash)
+                            (<PerAggregateCountDistinctState> per_agg_state).counts[state_index] = len((<PerAggregateCountDistinctState> per_agg_state).distinct_sets[state_index])
             finally:
                 free(temp_hashes)
             return
@@ -2325,6 +2378,14 @@ cdef class CarcharGroupStateEngine:
             value_nulls,
             state_indices, row_count, self._multi_agg_count, agg_idx,
         )
+        # Populate per-aggregate state if available
+        if per_agg_state is not None:
+            for row_idx in range(row_count):
+                if _bitmap_is_valid(value_nulls, row_idx):
+                    state_index = state_indices[row_idx]
+                    value_hash = hash_view[row_idx]
+                    (<PerAggregateCountDistinctState> per_agg_state).distinct_sets[state_index].add(value_hash)
+                    (<PerAggregateCountDistinctState> per_agg_state).counts[state_index] = len((<PerAggregateCountDistinctState> per_agg_state).distinct_sets[state_index])
 
     cdef void _ingest_any_value_var_for_states(
         self,
@@ -2350,6 +2411,7 @@ cdef class CarcharGroupStateEngine:
         cdef Py_ssize_t max_bytes = 0
         cdef size_t cursor_start
         cdef size_t arena_cursor
+        cdef object per_agg_state = self._get_per_aggregate_state(0)
 
         if _vector_const_accessor(value_vector) != NULL:
             if _const_accessor_is_null(_vector_const_accessor(value_vector)):
@@ -2370,6 +2432,9 @@ cdef class CarcharGroupStateEngine:
                 if self._seen[state_index] == 0:
                     self._store_object_state_bytes(state_index, data_ptr, data_len)
                     self._seen[state_index] = 1
+                    # Populate per-aggregate state if available
+                    if per_agg_state is not None:
+                        (<PerAggregateAnyValueState> per_agg_state).seen[state_index] = 1
             return
 
         if self._is_stringlike_vector(value_vector):
@@ -2410,6 +2475,21 @@ cdef class CarcharGroupStateEngine:
                     row_count,
                 )
                 self._object_state_bytes.resize(arena_cursor)
+
+                # Populate per-aggregate state if available
+                if per_agg_state is not None:
+                    for row_idx in range(row_count):
+                        if _bitmap_is_valid(value_nulls, row_idx):
+                            state_index = state_indices[row_idx]
+                            # Copy results from flattened storage to per-aggregate state
+                            while (<PerAggregateAnyValueState> per_agg_state).object_bytes.size() < self._object_state_bytes.size():
+                                (<PerAggregateAnyValueState> per_agg_state).object_bytes.push_back(self._object_state_bytes[(<PerAggregateAnyValueState> per_agg_state).object_bytes.size()])
+                            while (<PerAggregateAnyValueState> per_agg_state).object_starts.size() < self._object_state_starts.size():
+                                (<PerAggregateAnyValueState> per_agg_state).object_starts.push_back(self._object_state_starts[(<PerAggregateAnyValueState> per_agg_state).object_starts.size()])
+                            while (<PerAggregateAnyValueState> per_agg_state).object_lengths.size() < self._object_state_lengths.size():
+                                (<PerAggregateAnyValueState> per_agg_state).object_lengths.push_back(self._object_state_lengths[(<PerAggregateAnyValueState> per_agg_state).object_lengths.size()])
+                            while (<PerAggregateAnyValueState> per_agg_state).seen.size() < self._seen.size():
+                                (<PerAggregateAnyValueState> per_agg_state).seen.push_back(self._seen[(<PerAggregateAnyValueState> per_agg_state).seen.size()])
             finally:
                 free(values_data)
                 free(values_lens)
@@ -2425,6 +2505,10 @@ cdef class CarcharGroupStateEngine:
             if self._seen[state_index] == 0:
                 self._object_state[state_index] = value_obj
                 self._seen[state_index] = 1
+                # Populate per-aggregate state if available
+                if per_agg_state is not None:
+                    (<PerAggregateAnyValueState> per_agg_state).object_values[state_index] = value_obj
+                    (<PerAggregateAnyValueState> per_agg_state).seen[state_index] = 1
 
     cdef void _ingest_any_value_var_multi_for_states(
         self,
@@ -2439,6 +2523,7 @@ cdef class CarcharGroupStateEngine:
         cdef object value_vector = morsel.column(self._multi_value_columns[agg_idx])
         cdef uint8_t* value_nulls = self._value_null_bitmap(value_vector)
         cdef Py_ssize_t row_idx
+        cdef int64_t state_index
         cdef Py_ssize_t offset
         cdef object value_obj
         cdef const char* data_ptr = NULL
@@ -2450,6 +2535,7 @@ cdef class CarcharGroupStateEngine:
         cdef Py_ssize_t mv_max_bytes = 0
         cdef size_t mv_cursor_start
         cdef size_t mv_arena_cursor
+        cdef object per_agg_state = self._get_per_aggregate_state(agg_idx)
 
         if _vector_const_accessor(value_vector) != NULL:
             if _const_accessor_is_null(_vector_const_accessor(value_vector)):
@@ -2470,6 +2556,10 @@ cdef class CarcharGroupStateEngine:
                 if self._multi_seen[offset] == 0:
                     self._store_multi_object_state_bytes(offset, data_ptr, data_len)
                     self._multi_seen[offset] = 1
+                    # Populate per-aggregate state if available
+                    if per_agg_state is not None:
+                        state_index = state_indices[row_idx]
+                        (<PerAggregateAnyValueState> per_agg_state).seen[state_index] = 1
             return
 
         if self._is_stringlike_vector(value_vector):
@@ -2512,6 +2602,21 @@ cdef class CarcharGroupStateEngine:
                     agg_idx,
                 )
                 self._multi_object_state_bytes.resize(mv_arena_cursor)
+
+                # Populate per-aggregate state if available
+                if per_agg_state is not None:
+                    for row_idx in range(row_count):
+                        if _bitmap_is_valid(value_nulls, row_idx):
+                            state_index = state_indices[row_idx]
+                            # Copy results from flattened storage to per-aggregate state
+                            while (<PerAggregateAnyValueState> per_agg_state).object_bytes.size() < self._multi_object_state_bytes.size():
+                                (<PerAggregateAnyValueState> per_agg_state).object_bytes.push_back(self._multi_object_state_bytes[(<PerAggregateAnyValueState> per_agg_state).object_bytes.size()])
+                            while (<PerAggregateAnyValueState> per_agg_state).object_starts.size() < self._multi_object_state_starts.size():
+                                (<PerAggregateAnyValueState> per_agg_state).object_starts.push_back(self._multi_object_state_starts[(<PerAggregateAnyValueState> per_agg_state).object_starts.size()])
+                            while (<PerAggregateAnyValueState> per_agg_state).object_lengths.size() < self._multi_object_state_lengths.size():
+                                (<PerAggregateAnyValueState> per_agg_state).object_lengths.push_back(self._multi_object_state_lengths[(<PerAggregateAnyValueState> per_agg_state).object_lengths.size()])
+                            while (<PerAggregateAnyValueState> per_agg_state).seen.size() < self._multi_seen.size():
+                                (<PerAggregateAnyValueState> per_agg_state).seen.push_back(self._multi_seen[(<PerAggregateAnyValueState> per_agg_state).seen.size()])
             finally:
                 free(mv_values_data)
                 free(mv_values_lens)
@@ -2527,6 +2632,11 @@ cdef class CarcharGroupStateEngine:
             if self._multi_seen[offset] == 0:
                 self._multi_object_state[offset] = value_obj
                 self._multi_seen[offset] = 1
+                # Populate per-aggregate state if available
+                if per_agg_state is not None:
+                    state_index = state_indices[row_idx]
+                    (<PerAggregateAnyValueState> per_agg_state).object_values[state_index] = value_obj
+                    (<PerAggregateAnyValueState> per_agg_state).seen[state_index] = 1
 
     cdef void _ingest_object_minmax_for_states(
         self,
@@ -5204,7 +5314,7 @@ cdef class CarcharGroupStateEngine:
         if saw_dict_group_key:
             record_dict_groupby_fastpath_hit(self)
 
-        self._maybe_init_bloom()
+        _maybe_init_bloom(self)
         t_reserve_start = time.monotonic_ns()
         self._reserve_for_rows(morsel.num_rows)
         record_groupby_reserve_time(self, t_reserve_start)
@@ -5314,17 +5424,7 @@ cdef class CarcharGroupStateEngine:
             stop,
         )
 
-    cdef object _build_multi_object_state_vector(self, Py_ssize_t start, Py_ssize_t stop, Py_ssize_t agg_idx):
-        return build_multi_object_state_vector(
-            self._multi_object_state_bytes,
-            self._multi_object_state_starts,
-            self._multi_object_state_lengths,
-            self._multi_seen,
-            self._multi_agg_count,
-            agg_idx,
-            start,
-            stop,
-        )
+
 
     cdef Morsel _empty_morsel(self):
         cdef list names = self._output_names()
