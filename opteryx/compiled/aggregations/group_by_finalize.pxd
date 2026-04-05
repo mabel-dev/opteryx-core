@@ -117,6 +117,60 @@ cdef list build_finalize_multi_aggregate_vectors(
     Py_ssize_t multi_agg_count,
     Py_ssize_t start,
     Py_ssize_t stop,
+    list per_agg_states=*,
+)
+cdef list build_finalize_multi_aggregate_vectors_per_aggregate(
+    list per_aggregate_states,
+    vector[int64_t]& multi_agg_modes,
+    vector[int64_t]& multi_value_kinds,
+    vector[int64_t]& multi_counts,
+    vector[int64_t]& multi_i64_state,
+    vector[double]& multi_f64_state,
+    vector[int64_t]& multi_seen,
+    vector[double]& multi_avg_sums,
+    vector[int64_t]& multi_avg_counts,
+    vector[uint8_t]& multi_object_state_bytes,
+    vector[int32_t]& multi_object_state_starts,
+    vector[int32_t]& multi_object_state_lengths,
+    list multi_object_state,
+    Py_ssize_t multi_agg_count,
+    Py_ssize_t start,
+    Py_ssize_t stop,
+)
+cdef object build_finalize_multi_count_per_aggregate(
+    object agg_state,
+    Py_ssize_t start,
+    Py_ssize_t stop,
+)
+cdef object build_finalize_multi_sum_int64_per_aggregate(
+    object agg_state,
+    Py_ssize_t start,
+    Py_ssize_t stop,
+)
+cdef object build_finalize_multi_sum_float64_per_aggregate(
+    object agg_state,
+    Py_ssize_t start,
+    Py_ssize_t stop,
+)
+cdef object build_finalize_multi_minmax_int64_per_aggregate(
+    object agg_state,
+    Py_ssize_t start,
+    Py_ssize_t stop,
+)
+cdef object build_finalize_multi_minmax_float64_per_aggregate(
+    object agg_state,
+    Py_ssize_t start,
+    Py_ssize_t stop,
+)
+cdef object build_finalize_multi_avg_int64_per_aggregate(
+    object agg_state,
+    Py_ssize_t start,
+    Py_ssize_t stop,
+)
+cdef object build_finalize_multi_avg_float64_per_aggregate(
+    object agg_state,
+    Py_ssize_t start,
+    Py_ssize_t stop,
 )
 cdef object build_finalize_object_aggregate_vector(
     vector[uint8_t]& object_state_bytes,

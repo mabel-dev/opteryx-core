@@ -9,7 +9,7 @@ def _inject_partition_kernel_for_tests(monkeypatch):
     Unit tests run without compiling new extensions in some environments.
     Inject a deterministic test kernel only when the compiled module is absent.
     """
-    if partitioning._row_indexes_by_bin_flat is not None:
+    if partitioning.row_indexes_by_bin_flat is not None:
         return
 
     def _emulated_compiled(hashes, num_bins, shift_bits):
@@ -27,4 +27,4 @@ def _inject_partition_kernel_for_tests(monkeypatch):
             offsets.append(running)
         return flat, offsets
 
-    monkeypatch.setattr(partitioning, "_row_indexes_by_bin_flat", _emulated_compiled)
+    monkeypatch.setattr(partitioning, "row_indexes_by_bin_flat", _emulated_compiled)

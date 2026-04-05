@@ -9,6 +9,7 @@ from libc.stdint cimport int64_t, uint8_t
 from opteryx.compiled.draken.core.buffers cimport DictAccessor
 from opteryx.compiled.aggregations.kernels.utils cimport _bitmap_is_valid
 from opteryx.compiled.aggregations.vector_readers cimport _dict_accessor_read_float_value
+from opteryx.compiled.aggregations.aggregations_state_classes cimport PerAggregateSumFloat64State
 
 
 cdef void sum_f64_accumulate(
@@ -107,3 +108,60 @@ cdef void sum_f64_multi_accumulate_from_dict(
             offset = state_indices[i] * multi_agg_count + agg_idx
             multi_f64_state[offset] = multi_f64_state[offset] + val
             multi_seen[offset] = 1
+
+
+cdef void sum_f64_multi_accumulate_per_aggregate(
+    object state_obj,
+    const int64_t* state_indices,
+    const double* values,
+    const uint8_t* value_nulls,
+    Py_ssize_t row_count,
+) noexcept:
+    """
+    Accumulate SUM for a plain float64 value column using per-aggregate state object.
+
+    For each row i in [0, row_count):
+      if value_nulls[i] is valid: values[state_indices[i]] += values[i]; seen[state_indices[i]] = 1
+
+    Direct indexing by state_index without offset math.
+    """
+    cdef Py_ssize_t i
+    cdef int64_t sidx
+    cdef PerAggregateSumFloat64State state_obj_cast = <PerAggregateSumFloat64State>state_obj
+    cdef double* values_ptr = state_obj_cast.values.data()
+    cdef int64_t* seen_ptr = state_obj_cast.seen.data()
+    for i in range(row_count):
+        if _bitmap_is_valid(value_nulls, i):
+            sidx = state_indices[i]
+            values_ptr[sidx] = values_ptr[sidx] + values[i]
+            seen_ptr[sidx] = 1
+
+
+cdef void sum_f64_multi_accumulate_from_dict_per_aggregate(
+    object state_obj,
+    const int64_t* state_indices,
+    DictAccessor* accessor,
+    Py_ssize_t row_count,
+) except *:
+    """
+    Accumulate SUM from a dictionary-encoded float64 value column using per-aggregate state object.
+
+    For each row i in [0, row_count):
+      if value_nulls[i] is valid: values[state_indices[i]] += dict_value[i]; seen[state_indices[i]] = 1
+
+    Not nogil because _dict_accessor_read_float_value is except*.
+    Direct indexing by state_index without offset math.
+    """
+    cdef Py_ssize_t i
+    cdef int64_t sidx
+    cdef double val
+    cdef uint8_t* value_nulls = accessor.row_nulls
+    cdef PerAggregateSumFloat64State state_obj_cast = <PerAggregateSumFloat64State>state_obj
+    cdef double* values_ptr = state_obj_cast.values.data()
+    cdef int64_t* seen_ptr = state_obj_cast.seen.data()
+    for i in range(row_count):
+        if _bitmap_is_valid(value_nulls, i):
+            val = _dict_accessor_read_float_value(accessor, i)
+            sidx = state_indices[i]
+            values_ptr[sidx] = values_ptr[sidx] + val
+            seen_ptr[sidx] = 1

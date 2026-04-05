@@ -58,3 +58,26 @@ cdef void sum_integer_multi_accumulate(
     Py_ssize_t multi_agg_count,
     Py_ssize_t agg_idx,
 ) noexcept nogil
+
+# Phase 2: Per-aggregate kernel signatures
+cdef void sum_i64_multi_accumulate_per_aggregate(
+    object state_obj,
+    const int64_t* state_indices,
+    const int64_t* values,
+    const uint8_t* value_nulls,
+    Py_ssize_t row_count,
+) noexcept
+
+cdef void sum_i64_multi_accumulate_from_dict_per_aggregate(
+    object state_obj,
+    const int64_t* state_indices,
+    DictAccessor* accessor,
+    Py_ssize_t row_count,
+) except *
+
+cdef void sum_integer_multi_accumulate_per_aggregate(
+    object state_obj,
+    const int64_t* state_indices,
+    DrakenFixedBuffer* value_ptr,
+    Py_ssize_t row_count,
+) noexcept

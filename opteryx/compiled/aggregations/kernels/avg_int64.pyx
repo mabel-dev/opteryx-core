@@ -9,6 +9,7 @@ from libc.stdint cimport int64_t, uint8_t
 from opteryx.compiled.draken.core.buffers cimport DictAccessor, DrakenFixedBuffer
 from opteryx.compiled.aggregations.kernels.utils cimport _bitmap_is_valid, _read_integer_value
 from opteryx.compiled.aggregations.vector_readers cimport _dict_accessor_read_int_value
+from opteryx.compiled.aggregations.aggregations_state_classes cimport PerAggregateAvgInt64State
 
 
 cdef void avg_i64_accumulate(
@@ -151,3 +152,86 @@ cdef void avg_integer_multi_accumulate(
             offset = state_indices[i] * multi_agg_count + agg_idx
             multi_avg_sums[offset] = multi_avg_sums[offset] + <double> val
             multi_avg_counts[offset] = multi_avg_counts[offset] + 1
+
+
+cdef void avg_i64_multi_accumulate_per_aggregate(
+    object state_obj,
+    const int64_t* state_indices,
+    const int64_t* values,
+    const uint8_t* value_nulls,
+    Py_ssize_t row_count,
+) noexcept:
+    """
+    Accumulate AVG for a plain int64 value column using per-aggregate state object.
+
+    For each row i in [0, row_count):
+      if value_nulls[i] is valid: sums[state_indices[i]] += values[i]; counts[state_indices[i]] += 1
+
+    Direct indexing by state_index without offset math.
+    """
+    cdef Py_ssize_t i
+    cdef int64_t sidx
+    cdef double* sums_ptr = (<PerAggregateAvgInt64State>state_obj).sums.data()
+    cdef int64_t* counts_ptr = (<PerAggregateAvgInt64State>state_obj).counts.data()
+    for i in range(row_count):
+        if _bitmap_is_valid(value_nulls, i):
+            sidx = state_indices[i]
+            sums_ptr[sidx] = sums_ptr[sidx] + <double> values[i]
+            counts_ptr[sidx] = counts_ptr[sidx] + 1
+
+
+cdef void avg_i64_multi_accumulate_from_dict_per_aggregate(
+    object state_obj,
+    const int64_t* state_indices,
+    DictAccessor* accessor,
+    Py_ssize_t row_count,
+) except *:
+    """
+    Accumulate AVG from a dictionary-encoded int64 value column using per-aggregate state object.
+
+    For each row i in [0, row_count):
+      if value_nulls[i] is valid: sums[state_indices[i]] += dict_value[i]; counts[state_indices[i]] += 1
+
+    Not nogil because _dict_accessor_read_int_value is except*.
+    Direct indexing by state_index without offset math.
+    """
+    cdef Py_ssize_t i
+    cdef int64_t sidx
+    cdef int64_t val
+    cdef uint8_t* value_nulls = accessor.row_nulls
+    cdef double* sums_ptr = (<PerAggregateAvgInt64State>state_obj).sums.data()
+    cdef int64_t* counts_ptr = (<PerAggregateAvgInt64State>state_obj).counts.data()
+    for i in range(row_count):
+        if _bitmap_is_valid(value_nulls, i):
+            val = _dict_accessor_read_int_value(accessor, i)
+            sidx = state_indices[i]
+            sums_ptr[sidx] = sums_ptr[sidx] + <double> val
+            counts_ptr[sidx] = counts_ptr[sidx] + 1
+
+
+cdef void avg_integer_multi_accumulate_per_aggregate(
+    object state_obj,
+    const int64_t* state_indices,
+    DrakenFixedBuffer* value_ptr,
+    Py_ssize_t row_count,
+) noexcept:
+    """
+    Accumulate AVG for a generic integer value column (int8/16/32/64) using per-aggregate state object.
+
+    For each row i in [0, row_count):
+      if value_nulls[i] is valid: sums[state_indices[i]] += read_value[i]; counts[state_indices[i]] += 1
+
+    Direct indexing by state_index without offset math.
+    """
+    cdef Py_ssize_t i
+    cdef int64_t sidx
+    cdef int64_t val
+    cdef uint8_t* value_nulls = <uint8_t*> value_ptr.null_bitmap
+    cdef double* sums_ptr = (<PerAggregateAvgInt64State>state_obj).sums.data()
+    cdef int64_t* counts_ptr = (<PerAggregateAvgInt64State>state_obj).counts.data()
+    for i in range(row_count):
+        if _bitmap_is_valid(value_nulls, i):
+            val = _read_integer_value(value_ptr, i)
+            sidx = state_indices[i]
+            sums_ptr[sidx] = sums_ptr[sidx] + <double> val
+            counts_ptr[sidx] = counts_ptr[sidx] + 1
