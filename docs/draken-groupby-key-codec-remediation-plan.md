@@ -76,6 +76,15 @@ Current rewrite implication:
 - the segfault remains relevant only insofar as it can expose a mismatch left behind by the storage rewrite
 - many remaining unchecked boxes are validation, cleanup, and follow-up design tasks rather than missing core codec implementation
 
+Precise current isolation result:
+- the failing shape is no longer “single fixed-int group by in general”
+- `COUNT(*) FROM ... GROUP BY planetId` now works again
+- `planetId, COUNT(*) FROM ... GROUP BY planetId` now works again
+- the remaining failing shape is single fixed-int group by with multiple projected outputs, for example `planetId, COUNT(*), MAX(id)` and related variants such as `MIN(id)` and `COUNT(id)`
+- this means the common factor is more likely the single-key multi-aggregate finalize/construction path than any one aggregate kernel
+- the first meaningful path transition is when `self._multi_agg_count > 0`, which switches finalize from `_build_chunk_morsel()` to `_build_chunk_morsel_multi()` for the same single fixed-int key shape
+- the current leading hypothesis is therefore: single fixed-int key + multi-aggregate finalize/construction is still mismatched after the storage rewrite, while the simpler single-aggregate path is now working again
+
 Current storage-contract finding:
 - the native `decode_multi_record(...)` API is schema-count-driven by the sizes of the caller-provided output vectors
 - it infers fixed-key count from `fixed_values_out.size()` and encoded-key count from `encoded_values_out.size()`
@@ -97,6 +106,12 @@ Current finalize/rewrite finding:
 
 ### Sidequest status: segfault isolation
 The isolated repro still segfaults under `make b` after the latest decode-contract fixes, finalize hardening, and native morsel-construction breadcrumb addition.
+
+Current sidequest refinement:
+- the broad single fixed-int group-by regression has been narrowed
+- simple single fixed-int grouped shapes now work again
+- the remaining failing shape is specifically single fixed-int group by with multiple projected outputs, which points at finalize/construction branching rather than a general fixed-key ingest failure
+- the next sidequest work, if continued, should stay focused on the single-key multi-aggregate finalize/construction path rather than on aggregate-specific kernels in isolation
 
 That remains a sidequest to the rewrite. The rewrite should continue to be driven by:
 - completing the storage migration
@@ -237,6 +252,7 @@ Status note:
   - [ ] confirm null bitmap correctness under runtime execution
   - [ ] confirm date/time/timestamp round-trip correctness under runtime execution
   - [ ] confirm finalize runtime behavior once the storage rewrite is exercised end-to-end without relying on legacy assumptions
+  - [ ] if the sidequest continues, isolate the single-key multi-aggregate finalize/construction mismatch now that the simpler single fixed-int grouped shapes are working again
 
 ## Phase 5 - Remove zpp from group-key paths
 
@@ -360,6 +376,7 @@ The implementation should proceed with the following assumptions unless a later 
 - `_build_chunk_morsel_multi(...)` now records a more specific breadcrumb immediately before the native `Morsel.from_vectors(...)` call, but the repeated repro still has not surfaced a Python-visible finalize-stage distinction after that change.
 - Most remaining unchecked boxes are now runtime-only validation or isolation tasks rather than missing codec-format, decode-contract, or finalize-shape implementation work.
 - Single `int64` key-group insertion paths now bypass arena serialization and store key values directly in `_group_key_values` / `_group_key_valid`, so the storage rewrite no longer routes new single fixed `int64` states through `append_single_fixed_key_record(...)`.
+- The broad single fixed-int group-by regression has been narrowed: simple grouped shapes now work again, while the remaining failing shape is single fixed-int group by with multiple projected outputs, which points at the single-key multi-aggregate finalize/construction path rather than at a general fixed-key ingest failure.
 - New rewrite-focused regression coverage now exists for:
   - direct single fixed / single encoded / mixed multi-key codec smoke paths
   - single `int64` key-group storage bypass behavior
