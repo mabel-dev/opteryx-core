@@ -2,12 +2,10 @@ from libc.stdint cimport int64_t, uint64_t
 
 
 cdef inline Py_ssize_t _state_count(object self) noexcept
-cdef inline Py_ssize_t _multi_offset(object self, int64_t state_index, Py_ssize_t agg_idx) noexcept
 
 cdef inline void _initialize_per_aggregate_states(object self) except *
 cdef inline void _grow_per_aggregate_states(object self, Py_ssize_t additional_states) except *
 cdef inline void _assert_per_aggregate_state_sizes(object self) except *
-cdef inline object _get_per_aggregate_state(object self, int64_t state_index, Py_ssize_t agg_idx)
 
 cdef inline void _bloom_record_new_state(object self, uint64_t row_hash) noexcept
 cdef inline bint _bloom_might_contain(object self, uint64_t h) noexcept

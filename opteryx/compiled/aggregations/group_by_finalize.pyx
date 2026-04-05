@@ -22,6 +22,9 @@ from opteryx.compiled.aggregations.aggregations_state_classes cimport PerAggrega
 from opteryx.compiled.aggregations.aggregations_state_classes cimport PerAggregateMinMaxFloat64State
 from opteryx.compiled.aggregations.aggregations_state_classes cimport PerAggregateAvgInt64State
 from opteryx.compiled.aggregations.aggregations_state_classes cimport PerAggregateAvgFloat64State
+from opteryx.compiled.aggregations.aggregations_state_classes cimport PerAggregateObjectState
+from opteryx.compiled.aggregations.aggregations_state_classes cimport PerAggregateAnyValueState
+from opteryx.compiled.aggregations.aggregations_state_classes cimport PerAggregateCountDistinctState
 from opteryx.compiled.aggregations.key_codec cimport decode_multi_key_record
 from opteryx.compiled.aggregations.key_codec cimport decode_single_encoded_key_record
 from opteryx.compiled.aggregations.key_codec cimport decode_single_fixed_key_record
@@ -1546,6 +1549,100 @@ cdef object build_finalize_multi_avg_float64_per_aggregate(
     return result
 
 
+cdef object build_finalize_multi_anyvalue_per_aggregate(
+    object agg_state,
+    Py_ssize_t start,
+    Py_ssize_t stop,
+):
+    """Finalize ANY_VALUE aggregate from per-aggregate state."""
+    cdef PerAggregateAnyValueState state = <PerAggregateAnyValueState> agg_state
+    cdef Py_ssize_t length = stop - start
+    cdef Py_ssize_t idx
+    cdef Py_ssize_t state_index
+    cdef list agg_objects
+
+    if stop < start:
+        raise RuntimeError(f"invalid anyvalue aggregate finalize range: start={start}, stop={stop}")
+
+    # Use byte storage if available (more compact than object list)
+    if state.object_lengths.size() == state.seen.size():
+        if <Py_ssize_t> state.seen.size() < stop:
+            raise RuntimeError(
+                f"anyvalue aggregate seen store shorter than finalize range: "
+                f"have {state.seen.size()} entries, need {stop}"
+            )
+        if <Py_ssize_t> state.object_starts.size() < stop:
+            raise RuntimeError(
+                f"anyvalue aggregate start store shorter than finalize range: "
+                f"have {state.object_starts.size()} entries, need {stop}"
+            )
+        if <Py_ssize_t> state.object_lengths.size() < stop:
+            raise RuntimeError(
+                f"anyvalue aggregate length store shorter than finalize range: "
+                f"have {state.object_lengths.size()} entries, need {stop}"
+            )
+        return build_object_state_vector(
+            state.object_bytes,
+            state.object_starts,
+            state.object_lengths,
+            state.seen,
+            start,
+            stop,
+        )
+
+    # Otherwise use object list storage (fallback)
+    if len(state.object_values) < stop:
+        raise RuntimeError(
+            f"anyvalue aggregate object store shorter than finalize range: "
+            f"have {len(state.object_values)} entries, need {stop}"
+        )
+
+    agg_objects = []
+    for idx in range(length):
+        state_index = start + idx
+        if state.seen[state_index] == 0:
+            agg_objects.append(None)
+        else:
+            agg_objects.append(state.object_values[state_index])
+    return build_native_object_vector(agg_objects)
+
+
+cdef object build_finalize_multi_count_distinct_per_aggregate(
+    object agg_state,
+    Py_ssize_t start,
+    Py_ssize_t stop,
+):
+    """Finalize COUNT(DISTINCT) aggregate from per-aggregate state."""
+    cdef PerAggregateCountDistinctState state = <PerAggregateCountDistinctState> agg_state
+    cdef Py_ssize_t length = stop - start
+    cdef Py_ssize_t idx
+    cdef Int64Vector result
+    cdef int64_t* result_data
+
+    if stop < start:
+        raise RuntimeError(f"invalid count_distinct aggregate finalize range: start={start}, stop={stop}")
+
+    if <Py_ssize_t> state.counts.size() < stop:
+        raise RuntimeError(
+            f"count_distinct aggregate count store shorter than finalize range: "
+            f"have {state.counts.size()} entries, need {stop}"
+        )
+
+    if len(state.distinct_sets) < stop:
+        raise RuntimeError(
+            f"count_distinct aggregate distinct_sets store shorter than finalize range: "
+            f"have {len(state.distinct_sets)} entries, need {stop}"
+        )
+
+    result = Int64Vector(length)
+    result_data = <int64_t*> result.ptr.data
+
+    for idx in range(length):
+        result_data[idx] = state.counts[start + idx]
+
+    return result
+
+
 cdef list build_finalize_multi_aggregate_vectors_per_aggregate(
     list per_aggregate_states,
     vector[int64_t]& multi_agg_modes,
@@ -1590,25 +1687,20 @@ cdef list build_finalize_multi_aggregate_vectors_per_aggregate(
         agg_mode = multi_agg_modes[agg_idx]
         agg_value_kind = multi_value_kinds[agg_idx]
 
-        # Fall back to flattened path for object aggregates or missing per-aggregate state
-        if agg_state is None or (agg_value_kind == VALUE_OBJECT and agg_mode in (AGG_MIN, AGG_MAX)):
-            vectors.append(
-                build_finalize_multi_object_aggregate_vector(
-                    multi_object_state_bytes,
-                    multi_object_state_starts,
-                    multi_object_state_lengths,
-                    multi_seen,
-                    multi_object_state,
-                    multi_agg_count,
-                    agg_idx,
-                    start,
-                    stop,
-                )
+        # Phase 3+: No fallback. Fail if state is missing.
+        if agg_state is None:
+            raise RuntimeError(
+                f"aggregate {agg_idx} (mode={agg_mode}, value_kind={agg_value_kind}) "
+                f"has no per-aggregate state - per-aggregate finalize is mandatory"
             )
-            continue
 
-        # Dispatch to appropriate per-aggregate finalize helper based on state type
-        if isinstance(agg_state, PerAggregateCountState):
+        # Phase 4 Complete: Per-aggregate finalize for object aggregates is now active
+        if agg_mode == AGG_ANY_VALUE:
+            vectors.append(build_finalize_multi_anyvalue_per_aggregate(agg_state, start, stop))
+        elif agg_mode == AGG_COUNT_DISTINCT:
+            vectors.append(build_finalize_multi_count_distinct_per_aggregate(agg_state, start, stop))
+        # Dispatch to helper based on state type for numeric aggregates
+        elif isinstance(agg_state, PerAggregateCountState):
             vectors.append(build_finalize_multi_count_per_aggregate(agg_state, start, stop))
         elif isinstance(agg_state, PerAggregateSumInt64State):
             vectors.append(build_finalize_multi_sum_int64_per_aggregate(agg_state, start, stop))
@@ -1622,9 +1714,22 @@ cdef list build_finalize_multi_aggregate_vectors_per_aggregate(
             vectors.append(build_finalize_multi_avg_int64_per_aggregate(agg_state, start, stop))
         elif isinstance(agg_state, PerAggregateAvgFloat64State):
             vectors.append(build_finalize_multi_avg_float64_per_aggregate(agg_state, start, stop))
+        elif isinstance(agg_state, PerAggregateAnyValueState):
+            # This branch is reached when agg_mode is not yet dispatched (should not happen)
+            raise RuntimeError(
+                f"aggregate {agg_idx}: PerAggregateAnyValueState but agg_mode is {agg_mode}, "
+                f"expected AGG_ANY_VALUE ({AGG_ANY_VALUE})"
+            )
+        elif isinstance(agg_state, PerAggregateCountDistinctState):
+            # This branch is reached when agg_mode is not yet dispatched (should not happen)
+            raise RuntimeError(
+                f"aggregate {agg_idx}: PerAggregateCountDistinctState but agg_mode is {agg_mode}, "
+                f"expected AGG_COUNT_DISTINCT ({AGG_COUNT_DISTINCT})"
+            )
         else:
             raise RuntimeError(
-                f"unsupported per-aggregate state type: {type(agg_state).__name__}"
+                f"aggregate {agg_idx} has unsupported state type: {type(agg_state).__name__} "
+                f"(mode={agg_mode}, value_kind={agg_value_kind})"
             )
 
     if len(vectors) != multi_agg_count:
@@ -1684,76 +1789,44 @@ cdef list build_finalize_multi_aggregate_vectors(
             f"have {multi_value_kinds.size()} kinds, need {multi_agg_count}"
         )
 
-    # If per-aggregate states are provided, use the per-aggregate finalize path
-    if per_agg_states is not None and len(per_agg_states) > 0:
-        return build_finalize_multi_aggregate_vectors_per_aggregate(
-            per_agg_states,
-            multi_agg_modes,
-            multi_value_kinds,
-            multi_counts,
-            multi_i64_state,
-            multi_f64_state,
-            multi_seen,
-            multi_avg_sums,
-            multi_avg_counts,
-            multi_object_state_bytes,
-            multi_object_state_starts,
-            multi_object_state_lengths,
-            multi_object_state,
-            multi_agg_count,
-            start,
-            stop,
-        )
+    # Phase 3+: Per-aggregate finalize is mandatory.
+    # Architectural principle: Always prefer failure over silent degradation.
+    # No fallback to flattened path - if per-aggregate state is missing or incomplete, fail loudly.
 
-    for agg_idx in range(multi_agg_count):
-        agg_mode = multi_agg_modes[agg_idx]
-        agg_value_kind = multi_value_kinds[agg_idx]
-        if agg_value_kind == VALUE_OBJECT and agg_mode in (AGG_MIN, AGG_MAX):
-            vectors.append(
-                build_finalize_multi_object_aggregate_vector(
-                    multi_object_state_bytes,
-                    multi_object_state_starts,
-                    multi_object_state_lengths,
-                    multi_seen,
-                    multi_object_state,
-                    multi_agg_count,
-                    agg_idx,
-                    start,
-                    stop,
-                )
-            )
-            continue
-        vectors.append(
-            build_finalize_multi_scalar_aggregate_vector(
-                agg_mode,
-                agg_value_kind,
-                agg_value_kind == VALUE_FLOAT64 or agg_value_kind == VALUE_DICT_FLOAT64,
-                multi_counts,
-                multi_i64_state,
-                multi_f64_state,
-                multi_seen,
-                multi_avg_sums,
-                multi_avg_counts,
-                multi_agg_count,
-                agg_idx,
-                start,
-                stop,
-            )
-        )
-
-    if len(vectors) != multi_agg_count:
+    if per_agg_states is None:
         raise RuntimeError(
-            f"multi-aggregate finalize produced {len(vectors)} vectors for "
-            f"{multi_agg_count} aggregates"
+            "build_finalize_multi_aggregate_vectors requires per-aggregate states. "
+            "Per-aggregate finalize path is mandatory (no fallback to flattened storage). "
+            "If per-aggregate states were not initialized, the query should have failed earlier. "
+            "This indicates a critical engine initialization bug."
         )
 
-    for agg_idx in range(len(vectors)):
-        if vectors[agg_idx] is None:
-            raise RuntimeError(
-                f"multi-aggregate finalize produced None vector at aggregate {agg_idx}"
-            )
+    if len(per_agg_states) != multi_agg_count:
+        raise RuntimeError(
+            f"per-aggregate states list has {len(per_agg_states)} items but expected {multi_agg_count}. "
+            "Per-aggregate state initialization is incomplete or corrupted. "
+            "This indicates a critical engine state management bug."
+        )
 
-    return vectors
+    # Use per-aggregate dispatcher exclusively
+    return build_finalize_multi_aggregate_vectors_per_aggregate(
+        per_agg_states,
+        multi_agg_modes,
+        multi_value_kinds,
+        multi_counts,
+        multi_i64_state,
+        multi_f64_state,
+        multi_seen,
+        multi_avg_sums,
+        multi_avg_counts,
+        multi_object_state_bytes,
+        multi_object_state_starts,
+        multi_object_state_lengths,
+        multi_object_state,
+        multi_agg_count,
+        start,
+        stop,
+    )
 
 
 # Rebuild object-valued aggregate output for multi-aggregate GROUP BY.

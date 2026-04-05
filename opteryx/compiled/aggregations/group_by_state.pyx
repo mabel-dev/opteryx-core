@@ -27,8 +27,6 @@ cdef inline Py_ssize_t _state_count(object self) noexcept:
     return <Py_ssize_t> self._group_key_values.size()
 
 
-cdef inline Py_ssize_t _multi_offset(object self, int64_t state_index, Py_ssize_t agg_idx) noexcept:
-    return <Py_ssize_t>state_index * self._multi_agg_count + agg_idx
 
 
 cdef inline void _initialize_per_aggregate_states(object self) except *:
@@ -124,32 +122,7 @@ cdef inline void _assert_per_aggregate_state_sizes(object self) except *:
             raise RuntimeError("group-by distinct sets size mismatch")
 
 
-cdef inline object _get_per_aggregate_state(object self, int64_t state_index, Py_ssize_t agg_idx):
-    cdef Py_ssize_t offset
 
-    if self._multi_agg_count > 0:
-        offset = _multi_offset(self, state_index, agg_idx)
-        return (
-            self._multi_counts[offset],
-            self._multi_i64_state[offset],
-            self._multi_f64_state[offset],
-            self._multi_seen[offset],
-            self._multi_avg_sums[offset],
-            self._multi_avg_counts[offset],
-            self._multi_object_state[offset],
-            self._multi_distinct_sets[offset],
-        )
-
-    return (
-        self._counts[state_index],
-        self._i64_state[state_index],
-        self._f64_state[state_index],
-        self._seen[state_index],
-        self._avg_sums[state_index],
-        self._avg_counts[state_index],
-        self._object_state[state_index],
-        self._distinct_sets[state_index] if self._agg_mode == AGG_COUNT_DISTINCT else None,
-    )
 
 
 cdef inline void _bloom_record_new_state(object self, uint64_t row_hash) noexcept:
