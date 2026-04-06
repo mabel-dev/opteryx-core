@@ -496,6 +496,54 @@ cdef object build_encoded_key_vector(
     cdef int64_t valid_flag
     cdef StringVectorBuilder builder
     cdef string raw_value
+    cdef list values = []
+
+    if stop < start:
+        raise RuntimeError(f"invalid encoded key finalize range: start={start}, stop={stop}")
+
+    if <Py_ssize_t> key_payload_offsets.size() < stop + 1:
+        raise RuntimeError("encoded key payload offsets shorter than finalize range")
+
+    for row_idx in range(start, stop):
+        if not decode_single_encoded_key_record(
+            key_payload_bytes, key_payload_offsets, row_idx, raw_value, &valid_flag
+        ):
+            raise RuntimeError("failed to decode encoded key payload")
+        if valid_flag != 0:
+            total_bytes += raw_value.size()
+
+    if total_bytes == 0:
+        for row_idx in range(start, stop):
+            if not decode_single_encoded_key_record(
+                key_payload_bytes, key_payload_offsets, row_idx, raw_value, &valid_flag
+            ):
+                raise RuntimeError("failed to decode encoded key payload")
+            if valid_flag == 0:
+                values.append(None)
+            else:
+                values.append(raw_value.decode("utf-8"))
+        return build_native_object_vector(values)
+
+    builder = StringVectorBuilder.with_counts(length, total_bytes)
+    for row_idx in range(start, stop):
+        if not decode_single_encoded_key_record(
+            key_payload_bytes, key_payload_offsets, row_idx, raw_value, &valid_flag
+        ):
+            raise RuntimeError("failed to decode encoded key payload")
+        if valid_flag == 0:
+            builder.append_null()
+            continue
+        if raw_value.size() > 0:
+            builder.append_bytes(raw_value.data(), raw_value.size())
+        else:
+            builder.append_bytes(NULL, 0)
+    return builder.finish()
+    cdef Py_ssize_t row_idx
+    cdef Py_ssize_t length = stop - start
+    cdef Py_ssize_t total_bytes = 0
+    cdef int64_t valid_flag
+    cdef StringVectorBuilder builder
+    cdef string raw_value
 
     if stop < start:
         raise RuntimeError(f"invalid encoded key finalize range: start={start}, stop={stop}")
@@ -1647,16 +1695,6 @@ cdef list build_finalize_multi_aggregate_vectors_per_aggregate(
     list per_aggregate_states,
     vector[int64_t]& multi_agg_modes,
     vector[int64_t]& multi_value_kinds,
-    vector[int64_t]& multi_counts,
-    vector[int64_t]& multi_i64_state,
-    vector[double]& multi_f64_state,
-    vector[int64_t]& multi_seen,
-    vector[double]& multi_avg_sums,
-    vector[int64_t]& multi_avg_counts,
-    vector[uint8_t]& multi_object_state_bytes,
-    vector[int32_t]& multi_object_state_starts,
-    vector[int32_t]& multi_object_state_lengths,
-    list multi_object_state,
     Py_ssize_t multi_agg_count,
     Py_ssize_t start,
     Py_ssize_t stop,
@@ -1750,16 +1788,6 @@ cdef list build_finalize_multi_aggregate_vectors_per_aggregate(
 cdef list build_finalize_multi_aggregate_vectors(
     vector[int64_t]& multi_agg_modes,
     vector[int64_t]& multi_value_kinds,
-    vector[int64_t]& multi_counts,
-    vector[int64_t]& multi_i64_state,
-    vector[double]& multi_f64_state,
-    vector[int64_t]& multi_seen,
-    vector[double]& multi_avg_sums,
-    vector[int64_t]& multi_avg_counts,
-    vector[uint8_t]& multi_object_state_bytes,
-    vector[int32_t]& multi_object_state_starts,
-    vector[int32_t]& multi_object_state_lengths,
-    list multi_object_state,
     Py_ssize_t multi_agg_count,
     Py_ssize_t start,
     Py_ssize_t stop,
@@ -1813,16 +1841,6 @@ cdef list build_finalize_multi_aggregate_vectors(
         per_agg_states,
         multi_agg_modes,
         multi_value_kinds,
-        multi_counts,
-        multi_i64_state,
-        multi_f64_state,
-        multi_seen,
-        multi_avg_sums,
-        multi_avg_counts,
-        multi_object_state_bytes,
-        multi_object_state_starts,
-        multi_object_state_lengths,
-        multi_object_state,
         multi_agg_count,
         start,
         stop,
