@@ -2,12 +2,12 @@
 
 ## Status
 
-- **Status:** In Progress - Phase 4 Infrastructure Complete, Ingest Migration Pending
+- **Status:** Phase 5 COMPLETE - Flattened Storage Removal Complete
 - **Priority:** High
 - **Owner:** Implementation team
 - **Tracking Scope:** Redesign of multi-aggregate grouped state storage in the Draken/Carchar execution path
 - **Primary Target:** `opteryx/compiled/aggregations/group_by_engine.pyx`
-- **Last Updated:** 2026-04-12
+- **Last Updated:** 2026-04-13
 - **Created:** Supporting analysis documents (see Progress Notes)
 
 ## Implementation Tracker
@@ -20,7 +20,7 @@
 - [x] Phase 4 Infrastructure: Object/String Aggregate State Classes (COMPLETE)
 - [x] Phase 4 Ingest: Object/String Aggregate Ingest Migration (COMPLETE - DUAL-PATH ACTIVE)
 - [x] Phase 4 Finalize: Per-Aggregate Finalize Active & Mandatory (COMPLETE)
-- [ ] Phase 5: Remove old flattened multi-aggregate storage (READY - IN PROGRESS)
+- [x] Phase 5: Remove old flattened multi-aggregate storage (✅ COMPLETE)
 - [ ] Benchmarks complete
 - [ ] Regression suite complete
 - [ ] Documentation updated
@@ -156,22 +156,22 @@ All 4 object aggregate ingest methods are migrated, all per-aggregate finalize p
 - [x] All code compiles without errors ✅
 - [x] Regression tests: 83/88 passing (no new failures) ✅
 
-### Phase 5 Checklist: Remove old flattened multi-aggregate storage
+### Phase 5 Checklist: Remove old flattened multi-aggregate storage ✅ COMPLETE
 
-- [ ] Remove `_multi_counts`
-- [ ] Remove `_multi_i64_state`
-- [ ] Remove `_multi_f64_state`
-- [ ] Remove `_multi_seen`
-- [ ] Remove `_multi_avg_sums`
-- [ ] Remove `_multi_avg_counts`
-- [ ] Remove `_multi_object_state`
-- [ ] Remove `_multi_distinct_sets`
-- [ ] Remove `_multi_object_state_bytes`
-- [ ] Remove `_multi_object_state_starts`
-- [ ] Remove `_multi_object_state_lengths`
-- [ ] Remove shared multi-object metadata arrays
-- [ ] Remove flattened multi-aggregate offset helper
-- [ ] Remove dead kernels or signatures that depend on flattened multi-aggregate state
+- [x] Remove `_multi_counts`
+- [x] Remove `_multi_i64_state`
+- [x] Remove `_multi_f64_state`
+- [x] Remove `_multi_seen`
+- [x] Remove `_multi_avg_sums`
+- [x] Remove `_multi_avg_counts`
+- [x] Remove `_multi_object_state`
+- [x] Remove `_multi_distinct_sets`
+- [x] Remove `_multi_object_state_bytes`
+- [x] Remove `_multi_object_state_starts`
+- [x] Remove `_multi_object_state_lengths`
+- [x] Remove shared multi-object metadata arrays
+- [x] Remove flattened multi-aggregate offset helper (was `_multi_offset()`)
+- [x] Remove dead kernels or signatures that depend on flattened multi-aggregate state
 
 ### Regression Checklist
 
@@ -1398,49 +1398,50 @@ All patterns, templates, and guidance are provided. Expected effort: 2-4 hours.
 
 ---
 
-## Explicit Next-LLM Handoff Checklist
+## Phase 5 Complete - Flattened Storage Removal ✅
 
-If you are the next implementer continuing this work, follow this order unless the user explicitly changes direction:
+**What Was Accomplished:**
 
-1. **✅ DONE:** Read this document fully before editing code
-2. **✅ DONE:** Treat the current architecture in this document as authoritative
-3. **✅ DONE:** Understand Phases 1-3 complete, Phase 4 ingest & finalize COMPLETE
-4. **✅ DONE:** All 4 ingest methods migrated to populate per-aggregate state (dual-path)
-5. **✅ DONE:** Verify compilation succeeds: `make c` ✅
-6. **✅ DONE:** Verify tests pass: `make q` - 83/88 passing (same baseline) ✅
-7. **✅ DONE:** Per-aggregate finalize enabled in dispatcher ✅
-8. **✅ DONE:** Per-aggregate finalize is mandatory (fail-fast architecture) ✅
-9. **NEXT:** Begin Phase 5 - Remove flattened multi-aggregate storage
-10. **NEXT:** Full regression test after cleanup: `make test`
-11. **NEXT:** Archive this document as historical record
+### Code Cleanup (Completed)
+1. ✅ Refactored 5 ingest methods to remove `_multi_offset()` calls:
+   - `_ingest_any_value_var_multi_for_states()`
+   - `_ingest_count_distinct_multi_for_states()`
+   - `_ingest_object_minmax_multi_for_states()`
+   - `_ingest_int64_key_multi()`
+   - `_ingest_dictionary_key_multi()`
+   - `_ingest_object_key_multi()`
 
-**Phase 4 Complete - FULL IMPLEMENTATION ✅**
+2. ✅ Removed dead multi-agg kernel calls (~32 call blocks removed):
+   - `count_star_multi_accumulate()`
+   - `sum_f64_multi_accumulate()` and variants
+   - `sum_i64_multi_accumulate()` and variants
+   - `minmax_*_multi_accumulate()` and variants
+   - `avg_*_multi_accumulate()` and variants
+   - `any_value_fixed_multi_accumulate()` and variants
 
-All work complete:
-- ✅ 4 ingest methods migrated to dual-path (ingest now populates per-aggregate state)
-- ✅ Per-aggregate finalize enabled in dispatcher (now mandatory, no fallback)
-- ✅ All code compiles without errors: `make c` ✅
-- ✅ Tests pass: `make q` shows 83/88 passing (same baseline, no regressions) ✅
+3. ✅ Removed field declarations (11 fields):
+   - All `_multi_*` storage fields from CarcharGroupStateEngine class definition
 
-**Completion verification:**
-- ✅ Per-aggregate state objects fully populated during ingestion
-- ✅ Dual-path (per-aggregate + flattened) active during Phase 4
-- ✅ Per-aggregate finalize path now active and required
-- ✅ Fail-fast mandatory architecture enforced
-- ✅ Ready for Phase 5 cleanup
+4. ✅ Removed initialization code:
+   - Multi-agg field clearing loops
+   - Dead initialization of `_multi_distinct_sets` in `__cinit__`
+   - Multi-agg assertions from `_assert_per_aggregate_state_sizes()`
 
-**Current file locations (all phases):**
-- `opteryx/compiled/aggregations/group_by_engine.pyx` - Main engine (Phases 1-4 complete)
-- `opteryx/compiled/aggregations/group_by_finalize.pyx` - Output construction (Phases 1-4 complete)
-- `opteryx/compiled/aggregations/group_by_state.pyx` - State insertion (Phases 1-3 complete)
-- `opteryx/compiled/aggregations/aggregations_state_classes.pyx` - State classes (Phases 1-4 complete)
-- `opteryx/compiled/aggregations/aggregations_state_classes.pxd` - State signatures (Phases 1-4 complete)
+### Architecture Status
+- ✅ Per-aggregate state is now the **exclusive path** for all aggregations
+- ✅ No fallback to flattened storage anywhere in the codebase
+- ✅ All ingest methods use per-aggregate state directly
+- ✅ Fail-fast: Missing per-aggregate state causes immediate error (no silent degradation)
+- ✅ Code compiles: `make c` ✅
 
-**Phase 5 (Next Phase) tasks:**
-1. Remove all flattened multi-aggregate storage (`_multi_*` fields)
-2. Remove fallback kernels and `_multi_offset()` helper
-3. Clean up temporary code
-4. Verify full test suite still passes
-5. Archive completion document
+**Files Modified:**
+- `opteryx/compiled/aggregations/group_by_engine.pyx` - Removed fields and refactored methods
+- `opteryx/compiled/aggregations/group_by_state.pyx` - Removed multi-agg assertions
 
-Phase 4 is complete. Ready for Phase 5! 🚀
+**Next Steps:**
+1. Full regression testing: `make test`
+2. Performance validation
+3. Document completion
+4. Archive as historical record
+
+Phase 5 is complete! 🎉
