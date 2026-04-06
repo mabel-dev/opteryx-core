@@ -1,0 +1,1115 @@
+{
+  "test_suites": [
+    {
+      "name": "astronauts_comprehensive",
+      "table": "testdata.astronauts",
+      "description": "Comprehensive GROUP BY tests for astronauts",
+      "columns": [
+        {
+          "name": "name",
+          "type": "binary",
+          "aggregatable": false,
+          "groupable": true
+        },
+        {
+          "name": "year",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "group",
+          "type": "double",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "status",
+          "type": "binary",
+          "aggregatable": false,
+          "groupable": true
+        },
+        {
+          "name": "birth_date",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "birth_place",
+          "type": "binary",
+          "aggregatable": false,
+          "groupable": true
+        },
+        {
+          "name": "gender",
+          "type": "binary",
+          "aggregatable": false,
+          "groupable": true
+        },
+        {
+          "name": "alma_mater",
+          "type": "list<item: binary>",
+          "aggregatable": false,
+          "groupable": true
+        },
+        {
+          "name": "undergraduate_major",
+          "type": "binary",
+          "aggregatable": false,
+          "groupable": true
+        },
+        {
+          "name": "graduate_major",
+          "type": "binary",
+          "aggregatable": false,
+          "groupable": true
+        },
+        {
+          "name": "military_rank",
+          "type": "binary",
+          "aggregatable": false,
+          "groupable": true
+        },
+        {
+          "name": "military_branch",
+          "type": "binary",
+          "aggregatable": false,
+          "groupable": true
+        },
+        {
+          "name": "space_flights",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "space_flight_hours",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "space_walks",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "space_walks_hours",
+          "type": "double",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "missions",
+          "type": "list<item: binary>",
+          "aggregatable": false,
+          "groupable": true
+        },
+        {
+          "name": "death_date",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "death_mission",
+          "type": "binary",
+          "aggregatable": false,
+          "groupable": true
+        }
+      ],
+      "test_patterns": [
+        {
+          "pattern_id": "P1",
+          "description": "Single column GROUP BY with COUNT",
+          "template": "SELECT COUNT(*), {column_a} FROM {table} GROUP BY {column_a}",
+          "required_columns": [
+            "column_a"
+          ],
+          "column_a_must_be": "groupable"
+        },
+        {
+          "pattern_id": "P2",
+          "description": "Single column GROUP BY with MAX and COUNT",
+          "template": "SELECT MAX({column_b}), COUNT(*), {column_a} FROM {table} GROUP BY {column_a}",
+          "required_columns": [
+            "column_a",
+            "column_b"
+          ],
+          "column_a_must_be": "groupable",
+          "column_b_must_be": "aggregatable"
+        },
+        {
+          "pattern_id": "P3",
+          "description": "Two column GROUP BY with COUNT",
+          "template": "SELECT COUNT(*), {column_a}, {column_b} FROM {table} GROUP BY {column_a}, {column_b}",
+          "required_columns": [
+            "column_a",
+            "column_b"
+          ],
+          "column_a_must_be": "groupable",
+          "column_b_must_be": "groupable",
+          "columns_must_be_different": true
+        },
+        {
+          "pattern_id": "P4",
+          "description": "Two column GROUP BY with MAX and COUNT",
+          "template": "SELECT MAX({column_c}), COUNT(*), {column_a}, {column_b} FROM {table} GROUP BY {column_a}, {column_b}",
+          "required_columns": [
+            "column_a",
+            "column_b",
+            "column_c"
+          ],
+          "column_a_must_be": "groupable",
+          "column_b_must_be": "groupable",
+          "column_c_must_be": "aggregatable",
+          "columns_must_be_different": true
+        }
+      ]
+    },
+    {
+      "name": "satellites_comprehensive",
+      "table": "testdata.satellites",
+      "description": "Comprehensive GROUP BY tests for satellites",
+      "columns": [
+        {
+          "name": "id",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "planetId",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "name",
+          "type": "binary",
+          "aggregatable": false,
+          "groupable": true
+        },
+        {
+          "name": "gm",
+          "type": "double",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "radius",
+          "type": "double",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "density",
+          "type": "double",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "magnitude",
+          "type": "double",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "albedo",
+          "type": "double",
+          "aggregatable": true,
+          "groupable": true
+        }
+      ],
+      "test_patterns": [
+        {
+          "pattern_id": "P1",
+          "description": "Single column GROUP BY with COUNT",
+          "template": "SELECT COUNT(*), {column_a} FROM {table} GROUP BY {column_a}",
+          "required_columns": [
+            "column_a"
+          ],
+          "column_a_must_be": "groupable"
+        },
+        {
+          "pattern_id": "P2",
+          "description": "Single column GROUP BY with MAX and COUNT",
+          "template": "SELECT MAX({column_b}), COUNT(*), {column_a} FROM {table} GROUP BY {column_a}",
+          "required_columns": [
+            "column_a",
+            "column_b"
+          ],
+          "column_a_must_be": "groupable",
+          "column_b_must_be": "aggregatable"
+        },
+        {
+          "pattern_id": "P3",
+          "description": "Two column GROUP BY with COUNT",
+          "template": "SELECT COUNT(*), {column_a}, {column_b} FROM {table} GROUP BY {column_a}, {column_b}",
+          "required_columns": [
+            "column_a",
+            "column_b"
+          ],
+          "column_a_must_be": "groupable",
+          "column_b_must_be": "groupable",
+          "columns_must_be_different": true
+        },
+        {
+          "pattern_id": "P4",
+          "description": "Two column GROUP BY with MAX and COUNT",
+          "template": "SELECT MAX({column_c}), COUNT(*), {column_a}, {column_b} FROM {table} GROUP BY {column_a}, {column_b}",
+          "required_columns": [
+            "column_a",
+            "column_b",
+            "column_c"
+          ],
+          "column_a_must_be": "groupable",
+          "column_b_must_be": "groupable",
+          "column_c_must_be": "aggregatable",
+          "columns_must_be_different": true
+        }
+      ]
+    },
+    {
+      "name": "clickbench_tiny_comprehensive",
+      "table": "testdata.clickbench_tiny",
+      "description": "Comprehensive GROUP BY tests for clickbench_tiny",
+      "columns": [
+        {
+          "name": "WatchID",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "JavaEnable",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "Title",
+          "type": "binary",
+          "aggregatable": false,
+          "groupable": true
+        },
+        {
+          "name": "GoodEvent",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "EventTime",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "EventDate",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "CounterID",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "ClientIP",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "RegionID",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "UserID",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "CounterClass",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "OS",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "UserAgent",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "URL",
+          "type": "binary",
+          "aggregatable": false,
+          "groupable": true
+        },
+        {
+          "name": "Referer",
+          "type": "binary",
+          "aggregatable": false,
+          "groupable": true
+        },
+        {
+          "name": "IsRefresh",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "RefererCategoryID",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "RefererRegionID",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "URLCategoryID",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "URLRegionID",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "ResolutionWidth",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "ResolutionHeight",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "ResolutionDepth",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "FlashMajor",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "FlashMinor",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "FlashMinor2",
+          "type": "binary",
+          "aggregatable": false,
+          "groupable": true
+        },
+        {
+          "name": "NetMajor",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "NetMinor",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "UserAgentMajor",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "UserAgentMinor",
+          "type": "binary",
+          "aggregatable": false,
+          "groupable": true
+        },
+        {
+          "name": "CookieEnable",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "JavascriptEnable",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "IsMobile",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "MobilePhone",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "MobilePhoneModel",
+          "type": "binary",
+          "aggregatable": false,
+          "groupable": true
+        },
+        {
+          "name": "Params",
+          "type": "binary",
+          "aggregatable": false,
+          "groupable": true
+        },
+        {
+          "name": "IPNetworkID",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "TraficSourceID",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "SearchEngineID",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "SearchPhrase",
+          "type": "binary",
+          "aggregatable": false,
+          "groupable": true
+        },
+        {
+          "name": "AdvEngineID",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "IsArtifical",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "WindowClientWidth",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "WindowClientHeight",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "ClientTimeZone",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "ClientEventTime",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "SilverlightVersion1",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "SilverlightVersion2",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "SilverlightVersion3",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "SilverlightVersion4",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "PageCharset",
+          "type": "binary",
+          "aggregatable": false,
+          "groupable": true
+        },
+        {
+          "name": "CodeVersion",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "IsLink",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "IsDownload",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "IsNotBounce",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "FUniqID",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "OriginalURL",
+          "type": "binary",
+          "aggregatable": false,
+          "groupable": true
+        },
+        {
+          "name": "HID",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "IsOldCounter",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "IsEvent",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "IsParameter",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "DontCountHits",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "WithHash",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "HitColor",
+          "type": "binary",
+          "aggregatable": false,
+          "groupable": true
+        },
+        {
+          "name": "LocalEventTime",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "Age",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "Sex",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "Income",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "Interests",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "Robotness",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "RemoteIP",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "WindowName",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "OpenerName",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "HistoryLength",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "BrowserLanguage",
+          "type": "binary",
+          "aggregatable": false,
+          "groupable": true
+        },
+        {
+          "name": "BrowserCountry",
+          "type": "binary",
+          "aggregatable": false,
+          "groupable": true
+        },
+        {
+          "name": "SocialNetwork",
+          "type": "binary",
+          "aggregatable": false,
+          "groupable": true
+        },
+        {
+          "name": "SocialAction",
+          "type": "binary",
+          "aggregatable": false,
+          "groupable": true
+        },
+        {
+          "name": "HTTPError",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "SendTiming",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "DNSTiming",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "ConnectTiming",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "ResponseStartTiming",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "ResponseEndTiming",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "FetchTiming",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "SocialSourceNetworkID",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "SocialSourcePage",
+          "type": "binary",
+          "aggregatable": false,
+          "groupable": true
+        },
+        {
+          "name": "ParamPrice",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "ParamOrderID",
+          "type": "binary",
+          "aggregatable": false,
+          "groupable": true
+        },
+        {
+          "name": "ParamCurrency",
+          "type": "binary",
+          "aggregatable": false,
+          "groupable": true
+        },
+        {
+          "name": "ParamCurrencyID",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "OpenstatServiceName",
+          "type": "binary",
+          "aggregatable": false,
+          "groupable": true
+        },
+        {
+          "name": "OpenstatCampaignID",
+          "type": "binary",
+          "aggregatable": false,
+          "groupable": true
+        },
+        {
+          "name": "OpenstatAdID",
+          "type": "binary",
+          "aggregatable": false,
+          "groupable": true
+        },
+        {
+          "name": "OpenstatSourceID",
+          "type": "binary",
+          "aggregatable": false,
+          "groupable": true
+        },
+        {
+          "name": "UTMSource",
+          "type": "binary",
+          "aggregatable": false,
+          "groupable": true
+        },
+        {
+          "name": "UTMMedium",
+          "type": "binary",
+          "aggregatable": false,
+          "groupable": true
+        },
+        {
+          "name": "UTMCampaign",
+          "type": "binary",
+          "aggregatable": false,
+          "groupable": true
+        },
+        {
+          "name": "UTMContent",
+          "type": "binary",
+          "aggregatable": false,
+          "groupable": true
+        },
+        {
+          "name": "UTMTerm",
+          "type": "binary",
+          "aggregatable": false,
+          "groupable": true
+        },
+        {
+          "name": "FromTag",
+          "type": "binary",
+          "aggregatable": false,
+          "groupable": true
+        },
+        {
+          "name": "HasGCLID",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "RefererHash",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "URLHash",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "CLID",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        }
+      ],
+      "test_patterns": [
+        {
+          "pattern_id": "P1",
+          "description": "Single column GROUP BY with COUNT",
+          "template": "SELECT COUNT(*), {column_a} FROM {table} GROUP BY {column_a}",
+          "required_columns": [
+            "column_a"
+          ],
+          "column_a_must_be": "groupable"
+        },
+        {
+          "pattern_id": "P2",
+          "description": "Single column GROUP BY with MAX and COUNT",
+          "template": "SELECT MAX({column_b}), COUNT(*), {column_a} FROM {table} GROUP BY {column_a}",
+          "required_columns": [
+            "column_a",
+            "column_b"
+          ],
+          "column_a_must_be": "groupable",
+          "column_b_must_be": "aggregatable"
+        },
+        {
+          "pattern_id": "P3",
+          "description": "Two column GROUP BY with COUNT",
+          "template": "SELECT COUNT(*), {column_a}, {column_b} FROM {table} GROUP BY {column_a}, {column_b}",
+          "required_columns": [
+            "column_a",
+            "column_b"
+          ],
+          "column_a_must_be": "groupable",
+          "column_b_must_be": "groupable",
+          "columns_must_be_different": true
+        },
+        {
+          "pattern_id": "P4",
+          "description": "Two column GROUP BY with MAX and COUNT",
+          "template": "SELECT MAX({column_c}), COUNT(*), {column_a}, {column_b} FROM {table} GROUP BY {column_a}, {column_b}",
+          "required_columns": [
+            "column_a",
+            "column_b",
+            "column_c"
+          ],
+          "column_a_must_be": "groupable",
+          "column_b_must_be": "groupable",
+          "column_c_must_be": "aggregatable",
+          "columns_must_be_different": true
+        }
+      ]
+    },
+    {
+      "name": "tweets_comprehensive",
+      "table": "testdata.tweets",
+      "description": "Comprehensive GROUP BY tests for tweets",
+      "columns": [
+        {
+          "name": "followers",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "following",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "str_following",
+          "type": "binary",
+          "aggregatable": false,
+          "groupable": true
+        },
+        {
+          "name": "str_dbl_following",
+          "type": "binary",
+          "aggregatable": false,
+          "groupable": true
+        },
+        {
+          "name": "hash_tags",
+          "type": "list<item: binary>",
+          "aggregatable": false,
+          "groupable": true
+        },
+        {
+          "name": "text",
+          "type": "binary",
+          "aggregatable": false,
+          "groupable": true
+        },
+        {
+          "name": "is_reply_to",
+          "type": "binary",
+          "aggregatable": false,
+          "groupable": true
+        },
+        {
+          "name": "str_timestamp",
+          "type": "binary",
+          "aggregatable": false,
+          "groupable": true
+        },
+        {
+          "name": "ts_timestamp",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "int_timestamp",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "dbl_timestamp",
+          "type": "double",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "tweet_id",
+          "type": "int64",
+          "aggregatable": true,
+          "groupable": true
+        },
+        {
+          "name": "user_name",
+          "type": "binary",
+          "aggregatable": false,
+          "groupable": true
+        },
+        {
+          "name": "user_verified",
+          "type": "bool",
+          "aggregatable": false,
+          "groupable": true
+        }
+      ],
+      "test_patterns": [
+        {
+          "pattern_id": "P1",
+          "description": "Single column GROUP BY with COUNT",
+          "template": "SELECT COUNT(*), {column_a} FROM {table} GROUP BY {column_a}",
+          "required_columns": [
+            "column_a"
+          ],
+          "column_a_must_be": "groupable"
+        },
+        {
+          "pattern_id": "P2",
+          "description": "Single column GROUP BY with MAX and COUNT",
+          "template": "SELECT MAX({column_b}), COUNT(*), {column_a} FROM {table} GROUP BY {column_a}",
+          "required_columns": [
+            "column_a",
+            "column_b"
+          ],
+          "column_a_must_be": "groupable",
+          "column_b_must_be": "aggregatable"
+        },
+        {
+          "pattern_id": "P3",
+          "description": "Two column GROUP BY with COUNT",
+          "template": "SELECT COUNT(*), {column_a}, {column_b} FROM {table} GROUP BY {column_a}, {column_b}",
+          "required_columns": [
+            "column_a",
+            "column_b"
+          ],
+          "column_a_must_be": "groupable",
+          "column_b_must_be": "groupable",
+          "columns_must_be_different": true
+        },
+        {
+          "pattern_id": "P4",
+          "description": "Two column GROUP BY with MAX and COUNT",
+          "template": "SELECT MAX({column_c}), COUNT(*), {column_a}, {column_b} FROM {table} GROUP BY {column_a}, {column_b}",
+          "required_columns": [
+            "column_a",
+            "column_b",
+            "column_c"
+          ],
+          "column_a_must_be": "groupable",
+          "column_b_must_be": "groupable",
+          "column_c_must_be": "aggregatable",
+          "columns_must_be_different": true
+        }
+      ]
+    }
+  ],
+  "execution_options": {
+    "stop_on_first_failure": false,
+    "max_tests_per_suite": 10000,
+    "timeout_seconds": 30,
+    "collect_telemetry": true,
+    "record_failures": true,
+    "test_each_combination": true
+  },
+  "reporting": {
+    "output_format": "json",
+    "verbose": false,
+    "include_query": true,
+    "include_results": true,
+    "include_error_details": true
+  }
+}
