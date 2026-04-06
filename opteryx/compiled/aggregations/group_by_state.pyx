@@ -39,28 +39,12 @@ cdef inline void _initialize_per_aggregate_states(object self) except *:
     if self._agg_mode == AGG_COUNT_DISTINCT:
         self._distinct_sets.append(CarcharSetWrapper())
 
-    if self._multi_agg_count > 0:
-        for agg_idx in range(self._multi_agg_count):
-            self._multi_counts.push_back(0)
-            self._multi_i64_state.push_back(0)
-            self._multi_f64_state.push_back(0.0)
-            self._multi_seen.push_back(0)
-            self._multi_avg_sums.push_back(0.0)
-            self._multi_avg_counts.push_back(0)
-            self._multi_object_state.append(None)
-            self._multi_object_state_starts.push_back(0)
-            self._multi_object_state_lengths.push_back(0)
-            if self._multi_agg_modes[agg_idx] == AGG_COUNT_DISTINCT:
-                self._multi_distinct_sets.append(CarcharSetWrapper())
-            else:
-                self._multi_distinct_sets.append(None)
-    else:
-        self._counts.push_back(0)
-        self._i64_state.push_back(0)
-        self._f64_state.push_back(0.0)
-        self._seen.push_back(0)
-        self._avg_sums.push_back(0.0)
-        self._avg_counts.push_back(0)
+    self._counts.push_back(0)
+    self._i64_state.push_back(0)
+    self._f64_state.push_back(0.0)
+    self._seen.push_back(0)
+    self._avg_sums.push_back(0.0)
+    self._avg_counts.push_back(0)
 
 
 cdef inline void _grow_per_aggregate_states(object self, Py_ssize_t additional_states) except *:
@@ -75,7 +59,6 @@ cdef inline void _grow_per_aggregate_states(object self, Py_ssize_t additional_s
 
 cdef inline void _assert_per_aggregate_state_sizes(object self) except *:
     cdef Py_ssize_t state_count = _state_count(self)
-    cdef Py_ssize_t expected_multi = state_count * self._multi_agg_count
 
     if <Py_ssize_t>self._object_state_starts.size() != state_count:
         raise RuntimeError("group-by object state starts size mismatch")
@@ -84,42 +67,20 @@ cdef inline void _assert_per_aggregate_state_sizes(object self) except *:
     if len(self._object_state) != state_count:
         raise RuntimeError("group-by object state list size mismatch")
 
-    if self._multi_agg_count > 0:
-        if <Py_ssize_t>self._multi_counts.size() != expected_multi:
-            raise RuntimeError("group-by multi counts size mismatch")
-        if <Py_ssize_t>self._multi_i64_state.size() != expected_multi:
-            raise RuntimeError("group-by multi int64 state size mismatch")
-        if <Py_ssize_t>self._multi_f64_state.size() != expected_multi:
-            raise RuntimeError("group-by multi float64 state size mismatch")
-        if <Py_ssize_t>self._multi_seen.size() != expected_multi:
-            raise RuntimeError("group-by multi seen size mismatch")
-        if <Py_ssize_t>self._multi_avg_sums.size() != expected_multi:
-            raise RuntimeError("group-by multi avg sums size mismatch")
-        if <Py_ssize_t>self._multi_avg_counts.size() != expected_multi:
-            raise RuntimeError("group-by multi avg counts size mismatch")
-        if <Py_ssize_t>self._multi_object_state_starts.size() != expected_multi:
-            raise RuntimeError("group-by multi object state starts size mismatch")
-        if <Py_ssize_t>self._multi_object_state_lengths.size() != expected_multi:
-            raise RuntimeError("group-by multi object state lengths size mismatch")
-        if len(self._multi_object_state) != expected_multi:
-            raise RuntimeError("group-by multi object state list size mismatch")
-        if len(self._multi_distinct_sets) != expected_multi:
-            raise RuntimeError("group-by multi distinct sets size mismatch")
-    else:
-        if <Py_ssize_t>self._counts.size() != state_count:
-            raise RuntimeError("group-by counts size mismatch")
-        if <Py_ssize_t>self._i64_state.size() != state_count:
-            raise RuntimeError("group-by int64 state size mismatch")
-        if <Py_ssize_t>self._f64_state.size() != state_count:
-            raise RuntimeError("group-by float64 state size mismatch")
-        if <Py_ssize_t>self._seen.size() != state_count:
-            raise RuntimeError("group-by seen size mismatch")
-        if <Py_ssize_t>self._avg_sums.size() != state_count:
-            raise RuntimeError("group-by avg sums size mismatch")
-        if <Py_ssize_t>self._avg_counts.size() != state_count:
-            raise RuntimeError("group-by avg counts size mismatch")
-        if self._agg_mode == AGG_COUNT_DISTINCT and len(self._distinct_sets) != state_count:
-            raise RuntimeError("group-by distinct sets size mismatch")
+    if <Py_ssize_t>self._counts.size() != state_count:
+        raise RuntimeError("group-by counts size mismatch")
+    if <Py_ssize_t>self._i64_state.size() != state_count:
+        raise RuntimeError("group-by int64 state size mismatch")
+    if <Py_ssize_t>self._f64_state.size() != state_count:
+        raise RuntimeError("group-by float64 state size mismatch")
+    if <Py_ssize_t>self._seen.size() != state_count:
+        raise RuntimeError("group-by seen size mismatch")
+    if <Py_ssize_t>self._avg_sums.size() != state_count:
+        raise RuntimeError("group-by avg sums size mismatch")
+    if <Py_ssize_t>self._avg_counts.size() != state_count:
+        raise RuntimeError("group-by avg counts size mismatch")
+    if self._agg_mode == AGG_COUNT_DISTINCT and len(self._distinct_sets) != state_count:
+        raise RuntimeError("group-by distinct sets size mismatch")
 
 
 
