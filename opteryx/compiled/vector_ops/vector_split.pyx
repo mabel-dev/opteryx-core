@@ -174,6 +174,7 @@ cdef class _BufferCleanup:
         else:
             free(self.ptr)
 
+from cpython.bytes cimport PyBytes_FromStringAndSize
 from opteryx.compiled.draken.vectors.string_vector cimport StringVector
 from opteryx.compiled.draken.core.buffers cimport DrakenVarBuffer
 
@@ -182,20 +183,44 @@ cpdef object vector_split(StringVector vec, char delimiter):
     FAST string splitting that actually compiles.
     Works on x86 and ARM, no compiler errors.
     """
-    # Access Draken StringVector buffers directly
     cdef DrakenVarBuffer* dptr = vec.ptr
     cdef int64_t n = <int64_t>dptr.length
 
+    import pyarrow as pa
+
+    if n <= 0:
+        return pa.array([], type=pa.list_(pa.binary()))
+
+    # Constant encoding: split once, replicate n times
+    if vec._has_const:
+        if vec._const_is_null or vec._const_value == NULL:
+            return pa.array([None] * n, type=pa.list_(pa.binary()))
+        const_bytes = PyBytes_FromStringAndSize(
+            <const char*>vec._const_value.data, vec._const_value.length
+        )
+        parts = const_bytes.split(bytes([delimiter]))
+        return pa.array([parts] * n, type=pa.list_(pa.binary()))
+
+    # Dictionary encoding: process per row via to_pylist (rare path)
+    if vec._encoding == DRAKEN_ENCODING_DICTIONARY:
+        py_list = vec.to_pylist()
+        delim_bytes = bytes([delimiter])
+        result = []
+        for val in py_list:
+            if val is None:
+                result.append(None)
+            elif isinstance(val, str):
+                result.append(val.encode("utf-8").split(delim_bytes))
+            else:
+                result.append(val.split(delim_bytes))
+        return pa.array(result, type=pa.list_(pa.binary()))
+
+    # Dense encoding: SIMD fast path
     cdef const char* raw_data = <const char*>dptr.data
     cdef const int32_t* offsets = dptr.offsets
 
     cdef int64_t i
     cdef int64_t start, end
-
-    # Handle empty array
-    if n <= 0:
-        import pyarrow as pa
-        return pa.array([], type=pa.list_(pa.binary()))
 
     cdef int64_t total_bytes = offsets[n] - offsets[0]
     cdef int64_t base = offsets[0]
@@ -216,7 +241,6 @@ cpdef object vector_split(StringVector vec, char delimiter):
     # Handle trivial case (no delimiters) quickly
     if num_delims == 0:
         free(delim_pos)
-        import pyarrow as pa
 
         # Build result without any splitting
         results = []
@@ -349,7 +373,6 @@ cpdef object vector_split(StringVector vec, char delimiter):
     child_offsets[segment_idx] = write_pos
 
     # Build Arrow arrays with cleanup objects
-    import pyarrow as pa
 
     # Create cleanup objects
     cdef _BufferCleanup cleanup_output_data = _BufferCleanup()

@@ -29,7 +29,7 @@ from opteryx.expression.intervals import (
 )
 from opteryx.expression.operator_catalog import get_operator_node_type
 from opteryx.models import LogicalColumn, Node
-from opteryx.operators.aggregate_helpers import aggregator_names, is_aggregator
+from opteryx.operators.aggregate.helpers import aggregator_names, is_aggregator
 from opteryx.utils import dates, suggest_alternative
 
 # Epoch constants for converting datetime literals to Draken-native integers.

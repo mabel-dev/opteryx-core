@@ -34,6 +34,7 @@ smallest unsigned key after the sign-bit flip, giving NULLS FIRST for ASC.
 from array import array
 
 from cpython.mem cimport PyMem_Malloc, PyMem_Free
+from libc.stddef cimport size_t
 from libc.stdint cimport int8_t, int16_t, int32_t, int64_t, uint8_t, uint16_t, uint32_t, uint64_t
 from libc.string cimport memset, memcpy
 
@@ -55,10 +56,23 @@ from opteryx.compiled.draken.core.buffers cimport (
     DRAKEN_TIME64,
 )
 from opteryx.compiled.draken.vectors.string_vector cimport StringVector
-from opteryx.compiled.aggregations.vector_readers cimport (
-    _vector_dict_accessor,
-    _dict_read_code,
-)
+from opteryx.compiled.draken.vectors.vector cimport Vector
+
+
+# ── Inline helpers (replaces phantom vector_readers cimport) ──────────────────
+
+cdef inline DictAccessor* _vector_dict_accessor(object vec) noexcept:
+    """Return the DictAccessor* for a dictionary-encoded Vector, or NULL."""
+    return (<Vector>vec).dict_accessor()
+
+
+cdef inline uint32_t _dict_read_code(const DictAccessor* acc, Py_ssize_t i) noexcept nogil:
+    """Read the dictionary code at row i, handling 1/2/4-byte code widths."""
+    if acc.code_width == 1:
+        return (<uint8_t*>acc.codes)[i]
+    if acc.code_width == 2:
+        return (<uint16_t*>acc.codes)[i]
+    return (<uint32_t*>acc.codes)[i]
 
 
 # ── SIMD remap ────────────────────────────────────────────────────────────────

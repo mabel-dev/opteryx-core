@@ -87,18 +87,15 @@ cpdef Int64Vector vector_position(StringVector haystack, object needle):
     Int64Vector
         1-based positions; 0 where not found; 0 for null rows.
     """
-    cdef DrakenVarBuffer* hay_ptr = haystack.ptr
-    cdef Py_ssize_t n = hay_ptr.length
-    cdef uint8_t* hay_null = hay_ptr.null_bitmap
+    cdef Py_ssize_t n = haystack.ptr.length
     cdef Py_ssize_t i
-
+    cdef StringRow hay_row, ned_row
     cdef bint needle_is_vec = isinstance(needle, StringVector)
-    cdef DrakenVarBuffer* ned_ptr = NULL
     cdef bytes needle_scalar = None
+    cdef const char* ned_data
+    cdef size_t ned_len
 
-    if needle_is_vec:
-        ned_ptr = (<StringVector>needle).ptr
-    else:
+    if not needle_is_vec:
         if isinstance(needle, bytes):
             needle_scalar = needle
         else:
@@ -107,42 +104,31 @@ cpdef Int64Vector vector_position(StringVector haystack, object needle):
     cdef numpy.ndarray[int64_t, ndim=1] result = numpy.zeros(n, dtype=numpy.int64)
     cdef int64_t[::1] result_view = result
 
-    cdef int32_t hay_start, hay_end
-    cdef int32_t ned_start, ned_end
-    cdef const char *hay_data
-    cdef const char *ned_data
-    cdef size_t hay_len, ned_len
-    cdef uint8_t* ned_null
-
     if needle_is_vec:
-        ned_null = ned_ptr.null_bitmap
-    else:
-        ned_null = NULL
-
-    for i in range(n):
-        # null haystack row → 0
-        if hay_null != NULL and not ((hay_null[i >> 3] >> (i & 7)) & 1):
-            result_view[i] = 0
-            continue
-
-        hay_start = hay_ptr.offsets[i]
-        hay_end = hay_ptr.offsets[i + 1]
-        hay_data = <const char *>hay_ptr.data + hay_start
-        hay_len = hay_end - hay_start
-
-        if needle_is_vec:
-            # null needle row → 0
-            if ned_null != NULL and not ((ned_null[i >> 3] >> (i & 7)) & 1):
+        for i in range(n):
+            hay_row = string_vec_get_at(haystack, i)
+            if hay_row.is_null:
                 result_view[i] = 0
                 continue
-            ned_start = ned_ptr.offsets[i]
-            ned_end = ned_ptr.offsets[i + 1]
-            ned_data = <const char *>ned_ptr.data + ned_start
-            ned_len = ned_end - ned_start
-        else:
-            ned_data = <const char *>needle_scalar
-            ned_len = len(needle_scalar)
-
-        result_view[i] = _find_position(hay_data, hay_len, ned_data, ned_len)
+            ned_row = string_vec_get_at(<StringVector>needle, i)
+            if ned_row.is_null:
+                result_view[i] = 0
+                continue
+            result_view[i] = _find_position(
+                hay_row.data, <size_t>hay_row.length,
+                ned_row.data, <size_t>ned_row.length,
+            )
+    else:
+        ned_data = <const char*>needle_scalar
+        ned_len = <size_t>len(needle_scalar)
+        for i in range(n):
+            hay_row = string_vec_get_at(haystack, i)
+            if hay_row.is_null:
+                result_view[i] = 0
+                continue
+            result_view[i] = _find_position(
+                hay_row.data, <size_t>hay_row.length,
+                ned_data, ned_len,
+            )
 
     return int64_from_sequence(result_view)

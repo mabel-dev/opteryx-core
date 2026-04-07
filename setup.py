@@ -804,188 +804,24 @@ extensions = [
         language="c++",
         extra_compile_args=CPP_FLAGS,
     ),
-    # Aggregations: count_distinct and group-by helpers (C++ implementations)
+    # Grouped aggregate (hashed) — new ground-up rewrite, single .so
     Extension(
-        "opteryx.compiled.aggregations.scalar_kernels._definitions",
+        "opteryx.operators.grouped_aggregate_hashed._grouped_agg",
         sources=[
-            "opteryx/compiled/aggregations/scalar_kernels/_definitions.pyx",
+            "opteryx/operators/grouped_aggregate_hashed/_grouped_agg.pyx",
             "src/cpp/hllpp.cpp",
             "third_party/tdigest-c/src/tdigest_cpp.cpp",
         ],
         include_dirs=include_dirs,
         language="c++",
         extra_compile_args=CPP_FLAGS,
+        extra_link_args=LD_EXTRA,
     ),
+    # Ungrouped (global) aggregate engine — single .so
     Extension(
-        "opteryx.compiled.aggregations.key_codec",
-        sources=[
-            "opteryx/compiled/aggregations/key_codec.pyx",
-        ],
-        include_dirs=include_dirs,
-        language="c++",
-        extra_compile_args=CPP_FLAGS,
-    ),
-    Extension(
-        "opteryx.compiled.aggregations.vector_readers",
-        sources=[
-            "opteryx/compiled/aggregations/vector_readers.pyx",
-        ],
-        include_dirs=include_dirs,
-        language="c++",
-        extra_compile_args=CPP_FLAGS,
-    ),
-    Extension(
-        "opteryx.compiled.aggregations.aggregations_state_classes",
-        sources=[
-            "opteryx/compiled/aggregations/aggregations_state_classes.pyx",
-        ],
-        include_dirs=include_dirs,
-        language="c++",
-        extra_compile_args=CPP_FLAGS,
-    ),
-    Extension(
-        "opteryx.compiled.aggregations.group_by_finalize",
-        sources=[
-            "opteryx/compiled/aggregations/group_by_finalize.pyx",
-        ],
-        include_dirs=include_dirs,
-        language="c++",
-        extra_compile_args=CPP_FLAGS,
-    ),
-    Extension(
-        "opteryx.compiled.aggregations.group_by_key_helpers",
-        sources=[
-            "opteryx/compiled/aggregations/group_by_key_helpers.pyx",
-        ],
-        include_dirs=include_dirs,
-        language="c++",
-        extra_compile_args=CPP_FLAGS,
-    ),
-    Extension(
-        "opteryx.compiled.aggregations.group_by_telemetry",
-        sources=[
-            "opteryx/compiled/aggregations/group_by_telemetry.pyx",
-        ],
-        include_dirs=include_dirs,
-        language="c++",
-        extra_compile_args=CPP_FLAGS,
-    ),
-    Extension(
-        "opteryx.compiled.aggregations.group_by_state",
-        sources=[
-            "opteryx/compiled/aggregations/group_by_state.pyx",
-        ],
-        include_dirs=include_dirs,
-        language="c++",
-        extra_compile_args=CPP_FLAGS,
-    ),
-    Extension(
-        "opteryx.compiled.aggregations.kernels.count_star",
-        sources=[
-            "opteryx/compiled/aggregations/kernels/count_star.pyx",
-        ],
-        include_dirs=include_dirs,
-        language="c++",
-        extra_compile_args=CPP_FLAGS,
-    ),
-    Extension(
-        "opteryx.compiled.aggregations.kernels.sum_float64",
-        sources=[
-            "opteryx/compiled/aggregations/kernels/sum_float64.pyx",
-        ],
-        include_dirs=include_dirs,
-        language="c++",
-        extra_compile_args=CPP_FLAGS,
-    ),
-    Extension(
-        "opteryx.compiled.aggregations.kernels.sum_int64",
-        sources=[
-            "opteryx/compiled/aggregations/kernels/sum_int64.pyx",
-        ],
-        include_dirs=include_dirs,
-        language="c++",
-        extra_compile_args=CPP_FLAGS,
-    ),
-    Extension(
-        "opteryx.compiled.aggregations.kernels.min_max_fixed",
-        sources=[
-            "opteryx/compiled/aggregations/kernels/min_max_fixed.pyx",
-        ],
-        include_dirs=include_dirs,
-        language="c++",
-        extra_compile_args=CPP_FLAGS,
-    ),
-    Extension(
-        "opteryx.compiled.aggregations.kernels.any_value_fixed",
-        sources=[
-            "opteryx/compiled/aggregations/kernels/any_value_fixed.pyx",
-        ],
-        include_dirs=include_dirs,
-        language="c++",
-        extra_compile_args=CPP_FLAGS,
-    ),
-    Extension(
-        "opteryx.compiled.aggregations.kernels.any_value_var",
-        sources=[
-            "opteryx/compiled/aggregations/kernels/any_value_var.pyx",
-        ],
-        include_dirs=include_dirs,
-        language="c++",
-        extra_compile_args=CPP_FLAGS,
-    ),
-    Extension(
-        "opteryx.compiled.aggregations.kernels.min_max_var",
-        sources=[
-            "opteryx/compiled/aggregations/kernels/min_max_var.pyx",
-        ],
-        include_dirs=include_dirs,
-        language="c++",
-        extra_compile_args=CPP_FLAGS,
-    ),
-    Extension(
-        "opteryx.compiled.aggregations.kernels.avg_float64",
-        sources=[
-            "opteryx/compiled/aggregations/kernels/avg_float64.pyx",
-        ],
-        include_dirs=include_dirs,
-        language="c++",
-        extra_compile_args=CPP_FLAGS,
-    ),
-    Extension(
-        "opteryx.compiled.aggregations.kernels.avg_int64",
-        sources=[
-            "opteryx/compiled/aggregations/kernels/avg_int64.pyx",
-        ],
-        include_dirs=include_dirs,
-        language="c++",
-        extra_compile_args=CPP_FLAGS,
-    ),
-    Extension(
-        "opteryx.compiled.aggregations.kernels.count_distinct",
-        sources=[
-            "opteryx/compiled/aggregations/kernels/count_distinct.pyx",
-            "src/cpp/cpu_features.cpp",
-        ],
-        include_dirs=include_dirs,
-        language="c++",
-        extra_compile_args=CPP_FLAGS,
-    ),
-    Extension(
-        "opteryx.compiled.aggregations.kernels.count",
-        sources=[
-            "opteryx/compiled/aggregations/kernels/count.pyx",
-        ],
-        include_dirs=include_dirs,
-        language="c++",
-        extra_compile_args=CPP_FLAGS,
-    ),
-    Extension(
-        "opteryx.compiled.aggregations.group_by_engine",
-        sources=[
-            "opteryx/compiled/aggregations/group_by_engine.pyx",
-            "src/cpp/cpu_features.cpp",
-        ],
-        include_dirs=include_dirs,
+        "opteryx.operators.aggregate.ungrouped_agg",
+        sources=["opteryx/operators/aggregate/ungrouped_agg.pyx"],
+        include_dirs=include_dirs + ["opteryx/operators/aggregate"],
         language="c++",
         extra_compile_args=CPP_FLAGS,
     ),
@@ -997,19 +833,6 @@ extensions = [
         include_dirs=include_dirs,
         language="c++",
         extra_compile_args=CPP_FLAGS,
-    ),
-    Extension(
-        "opteryx.compiled.morsel_ops.sort",
-        sources=[
-            "opteryx/compiled/morsel_ops/sort.pyx",
-            "src/cpp/simd_remap.cpp",
-            "src/cpp/cpu_features.cpp",
-            "src/cpp/simd_env.cpp",
-        ],
-        include_dirs=include_dirs,
-        language="c++",
-        extra_compile_args=CPP_FLAGS,
-        depends=["third_party/mabel/draken/core/buffers.h", "src/cpp/simd_remap.h"],
     ),
     Extension(
         "opteryx.compiled.morsel_ops.distinct",
@@ -1025,6 +848,18 @@ extensions = [
             "third_party/mabel/carchar/carchar_common.hpp",
             "third_party/mabel/carchar/carchar_simd.hpp",
         ],
+    ),
+    Extension(
+        "opteryx.compiled.morsel_ops.sort",
+        sources=[
+            "opteryx/compiled/morsel_ops/sort.pyx",
+            "src/cpp/simd_remap.cpp",
+            "src/cpp/simd_env.cpp",
+            "src/cpp/cpu_features.cpp",
+        ],
+        include_dirs=include_dirs,
+        language="c++",
+        extra_compile_args=CPP_FLAGS,
     ),
     Extension(
         "opteryx.compiled.table_ops.distinct",
@@ -1074,14 +909,8 @@ extensions = [
         extra_compile_args=C_FLAGS,
     ),
     Extension(
-        "opteryx.operators.draken_aggregate_and_group_node",
-        sources=["opteryx/operators/draken_aggregate_and_group_node.pyx"],
-        include_dirs=include_dirs,
-        extra_compile_args=C_FLAGS,
-    ),
-    Extension(
-        "opteryx.operators.draken_aggregate_node",
-        sources=["opteryx/operators/draken_aggregate_node.pyx"],
+        "opteryx.operators.aggregate.aggregate_node",
+        sources=["opteryx/operators/aggregate/aggregate_node.pyx"],
         include_dirs=include_dirs,
         extra_compile_args=C_FLAGS,
     ),
@@ -1311,10 +1140,6 @@ generate_consolidated_module(
     "opteryx/compiled/vector_ops", "opteryx/compiled/vector_ops/vector_ops.pyx"
 )
 generate_consolidated_module("opteryx/compiled/joins", "opteryx/compiled/joins/joins.pyx")
-generate_consolidated_module(
-    "opteryx/compiled/aggregations/scalar_kernels",
-    "opteryx/compiled/aggregations/scalar_kernels/_definitions.pyx",
-)
 
 
 # Add consolidated modules with their dependencies

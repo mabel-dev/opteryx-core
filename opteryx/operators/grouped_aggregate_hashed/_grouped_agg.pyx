@@ -1,0 +1,50 @@
+# cython: language_level=3
+# cython: boundscheck=False
+# cython: wraparound=False
+# cython: cdivision=True
+# cython: nonecheck=False
+# cython: initializedcheck=False
+# cython: infer_types=True
+
+"""
+Grouped aggregate (hashed) — single compiled module.
+
+Compilation order matters: each .pxi file depends on symbols from the ones
+included before it.  The include order below is topologically sorted.
+
+  _key_codec.pxi         → C++ codec declarations + inline wrappers
+  _key_store.pxi         → KeyStore (depends on _key_codec)
+  _collectors_base.pxi   → BaseCollector
+  _collectors_numeric.pxi → numeric collectors (depends on BaseCollector)
+  _collectors_distinct.pxi → distinct collectors (depends on numeric helpers)
+  _collectors_approx.pxi  → approx + array_agg collectors
+  _engine.pxi            → GroupHashEngine (depends on all collectors + KeyStore)
+  _factory.pxi           → create_collectors / resolve_deferred_collectors
+  _node.pxi              → GroupedAggregateHashedNode (Python class)
+"""
+
+from libc.stdint cimport int8_t, int32_t, int64_t, uint8_t, uint64_t, INT64_MAX, INT64_MIN
+from libc.math cimport HUGE_VAL
+from libc.stdlib cimport malloc, free
+from libc.stddef cimport size_t
+from libcpp.string cimport string
+from libcpp.vector cimport vector
+from cpython.bytes cimport PyBytes_FromStringAndSize
+
+from opteryx.compiled.draken.core.buffers cimport DrakenFixedBuffer, DrakenVarBuffer, DrakenType
+from opteryx.compiled.draken.vectors.vector cimport Vector
+from opteryx.compiled.draken.vectors.int64_vector cimport Int64Vector
+from opteryx.compiled.draken.vectors.float64_vector cimport Float64Vector
+from opteryx.compiled.draken.vectors.string_vector cimport StringVector
+from opteryx.compiled.draken.morsels.morsel cimport Morsel
+
+
+include "_key_codec.pxi"
+include "_key_store.pxi"
+include "_collectors_base.pxi"
+include "_collectors_numeric.pxi"
+include "_collectors_distinct.pxi"
+include "_collectors_approx.pxi"
+include "_engine.pxi"
+include "_factory.pxi"
+include "_node.pxi"

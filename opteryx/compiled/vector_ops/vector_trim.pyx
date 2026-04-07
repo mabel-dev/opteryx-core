@@ -6,7 +6,7 @@
 # cython: wraparound=False
 # cython: boundscheck=False
 
-from opteryx.compiled.draken.vectors.string_vector cimport StringVector
+from opteryx.compiled.draken.vectors.string_vector cimport StringVector, from_packed_dict
 from opteryx.compiled.draken.vectors import string_vector as string_vector_module
 from opteryx.compiled.draken.core.buffers cimport ConstAccessor
 from opteryx.compiled.draken.core.buffers cimport DrakenConstantStringPayload
@@ -133,6 +133,8 @@ cpdef StringVector vector_trim(StringVector vec, object chars=None):
     cdef const uint8_t* const_data_ptr
     cdef int32_t const_data_len
     cdef bint is_constant_vec
+    cdef Py_ssize_t dict_size
+    cdef DrakenVarBuffer* ndp
 
     # Convert trim specification to a byte‑flag array.
     trim_chars = _trim_chars_bytes(chars)
@@ -179,6 +181,34 @@ cpdef StringVector vector_trim(StringVector vec, object chars=None):
             builder.append(trimmed_bytes)
         return builder.finish()
 
+    # Dictionary encoding: trim each unique entry, repack with same codes
+    if vec._encoding == DRAKEN_ENCODING_DICTIONARY:
+        dict_size = vec._dict_values.length
+        dict_builder = string_vector_module.StringVectorBuilder.with_estimate(dict_size, 16)
+        for i in range(dict_size):
+            start = vec._dict_values.offsets[i]
+            end = vec._dict_values.offsets[i + 1]
+            data_ptr = <uint8_t*>vec._dict_values.data + start
+            length = end - start
+            left = 0
+            while left < length and trim_flags[data_ptr[left]]:
+                left += 1
+            right = length
+            while right > left and trim_flags[data_ptr[right - 1]]:
+                right -= 1
+            if left < right:
+                trimmed_bytes = PyBytes_FromStringAndSize(<const char*>(data_ptr + left), right - left)
+            else:
+                trimmed_bytes = b''
+            dict_builder.append(trimmed_bytes)
+        new_dict_sv = dict_builder.finish()
+        ndp = (<StringVector>new_dict_sv).ptr
+        return from_packed_dict(
+            vec._dict_codes, vec._dict_code_width, n,
+            ndp.offsets, <const uint8_t*>ndp.data, dict_size,
+            vec._dict_accessor.row_nulls,
+        )
+
     for i in range(n):
         # Handle nulls
         if null_bm != NULL and not ((null_bm[i >> 3] >> (i & 7)) & 1):
@@ -222,6 +252,8 @@ cpdef StringVector vector_ltrim(StringVector vec, object chars=None):
     cdef const uint8_t* const_data_ptr
     cdef int32_t const_data_len
     cdef bint is_constant_vec
+    cdef Py_ssize_t dict_size
+    cdef DrakenVarBuffer* ndp
 
     trim_chars = _trim_chars_bytes(chars)
     build_trim_flags(trim_flags, trim_chars)
@@ -263,6 +295,31 @@ cpdef StringVector vector_ltrim(StringVector vec, object chars=None):
             builder.append(trimmed_bytes)
         return builder.finish()
 
+    # Dictionary encoding: ltrim each unique entry, repack with same codes
+    if vec._encoding == DRAKEN_ENCODING_DICTIONARY:
+        dict_size = vec._dict_values.length
+        dict_builder = string_vector_module.StringVectorBuilder.with_estimate(dict_size, 16)
+        for i in range(dict_size):
+            start = vec._dict_values.offsets[i]
+            end = vec._dict_values.offsets[i + 1]
+            data_ptr = <uint8_t*>vec._dict_values.data + start
+            length = end - start
+            left = 0
+            while left < length and trim_flags[data_ptr[left]]:
+                left += 1
+            if left < length:
+                trimmed_bytes = PyBytes_FromStringAndSize(<const char*>(data_ptr + left), length - left)
+            else:
+                trimmed_bytes = b''
+            dict_builder.append(trimmed_bytes)
+        new_dict_sv = dict_builder.finish()
+        ndp = (<StringVector>new_dict_sv).ptr
+        return from_packed_dict(
+            vec._dict_codes, vec._dict_code_width, n,
+            ndp.offsets, <const uint8_t*>ndp.data, dict_size,
+            vec._dict_accessor.row_nulls,
+        )
+
     for i in range(n):
         if null_bm != NULL and not ((null_bm[i >> 3] >> (i & 7)) & 1):
             builder.append_null()
@@ -298,6 +355,8 @@ cpdef StringVector vector_rtrim(StringVector vec, object chars=None):
     cdef const uint8_t* const_data_ptr
     cdef int32_t const_data_len
     cdef bint is_constant_vec
+    cdef Py_ssize_t dict_size
+    cdef DrakenVarBuffer* ndp
 
     trim_chars = _trim_chars_bytes(chars)
     build_trim_flags(trim_flags, trim_chars)
@@ -338,6 +397,31 @@ cpdef StringVector vector_rtrim(StringVector vec, object chars=None):
         for i in range(n):
             builder.append(trimmed_bytes)
         return builder.finish()
+
+    # Dictionary encoding: rtrim each unique entry, repack with same codes
+    if vec._encoding == DRAKEN_ENCODING_DICTIONARY:
+        dict_size = vec._dict_values.length
+        dict_builder = string_vector_module.StringVectorBuilder.with_estimate(dict_size, 16)
+        for i in range(dict_size):
+            start = vec._dict_values.offsets[i]
+            end = vec._dict_values.offsets[i + 1]
+            data_ptr = <uint8_t*>vec._dict_values.data + start
+            length = end - start
+            right = length
+            while right > 0 and trim_flags[data_ptr[right - 1]]:
+                right -= 1
+            if right > 0:
+                trimmed_bytes = PyBytes_FromStringAndSize(<const char*>data_ptr, right)
+            else:
+                trimmed_bytes = b''
+            dict_builder.append(trimmed_bytes)
+        new_dict_sv = dict_builder.finish()
+        ndp = (<StringVector>new_dict_sv).ptr
+        return from_packed_dict(
+            vec._dict_codes, vec._dict_code_width, n,
+            ndp.offsets, <const uint8_t*>ndp.data, dict_size,
+            vec._dict_accessor.row_nulls,
+        )
 
     for i in range(n):
         if null_bm != NULL and not ((null_bm[i >> 3] >> (i & 7)) & 1):

@@ -39,21 +39,19 @@ cdef inline int64_t parse_int64(const char* data, int32_t length) except -1:
 
 cpdef Int64Vector vector_cast_bytes_to_int(StringVector vec):
     """Parse each element of a StringVector as a decimal integer."""
-    cdef DrakenVarBuffer* ptr = vec.ptr
-    cdef Py_ssize_t n = ptr.length
+    cdef Py_ssize_t n = vec.ptr.length
     cdef Py_ssize_t i
+    cdef StringRow row
 
     cdef numpy.ndarray[int64_t, ndim=1] result = numpy.zeros(n, dtype=numpy.int64)
     cdef int64_t[::1] result_view = result
 
     for i in range(n):
-        if ptr.null_bitmap != NULL and not ((ptr.null_bitmap[i >> 3] >> (i & 7)) & 1):
+        row = string_vec_get_at(vec, i)
+        if row.is_null:
             result_view[i] = 0
         else:
-            result_view[i] = parse_int64(
-                <const char*>ptr.data + ptr.offsets[i],
-                ptr.offsets[i + 1] - ptr.offsets[i]
-            )
+            result_view[i] = parse_int64(row.data, <int32_t>row.length)
 
     return int64_from_sequence(result_view)
 

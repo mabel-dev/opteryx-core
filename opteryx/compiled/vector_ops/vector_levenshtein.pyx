@@ -68,31 +68,24 @@ cpdef Int64Vector vector_levenshtein(StringVector a, StringVector b):
     Returns:
         Int64Vector: Levenshtein distances; -1 where either input is null.
     """
-    cdef DrakenVarBuffer* ap = a.ptr
-    cdef DrakenVarBuffer* bp = b.ptr
-    cdef Py_ssize_t n = ap.length
+    cdef Py_ssize_t n = a.ptr.length
     cdef Py_ssize_t i
-    cdef int32_t a_start, a_end, b_start, b_end
+    cdef StringRow a_row, b_row
 
     cdef numpy.ndarray[int64_t, ndim=1] result = numpy.zeros(n, dtype=numpy.int64)
     cdef int64_t[::1] result_view = result
 
     for i in range(n):
-        if ap.null_bitmap != NULL and not ((ap.null_bitmap[i >> 3] >> (i & 7)) & 1):
-            result_view[i] = -1
-            continue
-        if bp.null_bitmap != NULL and not ((bp.null_bitmap[i >> 3] >> (i & 7)) & 1):
-            result_view[i] = -1
-            continue
+        a_row = string_vec_get_at(a, i)
+        b_row = string_vec_get_at(b, i)
 
-        a_start = ap.offsets[i]
-        a_end = ap.offsets[i + 1]
-        b_start = bp.offsets[i]
-        b_end = bp.offsets[i + 1]
+        if a_row.is_null or b_row.is_null:
+            result_view[i] = -1
+            continue
 
         result_view[i] = levenshtein_bytes(
-            <const uint8_t*>ap.data + a_start, a_end - a_start,
-            <const uint8_t*>bp.data + b_start, b_end - b_start
+            <const uint8_t*>a_row.data, <int32_t>a_row.length,
+            <const uint8_t*>b_row.data, <int32_t>b_row.length,
         )
 
     return int64_from_sequence(result_view)
