@@ -144,8 +144,8 @@ def _build_registry() -> OperatorRegistry:
     # Local imports to avoid circular dependencies at module load time.
     from opteryx.operators.cross_join_node import CrossJoinNode
     from opteryx.operators.distinct_node import DistinctNode
-    from opteryx.operators.draken_aggregate_and_group_node import DrakenAggregateAndGroupNode
-    from opteryx.operators.draken_aggregate_node import DrakenAggregateNode
+    from opteryx.operators.aggregate.aggregate_node import AggregateOperator
+    from opteryx.operators.grouped_aggregate_hashed import GroupedAggregateHashedNode as DrakenAggregateAndGroupNode
     from opteryx.operators.draken_inner_join_node import DrakenInnerJoinNode
     from opteryx.operators.exit_node import ExitNode
     from opteryx.operators.explain_node import ExplainNode
@@ -226,7 +226,7 @@ def _build_registry() -> OperatorRegistry:
 
     # -- Aggregate operators --------------------------------------------------
     r.register(
-        DrakenAggregateNode,
+        AggregateOperator,
         name="Aggregate",
         category=OperatorCategory.AGGREGATE,
         is_pipeline_breaking=True,

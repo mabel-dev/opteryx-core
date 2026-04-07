@@ -1,0 +1,164 @@
+# included by ungrouped_agg.pyx — do not compile standalone
+
+
+cdef class CountStarAggregate(UngroupedAggregate):
+    """COUNT(*) — counts every row unconditionally."""
+
+    def __cinit__(self, bytes alias):
+        self.column_name = b""
+        self.alias       = alias
+        self.result_type = AGG_RESULT_I64
+        self._count      = 0
+
+    cdef void apply(self, Morsel morsel) except *:
+        self._count += <int64_t>(<Morsel>morsel).ptr.num_rows
+
+    cdef int64_t get_result_i64(self) noexcept:
+        return self._count
+
+    cdef double get_result_f64(self) noexcept:
+        return <double>self._count
+
+    cdef void get_result_bytes(self, const char** out_ptr, size_t* out_len) noexcept:
+        out_ptr[0] = NULL; out_len[0] = 0
+
+    cdef bint is_null(self) noexcept:
+        return False
+
+    cpdef object get_result(self):
+        return self._count
+
+
+cdef class CountAggregate(UngroupedAggregate):
+    """COUNT(col) — counts non-null values in the named column."""
+
+    def __cinit__(self, bytes column_name, bytes alias):
+        self.column_name = column_name
+        self.alias       = alias
+        self.result_type = AGG_RESULT_I64
+        self._count      = 0
+
+    cdef void apply(self, Morsel morsel) except *:
+        cdef Morsel typed    = <Morsel>morsel
+        cdef Py_ssize_t nrows = <Py_ssize_t>typed.ptr.num_rows
+
+        # Cached column index — list[i] on subsequent morsels, no dict hash
+        if self._col_idx < 0:
+            self._col_idx = typed._column_index_from_name(self.column_name)
+        cdef Vector raw = <Vector>typed._columns[self._col_idx]
+
+        # Classify once; integer compare on all subsequent morsels
+        if self._col_type == _VTYPE_UNKNOWN:
+            self._col_type = _classify_vector(raw)
+
+        cdef const uint8_t* nulls
+        cdef Py_ssize_t i
+        cdef DictAccessor* dacc
+
+        if self._col_type == _VTYPE_INT64:
+            vec_i = <Int64Vector>raw
+            if vec_i._has_const:
+                if not vec_i._const_is_null:
+                    self._count += nrows
+                return
+            if vec_i._dict_codes != NULL:
+                dacc  = vec_i.dict_accessor()
+                nulls = dacc.row_nulls
+                if nulls == NULL:
+                    self._count += nrows   # no row-level nulls — O(1)
+                    return
+                for i in range(nrows):
+                    if _bitmap_is_valid(nulls, i):
+                        self._count += 1
+                return
+            nulls = vec_i.null_bitmap_ptr()
+            if nulls == NULL:
+                self._count += nrows
+                return
+            with nogil:
+                for i in range(nrows):
+                    if _bitmap_is_valid(nulls, i):
+                        self._count += 1
+            return
+
+        if self._col_type == _VTYPE_STRING:
+            vec_s = <StringVector>raw
+            if vec_s._has_const:
+                if not vec_s._const_is_null:
+                    self._count += nrows
+                return
+            if vec_s._dict_codes != NULL:
+                dacc  = vec_s.dict_accessor()
+                nulls = dacc.row_nulls
+                if nulls == NULL:
+                    self._count += nrows
+                    return
+                for i in range(nrows):
+                    if _bitmap_is_valid(nulls, i):
+                        self._count += 1
+                return
+            nulls = vec_s.null_bitmap_ptr()
+            if nulls == NULL:
+                self._count += nrows
+                return
+            with nogil:
+                for i in range(nrows):
+                    if _bitmap_is_valid(nulls, i):
+                        self._count += 1
+            return
+
+        if self._col_type == _VTYPE_FLOAT64:
+            vec_f = <Float64Vector>raw
+            if vec_f._has_const:
+                if not vec_f._const_is_null:
+                    self._count += nrows
+                return
+            nulls = vec_f.null_bitmap_ptr()
+            if nulls == NULL:
+                self._count += nrows
+                return
+            with nogil:
+                for i in range(nrows):
+                    if _bitmap_is_valid(nulls, i):
+                        self._count += 1
+            return
+
+        if self._col_type == _VTYPE_INTEGER:
+            vec_n = <IntegerVector>raw
+            if vec_n._has_const:
+                if not vec_n._const_is_null:
+                    self._count += nrows
+                return
+            nulls = vec_n.null_bitmap_ptr()
+            if nulls == NULL:
+                self._count += nrows
+                return
+            with nogil:
+                for i in range(nrows):
+                    if _bitmap_is_valid(nulls, i):
+                        self._count += 1
+            return
+
+        # Generic fallback
+        nulls = raw.null_bitmap_ptr()
+        if nulls == NULL:
+            self._count += nrows
+            return
+        for i in range(nrows):
+            if _bitmap_is_valid(nulls, i):
+                self._count += 1
+
+    cdef int64_t get_result_i64(self) noexcept:
+        return self._count
+
+    cdef double get_result_f64(self) noexcept:
+        return <double>self._count
+
+    cdef void get_result_bytes(self, const char** out_ptr, size_t* out_len) noexcept:
+        out_ptr[0] = NULL; out_len[0] = 0
+
+    cdef bint is_null(self) noexcept:
+        return False
+
+    cpdef object get_result(self):
+        return self._count
