@@ -7,11 +7,9 @@
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
 from opteryx.operators.shuffle.bin_store import BinStore
-from opteryx.operators.shuffle.merge import (
-    ShuffleMergeOperation,
-    ShuffleMergeSortOperation,
-    SortKey,
-)
+from opteryx.operators.shuffle.merge import ShuffleMergeOperation
+from opteryx.operators.shuffle.merge import ShuffleMergeSortOperation
+from opteryx.operators.shuffle.merge import SortKey
 
 __all__ = (
     "BinStore",

@@ -20,10 +20,7 @@ This test suite provides advanced stress testing and performance validation:
 
 import os
 import random
-import struct
 import sys
-import time
-from typing import List, Tuple
 
 import pyarrow as pa
 import pytest

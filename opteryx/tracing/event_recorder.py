@@ -148,8 +148,6 @@ def trace_decode_completed(**kwargs) -> None:
     record_event("decode_complete", **kwargs)
 
 
-
-
 # ---------------------------------------------------------------------------
 # Buffer / writer management
 # ---------------------------------------------------------------------------

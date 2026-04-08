@@ -143,9 +143,27 @@ _RELATION_CONTEXT = {"FROM", "JOIN", "INTO", "UPDATE", "AS"}
 
 # Tokens that precede column names
 _COLUMN_CONTEXT = {
-    "SELECT", ",", "BY", "ON", "USING", "PARTITION", "HAVING",
-    "=", "==", ">=", "<=", "!=", "<", ">", "<>",
-    "LIKE", "ILIKE", "RLIKE", "BETWEEN", "IN", "IS"
+    "SELECT",
+    ",",
+    "BY",
+    "ON",
+    "USING",
+    "PARTITION",
+    "HAVING",
+    "=",
+    "==",
+    ">=",
+    "<=",
+    "!=",
+    "<",
+    ">",
+    "<>",
+    "LIKE",
+    "ILIKE",
+    "RLIKE",
+    "BETWEEN",
+    "IN",
+    "IS",
 }
 try:  # pragma: no cover - best-effort enrichment
     from opteryx.expression.functions import functions as _list_functions
@@ -249,17 +267,25 @@ def format_sql(sql):  # pragma: no cover
                 if words[j] != "\n" and words[j] not in (".", "_"):
                     tk = words[j].upper()
                     # If we find a context keyword (FROM, JOIN, etc.), use it
-                    if tk in _RELATION_CONTEXT or tk in ("SELECT", ","):
-                        context_token = tk
-                        break
-                    elif tk in _COLUMN_CONTEXT:
+                    if tk in _RELATION_CONTEXT or tk in ("SELECT", ",") or tk in _COLUMN_CONTEXT:
                         context_token = tk
                         break
 
         # Contexts where reserved words can be used as plain identifiers (preserve case, no color)
         is_reserved_word_context = prev_token in (
-            "SELECT", ",", "FROM", "AS",
-            "JOIN", "INNER", "LEFT", "RIGHT", "FULL", "CROSS", "ANTI", "SEMI", "NATURAL"
+            "SELECT",
+            ",",
+            "FROM",
+            "AS",
+            "JOIN",
+            "INNER",
+            "LEFT",
+            "RIGHT",
+            "FULL",
+            "CROSS",
+            "ANTI",
+            "SEMI",
+            "NATURAL",
         )
 
         if word in _PUNCTUATION_TOKENS:
@@ -330,7 +356,11 @@ def format_sql(sql):  # pragma: no cover
     # Remove spaces around dots and underscores for qualified names
     formatted_sql = formatted_sql.replace(f" {_COLOR_PUNCTUATION}.", f"{_COLOR_PUNCTUATION}.")
     formatted_sql = formatted_sql.replace(f" {_COLOR_PUNCTUATION}_", f"{_COLOR_PUNCTUATION}_")
-    formatted_sql = formatted_sql.replace(f"{_RESET} {_COLOR_PUNCTUATION}.", f"{_RESET}{_COLOR_PUNCTUATION}.")
-    formatted_sql = formatted_sql.replace(f"{_RESET} {_COLOR_PUNCTUATION}_", f"{_RESET}{_COLOR_PUNCTUATION}_")
+    formatted_sql = formatted_sql.replace(
+        f"{_RESET} {_COLOR_PUNCTUATION}.", f"{_RESET}{_COLOR_PUNCTUATION}."
+    )
+    formatted_sql = formatted_sql.replace(
+        f"{_RESET} {_COLOR_PUNCTUATION}_", f"{_RESET}{_COLOR_PUNCTUATION}_"
+    )
 
     return color_comments(formatted_sql).strip()

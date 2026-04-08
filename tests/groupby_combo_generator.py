@@ -20,7 +20,6 @@ import json
 import os
 import subprocess
 import sys
-import time
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
@@ -194,8 +193,7 @@ class ComboTestGenerator:
                             table=table,
                         )
                         sqls.append(
-                            (sql, [col_a_candidate["name"], col
-_b_candidate["name"]], pattern_id)
+                            (sql, [col_a_candidate["name"], col_b_candidate["name"]], pattern_id)
                         )
 
         elif len(required_columns) == 3:
@@ -249,9 +247,9 @@ _b_candidate["name"]], pattern_id)
     def _run_test_subprocess(self, pattern_id: str, table: str, sql: str) -> TestResult:
         """Run a single test in an isolated subprocess."""
         test_data = {
-            'pattern_id': pattern_id,
-            'table': table,
-            'sql': sql,
+            "pattern_id": pattern_id,
+            "table": table,
+            "sql": sql,
         }
 
         try:
@@ -267,16 +265,16 @@ _b_candidate["name"]], pattern_id)
                 # Parse the JSON output
                 result_data = json.loads(result.stdout)
                 return TestResult(
-                    pattern_id=result_data['pattern_id'],
-                    table=result_data['table'],
-                    columns_used=self._extract_columns_from_sql(result_data['sql']),
-                    sql=result_data['sql'],
-                    status=TestStatus(result_data['status']),
-                    error_message=result_data.get('error_message'),
-                    row_count=result_data.get('row_count'),
-                    execution_time_ms=result_data.get('execution_time_ms'),
-                    error_type=result_data.get('error_type'),
-                    traceback_str=result_data.get('traceback_str'),
+                    pattern_id=result_data["pattern_id"],
+                    table=result_data["table"],
+                    columns_used=self._extract_columns_from_sql(result_data["sql"]),
+                    sql=result_data["sql"],
+                    status=TestStatus(result_data["status"]),
+                    error_message=result_data.get("error_message"),
+                    row_count=result_data.get("row_count"),
+                    execution_time_ms=result_data.get("execution_time_ms"),
+                    error_type=result_data.get("error_type"),
+                    traceback_str=result_data.get("traceback_str"),
                 )
             else:
                 # Subprocess crashed or failed
@@ -336,7 +334,9 @@ _b_candidate["name"]], pattern_id)
             if test_result.status == TestStatus.PASSED:
                 self.passed_count += 1
                 if self.verbose:
-                    print(f"  ✓ Passed ({test_result.row_count} rows, {test_result.execution_time_ms:.1f}ms)\n")
+                    print(
+                        f"  ✓ Passed ({test_result.row_count} rows, {test_result.execution_time_ms:.1f}ms)\n"
+                    )
                 else:
                     print(".", end="", flush=True)
             elif test_result.status == TestStatus.CRASHED:

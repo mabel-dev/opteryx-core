@@ -14,17 +14,14 @@ from __future__ import annotations
 
 from typing import List
 
-from orso.types import OrsoTypes
-
-from opteryx.expression.functions import (
-    FunctionDefinition,
-    FunctionOverload,
-    KernelSpec,
-    LifecycleSpec,
-    ParameterSpec,
-    ReturnSpec,
-)
+from opteryx.expression.functions import FunctionDefinition
+from opteryx.expression.functions import FunctionOverload
+from opteryx.expression.functions import KernelSpec
+from opteryx.expression.functions import LifecycleSpec
+from opteryx.expression.functions import ParameterSpec
+from opteryx.expression.functions import ReturnSpec
 from opteryx.expression.functions.registrar import _make
+from orso.types import OrsoTypes
 
 
 def get_builtin_text_functions() -> List[FunctionDefinition]:

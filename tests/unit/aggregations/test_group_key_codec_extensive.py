@@ -20,9 +20,7 @@ This test suite provides comprehensive coverage of:
 """
 
 import os
-import struct
 import sys
-from typing import List, Tuple
 
 import pyarrow as pa
 import pytest
@@ -1249,8 +1247,8 @@ class TestPayloadIntegrity:
         by_key = _rows_by_key(rows, "s")
 
         # Verify data integrity by checking it comes back unchanged
-        assert large_string in [k[0] for k in by_key.keys()]
-        assert "short" in [k[0] for k in by_key.keys()]
+        assert large_string in [k[0] for k in by_key]
+        assert "short" in [k[0] for k in by_key]
 
 
 # ============================================================================

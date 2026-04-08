@@ -54,9 +54,98 @@ from libc.stddef cimport size_t
 from libc.stdint cimport int32_t, uint8_t
 from libc.string cimport memcmp, memcpy, memset
 
+from cpython.bytes cimport PyBytes_AsStringAndSize
+from libcpp.string cimport string
+
 cdef extern from "simd_search.h":
     int neon_search(const char* data, size_t length, char target)
     int avx_search(const char* data, size_t length, char target)
+
+cdef extern from "re2/stringpiece.h" namespace "re2":
+    cdef cppclass StringPiece:
+        StringPiece() except +
+        StringPiece(const char* data, size_t length) except +
+
+cdef extern from "re2/regexp.h" namespace "re2":
+    cdef enum RegexpOp:
+        kRegexpNoMatch
+        kRegexpEmptyMatch
+        kRegexpLiteral
+        kRegexpLiteralString
+        kRegexpConcat
+        kRegexpAlternate
+        kRegexpStar
+        kRegexpPlus
+        kRegexpQuest
+        kRegexpRepeat
+        kRegexpCapture
+        kRegexpAnyChar
+        kRegexpAnyByte
+        kRegexpBeginLine
+        kRegexpEndLine
+        kRegexpWordBoundary
+        kRegexpNoWordBoundary
+        kRegexpBeginText
+        kRegexpEndText
+        kRegexpCharClass
+        kRegexpHaveMatch
+
+    cdef cppclass RegexpStatus:
+        RegexpStatus() except +
+        bint ok() const
+        string Text() const
+
+    cdef struct RuneRange:
+        int lo
+        int hi
+
+    cdef cppclass CharClass:
+        int size()
+        RuneRange* begin()
+        RuneRange* end()
+
+    cdef cppclass Regexp:
+        RegexpOp op()
+        int nsub()
+        Regexp** sub()
+        int min()
+        int max()
+        int cap()
+        int nrunes()
+        int match_id()
+        int parse_flags()
+        int rune()
+        int Ref()
+        int* runes()
+        CharClass* cc()
+        Regexp* Incref()
+        void Decref()
+        Regexp* Simplify()
+        @staticmethod
+        Regexp* Parse(const StringPiece& s, RegexpParseFlags flags, RegexpStatus* status)
+
+# Nested enum re2::Regexp::ParseFlags — declared at namespace "re2::Regexp" so
+# Cython emits the correct re2::Regexp::LikePerl etc. in generated C++.
+cdef extern from "re2/regexp.h" namespace "re2::Regexp":
+    cdef enum RegexpParseFlags "re2::Regexp::ParseFlags":
+        NoParseFlags
+        FoldCase
+        Literal
+        ClassNL
+        DotNL
+        MatchNL
+        OneLine
+        Latin1
+        NonGreedy
+        PerlClasses
+        PerlB
+        PerlX
+        UnicodeGroups
+        NeverNL
+        NeverCapture
+        LikePerl
+
+cdef int DFA_MAX_LITERAL_BYTES = 64
 
 import platform
 
@@ -92,6 +181,15 @@ cdef struct DfaOp:
 
 cdef struct DfaProcedure:
     DfaOp ops[8]
+    int op_count
+
+
+cdef struct DfaProgramBuilder:
+    uint8_t op_types[8]
+    const char* literals[8]
+    Py_ssize_t literal_lens[8]
+    char target_chars[8]
+    char literal_storage[8][64]
     int op_count
 
 
@@ -188,6 +286,364 @@ cdef inline void _write_u32(char** p, uint32_t value) noexcept:
     dst[2] = <uint8_t>((value >> 16) & 0xFF)
     dst[3] = <uint8_t>((value >> 24) & 0xFF)
     p[0] += 4
+
+
+cdef inline void _builder_reset(DfaProgramBuilder* builder) noexcept:
+    cdef int i
+    builder.op_count = 0
+    for i in range(8):
+        builder.literals[i] = NULL
+        builder.literal_lens[i] = 0
+        builder.target_chars[i] = <char>0
+
+
+cdef inline bint _builder_append_literal(
+    DfaProgramBuilder* builder,
+    uint8_t op_type,
+    const char* literal,
+    Py_ssize_t literal_len,
+) noexcept:
+    cdef int slot
+    if builder.op_count >= 8:
+        return False
+    if literal == NULL or literal_len <= 0 or literal_len > DFA_MAX_LITERAL_BYTES:
+        return False
+    slot = builder.op_count
+    memcpy(builder.literal_storage[slot], literal, <size_t>literal_len)
+    builder.op_types[slot] = op_type
+    builder.literals[slot] = <const char*>builder.literal_storage[slot]
+    builder.literal_lens[slot] = literal_len
+    builder.target_chars[slot] = <char>0
+    builder.op_count += 1
+    return True
+
+
+cdef inline bint _builder_append_target(
+    DfaProgramBuilder* builder,
+    uint8_t op_type,
+    char target_char,
+) noexcept:
+    if builder.op_count >= 8:
+        return False
+    builder.op_types[builder.op_count] = op_type
+    builder.literals[builder.op_count] = NULL
+    builder.literal_lens[builder.op_count] = 0
+    builder.target_chars[builder.op_count] = target_char
+    builder.op_count += 1
+    return True
+
+
+cdef inline bint _builder_append_simple(
+    DfaProgramBuilder* builder,
+    uint8_t op_type,
+) noexcept:
+    if builder.op_count >= 8:
+        return False
+    builder.op_types[builder.op_count] = op_type
+    builder.literals[builder.op_count] = NULL
+    builder.literal_lens[builder.op_count] = 0
+    builder.target_chars[builder.op_count] = <char>0
+    builder.op_count += 1
+    return True
+
+
+cdef inline bint _is_ascii_literal_regexp(Regexp* re) noexcept:
+    cdef int i
+    cdef int rune_value
+    if re == NULL:
+        return False
+    if re.op() == kRegexpLiteral:
+        rune_value = re.rune()
+        return 0 <= rune_value <= 127
+    if re.op() != kRegexpLiteralString:
+        return False
+    for i in range(re.nrunes()):
+        rune_value = re.runes()[i]
+        if rune_value < 0 or rune_value > 127:
+            return False
+    return True
+
+
+cdef inline bint _extract_ascii_literal(
+    Regexp* re,
+    const char** literal_ptr,
+    Py_ssize_t* literal_len,
+    char* literal_buf,
+) noexcept:
+    cdef int rune_value
+    cdef int i
+    if re == NULL:
+        return False
+    if re.op() == kRegexpLiteral:
+        rune_value = re.rune()
+        if rune_value < 0 or rune_value > 127:
+            return False
+        literal_buf[0] = <char>rune_value
+        literal_ptr[0] = <const char*>literal_buf
+        literal_len[0] = 1
+        return True
+    if re.op() != kRegexpLiteralString:
+        return False
+    if not _is_ascii_literal_regexp(re):
+        return False
+    if re.nrunes() <= 0 or re.nrunes() > DFA_MAX_LITERAL_BYTES:
+        return False
+    for i in range(re.nrunes()):
+        rune_value = re.runes()[i]
+        if rune_value < 0 or rune_value > 127:
+            return False
+        literal_buf[i] = <char>rune_value
+    literal_ptr[0] = <const char*>literal_buf
+    literal_len[0] = re.nrunes()
+    return True
+
+
+cdef inline bint _is_optional_literal(Regexp* re) noexcept:
+    if re == NULL:
+        return False
+    if re.op() == kRegexpQuest and re.nsub() == 1:
+        return _is_ascii_literal_regexp(re.sub()[0])
+    return False
+
+
+cdef inline bint _is_capture_until_char(Regexp* re, char* target_char) noexcept:
+    cdef Regexp* inner
+    cdef Regexp* repeated
+    cdef CharClass* char_class
+    cdef RuneRange* it
+    cdef RuneRange* end
+    cdef int slash = 47
+    cdef bint saw_before = False
+    cdef bint saw_after = False
+    cdef int range_count = 0
+
+    if re == NULL or re.op() != kRegexpCapture or re.nsub() != 1 or re.cap() != 1:
+        return False
+
+    inner = re.sub()[0]
+    if inner == NULL:
+        return False
+
+    if inner.op() == kRegexpPlus and inner.nsub() == 1:
+        repeated = inner.sub()[0]
+    elif inner.op() == kRegexpRepeat and inner.nsub() == 1 and inner.min() == 1 and inner.max() == -1:
+        repeated = inner.sub()[0]
+    else:
+        repeated = inner
+
+    if repeated == NULL or repeated.op() != kRegexpCharClass:
+        return False
+
+    char_class = repeated.cc()
+    if char_class == NULL:
+        return False
+
+    it = char_class.begin()
+    end = char_class.end()
+
+    while it != end:
+        range_count += 1
+        if it.lo <= slash and slash <= it.hi:
+            return False
+        if it.lo == 0 and it.hi == slash - 1:
+            saw_before = True
+        elif it.lo == slash + 1 and it.hi == 1114111:
+            saw_after = True
+        it += 1
+
+    if not (saw_before and saw_after):
+        return False
+
+    target_char[0] = <char>slash
+    return True
+
+
+cdef inline bint _lower_regexp_to_builder(
+    Regexp* re,
+    DfaProgramBuilder* builder,
+) noexcept:
+    cdef int i
+    cdef Regexp* child
+    cdef const char* literal_ptr = NULL
+    cdef Py_ssize_t literal_len = 0
+    cdef char target_char = <char>0
+    cdef char literal_buf[64]
+
+    if re == NULL:
+        return False
+
+    if re.op() == kRegexpBeginText:
+        return True
+
+    if re.op() == kRegexpEndText:
+        return True
+
+    if re.op() == kRegexpConcat:
+        for i in range(re.nsub()):
+            child = re.sub()[i]
+            if child == NULL:
+                return False
+            if child.op() == kRegexpBeginText:
+                continue
+            if child.op() == kRegexpEndText:
+                continue
+            if _extract_ascii_literal(child, &literal_ptr, &literal_len, literal_buf):
+                if not _builder_append_literal(
+                    builder,
+                    DFA_OP_CONSUME_LITERAL,
+                    literal_ptr,
+                    literal_len,
+                ):
+                    return False
+                continue
+            if _is_optional_literal(child):
+                if not _extract_ascii_literal(child.sub()[0], &literal_ptr, &literal_len, literal_buf):
+                    return False
+                if not _builder_append_literal(
+                    builder,
+                    DFA_OP_CONSUME_OPTIONAL_LITERAL,
+                    literal_ptr,
+                    literal_len,
+                ):
+                    return False
+                continue
+            if _is_capture_until_char(child, &target_char):
+                if not _builder_append_target(
+                    builder,
+                    DFA_OP_CAPTURE_UNTIL_CHAR,
+                    target_char,
+                ):
+                    return False
+                continue
+            if child.nsub() == 1 and child.sub()[0] != NULL:
+                if child.op() == kRegexpStar or child.op() == kRegexpPlus:
+                    if (
+                        child.sub()[0].op() == kRegexpAnyChar
+                        or child.sub()[0].op() == kRegexpAnyByte
+                        or child.sub()[0].op() == kRegexpCharClass
+                    ):
+                        if not _builder_append_simple(builder, DFA_OP_CONSUME_TO_END):
+                            return False
+                        continue
+            return False
+        return True
+
+    if _extract_ascii_literal(re, &literal_ptr, &literal_len, literal_buf):
+        return _builder_append_literal(
+            builder,
+            DFA_OP_CONSUME_LITERAL,
+            literal_ptr,
+            literal_len,
+        )
+
+    if _is_optional_literal(re):
+        if not _extract_ascii_literal(re.sub()[0], &literal_ptr, &literal_len, literal_buf):
+            return False
+        return _builder_append_literal(
+            builder,
+            DFA_OP_CONSUME_OPTIONAL_LITERAL,
+            literal_ptr,
+            literal_len,
+        )
+
+    if _is_capture_until_char(re, &target_char):
+        return _builder_append_target(
+            builder,
+            DFA_OP_CAPTURE_UNTIL_CHAR,
+            target_char,
+        )
+
+    if re.nsub() == 1 and re.sub()[0] != NULL:
+        if re.op() == kRegexpStar or re.op() == kRegexpPlus:
+            if (
+                re.sub()[0].op() == kRegexpAnyChar
+                or re.sub()[0].op() == kRegexpAnyByte
+                or re.sub()[0].op() == kRegexpCharClass
+            ):
+                return _builder_append_simple(builder, DFA_OP_CONSUME_TO_END)
+
+    return False
+
+
+cdef inline bytes _encode_builder_program(DfaProgramBuilder* builder):
+    cdef Py_ssize_t total_len = 2
+    cdef Py_ssize_t i
+    cdef bytes program
+    cdef char* out_ptr
+
+    if builder.op_count <= 0 or builder.op_count > 8:
+        raise ValueError("vector_dfa_replace: compiled program op count is invalid")
+
+    for i in range(builder.op_count):
+        total_len += 1
+        if builder.op_types[i] == DFA_OP_CONSUME_LITERAL or builder.op_types[i] == DFA_OP_CONSUME_OPTIONAL_LITERAL:
+            total_len += 4 + builder.literal_lens[i]
+        elif builder.op_types[i] == DFA_OP_CAPTURE_UNTIL_CHAR:
+            total_len += 1
+
+    program = bytes(total_len)
+    out_ptr = <char*>program
+
+    _write_u8(&out_ptr, 1)
+    _write_u8(&out_ptr, <uint8_t>builder.op_count)
+
+    for i in range(builder.op_count):
+        _write_u8(&out_ptr, builder.op_types[i])
+        if builder.op_types[i] == DFA_OP_CONSUME_LITERAL or builder.op_types[i] == DFA_OP_CONSUME_OPTIONAL_LITERAL:
+            _write_u32(&out_ptr, <uint32_t>builder.literal_lens[i])
+            memcpy(out_ptr, builder.literals[i], <size_t>builder.literal_lens[i])
+            out_ptr += builder.literal_lens[i]
+        elif builder.op_types[i] == DFA_OP_CAPTURE_UNTIL_CHAR:
+            _write_u8(&out_ptr, <uint8_t>builder.target_chars[i])
+
+    return program
+
+
+cpdef object compile_dfa_program(bytes pattern, bytes replacement):
+    cdef char* pattern_buf = NULL
+    cdef char* replacement_buf = NULL
+    cdef Py_ssize_t pattern_len = 0
+    cdef Py_ssize_t replacement_len = 0
+    cdef StringPiece pattern_piece
+    cdef RegexpStatus status
+    cdef Regexp* parsed = NULL
+    cdef Regexp* simplified = NULL
+    cdef DfaProgramBuilder builder
+
+    PyBytes_AsStringAndSize(pattern, &pattern_buf, &pattern_len)
+    PyBytes_AsStringAndSize(replacement, &replacement_buf, &replacement_len)
+
+    if replacement_len != 2 or replacement_buf[0] != 92 or replacement_buf[1] != 49:
+        return None
+
+    pattern_piece = StringPiece(pattern_buf, <size_t>pattern_len)
+    parsed = Regexp.Parse(pattern_piece, LikePerl, &status)
+    if parsed == NULL:
+        if status.ok():
+            return None
+        raise ValueError(status.Text().decode("utf8"))
+
+    try:
+        simplified = parsed.Simplify()
+        if simplified == NULL:
+            return None
+
+        _builder_reset(&builder)
+        if not _lower_regexp_to_builder(simplified, &builder):
+            return None
+
+        if builder.op_count == 0:
+            return None
+
+        if builder.op_types[builder.op_count - 1] != DFA_OP_RETURN_CAPTURE:
+            if not _builder_append_simple(&builder, DFA_OP_RETURN_CAPTURE):
+                return None
+
+        return _encode_builder_program(&builder)
+    finally:
+        if simplified != NULL:
+            simplified.Decref()
+        parsed.Decref()
 
 
 cdef inline bint _slice_equals(

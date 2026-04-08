@@ -16,7 +16,6 @@ import json
 import os
 import subprocess
 import sys
-import time
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum

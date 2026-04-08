@@ -584,7 +584,11 @@ def iter_row_groups(
             row_group["__parquet_scan_strategy__"] = "reader"
 
             if trace_enabled:
-                rows_fetched = len(row_group) if isinstance(row_group, dict) else getattr(row_group, "num_rows", 0)
+                rows_fetched = (
+                    len(row_group)
+                    if isinstance(row_group, dict)
+                    else getattr(row_group, "num_rows", 0)
+                )
                 _trace_rowgroup_fetched(
                     file_id=path, rg_idx=rg_idx, connector=connector, rows_out=rows_fetched
                 )

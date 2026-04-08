@@ -9,10 +9,8 @@ This module tests extensive GROUP BY scenarios including:
 - Interaction with WHERE, HAVING, ORDER BY, LIMIT
 """
 
-import math
 import os
 import sys
-from typing import Any, Dict, List
 
 import pytest
 

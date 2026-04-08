@@ -14,8 +14,7 @@ import threading
 import time
 import sys
 import importlib.util
-from collections import defaultdict
-from typing import Dict, List, Tuple, Any
+from typing import Dict, List, Tuple
 
 # Load Edge module directly
 spec = importlib.util.spec_from_file_location('edge', './opteryx/execution/edge.py')
