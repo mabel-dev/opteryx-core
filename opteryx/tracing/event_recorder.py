@@ -18,6 +18,7 @@ analysis, and waterfall visualizations.
 from __future__ import annotations
 
 import atexit
+import random
 import threading
 import time
 from typing import Optional
@@ -87,8 +88,6 @@ def record_event(event_type: str, **kwargs) -> None:
     When tracing is enabled (OPTERYX_TRACE=1), the event is stored in-memory for
     later inspection and optional export.
     """
-    import random
-
     from opteryx import config
 
     if not config.OPTERYX_TRACE:
@@ -103,8 +102,9 @@ def record_event(event_type: str, **kwargs) -> None:
     if "session_id" not in event and _current_session_id is not None:
         event["session_id"] = _current_session_id
 
-    with _global_lock:
-        _global_events.append(event)
+    # list.append() is GIL-safe in CPython — no lock needed for the append.
+    # _global_lock is still held in flush_all()/reset() where we read the list.
+    _global_events.append(event)
 
     writer = _get_trace_writer()
     if writer:

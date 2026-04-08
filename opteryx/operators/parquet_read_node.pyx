@@ -571,7 +571,7 @@ class ParquetReadNode(ReaderNode):
                     fetch_footer,
                     filesystem,
                     blob_name,
-                    None,
+                    cache,
                     file_sizes.get(blob_name),
                 ): blob_name
                 for blob_name in unique_blob_paths

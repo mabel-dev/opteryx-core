@@ -177,6 +177,11 @@ def _get_or_create_pool(name: str, max_workers: int) -> ThreadPool:
     Returns:
         ThreadPool instance
     """
+    # Fast path: pool already exists — avoid lock acquisition entirely.
+    pool = _pools.get(name)
+    if pool is not None:
+        return pool
+
     global _pool_lock
     if _pool_lock is None:
         import threading
@@ -184,6 +189,8 @@ def _get_or_create_pool(name: str, max_workers: int) -> ThreadPool:
         _pool_lock = threading.Lock()
 
     with _pool_lock:
+        # Re-check under lock in case another thread created it between the
+        # unlocked read above and acquiring the lock.
         if name not in _pools or _pools[name] is None:
             _pools[name] = create_thread_pool(name, max_workers)
             logger.debug(
@@ -197,7 +204,7 @@ def get_decode_pool(max_workers: Optional[int] = None) -> ThreadPool:
     """Get the global column decode pool.
 
     Args:
-        max_workers: Max workers (default: cpu_count from config)
+        max_workers: Max workers (default: cpu_count - 2)
 
     Returns:
         Shared decode thread pool
@@ -205,7 +212,8 @@ def get_decode_pool(max_workers: Optional[int] = None) -> ThreadPool:
     if max_workers is None:
         import os
 
-        max_workers = os.cpu_count() or 4
+        cpu_count = os.cpu_count() or 4
+        max_workers = max(1, cpu_count - 2)
 
     return _get_or_create_pool("parquet-decode", max_workers)
 
