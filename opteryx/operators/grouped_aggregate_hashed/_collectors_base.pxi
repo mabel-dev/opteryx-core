@@ -21,8 +21,10 @@ cdef class BaseCollector:
          after all new groups for that morsel are counted.
       3. engine.ingest() calls accumulate(morsel, state_indices, n_rows)
          once per morsel to update per-group state.
-      4. engine.finalize_morsels() calls finalize(num_groups) once
-         to produce the output Vector.
+      4. engine.finalize_morsels() may call finalize_slice(start, stop)
+         repeatedly to produce chunked output vectors.
+      5. finalize(num_groups) remains as a compatibility wrapper for
+         collectors that only implement whole-column finalization.
     """
 
     cdef public bytes column_name    # source column, or b"*" for COUNT(*)
@@ -57,4 +59,8 @@ cdef class BaseCollector:
 
     cpdef Vector finalize(self, int64_t num_groups):
         """Return an output Vector with one value per group."""
+        return self.finalize_slice(0, num_groups)
+
+    cpdef Vector finalize_slice(self, int64_t start, int64_t stop):
+        """Return an output Vector for groups in [start, stop)."""
         return None

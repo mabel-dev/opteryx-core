@@ -4,7 +4,8 @@
 # cython: cdivision=True
 
 # Numeric collectors — COUNT, SUM, MIN, MAX, AVG.
-# All state lives in C++ typed vectors.  No Python in accumulate().
+# Numeric state lives in Draken-owned fixed buffers so finalize can hand off
+# buffers without copying. No Python in accumulate().
 #
 # Constant-encoding: dense_ptr() returns NULL for DRAKEN_ENCODING_CONSTANT vectors.
 # Every collector that calls dense_ptr() must check _has_const first and use
@@ -12,9 +13,14 @@
 
 from libc.stdint cimport int64_t, uint8_t, INT64_MAX, INT64_MIN
 from libc.math cimport HUGE_VAL
-from libcpp.vector cimport vector
+from libc.string cimport memset, memcpy
+from libc.stdlib cimport malloc, free
 
 from opteryx.compiled.draken.core.buffers cimport DrakenFixedBuffer
+from opteryx.compiled.draken.core.buffers cimport DRAKEN_INT64
+from opteryx.compiled.draken.core.buffers cimport DRAKEN_FLOAT64
+from opteryx.compiled.draken.core.fixed_vector cimport alloc_fixed_buffer
+from opteryx.compiled.draken.core.fixed_vector cimport free_fixed_buffer
 from opteryx.compiled.draken.vectors.vector cimport Vector
 from opteryx.compiled.draken.vectors.int64_vector cimport Int64Vector
 from opteryx.compiled.draken.vectors.float64_vector cimport Float64Vector
@@ -26,17 +32,206 @@ cdef inline bint _num_bitmap_valid(uint8_t* bm, Py_ssize_t i) noexcept nogil:
     return ((bm[i >> 3] >> (i & 7)) & 1) != 0
 
 
+cdef inline Py_ssize_t _bitmap_nbytes(int64_t length) noexcept nogil:
+    return <Py_ssize_t>((length + 7) >> 3)
+
+
+cdef inline uint8_t* _alloc_all_valid_bitmap(int64_t length) except NULL:
+    cdef Py_ssize_t nbytes = _bitmap_nbytes(length)
+    cdef uint8_t* bitmap
+    if nbytes == 0:
+        return NULL
+    bitmap = <uint8_t*>malloc(nbytes)
+    if bitmap == NULL:
+        raise MemoryError()
+    memset(bitmap, 0xFF, nbytes)
+    return bitmap
+
+
+cdef inline void _bitmap_clear(uint8_t* bitmap, Py_ssize_t index) noexcept nogil:
+    bitmap[index >> 3] &= ~(1 << (index & 7))
+
+
+cdef inline void _bitmap_set(uint8_t* bitmap, Py_ssize_t index) noexcept nogil:
+    bitmap[index >> 3] |= (1 << (index & 7))
+
+
+cdef inline void _ensure_validity_bitmap(DrakenFixedBuffer* buf) except *:
+    if buf.null_bitmap == NULL:
+        buf.null_bitmap = _alloc_all_valid_bitmap(<int64_t>buf.length)
+
+
+cdef inline void _grow_fixed_buffer(DrakenFixedBuffer* buf, int64_t old_count, int64_t new_count) except *:
+    cdef void* new_data
+    cdef Py_ssize_t old_bytes
+    cdef Py_ssize_t new_bytes
+
+    if new_count <= old_count:
+        buf.length = <size_t>new_count
+        return
+
+    old_bytes = <Py_ssize_t>(old_count * <int64_t>buf.itemsize)
+    new_bytes = <Py_ssize_t>(new_count * <int64_t>buf.itemsize)
+
+    new_data = malloc(new_bytes) if new_bytes > 0 else NULL
+    if new_bytes > 0 and new_data == NULL:
+        raise MemoryError()
+
+    if old_bytes > 0 and buf.data != NULL:
+        memcpy(new_data, buf.data, old_bytes)
+    if new_bytes > old_bytes:
+        memset(<uint8_t*>new_data + old_bytes, 0, new_bytes - old_bytes)
+
+    if buf.data != NULL:
+        free(buf.data)
+    buf.data = new_data
+    buf.length = <size_t>new_count
+
+
+cdef inline void _grow_bitmap(uint8_t** bitmap_ref, int64_t old_count, int64_t new_count, bint fill_valid) except *:
+    cdef Py_ssize_t old_bytes = _bitmap_nbytes(old_count)
+    cdef Py_ssize_t new_bytes = _bitmap_nbytes(new_count)
+    cdef uint8_t fill_byte = 0xFF if fill_valid else 0x00
+    cdef uint8_t* new_bitmap
+
+    if new_bytes == 0:
+        if bitmap_ref[0] != NULL:
+            free(bitmap_ref[0])
+            bitmap_ref[0] = NULL
+        return
+
+    new_bitmap = <uint8_t*>malloc(new_bytes)
+    if new_bitmap == NULL:
+        raise MemoryError()
+
+    memset(new_bitmap, fill_byte, new_bytes)
+    if old_bytes > 0 and bitmap_ref[0] != NULL:
+        memcpy(new_bitmap, bitmap_ref[0], old_bytes)
+        free(bitmap_ref[0])
+
+    bitmap_ref[0] = new_bitmap
+
+
+cdef inline Int64Vector _wrap_int64_buffer(DrakenFixedBuffer* buf) except *:
+    cdef Int64Vector vec = Int64Vector(0, True)
+    vec.ptr = buf
+    vec.owns_data = True
+    vec._dict_values = NULL
+    vec._dict_codes = NULL
+    vec._dict_code_width = 0
+    vec._dict_ordered = 0
+    vec._dict_accessor.codes = NULL
+    vec._dict_accessor.code_width = 0
+    vec._dict_accessor.row_nulls = NULL
+    vec._dict_accessor.length = 0
+    vec._dict_accessor.dict_values = NULL
+    vec._dict_accessor.value_type = DRAKEN_INT64
+    vec._const_accessor.length = 0
+    vec._const_accessor.value_type = DRAKEN_INT64
+    vec._const_accessor.value_ptr = NULL
+    vec._const_accessor.is_null = 0
+    vec._const_value = 0
+    vec._has_const = False
+    vec._const_is_null = False
+    return vec
+
+
+cdef inline Float64Vector _wrap_float64_buffer(DrakenFixedBuffer* buf) except *:
+    cdef Float64Vector vec = Float64Vector(0, True)
+    vec.ptr = buf
+    vec.owns_data = True
+    vec._dict_values = NULL
+    vec._dict_codes = NULL
+    vec._dict_code_width = 0
+    vec._dict_ordered = 0
+    vec._dict_accessor.codes = NULL
+    vec._dict_accessor.code_width = 0
+    vec._dict_accessor.row_nulls = NULL
+    vec._dict_accessor.length = 0
+    vec._dict_accessor.dict_values = NULL
+    vec._dict_accessor.value_type = DRAKEN_FLOAT64
+    vec._const_accessor.length = 0
+    vec._const_accessor.value_type = DRAKEN_FLOAT64
+    vec._const_accessor.value_ptr = NULL
+    vec._const_accessor.is_null = 0
+    vec._const_value = 0.0
+    vec._has_const = False
+    vec._const_is_null = False
+    return vec
+
+
+cdef inline Int64Vector _slice_int64_buffer(
+    DrakenFixedBuffer* src,
+    int64_t start,
+    int64_t stop,
+) except *:
+    cdef Py_ssize_t length = <Py_ssize_t>(stop - start)
+    cdef Int64Vector out = Int64Vector(<size_t>length)
+    cdef int64_t* src_data = <int64_t*>src.data
+    cdef int64_t* out_data = <int64_t*>out.ptr.data
+    cdef Py_ssize_t i
+
+    if length <= 0:
+        return out
+
+    memcpy(out_data, src_data + start, length * sizeof(int64_t))
+
+    if src.null_bitmap != NULL:
+        out.ptr.null_bitmap = _alloc_all_valid_bitmap(length)
+        for i in range(length):
+            if not _num_bitmap_valid(src.null_bitmap, start + i):
+                _bitmap_clear(out.ptr.null_bitmap, i)
+
+    return out
+
+
+cdef inline Float64Vector _slice_float64_buffer(
+    DrakenFixedBuffer* src,
+    int64_t start,
+    int64_t stop,
+) except *:
+    cdef Py_ssize_t length = <Py_ssize_t>(stop - start)
+    cdef Float64Vector out = Float64Vector(<size_t>length)
+    cdef double* src_data = <double*>src.data
+    cdef double* out_data = <double*>out.ptr.data
+    cdef Py_ssize_t i
+
+    if length <= 0:
+        return out
+
+    memcpy(out_data, src_data + start, length * sizeof(double))
+
+    if src.null_bitmap != NULL:
+        out.ptr.null_bitmap = _alloc_all_valid_bitmap(length)
+        for i in range(length):
+            if not _num_bitmap_valid(src.null_bitmap, start + i):
+                _bitmap_clear(out.ptr.null_bitmap, i)
+
+    return out
+
+
 # ---------------------------------------------------------------------------
 # COUNT(*) — no column, counts every row
 # ---------------------------------------------------------------------------
 
 cdef class CountStarCollector(BaseCollector):
-    cdef vector[int64_t] _counts
+    cdef DrakenFixedBuffer* _counts
+    cdef int64_t _capacity
     cdef long long _time_finalize_ns
 
+    def __cinit__(self):
+        self._counts = alloc_fixed_buffer(DRAKEN_INT64, 0, 8)
+        self._capacity = 0
+
+    def __dealloc__(self):
+        if self._counts != NULL:
+            free_fixed_buffer(self._counts, True)
+            self._counts = NULL
+
     cdef void grow(self, int64_t new_count):
-        while self._counts.size() < <size_t>new_count:
-            self._counts.push_back(0)
+        if new_count > self._capacity:
+            _grow_fixed_buffer(self._counts, self._capacity, new_count)
+            self._capacity = new_count
 
     cdef void accumulate(
         self,
@@ -44,20 +239,19 @@ cdef class CountStarCollector(BaseCollector):
         const int64_t* state_indices,
         Py_ssize_t n_rows,
     ):
-        cdef int64_t* counts = self._counts.data()
+        cdef int64_t* counts = <int64_t*>self._counts.data
         cdef Py_ssize_t i
         for i in range(n_rows):
             counts[state_indices[i]] += 1
 
     cpdef Vector finalize(self, int64_t num_groups):
-        from opteryx.compiled.draken.interop.arrow import vector_from_sequence
+        return self.finalize_slice(0, num_groups)
+
+    cpdef Vector finalize_slice(self, int64_t start, int64_t stop):
         cdef long long start_ns = _now_ns()
-        cdef list vals = []
-        cdef Py_ssize_t i
-        for i in range(num_groups):
-            vals.append(self._counts[i])
+        cdef Vector out = _slice_int64_buffer(self._counts, start, stop)
         self._time_finalize_ns += _now_ns() - start_ns
-        return vector_from_sequence(vals)
+        return out
 
 
 # ---------------------------------------------------------------------------
@@ -65,12 +259,23 @@ cdef class CountStarCollector(BaseCollector):
 # ---------------------------------------------------------------------------
 
 cdef class CountValueCollector(BaseCollector):
-    cdef vector[int64_t] _counts
+    cdef DrakenFixedBuffer* _counts
+    cdef int64_t _capacity
     cdef long long _time_finalize_ns
 
+    def __cinit__(self):
+        self._counts = alloc_fixed_buffer(DRAKEN_INT64, 0, 8)
+        self._capacity = 0
+
+    def __dealloc__(self):
+        if self._counts != NULL:
+            free_fixed_buffer(self._counts, True)
+            self._counts = NULL
+
     cdef void grow(self, int64_t new_count):
-        while self._counts.size() < <size_t>new_count:
-            self._counts.push_back(0)
+        if new_count > self._capacity:
+            _grow_fixed_buffer(self._counts, self._capacity, new_count)
+            self._capacity = new_count
 
     cdef void accumulate(
         self,
@@ -79,7 +284,7 @@ cdef class CountValueCollector(BaseCollector):
         Py_ssize_t n_rows,
     ):
         cdef Vector vec = morsel.column(self.column_name)
-        cdef int64_t* counts = self._counts.data()
+        cdef int64_t* counts = <int64_t*>self._counts.data
         cdef Py_ssize_t i
         cdef uint8_t* nulls
         cdef Int64Vector iv
@@ -107,14 +312,13 @@ cdef class CountValueCollector(BaseCollector):
                 counts[state_indices[i]] += 1
 
     cpdef Vector finalize(self, int64_t num_groups):
-        from opteryx.compiled.draken.interop.arrow import vector_from_sequence
+        return self.finalize_slice(0, num_groups)
+
+    cpdef Vector finalize_slice(self, int64_t start, int64_t stop):
         cdef long long start_ns = _now_ns()
-        cdef list vals = []
-        cdef Py_ssize_t i
-        for i in range(num_groups):
-            vals.append(self._counts[i])
+        cdef Vector out = _slice_int64_buffer(self._counts, start, stop)
         self._time_finalize_ns += _now_ns() - start_ns
-        return vector_from_sequence(vals)
+        return out
 
 
 # ---------------------------------------------------------------------------
@@ -122,14 +326,29 @@ cdef class CountValueCollector(BaseCollector):
 # ---------------------------------------------------------------------------
 
 cdef class SumInt64Collector(BaseCollector):
-    cdef vector[int64_t] _sums
-    cdef vector[uint8_t] _seen   # 1 = at least one non-NULL row seen
+    cdef DrakenFixedBuffer* _sums
+    cdef uint8_t* _seen
+    cdef int64_t _capacity
     cdef long long _time_finalize_ns
 
+    def __cinit__(self):
+        self._sums = alloc_fixed_buffer(DRAKEN_INT64, 0, 8)
+        self._seen = NULL
+        self._capacity = 0
+
+    def __dealloc__(self):
+        if self._sums != NULL:
+            free_fixed_buffer(self._sums, True)
+            self._sums = NULL
+        if self._seen != NULL:
+            free(self._seen)
+            self._seen = NULL
+
     cdef void grow(self, int64_t new_count):
-        while self._sums.size() < <size_t>new_count:
-            self._sums.push_back(0)
-            self._seen.push_back(0)
+        if new_count > self._capacity:
+            _grow_fixed_buffer(self._sums, self._capacity, new_count)
+            _grow_bitmap(&self._seen, self._capacity, new_count, False)
+            self._capacity = new_count
 
     cdef void accumulate(
         self,
@@ -138,8 +357,8 @@ cdef class SumInt64Collector(BaseCollector):
         Py_ssize_t n_rows,
     ):
         cdef Int64Vector vec = <Int64Vector>morsel.column(self.column_name)
-        cdef int64_t* sums = self._sums.data()
-        cdef uint8_t* seen = self._seen.data()
+        cdef int64_t* sums = <int64_t*>self._sums.data
+        cdef uint8_t* seen = self._seen
         cdef int64_t* data
         cdef uint8_t* nulls
         cdef Py_ssize_t i
@@ -151,7 +370,7 @@ cdef class SumInt64Collector(BaseCollector):
                 for i in range(n_rows):
                     si = state_indices[i]
                     sums[si] += const_val
-                    seen[si] = 1
+                    _bitmap_set(seen, si)
             return
 
         data = <int64_t*>vec.dense_ptr()
@@ -160,15 +379,52 @@ cdef class SumInt64Collector(BaseCollector):
             if _num_bitmap_valid(nulls, i):
                 si = state_indices[i]
                 sums[si] += data[i]
-                seen[si] = 1
+                _bitmap_set(seen, si)
 
     cpdef Vector finalize(self, int64_t num_groups):
-        from opteryx.compiled.draken.interop.arrow import vector_from_sequence
-        cdef list vals = []
+        cdef long long start_ns = _now_ns()
+        cdef DrakenFixedBuffer* out = self._sums
+        cdef uint8_t* seen = self._seen
         cdef Py_ssize_t i
-        for i in range(num_groups):
-            vals.append(self._sums[i] if self._seen[i] else None)
-        return vector_from_sequence(vals)
+
+        out.length = <size_t>num_groups
+        if seen != NULL:
+            for i in range(num_groups):
+                if not _num_bitmap_valid(seen, i):
+                    out.null_bitmap = seen
+                    seen = NULL
+                    break
+
+        self._sums = alloc_fixed_buffer(DRAKEN_INT64, 0, 8)
+        self._seen = NULL
+        self._capacity = 0
+
+        if seen != NULL:
+            free(seen)
+
+        self._time_finalize_ns += _now_ns() - start_ns
+        return _wrap_int64_buffer(out)
+
+    cpdef Vector finalize_slice(self, int64_t start, int64_t stop):
+        cdef long long start_ns = _now_ns()
+        cdef DrakenFixedBuffer* out = self._sums
+        cdef uint8_t* seen = self._seen
+        cdef Py_ssize_t i
+
+        out.length = <size_t>self._capacity
+        if out.null_bitmap == NULL and seen != NULL:
+            for i in range(self._capacity):
+                if not _num_bitmap_valid(seen, i):
+                    out.null_bitmap = seen
+                    seen = NULL
+                    break
+            if seen != NULL:
+                free(seen)
+                self._seen = NULL
+
+        cdef Vector result = _slice_int64_buffer(out, start, stop)
+        self._time_finalize_ns += _now_ns() - start_ns
+        return result
 
 
 # ---------------------------------------------------------------------------
@@ -176,13 +432,28 @@ cdef class SumInt64Collector(BaseCollector):
 # ---------------------------------------------------------------------------
 
 cdef class SumFloat64Collector(BaseCollector):
-    cdef vector[double] _sums
-    cdef vector[uint8_t] _seen
+    cdef DrakenFixedBuffer* _sums
+    cdef uint8_t* _seen
+    cdef int64_t _capacity
+
+    def __cinit__(self):
+        self._sums = alloc_fixed_buffer(DRAKEN_FLOAT64, 0, 8)
+        self._seen = NULL
+        self._capacity = 0
+
+    def __dealloc__(self):
+        if self._sums != NULL:
+            free_fixed_buffer(self._sums, True)
+            self._sums = NULL
+        if self._seen != NULL:
+            free(self._seen)
+            self._seen = NULL
 
     cdef void grow(self, int64_t new_count):
-        while self._sums.size() < <size_t>new_count:
-            self._sums.push_back(0.0)
-            self._seen.push_back(0)
+        if new_count > self._capacity:
+            _grow_fixed_buffer(self._sums, self._capacity, new_count)
+            _grow_bitmap(&self._seen, self._capacity, new_count, False)
+            self._capacity = new_count
 
     cdef void accumulate(
         self,
@@ -191,8 +462,8 @@ cdef class SumFloat64Collector(BaseCollector):
         Py_ssize_t n_rows,
     ):
         cdef Float64Vector vec = <Float64Vector>morsel.column(self.column_name)
-        cdef double* sums = self._sums.data()
-        cdef uint8_t* seen = self._seen.data()
+        cdef double* sums = <double*>self._sums.data
+        cdef uint8_t* seen = self._seen
         cdef double* data
         cdef uint8_t* nulls
         cdef Py_ssize_t i
@@ -205,7 +476,7 @@ cdef class SumFloat64Collector(BaseCollector):
                 for i in range(n_rows):
                     si = state_indices[i]
                     sums[si] += const_val
-                    seen[si] = 1
+                    _bitmap_set(seen, si)
             return
 
         data = <double*>vec.dense_ptr()
@@ -214,15 +485,47 @@ cdef class SumFloat64Collector(BaseCollector):
             if _num_bitmap_valid(nulls, i):
                 si = state_indices[i]
                 sums[si] += data[i]
-                seen[si] = 1
+                _bitmap_set(seen, si)
 
     cpdef Vector finalize(self, int64_t num_groups):
-        from opteryx.compiled.draken.interop.arrow import vector_from_sequence
-        cdef list vals = []
+        cdef DrakenFixedBuffer* out = self._sums
+        cdef uint8_t* seen = self._seen
         cdef Py_ssize_t i
-        for i in range(num_groups):
-            vals.append(self._sums[i] if self._seen[i] else None)
-        return vector_from_sequence(vals)
+
+        out.length = <size_t>num_groups
+        if seen != NULL:
+            for i in range(num_groups):
+                if not _num_bitmap_valid(seen, i):
+                    out.null_bitmap = seen
+                    seen = NULL
+                    break
+
+        self._sums = alloc_fixed_buffer(DRAKEN_FLOAT64, 0, 8)
+        self._seen = NULL
+        self._capacity = 0
+
+        if seen != NULL:
+            free(seen)
+
+        return _wrap_float64_buffer(out)
+
+    cpdef Vector finalize_slice(self, int64_t start, int64_t stop):
+        cdef DrakenFixedBuffer* out = self._sums
+        cdef uint8_t* seen = self._seen
+        cdef Py_ssize_t i
+
+        out.length = <size_t>self._capacity
+        if out.null_bitmap == NULL and seen != NULL:
+            for i in range(self._capacity):
+                if not _num_bitmap_valid(seen, i):
+                    out.null_bitmap = seen
+                    seen = NULL
+                    break
+            if seen != NULL:
+                free(seen)
+                self._seen = NULL
+
+        return _slice_float64_buffer(out, start, stop)
 
 
 # ---------------------------------------------------------------------------
@@ -230,15 +533,37 @@ cdef class SumFloat64Collector(BaseCollector):
 # ---------------------------------------------------------------------------
 
 cdef class MinMaxInt64Collector(BaseCollector):
-    cdef vector[int64_t] _values
-    cdef vector[uint8_t] _seen
+    cdef DrakenFixedBuffer* _values
+    cdef uint8_t* _seen
+    cdef int64_t _capacity
     cdef int8_t _direction    # +1 = MIN (use INT64_MAX as init), -1 = MAX (INT64_MIN)
+
+    def __cinit__(self):
+        self._values = alloc_fixed_buffer(DRAKEN_INT64, 0, 8)
+        self._seen = NULL
+        self._capacity = 0
+
+    def __dealloc__(self):
+        if self._values != NULL:
+            free_fixed_buffer(self._values, True)
+            self._values = NULL
+        if self._seen != NULL:
+            free(self._seen)
+            self._seen = NULL
 
     cdef void grow(self, int64_t new_count):
         cdef int64_t sentinel = INT64_MAX if self._direction == 1 else INT64_MIN
-        while self._values.size() < <size_t>new_count:
-            self._values.push_back(sentinel)
-            self._seen.push_back(0)
+        cdef int64_t old_count = self._capacity
+        cdef int64_t* values
+        cdef int64_t i
+
+        if new_count > old_count:
+            _grow_fixed_buffer(self._values, old_count, new_count)
+            _grow_bitmap(&self._seen, old_count, new_count, False)
+            values = <int64_t*>self._values.data
+            for i in range(old_count, new_count):
+                values[i] = sentinel
+            self._capacity = new_count
 
     cdef void accumulate(
         self,
@@ -247,8 +572,8 @@ cdef class MinMaxInt64Collector(BaseCollector):
         Py_ssize_t n_rows,
     ):
         cdef Int64Vector vec = <Int64Vector>morsel.column(self.column_name)
-        cdef int64_t* values = self._values.data()
-        cdef uint8_t* seen = self._seen.data()
+        cdef int64_t* values = <int64_t*>self._values.data
+        cdef uint8_t* seen = self._seen
         cdef int64_t* data
         cdef uint8_t* nulls
         cdef Py_ssize_t i
@@ -260,15 +585,15 @@ cdef class MinMaxInt64Collector(BaseCollector):
                 if self._direction == 1:   # MIN
                     for i in range(n_rows):
                         si = state_indices[i]
-                        if not seen[si] or v < values[si]:
+                        if not _num_bitmap_valid(seen, si) or v < values[si]:
                             values[si] = v
-                        seen[si] = 1
+                        _bitmap_set(seen, si)
                 else:                      # MAX
                     for i in range(n_rows):
                         si = state_indices[i]
-                        if not seen[si] or v > values[si]:
+                        if not _num_bitmap_valid(seen, si) or v > values[si]:
                             values[si] = v
-                        seen[si] = 1
+                        _bitmap_set(seen, si)
             return
 
         data = <int64_t*>vec.dense_ptr()
@@ -278,25 +603,57 @@ cdef class MinMaxInt64Collector(BaseCollector):
                 if _num_bitmap_valid(nulls, i):
                     si = state_indices[i]
                     v = data[i]
-                    if not seen[si] or v < values[si]:
+                    if not _num_bitmap_valid(seen, si) or v < values[si]:
                         values[si] = v
-                    seen[si] = 1
+                    _bitmap_set(seen, si)
         else:                      # MAX
             for i in range(n_rows):
                 if _num_bitmap_valid(nulls, i):
                     si = state_indices[i]
                     v = data[i]
-                    if not seen[si] or v > values[si]:
+                    if not _num_bitmap_valid(seen, si) or v > values[si]:
                         values[si] = v
-                    seen[si] = 1
+                    _bitmap_set(seen, si)
 
     cpdef Vector finalize(self, int64_t num_groups):
-        from opteryx.compiled.draken.interop.arrow import vector_from_sequence
-        cdef list vals = []
+        cdef DrakenFixedBuffer* out = self._values
+        cdef uint8_t* seen = self._seen
         cdef Py_ssize_t i
-        for i in range(num_groups):
-            vals.append(self._values[i] if self._seen[i] else None)
-        return vector_from_sequence(vals)
+
+        out.length = <size_t>num_groups
+        if seen != NULL:
+            for i in range(num_groups):
+                if not _num_bitmap_valid(seen, i):
+                    out.null_bitmap = seen
+                    seen = NULL
+                    break
+
+        self._values = alloc_fixed_buffer(DRAKEN_INT64, 0, 8)
+        self._seen = NULL
+        self._capacity = 0
+
+        if seen != NULL:
+            free(seen)
+
+        return _wrap_int64_buffer(out)
+
+    cpdef Vector finalize_slice(self, int64_t start, int64_t stop):
+        cdef DrakenFixedBuffer* out = self._values
+        cdef uint8_t* seen = self._seen
+        cdef Py_ssize_t i
+
+        out.length = <size_t>self._capacity
+        if out.null_bitmap == NULL and seen != NULL:
+            for i in range(self._capacity):
+                if not _num_bitmap_valid(seen, i):
+                    out.null_bitmap = seen
+                    seen = NULL
+                    break
+            if seen != NULL:
+                free(seen)
+                self._seen = NULL
+
+        return _slice_int64_buffer(out, start, stop)
 
 
 # ---------------------------------------------------------------------------
@@ -304,15 +661,37 @@ cdef class MinMaxInt64Collector(BaseCollector):
 # ---------------------------------------------------------------------------
 
 cdef class MinMaxFloat64Collector(BaseCollector):
-    cdef vector[double] _values
-    cdef vector[uint8_t] _seen
+    cdef DrakenFixedBuffer* _values
+    cdef uint8_t* _seen
+    cdef int64_t _capacity
     cdef int8_t _direction    # +1 = MIN, -1 = MAX
+
+    def __cinit__(self):
+        self._values = alloc_fixed_buffer(DRAKEN_FLOAT64, 0, 8)
+        self._seen = NULL
+        self._capacity = 0
+
+    def __dealloc__(self):
+        if self._values != NULL:
+            free_fixed_buffer(self._values, True)
+            self._values = NULL
+        if self._seen != NULL:
+            free(self._seen)
+            self._seen = NULL
 
     cdef void grow(self, int64_t new_count):
         cdef double sentinel = HUGE_VAL if self._direction == 1 else -HUGE_VAL
-        while self._values.size() < <size_t>new_count:
-            self._values.push_back(sentinel)
-            self._seen.push_back(0)
+        cdef int64_t old_count = self._capacity
+        cdef double* values
+        cdef int64_t i
+
+        if new_count > old_count:
+            _grow_fixed_buffer(self._values, old_count, new_count)
+            _grow_bitmap(&self._seen, old_count, new_count, False)
+            values = <double*>self._values.data
+            for i in range(old_count, new_count):
+                values[i] = sentinel
+            self._capacity = new_count
 
     cdef void accumulate(
         self,
@@ -321,8 +700,8 @@ cdef class MinMaxFloat64Collector(BaseCollector):
         Py_ssize_t n_rows,
     ):
         cdef Float64Vector vec = <Float64Vector>morsel.column(self.column_name)
-        cdef double* values = self._values.data()
-        cdef uint8_t* seen = self._seen.data()
+        cdef double* values = <double*>self._values.data
+        cdef uint8_t* seen = self._seen
         cdef double* data
         cdef uint8_t* nulls
         cdef Py_ssize_t i
@@ -335,15 +714,15 @@ cdef class MinMaxFloat64Collector(BaseCollector):
                 if self._direction == 1:   # MIN
                     for i in range(n_rows):
                         si = state_indices[i]
-                        if not seen[si] or v < values[si]:
+                        if not _num_bitmap_valid(seen, si) or v < values[si]:
                             values[si] = v
-                        seen[si] = 1
+                        _bitmap_set(seen, si)
                 else:                      # MAX
                     for i in range(n_rows):
                         si = state_indices[i]
-                        if not seen[si] or v > values[si]:
+                        if not _num_bitmap_valid(seen, si) or v > values[si]:
                             values[si] = v
-                        seen[si] = 1
+                        _bitmap_set(seen, si)
             return
 
         data = <double*>vec.dense_ptr()
@@ -353,25 +732,57 @@ cdef class MinMaxFloat64Collector(BaseCollector):
                 if _num_bitmap_valid(nulls, i):
                     si = state_indices[i]
                     v = data[i]
-                    if not seen[si] or v < values[si]:
+                    if not _num_bitmap_valid(seen, si) or v < values[si]:
                         values[si] = v
-                    seen[si] = 1
+                    _bitmap_set(seen, si)
         else:                      # MAX
             for i in range(n_rows):
                 if _num_bitmap_valid(nulls, i):
                     si = state_indices[i]
                     v = data[i]
-                    if not seen[si] or v > values[si]:
+                    if not _num_bitmap_valid(seen, si) or v > values[si]:
                         values[si] = v
-                    seen[si] = 1
+                    _bitmap_set(seen, si)
 
     cpdef Vector finalize(self, int64_t num_groups):
-        from opteryx.compiled.draken.interop.arrow import vector_from_sequence
-        cdef list vals = []
+        cdef DrakenFixedBuffer* out = self._values
+        cdef uint8_t* seen = self._seen
         cdef Py_ssize_t i
-        for i in range(num_groups):
-            vals.append(self._values[i] if self._seen[i] else None)
-        return vector_from_sequence(vals)
+
+        out.length = <size_t>num_groups
+        if seen != NULL:
+            for i in range(num_groups):
+                if not _num_bitmap_valid(seen, i):
+                    out.null_bitmap = seen
+                    seen = NULL
+                    break
+
+        self._values = alloc_fixed_buffer(DRAKEN_FLOAT64, 0, 8)
+        self._seen = NULL
+        self._capacity = 0
+
+        if seen != NULL:
+            free(seen)
+
+        return _wrap_float64_buffer(out)
+
+    cpdef Vector finalize_slice(self, int64_t start, int64_t stop):
+        cdef DrakenFixedBuffer* out = self._values
+        cdef uint8_t* seen = self._seen
+        cdef Py_ssize_t i
+
+        out.length = <size_t>self._capacity
+        if out.null_bitmap == NULL and seen != NULL:
+            for i in range(self._capacity):
+                if not _num_bitmap_valid(seen, i):
+                    out.null_bitmap = seen
+                    seen = NULL
+                    break
+            if seen != NULL:
+                free(seen)
+                self._seen = NULL
+
+        return _slice_float64_buffer(out, start, stop)
 
 
 # ---------------------------------------------------------------------------
@@ -434,13 +845,28 @@ cdef class MinMaxObjectCollector(BaseCollector):
 # ---------------------------------------------------------------------------
 
 cdef class AvgCollector(BaseCollector):
-    cdef vector[double] _sums
-    cdef vector[int64_t] _counts
+    cdef DrakenFixedBuffer* _sums
+    cdef DrakenFixedBuffer* _counts
+    cdef int64_t _capacity
+
+    def __cinit__(self):
+        self._sums = alloc_fixed_buffer(DRAKEN_FLOAT64, 0, 8)
+        self._counts = alloc_fixed_buffer(DRAKEN_INT64, 0, 8)
+        self._capacity = 0
+
+    def __dealloc__(self):
+        if self._sums != NULL:
+            free_fixed_buffer(self._sums, True)
+            self._sums = NULL
+        if self._counts != NULL:
+            free_fixed_buffer(self._counts, True)
+            self._counts = NULL
 
     cdef void grow(self, int64_t new_count):
-        while self._sums.size() < <size_t>new_count:
-            self._sums.push_back(0.0)
-            self._counts.push_back(0)
+        if new_count > self._capacity:
+            _grow_fixed_buffer(self._sums, self._capacity, new_count)
+            _grow_fixed_buffer(self._counts, self._capacity, new_count)
+            self._capacity = new_count
 
     cdef void accumulate(
         self,
@@ -449,8 +875,8 @@ cdef class AvgCollector(BaseCollector):
         Py_ssize_t n_rows,
     ):
         cdef Vector raw = morsel.column(self.column_name)
-        cdef double* sums = self._sums.data()
-        cdef int64_t* counts = self._counts.data()
+        cdef double* sums = <double*>self._sums.data
+        cdef int64_t* counts = <int64_t*>self._counts.data
         cdef Py_ssize_t i
         cdef int64_t si
         cdef Int64Vector iv
@@ -497,11 +923,40 @@ cdef class AvgCollector(BaseCollector):
                     counts[si] += 1
 
     cpdef Vector finalize(self, int64_t num_groups):
-        from opteryx.compiled.draken.interop.arrow import vector_from_sequence
-        cdef list vals = []
+        cdef DrakenFixedBuffer* out = self._sums
+        cdef DrakenFixedBuffer* counts = self._counts
+        cdef double* sums_data = <double*>out.data
+        cdef int64_t* counts_data = <int64_t*>counts.data
         cdef Py_ssize_t i
-        cdef int64_t cnt
+
+        out.length = <size_t>num_groups
         for i in range(num_groups):
-            cnt = self._counts[i]
-            vals.append(self._sums[i] / cnt if cnt > 0 else None)
-        return vector_from_sequence(vals)
+            if counts_data[i] > 0:
+                sums_data[i] = sums_data[i] / counts_data[i]
+            else:
+                _ensure_validity_bitmap(out)
+                _bitmap_clear(out.null_bitmap, i)
+
+        self._sums = alloc_fixed_buffer(DRAKEN_FLOAT64, 0, 8)
+        self._counts = alloc_fixed_buffer(DRAKEN_INT64, 0, 8)
+        self._capacity = 0
+
+        free_fixed_buffer(counts, True)
+        return _wrap_float64_buffer(out)
+
+    cpdef Vector finalize_slice(self, int64_t start, int64_t stop):
+        cdef DrakenFixedBuffer* out = self._sums
+        cdef DrakenFixedBuffer* counts = self._counts
+        cdef double* sums_data = <double*>out.data
+        cdef int64_t* counts_data = <int64_t*>counts.data
+        cdef Py_ssize_t i
+
+        out.length = <size_t>self._capacity
+        for i in range(self._capacity):
+            if counts_data[i] > 0:
+                sums_data[i] = sums_data[i] / counts_data[i]
+            else:
+                _ensure_validity_bitmap(out)
+                _bitmap_clear(out.null_bitmap, i)
+
+        return _slice_float64_buffer(out, start, stop)

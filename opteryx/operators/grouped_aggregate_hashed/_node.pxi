@@ -217,10 +217,12 @@ class GroupedAggregateHashedNode(BasePlanNode):
         if b"*" not in chunk.column_names and "*" not in chunk.column_names:
             star_vector = constant_from_scalar(1, chunk.num_rows, dtype="int8")
             chunk.append_vector("*", star_vector)
+        eval_start = time.monotonic_ns()
         try:
             if self.evaluatable_nodes:
                 chunk = evaluate_and_append_draken(self.evaluatable_nodes, chunk)
             chunk = evaluate_and_append_draken(self.groups, chunk)
+            self.readings["time_aggregate_evaluations"] += time.monotonic_ns() - eval_start
             return chunk
         except (NotImplementedError, TypeError, UnsupportedSyntaxError) as err:
             raise UnsupportedSyntaxError(
@@ -274,5 +276,8 @@ class GroupedAggregateHashedNode(BasePlanNode):
         self.readings["time_aggregate_grow"] += engine_telemetry["time_grow_ns"]
         self.readings["time_aggregate_accumulate"] += engine_telemetry["time_accumulate_ns"]
         self.readings["time_aggregate_reconstruct"] += engine_telemetry["time_reconstruct_ns"]
+        self.readings["time_aggregate_reconstruct_single_fixed"] += engine_telemetry["time_reconstruct_single_fixed_ns"]
+        self.readings["time_aggregate_reconstruct_single_string"] += engine_telemetry["time_reconstruct_single_string_ns"]
+        self.readings["time_aggregate_reconstruct_multi"] += engine_telemetry["time_reconstruct_multi_ns"]
         self.readings["time_aggregate_build_morsel"] += engine_telemetry["time_build_morsel_ns"]
         self.readings["time_aggregate_slice_output"] += engine_telemetry["time_slice_output_ns"]

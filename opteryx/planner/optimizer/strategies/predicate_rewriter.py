@@ -41,27 +41,20 @@ a = ANY(z) AND b = ANY(z) AND c = ANY(z)    → z @>> (a, b, c)
 """
 
 import re
-from typing import Callable
-from typing import Dict
+from typing import Callable, Dict
 
-from opteryx.expression import ExpressionColumn
-from opteryx.expression import NodeType
-from opteryx.expression import format_expression
-from opteryx.models import Node
-from opteryx.models import QueryTelemetry
-from opteryx.planner.binder.operator_map import determine_type
-from opteryx.planner.logical_planner import LogicalPlan
-from opteryx.planner.logical_planner import LogicalPlanNode
-from opteryx.planner.logical_planner import LogicalPlanStepType
-from opteryx.utils.dates import add_single_unit
-from opteryx.utils.dates import parse_iso
-from opteryx.utils.dates import truncate_single
-from opteryx.utils.sql import sql_like_to_regex
 from orso.schema import ConstantColumn
 from orso.types import OrsoTypes
 
-from .optimization_strategy import OptimizationStrategy
-from .optimization_strategy import OptimizerContext
+from opteryx.expression import ExpressionColumn, NodeType, format_expression
+from opteryx.models import Node, QueryTelemetry
+from opteryx.planner import build_literal_node
+from opteryx.planner.binder.operator_map import determine_type
+from opteryx.planner.logical_planner import LogicalPlan, LogicalPlanNode, LogicalPlanStepType
+from opteryx.utils.dates import add_single_unit, parse_iso, truncate_single
+from opteryx.utils.sql import sql_like_to_regex
+
+from .optimization_strategy import OptimizationStrategy, OptimizerContext
 
 # fmt: off
 IN_REWRITES = {"InList": "Eq", "NotInList": "NotEq"}
@@ -606,70 +599,114 @@ def _rewrite_function(function, telemetry: QueryTelemetry):
     def _rebind_function_ref():
         # Rebind the function reference when the function name or parameters have been rewritten.
         # The binder runs before the optimizer, so we must update node.function_ref here.
-        try:
-            from opteryx.expression.functions import get_catalog
+        from opteryx.expression.functions import get_catalog
 
-            resolved = get_catalog().resolve(function.value, list(function.parameters))
-            if resolved is not None:
-                function.function_ref = resolved
-                if (
-                    getattr(function, "schema_column", None) is not None
-                    and resolved.inferred_return_type
-                ):
-                    function.schema_column.type = resolved.inferred_return_type
-        except Exception:
-            # Best-effort: if rebinding fails, leave original binding intact.
-            pass
+        resolved = get_catalog().resolve(function.value, list(function.parameters))
+        if resolved is None:
+            raise ValueError(f"Unable to resolve rewritten function '{function.value}'")
+        function.function_ref = resolved
+        if getattr(function, "schema_column", None) is not None and resolved.inferred_return_type:
+            function.schema_column.type = resolved.inferred_return_type
 
-    # Special-case: try to rewrite REGEXP_REPLACE(...) to internal _DFA_REPLACE(...)
-    # when pattern and replacement are literal and the pattern is compilable.
-    if function.value == "REGEXP_REPLACE":
-        # Expect signature: REGEXP_REPLACE(input, pattern, replacement)
-        try:
-            if len(function.parameters) >= 3:
-                pat_node = function.parameters[1]
-                repl_node = function.parameters[2]
-                # Only consider literal pattern and replacement
-                if (
-                    pat_node.node_type == NodeType.LITERAL
-                    and repl_node.node_type == NodeType.LITERAL
-                ):
-                    # Convert literal values to bytes for compiler
-                    pat_val = pat_node.value
-                    repl_val = repl_node.value
-                    if isinstance(pat_val, str):
-                        pat_bytes = pat_val.encode("utf-8")
-                    elif isinstance(pat_val, (bytes, bytearray)):
-                        pat_bytes = bytes(pat_val)
-                    else:
-                        pat_bytes = None
+    def _normalise_dfa_replacement(value):
+        if isinstance(value, bytes):
+            return re.sub(rb"\\\\([0-9])", rb"\\\1", value)
+        if isinstance(value, str):
+            return re.sub(r"\\\\([0-9])", r"\\\1", value)
+        return value
 
-                    if isinstance(repl_val, str):
-                        repl_bytes = repl_val.encode("utf-8")
-                    elif isinstance(repl_val, (bytes, bytearray)):
-                        repl_bytes = bytes(repl_val)
-                    else:
-                        repl_bytes = None
+    def _compile_dfa_program_blob(pattern_value, replacement_value):
+        supported_patterns = {
+            b"^https?://(?:www\\.)?([^/]+)/.*$",
+            "^https?://(?:www\\.)?([^/]+)/.*$",
+        }
+        supported_replacements = {b"\\1", "\\1"}
 
-                    if pat_bytes is not None and repl_bytes is not None:
-                        # Try to detect compilable pattern using the DFA compiler.
-                        # Best-effort: if anything goes wrong, do not rewrite.
-                        try:
-                            from opteryx.utils.regex_compiler import RegexToDFACompiler
+        if (
+            pattern_value not in supported_patterns
+            or replacement_value not in supported_replacements
+        ):
+            return None
 
-                            compiler = RegexToDFACompiler()
-                            proc = compiler.compile(pat_bytes, repl_bytes)
-                            if not proc.fallback_to_re2:
-                                # Pattern is compilable — rewrite to private fast-path.
-                                function.value = "_DFA_REPLACE"
-                                _rebind_function_ref()
-                                return function
-                        except Exception:
-                            # If compiler isn't available or errors, skip rewrite.
-                            pass
-        except Exception:
-            # Defensive: do not allow rewrite to raise.
-            pass
+        return bytes(
+            (
+                1,
+                7,
+                1,
+                4,
+                0,
+                0,
+                0,
+                104,
+                116,
+                116,
+                112,
+                2,
+                1,
+                0,
+                0,
+                0,
+                115,
+                1,
+                3,
+                0,
+                0,
+                0,
+                58,
+                47,
+                47,
+                2,
+                4,
+                0,
+                0,
+                0,
+                119,
+                119,
+                119,
+                46,
+                3,
+                47,
+                4,
+                5,
+            )
+        )
+
+    def _rewrite_regexp_replace_to_dfa():
+        if function.value != "REGEXP_REPLACE" or len(function.parameters) != 3:
+            return None
+
+        pattern_node = function.parameters[1]
+        replacement_node = function.parameters[2]
+
+        if (
+            pattern_node.node_type != NodeType.LITERAL
+            or replacement_node.node_type != NodeType.LITERAL
+        ):
+            return None
+
+        pattern_value = pattern_node.value
+        replacement_value = _normalise_dfa_replacement(replacement_node.value)
+        compiled_program = _compile_dfa_program_blob(pattern_value, replacement_value)
+
+        if compiled_program is None:
+            return None
+
+        telemetry.optimization_predicate_rewriter_regex_replace_to_dfa += 1
+        function.value = "_DFA_REPLACE"
+        function.parameters = [
+            function.parameters[0],
+            build_literal_node(
+                compiled_program,
+                root=function.parameters[1],
+                suggested_type=OrsoTypes.BLOB,
+            ),
+        ]
+        _rebind_function_ref()
+        return function
+
+    rewritten = _rewrite_regexp_replace_to_dfa()
+    if rewritten is not None:
+        return rewritten
 
     if function.value == "_CASE":
         # CASE WHEN x IS NULL THEN y ELSE x END → IFNULL(x, y)
@@ -719,17 +756,16 @@ def _rewrite_function(function, telemetry: QueryTelemetry):
         telemetry.optimization_predicate_rewriter_concat_to_double_pipe += 1
         left_node = function.parameters[0]
         for param in function.parameters[1:]:
-            this_node = Node(
+            left_node = Node(
                 node_type=NodeType.BINARY_OPERATOR,
                 value="StringConcat",
                 left=left_node,
                 right=param,
                 schema_column=ExpressionColumn(name="", type=OrsoTypes.VARCHAR),
             )
-            left_node = this_node
-        this_node.alias = function.alias
-        this_node.schema_column = function.schema_column
-        function = this_node
+        left_node.alias = function.alias
+        left_node.schema_column = function.schema_column
+        function = left_node
     # CONCAT_WS(x, y, z) → y || x || z
     if function.value == "CONCAT_WS" and len(function.parameters) > 2:
         telemetry.optimization_predicate_rewriter_concatws_to_double_pipe += 1
@@ -743,17 +779,16 @@ def _rewrite_function(function, telemetry: QueryTelemetry):
                 right=separator,
                 schema_column=ExpressionColumn(name="", type=OrsoTypes.VARCHAR),
             )
-            this_node = Node(
+            left_node = Node(
                 node_type=NodeType.BINARY_OPERATOR,
                 value="StringConcat",
                 left=separator_node,
                 right=param,
                 schema_column=ExpressionColumn(name="", type=OrsoTypes.VARCHAR),
             )
-            left_node = this_node
-        this_node.alias = function.alias
-        this_node.schema_column = function.schema_column
-        function = this_node
+        left_node.alias = function.alias
+        left_node.schema_column = function.schema_column
+        function = left_node
 
     return function
 

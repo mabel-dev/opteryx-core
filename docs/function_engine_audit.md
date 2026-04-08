@@ -386,21 +386,7 @@ def match_against(arr, val):
 ```
 Rationale: compiled `vector_match_against` when a `StringVector` is available.
 
-_get_dfa_ops — engines: python (cache & normalisation) + native compiler via `opteryx.utils.regex_compiler`  
-```opteryx-core/opteryx/expression/functions/implementations/text.py#L496-504
-@functools.lru_cache(maxsize=64)
-def _get_dfa_ops(pattern: bytes, replacement: bytes):
-    ...
-    from opteryx.utils.regex_compiler import RegexToDFACompiler
 
-    try:
-        compiler = RegexToDFACompiler()
-        proc = compiler.compile(pattern, replacement)
-        return proc.to_cython_args()
-    except Exception:
-        return (None, 0, True)
-```
-Rationale: Python caching & normalisation; `RegexToDFACompiler` delegates to native C++ translator when present; executor is a compiled kernel.
 
 _normalise_replacement — engines: python (bytes processing)  
 ```opteryx-core/opteryx/expression/functions/implementations/text.py#L520-...

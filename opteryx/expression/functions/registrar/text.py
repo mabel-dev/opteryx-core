@@ -14,14 +14,17 @@ from __future__ import annotations
 
 from typing import List
 
-from opteryx.expression.functions import FunctionDefinition
-from opteryx.expression.functions import FunctionOverload
-from opteryx.expression.functions import KernelSpec
-from opteryx.expression.functions import LifecycleSpec
-from opteryx.expression.functions import ParameterSpec
-from opteryx.expression.functions import ReturnSpec
-from opteryx.expression.functions.registrar import _make
 from orso.types import OrsoTypes
+
+from opteryx.expression.functions import (
+    FunctionDefinition,
+    FunctionOverload,
+    KernelSpec,
+    LifecycleSpec,
+    ParameterSpec,
+    ReturnSpec,
+)
+from opteryx.expression.functions.registrar import _make
 
 
 def get_builtin_text_functions() -> List[FunctionDefinition]:
@@ -202,15 +205,16 @@ def get_builtin_text_extended_functions() -> List[FunctionDefinition]:
     Extended text functions (CONCAT_WS, POSITION, TRIM/LTRIM/RTRIM, REPLACE, REGEXP_REPLACE, etc.)
     Combined with the core group in one module for maintainability.
     """
-    from opteryx.compiled.vector_ops import vector_ltrim
-    from opteryx.compiled.vector_ops import vector_rtrim
-    from opteryx.compiled.vector_ops import vector_trim
+    from opteryx.compiled import vector_ops as compiled_vector_ops
     from opteryx.expression.functions.implementations import text as string_functions
 
     # Parameter shortcuts
     _string = ParameterSpec(name="string", type_family="string")
     _pattern = ParameterSpec(name="pattern", type_family="string", constant_only=True)
     _replacement = ParameterSpec(name="replacement", type_family="string", constant_only=True)
+    _compiled_program = ParameterSpec(
+        name="compiled_program", type_family="binary", constant_only=True
+    )
     _search = ParameterSpec(name="search", type_family="string")
 
     def _trim_return_type(arg_nodes) -> OrsoTypes:
@@ -220,6 +224,11 @@ def get_builtin_text_extended_functions() -> List[FunctionDefinition]:
     def _concat_ws_kernel(sep, *args):
         """Concatenate with separator, skipping nulls."""
         return sep.join(str(a) for a in args if a is not None)
+
+    vector_dfa_replace = getattr(compiled_vector_ops, "vector_dfa_replace")
+    vector_ltrim = getattr(compiled_vector_ops, "vector_ltrim")
+    vector_rtrim = getattr(compiled_vector_ops, "vector_rtrim")
+    vector_trim = getattr(compiled_vector_ops, "vector_trim")
 
     return [
         FunctionDefinition(
@@ -354,6 +363,33 @@ def get_builtin_text_extended_functions() -> List[FunctionDefinition]:
                         callable_ref=string_functions.regex_replace,
                         null_policy="passthru",
                         cost_us_per_million=1876.0,
+                    ),
+                ),
+            ),
+        ),
+        FunctionDefinition(
+            name="_DFA_REPLACE",
+            aliases=(),
+            category="text",
+            volatility="immutable",
+            deterministic=True,
+            lifecycle=LifecycleSpec(status="active"),
+            summary="Replace using compiled DFA procedure.",
+            documentation="Internal Draken-native regex replacement for optimizer-selected compiled DFA programs.",
+            overloads=(
+                FunctionOverload(
+                    id="_DFA_REPLACE_2",
+                    parameters=(
+                        _string,
+                        _compiled_program,
+                    ),
+                    return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.VARCHAR),
+                    kernel=KernelSpec(
+                        engine="draken",
+                        id="default",
+                        callable_ref=vector_dfa_replace,
+                        null_policy="passthru",
+                        cost_us_per_million=112.0,
                     ),
                 ),
             ),
