@@ -142,16 +142,18 @@ _registry_lock = RLock()
 def _build_registry() -> OperatorRegistry:
     """Explicitly register every operator with its metadata. No magic."""
     # Local imports to avoid circular dependencies at module load time.
+    from opteryx.operators.aggregate.aggregate_node import AggregateOperator
     from opteryx.operators.cross_join_node import CrossJoinNode
     from opteryx.operators.distinct_node import DistinctNode
-    from opteryx.operators.aggregate.aggregate_node import AggregateOperator
-    from opteryx.operators.grouped_aggregate_hashed import GroupedAggregateHashedNode as DrakenAggregateAndGroupNode
     from opteryx.operators.draken_inner_join_node import DrakenInnerJoinNode
     from opteryx.operators.exit_node import ExitNode
     from opteryx.operators.explain_node import ExplainNode
     from opteryx.operators.filter_join_node import FilterJoinNode
     from opteryx.operators.filter_node import FilterNode
     from opteryx.operators.function_dataset_node import FunctionDatasetNode
+    from opteryx.operators.grouped_aggregate_hashed import (
+        GroupedAggregateHashedNode as DrakenAggregateAndGroupNode,
+    )
     from opteryx.operators.heap_sort_node import HeapSortNode
     from opteryx.operators.limit_node import LimitNode
     from opteryx.operators.nested_loop_join_node import NestedLoopJoinNode

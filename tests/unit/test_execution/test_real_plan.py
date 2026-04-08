@@ -15,8 +15,6 @@ This test:
 
 import sys
 import importlib.util
-import threading
-import time
 
 # Load Edge module directly
 spec = importlib.util.spec_from_file_location('edge', './opteryx/execution/edge.py')

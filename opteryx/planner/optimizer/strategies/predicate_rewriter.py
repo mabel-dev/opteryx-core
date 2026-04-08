@@ -41,20 +41,28 @@ a = ANY(z) AND b = ANY(z) AND c = ANY(z)    → z @>> (a, b, c)
 """
 
 import re
-from typing import Callable, Dict
+from typing import Callable
+from typing import Dict
 
+from opteryx.expression import ExpressionColumn
+from opteryx.expression import NodeType
+from opteryx.expression import format_expression
+from opteryx.models import Node
+from opteryx.models import QueryTelemetry
+from opteryx.planner import build_literal_node
+from opteryx.planner.binder.operator_map import determine_type
+from opteryx.planner.logical_planner import LogicalPlan
+from opteryx.planner.logical_planner import LogicalPlanNode
+from opteryx.planner.logical_planner import LogicalPlanStepType
+from opteryx.utils.dates import add_single_unit
+from opteryx.utils.dates import parse_iso
+from opteryx.utils.dates import truncate_single
+from opteryx.utils.sql import sql_like_to_regex
 from orso.schema import ConstantColumn
 from orso.types import OrsoTypes
 
-from opteryx.expression import ExpressionColumn, NodeType, format_expression
-from opteryx.models import Node, QueryTelemetry
-from opteryx.planner import build_literal_node
-from opteryx.planner.binder.operator_map import determine_type
-from opteryx.planner.logical_planner import LogicalPlan, LogicalPlanNode, LogicalPlanStepType
-from opteryx.utils.dates import add_single_unit, parse_iso, truncate_single
-from opteryx.utils.sql import sql_like_to_regex
-
-from .optimization_strategy import OptimizationStrategy, OptimizerContext
+from .optimization_strategy import OptimizationStrategy
+from .optimization_strategy import OptimizerContext
 
 # fmt: off
 IN_REWRITES = {"InList": "Eq", "NotInList": "NotEq"}
@@ -616,60 +624,19 @@ def _rewrite_function(function, telemetry: QueryTelemetry):
         return value
 
     def _compile_dfa_program_blob(pattern_value, replacement_value):
-        supported_patterns = {
-            b"^https?://(?:www\\.)?([^/]+)/.*$",
-            "^https?://(?:www\\.)?([^/]+)/.*$",
-        }
-        supported_replacements = {b"\\1", "\\1"}
+        from opteryx.compiled import vector_ops as compiled_vector_ops
 
-        if (
-            pattern_value not in supported_patterns
-            or replacement_value not in supported_replacements
-        ):
+        if isinstance(pattern_value, str):
+            pattern_value = pattern_value.encode("utf8")
+        elif not isinstance(pattern_value, bytes):
             return None
 
-        return bytes(
-            (
-                1,
-                7,
-                1,
-                4,
-                0,
-                0,
-                0,
-                104,
-                116,
-                116,
-                112,
-                2,
-                1,
-                0,
-                0,
-                0,
-                115,
-                1,
-                3,
-                0,
-                0,
-                0,
-                58,
-                47,
-                47,
-                2,
-                4,
-                0,
-                0,
-                0,
-                119,
-                119,
-                119,
-                46,
-                3,
-                47,
-                4,
-                5,
-            )
-        )
+        if isinstance(replacement_value, str):
+            replacement_value = replacement_value.encode("utf8")
+        elif not isinstance(replacement_value, bytes):
+            return None
+
+        return compiled_vector_ops.compile_dfa_program(pattern_value, replacement_value)
 
     def _rewrite_regexp_replace_to_dfa():
         if function.value != "REGEXP_REPLACE" or len(function.parameters) != 3:

@@ -10,10 +10,8 @@ This module contains advanced GROUP BY scenarios including:
 - Complex multi-stage aggregations
 """
 
-import math
 import os
 import sys
-from typing import Any, Dict, List
 
 import pytest
 

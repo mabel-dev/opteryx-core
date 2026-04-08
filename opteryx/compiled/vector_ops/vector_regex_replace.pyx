@@ -75,7 +75,7 @@ cpdef StringVector vector_regex_replace(StringVector data, bytes pattern, bytes 
         _re2_cache[pattern_str] = regex
     regex = _re2_cache[pattern_str]
 
-    repl_piece = StringPiece(repl_str)
+    repl_piece = StringPiece(repl_buf, <size_t>repl_len)
     value_str.reserve(256)
 
     # Constant encoding: apply once, replicate

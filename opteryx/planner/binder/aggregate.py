@@ -6,7 +6,8 @@
 from typing import Tuple
 
 from opteryx.exceptions import UnsupportedSyntaxError
-from opteryx.expression import NodeType, get_all_nodes_of_type
+from opteryx.expression import NodeType
+from opteryx.expression import get_all_nodes_of_type
 from opteryx.managers.virtual_datasets import derived
 from opteryx.models import Node
 from opteryx.planner.binder.binder import inner_binder

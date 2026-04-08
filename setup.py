@@ -10,7 +10,9 @@ import threading
 
 import numpy
 from Cython.Build import cythonize
-from setuptools import Extension, find_packages, setup
+from setuptools import Extension
+from setuptools import find_packages
+from setuptools import setup
 from setuptools.command.build_ext import build_ext as build_ext_orig
 from setuptools_rust import RustExtension
 

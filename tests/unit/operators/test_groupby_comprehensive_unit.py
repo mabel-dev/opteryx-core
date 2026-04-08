@@ -11,7 +11,6 @@ This module focuses on unit-level testing of GROUP BY operations including:
 - Edge cases and boundary conditions
 """
 
-import math
 from typing import Dict, List
 
 import pyarrow as pa
@@ -42,10 +41,7 @@ def _result_to_dict(morsel, group_keys: List[str]) -> Dict:
     result = {}
     for row in rows:
         key_values = tuple(row[k] for k in group_keys)
-        if len(group_keys) == 1:
-            key = key_values[0]
-        else:
-            key = key_values
+        key = key_values[0] if len(group_keys) == 1 else key_values
         result[key] = row
     return result
 

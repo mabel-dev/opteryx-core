@@ -16,8 +16,14 @@ decisions. It:
 
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Dict, List, Tuple, Optional, Any, Callable
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import as_completed
+from typing import Any
+from typing import Callable
+from typing import Dict
+from typing import List
+from typing import Optional
+from typing import Tuple
 
 from opteryx.execution.edge import Edge
 
@@ -48,7 +54,9 @@ class Scheduler:
             max_workers: Maximum number of worker threads in the pool
         """
         self.max_workers = max_workers
-        self._executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="opteryx-exec")
+        self._executor = ThreadPoolExecutor(
+            max_workers=max_workers, thread_name_prefix="opteryx-exec"
+        )
         self._edges: Dict[str, Edge] = {}
         self._operators: Dict[str, Any] = {}
 
@@ -112,7 +120,9 @@ class Scheduler:
             self._producers[nid] = producer_fn
             self._operators[nid] = operator
 
-    def add_consumer(self, nid: str, operator: Any, consumer_fn: Callable, finisher_fn: Optional[Callable] = None) -> None:
+    def add_consumer(
+        self, nid: str, operator: Any, consumer_fn: Callable, finisher_fn: Optional[Callable] = None
+    ) -> None:
         """
         Register a consumer (transform) operator.
 
@@ -134,7 +144,9 @@ class Scheduler:
             self._finishers[nid] = finisher_fn
             self._operators[nid] = operator
 
-    def add_join(self, join_nid: str, operator: Any, build_fn: Callable, probe_fn: Callable) -> None:
+    def add_join(
+        self, join_nid: str, operator: Any, build_fn: Callable, probe_fn: Callable
+    ) -> None:
         """
         Register a join operator with separate build and probe phases.
 
@@ -151,7 +163,9 @@ class Scheduler:
             probe_fn: Callable for probe phase
         """
         with self._lock:
-            self._consumers[join_nid] = build_fn  # Will be replaced with probe_fn after build completes
+            self._consumers[join_nid] = (
+                build_fn  # Will be replaced with probe_fn after build completes
+            )
             self._operators[join_nid] = operator
             self._join_build_complete[join_nid] = threading.Event()
 
@@ -181,7 +195,9 @@ class Scheduler:
 
                         edge = output_edges[0][1]
                         if edge.is_open() and edge.total_in_transit() < edge.target_queue_depth:
-                            future = self._executor.submit(self._run_producer, nid, producer_fn, edge)
+                            future = self._executor.submit(
+                                self._run_producer, nid, producer_fn, edge
+                            )
                             futures.add(future)
                             work_scheduled = True
 
@@ -196,14 +212,18 @@ class Scheduler:
                         has_data = any(edge.has_data() for _, edge in input_edges)
                         if has_data:
                             # For joins, check build phase is complete
-                            if nid in self._join_build_complete:
-                                if not self._join_build_complete[nid].is_set():
-                                    continue
+                            if (
+                                nid in self._join_build_complete
+                                and not self._join_build_complete[nid].is_set()
+                            ):
+                                continue
 
                             for _, edge in input_edges:
                                 morsel = edge.dequeue()
                                 if morsel is not None:
-                                    future = self._executor.submit(self._run_consumer, nid, consumer_fn, morsel, edge)
+                                    future = self._executor.submit(
+                                        self._run_consumer, nid, consumer_fn, morsel, edge
+                                    )
                                     futures.add(future)
                                     work_scheduled = True
 

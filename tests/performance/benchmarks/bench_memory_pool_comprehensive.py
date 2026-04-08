@@ -16,7 +16,7 @@ import sys
 import time
 import threading
 import statistics
-from typing import Callable, Tuple, List
+from typing import Callable
 
 # Make sure we can import opteryx
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../../'))

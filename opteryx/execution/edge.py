@@ -18,7 +18,8 @@ that all data has drained and finish() should be called.
 
 import threading
 from collections import deque
-from typing import Any, Optional
+from typing import Any
+from typing import Optional
 
 
 class Edge:
