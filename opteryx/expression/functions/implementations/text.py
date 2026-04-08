@@ -9,29 +9,31 @@ from typing import List
 import numpy
 import pyarrow
 import pyarrow as pa
+from pyarrow import compute
+
 from opteryx.compiled.draken.vectors.string_vector import StringVector
 from opteryx.compiled.draken.vectors.string_vector import lowercase as string_vector_lowercase
 from opteryx.compiled.draken.vectors.string_vector import uppercase as string_vector_uppercase
-from opteryx.compiled.functions import regex_procedures as _regex_procedures
-from opteryx.compiled.vector_ops import vector_initcap
-from opteryx.compiled.vector_ops import vector_length
-from opteryx.compiled.vector_ops import vector_ltrim
-from opteryx.compiled.vector_ops import vector_match_against
-from opteryx.compiled.vector_ops import vector_md5
-from opteryx.compiled.vector_ops import vector_replace
-from opteryx.compiled.vector_ops import vector_reverse
-from opteryx.compiled.vector_ops import vector_rtrim
-from opteryx.compiled.vector_ops import vector_sha1
-from opteryx.compiled.vector_ops import vector_sha256
-from opteryx.compiled.vector_ops import vector_sha512
-from opteryx.compiled.vector_ops import vector_soundex
-from opteryx.compiled.vector_ops import vector_string_length
-from opteryx.compiled.vector_ops import vector_string_slice_left
-from opteryx.compiled.vector_ops import vector_string_slice_right
-from opteryx.compiled.vector_ops import vector_trim
+from opteryx.compiled.vector_ops import (
+    vector_initcap,
+    vector_length,
+    vector_ltrim,
+    vector_match_against,
+    vector_md5,
+    vector_replace,
+    vector_reverse,
+    vector_rtrim,
+    vector_sha1,
+    vector_sha256,
+    vector_sha512,
+    vector_soundex,
+    vector_string_length,
+    vector_string_slice_left,
+    vector_string_slice_right,
+    vector_trim,
+)
 from opteryx.exceptions import InvalidFunctionParameterError
 from opteryx.vectors.embeddings import get_embedding_provider
-from pyarrow import compute
 
 """Text and encoding function kernels.
 
@@ -434,28 +436,6 @@ def match_against(arr, val):
     )
 
 
-@functools.lru_cache(maxsize=64)
-def _get_dfa_ops(pattern: bytes, replacement: bytes):
-    """
-    Compile a (pattern, replacement) pair to Cython op-args and cache the result.
-
-    The pattern and replacement are constants for any given query, but
-    regex_replace() is called once per morsel.  Without caching,
-    RegexToDFACompiler().compile() runs on every morsel — pure waste.
-
-    Returns the (ops, ops_len, fallback_flag) triple from
-    CompiledProcedure.to_cython_args(), or (None, 0, True) on any error.
-    """
-    from opteryx.utils.regex_compiler import RegexToDFACompiler
-
-    try:
-        compiler = RegexToDFACompiler()
-        proc = compiler.compile(pattern, replacement)
-        return proc.to_cython_args()
-    except Exception:
-        return (None, 0, True)
-
-
 def _normalise_replacement(repl: bytes) -> bytes:
     """
     Normalise regex replacement backreferences from double-backslash form to single.
@@ -520,16 +500,7 @@ def regex_replace(array, _pattern, _replacement):
     replacement = _normalise_replacement(as_bytes(_replacement[0]))
 
     try:
-        # Attempt DFA-based fast-path first (private/internal, high-perf).
-        # _get_dfa_ops caches the compile result so the compiler only runs
-        # once per unique (pattern, replacement) pair across all morsels.
-        ops, ops_len, fallback_flag = _get_dfa_ops(pattern, replacement)
-
-        if not fallback_flag and ops is not None:
-            result_sv = _regex_procedures.execute_regex_procedure(data_vector, ops, ops_len, False)
-            result = result_sv.to_arrow()
-        else:
-            result = vector_regex_replace(data_vector, pattern, replacement).to_arrow()
+        result = vector_regex_replace(data_vector, pattern, replacement).to_arrow()
 
         if input_type is not None and (
             pyarrow.types.is_string(input_type)
@@ -541,10 +512,3 @@ def regex_replace(array, _pattern, _replacement):
         return result
     except ValueError as exc:
         raise InvalidFunctionParameterError(str(exc)) from exc
-
-
-def _dfa_replace(array, _pattern, _replacement):
-    """
-    Private internal alias for the DFA fast-path.
-    """
-    return regex_replace(array, _pattern, _replacement)

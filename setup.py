@@ -682,31 +682,6 @@ extensions = [
         extra_compile_args=CPP_FLAGS,
         extra_link_args=LD_EXTRA,
     ),
-    # DFA regex executor — lives in compiled/functions alongside other string kernels
-    Extension(
-        "opteryx.compiled.functions.regex_procedures",
-        sources=[
-            "opteryx/compiled/functions/regex_procedures.pyx",
-            "src/cpp/simd_search.cpp",
-            "src/cpp/cpu_features.cpp",
-        ],
-        include_dirs=include_dirs,
-        language="c++",
-        extra_compile_args=CPP_FLAGS,
-        extra_link_args=LD_EXTRA,
-    ),
-    # Vector-level DFA replacement — mirrors vector_regex_replace calling convention,
-    # handles compilation caching and RE2 fallback internally
-    Extension(
-        "opteryx.compiled.vector_ops.vector_dfa_replace",
-        sources=[
-            "opteryx/compiled/vector_ops/vector_dfa_replace.pyx",
-        ],
-        include_dirs=include_dirs,
-        language="c++",
-        extra_compile_args=CPP_FLAGS,
-        extra_link_args=LD_EXTRA,
-    ),
     Extension(
         name="opteryx.compiled.functions.timestamp",
         sources=["opteryx/compiled/functions/timestamp.pyx"],
@@ -1292,39 +1267,6 @@ extensions.append(
         include_dirs=include_dirs
         + [
             "third_party/mabel/carchar",
-            "third_party/nanobind",
-            "third_party/nanobind/src",
-            "third_party/nanobind/ext/robin_map/include",
-        ],
-        extra_compile_args=CPP_FLAGS + ["-fno-strict-aliasing", "-DNB_COMPACT_ASSERTIONS"],
-        extra_link_args=LD_EXTRA,
-        language="c++",
-    )
-)
-
-# regex_compiler_native: RE2 AST-based regex -> DFA-ops translator.
-# Lives at opteryx.compiled.functions.regex_compiler_native so the Python
-# shim at opteryx/compiled/functions/regex_compiler_native.py can import it.
-# It needs its own extension (not bundled into carchar_native) because it
-# defines a separate NB_MODULE(regex_compiler_native, ...).
-extensions.append(
-    Extension(
-        "opteryx.compiled.functions._regex_compiler_native",
-        sources=(
-            [
-                "src/cpp/regex_compiler_native.cpp",
-                "third_party/nanobind/src/nb_combined.cpp",
-            ]
-            + sorted(
-                glob.glob("third_party/re2/re2/*.cc")
-                + [
-                    "third_party/re2/util/strutil.cc",
-                    "third_party/re2/util/rune.cc",
-                ]
-            )
-        ),
-        include_dirs=include_dirs
-        + [
             "third_party/nanobind",
             "third_party/nanobind/src",
             "third_party/nanobind/ext/robin_map/include",
