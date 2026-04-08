@@ -185,6 +185,15 @@ class TestThreadPoolManager:
 
         pool.shutdown()
 
+    def test_get_decode_pool_default_uses_cpu_count_minus_two(self, monkeypatch):
+        """Test default decode pool sizing derives from cpu_count()-2."""
+        import os
+
+        monkeypatch.setattr(os, "cpu_count", lambda: 8)
+        pool = get_decode_pool()
+        assert pool.max_workers == 6
+        pool.shutdown()
+
     def test_get_range_pool(self):
         """Test get_range_pool creates named pool."""
         pool1 = get_range_pool(name="range-1", max_workers=32)

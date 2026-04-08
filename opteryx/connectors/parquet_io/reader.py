@@ -430,35 +430,30 @@ def fetch_columns(
             cache.set_column(path, rg_idx, col_name, decoded)
             results[col_name] = decoded
         else:
-            from concurrent.futures import as_completed
-
-            from opteryx.connectors.parquet_io.thread_pool_manager import get_decode_pool
-
-            decode_pool = get_decode_pool(max_workers=os.cpu_count() or 4)
-
-            decode_futures = {
-                decode_pool.submit(_decode_one, cn, rb): cn for cn, rb in zip(misses, raw_buffers)
-            }
-            for fut in as_completed(decode_futures):
-                cn = decode_futures[fut]
+            # Inline sequential decode: fetch_columns is typically called from
+            # iter_row_groups which already parallelises across row groups, so
+            # outer-level parallelism covers all CPUs.  A shared decode pool
+            # creates a global serialisation point that is strictly slower when
+            # many row groups are in flight simultaneously.
+            for col_name, raw_buffer in zip(misses, raw_buffers):
                 if _trace_enabled():
                     _trace_buffer_completed(
                         file_id=path,
                         component="column",
                         rg_idx=rg_idx,
-                        column=cn,
+                        column=col_name,
                         connector=connector,
                     )
                 try:
-                    cn, decoded = fut.result()
+                    col_name, decoded = _decode_one(col_name, raw_buffer)
                 except RuntimeError:
                     raise
                 except Exception as e:
                     raise RuntimeError(
-                        f"Failed to decode column '{path}:{rg_idx}:{cn}': {e}"
+                        f"Failed to decode column '{path}:{rg_idx}:{col_name}': {e}"
                     ) from e
-                cache.set_column(path, rg_idx, cn, decoded)
-                results[cn] = decoded
+                cache.set_column(path, rg_idx, col_name, decoded)
+                results[col_name] = decoded
 
         time_decode_columns_ns = time.monotonic_ns() - decode_start_ns
 
@@ -534,7 +529,7 @@ def iter_row_groups(
     paths: List[str],
     column_names: List[str],
     cache: Optional[ParquetCache] = None,
-    max_workers: int = 16,
+    max_workers: int = 32,
     decoder: Optional[Any] = None,
     predicates: Optional[List] = None,
     file_sizes: Optional[Dict[str, int]] = None,
@@ -545,52 +540,73 @@ def iter_row_groups(
     """
     Yield assembled row groups.
 
-    This is the public API required by ``opteryx.connectors.parquet_io``.
-    For this restored reader, the implementation is intentionally conservative:
-    row groups are fetched through ``fetch_columns`` using the requested
-    projection, and a scan-strategy marker is attached to each yielded row
-    group for downstream consumers.
+    Row groups across all paths are fetched in parallel using a dedicated
+    reader-rowgroup pool (cross-file IO) while fetch_columns uses the
+    separate decode and local-range pools internally — no nested-pool deadlock.
     """
     if cache is None:
         cache = InMemoryParquetCache()
 
     from opteryx import config as _cfg
 
-    _ = max_workers, decoder, predicates, file_sizes, query_id, prefetched_footers
+    _ = file_sizes, query_id, prefetched_footers  # resolved via cache / filesystem already
     decoder_fn = _resolve_decoder(decoder)
     trace_enabled = bool(_cfg.OPTERYX_TRACE)
 
+    # Build all work items up front.  Footer reads are cache hits when the
+    # caller (ParquetReadNode) has pre-fetched them; otherwise a real read
+    # happens here.
+    work_items: List[Tuple[str, int]] = []
     for path in paths:
         meta = fetch_footer(filesystem, path, cache=cache, connector=connector)
-        row_groups = meta.get("row_groups", [])
-        if not row_groups:
-            continue
-
-        for rg_idx, rg_meta in enumerate(row_groups):
+        for rg_idx, rg_meta in enumerate(meta.get("row_groups", [])):
             if predicates and not row_group_may_satisfy(rg_meta, predicates):
                 continue
+            work_items.append((path, rg_idx))
 
-            row_group = fetch_columns(
-                filesystem,
-                path,
-                rg_idx,
-                column_names,
-                cache=cache,
-                decoder=decoder_fn,
-                connector=connector,
+    if not work_items:
+        return
+
+    def _fetch_one(path: str, rg_idx: int) -> Dict[str, Any]:
+        row_group = fetch_columns(
+            filesystem,
+            path,
+            rg_idx,
+            column_names,
+            cache=cache,
+            decoder=decoder_fn,
+            connector=connector,
+        )
+        row_group["__path__"] = path
+        row_group["__row_group__"] = rg_idx
+        row_group["__parquet_scan_strategy__"] = "reader"
+        if trace_enabled:
+            rows_fetched = (
+                len(row_group)
+                if isinstance(row_group, dict)
+                else getattr(row_group, "num_rows", 0)
             )
-            row_group["__path__"] = path
-            row_group["__row_group__"] = rg_idx
-            row_group["__parquet_scan_strategy__"] = "reader"
+            _trace_rowgroup_fetched(
+                file_id=path, rg_idx=rg_idx, connector=connector, rows_out=rows_fetched
+            )
+        return row_group
 
-            if trace_enabled:
-                rows_fetched = (
-                    len(row_group)
-                    if isinstance(row_group, dict)
-                    else getattr(row_group, "num_rows", 0)
-                )
-                _trace_rowgroup_fetched(
-                    file_id=path, rg_idx=rg_idx, connector=connector, rows_out=rows_fetched
-                )
+    if len(work_items) == 1 or max_workers <= 1:
+        for path, rg_idx in work_items:
+            yield _fetch_one(path, rg_idx)
+        return
 
-            yield row_group
+    # Parallel path — fan out all (path, rg_idx) work items.
+    # We use a *separate* pool from "parquet-decode" (used inside fetch_columns)
+    # to avoid nested-pool starvation.
+    from concurrent.futures import as_completed
+
+    from opteryx.connectors.parquet_io.thread_pool_manager import get_range_pool
+
+    rg_pool = get_range_pool(name="reader-rowgroup", max_workers=max_workers)
+    futures = {
+        rg_pool.submit(_fetch_one, path, rg_idx): (path, rg_idx)
+        for path, rg_idx in work_items
+    }
+    for future in as_completed(futures):
+        yield future.result()

@@ -44,27 +44,33 @@ class ParquetCache(ABC):
 
 
 class InMemoryParquetCache(ParquetCache):
-    """Null cache — all gets return misses, all sets are no-ops.
+    """Simple in-memory footer and decoded-column cache.
 
-    Caching is intentionally disabled until a proper bounded, eviction-aware
-    cache is implemented.  Leaving decoded column data in an unbounded dict
-    across a scan inflates GC pressure without meaningful re-use benefit.
+    This cache stores parsed footer metadata and decoded column payloads for a
+    single process lifetime. It is intentionally simple: there is no eviction or
+    persistence, but it avoids repeated footer parsing and repeated column decode
+    work within the same query execution.
     """
 
+    def __init__(self):
+        self._footer_cache: dict[str, dict] = {}
+        self._column_cache: dict[tuple[str, int, str], Any] = {}
+
     def get_footer(self, path: str) -> Optional[dict]:
-        return None
+        return self._footer_cache.get(path)
 
     def set_footer(self, path: str, metadata: dict) -> None:
-        pass
+        self._footer_cache[path] = metadata
 
     def get_column(self, path: str, rg_idx: int, column_name: str) -> Optional[Any]:
-        return None
+        return self._column_cache.get((path, rg_idx, column_name))
 
     def set_column(self, path: str, rg_idx: int, column_name: str, data: Any) -> None:
-        pass
+        self._column_cache[(path, rg_idx, column_name)] = data
 
     def clear(self) -> None:
-        pass
+        self._footer_cache.clear()
+        self._column_cache.clear()
 
     def stats(self) -> dict:
         """Return cache sizes for observability."""
