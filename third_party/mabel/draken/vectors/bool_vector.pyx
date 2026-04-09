@@ -68,6 +68,8 @@ cdef class BoolVector(Vector):
                 self.ptr.data = malloc(nbytes)
                 if self.ptr.data == NULL:
                     raise MemoryError()
+                if nbytes > 0:
+                    memset(self.ptr.data, 0, nbytes)
             self.owns_data = True
         self._const_accessor.length = 0
         self._const_accessor.value_type = DRAKEN_BOOL

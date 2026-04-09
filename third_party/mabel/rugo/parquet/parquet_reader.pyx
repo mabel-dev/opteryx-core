@@ -977,6 +977,10 @@ cdef tuple _expanded_dict_codes_and_validity(
         for i in range(num_rows):
             if (decoded_col.valid_bits[i >> 3] >> (i & 7)) & 1:
                 if val_idx >= decoded_col.dict_indices.size():
+                    import sys
+                    sys.stderr.write(
+                        f"DEBUG: num_rows={num_rows} valid_bits_bytes={decoded_col.valid_bits.size()} dict_indices={decoded_col.dict_indices.size()} val_idx={val_idx}\n"
+                    )
                     raise ValueError("dictionary index stream shorter than number of valid rows")
                 codes[i] = decoded_col.dict_indices[val_idx]
                 validity[i] = 1

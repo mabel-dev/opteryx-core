@@ -84,12 +84,15 @@ static inline void build_validity_bitmap_avx2(
 
         // Extract the MSB from each of the 8 int32_t comparison results
         // Each 4-byte group has MSB we care about
+        // Each int32 comparison result produces 4 bytes in cmp_result.
+        // movemask_epi8 places the MSB of each byte into mask_bits, so the
+        // valid bit for lane i lives at bit position 4*i + 3.
+        static const uint32_t lane_mask[8] = {
+            1u << 3,  1u << 7,  1u << 11, 1u << 15,
+            1u << 19, 1u << 23, 1u << 27, 1u << 31,
+        };
         for (int i = 0; i < 8; ++i) {
-            // Extract byte at offset 4*i + 3 (MSB of i-th int32_t)
-            int byte_offset = 4 * i + 3;
-            uint8_t byte_val = (mask_bits >> (8 * (byte_offset / 4))) & 0xFF;
-            // Check if MSB is set
-            if (byte_val & 0x80) {
+            if (mask_bits & lane_mask[i]) {
                 bitmap_byte |= (1 << i);
             }
         }

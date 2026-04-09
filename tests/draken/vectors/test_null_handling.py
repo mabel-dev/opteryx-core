@@ -222,7 +222,17 @@ class TestBoolNullHandling:
         expected = [0, 1, 0, 1, 0]
         
         assert list(result) == expected
-    
+
+    def test_is_null_all_false_for_non_null_strings(self):
+        """Test that non-null string vectors produce an all-false IS NULL mask."""
+        from opteryx.expression.evaluator.type_coercion import _is_null_as_boolvector
+
+        vec = Vector.from_arrow(pa.array(['Mercury', 'Venus', 'Earth'], type=pa.binary()))
+        mask = _is_null_as_boolvector(vec)
+
+        assert mask.to_pylist() == [False, False, False]
+        assert mask.null_count == 0
+
     def test_null_count(self):
         """Test null_count property."""
         arr = pa.array([True, None, False, None, True])
