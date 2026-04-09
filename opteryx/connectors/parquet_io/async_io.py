@@ -48,9 +48,8 @@ async def async_read_column_task(
     """
     import time
 
-    from opteryx.tracing import record_event
-
     from opteryx import config as _trace_cfg
+    from opteryx.tracing import record_event
 
     task_start_ns = time.monotonic_ns()
     queue_wait_ns = (task_start_ns - submitted_ns) if submitted_ns else 0

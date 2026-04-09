@@ -12,12 +12,13 @@ This is used to prepresent no table.
 It actually is a table, with one row and one column.
 """
 
-from opteryx.compiled.draken.interop.arrow import vector_from_sequence
-from opteryx.compiled.draken.morsels.morsel import Morsel
 from orso.schema import FlatColumn
 from orso.schema import RelationSchema
 from orso.tools import single_item_cache
 from orso.types import OrsoTypes
+
+from opteryx.compiled.draken.interop.arrow import vector_from_sequence
+from opteryx.compiled.draken.morsels.morsel import Morsel
 
 __all__ = ("read", "schema")
 

@@ -22,6 +22,8 @@ JOINs, this is sometimes as part of the join condition, but we also push SELECTI
 into joins.
 """
 
+from orso.types import OrsoTypes
+
 from opteryx.expression import NodeType
 from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner import LogicalPlanNode
@@ -29,7 +31,6 @@ from opteryx.planner.logical_planner import LogicalPlanStepType
 from opteryx.vectors.vector_types import get_vector_source_identifier
 from opteryx.vectors.vector_types import node_is_numeric_vector
 from opteryx.vectors.vector_types import node_is_vector_query_expression
-from orso.types import OrsoTypes
 
 from .optimization_strategy import OptimizationStrategy
 from .optimization_strategy import OptimizerContext

@@ -67,8 +67,9 @@ def rename_relations(plan: LogicalPlan):
     """
     import uuid
 
-    from opteryx.models import LogicalColumn
     from orso.tools import random_string
+
+    from opteryx.models import LogicalColumn
 
     relations = {}
 

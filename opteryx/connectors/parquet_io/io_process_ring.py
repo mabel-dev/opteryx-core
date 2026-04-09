@@ -38,14 +38,13 @@ from typing import Iterator
 from typing import List
 from typing import Optional
 
+from opteryx import config as _cfg
 from opteryx.compiled.draken.morsels.morsel import Morsel
 from opteryx.compiled.draken.storage import read_morsel
 from opteryx.compiled.draken.storage import write_morsel
 from opteryx.connectors.io_systems import create_filesystem
 from opteryx.connectors.parquet_io.cache import InMemoryParquetCache
 from opteryx.connectors.parquet_io.predicates import row_group_may_satisfy
-
-from opteryx import config as _cfg
 
 # Slot states
 FREE = 0
@@ -558,9 +557,8 @@ def _read_column_task(
     submitted_ns: int,
     connector: Optional[str] = None,
 ) -> dict:
-    from opteryx.tracing import record_event
-
     from opteryx import config as _trace_cfg
+    from opteryx.tracing import record_event
 
     task_start_ns = time.monotonic_ns()
     queue_wait_ns = task_start_ns - submitted_ns
@@ -611,9 +609,8 @@ def _decode_column_task(
     codec_metrics: Optional[Dict[str, _CodecMetrics]] = None,
     scan_codec_metrics: Optional[Dict[str, _CodecMetrics]] = None,
 ) -> dict:
-    from opteryx.tracing import record_event
-
     from opteryx import config as _trace_cfg
+    from opteryx.tracing import record_event
 
     task_start_ns = time.monotonic_ns()
     queue_wait_ns = task_start_ns - submitted_ns
@@ -923,11 +920,10 @@ def _io_worker(
             decode_pending: deque[tuple[tuple[int, int], _IOColumnWork, bytes]] = deque()
 
             try:
+                from opteryx import config as _trace_cfg
                 from opteryx.connectors.parquet_io.reader import _parse_footer_envelope
                 from opteryx.connectors.parquet_io.reader import _read_footer_payload
                 from opteryx.tracing import record_event
-
-                from opteryx import config as _trace_cfg
 
                 paths = command["paths"]
                 column_names = command["column_names"]

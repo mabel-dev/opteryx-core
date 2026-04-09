@@ -4,6 +4,7 @@ import datetime
 
 import numpy
 import pyarrow as _pa
+
 from opteryx.exceptions import ColumnReferencedBeforeEvaluationError
 
 from .function_execution import _is_draken_vector
@@ -43,8 +44,9 @@ _NEGATED_OPS = {
 
 
 def _int64_temporal_compare(op: str, vec, right, temporal_type):
-    from opteryx.compiled.draken.vectors.bool_vector import BoolVector
     from orso.types import OrsoTypes
+
+    from opteryx.compiled.draken.vectors.bool_vector import BoolVector
 
     if right is None:
         return BoolVector(len(vec))
@@ -114,6 +116,7 @@ def _timestamp_compare(op: str, vec, right):
         return BoolVector.from_arrow(result_arr)
     elif right.__class__.__name__ == "Date32Vector":
         import pyarrow as _pa_local
+
         from opteryx.compiled.draken.interop.arrow import vector_from_arrow as _vfa
 
         ts_right = _vfa(right.to_arrow().cast(_pa_local.timestamp("us")))
@@ -160,6 +163,7 @@ def _date32_compare(op: str, vec, right):
         return fn(right)
     elif right.__class__.__name__ == "TimestampVector":
         import pyarrow as _pa_local
+
         from opteryx.compiled.draken.interop.arrow import vector_from_arrow as _vfa
 
         ts_left = _vfa(vec.to_arrow().cast(_pa_local.timestamp("us")))
@@ -205,6 +209,7 @@ def _interval_compare(op: str, vec, right):
 def _date_minus_date_draken(left_vec, right_vec):
     import pyarrow as pa
     import pyarrow.compute as pc
+
     from opteryx.compiled.draken.interop.arrow import vector_from_arrow
     from opteryx.expression.intervals import MICROSECONDS_PER_DAY
     from opteryx.expression.intervals import _intervals_to_month_day_nano

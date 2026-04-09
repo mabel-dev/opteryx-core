@@ -1,6 +1,7 @@
 """List operations (InList, NotInList)."""
 
 import pyarrow
+
 from opteryx.compiled import vector_ops
 from opteryx.expression.operations.fastpath_constant import _coerce_in_list_values
 from opteryx.expression.operations.fastpath_dictionary import dictionary_fastpath

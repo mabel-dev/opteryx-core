@@ -12,9 +12,10 @@ from typing import Iterable
 from typing import Union
 from urllib.parse import urlparse
 
+from orso.tools import single_item_cache
+
 from opteryx.exceptions import MissingDependencyError
 from opteryx.managers.kvstores.base_kv_store import BaseKeyValueStore
-from orso.tools import single_item_cache
 
 GoogleAPIError = Exception
 

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import List
 
+from orso.types import OrsoTypes
+
 from opteryx.expression.functions import FunctionDefinition
 from opteryx.expression.functions import FunctionOverload
 from opteryx.expression.functions import KernelSpec
@@ -11,7 +13,6 @@ from opteryx.expression.functions import ReturnSpec
 
 # Use package-level helper to construct concise FunctionDefinition entries.
 from opteryx.expression.functions.registrar import _make
-from orso.types import OrsoTypes
 
 
 def get_builtin_utility_functions() -> List[FunctionDefinition]:
@@ -21,6 +22,7 @@ def get_builtin_utility_functions() -> List[FunctionDefinition]:
     """
     # Local imports to avoid heavy imports at module import time
     import numpy
+
     from opteryx.expression.functions.registrar import _iterate_single_parameter as _isingle
     from opteryx.expression.functions.registrar import _sort as _sort_factory
 

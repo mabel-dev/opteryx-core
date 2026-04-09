@@ -16,6 +16,9 @@ from typing import List
 from typing import Optional
 from typing import Tuple
 
+from orso.tools import random_string
+from orso.types import OrsoTypes
+
 from opteryx.exceptions import UnnamedColumnError
 from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.expression import NodeType
@@ -30,8 +33,6 @@ from opteryx.third_party.travers import Graph
 from opteryx.utils import dnf
 from opteryx.vectors.vector_types import get_vector_source_identifier
 from opteryx.vectors.vector_types import node_is_vector_query_expression
-from orso.tools import random_string
-from orso.types import OrsoTypes
 
 
 class LogicalPlanStepType(int, Enum):

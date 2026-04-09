@@ -10,12 +10,13 @@ Type: Heuristic
 Goal: Break filters into units which are easier to handle
 """
 
+from orso.tools import random_string
+
 from opteryx.expression import NodeType
 from opteryx.expression import get_all_nodes_of_type
 from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner import LogicalPlanNode
 from opteryx.planner.logical_planner import LogicalPlanStepType
-from orso.tools import random_string
 
 from .optimization_strategy import OptimizationStrategy
 from .optimization_strategy import OptimizerContext

@@ -21,15 +21,15 @@ from typing import Dict
 from typing import Tuple
 from typing import Type
 
+from orso.types import OrsoTypes
+
+from opteryx import config
 from opteryx.__version__ import __version__
 from opteryx.compiled.simd_probe import cpu_architecture
 from opteryx.constants.character_set import CharacterSet
 from opteryx.constants.character_set import Collation
 from opteryx.exceptions import PermissionsError
 from opteryx.exceptions import VariableNotFoundError
-from orso.types import OrsoTypes
-
-from opteryx import config
 
 
 class VariableOwner(int, Enum):

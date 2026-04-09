@@ -4,6 +4,7 @@ import datetime
 
 import numpy
 import pyarrow as _pa
+
 from opteryx.exceptions import ColumnReferencedBeforeEvaluationError
 
 from .function_execution import _is_draken_vector
@@ -82,6 +83,7 @@ def _int64_compare(op: str, vec, right):
     # Fallback for edge cases like Float64Vector comparison (not in hot path for ClickBench)
     if right.__class__.__name__ == "Float64Vector":
         import pyarrow as pa
+
         from opteryx.compiled.draken.interop.arrow import vector_from_arrow
 
         float_vec = vector_from_arrow(vec.to_arrow().cast(pa.float64()))
@@ -131,6 +133,7 @@ def _float64_compare(op: str, vec, right):
 def _dict_compare(op: str, vec, right):
     import pyarrow as pa
     import pyarrow.compute as pc
+
     from opteryx.compiled.draken.vectors.bool_vector import BoolVector
 
     vec = _dictionary_compare_vector(vec)
@@ -276,6 +279,7 @@ _ARROW_COMPARE_OPS = {
 def _arrow_vector_compare(op: str, vec, right):
     import pyarrow as pa
     import pyarrow.compute as pc
+
     from opteryx.compiled.draken.vectors.bool_vector import BoolVector
 
     pc_op = _ARROW_COMPARE_OPS.get(op)
@@ -383,6 +387,7 @@ def draken_compare(op: str, left, right, left_schema_type=None, right_schema_typ
         return vector_anyop_ilike(right, _ensure_array_vector(left)).not_vector()
     if op == "AtQuestion":
         import pyarrow as pa
+
         from opteryx.compiled.draken.interop.arrow import vector_from_arrow
         from opteryx.third_party.tktech import csimdjson as simdjson
 
@@ -477,6 +482,7 @@ def draken_compare(op: str, left, right, left_schema_type=None, right_schema_typ
         elif op == "InList":
             import pyarrow as _pa_local
             import pyarrow.compute as _pac
+
             from opteryx.compiled.draken.vectors.bool_vector import BoolVector as _BoolVec
 
             bool_set = {bool(v) for v in right if v is not None}
@@ -486,6 +492,7 @@ def draken_compare(op: str, left, right, left_schema_type=None, right_schema_typ
             result = _BoolVec.from_arrow(result_arr)
         else:
             import pyarrow.compute as _pac
+
             from opteryx.compiled.draken.vectors.bool_vector import BoolVector as _BoolVec
 
             bool_arrow_ops = {

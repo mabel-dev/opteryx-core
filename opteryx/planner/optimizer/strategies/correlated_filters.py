@@ -14,14 +14,15 @@ or filters. This can be used to reduce the number of rows that need to be read
 and processed.
 """
 
+from orso.tools import random_string
+from orso.types import OrsoTypes
+
 from opteryx.expression import NodeType
 from opteryx.models import Node
 from opteryx.planner import build_literal_node
 from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner import LogicalPlanNode
 from opteryx.planner.logical_planner import LogicalPlanStepType
-from orso.tools import random_string
-from orso.types import OrsoTypes
 
 from .optimization_strategy import OptimizationStrategy
 from .optimization_strategy import OptimizerContext

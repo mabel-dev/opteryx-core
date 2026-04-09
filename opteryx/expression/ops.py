@@ -8,9 +8,10 @@ import re
 
 import numpy
 import pyarrow
-from opteryx.compiled import vector_ops
 from orso.types import OrsoTypes
 from pyarrow import compute
+
+from opteryx.compiled import vector_ops
 
 _DICT_EXPR_TEL = {
     "draken_dict_expr_fastpath_hits": 0,

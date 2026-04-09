@@ -1,6 +1,7 @@
 """Dictionary vector encoding optimization for filter operations."""
 
 import pyarrow
+
 from opteryx.expression.operations.fastpath_constant import _coerce_in_list_values
 from opteryx.expression.operations.fastpath_telemetry import record_dict_fastpath_hit
 

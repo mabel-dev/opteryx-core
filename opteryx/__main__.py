@@ -19,11 +19,10 @@ import time
 sys.path.insert(1, os.path.join(sys.path[0], ".."))
 
 if True:
+    import opteryx
     from opteryx.exceptions import MissingSqlStatement
     from opteryx.utils.sql import clean_statement
     from opteryx.utils.sql import remove_comments
-
-    import opteryx
 
 # Define ANSI color codes
 ANSI_RED = "\u001b[31m"

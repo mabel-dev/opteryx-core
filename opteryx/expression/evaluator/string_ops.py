@@ -2,8 +2,6 @@
 
 import datetime
 
-import numpy
-import pyarrow as _pa
 from opteryx.exceptions import ColumnReferencedBeforeEvaluationError
 
 from .function_execution import _is_draken_vector

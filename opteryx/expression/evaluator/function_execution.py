@@ -5,6 +5,7 @@ from typing import Any
 import numpy
 import pyarrow as _pa
 import pyarrow.compute as compute
+
 from opteryx.exceptions import FunctionExecutionError
 
 

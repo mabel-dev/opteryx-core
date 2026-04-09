@@ -23,17 +23,18 @@ been run if this strategy didn't run.
 
 from itertools import permutations
 
+from orso.schema import ConstantColumn
+from orso.tools import random_string
+
+# pragma: no cover
+from orso.types import OrsoTypes
+
 from opteryx.expression import NodeType
 from opteryx.expression import get_all_nodes_of_type
 from opteryx.models import Node
 from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner import LogicalPlanNode
 from opteryx.planner.logical_planner import LogicalPlanStepType
-from orso.schema import ConstantColumn
-from orso.tools import random_string
-
-# pragma: no cover
-from orso.types import OrsoTypes
 
 from .optimization_strategy import OptimizationStrategy
 from .optimization_strategy import OptimizerContext

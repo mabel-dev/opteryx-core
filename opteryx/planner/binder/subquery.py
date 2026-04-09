@@ -5,10 +5,11 @@
 
 from typing import Tuple
 
+from orso.schema import RelationSchema
+
 from opteryx.managers.virtual_datasets import derived
 from opteryx.models import Node
 from opteryx.planner.binder.binding_context import BindingContext
-from orso.schema import RelationSchema
 
 
 def visit_comment(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:

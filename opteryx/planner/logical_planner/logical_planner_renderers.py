@@ -167,13 +167,34 @@ def render_order(node: LogicalPlanNode) -> str:
 
 @register_render(LogicalPlanStepType.Scan)
 def render_scan(node: LogicalPlanNode) -> str:
+    from opteryx.expression import NodeType
+    from opteryx.expression import get_all_nodes_of_type
+
     io_async = "ASYNC " if hasattr(node.connector, "async_read_blob") else ""
     connector = " " if not hasattr(node.connector, "__type__") else f" [{node.connector.__type__}] "
     date_range = ""
     if node.at_date is not None:
         date_range = f" AT ('{node.at_date.isoformat()}')"
     alias = f" AS {node.alias}" if node.relation != node.alias else ""
-    columns = " [" + ", ".join(c.source_column for c in node.columns) + "]" if node.columns else ""
+
+    proj_names = [c.source_column for c in node.columns] if node.columns else []
+    proj_set = set(proj_names)
+
+    # Columns referenced only in pushed-down predicates are not in node.columns
+    # (they were removed by ProjectionPushdown because they're not output columns),
+    # but will still be fetched from storage by the executor.  Mark them with ~ so
+    # the plan makes clear what is actually read vs what is projected.
+    filter_only_names = []
+    if node.predicates:
+        for pred in node.predicates:
+            for ident in get_all_nodes_of_type(pred, (NodeType.IDENTIFIER,)):
+                name = getattr(ident, "source_column", None) or getattr(ident, "value", None)
+                if name and name not in proj_set and name not in filter_only_names:
+                    filter_only_names.append(name)
+
+    all_col_parts = proj_names + [f"~{n}" for n in filter_only_names]
+    columns = " [" + ", ".join(all_col_parts) + "]" if all_col_parts else ""
+
     predicates = (
         " (" + " AND ".join(map(format_expression, node.predicates)) + ")"
         if node.predicates

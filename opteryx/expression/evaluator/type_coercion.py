@@ -186,8 +186,9 @@ def _coerce_interval(value) -> tuple:
 
 
 def _coerce_temporal_scalar_for_arrow(value, target_type):
-    from opteryx.expression.casts import parse_timestamp_value
     from orso.types import OrsoTypes
+
+    from opteryx.expression.casts import parse_timestamp_value
 
     if hasattr(value, "as_py"):
         value = value.as_py()
@@ -228,6 +229,7 @@ _FIXED_BUFFER_VECTOR_CLASSES = frozenset(
 
 def _is_null_as_boolvector(vec):
     import pyarrow.compute as _pc
+
     from opteryx.compiled.draken.vectors.bool_vector import BoolVector
     from opteryx.compiled.vector_ops.function_definitions import bool_vector_all_true
     from opteryx.compiled.vector_ops.function_definitions import bool_vector_from_int8_mask
@@ -264,6 +266,7 @@ def _is_null_as_boolvector(vec):
     if cls_name in _FIXED_BUFFER_VECTOR_CLASSES:
         if cls_name == "Float64Vector":
             import pyarrow.compute as _pc
+
             from opteryx.compiled.draken.interop.arrow import vector_from_arrow as _vfa
 
             arrow_arr = vec.to_arrow()

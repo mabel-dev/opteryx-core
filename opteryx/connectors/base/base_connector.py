@@ -16,11 +16,12 @@ from typing import Iterable
 from typing import Optional
 from typing import Tuple
 
+from orso.schema import RelationSchema
+
 from opteryx.compiled.draken.morsels.morsel import Morsel
 from opteryx.connectors import TableType
 from opteryx.exceptions import DatasetNotFoundError
 from opteryx.models import QueryTelemetry
-from orso.schema import RelationSchema
 
 MIN_CHUNK_SIZE: int = 500
 INITIAL_CHUNK_SIZE: int = 500

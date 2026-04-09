@@ -1,3 +1,6 @@
+from orso.types import OrsoTypes
+from pyarrow import compute
+
 from opteryx.expression.functions import FunctionDefinition
 from opteryx.expression.functions import FunctionOverload
 from opteryx.expression.functions import KernelSpec
@@ -9,8 +12,6 @@ from opteryx.expression.functions.implementations import temporal as date_functi
 
 # Helper from package-level registrar for concise entries
 from opteryx.expression.functions.registrar import _make
-from orso.types import OrsoTypes
-from pyarrow import compute
 
 
 def get_builtin_arithmetic_extended_functions() -> list[FunctionDefinition]:

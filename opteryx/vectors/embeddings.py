@@ -7,6 +7,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 import numpy
+
 from opteryx.exceptions import InvalidConfigurationError
 from opteryx.third_party.cyan4973.xxhash import hash_bytes
 
