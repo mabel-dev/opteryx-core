@@ -16,7 +16,12 @@ This module is intentionally Draken-native in the hot path:
 """
 
 from cpython.buffer cimport PyBUF_READ
+from cpython.buffer cimport PyBUF_SIMPLE
+from cpython.buffer cimport PyBUF_WRITABLE
 from cpython.buffer cimport PyBUF_WRITE
+from cpython.buffer cimport Py_buffer
+from cpython.buffer cimport PyBuffer_Release
+from cpython.buffer cimport PyObject_GetBuffer
 from cpython.bytes cimport PyBytes_AS_STRING
 from cpython.bytes cimport PyBytes_AsStringAndSize
 from cpython.bytes cimport PyBytes_FromStringAndSize
@@ -147,7 +152,65 @@ class DrakenMorselCorruptionError(DrakenMorselStorageError):
 
 _codec_tls = threading.local()
 
-# Module-level cache for codec function pointers (set on first load, never changes)
+
+cdef class _PoolWriter:
+    """
+    Zero-copy writable sink backed by a caller-supplied memoryview.
+
+    All writes go directly into the underlying buffer via memcpy with no
+    intermediate allocation.  The Py_buffer view is released only on
+    deallocation so the data remains readable after close().
+    """
+    cdef Py_buffer _view
+    cdef char* _ptr
+    cdef Py_ssize_t _capacity
+    cdef Py_ssize_t _pos
+    cdef bint _acquired
+
+    def __cinit__(self, object mv):
+        self._acquired = False
+        self._pos = 0
+        self._ptr = NULL
+        self._capacity = 0
+        PyObject_GetBuffer(mv, &self._view, PyBUF_WRITABLE)
+        self._acquired = True
+        self._ptr = <char*>self._view.buf
+        self._capacity = self._view.len
+
+    def write(self, object data):
+        cdef Py_buffer view
+        cdef Py_ssize_t n
+        PyObject_GetBuffer(data, &view, PyBUF_SIMPLE)
+        n = view.len
+        if self._pos + n > self._capacity:
+            PyBuffer_Release(&view)
+            raise ValueError(
+                f"memoryview target too small: buffer capacity {self._capacity} bytes, "
+                f"need at least {self._pos + n} bytes"
+            )
+        memcpy(self._ptr + self._pos, view.buf, n)
+        self._pos += n
+        PyBuffer_Release(&view)
+        return n
+
+    def tell(self):
+        return self._pos
+
+    def close(self):
+        pass  # data must remain readable after close; buffer released only on dealloc
+
+    def __dealloc__(self):
+        if self._acquired:
+            PyBuffer_Release(&self._view)
+            self._acquired = False
+
+    @property
+    def bytes_written(self):
+        return self._pos
+
+# Module-level cache for codec modules and function pointers (set on first load, never changes)
+_lz4_module = None
+_zstd_module = None
 _lz4_decompress_into_fn = None
 _zstd_decompress_into_fn = None
 _lz4_loaded = False
@@ -176,31 +239,35 @@ def _codec_id_to_name(codec_id: int) -> str:
 
 
 def _load_lz4():
-    global _lz4_decompress_into_fn, _lz4_loaded
+    global _lz4_module, _lz4_decompress_into_fn, _lz4_loaded
     if _lz4_loaded:
-        return _lz4_decompress_into_fn is not None
+        return _lz4_module
     _lz4_loaded = True
 
     try:
-        from opteryx.third_party.lz4 import lz4 as lz4_module
-        _lz4_decompress_into_fn = getattr(lz4_module, "decompress_into", None)
+        from opteryx.third_party.lz4 import lz4 as lz4_mod
+        _lz4_decompress_into_fn = getattr(lz4_mod, "decompress_into", None)
+        _lz4_module = lz4_mod
     except ImportError:
         _lz4_decompress_into_fn = None
-    return _lz4_decompress_into_fn is not None
+        _lz4_module = None
+    return _lz4_module
 
 
 def _load_zstd():
-    global _zstd_decompress_into_fn, _zstd_loaded
+    global _zstd_module, _zstd_decompress_into_fn, _zstd_loaded
     if _zstd_loaded:
-        return _zstd_decompress_into_fn is not None
+        return _zstd_module
     _zstd_loaded = True
 
     try:
-        from opteryx.third_party.facebook import zstd as zstd_module
-        _zstd_decompress_into_fn = getattr(zstd_module, "decompress_into", None)
+        from opteryx.third_party.facebook import zstd as zstd_mod
+        _zstd_decompress_into_fn = getattr(zstd_mod, "decompress_into", None)
+        _zstd_module = zstd_mod
     except ImportError:
         _zstd_decompress_into_fn = None
-    return _zstd_decompress_into_fn is not None
+        _zstd_module = None
+    return _zstd_module
 
 
 def _compress_payload(object payload, int codec_id, int zstd_level):
@@ -208,6 +275,8 @@ def _compress_payload(object payload, int codec_id, int zstd_level):
         return payload
     if codec_id == CODEC_LZ4:
         lz4 = _load_lz4()
+        if lz4 is None:
+            raise DrakenMorselStorageError("codec_default='lz4' requested but liblz4 is unavailable")
         return lz4.compress_block(payload)
     if codec_id == CODEC_ZSTD:
         zstd_compress = getattr(_codec_tls, "zstd_compress", None)
@@ -232,9 +301,13 @@ def _decompress_payload(bytes payload, int codec_id, int expected_len):
         return payload
     if codec_id == CODEC_LZ4:
         lz4 = _load_lz4()
+        if lz4 is None:
+            raise DrakenMorselStorageError("lz4 decompression requested but liblz4 is unavailable")
         return lz4.decompress_block(payload, expected_len)
     if codec_id == CODEC_ZSTD:
         zstd = _load_zstd()
+        if zstd is None:
+            raise DrakenMorselStorageError("zstd decompression requested but zstd is unavailable")
         return zstd.decompress(payload)
     raise DrakenMorselStorageError(f"unsupported codec id {codec_id}")
 
@@ -568,7 +641,10 @@ cdef inline tuple _decode_block_header(bytes payload):
 
 cdef inline bint _is_supported_fixed_type(int dtype):
     return (
-        dtype == DRAKEN_INT64
+        dtype == DRAKEN_INT8
+        or dtype == DRAKEN_INT16
+        or dtype == DRAKEN_INT32
+        or dtype == DRAKEN_INT64
         or dtype == DRAKEN_FLOAT64
         or dtype == DRAKEN_BOOL
         or dtype == DRAKEN_DATE32
@@ -789,6 +865,8 @@ cdef inline uint32_t _dict_read_packed_code(
 
 
 cdef DrakenFixedBuffer* _fixed_ptr_from_vector(Vector vec, int dtype):
+    if dtype == DRAKEN_INT8 or dtype == DRAKEN_INT16 or dtype == DRAKEN_INT32:
+        return (<IntegerVector>vec).ptr
     if dtype == DRAKEN_INT64:
         return (<Int64Vector>vec).ptr
     if dtype == DRAKEN_FLOAT64:
@@ -976,7 +1054,9 @@ cdef Vector _build_dense_string_dict_vector(
 cdef Vector _allocate_fixed_vector(int dtype, Py_ssize_t row_count):
     cdef Vector out
 
-    if dtype == DRAKEN_INT64:
+    if dtype == DRAKEN_INT8 or dtype == DRAKEN_INT16 or dtype == DRAKEN_INT32:
+        out = IntegerVector(<DrakenType>dtype, <size_t>row_count)
+    elif dtype == DRAKEN_INT64:
         out = Int64Vector(<size_t>row_count)
     elif dtype == DRAKEN_FLOAT64:
         out = Float64Vector(<size_t>row_count)
@@ -1169,12 +1249,12 @@ def _open_writer(path_or_handle):
     if isinstance(path_or_handle, memoryview):
         if path_or_handle.readonly:
             raise TypeError("memoryview target for write_morsel must be writable")
-        return io.BytesIO(), True, None, SINK_MEMORYVIEW, path_or_handle
+        return _PoolWriter(path_or_handle), True, None, SINK_MEMORYVIEW, None
     try:
         mv = memoryview(path_or_handle)
         if mv.readonly:
             raise TypeError("buffer target for write_morsel must be writable")
-        return io.BytesIO(), True, None, SINK_MEMORYVIEW, mv
+        return _PoolWriter(mv), True, None, SINK_MEMORYVIEW, None
     except TypeError:
         pass
     path = os.fspath(path_or_handle)
@@ -1247,7 +1327,7 @@ cpdef object write_morsel(object path_or_handle, Morsel morsel, dict options=Non
 
     if codec_id == CODEC_LZ4:
         lz4 = _load_lz4()
-        if not lz4.is_available():
+        if lz4 is None or not lz4.is_available():
             raise DrakenMorselStorageError("codec_default='lz4' requested but liblz4 is unavailable")
 
     if codec_id == CODEC_ZSTD:
@@ -1472,7 +1552,7 @@ cpdef object write_morsel(object path_or_handle, Morsel morsel, dict options=Non
                 <uint32_t>block_count,
             )
         )
-        if sink_kind == SINK_RETURN_BYTES or sink_kind == SINK_BYTEARRAY or sink_kind == SINK_MEMORYVIEW:
+        if sink_kind == SINK_RETURN_BYTES or sink_kind == SINK_BYTEARRAY:
             serialized_blob = handle.getvalue()
     finally:
         if close_when_done:
@@ -1483,23 +1563,6 @@ cpdef object write_morsel(object path_or_handle, Morsel morsel, dict options=Non
 
     if sink_kind == SINK_BYTEARRAY:
         sink_target[:] = serialized_blob
-    elif sink_kind == SINK_MEMORYVIEW:
-        sink_bytes_view = sink_target
-        if sink_bytes_view.ndim != 1:
-            try:
-                sink_bytes_view = sink_bytes_view.cast("B")
-            except (TypeError, ValueError):
-                raise TypeError("memoryview target for write_morsel must be contiguous")
-        elif sink_bytes_view.format != "B":
-            try:
-                sink_bytes_view = sink_bytes_view.cast("B")
-            except (TypeError, ValueError):
-                raise TypeError("memoryview target for write_morsel must be byte-addressable")
-        if len(serialized_blob) > sink_bytes_view.nbytes:
-            raise ValueError(
-                f"memoryview target too small for serialized morsel: need {len(serialized_blob)} bytes, got {sink_bytes_view.nbytes}"
-            )
-        sink_bytes_view[: len(serialized_blob)] = serialized_blob
 
     return {
         "path": resolved_path,
@@ -1508,7 +1571,7 @@ cpdef object write_morsel(object path_or_handle, Morsel morsel, dict options=Non
         "blocks": int(block_count),
         "bytes_raw_written": int(raw_written),
         "bytes_compressed_written": int(compressed_written),
-        "bytes_output": int(len(serialized_blob)) if serialized_blob else None,
+        "bytes_output": int(handle.bytes_written) if sink_kind == SINK_MEMORYVIEW else (int(len(serialized_blob)) if serialized_blob else None),
         "codec_default": _codec_id_to_name(codec_id),
     }
 
