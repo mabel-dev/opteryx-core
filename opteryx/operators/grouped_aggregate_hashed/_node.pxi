@@ -258,15 +258,17 @@ class GroupedAggregateHashedNode(BasePlanNode):
 
     def _finalize(self):
         finalize_start = time.monotonic_ns()
-        for chunk in self._engine.finalize_morsels(CHUNK_SIZE):
-            if self._having_condition is not None:
-                chunk = self._apply_having_filter(chunk)
-                if chunk is None or chunk.num_rows == 0:
-                    continue
+
+        # Pass HAVING filter to engine for early filtering before chunking
+        # This avoids reconstructing groups that don't pass the filter.
+        filter_fn = self._apply_having_filter if self._having_condition is not None else None
+
+        for chunk in self._engine.finalize_morsels(CHUNK_SIZE, filter_fn=filter_fn):
             if self._implicit_count_added:
                 # Drop the first column (the implicit COUNT(*))
                 chunk = chunk.select(chunk.column_names[1:])
             yield chunk
+
         self.readings["time_aggregate_finalize"] += time.monotonic_ns() - finalize_start
         engine_telemetry = self._engine.telemetry()
         self.readings["time_aggregate_resolve"] += engine_telemetry["time_resolve_ns"]

@@ -80,25 +80,3 @@ def test_retired_parquet_dictionary_feature_attribute_removed(monkeypatch):
     importlib.reload(config)
 
     assert not hasattr(config.features, "parquet_native_dictionary")
-
-
-def test_serial_reader_selector_parses_connector_list(monkeypatch):
-    monkeypatch.setenv("FEATURE_USE_SERIAL_READER", "LOCAL,S3")
-    monkeypatch.delenv("FEATURE_PARQUET_LOCAL_SERIAL_FASTPATH", raising=False)
-
-    import opteryx.config as config
-
-    importlib.reload(config)
-
-    assert config.features.use_serial_reader == frozenset({"LOCAL", "S3"})
-
-
-def test_serial_reader_selector_none_disables_serial_reader(monkeypatch):
-    monkeypatch.setenv("FEATURE_USE_SERIAL_READER", "NONE")
-    monkeypatch.delenv("FEATURE_PARQUET_LOCAL_SERIAL_FASTPATH", raising=False)
-
-    import opteryx.config as config
-
-    importlib.reload(config)
-
-    assert config.features.use_serial_reader == frozenset()

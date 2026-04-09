@@ -52,6 +52,19 @@ cdef extern from "<vector>" namespace "std":
 cdef extern from "simd_search.h":
     vector[size_t] simd_find_all(const char* data, size_t length, char target)
 
+cdef extern from "volnitsky.h":
+    cppclass VolnitskyTable:
+        pass
+    VolnitskyTable* volnitsky_alloc() noexcept nogil
+    void volnitsky_free(VolnitskyTable* t) noexcept nogil
+    void volnitsky_build(VolnitskyTable* t, const uint8_t* pat, size_t len) nogil
+    bint volnitsky_contains_cs(const uint8_t* hay, size_t hay_len,
+                                const uint8_t* pat, size_t pat_len,
+                                const VolnitskyTable* table) noexcept nogil
+    bint volnitsky_contains_ci(const uint8_t* hay, size_t hay_len,
+                                const uint8_t* pat_lower, size_t pat_len,
+                                const VolnitskyTable* table) noexcept nogil
+
 cdef extern from *:
     """
     #ifdef __GNUC__
@@ -338,144 +351,14 @@ cdef bint _sv_sql_like_match(
     return pi == pattern_len
 
 
-cdef inline void _build_bmh_skip_table(
-    const uint8_t* needle,
-    Py_ssize_t ndl_len,
-    unsigned char* skip
-) noexcept nogil:
-    """Build Boyer-Moore-Horspool skip table."""
-    cdef Py_ssize_t i
-    # Initialize all entries to pattern length
-    for i in range(256):
-        skip[i] = <unsigned char>ndl_len
-    # Set skip values for characters in pattern
-    if ndl_len >= 2:
-        for i in range(ndl_len - 1):
-            skip[needle[i]] = <unsigned char>(ndl_len - i - 1)
-
-
-cdef inline bint _bmh_search_cs(
-    const uint8_t* haystack,
-    Py_ssize_t hay_len,
-    const uint8_t* needle,
-    Py_ssize_t ndl_len,
-    unsigned char* skip
-) noexcept nogil:
-    """Boyer-Moore-Horspool case-sensitive search."""
-    cdef Py_ssize_t i = 0
-    cdef Py_ssize_t tail_index
-    cdef Py_ssize_t end_index = hay_len - ndl_len
-    cdef uint8_t last_char = needle[ndl_len - 1]
-    cdef uint8_t tail_char
-    cdef Py_ssize_t j
-
-    if ndl_len == 0:
-        return True
-    if hay_len < ndl_len:
-        return False
-
-    # Single character fast path
-    if ndl_len == 1:
-        for i in range(hay_len):
-            if haystack[i] == needle[0]:
-                return True
-        return False
-
-    while i <= end_index:
-        tail_index = i + ndl_len - 1
-        tail_char = haystack[tail_index]
-
-        # Check if last character matches
-        if tail_char == last_char:
-            # Check if first character also matches
-            if haystack[i] == needle[0]:
-                # Full comparison - optimized for short needles
-                j = 1
-                while j < ndl_len and haystack[i + j] == needle[j]:
-                    j += 1
-                if j == ndl_len:
-                    return True
-
-        # Skip using precomputed table
-        i += skip[tail_char]
-
-    return False
-
-
 cdef bint _sv_contains_cs(
     const uint8_t* haystack,
     Py_ssize_t hay_len,
     const uint8_t* needle,
     Py_ssize_t ndl_len,
+    const VolnitskyTable* tbl,
 ) noexcept nogil:
-    """Case-sensitive substring search using Boyer-Moore-Horspool."""
-    cdef unsigned char skip[256]
-    _build_bmh_skip_table(needle, ndl_len, skip)
-    return _bmh_search_cs(haystack, hay_len, needle, ndl_len, skip)
-
-
-cdef inline bint _bmh_search_ci(
-    const uint8_t* haystack,
-    Py_ssize_t hay_len,
-    const uint8_t* needle_lower,
-    Py_ssize_t ndl_len,
-) noexcept nogil:
-    """Boyer-Moore-Horspool case-insensitive search.
-
-    needle_lower: Pattern already lowercased.
-    """
-    cdef unsigned char skip[256]
-    cdef Py_ssize_t i = 0
-    cdef Py_ssize_t tail_index
-    cdef Py_ssize_t end_index = hay_len - ndl_len
-    cdef uint8_t last_char = needle_lower[ndl_len - 1]
-    cdef uint8_t tail_char_lower
-    cdef Py_ssize_t j
-    cdef Py_ssize_t pos
-
-    if ndl_len == 0:
-        return True
-    if hay_len < ndl_len:
-        return False
-
-    # Build skip table with case-insensitive variants
-    for i in range(256):
-        skip[i] = <unsigned char>ndl_len
-
-    if ndl_len >= 2:
-        for i in range(ndl_len - 1):
-            skip[needle_lower[i]] = <unsigned char>(ndl_len - i - 1)
-            # Add uppercase variant to skip table
-            if needle_lower[i] >= 97 and needle_lower[i] <= 122:
-                skip[needle_lower[i] - 32] = <unsigned char>(ndl_len - i - 1)
-
-    # Single character fast path
-    if ndl_len == 1:
-        for i in range(hay_len):
-            if _sv_ascii_lower(haystack[i]) == needle_lower[0]:
-                return True
-        return False
-
-    i = 0
-    while i <= end_index:
-        tail_index = i + ndl_len - 1
-        tail_char_lower = _sv_ascii_lower(haystack[tail_index])
-
-        # Check if last character matches (case-insensitive)
-        if tail_char_lower == last_char:
-            # Check if first character matches
-            if _sv_ascii_lower(haystack[i]) == needle_lower[0]:
-                # Full comparison
-                j = 1
-                while j < ndl_len and _sv_ascii_lower(haystack[i + j]) == needle_lower[j]:
-                    j += 1
-                if j == ndl_len:
-                    return True
-
-        # Skip using precomputed table
-        i += skip[<unsigned char>haystack[tail_index]]
-
-    return False
+    return volnitsky_contains_cs(haystack, <size_t>hay_len, needle, <size_t>ndl_len, tbl)
 
 
 cdef bint _sv_contains_ci(
@@ -483,12 +366,9 @@ cdef bint _sv_contains_ci(
     Py_ssize_t hay_len,
     const uint8_t* needle_lower,
     Py_ssize_t ndl_len,
+    const VolnitskyTable* tbl,
 ) noexcept nogil:
-    """Case-insensitive substring search using Boyer-Moore-Horspool.
-
-    needle_lower: Pattern must already be lowercased.
-    """
-    return _bmh_search_ci(haystack, hay_len, needle_lower, ndl_len)
+    return volnitsky_contains_ci(haystack, <size_t>hay_len, needle_lower, <size_t>ndl_len, tbl)
 
 
 cdef class StringVector(Vector):
@@ -1246,7 +1126,10 @@ cdef class StringVector(Vector):
         return out
 
     cpdef BoolVector like(self, bytes pattern, bint ignore_case=False):
-        """Return mask: 1 if element matches SQL LIKE pattern, else 0. Propagates NULLs."""
+        """Return mask: 1 if element matches SQL LIKE pattern, else 0. Propagates NULLs.
+
+        Optimized for dictionary-encoded vectors: tests each unique value once.
+        """
         cdef DrakenVarBuffer* ptr = self.ptr
         cdef Py_ssize_t n = ptr.length
         cdef Py_ssize_t nbytes = (n + 7) >> 3
@@ -1258,7 +1141,14 @@ cdef class StringVector(Vector):
         cdef char* pat_ptr = PyBytes_AS_STRING(pattern)
         cdef Py_ssize_t pat_len = len(pattern)
         cdef int32_t start, end, str_len
-        cdef Py_ssize_t i
+        cdef Py_ssize_t i, dict_idx, dict_size
+        cdef uint32_t code
+        cdef DrakenVarBuffer* dict_values_buf
+        cdef const uint8_t* dict_data
+        cdef uint8_t* dict_like_results = NULL
+        cdef const uint8_t* dict_codes
+        cdef uint8_t dict_code_width
+        cdef uint8_t* dict_row_nulls
 
         if self._has_const:
             if self._const_is_null:
@@ -1288,22 +1178,73 @@ cdef class StringVector(Vector):
         else:
             out.ptr.null_bitmap = NULL
 
-        for i in range(n):
-            if nb_ptr != NULL and ((nb_ptr[i >> 3] >> (i & 7)) & 1) == 0:
-                continue
-            start = ptr.offsets[i]
-            end = ptr.offsets[i + 1]
-            str_len = end - start
-            if _sv_sql_like_match(
-                <const uint8_t*>ptr.data + start, <Py_ssize_t>str_len,
-                <const uint8_t*>pat_ptr, pat_len, ignore_case,
-            ):
-                dst[i >> 3] |= (1 << (i & 7))
+        try:
+            # Dictionary-encoded path: check each unique value once
+            if self._encoding == DRAKEN_ENCODING_DICTIONARY:
+                dict_values_buf = self._dict_values
+                if dict_values_buf == NULL or dict_values_buf.data == NULL:
+                    return out  # Fallback to empty result
+
+                dict_size = <Py_ssize_t>dict_values_buf.length
+                dict_codes = self._dict_codes
+                if dict_codes == NULL or dict_size == 0:
+                    return out  # Fallback to empty result
+
+                dict_code_width = self._dict_code_width
+                dict_row_nulls = self.ptr.null_bitmap
+                dict_data = <const uint8_t*>dict_values_buf.data
+
+                # Allocate results array for each dictionary entry
+                dict_like_results = <uint8_t*>malloc(dict_size)
+                if dict_like_results == NULL:
+                    raise MemoryError()
+
+                # Test each unique dictionary value once
+                for dict_idx in range(dict_size):
+                    start = dict_values_buf.offsets[dict_idx]
+                    end = dict_values_buf.offsets[dict_idx + 1]
+                    str_len = end - start
+
+                    if _sv_sql_like_match(
+                        dict_data + start, <Py_ssize_t>str_len,
+                        <const uint8_t*>pat_ptr, pat_len, ignore_case,
+                    ):
+                        dict_like_results[dict_idx] = 1
+                    else:
+                        dict_like_results[dict_idx] = 0
+
+                # Scatter results by code index
+                for i in range(n):
+                    if dict_row_nulls != NULL and ((dict_row_nulls[i >> 3] >> (i & 7)) & 1) == 0:
+                        continue
+                    code = _read_packed_code(dict_codes, dict_code_width, i)
+                    if dict_like_results[code]:
+                        dst[i >> 3] |= (1 << (i & 7))
+
+            # Dense vector path (non-dictionary, non-constant)
+            else:
+                for i in range(n):
+                    if nb_ptr != NULL and ((nb_ptr[i >> 3] >> (i & 7)) & 1) == 0:
+                        continue
+                    start = ptr.offsets[i]
+                    end = ptr.offsets[i + 1]
+                    str_len = end - start
+                    if _sv_sql_like_match(
+                        <const uint8_t*>ptr.data + start, <Py_ssize_t>str_len,
+                        <const uint8_t*>pat_ptr, pat_len, ignore_case,
+                    ):
+                        dst[i >> 3] |= (1 << (i & 7))
+        finally:
+            if dict_like_results != NULL:
+                free(dict_like_results)
 
         return out
 
     cpdef BoolVector rlike(self, bytes pattern):
-        """Return mask: 1 if element matches regex pattern, else 0. Propagates NULLs."""
+        """Return mask: 1 if element matches regex pattern, else 0. Propagates NULLs.
+
+        Optimized for dictionary-encoded vectors: tests each unique value once.
+        """
         import re
         cdef DrakenVarBuffer* ptr = self.ptr
         cdef Py_ssize_t n = ptr.length
@@ -1314,8 +1255,15 @@ cdef class StringVector(Vector):
         cdef uint8_t* out_null = NULL
         cdef uint8_t mask
         cdef int32_t start, end, str_len
-        cdef Py_ssize_t i
+        cdef Py_ssize_t i, dict_idx, dict_size
+        cdef uint32_t code
         cdef bytes cell_bytes
+        cdef DrakenVarBuffer* dict_values_buf
+        cdef const uint8_t* dict_data
+        cdef uint8_t* dict_rlike_results = NULL
+        cdef const uint8_t* dict_codes
+        cdef uint8_t dict_code_width
+        cdef uint8_t* dict_row_nulls
 
         compiled = re.compile(pattern)
 
@@ -1338,20 +1286,70 @@ cdef class StringVector(Vector):
         else:
             out.ptr.null_bitmap = NULL
 
-        for i in range(n):
-            if nb_ptr != NULL and ((nb_ptr[i >> 3] >> (i & 7)) & 1) == 0:
-                continue
-            start = ptr.offsets[i]
-            end = ptr.offsets[i + 1]
-            str_len = end - start
-            cell_bytes = PyBytes_FromStringAndSize(<char*>ptr.data + start, <Py_ssize_t>str_len)
-            if compiled.search(cell_bytes):
-                dst[i >> 3] |= (1 << (i & 7))
+        try:
+            # Dictionary-encoded path: check each unique value once
+            if self._encoding == DRAKEN_ENCODING_DICTIONARY:
+                dict_values_buf = self._dict_values
+                if dict_values_buf == NULL or dict_values_buf.data == NULL:
+                    return out  # Fallback to empty result
+
+                dict_size = <Py_ssize_t>dict_values_buf.length
+                dict_codes = self._dict_codes
+                if dict_codes == NULL or dict_size == 0:
+                    return out  # Fallback to empty result
+
+                dict_code_width = self._dict_code_width
+                dict_row_nulls = self.ptr.null_bitmap
+                dict_data = <const uint8_t*>dict_values_buf.data
+
+                # Allocate results array for each dictionary entry
+                dict_rlike_results = <uint8_t*>malloc(dict_size)
+                if dict_rlike_results == NULL:
+                    raise MemoryError()
+
+                # Test each unique dictionary value once
+                for dict_idx in range(dict_size):
+                    start = dict_values_buf.offsets[dict_idx]
+                    end = dict_values_buf.offsets[dict_idx + 1]
+                    str_len = end - start
+                    cell_bytes = PyBytes_FromStringAndSize(<char*>dict_data + start, <Py_ssize_t>str_len)
+                    if compiled.search(cell_bytes) is not None:
+                        dict_rlike_results[dict_idx] = 1
+                    else:
+                        dict_rlike_results[dict_idx] = 0
+
+                # Scatter results by code index
+                for i in range(n):
+                    if dict_row_nulls != NULL and ((dict_row_nulls[i >> 3] >> (i & 7)) & 1) == 0:
+                        continue
+                    code = _read_packed_code(dict_codes, dict_code_width, i)
+                    if dict_rlike_results[code]:
+                        dst[i >> 3] |= (1 << (i & 7))
+
+            # Dense vector path (non-dictionary, non-constant)
+            else:
+                for i in range(n):
+                    if nb_ptr != NULL and ((nb_ptr[i >> 3] >> (i & 7)) & 1) == 0:
+                        continue
+                    start = ptr.offsets[i]
+                    end = ptr.offsets[i + 1]
+                    str_len = end - start
+                    cell_bytes = PyBytes_FromStringAndSize(<char*>ptr.data + start, <Py_ssize_t>str_len)
+                    if compiled.search(cell_bytes):
+                        dst[i >> 3] |= (1 << (i & 7))
+        finally:
+            if dict_rlike_results != NULL:
+                free(dict_rlike_results)
 
         return out
 
     cpdef BoolVector contains(self, bytes substr, bint ignore_case=False):
-        """Return mask: 1 if element contains substr, else 0. Propagates NULLs."""
+        """Return mask: 1 if element contains substr, else 0. Propagates NULLs.
+
+        Optimized for:
+        - Dictionary-encoded vectors: tests each unique value once
+        - Case-insensitive: pre-lowers entire buffer before comparison
+        """
         cdef DrakenVarBuffer* ptr = self.ptr
         cdef Py_ssize_t n = ptr.length
         cdef Py_ssize_t nbytes = (n + 7) >> 3
@@ -1364,8 +1362,20 @@ cdef class StringVector(Vector):
         cdef Py_ssize_t ndl_len = len(substr)
         cdef uint8_t* ndl_lower = NULL
         cdef int32_t start, end, str_len
-        cdef Py_ssize_t i, j
+        cdef Py_ssize_t i, j, dict_idx, dict_size
+        cdef uint32_t code
+        cdef uint8_t byte
+        cdef DrakenVarBuffer* dict_values_buf
+        cdef const uint8_t* dict_data
+        cdef uint8_t* dict_contains_results = NULL
+        cdef const uint8_t* dict_codes
+        cdef uint8_t dict_code_width
+        cdef uint8_t* dict_row_nulls
+        cdef uint8_t* data_lower = NULL
+        cdef Py_ssize_t data_len
+        cdef VolnitskyTable* tbl = NULL
 
+        # Constant vector case
         if self._has_const:
             if self._const_is_null:
                 return _constant_bool_result(n, False, True)
@@ -1375,6 +1385,15 @@ cdef class StringVector(Vector):
                     raise MemoryError()
                 for j in range(ndl_len):
                     ndl_lower[j] = _sv_ascii_lower(<uint8_t>ndl_ptr_char[j])
+            tbl = volnitsky_alloc()
+            if tbl == NULL:
+                if ndl_lower != NULL:
+                    free(ndl_lower)
+                raise MemoryError()
+            if ignore_case and ndl_lower != NULL:
+                volnitsky_build(tbl, ndl_lower, <size_t>ndl_len)
+            else:
+                volnitsky_build(tbl, <const uint8_t*>ndl_ptr_char, <size_t>ndl_len)
             try:
                 if ignore_case:
                     return _constant_bool_result(
@@ -1384,6 +1403,7 @@ cdef class StringVector(Vector):
                             self._const_value.length,
                             ndl_lower if ndl_lower != NULL else <uint8_t*>ndl_ptr_char,
                             ndl_len,
+                            tbl,
                         ),
                         False,
                     )
@@ -1394,13 +1414,17 @@ cdef class StringVector(Vector):
                         self._const_value.length,
                         <const uint8_t*>ndl_ptr_char,
                         ndl_len,
+                        tbl,
                     ),
                     False,
                 )
             finally:
+                volnitsky_free(tbl)
+                tbl = NULL
                 if ndl_lower != NULL:
                     free(ndl_lower)
 
+        # Setup output null bitmap
         memset(dst, 0, nbytes)
         if nb_ptr != NULL and nbytes != 0:
             out_null = <uint8_t*> malloc(nbytes)
@@ -1414,6 +1438,7 @@ cdef class StringVector(Vector):
         else:
             out.ptr.null_bitmap = NULL
 
+        # Pre-lowercase needle once
         if ignore_case and ndl_len > 0:
             ndl_lower = <uint8_t*>malloc(<size_t>ndl_len)
             if ndl_lower == NULL:
@@ -1421,29 +1446,119 @@ cdef class StringVector(Vector):
             for j in range(ndl_len):
                 ndl_lower[j] = _sv_ascii_lower(<uint8_t>ndl_ptr_char[j])
 
-        try:
-            for i in range(n):
-                if nb_ptr != NULL and ((nb_ptr[i >> 3] >> (i & 7)) & 1) == 0:
-                    continue
-                start = ptr.offsets[i]
-                end = ptr.offsets[i + 1]
-                str_len = end - start
-                if ignore_case:
-                    if _sv_contains_ci(
-                        <const uint8_t*>ptr.data + start, <Py_ssize_t>str_len,
-                        ndl_lower if ndl_lower != NULL else <uint8_t*>ndl_ptr_char,
-                        ndl_len,
-                    ):
-                        dst[i >> 3] |= (1 << (i & 7))
-                else:
-                    if _sv_contains_cs(
-                        <const uint8_t*>ptr.data + start, <Py_ssize_t>str_len,
-                        <const uint8_t*>ndl_ptr_char, ndl_len,
-                    ):
-                        dst[i >> 3] |= (1 << (i & 7))
-        finally:
+        # Build Volnitsky table once for all elements in this morsel
+        tbl = volnitsky_alloc()
+        if tbl == NULL:
             if ndl_lower != NULL:
                 free(ndl_lower)
+            raise MemoryError()
+        if ignore_case and ndl_lower != NULL:
+            volnitsky_build(tbl, ndl_lower, <size_t>ndl_len)
+        else:
+            volnitsky_build(tbl, <const uint8_t*>ndl_ptr_char, <size_t>ndl_len)
+
+        try:
+            # Dictionary-encoded path: check each unique value once
+            if self._encoding == DRAKEN_ENCODING_DICTIONARY:
+                dict_values_buf = self._dict_values
+                if dict_values_buf == NULL or dict_values_buf.data == NULL:
+                    return out  # Fallback to empty result
+
+                dict_size = <Py_ssize_t>dict_values_buf.length
+                dict_codes = self._dict_codes
+                if dict_codes == NULL or dict_size == 0:
+                    return out  # Fallback to empty result
+
+                dict_code_width = self._dict_code_width
+                dict_row_nulls = self.ptr.null_bitmap
+                dict_data = <const uint8_t*>dict_values_buf.data
+
+                # Allocate results array for each dictionary entry
+                dict_contains_results = <uint8_t*>malloc(dict_size)
+                if dict_contains_results == NULL:
+                    raise MemoryError()
+
+                # Test each unique dictionary value once
+                for dict_idx in range(dict_size):
+                    start = dict_values_buf.offsets[dict_idx]
+                    end = dict_values_buf.offsets[dict_idx + 1]
+                    str_len = end - start
+
+                    if ignore_case:
+                        if _sv_contains_ci(
+                            dict_data + start, <Py_ssize_t>str_len,
+                            ndl_lower if ndl_lower != NULL else <uint8_t*>ndl_ptr_char,
+                            ndl_len,
+                            tbl,
+                        ):
+                            dict_contains_results[dict_idx] = 1
+                        else:
+                            dict_contains_results[dict_idx] = 0
+                    else:
+                        if _sv_contains_cs(
+                            dict_data + start, <Py_ssize_t>str_len,
+                            <const uint8_t*>ndl_ptr_char,
+                            ndl_len,
+                            tbl,
+                        ):
+                            dict_contains_results[dict_idx] = 1
+                        else:
+                            dict_contains_results[dict_idx] = 0
+
+                # Scatter results by code index
+                for i in range(n):
+                    if dict_row_nulls != NULL and ((dict_row_nulls[i >> 3] >> (i & 7)) & 1) == 0:
+                        continue
+                    code = _read_packed_code(dict_codes, dict_code_width, i)
+                    if dict_contains_results[code]:
+                        dst[i >> 3] |= (1 << (i & 7))
+
+            # Dense vector path (non-dictionary, non-constant)
+            else:
+                # For case-insensitive: pre-lowercase entire buffer once
+                if ignore_case and ptr.data != NULL:
+                    data_len = ptr.offsets[n]
+                    data_lower = <uint8_t*>malloc(data_len)
+                    if data_lower == NULL:
+                        raise MemoryError()
+                    # Copy and lowercase entire buffer in one pass
+                    for j in range(data_len):
+                        data_lower[j] = _sv_ascii_lower((<const uint8_t*>ptr.data)[j])
+
+                # Process each row
+                for i in range(n):
+                    if nb_ptr != NULL and ((nb_ptr[i >> 3] >> (i & 7)) & 1) == 0:
+                        continue
+                    start = ptr.offsets[i]
+                    end = ptr.offsets[i + 1]
+                    str_len = end - start
+
+                    if ignore_case:
+                        # Use pre-lowercased buffer for case-sensitive search
+                        if _sv_contains_cs(
+                            data_lower + start, <Py_ssize_t>str_len,
+                            ndl_lower if ndl_lower != NULL else <uint8_t*>ndl_ptr_char,
+                            ndl_len,
+                            tbl,
+                        ):
+                            dst[i >> 3] |= (1 << (i & 7))
+                    else:
+                        if _sv_contains_cs(
+                            <const uint8_t*>ptr.data + start, <Py_ssize_t>str_len,
+                            <const uint8_t*>ndl_ptr_char, ndl_len,
+                            tbl,
+                        ):
+                            dst[i >> 3] |= (1 << (i & 7))
+
+        finally:
+            volnitsky_free(tbl)
+            tbl = NULL
+            if ndl_lower != NULL:
+                free(ndl_lower)
+            if data_lower != NULL:
+                free(data_lower)
+            if dict_contains_results != NULL:
+                free(dict_contains_results)
 
         return out
 
