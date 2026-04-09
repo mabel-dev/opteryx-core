@@ -1,3 +1,5 @@
+from orso.types import OrsoTypes
+
 from opteryx.expression.functions import FunctionDefinition
 from opteryx.expression.functions import FunctionOverload
 from opteryx.expression.functions import KernelSpec
@@ -5,7 +7,6 @@ from opteryx.expression.functions import LifecycleSpec
 from opteryx.expression.functions import ParameterSpec
 from opteryx.expression.functions import ReturnSpec
 from opteryx.expression.functions.registrar import _make
-from orso.types import OrsoTypes
 
 
 def get_builtin_hash_encoding_functions() -> list[FunctionDefinition]:

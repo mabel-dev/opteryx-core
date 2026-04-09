@@ -19,6 +19,7 @@ Includes:
 
 import numpy
 import pyarrow
+
 from opteryx.third_party.tktech import csimdjson as simdjson
 from opteryx.vectors.embeddings import embed_text_matrix
 from opteryx.vectors.embeddings import embed_text_values

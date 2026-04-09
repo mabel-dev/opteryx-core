@@ -4,6 +4,7 @@ import datetime
 
 import numpy
 import pyarrow as _pa
+
 from opteryx.exceptions import ColumnReferencedBeforeEvaluationError
 
 from .comparisons import _DATE_TYPES

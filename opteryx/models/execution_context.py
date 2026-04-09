@@ -10,11 +10,12 @@ from typing import Iterable
 from typing import List
 
 import pyarrow
+from orso.types import OrsoTypes
+
 from opteryx.variables import SystemVariables
 from opteryx.variables import SystemVariablesContainer
 from opteryx.variables import VariableOwner
 from opteryx.variables import Visibility
-from orso.types import OrsoTypes
 
 
 @dataclass

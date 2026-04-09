@@ -1,6 +1,7 @@
 """Constant vector encoding optimization for filter operations."""
 
 import pyarrow
+
 from opteryx.expression.operations.fastpath_telemetry import record_constant_fastpath_fallback
 from opteryx.expression.operations.fastpath_telemetry import record_constant_fastpath_hit
 

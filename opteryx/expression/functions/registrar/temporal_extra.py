@@ -1,12 +1,13 @@
 from typing import List
 
+from orso.types import OrsoTypes
+
 from opteryx.expression.functions import FunctionDefinition
 from opteryx.expression.functions import FunctionOverload
 from opteryx.expression.functions import KernelSpec
 from opteryx.expression.functions import LifecycleSpec
 from opteryx.expression.functions import ParameterSpec
 from opteryx.expression.functions import ReturnSpec
-from orso.types import OrsoTypes
 
 
 def get_builtin_temporal_extra_functions() -> List[FunctionDefinition]:

@@ -11,16 +11,16 @@ from typing import Union
 
 import pyarrow
 import pyarrow.compute as pc
-from opteryx.compiled.draken import Morsel
-from opteryx.expression import NodeType
-from opteryx.expression import get_all_nodes_of_type
-from opteryx.tracing.event_recorder import record_event as _trace_record
 from orso.tools import random_string
 from orso.types import OrsoTypes
 from pyarrow import Table
 
 from opteryx import EMPTY
 from opteryx import EOS
+from opteryx.compiled.draken import Morsel
+from opteryx.expression import NodeType
+from opteryx.expression import get_all_nodes_of_type
+from opteryx.tracing.event_recorder import record_event as _trace_record
 
 _DATA_FORMAT = "arrow,draken"
 END = object()

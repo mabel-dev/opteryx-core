@@ -8,6 +8,8 @@ from typing import List
 import numpy
 import pyarrow
 import pyarrow as pa
+from pyarrow import compute
+
 from opteryx.compiled.draken.vectors.string_vector import StringVector
 from opteryx.compiled.draken.vectors.string_vector import lowercase as string_vector_lowercase
 from opteryx.compiled.draken.vectors.string_vector import uppercase as string_vector_uppercase
@@ -29,7 +31,6 @@ from opteryx.compiled.vector_ops import vector_string_slice_right
 from opteryx.compiled.vector_ops import vector_trim
 from opteryx.exceptions import InvalidFunctionParameterError
 from opteryx.vectors.embeddings import get_embedding_provider
-from pyarrow import compute
 
 """Text and encoding function kernels.
 

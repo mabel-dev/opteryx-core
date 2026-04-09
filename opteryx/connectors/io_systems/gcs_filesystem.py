@@ -110,6 +110,7 @@ class OpteryxGcsFileSystem:
 
         try:
             from google.auth.transport.requests import Request
+
             from opteryx.compiled.http_client import HttpClient
         except (ImportError, AttributeError) as err:  # pragma: no cover
             raise RuntimeError(

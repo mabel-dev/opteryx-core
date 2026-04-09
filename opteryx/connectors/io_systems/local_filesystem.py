@@ -5,7 +5,6 @@ This implements pyarrow.fs.FileSystem interface but uses memory-mapped files
 and stream wrappers for high-performance local file access.
 """
 
-import datetime
 import os
 from concurrent.futures import as_completed
 from typing import List
@@ -128,87 +127,62 @@ class OpteryxLocalFileSystem:
     def __init__(self):
         pass  # No initialization needed
 
+    def list_files(self, base_dir: str, recursive: bool = True) -> list:
+        """
+        Return a list of file paths under base_dir.
+        """
+        try:
+            from opteryx.compiled.io.disk_reader import list_directory
+            from opteryx.compiled.io.disk_reader import list_files_info
+
+            compiled_available = True
+        except ImportError:
+            compiled_available = False
+
+        paths = []
+        if not os.path.isdir(base_dir):
+            return paths
+
+        if recursive and compiled_available:
+            for entry in list_files_info(base_dir, ()):
+                path, is_dir, is_file, size, mtime = entry
+                if is_file:
+                    paths.append(path)
+        elif recursive:
+            for root, dirs, files in os.walk(base_dir):
+                for filename in files:
+                    paths.append(os.path.join(root, filename))
+        elif compiled_available:
+            for name, is_dir, is_file, size, mtime in list_directory(base_dir):
+                if is_file:
+                    paths.append(os.path.join(base_dir, name))
+        else:
+            for item in os.listdir(base_dir):
+                filepath = os.path.join(base_dir, item)
+                if os.path.isfile(filepath):
+                    paths.append(filepath)
+        return paths
+
     def get_file_info(self, paths):
         """
-        Get info about files/directories.
+        Get info about files/directories. Returns lightweight FileInfo-like objects.
 
         Args:
-            paths: Single path, list of paths, or FileSelector
+            paths: Single path, list of paths, or object with .base_dir/.recursive
 
         Returns:
-            FileInfo or list of FileInfo objects
+            FileInfo-like object or list thereof (each has .path and .size).
         """
-        from pyarrow.fs import FileInfo
-        from pyarrow.fs import FileSelector
-        from pyarrow.fs import FileType
+        from opteryx.connectors.io_systems._file_info import FileInfoLike
 
-        # Handle FileSelector for recursive directory listing
-        if isinstance(paths, FileSelector):
-            base_dir = paths.base_dir
-            recursive = paths.recursive
-
-            infos = []
-            if os.path.isdir(base_dir):
-                # Try using compiled fast directory listing for better performance,
-                # but fall back to Python os.walk/os.listdir if compiled module is not present.
-                try:
-                    from opteryx.compiled.io.disk_reader import list_directory
-                    from opteryx.compiled.io.disk_reader import list_files_info
-
-                    compiled_available = True
-                except ImportError:
-                    compiled_available = False
-
-                if recursive and compiled_available:
-                    entries = list_files_info(base_dir, ())
-                    for entry in entries:
-                        path, is_dir, is_file, size, mtime = entry
-                        if is_file:
-                            info = FileInfo(
-                                path=path,
-                                type=FileType.File,
-                                size=size,
-                                mtime=datetime.datetime.fromtimestamp(mtime),
-                            )
-                            infos.append(info)
-                elif recursive:
-                    # fallback to os.walk
-                    for root, dirs, files in os.walk(base_dir):
-                        for filename in files:
-                            filepath = os.path.join(root, filename)
-                            stat = os.stat(filepath)
-                            info = FileInfo(
-                                path=filepath,
-                                type=FileType.File,
-                                size=stat.st_size,
-                                mtime=datetime.datetime.fromtimestamp(stat.st_mtime),
-                            )
-                            infos.append(info)
-                elif compiled_available:
-                    entries = list_directory(base_dir)
-                    for name, is_dir, is_file, size, mtime in entries:
-                        if is_file:
-                            filepath = os.path.join(base_dir, name)
-                            info = FileInfo(
-                                path=filepath,
-                                type=FileType.File,
-                                size=size,
-                                mtime=datetime.datetime.fromtimestamp(mtime),
-                            )
-                            infos.append(info)
-                else:
-                    for item in os.listdir(base_dir):
-                        filepath = os.path.join(base_dir, item)
-                        if os.path.isfile(filepath):
-                            stat = os.stat(filepath)
-                            info = FileInfo(
-                                path=filepath,
-                                type=FileType.File,
-                                size=stat.st_size,
-                                mtime=datetime.datetime.fromtimestamp(stat.st_mtime),
-                            )
-                            infos.append(info)
-            return infos
+        # Handle FileSelector-like object (duck-typed: has base_dir + recursive)
+        if hasattr(paths, "base_dir"):
+            return [
+                FileInfoLike(path=p, size=os.path.getsize(p))
+                for p in self.list_files(
+                    paths.base_dir, recursive=getattr(paths, "recursive", True)
+                )
+            ]
 
         # Handle single path or list of paths
         single_path = isinstance(paths, str)
@@ -219,17 +193,9 @@ class OpteryxLocalFileSystem:
         for path in paths:
             if os.path.isfile(path):
                 stat = os.stat(path)
-                info = FileInfo(
-                    path=path,
-                    type=FileType.File,
-                    size=stat.st_size,
-                    mtime=datetime.datetime.fromtimestamp(stat.st_mtime),
-                )
-            elif os.path.isdir(path):
-                info = FileInfo(path=path, type=FileType.Directory)
+                infos.append(FileInfoLike(path=path, size=stat.st_size))
             else:
-                info = FileInfo(path=path, type=FileType.NotFound)
-            infos.append(info)
+                infos.append(FileInfoLike(path=path, size=0))
 
         return infos[0] if single_path else infos
 

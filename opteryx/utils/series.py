@@ -4,10 +4,11 @@
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
 import numpy
+from orso.types import OrsoTypes
+
 from opteryx.exceptions import InvalidFunctionParameterError
 from opteryx.exceptions import SqlError
 from opteryx.utils import dates
-from orso.types import OrsoTypes
 
 
 def generate_series(*args):

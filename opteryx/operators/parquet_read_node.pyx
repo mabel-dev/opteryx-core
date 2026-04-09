@@ -32,6 +32,7 @@ from copy import deepcopy
 from typing import Generator
 
 from opteryx.compiled.draken.morsels.morsel import Morsel
+from opteryx.compiled.draken.vectors.bool_vector import BoolVector
 from opteryx.connectors.parquet_io import InMemoryParquetCache
 from opteryx.connectors.parquet_io import fetch_columns
 from opteryx.connectors.parquet_io import fetch_footer
@@ -860,6 +861,19 @@ class ParquetReadNode(ReaderNode):
                 total_rows_after_filter += rows_after_filter
                 if output_identity_order:
                     result_morsel = result_morsel.select(output_identity_order)
+                elif not two_pass_eligible:
+                    # No output columns (e.g. COUNT(*) with a filter-only read).
+                    # Replace the post-filter morsel with the smallest valid morsel:
+                    # a single constant BoolVector column named b'*'.  The aggregator
+                    # only reads .num_rows; shipping the full filter column (e.g. all
+                    # URL strings) across the operator boundary is pure waste.
+                    surviving_rows = result_morsel.num_rows
+                    if surviving_rows == 0:
+                        continue
+                    result_morsel = Morsel.from_vectors(
+                        [b'*'],
+                        [BoolVector.from_constant(True, surviving_rows)],
+                    )
 
                 num_rows = result_morsel.num_rows
                 self.readings["rows_seen"] += num_rows

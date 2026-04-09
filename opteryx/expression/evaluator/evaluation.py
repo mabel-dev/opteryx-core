@@ -4,6 +4,7 @@ import datetime
 
 import numpy
 import pyarrow as _pa
+
 from opteryx.exceptions import ColumnReferencedBeforeEvaluationError
 
 from .arithmetic import _eval_binary_op_draken
@@ -213,6 +214,7 @@ def evaluate_draken(node, morsel):
 
     if node_type == NodeType.LITERAL:
         import pyarrow as pa
+
         from opteryx.compiled.draken.vectors.bool_vector import BoolVector
 
         val = node.value
@@ -235,6 +237,7 @@ def evaluate_draken(node, morsel):
 
         if not hasattr(left, "null_count") and not hasattr(right, "null_count"):
             import pyarrow as pa
+
             from opteryx.compiled.draken.vectors.bool_vector import BoolVector
             from opteryx.expression.operations import filter_operations
 
@@ -270,6 +273,7 @@ def evaluate_draken(node, morsel):
                 )
             if result.dtype.kind in ("b", "O", "f", "i", "u"):
                 import pyarrow as pa
+
                 from opteryx.compiled.draken.vectors.bool_vector import BoolVector
 
                 try:
@@ -340,6 +344,7 @@ def evaluate_and_append_draken(nodes, morsel):
             result = _eval_value(node, morsel)
         if not _is_draken_vector(result):
             import pyarrow as _pa_local
+
             from opteryx.compiled.draken.interop.arrow import vector_from_arrow as _vfa
 
             if isinstance(result, (_pa_local.Array, _pa_local.ChunkedArray)):

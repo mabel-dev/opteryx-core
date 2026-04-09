@@ -24,7 +24,6 @@ Design notes
 
 from __future__ import annotations
 
-import os
 import struct
 import time
 from dataclasses import dataclass
@@ -582,14 +581,21 @@ def iter_row_groups(
         row_group["__parquet_scan_strategy__"] = "reader"
         if trace_enabled:
             rows_fetched = (
-                len(row_group)
-                if isinstance(row_group, dict)
-                else getattr(row_group, "num_rows", 0)
+                len(row_group) if isinstance(row_group, dict) else getattr(row_group, "num_rows", 0)
             )
             _trace_rowgroup_fetched(
                 file_id=path, rg_idx=rg_idx, connector=connector, rows_out=rows_fetched
             )
         return row_group
+
+    # Honour FEATURE_USE_SERIAL_READER: if the connector type matches the
+    # configured serial-reader targets, force a serial scan regardless of
+    # max_workers.  This prevents SD-card / slow-disk overload on dev machines.
+    from opteryx import config as _cfg2
+
+    _conn_upper = (connector or "").upper()
+    if _conn_upper in _cfg2.features.use_serial_reader or "ALL" in _cfg2.features.use_serial_reader:
+        max_workers = 1
 
     if len(work_items) == 1 or max_workers <= 1:
         for path, rg_idx in work_items:
@@ -605,8 +611,7 @@ def iter_row_groups(
 
     rg_pool = get_range_pool(name="reader-rowgroup", max_workers=max_workers)
     futures = {
-        rg_pool.submit(_fetch_one, path, rg_idx): (path, rg_idx)
-        for path, rg_idx in work_items
+        rg_pool.submit(_fetch_one, path, rg_idx): (path, rg_idx) for path, rg_idx in work_items
     }
     for future in as_completed(futures):
         yield future.result()

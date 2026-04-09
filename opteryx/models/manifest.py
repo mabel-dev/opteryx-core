@@ -21,11 +21,12 @@ from typing import List
 from typing import Optional
 from typing import Tuple
 
+from orso.schema import RelationSchema
+
 from opteryx.compiled.structures.relation_statistics import to_int
 from opteryx.models.file_entry import FileEntry
 from opteryx.third_party.maki_nage.distogram import Distogram
 from opteryx.third_party.maki_nage.distogram import load
-from orso.schema import RelationSchema
 
 
 class Manifest:

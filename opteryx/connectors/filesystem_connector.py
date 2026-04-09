@@ -14,7 +14,9 @@ from typing import Dict
 from typing import Optional
 from typing import Tuple
 
-import pyarrow
+from orso.schema import RelationSchema
+from orso.types import OrsoTypes
+
 from opteryx.compiled.draken.morsels.morsel import Morsel
 from opteryx.connectors import TableType
 from opteryx.connectors.base.base_connector import BaseConnector
@@ -26,8 +28,6 @@ from opteryx.exceptions import DatasetNotFoundError
 from opteryx.exceptions import EmptyDatasetError
 from opteryx.tracing import record_event
 from opteryx.utils.parquet_decoder import parquet_decoder
-from orso.schema import RelationSchema
-from orso.types import OrsoTypes
 
 OS_SEP = os.sep
 PARQUET_SUFFIX = ".parquet"
@@ -129,14 +129,7 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
         Returns:
             List of file paths
         """
-        from pyarrow.fs import FileSelector
-
-        # Create file selector to list files recursively
-        selector = FileSelector(prefix, recursive=True)
-        file_infos = self.filesystem.get_file_info(selector)
-
-        # Extract paths from FileInfo objects
-        return [info.path for info in file_infos]
+        return self.filesystem.list_files(prefix, recursive=True)
 
     def read_blob(
         self, *, blob_name: str, decoder, just_schema=False, projection=None, selection=None
@@ -246,10 +239,11 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
                         schema.row_count_metric = None
                         self.telemetry.estimated_row_count += schema.row_count_estimate
                     yield schema
-                except pyarrow.ArrowInvalid:
-                    with self._stats_lock:
-                        self.telemetry.unreadable_data_blobs += 1
                 except Exception as err:
+                    if "Invalid" in type(err).__name__ or "Arrow" in type(err).__name__:
+                        with self._stats_lock:
+                            self.telemetry.unreadable_data_blobs += 1
+                        continue
                     raise DataError(
                         f"Unable to read file {blob_name}: {type(err).__name__}"
                     ) from err
@@ -273,11 +267,11 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
                         columns,
                         predicates,
                     )
-                except pyarrow.ArrowInvalid:
-                    with self._stats_lock:
-                        self.telemetry.unreadable_data_blobs += 1
-                    continue
                 except Exception as err:
+                    if "Invalid" in type(err).__name__ or "Arrow" in type(err).__name__:
+                        with self._stats_lock:
+                            self.telemetry.unreadable_data_blobs += 1
+                        continue
                     raise DataError(
                         f"Unable to read file {blob_name}: {type(err).__name__}"
                     ) from err
@@ -309,12 +303,13 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
                     blob_name = pending.pop(future)
                     try:
                         num_rows, _, raw_size, decoded = future.result()
-                    except pyarrow.ArrowInvalid:
-                        with self._stats_lock:
-                            self.telemetry.unreadable_data_blobs += 1
                     except Exception as err:
-                        for remaining_future in list(pending):
-                            remaining_future.cancel()
+                        if "Invalid" in type(err).__name__ or "Arrow" in type(err).__name__:
+                            with self._stats_lock:
+                                self.telemetry.unreadable_data_blobs += 1
+                        else:
+                            for remaining_future in list(pending):
+                                remaining_future.cancel()
                         raise DataError(
                             f"Unable to read file {blob_name}: {type(err).__name__}"
                         ) from err
@@ -393,38 +388,33 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
                 continue
 
             try:
-                # Open the file and read just the metadata. Ensure stream closes promptly.
-                file_stream = self.filesystem.open_input_file(blob_name)
+                file_format = "PARQUET"
+                record_count = 0
+                file_size = 0
+
                 try:
-                    # Determine file format
-                    file_format = "PARQUET"
+                    file_info = self.filesystem.get_file_info(blob_name)
+                    file_size = getattr(file_info, "size", 0) or 0
+                except Exception:
+                    pass
 
-                    # Extract record count from Parquet metadata without reading row data.
+                try:
+                    from opteryx.connectors.parquet_io.reader import fetch_footer
+
+                    meta = fetch_footer(self.filesystem, blob_name, file_size=file_size or None)
+                    record_count = sum(rg.get("num_rows", 0) for rg in meta.get("row_groups", []))
+                    if file_size == 0:
+                        file_size = meta.get("__footer_bytes__", 0)
+                except Exception:
                     record_count = 0
-                    file_size = file_stream.size() if hasattr(file_stream, "size") else 0
 
-                    try:
-                        import pyarrow.parquet as pq
-
-                        parquet_file = pq.ParquetFile(file_stream)
-                        record_count = parquet_file.metadata.num_rows
-                    except (OSError, ValueError, RuntimeError) as ex:
-                        # Fallback: set to 0 if we can't read metadata
-                        _ = ex
-                        record_count = 0
-
-                    # Create FileEntry
-                    entry = FileEntry(
-                        file_path=blob_name,
-                        file_format=file_format,
-                        record_count=record_count,
-                        file_size_in_bytes=file_size,
-                    )
-                    file_entries.append(entry)
-                finally:
-                    close = getattr(file_stream, "close", None)
-                    if callable(close):
-                        close()
+                entry = FileEntry(
+                    file_path=blob_name,
+                    file_format=file_format,
+                    record_count=record_count,
+                    file_size_in_bytes=file_size,
+                )
+                file_entries.append(entry)
 
             except (OSError, ValueError, RuntimeError):
                 # Skip files we can't read metadata from

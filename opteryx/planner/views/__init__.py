@@ -5,9 +5,10 @@
 
 from typing import Optional
 
+from orso.tools import lru_cache_with_expiry
+
 from opteryx.connectors import connector_factory
 from opteryx.connectors.capabilities.eidetic import ViewDefinition
-from orso.tools import lru_cache_with_expiry
 
 
 def get_view_plan(view_name: str, telemetry) -> dict:
