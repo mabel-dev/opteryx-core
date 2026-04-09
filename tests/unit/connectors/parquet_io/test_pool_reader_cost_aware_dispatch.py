@@ -13,7 +13,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from opteryx.connectors.parquet_io.io_process_ring import (
+from opteryx.connectors.parquet_io.pool_reader import (
     _CodecMetrics,
     _estimate_decode_cost,
     _IOColumnWork,

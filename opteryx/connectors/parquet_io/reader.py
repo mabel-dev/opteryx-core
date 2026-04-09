@@ -27,7 +27,7 @@ from __future__ import annotations
 import struct
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
 
 from opteryx.connectors.parquet_io.cache import InMemoryParquetCache, ParquetCache
 from opteryx.connectors.parquet_io.predicates import row_group_may_satisfy
@@ -85,13 +85,14 @@ def _resolve_decoder(decoder: Optional[Any]) -> Any:
     if decoder is not None:
         return decoder
     try:
-        from opteryx.compiled.rugo import parquet as rugo_parquet
+        from opteryx.compiled.rugo.parquet import decode_column_from_chunk  # type: ignore[import]
     except ImportError:
         raise RuntimeError(
             "rugo.parquet is required but not available. "
             "Ensure rugo is compiled and in the Python path."
         )
-    return rugo_parquet.decode_column_from_chunk
+    return decode_column_from_chunk
+    return decode_column_from_chunk
 
 
 def _column_chunk_range(col_stats: dict) -> Tuple[int, int]:
@@ -221,7 +222,7 @@ def _read_footer_payload(
 
 def _parse_footer_envelope(path: str, envelope: bytes, footer_bytes: int) -> dict:
     try:
-        from opteryx.compiled.rugo import parquet as rugo_parquet
+        from opteryx.compiled.rugo.parquet import read_metadata_from_bytes  # type: ignore[import]
     except ImportError:
         raise RuntimeError(
             "rugo.parquet is required but not available. "
@@ -229,7 +230,7 @@ def _parse_footer_envelope(path: str, envelope: bytes, footer_bytes: int) -> dic
         )
 
     try:
-        meta = rugo_parquet.read_metadata_from_bytes(envelope)
+        meta = read_metadata_from_bytes(envelope)
     except Exception as exc:
         raise RuntimeError(f"Failed to parse Parquet footer from {path!r}: {exc}") from exc
 
@@ -310,9 +311,9 @@ def fetch_columns(
     _pages_skipped_before: int = 0
     _pages_decoded_before: int = 0
     if row_mask is not None and misses:
-        from opteryx.compiled.rugo import parquet as _rugo_parquet
+        from opteryx.compiled.rugo.parquet import get_telemetry  # type: ignore[import]
 
-        _tel_before = _rugo_parquet.get_telemetry()
+        _tel_before = get_telemetry()
         _pages_skipped_before = _tel_before.get("parquet_pages_skipped", 0)
         _pages_decoded_before = _tel_before.get("parquet_pages_decoded", 0)
 
@@ -367,7 +368,7 @@ def fetch_columns(
                 connector=connector,
             )
 
-        def _decode_one(col_name: str, raw_bytes: bytes) -> tuple:
+        def _decode_one(col_name: str, raw_bytes: Union[bytes, memoryview]) -> tuple:
             _col_stats = name_to_stats[col_name]
             if _trace_enabled():
                 _trace_decode_started(
@@ -378,10 +379,12 @@ def fetch_columns(
                     connector=connector,
                 )
 
+            # Convert memoryview to bytes if needed
+            raw_bytes_arg = bytes(raw_bytes) if isinstance(raw_bytes, memoryview) else raw_bytes
             decoded = (
-                decoder(raw_bytes, _col_stats)
+                decoder(raw_bytes_arg, _col_stats)  # type: ignore[misc]
                 if row_mask is None
-                else decoder(raw_bytes, _col_stats, row_mask)
+                else decoder(raw_bytes_arg, _col_stats, row_mask)  # type: ignore[misc]
             )
             if decoded is None:
                 raise RuntimeError(
@@ -413,7 +416,7 @@ def fetch_columns(
                     connector=connector,
                 )
             try:
-                col_name, decoded = _decode_one(col_name, raw_buffers[0])
+                col_name, decoded = _decode_one(col_name, raw_buffers[0])  # type: ignore[arg-type]
             except RuntimeError:
                 raise
             except Exception as e:
@@ -438,7 +441,7 @@ def fetch_columns(
                         connector=connector,
                     )
                 try:
-                    col_name, decoded = _decode_one(col_name, raw_buffer)
+                    col_name, decoded = _decode_one(col_name, raw_buffer)  # type: ignore[arg-type]
                 except RuntimeError:
                     raise
                 except Exception as e:
@@ -460,9 +463,9 @@ def fetch_columns(
     result_dict["__cache_column_misses__"] = cache_misses
 
     if row_mask is not None:
-        from opteryx.compiled.rugo import parquet as _rugo_parquet
+        from opteryx.compiled.rugo.parquet import get_telemetry  # type: ignore[import]
 
-        _tel_after = _rugo_parquet.get_telemetry()
+        _tel_after = get_telemetry()
         result_dict["__pages_skipped__"] = (
             _tel_after.get("parquet_pages_skipped", 0) - _pages_skipped_before
         )

@@ -228,10 +228,10 @@ Default = PARQUET_GLOBAL_RANGE_READERS * 2 so downloads run two full waves
 ahead of the decode pool without unbounded memory accumulation."""
 
 PARQUET_READ_QUEUE_CAP: int = int(get("OPTERYX_PARQUET_READ_QUEUE_CAP", 64))
-"""Maximum in-flight column range reads for io_process_ring read dispatch queue."""
+"""Maximum in-flight column range reads for the pool reader read dispatch queue."""
 
 PARQUET_DECODE_QUEUE_CAP: int = int(get("OPTERYX_PARQUET_DECODE_QUEUE_CAP", 128))
-"""Maximum pending/in-flight decode tasks for io_process_ring decode dispatch queue."""
+"""Maximum pending/in-flight decode tasks for the pool reader decode dispatch queue."""
 
 OPTERYX_TRACK_CODEC_METRICS: bool = str(get("OPTERYX_TRACK_CODEC_METRICS", "1")) != "0"
 """Enable codec performance tracking for cost-aware dispatch.
@@ -278,18 +278,12 @@ if environ.get("FEATURE_DRAKEN_DICT_EXPR_FASTPATH") is not None:
         stacklevel=2,
     )
 
-# IO process row-group ring transport configuration
-IO_RING_SLOT_BYTES: int = int(get("IO_RING_SLOT_BYTES", 32 * 1024 * 1024))
-"""Shared-memory slot size in bytes for FEATURE_IO_PROCESS_ROWGROUP_RING."""
+# Parquet pool reader (threaded IO worker + MemoryPool transport) configuration
+IO_POOL_SLOT_BYTES: int = int(get("IO_POOL_SLOT_BYTES", 32 * 1024 * 1024))
+"""Initial per-slot byte budget for the MemoryPool used by the pool reader."""
 
-IO_RING_SLOT_COUNT: int = int(get("IO_RING_SLOT_COUNT", 64))
-"""Shared-memory slot count for FEATURE_IO_PROCESS_ROWGROUP_RING."""
-
-IO_MAX_FRAGMENTS_PER_TRANSFER: int = int(get("IO_MAX_FRAGMENTS_PER_TRANSFER", 8))
-"""Maximum fragments for one transfer before row-group slicing is applied."""
-
-IO_TARGET_SLICE_BYTES: int = int(get("IO_TARGET_SLICE_BYTES", 16 * 1024 * 1024))
-"""Target serialized bytes per row-group slice when slicing is required."""
+IO_POOL_SLOT_COUNT: int = int(get("IO_POOL_SLOT_COUNT", 64))
+"""Initial slot count for the MemoryPool used by the pool reader."""
 
 
 
@@ -303,7 +297,7 @@ class Features:
     disable_predicate_ordering = bool(get("FEATURE_DISABLE_PREDICATE_ORDERING", False))
     disable_predicate_pushdown = bool(get("FEATURE_DISABLE_PREDICATE_PUSHDOWN", False))
     disable_manifest_pruning = bool(get("FEATURE_DISABLE_MANIFEST_PRUNING", False))
-    io_process_rowgroup_ring = str(get("FEATURE_IO_PROCESS_ROWGROUP_RING", "1")).lower() in ("1", "true", "yes")
+    parquet_pool_reader = str(get("FEATURE_PARQUET_POOL_READER", "1")).lower() in ("1", "true", "yes")
     parquet_thread_scheduler = str(get("FEATURE_PARQUET_THREAD_SCHEDULER", "0")).lower() in ("1", "true", "yes")
     parquet_late_materialization = str(get("FEATURE_PARQUET_LATE_MATERIALIZATION", "1")).lower() in ("1", "true", "yes")
 

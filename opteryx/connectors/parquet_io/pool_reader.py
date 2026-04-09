@@ -4,18 +4,31 @@
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
 """
-Parquet row-group transport over a shared-memory slot ring with a dedicated IO process.
+Parquet row-group transport over an in-process MemoryPool with threaded IO.
 
-This module implements the design in docs/io-process/rowgroup-draken-ring-design.md.
-It is intentionally opt-in via a feature flag.
+ARCHITECTURE
+============
+1. Producer (_emit_loop): Serializes Morsel objects, writes directly into a
+   reserved MemoryPool segment (reserve-and-write, zero intermediate copy),
+   then signals consumer via event queue with ref_id.
+2. MemoryPool: In-process auto-resizable memory pool. Data lives here;
+   control (ref_id + metadata) travels on the event queue.
+3. Consumer (iter_row_groups_pool): Reads ref_id from event queue, zero-copy
+   reads from MemoryPool, deserializes morsel, releases pool segment.
+
+THREADING MODEL
+===============
+- IO Worker (_io_worker): Daemon thread. Persistent thread pools for IO+decode.
+- Emitter Thread (_emit_loop): Per-scan daemon thread.
+- Consumer: Main thread.
 """
 
 from __future__ import annotations
 
+import ctypes
 import io
 import math
 import queue
-import struct
 import threading
 import time
 import traceback
@@ -24,34 +37,18 @@ from collections import deque
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, as_completed, wait
 from dataclasses import dataclass, field
 from multiprocessing import Event, Queue, get_context
-from multiprocessing.shared_memory import SharedMemory
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
 
 from opteryx import config as _cfg
 from opteryx.compiled.draken.morsels.morsel import Morsel
 from opteryx.compiled.draken.storage import read_morsel, write_morsel
+from opteryx.compiled.structures.memory_pool import MemoryPool
 from opteryx.connectors.io_systems import create_filesystem
 from opteryx.connectors.parquet_io.cache import InMemoryParquetCache
 from opteryx.connectors.parquet_io.predicates import row_group_may_satisfy
 
-# Slot states
-FREE = 0
-WRITING = 1
-READY = 2
-READING = 3
-ERROR = 4
-
-# Frame flags
-FLAG_LAST_FRAGMENT = 1 << 0
-FLAG_SLICED_ROWGROUP = 1 << 1
-FLAG_ERROR = 1 << 2
-
-# Header layout (packed at slot start). Keep compact; slot header budget is 256 bytes.
-_SLOT_STATE_STRUCT = struct.Struct("<I")
-_SLOT_FRAME_STRUCT = struct.Struct("<IIQQIIIIIIQQ")
-
 _EVENT_IO_READY = "io_ready"
-_EVENT_FRAME_READY = "frame_ready"
+_EVENT_ROWGROUP_READY = "rowgroup_ready"
 _EVENT_TRANSFER_ERROR = "transfer_error"
 _EVENT_SCAN_COMPLETE = "scan_complete"
 
@@ -107,7 +104,7 @@ def _estimate_decode_cost(
     codec: str,
     raw_bytes: int,
 ) -> int:
-    """Estimate decode time based on codec history."""
+    """Estimate decode cost in nanoseconds based on historical codec performance."""
     codec_defaults = {
         "SNAPPY": 100,
         "GZIP": 1000,
@@ -130,18 +127,6 @@ def _decode_column_name(name: bytes | str) -> str:
     if isinstance(name, bytes):
         return name.decode("utf8")
     return str(name)
-
-
-@dataclass
-class _TransferAssembly:
-    transfer_id: int
-    fragment_count: int
-    metadata: dict
-    slice_index: int
-    slice_count: int
-    rows_in_slice: int
-    fragments: Dict[int, bytes]
-    created_ns: int
 
 
 @dataclass
@@ -188,315 +173,7 @@ class _IORowGroupState:
     bytes_fetched: int = 0
     bytes_requested: int = 0
     range_request_count: int = 0
-    columns: Dict[str, Any] = None
-
-    def __post_init__(self):
-        if self.columns is None:
-            self.columns = {}
-
-
-class _SharedMemoryRing:
-    def __init__(
-        self,
-        slot_bytes: int,
-        slot_count: int,
-        *,
-        name: Optional[str] = None,
-        create: bool = False,
-    ) -> None:
-        if slot_bytes < 1024:
-            raise ValueError(f"slot_bytes too small: {slot_bytes}")
-        if slot_count <= 0:
-            raise ValueError(f"slot_count must be > 0, got {slot_count}")
-
-        self.slot_bytes = int(slot_bytes)
-        self.slot_count = int(slot_count)
-        self.header_bytes = 256
-        self.payload_bytes = self.slot_bytes - self.header_bytes
-        if self.payload_bytes <= 0:
-            raise ValueError(
-                f"slot_bytes ({self.slot_bytes}) must be greater than header_bytes ({self.header_bytes})"
-            )
-
-        total_bytes = self.slot_bytes * self.slot_count
-        self.shm = SharedMemory(name=name, create=create, size=total_bytes)
-        self.buf = self.shm.buf
-        # Bitmap for fast free-slot discovery: one byte per slot (0=FREE, non-zero=IN_USE).
-        # Local cache (worker process only), synced with actual slot states on demand.
-        self.free_slot_bitmap = bytearray(slot_count)
-        # Cursor for round-robin slot discovery (O(1) typical case).
-        self.free_slot_cursor = 0
-
-    @property
-    def name(self) -> str:
-        return self.shm.name
-
-    def close(self) -> None:
-        self.shm.close()
-
-    def unlink(self) -> None:
-        try:
-            self.shm.unlink()
-        except FileNotFoundError:
-            pass
-
-    def initialize_free(self) -> None:
-        for slot_id in range(self.slot_count):
-            self.write_state(slot_id, FREE)
-        # Initialize bitmap: all slots are FREE (value 0).
-        self.free_slot_bitmap = bytearray(self.slot_count)
-        # Reset cursor for round-robin discovery.
-        self.free_slot_cursor = 0
-
-    def _slot_offset(self, slot_id: int) -> int:
-        return slot_id * self.slot_bytes
-
-    def write_state(self, slot_id: int, state: int) -> None:
-        struct.pack_into(_SLOT_STATE_STRUCT.format, self.buf, self._slot_offset(slot_id), state)
-
-    def read_state(self, slot_id: int) -> int:
-        (state,) = struct.unpack_from(
-            _SLOT_STATE_STRUCT.format, self.buf, self._slot_offset(slot_id)
-        )
-        return state
-
-    def _find_free_slot_from_bitmap(self) -> int | None:
-        """Find first free slot using cursor-based round-robin scan with bitmap.
-
-        Typical case: O(1) on first check (hits recently freed slot).
-        Worst case: O(n) if ring completely full (same as before).
-        Returns slot_id if found, None if no free slots in bitmap.
-        """
-        start_pos = self.free_slot_cursor
-        for offset in range(self.slot_count):
-            slot_id = (start_pos + offset) % self.slot_count
-            if self.free_slot_bitmap[slot_id] == 0:
-                # Bitmap says free; verify with actual state (bitmap may lag).
-                if self.read_state(slot_id) == FREE:
-                    # Found free slot; advance cursor for next search.
-                    self.free_slot_cursor = (slot_id + 1) % self.slot_count
-                    return slot_id
-                else:
-                    # Bitmap was stale; mark as in-use and continue.
-                    self.free_slot_bitmap[slot_id] = 1
-        return None
-
-    def claim_free_slot(self, cancel_event: Event) -> tuple[int, int, int]:
-        """Return (slot_id, waited_ns, wait_events).
-
-        Uses bitmap for O(1) free-slot discovery on typical workloads.
-        """
-        waited_ns = 0
-        wait_events = 0
-        while True:
-            slot_id = self._find_free_slot_from_bitmap()
-            if slot_id is not None:
-                self.write_state(slot_id, WRITING)
-                self.free_slot_bitmap[slot_id] = 1  # Mark as in-use.
-                return slot_id, waited_ns, wait_events
-            wait_events += 1
-            block_start = time.monotonic_ns()
-            if cancel_event.wait(timeout=0.001):
-                raise RuntimeError("scan cancelled")
-            waited_ns += time.monotonic_ns() - block_start
-
-    def write_frame(
-        self,
-        slot_id: int,
-        *,
-        query_id_hash: int,
-        transfer_id: int,
-        file_id_hash: int,
-        row_group_index: int,
-        slice_index: int,
-        fragment_index: int,
-        fragment_count: int,
-        rows_in_slice: int,
-        flags: int,
-        payload: bytes,
-    ) -> None:
-        payload_len = len(payload)
-        if payload_len > self.payload_bytes:
-            raise ValueError(
-                f"frame payload {payload_len} exceeds slot payload capacity {self.payload_bytes}"
-            )
-
-        base = self._slot_offset(slot_id)
-        struct.pack_into(
-            _SLOT_FRAME_STRUCT.format,
-            self.buf,
-            base,
-            WRITING,  # state
-            flags,
-            transfer_id,
-            file_id_hash,
-            row_group_index,
-            slice_index,
-            fragment_index,
-            fragment_count,
-            rows_in_slice,
-            payload_len,
-            query_id_hash,
-            0,
-        )
-        payload_off = base + self.header_bytes
-        self.buf[payload_off : payload_off + payload_len] = payload
-        self.write_state(slot_id, READY)
-
-    def read_frame(self, slot_id: int) -> tuple[dict, bytes]:
-        base = self._slot_offset(slot_id)
-        fields = struct.unpack_from(_SLOT_FRAME_STRUCT.format, self.buf, base)
-        (
-            state,
-            flags,
-            transfer_id,
-            file_id_hash,
-            row_group_index,
-            slice_index,
-            fragment_index,
-            fragment_count,
-            rows_in_slice,
-            payload_len,
-            query_id_hash,
-            _,
-        ) = fields
-
-        if state not in (READY, READING):
-            raise RuntimeError(f"slot {slot_id} is not READY/READING (state={state})")
-
-        payload_off = base + self.header_bytes
-        payload = bytes(self.buf[payload_off : payload_off + payload_len])
-
-        header = {
-            "flags": flags,
-            "transfer_id": transfer_id,
-            "file_id_hash": file_id_hash,
-            "row_group_index": row_group_index,
-            "slice_index": slice_index,
-            "fragment_index": fragment_index,
-            "fragment_count": fragment_count,
-            "rows_in_slice": rows_in_slice,
-            "payload_bytes": payload_len,
-            "query_id_hash": query_id_hash,
-        }
-        return header, payload
-
-
-def _serialize_morsel(morsel: Morsel) -> tuple[bytes, int]:
-    start_ns = time.monotonic_ns()
-    sink = io.BytesIO()
-    write_morsel(sink, morsel)
-    payload = sink.getvalue()
-    return payload, (time.monotonic_ns() - start_ns)
-
-
-def _slice_and_serialize(
-    morsel: Morsel,
-    *,
-    slot_payload_bytes: int,
-    max_fragments_per_transfer: int,
-    target_slice_bytes: int,
-) -> tuple[List[dict], int]:
-    """
-    Return transfer payloads for this row group.
-
-    Each entry:
-      {
-        "slice_index": int,
-        "slice_count": int,
-        "rows_in_slice": int,
-        "payload": bytes,
-        "fragment_count": int,
-      }
-    """
-    payload, serialize_ns = _serialize_morsel(morsel)
-    fragment_count = max(1, math.ceil(len(payload) / slot_payload_bytes))
-    if fragment_count <= max_fragments_per_transfer:
-        return (
-            [
-                {
-                    "slice_index": 0,
-                    "slice_count": 1,
-                    "rows_in_slice": morsel.num_rows,
-                    "payload": payload,
-                    "fragment_count": fragment_count,
-                }
-            ],
-            serialize_ns,
-        )
-
-    # Too fragmented: derive deterministic row slices using measured compression ratio.
-    # Avoid re-serialization by using actual payload size to estimate bytes/row.
-    rows_total = morsel.num_rows
-    if rows_total <= 1:
-        return (
-            [
-                {
-                    "slice_index": 0,
-                    "slice_count": 1,
-                    "rows_in_slice": rows_total,
-                    "payload": payload,
-                    "fragment_count": fragment_count,
-                }
-            ],
-            serialize_ns,
-        )
-
-    # Measured bytes/row from full morsel serialization.
-    # Use this to pre-calculate ideal slice size before serializing slices.
-    bytes_per_row = len(payload) / max(1, rows_total)
-
-    # Target: fragments_per_slice <= max_fragments_per_transfer
-    # max_bytes_per_slice = max_fragments_per_transfer * slot_payload_bytes
-    # rows_per_slice = max_bytes_per_slice / bytes_per_row
-    max_bytes_per_slice = max_fragments_per_transfer * slot_payload_bytes
-    ideal_rows_per_slice = max(1, int(max_bytes_per_slice / bytes_per_row))
-
-    # Apply target_slice_bytes as additional constraint.
-    if target_slice_bytes > 0:
-        target_rows_per_slice = max(1, int((target_slice_bytes / bytes_per_row)))
-        ideal_rows_per_slice = min(ideal_rows_per_slice, target_rows_per_slice)
-
-    # Conservative: reduce by 20% to account for compression variation per slice.
-    rows_per_slice = max(1, int(ideal_rows_per_slice * 0.8))
-    if rows_per_slice >= rows_total:
-        rows_per_slice = max(1, rows_total // 2)
-
-    # Single pass: serialize slices with pre-calculated size.
-    # If any slice exceeds max_fragments, fall back to smaller size.
-    max_retry = 3  # Limit retry depth to avoid pathological cases.
-    for _ in range(max_retry):
-        serialized: List[tuple[int, bytes, int]] = []
-        total_serialize_ns = 0
-        too_fragmented = False
-
-        for start_row in range(0, rows_total, rows_per_slice):
-            length = min(rows_per_slice, rows_total - start_row)
-            slice_morsel = morsel.slice(start_row, length)
-            slice_payload, slice_serialize_ns = _serialize_morsel(slice_morsel)
-            total_serialize_ns += slice_serialize_ns
-            slice_fragments = max(1, math.ceil(len(slice_payload) / slot_payload_bytes))
-            serialized.append((length, slice_payload, slice_fragments))
-            if slice_fragments > max_fragments_per_transfer and length > 1:
-                too_fragmented = True
-                break
-
-        if not too_fragmented or rows_per_slice == 1:
-            entries: List[dict] = []
-            slice_count = len(serialized)
-            for idx, (rows_in_slice, slice_payload, slice_fragments) in enumerate(serialized):
-                entries.append(
-                    {
-                        "slice_index": idx,
-                        "slice_count": slice_count,
-                        "rows_in_slice": rows_in_slice,
-                        "payload": slice_payload,
-                        "fragment_count": slice_fragments,
-                    }
-                )
-            return entries, total_serialize_ns
-
-        rows_per_slice = max(1, rows_per_slice // 2)
+    columns: Dict[str, Any] = field(default_factory=dict)
 
 
 def _connector_to_protocol(connector: Optional[str]) -> str:
@@ -516,7 +193,7 @@ def _resolve_protocol(paths: List[str], connector: Optional[str]) -> str:
     return _connector_to_protocol(connector)
 
 
-def _column_chunk_range(col_stats: dict) -> tuple[int, int]:
+def _column_chunk_range(col_stats: dict) -> Tuple[int, int]:
     dict_off = col_stats.get("dictionary_page_offset")
     data_off = col_stats["data_page_offset"]
     if dict_off is not None and dict_off >= 0 and dict_off < data_off:
@@ -528,13 +205,13 @@ def _column_chunk_range(col_stats: dict) -> tuple[int, int]:
 
 def _resolve_decoder() -> Any:
     try:
-        from opteryx.compiled.rugo import parquet as rugo_parquet
+        from opteryx.compiled.rugo.parquet import decode_column_from_chunk  # type: ignore[import]
     except ImportError:
         raise RuntimeError(
             "rugo.parquet is required but not available. "
             "Ensure rugo is compiled and in the Python path."
         )
-    return rugo_parquet.decode_column_from_chunk
+    return decode_column_from_chunk
 
 
 def _read_column_task(
@@ -653,19 +330,32 @@ def _decode_column_task(
 
 
 def _emit_loop(
-    ready_queue: "queue.Queue[_IORowGroupState | None]",
-    ring: _SharedMemoryRing,
+    ready_queue: "queue.Queue",
+    pool: MemoryPool,
     event_q: Queue,
     cancel_event: Event,
     *,
     query_id_hash: int,
-    slot_payload_bytes: int,
-    max_fragments: int,
-    target_slice_bytes: int,
     metrics: dict,
     metrics_lock: threading.Lock,
-    next_transfer_id: List[int],
 ) -> None:
+    """
+    Emit serialized row groups into the MemoryPool and signal the consumer.
+
+    For each completed row group attempts reserve-and-write (zero intermediate
+    copy): reserves a pool segment, writes the Morsel directly into it via
+    _PoolWriter, then finalizes.  Falls back to commit(bytes) if the size
+    estimate is too small or the reservation fails.
+    """
+    # Rolling size estimator for the reserve-and-write fast path.
+    _size_history: deque = deque(maxlen=16)
+    _RESERVE_INITIAL_BYTES = 8 * 1024 * 1024  # 8 MB conservative start
+
+    def _reserve_estimate() -> int:
+        if not _size_history:
+            return _RESERVE_INITIAL_BYTES
+        return max(_RESERVE_INITIAL_BYTES, int(max(_size_history) * 1.5))
+
     try:
         while True:
             state = ready_queue.get()
@@ -682,17 +372,49 @@ def _emit_loop(
 
             vectors = [state.columns[name] for name in state.column_order]
             morsel = Morsel.from_vectors(list(state.column_order), vectors)
-            payload_entries, serialize_ns = _slice_and_serialize(
-                morsel,
-                slot_payload_bytes=slot_payload_bytes,
-                max_fragments_per_transfer=max_fragments,
-                target_slice_bytes=target_slice_bytes,
-            )
+
+            serialize_start_ns = time.monotonic_ns()
+
+            # Reserve-and-write: attempt to write the morsel directly into a pool
+            # segment without an intermediate bytes allocation (zero extra copy).
+            # Falls back to commit(bytes) if the reservation fails or the size
+            # estimate is too small.
+            ref_id = -1
+            actual_bytes = 0
+            rsv_ref_id, ptr_int, capacity = pool.reserve_for_write_ptr(_reserve_estimate())
+            if rsv_ref_id != -1:
+                try:
+                    ctypes_buf = (ctypes.c_char * capacity).from_address(ptr_int)
+                    mv = memoryview(ctypes_buf)
+                    result = write_morsel(mv, morsel)
+                    actual_bytes = result["bytes_output"]
+                    pool.finalize_commit(rsv_ref_id, actual_bytes)
+                    ref_id = rsv_ref_id
+                except ValueError:
+                    # _PoolWriter overflow: estimate too small — release reserved
+                    # segment and fall through to the commit(bytes) path.
+                    pool.release(rsv_ref_id)
+                except Exception:
+                    pool.release(rsv_ref_id)
+                    raise
+
+            if ref_id == -1:
+                # Fallback: serialize to bytes then commit into pool (one extra copy).
+                data = write_morsel(None, morsel)
+                actual_bytes = len(data)
+                ref_id = pool.commit(data)
+                if ref_id == -1:
+                    cancel_event.set()
+                    raise RuntimeError("MemoryPool exhausted: cannot commit row group data")
+
+            serialize_ns = time.monotonic_ns() - serialize_start_ns
+            _size_history.append(actual_bytes)
+
             with metrics_lock:
                 metrics["io_serialize_ns"] += serialize_ns
-                metrics["io_rowgroup_slice_count"] += max(0, len(payload_entries) - 1)
+                metrics["transfer_payload_sizes"].append(actual_bytes)
 
-            base_meta = {
+            metadata = {
                 "__path__": state.path,
                 "__row_group__": state.rg_idx,
                 "__bytes_fetched__": state.bytes_fetched + int(getattr(state, "footer_bytes", 0)),
@@ -727,85 +449,18 @@ def _emit_loop(
                 "__row_groups_pruned__": int(metrics.get("row_groups_pruned", 0)),
             }
 
-            for payload_entry in payload_entries:
-                with metrics_lock:
-                    next_transfer_id[0] += 1
-                    transfer_id = next_transfer_id[0]
-                payload = payload_entry["payload"]
-                fragment_count = payload_entry["fragment_count"]
-                with metrics_lock:
-                    metrics["transfer_fragment_counts"].append(fragment_count)
-                    metrics["transfer_payload_sizes"].append(len(payload))
-                file_id_hash = _stable_u64(state.path)
+            event = {
+                "type": _EVENT_ROWGROUP_READY,
+                "ref_id": ref_id,
+                "row_group_meta": metadata,
+            }
+            try:
+                event_q.put(event, timeout=0.1)
+            except queue.Full:
+                pool.release(ref_id)
+                cancel_event.set()
+                raise RuntimeError("Event queue full: consumer not keeping up")
 
-                transfer_meta = dict(base_meta)
-                if payload_entry["slice_index"] > 0:
-                    for key in (
-                        "__bytes_fetched__",
-                        "__footer_bytes__",
-                        "__range_request_count__",
-                        "__range_bytes_requested__",
-                        "__time_read_ranges_ns__",
-                        "__time_decode_columns_ns__",
-                        "__cache_column_hits__",
-                        "__cache_column_misses__",
-                        "__task_queue_wait_ns__",
-                        "__task_total_ns__",
-                        "__scheduler_wait_ns__",
-                        "__rowgroup_completion_latency_ns__",
-                        "__emit_wait_ns__",
-                        "__scheduler_empty_wait_ns__",
-                        "__scheduler_empty_wait_events__",
-                        "__time_to_first_rowgroup_ns__",
-                    ):
-                        transfer_meta[key] = 0
-
-                for fragment_index in range(fragment_count):
-                    if cancel_event.is_set():
-                        break
-                    start = fragment_index * slot_payload_bytes
-                    end = start + slot_payload_bytes
-                    fragment_payload = payload[start:end]
-                    flags = 0
-                    if payload_entry["slice_count"] > 1:
-                        flags |= FLAG_SLICED_ROWGROUP
-                    if fragment_index == (fragment_count - 1):
-                        flags |= FLAG_LAST_FRAGMENT
-
-                    slot_id, wait_ns, wait_events = ring.claim_free_slot(cancel_event)
-                    with metrics_lock:
-                        metrics["io_ring_producer_full_wait_ns"] += wait_ns
-                        metrics["io_ring_producer_full_wait_events"] += wait_events
-                    ring.write_frame(
-                        slot_id,
-                        query_id_hash=query_id_hash,
-                        transfer_id=transfer_id,
-                        file_id_hash=file_id_hash,
-                        row_group_index=state.rg_idx,
-                        slice_index=payload_entry["slice_index"],
-                        fragment_index=fragment_index,
-                        fragment_count=fragment_count,
-                        rows_in_slice=payload_entry["rows_in_slice"],
-                        flags=flags,
-                        payload=fragment_payload,
-                    )
-                    event = {
-                        "type": _EVENT_FRAME_READY,
-                        "slot_id": slot_id,
-                        "transfer_id": transfer_id,
-                        "fragment_index": fragment_index,
-                        "fragment_count": fragment_count,
-                        "rows_in_slice": payload_entry["rows_in_slice"],
-                        "slice_index": payload_entry["slice_index"],
-                        "slice_count": payload_entry["slice_count"],
-                        "row_group_meta": transfer_meta,
-                    }
-                    # Put event in queue with timeout to handle back-pressure gracefully.
-                    try:
-                        event_q.put(event, timeout=0.1)
-                    except queue.Full:
-                        # Timeout waiting to put event; continue and let main process handle backlog
-                        pass
     except Exception as err:
         error_event = {
             "type": _EVENT_TRANSFER_ERROR,
@@ -815,23 +470,16 @@ def _emit_loop(
         try:
             event_q.put(error_event, timeout=0.1)
         except queue.Full:
-            # If queue is still full on error, log and continue—main process will handle timeout
             pass
         cancel_event.set()
 
 
 def _io_worker(
-    shm_name: str,
-    slot_bytes: int,
-    slot_count: int,
-    command_q: Queue,
-    event_q: Queue,
+    pool: MemoryPool,
+    command_q: Queue,  # type: ignore[type-arg]
+    event_q: Queue,  # type: ignore[type-arg]
     cancel_event: Event,
 ) -> None:
-    ring = _SharedMemoryRing(
-        slot_bytes=slot_bytes, slot_count=slot_count, name=shm_name, create=False
-    )
-
     # Create persistent thread pools once at subprocess startup and reuse them
     # across all scans.  Per-scan creation/destruction of 64+ threads adds
     # measurable latency for high-frequency short queries.
@@ -871,24 +519,19 @@ def _io_worker(
 
             cancel_event.clear()
             metrics = {
-                "io_ring_slot_bytes": slot_bytes,
-                "io_ring_slot_count": slot_count,
-                "io_ring_total_bytes": slot_bytes * slot_count,
-                "io_ring_producer_full_wait_ns": 0,
-                "io_ring_producer_full_wait_events": 0,
-                "io_ring_consumer_empty_wait_ns": 0,
-                "io_ring_consumer_empty_wait_events": 0,
                 "io_transfer_ready_backlog_peak": 0,
                 "io_transfer_emit_wait_ns": 0,
                 "io_serialize_ns": 0,
-                "io_rowgroup_slice_count": 0,
                 "ranges_in_flight_peak": 0,
                 "active_files_peak": 0,
                 "active_rowgroups_peak": 0,
                 "row_groups_pruned": 0,
                 "rowgroups_in_flight_cap": 0,
-                "transfer_fragment_counts": [],
                 "transfer_payload_sizes": [],
+                "io_pool_commits": 0,
+                "io_pool_bytes_committed": 0,
+                "io_scheduler_empty_wait_events": 0,
+                "io_scheduler_empty_wait_ns": 0,
             }
 
             # Per-scan codec metrics for cost-aware dispatch
@@ -899,7 +542,6 @@ def _io_worker(
                 maxsize=ready_queue_cap
             )
             metrics_lock = threading.Lock()
-            next_transfer_id = [0]
             emitter: Optional[threading.Thread] = None
             read_pool: ThreadPoolExecutor = _persistent_read_pool
             decode_pool: ThreadPoolExecutor = _persistent_decode_pool
@@ -950,10 +592,6 @@ def _io_worker(
                     active_target,
                     int(_cfg.PARQUET_COMPLETED_ROWGROUP_BACKLOG_CAP),
                 )
-
-                slot_payload_bytes = slot_bytes - 256
-                max_fragments = int(command["max_fragments_per_transfer"])
-                target_slice_bytes = int(command["target_slice_bytes"])
 
                 protocol = _resolve_protocol(paths, connector)
                 if protocol not in _filesystem_by_protocol:
@@ -1046,15 +684,11 @@ def _io_worker(
 
                 emitter = threading.Thread(
                     target=_emit_loop,
-                    args=(ready_queue, ring, event_q, cancel_event),
+                    args=(ready_queue, pool, event_q, cancel_event),
                     kwargs={
                         "query_id_hash": query_id_hash,
-                        "slot_payload_bytes": slot_payload_bytes,
-                        "max_fragments": max_fragments,
-                        "target_slice_bytes": target_slice_bytes,
                         "metrics": metrics,
                         "metrics_lock": metrics_lock,
-                        "next_transfer_id": next_transfer_id,
                     },
                     daemon=True,
                 )
@@ -1339,8 +973,8 @@ def _io_worker(
                             sleep_start = time.monotonic_ns()
                             time.sleep(0.001)
                             with metrics_lock:
-                                metrics["io_ring_consumer_empty_wait_events"] += 1
-                                metrics["io_ring_consumer_empty_wait_ns"] += (
+                                metrics["io_scheduler_empty_wait_events"] += 1
+                                metrics["io_scheduler_empty_wait_ns"] += (
                                     time.monotonic_ns() - sleep_start
                                 )
                         continue
@@ -1354,8 +988,8 @@ def _io_worker(
                     )
                     if not done:
                         with metrics_lock:
-                            metrics["io_ring_consumer_empty_wait_events"] += 1
-                            metrics["io_ring_consumer_empty_wait_ns"] += (
+                            metrics["io_scheduler_empty_wait_events"] += 1
+                            metrics["io_scheduler_empty_wait_ns"] += (
                                 time.monotonic_ns() - wait_start
                             )
                         continue
@@ -1427,17 +1061,6 @@ def _io_worker(
                 if emitter is not None:
                     emitter.join(timeout=10)
 
-                metrics["io_transfer_fragment_count_p50"] = _percentile(
-                    metrics["transfer_fragment_counts"], 0.5
-                )
-                metrics["io_transfer_fragment_count_p95"] = _percentile(
-                    metrics["transfer_fragment_counts"], 0.95
-                )
-                metrics["io_transfer_fragment_count_max"] = (
-                    max(metrics["transfer_fragment_counts"])
-                    if metrics["transfer_fragment_counts"]
-                    else 0
-                )
                 metrics["io_transfer_payload_bytes_p50"] = _percentile(
                     metrics["transfer_payload_sizes"], 0.5
                 )
@@ -1449,7 +1072,6 @@ def _io_worker(
                     if metrics["transfer_payload_sizes"]
                     else 0
                 )
-                metrics.pop("transfer_fragment_counts", None)
                 metrics.pop("transfer_payload_sizes", None)
 
                 event_q.put(
@@ -1475,7 +1097,6 @@ def _io_worker(
                     }
                 )
                 # Preserve partial metrics for debugging.
-                metrics.pop("transfer_fragment_counts", None)
                 metrics.pop("transfer_payload_sizes", None)
                 event_q.put({"type": _EVENT_SCAN_COMPLETE, "cancelled": True, "metrics": metrics})
             finally:
@@ -1485,13 +1106,12 @@ def _io_worker(
                     fut.cancel()
                 for fut in list(decode_futures):
                     fut.cancel()
-    finally:
-        ring.close()
 
 
-def _build_row_group_from_payload(payload: bytes, metadata: dict) -> tuple[Dict[str, Any], int]:
+def _build_row_group_from_payload(payload: bytes, metadata: dict) -> Tuple[Dict[str, Any], int]:
     start_ns = time.monotonic_ns()
-    morsel = read_morsel(io.BytesIO(payload))
+    mv = memoryview(payload) if not isinstance(payload, memoryview) else payload
+    morsel = read_morsel(mv)
     deserialize_ns = time.monotonic_ns() - start_ns
 
     row_group: Dict[str, Any] = {}
@@ -1503,7 +1123,7 @@ def _build_row_group_from_payload(payload: bytes, metadata: dict) -> tuple[Dict[
     return row_group, deserialize_ns
 
 
-def iter_row_groups_io_process_v2(
+def iter_row_groups_pool(
     paths: List[str],
     column_names: List[str],
     *,
@@ -1515,18 +1135,14 @@ def iter_row_groups_io_process_v2(
     prefetched_footers: Optional[Dict[str, dict]] = None,
 ) -> Iterator[Dict[str, Any]]:
     """
-    Process-isolated row-group iterator.
+    Threaded pool-based row-group iterator.
 
-    Contract matches parquet_io.reader.iter_row_groups(): yields
-    ``Dict[column_name -> DrakenVector]`` plus ``__*`` metadata.
+    Runs a persistent IO worker thread with a MemoryPool transport. Yields
+    ``Dict[column_name -> DrakenVector]`` plus ``__*`` metadata, matching the
+    contract of parquet_io.reader.iter_row_groups().
     """
-    slot_bytes = int(_cfg.IO_RING_SLOT_BYTES)
-    slot_count = int(_cfg.IO_RING_SLOT_COUNT)
-    max_fragments = int(_cfg.IO_MAX_FRAGMENTS_PER_TRANSFER)
-    target_slice_bytes = int(_cfg.IO_TARGET_SLICE_BYTES)
-
-    ring = _SharedMemoryRing(slot_bytes=slot_bytes, slot_count=slot_count, create=True)
-    ring.initialize_free()
+    pool_size = int(_cfg.IO_POOL_SLOT_BYTES) * int(_cfg.IO_POOL_SLOT_COUNT)
+    pool = MemoryPool(size=pool_size, name="parquet-io-pool", auto_resize=True, alignment=8)
 
     # Run IO worker in-process using a thread (replace process-based worker)
     # Note: we keep the same queue/event semantics but use thread-safe primitives
@@ -1538,7 +1154,7 @@ def iter_row_groups_io_process_v2(
 
     worker = threading.Thread(
         target=_io_worker,
-        args=(ring.name, slot_bytes, slot_count, command_q, event_q, cancel_event),
+        args=(pool, command_q, event_q, cancel_event),
         daemon=True,
         name="io-worker-thread",
     )
@@ -1553,7 +1169,6 @@ def iter_row_groups_io_process_v2(
     transfer_emit_wait_ns = 0
     transfer_emit_wait_ns_emitted = 0
 
-    assemblies: Dict[int, _TransferAssembly] = {}
     pending_row_group: Optional[Dict[str, Any]] = None
     poll_timeout_s = 0.05
 
@@ -1573,21 +1188,19 @@ def iter_row_groups_io_process_v2(
                 "file_sizes": file_sizes,
                 "connector": connector,
                 "max_workers": max_workers,
-                "max_fragments_per_transfer": max_fragments,
-                "target_slice_bytes": target_slice_bytes,
                 "prefetched_footers": prefetched_footers,
             }
         )
 
         scan_complete = False
         while True:
-            if scan_complete and not assemblies:
+            if scan_complete:
                 if pending_row_group is not None:
                     # Attach scan-level transport metrics to the final emitted row group.
-                    pending_row_group["__io_ring_consumer_empty_wait_ns__"] += (
+                    pending_row_group["__io_consumer_empty_wait_ns__"] += (
                         consumer_empty_wait_ns - consumer_empty_wait_ns_emitted
                     )
-                    pending_row_group["__io_ring_consumer_empty_wait_events__"] += (
+                    pending_row_group["__io_consumer_empty_wait_events__"] += (
                         consumer_empty_wait_events - consumer_empty_wait_events_emitted
                     )
                     pending_row_group["__io_transfer_emit_wait_ns__"] += (
@@ -1609,7 +1222,7 @@ def iter_row_groups_io_process_v2(
                 # Queue empty: emitter backlog is drained by emit_loop in worker.
                 consumer_empty_wait_events += 1
                 consumer_empty_wait_ns += int(poll_timeout_s * 1_000_000_000)
-                if scan_complete and not assemblies:
+                if scan_complete:
                     break
                 if not worker.is_alive() and event_q.empty():
                     break
@@ -1626,47 +1239,31 @@ def iter_row_groups_io_process_v2(
                 scan_complete = True
                 continue
 
-            if event_type != _EVENT_FRAME_READY:
+            if event_type != _EVENT_ROWGROUP_READY:
                 continue
 
-            slot_id = int(event["slot_id"])
-            ring.write_state(slot_id, READING)
-            _header, payload = ring.read_frame(slot_id)
-            ring.write_state(slot_id, FREE)
+            ref_id = int(event["ref_id"])
+            metadata = dict(event.get("row_group_meta") or {})
 
-            transfer_id = int(event["transfer_id"])
-            assembly = assemblies.get(transfer_id)
-            if assembly is None:
-                assembly = _TransferAssembly(
-                    transfer_id=transfer_id,
-                    fragment_count=int(event["fragment_count"]),
-                    metadata=dict(event.get("row_group_meta") or {}),
-                    slice_index=int(event.get("slice_index", 0)),
-                    slice_count=int(event.get("slice_count", 1)),
-                    rows_in_slice=int(event.get("rows_in_slice", 0)),
-                    fragments={},
-                    created_ns=time.monotonic_ns(),
-                )
-                assemblies[transfer_id] = assembly
+            deserialize_start_ns = time.monotonic_ns()
+            mv = pool.read(ref_id, zero_copy=True, latch=True)
+            morsel = read_morsel(mv)
+            pool.unlatch(ref_id)
+            pool.release(ref_id)
+            deserialize_ns = time.monotonic_ns() - deserialize_start_ns
 
-            assembly.fragments[int(event["fragment_index"])] = payload
-            transfer_ready_backlog_peak = max(transfer_ready_backlog_peak, len(assemblies))
+            row_group: Dict[str, Any] = {}
+            for col_name in morsel.column_names:
+                key = _decode_column_name(col_name)
+                raw_name = col_name if isinstance(col_name, bytes) else str(col_name).encode("utf8")
+                row_group[key] = morsel.column(raw_name)
+            row_group.update(metadata)
 
-            if len(assembly.fragments) < assembly.fragment_count:
-                continue
-
-            assembled = b"".join(assembly.fragments[i] for i in range(assembly.fragment_count))
-            row_group, deserialize_ns = _build_row_group_from_payload(assembled, assembly.metadata)
-            transfer_emit_wait_ns += max(0, time.monotonic_ns() - assembly.created_ns)
-
-            row_group["__slice_index__"] = assembly.slice_index
-            row_group["__slice_count__"] = assembly.slice_count
-            row_group["__rows_in_slice__"] = assembly.rows_in_slice
             row_group["__io_deserialize_ns__"] = deserialize_ns
-            row_group["__io_ring_consumer_empty_wait_ns__"] = (
+            row_group["__io_consumer_empty_wait_ns__"] = (
                 consumer_empty_wait_ns - consumer_empty_wait_ns_emitted
             )
-            row_group["__io_ring_consumer_empty_wait_events__"] = (
+            row_group["__io_consumer_empty_wait_events__"] = (
                 consumer_empty_wait_events - consumer_empty_wait_events_emitted
             )
             row_group["__io_transfer_emit_wait_ns__"] = (
@@ -1676,7 +1273,6 @@ def iter_row_groups_io_process_v2(
             consumer_empty_wait_ns_emitted = consumer_empty_wait_ns
             consumer_empty_wait_events_emitted = consumer_empty_wait_events
             transfer_emit_wait_ns_emitted = transfer_emit_wait_ns
-            del assemblies[transfer_id]
 
             if pending_row_group is not None:
                 yield pending_row_group
@@ -1701,12 +1297,3 @@ def iter_row_groups_io_process_v2(
             # The worker should exit after seeing cancel_event. If it doesn't, the
             # process will continue and resources will be reclaimed at process exit.
             pass
-
-        # Force-reset any non-free slots to avoid reattach confusion in tests/dev.
-        for slot_id in range(ring.slot_count):
-            state = ring.read_state(slot_id)
-            if state != FREE:
-                ring.write_state(slot_id, FREE)
-
-        ring.close()
-        ring.unlink()

@@ -1,5 +1,5 @@
 """
-Tests for decoupled read and decode queues in io_process_ring.
+Tests for decoupled read and decode queues in pool_reader.
 
 Validates that read and decode dispatch are independent:
 - Reads can dispatch even when decode queue is full
