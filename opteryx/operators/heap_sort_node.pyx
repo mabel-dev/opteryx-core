@@ -3,7 +3,6 @@ from collections.abc import Iterable
 from functools import cmp_to_key
 
 import numpy
-import pyarrow
 from opteryx.compiled.draken.interop.arrow import vector_from_sequence
 from opteryx.compiled.draken.morsels.morsel import Morsel
 from opteryx.exceptions import ColumnNotFoundError
@@ -43,7 +42,7 @@ _DATA_FORMAT = "arrow,draken"
 
 
 class HeapSortNode(BasePlanNode):
-    _NULL_COMPRESSED = numpy.iinfo(numpy.int64).min
+    _NULL_COMPRESSED = -(1 << 63)  # INT64_MIN — same sentinel used by compress_into
     _USEARCH_ENABLED = False
     _USEARCH_MIN_ROWS = 2048
     _EXACT_COMPRESS_VECTOR_TYPES = frozenset(
@@ -67,26 +66,7 @@ class HeapSortNode(BasePlanNode):
 
     @classmethod
     def _is_exact_compressible_vector(cls, vector) -> bool:
-        vector_type = vector.__class__.__name__
-        if vector_type in cls._EXACT_COMPRESS_VECTOR_TYPES:
-            return True
-
-        to_arrow = getattr(vector, "to_arrow", None)
-        if to_arrow is None:
-            return False
-
-        try:
-            arrow_arr = to_arrow()
-        except Exception:
-            return False
-
-        if not isinstance(arrow_arr, (pyarrow.Array, pyarrow.ChunkedArray)):
-            return False
-        if not pyarrow.types.is_dictionary(arrow_arr.type):
-            return False
-
-        value_type = arrow_arr.type.value_type
-        return pyarrow.types.is_integer(value_type) or pyarrow.types.is_boolean(value_type)
+        return vector.__class__.__name__ in cls._EXACT_COMPRESS_VECTOR_TYPES
 
     def __init__(self, properties: QueryProperties, **parameters):
         super().__init__(properties=properties, **parameters)
@@ -148,12 +128,7 @@ class HeapSortNode(BasePlanNode):
 
             if self.limit and self.limit > 0 and self.mapped_order:
                 if self._chunk_buffer:
-                    combined = pyarrow.concat_tables(
-                        [chunk.to_arrow() for chunk in self._chunk_buffer],
-                        promote_options="permissive",
-                    )
-                    combined = combined.combine_chunks()
-                    self.table = Morsel.from_arrow(combined)
+                    self.table = Morsel.combine(self._chunk_buffer)
                     self.table = self._top_n(self.table)
                 elif self.table is not None:
                     self.table = self._top_n(self.table)
@@ -222,7 +197,6 @@ class HeapSortNode(BasePlanNode):
 
         names = morsel.column_names
         py_materialize_types = {"StringVector", "ArrayVector", "VectorVector"}
-        selection = numpy.asarray(row_indices, dtype=numpy.int32)
         vectors = []
         for name in names:
             vector = morsel.column(name)
@@ -237,7 +211,7 @@ class HeapSortNode(BasePlanNode):
                     vector_from_sequence([values[row_index] for row_index in row_indices])
                 )
             else:
-                vectors.append(vector.take(selection))
+                vectors.append(vector.take(row_indices))
         return Morsel.from_vectors(names, vectors)
 
     def _sort_morsel(self, morsel: Morsel) -> Morsel:

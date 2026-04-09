@@ -29,8 +29,10 @@ import time
 from dataclasses import dataclass
 from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
 
+from opteryx import config as _cfg
 from opteryx.connectors.parquet_io.cache import InMemoryParquetCache, ParquetCache
 from opteryx.connectors.parquet_io.predicates import row_group_may_satisfy
+from opteryx.tracing.event_recorder import record_event as _record_event
 
 _PARQUET_MAGIC = b"PAR1"
 _PARQUET_FOOTER_SUFFIX = 8
@@ -42,15 +44,11 @@ class ListColumnError(ValueError):
 
 
 def _trace_enabled() -> bool:
-    from opteryx import config as _cfg
-
     return bool(_cfg.OPTERYX_TRACE)
 
 
 def _trace(**kwargs) -> None:
-    from opteryx.tracing.event_recorder import record_event
-
-    record_event(kwargs.pop("event_type"), **kwargs)
+    _record_event(kwargs.pop("event_type"), **kwargs)
 
 
 def _trace_io_started(**kwargs) -> None:
@@ -529,8 +527,6 @@ def iter_row_groups(
     """
     if cache is None:
         cache = InMemoryParquetCache()
-
-    from opteryx import config as _cfg
 
     _ = file_sizes, query_id, prefetched_footers  # resolved via cache / filesystem already
     decoder_fn = _resolve_decoder(decoder)
