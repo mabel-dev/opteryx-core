@@ -214,10 +214,16 @@ cdef class GroupHashEngine:
         if self._telemetry_enabled:
             self._time_resolve_ns += _now_ns() - start_ns
 
-    def finalize_morsels(self, Py_ssize_t chunk_size=65536):
+    def finalize_morsels(self, Py_ssize_t chunk_size=65536, filter_fn=None):
         """
         Generator. Yields result Morsels in chunks.
         Called once after all input morsels have been ingested.
+
+        Args:
+            chunk_size: Size of output chunks (default 65536)
+            filter_fn: Optional callable that takes a Morsel and returns filtered Morsel.
+                       If provided, filter is applied once to the complete result before chunking.
+                       This avoids reconstructing groups that don't pass the filter.
         """
         from opteryx.compiled.draken.morsels.morsel import Morsel as _Morsel
 
@@ -267,7 +273,7 @@ cdef class GroupHashEngine:
         if self._telemetry_enabled:
             self._time_finalize_ns += _now_ns() - t0
 
-        # Build one full-size Morsel, then slice into chunks
+        # Build one full-size Morsel, then apply filter if provided, then slice into chunks
         if self._telemetry_enabled:
             t0 = _now_ns()
         all_names = agg_names + key_names
@@ -276,12 +282,19 @@ cdef class GroupHashEngine:
         if self._telemetry_enabled:
             self._time_build_morsel_ns += _now_ns() - t0
 
+        # Apply filter early (before chunking) if provided, to avoid creating chunks for filtered-out groups
+        if filter_fn is not None:
+            full_morsel = filter_fn(full_morsel)
+            if full_morsel is None or full_morsel.num_rows == 0:
+                return
+
         cdef Py_ssize_t start = 0
         cdef Py_ssize_t length
-        while start < num_groups:
+        cdef Py_ssize_t result_rows = full_morsel.num_rows
+        while start < result_rows:
             if self._telemetry_enabled:
                 t1 = _now_ns()
-            length = min(chunk_size, num_groups - start)
+            length = min(chunk_size, result_rows - start)
             yield full_morsel.slice(start, length)
             if self._telemetry_enabled:
                 self._time_slice_output_ns += _now_ns() - t1

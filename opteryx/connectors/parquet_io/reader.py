@@ -27,15 +27,9 @@ from __future__ import annotations
 import struct
 import time
 from dataclasses import dataclass
-from typing import Any
-from typing import Dict
-from typing import Iterator
-from typing import List
-from typing import Optional
-from typing import Tuple
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
-from opteryx.connectors.parquet_io.cache import InMemoryParquetCache
-from opteryx.connectors.parquet_io.cache import ParquetCache
+from opteryx.connectors.parquet_io.cache import InMemoryParquetCache, ParquetCache
 from opteryx.connectors.parquet_io.predicates import row_group_may_satisfy
 
 _PARQUET_MAGIC = b"PAR1"
@@ -501,19 +495,6 @@ def _connector_name(filesystem: Any, connector: Optional[str]) -> Optional[str]:
     return None
 
 
-def _serial_reader_selected(
-    filesystem: Any,
-    connector: Optional[str],
-    serial_targets: frozenset[str],
-) -> bool:
-    if not serial_targets:
-        return False
-    if "ALL" in serial_targets:
-        return True
-    resolved = _connector_name(filesystem, connector)
-    return resolved in serial_targets if resolved is not None else False
-
-
 def _yield_with_scan_strategy(
     row_groups: Iterator[Dict[str, Any]],
     strategy: str,
@@ -587,15 +568,6 @@ def iter_row_groups(
                 file_id=path, rg_idx=rg_idx, connector=connector, rows_out=rows_fetched
             )
         return row_group
-
-    # Honour FEATURE_USE_SERIAL_READER: if the connector type matches the
-    # configured serial-reader targets, force a serial scan regardless of
-    # max_workers.  This prevents SD-card / slow-disk overload on dev machines.
-    from opteryx import config as _cfg2
-
-    _conn_upper = (connector or "").upper()
-    if _conn_upper in _cfg2.features.use_serial_reader or "ALL" in _cfg2.features.use_serial_reader:
-        max_workers = 1
 
     if len(work_items) == 1 or max_workers <= 1:
         for path, rg_idx in work_items:

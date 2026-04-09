@@ -21,27 +21,15 @@ import time
 import traceback
 import zlib
 from collections import deque
-from concurrent.futures import FIRST_COMPLETED
-from concurrent.futures import Future
-from concurrent.futures import ThreadPoolExecutor
-from concurrent.futures import as_completed
-from concurrent.futures import wait
-from dataclasses import dataclass
-from dataclasses import field
-from multiprocessing import Event
-from multiprocessing import Queue
-from multiprocessing import get_context
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, as_completed, wait
+from dataclasses import dataclass, field
+from multiprocessing import Event, Queue, get_context
 from multiprocessing.shared_memory import SharedMemory
-from typing import Any
-from typing import Dict
-from typing import Iterator
-from typing import List
-from typing import Optional
+from typing import Any, Dict, Iterator, List, Optional
 
 from opteryx import config as _cfg
 from opteryx.compiled.draken.morsels.morsel import Morsel
-from opteryx.compiled.draken.storage import read_morsel
-from opteryx.compiled.draken.storage import write_morsel
+from opteryx.compiled.draken.storage import read_morsel, write_morsel
 from opteryx.connectors.io_systems import create_filesystem
 from opteryx.connectors.parquet_io.cache import InMemoryParquetCache
 from opteryx.connectors.parquet_io.predicates import row_group_may_satisfy
@@ -921,8 +909,10 @@ def _io_worker(
 
             try:
                 from opteryx import config as _trace_cfg
-                from opteryx.connectors.parquet_io.reader import _parse_footer_envelope
-                from opteryx.connectors.parquet_io.reader import _read_footer_payload
+                from opteryx.connectors.parquet_io.reader import (
+                    _parse_footer_envelope,
+                    _read_footer_payload,
+                )
                 from opteryx.tracing import record_event
 
                 paths = command["paths"]
@@ -1538,15 +1528,19 @@ def iter_row_groups_io_process_v2(
     ring = _SharedMemoryRing(slot_bytes=slot_bytes, slot_count=slot_count, create=True)
     ring.initialize_free()
 
-    ctx = get_context("spawn")
-    command_q: Queue = ctx.Queue()
-    event_q: Queue = ctx.Queue()
-    cancel_event: Event = ctx.Event()
+    # Run IO worker in-process using a thread (replace process-based worker)
+    # Note: we keep the same queue/event semantics but use thread-safe primitives
+    # so the rest of the logic (command_q.get(), event_q.put(), cancel_event.wait(), etc.)
+    # continues to work with minimal changes.
+    command_q: queue.Queue = queue.Queue()
+    event_q: queue.Queue = queue.Queue()
+    cancel_event: threading.Event = threading.Event()
 
-    worker = ctx.Process(
+    worker = threading.Thread(
         target=_io_worker,
         args=(ring.name, slot_bytes, slot_count, command_q, event_q, cancel_event),
         daemon=True,
+        name="io-worker-thread",
     )
     worker.start()
 
@@ -1699,10 +1693,14 @@ def iter_row_groups_io_process_v2(
         except Exception:
             pass
 
+        # Thread-based worker: join and best-effort stop. Threads cannot be
+        # forcibly terminated; ensure the worker checks cancel_event periodically.
         worker.join(timeout=5)
         if worker.is_alive():
-            worker.terminate()
-            worker.join(timeout=5)
+            # No graceful way to terminate a Python thread; log situation and continue.
+            # The worker should exit after seeing cancel_event. If it doesn't, the
+            # process will continue and resources will be reclaimed at process exit.
+            pass
 
         # Force-reset any non-free slots to avoid reattach confusion in tests/dev.
         for slot_id in range(ring.slot_count):

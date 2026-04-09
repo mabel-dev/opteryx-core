@@ -11,14 +11,9 @@ structured access to events and computed metrics.
 """
 
 import json
-from collections import defaultdict
-from collections import deque
+from collections import defaultdict, deque
 from pathlib import Path
-from typing import Any
-from typing import Dict
-from typing import Iterator
-from typing import List
-from typing import Optional
+from typing import Any, Dict, Iterator, List, Optional
 
 
 class TraceReader:
@@ -162,8 +157,8 @@ class TraceReader:
         component = event.get("component")
         if not component:
             return "file"
-        if phase == "download" and component == "columns":
-            # Downloaded bytes for a row group are emitted as `columns`.
+        if phase in ("download", "buffer") and component == "columns":
+            # Downloaded/buffered bytes for a row group are emitted as `columns`.
             # Align with decode `rowgroup` events so both phases share one lane.
             return "rowgroup"
         return str(component)
@@ -372,6 +367,12 @@ class TraceReader:
             elif e["type"] == "trace_session_end":
                 t_end = e["timestamp"]
 
+        # When there is no trace_session_start event (older trace format), fall
+        # back to the earliest timestamp in the file so that all wall times are
+        # still relative rather than using enormous absolute epoch values.
+        if t0 is None and events:
+            t0 = min(e["timestamp"] for e in events)
+
         total_duration = (t_end - t0) if (t0 is not None and t_end is not None) else None
 
         ops: List[Dict[str, Any]] = []
@@ -413,7 +414,13 @@ class TraceReader:
             row["wall_end"] = ts - t0 if t0 is not None else ts
             row["rows_out"] = e.get("rows_out", 0) or 0
             row["duration_ns"] = e.get("duration_ns", 0) or 0
-            row["produced_rows"] = e.get("produced_rows", True)
+            # The event field is `produced_output`; `produced_rows` is the old name.
+            row["produced_rows"] = e.get("produced_output", e.get("produced_rows", True))
+            # When there was no phase="start" event the start and end times are
+            # identical.  Recover wall_start from the known duration so the bar
+            # has the correct width instead of collapsing to a single pixel.
+            if row["wall_start"] >= row["wall_end"] and row["duration_ns"] > 0:
+                row["wall_start"] = row["wall_end"] - row["duration_ns"] / 1e9
             ops.append(row)
 
         ops.sort(key=lambda row: (row.get("wall_start", 0), row.get("operator_name", "")))
@@ -450,7 +457,7 @@ class TraceReader:
             s["total_rows_in"] += e.get("rows_in", 0) or 0
             s["total_rows_out"] += e.get("rows_out", 0) or 0
             s["call_count"] += 1
-            if e.get("produced_rows", True):
+            if e.get("produced_output", e.get("produced_rows", True)):
                 s["producing_calls"] += 1
 
         result = []

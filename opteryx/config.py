@@ -6,8 +6,7 @@
 import json
 import typing
 from os import environ
-from typing import Optional
-from typing import Union
+from typing import Optional, Union
 
 
 def memory_allocation_calculation(allocation: Union[float, int]) -> int:
@@ -82,29 +81,6 @@ def parse_json(value: typing.Any, default: typing.Any = None) -> typing.Any:
         return json.loads(text)
     except json.JSONDecodeError:
         return default
-
-
-def parse_connector_targets(
-    value: typing.Any, default: Optional[typing.Iterable[str]] = None
-) -> frozenset[str]:
-    """
-    Parse a connector selector string such as ``LOCAL,GCS`` into uppercase tokens.
-    """
-    if value is None:
-        value = default
-    if value is None:
-        return frozenset()
-    if isinstance(value, str):
-        items = [part.strip().upper() for part in value.split(",") if part.strip()]
-    else:
-        items = [str(part).strip().upper() for part in value if str(part).strip()]
-    if not items:
-        return frozenset()
-    if "ALL" in items:
-        return frozenset({"ALL"})
-    if "NONE" in items:
-        return frozenset()
-    return frozenset(items)
 
 
 # fmt:off
@@ -316,9 +292,6 @@ IO_TARGET_SLICE_BYTES: int = int(get("IO_TARGET_SLICE_BYTES", 16 * 1024 * 1024))
 """Target serialized bytes per row-group slice when slicing is required."""
 
 
-_serial_reader_setting = get("FEATURE_USE_SERIAL_READER", "LOCAL")
-
-
 
 # FEATURE FLAGS
 class Features:
@@ -331,7 +304,6 @@ class Features:
     disable_predicate_pushdown = bool(get("FEATURE_DISABLE_PREDICATE_PUSHDOWN", False))
     disable_manifest_pruning = bool(get("FEATURE_DISABLE_MANIFEST_PRUNING", False))
     io_process_rowgroup_ring = str(get("FEATURE_IO_PROCESS_ROWGROUP_RING", "1")).lower() in ("1", "true", "yes")
-    use_serial_reader = parse_connector_targets(_serial_reader_setting, default=("LOCAL",))
     parquet_thread_scheduler = str(get("FEATURE_PARQUET_THREAD_SCHEDULER", "0")).lower() in ("1", "true", "yes")
     parquet_late_materialization = str(get("FEATURE_PARQUET_LATE_MATERIALIZATION", "1")).lower() in ("1", "true", "yes")
 

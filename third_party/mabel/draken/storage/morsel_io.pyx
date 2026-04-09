@@ -1120,15 +1120,41 @@ SINK_MEMORYVIEW = 4
 
 
 def _open_reader(path_or_handle):
+    """
+    Open a reader for the given path_or_handle.
+
+    Accepts:
+      - file-like objects (has .read()) -> return as-is
+      - bytes / bytearray -> return io.BytesIO(bytes(...))
+      - memoryview / buffer-supporting objects -> return a MemoryViewStreamOptimized
+        (zero-copy path) so callers can decode from a memoryview without copying.
+
+    Returns:
+      (handle, close_when_done, resolved_path)
+    """
     if hasattr(path_or_handle, "read"):
         return path_or_handle, False, None
-    if isinstance(path_or_handle, (bytes, bytearray, memoryview)):
+
+    # Bytes/bytearray: keep previous behaviour (BytesIO)
+    if isinstance(path_or_handle, (bytes, bytearray)):
         return io.BytesIO(bytes(path_or_handle)), True, None
+
+    # Prefer zero-copy for memoryview/buffer objects by returning MemoryViewStreamOptimized
     try:
         mv = memoryview(path_or_handle)
-        return io.BytesIO(mv.tobytes()), True, None
+        try:
+            # Import the optimized memoryview stream and return an instance that
+            # presents a file-like interface without creating an intermediate bytes object.
+            from opteryx.compiled.structures.memory_view_stream import MemoryViewStreamOptimized
+
+            return MemoryViewStreamOptimized(mv), True, None
+        except Exception:
+            # Fall back to the previous safe behaviour if the optimized stream
+            # is unavailable for any reason (keeps compatibility)
+            return io.BytesIO(mv.tobytes()), True, None
     except TypeError:
         pass
+
     path = os.fspath(path_or_handle)
     return open(path, "rb"), True, path
 
