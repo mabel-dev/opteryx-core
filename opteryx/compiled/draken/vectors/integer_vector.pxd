@@ -18,6 +18,7 @@ cdef class IntegerVector(Vector):
     cdef uint8_t* null_bitmap_ptr(self) noexcept
 
     cpdef list to_pylist(self)
+    cpdef IntegerVector take(self, int32_t[::1] indices)
     cdef void hash_into(self, uint64_t[::1] out_buf, Py_ssize_t offset=*) except *
 
 cdef IntegerVector from_arrow(object array)

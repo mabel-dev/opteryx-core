@@ -1820,9 +1820,9 @@ struct __pyx_opt_args_7opteryx_8compiled_6draken_7vectors_12int64_vector_from_pa
 };
 struct __pyx_opt_args_7opteryx_8compiled_6draken_7vectors_14integer_vector_13IntegerVector_hash_into;
 
-/* "opteryx/compiled/draken/vectors/integer_vector.pxd":21
- * 
+/* "opteryx/compiled/draken/vectors/integer_vector.pxd":22
  *     cpdef list to_pylist(self)
+ *     cpdef IntegerVector take(self, int32_t[::1] indices)
  *     cdef void hash_into(self, uint64_t[::1] out_buf, Py_ssize_t offset=*) except *             # <<<<<<<<<<<<<<
  * 
  * cdef IntegerVector from_arrow(object array)
@@ -2600,6 +2600,7 @@ static struct __pyx_vtabstruct_7opteryx_8compiled_6draken_7vectors_12int64_vecto
 struct __pyx_vtabstruct_7opteryx_8compiled_6draken_7vectors_14integer_vector_IntegerVector {
   struct __pyx_vtabstruct_7opteryx_8compiled_6draken_7vectors_6vector_Vector __pyx_base;
   PyObject *(*to_pylist)(struct __pyx_obj_7opteryx_8compiled_6draken_7vectors_14integer_vector_IntegerVector *, int __pyx_skip_dispatch);
+  struct __pyx_obj_7opteryx_8compiled_6draken_7vectors_14integer_vector_IntegerVector *(*take)(struct __pyx_obj_7opteryx_8compiled_6draken_7vectors_14integer_vector_IntegerVector *, __Pyx_memviewslice, int __pyx_skip_dispatch);
 };
 static struct __pyx_vtabstruct_7opteryx_8compiled_6draken_7vectors_14integer_vector_IntegerVector *__pyx_vtabptr_7opteryx_8compiled_6draken_7vectors_14integer_vector_IntegerVector;
 

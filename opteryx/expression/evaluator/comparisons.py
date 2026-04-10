@@ -7,28 +7,29 @@ import pyarrow as _pa
 
 from opteryx.exceptions import ColumnReferencedBeforeEvaluationError
 
-from .function_execution import _is_draken_vector
-from .function_execution import apply_bounded_function
+from .function_execution import _is_draken_vector, apply_bounded_function
 from .string_ops import _string_compare
-from .type_coercion import _coerce_date32
-from .type_coercion import _coerce_date32_set
-from .type_coercion import _coerce_float
-from .type_coercion import _coerce_float_set
-from .type_coercion import _coerce_int64
-from .type_coercion import _coerce_int64_set
-from .type_coercion import _coerce_interval
-from .type_coercion import _coerce_str
-from .type_coercion import _coerce_str_set
-from .type_coercion import _coerce_temporal_scalar_for_arrow
-from .type_coercion import _coerce_timestamp
-from .type_coercion import _coerce_timestamp_set
-from .type_coercion import _constant_scalar_value
-from .type_coercion import _dictionary_arrow_type
-from .type_coercion import _dictionary_compare_vector
-from .type_coercion import _is_constant_vector_like
-from .type_coercion import _is_dictionary_encoded_vector
-from .type_coercion import _is_null_as_boolvector
-from .type_coercion import _is_typed_constant_encoded_vector
+from .type_coercion import (
+    _coerce_date32,
+    _coerce_date32_set,
+    _coerce_float,
+    _coerce_float_set,
+    _coerce_int64,
+    _coerce_int64_set,
+    _coerce_interval,
+    _coerce_str,
+    _coerce_str_set,
+    _coerce_temporal_scalar_for_arrow,
+    _coerce_timestamp,
+    _coerce_timestamp_set,
+    _constant_scalar_value,
+    _dictionary_arrow_type,
+    _dictionary_compare_vector,
+    _is_constant_vector_like,
+    _is_dictionary_encoded_vector,
+    _is_null_as_boolvector,
+    _is_typed_constant_encoded_vector,
+)
 
 _EPOCH_DATE = datetime.date(1970, 1, 1)
 _EPOCH_DATETIME = datetime.datetime(1970, 1, 1)
@@ -395,7 +396,7 @@ def draken_compare(op: str, left, right, left_schema_type=None, right_schema_typ
         path = right
         parser = simdjson.Parser()
 
-        if not path.startswith("$."):
+        if path.startswith("$."):
             result = [None if doc is None else path in parser.parse(doc) for doc in docs]
         else:
 

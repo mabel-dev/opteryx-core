@@ -291,9 +291,9 @@ cdef inline uint64_t _short_string_hash(const uint8_t* ptr, size_t n) nogil:
 # ---------------------------------------------------------------------------
 
 cdef inline uint8_t _sv_ascii_lower(uint8_t b) noexcept nogil:
-    if b >= 65 and b <= 90:
-        return b + 32
-    return b
+    # Unsigned arithmetic: for b < 65, (b - 65) wraps around to a large number > 25.
+    # For 65 <= b <= 90, (b - 65) is 0..25.
+    return b + (32 * ((b - 65U) <= 25U))
 
 
 cdef inline bint _sv_byte_equals(uint8_t left, uint8_t right, bint ignore_case) noexcept nogil:
