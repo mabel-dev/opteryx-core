@@ -241,6 +241,95 @@ cdef class IntegerVector(Vector):
                     out.append(d32[i] if (byte >> (i & 7)) & 1 else None)
         return out
 
+    cpdef IntegerVector take(self, int32_t[::1] indices):
+        cdef Py_ssize_t i, n = indices.shape[0]
+        if self._has_const:
+            return IntegerVector.from_constant(
+                None if self._const_is_null else self._const_value,
+                n,
+                is_null=self._const_is_null,
+            )
+        cdef IntegerVector out = IntegerVector(self.ptr.type, <size_t>n)
+        cdef uint8_t* src_null = self.ptr.null_bitmap
+        cdef uint8_t* out_null = NULL
+        cdef Py_ssize_t out_nbytes
+        cdef int32_t src_idx
+        cdef uint8_t byte
+        cdef int8_t*  src8
+        cdef int16_t* src16
+        cdef int32_t* src32
+        cdef int8_t*  dst8
+        cdef int16_t* dst16
+        cdef int32_t* dst32
+
+        if self.ptr.itemsize == 1:
+            src8 = <int8_t*>self.ptr.data
+            dst8 = <int8_t*>out.ptr.data
+            if src_null == NULL:
+                for i in range(n):
+                    dst8[i] = src8[indices[i]]
+                out.ptr.null_bitmap = NULL
+            else:
+                out_nbytes = (n + 7) >> 3
+                out_null = <uint8_t*>malloc(out_nbytes)
+                if out_null == NULL:
+                    raise MemoryError()
+                memset(out_null, 0, out_nbytes)
+                for i in range(n):
+                    src_idx = indices[i]
+                    byte = src_null[src_idx >> 3]
+                    if byte & (1 << (src_idx & 7)):
+                        dst8[i] = src8[src_idx]
+                        out_null[i >> 3] |= <uint8_t>(1 << (i & 7))
+                    else:
+                        dst8[i] = 0
+                out.ptr.null_bitmap = out_null
+        elif self.ptr.itemsize == 2:
+            src16 = <int16_t*>self.ptr.data
+            dst16 = <int16_t*>out.ptr.data
+            if src_null == NULL:
+                for i in range(n):
+                    dst16[i] = src16[indices[i]]
+                out.ptr.null_bitmap = NULL
+            else:
+                out_nbytes = (n + 7) >> 3
+                out_null = <uint8_t*>malloc(out_nbytes)
+                if out_null == NULL:
+                    raise MemoryError()
+                memset(out_null, 0, out_nbytes)
+                for i in range(n):
+                    src_idx = indices[i]
+                    byte = src_null[src_idx >> 3]
+                    if byte & (1 << (src_idx & 7)):
+                        dst16[i] = src16[src_idx]
+                        out_null[i >> 3] |= <uint8_t>(1 << (i & 7))
+                    else:
+                        dst16[i] = 0
+                out.ptr.null_bitmap = out_null
+        else:
+            src32 = <int32_t*>self.ptr.data
+            dst32 = <int32_t*>out.ptr.data
+            if src_null == NULL:
+                for i in range(n):
+                    dst32[i] = src32[indices[i]]
+                out.ptr.null_bitmap = NULL
+            else:
+                out_nbytes = (n + 7) >> 3
+                out_null = <uint8_t*>malloc(out_nbytes)
+                if out_null == NULL:
+                    raise MemoryError()
+                memset(out_null, 0, out_nbytes)
+                for i in range(n):
+                    src_idx = indices[i]
+                    byte = src_null[src_idx >> 3]
+                    if byte & (1 << (src_idx & 7)):
+                        dst32[i] = src32[src_idx]
+                        out_null[i >> 3] |= <uint8_t>(1 << (i & 7))
+                    else:
+                        dst32[i] = 0
+                out.ptr.null_bitmap = out_null
+        return out
+
     cdef void hash_into(
         self,
         uint64_t[::1] out_buf,

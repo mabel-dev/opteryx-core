@@ -16,12 +16,16 @@ from typing import List
 
 from orso.types import OrsoTypes
 
-from opteryx.expression.functions import FunctionDefinition
-from opteryx.expression.functions import FunctionOverload
-from opteryx.expression.functions import KernelSpec
-from opteryx.expression.functions import LifecycleSpec
-from opteryx.expression.functions import ParameterSpec
-from opteryx.expression.functions import ReturnSpec
+from opteryx.compiled import vector_ops as compiled_vector_ops
+from opteryx.compiled.vector_ops import vector_ends_with, vector_starts_with
+from opteryx.expression.functions import (
+    FunctionDefinition,
+    FunctionOverload,
+    KernelSpec,
+    LifecycleSpec,
+    ParameterSpec,
+    ReturnSpec,
+)
 from opteryx.expression.functions.registrar import _make
 
 
@@ -194,6 +198,48 @@ def get_builtin_text_functions() -> List[FunctionDefinition]:
             engine="draken",
             summary="Extract rightmost characters.",
             cost=98.0,
+        ),
+        _make(
+            "_STARTS_WITH",
+            vector_starts_with,
+            OrsoTypes.BOOLEAN,
+            (
+                ParameterSpec(name="haystack", type_family="string"),
+                ParameterSpec(name="needle", type_family="string", constant_only=True),
+                ParameterSpec(
+                    name="case_insensitive",
+                    type_family="boolean",
+                    constant_only=True,
+                    optional=True,
+                ),
+                ParameterSpec(
+                    name="negated", type_family="boolean", constant_only=True, optional=True
+                ),
+            ),
+            engine="draken",
+            summary="Internal prefix match.",
+            cost=64.0,
+        ),
+        _make(
+            "_ENDS_WITH",
+            vector_ends_with,
+            OrsoTypes.BOOLEAN,
+            (
+                ParameterSpec(name="haystack", type_family="string"),
+                ParameterSpec(name="needle", type_family="string", constant_only=True),
+                ParameterSpec(
+                    name="case_insensitive",
+                    type_family="boolean",
+                    constant_only=True,
+                    optional=True,
+                ),
+                ParameterSpec(
+                    name="negated", type_family="boolean", constant_only=True, optional=True
+                ),
+            ),
+            engine="draken",
+            summary="Internal suffix match.",
+            cost=64.0,
         ),
     ]
 
