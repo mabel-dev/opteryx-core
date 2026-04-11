@@ -27,6 +27,10 @@ cdef class TimeVector(Vector):
 
     cpdef list to_pylist(self)
 
+    cpdef int64_t min(self)
+    cpdef int64_t max(self)
+    cpdef int64_t sum(self)
+
     cpdef uint64_t[::1] hash(self)
     cdef void hash_into(self, uint64_t[::1] out_buf, Py_ssize_t offset=*) except *
 

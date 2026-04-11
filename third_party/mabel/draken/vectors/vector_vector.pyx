@@ -131,6 +131,18 @@ cdef class VectorVector(ArrayVector):
         cdef ArrayVector taken = <ArrayVector> ArrayVector.take(self, indices)
         return _wrap_array_vector(taken, self._dimensions)
 
+    cpdef object min(self):
+        """Min is not defined for vector vectors."""
+        raise NotImplementedError("min() is not supported for VectorVector")
+
+    cpdef object max(self):
+        """Max is not defined for vector vectors."""
+        raise NotImplementedError("max() is not supported for VectorVector")
+
+    cpdef object sum(self):
+        """Sum is not defined for vector vectors."""
+        raise NotImplementedError("sum() is not supported for VectorVector")
+
     def __str__(self):
         if self.ptr == NULL:
             return "<VectorVector uninitialized>"

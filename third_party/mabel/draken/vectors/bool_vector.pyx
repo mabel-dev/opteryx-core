@@ -34,6 +34,13 @@ cdef const uint64_t FALSE_HASH = <uint64_t>0xc2fd8b2343f83ce7
 
 DEF BOOL_HASH_CHUNK = 1024
 
+
+cdef inline bint _bitmap_is_valid(uint8_t* bitmap, Py_ssize_t idx, Py_ssize_t bit_offset) noexcept nogil:
+    cdef Py_ssize_t bit_index = idx + bit_offset
+    cdef uint8_t byte = bitmap[bit_index >> 3]
+    return (byte >> (bit_index & 7)) & 1
+
+
 cdef class BoolVector(Vector):
     # Re-Cythonize this implementation when the pxd layout changes.
 
@@ -562,6 +569,108 @@ cdef class BoolVector(Vector):
             val = ((<uint8_t*>ptr.data)[i >> 3] >> (i & 7)) & 1
             out.append(bool(val))
         return out
+
+    cpdef int64_t min(self):
+        cdef DrakenFixedBuffer* ptr = self.ptr
+        cdef Py_ssize_t i, n = ptr.length
+        if n == 0:
+            raise ValueError("Cannot compute min of empty column")
+        if self._has_const:
+            if self._const_is_null:
+                raise ValueError("Cannot compute min of all-null column")
+            # For bool: min(true) = true, min(false) = false
+            return <int64_t>self._const_value
+
+        cdef uint8_t byte, bit, val
+        cdef bint found = False
+
+        # Find first non-null value
+        for i in range(n):
+            if ptr.null_bitmap != NULL:
+                if not _bitmap_is_valid(ptr.null_bitmap, i, 0):
+                    continue
+            val = ((<uint8_t*>ptr.data)[i >> 3] >> (i & 7)) & 1
+            found = True
+            # If we find false (0), that's the minimum
+            if not val:
+                return <int64_t>0
+            break
+
+        if not found:
+            raise ValueError("Cannot compute min of all-null column")
+
+        # Check remaining values for false
+        for i in range(i + 1, n):
+            if ptr.null_bitmap != NULL:
+                if not _bitmap_is_valid(ptr.null_bitmap, i, 0):
+                    continue
+            val = ((<uint8_t*>ptr.data)[i >> 3] >> (i & 7)) & 1
+            if not val:
+                return <int64_t>0
+
+        # All non-null values are true
+        return <int64_t>1
+
+    cpdef int64_t max(self):
+        cdef DrakenFixedBuffer* ptr = self.ptr
+        cdef Py_ssize_t i, n = ptr.length
+        if n == 0:
+            raise ValueError("Cannot compute max of empty column")
+        if self._has_const:
+            if self._const_is_null:
+                raise ValueError("Cannot compute max of all-null column")
+            return <int64_t>self._const_value
+
+        cdef uint8_t byte, bit, val
+        cdef bint found = False
+
+        # Find first non-null value
+        for i in range(n):
+            if ptr.null_bitmap != NULL:
+                if not _bitmap_is_valid(ptr.null_bitmap, i, 0):
+                    continue
+            val = ((<uint8_t*>ptr.data)[i >> 3] >> (i & 7)) & 1
+            found = True
+            # If we find true (1), that's the maximum
+            if val:
+                return <int64_t>1
+            break
+
+        if not found:
+            raise ValueError("Cannot compute max of all-null column")
+
+        # Check remaining values for true
+        for i in range(i + 1, n):
+            if ptr.null_bitmap != NULL:
+                if not _bitmap_is_valid(ptr.null_bitmap, i, 0):
+                    continue
+            val = ((<uint8_t*>ptr.data)[i >> 3] >> (i & 7)) & 1
+            if val:
+                return <int64_t>1
+
+        # All non-null values are false
+        return <int64_t>0
+
+    cpdef int64_t sum(self):
+        # sum(bool) = count of true values
+        if self._has_const:
+            if self._const_is_null:
+                return 0
+            return <int64_t>(self.ptr.length * self._const_value)
+
+        cdef DrakenFixedBuffer* ptr = self.ptr
+        cdef Py_ssize_t i, n = ptr.length
+        cdef int64_t total = 0
+        cdef uint8_t val
+
+        for i in range(n):
+            if ptr.null_bitmap != NULL:
+                if not _bitmap_is_valid(ptr.null_bitmap, i, 0):
+                    continue
+            val = ((<uint8_t*>ptr.data)[i >> 3] >> (i & 7)) & 1
+            if val:
+                total += 1
+        return total
 
     cdef void hash_into(
         self,

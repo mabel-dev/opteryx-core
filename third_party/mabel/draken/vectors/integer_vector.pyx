@@ -38,6 +38,12 @@ from opteryx.compiled.draken.vectors.vector cimport MIX_HASH_CONSTANT, NULL_HASH
 DEF INTEGER_HASH_CHUNK = 1024
 
 
+cdef inline bint _bitmap_is_valid(uint8_t* bitmap, Py_ssize_t idx, Py_ssize_t bit_offset) noexcept nogil:
+    cdef Py_ssize_t bit_index = idx + bit_offset
+    cdef uint8_t byte = bitmap[bit_index >> 3]
+    return (byte >> (bit_index & 7)) & 1
+
+
 cdef class IntegerVector(Vector):
     """Fixed-width signed integer vector supporting int8, int16, and int32 widths."""
 
@@ -240,6 +246,179 @@ cdef class IntegerVector(Vector):
                     byte = ptr.null_bitmap[i >> 3]
                     out.append(d32[i] if (byte >> (i & 7)) & 1 else None)
         return out
+
+    cpdef int64_t min(self):
+        cdef DrakenFixedBuffer* ptr = self.ptr
+        cdef Py_ssize_t i, n = ptr.length
+        if n == 0:
+            raise ValueError("Cannot compute min of empty column")
+        if self._has_const:
+            if self._const_is_null:
+                raise ValueError("Cannot compute min of all-null column")
+            return self._const_value
+
+        cdef int64_t m
+        cdef int8_t* d8
+        cdef int16_t* d16
+        cdef int32_t* d32
+        cdef bint found = False
+
+        if ptr.itemsize == 1:
+            d8 = <int8_t*>ptr.data
+            for i in range(n):
+                if ptr.null_bitmap != NULL:
+                    if not _bitmap_is_valid(ptr.null_bitmap, i, self.null_bit_offset):
+                        continue
+                m = <int64_t>d8[i]
+                found = True
+                break
+            if not found:
+                raise ValueError("Cannot compute min of all-null column")
+            for i in range(i + 1, n):
+                if ptr.null_bitmap != NULL:
+                    if not _bitmap_is_valid(ptr.null_bitmap, i, self.null_bit_offset):
+                        continue
+                if <int64_t>d8[i] < m:
+                    m = <int64_t>d8[i]
+        elif ptr.itemsize == 2:
+            d16 = <int16_t*>ptr.data
+            for i in range(n):
+                if ptr.null_bitmap != NULL:
+                    if not _bitmap_is_valid(ptr.null_bitmap, i, self.null_bit_offset):
+                        continue
+                m = <int64_t>d16[i]
+                found = True
+                break
+            if not found:
+                raise ValueError("Cannot compute min of all-null column")
+            for i in range(i + 1, n):
+                if ptr.null_bitmap != NULL:
+                    if not _bitmap_is_valid(ptr.null_bitmap, i, self.null_bit_offset):
+                        continue
+                if <int64_t>d16[i] < m:
+                    m = <int64_t>d16[i]
+        else:
+            d32 = <int32_t*>ptr.data
+            for i in range(n):
+                if ptr.null_bitmap != NULL:
+                    if not _bitmap_is_valid(ptr.null_bitmap, i, self.null_bit_offset):
+                        continue
+                m = <int64_t>d32[i]
+                found = True
+                break
+            if not found:
+                raise ValueError("Cannot compute min of all-null column")
+            for i in range(i + 1, n):
+                if ptr.null_bitmap != NULL:
+                    if not _bitmap_is_valid(ptr.null_bitmap, i, self.null_bit_offset):
+                        continue
+                if <int64_t>d32[i] < m:
+                    m = <int64_t>d32[i]
+        return m
+
+    cpdef int64_t max(self):
+        cdef DrakenFixedBuffer* ptr = self.ptr
+        cdef Py_ssize_t i, n = ptr.length
+        if n == 0:
+            raise ValueError("Cannot compute max of empty column")
+        if self._has_const:
+            if self._const_is_null:
+                raise ValueError("Cannot compute max of all-null column")
+            return self._const_value
+
+        cdef int64_t m
+        cdef int8_t* d8
+        cdef int16_t* d16
+        cdef int32_t* d32
+        cdef bint found = False
+
+        if ptr.itemsize == 1:
+            d8 = <int8_t*>ptr.data
+            for i in range(n):
+                if ptr.null_bitmap != NULL:
+                    if not _bitmap_is_valid(ptr.null_bitmap, i, self.null_bit_offset):
+                        continue
+                m = <int64_t>d8[i]
+                found = True
+                break
+            if not found:
+                raise ValueError("Cannot compute max of all-null column")
+            for i in range(i + 1, n):
+                if ptr.null_bitmap != NULL:
+                    if not _bitmap_is_valid(ptr.null_bitmap, i, self.null_bit_offset):
+                        continue
+                if <int64_t>d8[i] > m:
+                    m = <int64_t>d8[i]
+        elif ptr.itemsize == 2:
+            d16 = <int16_t*>ptr.data
+            for i in range(n):
+                if ptr.null_bitmap != NULL:
+                    if not _bitmap_is_valid(ptr.null_bitmap, i, self.null_bit_offset):
+                        continue
+                m = <int64_t>d16[i]
+                found = True
+                break
+            if not found:
+                raise ValueError("Cannot compute max of all-null column")
+            for i in range(i + 1, n):
+                if ptr.null_bitmap != NULL:
+                    if not _bitmap_is_valid(ptr.null_bitmap, i, self.null_bit_offset):
+                        continue
+                if <int64_t>d16[i] > m:
+                    m = <int64_t>d16[i]
+        else:
+            d32 = <int32_t*>ptr.data
+            for i in range(n):
+                if ptr.null_bitmap != NULL:
+                    if not _bitmap_is_valid(ptr.null_bitmap, i, self.null_bit_offset):
+                        continue
+                m = <int64_t>d32[i]
+                found = True
+                break
+            if not found:
+                raise ValueError("Cannot compute max of all-null column")
+            for i in range(i + 1, n):
+                if ptr.null_bitmap != NULL:
+                    if not _bitmap_is_valid(ptr.null_bitmap, i, self.null_bit_offset):
+                        continue
+                if <int64_t>d32[i] > m:
+                    m = <int64_t>d32[i]
+        return m
+
+    cpdef int64_t sum(self):
+        if self._has_const:
+            if self._const_is_null:
+                return 0
+            return <int64_t>(self.ptr.length * self._const_value)
+        cdef DrakenFixedBuffer* ptr = self.ptr
+        cdef Py_ssize_t i, n = ptr.length
+        cdef int64_t total = 0
+        cdef int8_t* d8
+        cdef int16_t* d16
+        cdef int32_t* d32
+
+        if ptr.itemsize == 1:
+            d8 = <int8_t*>ptr.data
+            for i in range(n):
+                if ptr.null_bitmap != NULL:
+                    if not _bitmap_is_valid(ptr.null_bitmap, i, self.null_bit_offset):
+                        continue
+                total += <int64_t>d8[i]
+        elif ptr.itemsize == 2:
+            d16 = <int16_t*>ptr.data
+            for i in range(n):
+                if ptr.null_bitmap != NULL:
+                    if not _bitmap_is_valid(ptr.null_bitmap, i, self.null_bit_offset):
+                        continue
+                total += <int64_t>d16[i]
+        else:
+            d32 = <int32_t*>ptr.data
+            for i in range(n):
+                if ptr.null_bitmap != NULL:
+                    if not _bitmap_is_valid(ptr.null_bitmap, i, self.null_bit_offset):
+                        continue
+                total += <int64_t>d32[i]
+        return total
 
     cpdef IntegerVector take(self, int32_t[::1] indices):
         cdef Py_ssize_t i, n = indices.shape[0]

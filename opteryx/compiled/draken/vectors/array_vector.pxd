@@ -23,6 +23,9 @@ cdef class ArrayVector(Vector):
         uint64_t[::1] out_buf,
         Py_ssize_t offset=*
     ) except *
+    cpdef object min(self)
+    cpdef object max(self)
+    cpdef object sum(self)
 
 
 cdef ArrayVector from_arrow(object array)

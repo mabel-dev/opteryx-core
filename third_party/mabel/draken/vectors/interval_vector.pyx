@@ -920,6 +920,76 @@ cdef class IntervalVector(Vector):
             for i in range(n):
                 dst[i] = data[i].months
 
+    cpdef object min(self):
+        """Return interval with minimum duration (by microseconds), or None if all null or empty."""
+        cdef DrakenFixedBuffer* ptr = self.ptr
+        cdef Py_ssize_t n = ptr.length
+        cdef Py_ssize_t i
+        cdef IntervalValue* data = <IntervalValue*> ptr.data
+        cdef IntervalValue min_val
+        cdef bint found = False
+
+        for i in range(n):
+            if not _is_valid(ptr, i):
+                continue
+
+            if not found:
+                min_val = data[i]
+                found = True
+            else:
+                if data[i].microseconds < min_val.microseconds:
+                    min_val = data[i]
+
+        if not found:
+            return None
+        return (min_val.months, min_val.microseconds)
+
+    cpdef object max(self):
+        """Return interval with maximum duration (by microseconds), or None if all null or empty."""
+        cdef DrakenFixedBuffer* ptr = self.ptr
+        cdef Py_ssize_t n = ptr.length
+        cdef Py_ssize_t i
+        cdef IntervalValue* data = <IntervalValue*> ptr.data
+        cdef IntervalValue max_val
+        cdef bint found = False
+
+        for i in range(n):
+            if not _is_valid(ptr, i):
+                continue
+
+            if not found:
+                max_val = data[i]
+                found = True
+            else:
+                if data[i].microseconds > max_val.microseconds:
+                    max_val = data[i]
+
+        if not found:
+            return None
+        return (max_val.months, max_val.microseconds)
+
+    cpdef object sum(self):
+        """Sum intervals by adding months and microseconds components separately."""
+        cdef DrakenFixedBuffer* ptr = self.ptr
+        cdef Py_ssize_t n = ptr.length
+        cdef Py_ssize_t i
+        cdef IntervalValue* data = <IntervalValue*> ptr.data
+        cdef int64_t sum_months = 0
+        cdef int64_t sum_microseconds = 0
+        cdef int64_t valid_count = 0
+
+        for i in range(n):
+            if not _is_valid(ptr, i):
+                continue
+
+            sum_months += data[i].months
+            sum_microseconds += data[i].microseconds
+            valid_count += 1
+
+        if valid_count == 0:
+            return None
+        return (sum_months, sum_microseconds)
+
     def __str__(self):
         cdef list preview = []
         cdef Py_ssize_t i, n = buf_length(self.ptr)

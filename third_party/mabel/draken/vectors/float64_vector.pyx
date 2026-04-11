@@ -57,6 +57,12 @@ cdef inline uint32_t _read_packed_code(const uint8_t* codes, uint8_t code_width,
     return (<const uint32_t*>codes)[row_idx]
 
 
+cdef inline bint _bitmap_is_valid(uint8_t* bitmap, Py_ssize_t idx, Py_ssize_t bit_offset) noexcept nogil:
+    cdef Py_ssize_t bit_index = idx + bit_offset
+    cdef uint8_t byte = bitmap[bit_index >> 3]
+    return (byte >> (bit_index & 7)) & 1
+
+
 cdef void _release_dict_storage(Float64Vector vec) noexcept:
     if vec._dict_codes != NULL:
         free(vec._dict_codes)
@@ -614,6 +620,9 @@ cdef class Float64Vector(Vector):
         cdef Py_ssize_t i, n = ptr.length
         cdef double total = 0.0
         for i in range(n):
+            if ptr.null_bitmap != NULL:
+                if not _bitmap_is_valid(ptr.null_bitmap, i, self.null_bit_offset):  # null
+                    continue
             total += data[i]
         return total
 
@@ -627,7 +636,6 @@ cdef class Float64Vector(Vector):
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef double* data = <double*> ptr.data
         cdef Py_ssize_t i, n = ptr.length
-        cdef uint8_t byte, bit
         cdef bint found = False
         if n == 0:
             raise ValueError("Cannot compute min of empty column")
@@ -635,9 +643,7 @@ cdef class Float64Vector(Vector):
         cdef double m = 0.0
         for i in range(n):
             if ptr.null_bitmap != NULL:
-                byte = ptr.null_bitmap[i >> 3]
-                bit = (byte >> (i & 7)) & 1
-                if not bit:
+                if not _bitmap_is_valid(ptr.null_bitmap, i, self.null_bit_offset):  # null
                     continue
             m = data[i]
             found = True
@@ -648,9 +654,7 @@ cdef class Float64Vector(Vector):
 
         for i in range(i + 1, n):
             if ptr.null_bitmap != NULL:
-                byte = ptr.null_bitmap[i >> 3]
-                bit = (byte >> (i & 7)) & 1
-                if not bit:
+                if not _bitmap_is_valid(ptr.null_bitmap, i, self.null_bit_offset):  # null
                     continue
             if data[i] < m:
                 m = data[i]
@@ -666,7 +670,6 @@ cdef class Float64Vector(Vector):
         cdef DrakenFixedBuffer* ptr = self.ptr
         cdef double* data = <double*> ptr.data
         cdef Py_ssize_t i, n = ptr.length
-        cdef uint8_t byte, bit
         cdef bint found = False
         if n == 0:
             raise ValueError("Cannot compute max of empty column")
@@ -674,9 +677,7 @@ cdef class Float64Vector(Vector):
         cdef double m = 0.0
         for i in range(n):
             if ptr.null_bitmap != NULL:
-                byte = ptr.null_bitmap[i >> 3]
-                bit = (byte >> (i & 7)) & 1
-                if not bit:
+                if not _bitmap_is_valid(ptr.null_bitmap, i, self.null_bit_offset):  # null
                     continue
             m = data[i]
             found = True
@@ -687,9 +688,7 @@ cdef class Float64Vector(Vector):
 
         for i in range(i + 1, n):
             if ptr.null_bitmap != NULL:
-                byte = ptr.null_bitmap[i >> 3]
-                bit = (byte >> (i & 7)) & 1
-                if not bit:
+                if not _bitmap_is_valid(ptr.null_bitmap, i, self.null_bit_offset):  # null
                     continue
             if data[i] > m:
                 m = data[i]

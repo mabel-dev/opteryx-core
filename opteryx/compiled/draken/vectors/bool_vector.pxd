@@ -2,7 +2,7 @@
 
 # cython: language_level=3
 
-from libc.stdint cimport int32_t, int8_t, uint8_t, uint64_t
+from libc.stdint cimport int32_t, int8_t, int64_t, uint8_t, uint64_t
 from opteryx.compiled.draken.core.buffers cimport ConstAccessor, DrakenFixedBuffer
 from opteryx.compiled.draken.vectors.vector cimport Vector
 
@@ -26,6 +26,9 @@ cdef class BoolVector(Vector):
     cpdef int8_t all(self)
     cpdef int8_t[::1] is_null(self)
     cpdef list to_pylist(self)
+    cpdef int64_t min(self)
+    cpdef int64_t max(self)
+    cpdef int64_t sum(self)
     cdef void hash_into(self, uint64_t[::1] out_buf, Py_ssize_t offset=*) except *
     cpdef BoolVector and_vector(self, BoolVector other)
     cpdef BoolVector or_vector(self, BoolVector other)
