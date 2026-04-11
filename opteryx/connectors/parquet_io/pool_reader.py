@@ -359,10 +359,17 @@ def _emit_loop(
     copy): reserves a pool segment, writes the Morsel directly into it via
     _PoolWriter, then finalizes.  Falls back to commit(bytes) if the size
     estimate is too small or the reservation fails.
+
+    Optimized for GIL contention: defers metrics updates and batches metadata
+    creation outside of lock-held regions.
     """
     # Rolling size estimator for the reserve-and-write fast path.
     _size_history: deque = deque(maxlen=16)
     _RESERVE_INITIAL_BYTES = 8 * 1024 * 1024  # 8 MB conservative start
+
+    # Local metrics batching to reduce lock contention
+    _local_serialize_ns = 0
+    _local_payload_sizes = []
 
     def _reserve_estimate() -> int:
         if not _size_history:
@@ -378,10 +385,8 @@ def _emit_loop(
                 continue
 
             emit_start_ns = time.monotonic_ns()
-            with metrics_lock:
-                metrics["io_transfer_emit_wait_ns"] += max(
-                    0, emit_start_ns - (state.completed_ns or emit_start_ns)
-                )
+            # Defer metrics update until after serialization
+            emit_wait_delta = max(0, emit_start_ns - (state.completed_ns or emit_start_ns))
 
             vectors = [state.columns[name] for name in state.column_order]
             morsel = Morsel.from_vectors(list(state.column_order), vectors)
@@ -423,9 +428,18 @@ def _emit_loop(
             serialize_ns = time.monotonic_ns() - serialize_start_ns
             _size_history.append(actual_bytes)
 
-            with metrics_lock:
-                metrics["io_serialize_ns"] += serialize_ns
-                metrics["transfer_payload_sizes"].append(actual_bytes)
+            # Batch local metrics (deferred to reduce lock contention)
+            _local_serialize_ns += serialize_ns
+            _local_payload_sizes.append(actual_bytes)
+
+            # Acquire lock only once per 16 row groups (or when local buffers fill)
+            if len(_local_payload_sizes) >= 16:
+                with metrics_lock:
+                    metrics["io_transfer_emit_wait_ns"] += emit_wait_delta
+                    metrics["io_serialize_ns"] += _local_serialize_ns
+                    metrics["transfer_payload_sizes"].extend(_local_payload_sizes)
+                _local_serialize_ns = 0
+                _local_payload_sizes = []
 
             metadata = {
                 "__path__": state.path,
@@ -475,6 +489,12 @@ def _emit_loop(
                 raise RuntimeError("Event queue full: consumer not keeping up")
 
     except Exception as err:
+        # Flush remaining metrics before error
+        if _local_payload_sizes:
+            with metrics_lock:
+                metrics["io_serialize_ns"] += _local_serialize_ns
+                metrics["transfer_payload_sizes"].extend(_local_payload_sizes)
+
         error_event = {
             "type": _EVENT_TRANSFER_ERROR,
             "message": str(err),
