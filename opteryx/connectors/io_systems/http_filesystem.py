@@ -8,10 +8,14 @@ import urllib.parse
 from concurrent.futures import as_completed
 from dataclasses import dataclass
 from enum import Enum
-from typing import List, Tuple, Union
+from typing import List
+from typing import Tuple
+from typing import Union
 
-from opteryx.connectors.parquet_io.thread_pool_manager import LazyPoolProxy, get_filesystem_pool
-from opteryx.exceptions import DatasetReadError, MissingDependencyError
+from opteryx.connectors.parquet_io.thread_pool_manager import LazyPoolProxy
+from opteryx.connectors.parquet_io.thread_pool_manager import get_filesystem_pool
+from opteryx.exceptions import DatasetReadError
+from opteryx.exceptions import MissingDependencyError
 
 
 # File type enumeration (minimal, no Arrow dependency)

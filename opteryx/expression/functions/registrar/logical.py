@@ -3,7 +3,6 @@ from __future__ import annotations
 from typing import List
 
 import numpy
-from orso.types import OrsoTypes
 
 # Local implementation imports (kept as late imports inside function if heavy)
 from opteryx.compiled.vector_ops import vector_iif as _vector_iif
@@ -29,6 +28,7 @@ from opteryx.expression.functions.implementations.utility import (
 # Local helpers provided by registrar package
 from opteryx.expression.functions.registrar import _case_return_type
 from opteryx.expression.functions.registrar import _coalesce_return_type
+from orso.types import OrsoTypes
 
 
 def _coalesce(*arrays):

@@ -8,14 +8,13 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
-from orso.types import OrsoTypes
-
 from opteryx.compiled.rugo.converters.orso import JSONL_ARRAY_INNER_TYPE_ALIASES
 from opteryx.compiled.rugo.converters.orso import JSONL_TYPE_MAP
 from opteryx.compiled.rugo.converters.orso import ORSO_TYPE_ALIASES
 from opteryx.compiled.rugo.converters.orso import PARQUET_LOGICAL_COMPLEX_PREFIXES
 from opteryx.compiled.rugo.converters.orso import PARQUET_LOGICAL_TYPE_MAP
 from opteryx.compiled.rugo.converters.orso import PARQUET_PHYSICAL_TYPE_MAP
+from orso.types import OrsoTypes
 
 _TYPE_PARAMETER_PROBES = OrderedDict(
     [

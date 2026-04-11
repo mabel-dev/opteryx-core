@@ -14,9 +14,6 @@ from typing import Dict
 from typing import Optional
 from typing import Tuple
 
-from orso.schema import RelationSchema
-from orso.types import OrsoTypes
-
 from opteryx.compiled.draken.morsels.morsel import Morsel
 from opteryx.connectors import TableType
 from opteryx.connectors.base.base_connector import BaseConnector
@@ -28,6 +25,8 @@ from opteryx.exceptions import DatasetNotFoundError
 from opteryx.exceptions import EmptyDatasetError
 from opteryx.tracing import record_event
 from opteryx.utils.parquet_decoder import parquet_decoder
+from orso.schema import RelationSchema
+from orso.types import OrsoTypes
 
 OS_SEP = os.sep
 PARQUET_SUFFIX = ".parquet"

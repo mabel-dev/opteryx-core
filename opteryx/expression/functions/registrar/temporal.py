@@ -1,9 +1,8 @@
-from orso.types import OrsoTypes
-
 from opteryx.expression.functions import ParameterSpec
 
 # Use package-level helper to construct concise FunctionDefinition entries.
 from opteryx.expression.functions.registrar import _make
+from orso.types import OrsoTypes
 
 
 def get_builtin_temporal_functions() -> list:

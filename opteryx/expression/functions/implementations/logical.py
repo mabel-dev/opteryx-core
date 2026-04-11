@@ -17,7 +17,6 @@ logical operators respectively.
 
 import numpy
 import pyarrow
-
 from opteryx.exceptions import IncompatibleTypesError
 
 

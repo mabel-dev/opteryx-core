@@ -2,11 +2,11 @@ import gc
 from typing import Generator
 
 import pyarrow
-
-from opteryx import config
 from opteryx.config import features
 from opteryx.exceptions import InvalidInternalStateError
 from opteryx.utils.free_threading import is_free_threading_available
+
+from opteryx import config
 
 from .serial_engine import ResultType
 from .serial_engine import execute as serial_execute

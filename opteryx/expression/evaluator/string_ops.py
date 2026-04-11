@@ -2,9 +2,11 @@
 
 import datetime
 
-from opteryx.exceptions import ColumnReferencedBeforeEvaluationError
-from opteryx.compiled.vector_ops import vector_like, vector_rlike, vector_contains
+from opteryx.compiled.vector_ops import vector_contains
 from opteryx.compiled.vector_ops import vector_in_list
+from opteryx.compiled.vector_ops import vector_like
+from opteryx.compiled.vector_ops import vector_rlike
+from opteryx.exceptions import ColumnReferencedBeforeEvaluationError
 
 from .function_execution import _is_draken_vector
 from .function_execution import apply_bounded_function

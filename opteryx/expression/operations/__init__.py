@@ -15,10 +15,7 @@ Main entry points:
 
 import numpy
 import pyarrow
-from orso.types import OrsoTypes
-
 from opteryx.compiled.vector_ops import vector_contains
-
 from opteryx.expression.operations import array_ops
 from opteryx.expression.operations import comparisons
 from opteryx.expression.operations import list_ops
@@ -35,6 +32,7 @@ from opteryx.expression.operations.fastpath_telemetry import record_constant_fas
 from opteryx.expression.operations.fastpath_telemetry import record_constant_fastpath_hit
 from opteryx.expression.operations.fastpath_telemetry import reset_fastpath_telemetry
 from opteryx.expression.operations.type_coercion import to_temporal_array
+from orso.types import OrsoTypes
 
 # Operators that should skip null compression during filtering
 _SKIP_COMPRESSION_OPS = frozenset(

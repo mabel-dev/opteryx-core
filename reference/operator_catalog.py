@@ -7,14 +7,13 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Any
 
-from orso.types import OrsoTypes
-
 from opteryx.expression.operator_catalog import OPERATOR_DEFINITIONS
 from opteryx.expression.operator_catalog import OperatorSignatureDefinition
 from opteryx.expression.operator_catalog import default_operator_friendly_name
 from opteryx.expression.operator_catalog import get_operator_definition
 from opteryx.expression.operator_catalog import get_operator_signatures
 from opteryx.expression.operator_catalog import get_operator_sql_symbol
+from orso.types import OrsoTypes
 
 
 def _type_id(type_name: OrsoTypes | None) -> str | None:

@@ -5,14 +5,13 @@
 
 from typing import Tuple
 
-from orso.types import OrsoTypes
-
 from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.expression import NodeType
 from opteryx.expression import get_all_nodes_of_type
 from opteryx.models import Node
 from opteryx.planner.binder.binder import inner_binder
 from opteryx.planner.binder.binding_context import BindingContext
+from orso.types import OrsoTypes
 
 
 def visit_filter(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:

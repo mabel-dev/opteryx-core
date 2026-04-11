@@ -42,8 +42,9 @@ class _QueryTelemetry:
         """
         Return telemetry as a dictionary
         """
-        import opteryx
         from opteryx.utils.firestore_utils import sanitize_for_firestore
+
+        import opteryx
 
         readings_dict = dict(self._reading)
 

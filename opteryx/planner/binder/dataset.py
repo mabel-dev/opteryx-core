@@ -5,11 +5,6 @@
 
 from typing import Tuple
 
-from orso.schema import FlatColumn
-from orso.schema import RelationSchema
-from orso.tools import random_string
-from orso.types import OrsoTypes
-
 from opteryx.exceptions import AmbiguousDatasetError
 from opteryx.exceptions import InvalidFunctionParameterError
 from opteryx.exceptions import UnsupportedSyntaxError
@@ -17,6 +12,10 @@ from opteryx.expression import NodeType
 from opteryx.models import LogicalColumn
 from opteryx.models import Node
 from opteryx.planner.binder.binding_context import BindingContext
+from orso.schema import FlatColumn
+from orso.schema import RelationSchema
+from orso.tools import random_string
+from orso.types import OrsoTypes
 
 
 def visit_function_dataset(

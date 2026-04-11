@@ -26,26 +26,37 @@ THREADING MODEL
 from __future__ import annotations
 
 import ctypes
-import io
-import math
 import queue
 import threading
 import time
 import traceback
 import zlib
 from collections import deque
-from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, as_completed, wait
-from dataclasses import dataclass, field
-from multiprocessing import Event, Queue, get_context
-from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
+from concurrent.futures import FIRST_COMPLETED
+from concurrent.futures import Future
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import as_completed
+from concurrent.futures import wait
+from dataclasses import dataclass
+from dataclasses import field
+from multiprocessing import Event
+from multiprocessing import Queue
+from typing import Any
+from typing import Dict
+from typing import Iterator
+from typing import List
+from typing import Optional
+from typing import Tuple
 
-from opteryx import config as _cfg
 from opteryx.compiled.draken.morsels.morsel import Morsel
-from opteryx.compiled.draken.storage import read_morsel, write_morsel
+from opteryx.compiled.draken.storage import read_morsel
+from opteryx.compiled.draken.storage import write_morsel
 from opteryx.compiled.structures.memory_pool import MemoryPool
 from opteryx.connectors.io_systems import create_filesystem
 from opteryx.connectors.parquet_io.cache import InMemoryParquetCache
 from opteryx.connectors.parquet_io.predicates import row_group_may_satisfy
+
+from opteryx import config as _cfg
 
 _EVENT_IO_READY = "io_ready"
 _EVENT_ROWGROUP_READY = "rowgroup_ready"
@@ -222,8 +233,9 @@ def _read_column_task(
     submitted_ns: int,
     connector: Optional[str] = None,
 ) -> dict:
-    from opteryx import config as _trace_cfg
     from opteryx.tracing import record_event
+
+    from opteryx import config as _trace_cfg
 
     task_start_ns = time.monotonic_ns()
     queue_wait_ns = task_start_ns - submitted_ns
@@ -274,8 +286,9 @@ def _decode_column_task(
     codec_metrics: Optional[Dict[str, _CodecMetrics]] = None,
     scan_codec_metrics: Optional[Dict[str, _CodecMetrics]] = None,
 ) -> dict:
-    from opteryx import config as _trace_cfg
     from opteryx.tracing import record_event
+
+    from opteryx import config as _trace_cfg
 
     task_start_ns = time.monotonic_ns()
     queue_wait_ns = task_start_ns - submitted_ns
@@ -505,607 +518,599 @@ def _io_worker(
 
     event_q.put({"type": _EVENT_IO_READY})
 
-    try:
-        while True:
-            command = command_q.get()
-            cmd_type = command.get("type")
-            if cmd_type == _CMD_SHUTDOWN:
-                return
-            if cmd_type == _CMD_SCAN_CANCEL:
-                cancel_event.set()
-                continue
-            if cmd_type != _CMD_SCAN_START:
-                continue
+    while True:
+        command = command_q.get()
+        cmd_type = command.get("type")
+        if cmd_type == _CMD_SHUTDOWN:
+            return
+        if cmd_type == _CMD_SCAN_CANCEL:
+            cancel_event.set()
+            continue
+        if cmd_type != _CMD_SCAN_START:
+            continue
 
-            cancel_event.clear()
-            metrics = {
-                "io_transfer_ready_backlog_peak": 0,
-                "io_transfer_emit_wait_ns": 0,
-                "io_serialize_ns": 0,
-                "ranges_in_flight_peak": 0,
-                "active_files_peak": 0,
-                "active_rowgroups_peak": 0,
-                "row_groups_pruned": 0,
-                "rowgroups_in_flight_cap": 0,
-                "transfer_payload_sizes": [],
-                "io_pool_commits": 0,
-                "io_pool_bytes_committed": 0,
-                "io_scheduler_empty_wait_events": 0,
-                "io_scheduler_empty_wait_ns": 0,
-            }
+        cancel_event.clear()
+        metrics = {
+            "io_transfer_ready_backlog_peak": 0,
+            "io_transfer_emit_wait_ns": 0,
+            "io_serialize_ns": 0,
+            "ranges_in_flight_peak": 0,
+            "active_files_peak": 0,
+            "active_rowgroups_peak": 0,
+            "row_groups_pruned": 0,
+            "rowgroups_in_flight_cap": 0,
+            "transfer_payload_sizes": [],
+            "io_pool_commits": 0,
+            "io_pool_bytes_committed": 0,
+            "io_scheduler_empty_wait_events": 0,
+            "io_scheduler_empty_wait_ns": 0,
+        }
 
-            # Per-scan codec metrics for cost-aware dispatch
-            scan_codec_metrics: Dict[str, _CodecMetrics] = {}
+        # Per-scan codec metrics for cost-aware dispatch
+        scan_codec_metrics: Dict[str, _CodecMetrics] = {}
 
-            ready_queue_cap = max(2, int(_cfg.PARQUET_READY_ROWGROUP_QUEUE_CAP))
-            ready_queue: "queue.Queue[_IORowGroupState | None]" = queue.Queue(
-                maxsize=ready_queue_cap
+        ready_queue_cap = max(2, int(_cfg.PARQUET_READY_ROWGROUP_QUEUE_CAP))
+        ready_queue: "queue.Queue[_IORowGroupState | None]" = queue.Queue(maxsize=ready_queue_cap)
+        metrics_lock = threading.Lock()
+        emitter: Optional[threading.Thread] = None
+        read_pool: ThreadPoolExecutor = _persistent_read_pool
+        decode_pool: ThreadPoolExecutor = _persistent_decode_pool
+        read_futures: Dict[Future, tuple[tuple[int, int], _IOColumnWork]] = {}
+        decode_futures: Dict[Future, tuple[tuple[int, int], _IOColumnWork]] = {}
+        decode_pending: deque[tuple[tuple[int, int], _IOColumnWork, bytes]] = deque()
+
+        try:
+            from opteryx.connectors.parquet_io.reader import _parse_footer_envelope
+            from opteryx.connectors.parquet_io.reader import _read_footer_payload
+            from opteryx.tracing import record_event
+
+            from opteryx import config as _trace_cfg
+
+            paths = command["paths"]
+            column_names = command["column_names"]
+            predicates = command.get("predicates")
+            file_sizes = command.get("file_sizes") or {}
+            max_workers = int(command.get("max_workers", 16))
+            connector = command.get("connector")
+            query_id_hash = _stable_u64(str(command.get("query_id", "")))
+            prefetched_footers = command.get("prefetched_footers") or {}
+
+            global_ranges_cap = max(1, int(_cfg.PARQUET_GLOBAL_RANGE_READERS))
+            per_rowgroup_cap = max(1, int(_cfg.PARQUET_RANGE_READERS_PER_ROWGROUP))
+            rowgroups_in_flight_cap = max(1, int(_cfg.PARQUET_ROWGROUPS_IN_FLIGHT))
+            rowgroups_per_file_cap = max(1, int(_cfg.PARQUET_ROWGROUPS_PER_FILE_IN_FLIGHT))
+            decode_workers = max(1, int(_cfg.PARQUET_DECODE_WORKERS))
+            read_queue_cap = max(1, int(_cfg.PARQUET_READ_QUEUE_CAP or global_ranges_cap))
+            decode_queue_cap = max(
+                read_queue_cap * 2, int(_cfg.PARQUET_DECODE_QUEUE_CAP or (read_queue_cap * 2))
             )
-            metrics_lock = threading.Lock()
-            emitter: Optional[threading.Thread] = None
-            read_pool: ThreadPoolExecutor = _persistent_read_pool
-            decode_pool: ThreadPoolExecutor = _persistent_decode_pool
-            read_futures: Dict[Future, tuple[tuple[int, int], _IOColumnWork]] = {}
-            decode_futures: Dict[Future, tuple[tuple[int, int], _IOColumnWork]] = {}
-            decode_pending: deque[tuple[tuple[int, int], _IOColumnWork, bytes]] = deque()
 
-            try:
-                from opteryx import config as _trace_cfg
-                from opteryx.connectors.parquet_io.reader import (
-                    _parse_footer_envelope,
-                    _read_footer_payload,
-                )
-                from opteryx.tracing import record_event
+            active_target_default = max(1, int(_cfg.PARQUET_ACTIVE_ROWGROUPS_TARGET))
+            warm_start_ops = max(0, int(_cfg.PARQUET_WARM_START_OPS))
+            low_col_threshold = max(0, int(_cfg.PARQUET_LOW_COLUMN_THRESHOLD))
+            low_col_active_target = max(1, int(_cfg.PARQUET_LOW_COLUMN_ACTIVE_ROWGROUPS_TARGET))
+            low_col_per_rowgroup_cap = max(1, int(_cfg.PARQUET_LOW_COLUMN_PER_ROWGROUP_SLOTS))
 
-                paths = command["paths"]
-                column_names = command["column_names"]
-                predicates = command.get("predicates")
-                file_sizes = command.get("file_sizes") or {}
-                max_workers = int(command.get("max_workers", 16))
-                connector = command.get("connector")
-                query_id_hash = _stable_u64(str(command.get("query_id", "")))
-                prefetched_footers = command.get("prefetched_footers") or {}
+            if low_col_threshold > 0 and len(column_names) < low_col_threshold:
+                active_target = min(rowgroups_in_flight_cap, low_col_active_target)
+                per_rowgroup_cap = min(per_rowgroup_cap, low_col_per_rowgroup_cap)
+            else:
+                active_target = min(rowgroups_in_flight_cap, active_target_default)
+            metrics["rowgroups_in_flight_cap"] = active_target
+            ready_backlog_cap = max(
+                active_target,
+                int(_cfg.PARQUET_COMPLETED_ROWGROUP_BACKLOG_CAP),
+            )
 
-                global_ranges_cap = max(1, int(_cfg.PARQUET_GLOBAL_RANGE_READERS))
-                per_rowgroup_cap = max(1, int(_cfg.PARQUET_RANGE_READERS_PER_ROWGROUP))
-                rowgroups_in_flight_cap = max(1, int(_cfg.PARQUET_ROWGROUPS_IN_FLIGHT))
-                rowgroups_per_file_cap = max(1, int(_cfg.PARQUET_ROWGROUPS_PER_FILE_IN_FLIGHT))
-                decode_workers = max(1, int(_cfg.PARQUET_DECODE_WORKERS))
-                read_queue_cap = max(1, int(_cfg.PARQUET_READ_QUEUE_CAP or global_ranges_cap))
-                decode_queue_cap = max(
-                    read_queue_cap * 2, int(_cfg.PARQUET_DECODE_QUEUE_CAP or (read_queue_cap * 2))
-                )
+            protocol = _resolve_protocol(paths, connector)
+            if protocol not in _filesystem_by_protocol:
+                _filesystem_by_protocol[protocol] = create_filesystem(protocol)
+            filesystem = _filesystem_by_protocol[protocol]
+            decoder_fn = _resolve_decoder()
 
-                active_target_default = max(1, int(_cfg.PARQUET_ACTIVE_ROWGROUPS_TARGET))
-                warm_start_ops = max(0, int(_cfg.PARQUET_WARM_START_OPS))
-                low_col_threshold = max(0, int(_cfg.PARQUET_LOW_COLUMN_THRESHOLD))
-                low_col_active_target = max(1, int(_cfg.PARQUET_LOW_COLUMN_ACTIVE_ROWGROUPS_TARGET))
-                low_col_per_rowgroup_cap = max(1, int(_cfg.PARQUET_LOW_COLUMN_PER_ROWGROUP_SLOTS))
+            unique_paths = list(dict.fromkeys(paths))
+            footers: Dict[str, dict] = {}
+            footer_fetch_ns: Dict[str, int] = {}
 
-                if low_col_threshold > 0 and len(column_names) < low_col_threshold:
-                    active_target = min(rowgroups_in_flight_cap, low_col_active_target)
-                    per_rowgroup_cap = min(per_rowgroup_cap, low_col_per_rowgroup_cap)
-                else:
-                    active_target = min(rowgroups_in_flight_cap, active_target_default)
-                metrics["rowgroups_in_flight_cap"] = active_target
-                ready_backlog_cap = max(
-                    active_target,
-                    int(_cfg.PARQUET_COMPLETED_ROWGROUP_BACKLOG_CAP),
-                )
-
-                protocol = _resolve_protocol(paths, connector)
-                if protocol not in _filesystem_by_protocol:
-                    _filesystem_by_protocol[protocol] = create_filesystem(protocol)
-                filesystem = _filesystem_by_protocol[protocol]
-                decoder_fn = _resolve_decoder()
-
-                unique_paths = list(dict.fromkeys(paths))
-                footers: Dict[str, dict] = {}
-                footer_fetch_ns: Dict[str, int] = {}
-
-                # Fetch footer payloads in parallel (pure IO), then parse on
-                # this thread (rugo C++ parse must not cross thread boundaries).
-                _footer_io_futures: Dict[Future, str] = {}
-                for p in unique_paths:
-                    prefetch_meta = prefetched_footers.get(p)
-                    if prefetch_meta is not None:
-                        footers[p] = prefetch_meta
-                        footer_fetch_ns[p] = 0
-                        continue
-                    known_size = file_sizes.get(p)
-                    if not isinstance(known_size, int) or known_size <= 0:
-                        known_size = None
-                    if known_size is None:
-                        fut = _persistent_read_pool.submit(
-                            _read_footer_payload, filesystem, p, connector=connector
-                        )
-                    else:
-                        fut = _persistent_read_pool.submit(
-                            _read_footer_payload, filesystem, p, known_size, connector
-                        )
-                    _footer_io_futures[fut] = p
-
-                for fut in as_completed(_footer_io_futures):
-                    p = _footer_io_futures[fut]
-                    envelope, footer_bytes, fetch_ns = fut.result()
-                    parse_start_ns = time.monotonic_ns()
-                    meta = _parse_footer_envelope(p, envelope, footer_bytes)
-                    parse_ns = time.monotonic_ns() - parse_start_ns
-                    footers[p] = meta
-                    footer_fetch_ns[p] = fetch_ns + parse_ns
-
-                    # Emit file_discovered event after footer is successfully parsed
-                    if _trace_cfg.OPTERYX_TRACE:
-                        file_kwargs = {"file_id": p}
-                        if connector:
-                            file_kwargs["connector"] = connector
-                        # file_size is optional metadata
-                        if file_sizes and p in file_sizes and file_sizes[p] > 0:
-                            file_kwargs["size_bytes"] = file_sizes[p]
-                        record_event("file_discovered", **file_kwargs)
-
-                file_states: Dict[int, _IOFileState] = {}
-                file_rr: deque[int] = deque()
-                for file_seq, path in enumerate(paths):
-                    meta = footers[path]
-                    rg_meta_list = meta.get("row_groups", [])
-                    pending_rg: deque[int] = deque()
-                    for rg_idx, rg_meta in enumerate(rg_meta_list):
-                        if predicates and not row_group_may_satisfy(rg_meta, predicates):
-                            metrics["row_groups_pruned"] += 1
-                            continue
-                        pending_rg.append(rg_idx)
-                    file_states[file_seq] = _IOFileState(
-                        file_seq=file_seq,
-                        path=path,
-                        total_rowgroups=len(rg_meta_list),
-                        pending_rg_indices=pending_rg,
-                        footer_bytes=int(meta.get("__footer_bytes__", 0)),
-                        footer_fetch_ns=int(footer_fetch_ns.get(path, 0)),
+            # Fetch footer payloads in parallel (pure IO), then parse on
+            # this thread (rugo C++ parse must not cross thread boundaries).
+            _footer_io_futures: Dict[Future, str] = {}
+            for p in unique_paths:
+                prefetch_meta = prefetched_footers.get(p)
+                if prefetch_meta is not None:
+                    footers[p] = prefetch_meta
+                    footer_fetch_ns[p] = 0
+                    continue
+                known_size = file_sizes.get(p)
+                if not isinstance(known_size, int) or known_size <= 0:
+                    known_size = None
+                if known_size is None:
+                    fut = _persistent_read_pool.submit(
+                        _read_footer_payload, filesystem, p, connector=connector
                     )
-                    if pending_rg:
-                        file_rr.append(file_seq)
+                else:
+                    fut = _persistent_read_pool.submit(
+                        _read_footer_payload, filesystem, p, known_size, connector
+                    )
+                _footer_io_futures[fut] = p
 
-                def _active_file_count(
-                    active_states: Dict[tuple[int, int], _IORowGroupState],
-                ) -> int:
-                    return len({state.file_seq for state in active_states.values()})
+            for fut in as_completed(_footer_io_futures):
+                p = _footer_io_futures[fut]
+                envelope, footer_bytes, fetch_ns = fut.result()
+                parse_start_ns = time.monotonic_ns()
+                meta = _parse_footer_envelope(p, envelope, footer_bytes)
+                parse_ns = time.monotonic_ns() - parse_start_ns
+                footers[p] = meta
+                footer_fetch_ns[p] = fetch_ns + parse_ns
 
-                active_states: Dict[tuple[int, int], _IORowGroupState] = {}
-                read_futures.clear()
-                decode_futures.clear()
-                decode_pending.clear()
-                ready_backlog: deque[_IORowGroupState] = deque()
-                reads_in_flight = 0
-                scan_start_ns = time.monotonic_ns()
-                first_completion_emitted = False
-                warm_start_remaining = warm_start_ops
-                first_rowgroup_key: Optional[tuple[int, int]] = None
+                # Emit file_discovered event after footer is successfully parsed
+                if _trace_cfg.OPTERYX_TRACE:
+                    file_kwargs = {"file_id": p}
+                    if connector:
+                        file_kwargs["connector"] = connector
+                    # file_size is optional metadata
+                    if file_sizes and p in file_sizes and file_sizes[p] > 0:
+                        file_kwargs["size_bytes"] = file_sizes[p]
+                    record_event("file_discovered", **file_kwargs)
 
-                emitter = threading.Thread(
-                    target=_emit_loop,
-                    args=(ready_queue, pool, event_q, cancel_event),
-                    kwargs={
-                        "query_id_hash": query_id_hash,
-                        "metrics": metrics,
-                        "metrics_lock": metrics_lock,
-                    },
-                    daemon=True,
+            file_states: Dict[int, _IOFileState] = {}
+            file_rr: deque[int] = deque()
+            for file_seq, path in enumerate(paths):
+                meta = footers[path]
+                rg_meta_list = meta.get("row_groups", [])
+                pending_rg: deque[int] = deque()
+                for rg_idx, rg_meta in enumerate(rg_meta_list):
+                    if predicates and not row_group_may_satisfy(rg_meta, predicates):
+                        metrics["row_groups_pruned"] += 1
+                        continue
+                    pending_rg.append(rg_idx)
+                file_states[file_seq] = _IOFileState(
+                    file_seq=file_seq,
+                    path=path,
+                    total_rowgroups=len(rg_meta_list),
+                    pending_rg_indices=pending_rg,
+                    footer_bytes=int(meta.get("__footer_bytes__", 0)),
+                    footer_fetch_ns=int(footer_fetch_ns.get(path, 0)),
                 )
-                emitter.start()
+                if pending_rg:
+                    file_rr.append(file_seq)
 
-                # Pools are persistent (created at subprocess startup); no per-scan creation.
+            def _active_file_count(
+                active_states: Dict[tuple[int, int], _IORowGroupState],
+            ) -> int:
+                return len({state.file_seq for state in active_states.values()})
 
-                def _ready_buffer_depth() -> int:
-                    return len(ready_backlog) + ready_queue.qsize()
+            active_states: Dict[tuple[int, int], _IORowGroupState] = {}
+            read_futures.clear()
+            decode_futures.clear()
+            decode_pending.clear()
+            ready_backlog: deque[_IORowGroupState] = deque()
+            reads_in_flight = 0
+            scan_start_ns = time.monotonic_ns()
+            first_completion_emitted = False
+            warm_start_remaining = warm_start_ops
+            first_rowgroup_key: Optional[tuple[int, int]] = None
 
-                def _flush_ready_backlog() -> int:
-                    moved = 0
-                    while ready_backlog and not cancel_event.is_set():
-                        state = ready_backlog[0]
-                        try:
-                            ready_queue.put_nowait(state)
-                        except queue.Full:
-                            break
-                        ready_backlog.popleft()
-                        moved += 1
-                    if moved:
-                        with metrics_lock:
-                            metrics["io_transfer_ready_backlog_peak"] = max(
-                                metrics["io_transfer_ready_backlog_peak"],
-                                _ready_buffer_depth(),
-                            )
-                    return moved
+            emitter = threading.Thread(
+                target=_emit_loop,
+                args=(ready_queue, pool, event_q, cancel_event),
+                kwargs={
+                    "query_id_hash": query_id_hash,
+                    "metrics": metrics,
+                    "metrics_lock": metrics_lock,
+                },
+                daemon=True,
+            )
+            emitter.start()
 
-                def _admit_rowgroups() -> None:
-                    nonlocal first_rowgroup_key
-                    if cancel_event.is_set():
-                        return
-                    while (
-                        len(active_states) < active_target
-                        and file_rr
-                        and _ready_buffer_depth() < ready_backlog_cap
-                    ):
-                        cycle = len(file_rr)
-                        admitted = False
-                        for _ in range(cycle):
-                            file_seq = file_rr.popleft()
-                            fstate = file_states[file_seq]
-                            if fstate.active_rowgroups >= rowgroups_per_file_cap:
-                                if fstate.pending_rg_indices:
-                                    file_rr.append(file_seq)
-                                continue
-                            if not fstate.pending_rg_indices:
-                                continue
+            # Pools are persistent (created at subprocess startup); no per-scan creation.
 
-                            rg_idx = fstate.pending_rg_indices.popleft()
-                            rg_meta = footers[fstate.path]["row_groups"][rg_idx]
-                            name_to_stats: Dict[str, dict] = {
-                                col["name"]: col for col in rg_meta["columns"]
-                            }
-                            column_work: List[_IOColumnWork] = []
-                            for col_name in column_names:
-                                if col_name not in name_to_stats:
-                                    raise KeyError(
-                                        f"Column '{col_name}' not found in row group {rg_idx}. "
-                                        f"Available columns: {list(name_to_stats.keys())}"
-                                    )
-                                col_stats = name_to_stats[col_name]
-                                offset, length = _column_chunk_range(col_stats)
-                                column_work.append(
-                                    _IOColumnWork(
-                                        name=col_name,
-                                        stats=col_stats,
-                                        offset=offset,
-                                        length=length,
-                                    )
-                                )
-                            # Largest columns first to reduce tail.
-                            column_work.sort(key=lambda item: item.length, reverse=True)
+            def _ready_buffer_depth() -> int:
+                return len(ready_backlog) + ready_queue.qsize()
 
-                            admitted_ns = time.monotonic_ns()
-                            state = _IORowGroupState(
-                                file_seq=file_seq,
-                                path=fstate.path,
-                                rg_idx=rg_idx,
-                                admitted_ns=admitted_ns,
-                                column_order=list(column_names),
-                                pending_columns=column_work,
-                                footer_bytes=fstate.footer_bytes if rg_idx == 0 else 0,
-                                footer_fetch_ns=fstate.footer_fetch_ns if rg_idx == 0 else 0,
-                            )
-                            key = (file_seq, rg_idx)
-                            active_states[key] = state
-                            fstate.active_rowgroups += 1
-                            if first_rowgroup_key is None:
-                                first_rowgroup_key = key
-                            admitted = True
+            def _flush_ready_backlog() -> int:
+                moved = 0
+                while ready_backlog and not cancel_event.is_set():
+                    state = ready_backlog[0]
+                    try:
+                        ready_queue.put_nowait(state)
+                    except queue.Full:
+                        break
+                    ready_backlog.popleft()
+                    moved += 1
+                if moved:
+                    with metrics_lock:
+                        metrics["io_transfer_ready_backlog_peak"] = max(
+                            metrics["io_transfer_ready_backlog_peak"],
+                            _ready_buffer_depth(),
+                        )
+                return moved
 
+            def _admit_rowgroups() -> None:
+                nonlocal first_rowgroup_key
+                if cancel_event.is_set():
+                    return
+                while (
+                    len(active_states) < active_target
+                    and file_rr
+                    and _ready_buffer_depth() < ready_backlog_cap
+                ):
+                    cycle = len(file_rr)
+                    admitted = False
+                    for _ in range(cycle):
+                        file_seq = file_rr.popleft()
+                        fstate = file_states[file_seq]
+                        if fstate.active_rowgroups >= rowgroups_per_file_cap:
                             if fstate.pending_rg_indices:
                                 file_rr.append(file_seq)
-                            if len(active_states) >= active_target:
-                                break
-
-                        if not admitted:
-                            break
-
-                        with metrics_lock:
-                            metrics["active_rowgroups_peak"] = max(
-                                metrics["active_rowgroups_peak"], len(active_states)
-                            )
-                            metrics["active_files_peak"] = max(
-                                metrics["active_files_peak"], _active_file_count(active_states)
-                            )
-
-                def _pick_dispatch_state() -> Optional[tuple[tuple[int, int], _IORowGroupState]]:
-                    """Pick next row group to dispatch, using cost-aware ordering.
-
-                    Prioritizes by estimated decode cost (cost = size * codec_rate),
-                    then by size (tie-breaker), then by admission order (oldest first).
-
-                    This reduces queue depth variance by processing hard problems early.
-                    """
-                    nonlocal warm_start_remaining
-
-                    # Warm-start: prioritize first row group
-                    if warm_start_remaining > 0 and first_rowgroup_key in active_states:
-                        first_state = active_states[first_rowgroup_key]
-                        if first_state.pending_columns and first_state.in_flight < per_rowgroup_cap:
-                            warm_start_remaining -= 1
-                            return first_rowgroup_key, first_state
-
-                    # Build candidates with cost estimates
-                    candidates = []
-                    for key, state in active_states.items():
-                        if not state.pending_columns or state.in_flight >= per_rowgroup_cap:
+                            continue
+                        if not fstate.pending_rg_indices:
                             continue
 
-                        col = state.pending_columns[0]
-                        codec = col.stats.get("compression_codec", "PLAIN")
-                        cost = _estimate_decode_cost(scan_codec_metrics, codec, col.length)
-
-                        candidates.append((cost, col.length, -state.admitted_ns, key, state))
-
-                    if not candidates:
-                        return None
-
-                    # Sort by cost (highest first to prioritize fast ones)
-                    candidates.sort(reverse=True, key=lambda x: (x[0], x[1], x[2]))
-                    _, _, _, key, state = candidates[0]
-                    return key, state
-
-                def _dispatch_columns() -> int:
-                    nonlocal reads_in_flight
-                    dispatched = 0
-                    while reads_in_flight < read_queue_cap and not cancel_event.is_set():
-                        picked = _pick_dispatch_state()
-                        if picked is None:
-                            break
-                        key, state = picked
-                        if not state.pending_columns:
-                            break
-                        work = state.pending_columns.pop(0)
-                        submit_ns = time.monotonic_ns()
-                        if state.first_dispatch_ns is None:
-                            state.first_dispatch_ns = submit_ns
-                        fut = read_pool.submit(
-                            _read_column_task,
-                            filesystem,
-                            state.path,
-                            state.rg_idx,
-                            work,
-                            submit_ns,
-                            connector,
-                        )
-                        read_futures[fut] = (key, work)
-                        state.in_flight += 1
-                        state.in_flight_peak = max(state.in_flight_peak, state.in_flight)
-                        reads_in_flight += 1
-                        with metrics_lock:
-                            metrics["ranges_in_flight_peak"] = max(
-                                metrics["ranges_in_flight_peak"], reads_in_flight
+                        rg_idx = fstate.pending_rg_indices.popleft()
+                        rg_meta = footers[fstate.path]["row_groups"][rg_idx]
+                        name_to_stats: Dict[str, dict] = {
+                            col["name"]: col for col in rg_meta["columns"]
+                        }
+                        column_work: List[_IOColumnWork] = []
+                        for col_name in column_names:
+                            if col_name not in name_to_stats:
+                                raise KeyError(
+                                    f"Column '{col_name}' not found in row group {rg_idx}. "
+                                    f"Available columns: {list(name_to_stats.keys())}"
+                                )
+                            col_stats = name_to_stats[col_name]
+                            offset, length = _column_chunk_range(col_stats)
+                            column_work.append(
+                                _IOColumnWork(
+                                    name=col_name,
+                                    stats=col_stats,
+                                    offset=offset,
+                                    length=length,
+                                )
                             )
-                        dispatched += 1
-                    return dispatched
+                        # Largest columns first to reduce tail.
+                        column_work.sort(key=lambda item: item.length, reverse=True)
 
-                def _dispatch_decodes() -> int:
-                    dispatched = 0
-                    while (
-                        len(decode_pending) + len(decode_futures) < decode_queue_cap
-                        and decode_pending
-                        and not cancel_event.is_set()
+                        admitted_ns = time.monotonic_ns()
+                        state = _IORowGroupState(
+                            file_seq=file_seq,
+                            path=fstate.path,
+                            rg_idx=rg_idx,
+                            admitted_ns=admitted_ns,
+                            column_order=list(column_names),
+                            pending_columns=column_work,
+                            footer_bytes=fstate.footer_bytes if rg_idx == 0 else 0,
+                            footer_fetch_ns=fstate.footer_fetch_ns if rg_idx == 0 else 0,
+                        )
+                        key = (file_seq, rg_idx)
+                        active_states[key] = state
+                        fstate.active_rowgroups += 1
+                        if first_rowgroup_key is None:
+                            first_rowgroup_key = key
+                        admitted = True
+
+                        if fstate.pending_rg_indices:
+                            file_rr.append(file_seq)
+                        if len(active_states) >= active_target:
+                            break
+
+                    if not admitted:
+                        break
+
+                    with metrics_lock:
+                        metrics["active_rowgroups_peak"] = max(
+                            metrics["active_rowgroups_peak"], len(active_states)
+                        )
+                        metrics["active_files_peak"] = max(
+                            metrics["active_files_peak"], _active_file_count(active_states)
+                        )
+
+            def _pick_dispatch_state() -> Optional[tuple[tuple[int, int], _IORowGroupState]]:
+                """Pick next row group to dispatch, using cost-aware ordering.
+
+                Prioritizes by estimated decode cost (cost = size * codec_rate),
+                then by size (tie-breaker), then by admission order (oldest first).
+
+                This reduces queue depth variance by processing hard problems early.
+                """
+                nonlocal warm_start_remaining
+
+                # Warm-start: prioritize first row group
+                if warm_start_remaining > 0 and first_rowgroup_key in active_states:
+                    first_state = active_states[first_rowgroup_key]
+                    if first_state.pending_columns and first_state.in_flight < per_rowgroup_cap:
+                        warm_start_remaining -= 1
+                        return first_rowgroup_key, first_state
+
+                # Build candidates with cost estimates
+                candidates = []
+                for key, state in active_states.items():
+                    if not state.pending_columns or state.in_flight >= per_rowgroup_cap:
+                        continue
+
+                    col = state.pending_columns[0]
+                    codec = col.stats.get("compression_codec", "PLAIN")
+                    cost = _estimate_decode_cost(scan_codec_metrics, codec, col.length)
+
+                    candidates.append((cost, col.length, -state.admitted_ns, key, state))
+
+                if not candidates:
+                    return None
+
+                # Sort by cost (highest first to prioritize fast ones)
+                candidates.sort(reverse=True, key=lambda x: (x[0], x[1], x[2]))
+                _, _, _, key, state = candidates[0]
+                return key, state
+
+            def _dispatch_columns() -> int:
+                nonlocal reads_in_flight
+                dispatched = 0
+                while reads_in_flight < read_queue_cap and not cancel_event.is_set():
+                    picked = _pick_dispatch_state()
+                    if picked is None:
+                        break
+                    key, state = picked
+                    if not state.pending_columns:
+                        break
+                    work = state.pending_columns.pop(0)
+                    submit_ns = time.monotonic_ns()
+                    if state.first_dispatch_ns is None:
+                        state.first_dispatch_ns = submit_ns
+                    fut = read_pool.submit(
+                        _read_column_task,
+                        filesystem,
+                        state.path,
+                        state.rg_idx,
+                        work,
+                        submit_ns,
+                        connector,
+                    )
+                    read_futures[fut] = (key, work)
+                    state.in_flight += 1
+                    state.in_flight_peak = max(state.in_flight_peak, state.in_flight)
+                    reads_in_flight += 1
+                    with metrics_lock:
+                        metrics["ranges_in_flight_peak"] = max(
+                            metrics["ranges_in_flight_peak"], reads_in_flight
+                        )
+                    dispatched += 1
+                return dispatched
+
+            def _dispatch_decodes() -> int:
+                dispatched = 0
+                while (
+                    len(decode_pending) + len(decode_futures) < decode_queue_cap
+                    and decode_pending
+                    and not cancel_event.is_set()
+                ):
+                    key, work, raw_bytes = decode_pending.popleft()
+                    state = active_states.get(key)
+                    if state is None:
+                        continue
+
+                    # Emit buffer_complete event when buffered data is about to be decoded
+                    if _trace_cfg.OPTERYX_TRACE:
+                        buf_kwargs = {
+                            "file_id": state.path,
+                            "component": "column",
+                            "rg_idx": state.rg_idx,
+                            "column": work.name,
+                        }
+                        if connector:
+                            buf_kwargs["connector"] = connector
+                        record_event("buffer_complete", **buf_kwargs)
+
+                    submit_ns = time.monotonic_ns()
+                    if not state.decode_started and _trace_cfg.OPTERYX_TRACE:
+                        kwargs = {
+                            "file_id": state.path,
+                            "component": "rowgroup",
+                            "rg_idx": state.rg_idx,
+                            "columns": state.column_order,
+                        }
+                        if connector:
+                            kwargs["connector"] = connector
+                        record_event("decode_start", **kwargs)
+                        state.decode_started = True
+
+                    fut = decode_pool.submit(
+                        _decode_column_task,
+                        state.path,
+                        state.rg_idx,
+                        work,
+                        raw_bytes,
+                        decoder_fn,
+                        submit_ns,
+                        connector,
+                        codec_metrics,
+                        scan_codec_metrics,
+                    )
+                    decode_futures[fut] = (key, work)
+                    dispatched += 1
+                return dispatched
+
+            def _complete_rowgroup(key: tuple[int, int], state: _IORowGroupState) -> None:
+                nonlocal first_completion_emitted
+                now_ns = time.monotonic_ns()
+                state.completed_ns = now_ns
+                if not first_completion_emitted:
+                    state.time_to_first_rowgroup_ns = max(0, now_ns - scan_start_ns)
+                    first_completion_emitted = True
+                if _trace_cfg.OPTERYX_TRACE and state.decode_started:
+                    kwargs = {
+                        "file_id": state.path,
+                        "component": "rowgroup",
+                        "rg_idx": state.rg_idx,
+                        "rows_decoded": (
+                            len(next(iter(state.columns.values()))) if state.columns else 0
+                        ),
+                    }
+                    if connector:
+                        kwargs["connector"] = connector
+                    record_event("decode_complete", **kwargs)
+
+                fstate = file_states[state.file_seq]
+                fstate.active_rowgroups = max(0, fstate.active_rowgroups - 1)
+                del active_states[key]
+
+                state.ready_queue_depth_at_ready = _ready_buffer_depth()
+                ready_backlog.append(state)
+                with metrics_lock:
+                    metrics["io_transfer_ready_backlog_peak"] = max(
+                        metrics["io_transfer_ready_backlog_peak"],
+                        _ready_buffer_depth(),
+                    )
+
+            while not cancel_event.is_set():
+                _flush_ready_backlog()
+                _dispatch_decodes()
+                _admit_rowgroups()
+                dispatched_reads = _dispatch_columns()
+                dispatched_decodes = _dispatch_decodes()
+
+                if not read_futures and not decode_futures:
+                    if (
+                        not active_states
+                        and not file_rr
+                        and not decode_pending
+                        and not ready_backlog
+                        and ready_queue.empty()
                     ):
-                        key, work, raw_bytes = decode_pending.popleft()
+                        break
+                    if dispatched_reads == 0 and dispatched_decodes == 0:
+                        sleep_start = time.monotonic_ns()
+                        time.sleep(0.001)
+                        with metrics_lock:
+                            metrics["io_scheduler_empty_wait_events"] += 1
+                            metrics["io_scheduler_empty_wait_ns"] += (
+                                time.monotonic_ns() - sleep_start
+                            )
+                    continue
+
+                wait_start = time.monotonic_ns()
+                waiting = set(read_futures) | set(decode_futures)
+                done, _ = wait(
+                    waiting,
+                    timeout=0 if (dispatched_reads > 0 or dispatched_decodes > 0) else 0.02,
+                    return_when=FIRST_COMPLETED,
+                )
+                if not done:
+                    with metrics_lock:
+                        metrics["io_scheduler_empty_wait_events"] += 1
+                        metrics["io_scheduler_empty_wait_ns"] += time.monotonic_ns() - wait_start
+                    continue
+
+                for fut in done:
+                    read_entry = read_futures.pop(fut, None)
+                    if read_entry is not None:
+                        key, work = read_entry
+                        reads_in_flight = max(0, reads_in_flight - 1)
                         state = active_states.get(key)
                         if state is None:
                             continue
+                        result = fut.result()
+                        state.bytes_fetched += result["bytes_fetched"]
+                        state.bytes_requested += result["bytes_requested"]
+                        state.range_request_count += result["range_request_count"]
+                        state.read_ns += result["read_ns"]
+                        state.queue_wait_ns += result["queue_wait_ns"]
+                        state.task_total_ns += result["task_total_ns"]
 
-                        # Emit buffer_complete event when buffered data is about to be decoded
+                        # Emit buffer_start event when column is queued for decode
                         if _trace_cfg.OPTERYX_TRACE:
                             buf_kwargs = {
                                 "file_id": state.path,
                                 "component": "column",
                                 "rg_idx": state.rg_idx,
                                 "column": work.name,
+                                "bytes": len(result["raw_bytes"]),
                             }
                             if connector:
                                 buf_kwargs["connector"] = connector
-                            record_event("buffer_complete", **buf_kwargs)
+                            record_event("buffer_start", **buf_kwargs)
 
-                        submit_ns = time.monotonic_ns()
-                        if not state.decode_started and _trace_cfg.OPTERYX_TRACE:
-                            kwargs = {
-                                "file_id": state.path,
-                                "component": "rowgroup",
-                                "rg_idx": state.rg_idx,
-                                "columns": state.column_order,
-                            }
-                            if connector:
-                                kwargs["connector"] = connector
-                            record_event("decode_start", **kwargs)
-                            state.decode_started = True
-
-                        fut = decode_pool.submit(
-                            _decode_column_task,
-                            state.path,
-                            state.rg_idx,
-                            work,
-                            raw_bytes,
-                            decoder_fn,
-                            submit_ns,
-                            connector,
-                            codec_metrics,
-                            scan_codec_metrics,
-                        )
-                        decode_futures[fut] = (key, work)
-                        dispatched += 1
-                    return dispatched
-
-                def _complete_rowgroup(key: tuple[int, int], state: _IORowGroupState) -> None:
-                    nonlocal first_completion_emitted
-                    now_ns = time.monotonic_ns()
-                    state.completed_ns = now_ns
-                    if not first_completion_emitted:
-                        state.time_to_first_rowgroup_ns = max(0, now_ns - scan_start_ns)
-                        first_completion_emitted = True
-                    if _trace_cfg.OPTERYX_TRACE and state.decode_started:
-                        kwargs = {
-                            "file_id": state.path,
-                            "component": "rowgroup",
-                            "rg_idx": state.rg_idx,
-                            "rows_decoded": (
-                                len(next(iter(state.columns.values()))) if state.columns else 0
-                            ),
-                        }
-                        if connector:
-                            kwargs["connector"] = connector
-                        record_event("decode_complete", **kwargs)
-
-                    fstate = file_states[state.file_seq]
-                    fstate.active_rowgroups = max(0, fstate.active_rowgroups - 1)
-                    del active_states[key]
-
-                    state.ready_queue_depth_at_ready = _ready_buffer_depth()
-                    ready_backlog.append(state)
-                    with metrics_lock:
-                        metrics["io_transfer_ready_backlog_peak"] = max(
-                            metrics["io_transfer_ready_backlog_peak"],
-                            _ready_buffer_depth(),
-                        )
-
-                while not cancel_event.is_set():
-                    _flush_ready_backlog()
-                    _dispatch_decodes()
-                    _admit_rowgroups()
-                    dispatched_reads = _dispatch_columns()
-                    dispatched_decodes = _dispatch_decodes()
-
-                    if not read_futures and not decode_futures:
-                        if (
-                            not active_states
-                            and not file_rr
-                            and not decode_pending
-                            and not ready_backlog
-                            and ready_queue.empty()
-                        ):
-                            break
-                        if dispatched_reads == 0 and dispatched_decodes == 0:
-                            sleep_start = time.monotonic_ns()
-                            time.sleep(0.001)
-                            with metrics_lock:
-                                metrics["io_scheduler_empty_wait_events"] += 1
-                                metrics["io_scheduler_empty_wait_ns"] += (
-                                    time.monotonic_ns() - sleep_start
-                                )
+                        decode_pending.append((key, work, result["raw_bytes"]))
                         continue
 
-                    wait_start = time.monotonic_ns()
-                    waiting = set(read_futures) | set(decode_futures)
-                    done, _ = wait(
-                        waiting,
-                        timeout=0 if (dispatched_reads > 0 or dispatched_decodes > 0) else 0.02,
-                        return_when=FIRST_COMPLETED,
-                    )
-                    if not done:
-                        with metrics_lock:
-                            metrics["io_scheduler_empty_wait_events"] += 1
-                            metrics["io_scheduler_empty_wait_ns"] += (
-                                time.monotonic_ns() - wait_start
-                            )
+                    decode_entry = decode_futures.pop(fut, None)
+                    if decode_entry is None:
                         continue
+                    key, _work = decode_entry
+                    state = active_states.get(key)
+                    if state is None:
+                        continue
+                    result = fut.result()
+                    state.in_flight = max(0, state.in_flight - 1)
+                    state.columns[result["name"]] = result["decoded"]
+                    state.decode_ns += result["decode_ns"]
+                    state.queue_wait_ns += result["queue_wait_ns"]
+                    state.task_total_ns += result["task_total_ns"]
 
-                    for fut in done:
-                        read_entry = read_futures.pop(fut, None)
-                        if read_entry is not None:
-                            key, work = read_entry
-                            reads_in_flight = max(0, reads_in_flight - 1)
-                            state = active_states.get(key)
-                            if state is None:
-                                continue
-                            result = fut.result()
-                            state.bytes_fetched += result["bytes_fetched"]
-                            state.bytes_requested += result["bytes_requested"]
-                            state.range_request_count += result["range_request_count"]
-                            state.read_ns += result["read_ns"]
-                            state.queue_wait_ns += result["queue_wait_ns"]
-                            state.task_total_ns += result["task_total_ns"]
+                    if not state.pending_columns and state.in_flight == 0:
+                        _complete_rowgroup(key, state)
 
-                            # Emit buffer_start event when column is queued for decode
-                            if _trace_cfg.OPTERYX_TRACE:
-                                buf_kwargs = {
-                                    "file_id": state.path,
-                                    "component": "column",
-                                    "rg_idx": state.rg_idx,
-                                    "column": work.name,
-                                    "bytes": len(result["raw_bytes"]),
-                                }
-                                if connector:
-                                    buf_kwargs["connector"] = connector
-                                record_event("buffer_start", **buf_kwargs)
+                _dispatch_decodes()
+                _flush_ready_backlog()
 
-                            decode_pending.append((key, work, result["raw_bytes"]))
-                            continue
+            while ready_backlog and not cancel_event.is_set():
+                moved = _flush_ready_backlog()
+                if moved == 0:
+                    time.sleep(0.001)
 
-                        decode_entry = decode_futures.pop(fut, None)
-                        if decode_entry is None:
-                            continue
-                        key, _work = decode_entry
-                        state = active_states.get(key)
-                        if state is None:
-                            continue
-                        result = fut.result()
-                        state.in_flight = max(0, state.in_flight - 1)
-                        state.columns[result["name"]] = result["decoded"]
-                        state.decode_ns += result["decode_ns"]
-                        state.queue_wait_ns += result["queue_wait_ns"]
-                        state.task_total_ns += result["task_total_ns"]
-
-                        if not state.pending_columns and state.in_flight == 0:
-                            _complete_rowgroup(key, state)
-
-                    _dispatch_decodes()
-                    _flush_ready_backlog()
-
-                while ready_backlog and not cancel_event.is_set():
-                    moved = _flush_ready_backlog()
-                    if moved == 0:
-                        time.sleep(0.001)
-
-                while True:
-                    try:
-                        ready_queue.put(None, timeout=0.1)
-                        break
-                    except queue.Full:
-                        if cancel_event.is_set():
-                            break
-                if emitter is not None:
-                    emitter.join(timeout=10)
-
-                metrics["io_transfer_payload_bytes_p50"] = _percentile(
-                    metrics["transfer_payload_sizes"], 0.5
-                )
-                metrics["io_transfer_payload_bytes_p95"] = _percentile(
-                    metrics["transfer_payload_sizes"], 0.95
-                )
-                metrics["io_transfer_payload_bytes_max"] = (
-                    max(metrics["transfer_payload_sizes"])
-                    if metrics["transfer_payload_sizes"]
-                    else 0
-                )
-                metrics.pop("transfer_payload_sizes", None)
-
-                event_q.put(
-                    {
-                        "type": _EVENT_SCAN_COMPLETE,
-                        "cancelled": bool(cancel_event.is_set()),
-                        "metrics": metrics,
-                    }
-                )
-            except Exception as err:
-                cancel_event.set()
+            while True:
                 try:
-                    ready_queue.put_nowait(None)
-                except Exception:
-                    pass
-                if emitter is not None and emitter.is_alive():
-                    emitter.join(timeout=2)
-                event_q.put(
-                    {
-                        "type": _EVENT_TRANSFER_ERROR,
-                        "message": str(err),
-                        "traceback": traceback.format_exc(),
-                    }
-                )
-                # Preserve partial metrics for debugging.
-                metrics.pop("transfer_payload_sizes", None)
-                event_q.put({"type": _EVENT_SCAN_COMPLETE, "cancelled": True, "metrics": metrics})
-            finally:
-                # Cancel in-flight futures; do NOT shut down the persistent pools
-                # since they are reused across all scans in this subprocess.
-                for fut in list(read_futures):
-                    fut.cancel()
-                for fut in list(decode_futures):
-                    fut.cancel()
+                    ready_queue.put(None, timeout=0.1)
+                    break
+                except queue.Full:
+                    if cancel_event.is_set():
+                        break
+            if emitter is not None:
+                emitter.join(timeout=10)
+
+            metrics["io_transfer_payload_bytes_p50"] = _percentile(
+                metrics["transfer_payload_sizes"], 0.5
+            )
+            metrics["io_transfer_payload_bytes_p95"] = _percentile(
+                metrics["transfer_payload_sizes"], 0.95
+            )
+            metrics["io_transfer_payload_bytes_max"] = (
+                max(metrics["transfer_payload_sizes"]) if metrics["transfer_payload_sizes"] else 0
+            )
+            metrics.pop("transfer_payload_sizes", None)
+
+            event_q.put(
+                {
+                    "type": _EVENT_SCAN_COMPLETE,
+                    "cancelled": bool(cancel_event.is_set()),
+                    "metrics": metrics,
+                }
+            )
+        except Exception as err:
+            cancel_event.set()
+            try:
+                ready_queue.put_nowait(None)
+            except Exception:
+                pass
+            if emitter is not None and emitter.is_alive():
+                emitter.join(timeout=2)
+            event_q.put(
+                {
+                    "type": _EVENT_TRANSFER_ERROR,
+                    "message": str(err),
+                    "traceback": traceback.format_exc(),
+                }
+            )
+            # Preserve partial metrics for debugging.
+            metrics.pop("transfer_payload_sizes", None)
+            event_q.put({"type": _EVENT_SCAN_COMPLETE, "cancelled": True, "metrics": metrics})
+        finally:
+            # Cancel in-flight futures; do NOT shut down the persistent pools
+            # since they are reused across all scans in this subprocess.
+            for fut in list(read_futures):
+                fut.cancel()
+            for fut in list(decode_futures):
+                fut.cancel()
 
 
 def _build_row_group_from_payload(payload: bytes, metadata: dict) -> Tuple[Dict[str, Any], int]:

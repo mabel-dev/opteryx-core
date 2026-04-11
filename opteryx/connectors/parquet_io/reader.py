@@ -27,12 +27,20 @@ from __future__ import annotations
 import struct
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
+from typing import Any
+from typing import Dict
+from typing import Iterator
+from typing import List
+from typing import Optional
+from typing import Tuple
+from typing import Union
 
-from opteryx import config as _cfg
-from opteryx.connectors.parquet_io.cache import InMemoryParquetCache, ParquetCache
+from opteryx.connectors.parquet_io.cache import InMemoryParquetCache
+from opteryx.connectors.parquet_io.cache import ParquetCache
 from opteryx.connectors.parquet_io.predicates import row_group_may_satisfy
 from opteryx.tracing.event_recorder import record_event as _record_event
+
+from opteryx import config as _cfg
 
 _PARQUET_MAGIC = b"PAR1"
 _PARQUET_FOOTER_SUFFIX = 8

@@ -15,8 +15,6 @@ from typing import Dict
 from typing import Optional
 from typing import Tuple
 
-from orso.schema import RelationSchema
-
 from opteryx.connectors import TableType
 from opteryx.connectors.capabilities import Diachronic
 from opteryx.connectors.capabilities import Eidetic
@@ -25,6 +23,7 @@ from opteryx.exceptions import DatasetNotFoundError
 from opteryx.exceptions import DatasetReadError
 from opteryx.models import FileEntry
 from opteryx.models import Manifest
+from orso.schema import RelationSchema
 
 
 class OpteryxTable(Diachronic, PredicatePushable):

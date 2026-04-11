@@ -19,11 +19,6 @@ from typing import List
 
 import numpy
 import pyarrow
-from orso.tools import random_string
-from orso.types import OrsoTypes
-from pyarrow import Table
-from pyarrow import compute
-
 from opteryx.exceptions import ColumnReferencedBeforeEvaluationError
 from opteryx.exceptions import IncorrectTypeError
 from opteryx.exceptions import UnsupportedSyntaxError
@@ -33,6 +28,10 @@ from opteryx.expression.operations import filter_operations
 from opteryx.expression.unary_operations import UNARY_OPERATIONS
 from opteryx.models import LogicalColumn
 from opteryx.models import Node
+from orso.tools import random_string
+from orso.types import OrsoTypes
+from pyarrow import Table
+from pyarrow import compute
 
 from .formatter import ExpressionColumn  # this is used
 from .formatter import format_expression
