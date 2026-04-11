@@ -17,6 +17,8 @@ import numpy
 import pyarrow
 from orso.types import OrsoTypes
 
+from opteryx.compiled.vector_ops import vector_contains
+
 from opteryx.expression.operations import array_ops
 from opteryx.expression.operations import comparisons
 from opteryx.expression.operations import list_ops
@@ -250,7 +252,7 @@ def _inner_filter_operations(arr, operator, value):
         else:
             vec = vector_from_arrow(pyarrow.array(list(raw_arr), type=pyarrow.string()))
 
-        result = vec.contains(needle, ignore_case)
+        result = vector_contains(vec, needle, ignore_case)
         if negate:
             result = result.not_vector()
         return result

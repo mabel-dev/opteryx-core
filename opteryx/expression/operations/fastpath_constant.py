@@ -2,6 +2,8 @@
 
 import pyarrow
 
+from opteryx.compiled.vector_ops import vector_in_list
+
 from opteryx.expression.operations.fastpath_telemetry import record_constant_fastpath_fallback
 from opteryx.expression.operations.fastpath_telemetry import record_constant_fastpath_hit
 
@@ -116,7 +118,7 @@ def constant_fastpath(arr, operator, value):
         if operator == "NotEq":
             return vec.not_equals(value)
         if operator in ("InList", "NotInList"):
-            result = vec.in_list(_coerce_in_list_values(value))
+            result = vector_in_list(vec, _coerce_in_list_values(value))
             if operator == "NotInList":
                 result = result.not_vector()
             return result

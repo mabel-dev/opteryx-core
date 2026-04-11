@@ -6,6 +6,12 @@ import numpy
 import pyarrow as _pa
 
 from opteryx.exceptions import ColumnReferencedBeforeEvaluationError
+from opteryx.compiled.vector_ops import (
+    vector_like,
+    vector_rlike,
+    vector_contains,
+    vector_in_list,
+)
 
 from .function_execution import _is_draken_vector, apply_bounded_function
 from .string_ops import _string_compare
@@ -79,7 +85,7 @@ def _int64_compare(op: str, vec, right):
     if op == "GtEq":
         return vec.greater_than_or_equals(value)
     if op == "InList":
-        return vec.in_list(value_set)
+        return vector_in_list(vec,value_set)
 
     # Fallback for edge cases like Float64Vector comparison (not in hot path for ClickBench)
     if right.__class__.__name__ == "Float64Vector":
@@ -127,7 +133,7 @@ def _float64_compare(op: str, vec, right):
     if op == "GtEq":
         return vec.greater_than_or_equals(value)
     if op == "InList":
-        return vec.in_list(value_set)
+        return vector_in_list(vec,value_set)
     raise NotImplementedError(f"Float64Vector: unsupported op {op!r}")
 
 
@@ -226,19 +232,19 @@ def _dict_compare(op: str, vec, right):
     if op == "GtEq":
         return vec.greater_than_or_equals(right)
     if op == "InList":
-        return vec.in_list(value_list)
+        return vector_in_list(vec,value_list)
     if op in ("Like", "ILike", "RLike", "InStr", "IInStr"):
         right = _coerce_str(right)
     if op == "Like":
-        return vec.like(right, False)
+        return vector_like(vec,right, False)
     if op == "ILike":
-        return vec.like(right, True)
+        return vector_like(vec,right, True)
     if op == "RLike":
-        return vec.rlike(right)
+        return vector_rlike(vec,right)
     if op == "InStr":
-        return vec.contains(right, False)
+        return vector_contains(vec,right, False)
     if op == "IInStr":
-        return vec.contains(right, True)
+        return vector_contains(vec,right, True)
     raise NotImplementedError(f"dictionary-encoded vector: unsupported op {op!r}")
 
 
@@ -263,7 +269,7 @@ def _constant_compare(op: str, vec, right):
     if op == "GtEq":
         return vec.greater_than_or_equals(right)
     if op == "InList":
-        return vec.in_list(right)
+        return vector_in_list(vec,right)
     raise NotImplementedError(f"constant-encoded vector: unsupported op {op!r}")
 
 

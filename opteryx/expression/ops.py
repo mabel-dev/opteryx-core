@@ -12,6 +12,11 @@ from orso.types import OrsoTypes
 from pyarrow import compute
 
 from opteryx.compiled import vector_ops
+from opteryx.compiled.vector_ops import (
+    vector_in_list,
+    vector_like,
+    vector_rlike,
+)
 
 _DICT_EXPR_TEL = {
     "draken_dict_expr_fastpath_hits": 0,
@@ -179,7 +184,7 @@ def _constant_fastpath(arr, operator, value):
         if operator == "NotEq":
             return vec.not_equals(value)
         if operator in ("InList", "NotInList"):
-            result = vec.in_list(_coerce_in_list_values(value))
+            result = vector_in_list(vec,_coerce_in_list_values(value))
             if operator == "NotInList":
                 result = result.not_vector()
             return result
@@ -284,7 +289,7 @@ def _dictionary_fastpath(arr, operator, value):
     if operator == "NotEq":
         return vec.not_equals(value)
     if operator in ("InList", "NotInList"):
-        result = vec.in_list(_coerce_in_list_values(value))
+        result = vector_in_list(vec,_coerce_in_list_values(value))
         if operator == "NotInList":
             result = result.not_vector()
         return result
@@ -293,17 +298,17 @@ def _dictionary_fastpath(arr, operator, value):
 
         value = _coerce_str(value)
     if operator in ("Like", "NotLike"):
-        result = vec.like(value, False)
+        result = vector_like(vec,value, False)
         if operator == "NotLike":
             result = result.not_vector()
         return result
     if operator in ("ILike", "NotILike"):
-        result = vec.like(value, True)
+        result = vector_like(vec,value, True)
         if operator == "NotILike":
             result = result.not_vector()
         return result
     if operator in ("RLike", "NotRLike"):
-        result = vec.rlike(value)
+        result = vector_rlike(vec,value)
         if operator == "NotRLike":
             result = result.not_vector()
         return result

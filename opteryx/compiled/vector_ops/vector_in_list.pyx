@@ -101,17 +101,21 @@ cdef BoolVector _list_in_list_generic(Vector vec, set values):
     return out
 
 
-cpdef BoolVector vector_in_list(object arr, set values):
+cpdef BoolVector vector_in_list(object arr, object values):
     """
     Fast membership check for "InList".
 
     Parameters:
         arr: Draken Vector (Int64Vector, StringVector, or generic Vector).
-        values: Set of valid values.
+        values: Set or frozenset of valid values.
 
     Returns:
         BoolVector indicating membership.
     """
+    # Convert frozenset to set if needed
+    if isinstance(values, frozenset):
+        values = set(values)
+
     if isinstance(arr, Int64Vector):
         return vector_in_list_int64_vector(arr, values)
     if isinstance(arr, StringVector):

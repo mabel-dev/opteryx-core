@@ -1142,6 +1142,7 @@ extensions.extend(
                         "src/cpp/simd_env.cpp",
                         "src/cpp/simd_search.cpp",
                         "src/cpp/simd_datepart.cpp",
+                        "src/cpp/simd_string_ops.cpp",
                         "src/cpp/cpu_features.cpp",
                         "third_party/crypto/md5.cpp",
                         "third_party/crypto/sha1.cpp",
