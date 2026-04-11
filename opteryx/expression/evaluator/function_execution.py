@@ -5,6 +5,8 @@ from typing import Any
 import numpy
 import pyarrow as _pa
 import pyarrow.compute as compute
+
+from opteryx.compiled.draken.vectors.scalar_constructors import from_scalar as _const_scalar
 from opteryx.exceptions import FunctionExecutionError
 
 
@@ -40,15 +42,19 @@ def _coerce_param_for_draken(p):
         except Exception:
             pass
 
-    try:
-        import numpy as np
+    # Fast-path plain Python scalars before the numpy isinstance checks.
+    if isinstance(p, bool):
+        return p
 
-        if isinstance(p, np.generic):
-            p = p.item()
-        elif isinstance(p, np.ndarray):
-            p = p.item() if p.ndim == 0 else p.tolist()
-    except Exception:
-        pass
+    if isinstance(p, (int, float, str, bytes, type(None))):
+        vec = _const_scalar(p, 1)
+        if vec is not None:
+            return vec
+
+    if isinstance(p, numpy.generic):
+        p = p.item()
+    elif isinstance(p, numpy.ndarray):
+        p = p.item() if p.ndim == 0 else p.tolist()
 
     if isinstance(p, (list, tuple)):
         from opteryx.compiled.draken.interop.arrow import vector_from_sequence
@@ -63,16 +69,6 @@ def _coerce_param_for_draken(p):
                 ),
                 function=None,
             )
-
-    from opteryx.compiled.draken.vectors.scalar_constructors import from_scalar as _const_scalar
-
-    if isinstance(p, bool):
-        return p
-
-    if isinstance(p, (int, float, str, bytes, type(None))):
-        vec = _const_scalar(p, 1)
-        if vec is not None:
-            return vec
 
     return p
 
