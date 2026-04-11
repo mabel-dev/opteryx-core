@@ -24,15 +24,20 @@ from libc.stdint cimport int32_t
 from libc.stdint cimport int64_t
 from libc.stdint cimport int8_t
 from libc.stdint cimport intptr_t
+from libc.stdint cimport uint16_t
+from libc.stdint cimport uint32_t
 from libc.stdint cimport uint64_t
 from libc.stdint cimport uint8_t
-from libc.stdlib cimport malloc
+from libc.stdlib cimport free, malloc
 from libc.string cimport memset, memcpy
 
-from opteryx.compiled.draken.core.buffers cimport ConstAccessor, DrakenFixedBuffer
+from opteryx.compiled.draken.core.buffers cimport ConstAccessor, DictAccessor, DrakenFixedBuffer, DrakenVarBuffer
 from opteryx.compiled.draken.core.buffers cimport DRAKEN_TIMESTAMP64
 from opteryx.compiled.draken.core.buffers cimport DRAKEN_ENCODING_CONSTANT
+from opteryx.compiled.draken.core.buffers cimport DRAKEN_ENCODING_DENSE
+from opteryx.compiled.draken.core.buffers cimport DRAKEN_ENCODING_DICTIONARY
 from opteryx.compiled.draken.core.fixed_vector cimport alloc_fixed_buffer
+from opteryx.compiled.draken.core.var_vector cimport alloc_var_buffer, free_var_buffer
 from opteryx.compiled.draken.core.fixed_vector cimport buf_dtype
 from opteryx.compiled.draken.core.fixed_vector cimport buf_itemsize
 from opteryx.compiled.draken.core.fixed_vector cimport buf_length
@@ -52,6 +57,81 @@ DEF UNIT_NS = 0
 DEF UNIT_US = 1
 DEF UNIT_MS = 2
 DEF UNIT_S  = 3
+
+
+cdef inline uint8_t _dict_code_width_for_size(Py_ssize_t dict_size) noexcept:
+    if dict_size <= 256:
+        return 1
+    if dict_size <= 65536:
+        return 2
+    return 4
+
+
+cdef inline uint32_t _read_packed_code(const uint8_t* codes, uint8_t code_width, Py_ssize_t row_idx) noexcept nogil:
+    if code_width == 1:
+        return (<const uint8_t*>codes)[row_idx]
+    if code_width == 2:
+        return (<const uint16_t*>codes)[row_idx]
+    return (<const uint32_t*>codes)[row_idx]
+
+
+cdef void _release_dict_storage(TimestampVector vec) noexcept:
+    if vec._dict_codes != NULL:
+        free(vec._dict_codes)
+        vec._dict_codes = NULL
+    if vec._dict_values != NULL:
+        free_var_buffer(vec._dict_values, True)
+        vec._dict_values = NULL
+    vec._dict_code_width = 0
+    vec._dict_ordered = 0
+    vec._dict_accessor.codes = NULL
+    vec._dict_accessor.code_width = 0
+    vec._dict_accessor.row_nulls = NULL
+    vec._dict_accessor.length = 0
+    vec._dict_accessor.dict_values = NULL
+    vec._dict_accessor.value_type = DRAKEN_TIMESTAMP64
+    vec._encoding = DRAKEN_ENCODING_DENSE
+
+
+cdef void _attach_dictionary_storage(TimestampVector vec, const int32_t[::1] codes, const int64_t[::1] dictionary, bint ordered) except *:
+    cdef Py_ssize_t row_count = codes.shape[0]
+    cdef Py_ssize_t dict_size = dictionary.shape[0]
+    cdef uint8_t code_width = _dict_code_width_for_size(dict_size)
+    cdef Py_ssize_t code_bytes = row_count * code_width
+    cdef Py_ssize_t dict_bytes = dict_size * sizeof(int64_t)
+    cdef Py_ssize_t i
+    cdef Py_ssize_t code
+    cdef DrakenVarBuffer* dict_values
+
+    _release_dict_storage(vec)
+
+    if code_bytes > 0:
+        vec._dict_codes = <uint8_t*>malloc(code_bytes)
+        if vec._dict_codes == NULL:
+            raise MemoryError()
+    else:
+        vec._dict_codes = NULL
+
+    dict_values = alloc_var_buffer(DRAKEN_TIMESTAMP64, <size_t>dict_size, <size_t>dict_bytes)
+    dict_values.offsets[0] = 0
+    for i in range(dict_size):
+        dict_values.offsets[i + 1] = <int32_t>((i + 1) * sizeof(int64_t))
+    if dict_bytes > 0:
+        memcpy(dict_values.data, <const void*>&dictionary[0], <size_t>dict_bytes)
+
+    for i in range(row_count):
+        code = <Py_ssize_t>codes[i]
+        if code_width == 1:
+            (<uint8_t*>vec._dict_codes)[i] = <uint8_t>code
+        elif code_width == 2:
+            (<uint16_t*>vec._dict_codes)[i] = <uint16_t>code
+        else:
+            (<uint32_t*>vec._dict_codes)[i] = <uint32_t>code
+
+    vec._dict_values = dict_values
+    vec._dict_code_width = code_width
+    vec._dict_ordered = 1 if ordered else 0
+    vec._encoding = DRAKEN_ENCODING_DICTIONARY
 
 cdef inline int _unit_code_from_str(str unit):
     if unit == 'ns':
@@ -180,12 +260,34 @@ cdef class TimestampVector(Vector):
         self._const_value = 0
         self._has_const = False
         self._const_is_null = False
+        self._dict_values = NULL
+        self._dict_codes = NULL
+        self._dict_code_width = 0
+        self._dict_ordered = 0
+        self._dict_accessor.codes = NULL
+        self._dict_accessor.code_width = 0
+        self._dict_accessor.row_nulls = NULL
+        self._dict_accessor.length = 0
+        self._dict_accessor.dict_values = NULL
+        self._dict_accessor.value_type = DRAKEN_TIMESTAMP64
 
     def __dealloc__(self):
+        _release_dict_storage(self)
         # Only free if we own the data and the pointer is not NULL
         if self.owns_data and self.ptr is not NULL:
             free_fixed_buffer(self.ptr, True)
             self.ptr = NULL
+
+    cdef DictAccessor* dict_accessor(self) noexcept:
+        if self._dict_values == NULL or self._dict_codes == NULL or self.ptr == NULL:
+            return NULL
+        self._dict_accessor.codes = self._dict_codes
+        self._dict_accessor.code_width = self._dict_code_width
+        self._dict_accessor.row_nulls = self.ptr.null_bitmap
+        self._dict_accessor.length = self.ptr.length
+        self._dict_accessor.dict_values = self._dict_values
+        self._dict_accessor.value_type = self._dict_values.type
+        return &self._dict_accessor
 
     cdef ConstAccessor* const_accessor(self) noexcept:
         if not self._has_const or self.ptr == NULL:
@@ -785,6 +887,8 @@ cdef TimestampVector from_dict(
             raise ValueError(f"dictionary index out of bounds at row {i}: {code}")
         dst[i] = dictionary[code]
 
+    _attach_dictionary_storage(vec, codes, dictionary, False)
+
     return vec
 
 
@@ -827,5 +931,7 @@ cdef TimestampVector from_dict_nullable(
             nb[i >> 3] |= <uint8_t>(1 << (i & 7))
         else:
             dst[i] = 0
+
+    _attach_dictionary_storage(vec, codes, dictionary, False)
 
     return vec

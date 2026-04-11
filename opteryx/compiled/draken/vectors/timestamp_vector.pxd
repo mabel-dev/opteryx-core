@@ -3,7 +3,7 @@ from libc.stdint cimport int64_t
 from libc.stdint cimport int8_t
 from libc.stdint cimport uint64_t, uint8_t
 
-from opteryx.compiled.draken.core.buffers cimport ConstAccessor, DrakenFixedBuffer
+from opteryx.compiled.draken.core.buffers cimport ConstAccessor, DictAccessor, DrakenFixedBuffer, DrakenVarBuffer
 from opteryx.compiled.draken.vectors.vector cimport Vector
 from opteryx.compiled.draken.vectors.bool_vector cimport BoolVector
 
@@ -19,7 +19,13 @@ cdef class TimestampVector(Vector):
     cdef int64_t _const_value
     cdef bint _has_const
     cdef bint _const_is_null
+    cdef DictAccessor _dict_accessor
+    cdef DrakenVarBuffer* _dict_values
+    cdef uint8_t* _dict_codes
+    cdef uint8_t _dict_code_width
+    cdef uint8_t _dict_ordered
 
+    cdef DictAccessor* dict_accessor(self) noexcept
     cdef ConstAccessor* const_accessor(self) noexcept
     cdef void* dense_ptr(self) noexcept
     cdef uint8_t* null_bitmap_ptr(self) noexcept
