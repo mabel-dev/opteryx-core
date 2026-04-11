@@ -4,7 +4,6 @@ from typing import Any
 
 import numpy
 import pyarrow as _pa
-import pyarrow.compute as compute
 
 from opteryx.compiled.draken.vectors.scalar_constructors import from_scalar as _const_scalar
 from opteryx.exceptions import FunctionExecutionError
@@ -115,13 +114,30 @@ def apply_bounded_function(node, *parameters) -> Any:
         morsel_size = len(parameters[0])
         null_positions = numpy.zeros(morsel_size, dtype=numpy.bool_)
 
+        def _np_is_null(arr, nan_is_null: bool = True):
+            """
+            Lightweight numpy-based null detection to avoid pyarrow.compute in the
+            hot path. For float arrays we treat NaN as null when requested. For
+            object arrays we detect Python None via elementwise equality. For other
+            numeric types there is no representation of null, so we return all-False.
+            """
+            try:
+                kind = arr.dtype.kind
+            except Exception:
+                # If dtype introspection fails, assume no nulls
+                return numpy.zeros(arr.shape, dtype=numpy.bool_)
+
+            if kind == "f" and nan_is_null:
+                # Use numpy.isnan for float NaN detection (vectorized, fast).
+                return numpy.isnan(arr)
+            if arr.dtype == object:
+                # Elementwise check for None for object dtype arrays.
+                return numpy.equal(arr, None)
+            # Other dtypes (ints, bools, etc.) do not carry NaN/None in native numpy arrays.
+            return numpy.zeros(arr.shape, dtype=numpy.bool_)
+
         for arr in parameters:
-            if arr.dtype.kind == "f":
-                null_positions = numpy.logical_or(
-                    null_positions, compute.is_null(arr, nan_is_null=True)
-                )
-            else:
-                null_positions = numpy.logical_or(null_positions, compute.is_null(arr))
+            null_positions = numpy.logical_or(null_positions, _np_is_null(arr, nan_is_null=True))
 
         if null_positions.all():
             return numpy.full(morsel_size, None, dtype=object)
