@@ -38,11 +38,9 @@ This document summarizes the restoration of missing trace events in the Opteryx 
 **Buffer Phase Tracing - Parallel Decode Path** (Added ~line 1125-1140, ~line 1160-1175)
 - In `_decode_serial_one` closure, emit `buffer_complete` before decode_start
 
-#### 3. ✅ async_io.py (`async_read_column_task` function)
+#### 3. async helper (removed)
 
-**Buffer Phase Tracing** (Added after line 99)
-- Emit `buffer_start` after download_complete
-- Emit `buffer_complete` immediately after (minimal buffer in async path)
+The experimental async helper module `opteryx/connectors/parquet_io/async_io.py` has been removed from the codebase. Buffer-phase tracing (`buffer_start` / `buffer_complete`) is implemented in the synchronous instrumentation within `io_process_ring.py` and `reader.py` (see the entries above). Async-specific tests and the `aiohttp` dependency were removed as part of this consolidation. If an async I/O strategy is reintroduced in the future, it should be a maintained implementation with explicit documentation and dependency declarations.
 
 ### Changes Still Needed
 

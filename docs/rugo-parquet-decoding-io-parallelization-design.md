@@ -268,34 +268,30 @@ Current IO throughput utilizes only **~20% of available bandwidth**. The bottlen
 **Status**: ✅ **PHASES 1-2 COMPLETE** (2026-03-30)
 
 **Files created**:
-- ✅ `opteryx/connectors/io_systems/http_filesystem.py` — OpteryxHttpFileSystem with async support
-- ✅ `opteryx/connectors/parquet_io/async_io.py` — AsyncIOPool with event-driven concurrency control
+- ✅ `opteryx/connectors/io_systems/http_filesystem.py` — OpteryxHttpFileSystem (synchronous I/O implementation)
+- ✅ `opteryx/connectors/parquet_io/thread_pool_manager.py` — Thread pool manager and related C++/Cython glue
 
 **Implementation (actual)**:
-- ✅ Sync path: `requests` library with optimized HTTPAdapter (pool_connections=1, pool_maxsize=80-128)
-- ✅ Async path: Caller-provided `aiohttp.ClientSession` for event-driven I/O
+- ✅ Sync path: native compiled `HttpClient` (libcurl-based) providing efficient range reads and connection pooling
 - ✅ HTTP Range headers for byte-level reads (GET with offset/length)
-- ✅ Connection pooling: 128 max connections, 96 workers + 32 buffer slots
+- ✅ Connection pooling: 128 max connections, integrated with C++ event loops for high concurrency
 - ✅ Factory registration: http/https protocols routed via `create_filesystem()`
-- ✅ AsyncIOPool: Semaphore-based concurrency control (max 64 concurrent by default)
 
 **Integration**:
 - ✅ Works with v1/v2 schedulers via sync path
-- ✅ Async path ready for future async scheduler
 - ✅ Full backwards compatibility (no breaking changes)
 
-**Tests**: 19 HTTP filesystem + 7 async integration = 26/26 passing ✅
+**Tests**: 19 HTTP filesystem tests passing ✅
 
 **Remaining (Phase 3)**:
-- Connection pooling optimization (profile HTTPAdapter settings)
+- Connection pooling optimization (profile native client settings)
 - End-to-end benchmarking with real Parquet queries
-- Optional: Integrate AsyncIOPool into io_process_ring
 
 **Advantages**:
 - Parallel range reads eliminate sequential bottleneck
 - Connection pooling reduces HTTP handshake overhead
 - Async path ready for future event-loop scheduler (no refactoring needed)
-- Supports both sync (ThreadPoolExecutor) and async (aiohttp) patterns
+- Supports synchronous I/O patterns (native compiled HTTP client / libcurl-backed implementation). Async strategies (e.g., aiohttp-based) have been deferred.
 
 ---
 

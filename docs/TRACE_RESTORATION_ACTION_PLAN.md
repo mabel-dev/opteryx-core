@@ -19,9 +19,10 @@ This document provides a complete action plan for verifying and completing the I
    - ✅ buffer_start/complete for individual reads (lines ~1100-1110)
    - ✅ buffer_complete in decode closure (line ~1165)
 
-3. **async_io.py** - Async HTTP support
-   - ✅ buffer_start after download_complete (line ~115)
-   - ✅ buffer_complete after buffer_start (line ~130)
+3. async helper (removed)
+   - The experimental async helper `opteryx/connectors/parquet_io/async_io.py` has been removed.
+   - Buffer-phase tracing (`buffer_start` / `buffer_complete`) is implemented in the synchronous reader and scheduler instrumentation in `io_process_ring.py` and `reader.py` (see entries above).
+   - Async-specific tests and the aiohttp dependency were removed; no async runtime instrumentation remains in the codebase.
 
 ### ⏳ PENDING (20%)
 
