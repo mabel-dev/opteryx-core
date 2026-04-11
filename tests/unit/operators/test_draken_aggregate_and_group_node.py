@@ -5,7 +5,7 @@
 from opteryx.operators.draken_aggregate_and_group_node import DrakenAggregateAndGroupNode
 from opteryx.expression import NodeType
 from opteryx.models import QueryProperties
-from orso.types import OrsoTypes
+from opteryx.types import OrsoTypes
 
 
 class _Aggregate:

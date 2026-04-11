@@ -12,9 +12,8 @@ It is the user attributes collection.
 from opteryx.compiled.draken.interop.arrow import vector_from_sequence
 from opteryx.compiled.draken.morsels.morsel import Morsel
 from opteryx.exceptions import VariableNotFoundError
-from orso.schema import FlatColumn
-from orso.schema import RelationSchema
-from orso.types import OrsoTypes
+from opteryx.schema import FlatColumn, RelationSchema
+from opteryx.types import OrsoTypes
 
 __all__ = ("read", "schema")
 

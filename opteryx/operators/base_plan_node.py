@@ -6,21 +6,18 @@
 
 import time
 from collections import defaultdict
-from typing import Optional
-from typing import Union
+from typing import Optional, Union
 
 import pyarrow
 import pyarrow.compute as pc
-from opteryx.compiled.draken import Morsel
-from opteryx.expression import NodeType
-from opteryx.expression import get_all_nodes_of_type
-from opteryx.tracing.event_recorder import record_event as _trace_record
-from orso.tools import random_string
-from orso.types import OrsoTypes
 from pyarrow import Table
 
-from opteryx import EMPTY
-from opteryx import EOS
+from opteryx import EMPTY, EOS
+from opteryx.compiled.draken import Morsel
+from opteryx.expression import NodeType, get_all_nodes_of_type
+from opteryx.tracing.event_recorder import record_event as _trace_record
+from opteryx.types import OrsoTypes
+from opteryx.utils import random_string
 
 _DATA_FORMAT = "arrow,draken"
 END = object()
@@ -40,8 +37,7 @@ class BasePlanNode:
         The initializer accepts a QueryTelemetry node which is populated by different nodes
         differently to record what happened during the query execution.
         """
-        from opteryx.models import QueryProperties
-        from opteryx.models import QueryTelemetry
+        from opteryx.models import QueryProperties, QueryTelemetry
         from opteryx.operators.catalog import get_registry
 
         self.properties: QueryProperties = properties

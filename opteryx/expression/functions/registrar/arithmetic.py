@@ -1,12 +1,15 @@
-from opteryx.expression.functions import FunctionDefinition
-from opteryx.expression.functions import FunctionOverload
-from opteryx.expression.functions import KernelSpec
-from opteryx.expression.functions import LifecycleSpec
-from opteryx.expression.functions import ParameterSpec
-from opteryx.expression.functions import ReturnSpec
-from opteryx.expression.functions.implementations import arithmetic as number_functions
-from orso.types import OrsoTypes
 from pyarrow import compute
+
+from opteryx.expression.functions import (
+    FunctionDefinition,
+    FunctionOverload,
+    KernelSpec,
+    LifecycleSpec,
+    ParameterSpec,
+    ReturnSpec,
+)
+from opteryx.expression.functions.implementations import arithmetic as number_functions
+from opteryx.types import OrsoTypes
 
 
 def get_builtin_arithmetic_functions() -> list[FunctionDefinition]:

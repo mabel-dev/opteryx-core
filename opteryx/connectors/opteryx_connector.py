@@ -11,19 +11,13 @@ Architecture:
 - OpteryxTable: Transient table-specific engine (handles data reading for one table)
 """
 
-from typing import Dict
-from typing import Optional
-from typing import Tuple
+from typing import Dict, Optional, Tuple
 
 from opteryx.connectors import TableType
-from opteryx.connectors.capabilities import Diachronic
-from opteryx.connectors.capabilities import Eidetic
-from opteryx.connectors.capabilities import PredicatePushable
-from opteryx.exceptions import DatasetNotFoundError
-from opteryx.exceptions import DatasetReadError
-from opteryx.models import FileEntry
-from opteryx.models import Manifest
-from orso.schema import RelationSchema
+from opteryx.connectors.capabilities import Diachronic, Eidetic, PredicatePushable
+from opteryx.exceptions import DatasetNotFoundError, DatasetReadError
+from opteryx.models import FileEntry, Manifest
+from opteryx.schema import RelationSchema
 
 
 class OpteryxTable(Diachronic, PredicatePushable):

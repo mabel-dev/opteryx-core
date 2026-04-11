@@ -3,7 +3,7 @@
 from types import SimpleNamespace
 
 import pytest
-from orso.types import OrsoTypes
+from opteryx.types import OrsoTypes
 
 from opteryx.expression.functions import (
     BindingContext,

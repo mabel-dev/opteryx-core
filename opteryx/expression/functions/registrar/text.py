@@ -15,16 +15,17 @@ from __future__ import annotations
 from typing import List
 
 from opteryx.compiled import vector_ops as compiled_vector_ops
-from opteryx.compiled.vector_ops import vector_ends_with
-from opteryx.compiled.vector_ops import vector_starts_with
-from opteryx.expression.functions import FunctionDefinition
-from opteryx.expression.functions import FunctionOverload
-from opteryx.expression.functions import KernelSpec
-from opteryx.expression.functions import LifecycleSpec
-from opteryx.expression.functions import ParameterSpec
-from opteryx.expression.functions import ReturnSpec
+from opteryx.compiled.vector_ops import vector_ends_with, vector_starts_with
+from opteryx.expression.functions import (
+    FunctionDefinition,
+    FunctionOverload,
+    KernelSpec,
+    LifecycleSpec,
+    ParameterSpec,
+    ReturnSpec,
+)
 from opteryx.expression.functions.registrar import _make
-from orso.types import OrsoTypes
+from opteryx.types import OrsoTypes
 
 
 def get_builtin_text_functions() -> List[FunctionDefinition]:

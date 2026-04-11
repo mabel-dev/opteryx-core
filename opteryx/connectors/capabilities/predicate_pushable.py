@@ -19,11 +19,10 @@ import datetime
 from typing import Dict
 
 from opteryx.exceptions import NotSupportedError
-from opteryx.expression import NodeType
-from opteryx.expression import get_all_nodes_of_type
+from opteryx.expression import NodeType, get_all_nodes_of_type
 from opteryx.models import Node
-from orso.tools import single_item_cache
-from orso.types import OrsoTypes
+from opteryx.types import OrsoTypes
+from opteryx.utils import single_item_cache
 
 
 class PredicatePushable:

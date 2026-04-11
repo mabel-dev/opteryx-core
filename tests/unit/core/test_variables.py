@@ -4,7 +4,7 @@ import sys
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
 import pytest
-from orso.types import OrsoTypes
+from opteryx.types import OrsoTypes
 
 from opteryx.exceptions import PermissionsError
 from opteryx.models import Node

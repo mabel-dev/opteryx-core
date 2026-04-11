@@ -2,12 +2,12 @@ from dataclasses import dataclass
 from typing import Any
 
 from opteryx.expression.intervals import MICROSECONDS_PER_SECOND
-from orso.schema import FlatColumn
-from orso.tools import random_string
-from orso.types import OrsoTypes
+from opteryx.schema import FlatColumn
+from opteryx.types import OrsoTypes
+from opteryx.utils import random_string
 
 
-@dataclass(init=False)
+@dataclass
 class ExpressionColumn(FlatColumn):
     expression: Any = None
 
@@ -38,8 +38,7 @@ def _format_interval(value):
 
 def format_expression(root, qualify: bool = False):
     # circular imports
-    from . import INTERNAL_TYPE
-    from . import NodeType
+    from . import INTERNAL_TYPE, NodeType
     from .operator_catalog import get_operator_token
 
     if root is None:

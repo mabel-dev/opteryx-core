@@ -17,15 +17,15 @@ and processed.
 from opteryx.expression import NodeType
 from opteryx.models import Node
 from opteryx.planner import build_literal_node
-from opteryx.planner.logical_planner import LogicalPlan
-from opteryx.planner.logical_planner import LogicalPlanNode
-from opteryx.planner.logical_planner import LogicalPlanStepType
-from orso.tools import random_string
-from orso.types import OrsoTypes
+from opteryx.planner.logical_planner import LogicalPlan, LogicalPlanNode, LogicalPlanStepType
+from opteryx.types import OrsoTypes
+from opteryx.utils import random_string
 
-from .optimization_strategy import OptimizationStrategy
-from .optimization_strategy import OptimizerContext
-from .optimization_strategy import get_nodes_of_type_from_logical_plan
+from .optimization_strategy import (
+    OptimizationStrategy,
+    OptimizerContext,
+    get_nodes_of_type_from_logical_plan,
+)
 
 
 def _write_filters(left_column, right_column):

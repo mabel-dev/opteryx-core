@@ -20,7 +20,7 @@ import sys
 import time
 
 import pyarrow as pa
-from orso.types import OrsoTypes
+from opteryx.types import OrsoTypes
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 

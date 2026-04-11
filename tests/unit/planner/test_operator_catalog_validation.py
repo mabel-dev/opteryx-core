@@ -5,7 +5,7 @@ import pytest
 
 sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 
-from orso.types import OrsoTypes
+from opteryx.types import OrsoTypes
 
 from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.expression import NodeType

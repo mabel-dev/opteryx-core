@@ -37,19 +37,15 @@
 import datetime
 import decimal
 import time
-from typing import Any
-from typing import Dict
-from typing import Generator
-from typing import Iterable
-from typing import Optional
-from typing import Union
+from typing import Any, Dict, Generator, Iterable, Optional, Union
 
 import numpy
+
 from opteryx.expression import NodeType
 from opteryx.expression.intervals import normalize_interval_value
 from opteryx.models import Node
-from orso.schema import ConstantColumn
-from orso.types import OrsoTypes
+from opteryx.schema import ConstantColumn
+from opteryx.types import OrsoTypes
 
 
 def _infer_collection_literal(value: Any) -> tuple[OrsoTypes, Optional[OrsoTypes]]:
@@ -255,12 +251,11 @@ def execute_logical_plan(
     import uuid
 
     import pyarrow
+
     from opteryx.constants import ResultType
     from opteryx.exceptions import SqlError
     from opteryx.managers.execution import execute as execute_plan
-    from opteryx.models import ExecutionContext
-    from opteryx.models import QueryProperties
-    from opteryx.models import QueryTelemetry
+    from opteryx.models import ExecutionContext, QueryProperties, QueryTelemetry
     from opteryx.planner.binder import do_bind_phase
     from opteryx.planner.optimizer import do_optimizer
     from opteryx.planner.physical_planner import create_physical_plan
@@ -327,22 +322,19 @@ def execute_logical_plan(
 
     # Handle statistics-only (execute_plan may have returned a simple generator)
     if result_type == ResultType.NON_TABULAR:
-        import orso
-        from orso.schema import FlatColumn
-        from orso.schema import RelationSchema
+        from opteryx.schema import FlatColumn, RelationSchema, convert_orso_schema_to_arrow_schema
 
         # Consume generator to get the first non-empty result (if any)
         data = next(results_generator, None)
         if data is None:
             # return an empty meta table
-            meta_dataframe = orso.DataFrame(
-                rows=[(0,)],
-                schema=RelationSchema(
-                    name="table",
-                    columns=[FlatColumn(name="rows_affected", type=OrsoTypes.INTEGER)],
-                ),
+            schema_obj = RelationSchema(
+                name="table",
+                columns=[FlatColumn(name="rows_affected", type=OrsoTypes.INTEGER)],
             )
-            return meta_dataframe.arrow()
+            arrow_schema = convert_orso_schema_to_arrow_schema(schema_obj)
+            arrays = [pyarrow.array([0], type=pyarrow.int64())]
+            return pyarrow.Table.from_arrays(arrays, schema=arrow_schema)
         # If data is already an Arrow table, return it
         if isinstance(data, pyarrow.Table):
             return data
@@ -354,8 +346,7 @@ def execute_logical_plan(
         first_table = next(results_generator, None)
         if first_table is None:
             # No rows; return empty table with schema from physical plan Exit node
-            from orso.schema import RelationSchema
-            from orso.schema import convert_orso_schema_to_arrow_schema
+            from opteryx.schema import RelationSchema, convert_orso_schema_to_arrow_schema
 
             exit_node = physical_plan.get_exit_points()[0]
             exit_instance = physical_plan[exit_node]

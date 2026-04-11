@@ -15,7 +15,7 @@ from opteryx.compiled.draken.interop.arrow import vector_from_sequence
 from opteryx.compiled.draken.morsels.morsel import Morsel
 from opteryx.exceptions import SqlError
 from opteryx.models import QueryProperties
-from orso.types import OrsoTypes
+from opteryx.types import OrsoTypes
 
 from opteryx import EOS
 

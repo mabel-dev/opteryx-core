@@ -6,12 +6,14 @@ import numpy
 
 # Local implementation imports (kept as late imports inside function if heavy)
 from opteryx.compiled.vector_ops import vector_iif as _vector_iif
-from opteryx.expression.functions import FunctionDefinition
-from opteryx.expression.functions import FunctionOverload
-from opteryx.expression.functions import KernelSpec
-from opteryx.expression.functions import LifecycleSpec
-from opteryx.expression.functions import ParameterSpec
-from opteryx.expression.functions import ReturnSpec
+from opteryx.expression.functions import (
+    FunctionDefinition,
+    FunctionOverload,
+    KernelSpec,
+    LifecycleSpec,
+    ParameterSpec,
+    ReturnSpec,
+)
 from opteryx.expression.functions.implementations.logical import (
     array_contains as _lf_array_contains,
 )
@@ -26,9 +28,8 @@ from opteryx.expression.functions.implementations.utility import (
 )
 
 # Local helpers provided by registrar package
-from opteryx.expression.functions.registrar import _case_return_type
-from opteryx.expression.functions.registrar import _coalesce_return_type
-from orso.types import OrsoTypes
+from opteryx.expression.functions.registrar import _case_return_type, _coalesce_return_type
+from opteryx.types import OrsoTypes
 
 
 def _coalesce(*arrays):

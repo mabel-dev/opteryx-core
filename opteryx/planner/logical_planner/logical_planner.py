@@ -10,28 +10,22 @@ The plan does not try to be efficient or clever, at this point it is only trying
 """
 
 import time
-from enum import Enum
-from enum import auto
-from typing import List
-from typing import Optional
-from typing import Tuple
+from enum import Enum, auto
+from typing import List, Optional, Tuple
 
-from opteryx.exceptions import UnnamedColumnError
-from opteryx.exceptions import UnsupportedSyntaxError
-from opteryx.expression import NodeType
-from opteryx.expression import format_expression
-from opteryx.expression import get_all_nodes_of_type
-from opteryx.models import LogicalColumn
-from opteryx.models import Node
+from opteryx.exceptions import UnnamedColumnError, UnsupportedSyntaxError
+from opteryx.expression import NodeType, format_expression, get_all_nodes_of_type
+from opteryx.models import LogicalColumn, Node
 from opteryx.planner import build_literal_node
 from opteryx.planner.logical_planner import logical_planner_builders
 from opteryx.planner.logical_planner.logical_planner_rewriter import decompose_aggregates
 from opteryx.third_party.travers import Graph
-from opteryx.utils import dnf
-from opteryx.vectors.vector_types import get_vector_source_identifier
-from opteryx.vectors.vector_types import node_is_vector_query_expression
-from orso.tools import random_string
-from orso.types import OrsoTypes
+from opteryx.types import OrsoTypes
+from opteryx.utils import dnf, random_string
+from opteryx.vectors.vector_types import (
+    get_vector_source_identifier,
+    node_is_vector_query_expression,
+)
 
 
 class LogicalPlanStepType(int, Enum):

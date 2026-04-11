@@ -1,11 +1,13 @@
-from opteryx.expression.functions import FunctionDefinition
-from opteryx.expression.functions import FunctionOverload
-from opteryx.expression.functions import KernelSpec
-from opteryx.expression.functions import LifecycleSpec
-from opteryx.expression.functions import ParameterSpec
-from opteryx.expression.functions import ReturnSpec
+from opteryx.expression.functions import (
+    FunctionDefinition,
+    FunctionOverload,
+    KernelSpec,
+    LifecycleSpec,
+    ParameterSpec,
+    ReturnSpec,
+)
 from opteryx.expression.functions.registrar import _make
-from orso.types import OrsoTypes
+from opteryx.types import OrsoTypes
 
 
 def get_builtin_hash_encoding_functions() -> list[FunctionDefinition]:
@@ -14,10 +16,7 @@ def get_builtin_hash_encoding_functions() -> list[FunctionDefinition]:
     # Local imports to avoid top-level import cycles and to keep costs lazy.
     from opteryx.expression.functions.implementations import arithmetic as number_functions
     from opteryx.expression.functions.implementations import text as string_functions
-    from opteryx.expression.functions.implementations.text import _md5
-    from opteryx.expression.functions.implementations.text import _sha1
-    from opteryx.expression.functions.implementations.text import _sha256
-    from opteryx.expression.functions.implementations.text import _sha512
+    from opteryx.expression.functions.implementations.text import _md5, _sha1, _sha256, _sha512
     from opteryx.expression.functions.registrar import _iterate_single_parameter as _isingle
     from opteryx.third_party.cyan4973.xxhash import hash_bytes
 

@@ -15,24 +15,33 @@ Main entry points:
 
 import numpy
 import pyarrow
+from opteryx.types import OrsoTypes
+
 from opteryx.compiled.vector_ops import vector_contains
-from opteryx.expression.operations import array_ops
-from opteryx.expression.operations import comparisons
-from opteryx.expression.operations import list_ops
-from opteryx.expression.operations import special_ops
-from opteryx.expression.operations import string_matching
-from opteryx.expression.operations.fastpath_constant import constant_fastpath
-from opteryx.expression.operations.fastpath_constant import has_constant_candidate
-from opteryx.expression.operations.fastpath_constant import supports_constant_fastpath
-from opteryx.expression.operations.fastpath_dictionary import has_dictionary_candidate
-from opteryx.expression.operations.fastpath_dictionary import supports_dictionary_fastpath
-from opteryx.expression.operations.fastpath_dictionary import supports_dictionary_numeric_fastpath
-from opteryx.expression.operations.fastpath_telemetry import get_fastpath_telemetry
-from opteryx.expression.operations.fastpath_telemetry import record_constant_fastpath_fallback
-from opteryx.expression.operations.fastpath_telemetry import record_constant_fastpath_hit
-from opteryx.expression.operations.fastpath_telemetry import reset_fastpath_telemetry
+from opteryx.expression.operations import (
+    array_ops,
+    comparisons,
+    list_ops,
+    special_ops,
+    string_matching,
+)
+from opteryx.expression.operations.fastpath_constant import (
+    constant_fastpath,
+    has_constant_candidate,
+    supports_constant_fastpath,
+)
+from opteryx.expression.operations.fastpath_dictionary import (
+    has_dictionary_candidate,
+    supports_dictionary_fastpath,
+    supports_dictionary_numeric_fastpath,
+)
+from opteryx.expression.operations.fastpath_telemetry import (
+    get_fastpath_telemetry,
+    record_constant_fastpath_fallback,
+    record_constant_fastpath_hit,
+    reset_fastpath_telemetry,
+)
 from opteryx.expression.operations.type_coercion import to_temporal_array
-from orso.types import OrsoTypes
 
 # Operators that should skip null compression during filtering
 _SKIP_COMPRESSION_OPS = frozenset(

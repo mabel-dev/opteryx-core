@@ -21,6 +21,8 @@ import decimal
 from enum import Enum
 from typing import Any, Callable, Dict, Optional, Tuple, Type, Union
 
+import numpy
+
 __all__ = [
     "OrsoTypes",
     "PYTHON_TO_ORSO_MAP",
@@ -34,6 +36,9 @@ class OrsoTypes(Enum):
 
     Replaces orso.types.OrsoTypes with optimized, dependency-free implementation.
     """
+
+    # Sentinel type for missing/unknown types
+    _MISSING_TYPE = "_MISSING_TYPE"
 
     # Core scalar types
     NULL = "NULL"
@@ -66,6 +71,23 @@ class OrsoTypes(Enum):
             OrsoTypes.TIMESTAMP.python_type -> datetime.datetime
         """
         return _TYPE_TO_PYTHON.get(self, object)
+
+    @property
+    def numpy_dtype(self) -> Any:
+        """Get the numpy dtype for this OrsoType.
+
+        Returns the numpy dtype that best represents this OrsoType.
+        Used by the expression evaluator for constant value handling.
+
+        Note: This is a temporary compatibility bridge during numpy eradication.
+        The expression evaluator will be refactored to use Draken vectors in Steps 4-5.
+
+        Examples:
+            OrsoTypes.INTEGER.numpy_dtype -> numpy.int32
+            OrsoTypes.DOUBLE.numpy_dtype -> numpy.float64
+            OrsoTypes.TIMESTAMP.numpy_dtype -> numpy.dtype('datetime64[us]')
+        """
+        return _TYPE_TO_NUMPY_DTYPE.get(self, numpy.object_)
 
     def parse(self, value: Any) -> Any:
         """Parse a value to this OrsoType.
@@ -328,6 +350,26 @@ _PARSERS: Dict[OrsoTypes, Callable[[Any], Any]] = {
     OrsoTypes.TIME: _parse_time,
     OrsoTypes.TIMESTAMP: _parse_timestamp,
     OrsoTypes.INTERVAL: _parse_interval,
+}
+
+# Mapping: OrsoType -> numpy dtype (for expression evaluator compatibility)
+# Note: This is temporary during numpy eradication (Steps 4-5)
+_TYPE_TO_NUMPY_DTYPE = {
+    OrsoTypes.NULL: numpy.object_,
+    OrsoTypes.BOOLEAN: numpy.bool_,
+    OrsoTypes.INTEGER: numpy.int32,
+    OrsoTypes.DOUBLE: numpy.float64,
+    OrsoTypes.VARCHAR: numpy.object_,
+    OrsoTypes.BLOB: numpy.object_,
+    OrsoTypes.DATE: numpy.object_,
+    OrsoTypes.TIME: numpy.object_,
+    OrsoTypes.TIMESTAMP: numpy.dtype("datetime64[us]"),
+    OrsoTypes.INTERVAL: numpy.dtype("timedelta64[us]"),
+    OrsoTypes.DECIMAL: numpy.object_,
+    OrsoTypes.ARRAY: numpy.object_,
+    OrsoTypes.STRUCT: numpy.object_,
+    OrsoTypes.VECTOR: numpy.object_,
+    OrsoTypes.JSONB: numpy.object_,
 }
 
 

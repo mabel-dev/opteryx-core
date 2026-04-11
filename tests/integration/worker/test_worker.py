@@ -4,22 +4,21 @@ import datetime
 import io
 import os
 import sys
-from typing import List
-from typing import Tuple
+from typing import List, Tuple
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../../orso"))
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 sys.path.insert(1, os.path.join(sys.path[0], "../../../../pyiceberg-firestore-gcs"))
 sys.path.insert(1, os.path.join(sys.path[0], "../../../../opteryx-catalog"))
 
-import opteryx
 import orjson
 import pyarrow as pa
 import pyarrow.parquet as pq
-from opteryx.connectors import OpteryxConnector
 from opteryx_catalog import OpteryxCatalog
-from orso.logging import get_logger
 
+import opteryx
+from opteryx.connectors import OpteryxConnector
+from opteryx.logging import get_logger
 
 logger = get_logger()
 
@@ -85,11 +84,11 @@ def _write_manifest(manifest: dict, manifest_path: str = "") -> None:
 
 def create_statement(sql_text: str, identity: str) -> dict:
     """Create a fake Firestore document representing a statement to execute.
-    
+
     Args:
         sql_text: The SQL query to execute
         identity: A unique identifier for this statement (used as document ID)
-        
+
     Returns:
         A dictionary representing a Firestore document with the statement data
     """
@@ -107,21 +106,21 @@ def worker_executor(
     batch_size: int = 50_000,
 ) -> dict:
     """Execute a query statement and return the modified statement with results metadata.
-    
+
     This function executes the SQL query from the statement dict using the opteryx engine,
     chunks the results the same way as the deployed worker, collects telemetry, but does
     not persist results to cloud storage.
-    
+
     Args:
         statement: A dictionary representing a statement (from create_statement or similar)
         batch_size: Number of rows per batch for result processing
-        
+
     Returns:
         The modified statement dictionary with execution metadata, telemetry, and result info
     """
     statement_handle = statement.get("handle")
     sql = statement.get("sql_text")
-    
+
     if not sql:
         statement["status"] = "FAILED"
         statement["error"] = "missing sql_text"
@@ -231,7 +230,6 @@ def worker_executor(
 
 
 if __name__ == "__main__":
-
     statement = create_statement(
         sql_text="SELECT 1",
         identity="test_statement_001",

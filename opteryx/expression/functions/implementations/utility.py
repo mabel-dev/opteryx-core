@@ -19,10 +19,9 @@ Includes:
 
 import numpy
 import pyarrow
+
 from opteryx.third_party.tktech import csimdjson as simdjson
-from opteryx.vectors.embeddings import embed_text_matrix
-from opteryx.vectors.embeddings import embed_text_values
-from opteryx.vectors.embeddings import get_embedding_provider
+from opteryx.vectors.embeddings import embed_text_matrix, embed_text_values, get_embedding_provider
 
 
 def _sequence_rows(values):
@@ -449,7 +448,7 @@ def array_contains_all(arr, val):
 
 
 def array_cast(array, element_type):
-    from orso.types import OrsoTypes
+    from opteryx.types import OrsoTypes
 
     result = numpy.empty(len(array), dtype=list)
     parser = OrsoTypes[element_type[0]].parse
@@ -469,7 +468,7 @@ def array_cast(array, element_type):
 def array_cast_safe(array, element_type):
     from contextlib import suppress
 
-    from orso.types import OrsoTypes
+    from opteryx.types import OrsoTypes
 
     result = numpy.empty(len(array), dtype=list)
     parser = OrsoTypes[element_type[0]].parse

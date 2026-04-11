@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-from orso.types import OrsoTypes
+from opteryx.types import OrsoTypes
 
 
 @dataclass(frozen=True)

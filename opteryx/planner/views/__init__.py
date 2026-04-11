@@ -7,7 +7,7 @@ from typing import Optional
 
 from opteryx.connectors import connector_factory
 from opteryx.connectors.capabilities.eidetic import ViewDefinition
-from orso.tools import lru_cache_with_expiry
+from opteryx.utils import lru_cache_with_expiry
 
 
 def get_view_plan(view_name: str, telemetry) -> dict:
@@ -40,13 +40,12 @@ def _get_view_definition(view_name: str, telemetry) -> Optional[ViewDefinition]:
         return None
 
 
-@lru_cache_with_expiry(max_size=128, valid_for_seconds=300)
+@lru_cache_with_expiry(maxsize=128, ttl=300)
 def _view_as_plan(view_sql: str) -> dict:
     """Return the logical plan for a view."""
     from opteryx.planner.logical_planner import do_logical_planning_phase
     from opteryx.third_party import sqloxide
-    from opteryx.utils.sql import clean_statement
-    from opteryx.utils.sql import remove_comments
+    from opteryx.utils.sql import clean_statement, remove_comments
 
     clean_sql = clean_statement(remove_comments(view_sql))
     parsed_statements = sqloxide.parse_sql(clean_sql, _dialect="opteryx")

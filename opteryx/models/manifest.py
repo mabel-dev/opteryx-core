@@ -15,17 +15,12 @@ One Manifest per READ node. Optimizer uses it to make decisions,
 execution follows those decisions deterministically.
 """
 
-from typing import Any
-from typing import Dict
-from typing import List
-from typing import Optional
-from typing import Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from opteryx.compiled.structures.relation_statistics import to_int
 from opteryx.models.file_entry import FileEntry
-from opteryx.third_party.maki_nage.distogram import Distogram
-from opteryx.third_party.maki_nage.distogram import load
-from orso.schema import RelationSchema
+from opteryx.schema import RelationSchema
+from opteryx.third_party.maki_nage.distogram import Distogram, load
 
 
 class Manifest:

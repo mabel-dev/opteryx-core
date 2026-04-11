@@ -8,13 +8,12 @@ The key provided will be the filename portion of the object key.
 from __future__ import annotations
 
 import importlib
-from typing import Iterable
-from typing import Union
+from typing import Iterable, Union
 from urllib.parse import urlparse
 
 from opteryx.exceptions import MissingDependencyError
 from opteryx.managers.kvstores.base_kv_store import BaseKeyValueStore
-from orso.tools import single_item_cache
+from opteryx.utils import single_item_cache
 
 GoogleAPIError = Exception
 

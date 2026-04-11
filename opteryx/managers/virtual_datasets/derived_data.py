@@ -10,7 +10,7 @@ derived
 This is used as the source relation for derived values.
 """
 
-from orso.schema import RelationSchema
+from opteryx.schema import RelationSchema
 
 __all__ = ("schema",)
 

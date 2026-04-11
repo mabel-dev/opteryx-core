@@ -12,17 +12,17 @@ the import statement.
 """
 
 import os
-import sys
-import time
-import threading
 import statistics
+import sys
+import threading
+import time
 from typing import Callable
 
 # Make sure we can import opteryx
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../../'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../../../"))
 
 from opteryx.shared import MemoryPool
-from orso.tools import random_string
+from opteryx.utils import random_string
 
 
 class MemoryPoolBenchmark:
@@ -64,13 +64,13 @@ class MemoryPoolBenchmark:
         # Calculate statistics (in milliseconds)
         times_ms = [t * 1000 for t in times]
         stats = {
-            'test': test_name,
-            'iterations': iterations,
-            'min_ms': min(times_ms),
-            'max_ms': max(times_ms),
-            'mean_ms': statistics.mean(times_ms),
-            'median_ms': statistics.median(times_ms),
-            'stdev_ms': statistics.stdev(times_ms) if len(times_ms) > 1 else 0,
+            "test": test_name,
+            "iterations": iterations,
+            "min_ms": min(times_ms),
+            "max_ms": max(times_ms),
+            "mean_ms": statistics.mean(times_ms),
+            "median_ms": statistics.median(times_ms),
+            "stdev_ms": statistics.stdev(times_ms) if len(times_ms) > 1 else 0,
         }
 
         self.results.append(stats)
@@ -82,11 +82,11 @@ class MemoryPoolBenchmark:
             print("No results to display")
             return
 
-        print(f"\n{'='*80}")
+        print(f"\n{'=' * 80}")
         print(f"{self.name}")
-        print(f"{'='*80}")
+        print(f"{'=' * 80}")
         print(f"{'Test Name':<40} {'Min':>10} {'Mean':>10} {'Median':>10} {'Max':>10}")
-        print(f"{'-'*80}")
+        print(f"{'-' * 80}")
 
         for result in self.results:
             print(
@@ -97,7 +97,7 @@ class MemoryPoolBenchmark:
                 f"{result['max_ms']:>10.3f}ms"
             )
 
-        print(f"{'='*80}\n")
+        print(f"{'=' * 80}\n")
 
 
 def test_small_allocations():
@@ -123,10 +123,10 @@ def test_small_allocations():
     release_time = time.perf_counter() - start
 
     return {
-        'commit': commit_time,
-        'read': read_time,
-        'release': release_time,
-        'total': commit_time + read_time + release_time
+        "commit": commit_time,
+        "read": read_time,
+        "release": release_time,
+        "total": commit_time + read_time + release_time,
     }
 
 
@@ -153,10 +153,10 @@ def test_medium_allocations():
     release_time = time.perf_counter() - start
 
     return {
-        'commit': commit_time,
-        'read': read_time,
-        'release': release_time,
-        'total': commit_time + read_time + release_time
+        "commit": commit_time,
+        "read": read_time,
+        "release": release_time,
+        "total": commit_time + read_time + release_time,
     }
 
 
@@ -183,10 +183,10 @@ def test_large_allocations():
     release_time = time.perf_counter() - start
 
     return {
-        'commit': commit_time,
-        'read': read_time,
-        'release': release_time,
-        'total': commit_time + read_time + release_time
+        "commit": commit_time,
+        "read": read_time,
+        "release": release_time,
+        "total": commit_time + read_time + release_time,
     }
 
 
@@ -217,7 +217,7 @@ def test_mixed_workload():
 
     total_time = time.perf_counter() - start
 
-    return {'total': total_time}
+    return {"total": total_time}
 
 
 def test_concurrent_access():
@@ -247,11 +247,7 @@ def test_concurrent_access():
     total_time = time.perf_counter() - start
     total_ops = num_threads * ops_per_thread * 3  # commit + read + release
 
-    return {
-        'total': total_time,
-        'ops': total_ops,
-        'throughput': total_ops / total_time
-    }
+    return {"total": total_time, "ops": total_ops, "throughput": total_ops / total_time}
 
 
 def test_rapid_allocate_release():
@@ -265,7 +261,7 @@ def test_rapid_allocate_release():
         pool.release(ref)
     total_time = time.perf_counter() - start
 
-    return {'total': total_time}
+    return {"total": total_time}
 
 
 def test_compaction_overhead():
@@ -292,7 +288,7 @@ def test_compaction_overhead():
 
     total_time = time.perf_counter() - start
 
-    return {'total': total_time}
+    return {"total": total_time}
 
 
 def test_zero_copy_vs_copy():
@@ -317,11 +313,7 @@ def test_zero_copy_vs_copy():
         pool.read(ref, zero_copy=True)
     zero_copy_time = time.perf_counter() - start
 
-    return {
-        'copy': copy_time,
-        'zero_copy': zero_copy_time,
-        'speedup': copy_time / zero_copy_time
-    }
+    return {"copy": copy_time, "zero_copy": zero_copy_time, "speedup": copy_time / zero_copy_time}
 
 
 def print_test_results(test_name: str, results: dict):
@@ -330,9 +322,9 @@ def print_test_results(test_name: str, results: dict):
     print("-" * 60)
     for key, value in results.items():
         if isinstance(value, float):
-            if key == 'throughput':
+            if key == "throughput":
                 print(f"  {key:.<40} {value:>15,.0f} ops/sec")
-            elif key == 'speedup':
+            elif key == "speedup":
                 print(f"  {key:.<40} {value:>15.2f}x")
             else:
                 print(f"  {key:.<40} {value:>15.3f} ms")
@@ -358,31 +350,31 @@ def main():
     results = {}
 
     print("\n[1/7] Small allocations (50k × 100 bytes)...", end="", flush=True)
-    results['small'] = test_small_allocations()
+    results["small"] = test_small_allocations()
     print(" ✓")
 
     print("[2/7] Medium allocations (2k × 10KB)...", end="", flush=True)
-    results['medium'] = test_medium_allocations()
+    results["medium"] = test_medium_allocations()
     print(" ✓")
 
     print("[3/7] Large allocations (10 × 10MB)...", end="", flush=True)
-    results['large'] = test_large_allocations()
+    results["large"] = test_large_allocations()
     print(" ✓")
 
     print("[4/7] Mixed workload...", end="", flush=True)
-    results['mixed'] = test_mixed_workload()
+    results["mixed"] = test_mixed_workload()
     print(" ✓")
 
     print("[5/7] Concurrent access (8 threads)...", end="", flush=True)
-    results['concurrent'] = test_concurrent_access()
+    results["concurrent"] = test_concurrent_access()
     print(" ✓")
 
     print("[6/7] Rapid allocate-release cycles...", end="", flush=True)
-    results['rapid'] = test_rapid_allocate_release()
+    results["rapid"] = test_rapid_allocate_release()
     print(" ✓")
 
     print("[7/7] Zero-copy vs copy reads...", end="", flush=True)
-    results['zero_copy'] = test_zero_copy_vs_copy()
+    results["zero_copy"] = test_zero_copy_vs_copy()
     print(" ✓")
 
     # Print results
@@ -390,13 +382,13 @@ def main():
     print("RESULTS")
     print("=" * 60)
 
-    print_test_results("Small Allocations (50k × 100 bytes)", results['small'])
-    print_test_results("Medium Allocations (2k × 10KB)", results['medium'])
-    print_test_results("Large Allocations (10 × 10MB)", results['large'])
-    print_test_results("Mixed Workload", results['mixed'])
-    print_test_results("Concurrent Access (8 threads)", results['concurrent'])
-    print_test_results("Rapid Allocate-Release", results['rapid'])
-    print_test_results("Zero-Copy vs Copy Reads", results['zero_copy'])
+    print_test_results("Small Allocations (50k × 100 bytes)", results["small"])
+    print_test_results("Medium Allocations (2k × 10KB)", results["medium"])
+    print_test_results("Large Allocations (10 × 10MB)", results["large"])
+    print_test_results("Mixed Workload", results["mixed"])
+    print_test_results("Concurrent Access (8 threads)", results["concurrent"])
+    print_test_results("Rapid Allocate-Release", results["rapid"])
+    print_test_results("Zero-Copy vs Copy Reads", results["zero_copy"])
 
     print("\n" + "=" * 60)
     print("Benchmark Complete!")
@@ -404,14 +396,14 @@ def main():
 
     # Summary stats
     print("\nKey Metrics:")
-    small_ops = 50000 * 3 / results['small']['total']
-    medium_ops = 2000 * 3 / results['medium']['total']
+    small_ops = 50000 * 3 / results["small"]["total"]
+    medium_ops = 2000 * 3 / results["medium"]["total"]
     print(f"  Small alloc throughput: {small_ops:,.0f} ops/sec")
     print(f"  Medium alloc throughput: {medium_ops:,.0f} ops/sec")
-    if 'throughput' in results['concurrent']:
+    if "throughput" in results["concurrent"]:
         print(f"  Concurrent throughput: {results['concurrent']['throughput']:,.0f} ops/sec")
     print(f"  Zero-copy speedup: {results['zero_copy'].get('speedup', 1):.2f}x")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

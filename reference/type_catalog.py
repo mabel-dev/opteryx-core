@@ -14,7 +14,7 @@ from opteryx.compiled.rugo.converters.orso import ORSO_TYPE_ALIASES
 from opteryx.compiled.rugo.converters.orso import PARQUET_LOGICAL_COMPLEX_PREFIXES
 from opteryx.compiled.rugo.converters.orso import PARQUET_LOGICAL_TYPE_MAP
 from opteryx.compiled.rugo.converters.orso import PARQUET_PHYSICAL_TYPE_MAP
-from orso.types import OrsoTypes
+from opteryx.types import OrsoTypes
 
 _TYPE_PARAMETER_PROBES = OrderedDict(
     [

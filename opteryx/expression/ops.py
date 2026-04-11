@@ -8,12 +8,11 @@ import re
 
 import numpy
 import pyarrow
-from opteryx.compiled import vector_ops
-from opteryx.compiled.vector_ops import vector_in_list
-from opteryx.compiled.vector_ops import vector_like
-from opteryx.compiled.vector_ops import vector_rlike
-from orso.types import OrsoTypes
 from pyarrow import compute
+
+from opteryx.compiled import vector_ops
+from opteryx.compiled.vector_ops import vector_in_list, vector_like, vector_rlike
+from opteryx.types import OrsoTypes
 
 _DICT_EXPR_TEL = {
     "draken_dict_expr_fastpath_hits": 0,

@@ -187,9 +187,8 @@ def _coerce_interval(value) -> tuple:
 
 
 def _coerce_temporal_scalar_for_arrow(value, target_type):
-    from orso.types import OrsoTypes
-
     from opteryx.expression.casts import parse_timestamp_value
+    from opteryx.types import OrsoTypes
 
     if hasattr(value, "as_py"):
         value = value.as_py()

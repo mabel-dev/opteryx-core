@@ -2,7 +2,8 @@
 
 import numpy
 import pyarrow
-from orso.types import OrsoTypes
+
+from opteryx.types import OrsoTypes
 
 
 def to_temporal_array(values, source_type, target_type):

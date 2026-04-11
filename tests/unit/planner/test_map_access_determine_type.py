@@ -5,14 +5,12 @@ import pytest
 
 sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 
-from orso.schema import ConstantColumn
-from orso.schema import FlatColumn
-from orso.types import OrsoTypes
-
 from opteryx.exceptions import IncorrectTypeError
 from opteryx.expression import NodeType
 from opteryx.models import Node
 from opteryx.planner.binder.operator_map import determine_type
+from opteryx.schema import ConstantColumn, FlatColumn
+from opteryx.types import OrsoTypes
 
 
 def _literal(value_type, value):

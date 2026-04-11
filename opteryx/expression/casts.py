@@ -10,7 +10,7 @@ import inspect
 
 import numpy
 import pyarrow
-from orso.types import OrsoTypes
+from opteryx.types import OrsoTypes
 
 
 def safe(func, value, **kwargs):
@@ -266,8 +266,7 @@ def cast_to_varchar(arr, *args):
     Uses optimized paths for float64 and int64 arrays when possible,
     falling back to generic conversion for other types.
     """
-    from opteryx.compiled.vector_ops import vector_cast_int64_to_ascii
-    from opteryx.compiled.vector_ops import vector_cast_uint64_to_ascii
+    from opteryx.compiled.vector_ops import vector_cast_int64_to_ascii, vector_cast_uint64_to_ascii
     from opteryx.third_party.ulfjack.ryu import format_double_array_ascii
 
     return _cast_to_binary_representation(
@@ -286,8 +285,7 @@ def cast_to_blob(arr, *args):
     Uses optimized paths for float64 and int64 arrays when possible,
     falling back to generic conversion for other types.
     """
-    from opteryx.compiled.vector_ops import vector_cast_int64_to_bytes
-    from opteryx.compiled.vector_ops import vector_cast_uint64_to_bytes
+    from opteryx.compiled.vector_ops import vector_cast_int64_to_bytes, vector_cast_uint64_to_bytes
     from opteryx.third_party.ulfjack.ryu import format_double_array_bytes
 
     return _cast_to_binary_representation(
@@ -307,8 +305,10 @@ def cast_to_double(arr, *args):
     Uses fast C++ path for string parsing when available,
     optimized conversion for int64 arrays, and generic fallback.
     """
-    from opteryx.third_party.fastfloat.fast_float import parse_ascii_array_to_double
-    from opteryx.third_party.fastfloat.fast_float import parse_byte_array_to_double
+    from opteryx.third_party.fastfloat.fast_float import (
+        parse_ascii_array_to_double,
+        parse_byte_array_to_double,
+    )
 
     if hasattr(arr, "to_numpy"):
         arr = arr.to_numpy(False)
@@ -334,8 +334,7 @@ def cast_to_int(arr, *args):
     Uses optimized C++ paths for string/byte parsing and date conversion,
     with generic fallback for other types.
     """
-    from opteryx.compiled.vector_ops import vector_cast_ascii_to_int
-    from opteryx.compiled.vector_ops import vector_cast_bytes_to_int
+    from opteryx.compiled.vector_ops import vector_cast_ascii_to_int, vector_cast_bytes_to_int
 
     if hasattr(arr, "to_numpy"):
         arr = arr.to_numpy(False)

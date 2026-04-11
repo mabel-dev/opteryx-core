@@ -8,12 +8,10 @@ from typing import Tuple
 from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.expression import NodeType
 from opteryx.managers.virtual_datasets import derived
-from opteryx.models import LogicalColumn
-from opteryx.models import Node
-from opteryx.planner.binder.binder import inner_binder
-from opteryx.planner.binder.binder import merge_schemas
+from opteryx.models import LogicalColumn, Node
+from opteryx.planner.binder.binder import inner_binder, merge_schemas
 from opteryx.planner.binder.binding_context import BindingContext
-from orso.schema import RelationSchema
+from opteryx.schema import RelationSchema
 
 
 def visit_exit(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:

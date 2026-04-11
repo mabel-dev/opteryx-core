@@ -70,6 +70,3 @@ __all__ = [
     "remove_nulls",
     "nulls_to_default",
 ]
-```
-
-Now let me run the tests to make sure everything still works:

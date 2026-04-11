@@ -7,14 +7,16 @@ from types import SimpleNamespace
 import numpy
 import pyarrow
 import pytest
-from orso.schema import FlatColumn
-from orso.types import PYTHON_TO_ORSO_MAP, OrsoTypes
+
+from opteryx.schema import FlatColumn
+from opteryx.types import PYTHON_TO_ORSO_MAP, OrsoTypes
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
+from opteryx.expression.functions.compat import fixed_value_function
+
 import opteryx
 from opteryx.expression.evaluator import apply_bounded_function
-from opteryx.expression.functions.compat import fixed_value_function
 from opteryx.expression.functions.registrar import get_builtin_functions
 
 ROW_COUNT = 3

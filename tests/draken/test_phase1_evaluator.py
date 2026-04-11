@@ -25,12 +25,12 @@ sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 
 from opteryx.compiled.draken.interop.arrow import vector_from_arrow, vector_from_sequence
 from opteryx.compiled.draken.morsels.morsel import Morsel
-from orso.schema import FlatColumn
-from orso.types import OrsoTypes
 
 from opteryx.expression import NodeType
 from opteryx.expression.evaluator import draken_compare, evaluate_draken
 from opteryx.models import Node
+from opteryx.schema import FlatColumn
+from opteryx.types import OrsoTypes
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -405,8 +405,9 @@ class TestFilterNodeDrakenPath:
     """Smoke tests for FilterNode (now unconditionally Draken-native)."""
 
     def _make_filter_node(self, filter_tree):
-        from opteryx.models import QueryProperties
         from opteryx.operators.filter_node import FilterNode
+
+        from opteryx.models import QueryProperties
 
         props = QueryProperties(None, {})
         return FilterNode(props, filter=filter_tree)

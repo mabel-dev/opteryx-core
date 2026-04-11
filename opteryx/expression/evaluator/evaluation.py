@@ -1,6 +1,7 @@
 """Main expression evaluation engine."""
 
 import datetime
+import decimal
 
 import numpy
 import pyarrow as _pa
@@ -44,6 +45,29 @@ _NEGATED_OPS = {
     "NotInStr": "InStr",
     "NotIInStr": "IInStr",
 }
+
+
+def _is_scalar_value(obj):
+    """Check if object is a raw Python scalar (not a vector or array).
+
+    Used to discriminate between scalars and vectors when both might have
+    null_count attributes (e.g., Draken vectors vs raw Python values).
+
+    Args:
+        obj: Object to test
+
+    Returns:
+        True if obj is a raw Python scalar, False if it's a vector/array
+    """
+    # Explicit checks for common scalar types
+    if obj is None or isinstance(obj, (bool, int, float, str, bytes, bytearray)):
+        return True
+    if isinstance(obj, (datetime.date, datetime.time, datetime.datetime, datetime.timedelta)):
+        return True
+    if isinstance(obj, decimal.Decimal):
+        return True
+    # Everything else (Arrow arrays, Draken vectors, etc.) is not a scalar
+    return False
 
 
 def _eval_value(node, morsel):
@@ -237,18 +261,18 @@ def evaluate_draken(node, morsel):
     if node_type == NodeType.COMPARISON_OPERATOR:
         left = _eval_value(node.left, morsel)
         right = _eval_value(node.right, morsel)
-        from orso.types import OrsoTypes
+        from opteryx.types import OrsoTypes
 
         temporal_types = {OrsoTypes.DATE, OrsoTypes.TIMESTAMP}
         left_schema_type = getattr(getattr(node.left, "schema_column", None), "type", None)
         right_schema_type = getattr(getattr(node.right, "schema_column", None), "type", None)
         if left_schema_type in temporal_types or right_schema_type in temporal_types:
-            if not hasattr(left, "null_count") and left_schema_type in temporal_types:
+            if _is_scalar_value(left) and left_schema_type in temporal_types:
                 left = _coerce_temporal_scalar_for_arrow(left, left_schema_type)
-            if not hasattr(right, "null_count") and right_schema_type in temporal_types:
+            if _is_scalar_value(right) and right_schema_type in temporal_types:
                 right = _coerce_temporal_scalar_for_arrow(right, right_schema_type)
 
-        if not hasattr(left, "null_count") and not hasattr(right, "null_count"):
+        if _is_scalar_value(left) and _is_scalar_value(right):
             import pyarrow as pa
 
             from opteryx.compiled.draken.vectors.bool_vector import BoolVector

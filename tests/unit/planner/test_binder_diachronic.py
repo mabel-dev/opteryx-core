@@ -1,11 +1,11 @@
 import datetime
-from orso.schema import RelationSchema, FlatColumn
-from orso.types import OrsoTypes
 
-from opteryx.planner.binder.common import BinderVisitor
-from opteryx.planner.binder.binding_context import BindingContext
-from opteryx.models import Node
 from opteryx.connectors.capabilities import Diachronic
+from opteryx.models import Node
+from opteryx.planner.binder.binding_context import BindingContext
+from opteryx.planner.binder.common import BinderVisitor
+from opteryx.schema import FlatColumn, RelationSchema
+from opteryx.types import OrsoTypes
 
 
 class FakeConnector(Diachronic):
@@ -27,7 +27,11 @@ def test_binder_sets_diachronic_dates():
     from types import SimpleNamespace
 
     context = BindingContext(
-        schemas={}, query_id="query_id", connection=SimpleNamespace(memberships=["opteryx"]), relations={}, telemetry=None
+        schemas={},
+        query_id="query_id",
+        connection=SimpleNamespace(memberships=["opteryx"]),
+        relations={},
+        telemetry=None,
     )
 
     # Monkeypatch the connector_factory so our fake connector is used

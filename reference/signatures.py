@@ -11,7 +11,7 @@ from opteryx.expression.functions import FunctionDefinition
 from opteryx.expression.functions import FunctionOverload
 from opteryx.expression.functions import ParameterSpec
 from opteryx.expression.functions import get_catalog
-from orso.types import OrsoTypes
+from opteryx.types import OrsoTypes
 
 _TYPE_LABELS = {
     "any": "any",

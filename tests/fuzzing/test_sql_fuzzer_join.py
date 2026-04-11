@@ -14,11 +14,11 @@ import random
 import time
 
 import pytest
-from orso.tools import random_int, random_string
-from orso.types import OrsoTypes
 
 import opteryx
 from opteryx.models import QueryTelemetry
+from opteryx.types import OrsoTypes
+from opteryx.utils import random_int, random_string
 from opteryx.utils.formatter import format_sql
 
 

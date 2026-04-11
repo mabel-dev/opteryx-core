@@ -5,12 +5,26 @@
 
 import platform
 from itertools import permutations
-from typing import Iterable
-from typing import Optional
+from typing import Iterable, Optional
 
 from opteryx.compiled.functions.strings import count_instances
 from opteryx.third_party.mbleven import compare
-from orso.tools import single_item_cache
+from opteryx.utils._orso_utils import (
+    lru_cache_with_expiry,
+    random_int,
+    random_string,
+    single_item_cache,
+)
+
+__all__ = [
+    "lru_cache_with_expiry",
+    "random_int",
+    "random_string",
+    "single_item_cache",
+    "suggest_alternative",
+    "Timer",
+    "is_windows",
+]
 
 
 @single_item_cache

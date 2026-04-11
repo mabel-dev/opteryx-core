@@ -4,33 +4,33 @@ import datetime
 
 import numpy
 import pyarrow as _pa
+
 from opteryx.exceptions import ColumnReferencedBeforeEvaluationError
 
-from .comparisons import _DATE_TYPES
-from .comparisons import _INTERVAL_TYPES
-from .function_execution import _is_draken_vector
-from .function_execution import apply_bounded_function
-from .temporal_ops import _date_interval_op_draken
-from .temporal_ops import _date_minus_date_draken
-from .type_coercion import _coerce_date32
-from .type_coercion import _coerce_date32_set
-from .type_coercion import _coerce_float
-from .type_coercion import _coerce_float_set
-from .type_coercion import _coerce_int64
-from .type_coercion import _coerce_int64_set
-from .type_coercion import _coerce_interval
-from .type_coercion import _coerce_str
-from .type_coercion import _coerce_str_set
-from .type_coercion import _coerce_temporal_scalar_for_arrow
-from .type_coercion import _coerce_timestamp
-from .type_coercion import _coerce_timestamp_set
-from .type_coercion import _constant_scalar_value
-from .type_coercion import _dictionary_arrow_type
-from .type_coercion import _dictionary_compare_vector
-from .type_coercion import _is_constant_vector_like
-from .type_coercion import _is_dictionary_encoded_vector
-from .type_coercion import _is_null_as_boolvector
-from .type_coercion import _is_typed_constant_encoded_vector
+from .comparisons import _DATE_TYPES, _INTERVAL_TYPES
+from .function_execution import _is_draken_vector, apply_bounded_function
+from .temporal_ops import _date_interval_op_draken, _date_minus_date_draken
+from .type_coercion import (
+    _coerce_date32,
+    _coerce_date32_set,
+    _coerce_float,
+    _coerce_float_set,
+    _coerce_int64,
+    _coerce_int64_set,
+    _coerce_interval,
+    _coerce_str,
+    _coerce_str_set,
+    _coerce_temporal_scalar_for_arrow,
+    _coerce_timestamp,
+    _coerce_timestamp_set,
+    _constant_scalar_value,
+    _dictionary_arrow_type,
+    _dictionary_compare_vector,
+    _is_constant_vector_like,
+    _is_dictionary_encoded_vector,
+    _is_null_as_boolvector,
+    _is_typed_constant_encoded_vector,
+)
 
 _EPOCH_DATE = datetime.date(1970, 1, 1)
 _EPOCH_DATETIME = datetime.datetime(1970, 1, 1)
@@ -53,7 +53,7 @@ def _eval_binary_op_draken(node, morsel):
     left = _eval_value(node.left, morsel)
     right = _eval_value(node.right, morsel)
 
-    from orso.types import OrsoTypes
+    from opteryx.types import OrsoTypes
 
     if not hasattr(left, "null_count") and node.left.schema_column.type in (
         OrsoTypes.DATE,
@@ -90,10 +90,8 @@ def _eval_binary_op_draken(node, morsel):
         if left_cls in _INTERVAL_TYPES and right_cls in _DATE_TYPES:
             return _date_interval_op_draken(right, left, op)
 
-    from opteryx.compiled.draken.interop.arrow import vector_from_arrow
-    from opteryx.compiled.draken.interop.arrow import vector_from_sequence
-    from opteryx.expression.binary_operators import BINARY_OPERATORS
-    from opteryx.expression.binary_operators import binary_operations
+    from opteryx.compiled.draken.interop.arrow import vector_from_arrow, vector_from_sequence
+    from opteryx.expression.binary_operators import BINARY_OPERATORS, binary_operations
 
     if op not in BINARY_OPERATORS:
         return None

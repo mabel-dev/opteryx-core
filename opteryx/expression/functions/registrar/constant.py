@@ -9,7 +9,7 @@ import numpy
 # FunctionDefinition with a single overload. Use the shorthand form where
 # the second argument is the return type for zero-argument constants.
 from opteryx.expression.functions.registrar import _make  # type: ignore
-from orso.types import OrsoTypes
+from opteryx.types import OrsoTypes
 
 
 def get_builtin_constant_functions() -> List:

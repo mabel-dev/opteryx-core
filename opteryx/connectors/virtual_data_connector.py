@@ -17,10 +17,9 @@ import typing
 from typing import Tuple
 
 from opteryx.compiled.draken.morsels.morsel import Morsel
-from opteryx.connectors.base.base_connector import BaseConnector
-from opteryx.connectors.base.base_connector import BaseTable
+from opteryx.connectors.base.base_connector import BaseConnector, BaseTable
 from opteryx.exceptions import DatasetNotFoundError
-from orso.schema import RelationSchema
+from opteryx.schema import RelationSchema
 
 WELL_KNOWN_DATASETS = {
     "$planets": ("opteryx.managers.virtual_datasets.planet_data", True),

@@ -4,30 +4,32 @@ import datetime
 
 import numpy
 import pyarrow as _pa
+
 from opteryx.compiled.vector_ops import vector_in_list
 from opteryx.exceptions import ColumnReferencedBeforeEvaluationError
 
-from .function_execution import _is_draken_vector
-from .function_execution import apply_bounded_function
-from .type_coercion import _coerce_date32
-from .type_coercion import _coerce_date32_set
-from .type_coercion import _coerce_float
-from .type_coercion import _coerce_float_set
-from .type_coercion import _coerce_int64
-from .type_coercion import _coerce_int64_set
-from .type_coercion import _coerce_interval
-from .type_coercion import _coerce_str
-from .type_coercion import _coerce_str_set
-from .type_coercion import _coerce_temporal_scalar_for_arrow
-from .type_coercion import _coerce_timestamp
-from .type_coercion import _coerce_timestamp_set
-from .type_coercion import _constant_scalar_value
-from .type_coercion import _dictionary_arrow_type
-from .type_coercion import _dictionary_compare_vector
-from .type_coercion import _is_constant_vector_like
-from .type_coercion import _is_dictionary_encoded_vector
-from .type_coercion import _is_null_as_boolvector
-from .type_coercion import _is_typed_constant_encoded_vector
+from .function_execution import _is_draken_vector, apply_bounded_function
+from .type_coercion import (
+    _coerce_date32,
+    _coerce_date32_set,
+    _coerce_float,
+    _coerce_float_set,
+    _coerce_int64,
+    _coerce_int64_set,
+    _coerce_interval,
+    _coerce_str,
+    _coerce_str_set,
+    _coerce_temporal_scalar_for_arrow,
+    _coerce_timestamp,
+    _coerce_timestamp_set,
+    _constant_scalar_value,
+    _dictionary_arrow_type,
+    _dictionary_compare_vector,
+    _is_constant_vector_like,
+    _is_dictionary_encoded_vector,
+    _is_null_as_boolvector,
+    _is_typed_constant_encoded_vector,
+)
 
 _EPOCH_DATE = datetime.date(1970, 1, 1)
 _EPOCH_DATETIME = datetime.datetime(1970, 1, 1)
@@ -45,7 +47,7 @@ _NEGATED_OPS = {
 
 def _int64_temporal_compare(op: str, vec, right, temporal_type):
     from opteryx.compiled.draken.vectors.bool_vector import BoolVector
-    from orso.types import OrsoTypes
+    from opteryx.types import OrsoTypes
 
     if right is None:
         return BoolVector(len(vec))
@@ -115,6 +117,7 @@ def _timestamp_compare(op: str, vec, right):
         return BoolVector.from_arrow(result_arr)
     elif right.__class__.__name__ == "Date32Vector":
         import pyarrow as _pa_local
+
         from opteryx.compiled.draken.interop.arrow import vector_from_arrow as _vfa
 
         ts_right = _vfa(right.to_arrow().cast(_pa_local.timestamp("us")))
@@ -161,6 +164,7 @@ def _date32_compare(op: str, vec, right):
         return fn(right)
     elif right.__class__.__name__ == "TimestampVector":
         import pyarrow as _pa_local
+
         from opteryx.compiled.draken.interop.arrow import vector_from_arrow as _vfa
 
         ts_left = _vfa(vec.to_arrow().cast(_pa_local.timestamp("us")))
@@ -206,9 +210,9 @@ def _interval_compare(op: str, vec, right):
 def _date_minus_date_draken(left_vec, right_vec):
     import pyarrow as pa
     import pyarrow.compute as pc
+
     from opteryx.compiled.draken.interop.arrow import vector_from_arrow
-    from opteryx.expression.intervals import MICROSECONDS_PER_DAY
-    from opteryx.expression.intervals import _intervals_to_month_day_nano
+    from opteryx.expression.intervals import MICROSECONDS_PER_DAY, _intervals_to_month_day_nano
 
     left_arr = left_vec.to_arrow()
     right_arr = right_vec.to_arrow()

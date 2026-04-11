@@ -31,7 +31,7 @@ from typing import Optional
 import numpy as np
 import pyarrow as pa
 from opteryx.expression.functions.catalog import get_catalog
-from orso.types import OrsoTypes
+from opteryx.types import OrsoTypes
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../../mabel/orso"))
 sys.path.insert(1, os.path.join(sys.path[0], ".."))
