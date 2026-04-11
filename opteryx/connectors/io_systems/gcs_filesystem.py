@@ -149,8 +149,18 @@ class OpteryxGcsFileSystem:
 
     def get_file_info(self, paths: Union[str, List[str]]):
         """Get info about GCS objects."""
-        from pyarrow.fs import FileInfo
-        from pyarrow.fs import FileType
+        from dataclasses import dataclass
+        from enum import Enum
+
+        # Local file info without Arrow dependency
+        class FileType(Enum):
+            File = "file"
+
+        @dataclass
+        class FileInfo:
+            path: str
+            type: "FileType"
+            size: int
 
         # Handle both single path and list of paths
         single_path = isinstance(paths, str)
@@ -159,7 +169,7 @@ class OpteryxGcsFileSystem:
 
         from opteryx.utils import paths as path_utils
 
-        def _head_one(idx: int, path: str, bearer: str) -> Tuple[int, "FileInfo"]:
+        def _head_one(idx: int, path: str, bearer: str) -> Tuple[int, FileInfo]:
             norm_path = path[5:] if path.startswith("gs://") else path
             bucket, _, _, _ = path_utils.get_parts(norm_path)
             object_full_path = urllib.parse.quote(norm_path[(len(bucket) + 1) :], safe="")
