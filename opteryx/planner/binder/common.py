@@ -11,12 +11,6 @@ from typing import List
 from typing import Set
 from typing import Tuple
 
-from orso.schema import ConstantColumn
-from orso.schema import FlatColumn
-from orso.schema import RelationSchema
-from orso.tools import random_string
-from orso.types import OrsoTypes
-
 from opteryx.exceptions import AmbiguousDatasetError
 from opteryx.exceptions import InvalidFunctionParameterError
 from opteryx.exceptions import UnsupportedSyntaxError
@@ -53,6 +47,11 @@ from opteryx.planner.binder.view import visit_create_view
 from opteryx.planner.binder.view import visit_drop_view
 from opteryx.planner.binder.view import visit_show_columns
 from opteryx.planner.logical_planner import LogicalPlan
+from orso.schema import ConstantColumn
+from orso.schema import FlatColumn
+from orso.schema import RelationSchema
+from orso.tools import random_string
+from orso.types import OrsoTypes
 
 CAMEL_TO_SNAKE = re.compile(r"(?<!^)(?=[A-Z])")
 

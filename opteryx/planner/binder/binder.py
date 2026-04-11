@@ -11,12 +11,6 @@ from typing import Dict
 from typing import Optional
 from typing import Tuple
 
-from orso.schema import ConstantColumn
-from orso.schema import FlatColumn
-from orso.schema import FunctionColumn
-from orso.schema import RelationSchema
-from orso.types import OrsoTypes
-
 from opteryx.exceptions import AmbiguousIdentifierError
 from opteryx.exceptions import ColumnNotFoundError
 from opteryx.exceptions import IncompatibleTypesError
@@ -28,6 +22,11 @@ from opteryx.expression.functions.registrar.constant import fixed_value_function
 from opteryx.models import Node
 from opteryx.planner.binder.binding_context import BindingContext
 from opteryx.planner.binder.operator_map import determine_type
+from orso.schema import ConstantColumn
+from orso.schema import FlatColumn
+from orso.schema import FunctionColumn
+from orso.schema import RelationSchema
+from orso.types import OrsoTypes
 
 
 def merge_schemas(*schemas: Dict[str, RelationSchema]) -> Dict[str, RelationSchema]:

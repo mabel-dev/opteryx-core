@@ -4,14 +4,14 @@ import os
 import sys
 
 import pyarrow
-from orso.tools import parse_iso
-from orso.types import OrsoTypes
-
-import opteryx
 from opteryx.expression import NodeType
 from opteryx.expression import evaluate
 from opteryx.expression.ops import filter_operations
 from opteryx.models import Node
+from orso.tools import parse_iso
+from orso.types import OrsoTypes
+
+import opteryx
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../../mabel/orso"))
 sys.path.insert(1, os.path.join(sys.path[0], ".."))

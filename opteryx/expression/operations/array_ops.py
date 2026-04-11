@@ -1,7 +1,6 @@
 """Array operations (AnyOp*, AllOp*, @>>, array contains)."""
 
 import numpy
-
 from opteryx.compiled import vector_ops
 
 

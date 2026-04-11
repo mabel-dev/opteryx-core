@@ -11,9 +11,14 @@ structured access to events and computed metrics.
 """
 
 import json
-from collections import defaultdict, deque
+from collections import defaultdict
+from collections import deque
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any
+from typing import Dict
+from typing import Iterator
+from typing import List
+from typing import Optional
 
 
 class TraceReader:

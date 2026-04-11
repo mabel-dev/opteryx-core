@@ -7,12 +7,11 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Any
 
-from orso.types import OrsoTypes
-
 from opteryx.expression.functions import FunctionDefinition
 from opteryx.expression.functions import FunctionOverload
 from opteryx.expression.functions import ParameterSpec
 from opteryx.expression.functions import get_catalog
+from orso.types import OrsoTypes
 
 _TYPE_LABELS = {
     "any": "any",

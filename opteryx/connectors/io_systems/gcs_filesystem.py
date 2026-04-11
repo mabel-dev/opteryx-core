@@ -9,10 +9,14 @@ import os
 import threading
 import urllib.parse
 from concurrent.futures import as_completed
-from typing import List, Tuple, Union
+from typing import List
+from typing import Tuple
+from typing import Union
 
-from opteryx.connectors.parquet_io.thread_pool_manager import LazyPoolProxy, get_filesystem_pool
-from opteryx.exceptions import DatasetReadError, MissingDependencyError
+from opteryx.connectors.parquet_io.thread_pool_manager import LazyPoolProxy
+from opteryx.connectors.parquet_io.thread_pool_manager import get_filesystem_pool
+from opteryx.exceptions import DatasetReadError
+from opteryx.exceptions import MissingDependencyError
 
 # GCS HEAD-request pool.
 #
@@ -106,7 +110,6 @@ class OpteryxGcsFileSystem:
 
         try:
             from google.auth.transport.requests import Request
-
             from opteryx.compiled.http_client import HttpClient
         except (ImportError, AttributeError) as err:  # pragma: no cover
             raise RuntimeError(
@@ -150,7 +153,8 @@ class OpteryxGcsFileSystem:
 
     def get_file_info(self, paths: Union[str, List[str]]):
         """Get info about GCS objects."""
-        from pyarrow.fs import FileInfo, FileType
+        from pyarrow.fs import FileInfo
+        from pyarrow.fs import FileType
 
         # Handle both single path and list of paths
         single_path = isinstance(paths, str)

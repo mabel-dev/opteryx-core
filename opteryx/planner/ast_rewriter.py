@@ -62,7 +62,6 @@ from typing import List
 from typing import Union
 
 import numpy
-
 from opteryx.exceptions import ParameterError
 
 LiteralNode = Dict[str, Any]

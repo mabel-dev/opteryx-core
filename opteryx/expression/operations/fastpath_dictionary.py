@@ -1,9 +1,9 @@
 """Dictionary vector encoding optimization for filter operations."""
 
 import pyarrow
-
-from opteryx.compiled.vector_ops import vector_in_list, vector_like, vector_rlike
-
+from opteryx.compiled.vector_ops import vector_in_list
+from opteryx.compiled.vector_ops import vector_like
+from opteryx.compiled.vector_ops import vector_rlike
 from opteryx.expression.operations.fastpath_constant import _coerce_in_list_values
 from opteryx.expression.operations.fastpath_telemetry import record_dict_fastpath_hit
 
@@ -143,22 +143,22 @@ def dictionary_fastpath(arr, operator, value):
     if operator == "NotEq":
         return vec.not_equals(normalized_value)
     if operator in ("InList", "NotInList"):
-        result = vector_in_list(vec,_coerce_in_list_values(value))
+        result = vector_in_list(vec, _coerce_in_list_values(value))
         if operator == "NotInList":
             result = result.not_vector()
         return result
     if operator in ("Like", "NotLike"):
-        result = vector_like(vec,normalized_value, False)
+        result = vector_like(vec, normalized_value, False)
         if operator == "NotLike":
             result = result.not_vector()
         return result
     if operator in ("ILike", "NotILike"):
-        result = vector_like(vec,normalized_value, True)
+        result = vector_like(vec, normalized_value, True)
         if operator == "NotILike":
             result = result.not_vector()
         return result
     if operator in ("RLike", "NotRLike"):
-        result = vector_rlike(vec,normalized_value)
+        result = vector_rlike(vec, normalized_value)
         if operator == "NotRLike":
             result = result.not_vector()
         return result

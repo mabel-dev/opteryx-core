@@ -7,9 +7,11 @@ and stream wrappers for high-performance local file access.
 
 import os
 from concurrent.futures import as_completed
-from typing import List, Tuple
+from typing import List
+from typing import Tuple
 
-from opteryx.connectors.parquet_io.thread_pool_manager import LazyPoolProxy, get_filesystem_pool
+from opteryx.connectors.parquet_io.thread_pool_manager import LazyPoolProxy
+from opteryx.connectors.parquet_io.thread_pool_manager import get_filesystem_pool
 
 _MAX_PARALLEL_RANGE_READS = 64
 
@@ -130,7 +132,8 @@ class OpteryxLocalFileSystem:
         Return a list of file paths under base_dir.
         """
         try:
-            from opteryx.compiled.io.disk_reader import list_directory, list_files_info
+            from opteryx.compiled.io.disk_reader import list_directory
+            from opteryx.compiled.io.disk_reader import list_files_info
 
             compiled_available = True
         except ImportError:

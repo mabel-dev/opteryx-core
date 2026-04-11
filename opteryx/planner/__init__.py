@@ -45,12 +45,11 @@ from typing import Optional
 from typing import Union
 
 import numpy
-from orso.schema import ConstantColumn
-from orso.types import OrsoTypes
-
 from opteryx.expression import NodeType
 from opteryx.expression.intervals import normalize_interval_value
 from opteryx.models import Node
+from orso.schema import ConstantColumn
+from orso.types import OrsoTypes
 
 
 def _infer_collection_literal(value: Any) -> tuple[OrsoTypes, Optional[OrsoTypes]]:
@@ -256,7 +255,6 @@ def execute_logical_plan(
     import uuid
 
     import pyarrow
-
     from opteryx.constants import ResultType
     from opteryx.exceptions import SqlError
     from opteryx.managers.execution import execute as execute_plan

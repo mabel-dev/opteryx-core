@@ -1,11 +1,10 @@
 from dataclasses import dataclass
 from typing import Any
 
+from opteryx.expression.intervals import MICROSECONDS_PER_SECOND
 from orso.schema import FlatColumn
 from orso.tools import random_string
 from orso.types import OrsoTypes
-
-from opteryx.expression.intervals import MICROSECONDS_PER_SECOND
 
 
 @dataclass(init=False)

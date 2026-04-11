@@ -4,9 +4,8 @@ import datetime
 
 import numpy
 import pyarrow as _pa
-
-from opteryx.exceptions import ColumnReferencedBeforeEvaluationError
 from opteryx.compiled.vector_ops import vector_in_list
+from opteryx.exceptions import ColumnReferencedBeforeEvaluationError
 
 from .function_execution import _is_draken_vector
 from .function_execution import apply_bounded_function
@@ -45,9 +44,8 @@ _NEGATED_OPS = {
 
 
 def _int64_temporal_compare(op: str, vec, right, temporal_type):
-    from orso.types import OrsoTypes
-
     from opteryx.compiled.draken.vectors.bool_vector import BoolVector
+    from orso.types import OrsoTypes
 
     if right is None:
         return BoolVector(len(vec))
@@ -87,7 +85,7 @@ def _int64_temporal_compare(op: str, vec, right, temporal_type):
     if op == "GtEq":
         return vec.greater_than_or_equals(value)
     if op == "InList":
-        return vector_in_list(vec,value_set)
+        return vector_in_list(vec, value_set)
     raise NotImplementedError(f"Int64Vector temporal: unsupported op {op!r}")
 
 
@@ -117,7 +115,6 @@ def _timestamp_compare(op: str, vec, right):
         return BoolVector.from_arrow(result_arr)
     elif right.__class__.__name__ == "Date32Vector":
         import pyarrow as _pa_local
-
         from opteryx.compiled.draken.interop.arrow import vector_from_arrow as _vfa
 
         ts_right = _vfa(right.to_arrow().cast(_pa_local.timestamp("us")))
@@ -138,7 +135,7 @@ def _timestamp_compare(op: str, vec, right):
     if op == "GtEq":
         return vec.greater_than_or_equals(value)
     if op == "InList":
-        return vector_in_list(vec,value_set)
+        return vector_in_list(vec, value_set)
     raise NotImplementedError(f"TimestampVector: unsupported op {op!r}")
 
 
@@ -164,7 +161,6 @@ def _date32_compare(op: str, vec, right):
         return fn(right)
     elif right.__class__.__name__ == "TimestampVector":
         import pyarrow as _pa_local
-
         from opteryx.compiled.draken.interop.arrow import vector_from_arrow as _vfa
 
         ts_left = _vfa(vec.to_arrow().cast(_pa_local.timestamp("us")))
@@ -183,7 +179,7 @@ def _date32_compare(op: str, vec, right):
     if op == "GtEq":
         return vec.greater_than_or_equals(value)
     if op == "InList":
-        return vector_in_list(vec,value_set)
+        return vector_in_list(vec, value_set)
     raise NotImplementedError(f"Date32Vector: unsupported op {op!r}")
 
 
@@ -210,7 +206,6 @@ def _interval_compare(op: str, vec, right):
 def _date_minus_date_draken(left_vec, right_vec):
     import pyarrow as pa
     import pyarrow.compute as pc
-
     from opteryx.compiled.draken.interop.arrow import vector_from_arrow
     from opteryx.expression.intervals import MICROSECONDS_PER_DAY
     from opteryx.expression.intervals import _intervals_to_month_day_nano

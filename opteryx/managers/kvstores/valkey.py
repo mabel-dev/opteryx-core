@@ -7,11 +7,10 @@ from __future__ import annotations
 import os
 from typing import Union
 
-from orso.tools import single_item_cache
-
 from opteryx.config import MAX_CONSECUTIVE_CACHE_FAILURES
 from opteryx.exceptions import MissingDependencyError
 from opteryx.managers.kvstores.base_kv_store import BaseKeyValueStore
+from orso.tools import single_item_cache
 
 
 @single_item_cache

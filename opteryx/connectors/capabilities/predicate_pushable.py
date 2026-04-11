@@ -18,13 +18,12 @@ accept filters and others don't so we 'fake' the read-time filtering.
 import datetime
 from typing import Dict
 
-from orso.tools import single_item_cache
-from orso.types import OrsoTypes
-
 from opteryx.exceptions import NotSupportedError
 from opteryx.expression import NodeType
 from opteryx.expression import get_all_nodes_of_type
 from opteryx.models import Node
+from orso.tools import single_item_cache
+from orso.types import OrsoTypes
 
 
 class PredicatePushable:
