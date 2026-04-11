@@ -7,7 +7,7 @@ import numpy
 from opteryx.exceptions import InvalidFunctionParameterError
 from opteryx.exceptions import SqlError
 from opteryx.utils import dates
-from orso.types import OrsoTypes
+from opteryx.types import OrsoTypes
 
 
 def generate_series(*args):

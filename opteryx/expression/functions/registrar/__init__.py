@@ -20,13 +20,16 @@ from __future__ import annotations
 from typing import Any
 
 import pyarrow
-from opteryx.expression.functions import FunctionDefinition
-from opteryx.expression.functions import FunctionOverload
-from opteryx.expression.functions import KernelSpec
-from opteryx.expression.functions import LifecycleSpec
-from opteryx.expression.functions import ParameterSpec
-from opteryx.expression.functions import ReturnSpec
-from orso.types import OrsoTypes
+
+from opteryx.expression.functions import (
+    FunctionDefinition,
+    FunctionOverload,
+    KernelSpec,
+    LifecycleSpec,
+    ParameterSpec,
+    ReturnSpec,
+)
+from opteryx.types import OrsoTypes
 
 
 # Kernel decorators for common iteration patterns
@@ -150,7 +153,7 @@ def _make(
 
 def _coalesce_return_type(arg_nodes) -> OrsoTypes:
     """Return the first non-null compatible type across all args."""
-    from orso.types import find_compatible_type
+    from opteryx.types import find_compatible_type
 
     types = [
         n.schema_column.type

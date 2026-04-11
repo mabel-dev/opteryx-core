@@ -1,15 +1,10 @@
-from typing import Callable
-from typing import Dict
-from typing import NamedTuple
-from typing import Optional
-from typing import Tuple
+from typing import Callable, Dict, NamedTuple, Optional, Tuple
 
-from opteryx.exceptions import IncorrectTypeError
-from opteryx.exceptions import UnsupportedSyntaxError
+from opteryx.exceptions import IncorrectTypeError, UnsupportedSyntaxError
 from opteryx.expression import NodeType
 from opteryx.expression.operator_catalog import is_known_operator
+from opteryx.types import OrsoTypes
 from opteryx.utils.sql import convert_camel_to_sql_case
-from orso.types import OrsoTypes
 
 
 class OperatorMapType(NamedTuple):

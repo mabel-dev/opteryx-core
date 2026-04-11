@@ -3,15 +3,11 @@
 # See the License at http://www.apache.org/licenses/LICENSE-2.0
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
-from typing import Callable
-from typing import Dict
-from typing import Iterable
-from typing import List
-from typing import Optional
-from typing import Tuple
+from typing import Callable, Dict, Iterable, List, Optional, Tuple
 
 import pyarrow
-from orso.types import OrsoTypes
+
+from opteryx.types import OrsoTypes
 
 MICROSECONDS_PER_SECOND = 1_000_000
 MICROSECONDS_PER_MINUTE = 60 * MICROSECONDS_PER_SECOND

@@ -3,17 +3,13 @@ import sys
 
 sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 
-from orso.schema import ConstantColumn
-from orso.schema import FlatColumn
-from orso.types import OrsoTypes
-
 from opteryx.expression import NodeType
-from opteryx.models import Node
-from opteryx.models import QueryTelemetry
-from opteryx.planner.logical_planner import LogicalPlanNode
-from opteryx.planner.logical_planner import LogicalPlanStepType
+from opteryx.models import Node, QueryTelemetry
+from opteryx.planner.logical_planner import LogicalPlanNode, LogicalPlanStepType
 from opteryx.planner.optimizer.strategies.constant_folding import fold_constants
 from opteryx.planner.optimizer.strategies.predicate_ordering import order_predicates
+from opteryx.schema import ConstantColumn, FlatColumn
+from opteryx.types import OrsoTypes
 
 
 def _literal(value_type, value, *, element_type=None):
@@ -22,7 +18,9 @@ def _literal(value_type, value, *, element_type=None):
         type=value_type,
         value=value,
         element_type=element_type,
-        schema_column=ConstantColumn(name="literal", type=value_type, value=value, element_type=element_type),
+        schema_column=ConstantColumn(
+            name="literal", type=value_type, value=value, element_type=element_type
+        ),
     )
 
 

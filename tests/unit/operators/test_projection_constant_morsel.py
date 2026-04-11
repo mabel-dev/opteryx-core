@@ -5,19 +5,15 @@ import pyarrow as pa
 
 sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 
-from orso.schema import ConstantColumn
-from orso.schema import FlatColumn
-from orso.schema import FunctionColumn
-from orso.types import OrsoTypes
-
 from opteryx.compiled.draken.interop.arrow import vector_from_sequence
 from opteryx.compiled.draken.morsels.morsel import Morsel
-from opteryx.expression import NodeType
-from opteryx.expression import evaluate_and_append
-from opteryx.models import Node
-from opteryx.models import QueryProperties
-from opteryx.operators.projection_node import ProjectionNode
 from opteryx.operators.group_state_store import DRAKEN_ENCODING_CONSTANT
+from opteryx.operators.projection_node import ProjectionNode
+
+from opteryx.expression import NodeType, evaluate_and_append
+from opteryx.models import Node, QueryProperties
+from opteryx.schema import ConstantColumn, FlatColumn, FunctionColumn
+from opteryx.types import OrsoTypes
 
 
 def _literal_node(identity: str, value, value_type: OrsoTypes) -> Node:

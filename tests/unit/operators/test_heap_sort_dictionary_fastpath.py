@@ -6,22 +6,23 @@ from functools import cmp_to_key
 import numpy
 import pyarrow as pa
 import pytest
-from orso.schema import ConstantColumn, FlatColumn, FunctionColumn
-from orso.types import OrsoTypes
+
+from opteryx.schema import ConstantColumn, FlatColumn, FunctionColumn
+from opteryx.types import OrsoTypes
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
 from opteryx.compiled.draken.morsels.morsel import Morsel
 from opteryx.compiled.draken.vectors.int64_vector import Int64Vector
 from opteryx.compiled.draken.vectors.string_vector import StringVector
+from opteryx.operators.heap_sort_node import HeapSortNode
+from opteryx.operators.sort_node import SortNode
 
 from opteryx import EOS
 from opteryx.expression import NodeType
 from opteryx.expression.functions import get_catalog
 from opteryx.models import Node
 from opteryx.models.query_properties import QueryProperties
-from opteryx.operators.heap_sort_node import HeapSortNode
-from opteryx.operators.sort_node import SortNode
 
 
 def _make_heap_sort(limit=2, direction="ASC"):

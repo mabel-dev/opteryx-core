@@ -36,9 +36,8 @@ import pytest
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
-from orso.tools import random_string
-
 from opteryx.shared import MemoryPool
+from opteryx.utils import random_string
 
 
 def test_commit_and_read():
@@ -212,9 +211,9 @@ def test_repeated_commits_and_releases():
     # Optional: Check internal state to ensure all resources are available again
     mp._level1_compaction()
 
-    assert (
-        mp.free_segments[0]["length"] == mp.size
-    ), f"Memory leak detected after repeated commits and releases. {mp.free_segments[0]['length']} != {mp.size}\n{mp.free_segments}"
+    assert mp.free_segments[0]["length"] == mp.size, (
+        f"Memory leak detected after repeated commits and releases. {mp.free_segments[0]['length']} != {mp.size}\n{mp.free_segments}"
+    )
 
 
 def test_stress_with_random_sized_data():
@@ -259,9 +258,9 @@ def test_stress_with_random_sized_data():
 
     # Ensure that the pool or leaking
     mp._level1_compaction()
-    assert (
-        mp.available_space() == mp.size
-    ), f"Memory fragmentation or leak detected.\n{mp.available_space()} != {mp.size}\n{mp.free_segments}\n{mp.used_segments}\nseed:{seed}"
+    assert mp.available_space() == mp.size, (
+        f"Memory fragmentation or leak detected.\n{mp.available_space()} != {mp.size}\n{mp.free_segments}\n{mp.used_segments}\nseed:{seed}"
+    )
 
     assert len(mp.free_segments) == 1
     assert len(mp.used_segments) == 0
@@ -364,9 +363,9 @@ def test_random_release_order():
     random.shuffle(refs)  # Randomize the order of releases
     for ref in refs:
         mp.release(ref)
-    assert (
-        mp.available_space() == mp.size
-    ), "Memory pool failed to reclaim space correctly after random releases."
+    assert mp.available_space() == mp.size, (
+        "Memory pool failed to reclaim space correctly after random releases."
+    )
 
 
 def test_concurrent_access():
@@ -435,17 +434,17 @@ def test_latch_and_unlatch_behavior():
     mp = MemoryPool(size=1024)
     data = b"abc" * 10
     ref = mp.commit(data)
-    
+
     # Read with latch
     view = mp.read(ref, zero_copy=True, latch=True)
     assert isinstance(view, memoryview)
-    
+
     # Unlatch should succeed
     mp.unlatch(ref)
-    
+
     # Release should now succeed
     mp.release(ref)
-    
+
     assert mp.available_space() == mp.size
 
 
@@ -486,7 +485,7 @@ def test_latch_counting():
 def test_unlatch_without_latching_raises():
     mp = MemoryPool(size=1024)
     ref = mp.commit(b"abc")
-    
+
     with pytest.raises(RuntimeError):
         mp.unlatch(ref)
 
@@ -496,11 +495,11 @@ def test_unlatch_without_latching_raises():
 def test_double_latch_and_unlatch():
     mp = MemoryPool(size=1024)
     ref = mp.commit(b"x" * 32)
-    
+
     # Latch twice (should just set flag)
     mp.read(ref, latch=True)
     mp.read(ref, latch=True)
-    
+
     # Unlatch once - no problem
     mp.unlatch(ref)
 
@@ -510,8 +509,9 @@ def test_double_latch_and_unlatch():
     # Third unlatch should now fail
     with pytest.raises(RuntimeError):
         mp.unlatch(ref)
-    
+
     mp.release(ref)
+
 
 def test_latching_sets_flag():
     pool = MemoryPool(1000)
@@ -619,7 +619,9 @@ def test_aggressive_compaction_respects_latches():
         assert seg["start"] == pre_compaction_positions[ref], (
             f"Latched ref {ref} moved from {pre_compaction_positions[ref]} to {seg['start']}"
         )
-        assert pool.read(ref) == data_map[ref], f"Data corruption on latched ref {ref}! {pool.read(ref)} != {data_map[ref]}"
+        assert pool.read(ref) == data_map[ref], (
+            f"Data corruption on latched ref {ref}! {pool.read(ref)} != {data_map[ref]}"
+        )
 
     # Run compaction
     pool._level2_compaction()
@@ -632,7 +634,9 @@ def test_aggressive_compaction_respects_latches():
         assert seg["start"] == pre_compaction_positions[ref], (
             f"Latched ref {ref} moved from {pre_compaction_positions[ref]} to {seg['start']}"
         )
-        assert pool.read(ref) == data_map[ref], f"Data corruption on latched ref {ref}! {pool.read(ref)} != {data_map[ref]}"
+        assert pool.read(ref) == data_map[ref], (
+            f"Data corruption on latched ref {ref}! {pool.read(ref)} != {data_map[ref]}"
+        )
 
     # Ensure free segments do not overlap with any latched segments
     for free_seg in pool.free_segments:
@@ -789,7 +793,9 @@ def test_staggered_latch_unlatch_compaction():
 
     # Compaction should now move everything to front
     pool._level2_compaction()
-    sorted_refs = sorted((r for r in refs if r in pool.used_segments), key=lambda r: pool.used_segments[r]["start"])
+    sorted_refs = sorted(
+        (r for r in refs if r in pool.used_segments), key=lambda r: pool.used_segments[r]["start"]
+    )
     for i, ref in enumerate(sorted_refs):
         assert pool.used_segments[ref]["start"] == i * 30
 

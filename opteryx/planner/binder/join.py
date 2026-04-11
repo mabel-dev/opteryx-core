@@ -6,17 +6,18 @@
 from typing import Tuple
 
 from opteryx.exceptions import UnsupportedSyntaxError
-from opteryx.expression import NodeType
-from opteryx.expression import get_all_nodes_of_type
+from opteryx.expression import NodeType, get_all_nodes_of_type
 from opteryx.models import Node
 from opteryx.planner.binder.binder import inner_binder
 from opteryx.planner.binder.binding_context import BindingContext
-from opteryx.planner.binder.common import convert_using_to_on
-from opteryx.planner.binder.common import extract_join_fields
-from opteryx.planner.binder.common import get_mismatched_condition_column_types
-from orso.schema import RelationSchema
-from orso.tools import random_string
-from orso.types import OrsoTypes
+from opteryx.planner.binder.common import (
+    convert_using_to_on,
+    extract_join_fields,
+    get_mismatched_condition_column_types,
+)
+from opteryx.schema import RelationSchema
+from opteryx.types import OrsoTypes
+from opteryx.utils import random_string
 
 
 def visit_join(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:

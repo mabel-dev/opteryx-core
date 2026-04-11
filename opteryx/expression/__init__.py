@@ -13,28 +13,29 @@ Expressions are evaluated against an entire morsel at a time.
 
 import datetime
 from enum import Enum
-from typing import Callable
-from typing import Dict
-from typing import List
+from typing import Callable, Dict, List
 
 import numpy
 import pyarrow
-from opteryx.exceptions import ColumnReferencedBeforeEvaluationError
-from opteryx.exceptions import IncorrectTypeError
-from opteryx.exceptions import UnsupportedSyntaxError
+from pyarrow import Table, compute
+
+from opteryx.exceptions import (
+    ColumnReferencedBeforeEvaluationError,
+    IncorrectTypeError,
+    UnsupportedSyntaxError,
+)
 from opteryx.expression.binary_operators import binary_operations
 from opteryx.expression.evaluator import apply_bounded_function
 from opteryx.expression.operations import filter_operations
 from opteryx.expression.unary_operations import UNARY_OPERATIONS
-from opteryx.models import LogicalColumn
-from opteryx.models import Node
-from orso.tools import random_string
-from orso.types import OrsoTypes
-from pyarrow import Table
-from pyarrow import compute
+from opteryx.models import LogicalColumn, Node
+from opteryx.types import OrsoTypes
+from opteryx.utils import random_string
 
-from .formatter import ExpressionColumn  # this is used
-from .formatter import format_expression
+from .formatter import (
+    ExpressionColumn,  # this is used
+    format_expression,
+)
 
 # These are bit-masks
 LOGICAL_TYPE: int = int("00010000", 2)
@@ -62,7 +63,7 @@ class NodeType(int, Enum):
     # LOGICAL OPERATORS
     # 0001 nnnn
     AND = 17  # 0001 0001
-    OR = 18  # 0001 0010 
+    OR = 18  # 0001 0010
     XOR = 19  # 0001 0011
     NOT = 20  # 0001 0100
     DNF = 21  # 0001 0101
@@ -424,8 +425,7 @@ def _inner_evaluate(root: Node, table: Table):
             return apply_bounded_function(root, *parameters)
         if node_type == NodeType.CAST:
             # Handle CAST operations (CAST(expr AS type), TRY_CAST, SAFE_CAST)
-            from opteryx.expression.casts import cast
-            from opteryx.expression.casts import try_cast
+            from opteryx.expression.casts import cast, try_cast
 
             # Evaluate source expression
             source = _inner_evaluate(root.left, table)

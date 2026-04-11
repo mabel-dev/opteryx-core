@@ -1,16 +1,19 @@
-from opteryx.expression.functions import FunctionDefinition
-from opteryx.expression.functions import FunctionOverload
-from opteryx.expression.functions import KernelSpec
-from opteryx.expression.functions import LifecycleSpec
-from opteryx.expression.functions import ParameterSpec
-from opteryx.expression.functions import ReturnSpec
+from pyarrow import compute
+
+from opteryx.expression.functions import (
+    FunctionDefinition,
+    FunctionOverload,
+    KernelSpec,
+    LifecycleSpec,
+    ParameterSpec,
+    ReturnSpec,
+)
 from opteryx.expression.functions.implementations import arithmetic as number_functions
 from opteryx.expression.functions.implementations import temporal as date_functions
 
 # Helper from package-level registrar for concise entries
 from opteryx.expression.functions.registrar import _make
-from orso.types import OrsoTypes
-from pyarrow import compute
+from opteryx.types import OrsoTypes
 
 
 def get_builtin_arithmetic_extended_functions() -> list[FunctionDefinition]:

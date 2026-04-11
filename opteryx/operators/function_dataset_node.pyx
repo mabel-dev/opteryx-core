@@ -23,7 +23,7 @@ from opteryx.exceptions import SqlError
 from opteryx.expression import NodeType
 from opteryx.models import QueryProperties
 from opteryx.utils import series
-from orso.types import OrsoTypes
+from opteryx.types import OrsoTypes
 
 from .read_node import ReaderNode
 
@@ -125,14 +125,12 @@ def _values(**parameters):
 
 
 def _fake_data(**kwargs):
-    from orso.faker import generate_fake_data
+    from opteryx.exceptions import UnsupportedSyntaxError
 
-    rows = kwargs["rows"]
-    schema = copy.deepcopy(kwargs["schema"])
-    for column in schema.columns:
-        column.name = column.identity
-    data = generate_fake_data(schema, rows)
-    return _build_morsel_from_rows(kwargs["columns"], data.fetchall())
+    raise UnsupportedSyntaxError(
+        "FAKE() function requires additional dependencies that are not currently available. "
+        "This function is rarely used and has been marked for future implementation."
+    )
 
 
 DATASET_FUNCTIONS = {

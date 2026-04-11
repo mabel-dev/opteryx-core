@@ -17,6 +17,7 @@ logical operators respectively.
 
 import numpy
 import pyarrow
+
 from opteryx.exceptions import IncompatibleTypesError
 
 
@@ -122,9 +123,7 @@ def null_if(col1, col2):
         mask = col1 == col2
         return numpy.where(mask, None, col1)
 
-    from orso.types import PYTHON_TO_ORSO_MAP
-    from orso.types import OrsoTypes
-    from orso.types import find_compatible_type
+    from opteryx.types import PYTHON_TO_ORSO_MAP, OrsoTypes, find_compatible_type
 
     def get_first_non_null_type(array):
         for item in array:

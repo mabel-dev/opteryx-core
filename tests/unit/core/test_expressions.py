@@ -7,13 +7,12 @@ import pytest
 
 sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 
-from orso.schema import ConstantColumn, FunctionColumn
-from orso.types import OrsoTypes
-
 import opteryx
 from opteryx.expression import NodeType, evaluate
 from opteryx.managers import virtual_datasets
 from opteryx.models import Node, QueryTelemetry
+from opteryx.schema import ConstantColumn, FunctionColumn
+from opteryx.types import OrsoTypes
 
 stats = QueryTelemetry()
 

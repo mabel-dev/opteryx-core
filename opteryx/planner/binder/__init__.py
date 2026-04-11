@@ -55,9 +55,11 @@ from opteryx.exceptions import InvalidInternalStateError
 from opteryx.models import Node
 from opteryx.planner.binder.binding_context import BindingContext
 from opteryx.planner.binder.common import BinderVisitor
-from opteryx.planner.logical_planner import LogicalPlan
-from opteryx.planner.logical_planner import LogicalPlanStepType
-from opteryx.planner.logical_planner import apply_visibility_filters
+from opteryx.planner.logical_planner import (
+    LogicalPlan,
+    LogicalPlanStepType,
+    apply_visibility_filters,
+)
 
 
 def rename_relations(plan: LogicalPlan):
@@ -68,7 +70,7 @@ def rename_relations(plan: LogicalPlan):
     import uuid
 
     from opteryx.models import LogicalColumn
-    from orso.tools import random_string
+    from opteryx.utils import random_string
 
     relations = {}
 

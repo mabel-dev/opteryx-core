@@ -10,7 +10,7 @@ from __future__ import annotations
 from typing import Optional
 
 import numpy
-from orso.types import OrsoTypes
+from opteryx.types import OrsoTypes
 
 NUMERIC_VECTOR_ELEMENT_TYPES = frozenset(
     {

@@ -3,7 +3,7 @@
 import numpy as np
 import pyarrow as pa
 import pytest
-from orso.types import OrsoTypes
+from opteryx.types import OrsoTypes
 
 from opteryx.expression.casts import (
     cast_to_int,

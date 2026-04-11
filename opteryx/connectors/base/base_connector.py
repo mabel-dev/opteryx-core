@@ -10,18 +10,14 @@ BaseConnector: Gateway interface for long-lived connectors (OpteryxConnector, Fi
 BaseTable: Table reader interface for transient readers (OpteryxTable, FileSystemTable)
 """
 
-from typing import Any
-from typing import Dict
-from typing import Iterable
-from typing import Optional
-from typing import Tuple
+from typing import Any, Dict, Iterable, Optional, Tuple
 
 from opteryx.compiled.draken.interop.arrow import vector_from_sequence
 from opteryx.compiled.draken.morsels.morsel import Morsel
 from opteryx.connectors import TableType
 from opteryx.exceptions import DatasetNotFoundError
 from opteryx.models import QueryTelemetry
-from orso.schema import RelationSchema
+from opteryx.schema import RelationSchema
 
 MIN_CHUNK_SIZE: int = 500
 INITIAL_CHUNK_SIZE: int = 500

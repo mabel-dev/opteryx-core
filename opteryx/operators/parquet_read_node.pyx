@@ -44,7 +44,7 @@ from opteryx.expression import NodeType
 from opteryx.expression import get_all_nodes_of_type
 from opteryx.models import Node
 from opteryx.models import QueryProperties
-from orso.tools import random_string
+from opteryx.utils import random_string
 
 from opteryx import EOS
 from opteryx import config

@@ -10,30 +10,26 @@ a function and a reference to it in the dictionary.
 """
 
 import datetime
-from typing import List
-from typing import Optional
+from typing import List, Optional
 
 import numpy
-from opteryx.exceptions import ArrayWithMixedTypesError
-from opteryx.exceptions import SqlError
-from opteryx.exceptions import UnsupportedSyntaxError
-from opteryx.expression import NodeType
-from opteryx.expression import format_expression
+
+from opteryx.exceptions import ArrayWithMixedTypesError, SqlError, UnsupportedSyntaxError
+from opteryx.expression import NodeType, format_expression
 from opteryx.expression.binary_operators import binary_operations
 from opteryx.expression.functions import functions as _list_functions
 from opteryx.expression.functions import is_function as _is_function
-from opteryx.expression.intervals import MICROSECONDS_PER_DAY
-from opteryx.expression.intervals import MICROSECONDS_PER_HOUR
-from opteryx.expression.intervals import MICROSECONDS_PER_MINUTE
-from opteryx.expression.intervals import MICROSECONDS_PER_SECOND
+from opteryx.expression.intervals import (
+    MICROSECONDS_PER_DAY,
+    MICROSECONDS_PER_HOUR,
+    MICROSECONDS_PER_MINUTE,
+    MICROSECONDS_PER_SECOND,
+)
 from opteryx.expression.operator_catalog import get_operator_node_type
-from opteryx.models import LogicalColumn
-from opteryx.models import Node
-from opteryx.operators.aggregate.helpers import aggregator_names
-from opteryx.operators.aggregate.helpers import is_aggregator
-from opteryx.utils import dates
-from opteryx.utils import suggest_alternative
-from orso.types import OrsoTypes
+from opteryx.models import LogicalColumn, Node
+from opteryx.operators.aggregate.helpers import aggregator_names, is_aggregator
+from opteryx.types import OrsoTypes
+from opteryx.utils import dates, suggest_alternative
 
 # Epoch constants for converting datetime literals to Draken-native integers.
 # DATE literals are stored as int (days since epoch, fits int32).
@@ -914,8 +910,7 @@ def json_access(branch, alias: Optional[List[str]] = None, key=None):
     identifier_node = build(branch["value"])
     key_node = build(branch["path"]["path"][0]["Bracket"]["key"])
 
-    from opteryx.exceptions import IncorrectTypeError
-    from opteryx.exceptions import UnsupportedSyntaxError
+    from opteryx.exceptions import IncorrectTypeError, UnsupportedSyntaxError
 
     if key_node.node_type == NodeType.IDENTIFIER:
         raise UnsupportedSyntaxError(

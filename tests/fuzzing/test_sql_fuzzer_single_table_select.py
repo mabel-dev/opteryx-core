@@ -16,11 +16,11 @@ import random
 import time
 
 import pytest
-from orso.tools import random_string
-from orso.types import OrsoTypes
 
 import opteryx
 from opteryx.managers import virtual_datasets
+from opteryx.types import OrsoTypes
+from opteryx.utils import random_string
 from opteryx.utils.formatter import format_sql
 
 

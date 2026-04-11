@@ -19,20 +19,14 @@ entered expressions we can optimize, and again at the end which handles where
 we've rewritten expressions at part of other optimizations which can be folded.
 """
 
-from opteryx.expression import NodeType
-from opteryx.expression import evaluate
-from opteryx.expression import get_all_nodes_of_type
+from opteryx.expression import NodeType, evaluate, get_all_nodes_of_type
 from opteryx.managers.virtual_datasets import no_table_data
-from opteryx.models import Node
-from opteryx.models import QueryTelemetry
+from opteryx.models import Node, QueryTelemetry
 from opteryx.planner import build_literal_node
-from opteryx.planner.logical_planner import LogicalPlan
-from opteryx.planner.logical_planner import LogicalPlanNode
-from opteryx.planner.logical_planner import LogicalPlanStepType
-from orso.types import OrsoTypes
+from opteryx.planner.logical_planner import LogicalPlan, LogicalPlanNode, LogicalPlanStepType
+from opteryx.types import OrsoTypes
 
-from .optimization_strategy import OptimizationStrategy
-from .optimization_strategy import OptimizerContext
+from .optimization_strategy import OptimizationStrategy, OptimizerContext
 
 
 def _build_if_not_null_node(root, value, value_if_not_null) -> Node:

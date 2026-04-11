@@ -2,7 +2,7 @@ import os
 import sys
 from types import SimpleNamespace
 
-from orso.types import OrsoTypes
+from opteryx.types import OrsoTypes
 
 sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 

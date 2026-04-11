@@ -20,13 +20,17 @@ from __future__ import annotations
 import dataclasses
 from typing import Any, Dict, List, Optional
 
+import pyarrow
+
 from opteryx.types import OrsoTypes
 
 __all__ = [
     "FlatColumn",
     "ConstantColumn",
+    "FunctionColumn",
     "RelationSchema",
     "ColumnDisposition",
+    "convert_orso_schema_to_arrow_schema",
 ]
 
 
@@ -53,7 +57,7 @@ class FlatColumn:
     Attributes:
         name: Column name (required)
         type: OrsoType for this column (required)
-        identity: Unique identifier for this column (required; used for tracking)
+        identity: Unique identifier for this column (default: auto-generated from name)
         nullable: Whether NULL values are allowed (default: True)
         default: Default value if not provided (default: None)
         description: Human-readable description (default: None)
@@ -75,8 +79,8 @@ class FlatColumn:
 
     name: str
     type: OrsoTypes
-    identity: str
     nullable: bool = True
+    identity: Optional[str] = None
     default: Optional[Any] = None
     description: Optional[str] = None
     disposition: Optional[str] = None
@@ -92,9 +96,34 @@ class FlatColumn:
     expectations: Optional[Any] = None  # Deferred to Phase 9
     origin: Optional[List[str]] = None  # Deferred to Phase 9
 
+    def __post_init__(self):
+        """Auto-generate identity from name if not provided."""
+        if self.identity is None:
+            self.identity = self.name
+
     def __str__(self) -> str:
         """String representation: name:type."""
         return f"{self.name}:{self.type.value}"
+
+    def to_flatcolumn(self) -> "FlatColumn":
+        """Convert to a FlatColumn (returns self for FlatColumn)."""
+        if isinstance(self, FlatColumn):
+            return self
+        # For subclasses, create a new FlatColumn with the same properties
+        return FlatColumn(
+            name=self.name,
+            type=self.type,
+            identity=self.identity,
+            nullable=self.nullable,
+            default=self.default,
+            description=self.description,
+            disposition=self.disposition,
+            aliases=self.aliases,
+            element_type=self.element_type,
+            precision=self.precision,
+            scale=self.scale,
+            length=self.length,
+        )
 
     def __repr__(self) -> str:
         """Detailed representation."""
@@ -107,6 +136,16 @@ class FlatColumn:
         if self.aliases:
             names.extend(self.aliases)
         return names
+
+    @property
+    def arrow_field(self) -> Any:
+        """Get PyArrow field representation of this column.
+
+        Returns a PyArrow Field that describes this column's type and nullability.
+        Used by the execution engine for morsel normalization.
+        """
+        arrow_type = _orso_type_to_arrow_type(self.type)
+        return pyarrow.field(self.name, arrow_type, nullable=self.nullable)
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert column to dictionary for serialization."""
@@ -155,6 +194,53 @@ class ConstantColumn(FlatColumn):
     def __str__(self) -> str:
         """String representation: name = value."""
         return f"{self.name}={self.value}"
+
+    def to_flatcolumn(self) -> FlatColumn:
+        """Convert to a FlatColumn, stripping constant value."""
+        return FlatColumn(
+            name=self.name,
+            type=self.type,
+            identity=self.identity,
+            nullable=self.nullable,
+            default=self.default,
+            description=self.description,
+            disposition=self.disposition,
+            aliases=self.aliases,
+            element_type=self.element_type,
+            precision=self.precision,
+            scale=self.scale,
+            length=self.length,
+        )
+
+
+@dataclasses.dataclass
+class FunctionColumn(FlatColumn):
+    """Column defined by a function/expression.
+
+    Used for computed columns (e.g., SELECT col1 + col2 AS sum_col).
+    Inherits from FlatColumn with additional function expression semantics.
+    """
+
+    def __str__(self) -> str:
+        """String representation: name (computed)."""
+        return f"{self.name}(computed)"
+
+    def to_flatcolumn(self) -> FlatColumn:
+        """Convert to a FlatColumn, stripping function metadata."""
+        return FlatColumn(
+            name=self.name,
+            type=self.type,
+            identity=self.identity,
+            nullable=self.nullable,
+            default=self.default,
+            description=self.description,
+            disposition=self.disposition,
+            aliases=self.aliases,
+            element_type=self.element_type,
+            precision=self.precision,
+            scale=self.scale,
+            length=self.length,
+        )
 
 
 @dataclasses.dataclass
@@ -210,23 +296,34 @@ class RelationSchema:
         """Get number of columns."""
         return len(self.columns)
 
-    def column(self, name: str) -> Optional[FlatColumn]:
+    def column(self, name: str, case_insensitive: bool = False) -> Optional[FlatColumn]:
         """Find column by name (including aliases).
 
         Args:
             name: Column name to search for
+            case_insensitive: If True, perform case-insensitive comparison
 
         Returns:
             FlatColumn if found, None otherwise
         """
-        for col in self.columns:
-            if col.name == name or (col.aliases and name in col.aliases):
-                return col
+        if case_insensitive:
+            name_lower = name.lower()
+            for col in self.columns:
+                if col.name.lower() == name_lower:
+                    return col
+                if col.aliases:
+                    for alias in col.aliases:
+                        if alias.lower() == name_lower:
+                            return col
+        else:
+            for col in self.columns:
+                if col.name == name or (col.aliases and name in col.aliases):
+                    return col
         return None
 
-    def find_column(self, name: str) -> Optional[FlatColumn]:
+    def find_column(self, name: str, case_insensitive: bool = False) -> Optional[FlatColumn]:
         """Alias for column() for orso compatibility."""
-        return self.column(name)
+        return self.column(name, case_insensitive=case_insensitive)
 
     def pop_column(self, name: str) -> Optional[FlatColumn]:
         """Remove and return column by name.
@@ -293,3 +390,83 @@ class RelationSchema:
                 return False
             names.add(col.name)
         return True
+
+    def __add__(self, other: "RelationSchema") -> "RelationSchema":
+        """Combine two schemas by merging columns.
+
+        Args:
+            other: Another RelationSchema to combine with
+
+        Returns:
+            New RelationSchema with combined columns
+        """
+        if not isinstance(other, RelationSchema):
+            return NotImplemented
+
+        combined_columns = self.columns + other.columns
+        return RelationSchema(
+            name=self.name,
+            columns=combined_columns,
+            aliases=self.aliases + other.aliases,
+            primary_key=self.primary_key or other.primary_key,
+        )
+
+    def __iadd__(self, other: "RelationSchema") -> "RelationSchema":
+        """In-place merge with another schema.
+
+        Args:
+            other: Another RelationSchema to combine with
+
+        Returns:
+            Self with columns from other schema added
+        """
+        if not isinstance(other, RelationSchema):
+            return NotImplemented
+
+        self.columns.extend(other.columns)
+        return self
+
+
+def _orso_type_to_arrow_type(orso_type: OrsoTypes) -> Any:
+    """Convert OrsoTypes enum to PyArrow type."""
+    type_mapping = {
+        OrsoTypes.NULL: pyarrow.null(),
+        OrsoTypes.BOOLEAN: pyarrow.bool_(),
+        OrsoTypes.INTEGER: pyarrow.int32(),
+        OrsoTypes.DOUBLE: pyarrow.float64(),
+        OrsoTypes.DECIMAL: pyarrow.decimal128(38, 10),
+        OrsoTypes.VARCHAR: pyarrow.string(),
+        OrsoTypes.BLOB: pyarrow.binary(),
+        OrsoTypes.DATE: pyarrow.date32(),
+        OrsoTypes.TIMESTAMP: pyarrow.timestamp("us"),
+        OrsoTypes.TIME: pyarrow.time64("us"),
+        OrsoTypes.INTERVAL: pyarrow.duration("us"),
+        OrsoTypes.ARRAY: pyarrow.list_(pyarrow.string()),
+        OrsoTypes.STRUCT: pyarrow.struct([]),
+        OrsoTypes.VECTOR: pyarrow.list_(pyarrow.float64()),
+        OrsoTypes.JSONB: pyarrow.string(),
+    }
+    return type_mapping.get(orso_type, pyarrow.string())
+
+
+def convert_orso_schema_to_arrow_schema(
+    schema: RelationSchema, use_identities: bool = False
+) -> pyarrow.Schema:
+    """Convert RelationSchema to PyArrow schema.
+
+    Args:
+        schema: RelationSchema to convert
+        use_identities: If True, use column identities as field names; otherwise use column names
+
+    Returns:
+        PyArrow schema corresponding to the RelationSchema
+    """
+    fields = []
+    for col in schema.columns:
+        # Use identity if requested, otherwise use name
+        field_name = col.identity if use_identities else col.name
+        arrow_type = _orso_type_to_arrow_type(col.type)
+        field = pyarrow.field(field_name, arrow_type, nullable=col.nullable)
+        fields.append(field)
+
+    return pyarrow.schema(fields)

@@ -4,17 +4,13 @@
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
 import datetime
-from dataclasses import dataclass
-from dataclasses import field
-from typing import Iterable
-from typing import List
+from dataclasses import dataclass, field
+from typing import Iterable, List
 
 import pyarrow
-from opteryx.variables import SystemVariables
-from opteryx.variables import SystemVariablesContainer
-from opteryx.variables import VariableOwner
-from opteryx.variables import Visibility
-from orso.types import OrsoTypes
+
+from opteryx.types import OrsoTypes
+from opteryx.variables import SystemVariables, SystemVariablesContainer, VariableOwner, Visibility
 
 
 @dataclass

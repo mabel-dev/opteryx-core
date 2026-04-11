@@ -24,20 +24,15 @@ after a join, we add conditions to the JOIN.
 
 from opteryx.connectors.capabilities import PredicatePushable
 from opteryx.exceptions import UnsupportedSyntaxError
-from opteryx.expression import NodeType
-from opteryx.expression import format_expression
-from opteryx.expression import get_all_nodes_of_type
+from opteryx.expression import NodeType, format_expression, get_all_nodes_of_type
 from opteryx.expression.formatter import ExpressionColumn
 from opteryx.models import Node
 from opteryx.planner.binder.common import extract_join_fields
-from opteryx.planner.logical_planner import LogicalPlan
-from opteryx.planner.logical_planner import LogicalPlanNode
-from opteryx.planner.logical_planner import LogicalPlanStepType
-from orso.tools import random_string
-from orso.types import OrsoTypes
+from opteryx.planner.logical_planner import LogicalPlan, LogicalPlanNode, LogicalPlanStepType
+from opteryx.types import OrsoTypes
+from opteryx.utils import random_string
 
-from .optimization_strategy import OptimizationStrategy
-from .optimization_strategy import OptimizerContext
+from .optimization_strategy import OptimizationStrategy, OptimizerContext
 
 
 def _add_condition(existing_condition, new_condition):

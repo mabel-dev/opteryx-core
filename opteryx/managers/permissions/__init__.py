@@ -52,7 +52,7 @@ def can_perform_action(
 
     except Exception as exc:
         # On any error, deny access
-        from orso.logging import get_logger
+        from opteryx.logging import get_logger
 
         get_logger().error(
             f"Permission check failed for policies {policies} on table {table} with action {action}: {exc}"

@@ -5,17 +5,17 @@
 
 from typing import Tuple
 
-from opteryx.exceptions import AmbiguousDatasetError
-from opteryx.exceptions import InvalidFunctionParameterError
-from opteryx.exceptions import UnsupportedSyntaxError
+from opteryx.exceptions import (
+    AmbiguousDatasetError,
+    InvalidFunctionParameterError,
+    UnsupportedSyntaxError,
+)
 from opteryx.expression import NodeType
-from opteryx.models import LogicalColumn
-from opteryx.models import Node
+from opteryx.models import LogicalColumn, Node
 from opteryx.planner.binder.binding_context import BindingContext
-from orso.schema import FlatColumn
-from orso.schema import RelationSchema
-from orso.tools import random_string
-from orso.types import OrsoTypes
+from opteryx.schema import FlatColumn, RelationSchema
+from opteryx.types import OrsoTypes
+from opteryx.utils import random_string
 
 
 def visit_function_dataset(
@@ -119,7 +119,7 @@ def visit_function_dataset(
         node.columns = columns
         node.schema = schema
     elif node.function == "FAKE":
-        from orso.schema import ColumnDisposition
+        from opteryx.schema import ColumnDisposition
 
         node.relation_name = node.alias
         node.rows = int(node.args[0].value)

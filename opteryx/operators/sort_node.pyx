@@ -20,7 +20,7 @@ from opteryx.exceptions import ColumnNotFoundError
 from opteryx.expression import NodeType
 from opteryx.expression import evaluate_and_append
 from opteryx.models import QueryProperties
-from orso.types import OrsoTypes
+from opteryx.types import OrsoTypes
 
 from opteryx import EOS
 

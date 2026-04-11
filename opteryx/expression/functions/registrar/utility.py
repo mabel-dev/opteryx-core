@@ -2,16 +2,18 @@ from __future__ import annotations
 
 from typing import List
 
-from opteryx.expression.functions import FunctionDefinition
-from opteryx.expression.functions import FunctionOverload
-from opteryx.expression.functions import KernelSpec
-from opteryx.expression.functions import LifecycleSpec
-from opteryx.expression.functions import ParameterSpec
-from opteryx.expression.functions import ReturnSpec
+from opteryx.expression.functions import (
+    FunctionDefinition,
+    FunctionOverload,
+    KernelSpec,
+    LifecycleSpec,
+    ParameterSpec,
+    ReturnSpec,
+)
 
 # Use package-level helper to construct concise FunctionDefinition entries.
 from opteryx.expression.functions.registrar import _make
-from orso.types import OrsoTypes
+from opteryx.types import OrsoTypes
 
 
 def get_builtin_utility_functions() -> List[FunctionDefinition]:
@@ -21,6 +23,7 @@ def get_builtin_utility_functions() -> List[FunctionDefinition]:
     """
     # Local imports to avoid heavy imports at module import time
     import numpy
+
     from opteryx.expression.functions.registrar import _iterate_single_parameter as _isingle
     from opteryx.expression.functions.registrar import _sort as _sort_factory
 
@@ -177,8 +180,7 @@ def get_builtin_array_misc_functions() -> List[FunctionDefinition]:
     These functions are grouped with utility functions per the requested merge.
     """
     # Local imports to keep startup lightweight
-    from opteryx.compiled.vector_ops import vector_contains_all
-    from opteryx.compiled.vector_ops import vector_contains_any
+    from opteryx.compiled.vector_ops import vector_contains_all, vector_contains_any
     from opteryx.expression.functions.implementations.logical import if_null as _of_if_null
     from opteryx.expression.functions.implementations.logical import null_if as _of_null_if
     from opteryx.expression.functions.implementations.utility import (

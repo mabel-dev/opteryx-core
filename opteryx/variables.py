@@ -16,20 +16,14 @@ e.g. disable_optimizer (default to False)
 """
 
 from enum import Enum
-from typing import Any
-from typing import Dict
-from typing import Tuple
-from typing import Type
-
-from opteryx.__version__ import __version__
-from opteryx.compiled.simd_probe import cpu_architecture
-from opteryx.constants.character_set import CharacterSet
-from opteryx.constants.character_set import Collation
-from opteryx.exceptions import PermissionsError
-from opteryx.exceptions import VariableNotFoundError
-from orso.types import OrsoTypes
+from typing import Any, Dict, Tuple, Type
 
 from opteryx import config
+from opteryx.__version__ import __version__
+from opteryx.compiled.simd_probe import cpu_architecture
+from opteryx.constants.character_set import CharacterSet, Collation
+from opteryx.exceptions import PermissionsError, VariableNotFoundError
+from opteryx.types import OrsoTypes
 
 
 class VariableOwner(int, Enum):
@@ -142,7 +136,7 @@ class SystemVariablesContainer:
 
     def as_column(self, key: str):
         """Return a variable as a CONSTANT column"""
-        from orso.schema import ConstantColumn
+        from opteryx.schema import ConstantColumn
 
         # system variables aren't stored with the @@
         variable = self._variables[key[2:]] if key.startswith("@@") else self._variables.get(key)

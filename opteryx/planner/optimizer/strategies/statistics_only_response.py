@@ -24,15 +24,18 @@ and complex types lose precision in BRIN bounds and cannot be answered.
 """
 
 import pyarrow
+
 from opteryx.expression import NodeType
 from opteryx.planner import build_literal_node
 from opteryx.planner.logical_planner.logical_planner import LogicalPlanStepType
-from orso.types import OrsoTypes
+from opteryx.types import OrsoTypes
 
 # Strategy-style Optimization Class
-from .optimization_strategy import OptimizationStrategy
-from .optimization_strategy import OptimizerContext
-from .optimization_strategy import get_nodes_of_type_from_logical_plan
+from .optimization_strategy import (
+    OptimizationStrategy,
+    OptimizerContext,
+    get_nodes_of_type_from_logical_plan,
+)
 
 
 def find_scan_node(logical_plan):

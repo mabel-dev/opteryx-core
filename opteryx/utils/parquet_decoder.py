@@ -7,29 +7,25 @@
 Parquet-only decoder utilities.
 """
 
-from typing import Optional
-from typing import Tuple
-from typing import Union
+from typing import Optional, Tuple, Union
+
+import pyarrow
+from pyarrow import parquet
 
 import opteryx.compiled.rugo.parquet as parquet_meta
-import pyarrow
 from opteryx.compiled.rugo.converters.orso import rugo_to_orso_schema
 from opteryx.compiled.structures.memory_view_stream import MemoryViewStream
 from opteryx.connectors.capabilities import PredicatePushable
-from opteryx.expression import NodeType
-from opteryx.expression import get_all_nodes_of_type
+from opteryx.expression import NodeType, get_all_nodes_of_type
 from opteryx.models import Node
-from orso.tools import random_string
-from pyarrow import parquet
+from opteryx.utils import random_string
 
 
 def filter_records(filters: Optional[list], table: pyarrow.Table) -> pyarrow.Table:
     """
     Apply residual filters to a PyArrow table after read-time pushdown.
     """
-    from opteryx.expression import evaluate
-    from opteryx.expression import evaluate_and_append
-    from opteryx.expression import get_all_nodes_of_type
+    from opteryx.expression import evaluate, evaluate_and_append, get_all_nodes_of_type
 
     if isinstance(filters, list) and filters:
         filter_copy = [f.copy() for f in filters]

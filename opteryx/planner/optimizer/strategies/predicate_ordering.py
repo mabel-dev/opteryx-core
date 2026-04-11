@@ -23,21 +23,18 @@ been run if this strategy didn't run.
 
 from itertools import permutations
 
-from opteryx.expression import NodeType
-from opteryx.expression import get_all_nodes_of_type
+from opteryx.expression import NodeType, get_all_nodes_of_type
 from opteryx.models import Node
-from opteryx.planner.logical_planner import LogicalPlan
-from opteryx.planner.logical_planner import LogicalPlanNode
-from opteryx.planner.logical_planner import LogicalPlanStepType
-from orso.schema import ConstantColumn
-from orso.tools import random_string
+from opteryx.planner.logical_planner import LogicalPlan, LogicalPlanNode, LogicalPlanStepType
+from opteryx.schema import ConstantColumn
+from opteryx.types import OrsoTypes
+from opteryx.utils import random_string
 
-# pragma: no cover
-from orso.types import OrsoTypes
-
-from .optimization_strategy import OptimizationStrategy
-from .optimization_strategy import OptimizerContext
-from .optimization_strategy import get_nodes_of_type_from_logical_plan
+from .optimization_strategy import (
+    OptimizationStrategy,
+    OptimizerContext,
+    get_nodes_of_type_from_logical_plan,
+)
 
 # Approximate of the time in seconds (3sf) to compare 1 million records
 # These are the core comparisons, Eq, NotEq, Gt, GtEq, Lt, LtEq

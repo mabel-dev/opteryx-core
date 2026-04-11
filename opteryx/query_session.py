@@ -24,40 +24,28 @@ code churn.
 
 import re
 import time
-from typing import Any
-from typing import Dict
-from typing import Iterable
-from typing import Iterator
-from typing import List
-from typing import Optional
-from typing import Tuple
-from typing import Union
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple, Union
 from uuid import uuid4
 
 import pyarrow
-from opteryx.constants import QueryStatus
-from opteryx.constants import ResultType
-from opteryx.exceptions import InconsistentSchemaError
-from opteryx.exceptions import InvalidCursorStateError
-from opteryx.exceptions import MissingSqlStatement
-from opteryx.exceptions import ProgrammingError
-from opteryx.exceptions import SqlError
-from opteryx.exceptions import UnsupportedSyntaxError
-from opteryx.managers.billing import BillingEventType
-from opteryx.managers.billing import write_billing_event
-from opteryx.models import ExecutionContext
-from opteryx.models import QueryTelemetry
-from opteryx.tracing import record_event
-from opteryx.utils import sql
-from orso import DataFrame
-from orso import converters
-from orso.schema import FlatColumn
-from orso.schema import RelationSchema
-from orso.types import OrsoTypes
 
-from opteryx import EOS
-from opteryx import config
-from opteryx import utils
+from opteryx import EOS, config, converters, utils
+from opteryx.constants import QueryStatus, ResultType
+from opteryx.dataframe import DataFrame
+from opteryx.exceptions import (
+    InconsistentSchemaError,
+    InvalidCursorStateError,
+    MissingSqlStatement,
+    ProgrammingError,
+    SqlError,
+    UnsupportedSyntaxError,
+)
+from opteryx.managers.billing import BillingEventType, write_billing_event
+from opteryx.models import ExecutionContext, QueryTelemetry
+from opteryx.schema import FlatColumn, RelationSchema
+from opteryx.tracing import record_event
+from opteryx.types import OrsoTypes
+from opteryx.utils import sql
 
 _CAMEL_SPLIT_RE = re.compile(r"[A-Z][a-z]*|[0-9]+")
 
@@ -263,9 +251,7 @@ class Session(DataFrame):
         if results is not None:
             result_data, self._result_type = results
             if self._result_type == ResultType.NON_TABULAR:
-                import orso
-
-                meta_dataframe = orso.DataFrame(
+                meta_dataframe = DataFrame(
                     rows=[(result_data.record_count,)],  # type: ignore
                     schema=RelationSchema(
                         name="table",
@@ -387,9 +373,7 @@ class Session(DataFrame):
             result_data, self._result_type = results
 
             if self._result_type == ResultType.NON_TABULAR:
-                import orso
-
-                meta_dataframe = orso.DataFrame(
+                meta_dataframe = DataFrame(
                     rows=[(result_data.record_count,)],  # type: ignore
                     schema=RelationSchema(
                         name="table",
@@ -641,9 +625,7 @@ class Session(DataFrame):
 
         # Handle non-tabular results
         if self._result_type == ResultType.NON_TABULAR:
-            import orso
-
-            meta_dataframe = orso.DataFrame(
+            meta_dataframe = DataFrame(
                 rows=[(result_data.record_count,)],  # type: ignore
                 schema=RelationSchema(
                     name="table",
@@ -936,8 +918,7 @@ class Session(DataFrame):
         if not self._tracing_enabled:
             raise RuntimeError("IO tracing not enabled for this session")
 
-        from opteryx.tracing import event_recorder
-        from opteryx.tracing import flush_all
+        from opteryx.tracing import event_recorder, flush_all
 
         # flush any pending in‑memory events so they appear in the result
         _ = flush_all()
@@ -962,8 +943,7 @@ class Session(DataFrame):
         # Flush any pending trace events and emit end marker
         if self._tracing_enabled:
             try:
-                from opteryx.tracing import event_recorder
-                from opteryx.tracing import record_event
+                from opteryx.tracing import event_recorder, record_event
 
                 record_event("trace_session_end", session_id=self._query_id)
                 event_recorder.flush_all()

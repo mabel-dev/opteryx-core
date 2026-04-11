@@ -41,28 +41,19 @@ a = ANY(z) AND b = ANY(z) AND c = ANY(z)    → z @>> (a, b, c)
 """
 
 import re
-from typing import Callable
-from typing import Dict
+from typing import Callable, Dict
 
-from opteryx.expression import ExpressionColumn
-from opteryx.expression import NodeType
-from opteryx.expression import format_expression
-from opteryx.models import Node
-from opteryx.models import QueryTelemetry
+from opteryx.expression import ExpressionColumn, NodeType, format_expression
+from opteryx.models import Node, QueryTelemetry
 from opteryx.planner import build_literal_node
 from opteryx.planner.binder.operator_map import determine_type
-from opteryx.planner.logical_planner import LogicalPlan
-from opteryx.planner.logical_planner import LogicalPlanNode
-from opteryx.planner.logical_planner import LogicalPlanStepType
-from opteryx.utils.dates import add_single_unit
-from opteryx.utils.dates import parse_iso
-from opteryx.utils.dates import truncate_single
+from opteryx.planner.logical_planner import LogicalPlan, LogicalPlanNode, LogicalPlanStepType
+from opteryx.schema import ConstantColumn
+from opteryx.types import OrsoTypes
+from opteryx.utils.dates import add_single_unit, parse_iso, truncate_single
 from opteryx.utils.sql import sql_like_to_regex
-from orso.schema import ConstantColumn
-from orso.types import OrsoTypes
 
-from .optimization_strategy import OptimizationStrategy
-from .optimization_strategy import OptimizerContext
+from .optimization_strategy import OptimizationStrategy, OptimizerContext
 
 # fmt: off
 IN_REWRITES = {"InList": "Eq", "NotInList": "NotEq"}

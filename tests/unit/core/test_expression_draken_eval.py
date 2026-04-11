@@ -9,7 +9,7 @@ import pytest
 sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 
 import opteryx
-from orso.types import OrsoTypes
+from opteryx.types import OrsoTypes
 
 from opteryx.compiled.draken.morsels.morsel import Morsel
 from opteryx.compiled.draken.vectors.arrow_vector import ArrowVector

@@ -12,7 +12,8 @@ from opteryx.compiled.structures.bloom_filter import (
     create_bloom_filter,
     create_bloom_filter_from_hashes,
 )
-from orso.tools import random_string
+
+from opteryx.utils import random_string
 
 SEED: int = random.randint(0, 2**32 - 1)
 NUM_ITEMS: int = 1_000_000
