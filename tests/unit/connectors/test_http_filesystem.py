@@ -1,12 +1,13 @@
 """Unit tests for OpteryxHttpFileSystem."""
 
+from unittest.mock import MagicMock, Mock, patch
+
 import pytest
-from unittest.mock import Mock, patch, MagicMock
 
 from opteryx.connectors.io_systems.http_filesystem import (
-    OpteryxHttpFileSystem,
     FileInfo,
     FileType,
+    OpteryxHttpFileSystem,
 )
 from opteryx.exceptions import DatasetReadError
 
@@ -153,19 +154,7 @@ class TestOpteryxHttpFileSystem:
         with pytest.raises(DatasetReadError):
             fs.stream_to("https://example.com/file.bin", sink)
 
-    def test_async_stream_to_requires_session(self):
-        """Test async_stream_to requires http_session parameter."""
-        import asyncio
-
-        fs = OpteryxHttpFileSystem()
-        sink = Mock()
-
-        # Test that calling async_stream_to without session raises ValueError
-        async def test_async():
-            with pytest.raises(ValueError, match="requires caller-provided"):
-                await fs.async_stream_to("https://example.com/file.bin", sink)
-
-        asyncio.run(test_async())
+    # Async-specific tests removed: async_stream_to support has been deleted.
 
     def test_open_input_stream(self):
         """Test open_input_stream returns BytesIO."""

@@ -7,11 +7,9 @@ and stream wrappers for high-performance local file access.
 
 import os
 from concurrent.futures import as_completed
-from typing import List
-from typing import Tuple
+from typing import List, Tuple
 
-from opteryx.connectors.parquet_io.thread_pool_manager import LazyPoolProxy
-from opteryx.connectors.parquet_io.thread_pool_manager import get_filesystem_pool
+from opteryx.connectors.parquet_io.thread_pool_manager import LazyPoolProxy, get_filesystem_pool
 
 _MAX_PARALLEL_RANGE_READS = 64
 
@@ -132,8 +130,7 @@ class OpteryxLocalFileSystem:
         Return a list of file paths under base_dir.
         """
         try:
-            from opteryx.compiled.io.disk_reader import list_directory
-            from opteryx.compiled.io.disk_reader import list_files_info
+            from opteryx.compiled.io.disk_reader import list_directory, list_files_info
 
             compiled_available = True
         except ImportError:
@@ -267,22 +264,6 @@ class OpteryxLocalFileSystem:
                 sink.write(chunk)
                 total += len(chunk)
         return total
-
-    async def async_stream_to(
-        self,
-        path: str,
-        sink,
-        http_session=None,
-        chunk_size: int = 1 << 20,
-    ) -> int:
-        """Async variant of ``stream_to`` via ``asyncio.to_thread``.
-
-        Local disk I/O is blocking; this offloads it to a thread so the event
-        loop remains responsive.  ``http_session`` is accepted but ignored.
-        """
-        import asyncio
-
-        return await asyncio.to_thread(self.stream_to, path, sink, chunk_size)
 
     def open_input_stream(self, path: str, columns=None, filters=None):
         """

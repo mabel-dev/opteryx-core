@@ -139,7 +139,11 @@ Timeline:
 
 - Add `file_discovered` events when manifest is built
 
-### 4. `opteryx/connectors/parquet_io/async_io.py`
+### 4. async helper (removed)
+
+The experimental async helper `opteryx/connectors/parquet_io/async_io.py` has been removed from the codebase. Buffer-phase tracing (`buffer_start` / `buffer_complete`) and related instrumentation are implemented in the synchronous scheduler and reader code (`opteryx/connectors/parquet_io/io_process_ring.py` and `opteryx/connectors/parquet_io/reader.py`). Async-specific tests and the `aiohttp` dependency were removed as part of this consolidation.
+
+If an async I/O strategy is reintroduced in the future, it should be a maintained implementation with explicit documentation and declared dependencies.
 
 - Already has download/decode events ✓
 

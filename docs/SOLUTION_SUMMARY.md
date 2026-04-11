@@ -28,9 +28,10 @@ Additionally, even when trace events were being recorded, they were **not appear
 - Added `buffer_start/complete` for individual read path (lines ~1108, ~1099)
 - Added `buffer_complete` in decode closure (line ~1165+)
 
-#### File 3: opteryx/connectors/parquet_io/async_io.py (~30 lines)
-- Added `buffer_start` after async download (line ~117)
-- Added `buffer_complete` for async buffers (line ~129)
+#### File 3: async helper (removed)
+- The experimental async helper module `opteryx/connectors/parquet_io/async_io.py` has been removed.
+- Buffer-phase tracing and related events are handled by the synchronous reader and scheduler instrumentation implemented in `io_process_ring.py` and `reader.py`.
+- See the entries for `io_process_ring.py` and `reader.py` above for details on `buffer_start` and `buffer_complete` placement.
 
 **Result**: Trace events now being recorded for all IO operations
 
@@ -121,7 +122,7 @@ File: data.parquet
 |------|------|---------|-------|
 | opteryx/connectors/parquet_io/io_process_ring.py | IO Stack | Added file_discovered, buffer_start, buffer_complete | ~50 |
 | opteryx/connectors/parquet_io/reader.py | IO Stack | Added file_discovered, buffer_start, buffer_complete (2 paths) | ~80 |
-| opteryx/connectors/parquet_io/async_io.py | IO Stack | Added buffer_start, buffer_complete | ~30 |
+| opteryx/connectors/parquet_io/async_io.py | IO Stack | REMOVED — experimental async helper consolidated into synchronous reader/scheduler instrumentation | — |
 | dev/io_waterfall/reader.py | Visualization | Parse buffer events in operation_timelines() | ~40 |
 | dev/io_waterfall/generator.py | Visualization | Use explicit buffer times in waterfall rendering | ~10 |
 | scratch/test_trace_events.py | Testing | New test script for trace events | 220 |

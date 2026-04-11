@@ -9,14 +9,10 @@ import os
 import threading
 import urllib.parse
 from concurrent.futures import as_completed
-from typing import List
-from typing import Tuple
-from typing import Union
+from typing import List, Tuple, Union
 
-from opteryx.connectors.parquet_io.thread_pool_manager import LazyPoolProxy
-from opteryx.connectors.parquet_io.thread_pool_manager import get_filesystem_pool
-from opteryx.exceptions import DatasetReadError
-from opteryx.exceptions import MissingDependencyError
+from opteryx.connectors.parquet_io.thread_pool_manager import LazyPoolProxy, get_filesystem_pool
+from opteryx.exceptions import DatasetReadError, MissingDependencyError
 
 # GCS HEAD-request pool.
 #
@@ -154,8 +150,7 @@ class OpteryxGcsFileSystem:
 
     def get_file_info(self, paths: Union[str, List[str]]):
         """Get info about GCS objects."""
-        from pyarrow.fs import FileInfo
-        from pyarrow.fs import FileType
+        from pyarrow.fs import FileInfo, FileType
 
         # Handle both single path and list of paths
         single_path = isinstance(paths, str)
@@ -286,57 +281,6 @@ class OpteryxGcsFileSystem:
         """
         with self._token_lock:
             self.client_credentials.refresh(self._Request())
-
-    async def async_stream_to(
-        self,
-        path: str,
-        sink,
-        http_session,
-        chunk_size: int = 1 << 20,
-    ) -> int:
-        """Async variant of ``stream_to`` using a caller-provided ``aiohttp.ClientSession``.
-
-        Uses native aiohttp streaming so each ``await`` fully releases the GIL,
-        allowing many concurrent downloads on a single event-loop thread without
-        GIL contention.
-
-        The caller is responsible for:
-        - creating and owning the ``aiohttp.ClientSession``
-        - holding an ``asyncio.Lock`` around token refresh and calling
-          ``_refresh_credentials()`` via ``asyncio.to_thread`` before calling
-          this method when ``self.client_credentials.valid`` is ``False``.
-
-        Args:
-            path:         GCS object path, with or without ``gs://`` prefix.
-            sink:         Object with ``write(bytes) -> int``.
-            http_session: ``aiohttp.ClientSession`` to use for the request.
-            chunk_size:   Streaming chunk size in bytes (default 1 MiB).
-
-        Returns:
-            Total bytes written to *sink*.
-        """
-        from opteryx.utils import paths
-
-        if path.startswith("gs://"):
-            path = path[5:]
-
-        bucket, _, _, _ = paths.get_parts(path)
-        object_full_path = urllib.parse.quote(path[(len(bucket) + 1) :], safe="")
-        url = f"https://storage.googleapis.com/{bucket}/{object_full_path}"
-
-        headers = {
-            "Authorization": self._bearer,
-            "Accept-Encoding": "identity",
-        }
-
-        async with http_session.get(url, headers=headers) as response:
-            if response.status != 200:
-                raise DatasetReadError(f"Unable to read '{path}' - {response.status}")
-            total = 0
-            async for chunk in response.content.iter_chunked(chunk_size):
-                sink.write(chunk)
-                total += len(chunk)
-        return total
 
     def open_input_stream(self, path: str, columns=None, filters=None):
         """Open a GCS object for reading as a stream.

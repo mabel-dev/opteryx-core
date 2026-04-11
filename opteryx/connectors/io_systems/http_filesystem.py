@@ -8,14 +8,10 @@ import urllib.parse
 from concurrent.futures import as_completed
 from dataclasses import dataclass
 from enum import Enum
-from typing import List
-from typing import Tuple
-from typing import Union
+from typing import List, Tuple, Union
 
-from opteryx.connectors.parquet_io.thread_pool_manager import LazyPoolProxy
-from opteryx.connectors.parquet_io.thread_pool_manager import get_filesystem_pool
-from opteryx.exceptions import DatasetReadError
-from opteryx.exceptions import MissingDependencyError
+from opteryx.connectors.parquet_io.thread_pool_manager import LazyPoolProxy, get_filesystem_pool
+from opteryx.exceptions import DatasetReadError, MissingDependencyError
 
 
 # File type enumeration (minimal, no Arrow dependency)
@@ -79,9 +75,9 @@ _HTTP_HEAD_POOL = LazyPoolProxy(_get_http_head_pool)
 class OpteryxHttpFileSystem:
     """HTTP(S) filesystem using HTTP Range requests for partial file access.
 
-    Supports both sync and async operations:
-    - Sync: read_ranges(), stream_to() use libcurl with native connection pooling
-    - Async: async_stream_to() uses caller-provided aiohttp.ClientSession
+    Supports synchronous operations:
+    - Sync: `read_ranges()` and `stream_to()` use the native compiled HTTP client
+      with connection pooling for efficient range reads.
 
     Standalone implementation with no external pip dependencies (libcurl via C extension).
     """
@@ -222,45 +218,6 @@ class OpteryxHttpFileSystem:
             sink.write(mv[i : i + chunk_size])
             total += chunk_size if i + chunk_size <= len(data) else len(data) - i
         return total
-
-    async def async_stream_to(
-        self,
-        path: str,
-        sink,
-        http_session=None,
-        chunk_size: int = 1 << 20,
-    ) -> int:
-        """Async streaming via aiohttp (caller-managed ClientSession).
-
-        Uses native aiohttp streaming so each ``await`` fully releases the GIL,
-        allowing many concurrent downloads on a single event-loop thread.
-
-        The caller is responsible for:
-        - Creating and owning the ``aiohttp.ClientSession``
-        - Holding an ``asyncio.Lock`` around token refresh if needed
-
-        Args:
-            path: HTTP(S) URL or relative path (requires base_url if relative)
-            sink: Object with ``write(bytes) -> int`` method
-            http_session: ``aiohttp.ClientSession`` to use for the request
-            chunk_size: Streaming chunk size in bytes (default 1 MiB)
-
-        Returns:
-            Total bytes written to sink
-        """
-        if http_session is None:
-            raise ValueError("async_stream_to requires caller-provided aiohttp.ClientSession")
-
-        url = self._normalize_url(path)
-        async with http_session.get(url) as response:
-            if response.status != 200:
-                raise DatasetReadError(f"Unable to read '{path}' - {response.status}")
-
-            total = 0
-            async for chunk in response.content.iter_chunked(chunk_size):
-                sink.write(chunk)
-                total += len(chunk)
-            return total
 
     def open_input_stream(self, path: str, columns=None, filters=None):
         """Open HTTP resource for sequential reading as file-like object.

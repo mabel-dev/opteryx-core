@@ -192,39 +192,19 @@ if trace_enabled:
     record_event("buffer_complete", **_buf_kw)
 ```
 
-### Phase 3: ✅ async_io.py (Async IO Support)
+### Phase 3: async helper (removed)
 
-**Location**: `opteryx/connectors/parquet_io/async_io.py` in `async_read_column_task()`
+The experimental async helper module `opteryx/connectors/parquet_io/async_io.py` has been removed from the codebase. Buffer-phase tracing is implemented in the synchronous instrumentation within `io_process_ring.py` and `reader.py`; those files contain the authoritative `buffer_start` and `buffer_complete` placements (see the entries above).
 
-**Changes**:
+Rationale:
+- The project consolidated I/O on the native compiled HTTP client and the synchronous read paths to avoid maintaining an experimental aiohttp-based async code path.
+- Async-specific tests and the `aiohttp` dependency were removed as part of this consolidation.
+- If an async I/O strategy is reintroduced in the future, it should provide a maintained implementation and include explicit documentation and dependency declarations.
 
-Added buffer phase tracing after async download completes:
-```python
-# trace: buffer phase
-if _trace_cfg.OPTERYX_TRACE:
-    kwargs = {
-        "file_id": path,
-        "component": "columns",
-        "rg_idx": rg_idx,
-        "column": column_name,
-        "bytes": bytes_fetched,
-    }
-    if connector:
-        kwargs["connector"] = connector
-    record_event("buffer_start", **kwargs)
+Impact:
+- The tracing events previously emitted by the experimental async helper are preserved via the synchronous scheduler/reader instrumentation, so waterfall visualization retains the buffer-phase visibility.
+- References to the removed module in other documentation and test summaries have been updated accordingly.
 
-# In async path, buffer is minimal (immediate decode follows)
-if _trace_cfg.OPTERYX_TRACE:
-    kwargs = {
-        "file_id": path,
-        "component": "columns",
-        "rg_idx": rg_idx,
-        "column": column_name,
-    }
-    if connector:
-        kwargs["connector"] = connector
-    record_event("buffer_complete", **kwargs)
-```
 
 ### Phase 4: ⏳ reader.py - fetch_columns() (Pending)
 
