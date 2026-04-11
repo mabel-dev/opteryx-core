@@ -10,8 +10,8 @@ from typing import Any, Generator, List, Optional, Tuple
 import pyarrow
 from pyarrow import types as arrow_types
 
-from opteryx.schema import FlatColumn, RelationSchema
 from opteryx.types import OrsoTypes
+from opteryx.types.schema import FlatColumn, RelationSchema
 
 __all__ = ["from_arrow"]
 

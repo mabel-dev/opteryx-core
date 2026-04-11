@@ -29,9 +29,8 @@ from uuid import uuid4
 
 import pyarrow
 
-from opteryx import EOS, config, converters, utils
+from opteryx import EOS, config, utils
 from opteryx.constants import QueryStatus, ResultType
-from opteryx.dataframe import DataFrame
 from opteryx.exceptions import (
     InconsistentSchemaError,
     InvalidCursorStateError,
@@ -42,9 +41,11 @@ from opteryx.exceptions import (
 )
 from opteryx.managers.billing import BillingEventType, write_billing_event
 from opteryx.models import ExecutionContext, QueryTelemetry
-from opteryx.schema import FlatColumn, RelationSchema
+from opteryx.models.dataframe import DataFrame
 from opteryx.tracing import record_event
 from opteryx.types import OrsoTypes
+from opteryx.types.schema import FlatColumn, RelationSchema
+from opteryx.utils import arrow_interop as converters
 from opteryx.utils import sql
 
 _CAMEL_SPLIT_RE = re.compile(r"[A-Z][a-z]*|[0-9]+")

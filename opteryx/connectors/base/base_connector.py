@@ -17,7 +17,7 @@ from opteryx.compiled.draken.morsels.morsel import Morsel
 from opteryx.connectors import TableType
 from opteryx.exceptions import DatasetNotFoundError
 from opteryx.models import QueryTelemetry
-from opteryx.schema import RelationSchema
+from opteryx.types.schema import RelationSchema
 
 MIN_CHUNK_SIZE: int = 500
 INITIAL_CHUNK_SIZE: int = 500

@@ -2,6 +2,7 @@ from libc.stdint cimport int8_t, int32_t, int64_t, uint64_t, uint8_t
 
 from opteryx.compiled.draken.core.buffers cimport ConstAccessor, DrakenFixedBuffer, DrakenType
 from opteryx.compiled.draken.vectors.vector cimport Vector
+from opteryx.compiled.draken.vectors.bool_vector cimport BoolVector
 
 cdef class IntegerVector(Vector):
     cdef object _arrow_data_buf
@@ -23,6 +24,23 @@ cdef class IntegerVector(Vector):
     cpdef int64_t max(self)
     cpdef int64_t sum(self)
     cdef void hash_into(self, uint64_t[::1] out_buf, Py_ssize_t offset=*) except *
+
+    cdef bint _compare_int_values(self, int64_t left, int64_t right, int op) nogil
+    cdef BoolVector _compare_scalar(self, int64_t value, int op)
+    cdef BoolVector _compare_vector(self, IntegerVector other, int op)
+
+    cpdef BoolVector equals(self, int64_t value)
+    cpdef BoolVector equals_vector(self, IntegerVector other)
+    cpdef BoolVector not_equals(self, int64_t value)
+    cpdef BoolVector not_equals_vector(self, IntegerVector other)
+    cpdef BoolVector greater_than(self, int64_t value)
+    cpdef BoolVector greater_than_vector(self, IntegerVector other)
+    cpdef BoolVector greater_than_or_equals(self, int64_t value)
+    cpdef BoolVector greater_than_or_equals_vector(self, IntegerVector other)
+    cpdef BoolVector less_than(self, int64_t value)
+    cpdef BoolVector less_than_vector(self, IntegerVector other)
+    cpdef BoolVector less_than_or_equals(self, int64_t value)
+    cpdef BoolVector less_than_or_equals_vector(self, IntegerVector other)
 
 cdef IntegerVector from_arrow(object array)
 cdef IntegerVector from_dict(const int32_t[::1] codes, const int64_t[::1] dictionary)

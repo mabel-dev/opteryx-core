@@ -9,8 +9,8 @@ from opteryx.expression import NodeType
 from opteryx.models import LogicalColumn, Node
 from opteryx.planner.binder.binder import merge_schemas
 from opteryx.planner.binder.binding_context import BindingContext
-from opteryx.schema import ConstantColumn, FlatColumn, RelationSchema
 from opteryx.types import OrsoTypes
+from opteryx.types.schema import ConstantColumn, FlatColumn, RelationSchema
 
 
 def visit_set(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:

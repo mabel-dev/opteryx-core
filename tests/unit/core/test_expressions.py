@@ -11,8 +11,8 @@ import opteryx
 from opteryx.expression import NodeType, evaluate
 from opteryx.managers import virtual_datasets
 from opteryx.models import Node, QueryTelemetry
-from opteryx.schema import ConstantColumn, FunctionColumn
 from opteryx.types import OrsoTypes
+from opteryx.types.schema import ConstantColumn, FunctionColumn
 
 stats = QueryTelemetry()
 

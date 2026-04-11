@@ -5,8 +5,8 @@ Convert rugo parquet metadata schemas to orso RelationSchema format.
 import re
 from typing import Any, Dict, Iterable, List, Optional
 
-from opteryx.schema import FlatColumn, RelationSchema
 from opteryx.types import OrsoTypes
+from opteryx.types.schema import FlatColumn, RelationSchema
 
 ORSO_TYPE_ALIASES = {
     "float": "double",

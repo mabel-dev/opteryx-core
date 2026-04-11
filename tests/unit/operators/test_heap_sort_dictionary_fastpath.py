@@ -7,8 +7,8 @@ import numpy
 import pyarrow as pa
 import pytest
 
-from opteryx.schema import ConstantColumn, FlatColumn, FunctionColumn
 from opteryx.types import OrsoTypes
+from opteryx.types.schema import ConstantColumn, FlatColumn, FunctionColumn
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 

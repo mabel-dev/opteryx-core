@@ -26,8 +26,8 @@ from itertools import permutations
 from opteryx.expression import NodeType, get_all_nodes_of_type
 from opteryx.models import Node
 from opteryx.planner.logical_planner import LogicalPlan, LogicalPlanNode, LogicalPlanStepType
-from opteryx.schema import ConstantColumn
 from opteryx.types import OrsoTypes
+from opteryx.types.schema import ConstantColumn
 from opteryx.utils import random_string
 
 from .optimization_strategy import (

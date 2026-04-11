@@ -18,8 +18,8 @@ try:
         extract_schema_only,
         rugo_to_orso_schema,
     )
-    from opteryx.schema import RelationSchema
     from opteryx.types import OrsoTypes
+    from opteryx.types.schema import RelationSchema
 
     ORSO_AVAILABLE = True
 except ImportError:

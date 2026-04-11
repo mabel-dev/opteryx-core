@@ -29,8 +29,8 @@ from opteryx.compiled.draken.morsels.morsel import Morsel
 from opteryx.expression import NodeType
 from opteryx.expression.evaluator import draken_compare, evaluate_draken
 from opteryx.models import Node
-from opteryx.schema import FlatColumn
 from opteryx.types import OrsoTypes
+from opteryx.types.schema import FlatColumn
 
 # ---------------------------------------------------------------------------
 # Helpers

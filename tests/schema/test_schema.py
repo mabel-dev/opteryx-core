@@ -4,8 +4,8 @@ import json
 
 import pytest
 
-from opteryx.schema import ColumnDisposition, ConstantColumn, FlatColumn, RelationSchema
 from opteryx.types import OrsoTypes
+from opteryx.types.schema import ColumnDisposition, ConstantColumn, FlatColumn, RelationSchema
 
 
 class TestColumnDisposition:

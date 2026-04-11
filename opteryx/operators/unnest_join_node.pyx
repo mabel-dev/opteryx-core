@@ -22,7 +22,7 @@ from opteryx.compiled.structures.carchar_set import CarcharSetWrapper
 from opteryx.expression import NodeType
 from opteryx.models import LogicalColumn
 from opteryx.models import QueryProperties
-from opteryx.schema import FlatColumn
+from opteryx.types.schema import FlatColumn
 
 from opteryx import EOS
 
