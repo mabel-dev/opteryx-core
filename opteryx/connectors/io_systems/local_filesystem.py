@@ -13,7 +13,9 @@ from typing import Tuple
 from opteryx.connectors.parquet_io.thread_pool_manager import LazyPoolProxy
 from opteryx.connectors.parquet_io.thread_pool_manager import get_filesystem_pool
 
-_MAX_PARALLEL_RANGE_READS = 64
+# Tuned for SSD-only systems: 64 was overkill (contention > benefit)
+# Optimal saturation point for local range reads: 48 workers
+_MAX_PARALLEL_RANGE_READS = 48
 
 
 def _get_local_range_pool():
