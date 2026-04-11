@@ -162,8 +162,8 @@ if __name__ == "__main__":  # pragma: no cover
     print(f"RUNNING CLICKBENCH BATTERY OF {len(STATEMENTS)} QUERIES\n")
     for index, (statement, err) in enumerate(STATEMENTS):
         # statement = statement.replace("testdata.clickbench_tiny", "scratch.hits")
-        statement = statement.replace("testdata.clickbench_tiny", "scratch.hits_mid")
-        #  statement = statement.replace("testdata.clickbench_tiny", "scratch.hits_single")
+        # statement = statement.replace("testdata.clickbench_tiny", "scratch.hits_mid")
+        statement = statement.replace("testdata.clickbench_tiny", "scratch.hits_single")
         printable = statement
         query_num = f"Q{(index + 1):02d}"
 
