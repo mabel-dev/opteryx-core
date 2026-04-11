@@ -191,8 +191,6 @@ cdef BoolVector _dense_starts_ends(
 
     memset(out_bits, 0, nbytes)
 
-    print('needle', needle, needle_len, ignore_case, is_suffix)
-
     if n == 0:
         return out
 
@@ -416,5 +414,4 @@ cpdef BoolVector vector_ends_with(StringVector vec, StringVector suffix, bint ig
         return _constant_starts_ends(vec, needle, needle_len, ignore_case, negated, True)
     if vec._encoding == DRAKEN_ENCODING_DICTIONARY and vec._dict_values != NULL:
         return _dictionary_starts_ends(vec, needle, needle_len, ignore_case, negated, True)
-    print('dense')
     return _dense_starts_ends(vec, needle, needle_len, ignore_case, negated, True)

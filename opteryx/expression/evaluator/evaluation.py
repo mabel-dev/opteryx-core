@@ -52,6 +52,16 @@ def _eval_value(node, morsel):
     node_type = node.node_type
 
     if node_type == NodeType.LITERAL:
+        # bool must stay as raw Python — bint Cython params coerce any non-None
+        # object to True, so wrapping False in a BoolVector breaks bint params.
+        if not isinstance(node.value, bool):
+            from opteryx.compiled.draken.vectors.scalar_constructors import (
+                from_scalar as _const_scalar,
+            )
+
+            vec = _const_scalar(node.value, morsel.num_rows)
+            if vec is not None:
+                return vec
         return node.value
 
     if node_type == NodeType.IDENTIFIER:
@@ -331,15 +341,9 @@ def evaluate_and_append_draken(nodes, morsel):
             from opteryx.expression import NodeType as _NT
             from opteryx.expression import _inner_evaluate
 
-            arrow_table = None
             parameters = []
             for param in node.parameters:
-                if param.node_type == _NT.LITERAL:
-                    if arrow_table is None:
-                        arrow_table = morsel.to_arrow()
-                    parameters.append(_inner_evaluate(param, arrow_table))
-                else:
-                    parameters.append(_eval_value(param, morsel))
+                parameters.append(_eval_value(param, morsel))
             if len(parameters) == 0:
                 parameters = [morsel.num_rows]
             result = apply_bounded_function(node, *parameters)
