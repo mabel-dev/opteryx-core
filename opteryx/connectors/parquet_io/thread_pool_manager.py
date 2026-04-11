@@ -16,21 +16,30 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# Try to import C++ thread pool, fall back to Python ThreadPoolExecutor
-_USE_CPP_POOL = os.getenv("OPTERYX_USE_CPP_POOL", "auto")
+# C++ thread pool is primary (no silent fallback to Python).
+# Explicitly requires C++ backend for high-performance IO.
+_USE_CPP_POOL = os.getenv("OPTERYX_USE_CPP_POOL", "1")
 
 _cpp_thread_pool_available = False
-if _USE_CPP_POOL.lower() in ("auto", "1", "true"):
+if _USE_CPP_POOL.lower() in ("1", "true"):
     try:
         from opteryx.compiled.thread_pool import CppThreadPool
 
         _cpp_thread_pool_available = True
         logger.info("Using C++ BS::thread_pool for parquet I/O (lock-free, work-stealing)")
     except (ImportError, AttributeError) as e:
-        logger.debug(f"C++ thread pool unavailable, falling back to ThreadPoolExecutor: {e}")
-        _cpp_thread_pool_available = False
+        raise RuntimeError(
+            "C++ thread pool (BS::thread_pool) is required but unavailable. "
+            "Opteryx IO requires high-performance thread pool for proper contention management. "
+            f"Error: {e}"
+        ) from e
+elif _USE_CPP_POOL.lower() == "0":
+    logger.warning("C++ thread pool explicitly disabled. IO performance will be degraded.")
 else:
-    logger.info(f"C++ thread pool disabled via OPTERYX_USE_CPP_POOL={_USE_CPP_POOL}")
+    raise ValueError(
+        f"Invalid OPTERYX_USE_CPP_POOL value: {_USE_CPP_POOL}. "
+        "Must be '0', '1', or 'true'."
+    )
 
 
 def create_thread_pool(
@@ -38,23 +47,35 @@ def create_thread_pool(
     max_workers: int,
     use_cpp: bool = True,
 ) -> "ThreadPool":
-    """Create a thread pool with C++ backend or Python fallback.
+    """Create a thread pool with C++ backend.
+
+    C++ BS::thread_pool is required (no Python fallback).
+    Provides lock-free, work-stealing thread pool for optimal IO performance.
 
     Args:
         name: Name for the pool (used for logging and thread names)
         max_workers: Maximum number of concurrent workers
-        use_cpp: Allow C++ backend (will fallback to Python if unavailable)
+        use_cpp: Must be True (C++ backend required)
 
     Returns:
-        Thread pool instance (either CppThreadPool or ThreadPoolExecutor wrapper)
-    """
-    if use_cpp and _cpp_thread_pool_available:
-        return CppThreadPool(max_workers=max_workers, name=name)
+        CppThreadPool instance
 
-    # Fallback: Python ThreadPoolExecutor
-    return PythonThreadPoolWrapper(
-        ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix=name)
-    )
+    Raises:
+        RuntimeError: If C++ backend unavailable or use_cpp=False
+    """
+    if not use_cpp:
+        raise ValueError(
+            "C++ thread pool (BS::thread_pool) is required. "
+            "use_cpp=False is not supported."
+        )
+
+    if not _cpp_thread_pool_available:
+        raise RuntimeError(
+            "C++ thread pool backend is required but unavailable. "
+            "Ensure opteryx.compiled.thread_pool is built correctly."
+        )
+
+    return CppThreadPool(max_workers=max_workers, name=name)
 
 
 class ThreadPool:
