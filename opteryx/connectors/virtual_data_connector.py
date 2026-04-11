@@ -171,10 +171,6 @@ class VirtualDataTable(BaseTable):
             )
 
         morsel = data_provider.read(at_date=kwargs.get("at_date"), variables=self.variables)
-        if not isinstance(morsel, Morsel):
-            # Backwards compatibility: allow providers that still return Arrow
-            morsel = Morsel.from_arrow(morsel)
-
         yield _project_morsel(morsel, columns)
 
 
@@ -222,8 +218,6 @@ class SampleDatasetReader:
             )
 
         morsel = data_provider.read(self.date, self.variables)
-        if not isinstance(morsel, Morsel):
-            morsel = Morsel.from_arrow(morsel)
 
         if self.columns:
             morsel = _project_morsel(morsel, self.columns)

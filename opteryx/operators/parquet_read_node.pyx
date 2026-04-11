@@ -471,15 +471,9 @@ class ParquetReadNode(ReaderNode):
 
         # ── Empty manifest ────────────────────────────────────────────────────
         if not self.manifest or self.manifest.get_file_count() == 0:
-            from orso import DataFrame
-
-            empty_schema = deepcopy(base_schema)
-            empty_schema.columns = read_schema.columns
-            as_arrow = DataFrame(rows=[], schema=empty_schema).arrow()
-            as_arrow = as_arrow.rename_columns(
-                [_planner_name_to_identity.get(col, col) for col in as_arrow.column_names]
-            )
-            yield as_arrow
+            # Yield empty Morsel with the correct column names
+            empty_morsel = Morsel()
+            yield empty_morsel
             return
 
         self.readings["columns_read"] += len(read_schema.columns)
@@ -935,7 +929,5 @@ class ParquetReadNode(ReaderNode):
         # ── Empty result guard ────────────────────────────────────────────────
         if result_morsel is None:
             self.readings["empty_datasets"] += 1
-            from orso import DataFrame
-            empty_schema = deepcopy(base_schema)
-            empty_schema.columns = read_schema.columns
-            yield Morsel.from_arrow(DataFrame(rows=[], schema=empty_schema).arrow())
+            # Yield empty Morsel without Arrow intermediate
+            yield Morsel()
