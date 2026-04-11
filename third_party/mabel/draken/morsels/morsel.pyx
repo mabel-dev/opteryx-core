@@ -790,11 +790,17 @@ cdef class Morsel:
             yield Morsel.from_arrow(table.slice(previous, slice_length))
             previous = boundary
 
-    cpdef Vector column(self, bytes name):
+    cpdef Vector column(self, bytes identity, bytes column_name=b''):
         cdef dict mapping = self._ensure_name_map()
-        cdef object idx = mapping.get(name)
+        cdef object idx = mapping.get(identity)
         if idx is None:
-            raise KeyError(f"Column '{name}' not found")
+            if column_name == b'':
+                raise KeyError(f"Column identity:'{identity}' not found")
+            n = self.ptr.num_columns
+            for i in range(n):
+                if self._encoded_names[i] == column_name:
+                    return <Vector>self.ptr.columns[<Py_ssize_t>i]
+            raise KeyError(f"Column named:'{column_name}' not found")
         return <Vector>self.ptr.columns[<Py_ssize_t>idx]
 
     @property

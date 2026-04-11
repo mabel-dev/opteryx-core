@@ -323,18 +323,19 @@ class ParquetReadNode(ReaderNode):
         return base
 
     @staticmethod
-    def _extract_filter_identities(predicates) -> set[str]:
+    def _extract_filter_column_names(predicates) -> set:
+        """Extract the physical column names referenced in pushed-down predicates."""
         if not predicates:
             return set()
-        identities = set()
+        names = set()
         for predicate in predicates:
             identifiers = get_all_nodes_of_type(predicate, select_nodes=(NodeType.IDENTIFIER,))
             for identifier in identifiers:
                 schema_column = getattr(identifier, "schema_column", None)
-                identity = getattr(schema_column, "identity", None)
-                if identity:
-                    identities.add(identity)
-        return identities
+                name = getattr(schema_column, "name", None) or getattr(identifier, "source_column", None)
+                if name:
+                    names.add(name)
+        return names
 
     @staticmethod
     def _compose_predicates(predicates):
@@ -396,26 +397,31 @@ class ParquetReadNode(ReaderNode):
             return
 
         base_schema = self.parameters["schema"]
-        projected_identities = [column.schema_column.identity for column in (self.columns or [])]
-        projected_identity_set = set(projected_identities)
 
-        filter_identity_set = self._extract_filter_identities(self.predicates)
-        required_identity_set = projected_identity_set.union(filter_identity_set)
-        if not required_identity_set and base_schema.columns:
-            # Zero-projection/no-filter scans still need one physical column so row
-            # counts flow through the pipeline. Keep output projection empty.
-            required_identity_set = {base_schema.columns[0].identity}
+        # Build name → planner identity map from self.columns.
+        # These are the identities downstream nodes (FILTER, PROJECT, etc.) expect.
+        # base_schema lives in a different identity namespace from the planner.
+        _planner_name_to_identity = {
+            col.schema_column.name: col.schema_column.identity
+            for col in (self.columns or [])
+        }
 
+        filter_column_names = self._extract_filter_column_names(self.predicates)
+        required_names = set(_planner_name_to_identity.keys()) | filter_column_names
+
+        # Select physical columns to read by NAME, not by identity.
         read_schema = deepcopy(base_schema)
-        read_schema.columns = [
-            column for column in base_schema.columns if column.identity in required_identity_set
-        ]
+        read_schema.columns = [c for c in base_schema.columns if c.name in required_names]
+        if not read_schema.columns and base_schema.columns:
+            # Zero-projection/no-filter scans still need one physical column for row counts.
+            read_schema.columns = [base_schema.columns[0]]
 
-        output_schema = deepcopy(base_schema)
-        output_schema.columns = [
-            column for column in base_schema.columns if column.identity in projected_identity_set
+        # output_identity_order: planner identities in self.columns order.
+        output_identity_order = [
+            _planner_name_to_identity[col.schema_column.name]
+            for col in (self.columns or [])
+            if col.schema_column.name in _planner_name_to_identity
         ]
-        output_identity_order = [column.identity for column in output_schema.columns]
         predicate_root = self._compose_predicates(self.predicates or [])
 
         # >> OPTIMIZATION: Pre-compute function nodes once instead of per row group
@@ -432,44 +438,53 @@ class ParquetReadNode(ReaderNode):
         if self._compiled_predicate_dispatcher is None and predicate_root:
             self._compiled_predicate_dispatcher = self._compile_predicate_dispatcher(predicate_root)
 
-        # ── Two-pass late materialization column split ────────────────────────
-        # pass1_column_names: filter columns only — fetched for every row group.
+        # ── Two# Two-pass late materialization column split ────────────────────────
+        # Use physical column names throughout — base_schema and the parquet file
+        # share the same names; identities are assigned afterpass.
+        # pass1_colun_names: filter columns only — fetched for every row group.
         # pass2_column_names: projection-only columns — fetched only for row groups
         # that have at least one row surviving the Pass 1 predicate evaluation.
         # Two-pass is skipped when predicates are absent, there are no projection-
         # only columns (e.g. SELECT url WHERE url LIKE …), or the feature is off.
-        pass2_identity_set = projected_identity_set - filter_identity_set
+        # Use physical column names throughout to avoid identity-space mismatch
+        # between self.columns (planner) and base_schema.columns (schema loader).
+        _filter_names = self._extract_filter_column_names(self.predicates)
+        _projected_names = {col.schema_column.name for col in (self.columns or [])}
+        _pass2_names = _projected_names - _filter_names
         two_pass_eligible = (
             config.features.parquet_late_materialization
             and bool(predicate_root)
-            and bool(filter_identity_set)
-            and bool(pass2_identity_set)
+            and bool(_filter_names)
+            and bool(_pass2_names)
         )
         pass1_column_names: list = []
         pass2_column_names: list = []
         pass1_name_to_identity: dict = {}
         pass2_name_to_identity: dict = {}
         if two_pass_eligible:
-            _p1_cols = [c for c in base_schema.columns if c.identity in filter_identity_set]
-            _p2_cols = [c for c in base_schema.columns if c.identity in pass2_identity_set]
+            _p1_cols = [c for c in base_schema.columns if c.name in _filter_names]
+            _p2_cols = [c for c in base_schema.columns if c.name in _pass2_names]
             pass1_column_names = [c.name for c in _p1_cols]
             pass2_column_names = [c.name for c in _p2_cols]
-            pass1_name_to_identity = {c.name: c.identity for c in _p1_cols}
-            pass2_name_to_identity = {c.name: c.identity for c in _p2_cols}
+            pass1_name_to_identity = {name: _planner_name_to_identity.get(name, name) for name in pass1_column_names}
+            pass2_name_to_identity = {name: _planner_name_to_identity.get(name, name) for name in pass2_column_names}
 
         # ── Empty manifest ────────────────────────────────────────────────────
         if not self.manifest or self.manifest.get_file_count() == 0:
             from orso import DataFrame
 
-            as_arrow = DataFrame(rows=[], schema=output_schema).arrow()
-            renames = [output_schema.column(col).identity for col in as_arrow.column_names]
-            as_arrow = as_arrow.rename_columns(renames)
+            empty_schema = deepcopy(base_schema)
+            empty_schema.columns = read_schema.columns
+            as_arrow = DataFrame(rows=[], schema=empty_schema).arrow()
+            as_arrow = as_arrow.rename_columns(
+                [_planner_name_to_identity.get(col, col) for col in as_arrow.column_names]
+            )
             yield as_arrow
             return
 
         self.readings["columns_read"] += len(read_schema.columns)
-        self.readings["parquet_filter_columns_read"] += len(filter_identity_set)
-        self.readings["parquet_projection_columns_read"] += len(projected_identity_set)
+        self.readings["parquet_filter_columns_read"] += len(filter_column_names)
+        self.readings["parquet_projection_columns_read"] += len(_planner_name_to_identity)
         self.readings["parquet_rows_before_filter"] += 0
         self.readings["parquet_rows_after_filter"] += 0
         self.readings["parquet_filter_selectivity"] += 0
@@ -556,7 +571,7 @@ class ParquetReadNode(ReaderNode):
         # original names, not identity aliases).
         column_names = [col.name for col in read_schema.columns]
         # Map data-file column name → query-engine identity for Morsel construction.
-        name_to_identity = {col.name: col.identity for col in read_schema.columns}
+        name_to_identity = {col.name: _planner_name_to_identity.get(col.name, col.name) for col in read_schema.columns}
 
         # One cache per execute() call: footers shared across all row groups of
         # the same file; column chunks cached for reuse across row groups with
@@ -921,4 +936,6 @@ class ParquetReadNode(ReaderNode):
         if result_morsel is None:
             self.readings["empty_datasets"] += 1
             from orso import DataFrame
-            yield Morsel.from_arrow(DataFrame(rows=[], schema=output_schema).arrow())
+            empty_schema = deepcopy(base_schema)
+            empty_schema.columns = read_schema.columns
+            yield Morsel.from_arrow(DataFrame(rows=[], schema=empty_schema).arrow())

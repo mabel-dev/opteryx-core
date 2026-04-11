@@ -7,8 +7,8 @@ cdef class Morsel:
     cdef list _encoded_names
     cdef list _columns
     cdef dict _name_to_index
-    
-    cpdef Vector column(self, bytes name)
+
+    cpdef Vector column(self, bytes identity, bytes column_name=?)
     cpdef void append(self, Morsel other)
     cpdef void append_vector(self, object name, Vector vector)
     cpdef uint64_t[::1] hash(self, object columns=*)

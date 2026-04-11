@@ -13,6 +13,7 @@ normalizes the data into the format for internal processing.
 """
 
 import datetime
+
 import time
 from collections import defaultdict
 from typing import Generator
@@ -394,9 +395,12 @@ class ReaderNode(BasePlanNode):
         morsel = None
         orso_schema = self.schema
         orso_schema_cols = []
+
+        # Filter columns
         for col in orso_schema.columns:
             if col.identity in [c.schema_column.identity for c in self.columns]:
                 orso_schema_cols.append(col)
+
         orso_schema.columns = orso_schema_cols
         arrow_schema = None
         start_clock = time.monotonic_ns()
