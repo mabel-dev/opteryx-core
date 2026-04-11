@@ -1,4 +1,5 @@
 from libc.stdint cimport int32_t
+from libc.stdint cimport int64_t
 from libc.stdint cimport int8_t
 from libc.stdint cimport uint64_t, uint8_t
 
@@ -38,6 +39,7 @@ cdef class Date32Vector(Vector):
 
     cpdef int32_t min(self)
     cpdef int32_t max(self)
+    cpdef int64_t sum(self)
 
     cdef void hash_into(self, uint64_t[::1] out_buf, Py_ssize_t offset=*) except *
 

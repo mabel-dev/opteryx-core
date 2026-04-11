@@ -444,6 +444,22 @@ cdef class TimestampVector(Vector):
                 m = data[i]
         return m
 
+    cpdef int64_t sum(self):
+        if self._has_const:
+            if self._const_is_null:
+                return 0
+            return <int64_t>(self.ptr.length * self._const_value)
+        cdef DrakenFixedBuffer* ptr = self.ptr
+        cdef int64_t* data = <int64_t*> ptr.data
+        cdef Py_ssize_t i, n = ptr.length
+        cdef int64_t total = 0
+        for i in range(n):
+            if ptr.null_bitmap != NULL:
+                if not _bitmap_is_valid(ptr.null_bitmap, i, self.null_bit_offset):  # null
+                    continue
+            total += data[i]
+        return total
+
     cpdef int8_t[::1] is_null(self):
         """
         Return a memoryview of int8_t, where each element is 1 if the value is null, 0 otherwise.

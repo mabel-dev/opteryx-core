@@ -2004,6 +2004,142 @@ cdef class StringVector(Vector):
 
         return result
 
+    cpdef object min(self):
+        """Return lexicographically smallest non-null string value, or None if all null or empty."""
+        cdef DrakenVarBuffer* ptr = self.ptr
+        cdef Py_ssize_t n = ptr.length
+        cdef Py_ssize_t i
+        cdef int32_t start, end
+        cdef int32_t min_start = -1, min_end = -1
+        cdef char* data = <char*> ptr.data
+        cdef bytes result
+        cdef int32_t cmp
+        cdef int32_t cur_start, cur_end, cur_len, min_len
+        cdef char* min_ptr = NULL
+        cdef char* cur_ptr
+        cdef uint8_t byte, bit
+
+        if self._has_const:
+            if self._const_is_null:
+                return None
+            return PyBytes_FromStringAndSize(<char*>self._const_value.data, self._const_value.length)
+
+        for i in range(n):
+            # Check if value is null
+            if ptr.null_bitmap != NULL:
+                byte = ptr.null_bitmap[i >> 3]
+                bit = (byte >> (i & 7)) & 1
+                if not bit:
+                    continue
+
+            start = ptr.offsets[i]
+            end = ptr.offsets[i + 1]
+
+            if min_start == -1:
+                min_start = start
+                min_end = end
+                min_ptr = data + start
+            else:
+                cur_start = start
+                cur_end = end
+                cur_len = cur_end - cur_start
+                min_len = min_end - min_start
+                cur_ptr = data + cur_start
+
+                # Compare lexicographically
+                if cur_len < min_len:
+                    cmp = memcmp(cur_ptr, min_ptr, cur_len)
+                    if cmp < 0 or (cmp == 0):  # cur is smaller or equal prefix
+                        min_start = cur_start
+                        min_end = cur_end
+                        min_ptr = cur_ptr
+                elif cur_len > min_len:
+                    cmp = memcmp(cur_ptr, min_ptr, min_len)
+                    if cmp < 0:  # cur is smaller
+                        min_start = cur_start
+                        min_end = cur_end
+                        min_ptr = cur_ptr
+                else:
+                    cmp = memcmp(cur_ptr, min_ptr, cur_len)
+                    if cmp < 0:
+                        min_start = cur_start
+                        min_end = cur_end
+                        min_ptr = cur_ptr
+
+        if min_start == -1:
+            return None
+        return PyBytes_FromStringAndSize(min_ptr, min_end - min_start)
+
+    cpdef object max(self):
+        """Return lexicographically largest non-null string value, or None if all null or empty."""
+        cdef DrakenVarBuffer* ptr = self.ptr
+        cdef Py_ssize_t n = ptr.length
+        cdef Py_ssize_t i
+        cdef int32_t start, end
+        cdef int32_t max_start = -1, max_end = -1
+        cdef char* data = <char*> ptr.data
+        cdef bytes result
+        cdef int32_t cmp
+        cdef int32_t cur_start, cur_end, cur_len, max_len
+        cdef char* max_ptr = NULL
+        cdef char* cur_ptr
+        cdef uint8_t byte, bit
+
+        if self._has_const:
+            if self._const_is_null:
+                return None
+            return PyBytes_FromStringAndSize(<char*>self._const_value.data, self._const_value.length)
+
+        for i in range(n):
+            # Check if value is null
+            if ptr.null_bitmap != NULL:
+                byte = ptr.null_bitmap[i >> 3]
+                bit = (byte >> (i & 7)) & 1
+                if not bit:
+                    continue
+
+            start = ptr.offsets[i]
+            end = ptr.offsets[i + 1]
+
+            if max_start == -1:
+                max_start = start
+                max_end = end
+                max_ptr = data + start
+            else:
+                cur_start = start
+                cur_end = end
+                cur_len = cur_end - cur_start
+                max_len = max_end - max_start
+                cur_ptr = data + cur_start
+
+                # Compare lexicographically
+                if cur_len < max_len:
+                    cmp = memcmp(cur_ptr, max_ptr, cur_len)
+                    if cmp > 0:  # cur is larger
+                        max_start = cur_start
+                        max_end = cur_end
+                        max_ptr = cur_ptr
+                elif cur_len > max_len:
+                    cmp = memcmp(cur_ptr, max_ptr, max_len)
+                    if cmp > 0:  # cur is larger
+                        max_start = cur_start
+                        max_end = cur_end
+                        max_ptr = cur_ptr
+                else:
+                    cmp = memcmp(cur_ptr, max_ptr, cur_len)
+                    if cmp > 0:
+                        max_start = cur_start
+                        max_end = cur_end
+                        max_ptr = cur_ptr
+
+        if max_start == -1:
+            return None
+        return PyBytes_FromStringAndSize(max_ptr, max_end - max_start)
+
+    cpdef sum(self):
+        """Sum is not defined for string vectors."""
+        raise NotImplementedError("sum() is not supported for StringVector")
+
     def __str__(self):
         cdef list vals = []
         cdef Py_ssize_t i, k = min(self.ptr.length, 5)

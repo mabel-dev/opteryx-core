@@ -19,6 +19,9 @@ cdef class IntegerVector(Vector):
 
     cpdef list to_pylist(self)
     cpdef IntegerVector take(self, int32_t[::1] indices)
+    cpdef int64_t min(self)
+    cpdef int64_t max(self)
+    cpdef int64_t sum(self)
     cdef void hash_into(self, uint64_t[::1] out_buf, Py_ssize_t offset=*) except *
 
 cdef IntegerVector from_arrow(object array)

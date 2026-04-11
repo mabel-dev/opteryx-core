@@ -36,6 +36,10 @@ cdef class IntervalVector(Vector):
     cpdef BoolVector greater_than_or_equals(self, object literal)
     cpdef object apply_to_temporal(self, object values, int8_t signum=*)
 
+    cpdef object min(self)
+    cpdef object max(self)
+    cpdef object sum(self)
+
     cpdef uint64_t[::1] hash(self)
     cdef void hash_into(self, uint64_t[::1] out_buf, Py_ssize_t offset=*) except *
 

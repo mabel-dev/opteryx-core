@@ -1572,7 +1572,7 @@ struct __pyx_obj_7opteryx_9operators_9aggregate_14aggregate_node___pyx_scope_str
 };
 
 
-/* "opteryx/operators/aggregate/aggregate_node.pyx":285
+/* "opteryx/operators/aggregate/aggregate_node.pyx":319
  *         self.collectors = [_DrakenAggregateCollector(aggregate) for aggregate in self.aggregates]
  * 
  *     @property             # <<<<<<<<<<<<<<
@@ -1585,7 +1585,7 @@ struct __pyx_obj_7opteryx_9operators_9aggregate_14aggregate_node___pyx_scope_str
 };
 
 
-/* "opteryx/operators/aggregate/aggregate_node.pyx":289
+/* "opteryx/operators/aggregate/aggregate_node.pyx":323
  *         from opteryx.expression import format_expression
  * 
  *         return f"AGGREGATE ({', '.join(format_expression(col) for col in self.aggregates)})"             # <<<<<<<<<<<<<<
@@ -1600,7 +1600,7 @@ struct __pyx_obj_7opteryx_9operators_9aggregate_14aggregate_node___pyx_scope_str
 };
 
 
-/* "opteryx/operators/aggregate/aggregate_node.pyx":316
+/* "opteryx/operators/aggregate/aggregate_node.pyx":350
  *         return Morsel.from_vectors(names, vectors)
  * 
  *     def execute(self, morsel):             # <<<<<<<<<<<<<<
@@ -2090,6 +2090,43 @@ static CYTHON_INLINE int __Pyx_ListComp_Append(PyObject* list, PyObject* x) {
 /* PyLongCompare.proto */
 static CYTHON_INLINE int __Pyx_PyLong_BoolEqObjC(PyObject *op1, PyObject *op2, long intval, long inplace);
 
+/* HasAttr.proto */
+#if __PYX_LIMITED_VERSION_HEX >= 0x030d0000
+#define __Pyx_HasAttr(o, n)  PyObject_HasAttrWithError(o, n)
+#else
+static CYTHON_INLINE int __Pyx_HasAttr(PyObject *, PyObject *);
+#endif
+
+/* PyValueError_Check.proto */
+#define __Pyx_PyExc_ValueError_Check(obj)  __Pyx_TypeCheck(obj, PyExc_ValueError)
+
+/* PyNotImplementedError_Check.proto */
+#define __Pyx_PyExc_NotImplementedError_Check(obj)  __Pyx_TypeCheck(obj, PyExc_NotImplementedError)
+
+/* FastTypeChecks.proto */
+#if CYTHON_COMPILING_IN_CPYTHON
+#define __Pyx_TypeCheck(obj, type) __Pyx_IsSubtype(Py_TYPE(obj), (PyTypeObject *)type)
+#define __Pyx_TypeCheck2(obj, type1, type2) __Pyx_IsAnySubtype2(Py_TYPE(obj), (PyTypeObject *)type1, (PyTypeObject *)type2)
+static CYTHON_INLINE int __Pyx_IsSubtype(PyTypeObject *a, PyTypeObject *b);
+static CYTHON_INLINE int __Pyx_IsAnySubtype2(PyTypeObject *cls, PyTypeObject *a, PyTypeObject *b);
+static CYTHON_INLINE int __Pyx_PyErr_GivenExceptionMatches(PyObject *err, PyObject *type);
+static CYTHON_INLINE int __Pyx_PyErr_GivenExceptionMatches2(PyObject *err, PyObject *type1, PyObject *type2);
+#else
+#define __Pyx_TypeCheck(obj, type) PyObject_TypeCheck(obj, (PyTypeObject *)type)
+#define __Pyx_TypeCheck2(obj, type1, type2) (PyObject_TypeCheck(obj, (PyTypeObject *)type1) || PyObject_TypeCheck(obj, (PyTypeObject *)type2))
+#define __Pyx_PyErr_GivenExceptionMatches(err, type) PyErr_GivenExceptionMatches(err, type)
+static CYTHON_INLINE int __Pyx_PyErr_GivenExceptionMatches2(PyObject *err, PyObject *type1, PyObject *type2) {
+    return PyErr_GivenExceptionMatches(err, type1) || PyErr_GivenExceptionMatches(err, type2);
+}
+#endif
+#define __Pyx_PyErr_ExceptionMatches2(err1, err2)  __Pyx_PyErr_GivenExceptionMatches2(__Pyx_PyErr_CurrentExceptionType(), err1, err2)
+#define __Pyx_PyException_Check(obj) __Pyx_TypeCheck(obj, PyExc_Exception)
+#ifdef PyExceptionInstance_Check
+  #define __Pyx_PyBaseException_Check(obj) PyExceptionInstance_Check(obj)
+#else
+  #define __Pyx_PyBaseException_Check(obj) __Pyx_TypeCheck(obj, PyExc_BaseException)
+#endif
+
 /* PyObjectDelAttr.proto (used by PyObjectSetAttrStr) */
 #if CYTHON_COMPILING_IN_LIMITED_API && __PYX_LIMITED_VERSION_HEX < 0x030d0000
 #define __Pyx_PyObject_DelAttr(o, n) PyObject_SetAttr(o, n, NULL)
@@ -2105,9 +2142,6 @@ static CYTHON_INLINE int __Pyx_PyObject_SetAttrStr(PyObject* obj, PyObject* attr
 #define __Pyx_PyObject_DelAttrStr(o,n)   __Pyx_PyObject_DelAttr(o,n)
 #define __Pyx_PyObject_SetAttrStr(o,n,v) PyObject_SetAttr(o,n,v)
 #endif
-
-/* PyNotImplementedError_Check.proto */
-#define __Pyx_PyExc_NotImplementedError_Check(obj)  __Pyx_TypeCheck(obj, PyExc_NotImplementedError)
 
 /* PyObjectFormatSimple.proto */
 #if CYTHON_COMPILING_IN_PYPY
@@ -2132,9 +2166,6 @@ static PyObject* __Pyx_PyUnicode_Join(PyObject** values, Py_ssize_t value_count,
 
 /* RaiseException.export */
 static void __Pyx_Raise(PyObject *type, PyObject *value, PyObject *tb, PyObject *cause);
-
-/* PyValueError_Check.proto */
-#define __Pyx_PyExc_ValueError_Check(obj)  __Pyx_TypeCheck(obj, PyExc_ValueError)
 
 /* IterFinish.proto (used by dict_iter) */
 static CYTHON_INLINE int __Pyx_IterFinish(void);
@@ -2217,13 +2248,6 @@ static int __Pyx_VectorcallBuilder_AddArgStr(const char *key, PyObject *value, P
 
 /* RaiseClosureNameError.proto */
 static void __Pyx_RaiseClosureNameError(const char *varname);
-
-/* HasAttr.proto (used by ImportImpl) */
-#if __PYX_LIMITED_VERSION_HEX >= 0x030d0000
-#define __Pyx_HasAttr(o, n)  PyObject_HasAttrWithError(o, n)
-#else
-static CYTHON_INLINE int __Pyx_HasAttr(PyObject *, PyObject *);
-#endif
 
 /* ImportImpl.export */
 static PyObject *__Pyx__Import(PyObject *name, PyObject *const *imported_names, Py_ssize_t len_imported_names, PyObject *qualname, PyObject *moddict, int level);
@@ -2536,30 +2560,6 @@ static CYTHON_INLINE long __Pyx_PyLong_As_long(PyObject *);
 /* CIntFromPy.proto */
 static CYTHON_INLINE int __Pyx_PyLong_As_int(PyObject *);
 
-/* FastTypeChecks.proto */
-#if CYTHON_COMPILING_IN_CPYTHON
-#define __Pyx_TypeCheck(obj, type) __Pyx_IsSubtype(Py_TYPE(obj), (PyTypeObject *)type)
-#define __Pyx_TypeCheck2(obj, type1, type2) __Pyx_IsAnySubtype2(Py_TYPE(obj), (PyTypeObject *)type1, (PyTypeObject *)type2)
-static CYTHON_INLINE int __Pyx_IsSubtype(PyTypeObject *a, PyTypeObject *b);
-static CYTHON_INLINE int __Pyx_IsAnySubtype2(PyTypeObject *cls, PyTypeObject *a, PyTypeObject *b);
-static CYTHON_INLINE int __Pyx_PyErr_GivenExceptionMatches(PyObject *err, PyObject *type);
-static CYTHON_INLINE int __Pyx_PyErr_GivenExceptionMatches2(PyObject *err, PyObject *type1, PyObject *type2);
-#else
-#define __Pyx_TypeCheck(obj, type) PyObject_TypeCheck(obj, (PyTypeObject *)type)
-#define __Pyx_TypeCheck2(obj, type1, type2) (PyObject_TypeCheck(obj, (PyTypeObject *)type1) || PyObject_TypeCheck(obj, (PyTypeObject *)type2))
-#define __Pyx_PyErr_GivenExceptionMatches(err, type) PyErr_GivenExceptionMatches(err, type)
-static CYTHON_INLINE int __Pyx_PyErr_GivenExceptionMatches2(PyObject *err, PyObject *type1, PyObject *type2) {
-    return PyErr_GivenExceptionMatches(err, type1) || PyErr_GivenExceptionMatches(err, type2);
-}
-#endif
-#define __Pyx_PyErr_ExceptionMatches2(err1, err2)  __Pyx_PyErr_GivenExceptionMatches2(__Pyx_PyErr_CurrentExceptionType(), err1, err2)
-#define __Pyx_PyException_Check(obj) __Pyx_TypeCheck(obj, PyExc_Exception)
-#ifdef PyExceptionInstance_Check
-  #define __Pyx_PyBaseException_Check(obj) PyExceptionInstance_Check(obj)
-#else
-  #define __Pyx_PyBaseException_Check(obj) __Pyx_TypeCheck(obj, PyExc_BaseException)
-#endif
-
 /* GetRuntimeVersion.proto */
 #if __PYX_LIMITED_VERSION_HEX < 0x030b0000
 static unsigned long __Pyx_cached_runtime_version = 0;
@@ -2811,7 +2811,7 @@ typedef struct {
   __Pyx_CachedCFunction __pyx_umethod_PyDict_Type_pop;
   __Pyx_CachedCFunction __pyx_umethod_PyDict_Type_values;
   PyObject *__pyx_codeobj_tab[27];
-  PyObject *__pyx_string_tab[210];
+  PyObject *__pyx_string_tab[207];
   PyObject *__pyx_number_tab[3];
 /* #### Code section: module_state_contents ### */
 
@@ -2924,173 +2924,170 @@ static __pyx_mstatetype * const __pyx_mstate_global = &__pyx_mstate_global_stati
 #define __pyx_n_u_DrakenAggregateCollector_collec __pyx_string_tab[40]
 #define __pyx_n_u_DrakenAggregateCollector_finali __pyx_string_tab[41]
 #define __pyx_n_u_EOS __pyx_string_tab[42]
-#define __pyx_n_u_Float64Vector __pyx_string_tab[43]
-#define __pyx_n_u_IDENTIFIER __pyx_string_tab[44]
-#define __pyx_n_u_Int64Vector __pyx_string_tab[45]
-#define __pyx_n_u_LITERAL __pyx_string_tab[46]
-#define __pyx_n_u_MAX __pyx_string_tab[47]
-#define __pyx_n_u_MIN __pyx_string_tab[48]
-#define __pyx_n_u_Morsel __pyx_string_tab[49]
-#define __pyx_n_u_NodeType __pyx_string_tab[50]
-#define __pyx_n_u_Pyx_PyDict_NextRef __pyx_string_tab[51]
-#define __pyx_n_u_QueryProperties __pyx_string_tab[52]
-#define __pyx_n_u_SUM __pyx_string_tab[53]
-#define __pyx_n_u_WILDCARD __pyx_string_tab[54]
-#define __pyx_n_u_aggregate __pyx_string_tab[55]
-#define __pyx_n_u_aggregate_type __pyx_string_tab[56]
-#define __pyx_n_u_aggregates __pyx_string_tab[57]
-#define __pyx_n_u_all_identifiers __pyx_string_tab[58]
-#define __pyx_n_u_asyncio_coroutines __pyx_string_tab[59]
-#define __pyx_n_u_bool __pyx_string_tab[60]
-#define __pyx_n_u_chunk __pyx_string_tab[61]
-#define __pyx_n_u_chunk_sum __pyx_string_tab[62]
-#define __pyx_n_u_class __pyx_string_tab[63]
-#define __pyx_n_u_cline_in_traceback __pyx_string_tab[64]
-#define __pyx_n_u_close __pyx_string_tab[65]
-#define __pyx_n_u_col __pyx_string_tab[66]
-#define __pyx_n_u_collect __pyx_string_tab[67]
-#define __pyx_n_u_collect_literal __pyx_string_tab[68]
-#define __pyx_n_u_collect_vector __pyx_string_tab[69]
-#define __pyx_n_u_collector __pyx_string_tab[70]
-#define __pyx_n_u_collectors __pyx_string_tab[71]
-#define __pyx_n_u_column __pyx_string_tab[72]
-#define __pyx_n_u_column_bytes __pyx_string_tab[73]
-#define __pyx_n_u_config __pyx_string_tab[74]
-#define __pyx_n_u_constant_scalar_value __pyx_string_tab[75]
-#define __pyx_n_u_contribution __pyx_string_tab[76]
-#define __pyx_n_u_count __pyx_string_tab[77]
-#define __pyx_n_u_distinct_hashes __pyx_string_tab[78]
-#define __pyx_n_u_distinct_hashes_2 __pyx_string_tab[79]
-#define __pyx_n_u_doc __pyx_string_tab[80]
-#define __pyx_n_u_draken __pyx_string_tab[81]
-#define __pyx_n_u_duplicate_treatment __pyx_string_tab[82]
-#define __pyx_n_u_encoding __pyx_string_tab[83]
-#define __pyx_n_u_ensure_carchar_set __pyx_string_tab[84]
-#define __pyx_n_u_ensure_draken_morsel __pyx_string_tab[85]
-#define __pyx_n_u_eval_start __pyx_string_tab[86]
-#define __pyx_n_u_evaluatable_nodes __pyx_string_tab[87]
-#define __pyx_n_u_evaluate_and_append_draken __pyx_string_tab[88]
-#define __pyx_n_u_execute __pyx_string_tab[89]
-#define __pyx_n_u_extract_evaluations __pyx_string_tab[90]
-#define __pyx_n_u_finalize __pyx_string_tab[91]
-#define __pyx_n_u_finalize_morsel __pyx_string_tab[92]
-#define __pyx_n_u_format_expression __pyx_string_tab[93]
-#define __pyx_n_u_from_vectors __pyx_string_tab[94]
-#define __pyx_n_u_fromkeys __pyx_string_tab[95]
-#define __pyx_n_u_func __pyx_string_tab[96]
-#define __pyx_n_u_genexpr __pyx_string_tab[97]
-#define __pyx_n_u_get __pyx_string_tab[98]
-#define __pyx_n_u_get_all_nodes_of_type __pyx_string_tab[99]
-#define __pyx_n_u_hash __pyx_string_tab[100]
-#define __pyx_n_u_identity __pyx_string_tab[101]
-#define __pyx_n_u_ingest_start __pyx_string_tab[102]
-#define __pyx_n_u_init __pyx_string_tab[103]
-#define __pyx_n_u_insert_literal_hash __pyx_string_tab[104]
-#define __pyx_n_u_insert_many __pyx_string_tab[105]
-#define __pyx_n_u_insert_vector_hashes __pyx_string_tab[106]
-#define __pyx_n_u_int __pyx_string_tab[107]
-#define __pyx_n_u_is_constant_vector_like __pyx_string_tab[108]
-#define __pyx_n_u_is_coroutine __pyx_string_tab[109]
-#define __pyx_n_u_items __pyx_string_tab[110]
-#define __pyx_n_u_literal __pyx_string_tab[111]
-#define __pyx_n_u_main __pyx_string_tab[112]
-#define __pyx_n_u_max __pyx_string_tab[113]
-#define __pyx_n_u_max_2 __pyx_string_tab[114]
-#define __pyx_n_u_metaclass __pyx_string_tab[115]
-#define __pyx_n_u_min __pyx_string_tab[116]
-#define __pyx_n_u_min_2 __pyx_string_tab[117]
-#define __pyx_n_u_module __pyx_string_tab[118]
-#define __pyx_n_u_monotonic_ns __pyx_string_tab[119]
-#define __pyx_n_u_morsel __pyx_string_tab[120]
-#define __pyx_n_u_mro_entries __pyx_string_tab[121]
-#define __pyx_n_u_name __pyx_string_tab[122]
-#define __pyx_n_u_name_2 __pyx_string_tab[123]
-#define __pyx_n_u_names __pyx_string_tab[124]
-#define __pyx_n_u_next __pyx_string_tab[125]
-#define __pyx_n_u_node __pyx_string_tab[126]
-#define __pyx_n_u_node_type __pyx_string_tab[127]
-#define __pyx_n_u_null_count __pyx_string_tab[128]
-#define __pyx_n_u_num_rows __pyx_string_tab[129]
-#define __pyx_n_u_opteryx __pyx_string_tab[130]
-#define __pyx_n_u_opteryx_compiled_draken_interop __pyx_string_tab[131]
-#define __pyx_n_u_opteryx_compiled_draken_morsels __pyx_string_tab[132]
-#define __pyx_n_u_opteryx_compiled_nanobind_carcha __pyx_string_tab[133]
-#define __pyx_n_u_opteryx_expression __pyx_string_tab[134]
-#define __pyx_n_u_opteryx_expression_evaluator __pyx_string_tab[135]
-#define __pyx_n_u_opteryx_models __pyx_string_tab[136]
-#define __pyx_n_u_opteryx_operators __pyx_string_tab[137]
-#define __pyx_n_u_opteryx_operators_aggregate_aggr __pyx_string_tab[138]
-#define __pyx_n_u_opteryx_operators_aggregate_help __pyx_string_tab[139]
-#define __pyx_n_u_output_name __pyx_string_tab[140]
-#define __pyx_n_u_parameter __pyx_string_tab[141]
-#define __pyx_n_u_parameters __pyx_string_tab[142]
-#define __pyx_n_u_pop __pyx_string_tab[143]
-#define __pyx_n_u_prepare __pyx_string_tab[144]
-#define __pyx_n_u_prepare_chunk __pyx_string_tab[145]
-#define __pyx_n_u_properties __pyx_string_tab[146]
-#define __pyx_n_u_property __pyx_string_tab[147]
-#define __pyx_n_u_qualname __pyx_string_tab[148]
-#define __pyx_n_u_readings __pyx_string_tab[149]
-#define __pyx_n_u_reject_unsupported_approximate __pyx_string_tab[150]
-#define __pyx_n_u_return __pyx_string_tab[151]
-#define __pyx_n_u_row_count __pyx_string_tab[152]
-#define __pyx_n_u_scalar __pyx_string_tab[153]
-#define __pyx_n_u_schema_column __pyx_string_tab[154]
-#define __pyx_n_u_select __pyx_string_tab[155]
-#define __pyx_n_u_select_nodes __pyx_string_tab[156]
-#define __pyx_n_u_self __pyx_string_tab[157]
-#define __pyx_n_u_send __pyx_string_tab[158]
-#define __pyx_n_u_set_name __pyx_string_tab[159]
-#define __pyx_n_u_setdefault __pyx_string_tab[160]
-#define __pyx_n_u_size __pyx_string_tab[161]
-#define __pyx_n_u_sum __pyx_string_tab[162]
-#define __pyx_n_u_sum_2 __pyx_string_tab[163]
-#define __pyx_n_u_super __pyx_string_tab[164]
-#define __pyx_n_u_test __pyx_string_tab[165]
-#define __pyx_n_u_throw __pyx_string_tab[166]
-#define __pyx_n_u_time __pyx_string_tab[167]
-#define __pyx_n_u_time_aggregate_evaluations __pyx_string_tab[168]
-#define __pyx_n_u_time_aggregate_ingest __pyx_string_tab[169]
-#define __pyx_n_u_to_pylist __pyx_string_tab[170]
-#define __pyx_n_u_update_max __pyx_string_tab[171]
-#define __pyx_n_u_update_min __pyx_string_tab[172]
-#define __pyx_n_u_valid_count __pyx_string_tab[173]
-#define __pyx_n_u_value __pyx_string_tab[174]
-#define __pyx_n_u_values __pyx_string_tab[175]
-#define __pyx_n_u_vector __pyx_string_tab[176]
-#define __pyx_n_u_vector_from_sequence __pyx_string_tab[177]
-#define __pyx_n_u_vector_max __pyx_string_tab[178]
-#define __pyx_n_u_vector_min __pyx_string_tab[179]
-#define __pyx_n_u_vector_null_count __pyx_string_tab[180]
-#define __pyx_n_u_vector_null_count_locals_genexp __pyx_string_tab[181]
-#define __pyx_n_u_vector_sum __pyx_string_tab[182]
-#define __pyx_n_u_vector_valid_values __pyx_string_tab[183]
-#define __pyx_n_u_vectors __pyx_string_tab[184]
-#define __pyx_kp_b_iso88591_1 __pyx_string_tab[185]
-#define __pyx_kp_b_iso88591_1F_ivZs_V7 __pyx_string_tab[186]
-#define __pyx_kp_b_iso88591_1_Ry_N_N_az_QnA_1D_t_c_a_Qd_XUV __pyx_string_tab[187]
-#define __pyx_kp_b_iso88591_7_8_vS __pyx_string_tab[188]
-#define __pyx_kp_b_iso88591_A __pyx_string_tab[189]
-#define __pyx_kp_b_iso88591_A_4_s_t_1_uD_2_ZtCTTYYZ_4q_4_s_3 __pyx_string_tab[190]
-#define __pyx_kp_b_iso88591_A_6_A_4vS_S_b_A __pyx_string_tab[191]
-#define __pyx_kp_b_iso88591_A_M_Q_7_q_1_v_7 __pyx_string_tab[192]
-#define __pyx_kp_b_iso88591_A_M_iq_7_6MQ_O9N_M_Qa_Ja_HA_HA_H __pyx_string_tab[193]
-#define __pyx_kp_b_iso88591_A_Qd __pyx_string_tab[194]
-#define __pyx_kp_b_iso88591_A_S_4_s_t_1_ATATTU_xwa_Kq_83a_4 __pyx_string_tab[195]
-#define __pyx_kp_b_iso88591_A_c_6aq_4_s_t_1_QdBUUV_1_4_s_33d __pyx_string_tab[196]
-#define __pyx_kp_b_iso88591_A_q __pyx_string_tab[197]
-#define __pyx_kp_b_iso88591_A_q_AT_8 __pyx_string_tab[198]
-#define __pyx_kp_b_iso88591_Kq_4q_E_Q_4q_at3Gq_4_CrQR_q __pyx_string_tab[199]
-#define __pyx_kp_b_iso88591_Qhb_2_1_3a_q_q_q_7_Q_1_wb_vZz __pyx_string_tab[200]
-#define __pyx_kp_b_iso88591__5 __pyx_string_tab[201]
-#define __pyx_kp_b_iso88591_a_4z_Cxq_6_4z_Cxq_j_a_wa_AT_AQ __pyx_string_tab[202]
-#define __pyx_kp_b_iso88591_gZz __pyx_string_tab[203]
-#define __pyx_kp_b_iso88591_q_4AQiuA_1 __pyx_string_tab[204]
-#define __pyx_kp_b_iso88591_q_e1_1 __pyx_string_tab[205]
-#define __pyx_kp_b_iso88591_q_q_z_z_3a_a __pyx_string_tab[206]
-#define __pyx_kp_b_iso88591_s_6_s_1 __pyx_string_tab[207]
-#define __pyx_kp_b_iso88591_s_83a_q_6 __pyx_string_tab[208]
-#define __pyx_kp_b_iso88591_z_L_1IWAQ __pyx_string_tab[209]
+#define __pyx_n_u_IDENTIFIER __pyx_string_tab[43]
+#define __pyx_n_u_LITERAL __pyx_string_tab[44]
+#define __pyx_n_u_MAX __pyx_string_tab[45]
+#define __pyx_n_u_MIN __pyx_string_tab[46]
+#define __pyx_n_u_Morsel __pyx_string_tab[47]
+#define __pyx_n_u_NodeType __pyx_string_tab[48]
+#define __pyx_n_u_Pyx_PyDict_NextRef __pyx_string_tab[49]
+#define __pyx_n_u_QueryProperties __pyx_string_tab[50]
+#define __pyx_n_u_SUM __pyx_string_tab[51]
+#define __pyx_n_u_WILDCARD __pyx_string_tab[52]
+#define __pyx_n_u_aggregate __pyx_string_tab[53]
+#define __pyx_n_u_aggregate_type __pyx_string_tab[54]
+#define __pyx_n_u_aggregates __pyx_string_tab[55]
+#define __pyx_n_u_all_identifiers __pyx_string_tab[56]
+#define __pyx_n_u_asyncio_coroutines __pyx_string_tab[57]
+#define __pyx_n_u_bool __pyx_string_tab[58]
+#define __pyx_n_u_chunk __pyx_string_tab[59]
+#define __pyx_n_u_chunk_sum __pyx_string_tab[60]
+#define __pyx_n_u_cline_in_traceback __pyx_string_tab[61]
+#define __pyx_n_u_close __pyx_string_tab[62]
+#define __pyx_n_u_col __pyx_string_tab[63]
+#define __pyx_n_u_collect __pyx_string_tab[64]
+#define __pyx_n_u_collect_literal __pyx_string_tab[65]
+#define __pyx_n_u_collect_vector __pyx_string_tab[66]
+#define __pyx_n_u_collector __pyx_string_tab[67]
+#define __pyx_n_u_collectors __pyx_string_tab[68]
+#define __pyx_n_u_column __pyx_string_tab[69]
+#define __pyx_n_u_column_bytes __pyx_string_tab[70]
+#define __pyx_n_u_config __pyx_string_tab[71]
+#define __pyx_n_u_constant_scalar_value __pyx_string_tab[72]
+#define __pyx_n_u_contribution __pyx_string_tab[73]
+#define __pyx_n_u_count __pyx_string_tab[74]
+#define __pyx_n_u_distinct_hashes __pyx_string_tab[75]
+#define __pyx_n_u_distinct_hashes_2 __pyx_string_tab[76]
+#define __pyx_n_u_doc __pyx_string_tab[77]
+#define __pyx_n_u_draken __pyx_string_tab[78]
+#define __pyx_n_u_duplicate_treatment __pyx_string_tab[79]
+#define __pyx_n_u_encoding __pyx_string_tab[80]
+#define __pyx_n_u_ensure_carchar_set __pyx_string_tab[81]
+#define __pyx_n_u_ensure_draken_morsel __pyx_string_tab[82]
+#define __pyx_n_u_eval_start __pyx_string_tab[83]
+#define __pyx_n_u_evaluatable_nodes __pyx_string_tab[84]
+#define __pyx_n_u_evaluate_and_append_draken __pyx_string_tab[85]
+#define __pyx_n_u_execute __pyx_string_tab[86]
+#define __pyx_n_u_extract_evaluations __pyx_string_tab[87]
+#define __pyx_n_u_finalize __pyx_string_tab[88]
+#define __pyx_n_u_finalize_morsel __pyx_string_tab[89]
+#define __pyx_n_u_format_expression __pyx_string_tab[90]
+#define __pyx_n_u_from_vectors __pyx_string_tab[91]
+#define __pyx_n_u_fromkeys __pyx_string_tab[92]
+#define __pyx_n_u_func __pyx_string_tab[93]
+#define __pyx_n_u_genexpr __pyx_string_tab[94]
+#define __pyx_n_u_get __pyx_string_tab[95]
+#define __pyx_n_u_get_all_nodes_of_type __pyx_string_tab[96]
+#define __pyx_n_u_hash __pyx_string_tab[97]
+#define __pyx_n_u_identity __pyx_string_tab[98]
+#define __pyx_n_u_ingest_start __pyx_string_tab[99]
+#define __pyx_n_u_init __pyx_string_tab[100]
+#define __pyx_n_u_insert_literal_hash __pyx_string_tab[101]
+#define __pyx_n_u_insert_many __pyx_string_tab[102]
+#define __pyx_n_u_insert_vector_hashes __pyx_string_tab[103]
+#define __pyx_n_u_int __pyx_string_tab[104]
+#define __pyx_n_u_is_constant_vector_like __pyx_string_tab[105]
+#define __pyx_n_u_is_coroutine __pyx_string_tab[106]
+#define __pyx_n_u_items __pyx_string_tab[107]
+#define __pyx_n_u_literal __pyx_string_tab[108]
+#define __pyx_n_u_main __pyx_string_tab[109]
+#define __pyx_n_u_max __pyx_string_tab[110]
+#define __pyx_n_u_max_2 __pyx_string_tab[111]
+#define __pyx_n_u_metaclass __pyx_string_tab[112]
+#define __pyx_n_u_min __pyx_string_tab[113]
+#define __pyx_n_u_min_2 __pyx_string_tab[114]
+#define __pyx_n_u_module __pyx_string_tab[115]
+#define __pyx_n_u_monotonic_ns __pyx_string_tab[116]
+#define __pyx_n_u_morsel __pyx_string_tab[117]
+#define __pyx_n_u_mro_entries __pyx_string_tab[118]
+#define __pyx_n_u_name __pyx_string_tab[119]
+#define __pyx_n_u_name_2 __pyx_string_tab[120]
+#define __pyx_n_u_names __pyx_string_tab[121]
+#define __pyx_n_u_next __pyx_string_tab[122]
+#define __pyx_n_u_node __pyx_string_tab[123]
+#define __pyx_n_u_node_type __pyx_string_tab[124]
+#define __pyx_n_u_null_count __pyx_string_tab[125]
+#define __pyx_n_u_num_rows __pyx_string_tab[126]
+#define __pyx_n_u_opteryx __pyx_string_tab[127]
+#define __pyx_n_u_opteryx_compiled_draken_interop __pyx_string_tab[128]
+#define __pyx_n_u_opteryx_compiled_draken_morsels __pyx_string_tab[129]
+#define __pyx_n_u_opteryx_compiled_nanobind_carcha __pyx_string_tab[130]
+#define __pyx_n_u_opteryx_expression __pyx_string_tab[131]
+#define __pyx_n_u_opteryx_expression_evaluator __pyx_string_tab[132]
+#define __pyx_n_u_opteryx_models __pyx_string_tab[133]
+#define __pyx_n_u_opteryx_operators __pyx_string_tab[134]
+#define __pyx_n_u_opteryx_operators_aggregate_aggr __pyx_string_tab[135]
+#define __pyx_n_u_opteryx_operators_aggregate_help __pyx_string_tab[136]
+#define __pyx_n_u_output_name __pyx_string_tab[137]
+#define __pyx_n_u_parameter __pyx_string_tab[138]
+#define __pyx_n_u_parameters __pyx_string_tab[139]
+#define __pyx_n_u_pop __pyx_string_tab[140]
+#define __pyx_n_u_prepare __pyx_string_tab[141]
+#define __pyx_n_u_prepare_chunk __pyx_string_tab[142]
+#define __pyx_n_u_properties __pyx_string_tab[143]
+#define __pyx_n_u_property __pyx_string_tab[144]
+#define __pyx_n_u_qualname __pyx_string_tab[145]
+#define __pyx_n_u_readings __pyx_string_tab[146]
+#define __pyx_n_u_reject_unsupported_approximate __pyx_string_tab[147]
+#define __pyx_n_u_return __pyx_string_tab[148]
+#define __pyx_n_u_row_count __pyx_string_tab[149]
+#define __pyx_n_u_scalar __pyx_string_tab[150]
+#define __pyx_n_u_schema_column __pyx_string_tab[151]
+#define __pyx_n_u_select __pyx_string_tab[152]
+#define __pyx_n_u_select_nodes __pyx_string_tab[153]
+#define __pyx_n_u_self __pyx_string_tab[154]
+#define __pyx_n_u_send __pyx_string_tab[155]
+#define __pyx_n_u_set_name __pyx_string_tab[156]
+#define __pyx_n_u_setdefault __pyx_string_tab[157]
+#define __pyx_n_u_size __pyx_string_tab[158]
+#define __pyx_n_u_sum __pyx_string_tab[159]
+#define __pyx_n_u_sum_2 __pyx_string_tab[160]
+#define __pyx_n_u_super __pyx_string_tab[161]
+#define __pyx_n_u_test __pyx_string_tab[162]
+#define __pyx_n_u_throw __pyx_string_tab[163]
+#define __pyx_n_u_time __pyx_string_tab[164]
+#define __pyx_n_u_time_aggregate_evaluations __pyx_string_tab[165]
+#define __pyx_n_u_time_aggregate_ingest __pyx_string_tab[166]
+#define __pyx_n_u_to_pylist __pyx_string_tab[167]
+#define __pyx_n_u_update_max __pyx_string_tab[168]
+#define __pyx_n_u_update_min __pyx_string_tab[169]
+#define __pyx_n_u_valid_count __pyx_string_tab[170]
+#define __pyx_n_u_value __pyx_string_tab[171]
+#define __pyx_n_u_values __pyx_string_tab[172]
+#define __pyx_n_u_vector __pyx_string_tab[173]
+#define __pyx_n_u_vector_from_sequence __pyx_string_tab[174]
+#define __pyx_n_u_vector_max __pyx_string_tab[175]
+#define __pyx_n_u_vector_min __pyx_string_tab[176]
+#define __pyx_n_u_vector_null_count __pyx_string_tab[177]
+#define __pyx_n_u_vector_null_count_locals_genexp __pyx_string_tab[178]
+#define __pyx_n_u_vector_sum __pyx_string_tab[179]
+#define __pyx_n_u_vector_valid_values __pyx_string_tab[180]
+#define __pyx_n_u_vectors __pyx_string_tab[181]
+#define __pyx_kp_b_iso88591_1 __pyx_string_tab[182]
+#define __pyx_kp_b_iso88591_1F_ivZs_V7 __pyx_string_tab[183]
+#define __pyx_kp_b_iso88591_1_Ry_N_N_az_QnA_1D_t_c_a_Qd_XUV __pyx_string_tab[184]
+#define __pyx_kp_b_iso88591_7_8_vS __pyx_string_tab[185]
+#define __pyx_kp_b_iso88591_A __pyx_string_tab[186]
+#define __pyx_kp_b_iso88591_A_4_s_t_1_uD_2_ZtCTTYYZ_4q_4_s_3 __pyx_string_tab[187]
+#define __pyx_kp_b_iso88591_A_6_A_4vS_S_b_A __pyx_string_tab[188]
+#define __pyx_kp_b_iso88591_A_M_Q_7_q_1_v_7 __pyx_string_tab[189]
+#define __pyx_kp_b_iso88591_A_M_iq_7_6MQ_O9N_M_Qa_Ja_HA_HA_H __pyx_string_tab[190]
+#define __pyx_kp_b_iso88591_A_Qd __pyx_string_tab[191]
+#define __pyx_kp_b_iso88591_A_S_4_s_t_1_ATATTU_xwa_Kq_83a_4 __pyx_string_tab[192]
+#define __pyx_kp_b_iso88591_A_c_6aq_4_s_t_1_QdBUUV_1_4_s_33d __pyx_string_tab[193]
+#define __pyx_kp_b_iso88591_A_q __pyx_string_tab[194]
+#define __pyx_kp_b_iso88591_A_q_AT_8 __pyx_string_tab[195]
+#define __pyx_kp_b_iso88591_Kq_4q_E_Q_4q_at3Gq_4_CrQR_q __pyx_string_tab[196]
+#define __pyx_kp_b_iso88591_Qhb_2_1_3a_q_q_q_7_Q_1_wb_waxq __pyx_string_tab[197]
+#define __pyx_kp_b_iso88591_Qhb_2_1_3a_q_q_q_z_z_waxq_6_Q_A __pyx_string_tab[198]
+#define __pyx_kp_b_iso88591__5 __pyx_string_tab[199]
+#define __pyx_kp_b_iso88591_a_4z_Cxq_6_4z_Cxq_j_a_wa_AT_AQ __pyx_string_tab[200]
+#define __pyx_kp_b_iso88591_gZz __pyx_string_tab[201]
+#define __pyx_kp_b_iso88591_q_4AQiuA_1 __pyx_string_tab[202]
+#define __pyx_kp_b_iso88591_q_e1_1 __pyx_string_tab[203]
+#define __pyx_kp_b_iso88591_s_6_s_1 __pyx_string_tab[204]
+#define __pyx_kp_b_iso88591_s_83a_q_6 __pyx_string_tab[205]
+#define __pyx_kp_b_iso88591_z_L_1IWAQ __pyx_string_tab[206]
 #define __pyx_int_0 __pyx_number_tab[0]
 #define __pyx_int_1 __pyx_number_tab[1]
 #define __pyx_int_3 __pyx_number_tab[2]
@@ -3117,7 +3114,7 @@ static CYTHON_SMALL_CODE int __pyx_m_clear(PyObject *m) {
   Py_CLEAR(clear_module_state->__pyx_ptype_7opteryx_9operators_9aggregate_14aggregate_node___pyx_scope_struct_3_execute);
   Py_CLEAR(clear_module_state->__pyx_type_7opteryx_9operators_9aggregate_14aggregate_node___pyx_scope_struct_3_execute);
   for (int i=0; i<27; ++i) { Py_CLEAR(clear_module_state->__pyx_codeobj_tab[i]); }
-  for (int i=0; i<210; ++i) { Py_CLEAR(clear_module_state->__pyx_string_tab[i]); }
+  for (int i=0; i<207; ++i) { Py_CLEAR(clear_module_state->__pyx_string_tab[i]); }
   for (int i=0; i<3; ++i) { Py_CLEAR(clear_module_state->__pyx_number_tab[i]); }
 /* #### Code section: module_state_clear_contents ### */
 /* CommonTypesMetaclass.module_state_clear */
@@ -3153,7 +3150,7 @@ static CYTHON_SMALL_CODE int __pyx_m_traverse(PyObject *m, visitproc visit, void
   Py_VISIT(traverse_module_state->__pyx_ptype_7opteryx_9operators_9aggregate_14aggregate_node___pyx_scope_struct_3_execute);
   Py_VISIT(traverse_module_state->__pyx_type_7opteryx_9operators_9aggregate_14aggregate_node___pyx_scope_struct_3_execute);
   for (int i=0; i<27; ++i) { __Pyx_VISIT_CONST(traverse_module_state->__pyx_codeobj_tab[i]); }
-  for (int i=0; i<210; ++i) { __Pyx_VISIT_CONST(traverse_module_state->__pyx_string_tab[i]); }
+  for (int i=0; i<207; ++i) { __Pyx_VISIT_CONST(traverse_module_state->__pyx_string_tab[i]); }
   for (int i=0; i<3; ++i) { __Pyx_VISIT_CONST(traverse_module_state->__pyx_number_tab[i]); }
 /* #### Code section: module_state_traverse_contents ### */
 /* CommonTypesMetaclass.module_state_traverse */
@@ -4409,7 +4406,10 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_10_vec
   PyObject *__pyx_t_5 = NULL;
   size_t __pyx_t_6;
   int __pyx_t_7;
-  int __pyx_t_8;
+  PyObject *__pyx_t_8 = NULL;
+  PyObject *__pyx_t_9 = NULL;
+  PyObject *__pyx_t_10 = NULL;
+  int __pyx_t_11;
   int __pyx_lineno = 0;
   const char *__pyx_filename = NULL;
   int __pyx_clineno = 0;
@@ -4587,7 +4587,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_10_vec
  *             return None
  *         return scalar * valid_count             # <<<<<<<<<<<<<<
  * 
- *     if vector.__class__.__name__ in ("Int64Vector", "Float64Vector"):
+ *     # Try to use native sum() method if available (fast path for numeric types)
 */
     __Pyx_XDECREF(__pyx_r);
     __pyx_t_5 = PyNumber_Multiply(__pyx_v_scalar, __pyx_v_valid_count); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 71, __pyx_L1_error)
@@ -4605,122 +4605,188 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_10_vec
 */
   }
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":73
- *         return scalar * valid_count
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":74
  * 
- *     if vector.__class__.__name__ in ("Int64Vector", "Float64Vector"):             # <<<<<<<<<<<<<<
- *         return vector.sum()
- * 
+ *     # Try to use native sum() method if available (fast path for numeric types)
+ *     if hasattr(vector, 'sum'):             # <<<<<<<<<<<<<<
+ *         try:
+ *             return vector.sum()
 */
-  __pyx_t_5 = __Pyx_PyObject_GetAttrStr(__pyx_v_vector, __pyx_mstate_global->__pyx_n_u_class); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 73, __pyx_L1_error)
-  __Pyx_GOTREF(__pyx_t_5);
-  __pyx_t_3 = __Pyx_PyObject_GetAttrStr(__pyx_t_5, __pyx_mstate_global->__pyx_n_u_name); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 73, __pyx_L1_error)
-  __Pyx_GOTREF(__pyx_t_3);
-  __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
-  __pyx_t_8 = (__Pyx_PyUnicode_Equals(__pyx_t_3, __pyx_mstate_global->__pyx_n_u_Int64Vector, Py_EQ)); if (unlikely((__pyx_t_8 < 0))) __PYX_ERR(0, 73, __pyx_L1_error)
-  if (!__pyx_t_8) {
-  } else {
-    __pyx_t_7 = __pyx_t_8;
-    goto __pyx_L7_bool_binop_done;
-  }
-  __pyx_t_8 = (__Pyx_PyUnicode_Equals(__pyx_t_3, __pyx_mstate_global->__pyx_n_u_Float64Vector, Py_EQ)); if (unlikely((__pyx_t_8 < 0))) __PYX_ERR(0, 73, __pyx_L1_error)
-  __pyx_t_7 = __pyx_t_8;
-  __pyx_L7_bool_binop_done:;
-  __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
-  __pyx_t_8 = __pyx_t_7;
-  if (__pyx_t_8) {
+  __pyx_t_7 = __Pyx_HasAttr(__pyx_v_vector, __pyx_mstate_global->__pyx_n_u_sum); if (unlikely(__pyx_t_7 == ((int)-1))) __PYX_ERR(0, 74, __pyx_L1_error)
+  if (__pyx_t_7) {
+
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":75
+ *     # Try to use native sum() method if available (fast path for numeric types)
+ *     if hasattr(vector, 'sum'):
+ *         try:             # <<<<<<<<<<<<<<
+ *             return vector.sum()
+ *         except (ValueError, NotImplementedError):
+*/
+    {
+      __Pyx_PyThreadState_declare
+      __Pyx_PyThreadState_assign
+      __Pyx_ExceptionSave(&__pyx_t_8, &__pyx_t_9, &__pyx_t_10);
+      __Pyx_XGOTREF(__pyx_t_8);
+      __Pyx_XGOTREF(__pyx_t_9);
+      __Pyx_XGOTREF(__pyx_t_10);
+      /*try:*/ {
+
+        /* "opteryx/operators/aggregate/aggregate_node.pyx":76
+ *     if hasattr(vector, 'sum'):
+ *         try:
+ *             return vector.sum()             # <<<<<<<<<<<<<<
+ *         except (ValueError, NotImplementedError):
+ *             # NotImplementedError: aggregate not supported for this type
+*/
+        __Pyx_XDECREF(__pyx_r);
+        __pyx_t_3 = __pyx_v_vector;
+        __Pyx_INCREF(__pyx_t_3);
+        __pyx_t_6 = 0;
+        {
+          PyObject *__pyx_callargs[2] = {__pyx_t_3, NULL};
+          __pyx_t_5 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_sum, __pyx_callargs+__pyx_t_6, (1-__pyx_t_6) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
+          __Pyx_XDECREF(__pyx_t_3); __pyx_t_3 = 0;
+          if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 76, __pyx_L7_error)
+          __Pyx_GOTREF(__pyx_t_5);
+        }
+        __pyx_r = __pyx_t_5;
+        __pyx_t_5 = 0;
+        goto __pyx_L11_try_return;
+
+        /* "opteryx/operators/aggregate/aggregate_node.pyx":75
+ *     # Try to use native sum() method if available (fast path for numeric types)
+ *     if hasattr(vector, 'sum'):
+ *         try:             # <<<<<<<<<<<<<<
+ *             return vector.sum()
+ *         except (ValueError, NotImplementedError):
+*/
+      }
+      __pyx_L7_error:;
+      __Pyx_XDECREF(__pyx_t_2); __pyx_t_2 = 0;
+      __Pyx_XDECREF(__pyx_t_3); __pyx_t_3 = 0;
+      __Pyx_XDECREF(__pyx_t_4); __pyx_t_4 = 0;
+      __Pyx_XDECREF(__pyx_t_5); __pyx_t_5 = 0;
+
+      /* "opteryx/operators/aggregate/aggregate_node.pyx":77
+ *         try:
+ *             return vector.sum()
+ *         except (ValueError, NotImplementedError):             # <<<<<<<<<<<<<<
+ *             # NotImplementedError: aggregate not supported for this type
+ *             return None
+*/
+      __pyx_t_11 = __Pyx_PyErr_ExceptionMatches2(((PyObject *)(((PyTypeObject*)PyExc_ValueError))), ((PyObject *)(((PyTypeObject*)PyExc_NotImplementedError))));
+      if (__pyx_t_11) {
+        __Pyx_ErrRestore(0,0,0);
+
+        /* "opteryx/operators/aggregate/aggregate_node.pyx":79
+ *         except (ValueError, NotImplementedError):
+ *             # NotImplementedError: aggregate not supported for this type
+ *             return None             # <<<<<<<<<<<<<<
+ * 
+ *     # Fallback to Python materialization
+*/
+        __Pyx_XDECREF(__pyx_r);
+        __pyx_r = Py_None; __Pyx_INCREF(Py_None);
+        goto __pyx_L10_except_return;
+      }
+      goto __pyx_L9_except_error;
+
+      /* "opteryx/operators/aggregate/aggregate_node.pyx":75
+ *     # Try to use native sum() method if available (fast path for numeric types)
+ *     if hasattr(vector, 'sum'):
+ *         try:             # <<<<<<<<<<<<<<
+ *             return vector.sum()
+ *         except (ValueError, NotImplementedError):
+*/
+      __pyx_L9_except_error:;
+      __Pyx_XGIVEREF(__pyx_t_8);
+      __Pyx_XGIVEREF(__pyx_t_9);
+      __Pyx_XGIVEREF(__pyx_t_10);
+      __Pyx_ExceptionReset(__pyx_t_8, __pyx_t_9, __pyx_t_10);
+      goto __pyx_L1_error;
+      __pyx_L11_try_return:;
+      __Pyx_XGIVEREF(__pyx_t_8);
+      __Pyx_XGIVEREF(__pyx_t_9);
+      __Pyx_XGIVEREF(__pyx_t_10);
+      __Pyx_ExceptionReset(__pyx_t_8, __pyx_t_9, __pyx_t_10);
+      goto __pyx_L0;
+      __pyx_L10_except_return:;
+      __Pyx_XGIVEREF(__pyx_t_8);
+      __Pyx_XGIVEREF(__pyx_t_9);
+      __Pyx_XGIVEREF(__pyx_t_10);
+      __Pyx_ExceptionReset(__pyx_t_8, __pyx_t_9, __pyx_t_10);
+      goto __pyx_L0;
+    }
 
     /* "opteryx/operators/aggregate/aggregate_node.pyx":74
  * 
- *     if vector.__class__.__name__ in ("Int64Vector", "Float64Vector"):
- *         return vector.sum()             # <<<<<<<<<<<<<<
- * 
- *     values = _vector_valid_values(vector)
-*/
-    __Pyx_XDECREF(__pyx_r);
-    __pyx_t_5 = __pyx_v_vector;
-    __Pyx_INCREF(__pyx_t_5);
-    __pyx_t_6 = 0;
-    {
-      PyObject *__pyx_callargs[2] = {__pyx_t_5, NULL};
-      __pyx_t_3 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_sum, __pyx_callargs+__pyx_t_6, (1-__pyx_t_6) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
-      __Pyx_XDECREF(__pyx_t_5); __pyx_t_5 = 0;
-      if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 74, __pyx_L1_error)
-      __Pyx_GOTREF(__pyx_t_3);
-    }
-    __pyx_r = __pyx_t_3;
-    __pyx_t_3 = 0;
-    goto __pyx_L0;
-
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":73
- *         return scalar * valid_count
- * 
- *     if vector.__class__.__name__ in ("Int64Vector", "Float64Vector"):             # <<<<<<<<<<<<<<
- *         return vector.sum()
- * 
+ *     # Try to use native sum() method if available (fast path for numeric types)
+ *     if hasattr(vector, 'sum'):             # <<<<<<<<<<<<<<
+ *         try:
+ *             return vector.sum()
 */
   }
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":76
- *         return vector.sum()
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":82
  * 
+ *     # Fallback to Python materialization
  *     values = _vector_valid_values(vector)             # <<<<<<<<<<<<<<
  *     return sum(values) if values else None
  * 
 */
-  __pyx_t_5 = NULL;
-  __Pyx_GetModuleGlobalName(__pyx_t_2, __pyx_mstate_global->__pyx_n_u_vector_valid_values); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 76, __pyx_L1_error)
+  __pyx_t_3 = NULL;
+  __Pyx_GetModuleGlobalName(__pyx_t_2, __pyx_mstate_global->__pyx_n_u_vector_valid_values); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 82, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
   __pyx_t_6 = 1;
   #if CYTHON_UNPACK_METHODS
   if (unlikely(PyMethod_Check(__pyx_t_2))) {
-    __pyx_t_5 = PyMethod_GET_SELF(__pyx_t_2);
-    assert(__pyx_t_5);
+    __pyx_t_3 = PyMethod_GET_SELF(__pyx_t_2);
+    assert(__pyx_t_3);
     PyObject* __pyx__function = PyMethod_GET_FUNCTION(__pyx_t_2);
-    __Pyx_INCREF(__pyx_t_5);
+    __Pyx_INCREF(__pyx_t_3);
     __Pyx_INCREF(__pyx__function);
     __Pyx_DECREF_SET(__pyx_t_2, __pyx__function);
     __pyx_t_6 = 0;
   }
   #endif
   {
-    PyObject *__pyx_callargs[2] = {__pyx_t_5, __pyx_v_vector};
-    __pyx_t_3 = __Pyx_PyObject_FastCall((PyObject*)__pyx_t_2, __pyx_callargs+__pyx_t_6, (2-__pyx_t_6) | (__pyx_t_6*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
-    __Pyx_XDECREF(__pyx_t_5); __pyx_t_5 = 0;
+    PyObject *__pyx_callargs[2] = {__pyx_t_3, __pyx_v_vector};
+    __pyx_t_5 = __Pyx_PyObject_FastCall((PyObject*)__pyx_t_2, __pyx_callargs+__pyx_t_6, (2-__pyx_t_6) | (__pyx_t_6*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
+    __Pyx_XDECREF(__pyx_t_3); __pyx_t_3 = 0;
     __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
-    if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 76, __pyx_L1_error)
-    __Pyx_GOTREF(__pyx_t_3);
+    if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 82, __pyx_L1_error)
+    __Pyx_GOTREF(__pyx_t_5);
   }
-  __pyx_v_values = __pyx_t_3;
-  __pyx_t_3 = 0;
+  __pyx_v_values = __pyx_t_5;
+  __pyx_t_5 = 0;
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":77
- * 
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":83
+ *     # Fallback to Python materialization
  *     values = _vector_valid_values(vector)
  *     return sum(values) if values else None             # <<<<<<<<<<<<<<
  * 
  * 
 */
   __Pyx_XDECREF(__pyx_r);
-  __pyx_t_8 = __Pyx_PyObject_IsTrue(__pyx_v_values); if (unlikely((__pyx_t_8 < 0))) __PYX_ERR(0, 77, __pyx_L1_error)
-  if (__pyx_t_8) {
-    __pyx_t_5 = NULL;
+  __pyx_t_7 = __Pyx_PyObject_IsTrue(__pyx_v_values); if (unlikely((__pyx_t_7 < 0))) __PYX_ERR(0, 83, __pyx_L1_error)
+  if (__pyx_t_7) {
+    __pyx_t_3 = NULL;
     __pyx_t_6 = 1;
     {
-      PyObject *__pyx_callargs[2] = {__pyx_t_5, __pyx_v_values};
+      PyObject *__pyx_callargs[2] = {__pyx_t_3, __pyx_v_values};
       __pyx_t_2 = __Pyx_PyObject_FastCall((PyObject*)__pyx_builtin_sum, __pyx_callargs+__pyx_t_6, (2-__pyx_t_6) | (__pyx_t_6*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
-      __Pyx_XDECREF(__pyx_t_5); __pyx_t_5 = 0;
-      if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 77, __pyx_L1_error)
+      __Pyx_XDECREF(__pyx_t_3); __pyx_t_3 = 0;
+      if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 83, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_2);
     }
-    __pyx_t_3 = __pyx_t_2;
+    __pyx_t_5 = __pyx_t_2;
     __pyx_t_2 = 0;
   } else {
     __Pyx_INCREF(Py_None);
-    __pyx_t_3 = Py_None;
+    __pyx_t_5 = Py_None;
   }
-  __pyx_r = __pyx_t_3;
-  __pyx_t_3 = 0;
+  __pyx_r = __pyx_t_5;
+  __pyx_t_5 = 0;
   goto __pyx_L0;
 
   /* "opteryx/operators/aggregate/aggregate_node.pyx":62
@@ -4748,12 +4814,12 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_10_vec
   return __pyx_r;
 }
 
-/* "opteryx/operators/aggregate/aggregate_node.pyx":80
+/* "opteryx/operators/aggregate/aggregate_node.pyx":86
  * 
  * 
  * def _vector_min(vector):             # <<<<<<<<<<<<<<
- *     if _is_constant_vector_like(vector):
- *         scalar = _constant_scalar_value(vector)
+ *     valid_count = len(vector) - _vector_null_count(vector)
+ *     if valid_count == 0:
 */
 
 /* Python wrapper */
@@ -4795,32 +4861,32 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   {
     PyObject ** const __pyx_pyargnames[] = {&__pyx_mstate_global->__pyx_n_u_vector,0};
     const Py_ssize_t __pyx_kwds_len = (__pyx_kwds) ? __Pyx_NumKwargs_FASTCALL(__pyx_kwds) : 0;
-    if (unlikely(__pyx_kwds_len) < 0) __PYX_ERR(0, 80, __pyx_L3_error)
+    if (unlikely(__pyx_kwds_len) < 0) __PYX_ERR(0, 86, __pyx_L3_error)
     if (__pyx_kwds_len > 0) {
       switch (__pyx_nargs) {
         case  1:
         values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 80, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 86, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  0: break;
         default: goto __pyx_L5_argtuple_error;
       }
       const Py_ssize_t kwd_pos_args = __pyx_nargs;
-      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "_vector_min", 0) < (0)) __PYX_ERR(0, 80, __pyx_L3_error)
+      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "_vector_min", 0) < (0)) __PYX_ERR(0, 86, __pyx_L3_error)
       for (Py_ssize_t i = __pyx_nargs; i < 1; i++) {
-        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("_vector_min", 1, 1, 1, i); __PYX_ERR(0, 80, __pyx_L3_error) }
+        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("_vector_min", 1, 1, 1, i); __PYX_ERR(0, 86, __pyx_L3_error) }
       }
     } else if (unlikely(__pyx_nargs != 1)) {
       goto __pyx_L5_argtuple_error;
     } else {
       values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 80, __pyx_L3_error)
+      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 86, __pyx_L3_error)
     }
     __pyx_v_vector = values[0];
   }
   goto __pyx_L6_skip;
   __pyx_L5_argtuple_error:;
-  __Pyx_RaiseArgtupleInvalid("_vector_min", 1, 1, 1, __pyx_nargs); __PYX_ERR(0, 80, __pyx_L3_error)
+  __Pyx_RaiseArgtupleInvalid("_vector_min", 1, 1, 1, __pyx_nargs); __PYX_ERR(0, 86, __pyx_L3_error)
   __pyx_L6_skip:;
   goto __pyx_L4_argument_unpacking_done;
   __pyx_L3_error:;
@@ -4842,194 +4908,395 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
 }
 
 static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_12_vector_min(CYTHON_UNUSED PyObject *__pyx_self, PyObject *__pyx_v_vector) {
+  PyObject *__pyx_v_valid_count = NULL;
   PyObject *__pyx_v_scalar = NULL;
   PyObject *__pyx_v_values = NULL;
   PyObject *__pyx_r = NULL;
   __Pyx_RefNannyDeclarations
-  PyObject *__pyx_t_1 = NULL;
+  Py_ssize_t __pyx_t_1;
   PyObject *__pyx_t_2 = NULL;
   PyObject *__pyx_t_3 = NULL;
-  size_t __pyx_t_4;
-  int __pyx_t_5;
+  PyObject *__pyx_t_4 = NULL;
+  PyObject *__pyx_t_5 = NULL;
+  size_t __pyx_t_6;
+  int __pyx_t_7;
+  PyObject *__pyx_t_8 = NULL;
+  PyObject *__pyx_t_9 = NULL;
+  PyObject *__pyx_t_10 = NULL;
+  int __pyx_t_11;
   int __pyx_lineno = 0;
   const char *__pyx_filename = NULL;
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("_vector_min", 0);
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":81
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":87
  * 
  * def _vector_min(vector):
+ *     valid_count = len(vector) - _vector_null_count(vector)             # <<<<<<<<<<<<<<
+ *     if valid_count == 0:
+ *         return None
+*/
+  __pyx_t_1 = PyObject_Length(__pyx_v_vector); if (unlikely(__pyx_t_1 == ((Py_ssize_t)-1))) __PYX_ERR(0, 87, __pyx_L1_error)
+  __pyx_t_2 = PyLong_FromSsize_t(__pyx_t_1); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 87, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_2);
+  __pyx_t_4 = NULL;
+  __Pyx_GetModuleGlobalName(__pyx_t_5, __pyx_mstate_global->__pyx_n_u_vector_null_count); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 87, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_5);
+  __pyx_t_6 = 1;
+  #if CYTHON_UNPACK_METHODS
+  if (unlikely(PyMethod_Check(__pyx_t_5))) {
+    __pyx_t_4 = PyMethod_GET_SELF(__pyx_t_5);
+    assert(__pyx_t_4);
+    PyObject* __pyx__function = PyMethod_GET_FUNCTION(__pyx_t_5);
+    __Pyx_INCREF(__pyx_t_4);
+    __Pyx_INCREF(__pyx__function);
+    __Pyx_DECREF_SET(__pyx_t_5, __pyx__function);
+    __pyx_t_6 = 0;
+  }
+  #endif
+  {
+    PyObject *__pyx_callargs[2] = {__pyx_t_4, __pyx_v_vector};
+    __pyx_t_3 = __Pyx_PyObject_FastCall((PyObject*)__pyx_t_5, __pyx_callargs+__pyx_t_6, (2-__pyx_t_6) | (__pyx_t_6*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
+    __Pyx_XDECREF(__pyx_t_4); __pyx_t_4 = 0;
+    __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
+    if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 87, __pyx_L1_error)
+    __Pyx_GOTREF(__pyx_t_3);
+  }
+  __pyx_t_5 = PyNumber_Subtract(__pyx_t_2, __pyx_t_3); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 87, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_5);
+  __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
+  __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
+  __pyx_v_valid_count = __pyx_t_5;
+  __pyx_t_5 = 0;
+
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":88
+ * def _vector_min(vector):
+ *     valid_count = len(vector) - _vector_null_count(vector)
+ *     if valid_count == 0:             # <<<<<<<<<<<<<<
+ *         return None
+ * 
+*/
+  __pyx_t_7 = (__Pyx_PyLong_BoolEqObjC(__pyx_v_valid_count, __pyx_mstate_global->__pyx_int_0, 0, 0)); if (unlikely((__pyx_t_7 < 0))) __PYX_ERR(0, 88, __pyx_L1_error)
+  if (__pyx_t_7) {
+
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":89
+ *     valid_count = len(vector) - _vector_null_count(vector)
+ *     if valid_count == 0:
+ *         return None             # <<<<<<<<<<<<<<
+ * 
+ *     if _is_constant_vector_like(vector):
+*/
+    __Pyx_XDECREF(__pyx_r);
+    __pyx_r = Py_None; __Pyx_INCREF(Py_None);
+    goto __pyx_L0;
+
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":88
+ * def _vector_min(vector):
+ *     valid_count = len(vector) - _vector_null_count(vector)
+ *     if valid_count == 0:             # <<<<<<<<<<<<<<
+ *         return None
+ * 
+*/
+  }
+
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":91
+ *         return None
+ * 
  *     if _is_constant_vector_like(vector):             # <<<<<<<<<<<<<<
  *         scalar = _constant_scalar_value(vector)
  *         return scalar if scalar is not None else None
 */
-  __pyx_t_2 = NULL;
-  __Pyx_GetModuleGlobalName(__pyx_t_3, __pyx_mstate_global->__pyx_n_u_is_constant_vector_like); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 81, __pyx_L1_error)
-  __Pyx_GOTREF(__pyx_t_3);
-  __pyx_t_4 = 1;
+  __pyx_t_3 = NULL;
+  __Pyx_GetModuleGlobalName(__pyx_t_2, __pyx_mstate_global->__pyx_n_u_is_constant_vector_like); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 91, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_2);
+  __pyx_t_6 = 1;
   #if CYTHON_UNPACK_METHODS
-  if (unlikely(PyMethod_Check(__pyx_t_3))) {
-    __pyx_t_2 = PyMethod_GET_SELF(__pyx_t_3);
-    assert(__pyx_t_2);
-    PyObject* __pyx__function = PyMethod_GET_FUNCTION(__pyx_t_3);
-    __Pyx_INCREF(__pyx_t_2);
+  if (unlikely(PyMethod_Check(__pyx_t_2))) {
+    __pyx_t_3 = PyMethod_GET_SELF(__pyx_t_2);
+    assert(__pyx_t_3);
+    PyObject* __pyx__function = PyMethod_GET_FUNCTION(__pyx_t_2);
+    __Pyx_INCREF(__pyx_t_3);
     __Pyx_INCREF(__pyx__function);
-    __Pyx_DECREF_SET(__pyx_t_3, __pyx__function);
-    __pyx_t_4 = 0;
+    __Pyx_DECREF_SET(__pyx_t_2, __pyx__function);
+    __pyx_t_6 = 0;
   }
   #endif
   {
-    PyObject *__pyx_callargs[2] = {__pyx_t_2, __pyx_v_vector};
-    __pyx_t_1 = __Pyx_PyObject_FastCall((PyObject*)__pyx_t_3, __pyx_callargs+__pyx_t_4, (2-__pyx_t_4) | (__pyx_t_4*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
-    __Pyx_XDECREF(__pyx_t_2); __pyx_t_2 = 0;
-    __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
-    if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 81, __pyx_L1_error)
-    __Pyx_GOTREF(__pyx_t_1);
+    PyObject *__pyx_callargs[2] = {__pyx_t_3, __pyx_v_vector};
+    __pyx_t_5 = __Pyx_PyObject_FastCall((PyObject*)__pyx_t_2, __pyx_callargs+__pyx_t_6, (2-__pyx_t_6) | (__pyx_t_6*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
+    __Pyx_XDECREF(__pyx_t_3); __pyx_t_3 = 0;
+    __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
+    if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 91, __pyx_L1_error)
+    __Pyx_GOTREF(__pyx_t_5);
   }
-  __pyx_t_5 = __Pyx_PyObject_IsTrue(__pyx_t_1); if (unlikely((__pyx_t_5 < 0))) __PYX_ERR(0, 81, __pyx_L1_error)
-  __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
-  if (__pyx_t_5) {
+  __pyx_t_7 = __Pyx_PyObject_IsTrue(__pyx_t_5); if (unlikely((__pyx_t_7 < 0))) __PYX_ERR(0, 91, __pyx_L1_error)
+  __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
+  if (__pyx_t_7) {
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":82
- * def _vector_min(vector):
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":92
+ * 
  *     if _is_constant_vector_like(vector):
  *         scalar = _constant_scalar_value(vector)             # <<<<<<<<<<<<<<
  *         return scalar if scalar is not None else None
  * 
 */
-    __pyx_t_3 = NULL;
-    __Pyx_GetModuleGlobalName(__pyx_t_2, __pyx_mstate_global->__pyx_n_u_constant_scalar_value); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 82, __pyx_L1_error)
-    __Pyx_GOTREF(__pyx_t_2);
-    __pyx_t_4 = 1;
+    __pyx_t_2 = NULL;
+    __Pyx_GetModuleGlobalName(__pyx_t_3, __pyx_mstate_global->__pyx_n_u_constant_scalar_value); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 92, __pyx_L1_error)
+    __Pyx_GOTREF(__pyx_t_3);
+    __pyx_t_6 = 1;
     #if CYTHON_UNPACK_METHODS
-    if (unlikely(PyMethod_Check(__pyx_t_2))) {
-      __pyx_t_3 = PyMethod_GET_SELF(__pyx_t_2);
-      assert(__pyx_t_3);
-      PyObject* __pyx__function = PyMethod_GET_FUNCTION(__pyx_t_2);
-      __Pyx_INCREF(__pyx_t_3);
+    if (unlikely(PyMethod_Check(__pyx_t_3))) {
+      __pyx_t_2 = PyMethod_GET_SELF(__pyx_t_3);
+      assert(__pyx_t_2);
+      PyObject* __pyx__function = PyMethod_GET_FUNCTION(__pyx_t_3);
+      __Pyx_INCREF(__pyx_t_2);
       __Pyx_INCREF(__pyx__function);
-      __Pyx_DECREF_SET(__pyx_t_2, __pyx__function);
-      __pyx_t_4 = 0;
+      __Pyx_DECREF_SET(__pyx_t_3, __pyx__function);
+      __pyx_t_6 = 0;
     }
     #endif
     {
-      PyObject *__pyx_callargs[2] = {__pyx_t_3, __pyx_v_vector};
-      __pyx_t_1 = __Pyx_PyObject_FastCall((PyObject*)__pyx_t_2, __pyx_callargs+__pyx_t_4, (2-__pyx_t_4) | (__pyx_t_4*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
-      __Pyx_XDECREF(__pyx_t_3); __pyx_t_3 = 0;
-      __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
-      if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 82, __pyx_L1_error)
-      __Pyx_GOTREF(__pyx_t_1);
+      PyObject *__pyx_callargs[2] = {__pyx_t_2, __pyx_v_vector};
+      __pyx_t_5 = __Pyx_PyObject_FastCall((PyObject*)__pyx_t_3, __pyx_callargs+__pyx_t_6, (2-__pyx_t_6) | (__pyx_t_6*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
+      __Pyx_XDECREF(__pyx_t_2); __pyx_t_2 = 0;
+      __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
+      if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 92, __pyx_L1_error)
+      __Pyx_GOTREF(__pyx_t_5);
     }
-    __pyx_v_scalar = __pyx_t_1;
-    __pyx_t_1 = 0;
+    __pyx_v_scalar = __pyx_t_5;
+    __pyx_t_5 = 0;
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":83
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":93
  *     if _is_constant_vector_like(vector):
  *         scalar = _constant_scalar_value(vector)
  *         return scalar if scalar is not None else None             # <<<<<<<<<<<<<<
  * 
- *     values = _vector_valid_values(vector)
+ *     # Try to use native min() method if available
 */
     __Pyx_XDECREF(__pyx_r);
-    __pyx_t_5 = (__pyx_v_scalar != Py_None);
-    if (__pyx_t_5) {
+    __pyx_t_7 = (__pyx_v_scalar != Py_None);
+    if (__pyx_t_7) {
       __Pyx_INCREF(__pyx_v_scalar);
-      __pyx_t_1 = __pyx_v_scalar;
+      __pyx_t_5 = __pyx_v_scalar;
     } else {
       __Pyx_INCREF(Py_None);
-      __pyx_t_1 = Py_None;
+      __pyx_t_5 = Py_None;
     }
-    __pyx_r = __pyx_t_1;
-    __pyx_t_1 = 0;
+    __pyx_r = __pyx_t_5;
+    __pyx_t_5 = 0;
     goto __pyx_L0;
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":81
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":91
+ *         return None
  * 
- * def _vector_min(vector):
  *     if _is_constant_vector_like(vector):             # <<<<<<<<<<<<<<
  *         scalar = _constant_scalar_value(vector)
  *         return scalar if scalar is not None else None
 */
   }
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":85
- *         return scalar if scalar is not None else None
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":96
  * 
+ *     # Try to use native min() method if available
+ *     if hasattr(vector, 'min'):             # <<<<<<<<<<<<<<
+ *         try:
+ *             return vector.min()
+*/
+  __pyx_t_7 = __Pyx_HasAttr(__pyx_v_vector, __pyx_mstate_global->__pyx_n_u_min); if (unlikely(__pyx_t_7 == ((int)-1))) __PYX_ERR(0, 96, __pyx_L1_error)
+  if (__pyx_t_7) {
+
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":97
+ *     # Try to use native min() method if available
+ *     if hasattr(vector, 'min'):
+ *         try:             # <<<<<<<<<<<<<<
+ *             return vector.min()
+ *         except (ValueError, NotImplementedError):
+*/
+    {
+      __Pyx_PyThreadState_declare
+      __Pyx_PyThreadState_assign
+      __Pyx_ExceptionSave(&__pyx_t_8, &__pyx_t_9, &__pyx_t_10);
+      __Pyx_XGOTREF(__pyx_t_8);
+      __Pyx_XGOTREF(__pyx_t_9);
+      __Pyx_XGOTREF(__pyx_t_10);
+      /*try:*/ {
+
+        /* "opteryx/operators/aggregate/aggregate_node.pyx":98
+ *     if hasattr(vector, 'min'):
+ *         try:
+ *             return vector.min()             # <<<<<<<<<<<<<<
+ *         except (ValueError, NotImplementedError):
+ *             # ValueError: empty or all-null column
+*/
+        __Pyx_XDECREF(__pyx_r);
+        __pyx_t_3 = __pyx_v_vector;
+        __Pyx_INCREF(__pyx_t_3);
+        __pyx_t_6 = 0;
+        {
+          PyObject *__pyx_callargs[2] = {__pyx_t_3, NULL};
+          __pyx_t_5 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_min, __pyx_callargs+__pyx_t_6, (1-__pyx_t_6) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
+          __Pyx_XDECREF(__pyx_t_3); __pyx_t_3 = 0;
+          if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 98, __pyx_L6_error)
+          __Pyx_GOTREF(__pyx_t_5);
+        }
+        __pyx_r = __pyx_t_5;
+        __pyx_t_5 = 0;
+        goto __pyx_L10_try_return;
+
+        /* "opteryx/operators/aggregate/aggregate_node.pyx":97
+ *     # Try to use native min() method if available
+ *     if hasattr(vector, 'min'):
+ *         try:             # <<<<<<<<<<<<<<
+ *             return vector.min()
+ *         except (ValueError, NotImplementedError):
+*/
+      }
+      __pyx_L6_error:;
+      __Pyx_XDECREF(__pyx_t_2); __pyx_t_2 = 0;
+      __Pyx_XDECREF(__pyx_t_3); __pyx_t_3 = 0;
+      __Pyx_XDECREF(__pyx_t_4); __pyx_t_4 = 0;
+      __Pyx_XDECREF(__pyx_t_5); __pyx_t_5 = 0;
+
+      /* "opteryx/operators/aggregate/aggregate_node.pyx":99
+ *         try:
+ *             return vector.min()
+ *         except (ValueError, NotImplementedError):             # <<<<<<<<<<<<<<
+ *             # ValueError: empty or all-null column
+ *             # NotImplementedError: aggregate not supported for this type
+*/
+      __pyx_t_11 = __Pyx_PyErr_ExceptionMatches2(((PyObject *)(((PyTypeObject*)PyExc_ValueError))), ((PyObject *)(((PyTypeObject*)PyExc_NotImplementedError))));
+      if (__pyx_t_11) {
+        __Pyx_ErrRestore(0,0,0);
+
+        /* "opteryx/operators/aggregate/aggregate_node.pyx":102
+ *             # ValueError: empty or all-null column
+ *             # NotImplementedError: aggregate not supported for this type
+ *             return None             # <<<<<<<<<<<<<<
+ * 
+ *     # Fallback to Python materialization
+*/
+        __Pyx_XDECREF(__pyx_r);
+        __pyx_r = Py_None; __Pyx_INCREF(Py_None);
+        goto __pyx_L9_except_return;
+      }
+      goto __pyx_L8_except_error;
+
+      /* "opteryx/operators/aggregate/aggregate_node.pyx":97
+ *     # Try to use native min() method if available
+ *     if hasattr(vector, 'min'):
+ *         try:             # <<<<<<<<<<<<<<
+ *             return vector.min()
+ *         except (ValueError, NotImplementedError):
+*/
+      __pyx_L8_except_error:;
+      __Pyx_XGIVEREF(__pyx_t_8);
+      __Pyx_XGIVEREF(__pyx_t_9);
+      __Pyx_XGIVEREF(__pyx_t_10);
+      __Pyx_ExceptionReset(__pyx_t_8, __pyx_t_9, __pyx_t_10);
+      goto __pyx_L1_error;
+      __pyx_L10_try_return:;
+      __Pyx_XGIVEREF(__pyx_t_8);
+      __Pyx_XGIVEREF(__pyx_t_9);
+      __Pyx_XGIVEREF(__pyx_t_10);
+      __Pyx_ExceptionReset(__pyx_t_8, __pyx_t_9, __pyx_t_10);
+      goto __pyx_L0;
+      __pyx_L9_except_return:;
+      __Pyx_XGIVEREF(__pyx_t_8);
+      __Pyx_XGIVEREF(__pyx_t_9);
+      __Pyx_XGIVEREF(__pyx_t_10);
+      __Pyx_ExceptionReset(__pyx_t_8, __pyx_t_9, __pyx_t_10);
+      goto __pyx_L0;
+    }
+
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":96
+ * 
+ *     # Try to use native min() method if available
+ *     if hasattr(vector, 'min'):             # <<<<<<<<<<<<<<
+ *         try:
+ *             return vector.min()
+*/
+  }
+
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":105
+ * 
+ *     # Fallback to Python materialization
  *     values = _vector_valid_values(vector)             # <<<<<<<<<<<<<<
  *     return min(values) if values else None
  * 
 */
-  __pyx_t_2 = NULL;
-  __Pyx_GetModuleGlobalName(__pyx_t_3, __pyx_mstate_global->__pyx_n_u_vector_valid_values); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 85, __pyx_L1_error)
-  __Pyx_GOTREF(__pyx_t_3);
-  __pyx_t_4 = 1;
+  __pyx_t_3 = NULL;
+  __Pyx_GetModuleGlobalName(__pyx_t_2, __pyx_mstate_global->__pyx_n_u_vector_valid_values); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 105, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_2);
+  __pyx_t_6 = 1;
   #if CYTHON_UNPACK_METHODS
-  if (unlikely(PyMethod_Check(__pyx_t_3))) {
-    __pyx_t_2 = PyMethod_GET_SELF(__pyx_t_3);
-    assert(__pyx_t_2);
-    PyObject* __pyx__function = PyMethod_GET_FUNCTION(__pyx_t_3);
-    __Pyx_INCREF(__pyx_t_2);
+  if (unlikely(PyMethod_Check(__pyx_t_2))) {
+    __pyx_t_3 = PyMethod_GET_SELF(__pyx_t_2);
+    assert(__pyx_t_3);
+    PyObject* __pyx__function = PyMethod_GET_FUNCTION(__pyx_t_2);
+    __Pyx_INCREF(__pyx_t_3);
     __Pyx_INCREF(__pyx__function);
-    __Pyx_DECREF_SET(__pyx_t_3, __pyx__function);
-    __pyx_t_4 = 0;
+    __Pyx_DECREF_SET(__pyx_t_2, __pyx__function);
+    __pyx_t_6 = 0;
   }
   #endif
   {
-    PyObject *__pyx_callargs[2] = {__pyx_t_2, __pyx_v_vector};
-    __pyx_t_1 = __Pyx_PyObject_FastCall((PyObject*)__pyx_t_3, __pyx_callargs+__pyx_t_4, (2-__pyx_t_4) | (__pyx_t_4*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
-    __Pyx_XDECREF(__pyx_t_2); __pyx_t_2 = 0;
-    __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
-    if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 85, __pyx_L1_error)
-    __Pyx_GOTREF(__pyx_t_1);
+    PyObject *__pyx_callargs[2] = {__pyx_t_3, __pyx_v_vector};
+    __pyx_t_5 = __Pyx_PyObject_FastCall((PyObject*)__pyx_t_2, __pyx_callargs+__pyx_t_6, (2-__pyx_t_6) | (__pyx_t_6*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
+    __Pyx_XDECREF(__pyx_t_3); __pyx_t_3 = 0;
+    __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
+    if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 105, __pyx_L1_error)
+    __Pyx_GOTREF(__pyx_t_5);
   }
-  __pyx_v_values = __pyx_t_1;
-  __pyx_t_1 = 0;
+  __pyx_v_values = __pyx_t_5;
+  __pyx_t_5 = 0;
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":86
- * 
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":106
+ *     # Fallback to Python materialization
  *     values = _vector_valid_values(vector)
  *     return min(values) if values else None             # <<<<<<<<<<<<<<
  * 
  * 
 */
   __Pyx_XDECREF(__pyx_r);
-  __pyx_t_5 = __Pyx_PyObject_IsTrue(__pyx_v_values); if (unlikely((__pyx_t_5 < 0))) __PYX_ERR(0, 86, __pyx_L1_error)
-  if (__pyx_t_5) {
-    __pyx_t_2 = NULL;
-    __pyx_t_4 = 1;
+  __pyx_t_7 = __Pyx_PyObject_IsTrue(__pyx_v_values); if (unlikely((__pyx_t_7 < 0))) __PYX_ERR(0, 106, __pyx_L1_error)
+  if (__pyx_t_7) {
+    __pyx_t_3 = NULL;
+    __pyx_t_6 = 1;
     {
-      PyObject *__pyx_callargs[2] = {__pyx_t_2, __pyx_v_values};
-      __pyx_t_3 = __Pyx_PyObject_FastCall((PyObject*)__pyx_builtin_min, __pyx_callargs+__pyx_t_4, (2-__pyx_t_4) | (__pyx_t_4*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
-      __Pyx_XDECREF(__pyx_t_2); __pyx_t_2 = 0;
-      if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 86, __pyx_L1_error)
-      __Pyx_GOTREF(__pyx_t_3);
+      PyObject *__pyx_callargs[2] = {__pyx_t_3, __pyx_v_values};
+      __pyx_t_2 = __Pyx_PyObject_FastCall((PyObject*)__pyx_builtin_min, __pyx_callargs+__pyx_t_6, (2-__pyx_t_6) | (__pyx_t_6*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
+      __Pyx_XDECREF(__pyx_t_3); __pyx_t_3 = 0;
+      if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 106, __pyx_L1_error)
+      __Pyx_GOTREF(__pyx_t_2);
     }
-    __pyx_t_1 = __pyx_t_3;
-    __pyx_t_3 = 0;
+    __pyx_t_5 = __pyx_t_2;
+    __pyx_t_2 = 0;
   } else {
     __Pyx_INCREF(Py_None);
-    __pyx_t_1 = Py_None;
+    __pyx_t_5 = Py_None;
   }
-  __pyx_r = __pyx_t_1;
-  __pyx_t_1 = 0;
+  __pyx_r = __pyx_t_5;
+  __pyx_t_5 = 0;
   goto __pyx_L0;
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":80
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":86
  * 
  * 
  * def _vector_min(vector):             # <<<<<<<<<<<<<<
- *     if _is_constant_vector_like(vector):
- *         scalar = _constant_scalar_value(vector)
+ *     valid_count = len(vector) - _vector_null_count(vector)
+ *     if valid_count == 0:
 */
 
   /* function exit code */
   __pyx_L1_error:;
-  __Pyx_XDECREF(__pyx_t_1);
   __Pyx_XDECREF(__pyx_t_2);
   __Pyx_XDECREF(__pyx_t_3);
+  __Pyx_XDECREF(__pyx_t_4);
+  __Pyx_XDECREF(__pyx_t_5);
   __Pyx_AddTraceback("opteryx.operators.aggregate.aggregate_node._vector_min", __pyx_clineno, __pyx_lineno, __pyx_filename);
   __pyx_r = NULL;
   __pyx_L0:;
+  __Pyx_XDECREF(__pyx_v_valid_count);
   __Pyx_XDECREF(__pyx_v_scalar);
   __Pyx_XDECREF(__pyx_v_values);
   __Pyx_XGIVEREF(__pyx_r);
@@ -5037,12 +5304,12 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_12_vec
   return __pyx_r;
 }
 
-/* "opteryx/operators/aggregate/aggregate_node.pyx":89
+/* "opteryx/operators/aggregate/aggregate_node.pyx":109
  * 
  * 
  * def _vector_max(vector):             # <<<<<<<<<<<<<<
- *     if _is_constant_vector_like(vector):
- *         scalar = _constant_scalar_value(vector)
+ *     valid_count = len(vector) - _vector_null_count(vector)
+ *     if valid_count == 0:
 */
 
 /* Python wrapper */
@@ -5084,32 +5351,32 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   {
     PyObject ** const __pyx_pyargnames[] = {&__pyx_mstate_global->__pyx_n_u_vector,0};
     const Py_ssize_t __pyx_kwds_len = (__pyx_kwds) ? __Pyx_NumKwargs_FASTCALL(__pyx_kwds) : 0;
-    if (unlikely(__pyx_kwds_len) < 0) __PYX_ERR(0, 89, __pyx_L3_error)
+    if (unlikely(__pyx_kwds_len) < 0) __PYX_ERR(0, 109, __pyx_L3_error)
     if (__pyx_kwds_len > 0) {
       switch (__pyx_nargs) {
         case  1:
         values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 89, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 109, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  0: break;
         default: goto __pyx_L5_argtuple_error;
       }
       const Py_ssize_t kwd_pos_args = __pyx_nargs;
-      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "_vector_max", 0) < (0)) __PYX_ERR(0, 89, __pyx_L3_error)
+      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "_vector_max", 0) < (0)) __PYX_ERR(0, 109, __pyx_L3_error)
       for (Py_ssize_t i = __pyx_nargs; i < 1; i++) {
-        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("_vector_max", 1, 1, 1, i); __PYX_ERR(0, 89, __pyx_L3_error) }
+        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("_vector_max", 1, 1, 1, i); __PYX_ERR(0, 109, __pyx_L3_error) }
       }
     } else if (unlikely(__pyx_nargs != 1)) {
       goto __pyx_L5_argtuple_error;
     } else {
       values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 89, __pyx_L3_error)
+      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 109, __pyx_L3_error)
     }
     __pyx_v_vector = values[0];
   }
   goto __pyx_L6_skip;
   __pyx_L5_argtuple_error:;
-  __Pyx_RaiseArgtupleInvalid("_vector_max", 1, 1, 1, __pyx_nargs); __PYX_ERR(0, 89, __pyx_L3_error)
+  __Pyx_RaiseArgtupleInvalid("_vector_max", 1, 1, 1, __pyx_nargs); __PYX_ERR(0, 109, __pyx_L3_error)
   __pyx_L6_skip:;
   goto __pyx_L4_argument_unpacking_done;
   __pyx_L3_error:;
@@ -5131,194 +5398,395 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
 }
 
 static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_14_vector_max(CYTHON_UNUSED PyObject *__pyx_self, PyObject *__pyx_v_vector) {
+  PyObject *__pyx_v_valid_count = NULL;
   PyObject *__pyx_v_scalar = NULL;
   PyObject *__pyx_v_values = NULL;
   PyObject *__pyx_r = NULL;
   __Pyx_RefNannyDeclarations
-  PyObject *__pyx_t_1 = NULL;
+  Py_ssize_t __pyx_t_1;
   PyObject *__pyx_t_2 = NULL;
   PyObject *__pyx_t_3 = NULL;
-  size_t __pyx_t_4;
-  int __pyx_t_5;
+  PyObject *__pyx_t_4 = NULL;
+  PyObject *__pyx_t_5 = NULL;
+  size_t __pyx_t_6;
+  int __pyx_t_7;
+  PyObject *__pyx_t_8 = NULL;
+  PyObject *__pyx_t_9 = NULL;
+  PyObject *__pyx_t_10 = NULL;
+  int __pyx_t_11;
   int __pyx_lineno = 0;
   const char *__pyx_filename = NULL;
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("_vector_max", 0);
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":90
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":110
  * 
  * def _vector_max(vector):
+ *     valid_count = len(vector) - _vector_null_count(vector)             # <<<<<<<<<<<<<<
+ *     if valid_count == 0:
+ *         return None
+*/
+  __pyx_t_1 = PyObject_Length(__pyx_v_vector); if (unlikely(__pyx_t_1 == ((Py_ssize_t)-1))) __PYX_ERR(0, 110, __pyx_L1_error)
+  __pyx_t_2 = PyLong_FromSsize_t(__pyx_t_1); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 110, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_2);
+  __pyx_t_4 = NULL;
+  __Pyx_GetModuleGlobalName(__pyx_t_5, __pyx_mstate_global->__pyx_n_u_vector_null_count); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 110, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_5);
+  __pyx_t_6 = 1;
+  #if CYTHON_UNPACK_METHODS
+  if (unlikely(PyMethod_Check(__pyx_t_5))) {
+    __pyx_t_4 = PyMethod_GET_SELF(__pyx_t_5);
+    assert(__pyx_t_4);
+    PyObject* __pyx__function = PyMethod_GET_FUNCTION(__pyx_t_5);
+    __Pyx_INCREF(__pyx_t_4);
+    __Pyx_INCREF(__pyx__function);
+    __Pyx_DECREF_SET(__pyx_t_5, __pyx__function);
+    __pyx_t_6 = 0;
+  }
+  #endif
+  {
+    PyObject *__pyx_callargs[2] = {__pyx_t_4, __pyx_v_vector};
+    __pyx_t_3 = __Pyx_PyObject_FastCall((PyObject*)__pyx_t_5, __pyx_callargs+__pyx_t_6, (2-__pyx_t_6) | (__pyx_t_6*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
+    __Pyx_XDECREF(__pyx_t_4); __pyx_t_4 = 0;
+    __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
+    if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 110, __pyx_L1_error)
+    __Pyx_GOTREF(__pyx_t_3);
+  }
+  __pyx_t_5 = PyNumber_Subtract(__pyx_t_2, __pyx_t_3); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 110, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_5);
+  __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
+  __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
+  __pyx_v_valid_count = __pyx_t_5;
+  __pyx_t_5 = 0;
+
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":111
+ * def _vector_max(vector):
+ *     valid_count = len(vector) - _vector_null_count(vector)
+ *     if valid_count == 0:             # <<<<<<<<<<<<<<
+ *         return None
+ * 
+*/
+  __pyx_t_7 = (__Pyx_PyLong_BoolEqObjC(__pyx_v_valid_count, __pyx_mstate_global->__pyx_int_0, 0, 0)); if (unlikely((__pyx_t_7 < 0))) __PYX_ERR(0, 111, __pyx_L1_error)
+  if (__pyx_t_7) {
+
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":112
+ *     valid_count = len(vector) - _vector_null_count(vector)
+ *     if valid_count == 0:
+ *         return None             # <<<<<<<<<<<<<<
+ * 
+ *     if _is_constant_vector_like(vector):
+*/
+    __Pyx_XDECREF(__pyx_r);
+    __pyx_r = Py_None; __Pyx_INCREF(Py_None);
+    goto __pyx_L0;
+
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":111
+ * def _vector_max(vector):
+ *     valid_count = len(vector) - _vector_null_count(vector)
+ *     if valid_count == 0:             # <<<<<<<<<<<<<<
+ *         return None
+ * 
+*/
+  }
+
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":114
+ *         return None
+ * 
  *     if _is_constant_vector_like(vector):             # <<<<<<<<<<<<<<
  *         scalar = _constant_scalar_value(vector)
  *         return scalar if scalar is not None else None
 */
-  __pyx_t_2 = NULL;
-  __Pyx_GetModuleGlobalName(__pyx_t_3, __pyx_mstate_global->__pyx_n_u_is_constant_vector_like); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 90, __pyx_L1_error)
-  __Pyx_GOTREF(__pyx_t_3);
-  __pyx_t_4 = 1;
+  __pyx_t_3 = NULL;
+  __Pyx_GetModuleGlobalName(__pyx_t_2, __pyx_mstate_global->__pyx_n_u_is_constant_vector_like); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 114, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_2);
+  __pyx_t_6 = 1;
   #if CYTHON_UNPACK_METHODS
-  if (unlikely(PyMethod_Check(__pyx_t_3))) {
-    __pyx_t_2 = PyMethod_GET_SELF(__pyx_t_3);
-    assert(__pyx_t_2);
-    PyObject* __pyx__function = PyMethod_GET_FUNCTION(__pyx_t_3);
-    __Pyx_INCREF(__pyx_t_2);
+  if (unlikely(PyMethod_Check(__pyx_t_2))) {
+    __pyx_t_3 = PyMethod_GET_SELF(__pyx_t_2);
+    assert(__pyx_t_3);
+    PyObject* __pyx__function = PyMethod_GET_FUNCTION(__pyx_t_2);
+    __Pyx_INCREF(__pyx_t_3);
     __Pyx_INCREF(__pyx__function);
-    __Pyx_DECREF_SET(__pyx_t_3, __pyx__function);
-    __pyx_t_4 = 0;
+    __Pyx_DECREF_SET(__pyx_t_2, __pyx__function);
+    __pyx_t_6 = 0;
   }
   #endif
   {
-    PyObject *__pyx_callargs[2] = {__pyx_t_2, __pyx_v_vector};
-    __pyx_t_1 = __Pyx_PyObject_FastCall((PyObject*)__pyx_t_3, __pyx_callargs+__pyx_t_4, (2-__pyx_t_4) | (__pyx_t_4*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
-    __Pyx_XDECREF(__pyx_t_2); __pyx_t_2 = 0;
-    __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
-    if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 90, __pyx_L1_error)
-    __Pyx_GOTREF(__pyx_t_1);
+    PyObject *__pyx_callargs[2] = {__pyx_t_3, __pyx_v_vector};
+    __pyx_t_5 = __Pyx_PyObject_FastCall((PyObject*)__pyx_t_2, __pyx_callargs+__pyx_t_6, (2-__pyx_t_6) | (__pyx_t_6*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
+    __Pyx_XDECREF(__pyx_t_3); __pyx_t_3 = 0;
+    __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
+    if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 114, __pyx_L1_error)
+    __Pyx_GOTREF(__pyx_t_5);
   }
-  __pyx_t_5 = __Pyx_PyObject_IsTrue(__pyx_t_1); if (unlikely((__pyx_t_5 < 0))) __PYX_ERR(0, 90, __pyx_L1_error)
-  __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
-  if (__pyx_t_5) {
+  __pyx_t_7 = __Pyx_PyObject_IsTrue(__pyx_t_5); if (unlikely((__pyx_t_7 < 0))) __PYX_ERR(0, 114, __pyx_L1_error)
+  __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
+  if (__pyx_t_7) {
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":91
- * def _vector_max(vector):
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":115
+ * 
  *     if _is_constant_vector_like(vector):
  *         scalar = _constant_scalar_value(vector)             # <<<<<<<<<<<<<<
  *         return scalar if scalar is not None else None
  * 
 */
-    __pyx_t_3 = NULL;
-    __Pyx_GetModuleGlobalName(__pyx_t_2, __pyx_mstate_global->__pyx_n_u_constant_scalar_value); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 91, __pyx_L1_error)
-    __Pyx_GOTREF(__pyx_t_2);
-    __pyx_t_4 = 1;
+    __pyx_t_2 = NULL;
+    __Pyx_GetModuleGlobalName(__pyx_t_3, __pyx_mstate_global->__pyx_n_u_constant_scalar_value); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 115, __pyx_L1_error)
+    __Pyx_GOTREF(__pyx_t_3);
+    __pyx_t_6 = 1;
     #if CYTHON_UNPACK_METHODS
-    if (unlikely(PyMethod_Check(__pyx_t_2))) {
-      __pyx_t_3 = PyMethod_GET_SELF(__pyx_t_2);
-      assert(__pyx_t_3);
-      PyObject* __pyx__function = PyMethod_GET_FUNCTION(__pyx_t_2);
-      __Pyx_INCREF(__pyx_t_3);
+    if (unlikely(PyMethod_Check(__pyx_t_3))) {
+      __pyx_t_2 = PyMethod_GET_SELF(__pyx_t_3);
+      assert(__pyx_t_2);
+      PyObject* __pyx__function = PyMethod_GET_FUNCTION(__pyx_t_3);
+      __Pyx_INCREF(__pyx_t_2);
       __Pyx_INCREF(__pyx__function);
-      __Pyx_DECREF_SET(__pyx_t_2, __pyx__function);
-      __pyx_t_4 = 0;
+      __Pyx_DECREF_SET(__pyx_t_3, __pyx__function);
+      __pyx_t_6 = 0;
     }
     #endif
     {
-      PyObject *__pyx_callargs[2] = {__pyx_t_3, __pyx_v_vector};
-      __pyx_t_1 = __Pyx_PyObject_FastCall((PyObject*)__pyx_t_2, __pyx_callargs+__pyx_t_4, (2-__pyx_t_4) | (__pyx_t_4*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
-      __Pyx_XDECREF(__pyx_t_3); __pyx_t_3 = 0;
-      __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
-      if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 91, __pyx_L1_error)
-      __Pyx_GOTREF(__pyx_t_1);
+      PyObject *__pyx_callargs[2] = {__pyx_t_2, __pyx_v_vector};
+      __pyx_t_5 = __Pyx_PyObject_FastCall((PyObject*)__pyx_t_3, __pyx_callargs+__pyx_t_6, (2-__pyx_t_6) | (__pyx_t_6*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
+      __Pyx_XDECREF(__pyx_t_2); __pyx_t_2 = 0;
+      __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
+      if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 115, __pyx_L1_error)
+      __Pyx_GOTREF(__pyx_t_5);
     }
-    __pyx_v_scalar = __pyx_t_1;
-    __pyx_t_1 = 0;
+    __pyx_v_scalar = __pyx_t_5;
+    __pyx_t_5 = 0;
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":92
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":116
  *     if _is_constant_vector_like(vector):
  *         scalar = _constant_scalar_value(vector)
  *         return scalar if scalar is not None else None             # <<<<<<<<<<<<<<
  * 
- *     values = _vector_valid_values(vector)
+ *     # Try to use native max() method if available
 */
     __Pyx_XDECREF(__pyx_r);
-    __pyx_t_5 = (__pyx_v_scalar != Py_None);
-    if (__pyx_t_5) {
+    __pyx_t_7 = (__pyx_v_scalar != Py_None);
+    if (__pyx_t_7) {
       __Pyx_INCREF(__pyx_v_scalar);
-      __pyx_t_1 = __pyx_v_scalar;
+      __pyx_t_5 = __pyx_v_scalar;
     } else {
       __Pyx_INCREF(Py_None);
-      __pyx_t_1 = Py_None;
+      __pyx_t_5 = Py_None;
     }
-    __pyx_r = __pyx_t_1;
-    __pyx_t_1 = 0;
+    __pyx_r = __pyx_t_5;
+    __pyx_t_5 = 0;
     goto __pyx_L0;
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":90
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":114
+ *         return None
  * 
- * def _vector_max(vector):
  *     if _is_constant_vector_like(vector):             # <<<<<<<<<<<<<<
  *         scalar = _constant_scalar_value(vector)
  *         return scalar if scalar is not None else None
 */
   }
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":94
- *         return scalar if scalar is not None else None
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":119
  * 
+ *     # Try to use native max() method if available
+ *     if hasattr(vector, 'max'):             # <<<<<<<<<<<<<<
+ *         try:
+ *             return vector.max()
+*/
+  __pyx_t_7 = __Pyx_HasAttr(__pyx_v_vector, __pyx_mstate_global->__pyx_n_u_max); if (unlikely(__pyx_t_7 == ((int)-1))) __PYX_ERR(0, 119, __pyx_L1_error)
+  if (__pyx_t_7) {
+
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":120
+ *     # Try to use native max() method if available
+ *     if hasattr(vector, 'max'):
+ *         try:             # <<<<<<<<<<<<<<
+ *             return vector.max()
+ *         except (ValueError, NotImplementedError):
+*/
+    {
+      __Pyx_PyThreadState_declare
+      __Pyx_PyThreadState_assign
+      __Pyx_ExceptionSave(&__pyx_t_8, &__pyx_t_9, &__pyx_t_10);
+      __Pyx_XGOTREF(__pyx_t_8);
+      __Pyx_XGOTREF(__pyx_t_9);
+      __Pyx_XGOTREF(__pyx_t_10);
+      /*try:*/ {
+
+        /* "opteryx/operators/aggregate/aggregate_node.pyx":121
+ *     if hasattr(vector, 'max'):
+ *         try:
+ *             return vector.max()             # <<<<<<<<<<<<<<
+ *         except (ValueError, NotImplementedError):
+ *             # ValueError: empty or all-null column
+*/
+        __Pyx_XDECREF(__pyx_r);
+        __pyx_t_3 = __pyx_v_vector;
+        __Pyx_INCREF(__pyx_t_3);
+        __pyx_t_6 = 0;
+        {
+          PyObject *__pyx_callargs[2] = {__pyx_t_3, NULL};
+          __pyx_t_5 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_max, __pyx_callargs+__pyx_t_6, (1-__pyx_t_6) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
+          __Pyx_XDECREF(__pyx_t_3); __pyx_t_3 = 0;
+          if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 121, __pyx_L6_error)
+          __Pyx_GOTREF(__pyx_t_5);
+        }
+        __pyx_r = __pyx_t_5;
+        __pyx_t_5 = 0;
+        goto __pyx_L10_try_return;
+
+        /* "opteryx/operators/aggregate/aggregate_node.pyx":120
+ *     # Try to use native max() method if available
+ *     if hasattr(vector, 'max'):
+ *         try:             # <<<<<<<<<<<<<<
+ *             return vector.max()
+ *         except (ValueError, NotImplementedError):
+*/
+      }
+      __pyx_L6_error:;
+      __Pyx_XDECREF(__pyx_t_2); __pyx_t_2 = 0;
+      __Pyx_XDECREF(__pyx_t_3); __pyx_t_3 = 0;
+      __Pyx_XDECREF(__pyx_t_4); __pyx_t_4 = 0;
+      __Pyx_XDECREF(__pyx_t_5); __pyx_t_5 = 0;
+
+      /* "opteryx/operators/aggregate/aggregate_node.pyx":122
+ *         try:
+ *             return vector.max()
+ *         except (ValueError, NotImplementedError):             # <<<<<<<<<<<<<<
+ *             # ValueError: empty or all-null column
+ *             # NotImplementedError: aggregate not supported for this type
+*/
+      __pyx_t_11 = __Pyx_PyErr_ExceptionMatches2(((PyObject *)(((PyTypeObject*)PyExc_ValueError))), ((PyObject *)(((PyTypeObject*)PyExc_NotImplementedError))));
+      if (__pyx_t_11) {
+        __Pyx_ErrRestore(0,0,0);
+
+        /* "opteryx/operators/aggregate/aggregate_node.pyx":125
+ *             # ValueError: empty or all-null column
+ *             # NotImplementedError: aggregate not supported for this type
+ *             return None             # <<<<<<<<<<<<<<
+ * 
+ *     # Fallback to Python materialization
+*/
+        __Pyx_XDECREF(__pyx_r);
+        __pyx_r = Py_None; __Pyx_INCREF(Py_None);
+        goto __pyx_L9_except_return;
+      }
+      goto __pyx_L8_except_error;
+
+      /* "opteryx/operators/aggregate/aggregate_node.pyx":120
+ *     # Try to use native max() method if available
+ *     if hasattr(vector, 'max'):
+ *         try:             # <<<<<<<<<<<<<<
+ *             return vector.max()
+ *         except (ValueError, NotImplementedError):
+*/
+      __pyx_L8_except_error:;
+      __Pyx_XGIVEREF(__pyx_t_8);
+      __Pyx_XGIVEREF(__pyx_t_9);
+      __Pyx_XGIVEREF(__pyx_t_10);
+      __Pyx_ExceptionReset(__pyx_t_8, __pyx_t_9, __pyx_t_10);
+      goto __pyx_L1_error;
+      __pyx_L10_try_return:;
+      __Pyx_XGIVEREF(__pyx_t_8);
+      __Pyx_XGIVEREF(__pyx_t_9);
+      __Pyx_XGIVEREF(__pyx_t_10);
+      __Pyx_ExceptionReset(__pyx_t_8, __pyx_t_9, __pyx_t_10);
+      goto __pyx_L0;
+      __pyx_L9_except_return:;
+      __Pyx_XGIVEREF(__pyx_t_8);
+      __Pyx_XGIVEREF(__pyx_t_9);
+      __Pyx_XGIVEREF(__pyx_t_10);
+      __Pyx_ExceptionReset(__pyx_t_8, __pyx_t_9, __pyx_t_10);
+      goto __pyx_L0;
+    }
+
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":119
+ * 
+ *     # Try to use native max() method if available
+ *     if hasattr(vector, 'max'):             # <<<<<<<<<<<<<<
+ *         try:
+ *             return vector.max()
+*/
+  }
+
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":128
+ * 
+ *     # Fallback to Python materialization
  *     values = _vector_valid_values(vector)             # <<<<<<<<<<<<<<
  *     return max(values) if values else None
  * 
 */
-  __pyx_t_2 = NULL;
-  __Pyx_GetModuleGlobalName(__pyx_t_3, __pyx_mstate_global->__pyx_n_u_vector_valid_values); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 94, __pyx_L1_error)
-  __Pyx_GOTREF(__pyx_t_3);
-  __pyx_t_4 = 1;
+  __pyx_t_3 = NULL;
+  __Pyx_GetModuleGlobalName(__pyx_t_2, __pyx_mstate_global->__pyx_n_u_vector_valid_values); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 128, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_2);
+  __pyx_t_6 = 1;
   #if CYTHON_UNPACK_METHODS
-  if (unlikely(PyMethod_Check(__pyx_t_3))) {
-    __pyx_t_2 = PyMethod_GET_SELF(__pyx_t_3);
-    assert(__pyx_t_2);
-    PyObject* __pyx__function = PyMethod_GET_FUNCTION(__pyx_t_3);
-    __Pyx_INCREF(__pyx_t_2);
+  if (unlikely(PyMethod_Check(__pyx_t_2))) {
+    __pyx_t_3 = PyMethod_GET_SELF(__pyx_t_2);
+    assert(__pyx_t_3);
+    PyObject* __pyx__function = PyMethod_GET_FUNCTION(__pyx_t_2);
+    __Pyx_INCREF(__pyx_t_3);
     __Pyx_INCREF(__pyx__function);
-    __Pyx_DECREF_SET(__pyx_t_3, __pyx__function);
-    __pyx_t_4 = 0;
+    __Pyx_DECREF_SET(__pyx_t_2, __pyx__function);
+    __pyx_t_6 = 0;
   }
   #endif
   {
-    PyObject *__pyx_callargs[2] = {__pyx_t_2, __pyx_v_vector};
-    __pyx_t_1 = __Pyx_PyObject_FastCall((PyObject*)__pyx_t_3, __pyx_callargs+__pyx_t_4, (2-__pyx_t_4) | (__pyx_t_4*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
-    __Pyx_XDECREF(__pyx_t_2); __pyx_t_2 = 0;
-    __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
-    if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 94, __pyx_L1_error)
-    __Pyx_GOTREF(__pyx_t_1);
+    PyObject *__pyx_callargs[2] = {__pyx_t_3, __pyx_v_vector};
+    __pyx_t_5 = __Pyx_PyObject_FastCall((PyObject*)__pyx_t_2, __pyx_callargs+__pyx_t_6, (2-__pyx_t_6) | (__pyx_t_6*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
+    __Pyx_XDECREF(__pyx_t_3); __pyx_t_3 = 0;
+    __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
+    if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 128, __pyx_L1_error)
+    __Pyx_GOTREF(__pyx_t_5);
   }
-  __pyx_v_values = __pyx_t_1;
-  __pyx_t_1 = 0;
+  __pyx_v_values = __pyx_t_5;
+  __pyx_t_5 = 0;
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":95
- * 
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":129
+ *     # Fallback to Python materialization
  *     values = _vector_valid_values(vector)
  *     return max(values) if values else None             # <<<<<<<<<<<<<<
  * 
  * 
 */
   __Pyx_XDECREF(__pyx_r);
-  __pyx_t_5 = __Pyx_PyObject_IsTrue(__pyx_v_values); if (unlikely((__pyx_t_5 < 0))) __PYX_ERR(0, 95, __pyx_L1_error)
-  if (__pyx_t_5) {
-    __pyx_t_2 = NULL;
-    __pyx_t_4 = 1;
+  __pyx_t_7 = __Pyx_PyObject_IsTrue(__pyx_v_values); if (unlikely((__pyx_t_7 < 0))) __PYX_ERR(0, 129, __pyx_L1_error)
+  if (__pyx_t_7) {
+    __pyx_t_3 = NULL;
+    __pyx_t_6 = 1;
     {
-      PyObject *__pyx_callargs[2] = {__pyx_t_2, __pyx_v_values};
-      __pyx_t_3 = __Pyx_PyObject_FastCall((PyObject*)__pyx_builtin_max, __pyx_callargs+__pyx_t_4, (2-__pyx_t_4) | (__pyx_t_4*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
-      __Pyx_XDECREF(__pyx_t_2); __pyx_t_2 = 0;
-      if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 95, __pyx_L1_error)
-      __Pyx_GOTREF(__pyx_t_3);
+      PyObject *__pyx_callargs[2] = {__pyx_t_3, __pyx_v_values};
+      __pyx_t_2 = __Pyx_PyObject_FastCall((PyObject*)__pyx_builtin_max, __pyx_callargs+__pyx_t_6, (2-__pyx_t_6) | (__pyx_t_6*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
+      __Pyx_XDECREF(__pyx_t_3); __pyx_t_3 = 0;
+      if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 129, __pyx_L1_error)
+      __Pyx_GOTREF(__pyx_t_2);
     }
-    __pyx_t_1 = __pyx_t_3;
-    __pyx_t_3 = 0;
+    __pyx_t_5 = __pyx_t_2;
+    __pyx_t_2 = 0;
   } else {
     __Pyx_INCREF(Py_None);
-    __pyx_t_1 = Py_None;
+    __pyx_t_5 = Py_None;
   }
-  __pyx_r = __pyx_t_1;
-  __pyx_t_1 = 0;
+  __pyx_r = __pyx_t_5;
+  __pyx_t_5 = 0;
   goto __pyx_L0;
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":89
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":109
  * 
  * 
  * def _vector_max(vector):             # <<<<<<<<<<<<<<
- *     if _is_constant_vector_like(vector):
- *         scalar = _constant_scalar_value(vector)
+ *     valid_count = len(vector) - _vector_null_count(vector)
+ *     if valid_count == 0:
 */
 
   /* function exit code */
   __pyx_L1_error:;
-  __Pyx_XDECREF(__pyx_t_1);
   __Pyx_XDECREF(__pyx_t_2);
   __Pyx_XDECREF(__pyx_t_3);
+  __Pyx_XDECREF(__pyx_t_4);
+  __Pyx_XDECREF(__pyx_t_5);
   __Pyx_AddTraceback("opteryx.operators.aggregate.aggregate_node._vector_max", __pyx_clineno, __pyx_lineno, __pyx_filename);
   __pyx_r = NULL;
   __pyx_L0:;
+  __Pyx_XDECREF(__pyx_v_valid_count);
   __Pyx_XDECREF(__pyx_v_scalar);
   __Pyx_XDECREF(__pyx_v_values);
   __Pyx_XGIVEREF(__pyx_r);
@@ -5326,7 +5794,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_14_vec
   return __pyx_r;
 }
 
-/* "opteryx/operators/aggregate/aggregate_node.pyx":98
+/* "opteryx/operators/aggregate/aggregate_node.pyx":132
  * 
  * 
  * def _ensure_carchar_set(distinct_hashes):             # <<<<<<<<<<<<<<
@@ -5373,32 +5841,32 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   {
     PyObject ** const __pyx_pyargnames[] = {&__pyx_mstate_global->__pyx_n_u_distinct_hashes,0};
     const Py_ssize_t __pyx_kwds_len = (__pyx_kwds) ? __Pyx_NumKwargs_FASTCALL(__pyx_kwds) : 0;
-    if (unlikely(__pyx_kwds_len) < 0) __PYX_ERR(0, 98, __pyx_L3_error)
+    if (unlikely(__pyx_kwds_len) < 0) __PYX_ERR(0, 132, __pyx_L3_error)
     if (__pyx_kwds_len > 0) {
       switch (__pyx_nargs) {
         case  1:
         values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 98, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 132, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  0: break;
         default: goto __pyx_L5_argtuple_error;
       }
       const Py_ssize_t kwd_pos_args = __pyx_nargs;
-      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "_ensure_carchar_set", 0) < (0)) __PYX_ERR(0, 98, __pyx_L3_error)
+      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "_ensure_carchar_set", 0) < (0)) __PYX_ERR(0, 132, __pyx_L3_error)
       for (Py_ssize_t i = __pyx_nargs; i < 1; i++) {
-        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("_ensure_carchar_set", 1, 1, 1, i); __PYX_ERR(0, 98, __pyx_L3_error) }
+        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("_ensure_carchar_set", 1, 1, 1, i); __PYX_ERR(0, 132, __pyx_L3_error) }
       }
     } else if (unlikely(__pyx_nargs != 1)) {
       goto __pyx_L5_argtuple_error;
     } else {
       values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 98, __pyx_L3_error)
+      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 132, __pyx_L3_error)
     }
     __pyx_v_distinct_hashes = values[0];
   }
   goto __pyx_L6_skip;
   __pyx_L5_argtuple_error:;
-  __Pyx_RaiseArgtupleInvalid("_ensure_carchar_set", 1, 1, 1, __pyx_nargs); __PYX_ERR(0, 98, __pyx_L3_error)
+  __Pyx_RaiseArgtupleInvalid("_ensure_carchar_set", 1, 1, 1, __pyx_nargs); __PYX_ERR(0, 132, __pyx_L3_error)
   __pyx_L6_skip:;
   goto __pyx_L4_argument_unpacking_done;
   __pyx_L3_error:;
@@ -5433,7 +5901,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_16_ens
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("_ensure_carchar_set", 0);
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":99
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":133
  * 
  * def _ensure_carchar_set(distinct_hashes):
  *     return distinct_hashes if distinct_hashes is not None else CarcharSet()             # <<<<<<<<<<<<<<
@@ -5447,7 +5915,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_16_ens
     __pyx_t_1 = __pyx_v_distinct_hashes;
   } else {
     __pyx_t_4 = NULL;
-    __Pyx_GetModuleGlobalName(__pyx_t_5, __pyx_mstate_global->__pyx_n_u_CarcharSet); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 99, __pyx_L1_error)
+    __Pyx_GetModuleGlobalName(__pyx_t_5, __pyx_mstate_global->__pyx_n_u_CarcharSet); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 133, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_5);
     __pyx_t_6 = 1;
     #if CYTHON_UNPACK_METHODS
@@ -5466,7 +5934,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_16_ens
       __pyx_t_3 = __Pyx_PyObject_FastCall((PyObject*)__pyx_t_5, __pyx_callargs+__pyx_t_6, (1-__pyx_t_6) | (__pyx_t_6*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
       __Pyx_XDECREF(__pyx_t_4); __pyx_t_4 = 0;
       __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
-      if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 99, __pyx_L1_error)
+      if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 133, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_3);
     }
     __pyx_t_1 = __pyx_t_3;
@@ -5476,7 +5944,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_16_ens
   __pyx_t_1 = 0;
   goto __pyx_L0;
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":98
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":132
  * 
  * 
  * def _ensure_carchar_set(distinct_hashes):             # <<<<<<<<<<<<<<
@@ -5498,7 +5966,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_16_ens
   return __pyx_r;
 }
 
-/* "opteryx/operators/aggregate/aggregate_node.pyx":102
+/* "opteryx/operators/aggregate/aggregate_node.pyx":136
  * 
  * 
  * def _insert_vector_hashes(distinct_hashes, vector):             # <<<<<<<<<<<<<<
@@ -5546,39 +6014,39 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   {
     PyObject ** const __pyx_pyargnames[] = {&__pyx_mstate_global->__pyx_n_u_distinct_hashes,&__pyx_mstate_global->__pyx_n_u_vector,0};
     const Py_ssize_t __pyx_kwds_len = (__pyx_kwds) ? __Pyx_NumKwargs_FASTCALL(__pyx_kwds) : 0;
-    if (unlikely(__pyx_kwds_len) < 0) __PYX_ERR(0, 102, __pyx_L3_error)
+    if (unlikely(__pyx_kwds_len) < 0) __PYX_ERR(0, 136, __pyx_L3_error)
     if (__pyx_kwds_len > 0) {
       switch (__pyx_nargs) {
         case  2:
         values[1] = __Pyx_ArgRef_FASTCALL(__pyx_args, 1);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(0, 102, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(0, 136, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  1:
         values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 102, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 136, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  0: break;
         default: goto __pyx_L5_argtuple_error;
       }
       const Py_ssize_t kwd_pos_args = __pyx_nargs;
-      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "_insert_vector_hashes", 0) < (0)) __PYX_ERR(0, 102, __pyx_L3_error)
+      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "_insert_vector_hashes", 0) < (0)) __PYX_ERR(0, 136, __pyx_L3_error)
       for (Py_ssize_t i = __pyx_nargs; i < 2; i++) {
-        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("_insert_vector_hashes", 1, 2, 2, i); __PYX_ERR(0, 102, __pyx_L3_error) }
+        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("_insert_vector_hashes", 1, 2, 2, i); __PYX_ERR(0, 136, __pyx_L3_error) }
       }
     } else if (unlikely(__pyx_nargs != 2)) {
       goto __pyx_L5_argtuple_error;
     } else {
       values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 102, __pyx_L3_error)
+      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 136, __pyx_L3_error)
       values[1] = __Pyx_ArgRef_FASTCALL(__pyx_args, 1);
-      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(0, 102, __pyx_L3_error)
+      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(0, 136, __pyx_L3_error)
     }
     __pyx_v_distinct_hashes = values[0];
     __pyx_v_vector = values[1];
   }
   goto __pyx_L6_skip;
   __pyx_L5_argtuple_error:;
-  __Pyx_RaiseArgtupleInvalid("_insert_vector_hashes", 1, 2, 2, __pyx_nargs); __PYX_ERR(0, 102, __pyx_L3_error)
+  __Pyx_RaiseArgtupleInvalid("_insert_vector_hashes", 1, 2, 2, __pyx_nargs); __PYX_ERR(0, 136, __pyx_L3_error)
   __pyx_L6_skip:;
   goto __pyx_L4_argument_unpacking_done;
   __pyx_L3_error:;
@@ -5613,7 +6081,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_18_ins
   __Pyx_RefNannySetupContext("_insert_vector_hashes", 0);
   __Pyx_INCREF(__pyx_v_distinct_hashes);
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":103
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":137
  * 
  * def _insert_vector_hashes(distinct_hashes, vector):
  *     distinct_hashes = _ensure_carchar_set(distinct_hashes)             # <<<<<<<<<<<<<<
@@ -5621,7 +6089,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_18_ins
  *     return distinct_hashes
 */
   __pyx_t_2 = NULL;
-  __Pyx_GetModuleGlobalName(__pyx_t_3, __pyx_mstate_global->__pyx_n_u_ensure_carchar_set); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 103, __pyx_L1_error)
+  __Pyx_GetModuleGlobalName(__pyx_t_3, __pyx_mstate_global->__pyx_n_u_ensure_carchar_set); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 137, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_3);
   __pyx_t_4 = 1;
   #if CYTHON_UNPACK_METHODS
@@ -5640,13 +6108,13 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_18_ins
     __pyx_t_1 = __Pyx_PyObject_FastCall((PyObject*)__pyx_t_3, __pyx_callargs+__pyx_t_4, (2-__pyx_t_4) | (__pyx_t_4*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
     __Pyx_XDECREF(__pyx_t_2); __pyx_t_2 = 0;
     __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
-    if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 103, __pyx_L1_error)
+    if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 137, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_1);
   }
   __Pyx_DECREF_SET(__pyx_v_distinct_hashes, __pyx_t_1);
   __pyx_t_1 = 0;
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":104
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":138
  * def _insert_vector_hashes(distinct_hashes, vector):
  *     distinct_hashes = _ensure_carchar_set(distinct_hashes)
  *     distinct_hashes.insert_many(vector.hash())             # <<<<<<<<<<<<<<
@@ -5662,7 +6130,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_18_ins
     PyObject *__pyx_callargs[2] = {__pyx_t_5, NULL};
     __pyx_t_2 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_hash, __pyx_callargs+__pyx_t_4, (1-__pyx_t_4) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
     __Pyx_XDECREF(__pyx_t_5); __pyx_t_5 = 0;
-    if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 104, __pyx_L1_error)
+    if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 138, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_2);
   }
   __pyx_t_4 = 0;
@@ -5671,12 +6139,12 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_18_ins
     __pyx_t_1 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_insert_many, __pyx_callargs+__pyx_t_4, (2-__pyx_t_4) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
     __Pyx_XDECREF(__pyx_t_3); __pyx_t_3 = 0;
     __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
-    if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 104, __pyx_L1_error)
+    if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 138, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_1);
   }
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":105
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":139
  *     distinct_hashes = _ensure_carchar_set(distinct_hashes)
  *     distinct_hashes.insert_many(vector.hash())
  *     return distinct_hashes             # <<<<<<<<<<<<<<
@@ -5688,7 +6156,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_18_ins
   __pyx_r = __pyx_v_distinct_hashes;
   goto __pyx_L0;
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":102
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":136
  * 
  * 
  * def _insert_vector_hashes(distinct_hashes, vector):             # <<<<<<<<<<<<<<
@@ -5711,7 +6179,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_18_ins
   return __pyx_r;
 }
 
-/* "opteryx/operators/aggregate/aggregate_node.pyx":108
+/* "opteryx/operators/aggregate/aggregate_node.pyx":142
  * 
  * 
  * def _insert_literal_hash(distinct_hashes, literal):             # <<<<<<<<<<<<<<
@@ -5759,39 +6227,39 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   {
     PyObject ** const __pyx_pyargnames[] = {&__pyx_mstate_global->__pyx_n_u_distinct_hashes,&__pyx_mstate_global->__pyx_n_u_literal,0};
     const Py_ssize_t __pyx_kwds_len = (__pyx_kwds) ? __Pyx_NumKwargs_FASTCALL(__pyx_kwds) : 0;
-    if (unlikely(__pyx_kwds_len) < 0) __PYX_ERR(0, 108, __pyx_L3_error)
+    if (unlikely(__pyx_kwds_len) < 0) __PYX_ERR(0, 142, __pyx_L3_error)
     if (__pyx_kwds_len > 0) {
       switch (__pyx_nargs) {
         case  2:
         values[1] = __Pyx_ArgRef_FASTCALL(__pyx_args, 1);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(0, 108, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(0, 142, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  1:
         values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 108, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 142, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  0: break;
         default: goto __pyx_L5_argtuple_error;
       }
       const Py_ssize_t kwd_pos_args = __pyx_nargs;
-      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "_insert_literal_hash", 0) < (0)) __PYX_ERR(0, 108, __pyx_L3_error)
+      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "_insert_literal_hash", 0) < (0)) __PYX_ERR(0, 142, __pyx_L3_error)
       for (Py_ssize_t i = __pyx_nargs; i < 2; i++) {
-        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("_insert_literal_hash", 1, 2, 2, i); __PYX_ERR(0, 108, __pyx_L3_error) }
+        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("_insert_literal_hash", 1, 2, 2, i); __PYX_ERR(0, 142, __pyx_L3_error) }
       }
     } else if (unlikely(__pyx_nargs != 2)) {
       goto __pyx_L5_argtuple_error;
     } else {
       values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 108, __pyx_L3_error)
+      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 142, __pyx_L3_error)
       values[1] = __Pyx_ArgRef_FASTCALL(__pyx_args, 1);
-      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(0, 108, __pyx_L3_error)
+      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(0, 142, __pyx_L3_error)
     }
     __pyx_v_distinct_hashes = values[0];
     __pyx_v_literal = values[1];
   }
   goto __pyx_L6_skip;
   __pyx_L5_argtuple_error:;
-  __Pyx_RaiseArgtupleInvalid("_insert_literal_hash", 1, 2, 2, __pyx_nargs); __PYX_ERR(0, 108, __pyx_L3_error)
+  __Pyx_RaiseArgtupleInvalid("_insert_literal_hash", 1, 2, 2, __pyx_nargs); __PYX_ERR(0, 142, __pyx_L3_error)
   __pyx_L6_skip:;
   goto __pyx_L4_argument_unpacking_done;
   __pyx_L3_error:;
@@ -5830,7 +6298,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_20_ins
   __Pyx_RefNannySetupContext("_insert_literal_hash", 0);
   __Pyx_INCREF(__pyx_v_distinct_hashes);
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":109
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":143
  * 
  * def _insert_literal_hash(distinct_hashes, literal):
  *     distinct_hashes = _ensure_carchar_set(distinct_hashes)             # <<<<<<<<<<<<<<
@@ -5838,7 +6306,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_20_ins
  *     return distinct_hashes
 */
   __pyx_t_2 = NULL;
-  __Pyx_GetModuleGlobalName(__pyx_t_3, __pyx_mstate_global->__pyx_n_u_ensure_carchar_set); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 109, __pyx_L1_error)
+  __Pyx_GetModuleGlobalName(__pyx_t_3, __pyx_mstate_global->__pyx_n_u_ensure_carchar_set); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 143, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_3);
   __pyx_t_4 = 1;
   #if CYTHON_UNPACK_METHODS
@@ -5857,13 +6325,13 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_20_ins
     __pyx_t_1 = __Pyx_PyObject_FastCall((PyObject*)__pyx_t_3, __pyx_callargs+__pyx_t_4, (2-__pyx_t_4) | (__pyx_t_4*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
     __Pyx_XDECREF(__pyx_t_2); __pyx_t_2 = 0;
     __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
-    if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 109, __pyx_L1_error)
+    if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 143, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_1);
   }
   __Pyx_DECREF_SET(__pyx_v_distinct_hashes, __pyx_t_1);
   __pyx_t_1 = 0;
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":110
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":144
  * def _insert_literal_hash(distinct_hashes, literal):
  *     distinct_hashes = _ensure_carchar_set(distinct_hashes)
  *     distinct_hashes.insert_many(vector_from_sequence([literal]).hash())             # <<<<<<<<<<<<<<
@@ -5873,13 +6341,13 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_20_ins
   __pyx_t_3 = __pyx_v_distinct_hashes;
   __Pyx_INCREF(__pyx_t_3);
   __pyx_t_7 = NULL;
-  __Pyx_GetModuleGlobalName(__pyx_t_8, __pyx_mstate_global->__pyx_n_u_vector_from_sequence); if (unlikely(!__pyx_t_8)) __PYX_ERR(0, 110, __pyx_L1_error)
+  __Pyx_GetModuleGlobalName(__pyx_t_8, __pyx_mstate_global->__pyx_n_u_vector_from_sequence); if (unlikely(!__pyx_t_8)) __PYX_ERR(0, 144, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_8);
-  __pyx_t_9 = PyList_New(1); if (unlikely(!__pyx_t_9)) __PYX_ERR(0, 110, __pyx_L1_error)
+  __pyx_t_9 = PyList_New(1); if (unlikely(!__pyx_t_9)) __PYX_ERR(0, 144, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_9);
   __Pyx_INCREF(__pyx_v_literal);
   __Pyx_GIVEREF(__pyx_v_literal);
-  if (__Pyx_PyList_SET_ITEM(__pyx_t_9, 0, __pyx_v_literal) != (0)) __PYX_ERR(0, 110, __pyx_L1_error);
+  if (__Pyx_PyList_SET_ITEM(__pyx_t_9, 0, __pyx_v_literal) != (0)) __PYX_ERR(0, 144, __pyx_L1_error);
   __pyx_t_4 = 1;
   #if CYTHON_UNPACK_METHODS
   if (unlikely(PyMethod_Check(__pyx_t_8))) {
@@ -5898,7 +6366,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_20_ins
     __Pyx_XDECREF(__pyx_t_7); __pyx_t_7 = 0;
     __Pyx_DECREF(__pyx_t_9); __pyx_t_9 = 0;
     __Pyx_DECREF(__pyx_t_8); __pyx_t_8 = 0;
-    if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 110, __pyx_L1_error)
+    if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 144, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_6);
   }
   __pyx_t_5 = __pyx_t_6;
@@ -5909,7 +6377,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_20_ins
     __pyx_t_2 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_hash, __pyx_callargs+__pyx_t_4, (1-__pyx_t_4) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
     __Pyx_XDECREF(__pyx_t_5); __pyx_t_5 = 0;
     __Pyx_DECREF(__pyx_t_6); __pyx_t_6 = 0;
-    if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 110, __pyx_L1_error)
+    if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 144, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_2);
   }
   __pyx_t_4 = 0;
@@ -5918,12 +6386,12 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_20_ins
     __pyx_t_1 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_insert_many, __pyx_callargs+__pyx_t_4, (2-__pyx_t_4) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
     __Pyx_XDECREF(__pyx_t_3); __pyx_t_3 = 0;
     __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
-    if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 110, __pyx_L1_error)
+    if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 144, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_1);
   }
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":111
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":145
  *     distinct_hashes = _ensure_carchar_set(distinct_hashes)
  *     distinct_hashes.insert_many(vector_from_sequence([literal]).hash())
  *     return distinct_hashes             # <<<<<<<<<<<<<<
@@ -5935,7 +6403,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_20_ins
   __pyx_r = __pyx_v_distinct_hashes;
   goto __pyx_L0;
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":108
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":142
  * 
  * 
  * def _insert_literal_hash(distinct_hashes, literal):             # <<<<<<<<<<<<<<
@@ -5962,7 +6430,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_20_ins
   return __pyx_r;
 }
 
-/* "opteryx/operators/aggregate/aggregate_node.pyx":115
+/* "opteryx/operators/aggregate/aggregate_node.pyx":149
  * 
  * class _DrakenAggregateCollector:
  *     def __init__(self, aggregate):             # <<<<<<<<<<<<<<
@@ -6010,39 +6478,39 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   {
     PyObject ** const __pyx_pyargnames[] = {&__pyx_mstate_global->__pyx_n_u_self,&__pyx_mstate_global->__pyx_n_u_aggregate,0};
     const Py_ssize_t __pyx_kwds_len = (__pyx_kwds) ? __Pyx_NumKwargs_FASTCALL(__pyx_kwds) : 0;
-    if (unlikely(__pyx_kwds_len) < 0) __PYX_ERR(0, 115, __pyx_L3_error)
+    if (unlikely(__pyx_kwds_len) < 0) __PYX_ERR(0, 149, __pyx_L3_error)
     if (__pyx_kwds_len > 0) {
       switch (__pyx_nargs) {
         case  2:
         values[1] = __Pyx_ArgRef_FASTCALL(__pyx_args, 1);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(0, 115, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(0, 149, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  1:
         values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 115, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 149, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  0: break;
         default: goto __pyx_L5_argtuple_error;
       }
       const Py_ssize_t kwd_pos_args = __pyx_nargs;
-      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "__init__", 0) < (0)) __PYX_ERR(0, 115, __pyx_L3_error)
+      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "__init__", 0) < (0)) __PYX_ERR(0, 149, __pyx_L3_error)
       for (Py_ssize_t i = __pyx_nargs; i < 2; i++) {
-        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("__init__", 1, 2, 2, i); __PYX_ERR(0, 115, __pyx_L3_error) }
+        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("__init__", 1, 2, 2, i); __PYX_ERR(0, 149, __pyx_L3_error) }
       }
     } else if (unlikely(__pyx_nargs != 2)) {
       goto __pyx_L5_argtuple_error;
     } else {
       values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 115, __pyx_L3_error)
+      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 149, __pyx_L3_error)
       values[1] = __Pyx_ArgRef_FASTCALL(__pyx_args, 1);
-      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(0, 115, __pyx_L3_error)
+      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(0, 149, __pyx_L3_error)
     }
     __pyx_v_self = values[0];
     __pyx_v_aggregate = values[1];
   }
   goto __pyx_L6_skip;
   __pyx_L5_argtuple_error:;
-  __Pyx_RaiseArgtupleInvalid("__init__", 1, 2, 2, __pyx_nargs); __PYX_ERR(0, 115, __pyx_L3_error)
+  __Pyx_RaiseArgtupleInvalid("__init__", 1, 2, 2, __pyx_nargs); __PYX_ERR(0, 149, __pyx_L3_error)
   __pyx_L6_skip:;
   goto __pyx_L4_argument_unpacking_done;
   __pyx_L3_error:;
@@ -6073,115 +6541,115 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("__init__", 0);
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":116
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":150
  * class _DrakenAggregateCollector:
  *     def __init__(self, aggregate):
  *         self.aggregate = aggregate             # <<<<<<<<<<<<<<
  *         self.aggregate_type = aggregate.value
  *         self.duplicate_treatment = getattr(aggregate, "duplicate_treatment", None)
 */
-  if (__Pyx_PyObject_SetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_aggregate, __pyx_v_aggregate) < (0)) __PYX_ERR(0, 116, __pyx_L1_error)
+  if (__Pyx_PyObject_SetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_aggregate, __pyx_v_aggregate) < (0)) __PYX_ERR(0, 150, __pyx_L1_error)
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":117
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":151
  *     def __init__(self, aggregate):
  *         self.aggregate = aggregate
  *         self.aggregate_type = aggregate.value             # <<<<<<<<<<<<<<
  *         self.duplicate_treatment = getattr(aggregate, "duplicate_treatment", None)
  *         self.output_name = aggregate.schema_column.identity
 */
-  __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_aggregate, __pyx_mstate_global->__pyx_n_u_value); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 117, __pyx_L1_error)
+  __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_aggregate, __pyx_mstate_global->__pyx_n_u_value); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 151, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
-  if (__Pyx_PyObject_SetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_aggregate_type, __pyx_t_1) < (0)) __PYX_ERR(0, 117, __pyx_L1_error)
+  if (__Pyx_PyObject_SetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_aggregate_type, __pyx_t_1) < (0)) __PYX_ERR(0, 151, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":118
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":152
  *         self.aggregate = aggregate
  *         self.aggregate_type = aggregate.value
  *         self.duplicate_treatment = getattr(aggregate, "duplicate_treatment", None)             # <<<<<<<<<<<<<<
  *         self.output_name = aggregate.schema_column.identity
  *         self.parameter = aggregate.parameters[0]
 */
-  __pyx_t_1 = __Pyx_GetAttr3(__pyx_v_aggregate, __pyx_mstate_global->__pyx_n_u_duplicate_treatment, Py_None); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 118, __pyx_L1_error)
+  __pyx_t_1 = __Pyx_GetAttr3(__pyx_v_aggregate, __pyx_mstate_global->__pyx_n_u_duplicate_treatment, Py_None); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 152, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
-  if (__Pyx_PyObject_SetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_duplicate_treatment, __pyx_t_1) < (0)) __PYX_ERR(0, 118, __pyx_L1_error)
+  if (__Pyx_PyObject_SetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_duplicate_treatment, __pyx_t_1) < (0)) __PYX_ERR(0, 152, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":119
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":153
  *         self.aggregate_type = aggregate.value
  *         self.duplicate_treatment = getattr(aggregate, "duplicate_treatment", None)
  *         self.output_name = aggregate.schema_column.identity             # <<<<<<<<<<<<<<
  *         self.parameter = aggregate.parameters[0]
  * 
 */
-  __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_aggregate, __pyx_mstate_global->__pyx_n_u_schema_column); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 119, __pyx_L1_error)
+  __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_aggregate, __pyx_mstate_global->__pyx_n_u_schema_column); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 153, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
-  __pyx_t_2 = __Pyx_PyObject_GetAttrStr(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_identity); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 119, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_PyObject_GetAttrStr(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_identity); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 153, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
-  if (__Pyx_PyObject_SetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_output_name, __pyx_t_2) < (0)) __PYX_ERR(0, 119, __pyx_L1_error)
+  if (__Pyx_PyObject_SetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_output_name, __pyx_t_2) < (0)) __PYX_ERR(0, 153, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":120
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":154
  *         self.duplicate_treatment = getattr(aggregate, "duplicate_treatment", None)
  *         self.output_name = aggregate.schema_column.identity
  *         self.parameter = aggregate.parameters[0]             # <<<<<<<<<<<<<<
  * 
  *         self._count = 0
 */
-  __pyx_t_2 = __Pyx_PyObject_GetAttrStr(__pyx_v_aggregate, __pyx_mstate_global->__pyx_n_u_parameters); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 120, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_PyObject_GetAttrStr(__pyx_v_aggregate, __pyx_mstate_global->__pyx_n_u_parameters); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 154, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
-  __pyx_t_1 = __Pyx_GetItemInt(__pyx_t_2, 0, long, 1, __Pyx_PyLong_From_long, 0, 0, 1, 1, __Pyx_ReferenceSharing_OwnStrongReference); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 120, __pyx_L1_error)
+  __pyx_t_1 = __Pyx_GetItemInt(__pyx_t_2, 0, long, 1, __Pyx_PyLong_From_long, 0, 0, 1, 1, __Pyx_ReferenceSharing_OwnStrongReference); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 154, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
-  if (__Pyx_PyObject_SetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_parameter, __pyx_t_1) < (0)) __PYX_ERR(0, 120, __pyx_L1_error)
+  if (__Pyx_PyObject_SetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_parameter, __pyx_t_1) < (0)) __PYX_ERR(0, 154, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":122
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":156
  *         self.parameter = aggregate.parameters[0]
  * 
  *         self._count = 0             # <<<<<<<<<<<<<<
  *         self._sum = None
  *         self._min = None
 */
-  if (__Pyx_PyObject_SetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_count, __pyx_mstate_global->__pyx_int_0) < (0)) __PYX_ERR(0, 122, __pyx_L1_error)
+  if (__Pyx_PyObject_SetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_count, __pyx_mstate_global->__pyx_int_0) < (0)) __PYX_ERR(0, 156, __pyx_L1_error)
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":123
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":157
  * 
  *         self._count = 0
  *         self._sum = None             # <<<<<<<<<<<<<<
  *         self._min = None
  *         self._max = None
 */
-  if (__Pyx_PyObject_SetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_sum_2, Py_None) < (0)) __PYX_ERR(0, 123, __pyx_L1_error)
+  if (__Pyx_PyObject_SetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_sum_2, Py_None) < (0)) __PYX_ERR(0, 157, __pyx_L1_error)
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":124
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":158
  *         self._count = 0
  *         self._sum = None
  *         self._min = None             # <<<<<<<<<<<<<<
  *         self._max = None
  *         self._distinct_hashes = None
 */
-  if (__Pyx_PyObject_SetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_min_2, Py_None) < (0)) __PYX_ERR(0, 124, __pyx_L1_error)
+  if (__Pyx_PyObject_SetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_min_2, Py_None) < (0)) __PYX_ERR(0, 158, __pyx_L1_error)
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":125
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":159
  *         self._sum = None
  *         self._min = None
  *         self._max = None             # <<<<<<<<<<<<<<
  *         self._distinct_hashes = None
  * 
 */
-  if (__Pyx_PyObject_SetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_max_2, Py_None) < (0)) __PYX_ERR(0, 125, __pyx_L1_error)
+  if (__Pyx_PyObject_SetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_max_2, Py_None) < (0)) __PYX_ERR(0, 159, __pyx_L1_error)
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":126
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":160
  *         self._min = None
  *         self._max = None
  *         self._distinct_hashes = None             # <<<<<<<<<<<<<<
  * 
  *     def _update_min(self, value):
 */
-  if (__Pyx_PyObject_SetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_distinct_hashes_2, Py_None) < (0)) __PYX_ERR(0, 126, __pyx_L1_error)
+  if (__Pyx_PyObject_SetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_distinct_hashes_2, Py_None) < (0)) __PYX_ERR(0, 160, __pyx_L1_error)
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":115
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":149
  * 
  * class _DrakenAggregateCollector:
  *     def __init__(self, aggregate):             # <<<<<<<<<<<<<<
@@ -6203,7 +6671,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
   return __pyx_r;
 }
 
-/* "opteryx/operators/aggregate/aggregate_node.pyx":128
+/* "opteryx/operators/aggregate/aggregate_node.pyx":162
  *         self._distinct_hashes = None
  * 
  *     def _update_min(self, value):             # <<<<<<<<<<<<<<
@@ -6251,39 +6719,39 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   {
     PyObject ** const __pyx_pyargnames[] = {&__pyx_mstate_global->__pyx_n_u_self,&__pyx_mstate_global->__pyx_n_u_value,0};
     const Py_ssize_t __pyx_kwds_len = (__pyx_kwds) ? __Pyx_NumKwargs_FASTCALL(__pyx_kwds) : 0;
-    if (unlikely(__pyx_kwds_len) < 0) __PYX_ERR(0, 128, __pyx_L3_error)
+    if (unlikely(__pyx_kwds_len) < 0) __PYX_ERR(0, 162, __pyx_L3_error)
     if (__pyx_kwds_len > 0) {
       switch (__pyx_nargs) {
         case  2:
         values[1] = __Pyx_ArgRef_FASTCALL(__pyx_args, 1);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(0, 128, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(0, 162, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  1:
         values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 128, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 162, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  0: break;
         default: goto __pyx_L5_argtuple_error;
       }
       const Py_ssize_t kwd_pos_args = __pyx_nargs;
-      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "_update_min", 0) < (0)) __PYX_ERR(0, 128, __pyx_L3_error)
+      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "_update_min", 0) < (0)) __PYX_ERR(0, 162, __pyx_L3_error)
       for (Py_ssize_t i = __pyx_nargs; i < 2; i++) {
-        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("_update_min", 1, 2, 2, i); __PYX_ERR(0, 128, __pyx_L3_error) }
+        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("_update_min", 1, 2, 2, i); __PYX_ERR(0, 162, __pyx_L3_error) }
       }
     } else if (unlikely(__pyx_nargs != 2)) {
       goto __pyx_L5_argtuple_error;
     } else {
       values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 128, __pyx_L3_error)
+      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 162, __pyx_L3_error)
       values[1] = __Pyx_ArgRef_FASTCALL(__pyx_args, 1);
-      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(0, 128, __pyx_L3_error)
+      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(0, 162, __pyx_L3_error)
     }
     __pyx_v_self = values[0];
     __pyx_v_value = values[1];
   }
   goto __pyx_L6_skip;
   __pyx_L5_argtuple_error:;
-  __Pyx_RaiseArgtupleInvalid("_update_min", 1, 2, 2, __pyx_nargs); __PYX_ERR(0, 128, __pyx_L3_error)
+  __Pyx_RaiseArgtupleInvalid("_update_min", 1, 2, 2, __pyx_nargs); __PYX_ERR(0, 162, __pyx_L3_error)
   __pyx_L6_skip:;
   goto __pyx_L4_argument_unpacking_done;
   __pyx_L3_error:;
@@ -6316,7 +6784,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("_update_min", 0);
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":129
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":163
  * 
  *     def _update_min(self, value):
  *         if value is None:             # <<<<<<<<<<<<<<
@@ -6326,7 +6794,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
   __pyx_t_1 = (__pyx_v_value == Py_None);
   if (__pyx_t_1) {
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":130
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":164
  *     def _update_min(self, value):
  *         if value is None:
  *             return             # <<<<<<<<<<<<<<
@@ -6337,7 +6805,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
     __pyx_r = Py_None; __Pyx_INCREF(Py_None);
     goto __pyx_L0;
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":129
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":163
  * 
  *     def _update_min(self, value):
  *         if value is None:             # <<<<<<<<<<<<<<
@@ -6346,14 +6814,14 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
 */
   }
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":131
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":165
  *         if value is None:
  *             return
  *         if self._min is None or value < self._min:             # <<<<<<<<<<<<<<
  *             self._min = value
  * 
 */
-  __pyx_t_2 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_min_2); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 131, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_min_2); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 165, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
   __pyx_t_3 = (__pyx_t_2 == Py_None);
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
@@ -6362,26 +6830,26 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
     __pyx_t_1 = __pyx_t_3;
     goto __pyx_L5_bool_binop_done;
   }
-  __pyx_t_2 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_min_2); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 131, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_min_2); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 165, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
-  __pyx_t_4 = PyObject_RichCompare(__pyx_v_value, __pyx_t_2, Py_LT); __Pyx_XGOTREF(__pyx_t_4); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 131, __pyx_L1_error)
+  __pyx_t_4 = PyObject_RichCompare(__pyx_v_value, __pyx_t_2, Py_LT); __Pyx_XGOTREF(__pyx_t_4); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 165, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
-  __pyx_t_3 = __Pyx_PyObject_IsTrue(__pyx_t_4); if (unlikely((__pyx_t_3 < 0))) __PYX_ERR(0, 131, __pyx_L1_error)
+  __pyx_t_3 = __Pyx_PyObject_IsTrue(__pyx_t_4); if (unlikely((__pyx_t_3 < 0))) __PYX_ERR(0, 165, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
   __pyx_t_1 = __pyx_t_3;
   __pyx_L5_bool_binop_done:;
   if (__pyx_t_1) {
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":132
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":166
  *             return
  *         if self._min is None or value < self._min:
  *             self._min = value             # <<<<<<<<<<<<<<
  * 
  *     def _update_max(self, value):
 */
-    if (__Pyx_PyObject_SetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_min_2, __pyx_v_value) < (0)) __PYX_ERR(0, 132, __pyx_L1_error)
+    if (__Pyx_PyObject_SetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_min_2, __pyx_v_value) < (0)) __PYX_ERR(0, 166, __pyx_L1_error)
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":131
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":165
  *         if value is None:
  *             return
  *         if self._min is None or value < self._min:             # <<<<<<<<<<<<<<
@@ -6390,7 +6858,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
 */
   }
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":128
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":162
  *         self._distinct_hashes = None
  * 
  *     def _update_min(self, value):             # <<<<<<<<<<<<<<
@@ -6412,7 +6880,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
   return __pyx_r;
 }
 
-/* "opteryx/operators/aggregate/aggregate_node.pyx":134
+/* "opteryx/operators/aggregate/aggregate_node.pyx":168
  *             self._min = value
  * 
  *     def _update_max(self, value):             # <<<<<<<<<<<<<<
@@ -6460,39 +6928,39 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   {
     PyObject ** const __pyx_pyargnames[] = {&__pyx_mstate_global->__pyx_n_u_self,&__pyx_mstate_global->__pyx_n_u_value,0};
     const Py_ssize_t __pyx_kwds_len = (__pyx_kwds) ? __Pyx_NumKwargs_FASTCALL(__pyx_kwds) : 0;
-    if (unlikely(__pyx_kwds_len) < 0) __PYX_ERR(0, 134, __pyx_L3_error)
+    if (unlikely(__pyx_kwds_len) < 0) __PYX_ERR(0, 168, __pyx_L3_error)
     if (__pyx_kwds_len > 0) {
       switch (__pyx_nargs) {
         case  2:
         values[1] = __Pyx_ArgRef_FASTCALL(__pyx_args, 1);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(0, 134, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(0, 168, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  1:
         values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 134, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 168, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  0: break;
         default: goto __pyx_L5_argtuple_error;
       }
       const Py_ssize_t kwd_pos_args = __pyx_nargs;
-      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "_update_max", 0) < (0)) __PYX_ERR(0, 134, __pyx_L3_error)
+      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "_update_max", 0) < (0)) __PYX_ERR(0, 168, __pyx_L3_error)
       for (Py_ssize_t i = __pyx_nargs; i < 2; i++) {
-        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("_update_max", 1, 2, 2, i); __PYX_ERR(0, 134, __pyx_L3_error) }
+        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("_update_max", 1, 2, 2, i); __PYX_ERR(0, 168, __pyx_L3_error) }
       }
     } else if (unlikely(__pyx_nargs != 2)) {
       goto __pyx_L5_argtuple_error;
     } else {
       values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 134, __pyx_L3_error)
+      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 168, __pyx_L3_error)
       values[1] = __Pyx_ArgRef_FASTCALL(__pyx_args, 1);
-      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(0, 134, __pyx_L3_error)
+      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(0, 168, __pyx_L3_error)
     }
     __pyx_v_self = values[0];
     __pyx_v_value = values[1];
   }
   goto __pyx_L6_skip;
   __pyx_L5_argtuple_error:;
-  __Pyx_RaiseArgtupleInvalid("_update_max", 1, 2, 2, __pyx_nargs); __PYX_ERR(0, 134, __pyx_L3_error)
+  __Pyx_RaiseArgtupleInvalid("_update_max", 1, 2, 2, __pyx_nargs); __PYX_ERR(0, 168, __pyx_L3_error)
   __pyx_L6_skip:;
   goto __pyx_L4_argument_unpacking_done;
   __pyx_L3_error:;
@@ -6525,7 +6993,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("_update_max", 0);
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":135
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":169
  * 
  *     def _update_max(self, value):
  *         if value is None:             # <<<<<<<<<<<<<<
@@ -6535,7 +7003,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
   __pyx_t_1 = (__pyx_v_value == Py_None);
   if (__pyx_t_1) {
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":136
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":170
  *     def _update_max(self, value):
  *         if value is None:
  *             return             # <<<<<<<<<<<<<<
@@ -6546,7 +7014,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
     __pyx_r = Py_None; __Pyx_INCREF(Py_None);
     goto __pyx_L0;
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":135
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":169
  * 
  *     def _update_max(self, value):
  *         if value is None:             # <<<<<<<<<<<<<<
@@ -6555,14 +7023,14 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
 */
   }
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":137
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":171
  *         if value is None:
  *             return
  *         if self._max is None or value > self._max:             # <<<<<<<<<<<<<<
  *             self._max = value
  * 
 */
-  __pyx_t_2 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_max_2); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 137, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_max_2); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 171, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
   __pyx_t_3 = (__pyx_t_2 == Py_None);
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
@@ -6571,26 +7039,26 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
     __pyx_t_1 = __pyx_t_3;
     goto __pyx_L5_bool_binop_done;
   }
-  __pyx_t_2 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_max_2); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 137, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_max_2); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 171, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
-  __pyx_t_4 = PyObject_RichCompare(__pyx_v_value, __pyx_t_2, Py_GT); __Pyx_XGOTREF(__pyx_t_4); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 137, __pyx_L1_error)
+  __pyx_t_4 = PyObject_RichCompare(__pyx_v_value, __pyx_t_2, Py_GT); __Pyx_XGOTREF(__pyx_t_4); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 171, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
-  __pyx_t_3 = __Pyx_PyObject_IsTrue(__pyx_t_4); if (unlikely((__pyx_t_3 < 0))) __PYX_ERR(0, 137, __pyx_L1_error)
+  __pyx_t_3 = __Pyx_PyObject_IsTrue(__pyx_t_4); if (unlikely((__pyx_t_3 < 0))) __PYX_ERR(0, 171, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
   __pyx_t_1 = __pyx_t_3;
   __pyx_L5_bool_binop_done:;
   if (__pyx_t_1) {
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":138
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":172
  *             return
  *         if self._max is None or value > self._max:
  *             self._max = value             # <<<<<<<<<<<<<<
  * 
  *     def _reject_unsupported_approximate(self):
 */
-    if (__Pyx_PyObject_SetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_max_2, __pyx_v_value) < (0)) __PYX_ERR(0, 138, __pyx_L1_error)
+    if (__Pyx_PyObject_SetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_max_2, __pyx_v_value) < (0)) __PYX_ERR(0, 172, __pyx_L1_error)
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":137
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":171
  *         if value is None:
  *             return
  *         if self._max is None or value > self._max:             # <<<<<<<<<<<<<<
@@ -6599,7 +7067,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
 */
   }
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":134
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":168
  *             self._min = value
  * 
  *     def _update_max(self, value):             # <<<<<<<<<<<<<<
@@ -6621,7 +7089,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
   return __pyx_r;
 }
 
-/* "opteryx/operators/aggregate/aggregate_node.pyx":140
+/* "opteryx/operators/aggregate/aggregate_node.pyx":174
  *             self._max = value
  * 
  *     def _reject_unsupported_approximate(self):             # <<<<<<<<<<<<<<
@@ -6668,32 +7136,32 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   {
     PyObject ** const __pyx_pyargnames[] = {&__pyx_mstate_global->__pyx_n_u_self,0};
     const Py_ssize_t __pyx_kwds_len = (__pyx_kwds) ? __Pyx_NumKwargs_FASTCALL(__pyx_kwds) : 0;
-    if (unlikely(__pyx_kwds_len) < 0) __PYX_ERR(0, 140, __pyx_L3_error)
+    if (unlikely(__pyx_kwds_len) < 0) __PYX_ERR(0, 174, __pyx_L3_error)
     if (__pyx_kwds_len > 0) {
       switch (__pyx_nargs) {
         case  1:
         values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 140, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 174, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  0: break;
         default: goto __pyx_L5_argtuple_error;
       }
       const Py_ssize_t kwd_pos_args = __pyx_nargs;
-      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "_reject_unsupported_approximate", 0) < (0)) __PYX_ERR(0, 140, __pyx_L3_error)
+      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "_reject_unsupported_approximate", 0) < (0)) __PYX_ERR(0, 174, __pyx_L3_error)
       for (Py_ssize_t i = __pyx_nargs; i < 1; i++) {
-        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("_reject_unsupported_approximate", 1, 1, 1, i); __PYX_ERR(0, 140, __pyx_L3_error) }
+        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("_reject_unsupported_approximate", 1, 1, 1, i); __PYX_ERR(0, 174, __pyx_L3_error) }
       }
     } else if (unlikely(__pyx_nargs != 1)) {
       goto __pyx_L5_argtuple_error;
     } else {
       values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 140, __pyx_L3_error)
+      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 174, __pyx_L3_error)
     }
     __pyx_v_self = values[0];
   }
   goto __pyx_L6_skip;
   __pyx_L5_argtuple_error:;
-  __Pyx_RaiseArgtupleInvalid("_reject_unsupported_approximate", 1, 1, 1, __pyx_nargs); __PYX_ERR(0, 140, __pyx_L3_error)
+  __Pyx_RaiseArgtupleInvalid("_reject_unsupported_approximate", 1, 1, 1, __pyx_nargs); __PYX_ERR(0, 174, __pyx_L3_error)
   __pyx_L6_skip:;
   goto __pyx_L4_argument_unpacking_done;
   __pyx_L3_error:;
@@ -6728,7 +7196,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("_reject_unsupported_approximate", 0);
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":141
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":175
  * 
  *     def _reject_unsupported_approximate(self):
  *         raise NotImplementedError(             # <<<<<<<<<<<<<<
@@ -6737,23 +7205,23 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
 */
   __pyx_t_2 = NULL;
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":142
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":176
  *     def _reject_unsupported_approximate(self):
  *         raise NotImplementedError(
  *             f"Approximate aggregate `{self.aggregate_type}` is no longer supported."             # <<<<<<<<<<<<<<
  *         )
  * 
 */
-  __pyx_t_3 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_aggregate_type); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 142, __pyx_L1_error)
+  __pyx_t_3 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_aggregate_type); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 176, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_3);
-  __pyx_t_4 = __Pyx_PyObject_FormatSimple(__pyx_t_3, __pyx_mstate_global->__pyx_empty_unicode); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 142, __pyx_L1_error)
+  __pyx_t_4 = __Pyx_PyObject_FormatSimple(__pyx_t_3, __pyx_mstate_global->__pyx_empty_unicode); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 176, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_4);
   __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
   __pyx_t_5[0] = __pyx_mstate_global->__pyx_kp_u_Approximate_aggregate;
   __pyx_t_5[1] = __pyx_t_4;
   __pyx_t_5[2] = __pyx_mstate_global->__pyx_kp_u_is_no_longer_supported;
   __pyx_t_3 = __Pyx_PyUnicode_Join(__pyx_t_5, 3, 23 + __Pyx_PyUnicode_GET_LENGTH(__pyx_t_4) + 25, 127 | __Pyx_PyUnicode_MAX_CHAR_VALUE(__pyx_t_4));
-  if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 142, __pyx_L1_error)
+  if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 176, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_3);
   __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
   __pyx_t_6 = 1;
@@ -6762,14 +7230,14 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
     __pyx_t_1 = __Pyx_PyObject_FastCall((PyObject*)(((PyTypeObject*)PyExc_NotImplementedError)), __pyx_callargs+__pyx_t_6, (2-__pyx_t_6) | (__pyx_t_6*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
     __Pyx_XDECREF(__pyx_t_2); __pyx_t_2 = 0;
     __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
-    if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 141, __pyx_L1_error)
+    if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 175, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_1);
   }
   __Pyx_Raise(__pyx_t_1, 0, 0, 0);
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
-  __PYX_ERR(0, 141, __pyx_L1_error)
+  __PYX_ERR(0, 175, __pyx_L1_error)
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":140
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":174
  *             self._max = value
  * 
  *     def _reject_unsupported_approximate(self):             # <<<<<<<<<<<<<<
@@ -6790,7 +7258,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
   return __pyx_r;
 }
 
-/* "opteryx/operators/aggregate/aggregate_node.pyx":145
+/* "opteryx/operators/aggregate/aggregate_node.pyx":179
  *         )
  * 
  *     def _collect_literal(self, literal, row_count):             # <<<<<<<<<<<<<<
@@ -6839,38 +7307,38 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   {
     PyObject ** const __pyx_pyargnames[] = {&__pyx_mstate_global->__pyx_n_u_self,&__pyx_mstate_global->__pyx_n_u_literal,&__pyx_mstate_global->__pyx_n_u_row_count,0};
     const Py_ssize_t __pyx_kwds_len = (__pyx_kwds) ? __Pyx_NumKwargs_FASTCALL(__pyx_kwds) : 0;
-    if (unlikely(__pyx_kwds_len) < 0) __PYX_ERR(0, 145, __pyx_L3_error)
+    if (unlikely(__pyx_kwds_len) < 0) __PYX_ERR(0, 179, __pyx_L3_error)
     if (__pyx_kwds_len > 0) {
       switch (__pyx_nargs) {
         case  3:
         values[2] = __Pyx_ArgRef_FASTCALL(__pyx_args, 2);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[2])) __PYX_ERR(0, 145, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[2])) __PYX_ERR(0, 179, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  2:
         values[1] = __Pyx_ArgRef_FASTCALL(__pyx_args, 1);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(0, 145, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(0, 179, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  1:
         values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 145, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 179, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  0: break;
         default: goto __pyx_L5_argtuple_error;
       }
       const Py_ssize_t kwd_pos_args = __pyx_nargs;
-      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "_collect_literal", 0) < (0)) __PYX_ERR(0, 145, __pyx_L3_error)
+      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "_collect_literal", 0) < (0)) __PYX_ERR(0, 179, __pyx_L3_error)
       for (Py_ssize_t i = __pyx_nargs; i < 3; i++) {
-        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("_collect_literal", 1, 3, 3, i); __PYX_ERR(0, 145, __pyx_L3_error) }
+        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("_collect_literal", 1, 3, 3, i); __PYX_ERR(0, 179, __pyx_L3_error) }
       }
     } else if (unlikely(__pyx_nargs != 3)) {
       goto __pyx_L5_argtuple_error;
     } else {
       values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 145, __pyx_L3_error)
+      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 179, __pyx_L3_error)
       values[1] = __Pyx_ArgRef_FASTCALL(__pyx_args, 1);
-      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(0, 145, __pyx_L3_error)
+      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(0, 179, __pyx_L3_error)
       values[2] = __Pyx_ArgRef_FASTCALL(__pyx_args, 2);
-      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[2])) __PYX_ERR(0, 145, __pyx_L3_error)
+      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[2])) __PYX_ERR(0, 179, __pyx_L3_error)
     }
     __pyx_v_self = values[0];
     __pyx_v_literal = values[1];
@@ -6878,7 +7346,7 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   }
   goto __pyx_L6_skip;
   __pyx_L5_argtuple_error:;
-  __Pyx_RaiseArgtupleInvalid("_collect_literal", 1, 3, 3, __pyx_nargs); __PYX_ERR(0, 145, __pyx_L3_error)
+  __Pyx_RaiseArgtupleInvalid("_collect_literal", 1, 3, 3, __pyx_nargs); __PYX_ERR(0, 179, __pyx_L3_error)
   __pyx_L6_skip:;
   goto __pyx_L4_argument_unpacking_done;
   __pyx_L3_error:;
@@ -6915,17 +7383,17 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("_collect_literal", 0);
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":146
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":180
  * 
  *     def _collect_literal(self, literal, row_count):
  *         if row_count == 0:             # <<<<<<<<<<<<<<
  *             return
  * 
 */
-  __pyx_t_1 = (__Pyx_PyLong_BoolEqObjC(__pyx_v_row_count, __pyx_mstate_global->__pyx_int_0, 0, 0)); if (unlikely((__pyx_t_1 < 0))) __PYX_ERR(0, 146, __pyx_L1_error)
+  __pyx_t_1 = (__Pyx_PyLong_BoolEqObjC(__pyx_v_row_count, __pyx_mstate_global->__pyx_int_0, 0, 0)); if (unlikely((__pyx_t_1 < 0))) __PYX_ERR(0, 180, __pyx_L1_error)
   if (__pyx_t_1) {
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":147
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":181
  *     def _collect_literal(self, literal, row_count):
  *         if row_count == 0:
  *             return             # <<<<<<<<<<<<<<
@@ -6936,7 +7404,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
     __pyx_r = Py_None; __Pyx_INCREF(Py_None);
     goto __pyx_L0;
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":146
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":180
  * 
  *     def _collect_literal(self, literal, row_count):
  *         if row_count == 0:             # <<<<<<<<<<<<<<
@@ -6945,33 +7413,33 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
 */
   }
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":149
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":183
  *             return
  * 
  *         if self.aggregate_type == "COUNT":             # <<<<<<<<<<<<<<
  *             if self.duplicate_treatment == "Distinct":
  *                 self._distinct_hashes = _insert_literal_hash(self._distinct_hashes, literal)
 */
-  __pyx_t_2 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_aggregate_type); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 149, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_aggregate_type); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 183, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
-  __pyx_t_1 = (__Pyx_PyUnicode_Equals(__pyx_t_2, __pyx_mstate_global->__pyx_n_u_COUNT, Py_EQ)); if (unlikely((__pyx_t_1 < 0))) __PYX_ERR(0, 149, __pyx_L1_error)
+  __pyx_t_1 = (__Pyx_PyUnicode_Equals(__pyx_t_2, __pyx_mstate_global->__pyx_n_u_COUNT, Py_EQ)); if (unlikely((__pyx_t_1 < 0))) __PYX_ERR(0, 183, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
   if (__pyx_t_1) {
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":150
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":184
  * 
  *         if self.aggregate_type == "COUNT":
  *             if self.duplicate_treatment == "Distinct":             # <<<<<<<<<<<<<<
  *                 self._distinct_hashes = _insert_literal_hash(self._distinct_hashes, literal)
  *                 return
 */
-    __pyx_t_2 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_duplicate_treatment); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 150, __pyx_L1_error)
+    __pyx_t_2 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_duplicate_treatment); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 184, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_2);
-    __pyx_t_1 = (__Pyx_PyUnicode_Equals(__pyx_t_2, __pyx_mstate_global->__pyx_n_u_Distinct, Py_EQ)); if (unlikely((__pyx_t_1 < 0))) __PYX_ERR(0, 150, __pyx_L1_error)
+    __pyx_t_1 = (__Pyx_PyUnicode_Equals(__pyx_t_2, __pyx_mstate_global->__pyx_n_u_Distinct, Py_EQ)); if (unlikely((__pyx_t_1 < 0))) __PYX_ERR(0, 184, __pyx_L1_error)
     __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
     if (__pyx_t_1) {
 
-      /* "opteryx/operators/aggregate/aggregate_node.pyx":151
+      /* "opteryx/operators/aggregate/aggregate_node.pyx":185
  *         if self.aggregate_type == "COUNT":
  *             if self.duplicate_treatment == "Distinct":
  *                 self._distinct_hashes = _insert_literal_hash(self._distinct_hashes, literal)             # <<<<<<<<<<<<<<
@@ -6979,9 +7447,9 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
  * 
 */
       __pyx_t_3 = NULL;
-      __Pyx_GetModuleGlobalName(__pyx_t_4, __pyx_mstate_global->__pyx_n_u_insert_literal_hash); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 151, __pyx_L1_error)
+      __Pyx_GetModuleGlobalName(__pyx_t_4, __pyx_mstate_global->__pyx_n_u_insert_literal_hash); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 185, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_4);
-      __pyx_t_5 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_distinct_hashes_2); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 151, __pyx_L1_error)
+      __pyx_t_5 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_distinct_hashes_2); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 185, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_5);
       __pyx_t_6 = 1;
       #if CYTHON_UNPACK_METHODS
@@ -7001,13 +7469,13 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
         __Pyx_XDECREF(__pyx_t_3); __pyx_t_3 = 0;
         __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
         __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
-        if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 151, __pyx_L1_error)
+        if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 185, __pyx_L1_error)
         __Pyx_GOTREF(__pyx_t_2);
       }
-      if (__Pyx_PyObject_SetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_distinct_hashes_2, __pyx_t_2) < (0)) __PYX_ERR(0, 151, __pyx_L1_error)
+      if (__Pyx_PyObject_SetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_distinct_hashes_2, __pyx_t_2) < (0)) __PYX_ERR(0, 185, __pyx_L1_error)
       __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
-      /* "opteryx/operators/aggregate/aggregate_node.pyx":152
+      /* "opteryx/operators/aggregate/aggregate_node.pyx":186
  *             if self.duplicate_treatment == "Distinct":
  *                 self._distinct_hashes = _insert_literal_hash(self._distinct_hashes, literal)
  *                 return             # <<<<<<<<<<<<<<
@@ -7018,7 +7486,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
       __pyx_r = Py_None; __Pyx_INCREF(Py_None);
       goto __pyx_L0;
 
-      /* "opteryx/operators/aggregate/aggregate_node.pyx":150
+      /* "opteryx/operators/aggregate/aggregate_node.pyx":184
  * 
  *         if self.aggregate_type == "COUNT":
  *             if self.duplicate_treatment == "Distinct":             # <<<<<<<<<<<<<<
@@ -7027,7 +7495,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
 */
     }
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":154
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":188
  *                 return
  * 
  *             if literal is not None:             # <<<<<<<<<<<<<<
@@ -7037,22 +7505,22 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
     __pyx_t_1 = (__pyx_v_literal != Py_None);
     if (__pyx_t_1) {
 
-      /* "opteryx/operators/aggregate/aggregate_node.pyx":155
+      /* "opteryx/operators/aggregate/aggregate_node.pyx":189
  * 
  *             if literal is not None:
  *                 self._count += row_count             # <<<<<<<<<<<<<<
  *             return
  * 
 */
-      __pyx_t_2 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_count); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 155, __pyx_L1_error)
+      __pyx_t_2 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_count); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 189, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_2);
-      __pyx_t_4 = PyNumber_InPlaceAdd(__pyx_t_2, __pyx_v_row_count); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 155, __pyx_L1_error)
+      __pyx_t_4 = PyNumber_InPlaceAdd(__pyx_t_2, __pyx_v_row_count); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 189, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_4);
       __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
-      if (__Pyx_PyObject_SetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_count, __pyx_t_4) < (0)) __PYX_ERR(0, 155, __pyx_L1_error)
+      if (__Pyx_PyObject_SetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_count, __pyx_t_4) < (0)) __PYX_ERR(0, 189, __pyx_L1_error)
       __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
 
-      /* "opteryx/operators/aggregate/aggregate_node.pyx":154
+      /* "opteryx/operators/aggregate/aggregate_node.pyx":188
  *                 return
  * 
  *             if literal is not None:             # <<<<<<<<<<<<<<
@@ -7061,7 +7529,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
 */
     }
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":156
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":190
  *             if literal is not None:
  *                 self._count += row_count
  *             return             # <<<<<<<<<<<<<<
@@ -7072,7 +7540,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
     __pyx_r = Py_None; __Pyx_INCREF(Py_None);
     goto __pyx_L0;
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":149
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":183
  *             return
  * 
  *         if self.aggregate_type == "COUNT":             # <<<<<<<<<<<<<<
@@ -7081,7 +7549,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
 */
   }
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":158
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":192
  *             return
  * 
  *         if literal is None:             # <<<<<<<<<<<<<<
@@ -7091,7 +7559,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
   __pyx_t_1 = (__pyx_v_literal == Py_None);
   if (__pyx_t_1) {
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":159
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":193
  * 
  *         if literal is None:
  *             return             # <<<<<<<<<<<<<<
@@ -7102,7 +7570,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
     __pyx_r = Py_None; __Pyx_INCREF(Py_None);
     goto __pyx_L0;
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":158
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":192
  *             return
  * 
  *         if literal is None:             # <<<<<<<<<<<<<<
@@ -7111,39 +7579,39 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
 */
   }
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":161
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":195
  *             return
  * 
  *         if self.aggregate_type == "SUM":             # <<<<<<<<<<<<<<
  *             contribution = literal * row_count
  *             self._sum = contribution if self._sum is None else self._sum + contribution
 */
-  __pyx_t_4 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_aggregate_type); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 161, __pyx_L1_error)
+  __pyx_t_4 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_aggregate_type); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 195, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_4);
-  __pyx_t_1 = (__Pyx_PyUnicode_Equals(__pyx_t_4, __pyx_mstate_global->__pyx_n_u_SUM, Py_EQ)); if (unlikely((__pyx_t_1 < 0))) __PYX_ERR(0, 161, __pyx_L1_error)
+  __pyx_t_1 = (__Pyx_PyUnicode_Equals(__pyx_t_4, __pyx_mstate_global->__pyx_n_u_SUM, Py_EQ)); if (unlikely((__pyx_t_1 < 0))) __PYX_ERR(0, 195, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
   if (__pyx_t_1) {
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":162
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":196
  * 
  *         if self.aggregate_type == "SUM":
  *             contribution = literal * row_count             # <<<<<<<<<<<<<<
  *             self._sum = contribution if self._sum is None else self._sum + contribution
  *             return
 */
-    __pyx_t_4 = PyNumber_Multiply(__pyx_v_literal, __pyx_v_row_count); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 162, __pyx_L1_error)
+    __pyx_t_4 = PyNumber_Multiply(__pyx_v_literal, __pyx_v_row_count); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 196, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_4);
     __pyx_v_contribution = __pyx_t_4;
     __pyx_t_4 = 0;
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":163
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":197
  *         if self.aggregate_type == "SUM":
  *             contribution = literal * row_count
  *             self._sum = contribution if self._sum is None else self._sum + contribution             # <<<<<<<<<<<<<<
  *             return
  * 
 */
-    __pyx_t_2 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_sum_2); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 163, __pyx_L1_error)
+    __pyx_t_2 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_sum_2); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 197, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_2);
     __pyx_t_1 = (__pyx_t_2 == Py_None);
     __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
@@ -7151,18 +7619,18 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
       __Pyx_INCREF(__pyx_v_contribution);
       __pyx_t_4 = __pyx_v_contribution;
     } else {
-      __pyx_t_2 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_sum_2); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 163, __pyx_L1_error)
+      __pyx_t_2 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_sum_2); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 197, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_2);
-      __pyx_t_5 = PyNumber_Add(__pyx_t_2, __pyx_v_contribution); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 163, __pyx_L1_error)
+      __pyx_t_5 = PyNumber_Add(__pyx_t_2, __pyx_v_contribution); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 197, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_5);
       __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
       __pyx_t_4 = __pyx_t_5;
       __pyx_t_5 = 0;
     }
-    if (__Pyx_PyObject_SetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_sum_2, __pyx_t_4) < (0)) __PYX_ERR(0, 163, __pyx_L1_error)
+    if (__Pyx_PyObject_SetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_sum_2, __pyx_t_4) < (0)) __PYX_ERR(0, 197, __pyx_L1_error)
     __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":164
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":198
  *             contribution = literal * row_count
  *             self._sum = contribution if self._sum is None else self._sum + contribution
  *             return             # <<<<<<<<<<<<<<
@@ -7173,7 +7641,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
     __pyx_r = Py_None; __Pyx_INCREF(Py_None);
     goto __pyx_L0;
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":161
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":195
  *             return
  * 
  *         if self.aggregate_type == "SUM":             # <<<<<<<<<<<<<<
@@ -7182,41 +7650,41 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
 */
   }
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":166
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":200
  *             return
  * 
  *         if self.aggregate_type == "AVG":             # <<<<<<<<<<<<<<
  *             self._sum = (
  *                 (literal * row_count) if self._sum is None else self._sum + (literal * row_count)
 */
-  __pyx_t_4 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_aggregate_type); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 166, __pyx_L1_error)
+  __pyx_t_4 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_aggregate_type); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 200, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_4);
-  __pyx_t_1 = (__Pyx_PyUnicode_Equals(__pyx_t_4, __pyx_mstate_global->__pyx_n_u_AVG, Py_EQ)); if (unlikely((__pyx_t_1 < 0))) __PYX_ERR(0, 166, __pyx_L1_error)
+  __pyx_t_1 = (__Pyx_PyUnicode_Equals(__pyx_t_4, __pyx_mstate_global->__pyx_n_u_AVG, Py_EQ)); if (unlikely((__pyx_t_1 < 0))) __PYX_ERR(0, 200, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
   if (__pyx_t_1) {
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":168
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":202
  *         if self.aggregate_type == "AVG":
  *             self._sum = (
  *                 (literal * row_count) if self._sum is None else self._sum + (literal * row_count)             # <<<<<<<<<<<<<<
  *             )
  *             self._count += row_count
 */
-    __pyx_t_5 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_sum_2); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 168, __pyx_L1_error)
+    __pyx_t_5 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_sum_2); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 202, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_5);
     __pyx_t_1 = (__pyx_t_5 == Py_None);
     __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
     if (__pyx_t_1) {
-      __pyx_t_5 = PyNumber_Multiply(__pyx_v_literal, __pyx_v_row_count); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 168, __pyx_L1_error)
+      __pyx_t_5 = PyNumber_Multiply(__pyx_v_literal, __pyx_v_row_count); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 202, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_5);
       __pyx_t_4 = __pyx_t_5;
       __pyx_t_5 = 0;
     } else {
-      __pyx_t_5 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_sum_2); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 168, __pyx_L1_error)
+      __pyx_t_5 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_sum_2); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 202, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_5);
-      __pyx_t_2 = PyNumber_Multiply(__pyx_v_literal, __pyx_v_row_count); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 168, __pyx_L1_error)
+      __pyx_t_2 = PyNumber_Multiply(__pyx_v_literal, __pyx_v_row_count); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 202, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_2);
-      __pyx_t_3 = PyNumber_Add(__pyx_t_5, __pyx_t_2); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 168, __pyx_L1_error)
+      __pyx_t_3 = PyNumber_Add(__pyx_t_5, __pyx_t_2); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 202, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_3);
       __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
       __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
@@ -7224,32 +7692,32 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
       __pyx_t_3 = 0;
     }
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":167
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":201
  * 
  *         if self.aggregate_type == "AVG":
  *             self._sum = (             # <<<<<<<<<<<<<<
  *                 (literal * row_count) if self._sum is None else self._sum + (literal * row_count)
  *             )
 */
-    if (__Pyx_PyObject_SetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_sum_2, __pyx_t_4) < (0)) __PYX_ERR(0, 167, __pyx_L1_error)
+    if (__Pyx_PyObject_SetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_sum_2, __pyx_t_4) < (0)) __PYX_ERR(0, 201, __pyx_L1_error)
     __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":170
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":204
  *                 (literal * row_count) if self._sum is None else self._sum + (literal * row_count)
  *             )
  *             self._count += row_count             # <<<<<<<<<<<<<<
  *             return
  * 
 */
-    __pyx_t_4 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_count); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 170, __pyx_L1_error)
+    __pyx_t_4 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_count); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 204, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_4);
-    __pyx_t_3 = PyNumber_InPlaceAdd(__pyx_t_4, __pyx_v_row_count); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 170, __pyx_L1_error)
+    __pyx_t_3 = PyNumber_InPlaceAdd(__pyx_t_4, __pyx_v_row_count); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 204, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_3);
     __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
-    if (__Pyx_PyObject_SetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_count, __pyx_t_3) < (0)) __PYX_ERR(0, 170, __pyx_L1_error)
+    if (__Pyx_PyObject_SetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_count, __pyx_t_3) < (0)) __PYX_ERR(0, 204, __pyx_L1_error)
     __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":171
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":205
  *             )
  *             self._count += row_count
  *             return             # <<<<<<<<<<<<<<
@@ -7260,7 +7728,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
     __pyx_r = Py_None; __Pyx_INCREF(Py_None);
     goto __pyx_L0;
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":166
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":200
  *             return
  * 
  *         if self.aggregate_type == "AVG":             # <<<<<<<<<<<<<<
@@ -7269,20 +7737,20 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
 */
   }
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":173
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":207
  *             return
  * 
  *         if self.aggregate_type == "MIN":             # <<<<<<<<<<<<<<
  *             self._update_min(literal)
  *             return
 */
-  __pyx_t_3 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_aggregate_type); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 173, __pyx_L1_error)
+  __pyx_t_3 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_aggregate_type); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 207, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_3);
-  __pyx_t_1 = (__Pyx_PyUnicode_Equals(__pyx_t_3, __pyx_mstate_global->__pyx_n_u_MIN, Py_EQ)); if (unlikely((__pyx_t_1 < 0))) __PYX_ERR(0, 173, __pyx_L1_error)
+  __pyx_t_1 = (__Pyx_PyUnicode_Equals(__pyx_t_3, __pyx_mstate_global->__pyx_n_u_MIN, Py_EQ)); if (unlikely((__pyx_t_1 < 0))) __PYX_ERR(0, 207, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
   if (__pyx_t_1) {
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":174
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":208
  * 
  *         if self.aggregate_type == "MIN":
  *             self._update_min(literal)             # <<<<<<<<<<<<<<
@@ -7296,12 +7764,12 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
       PyObject *__pyx_callargs[2] = {__pyx_t_4, __pyx_v_literal};
       __pyx_t_3 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_update_min, __pyx_callargs+__pyx_t_6, (2-__pyx_t_6) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
       __Pyx_XDECREF(__pyx_t_4); __pyx_t_4 = 0;
-      if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 174, __pyx_L1_error)
+      if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 208, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_3);
     }
     __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":175
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":209
  *         if self.aggregate_type == "MIN":
  *             self._update_min(literal)
  *             return             # <<<<<<<<<<<<<<
@@ -7312,7 +7780,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
     __pyx_r = Py_None; __Pyx_INCREF(Py_None);
     goto __pyx_L0;
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":173
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":207
  *             return
  * 
  *         if self.aggregate_type == "MIN":             # <<<<<<<<<<<<<<
@@ -7321,20 +7789,20 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
 */
   }
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":177
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":211
  *             return
  * 
  *         if self.aggregate_type == "MAX":             # <<<<<<<<<<<<<<
  *             self._update_max(literal)
  *             return
 */
-  __pyx_t_3 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_aggregate_type); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 177, __pyx_L1_error)
+  __pyx_t_3 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_aggregate_type); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 211, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_3);
-  __pyx_t_1 = (__Pyx_PyUnicode_Equals(__pyx_t_3, __pyx_mstate_global->__pyx_n_u_MAX, Py_EQ)); if (unlikely((__pyx_t_1 < 0))) __PYX_ERR(0, 177, __pyx_L1_error)
+  __pyx_t_1 = (__Pyx_PyUnicode_Equals(__pyx_t_3, __pyx_mstate_global->__pyx_n_u_MAX, Py_EQ)); if (unlikely((__pyx_t_1 < 0))) __PYX_ERR(0, 211, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
   if (__pyx_t_1) {
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":178
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":212
  * 
  *         if self.aggregate_type == "MAX":
  *             self._update_max(literal)             # <<<<<<<<<<<<<<
@@ -7348,12 +7816,12 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
       PyObject *__pyx_callargs[2] = {__pyx_t_4, __pyx_v_literal};
       __pyx_t_3 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_update_max, __pyx_callargs+__pyx_t_6, (2-__pyx_t_6) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
       __Pyx_XDECREF(__pyx_t_4); __pyx_t_4 = 0;
-      if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 178, __pyx_L1_error)
+      if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 212, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_3);
     }
     __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":179
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":213
  *         if self.aggregate_type == "MAX":
  *             self._update_max(literal)
  *             return             # <<<<<<<<<<<<<<
@@ -7364,7 +7832,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
     __pyx_r = Py_None; __Pyx_INCREF(Py_None);
     goto __pyx_L0;
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":177
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":211
  *             return
  * 
  *         if self.aggregate_type == "MAX":             # <<<<<<<<<<<<<<
@@ -7373,29 +7841,29 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
 */
   }
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":181
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":215
  *             return
  * 
  *         if self.aggregate_type in ("APPROX_COUNT_DISTINCT", "APPROX_PERCENTILE"):             # <<<<<<<<<<<<<<
  *             self._reject_unsupported_approximate()
  * 
 */
-  __pyx_t_3 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_aggregate_type); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 181, __pyx_L1_error)
+  __pyx_t_3 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_aggregate_type); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 215, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_3);
-  __pyx_t_7 = (__Pyx_PyUnicode_Equals(__pyx_t_3, __pyx_mstate_global->__pyx_n_u_APPROX_COUNT_DISTINCT, Py_EQ)); if (unlikely((__pyx_t_7 < 0))) __PYX_ERR(0, 181, __pyx_L1_error)
+  __pyx_t_7 = (__Pyx_PyUnicode_Equals(__pyx_t_3, __pyx_mstate_global->__pyx_n_u_APPROX_COUNT_DISTINCT, Py_EQ)); if (unlikely((__pyx_t_7 < 0))) __PYX_ERR(0, 215, __pyx_L1_error)
   if (!__pyx_t_7) {
   } else {
     __pyx_t_1 = __pyx_t_7;
     goto __pyx_L13_bool_binop_done;
   }
-  __pyx_t_7 = (__Pyx_PyUnicode_Equals(__pyx_t_3, __pyx_mstate_global->__pyx_n_u_APPROX_PERCENTILE, Py_EQ)); if (unlikely((__pyx_t_7 < 0))) __PYX_ERR(0, 181, __pyx_L1_error)
+  __pyx_t_7 = (__Pyx_PyUnicode_Equals(__pyx_t_3, __pyx_mstate_global->__pyx_n_u_APPROX_PERCENTILE, Py_EQ)); if (unlikely((__pyx_t_7 < 0))) __PYX_ERR(0, 215, __pyx_L1_error)
   __pyx_t_1 = __pyx_t_7;
   __pyx_L13_bool_binop_done:;
   __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
   __pyx_t_7 = __pyx_t_1;
   if (__pyx_t_7) {
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":182
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":216
  * 
  *         if self.aggregate_type in ("APPROX_COUNT_DISTINCT", "APPROX_PERCENTILE"):
  *             self._reject_unsupported_approximate()             # <<<<<<<<<<<<<<
@@ -7409,12 +7877,12 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
       PyObject *__pyx_callargs[2] = {__pyx_t_4, NULL};
       __pyx_t_3 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_reject_unsupported_approximate, __pyx_callargs+__pyx_t_6, (1-__pyx_t_6) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
       __Pyx_XDECREF(__pyx_t_4); __pyx_t_4 = 0;
-      if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 182, __pyx_L1_error)
+      if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 216, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_3);
     }
     __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":181
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":215
  *             return
  * 
  *         if self.aggregate_type in ("APPROX_COUNT_DISTINCT", "APPROX_PERCENTILE"):             # <<<<<<<<<<<<<<
@@ -7423,7 +7891,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
 */
   }
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":145
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":179
  *         )
  * 
  *     def _collect_literal(self, literal, row_count):             # <<<<<<<<<<<<<<
@@ -7448,7 +7916,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
   return __pyx_r;
 }
 
-/* "opteryx/operators/aggregate/aggregate_node.pyx":184
+/* "opteryx/operators/aggregate/aggregate_node.pyx":218
  *             self._reject_unsupported_approximate()
  * 
  *     def _collect_vector(self, vector):             # <<<<<<<<<<<<<<
@@ -7496,39 +7964,39 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   {
     PyObject ** const __pyx_pyargnames[] = {&__pyx_mstate_global->__pyx_n_u_self,&__pyx_mstate_global->__pyx_n_u_vector,0};
     const Py_ssize_t __pyx_kwds_len = (__pyx_kwds) ? __Pyx_NumKwargs_FASTCALL(__pyx_kwds) : 0;
-    if (unlikely(__pyx_kwds_len) < 0) __PYX_ERR(0, 184, __pyx_L3_error)
+    if (unlikely(__pyx_kwds_len) < 0) __PYX_ERR(0, 218, __pyx_L3_error)
     if (__pyx_kwds_len > 0) {
       switch (__pyx_nargs) {
         case  2:
         values[1] = __Pyx_ArgRef_FASTCALL(__pyx_args, 1);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(0, 184, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(0, 218, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  1:
         values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 184, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 218, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  0: break;
         default: goto __pyx_L5_argtuple_error;
       }
       const Py_ssize_t kwd_pos_args = __pyx_nargs;
-      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "_collect_vector", 0) < (0)) __PYX_ERR(0, 184, __pyx_L3_error)
+      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "_collect_vector", 0) < (0)) __PYX_ERR(0, 218, __pyx_L3_error)
       for (Py_ssize_t i = __pyx_nargs; i < 2; i++) {
-        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("_collect_vector", 1, 2, 2, i); __PYX_ERR(0, 184, __pyx_L3_error) }
+        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("_collect_vector", 1, 2, 2, i); __PYX_ERR(0, 218, __pyx_L3_error) }
       }
     } else if (unlikely(__pyx_nargs != 2)) {
       goto __pyx_L5_argtuple_error;
     } else {
       values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 184, __pyx_L3_error)
+      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 218, __pyx_L3_error)
       values[1] = __Pyx_ArgRef_FASTCALL(__pyx_args, 1);
-      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(0, 184, __pyx_L3_error)
+      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(0, 218, __pyx_L3_error)
     }
     __pyx_v_self = values[0];
     __pyx_v_vector = values[1];
   }
   goto __pyx_L6_skip;
   __pyx_L5_argtuple_error:;
-  __Pyx_RaiseArgtupleInvalid("_collect_vector", 1, 2, 2, __pyx_nargs); __PYX_ERR(0, 184, __pyx_L3_error)
+  __Pyx_RaiseArgtupleInvalid("_collect_vector", 1, 2, 2, __pyx_nargs); __PYX_ERR(0, 218, __pyx_L3_error)
   __pyx_L6_skip:;
   goto __pyx_L4_argument_unpacking_done;
   __pyx_L3_error:;
@@ -7568,18 +8036,18 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("_collect_vector", 0);
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":185
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":219
  * 
  *     def _collect_vector(self, vector):
  *         valid_count = len(vector) - _vector_null_count(vector)             # <<<<<<<<<<<<<<
  * 
  *         if self.aggregate_type == "COUNT":
 */
-  __pyx_t_1 = PyObject_Length(__pyx_v_vector); if (unlikely(__pyx_t_1 == ((Py_ssize_t)-1))) __PYX_ERR(0, 185, __pyx_L1_error)
-  __pyx_t_2 = PyLong_FromSsize_t(__pyx_t_1); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 185, __pyx_L1_error)
+  __pyx_t_1 = PyObject_Length(__pyx_v_vector); if (unlikely(__pyx_t_1 == ((Py_ssize_t)-1))) __PYX_ERR(0, 219, __pyx_L1_error)
+  __pyx_t_2 = PyLong_FromSsize_t(__pyx_t_1); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 219, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
   __pyx_t_4 = NULL;
-  __Pyx_GetModuleGlobalName(__pyx_t_5, __pyx_mstate_global->__pyx_n_u_vector_null_count); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 185, __pyx_L1_error)
+  __Pyx_GetModuleGlobalName(__pyx_t_5, __pyx_mstate_global->__pyx_n_u_vector_null_count); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 219, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_5);
   __pyx_t_6 = 1;
   #if CYTHON_UNPACK_METHODS
@@ -7598,43 +8066,43 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
     __pyx_t_3 = __Pyx_PyObject_FastCall((PyObject*)__pyx_t_5, __pyx_callargs+__pyx_t_6, (2-__pyx_t_6) | (__pyx_t_6*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
     __Pyx_XDECREF(__pyx_t_4); __pyx_t_4 = 0;
     __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
-    if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 185, __pyx_L1_error)
+    if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 219, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_3);
   }
-  __pyx_t_5 = PyNumber_Subtract(__pyx_t_2, __pyx_t_3); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 185, __pyx_L1_error)
+  __pyx_t_5 = PyNumber_Subtract(__pyx_t_2, __pyx_t_3); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 219, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_5);
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
   __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
   __pyx_v_valid_count = __pyx_t_5;
   __pyx_t_5 = 0;
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":187
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":221
  *         valid_count = len(vector) - _vector_null_count(vector)
  * 
  *         if self.aggregate_type == "COUNT":             # <<<<<<<<<<<<<<
  *             if self.duplicate_treatment == "Distinct":
  *                 self._distinct_hashes = _insert_vector_hashes(self._distinct_hashes, vector)
 */
-  __pyx_t_5 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_aggregate_type); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 187, __pyx_L1_error)
+  __pyx_t_5 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_aggregate_type); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 221, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_5);
-  __pyx_t_7 = (__Pyx_PyUnicode_Equals(__pyx_t_5, __pyx_mstate_global->__pyx_n_u_COUNT, Py_EQ)); if (unlikely((__pyx_t_7 < 0))) __PYX_ERR(0, 187, __pyx_L1_error)
+  __pyx_t_7 = (__Pyx_PyUnicode_Equals(__pyx_t_5, __pyx_mstate_global->__pyx_n_u_COUNT, Py_EQ)); if (unlikely((__pyx_t_7 < 0))) __PYX_ERR(0, 221, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
   if (__pyx_t_7) {
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":188
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":222
  * 
  *         if self.aggregate_type == "COUNT":
  *             if self.duplicate_treatment == "Distinct":             # <<<<<<<<<<<<<<
  *                 self._distinct_hashes = _insert_vector_hashes(self._distinct_hashes, vector)
  *                 return
 */
-    __pyx_t_5 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_duplicate_treatment); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 188, __pyx_L1_error)
+    __pyx_t_5 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_duplicate_treatment); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 222, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_5);
-    __pyx_t_7 = (__Pyx_PyUnicode_Equals(__pyx_t_5, __pyx_mstate_global->__pyx_n_u_Distinct, Py_EQ)); if (unlikely((__pyx_t_7 < 0))) __PYX_ERR(0, 188, __pyx_L1_error)
+    __pyx_t_7 = (__Pyx_PyUnicode_Equals(__pyx_t_5, __pyx_mstate_global->__pyx_n_u_Distinct, Py_EQ)); if (unlikely((__pyx_t_7 < 0))) __PYX_ERR(0, 222, __pyx_L1_error)
     __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
     if (__pyx_t_7) {
 
-      /* "opteryx/operators/aggregate/aggregate_node.pyx":189
+      /* "opteryx/operators/aggregate/aggregate_node.pyx":223
  *         if self.aggregate_type == "COUNT":
  *             if self.duplicate_treatment == "Distinct":
  *                 self._distinct_hashes = _insert_vector_hashes(self._distinct_hashes, vector)             # <<<<<<<<<<<<<<
@@ -7642,9 +8110,9 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
  * 
 */
       __pyx_t_3 = NULL;
-      __Pyx_GetModuleGlobalName(__pyx_t_2, __pyx_mstate_global->__pyx_n_u_insert_vector_hashes); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 189, __pyx_L1_error)
+      __Pyx_GetModuleGlobalName(__pyx_t_2, __pyx_mstate_global->__pyx_n_u_insert_vector_hashes); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 223, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_2);
-      __pyx_t_4 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_distinct_hashes_2); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 189, __pyx_L1_error)
+      __pyx_t_4 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_distinct_hashes_2); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 223, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_4);
       __pyx_t_6 = 1;
       #if CYTHON_UNPACK_METHODS
@@ -7664,13 +8132,13 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
         __Pyx_XDECREF(__pyx_t_3); __pyx_t_3 = 0;
         __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
         __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
-        if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 189, __pyx_L1_error)
+        if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 223, __pyx_L1_error)
         __Pyx_GOTREF(__pyx_t_5);
       }
-      if (__Pyx_PyObject_SetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_distinct_hashes_2, __pyx_t_5) < (0)) __PYX_ERR(0, 189, __pyx_L1_error)
+      if (__Pyx_PyObject_SetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_distinct_hashes_2, __pyx_t_5) < (0)) __PYX_ERR(0, 223, __pyx_L1_error)
       __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
 
-      /* "opteryx/operators/aggregate/aggregate_node.pyx":190
+      /* "opteryx/operators/aggregate/aggregate_node.pyx":224
  *             if self.duplicate_treatment == "Distinct":
  *                 self._distinct_hashes = _insert_vector_hashes(self._distinct_hashes, vector)
  *                 return             # <<<<<<<<<<<<<<
@@ -7681,7 +8149,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
       __pyx_r = Py_None; __Pyx_INCREF(Py_None);
       goto __pyx_L0;
 
-      /* "opteryx/operators/aggregate/aggregate_node.pyx":188
+      /* "opteryx/operators/aggregate/aggregate_node.pyx":222
  * 
  *         if self.aggregate_type == "COUNT":
  *             if self.duplicate_treatment == "Distinct":             # <<<<<<<<<<<<<<
@@ -7690,22 +8158,22 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
 */
     }
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":192
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":226
  *                 return
  * 
  *             self._count += valid_count             # <<<<<<<<<<<<<<
  *             return
  * 
 */
-    __pyx_t_5 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_count); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 192, __pyx_L1_error)
+    __pyx_t_5 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_count); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 226, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_5);
-    __pyx_t_2 = PyNumber_InPlaceAdd(__pyx_t_5, __pyx_v_valid_count); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 192, __pyx_L1_error)
+    __pyx_t_2 = PyNumber_InPlaceAdd(__pyx_t_5, __pyx_v_valid_count); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 226, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_2);
     __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
-    if (__Pyx_PyObject_SetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_count, __pyx_t_2) < (0)) __PYX_ERR(0, 192, __pyx_L1_error)
+    if (__Pyx_PyObject_SetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_count, __pyx_t_2) < (0)) __PYX_ERR(0, 226, __pyx_L1_error)
     __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":193
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":227
  * 
  *             self._count += valid_count
  *             return             # <<<<<<<<<<<<<<
@@ -7716,7 +8184,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
     __pyx_r = Py_None; __Pyx_INCREF(Py_None);
     goto __pyx_L0;
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":187
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":221
  *         valid_count = len(vector) - _vector_null_count(vector)
  * 
  *         if self.aggregate_type == "COUNT":             # <<<<<<<<<<<<<<
@@ -7725,31 +8193,31 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
 */
   }
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":195
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":229
  *             return
  * 
  *         if self.aggregate_type == "COUNT_DISTINCT" or self.aggregate_type == "DISTINCT":             # <<<<<<<<<<<<<<
  *             self._distinct_hashes = _insert_vector_hashes(self._distinct_hashes, vector)
  *             return
 */
-  __pyx_t_2 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_aggregate_type); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 195, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_aggregate_type); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 229, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
-  __pyx_t_8 = (__Pyx_PyUnicode_Equals(__pyx_t_2, __pyx_mstate_global->__pyx_n_u_COUNT_DISTINCT, Py_EQ)); if (unlikely((__pyx_t_8 < 0))) __PYX_ERR(0, 195, __pyx_L1_error)
+  __pyx_t_8 = (__Pyx_PyUnicode_Equals(__pyx_t_2, __pyx_mstate_global->__pyx_n_u_COUNT_DISTINCT, Py_EQ)); if (unlikely((__pyx_t_8 < 0))) __PYX_ERR(0, 229, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
   if (!__pyx_t_8) {
   } else {
     __pyx_t_7 = __pyx_t_8;
     goto __pyx_L6_bool_binop_done;
   }
-  __pyx_t_2 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_aggregate_type); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 195, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_aggregate_type); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 229, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
-  __pyx_t_8 = (__Pyx_PyUnicode_Equals(__pyx_t_2, __pyx_mstate_global->__pyx_n_u_DISTINCT, Py_EQ)); if (unlikely((__pyx_t_8 < 0))) __PYX_ERR(0, 195, __pyx_L1_error)
+  __pyx_t_8 = (__Pyx_PyUnicode_Equals(__pyx_t_2, __pyx_mstate_global->__pyx_n_u_DISTINCT, Py_EQ)); if (unlikely((__pyx_t_8 < 0))) __PYX_ERR(0, 229, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
   __pyx_t_7 = __pyx_t_8;
   __pyx_L6_bool_binop_done:;
   if (__pyx_t_7) {
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":196
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":230
  * 
  *         if self.aggregate_type == "COUNT_DISTINCT" or self.aggregate_type == "DISTINCT":
  *             self._distinct_hashes = _insert_vector_hashes(self._distinct_hashes, vector)             # <<<<<<<<<<<<<<
@@ -7757,9 +8225,9 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
  * 
 */
     __pyx_t_5 = NULL;
-    __Pyx_GetModuleGlobalName(__pyx_t_4, __pyx_mstate_global->__pyx_n_u_insert_vector_hashes); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 196, __pyx_L1_error)
+    __Pyx_GetModuleGlobalName(__pyx_t_4, __pyx_mstate_global->__pyx_n_u_insert_vector_hashes); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 230, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_4);
-    __pyx_t_3 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_distinct_hashes_2); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 196, __pyx_L1_error)
+    __pyx_t_3 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_distinct_hashes_2); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 230, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_3);
     __pyx_t_6 = 1;
     #if CYTHON_UNPACK_METHODS
@@ -7779,13 +8247,13 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
       __Pyx_XDECREF(__pyx_t_5); __pyx_t_5 = 0;
       __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
       __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
-      if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 196, __pyx_L1_error)
+      if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 230, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_2);
     }
-    if (__Pyx_PyObject_SetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_distinct_hashes_2, __pyx_t_2) < (0)) __PYX_ERR(0, 196, __pyx_L1_error)
+    if (__Pyx_PyObject_SetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_distinct_hashes_2, __pyx_t_2) < (0)) __PYX_ERR(0, 230, __pyx_L1_error)
     __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":197
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":231
  *         if self.aggregate_type == "COUNT_DISTINCT" or self.aggregate_type == "DISTINCT":
  *             self._distinct_hashes = _insert_vector_hashes(self._distinct_hashes, vector)
  *             return             # <<<<<<<<<<<<<<
@@ -7796,7 +8264,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
     __pyx_r = Py_None; __Pyx_INCREF(Py_None);
     goto __pyx_L0;
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":195
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":229
  *             return
  * 
  *         if self.aggregate_type == "COUNT_DISTINCT" or self.aggregate_type == "DISTINCT":             # <<<<<<<<<<<<<<
@@ -7805,17 +8273,17 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
 */
   }
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":199
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":233
  *             return
  * 
  *         if valid_count == 0:             # <<<<<<<<<<<<<<
  *             return
  * 
 */
-  __pyx_t_7 = (__Pyx_PyLong_BoolEqObjC(__pyx_v_valid_count, __pyx_mstate_global->__pyx_int_0, 0, 0)); if (unlikely((__pyx_t_7 < 0))) __PYX_ERR(0, 199, __pyx_L1_error)
+  __pyx_t_7 = (__Pyx_PyLong_BoolEqObjC(__pyx_v_valid_count, __pyx_mstate_global->__pyx_int_0, 0, 0)); if (unlikely((__pyx_t_7 < 0))) __PYX_ERR(0, 233, __pyx_L1_error)
   if (__pyx_t_7) {
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":200
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":234
  * 
  *         if valid_count == 0:
  *             return             # <<<<<<<<<<<<<<
@@ -7826,7 +8294,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
     __pyx_r = Py_None; __Pyx_INCREF(Py_None);
     goto __pyx_L0;
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":199
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":233
  *             return
  * 
  *         if valid_count == 0:             # <<<<<<<<<<<<<<
@@ -7835,20 +8303,20 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
 */
   }
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":202
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":236
  *             return
  * 
  *         if self.aggregate_type == "SUM":             # <<<<<<<<<<<<<<
  *             chunk_sum = _vector_sum(vector)
  *             self._sum = chunk_sum if self._sum is None else self._sum + chunk_sum
 */
-  __pyx_t_2 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_aggregate_type); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 202, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_aggregate_type); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 236, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
-  __pyx_t_7 = (__Pyx_PyUnicode_Equals(__pyx_t_2, __pyx_mstate_global->__pyx_n_u_SUM, Py_EQ)); if (unlikely((__pyx_t_7 < 0))) __PYX_ERR(0, 202, __pyx_L1_error)
+  __pyx_t_7 = (__Pyx_PyUnicode_Equals(__pyx_t_2, __pyx_mstate_global->__pyx_n_u_SUM, Py_EQ)); if (unlikely((__pyx_t_7 < 0))) __PYX_ERR(0, 236, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
   if (__pyx_t_7) {
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":203
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":237
  * 
  *         if self.aggregate_type == "SUM":
  *             chunk_sum = _vector_sum(vector)             # <<<<<<<<<<<<<<
@@ -7856,7 +8324,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
  *             return
 */
     __pyx_t_4 = NULL;
-    __Pyx_GetModuleGlobalName(__pyx_t_3, __pyx_mstate_global->__pyx_n_u_vector_sum); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 203, __pyx_L1_error)
+    __Pyx_GetModuleGlobalName(__pyx_t_3, __pyx_mstate_global->__pyx_n_u_vector_sum); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 237, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_3);
     __pyx_t_6 = 1;
     #if CYTHON_UNPACK_METHODS
@@ -7875,20 +8343,20 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
       __pyx_t_2 = __Pyx_PyObject_FastCall((PyObject*)__pyx_t_3, __pyx_callargs+__pyx_t_6, (2-__pyx_t_6) | (__pyx_t_6*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
       __Pyx_XDECREF(__pyx_t_4); __pyx_t_4 = 0;
       __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
-      if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 203, __pyx_L1_error)
+      if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 237, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_2);
     }
     __pyx_v_chunk_sum = __pyx_t_2;
     __pyx_t_2 = 0;
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":204
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":238
  *         if self.aggregate_type == "SUM":
  *             chunk_sum = _vector_sum(vector)
  *             self._sum = chunk_sum if self._sum is None else self._sum + chunk_sum             # <<<<<<<<<<<<<<
  *             return
  * 
 */
-    __pyx_t_3 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_sum_2); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 204, __pyx_L1_error)
+    __pyx_t_3 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_sum_2); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 238, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_3);
     __pyx_t_7 = (__pyx_t_3 == Py_None);
     __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
@@ -7896,18 +8364,18 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
       __Pyx_INCREF(__pyx_v_chunk_sum);
       __pyx_t_2 = __pyx_v_chunk_sum;
     } else {
-      __pyx_t_3 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_sum_2); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 204, __pyx_L1_error)
+      __pyx_t_3 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_sum_2); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 238, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_3);
-      __pyx_t_4 = PyNumber_Add(__pyx_t_3, __pyx_v_chunk_sum); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 204, __pyx_L1_error)
+      __pyx_t_4 = PyNumber_Add(__pyx_t_3, __pyx_v_chunk_sum); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 238, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_4);
       __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
       __pyx_t_2 = __pyx_t_4;
       __pyx_t_4 = 0;
     }
-    if (__Pyx_PyObject_SetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_sum_2, __pyx_t_2) < (0)) __PYX_ERR(0, 204, __pyx_L1_error)
+    if (__Pyx_PyObject_SetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_sum_2, __pyx_t_2) < (0)) __PYX_ERR(0, 238, __pyx_L1_error)
     __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":205
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":239
  *             chunk_sum = _vector_sum(vector)
  *             self._sum = chunk_sum if self._sum is None else self._sum + chunk_sum
  *             return             # <<<<<<<<<<<<<<
@@ -7918,7 +8386,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
     __pyx_r = Py_None; __Pyx_INCREF(Py_None);
     goto __pyx_L0;
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":202
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":236
  *             return
  * 
  *         if self.aggregate_type == "SUM":             # <<<<<<<<<<<<<<
@@ -7927,20 +8395,20 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
 */
   }
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":207
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":241
  *             return
  * 
  *         if self.aggregate_type == "AVG":             # <<<<<<<<<<<<<<
  *             chunk_sum = _vector_sum(vector)
  *             self._sum = chunk_sum if self._sum is None else self._sum + chunk_sum
 */
-  __pyx_t_2 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_aggregate_type); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 207, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_aggregate_type); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 241, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
-  __pyx_t_7 = (__Pyx_PyUnicode_Equals(__pyx_t_2, __pyx_mstate_global->__pyx_n_u_AVG, Py_EQ)); if (unlikely((__pyx_t_7 < 0))) __PYX_ERR(0, 207, __pyx_L1_error)
+  __pyx_t_7 = (__Pyx_PyUnicode_Equals(__pyx_t_2, __pyx_mstate_global->__pyx_n_u_AVG, Py_EQ)); if (unlikely((__pyx_t_7 < 0))) __PYX_ERR(0, 241, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
   if (__pyx_t_7) {
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":208
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":242
  * 
  *         if self.aggregate_type == "AVG":
  *             chunk_sum = _vector_sum(vector)             # <<<<<<<<<<<<<<
@@ -7948,7 +8416,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
  *             self._count += valid_count
 */
     __pyx_t_4 = NULL;
-    __Pyx_GetModuleGlobalName(__pyx_t_3, __pyx_mstate_global->__pyx_n_u_vector_sum); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 208, __pyx_L1_error)
+    __Pyx_GetModuleGlobalName(__pyx_t_3, __pyx_mstate_global->__pyx_n_u_vector_sum); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 242, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_3);
     __pyx_t_6 = 1;
     #if CYTHON_UNPACK_METHODS
@@ -7967,20 +8435,20 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
       __pyx_t_2 = __Pyx_PyObject_FastCall((PyObject*)__pyx_t_3, __pyx_callargs+__pyx_t_6, (2-__pyx_t_6) | (__pyx_t_6*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
       __Pyx_XDECREF(__pyx_t_4); __pyx_t_4 = 0;
       __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
-      if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 208, __pyx_L1_error)
+      if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 242, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_2);
     }
     __pyx_v_chunk_sum = __pyx_t_2;
     __pyx_t_2 = 0;
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":209
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":243
  *         if self.aggregate_type == "AVG":
  *             chunk_sum = _vector_sum(vector)
  *             self._sum = chunk_sum if self._sum is None else self._sum + chunk_sum             # <<<<<<<<<<<<<<
  *             self._count += valid_count
  *             return
 */
-    __pyx_t_3 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_sum_2); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 209, __pyx_L1_error)
+    __pyx_t_3 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_sum_2); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 243, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_3);
     __pyx_t_7 = (__pyx_t_3 == Py_None);
     __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
@@ -7988,33 +8456,33 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
       __Pyx_INCREF(__pyx_v_chunk_sum);
       __pyx_t_2 = __pyx_v_chunk_sum;
     } else {
-      __pyx_t_3 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_sum_2); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 209, __pyx_L1_error)
+      __pyx_t_3 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_sum_2); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 243, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_3);
-      __pyx_t_4 = PyNumber_Add(__pyx_t_3, __pyx_v_chunk_sum); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 209, __pyx_L1_error)
+      __pyx_t_4 = PyNumber_Add(__pyx_t_3, __pyx_v_chunk_sum); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 243, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_4);
       __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
       __pyx_t_2 = __pyx_t_4;
       __pyx_t_4 = 0;
     }
-    if (__Pyx_PyObject_SetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_sum_2, __pyx_t_2) < (0)) __PYX_ERR(0, 209, __pyx_L1_error)
+    if (__Pyx_PyObject_SetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_sum_2, __pyx_t_2) < (0)) __PYX_ERR(0, 243, __pyx_L1_error)
     __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":210
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":244
  *             chunk_sum = _vector_sum(vector)
  *             self._sum = chunk_sum if self._sum is None else self._sum + chunk_sum
  *             self._count += valid_count             # <<<<<<<<<<<<<<
  *             return
  * 
 */
-    __pyx_t_2 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_count); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 210, __pyx_L1_error)
+    __pyx_t_2 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_count); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 244, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_2);
-    __pyx_t_4 = PyNumber_InPlaceAdd(__pyx_t_2, __pyx_v_valid_count); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 210, __pyx_L1_error)
+    __pyx_t_4 = PyNumber_InPlaceAdd(__pyx_t_2, __pyx_v_valid_count); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 244, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_4);
     __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
-    if (__Pyx_PyObject_SetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_count, __pyx_t_4) < (0)) __PYX_ERR(0, 210, __pyx_L1_error)
+    if (__Pyx_PyObject_SetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_count, __pyx_t_4) < (0)) __PYX_ERR(0, 244, __pyx_L1_error)
     __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":211
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":245
  *             self._sum = chunk_sum if self._sum is None else self._sum + chunk_sum
  *             self._count += valid_count
  *             return             # <<<<<<<<<<<<<<
@@ -8025,7 +8493,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
     __pyx_r = Py_None; __Pyx_INCREF(Py_None);
     goto __pyx_L0;
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":207
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":241
  *             return
  * 
  *         if self.aggregate_type == "AVG":             # <<<<<<<<<<<<<<
@@ -8034,20 +8502,20 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
 */
   }
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":213
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":247
  *             return
  * 
  *         if self.aggregate_type == "MIN":             # <<<<<<<<<<<<<<
  *             self._update_min(_vector_min(vector))
  *             return
 */
-  __pyx_t_4 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_aggregate_type); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 213, __pyx_L1_error)
+  __pyx_t_4 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_aggregate_type); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 247, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_4);
-  __pyx_t_7 = (__Pyx_PyUnicode_Equals(__pyx_t_4, __pyx_mstate_global->__pyx_n_u_MIN, Py_EQ)); if (unlikely((__pyx_t_7 < 0))) __PYX_ERR(0, 213, __pyx_L1_error)
+  __pyx_t_7 = (__Pyx_PyUnicode_Equals(__pyx_t_4, __pyx_mstate_global->__pyx_n_u_MIN, Py_EQ)); if (unlikely((__pyx_t_7 < 0))) __PYX_ERR(0, 247, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
   if (__pyx_t_7) {
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":214
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":248
  * 
  *         if self.aggregate_type == "MIN":
  *             self._update_min(_vector_min(vector))             # <<<<<<<<<<<<<<
@@ -8057,7 +8525,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
     __pyx_t_2 = __pyx_v_self;
     __Pyx_INCREF(__pyx_t_2);
     __pyx_t_5 = NULL;
-    __Pyx_GetModuleGlobalName(__pyx_t_9, __pyx_mstate_global->__pyx_n_u_vector_min); if (unlikely(!__pyx_t_9)) __PYX_ERR(0, 214, __pyx_L1_error)
+    __Pyx_GetModuleGlobalName(__pyx_t_9, __pyx_mstate_global->__pyx_n_u_vector_min); if (unlikely(!__pyx_t_9)) __PYX_ERR(0, 248, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_9);
     __pyx_t_6 = 1;
     #if CYTHON_UNPACK_METHODS
@@ -8076,7 +8544,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
       __pyx_t_3 = __Pyx_PyObject_FastCall((PyObject*)__pyx_t_9, __pyx_callargs+__pyx_t_6, (2-__pyx_t_6) | (__pyx_t_6*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
       __Pyx_XDECREF(__pyx_t_5); __pyx_t_5 = 0;
       __Pyx_DECREF(__pyx_t_9); __pyx_t_9 = 0;
-      if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 214, __pyx_L1_error)
+      if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 248, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_3);
     }
     __pyx_t_6 = 0;
@@ -8085,12 +8553,12 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
       __pyx_t_4 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_update_min, __pyx_callargs+__pyx_t_6, (2-__pyx_t_6) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
       __Pyx_XDECREF(__pyx_t_2); __pyx_t_2 = 0;
       __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
-      if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 214, __pyx_L1_error)
+      if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 248, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_4);
     }
     __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":215
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":249
  *         if self.aggregate_type == "MIN":
  *             self._update_min(_vector_min(vector))
  *             return             # <<<<<<<<<<<<<<
@@ -8101,7 +8569,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
     __pyx_r = Py_None; __Pyx_INCREF(Py_None);
     goto __pyx_L0;
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":213
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":247
  *             return
  * 
  *         if self.aggregate_type == "MIN":             # <<<<<<<<<<<<<<
@@ -8110,20 +8578,20 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
 */
   }
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":217
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":251
  *             return
  * 
  *         if self.aggregate_type == "MAX":             # <<<<<<<<<<<<<<
  *             self._update_max(_vector_max(vector))
  *             return
 */
-  __pyx_t_4 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_aggregate_type); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 217, __pyx_L1_error)
+  __pyx_t_4 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_aggregate_type); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 251, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_4);
-  __pyx_t_7 = (__Pyx_PyUnicode_Equals(__pyx_t_4, __pyx_mstate_global->__pyx_n_u_MAX, Py_EQ)); if (unlikely((__pyx_t_7 < 0))) __PYX_ERR(0, 217, __pyx_L1_error)
+  __pyx_t_7 = (__Pyx_PyUnicode_Equals(__pyx_t_4, __pyx_mstate_global->__pyx_n_u_MAX, Py_EQ)); if (unlikely((__pyx_t_7 < 0))) __PYX_ERR(0, 251, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
   if (__pyx_t_7) {
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":218
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":252
  * 
  *         if self.aggregate_type == "MAX":
  *             self._update_max(_vector_max(vector))             # <<<<<<<<<<<<<<
@@ -8133,7 +8601,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
     __pyx_t_3 = __pyx_v_self;
     __Pyx_INCREF(__pyx_t_3);
     __pyx_t_9 = NULL;
-    __Pyx_GetModuleGlobalName(__pyx_t_5, __pyx_mstate_global->__pyx_n_u_vector_max); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 218, __pyx_L1_error)
+    __Pyx_GetModuleGlobalName(__pyx_t_5, __pyx_mstate_global->__pyx_n_u_vector_max); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 252, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_5);
     __pyx_t_6 = 1;
     #if CYTHON_UNPACK_METHODS
@@ -8152,7 +8620,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
       __pyx_t_2 = __Pyx_PyObject_FastCall((PyObject*)__pyx_t_5, __pyx_callargs+__pyx_t_6, (2-__pyx_t_6) | (__pyx_t_6*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
       __Pyx_XDECREF(__pyx_t_9); __pyx_t_9 = 0;
       __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
-      if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 218, __pyx_L1_error)
+      if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 252, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_2);
     }
     __pyx_t_6 = 0;
@@ -8161,12 +8629,12 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
       __pyx_t_4 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_update_max, __pyx_callargs+__pyx_t_6, (2-__pyx_t_6) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
       __Pyx_XDECREF(__pyx_t_3); __pyx_t_3 = 0;
       __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
-      if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 218, __pyx_L1_error)
+      if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 252, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_4);
     }
     __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":219
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":253
  *         if self.aggregate_type == "MAX":
  *             self._update_max(_vector_max(vector))
  *             return             # <<<<<<<<<<<<<<
@@ -8177,7 +8645,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
     __pyx_r = Py_None; __Pyx_INCREF(Py_None);
     goto __pyx_L0;
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":217
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":251
  *             return
  * 
  *         if self.aggregate_type == "MAX":             # <<<<<<<<<<<<<<
@@ -8186,29 +8654,29 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
 */
   }
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":221
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":255
  *             return
  * 
  *         if self.aggregate_type in ("APPROX_COUNT_DISTINCT", "APPROX_PERCENTILE"):             # <<<<<<<<<<<<<<
  *             self._reject_unsupported_approximate()
  * 
 */
-  __pyx_t_4 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_aggregate_type); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 221, __pyx_L1_error)
+  __pyx_t_4 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_aggregate_type); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 255, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_4);
-  __pyx_t_8 = (__Pyx_PyUnicode_Equals(__pyx_t_4, __pyx_mstate_global->__pyx_n_u_APPROX_COUNT_DISTINCT, Py_EQ)); if (unlikely((__pyx_t_8 < 0))) __PYX_ERR(0, 221, __pyx_L1_error)
+  __pyx_t_8 = (__Pyx_PyUnicode_Equals(__pyx_t_4, __pyx_mstate_global->__pyx_n_u_APPROX_COUNT_DISTINCT, Py_EQ)); if (unlikely((__pyx_t_8 < 0))) __PYX_ERR(0, 255, __pyx_L1_error)
   if (!__pyx_t_8) {
   } else {
     __pyx_t_7 = __pyx_t_8;
     goto __pyx_L14_bool_binop_done;
   }
-  __pyx_t_8 = (__Pyx_PyUnicode_Equals(__pyx_t_4, __pyx_mstate_global->__pyx_n_u_APPROX_PERCENTILE, Py_EQ)); if (unlikely((__pyx_t_8 < 0))) __PYX_ERR(0, 221, __pyx_L1_error)
+  __pyx_t_8 = (__Pyx_PyUnicode_Equals(__pyx_t_4, __pyx_mstate_global->__pyx_n_u_APPROX_PERCENTILE, Py_EQ)); if (unlikely((__pyx_t_8 < 0))) __PYX_ERR(0, 255, __pyx_L1_error)
   __pyx_t_7 = __pyx_t_8;
   __pyx_L14_bool_binop_done:;
   __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
   __pyx_t_8 = __pyx_t_7;
   if (__pyx_t_8) {
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":222
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":256
  * 
  *         if self.aggregate_type in ("APPROX_COUNT_DISTINCT", "APPROX_PERCENTILE"):
  *             self._reject_unsupported_approximate()             # <<<<<<<<<<<<<<
@@ -8222,12 +8690,12 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
       PyObject *__pyx_callargs[2] = {__pyx_t_2, NULL};
       __pyx_t_4 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_reject_unsupported_approximate, __pyx_callargs+__pyx_t_6, (1-__pyx_t_6) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
       __Pyx_XDECREF(__pyx_t_2); __pyx_t_2 = 0;
-      if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 222, __pyx_L1_error)
+      if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 256, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_4);
     }
     __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":221
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":255
  *             return
  * 
  *         if self.aggregate_type in ("APPROX_COUNT_DISTINCT", "APPROX_PERCENTILE"):             # <<<<<<<<<<<<<<
@@ -8236,7 +8704,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
 */
   }
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":184
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":218
  *             self._reject_unsupported_approximate()
  * 
  *     def _collect_vector(self, vector):             # <<<<<<<<<<<<<<
@@ -8263,7 +8731,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
   return __pyx_r;
 }
 
-/* "opteryx/operators/aggregate/aggregate_node.pyx":224
+/* "opteryx/operators/aggregate/aggregate_node.pyx":258
  *             self._reject_unsupported_approximate()
  * 
  *     def collect(self, morsel: Morsel):             # <<<<<<<<<<<<<<
@@ -8311,39 +8779,39 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   {
     PyObject ** const __pyx_pyargnames[] = {&__pyx_mstate_global->__pyx_n_u_self,&__pyx_mstate_global->__pyx_n_u_morsel,0};
     const Py_ssize_t __pyx_kwds_len = (__pyx_kwds) ? __Pyx_NumKwargs_FASTCALL(__pyx_kwds) : 0;
-    if (unlikely(__pyx_kwds_len) < 0) __PYX_ERR(0, 224, __pyx_L3_error)
+    if (unlikely(__pyx_kwds_len) < 0) __PYX_ERR(0, 258, __pyx_L3_error)
     if (__pyx_kwds_len > 0) {
       switch (__pyx_nargs) {
         case  2:
         values[1] = __Pyx_ArgRef_FASTCALL(__pyx_args, 1);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(0, 224, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(0, 258, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  1:
         values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 224, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 258, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  0: break;
         default: goto __pyx_L5_argtuple_error;
       }
       const Py_ssize_t kwd_pos_args = __pyx_nargs;
-      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "collect", 0) < (0)) __PYX_ERR(0, 224, __pyx_L3_error)
+      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "collect", 0) < (0)) __PYX_ERR(0, 258, __pyx_L3_error)
       for (Py_ssize_t i = __pyx_nargs; i < 2; i++) {
-        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("collect", 1, 2, 2, i); __PYX_ERR(0, 224, __pyx_L3_error) }
+        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("collect", 1, 2, 2, i); __PYX_ERR(0, 258, __pyx_L3_error) }
       }
     } else if (unlikely(__pyx_nargs != 2)) {
       goto __pyx_L5_argtuple_error;
     } else {
       values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 224, __pyx_L3_error)
+      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 258, __pyx_L3_error)
       values[1] = __Pyx_ArgRef_FASTCALL(__pyx_args, 1);
-      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(0, 224, __pyx_L3_error)
+      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(0, 258, __pyx_L3_error)
     }
     __pyx_v_self = values[0];
     __pyx_v_morsel = values[1];
   }
   goto __pyx_L6_skip;
   __pyx_L5_argtuple_error:;
-  __Pyx_RaiseArgtupleInvalid("collect", 1, 2, 2, __pyx_nargs); __PYX_ERR(0, 224, __pyx_L3_error)
+  __Pyx_RaiseArgtupleInvalid("collect", 1, 2, 2, __pyx_nargs); __PYX_ERR(0, 258, __pyx_L3_error)
   __pyx_L6_skip:;
   goto __pyx_L4_argument_unpacking_done;
   __pyx_L3_error:;
@@ -8382,49 +8850,49 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("collect", 0);
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":225
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":259
  * 
  *     def collect(self, morsel: Morsel):
  *         if self.parameter.node_type == NodeType.WILDCARD:             # <<<<<<<<<<<<<<
  *             self._count += morsel.num_rows
  *             return
 */
-  __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_parameter); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 225, __pyx_L1_error)
+  __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_parameter); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 259, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
-  __pyx_t_2 = __Pyx_PyObject_GetAttrStr(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_node_type); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 225, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_PyObject_GetAttrStr(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_node_type); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 259, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
-  __Pyx_GetModuleGlobalName(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_NodeType); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 225, __pyx_L1_error)
+  __Pyx_GetModuleGlobalName(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_NodeType); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 259, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
-  __pyx_t_3 = __Pyx_PyObject_GetAttrStr(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_WILDCARD); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 225, __pyx_L1_error)
+  __pyx_t_3 = __Pyx_PyObject_GetAttrStr(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_WILDCARD); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 259, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_3);
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
-  __pyx_t_1 = PyObject_RichCompare(__pyx_t_2, __pyx_t_3, Py_EQ); __Pyx_XGOTREF(__pyx_t_1); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 225, __pyx_L1_error)
+  __pyx_t_1 = PyObject_RichCompare(__pyx_t_2, __pyx_t_3, Py_EQ); __Pyx_XGOTREF(__pyx_t_1); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 259, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
   __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
-  __pyx_t_4 = __Pyx_PyObject_IsTrue(__pyx_t_1); if (unlikely((__pyx_t_4 < 0))) __PYX_ERR(0, 225, __pyx_L1_error)
+  __pyx_t_4 = __Pyx_PyObject_IsTrue(__pyx_t_1); if (unlikely((__pyx_t_4 < 0))) __PYX_ERR(0, 259, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
   if (__pyx_t_4) {
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":226
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":260
  *     def collect(self, morsel: Morsel):
  *         if self.parameter.node_type == NodeType.WILDCARD:
  *             self._count += morsel.num_rows             # <<<<<<<<<<<<<<
  *             return
  * 
 */
-    __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_count); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 226, __pyx_L1_error)
+    __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_count); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 260, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_1);
-    __pyx_t_3 = __Pyx_PyObject_GetAttrStr(__pyx_v_morsel, __pyx_mstate_global->__pyx_n_u_num_rows); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 226, __pyx_L1_error)
+    __pyx_t_3 = __Pyx_PyObject_GetAttrStr(__pyx_v_morsel, __pyx_mstate_global->__pyx_n_u_num_rows); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 260, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_3);
-    __pyx_t_2 = PyNumber_InPlaceAdd(__pyx_t_1, __pyx_t_3); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 226, __pyx_L1_error)
+    __pyx_t_2 = PyNumber_InPlaceAdd(__pyx_t_1, __pyx_t_3); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 260, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_2);
     __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
     __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
-    if (__Pyx_PyObject_SetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_count, __pyx_t_2) < (0)) __PYX_ERR(0, 226, __pyx_L1_error)
+    if (__Pyx_PyObject_SetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_count, __pyx_t_2) < (0)) __PYX_ERR(0, 260, __pyx_L1_error)
     __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":227
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":261
  *         if self.parameter.node_type == NodeType.WILDCARD:
  *             self._count += morsel.num_rows
  *             return             # <<<<<<<<<<<<<<
@@ -8435,7 +8903,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
     __pyx_r = Py_None; __Pyx_INCREF(Py_None);
     goto __pyx_L0;
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":225
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":259
  * 
  *     def collect(self, morsel: Morsel):
  *         if self.parameter.node_type == NodeType.WILDCARD:             # <<<<<<<<<<<<<<
@@ -8444,31 +8912,31 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
 */
   }
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":229
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":263
  *             return
  * 
  *         if self.parameter.node_type == NodeType.LITERAL:             # <<<<<<<<<<<<<<
  *             self._collect_literal(self.parameter.value, morsel.num_rows)
  *             return
 */
-  __pyx_t_2 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_parameter); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 229, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_parameter); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 263, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
-  __pyx_t_3 = __Pyx_PyObject_GetAttrStr(__pyx_t_2, __pyx_mstate_global->__pyx_n_u_node_type); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 229, __pyx_L1_error)
+  __pyx_t_3 = __Pyx_PyObject_GetAttrStr(__pyx_t_2, __pyx_mstate_global->__pyx_n_u_node_type); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 263, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_3);
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
-  __Pyx_GetModuleGlobalName(__pyx_t_2, __pyx_mstate_global->__pyx_n_u_NodeType); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 229, __pyx_L1_error)
+  __Pyx_GetModuleGlobalName(__pyx_t_2, __pyx_mstate_global->__pyx_n_u_NodeType); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 263, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
-  __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_t_2, __pyx_mstate_global->__pyx_n_u_LITERAL); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 229, __pyx_L1_error)
+  __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_t_2, __pyx_mstate_global->__pyx_n_u_LITERAL); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 263, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
-  __pyx_t_2 = PyObject_RichCompare(__pyx_t_3, __pyx_t_1, Py_EQ); __Pyx_XGOTREF(__pyx_t_2); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 229, __pyx_L1_error)
+  __pyx_t_2 = PyObject_RichCompare(__pyx_t_3, __pyx_t_1, Py_EQ); __Pyx_XGOTREF(__pyx_t_2); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 263, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
-  __pyx_t_4 = __Pyx_PyObject_IsTrue(__pyx_t_2); if (unlikely((__pyx_t_4 < 0))) __PYX_ERR(0, 229, __pyx_L1_error)
+  __pyx_t_4 = __Pyx_PyObject_IsTrue(__pyx_t_2); if (unlikely((__pyx_t_4 < 0))) __PYX_ERR(0, 263, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
   if (__pyx_t_4) {
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":230
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":264
  * 
  *         if self.parameter.node_type == NodeType.LITERAL:
  *             self._collect_literal(self.parameter.value, morsel.num_rows)             # <<<<<<<<<<<<<<
@@ -8477,12 +8945,12 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
 */
     __pyx_t_1 = __pyx_v_self;
     __Pyx_INCREF(__pyx_t_1);
-    __pyx_t_3 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_parameter); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 230, __pyx_L1_error)
+    __pyx_t_3 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_parameter); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 264, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_3);
-    __pyx_t_5 = __Pyx_PyObject_GetAttrStr(__pyx_t_3, __pyx_mstate_global->__pyx_n_u_value); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 230, __pyx_L1_error)
+    __pyx_t_5 = __Pyx_PyObject_GetAttrStr(__pyx_t_3, __pyx_mstate_global->__pyx_n_u_value); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 264, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_5);
     __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
-    __pyx_t_3 = __Pyx_PyObject_GetAttrStr(__pyx_v_morsel, __pyx_mstate_global->__pyx_n_u_num_rows); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 230, __pyx_L1_error)
+    __pyx_t_3 = __Pyx_PyObject_GetAttrStr(__pyx_v_morsel, __pyx_mstate_global->__pyx_n_u_num_rows); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 264, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_3);
     __pyx_t_6 = 0;
     {
@@ -8491,12 +8959,12 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
       __Pyx_XDECREF(__pyx_t_1); __pyx_t_1 = 0;
       __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
       __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
-      if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 230, __pyx_L1_error)
+      if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 264, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_2);
     }
     __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":231
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":265
  *         if self.parameter.node_type == NodeType.LITERAL:
  *             self._collect_literal(self.parameter.value, morsel.num_rows)
  *             return             # <<<<<<<<<<<<<<
@@ -8507,7 +8975,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
     __pyx_r = Py_None; __Pyx_INCREF(Py_None);
     goto __pyx_L0;
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":229
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":263
  *             return
  * 
  *         if self.parameter.node_type == NodeType.LITERAL:             # <<<<<<<<<<<<<<
@@ -8516,7 +8984,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
 */
   }
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":233
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":267
  *             return
  * 
  *         vector = morsel.column(_column_bytes(self.parameter.schema_column.identity))             # <<<<<<<<<<<<<<
@@ -8526,14 +8994,14 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
   __pyx_t_3 = __pyx_v_morsel;
   __Pyx_INCREF(__pyx_t_3);
   __pyx_t_1 = NULL;
-  __Pyx_GetModuleGlobalName(__pyx_t_7, __pyx_mstate_global->__pyx_n_u_column_bytes); if (unlikely(!__pyx_t_7)) __PYX_ERR(0, 233, __pyx_L1_error)
+  __Pyx_GetModuleGlobalName(__pyx_t_7, __pyx_mstate_global->__pyx_n_u_column_bytes); if (unlikely(!__pyx_t_7)) __PYX_ERR(0, 267, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_7);
-  __pyx_t_8 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_parameter); if (unlikely(!__pyx_t_8)) __PYX_ERR(0, 233, __pyx_L1_error)
+  __pyx_t_8 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_parameter); if (unlikely(!__pyx_t_8)) __PYX_ERR(0, 267, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_8);
-  __pyx_t_9 = __Pyx_PyObject_GetAttrStr(__pyx_t_8, __pyx_mstate_global->__pyx_n_u_schema_column); if (unlikely(!__pyx_t_9)) __PYX_ERR(0, 233, __pyx_L1_error)
+  __pyx_t_9 = __Pyx_PyObject_GetAttrStr(__pyx_t_8, __pyx_mstate_global->__pyx_n_u_schema_column); if (unlikely(!__pyx_t_9)) __PYX_ERR(0, 267, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_9);
   __Pyx_DECREF(__pyx_t_8); __pyx_t_8 = 0;
-  __pyx_t_8 = __Pyx_PyObject_GetAttrStr(__pyx_t_9, __pyx_mstate_global->__pyx_n_u_identity); if (unlikely(!__pyx_t_8)) __PYX_ERR(0, 233, __pyx_L1_error)
+  __pyx_t_8 = __Pyx_PyObject_GetAttrStr(__pyx_t_9, __pyx_mstate_global->__pyx_n_u_identity); if (unlikely(!__pyx_t_8)) __PYX_ERR(0, 267, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_8);
   __Pyx_DECREF(__pyx_t_9); __pyx_t_9 = 0;
   __pyx_t_6 = 1;
@@ -8554,7 +9022,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
     __Pyx_XDECREF(__pyx_t_1); __pyx_t_1 = 0;
     __Pyx_DECREF(__pyx_t_8); __pyx_t_8 = 0;
     __Pyx_DECREF(__pyx_t_7); __pyx_t_7 = 0;
-    if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 233, __pyx_L1_error)
+    if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 267, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_5);
   }
   __pyx_t_6 = 0;
@@ -8563,13 +9031,13 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
     __pyx_t_2 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_column, __pyx_callargs+__pyx_t_6, (2-__pyx_t_6) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
     __Pyx_XDECREF(__pyx_t_3); __pyx_t_3 = 0;
     __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
-    if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 233, __pyx_L1_error)
+    if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 267, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_2);
   }
   __pyx_v_vector = __pyx_t_2;
   __pyx_t_2 = 0;
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":234
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":268
  * 
  *         vector = morsel.column(_column_bytes(self.parameter.schema_column.identity))
  *         self._collect_vector(vector)             # <<<<<<<<<<<<<<
@@ -8583,12 +9051,12 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
     PyObject *__pyx_callargs[2] = {__pyx_t_5, __pyx_v_vector};
     __pyx_t_2 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_collect_vector, __pyx_callargs+__pyx_t_6, (2-__pyx_t_6) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
     __Pyx_XDECREF(__pyx_t_5); __pyx_t_5 = 0;
-    if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 234, __pyx_L1_error)
+    if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 268, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_2);
   }
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":224
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":258
  *             self._reject_unsupported_approximate()
  * 
  *     def collect(self, morsel: Morsel):             # <<<<<<<<<<<<<<
@@ -8616,7 +9084,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
   return __pyx_r;
 }
 
-/* "opteryx/operators/aggregate/aggregate_node.pyx":236
+/* "opteryx/operators/aggregate/aggregate_node.pyx":270
  *         self._collect_vector(vector)
  * 
  *     def finalize(self):             # <<<<<<<<<<<<<<
@@ -8663,32 +9131,32 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   {
     PyObject ** const __pyx_pyargnames[] = {&__pyx_mstate_global->__pyx_n_u_self,0};
     const Py_ssize_t __pyx_kwds_len = (__pyx_kwds) ? __Pyx_NumKwargs_FASTCALL(__pyx_kwds) : 0;
-    if (unlikely(__pyx_kwds_len) < 0) __PYX_ERR(0, 236, __pyx_L3_error)
+    if (unlikely(__pyx_kwds_len) < 0) __PYX_ERR(0, 270, __pyx_L3_error)
     if (__pyx_kwds_len > 0) {
       switch (__pyx_nargs) {
         case  1:
         values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 236, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 270, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  0: break;
         default: goto __pyx_L5_argtuple_error;
       }
       const Py_ssize_t kwd_pos_args = __pyx_nargs;
-      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "finalize", 0) < (0)) __PYX_ERR(0, 236, __pyx_L3_error)
+      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "finalize", 0) < (0)) __PYX_ERR(0, 270, __pyx_L3_error)
       for (Py_ssize_t i = __pyx_nargs; i < 1; i++) {
-        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("finalize", 1, 1, 1, i); __PYX_ERR(0, 236, __pyx_L3_error) }
+        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("finalize", 1, 1, 1, i); __PYX_ERR(0, 270, __pyx_L3_error) }
       }
     } else if (unlikely(__pyx_nargs != 1)) {
       goto __pyx_L5_argtuple_error;
     } else {
       values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 236, __pyx_L3_error)
+      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 270, __pyx_L3_error)
     }
     __pyx_v_self = values[0];
   }
   goto __pyx_L6_skip;
   __pyx_L5_argtuple_error:;
-  __Pyx_RaiseArgtupleInvalid("finalize", 1, 1, 1, __pyx_nargs); __PYX_ERR(0, 236, __pyx_L3_error)
+  __Pyx_RaiseArgtupleInvalid("finalize", 1, 1, 1, __pyx_nargs); __PYX_ERR(0, 270, __pyx_L3_error)
   __pyx_L6_skip:;
   goto __pyx_L4_argument_unpacking_done;
   __pyx_L3_error:;
@@ -8724,33 +9192,33 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("finalize", 0);
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":237
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":271
  * 
  *     def finalize(self):
  *         if self.aggregate_type == "COUNT":             # <<<<<<<<<<<<<<
  *             if self.duplicate_treatment == "Distinct":
  *                 return 0 if self._distinct_hashes is None else self._distinct_hashes.size()
 */
-  __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_aggregate_type); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 237, __pyx_L1_error)
+  __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_aggregate_type); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 271, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
-  __pyx_t_2 = (__Pyx_PyUnicode_Equals(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_COUNT, Py_EQ)); if (unlikely((__pyx_t_2 < 0))) __PYX_ERR(0, 237, __pyx_L1_error)
+  __pyx_t_2 = (__Pyx_PyUnicode_Equals(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_COUNT, Py_EQ)); if (unlikely((__pyx_t_2 < 0))) __PYX_ERR(0, 271, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
   if (__pyx_t_2) {
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":238
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":272
  *     def finalize(self):
  *         if self.aggregate_type == "COUNT":
  *             if self.duplicate_treatment == "Distinct":             # <<<<<<<<<<<<<<
  *                 return 0 if self._distinct_hashes is None else self._distinct_hashes.size()
  *             return self._count
 */
-    __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_duplicate_treatment); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 238, __pyx_L1_error)
+    __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_duplicate_treatment); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 272, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_1);
-    __pyx_t_2 = (__Pyx_PyUnicode_Equals(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_Distinct, Py_EQ)); if (unlikely((__pyx_t_2 < 0))) __PYX_ERR(0, 238, __pyx_L1_error)
+    __pyx_t_2 = (__Pyx_PyUnicode_Equals(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_Distinct, Py_EQ)); if (unlikely((__pyx_t_2 < 0))) __PYX_ERR(0, 272, __pyx_L1_error)
     __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
     if (__pyx_t_2) {
 
-      /* "opteryx/operators/aggregate/aggregate_node.pyx":239
+      /* "opteryx/operators/aggregate/aggregate_node.pyx":273
  *         if self.aggregate_type == "COUNT":
  *             if self.duplicate_treatment == "Distinct":
  *                 return 0 if self._distinct_hashes is None else self._distinct_hashes.size()             # <<<<<<<<<<<<<<
@@ -8758,7 +9226,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
  * 
 */
       __Pyx_XDECREF(__pyx_r);
-      __pyx_t_3 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_distinct_hashes_2); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 239, __pyx_L1_error)
+      __pyx_t_3 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_distinct_hashes_2); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 273, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_3);
       __pyx_t_2 = (__pyx_t_3 == Py_None);
       __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
@@ -8766,7 +9234,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
         __Pyx_INCREF(__pyx_mstate_global->__pyx_int_0);
         __pyx_t_1 = __pyx_mstate_global->__pyx_int_0;
       } else {
-        __pyx_t_5 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_distinct_hashes_2); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 239, __pyx_L1_error)
+        __pyx_t_5 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_distinct_hashes_2); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 273, __pyx_L1_error)
         __Pyx_GOTREF(__pyx_t_5);
         __pyx_t_4 = __pyx_t_5;
         __Pyx_INCREF(__pyx_t_4);
@@ -8776,7 +9244,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
           __pyx_t_3 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_size, __pyx_callargs+__pyx_t_6, (1-__pyx_t_6) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
           __Pyx_XDECREF(__pyx_t_4); __pyx_t_4 = 0;
           __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
-          if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 239, __pyx_L1_error)
+          if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 273, __pyx_L1_error)
           __Pyx_GOTREF(__pyx_t_3);
         }
         __pyx_t_1 = __pyx_t_3;
@@ -8786,7 +9254,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
       __pyx_t_1 = 0;
       goto __pyx_L0;
 
-      /* "opteryx/operators/aggregate/aggregate_node.pyx":238
+      /* "opteryx/operators/aggregate/aggregate_node.pyx":272
  *     def finalize(self):
  *         if self.aggregate_type == "COUNT":
  *             if self.duplicate_treatment == "Distinct":             # <<<<<<<<<<<<<<
@@ -8795,7 +9263,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
 */
     }
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":240
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":274
  *             if self.duplicate_treatment == "Distinct":
  *                 return 0 if self._distinct_hashes is None else self._distinct_hashes.size()
  *             return self._count             # <<<<<<<<<<<<<<
@@ -8803,13 +9271,13 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
  *         if self.aggregate_type == "COUNT_DISTINCT" or self.aggregate_type == "DISTINCT":
 */
     __Pyx_XDECREF(__pyx_r);
-    __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_count); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 240, __pyx_L1_error)
+    __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_count); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 274, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_1);
     __pyx_r = __pyx_t_1;
     __pyx_t_1 = 0;
     goto __pyx_L0;
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":237
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":271
  * 
  *     def finalize(self):
  *         if self.aggregate_type == "COUNT":             # <<<<<<<<<<<<<<
@@ -8818,31 +9286,31 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
 */
   }
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":242
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":276
  *             return self._count
  * 
  *         if self.aggregate_type == "COUNT_DISTINCT" or self.aggregate_type == "DISTINCT":             # <<<<<<<<<<<<<<
  *             return 0 if self._distinct_hashes is None else self._distinct_hashes.size()
  * 
 */
-  __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_aggregate_type); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 242, __pyx_L1_error)
+  __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_aggregate_type); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 276, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
-  __pyx_t_7 = (__Pyx_PyUnicode_Equals(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_COUNT_DISTINCT, Py_EQ)); if (unlikely((__pyx_t_7 < 0))) __PYX_ERR(0, 242, __pyx_L1_error)
+  __pyx_t_7 = (__Pyx_PyUnicode_Equals(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_COUNT_DISTINCT, Py_EQ)); if (unlikely((__pyx_t_7 < 0))) __PYX_ERR(0, 276, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
   if (!__pyx_t_7) {
   } else {
     __pyx_t_2 = __pyx_t_7;
     goto __pyx_L6_bool_binop_done;
   }
-  __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_aggregate_type); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 242, __pyx_L1_error)
+  __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_aggregate_type); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 276, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
-  __pyx_t_7 = (__Pyx_PyUnicode_Equals(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_DISTINCT, Py_EQ)); if (unlikely((__pyx_t_7 < 0))) __PYX_ERR(0, 242, __pyx_L1_error)
+  __pyx_t_7 = (__Pyx_PyUnicode_Equals(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_DISTINCT, Py_EQ)); if (unlikely((__pyx_t_7 < 0))) __PYX_ERR(0, 276, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
   __pyx_t_2 = __pyx_t_7;
   __pyx_L6_bool_binop_done:;
   if (__pyx_t_2) {
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":243
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":277
  * 
  *         if self.aggregate_type == "COUNT_DISTINCT" or self.aggregate_type == "DISTINCT":
  *             return 0 if self._distinct_hashes is None else self._distinct_hashes.size()             # <<<<<<<<<<<<<<
@@ -8850,7 +9318,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
  *         if self.aggregate_type in ("APPROX_COUNT_DISTINCT", "APPROX_PERCENTILE"):
 */
     __Pyx_XDECREF(__pyx_r);
-    __pyx_t_3 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_distinct_hashes_2); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 243, __pyx_L1_error)
+    __pyx_t_3 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_distinct_hashes_2); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 277, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_3);
     __pyx_t_2 = (__pyx_t_3 == Py_None);
     __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
@@ -8858,7 +9326,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
       __Pyx_INCREF(__pyx_mstate_global->__pyx_int_0);
       __pyx_t_1 = __pyx_mstate_global->__pyx_int_0;
     } else {
-      __pyx_t_4 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_distinct_hashes_2); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 243, __pyx_L1_error)
+      __pyx_t_4 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_distinct_hashes_2); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 277, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_4);
       __pyx_t_5 = __pyx_t_4;
       __Pyx_INCREF(__pyx_t_5);
@@ -8868,7 +9336,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
         __pyx_t_3 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_size, __pyx_callargs+__pyx_t_6, (1-__pyx_t_6) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
         __Pyx_XDECREF(__pyx_t_5); __pyx_t_5 = 0;
         __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
-        if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 243, __pyx_L1_error)
+        if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 277, __pyx_L1_error)
         __Pyx_GOTREF(__pyx_t_3);
       }
       __pyx_t_1 = __pyx_t_3;
@@ -8878,7 +9346,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
     __pyx_t_1 = 0;
     goto __pyx_L0;
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":242
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":276
  *             return self._count
  * 
  *         if self.aggregate_type == "COUNT_DISTINCT" or self.aggregate_type == "DISTINCT":             # <<<<<<<<<<<<<<
@@ -8887,29 +9355,29 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
 */
   }
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":245
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":279
  *             return 0 if self._distinct_hashes is None else self._distinct_hashes.size()
  * 
  *         if self.aggregate_type in ("APPROX_COUNT_DISTINCT", "APPROX_PERCENTILE"):             # <<<<<<<<<<<<<<
  *             self._reject_unsupported_approximate()
  * 
 */
-  __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_aggregate_type); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 245, __pyx_L1_error)
+  __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_aggregate_type); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 279, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
-  __pyx_t_7 = (__Pyx_PyUnicode_Equals(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_APPROX_COUNT_DISTINCT, Py_EQ)); if (unlikely((__pyx_t_7 < 0))) __PYX_ERR(0, 245, __pyx_L1_error)
+  __pyx_t_7 = (__Pyx_PyUnicode_Equals(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_APPROX_COUNT_DISTINCT, Py_EQ)); if (unlikely((__pyx_t_7 < 0))) __PYX_ERR(0, 279, __pyx_L1_error)
   if (!__pyx_t_7) {
   } else {
     __pyx_t_2 = __pyx_t_7;
     goto __pyx_L9_bool_binop_done;
   }
-  __pyx_t_7 = (__Pyx_PyUnicode_Equals(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_APPROX_PERCENTILE, Py_EQ)); if (unlikely((__pyx_t_7 < 0))) __PYX_ERR(0, 245, __pyx_L1_error)
+  __pyx_t_7 = (__Pyx_PyUnicode_Equals(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_APPROX_PERCENTILE, Py_EQ)); if (unlikely((__pyx_t_7 < 0))) __PYX_ERR(0, 279, __pyx_L1_error)
   __pyx_t_2 = __pyx_t_7;
   __pyx_L9_bool_binop_done:;
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
   __pyx_t_7 = __pyx_t_2;
   if (__pyx_t_7) {
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":246
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":280
  * 
  *         if self.aggregate_type in ("APPROX_COUNT_DISTINCT", "APPROX_PERCENTILE"):
  *             self._reject_unsupported_approximate()             # <<<<<<<<<<<<<<
@@ -8923,12 +9391,12 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
       PyObject *__pyx_callargs[2] = {__pyx_t_3, NULL};
       __pyx_t_1 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_reject_unsupported_approximate, __pyx_callargs+__pyx_t_6, (1-__pyx_t_6) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
       __Pyx_XDECREF(__pyx_t_3); __pyx_t_3 = 0;
-      if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 246, __pyx_L1_error)
+      if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 280, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_1);
     }
     __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":245
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":279
  *             return 0 if self._distinct_hashes is None else self._distinct_hashes.size()
  * 
  *         if self.aggregate_type in ("APPROX_COUNT_DISTINCT", "APPROX_PERCENTILE"):             # <<<<<<<<<<<<<<
@@ -8937,20 +9405,20 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
 */
   }
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":248
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":282
  *             self._reject_unsupported_approximate()
  * 
  *         if self.aggregate_type == "SUM":             # <<<<<<<<<<<<<<
  *             return self._sum
  * 
 */
-  __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_aggregate_type); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 248, __pyx_L1_error)
+  __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_aggregate_type); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 282, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
-  __pyx_t_7 = (__Pyx_PyUnicode_Equals(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_SUM, Py_EQ)); if (unlikely((__pyx_t_7 < 0))) __PYX_ERR(0, 248, __pyx_L1_error)
+  __pyx_t_7 = (__Pyx_PyUnicode_Equals(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_SUM, Py_EQ)); if (unlikely((__pyx_t_7 < 0))) __PYX_ERR(0, 282, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
   if (__pyx_t_7) {
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":249
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":283
  * 
  *         if self.aggregate_type == "SUM":
  *             return self._sum             # <<<<<<<<<<<<<<
@@ -8958,13 +9426,13 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
  *         if self.aggregate_type == "AVG":
 */
     __Pyx_XDECREF(__pyx_r);
-    __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_sum_2); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 249, __pyx_L1_error)
+    __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_sum_2); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 283, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_1);
     __pyx_r = __pyx_t_1;
     __pyx_t_1 = 0;
     goto __pyx_L0;
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":248
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":282
  *             self._reject_unsupported_approximate()
  * 
  *         if self.aggregate_type == "SUM":             # <<<<<<<<<<<<<<
@@ -8973,36 +9441,36 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
 */
   }
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":251
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":285
  *             return self._sum
  * 
  *         if self.aggregate_type == "AVG":             # <<<<<<<<<<<<<<
  *             if self._count == 0 or self._sum is None:
  *                 return None
 */
-  __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_aggregate_type); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 251, __pyx_L1_error)
+  __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_aggregate_type); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 285, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
-  __pyx_t_7 = (__Pyx_PyUnicode_Equals(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_AVG, Py_EQ)); if (unlikely((__pyx_t_7 < 0))) __PYX_ERR(0, 251, __pyx_L1_error)
+  __pyx_t_7 = (__Pyx_PyUnicode_Equals(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_AVG, Py_EQ)); if (unlikely((__pyx_t_7 < 0))) __PYX_ERR(0, 285, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
   if (__pyx_t_7) {
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":252
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":286
  * 
  *         if self.aggregate_type == "AVG":
  *             if self._count == 0 or self._sum is None:             # <<<<<<<<<<<<<<
  *                 return None
  *             return self._sum / self._count
 */
-    __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_count); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 252, __pyx_L1_error)
+    __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_count); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 286, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_1);
-    __pyx_t_2 = (__Pyx_PyLong_BoolEqObjC(__pyx_t_1, __pyx_mstate_global->__pyx_int_0, 0, 0)); if (unlikely((__pyx_t_2 < 0))) __PYX_ERR(0, 252, __pyx_L1_error)
+    __pyx_t_2 = (__Pyx_PyLong_BoolEqObjC(__pyx_t_1, __pyx_mstate_global->__pyx_int_0, 0, 0)); if (unlikely((__pyx_t_2 < 0))) __PYX_ERR(0, 286, __pyx_L1_error)
     __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
     if (!__pyx_t_2) {
     } else {
       __pyx_t_7 = __pyx_t_2;
       goto __pyx_L14_bool_binop_done;
     }
-    __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_sum_2); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 252, __pyx_L1_error)
+    __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_sum_2); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 286, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_1);
     __pyx_t_2 = (__pyx_t_1 == Py_None);
     __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
@@ -9010,7 +9478,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
     __pyx_L14_bool_binop_done:;
     if (__pyx_t_7) {
 
-      /* "opteryx/operators/aggregate/aggregate_node.pyx":253
+      /* "opteryx/operators/aggregate/aggregate_node.pyx":287
  *         if self.aggregate_type == "AVG":
  *             if self._count == 0 or self._sum is None:
  *                 return None             # <<<<<<<<<<<<<<
@@ -9021,7 +9489,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
       __pyx_r = Py_None; __Pyx_INCREF(Py_None);
       goto __pyx_L0;
 
-      /* "opteryx/operators/aggregate/aggregate_node.pyx":252
+      /* "opteryx/operators/aggregate/aggregate_node.pyx":286
  * 
  *         if self.aggregate_type == "AVG":
  *             if self._count == 0 or self._sum is None:             # <<<<<<<<<<<<<<
@@ -9030,7 +9498,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
 */
     }
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":254
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":288
  *             if self._count == 0 or self._sum is None:
  *                 return None
  *             return self._sum / self._count             # <<<<<<<<<<<<<<
@@ -9038,11 +9506,11 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
  *         if self.aggregate_type == "MIN":
 */
     __Pyx_XDECREF(__pyx_r);
-    __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_sum_2); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 254, __pyx_L1_error)
+    __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_sum_2); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 288, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_1);
-    __pyx_t_3 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_count); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 254, __pyx_L1_error)
+    __pyx_t_3 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_count); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 288, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_3);
-    __pyx_t_4 = __Pyx_PyNumber_Divide(__pyx_t_1, __pyx_t_3); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 254, __pyx_L1_error)
+    __pyx_t_4 = __Pyx_PyNumber_Divide(__pyx_t_1, __pyx_t_3); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 288, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_4);
     __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
     __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
@@ -9050,7 +9518,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
     __pyx_t_4 = 0;
     goto __pyx_L0;
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":251
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":285
  *             return self._sum
  * 
  *         if self.aggregate_type == "AVG":             # <<<<<<<<<<<<<<
@@ -9059,20 +9527,20 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
 */
   }
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":256
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":290
  *             return self._sum / self._count
  * 
  *         if self.aggregate_type == "MIN":             # <<<<<<<<<<<<<<
  *             return self._min
  * 
 */
-  __pyx_t_4 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_aggregate_type); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 256, __pyx_L1_error)
+  __pyx_t_4 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_aggregate_type); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 290, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_4);
-  __pyx_t_7 = (__Pyx_PyUnicode_Equals(__pyx_t_4, __pyx_mstate_global->__pyx_n_u_MIN, Py_EQ)); if (unlikely((__pyx_t_7 < 0))) __PYX_ERR(0, 256, __pyx_L1_error)
+  __pyx_t_7 = (__Pyx_PyUnicode_Equals(__pyx_t_4, __pyx_mstate_global->__pyx_n_u_MIN, Py_EQ)); if (unlikely((__pyx_t_7 < 0))) __PYX_ERR(0, 290, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
   if (__pyx_t_7) {
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":257
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":291
  * 
  *         if self.aggregate_type == "MIN":
  *             return self._min             # <<<<<<<<<<<<<<
@@ -9080,13 +9548,13 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
  *         if self.aggregate_type == "MAX":
 */
     __Pyx_XDECREF(__pyx_r);
-    __pyx_t_4 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_min_2); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 257, __pyx_L1_error)
+    __pyx_t_4 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_min_2); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 291, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_4);
     __pyx_r = __pyx_t_4;
     __pyx_t_4 = 0;
     goto __pyx_L0;
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":256
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":290
  *             return self._sum / self._count
  * 
  *         if self.aggregate_type == "MIN":             # <<<<<<<<<<<<<<
@@ -9095,20 +9563,20 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
 */
   }
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":259
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":293
  *             return self._min
  * 
  *         if self.aggregate_type == "MAX":             # <<<<<<<<<<<<<<
  *             return self._max
  * 
 */
-  __pyx_t_4 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_aggregate_type); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 259, __pyx_L1_error)
+  __pyx_t_4 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_aggregate_type); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 293, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_4);
-  __pyx_t_7 = (__Pyx_PyUnicode_Equals(__pyx_t_4, __pyx_mstate_global->__pyx_n_u_MAX, Py_EQ)); if (unlikely((__pyx_t_7 < 0))) __PYX_ERR(0, 259, __pyx_L1_error)
+  __pyx_t_7 = (__Pyx_PyUnicode_Equals(__pyx_t_4, __pyx_mstate_global->__pyx_n_u_MAX, Py_EQ)); if (unlikely((__pyx_t_7 < 0))) __PYX_ERR(0, 293, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
   if (__pyx_t_7) {
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":260
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":294
  * 
  *         if self.aggregate_type == "MAX":
  *             return self._max             # <<<<<<<<<<<<<<
@@ -9116,13 +9584,13 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
  *         raise ValueError(
 */
     __Pyx_XDECREF(__pyx_r);
-    __pyx_t_4 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_max_2); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 260, __pyx_L1_error)
+    __pyx_t_4 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_max_2); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 294, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_4);
     __pyx_r = __pyx_t_4;
     __pyx_t_4 = 0;
     goto __pyx_L0;
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":259
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":293
  *             return self._min
  * 
  *         if self.aggregate_type == "MAX":             # <<<<<<<<<<<<<<
@@ -9131,7 +9599,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
 */
   }
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":262
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":296
  *             return self._max
  * 
  *         raise ValueError(             # <<<<<<<<<<<<<<
@@ -9140,19 +9608,19 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
 */
   __pyx_t_3 = NULL;
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":263
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":297
  * 
  *         raise ValueError(
  *             f"Unsupported aggregate type for Draken global aggregate: {self.aggregate_type}"             # <<<<<<<<<<<<<<
  *         )
  * 
 */
-  __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_aggregate_type); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 263, __pyx_L1_error)
+  __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_aggregate_type); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 297, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
-  __pyx_t_5 = __Pyx_PyObject_FormatSimple(__pyx_t_1, __pyx_mstate_global->__pyx_empty_unicode); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 263, __pyx_L1_error)
+  __pyx_t_5 = __Pyx_PyObject_FormatSimple(__pyx_t_1, __pyx_mstate_global->__pyx_empty_unicode); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 297, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_5);
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
-  __pyx_t_1 = __Pyx_PyUnicode_Concat(__pyx_mstate_global->__pyx_kp_u_Unsupported_aggregate_type_for_D, __pyx_t_5); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 263, __pyx_L1_error)
+  __pyx_t_1 = __Pyx_PyUnicode_Concat(__pyx_mstate_global->__pyx_kp_u_Unsupported_aggregate_type_for_D, __pyx_t_5); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 297, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
   __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
   __pyx_t_6 = 1;
@@ -9161,14 +9629,14 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
     __pyx_t_4 = __Pyx_PyObject_FastCall((PyObject*)(((PyTypeObject*)PyExc_ValueError)), __pyx_callargs+__pyx_t_6, (2-__pyx_t_6) | (__pyx_t_6*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
     __Pyx_XDECREF(__pyx_t_3); __pyx_t_3 = 0;
     __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
-    if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 262, __pyx_L1_error)
+    if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 296, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_4);
   }
   __Pyx_Raise(__pyx_t_4, 0, 0, 0);
   __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
-  __PYX_ERR(0, 262, __pyx_L1_error)
+  __PYX_ERR(0, 296, __pyx_L1_error)
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":236
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":270
  *         self._collect_vector(vector)
  * 
  *     def finalize(self):             # <<<<<<<<<<<<<<
@@ -9190,7 +9658,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_25_Dra
   return __pyx_r;
 }
 
-/* "opteryx/operators/aggregate/aggregate_node.pyx":268
+/* "opteryx/operators/aggregate/aggregate_node.pyx":302
  * 
  * class AggregateOperator(BasePlanNode):
  *     def __init__(self, properties: QueryProperties, **parameters):             # <<<<<<<<<<<<<<
@@ -9241,39 +9709,39 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   {
     PyObject ** const __pyx_pyargnames[] = {&__pyx_mstate_global->__pyx_n_u_self,&__pyx_mstate_global->__pyx_n_u_properties,0};
     const Py_ssize_t __pyx_kwds_len = (__pyx_kwds) ? __Pyx_NumKwargs_FASTCALL(__pyx_kwds) : 0;
-    if (unlikely(__pyx_kwds_len) < 0) __PYX_ERR(0, 268, __pyx_L3_error)
+    if (unlikely(__pyx_kwds_len) < 0) __PYX_ERR(0, 302, __pyx_L3_error)
     if (__pyx_kwds_len > 0) {
       switch (__pyx_nargs) {
         case  2:
         values[1] = __Pyx_ArgRef_FASTCALL(__pyx_args, 1);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(0, 268, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(0, 302, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  1:
         values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 268, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 302, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  0: break;
         default: goto __pyx_L5_argtuple_error;
       }
       const Py_ssize_t kwd_pos_args = __pyx_nargs;
-      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, __pyx_v_parameters, values, kwd_pos_args, __pyx_kwds_len, "__init__", 1) < (0)) __PYX_ERR(0, 268, __pyx_L3_error)
+      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, __pyx_v_parameters, values, kwd_pos_args, __pyx_kwds_len, "__init__", 1) < (0)) __PYX_ERR(0, 302, __pyx_L3_error)
       for (Py_ssize_t i = __pyx_nargs; i < 2; i++) {
-        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("__init__", 1, 2, 2, i); __PYX_ERR(0, 268, __pyx_L3_error) }
+        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("__init__", 1, 2, 2, i); __PYX_ERR(0, 302, __pyx_L3_error) }
       }
     } else if (unlikely(__pyx_nargs != 2)) {
       goto __pyx_L5_argtuple_error;
     } else {
       values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 268, __pyx_L3_error)
+      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 302, __pyx_L3_error)
       values[1] = __Pyx_ArgRef_FASTCALL(__pyx_args, 1);
-      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(0, 268, __pyx_L3_error)
+      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(0, 302, __pyx_L3_error)
     }
     __pyx_v_self = values[0];
     __pyx_v_properties = values[1];
   }
   goto __pyx_L6_skip;
   __pyx_L5_argtuple_error:;
-  __Pyx_RaiseArgtupleInvalid("__init__", 1, 2, 2, __pyx_nargs); __PYX_ERR(0, 268, __pyx_L3_error)
+  __Pyx_RaiseArgtupleInvalid("__init__", 1, 2, 2, __pyx_nargs); __PYX_ERR(0, 302, __pyx_L3_error)
   __pyx_L6_skip:;
   goto __pyx_L4_argument_unpacking_done;
   __pyx_L3_error:;
@@ -9319,7 +9787,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("__init__", 0);
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":269
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":303
  * class AggregateOperator(BasePlanNode):
  *     def __init__(self, properties: QueryProperties, **parameters):
  *         super().__init__(properties=properties, **parameters)             # <<<<<<<<<<<<<<
@@ -9328,7 +9796,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
 */
   __pyx_t_2 = NULL;
   __pyx_t_3 = __Pyx_CyFunction_GetClassObj(__pyx_self);
-  if (!__pyx_t_3) { PyErr_SetString(PyExc_RuntimeError, "super(): empty __class__ cell"); __PYX_ERR(0, 269, __pyx_L1_error) }
+  if (!__pyx_t_3) { PyErr_SetString(PyExc_RuntimeError, "super(): empty __class__ cell"); __PYX_ERR(0, 303, __pyx_L1_error) }
   __Pyx_INCREF(__pyx_t_3);
   __pyx_t_4 = 1;
   {
@@ -9336,43 +9804,43 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
     __pyx_t_1 = __Pyx_PyObject_FastCall((PyObject*)__pyx_builtin_super, __pyx_callargs+__pyx_t_4, (3-__pyx_t_4) | (__pyx_t_4*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
     __Pyx_XDECREF(__pyx_t_2); __pyx_t_2 = 0;
     __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
-    if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 269, __pyx_L1_error)
+    if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 303, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_1);
   }
-  __pyx_t_3 = __Pyx_PyObject_GetAttrStr(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_init); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 269, __pyx_L1_error)
+  __pyx_t_3 = __Pyx_PyObject_GetAttrStr(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_init); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 303, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_3);
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
-  __pyx_t_2 = __Pyx_PyDict_NewPresized(1); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 269, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_PyDict_NewPresized(1); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 303, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
-  if (PyDict_SetItem(__pyx_t_2, __pyx_mstate_global->__pyx_n_u_properties, __pyx_v_properties) < (0)) __PYX_ERR(0, 269, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_2, __pyx_mstate_global->__pyx_n_u_properties, __pyx_v_properties) < (0)) __PYX_ERR(0, 303, __pyx_L1_error)
   __pyx_t_1 = __pyx_t_2;
   __pyx_t_2 = 0;
-  if (__Pyx_MergeKeywords(__pyx_t_1, __pyx_v_parameters) < (0)) __PYX_ERR(0, 269, __pyx_L1_error)
-  __pyx_t_2 = __Pyx_PyObject_Call(__pyx_t_3, __pyx_mstate_global->__pyx_empty_tuple, __pyx_t_1); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 269, __pyx_L1_error)
+  if (__Pyx_MergeKeywords(__pyx_t_1, __pyx_v_parameters) < (0)) __PYX_ERR(0, 303, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_PyObject_Call(__pyx_t_3, __pyx_mstate_global->__pyx_empty_tuple, __pyx_t_1); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 303, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
   __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":271
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":305
  *         super().__init__(properties=properties, **parameters)
  * 
  *         self.aggregates = list(parameters.get("aggregates", []))             # <<<<<<<<<<<<<<
  *         self.evaluatable_nodes = [
  *             node
 */
-  __pyx_t_2 = PyList_New(0); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 271, __pyx_L1_error)
+  __pyx_t_2 = PyList_New(0); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 305, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
-  __pyx_t_1 = __Pyx_PyDict_GetItemDefault(__pyx_v_parameters, __pyx_mstate_global->__pyx_n_u_aggregates, __pyx_t_2); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 271, __pyx_L1_error)
+  __pyx_t_1 = __Pyx_PyDict_GetItemDefault(__pyx_v_parameters, __pyx_mstate_global->__pyx_n_u_aggregates, __pyx_t_2); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 305, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
-  __pyx_t_2 = __Pyx_PySequence_ListKeepNew(__pyx_t_1); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 271, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_PySequence_ListKeepNew(__pyx_t_1); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 305, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
-  if (__Pyx_PyObject_SetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_aggregates, __pyx_t_2) < (0)) __PYX_ERR(0, 271, __pyx_L1_error)
+  if (__Pyx_PyObject_SetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_aggregates, __pyx_t_2) < (0)) __PYX_ERR(0, 305, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":272
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":306
  * 
  *         self.aggregates = list(parameters.get("aggregates", []))
  *         self.evaluatable_nodes = [             # <<<<<<<<<<<<<<
@@ -9380,10 +9848,10 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
  *             for node in extract_evaluations(self.aggregates)
 */
   { /* enter inner scope */
-    __pyx_t_2 = PyList_New(0); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 272, __pyx_L5_error)
+    __pyx_t_2 = PyList_New(0); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 306, __pyx_L5_error)
     __Pyx_GOTREF(__pyx_t_2);
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":274
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":308
  *         self.evaluatable_nodes = [
  *             node
  *             for node in extract_evaluations(self.aggregates)             # <<<<<<<<<<<<<<
@@ -9391,9 +9859,9 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
  *         ]
 */
     __pyx_t_3 = NULL;
-    __Pyx_GetModuleGlobalName(__pyx_t_5, __pyx_mstate_global->__pyx_n_u_extract_evaluations); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 274, __pyx_L5_error)
+    __Pyx_GetModuleGlobalName(__pyx_t_5, __pyx_mstate_global->__pyx_n_u_extract_evaluations); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 308, __pyx_L5_error)
     __Pyx_GOTREF(__pyx_t_5);
-    __pyx_t_6 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_aggregates); if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 274, __pyx_L5_error)
+    __pyx_t_6 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_aggregates); if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 308, __pyx_L5_error)
     __Pyx_GOTREF(__pyx_t_6);
     __pyx_t_4 = 1;
     #if CYTHON_UNPACK_METHODS
@@ -9413,7 +9881,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
       __Pyx_XDECREF(__pyx_t_3); __pyx_t_3 = 0;
       __Pyx_DECREF(__pyx_t_6); __pyx_t_6 = 0;
       __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
-      if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 274, __pyx_L5_error)
+      if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 308, __pyx_L5_error)
       __Pyx_GOTREF(__pyx_t_1);
     }
     if (likely(PyList_CheckExact(__pyx_t_1)) || PyTuple_CheckExact(__pyx_t_1)) {
@@ -9421,9 +9889,9 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
       __pyx_t_7 = 0;
       __pyx_t_8 = NULL;
     } else {
-      __pyx_t_7 = -1; __pyx_t_5 = PyObject_GetIter(__pyx_t_1); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 274, __pyx_L5_error)
+      __pyx_t_7 = -1; __pyx_t_5 = PyObject_GetIter(__pyx_t_1); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 308, __pyx_L5_error)
       __Pyx_GOTREF(__pyx_t_5);
-      __pyx_t_8 = (CYTHON_COMPILING_IN_LIMITED_API) ? PyIter_Next : __Pyx_PyObject_GetIterNextFunc(__pyx_t_5); if (unlikely(!__pyx_t_8)) __PYX_ERR(0, 274, __pyx_L5_error)
+      __pyx_t_8 = (CYTHON_COMPILING_IN_LIMITED_API) ? PyIter_Next : __Pyx_PyObject_GetIterNextFunc(__pyx_t_5); if (unlikely(!__pyx_t_8)) __PYX_ERR(0, 308, __pyx_L5_error)
     }
     __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
     for (;;) {
@@ -9432,7 +9900,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
           {
             Py_ssize_t __pyx_temp = __Pyx_PyList_GET_SIZE(__pyx_t_5);
             #if !CYTHON_ASSUME_SAFE_SIZE
-            if (unlikely((__pyx_temp < 0))) __PYX_ERR(0, 274, __pyx_L5_error)
+            if (unlikely((__pyx_temp < 0))) __PYX_ERR(0, 308, __pyx_L5_error)
             #endif
             if (__pyx_t_7 >= __pyx_temp) break;
           }
@@ -9442,7 +9910,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
           {
             Py_ssize_t __pyx_temp = __Pyx_PyTuple_GET_SIZE(__pyx_t_5);
             #if !CYTHON_ASSUME_SAFE_SIZE
-            if (unlikely((__pyx_temp < 0))) __PYX_ERR(0, 274, __pyx_L5_error)
+            if (unlikely((__pyx_temp < 0))) __PYX_ERR(0, 308, __pyx_L5_error)
             #endif
             if (__pyx_t_7 >= __pyx_temp) break;
           }
@@ -9453,13 +9921,13 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
           #endif
           ++__pyx_t_7;
         }
-        if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 274, __pyx_L5_error)
+        if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 308, __pyx_L5_error)
       } else {
         __pyx_t_1 = __pyx_t_8(__pyx_t_5);
         if (unlikely(!__pyx_t_1)) {
           PyObject* exc_type = PyErr_Occurred();
           if (exc_type) {
-            if (unlikely(!__Pyx_PyErr_GivenExceptionMatches(exc_type, PyExc_StopIteration))) __PYX_ERR(0, 274, __pyx_L5_error)
+            if (unlikely(!__Pyx_PyErr_GivenExceptionMatches(exc_type, PyExc_StopIteration))) __PYX_ERR(0, 308, __pyx_L5_error)
             PyErr_Clear();
           }
           break;
@@ -9469,37 +9937,37 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
       __Pyx_XDECREF_SET(__pyx_8genexpr2__pyx_v_node, __pyx_t_1);
       __pyx_t_1 = 0;
 
-      /* "opteryx/operators/aggregate/aggregate_node.pyx":275
+      /* "opteryx/operators/aggregate/aggregate_node.pyx":309
  *             node
  *             for node in extract_evaluations(self.aggregates)
  *             if node.node_type != NodeType.LITERAL             # <<<<<<<<<<<<<<
  *         ]
  * 
 */
-      __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_8genexpr2__pyx_v_node, __pyx_mstate_global->__pyx_n_u_node_type); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 275, __pyx_L5_error)
+      __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_8genexpr2__pyx_v_node, __pyx_mstate_global->__pyx_n_u_node_type); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 309, __pyx_L5_error)
       __Pyx_GOTREF(__pyx_t_1);
-      __Pyx_GetModuleGlobalName(__pyx_t_6, __pyx_mstate_global->__pyx_n_u_NodeType); if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 275, __pyx_L5_error)
+      __Pyx_GetModuleGlobalName(__pyx_t_6, __pyx_mstate_global->__pyx_n_u_NodeType); if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 309, __pyx_L5_error)
       __Pyx_GOTREF(__pyx_t_6);
-      __pyx_t_3 = __Pyx_PyObject_GetAttrStr(__pyx_t_6, __pyx_mstate_global->__pyx_n_u_LITERAL); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 275, __pyx_L5_error)
+      __pyx_t_3 = __Pyx_PyObject_GetAttrStr(__pyx_t_6, __pyx_mstate_global->__pyx_n_u_LITERAL); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 309, __pyx_L5_error)
       __Pyx_GOTREF(__pyx_t_3);
       __Pyx_DECREF(__pyx_t_6); __pyx_t_6 = 0;
-      __pyx_t_6 = PyObject_RichCompare(__pyx_t_1, __pyx_t_3, Py_NE); __Pyx_XGOTREF(__pyx_t_6); if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 275, __pyx_L5_error)
+      __pyx_t_6 = PyObject_RichCompare(__pyx_t_1, __pyx_t_3, Py_NE); __Pyx_XGOTREF(__pyx_t_6); if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 309, __pyx_L5_error)
       __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
       __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
-      __pyx_t_9 = __Pyx_PyObject_IsTrue(__pyx_t_6); if (unlikely((__pyx_t_9 < 0))) __PYX_ERR(0, 275, __pyx_L5_error)
+      __pyx_t_9 = __Pyx_PyObject_IsTrue(__pyx_t_6); if (unlikely((__pyx_t_9 < 0))) __PYX_ERR(0, 309, __pyx_L5_error)
       __Pyx_DECREF(__pyx_t_6); __pyx_t_6 = 0;
       if (__pyx_t_9) {
 
-        /* "opteryx/operators/aggregate/aggregate_node.pyx":273
+        /* "opteryx/operators/aggregate/aggregate_node.pyx":307
  *         self.aggregates = list(parameters.get("aggregates", []))
  *         self.evaluatable_nodes = [
  *             node             # <<<<<<<<<<<<<<
  *             for node in extract_evaluations(self.aggregates)
  *             if node.node_type != NodeType.LITERAL
 */
-        if (unlikely(__Pyx_ListComp_Append(__pyx_t_2, (PyObject*)__pyx_8genexpr2__pyx_v_node))) __PYX_ERR(0, 272, __pyx_L5_error)
+        if (unlikely(__Pyx_ListComp_Append(__pyx_t_2, (PyObject*)__pyx_8genexpr2__pyx_v_node))) __PYX_ERR(0, 306, __pyx_L5_error)
 
-        /* "opteryx/operators/aggregate/aggregate_node.pyx":275
+        /* "opteryx/operators/aggregate/aggregate_node.pyx":309
  *             node
  *             for node in extract_evaluations(self.aggregates)
  *             if node.node_type != NodeType.LITERAL             # <<<<<<<<<<<<<<
@@ -9508,7 +9976,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
 */
       }
 
-      /* "opteryx/operators/aggregate/aggregate_node.pyx":274
+      /* "opteryx/operators/aggregate/aggregate_node.pyx":308
  *         self.evaluatable_nodes = [
  *             node
  *             for node in extract_evaluations(self.aggregates)             # <<<<<<<<<<<<<<
@@ -9525,17 +9993,17 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
     __pyx_L10_exit_scope:;
   } /* exit inner scope */
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":272
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":306
  * 
  *         self.aggregates = list(parameters.get("aggregates", []))
  *         self.evaluatable_nodes = [             # <<<<<<<<<<<<<<
  *             node
  *             for node in extract_evaluations(self.aggregates)
 */
-  if (__Pyx_PyObject_SetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_evaluatable_nodes, __pyx_t_2) < (0)) __PYX_ERR(0, 272, __pyx_L1_error)
+  if (__Pyx_PyObject_SetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_evaluatable_nodes, __pyx_t_2) < (0)) __PYX_ERR(0, 306, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":278
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":312
  *         ]
  * 
  *         all_identifiers = [             # <<<<<<<<<<<<<<
@@ -9543,10 +10011,10 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
  *             for node in get_all_nodes_of_type(self.aggregates, select_nodes=(NodeType.IDENTIFIER,))
 */
   { /* enter inner scope */
-    __pyx_t_2 = PyList_New(0); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 278, __pyx_L13_error)
+    __pyx_t_2 = PyList_New(0); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 312, __pyx_L13_error)
     __Pyx_GOTREF(__pyx_t_2);
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":280
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":314
  *         all_identifiers = [
  *             node.schema_column.identity
  *             for node in get_all_nodes_of_type(self.aggregates, select_nodes=(NodeType.IDENTIFIER,))             # <<<<<<<<<<<<<<
@@ -9554,19 +10022,19 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
  *         self.all_identifiers = list(dict.fromkeys(all_identifiers))
 */
     __pyx_t_6 = NULL;
-    __Pyx_GetModuleGlobalName(__pyx_t_3, __pyx_mstate_global->__pyx_n_u_get_all_nodes_of_type); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 280, __pyx_L13_error)
+    __Pyx_GetModuleGlobalName(__pyx_t_3, __pyx_mstate_global->__pyx_n_u_get_all_nodes_of_type); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 314, __pyx_L13_error)
     __Pyx_GOTREF(__pyx_t_3);
-    __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_aggregates); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 280, __pyx_L13_error)
+    __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_aggregates); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 314, __pyx_L13_error)
     __Pyx_GOTREF(__pyx_t_1);
-    __Pyx_GetModuleGlobalName(__pyx_t_10, __pyx_mstate_global->__pyx_n_u_NodeType); if (unlikely(!__pyx_t_10)) __PYX_ERR(0, 280, __pyx_L13_error)
+    __Pyx_GetModuleGlobalName(__pyx_t_10, __pyx_mstate_global->__pyx_n_u_NodeType); if (unlikely(!__pyx_t_10)) __PYX_ERR(0, 314, __pyx_L13_error)
     __Pyx_GOTREF(__pyx_t_10);
-    __pyx_t_11 = __Pyx_PyObject_GetAttrStr(__pyx_t_10, __pyx_mstate_global->__pyx_n_u_IDENTIFIER); if (unlikely(!__pyx_t_11)) __PYX_ERR(0, 280, __pyx_L13_error)
+    __pyx_t_11 = __Pyx_PyObject_GetAttrStr(__pyx_t_10, __pyx_mstate_global->__pyx_n_u_IDENTIFIER); if (unlikely(!__pyx_t_11)) __PYX_ERR(0, 314, __pyx_L13_error)
     __Pyx_GOTREF(__pyx_t_11);
     __Pyx_DECREF(__pyx_t_10); __pyx_t_10 = 0;
-    __pyx_t_10 = PyTuple_New(1); if (unlikely(!__pyx_t_10)) __PYX_ERR(0, 280, __pyx_L13_error)
+    __pyx_t_10 = PyTuple_New(1); if (unlikely(!__pyx_t_10)) __PYX_ERR(0, 314, __pyx_L13_error)
     __Pyx_GOTREF(__pyx_t_10);
     __Pyx_GIVEREF(__pyx_t_11);
-    if (__Pyx_PyTuple_SET_ITEM(__pyx_t_10, 0, __pyx_t_11) != (0)) __PYX_ERR(0, 280, __pyx_L13_error);
+    if (__Pyx_PyTuple_SET_ITEM(__pyx_t_10, 0, __pyx_t_11) != (0)) __PYX_ERR(0, 314, __pyx_L13_error);
     __pyx_t_11 = 0;
     __pyx_t_4 = 1;
     #if CYTHON_UNPACK_METHODS
@@ -9582,16 +10050,16 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
     #endif
     {
       PyObject *__pyx_callargs[2 + ((CYTHON_VECTORCALL) ? 1 : 0)] = {__pyx_t_6, __pyx_t_1};
-      __pyx_t_11 = __Pyx_MakeVectorcallBuilderKwds(1); if (unlikely(!__pyx_t_11)) __PYX_ERR(0, 280, __pyx_L13_error)
+      __pyx_t_11 = __Pyx_MakeVectorcallBuilderKwds(1); if (unlikely(!__pyx_t_11)) __PYX_ERR(0, 314, __pyx_L13_error)
       __Pyx_GOTREF(__pyx_t_11);
-      if (__Pyx_VectorcallBuilder_AddArg(__pyx_mstate_global->__pyx_n_u_select_nodes, __pyx_t_10, __pyx_t_11, __pyx_callargs+2, 0) < (0)) __PYX_ERR(0, 280, __pyx_L13_error)
+      if (__Pyx_VectorcallBuilder_AddArg(__pyx_mstate_global->__pyx_n_u_select_nodes, __pyx_t_10, __pyx_t_11, __pyx_callargs+2, 0) < (0)) __PYX_ERR(0, 314, __pyx_L13_error)
       __pyx_t_5 = __Pyx_Object_Vectorcall_CallFromBuilder((PyObject*)__pyx_t_3, __pyx_callargs+__pyx_t_4, (2-__pyx_t_4) | (__pyx_t_4*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET), __pyx_t_11);
       __Pyx_XDECREF(__pyx_t_6); __pyx_t_6 = 0;
       __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
       __Pyx_DECREF(__pyx_t_10); __pyx_t_10 = 0;
       __Pyx_DECREF(__pyx_t_11); __pyx_t_11 = 0;
       __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
-      if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 280, __pyx_L13_error)
+      if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 314, __pyx_L13_error)
       __Pyx_GOTREF(__pyx_t_5);
     }
     if (likely(PyList_CheckExact(__pyx_t_5)) || PyTuple_CheckExact(__pyx_t_5)) {
@@ -9599,9 +10067,9 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
       __pyx_t_7 = 0;
       __pyx_t_8 = NULL;
     } else {
-      __pyx_t_7 = -1; __pyx_t_3 = PyObject_GetIter(__pyx_t_5); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 280, __pyx_L13_error)
+      __pyx_t_7 = -1; __pyx_t_3 = PyObject_GetIter(__pyx_t_5); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 314, __pyx_L13_error)
       __Pyx_GOTREF(__pyx_t_3);
-      __pyx_t_8 = (CYTHON_COMPILING_IN_LIMITED_API) ? PyIter_Next : __Pyx_PyObject_GetIterNextFunc(__pyx_t_3); if (unlikely(!__pyx_t_8)) __PYX_ERR(0, 280, __pyx_L13_error)
+      __pyx_t_8 = (CYTHON_COMPILING_IN_LIMITED_API) ? PyIter_Next : __Pyx_PyObject_GetIterNextFunc(__pyx_t_3); if (unlikely(!__pyx_t_8)) __PYX_ERR(0, 314, __pyx_L13_error)
     }
     __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
     for (;;) {
@@ -9610,7 +10078,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
           {
             Py_ssize_t __pyx_temp = __Pyx_PyList_GET_SIZE(__pyx_t_3);
             #if !CYTHON_ASSUME_SAFE_SIZE
-            if (unlikely((__pyx_temp < 0))) __PYX_ERR(0, 280, __pyx_L13_error)
+            if (unlikely((__pyx_temp < 0))) __PYX_ERR(0, 314, __pyx_L13_error)
             #endif
             if (__pyx_t_7 >= __pyx_temp) break;
           }
@@ -9620,7 +10088,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
           {
             Py_ssize_t __pyx_temp = __Pyx_PyTuple_GET_SIZE(__pyx_t_3);
             #if !CYTHON_ASSUME_SAFE_SIZE
-            if (unlikely((__pyx_temp < 0))) __PYX_ERR(0, 280, __pyx_L13_error)
+            if (unlikely((__pyx_temp < 0))) __PYX_ERR(0, 314, __pyx_L13_error)
             #endif
             if (__pyx_t_7 >= __pyx_temp) break;
           }
@@ -9631,13 +10099,13 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
           #endif
           ++__pyx_t_7;
         }
-        if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 280, __pyx_L13_error)
+        if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 314, __pyx_L13_error)
       } else {
         __pyx_t_5 = __pyx_t_8(__pyx_t_3);
         if (unlikely(!__pyx_t_5)) {
           PyObject* exc_type = PyErr_Occurred();
           if (exc_type) {
-            if (unlikely(!__Pyx_PyErr_GivenExceptionMatches(exc_type, PyExc_StopIteration))) __PYX_ERR(0, 280, __pyx_L13_error)
+            if (unlikely(!__Pyx_PyErr_GivenExceptionMatches(exc_type, PyExc_StopIteration))) __PYX_ERR(0, 314, __pyx_L13_error)
             PyErr_Clear();
           }
           break;
@@ -9647,22 +10115,22 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
       __Pyx_XDECREF_SET(__pyx_8genexpr3__pyx_v_node, __pyx_t_5);
       __pyx_t_5 = 0;
 
-      /* "opteryx/operators/aggregate/aggregate_node.pyx":279
+      /* "opteryx/operators/aggregate/aggregate_node.pyx":313
  * 
  *         all_identifiers = [
  *             node.schema_column.identity             # <<<<<<<<<<<<<<
  *             for node in get_all_nodes_of_type(self.aggregates, select_nodes=(NodeType.IDENTIFIER,))
  *         ]
 */
-      __pyx_t_5 = __Pyx_PyObject_GetAttrStr(__pyx_8genexpr3__pyx_v_node, __pyx_mstate_global->__pyx_n_u_schema_column); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 279, __pyx_L13_error)
+      __pyx_t_5 = __Pyx_PyObject_GetAttrStr(__pyx_8genexpr3__pyx_v_node, __pyx_mstate_global->__pyx_n_u_schema_column); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 313, __pyx_L13_error)
       __Pyx_GOTREF(__pyx_t_5);
-      __pyx_t_11 = __Pyx_PyObject_GetAttrStr(__pyx_t_5, __pyx_mstate_global->__pyx_n_u_identity); if (unlikely(!__pyx_t_11)) __PYX_ERR(0, 279, __pyx_L13_error)
+      __pyx_t_11 = __Pyx_PyObject_GetAttrStr(__pyx_t_5, __pyx_mstate_global->__pyx_n_u_identity); if (unlikely(!__pyx_t_11)) __PYX_ERR(0, 313, __pyx_L13_error)
       __Pyx_GOTREF(__pyx_t_11);
       __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
-      if (unlikely(__Pyx_ListComp_Append(__pyx_t_2, (PyObject*)__pyx_t_11))) __PYX_ERR(0, 278, __pyx_L13_error)
+      if (unlikely(__Pyx_ListComp_Append(__pyx_t_2, (PyObject*)__pyx_t_11))) __PYX_ERR(0, 312, __pyx_L13_error)
       __Pyx_DECREF(__pyx_t_11); __pyx_t_11 = 0;
 
-      /* "opteryx/operators/aggregate/aggregate_node.pyx":280
+      /* "opteryx/operators/aggregate/aggregate_node.pyx":314
  *         all_identifiers = [
  *             node.schema_column.identity
  *             for node in get_all_nodes_of_type(self.aggregates, select_nodes=(NodeType.IDENTIFIER,))             # <<<<<<<<<<<<<<
@@ -9681,7 +10149,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
   __pyx_v_all_identifiers = ((PyObject*)__pyx_t_2);
   __pyx_t_2 = 0;
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":282
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":316
  *             for node in get_all_nodes_of_type(self.aggregates, select_nodes=(NodeType.IDENTIFIER,))
  *         ]
  *         self.all_identifiers = list(dict.fromkeys(all_identifiers))             # <<<<<<<<<<<<<<
@@ -9695,16 +10163,16 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
     PyObject *__pyx_callargs[2] = {__pyx_t_3, __pyx_v_all_identifiers};
     __pyx_t_2 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_fromkeys, __pyx_callargs+__pyx_t_4, (2-__pyx_t_4) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
     __Pyx_XDECREF(__pyx_t_3); __pyx_t_3 = 0;
-    if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 282, __pyx_L1_error)
+    if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 316, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_2);
   }
-  __pyx_t_3 = __Pyx_PySequence_ListKeepNew(__pyx_t_2); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 282, __pyx_L1_error)
+  __pyx_t_3 = __Pyx_PySequence_ListKeepNew(__pyx_t_2); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 316, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_3);
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
-  if (__Pyx_PyObject_SetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_all_identifiers, __pyx_t_3) < (0)) __PYX_ERR(0, 282, __pyx_L1_error)
+  if (__Pyx_PyObject_SetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_all_identifiers, __pyx_t_3) < (0)) __PYX_ERR(0, 316, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":283
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":317
  *         ]
  *         self.all_identifiers = list(dict.fromkeys(all_identifiers))
  *         self.collectors = [_DrakenAggregateCollector(aggregate) for aggregate in self.aggregates]             # <<<<<<<<<<<<<<
@@ -9712,18 +10180,18 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
  *     @property
 */
   { /* enter inner scope */
-    __pyx_t_3 = PyList_New(0); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 283, __pyx_L20_error)
+    __pyx_t_3 = PyList_New(0); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 317, __pyx_L20_error)
     __Pyx_GOTREF(__pyx_t_3);
-    __pyx_t_2 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_aggregates); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 283, __pyx_L20_error)
+    __pyx_t_2 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_aggregates); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 317, __pyx_L20_error)
     __Pyx_GOTREF(__pyx_t_2);
     if (likely(PyList_CheckExact(__pyx_t_2)) || PyTuple_CheckExact(__pyx_t_2)) {
       __pyx_t_11 = __pyx_t_2; __Pyx_INCREF(__pyx_t_11);
       __pyx_t_7 = 0;
       __pyx_t_8 = NULL;
     } else {
-      __pyx_t_7 = -1; __pyx_t_11 = PyObject_GetIter(__pyx_t_2); if (unlikely(!__pyx_t_11)) __PYX_ERR(0, 283, __pyx_L20_error)
+      __pyx_t_7 = -1; __pyx_t_11 = PyObject_GetIter(__pyx_t_2); if (unlikely(!__pyx_t_11)) __PYX_ERR(0, 317, __pyx_L20_error)
       __Pyx_GOTREF(__pyx_t_11);
-      __pyx_t_8 = (CYTHON_COMPILING_IN_LIMITED_API) ? PyIter_Next : __Pyx_PyObject_GetIterNextFunc(__pyx_t_11); if (unlikely(!__pyx_t_8)) __PYX_ERR(0, 283, __pyx_L20_error)
+      __pyx_t_8 = (CYTHON_COMPILING_IN_LIMITED_API) ? PyIter_Next : __Pyx_PyObject_GetIterNextFunc(__pyx_t_11); if (unlikely(!__pyx_t_8)) __PYX_ERR(0, 317, __pyx_L20_error)
     }
     __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
     for (;;) {
@@ -9732,7 +10200,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
           {
             Py_ssize_t __pyx_temp = __Pyx_PyList_GET_SIZE(__pyx_t_11);
             #if !CYTHON_ASSUME_SAFE_SIZE
-            if (unlikely((__pyx_temp < 0))) __PYX_ERR(0, 283, __pyx_L20_error)
+            if (unlikely((__pyx_temp < 0))) __PYX_ERR(0, 317, __pyx_L20_error)
             #endif
             if (__pyx_t_7 >= __pyx_temp) break;
           }
@@ -9742,7 +10210,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
           {
             Py_ssize_t __pyx_temp = __Pyx_PyTuple_GET_SIZE(__pyx_t_11);
             #if !CYTHON_ASSUME_SAFE_SIZE
-            if (unlikely((__pyx_temp < 0))) __PYX_ERR(0, 283, __pyx_L20_error)
+            if (unlikely((__pyx_temp < 0))) __PYX_ERR(0, 317, __pyx_L20_error)
             #endif
             if (__pyx_t_7 >= __pyx_temp) break;
           }
@@ -9753,13 +10221,13 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
           #endif
           ++__pyx_t_7;
         }
-        if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 283, __pyx_L20_error)
+        if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 317, __pyx_L20_error)
       } else {
         __pyx_t_2 = __pyx_t_8(__pyx_t_11);
         if (unlikely(!__pyx_t_2)) {
           PyObject* exc_type = PyErr_Occurred();
           if (exc_type) {
-            if (unlikely(!__Pyx_PyErr_GivenExceptionMatches(exc_type, PyExc_StopIteration))) __PYX_ERR(0, 283, __pyx_L20_error)
+            if (unlikely(!__Pyx_PyErr_GivenExceptionMatches(exc_type, PyExc_StopIteration))) __PYX_ERR(0, 317, __pyx_L20_error)
             PyErr_Clear();
           }
           break;
@@ -9769,7 +10237,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
       __Pyx_XDECREF_SET(__pyx_8genexpr4__pyx_v_aggregate, __pyx_t_2);
       __pyx_t_2 = 0;
       __pyx_t_5 = NULL;
-      __Pyx_GetModuleGlobalName(__pyx_t_10, __pyx_mstate_global->__pyx_n_u_DrakenAggregateCollector); if (unlikely(!__pyx_t_10)) __PYX_ERR(0, 283, __pyx_L20_error)
+      __Pyx_GetModuleGlobalName(__pyx_t_10, __pyx_mstate_global->__pyx_n_u_DrakenAggregateCollector); if (unlikely(!__pyx_t_10)) __PYX_ERR(0, 317, __pyx_L20_error)
       __Pyx_GOTREF(__pyx_t_10);
       __pyx_t_4 = 1;
       #if CYTHON_UNPACK_METHODS
@@ -9788,10 +10256,10 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
         __pyx_t_2 = __Pyx_PyObject_FastCall((PyObject*)__pyx_t_10, __pyx_callargs+__pyx_t_4, (2-__pyx_t_4) | (__pyx_t_4*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
         __Pyx_XDECREF(__pyx_t_5); __pyx_t_5 = 0;
         __Pyx_DECREF(__pyx_t_10); __pyx_t_10 = 0;
-        if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 283, __pyx_L20_error)
+        if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 317, __pyx_L20_error)
         __Pyx_GOTREF(__pyx_t_2);
       }
-      if (unlikely(__Pyx_ListComp_Append(__pyx_t_3, (PyObject*)__pyx_t_2))) __PYX_ERR(0, 283, __pyx_L20_error)
+      if (unlikely(__Pyx_ListComp_Append(__pyx_t_3, (PyObject*)__pyx_t_2))) __PYX_ERR(0, 317, __pyx_L20_error)
       __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
     }
     __Pyx_DECREF(__pyx_t_11); __pyx_t_11 = 0;
@@ -9802,10 +10270,10 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
     goto __pyx_L1_error;
     __pyx_L24_exit_scope:;
   } /* exit inner scope */
-  if (__Pyx_PyObject_SetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_collectors, __pyx_t_3) < (0)) __PYX_ERR(0, 283, __pyx_L1_error)
+  if (__Pyx_PyObject_SetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_collectors, __pyx_t_3) < (0)) __PYX_ERR(0, 317, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":268
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":302
  * 
  * class AggregateOperator(BasePlanNode):
  *     def __init__(self, properties: QueryProperties, **parameters):             # <<<<<<<<<<<<<<
@@ -9836,7 +10304,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
   return __pyx_r;
 }
 
-/* "opteryx/operators/aggregate/aggregate_node.pyx":285
+/* "opteryx/operators/aggregate/aggregate_node.pyx":319
  *         self.collectors = [_DrakenAggregateCollector(aggregate) for aggregate in self.aggregates]
  * 
  *     @property             # <<<<<<<<<<<<<<
@@ -9883,32 +10351,32 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   {
     PyObject ** const __pyx_pyargnames[] = {&__pyx_mstate_global->__pyx_n_u_self,0};
     const Py_ssize_t __pyx_kwds_len = (__pyx_kwds) ? __Pyx_NumKwargs_FASTCALL(__pyx_kwds) : 0;
-    if (unlikely(__pyx_kwds_len) < 0) __PYX_ERR(0, 285, __pyx_L3_error)
+    if (unlikely(__pyx_kwds_len) < 0) __PYX_ERR(0, 319, __pyx_L3_error)
     if (__pyx_kwds_len > 0) {
       switch (__pyx_nargs) {
         case  1:
         values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 285, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 319, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  0: break;
         default: goto __pyx_L5_argtuple_error;
       }
       const Py_ssize_t kwd_pos_args = __pyx_nargs;
-      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "config", 0) < (0)) __PYX_ERR(0, 285, __pyx_L3_error)
+      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "config", 0) < (0)) __PYX_ERR(0, 319, __pyx_L3_error)
       for (Py_ssize_t i = __pyx_nargs; i < 1; i++) {
-        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("config", 1, 1, 1, i); __PYX_ERR(0, 285, __pyx_L3_error) }
+        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("config", 1, 1, 1, i); __PYX_ERR(0, 319, __pyx_L3_error) }
       }
     } else if (unlikely(__pyx_nargs != 1)) {
       goto __pyx_L5_argtuple_error;
     } else {
       values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 285, __pyx_L3_error)
+      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 319, __pyx_L3_error)
     }
     __pyx_v_self = values[0];
   }
   goto __pyx_L6_skip;
   __pyx_L5_argtuple_error:;
-  __Pyx_RaiseArgtupleInvalid("config", 1, 1, 1, __pyx_nargs); __PYX_ERR(0, 285, __pyx_L3_error)
+  __Pyx_RaiseArgtupleInvalid("config", 1, 1, 1, __pyx_nargs); __PYX_ERR(0, 319, __pyx_L3_error)
   __pyx_L6_skip:;
   goto __pyx_L4_argument_unpacking_done;
   __pyx_L3_error:;
@@ -9930,7 +10398,7 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
 }
 static PyObject *__pyx_gb_7opteryx_9operators_9aggregate_14aggregate_node_17AggregateOperator_6config_2generator2(__pyx_CoroutineObject *__pyx_generator, CYTHON_UNUSED PyThreadState *__pyx_tstate, PyObject *__pyx_sent_value); /* proto */
 
-/* "opteryx/operators/aggregate/aggregate_node.pyx":289
+/* "opteryx/operators/aggregate/aggregate_node.pyx":323
  *         from opteryx.expression import format_expression
  * 
  *         return f"AGGREGATE ({', '.join(format_expression(col) for col in self.aggregates)})"             # <<<<<<<<<<<<<<
@@ -9950,7 +10418,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
   if (unlikely(!__pyx_cur_scope)) {
     __pyx_cur_scope = ((struct __pyx_obj_7opteryx_9operators_9aggregate_14aggregate_node___pyx_scope_struct_2_genexpr *)Py_None);
     __Pyx_INCREF(Py_None);
-    __PYX_ERR(0, 289, __pyx_L1_error)
+    __PYX_ERR(0, 323, __pyx_L1_error)
   } else {
     __Pyx_GOTREF((PyObject *)__pyx_cur_scope);
   }
@@ -9961,7 +10429,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
   __Pyx_INCREF(__pyx_cur_scope->__pyx_genexpr_arg_0);
   __Pyx_GIVEREF(__pyx_cur_scope->__pyx_genexpr_arg_0);
   {
-    __pyx_CoroutineObject *gen = __Pyx_Generator_New((__pyx_coroutine_body_t) __pyx_gb_7opteryx_9operators_9aggregate_14aggregate_node_17AggregateOperator_6config_2generator2, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[1]), (PyObject *) __pyx_cur_scope, __pyx_mstate_global->__pyx_n_u_genexpr, __pyx_mstate_global->__pyx_n_u_AggregateOperator_config_locals, __pyx_mstate_global->__pyx_n_u_opteryx_operators_aggregate_aggr); if (unlikely(!gen)) __PYX_ERR(0, 289, __pyx_L1_error)
+    __pyx_CoroutineObject *gen = __Pyx_Generator_New((__pyx_coroutine_body_t) __pyx_gb_7opteryx_9operators_9aggregate_14aggregate_node_17AggregateOperator_6config_2generator2, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[1]), (PyObject *) __pyx_cur_scope, __pyx_mstate_global->__pyx_n_u_genexpr, __pyx_mstate_global->__pyx_n_u_AggregateOperator_config_locals, __pyx_mstate_global->__pyx_n_u_opteryx_operators_aggregate_aggr); if (unlikely(!gen)) __PYX_ERR(0, 323, __pyx_L1_error)
     __Pyx_DECREF(__pyx_cur_scope);
     __Pyx_RefNannyFinishContext();
     return (PyObject *) gen;
@@ -9997,18 +10465,18 @@ static PyObject *__pyx_gb_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
     return NULL;
   }
   __pyx_L3_first_run:;
-  if (unlikely(!__pyx_sent_value)) __PYX_ERR(0, 289, __pyx_L1_error)
-  __pyx_r = PyList_New(0); if (unlikely(!__pyx_r)) __PYX_ERR(0, 289, __pyx_L1_error)
+  if (unlikely(!__pyx_sent_value)) __PYX_ERR(0, 323, __pyx_L1_error)
+  __pyx_r = PyList_New(0); if (unlikely(!__pyx_r)) __PYX_ERR(0, 323, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_r);
-  if (unlikely(!__pyx_cur_scope->__pyx_genexpr_arg_0)) { __Pyx_RaiseUnboundLocalError(".0"); __PYX_ERR(0, 289, __pyx_L1_error) }
+  if (unlikely(!__pyx_cur_scope->__pyx_genexpr_arg_0)) { __Pyx_RaiseUnboundLocalError(".0"); __PYX_ERR(0, 323, __pyx_L1_error) }
   if (likely(PyList_CheckExact(__pyx_cur_scope->__pyx_genexpr_arg_0)) || PyTuple_CheckExact(__pyx_cur_scope->__pyx_genexpr_arg_0)) {
     __pyx_t_1 = __pyx_cur_scope->__pyx_genexpr_arg_0; __Pyx_INCREF(__pyx_t_1);
     __pyx_t_2 = 0;
     __pyx_t_3 = NULL;
   } else {
-    __pyx_t_2 = -1; __pyx_t_1 = PyObject_GetIter(__pyx_cur_scope->__pyx_genexpr_arg_0); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 289, __pyx_L1_error)
+    __pyx_t_2 = -1; __pyx_t_1 = PyObject_GetIter(__pyx_cur_scope->__pyx_genexpr_arg_0); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 323, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_1);
-    __pyx_t_3 = (CYTHON_COMPILING_IN_LIMITED_API) ? PyIter_Next : __Pyx_PyObject_GetIterNextFunc(__pyx_t_1); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 289, __pyx_L1_error)
+    __pyx_t_3 = (CYTHON_COMPILING_IN_LIMITED_API) ? PyIter_Next : __Pyx_PyObject_GetIterNextFunc(__pyx_t_1); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 323, __pyx_L1_error)
   }
   for (;;) {
     if (likely(!__pyx_t_3)) {
@@ -10016,7 +10484,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
         {
           Py_ssize_t __pyx_temp = __Pyx_PyList_GET_SIZE(__pyx_t_1);
           #if !CYTHON_ASSUME_SAFE_SIZE
-          if (unlikely((__pyx_temp < 0))) __PYX_ERR(0, 289, __pyx_L1_error)
+          if (unlikely((__pyx_temp < 0))) __PYX_ERR(0, 323, __pyx_L1_error)
           #endif
           if (__pyx_t_2 >= __pyx_temp) break;
         }
@@ -10026,7 +10494,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
         {
           Py_ssize_t __pyx_temp = __Pyx_PyTuple_GET_SIZE(__pyx_t_1);
           #if !CYTHON_ASSUME_SAFE_SIZE
-          if (unlikely((__pyx_temp < 0))) __PYX_ERR(0, 289, __pyx_L1_error)
+          if (unlikely((__pyx_temp < 0))) __PYX_ERR(0, 323, __pyx_L1_error)
           #endif
           if (__pyx_t_2 >= __pyx_temp) break;
         }
@@ -10037,13 +10505,13 @@ static PyObject *__pyx_gb_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
         #endif
         ++__pyx_t_2;
       }
-      if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 289, __pyx_L1_error)
+      if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 323, __pyx_L1_error)
     } else {
       __pyx_t_4 = __pyx_t_3(__pyx_t_1);
       if (unlikely(!__pyx_t_4)) {
         PyObject* exc_type = PyErr_Occurred();
         if (exc_type) {
-          if (unlikely(!__Pyx_PyErr_GivenExceptionMatches(exc_type, PyExc_StopIteration))) __PYX_ERR(0, 289, __pyx_L1_error)
+          if (unlikely(!__Pyx_PyErr_GivenExceptionMatches(exc_type, PyExc_StopIteration))) __PYX_ERR(0, 323, __pyx_L1_error)
           PyErr_Clear();
         }
         break;
@@ -10054,10 +10522,10 @@ static PyObject *__pyx_gb_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
     __Pyx_XDECREF_SET(__pyx_cur_scope->__pyx_v_col, __pyx_t_4);
     __Pyx_GIVEREF(__pyx_t_4);
     __pyx_t_4 = 0;
-    if (unlikely(!__pyx_cur_scope->__pyx_outer_scope->__pyx_v_format_expression)) { __Pyx_RaiseClosureNameError("format_expression"); __PYX_ERR(0, 289, __pyx_L1_error) }
-    __pyx_t_4 = __Pyx_PyObject_CallOneArg(__pyx_cur_scope->__pyx_outer_scope->__pyx_v_format_expression, __pyx_cur_scope->__pyx_v_col); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 289, __pyx_L1_error)
+    if (unlikely(!__pyx_cur_scope->__pyx_outer_scope->__pyx_v_format_expression)) { __Pyx_RaiseClosureNameError("format_expression"); __PYX_ERR(0, 323, __pyx_L1_error) }
+    __pyx_t_4 = __Pyx_PyObject_CallOneArg(__pyx_cur_scope->__pyx_outer_scope->__pyx_v_format_expression, __pyx_cur_scope->__pyx_v_col); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 323, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_4);
-    if (unlikely(__Pyx_ListComp_Append(__pyx_r, (PyObject*)__pyx_t_4))) __PYX_ERR(0, 289, __pyx_L1_error)
+    if (unlikely(__Pyx_ListComp_Append(__pyx_r, (PyObject*)__pyx_t_4))) __PYX_ERR(0, 323, __pyx_L1_error)
     __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
   }
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
@@ -10084,7 +10552,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
   return __pyx_r;
 }
 
-/* "opteryx/operators/aggregate/aggregate_node.pyx":285
+/* "opteryx/operators/aggregate/aggregate_node.pyx":319
  *         self.collectors = [_DrakenAggregateCollector(aggregate) for aggregate in self.aggregates]
  * 
  *     @property             # <<<<<<<<<<<<<<
@@ -10110,12 +10578,12 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
   if (unlikely(!__pyx_cur_scope)) {
     __pyx_cur_scope = ((struct __pyx_obj_7opteryx_9operators_9aggregate_14aggregate_node___pyx_scope_struct_1_config *)Py_None);
     __Pyx_INCREF(Py_None);
-    __PYX_ERR(0, 285, __pyx_L1_error)
+    __PYX_ERR(0, 319, __pyx_L1_error)
   } else {
     __Pyx_GOTREF((PyObject *)__pyx_cur_scope);
   }
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":287
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":321
  *     @property
  *     def config(self):  # pragma: no cover
  *         from opteryx.expression import format_expression             # <<<<<<<<<<<<<<
@@ -10124,14 +10592,14 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
 */
   {
     PyObject* const __pyx_imported_names[] = {__pyx_mstate_global->__pyx_n_u_format_expression};
-    __pyx_t_2 = __Pyx_Import(__pyx_mstate_global->__pyx_n_u_opteryx_expression, __pyx_imported_names, 1, NULL, 0); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 287, __pyx_L1_error)
+    __pyx_t_2 = __Pyx_Import(__pyx_mstate_global->__pyx_n_u_opteryx_expression, __pyx_imported_names, 1, NULL, 0); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 321, __pyx_L1_error)
   }
   __pyx_t_1 = __pyx_t_2;
   __Pyx_GOTREF(__pyx_t_1);
   {
     PyObject* const __pyx_imported_names[] = {__pyx_mstate_global->__pyx_n_u_format_expression};
     __pyx_t_3 = 0; {
-      __pyx_t_4 = __Pyx_ImportFrom(__pyx_t_1, __pyx_imported_names[__pyx_t_3]); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 287, __pyx_L1_error)
+      __pyx_t_4 = __Pyx_ImportFrom(__pyx_t_1, __pyx_imported_names[__pyx_t_3]); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 321, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_4);
       switch (__pyx_t_3) {
         case 0:
@@ -10146,7 +10614,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
   }
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":289
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":323
  *         from opteryx.expression import format_expression
  * 
  *         return f"AGGREGATE ({', '.join(format_expression(col) for col in self.aggregates)})"             # <<<<<<<<<<<<<<
@@ -10154,29 +10622,29 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
  *     @property
 */
   __Pyx_XDECREF(__pyx_r);
-  __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_aggregates); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 289, __pyx_L1_error)
+  __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_aggregates); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 323, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
-  __pyx_t_4 = __pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_17AggregateOperator_6config_genexpr(((PyObject*)__pyx_cur_scope), __pyx_t_1); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 289, __pyx_L1_error)
+  __pyx_t_4 = __pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_17AggregateOperator_6config_genexpr(((PyObject*)__pyx_cur_scope), __pyx_t_1); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 323, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_4);
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
-  __pyx_t_1 = __Pyx_Generator_GetInlinedResult(__pyx_t_4); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 289, __pyx_L1_error)
+  __pyx_t_1 = __Pyx_Generator_GetInlinedResult(__pyx_t_4); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 323, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
   __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
-  __pyx_t_4 = PyUnicode_Join(__pyx_mstate_global->__pyx_kp_u__2, __pyx_t_1); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 289, __pyx_L1_error)
+  __pyx_t_4 = PyUnicode_Join(__pyx_mstate_global->__pyx_kp_u__2, __pyx_t_1); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 323, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_4);
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
   __pyx_t_5[0] = __pyx_mstate_global->__pyx_kp_u_AGGREGATE;
   __pyx_t_5[1] = __pyx_t_4;
   __pyx_t_5[2] = __pyx_mstate_global->__pyx_kp_u__3;
   __pyx_t_1 = __Pyx_PyUnicode_Join(__pyx_t_5, 3, 11 + __Pyx_PyUnicode_GET_LENGTH(__pyx_t_4) + 1, 127 | __Pyx_PyUnicode_MAX_CHAR_VALUE(__pyx_t_4));
-  if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 289, __pyx_L1_error)
+  if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 323, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
   __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
   __pyx_r = __pyx_t_1;
   __pyx_t_1 = 0;
   goto __pyx_L0;
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":285
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":319
  *         self.collectors = [_DrakenAggregateCollector(aggregate) for aggregate in self.aggregates]
  * 
  *     @property             # <<<<<<<<<<<<<<
@@ -10198,7 +10666,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
   return __pyx_r;
 }
 
-/* "opteryx/operators/aggregate/aggregate_node.pyx":291
+/* "opteryx/operators/aggregate/aggregate_node.pyx":325
  *         return f"AGGREGATE ({', '.join(format_expression(col) for col in self.aggregates)})"
  * 
  *     @property             # <<<<<<<<<<<<<<
@@ -10245,32 +10713,32 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   {
     PyObject ** const __pyx_pyargnames[] = {&__pyx_mstate_global->__pyx_n_u_self,0};
     const Py_ssize_t __pyx_kwds_len = (__pyx_kwds) ? __Pyx_NumKwargs_FASTCALL(__pyx_kwds) : 0;
-    if (unlikely(__pyx_kwds_len) < 0) __PYX_ERR(0, 291, __pyx_L3_error)
+    if (unlikely(__pyx_kwds_len) < 0) __PYX_ERR(0, 325, __pyx_L3_error)
     if (__pyx_kwds_len > 0) {
       switch (__pyx_nargs) {
         case  1:
         values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 291, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 325, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  0: break;
         default: goto __pyx_L5_argtuple_error;
       }
       const Py_ssize_t kwd_pos_args = __pyx_nargs;
-      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "name", 0) < (0)) __PYX_ERR(0, 291, __pyx_L3_error)
+      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "name", 0) < (0)) __PYX_ERR(0, 325, __pyx_L3_error)
       for (Py_ssize_t i = __pyx_nargs; i < 1; i++) {
-        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("name", 1, 1, 1, i); __PYX_ERR(0, 291, __pyx_L3_error) }
+        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("name", 1, 1, 1, i); __PYX_ERR(0, 325, __pyx_L3_error) }
       }
     } else if (unlikely(__pyx_nargs != 1)) {
       goto __pyx_L5_argtuple_error;
     } else {
       values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 291, __pyx_L3_error)
+      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 325, __pyx_L3_error)
     }
     __pyx_v_self = values[0];
   }
   goto __pyx_L6_skip;
   __pyx_L5_argtuple_error:;
-  __Pyx_RaiseArgtupleInvalid("name", 1, 1, 1, __pyx_nargs); __PYX_ERR(0, 291, __pyx_L3_error)
+  __Pyx_RaiseArgtupleInvalid("name", 1, 1, 1, __pyx_nargs); __PYX_ERR(0, 325, __pyx_L3_error)
   __pyx_L6_skip:;
   goto __pyx_L4_argument_unpacking_done;
   __pyx_L3_error:;
@@ -10296,7 +10764,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
   __Pyx_RefNannyDeclarations
   __Pyx_RefNannySetupContext("name", 0);
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":293
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":327
  *     @property
  *     def name(self):  # pragma: no cover
  *         return "Aggregation Draken"             # <<<<<<<<<<<<<<
@@ -10308,7 +10776,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
   __pyx_r = __pyx_mstate_global->__pyx_kp_u_Aggregation_Draken;
   goto __pyx_L0;
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":291
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":325
  *         return f"AGGREGATE ({', '.join(format_expression(col) for col in self.aggregates)})"
  * 
  *     @property             # <<<<<<<<<<<<<<
@@ -10323,7 +10791,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
   return __pyx_r;
 }
 
-/* "opteryx/operators/aggregate/aggregate_node.pyx":295
+/* "opteryx/operators/aggregate/aggregate_node.pyx":329
  *         return "Aggregation Draken"
  * 
  *     def _prepare_chunk(self, chunk: Morsel) -> Morsel:             # <<<<<<<<<<<<<<
@@ -10371,39 +10839,39 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   {
     PyObject ** const __pyx_pyargnames[] = {&__pyx_mstate_global->__pyx_n_u_self,&__pyx_mstate_global->__pyx_n_u_chunk,0};
     const Py_ssize_t __pyx_kwds_len = (__pyx_kwds) ? __Pyx_NumKwargs_FASTCALL(__pyx_kwds) : 0;
-    if (unlikely(__pyx_kwds_len) < 0) __PYX_ERR(0, 295, __pyx_L3_error)
+    if (unlikely(__pyx_kwds_len) < 0) __PYX_ERR(0, 329, __pyx_L3_error)
     if (__pyx_kwds_len > 0) {
       switch (__pyx_nargs) {
         case  2:
         values[1] = __Pyx_ArgRef_FASTCALL(__pyx_args, 1);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(0, 295, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(0, 329, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  1:
         values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 295, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 329, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  0: break;
         default: goto __pyx_L5_argtuple_error;
       }
       const Py_ssize_t kwd_pos_args = __pyx_nargs;
-      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "_prepare_chunk", 0) < (0)) __PYX_ERR(0, 295, __pyx_L3_error)
+      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "_prepare_chunk", 0) < (0)) __PYX_ERR(0, 329, __pyx_L3_error)
       for (Py_ssize_t i = __pyx_nargs; i < 2; i++) {
-        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("_prepare_chunk", 1, 2, 2, i); __PYX_ERR(0, 295, __pyx_L3_error) }
+        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("_prepare_chunk", 1, 2, 2, i); __PYX_ERR(0, 329, __pyx_L3_error) }
       }
     } else if (unlikely(__pyx_nargs != 2)) {
       goto __pyx_L5_argtuple_error;
     } else {
       values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 295, __pyx_L3_error)
+      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 329, __pyx_L3_error)
       values[1] = __Pyx_ArgRef_FASTCALL(__pyx_args, 1);
-      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(0, 295, __pyx_L3_error)
+      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(0, 329, __pyx_L3_error)
     }
     __pyx_v_self = values[0];
     __pyx_v_chunk = values[1];
   }
   goto __pyx_L6_skip;
   __pyx_L5_argtuple_error:;
-  __Pyx_RaiseArgtupleInvalid("_prepare_chunk", 1, 2, 2, __pyx_nargs); __PYX_ERR(0, 295, __pyx_L3_error)
+  __Pyx_RaiseArgtupleInvalid("_prepare_chunk", 1, 2, 2, __pyx_nargs); __PYX_ERR(0, 329, __pyx_L3_error)
   __pyx_L6_skip:;
   goto __pyx_L4_argument_unpacking_done;
   __pyx_L3_error:;
@@ -10443,20 +10911,20 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
   __Pyx_RefNannySetupContext("_prepare_chunk", 0);
   __Pyx_INCREF(__pyx_v_chunk);
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":296
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":330
  * 
  *     def _prepare_chunk(self, chunk: Morsel) -> Morsel:
  *         if self.all_identifiers:             # <<<<<<<<<<<<<<
  *             chunk = chunk.select(self.all_identifiers)
  * 
 */
-  __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_all_identifiers); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 296, __pyx_L1_error)
+  __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_all_identifiers); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 330, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
-  __pyx_t_2 = __Pyx_PyObject_IsTrue(__pyx_t_1); if (unlikely((__pyx_t_2 < 0))) __PYX_ERR(0, 296, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_PyObject_IsTrue(__pyx_t_1); if (unlikely((__pyx_t_2 < 0))) __PYX_ERR(0, 330, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
   if (__pyx_t_2) {
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":297
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":331
  *     def _prepare_chunk(self, chunk: Morsel) -> Morsel:
  *         if self.all_identifiers:
  *             chunk = chunk.select(self.all_identifiers)             # <<<<<<<<<<<<<<
@@ -10465,7 +10933,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
 */
     __pyx_t_3 = __pyx_v_chunk;
     __Pyx_INCREF(__pyx_t_3);
-    __pyx_t_4 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_all_identifiers); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 297, __pyx_L1_error)
+    __pyx_t_4 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_all_identifiers); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 331, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_4);
     __pyx_t_5 = 0;
     {
@@ -10473,13 +10941,13 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
       __pyx_t_1 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_select, __pyx_callargs+__pyx_t_5, (2-__pyx_t_5) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
       __Pyx_XDECREF(__pyx_t_3); __pyx_t_3 = 0;
       __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
-      if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 297, __pyx_L1_error)
+      if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 331, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_1);
     }
     __Pyx_DECREF_SET(__pyx_v_chunk, __pyx_t_1);
     __pyx_t_1 = 0;
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":296
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":330
  * 
  *     def _prepare_chunk(self, chunk: Morsel) -> Morsel:
  *         if self.all_identifiers:             # <<<<<<<<<<<<<<
@@ -10488,20 +10956,20 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
 */
   }
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":299
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":333
  *             chunk = chunk.select(self.all_identifiers)
  * 
  *         if self.evaluatable_nodes:             # <<<<<<<<<<<<<<
  *             eval_start = time.monotonic_ns()
  *             chunk = evaluate_and_append_draken(self.evaluatable_nodes, chunk)
 */
-  __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_evaluatable_nodes); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 299, __pyx_L1_error)
+  __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_evaluatable_nodes); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 333, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
-  __pyx_t_2 = __Pyx_PyObject_IsTrue(__pyx_t_1); if (unlikely((__pyx_t_2 < 0))) __PYX_ERR(0, 299, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_PyObject_IsTrue(__pyx_t_1); if (unlikely((__pyx_t_2 < 0))) __PYX_ERR(0, 333, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
   if (__pyx_t_2) {
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":300
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":334
  * 
  *         if self.evaluatable_nodes:
  *             eval_start = time.monotonic_ns()             # <<<<<<<<<<<<<<
@@ -10509,9 +10977,9 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
  *             self.readings["time_aggregate_evaluations"] += time.monotonic_ns() - eval_start
 */
     __pyx_t_4 = NULL;
-    __Pyx_GetModuleGlobalName(__pyx_t_3, __pyx_mstate_global->__pyx_n_u_time); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 300, __pyx_L1_error)
+    __Pyx_GetModuleGlobalName(__pyx_t_3, __pyx_mstate_global->__pyx_n_u_time); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 334, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_3);
-    __pyx_t_6 = __Pyx_PyObject_GetAttrStr(__pyx_t_3, __pyx_mstate_global->__pyx_n_u_monotonic_ns); if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 300, __pyx_L1_error)
+    __pyx_t_6 = __Pyx_PyObject_GetAttrStr(__pyx_t_3, __pyx_mstate_global->__pyx_n_u_monotonic_ns); if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 334, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_6);
     __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
     __pyx_t_5 = 1;
@@ -10531,13 +10999,13 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
       __pyx_t_1 = __Pyx_PyObject_FastCall((PyObject*)__pyx_t_6, __pyx_callargs+__pyx_t_5, (1-__pyx_t_5) | (__pyx_t_5*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
       __Pyx_XDECREF(__pyx_t_4); __pyx_t_4 = 0;
       __Pyx_DECREF(__pyx_t_6); __pyx_t_6 = 0;
-      if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 300, __pyx_L1_error)
+      if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 334, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_1);
     }
     __pyx_v_eval_start = __pyx_t_1;
     __pyx_t_1 = 0;
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":301
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":335
  *         if self.evaluatable_nodes:
  *             eval_start = time.monotonic_ns()
  *             chunk = evaluate_and_append_draken(self.evaluatable_nodes, chunk)             # <<<<<<<<<<<<<<
@@ -10545,9 +11013,9 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
  * 
 */
     __pyx_t_6 = NULL;
-    __Pyx_GetModuleGlobalName(__pyx_t_4, __pyx_mstate_global->__pyx_n_u_evaluate_and_append_draken); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 301, __pyx_L1_error)
+    __Pyx_GetModuleGlobalName(__pyx_t_4, __pyx_mstate_global->__pyx_n_u_evaluate_and_append_draken); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 335, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_4);
-    __pyx_t_3 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_evaluatable_nodes); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 301, __pyx_L1_error)
+    __pyx_t_3 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_evaluatable_nodes); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 335, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_3);
     __pyx_t_5 = 1;
     #if CYTHON_UNPACK_METHODS
@@ -10567,29 +11035,29 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
       __Pyx_XDECREF(__pyx_t_6); __pyx_t_6 = 0;
       __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
       __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
-      if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 301, __pyx_L1_error)
+      if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 335, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_1);
     }
     __Pyx_DECREF_SET(__pyx_v_chunk, __pyx_t_1);
     __pyx_t_1 = 0;
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":302
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":336
  *             eval_start = time.monotonic_ns()
  *             chunk = evaluate_and_append_draken(self.evaluatable_nodes, chunk)
  *             self.readings["time_aggregate_evaluations"] += time.monotonic_ns() - eval_start             # <<<<<<<<<<<<<<
  * 
  *         return chunk
 */
-    __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_readings); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 302, __pyx_L1_error)
+    __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_readings); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 336, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_1);
     __Pyx_INCREF(__pyx_mstate_global->__pyx_n_u_time_aggregate_evaluations);
     __pyx_t_7 = __pyx_mstate_global->__pyx_n_u_time_aggregate_evaluations;
-    __pyx_t_4 = __Pyx_PyObject_Dict_GetItem(__pyx_t_1, __pyx_t_7); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 302, __pyx_L1_error)
+    __pyx_t_4 = __Pyx_PyObject_Dict_GetItem(__pyx_t_1, __pyx_t_7); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 336, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_4);
     __pyx_t_6 = NULL;
-    __Pyx_GetModuleGlobalName(__pyx_t_8, __pyx_mstate_global->__pyx_n_u_time); if (unlikely(!__pyx_t_8)) __PYX_ERR(0, 302, __pyx_L1_error)
+    __Pyx_GetModuleGlobalName(__pyx_t_8, __pyx_mstate_global->__pyx_n_u_time); if (unlikely(!__pyx_t_8)) __PYX_ERR(0, 336, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_8);
-    __pyx_t_9 = __Pyx_PyObject_GetAttrStr(__pyx_t_8, __pyx_mstate_global->__pyx_n_u_monotonic_ns); if (unlikely(!__pyx_t_9)) __PYX_ERR(0, 302, __pyx_L1_error)
+    __pyx_t_9 = __Pyx_PyObject_GetAttrStr(__pyx_t_8, __pyx_mstate_global->__pyx_n_u_monotonic_ns); if (unlikely(!__pyx_t_9)) __PYX_ERR(0, 336, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_9);
     __Pyx_DECREF(__pyx_t_8); __pyx_t_8 = 0;
     __pyx_t_5 = 1;
@@ -10609,22 +11077,22 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
       __pyx_t_3 = __Pyx_PyObject_FastCall((PyObject*)__pyx_t_9, __pyx_callargs+__pyx_t_5, (1-__pyx_t_5) | (__pyx_t_5*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
       __Pyx_XDECREF(__pyx_t_6); __pyx_t_6 = 0;
       __Pyx_DECREF(__pyx_t_9); __pyx_t_9 = 0;
-      if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 302, __pyx_L1_error)
+      if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 336, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_3);
     }
-    __pyx_t_9 = PyNumber_Subtract(__pyx_t_3, __pyx_v_eval_start); if (unlikely(!__pyx_t_9)) __PYX_ERR(0, 302, __pyx_L1_error)
+    __pyx_t_9 = PyNumber_Subtract(__pyx_t_3, __pyx_v_eval_start); if (unlikely(!__pyx_t_9)) __PYX_ERR(0, 336, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_9);
     __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
-    __pyx_t_3 = PyNumber_InPlaceAdd(__pyx_t_4, __pyx_t_9); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 302, __pyx_L1_error)
+    __pyx_t_3 = PyNumber_InPlaceAdd(__pyx_t_4, __pyx_t_9); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 336, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_3);
     __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
     __Pyx_DECREF(__pyx_t_9); __pyx_t_9 = 0;
-    if (unlikely((PyObject_SetItem(__pyx_t_1, __pyx_t_7, __pyx_t_3) < 0))) __PYX_ERR(0, 302, __pyx_L1_error)
+    if (unlikely((PyObject_SetItem(__pyx_t_1, __pyx_t_7, __pyx_t_3) < 0))) __PYX_ERR(0, 336, __pyx_L1_error)
     __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
     __Pyx_DECREF(__pyx_t_7); __pyx_t_7 = 0;
     __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":299
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":333
  *             chunk = chunk.select(self.all_identifiers)
  * 
  *         if self.evaluatable_nodes:             # <<<<<<<<<<<<<<
@@ -10633,7 +11101,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
 */
   }
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":304
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":338
  *             self.readings["time_aggregate_evaluations"] += time.monotonic_ns() - eval_start
  * 
  *         return chunk             # <<<<<<<<<<<<<<
@@ -10645,7 +11113,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
   __pyx_r = __pyx_v_chunk;
   goto __pyx_L0;
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":295
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":329
  *         return "Aggregation Draken"
  * 
  *     def _prepare_chunk(self, chunk: Morsel) -> Morsel:             # <<<<<<<<<<<<<<
@@ -10672,7 +11140,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
   return __pyx_r;
 }
 
-/* "opteryx/operators/aggregate/aggregate_node.pyx":306
+/* "opteryx/operators/aggregate/aggregate_node.pyx":340
  *         return chunk
  * 
  *     def _finalize_morsel(self):             # <<<<<<<<<<<<<<
@@ -10719,32 +11187,32 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   {
     PyObject ** const __pyx_pyargnames[] = {&__pyx_mstate_global->__pyx_n_u_self,0};
     const Py_ssize_t __pyx_kwds_len = (__pyx_kwds) ? __Pyx_NumKwargs_FASTCALL(__pyx_kwds) : 0;
-    if (unlikely(__pyx_kwds_len) < 0) __PYX_ERR(0, 306, __pyx_L3_error)
+    if (unlikely(__pyx_kwds_len) < 0) __PYX_ERR(0, 340, __pyx_L3_error)
     if (__pyx_kwds_len > 0) {
       switch (__pyx_nargs) {
         case  1:
         values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 306, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 340, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  0: break;
         default: goto __pyx_L5_argtuple_error;
       }
       const Py_ssize_t kwd_pos_args = __pyx_nargs;
-      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "_finalize_morsel", 0) < (0)) __PYX_ERR(0, 306, __pyx_L3_error)
+      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "_finalize_morsel", 0) < (0)) __PYX_ERR(0, 340, __pyx_L3_error)
       for (Py_ssize_t i = __pyx_nargs; i < 1; i++) {
-        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("_finalize_morsel", 1, 1, 1, i); __PYX_ERR(0, 306, __pyx_L3_error) }
+        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("_finalize_morsel", 1, 1, 1, i); __PYX_ERR(0, 340, __pyx_L3_error) }
       }
     } else if (unlikely(__pyx_nargs != 1)) {
       goto __pyx_L5_argtuple_error;
     } else {
       values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 306, __pyx_L3_error)
+      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 340, __pyx_L3_error)
     }
     __pyx_v_self = values[0];
   }
   goto __pyx_L6_skip;
   __pyx_L5_argtuple_error:;
-  __Pyx_RaiseArgtupleInvalid("_finalize_morsel", 1, 1, 1, __pyx_nargs); __PYX_ERR(0, 306, __pyx_L3_error)
+  __Pyx_RaiseArgtupleInvalid("_finalize_morsel", 1, 1, 1, __pyx_nargs); __PYX_ERR(0, 340, __pyx_L3_error)
   __pyx_L6_skip:;
   goto __pyx_L4_argument_unpacking_done;
   __pyx_L3_error:;
@@ -10786,47 +11254,47 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("_finalize_morsel", 0);
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":307
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":341
  * 
  *     def _finalize_morsel(self):
  *         names = []             # <<<<<<<<<<<<<<
  *         vectors = []
  * 
 */
-  __pyx_t_1 = PyList_New(0); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 307, __pyx_L1_error)
+  __pyx_t_1 = PyList_New(0); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 341, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
   __pyx_v_names = ((PyObject*)__pyx_t_1);
   __pyx_t_1 = 0;
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":308
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":342
  *     def _finalize_morsel(self):
  *         names = []
  *         vectors = []             # <<<<<<<<<<<<<<
  * 
  *         for collector in self.collectors:
 */
-  __pyx_t_1 = PyList_New(0); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 308, __pyx_L1_error)
+  __pyx_t_1 = PyList_New(0); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 342, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
   __pyx_v_vectors = ((PyObject*)__pyx_t_1);
   __pyx_t_1 = 0;
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":310
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":344
  *         vectors = []
  * 
  *         for collector in self.collectors:             # <<<<<<<<<<<<<<
  *             names.append(collector.output_name)
  *             vectors.append(vector_from_sequence([collector.finalize()]))
 */
-  __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_collectors); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 310, __pyx_L1_error)
+  __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_collectors); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 344, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
   if (likely(PyList_CheckExact(__pyx_t_1)) || PyTuple_CheckExact(__pyx_t_1)) {
     __pyx_t_2 = __pyx_t_1; __Pyx_INCREF(__pyx_t_2);
     __pyx_t_3 = 0;
     __pyx_t_4 = NULL;
   } else {
-    __pyx_t_3 = -1; __pyx_t_2 = PyObject_GetIter(__pyx_t_1); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 310, __pyx_L1_error)
+    __pyx_t_3 = -1; __pyx_t_2 = PyObject_GetIter(__pyx_t_1); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 344, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_2);
-    __pyx_t_4 = (CYTHON_COMPILING_IN_LIMITED_API) ? PyIter_Next : __Pyx_PyObject_GetIterNextFunc(__pyx_t_2); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 310, __pyx_L1_error)
+    __pyx_t_4 = (CYTHON_COMPILING_IN_LIMITED_API) ? PyIter_Next : __Pyx_PyObject_GetIterNextFunc(__pyx_t_2); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 344, __pyx_L1_error)
   }
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
   for (;;) {
@@ -10835,7 +11303,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
         {
           Py_ssize_t __pyx_temp = __Pyx_PyList_GET_SIZE(__pyx_t_2);
           #if !CYTHON_ASSUME_SAFE_SIZE
-          if (unlikely((__pyx_temp < 0))) __PYX_ERR(0, 310, __pyx_L1_error)
+          if (unlikely((__pyx_temp < 0))) __PYX_ERR(0, 344, __pyx_L1_error)
           #endif
           if (__pyx_t_3 >= __pyx_temp) break;
         }
@@ -10845,7 +11313,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
         {
           Py_ssize_t __pyx_temp = __Pyx_PyTuple_GET_SIZE(__pyx_t_2);
           #if !CYTHON_ASSUME_SAFE_SIZE
-          if (unlikely((__pyx_temp < 0))) __PYX_ERR(0, 310, __pyx_L1_error)
+          if (unlikely((__pyx_temp < 0))) __PYX_ERR(0, 344, __pyx_L1_error)
           #endif
           if (__pyx_t_3 >= __pyx_temp) break;
         }
@@ -10856,13 +11324,13 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
         #endif
         ++__pyx_t_3;
       }
-      if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 310, __pyx_L1_error)
+      if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 344, __pyx_L1_error)
     } else {
       __pyx_t_1 = __pyx_t_4(__pyx_t_2);
       if (unlikely(!__pyx_t_1)) {
         PyObject* exc_type = PyErr_Occurred();
         if (exc_type) {
-          if (unlikely(!__Pyx_PyErr_GivenExceptionMatches(exc_type, PyExc_StopIteration))) __PYX_ERR(0, 310, __pyx_L1_error)
+          if (unlikely(!__Pyx_PyErr_GivenExceptionMatches(exc_type, PyExc_StopIteration))) __PYX_ERR(0, 344, __pyx_L1_error)
           PyErr_Clear();
         }
         break;
@@ -10872,19 +11340,19 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
     __Pyx_XDECREF_SET(__pyx_v_collector, __pyx_t_1);
     __pyx_t_1 = 0;
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":311
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":345
  * 
  *         for collector in self.collectors:
  *             names.append(collector.output_name)             # <<<<<<<<<<<<<<
  *             vectors.append(vector_from_sequence([collector.finalize()]))
  * 
 */
-    __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_collector, __pyx_mstate_global->__pyx_n_u_output_name); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 311, __pyx_L1_error)
+    __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_v_collector, __pyx_mstate_global->__pyx_n_u_output_name); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 345, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_1);
-    __pyx_t_5 = __Pyx_PyList_Append(__pyx_v_names, __pyx_t_1); if (unlikely(__pyx_t_5 == ((int)-1))) __PYX_ERR(0, 311, __pyx_L1_error)
+    __pyx_t_5 = __Pyx_PyList_Append(__pyx_v_names, __pyx_t_1); if (unlikely(__pyx_t_5 == ((int)-1))) __PYX_ERR(0, 345, __pyx_L1_error)
     __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":312
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":346
  *         for collector in self.collectors:
  *             names.append(collector.output_name)
  *             vectors.append(vector_from_sequence([collector.finalize()]))             # <<<<<<<<<<<<<<
@@ -10892,7 +11360,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
  *         return Morsel.from_vectors(names, vectors)
 */
     __pyx_t_6 = NULL;
-    __Pyx_GetModuleGlobalName(__pyx_t_7, __pyx_mstate_global->__pyx_n_u_vector_from_sequence); if (unlikely(!__pyx_t_7)) __PYX_ERR(0, 312, __pyx_L1_error)
+    __Pyx_GetModuleGlobalName(__pyx_t_7, __pyx_mstate_global->__pyx_n_u_vector_from_sequence); if (unlikely(!__pyx_t_7)) __PYX_ERR(0, 346, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_7);
     __pyx_t_9 = __pyx_v_collector;
     __Pyx_INCREF(__pyx_t_9);
@@ -10901,13 +11369,13 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
       PyObject *__pyx_callargs[2] = {__pyx_t_9, NULL};
       __pyx_t_8 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_finalize, __pyx_callargs+__pyx_t_10, (1-__pyx_t_10) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
       __Pyx_XDECREF(__pyx_t_9); __pyx_t_9 = 0;
-      if (unlikely(!__pyx_t_8)) __PYX_ERR(0, 312, __pyx_L1_error)
+      if (unlikely(!__pyx_t_8)) __PYX_ERR(0, 346, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_8);
     }
-    __pyx_t_9 = PyList_New(1); if (unlikely(!__pyx_t_9)) __PYX_ERR(0, 312, __pyx_L1_error)
+    __pyx_t_9 = PyList_New(1); if (unlikely(!__pyx_t_9)) __PYX_ERR(0, 346, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_9);
     __Pyx_GIVEREF(__pyx_t_8);
-    if (__Pyx_PyList_SET_ITEM(__pyx_t_9, 0, __pyx_t_8) != (0)) __PYX_ERR(0, 312, __pyx_L1_error);
+    if (__Pyx_PyList_SET_ITEM(__pyx_t_9, 0, __pyx_t_8) != (0)) __PYX_ERR(0, 346, __pyx_L1_error);
     __pyx_t_8 = 0;
     __pyx_t_10 = 1;
     #if CYTHON_UNPACK_METHODS
@@ -10927,13 +11395,13 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
       __Pyx_XDECREF(__pyx_t_6); __pyx_t_6 = 0;
       __Pyx_DECREF(__pyx_t_9); __pyx_t_9 = 0;
       __Pyx_DECREF(__pyx_t_7); __pyx_t_7 = 0;
-      if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 312, __pyx_L1_error)
+      if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 346, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_1);
     }
-    __pyx_t_5 = __Pyx_PyList_Append(__pyx_v_vectors, __pyx_t_1); if (unlikely(__pyx_t_5 == ((int)-1))) __PYX_ERR(0, 312, __pyx_L1_error)
+    __pyx_t_5 = __Pyx_PyList_Append(__pyx_v_vectors, __pyx_t_1); if (unlikely(__pyx_t_5 == ((int)-1))) __PYX_ERR(0, 346, __pyx_L1_error)
     __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":310
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":344
  *         vectors = []
  * 
  *         for collector in self.collectors:             # <<<<<<<<<<<<<<
@@ -10943,7 +11411,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
   }
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":314
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":348
  *             vectors.append(vector_from_sequence([collector.finalize()]))
  * 
  *         return Morsel.from_vectors(names, vectors)             # <<<<<<<<<<<<<<
@@ -10952,9 +11420,9 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
 */
   __Pyx_XDECREF(__pyx_r);
   __pyx_t_1 = NULL;
-  __Pyx_GetModuleGlobalName(__pyx_t_7, __pyx_mstate_global->__pyx_n_u_Morsel); if (unlikely(!__pyx_t_7)) __PYX_ERR(0, 314, __pyx_L1_error)
+  __Pyx_GetModuleGlobalName(__pyx_t_7, __pyx_mstate_global->__pyx_n_u_Morsel); if (unlikely(!__pyx_t_7)) __PYX_ERR(0, 348, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_7);
-  __pyx_t_9 = __Pyx_PyObject_GetAttrStr(__pyx_t_7, __pyx_mstate_global->__pyx_n_u_from_vectors); if (unlikely(!__pyx_t_9)) __PYX_ERR(0, 314, __pyx_L1_error)
+  __pyx_t_9 = __Pyx_PyObject_GetAttrStr(__pyx_t_7, __pyx_mstate_global->__pyx_n_u_from_vectors); if (unlikely(!__pyx_t_9)) __PYX_ERR(0, 348, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_9);
   __Pyx_DECREF(__pyx_t_7); __pyx_t_7 = 0;
   __pyx_t_10 = 1;
@@ -10974,14 +11442,14 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
     __pyx_t_2 = __Pyx_PyObject_FastCall((PyObject*)__pyx_t_9, __pyx_callargs+__pyx_t_10, (3-__pyx_t_10) | (__pyx_t_10*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
     __Pyx_XDECREF(__pyx_t_1); __pyx_t_1 = 0;
     __Pyx_DECREF(__pyx_t_9); __pyx_t_9 = 0;
-    if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 314, __pyx_L1_error)
+    if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 348, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_2);
   }
   __pyx_r = __pyx_t_2;
   __pyx_t_2 = 0;
   goto __pyx_L0;
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":306
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":340
  *         return chunk
  * 
  *     def _finalize_morsel(self):             # <<<<<<<<<<<<<<
@@ -11009,7 +11477,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
 }
 static PyObject *__pyx_gb_7opteryx_9operators_9aggregate_14aggregate_node_17AggregateOperator_12generator(__pyx_CoroutineObject *__pyx_generator, CYTHON_UNUSED PyThreadState *__pyx_tstate, PyObject *__pyx_sent_value); /* proto */
 
-/* "opteryx/operators/aggregate/aggregate_node.pyx":316
+/* "opteryx/operators/aggregate/aggregate_node.pyx":350
  *         return Morsel.from_vectors(names, vectors)
  * 
  *     def execute(self, morsel):             # <<<<<<<<<<<<<<
@@ -11057,39 +11525,39 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   {
     PyObject ** const __pyx_pyargnames[] = {&__pyx_mstate_global->__pyx_n_u_self,&__pyx_mstate_global->__pyx_n_u_morsel,0};
     const Py_ssize_t __pyx_kwds_len = (__pyx_kwds) ? __Pyx_NumKwargs_FASTCALL(__pyx_kwds) : 0;
-    if (unlikely(__pyx_kwds_len) < 0) __PYX_ERR(0, 316, __pyx_L3_error)
+    if (unlikely(__pyx_kwds_len) < 0) __PYX_ERR(0, 350, __pyx_L3_error)
     if (__pyx_kwds_len > 0) {
       switch (__pyx_nargs) {
         case  2:
         values[1] = __Pyx_ArgRef_FASTCALL(__pyx_args, 1);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(0, 316, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(0, 350, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  1:
         values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 316, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 350, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  0: break;
         default: goto __pyx_L5_argtuple_error;
       }
       const Py_ssize_t kwd_pos_args = __pyx_nargs;
-      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "execute", 0) < (0)) __PYX_ERR(0, 316, __pyx_L3_error)
+      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "execute", 0) < (0)) __PYX_ERR(0, 350, __pyx_L3_error)
       for (Py_ssize_t i = __pyx_nargs; i < 2; i++) {
-        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("execute", 1, 2, 2, i); __PYX_ERR(0, 316, __pyx_L3_error) }
+        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("execute", 1, 2, 2, i); __PYX_ERR(0, 350, __pyx_L3_error) }
       }
     } else if (unlikely(__pyx_nargs != 2)) {
       goto __pyx_L5_argtuple_error;
     } else {
       values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 316, __pyx_L3_error)
+      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 350, __pyx_L3_error)
       values[1] = __Pyx_ArgRef_FASTCALL(__pyx_args, 1);
-      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(0, 316, __pyx_L3_error)
+      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(0, 350, __pyx_L3_error)
     }
     __pyx_v_self = values[0];
     __pyx_v_morsel = values[1];
   }
   goto __pyx_L6_skip;
   __pyx_L5_argtuple_error:;
-  __Pyx_RaiseArgtupleInvalid("execute", 1, 2, 2, __pyx_nargs); __PYX_ERR(0, 316, __pyx_L3_error)
+  __Pyx_RaiseArgtupleInvalid("execute", 1, 2, 2, __pyx_nargs); __PYX_ERR(0, 350, __pyx_L3_error)
   __pyx_L6_skip:;
   goto __pyx_L4_argument_unpacking_done;
   __pyx_L3_error:;
@@ -11122,7 +11590,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
   if (unlikely(!__pyx_cur_scope)) {
     __pyx_cur_scope = ((struct __pyx_obj_7opteryx_9operators_9aggregate_14aggregate_node___pyx_scope_struct_3_execute *)Py_None);
     __Pyx_INCREF(Py_None);
-    __PYX_ERR(0, 316, __pyx_L1_error)
+    __PYX_ERR(0, 350, __pyx_L1_error)
   } else {
     __Pyx_GOTREF((PyObject *)__pyx_cur_scope);
   }
@@ -11133,7 +11601,7 @@ static PyObject *__pyx_pf_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
   __Pyx_INCREF(__pyx_cur_scope->__pyx_v_morsel);
   __Pyx_GIVEREF(__pyx_cur_scope->__pyx_v_morsel);
   {
-    __pyx_CoroutineObject *gen = __Pyx_Generator_New((__pyx_coroutine_body_t) __pyx_gb_7opteryx_9operators_9aggregate_14aggregate_node_17AggregateOperator_12generator, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[2]), (PyObject *) __pyx_cur_scope, __pyx_mstate_global->__pyx_n_u_execute, __pyx_mstate_global->__pyx_n_u_AggregateOperator_execute, __pyx_mstate_global->__pyx_n_u_opteryx_operators_aggregate_aggr); if (unlikely(!gen)) __PYX_ERR(0, 316, __pyx_L1_error)
+    __pyx_CoroutineObject *gen = __Pyx_Generator_New((__pyx_coroutine_body_t) __pyx_gb_7opteryx_9operators_9aggregate_14aggregate_node_17AggregateOperator_12generator, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[2]), (PyObject *) __pyx_cur_scope, __pyx_mstate_global->__pyx_n_u_execute, __pyx_mstate_global->__pyx_n_u_AggregateOperator_execute, __pyx_mstate_global->__pyx_n_u_opteryx_operators_aggregate_aggr); if (unlikely(!gen)) __PYX_ERR(0, 350, __pyx_L1_error)
     __Pyx_DECREF(__pyx_cur_scope);
     __Pyx_RefNannyFinishContext();
     return (PyObject *) gen;
@@ -11184,10 +11652,10 @@ static PyObject *__pyx_gb_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
   __pyx_L3_first_run:;
   if (unlikely(__pyx_sent_value != Py_None)) {
     if (unlikely(__pyx_sent_value)) PyErr_SetString(PyExc_TypeError, "can't send non-None value to a just-started generator");
-    __PYX_ERR(0, 316, __pyx_L1_error)
+    __PYX_ERR(0, 350, __pyx_L1_error)
   }
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":317
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":351
  * 
  *     def execute(self, morsel):
  *         draken = self.ensure_draken_morsel(morsel)             # <<<<<<<<<<<<<<
@@ -11201,29 +11669,29 @@ static PyObject *__pyx_gb_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
     PyObject *__pyx_callargs[2] = {__pyx_t_2, __pyx_cur_scope->__pyx_v_morsel};
     __pyx_t_1 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_ensure_draken_morsel, __pyx_callargs+__pyx_t_3, (2-__pyx_t_3) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
     __Pyx_XDECREF(__pyx_t_2); __pyx_t_2 = 0;
-    if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 317, __pyx_L1_error)
+    if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 351, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_1);
   }
   __Pyx_GIVEREF(__pyx_t_1);
   __pyx_cur_scope->__pyx_v_draken = __pyx_t_1;
   __pyx_t_1 = 0;
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":319
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":353
  *         draken = self.ensure_draken_morsel(morsel)
  * 
  *         if draken == EOS:             # <<<<<<<<<<<<<<
  *             yield self._finalize_morsel()
  *             return
 */
-  __Pyx_GetModuleGlobalName(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_EOS); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 319, __pyx_L1_error)
+  __Pyx_GetModuleGlobalName(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_EOS); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 353, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
-  __pyx_t_2 = PyObject_RichCompare(__pyx_cur_scope->__pyx_v_draken, __pyx_t_1, Py_EQ); __Pyx_XGOTREF(__pyx_t_2); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 319, __pyx_L1_error)
+  __pyx_t_2 = PyObject_RichCompare(__pyx_cur_scope->__pyx_v_draken, __pyx_t_1, Py_EQ); __Pyx_XGOTREF(__pyx_t_2); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 353, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
-  __pyx_t_4 = __Pyx_PyObject_IsTrue(__pyx_t_2); if (unlikely((__pyx_t_4 < 0))) __PYX_ERR(0, 319, __pyx_L1_error)
+  __pyx_t_4 = __Pyx_PyObject_IsTrue(__pyx_t_2); if (unlikely((__pyx_t_4 < 0))) __PYX_ERR(0, 353, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
   if (__pyx_t_4) {
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":320
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":354
  * 
  *         if draken == EOS:
  *             yield self._finalize_morsel()             # <<<<<<<<<<<<<<
@@ -11237,7 +11705,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
       PyObject *__pyx_callargs[2] = {__pyx_t_1, NULL};
       __pyx_t_2 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_finalize_morsel, __pyx_callargs+__pyx_t_3, (1-__pyx_t_3) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
       __Pyx_XDECREF(__pyx_t_1); __pyx_t_1 = 0;
-      if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 320, __pyx_L1_error)
+      if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 354, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_2);
     }
     __pyx_r = __pyx_t_2;
@@ -11249,9 +11717,9 @@ static PyObject *__pyx_gb_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
     __pyx_generator->resume_label = 1;
     return __pyx_r;
     __pyx_L5_resume_from_yield:;
-    if (unlikely(!__pyx_sent_value)) __PYX_ERR(0, 320, __pyx_L1_error)
+    if (unlikely(!__pyx_sent_value)) __PYX_ERR(0, 354, __pyx_L1_error)
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":321
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":355
  *         if draken == EOS:
  *             yield self._finalize_morsel()
  *             return             # <<<<<<<<<<<<<<
@@ -11262,7 +11730,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
     __pyx_r = Py_None; __Pyx_INCREF(Py_None);
     goto __pyx_L0;
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":319
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":353
  *         draken = self.ensure_draken_morsel(morsel)
  * 
  *         if draken == EOS:             # <<<<<<<<<<<<<<
@@ -11271,7 +11739,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
 */
   }
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":323
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":357
  *             return
  * 
  *         ingest_start = time.monotonic_ns()             # <<<<<<<<<<<<<<
@@ -11279,9 +11747,9 @@ static PyObject *__pyx_gb_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
  *         if isinstance(draken, Morsel):
 */
   __pyx_t_1 = NULL;
-  __Pyx_GetModuleGlobalName(__pyx_t_5, __pyx_mstate_global->__pyx_n_u_time); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 323, __pyx_L1_error)
+  __Pyx_GetModuleGlobalName(__pyx_t_5, __pyx_mstate_global->__pyx_n_u_time); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 357, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_5);
-  __pyx_t_6 = __Pyx_PyObject_GetAttrStr(__pyx_t_5, __pyx_mstate_global->__pyx_n_u_monotonic_ns); if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 323, __pyx_L1_error)
+  __pyx_t_6 = __Pyx_PyObject_GetAttrStr(__pyx_t_5, __pyx_mstate_global->__pyx_n_u_monotonic_ns); if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 357, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_6);
   __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
   __pyx_t_3 = 1;
@@ -11301,42 +11769,42 @@ static PyObject *__pyx_gb_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
     __pyx_t_2 = __Pyx_PyObject_FastCall((PyObject*)__pyx_t_6, __pyx_callargs+__pyx_t_3, (1-__pyx_t_3) | (__pyx_t_3*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
     __Pyx_XDECREF(__pyx_t_1); __pyx_t_1 = 0;
     __Pyx_DECREF(__pyx_t_6); __pyx_t_6 = 0;
-    if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 323, __pyx_L1_error)
+    if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 357, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_2);
   }
   __Pyx_GIVEREF(__pyx_t_2);
   __pyx_cur_scope->__pyx_v_ingest_start = __pyx_t_2;
   __pyx_t_2 = 0;
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":325
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":359
  *         ingest_start = time.monotonic_ns()
  * 
  *         if isinstance(draken, Morsel):             # <<<<<<<<<<<<<<
  *             if draken.num_rows > 0:
  *                 draken = self._prepare_chunk(draken)
 */
-  __Pyx_GetModuleGlobalName(__pyx_t_2, __pyx_mstate_global->__pyx_n_u_Morsel); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 325, __pyx_L1_error)
+  __Pyx_GetModuleGlobalName(__pyx_t_2, __pyx_mstate_global->__pyx_n_u_Morsel); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 359, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
-  __pyx_t_4 = PyObject_IsInstance(__pyx_cur_scope->__pyx_v_draken, __pyx_t_2); if (unlikely(__pyx_t_4 == ((int)-1))) __PYX_ERR(0, 325, __pyx_L1_error)
+  __pyx_t_4 = PyObject_IsInstance(__pyx_cur_scope->__pyx_v_draken, __pyx_t_2); if (unlikely(__pyx_t_4 == ((int)-1))) __PYX_ERR(0, 359, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
   if (__pyx_t_4) {
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":326
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":360
  * 
  *         if isinstance(draken, Morsel):
  *             if draken.num_rows > 0:             # <<<<<<<<<<<<<<
  *                 draken = self._prepare_chunk(draken)
  *                 for collector in self.collectors:
 */
-    __pyx_t_2 = __Pyx_PyObject_GetAttrStr(__pyx_cur_scope->__pyx_v_draken, __pyx_mstate_global->__pyx_n_u_num_rows); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 326, __pyx_L1_error)
+    __pyx_t_2 = __Pyx_PyObject_GetAttrStr(__pyx_cur_scope->__pyx_v_draken, __pyx_mstate_global->__pyx_n_u_num_rows); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 360, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_2);
-    __pyx_t_6 = PyObject_RichCompare(__pyx_t_2, __pyx_mstate_global->__pyx_int_0, Py_GT); __Pyx_XGOTREF(__pyx_t_6); if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 326, __pyx_L1_error)
+    __pyx_t_6 = PyObject_RichCompare(__pyx_t_2, __pyx_mstate_global->__pyx_int_0, Py_GT); __Pyx_XGOTREF(__pyx_t_6); if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 360, __pyx_L1_error)
     __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
-    __pyx_t_4 = __Pyx_PyObject_IsTrue(__pyx_t_6); if (unlikely((__pyx_t_4 < 0))) __PYX_ERR(0, 326, __pyx_L1_error)
+    __pyx_t_4 = __Pyx_PyObject_IsTrue(__pyx_t_6); if (unlikely((__pyx_t_4 < 0))) __PYX_ERR(0, 360, __pyx_L1_error)
     __Pyx_DECREF(__pyx_t_6); __pyx_t_6 = 0;
     if (__pyx_t_4) {
 
-      /* "opteryx/operators/aggregate/aggregate_node.pyx":327
+      /* "opteryx/operators/aggregate/aggregate_node.pyx":361
  *         if isinstance(draken, Morsel):
  *             if draken.num_rows > 0:
  *                 draken = self._prepare_chunk(draken)             # <<<<<<<<<<<<<<
@@ -11350,7 +11818,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
         PyObject *__pyx_callargs[2] = {__pyx_t_2, __pyx_cur_scope->__pyx_v_draken};
         __pyx_t_6 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_prepare_chunk, __pyx_callargs+__pyx_t_3, (2-__pyx_t_3) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
         __Pyx_XDECREF(__pyx_t_2); __pyx_t_2 = 0;
-        if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 327, __pyx_L1_error)
+        if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 361, __pyx_L1_error)
         __Pyx_GOTREF(__pyx_t_6);
       }
       __Pyx_GOTREF(__pyx_cur_scope->__pyx_v_draken);
@@ -11358,23 +11826,23 @@ static PyObject *__pyx_gb_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
       __Pyx_GIVEREF(__pyx_t_6);
       __pyx_t_6 = 0;
 
-      /* "opteryx/operators/aggregate/aggregate_node.pyx":328
+      /* "opteryx/operators/aggregate/aggregate_node.pyx":362
  *             if draken.num_rows > 0:
  *                 draken = self._prepare_chunk(draken)
  *                 for collector in self.collectors:             # <<<<<<<<<<<<<<
  *                     collector.collect(draken)
  *             self.readings["time_aggregate_ingest"] += time.monotonic_ns() - ingest_start
 */
-      __pyx_t_6 = __Pyx_PyObject_GetAttrStr(__pyx_cur_scope->__pyx_v_self, __pyx_mstate_global->__pyx_n_u_collectors); if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 328, __pyx_L1_error)
+      __pyx_t_6 = __Pyx_PyObject_GetAttrStr(__pyx_cur_scope->__pyx_v_self, __pyx_mstate_global->__pyx_n_u_collectors); if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 362, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_6);
       if (likely(PyList_CheckExact(__pyx_t_6)) || PyTuple_CheckExact(__pyx_t_6)) {
         __pyx_t_2 = __pyx_t_6; __Pyx_INCREF(__pyx_t_2);
         __pyx_t_7 = 0;
         __pyx_t_8 = NULL;
       } else {
-        __pyx_t_7 = -1; __pyx_t_2 = PyObject_GetIter(__pyx_t_6); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 328, __pyx_L1_error)
+        __pyx_t_7 = -1; __pyx_t_2 = PyObject_GetIter(__pyx_t_6); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 362, __pyx_L1_error)
         __Pyx_GOTREF(__pyx_t_2);
-        __pyx_t_8 = (CYTHON_COMPILING_IN_LIMITED_API) ? PyIter_Next : __Pyx_PyObject_GetIterNextFunc(__pyx_t_2); if (unlikely(!__pyx_t_8)) __PYX_ERR(0, 328, __pyx_L1_error)
+        __pyx_t_8 = (CYTHON_COMPILING_IN_LIMITED_API) ? PyIter_Next : __Pyx_PyObject_GetIterNextFunc(__pyx_t_2); if (unlikely(!__pyx_t_8)) __PYX_ERR(0, 362, __pyx_L1_error)
       }
       __Pyx_DECREF(__pyx_t_6); __pyx_t_6 = 0;
       for (;;) {
@@ -11383,7 +11851,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
             {
               Py_ssize_t __pyx_temp = __Pyx_PyList_GET_SIZE(__pyx_t_2);
               #if !CYTHON_ASSUME_SAFE_SIZE
-              if (unlikely((__pyx_temp < 0))) __PYX_ERR(0, 328, __pyx_L1_error)
+              if (unlikely((__pyx_temp < 0))) __PYX_ERR(0, 362, __pyx_L1_error)
               #endif
               if (__pyx_t_7 >= __pyx_temp) break;
             }
@@ -11393,7 +11861,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
             {
               Py_ssize_t __pyx_temp = __Pyx_PyTuple_GET_SIZE(__pyx_t_2);
               #if !CYTHON_ASSUME_SAFE_SIZE
-              if (unlikely((__pyx_temp < 0))) __PYX_ERR(0, 328, __pyx_L1_error)
+              if (unlikely((__pyx_temp < 0))) __PYX_ERR(0, 362, __pyx_L1_error)
               #endif
               if (__pyx_t_7 >= __pyx_temp) break;
             }
@@ -11404,13 +11872,13 @@ static PyObject *__pyx_gb_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
             #endif
             ++__pyx_t_7;
           }
-          if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 328, __pyx_L1_error)
+          if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 362, __pyx_L1_error)
         } else {
           __pyx_t_6 = __pyx_t_8(__pyx_t_2);
           if (unlikely(!__pyx_t_6)) {
             PyObject* exc_type = PyErr_Occurred();
             if (exc_type) {
-              if (unlikely(!__Pyx_PyErr_GivenExceptionMatches(exc_type, PyExc_StopIteration))) __PYX_ERR(0, 328, __pyx_L1_error)
+              if (unlikely(!__Pyx_PyErr_GivenExceptionMatches(exc_type, PyExc_StopIteration))) __PYX_ERR(0, 362, __pyx_L1_error)
               PyErr_Clear();
             }
             break;
@@ -11422,7 +11890,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
         __Pyx_GIVEREF(__pyx_t_6);
         __pyx_t_6 = 0;
 
-        /* "opteryx/operators/aggregate/aggregate_node.pyx":329
+        /* "opteryx/operators/aggregate/aggregate_node.pyx":363
  *                 draken = self._prepare_chunk(draken)
  *                 for collector in self.collectors:
  *                     collector.collect(draken)             # <<<<<<<<<<<<<<
@@ -11436,12 +11904,12 @@ static PyObject *__pyx_gb_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
           PyObject *__pyx_callargs[2] = {__pyx_t_1, __pyx_cur_scope->__pyx_v_draken};
           __pyx_t_6 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_collect, __pyx_callargs+__pyx_t_3, (2-__pyx_t_3) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
           __Pyx_XDECREF(__pyx_t_1); __pyx_t_1 = 0;
-          if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 329, __pyx_L1_error)
+          if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 363, __pyx_L1_error)
           __Pyx_GOTREF(__pyx_t_6);
         }
         __Pyx_DECREF(__pyx_t_6); __pyx_t_6 = 0;
 
-        /* "opteryx/operators/aggregate/aggregate_node.pyx":328
+        /* "opteryx/operators/aggregate/aggregate_node.pyx":362
  *             if draken.num_rows > 0:
  *                 draken = self._prepare_chunk(draken)
  *                 for collector in self.collectors:             # <<<<<<<<<<<<<<
@@ -11451,7 +11919,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
       }
       __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
-      /* "opteryx/operators/aggregate/aggregate_node.pyx":326
+      /* "opteryx/operators/aggregate/aggregate_node.pyx":360
  * 
  *         if isinstance(draken, Morsel):
  *             if draken.num_rows > 0:             # <<<<<<<<<<<<<<
@@ -11460,23 +11928,23 @@ static PyObject *__pyx_gb_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
 */
     }
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":330
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":364
  *                 for collector in self.collectors:
  *                     collector.collect(draken)
  *             self.readings["time_aggregate_ingest"] += time.monotonic_ns() - ingest_start             # <<<<<<<<<<<<<<
  *             yield None
  *             return
 */
-    __pyx_t_2 = __Pyx_PyObject_GetAttrStr(__pyx_cur_scope->__pyx_v_self, __pyx_mstate_global->__pyx_n_u_readings); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 330, __pyx_L1_error)
+    __pyx_t_2 = __Pyx_PyObject_GetAttrStr(__pyx_cur_scope->__pyx_v_self, __pyx_mstate_global->__pyx_n_u_readings); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 364, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_2);
     __Pyx_INCREF(__pyx_mstate_global->__pyx_n_u_time_aggregate_ingest);
     __pyx_t_9 = __pyx_mstate_global->__pyx_n_u_time_aggregate_ingest;
-    __pyx_t_6 = __Pyx_PyObject_Dict_GetItem(__pyx_t_2, __pyx_t_9); if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 330, __pyx_L1_error)
+    __pyx_t_6 = __Pyx_PyObject_Dict_GetItem(__pyx_t_2, __pyx_t_9); if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 364, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_6);
     __pyx_t_5 = NULL;
-    __Pyx_GetModuleGlobalName(__pyx_t_10, __pyx_mstate_global->__pyx_n_u_time); if (unlikely(!__pyx_t_10)) __PYX_ERR(0, 330, __pyx_L1_error)
+    __Pyx_GetModuleGlobalName(__pyx_t_10, __pyx_mstate_global->__pyx_n_u_time); if (unlikely(!__pyx_t_10)) __PYX_ERR(0, 364, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_10);
-    __pyx_t_11 = __Pyx_PyObject_GetAttrStr(__pyx_t_10, __pyx_mstate_global->__pyx_n_u_monotonic_ns); if (unlikely(!__pyx_t_11)) __PYX_ERR(0, 330, __pyx_L1_error)
+    __pyx_t_11 = __Pyx_PyObject_GetAttrStr(__pyx_t_10, __pyx_mstate_global->__pyx_n_u_monotonic_ns); if (unlikely(!__pyx_t_11)) __PYX_ERR(0, 364, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_11);
     __Pyx_DECREF(__pyx_t_10); __pyx_t_10 = 0;
     __pyx_t_3 = 1;
@@ -11496,22 +11964,22 @@ static PyObject *__pyx_gb_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
       __pyx_t_1 = __Pyx_PyObject_FastCall((PyObject*)__pyx_t_11, __pyx_callargs+__pyx_t_3, (1-__pyx_t_3) | (__pyx_t_3*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
       __Pyx_XDECREF(__pyx_t_5); __pyx_t_5 = 0;
       __Pyx_DECREF(__pyx_t_11); __pyx_t_11 = 0;
-      if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 330, __pyx_L1_error)
+      if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 364, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_1);
     }
-    __pyx_t_11 = PyNumber_Subtract(__pyx_t_1, __pyx_cur_scope->__pyx_v_ingest_start); if (unlikely(!__pyx_t_11)) __PYX_ERR(0, 330, __pyx_L1_error)
+    __pyx_t_11 = PyNumber_Subtract(__pyx_t_1, __pyx_cur_scope->__pyx_v_ingest_start); if (unlikely(!__pyx_t_11)) __PYX_ERR(0, 364, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_11);
     __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
-    __pyx_t_1 = PyNumber_InPlaceAdd(__pyx_t_6, __pyx_t_11); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 330, __pyx_L1_error)
+    __pyx_t_1 = PyNumber_InPlaceAdd(__pyx_t_6, __pyx_t_11); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 364, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_1);
     __Pyx_DECREF(__pyx_t_6); __pyx_t_6 = 0;
     __Pyx_DECREF(__pyx_t_11); __pyx_t_11 = 0;
-    if (unlikely((PyObject_SetItem(__pyx_t_2, __pyx_t_9, __pyx_t_1) < 0))) __PYX_ERR(0, 330, __pyx_L1_error)
+    if (unlikely((PyObject_SetItem(__pyx_t_2, __pyx_t_9, __pyx_t_1) < 0))) __PYX_ERR(0, 364, __pyx_L1_error)
     __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
     __Pyx_DECREF(__pyx_t_9); __pyx_t_9 = 0;
     __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":331
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":365
  *                     collector.collect(draken)
  *             self.readings["time_aggregate_ingest"] += time.monotonic_ns() - ingest_start
  *             yield None             # <<<<<<<<<<<<<<
@@ -11527,9 +11995,9 @@ static PyObject *__pyx_gb_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
     __pyx_generator->resume_label = 2;
     return __pyx_r;
     __pyx_L11_resume_from_yield:;
-    if (unlikely(!__pyx_sent_value)) __PYX_ERR(0, 331, __pyx_L1_error)
+    if (unlikely(!__pyx_sent_value)) __PYX_ERR(0, 365, __pyx_L1_error)
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":332
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":366
  *             self.readings["time_aggregate_ingest"] += time.monotonic_ns() - ingest_start
  *             yield None
  *             return             # <<<<<<<<<<<<<<
@@ -11540,7 +12008,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
     __pyx_r = Py_None; __Pyx_INCREF(Py_None);
     goto __pyx_L0;
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":325
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":359
  *         ingest_start = time.monotonic_ns()
  * 
  *         if isinstance(draken, Morsel):             # <<<<<<<<<<<<<<
@@ -11549,7 +12017,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
 */
   }
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":334
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":368
  *             return
  * 
  *         for chunk in draken:             # <<<<<<<<<<<<<<
@@ -11561,9 +12029,9 @@ static PyObject *__pyx_gb_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
     __pyx_t_7 = 0;
     __pyx_t_8 = NULL;
   } else {
-    __pyx_t_7 = -1; __pyx_t_2 = PyObject_GetIter(__pyx_cur_scope->__pyx_v_draken); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 334, __pyx_L1_error)
+    __pyx_t_7 = -1; __pyx_t_2 = PyObject_GetIter(__pyx_cur_scope->__pyx_v_draken); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 368, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_2);
-    __pyx_t_8 = (CYTHON_COMPILING_IN_LIMITED_API) ? PyIter_Next : __Pyx_PyObject_GetIterNextFunc(__pyx_t_2); if (unlikely(!__pyx_t_8)) __PYX_ERR(0, 334, __pyx_L1_error)
+    __pyx_t_8 = (CYTHON_COMPILING_IN_LIMITED_API) ? PyIter_Next : __Pyx_PyObject_GetIterNextFunc(__pyx_t_2); if (unlikely(!__pyx_t_8)) __PYX_ERR(0, 368, __pyx_L1_error)
   }
   for (;;) {
     if (likely(!__pyx_t_8)) {
@@ -11571,7 +12039,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
         {
           Py_ssize_t __pyx_temp = __Pyx_PyList_GET_SIZE(__pyx_t_2);
           #if !CYTHON_ASSUME_SAFE_SIZE
-          if (unlikely((__pyx_temp < 0))) __PYX_ERR(0, 334, __pyx_L1_error)
+          if (unlikely((__pyx_temp < 0))) __PYX_ERR(0, 368, __pyx_L1_error)
           #endif
           if (__pyx_t_7 >= __pyx_temp) break;
         }
@@ -11581,7 +12049,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
         {
           Py_ssize_t __pyx_temp = __Pyx_PyTuple_GET_SIZE(__pyx_t_2);
           #if !CYTHON_ASSUME_SAFE_SIZE
-          if (unlikely((__pyx_temp < 0))) __PYX_ERR(0, 334, __pyx_L1_error)
+          if (unlikely((__pyx_temp < 0))) __PYX_ERR(0, 368, __pyx_L1_error)
           #endif
           if (__pyx_t_7 >= __pyx_temp) break;
         }
@@ -11592,13 +12060,13 @@ static PyObject *__pyx_gb_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
         #endif
         ++__pyx_t_7;
       }
-      if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 334, __pyx_L1_error)
+      if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 368, __pyx_L1_error)
     } else {
       __pyx_t_1 = __pyx_t_8(__pyx_t_2);
       if (unlikely(!__pyx_t_1)) {
         PyObject* exc_type = PyErr_Occurred();
         if (exc_type) {
-          if (unlikely(!__Pyx_PyErr_GivenExceptionMatches(exc_type, PyExc_StopIteration))) __PYX_ERR(0, 334, __pyx_L1_error)
+          if (unlikely(!__Pyx_PyErr_GivenExceptionMatches(exc_type, PyExc_StopIteration))) __PYX_ERR(0, 368, __pyx_L1_error)
           PyErr_Clear();
         }
         break;
@@ -11610,7 +12078,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
     __Pyx_GIVEREF(__pyx_t_1);
     __pyx_t_1 = 0;
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":335
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":369
  * 
  *         for chunk in draken:
  *             if chunk is None or chunk is EOS or chunk.num_rows == 0:             # <<<<<<<<<<<<<<
@@ -11623,7 +12091,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
       __pyx_t_4 = __pyx_t_12;
       goto __pyx_L15_bool_binop_done;
     }
-    __Pyx_GetModuleGlobalName(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_EOS); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 335, __pyx_L1_error)
+    __Pyx_GetModuleGlobalName(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_EOS); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 369, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_1);
     __pyx_t_12 = (__pyx_cur_scope->__pyx_v_chunk == __pyx_t_1);
     __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
@@ -11632,15 +12100,15 @@ static PyObject *__pyx_gb_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
       __pyx_t_4 = __pyx_t_12;
       goto __pyx_L15_bool_binop_done;
     }
-    __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_cur_scope->__pyx_v_chunk, __pyx_mstate_global->__pyx_n_u_num_rows); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 335, __pyx_L1_error)
+    __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_cur_scope->__pyx_v_chunk, __pyx_mstate_global->__pyx_n_u_num_rows); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 369, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_1);
-    __pyx_t_12 = (__Pyx_PyLong_BoolEqObjC(__pyx_t_1, __pyx_mstate_global->__pyx_int_0, 0, 0)); if (unlikely((__pyx_t_12 < 0))) __PYX_ERR(0, 335, __pyx_L1_error)
+    __pyx_t_12 = (__Pyx_PyLong_BoolEqObjC(__pyx_t_1, __pyx_mstate_global->__pyx_int_0, 0, 0)); if (unlikely((__pyx_t_12 < 0))) __PYX_ERR(0, 369, __pyx_L1_error)
     __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
     __pyx_t_4 = __pyx_t_12;
     __pyx_L15_bool_binop_done:;
     if (__pyx_t_4) {
 
-      /* "opteryx/operators/aggregate/aggregate_node.pyx":336
+      /* "opteryx/operators/aggregate/aggregate_node.pyx":370
  *         for chunk in draken:
  *             if chunk is None or chunk is EOS or chunk.num_rows == 0:
  *                 continue             # <<<<<<<<<<<<<<
@@ -11649,7 +12117,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
 */
       goto __pyx_L12_continue;
 
-      /* "opteryx/operators/aggregate/aggregate_node.pyx":335
+      /* "opteryx/operators/aggregate/aggregate_node.pyx":369
  * 
  *         for chunk in draken:
  *             if chunk is None or chunk is EOS or chunk.num_rows == 0:             # <<<<<<<<<<<<<<
@@ -11658,7 +12126,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
 */
     }
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":337
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":371
  *             if chunk is None or chunk is EOS or chunk.num_rows == 0:
  *                 continue
  *             chunk = self._prepare_chunk(chunk)             # <<<<<<<<<<<<<<
@@ -11672,7 +12140,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
       PyObject *__pyx_callargs[2] = {__pyx_t_11, __pyx_cur_scope->__pyx_v_chunk};
       __pyx_t_1 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_prepare_chunk, __pyx_callargs+__pyx_t_3, (2-__pyx_t_3) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
       __Pyx_XDECREF(__pyx_t_11); __pyx_t_11 = 0;
-      if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 337, __pyx_L1_error)
+      if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 371, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_1);
     }
     __Pyx_GOTREF(__pyx_cur_scope->__pyx_v_chunk);
@@ -11680,23 +12148,23 @@ static PyObject *__pyx_gb_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
     __Pyx_GIVEREF(__pyx_t_1);
     __pyx_t_1 = 0;
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":338
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":372
  *                 continue
  *             chunk = self._prepare_chunk(chunk)
  *             for collector in self.collectors:             # <<<<<<<<<<<<<<
  *                 collector.collect(chunk)
  * 
 */
-    __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_cur_scope->__pyx_v_self, __pyx_mstate_global->__pyx_n_u_collectors); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 338, __pyx_L1_error)
+    __pyx_t_1 = __Pyx_PyObject_GetAttrStr(__pyx_cur_scope->__pyx_v_self, __pyx_mstate_global->__pyx_n_u_collectors); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 372, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_1);
     if (likely(PyList_CheckExact(__pyx_t_1)) || PyTuple_CheckExact(__pyx_t_1)) {
       __pyx_t_11 = __pyx_t_1; __Pyx_INCREF(__pyx_t_11);
       __pyx_t_13 = 0;
       __pyx_t_14 = NULL;
     } else {
-      __pyx_t_13 = -1; __pyx_t_11 = PyObject_GetIter(__pyx_t_1); if (unlikely(!__pyx_t_11)) __PYX_ERR(0, 338, __pyx_L1_error)
+      __pyx_t_13 = -1; __pyx_t_11 = PyObject_GetIter(__pyx_t_1); if (unlikely(!__pyx_t_11)) __PYX_ERR(0, 372, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_11);
-      __pyx_t_14 = (CYTHON_COMPILING_IN_LIMITED_API) ? PyIter_Next : __Pyx_PyObject_GetIterNextFunc(__pyx_t_11); if (unlikely(!__pyx_t_14)) __PYX_ERR(0, 338, __pyx_L1_error)
+      __pyx_t_14 = (CYTHON_COMPILING_IN_LIMITED_API) ? PyIter_Next : __Pyx_PyObject_GetIterNextFunc(__pyx_t_11); if (unlikely(!__pyx_t_14)) __PYX_ERR(0, 372, __pyx_L1_error)
     }
     __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
     for (;;) {
@@ -11705,7 +12173,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
           {
             Py_ssize_t __pyx_temp = __Pyx_PyList_GET_SIZE(__pyx_t_11);
             #if !CYTHON_ASSUME_SAFE_SIZE
-            if (unlikely((__pyx_temp < 0))) __PYX_ERR(0, 338, __pyx_L1_error)
+            if (unlikely((__pyx_temp < 0))) __PYX_ERR(0, 372, __pyx_L1_error)
             #endif
             if (__pyx_t_13 >= __pyx_temp) break;
           }
@@ -11715,7 +12183,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
           {
             Py_ssize_t __pyx_temp = __Pyx_PyTuple_GET_SIZE(__pyx_t_11);
             #if !CYTHON_ASSUME_SAFE_SIZE
-            if (unlikely((__pyx_temp < 0))) __PYX_ERR(0, 338, __pyx_L1_error)
+            if (unlikely((__pyx_temp < 0))) __PYX_ERR(0, 372, __pyx_L1_error)
             #endif
             if (__pyx_t_13 >= __pyx_temp) break;
           }
@@ -11726,13 +12194,13 @@ static PyObject *__pyx_gb_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
           #endif
           ++__pyx_t_13;
         }
-        if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 338, __pyx_L1_error)
+        if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 372, __pyx_L1_error)
       } else {
         __pyx_t_1 = __pyx_t_14(__pyx_t_11);
         if (unlikely(!__pyx_t_1)) {
           PyObject* exc_type = PyErr_Occurred();
           if (exc_type) {
-            if (unlikely(!__Pyx_PyErr_GivenExceptionMatches(exc_type, PyExc_StopIteration))) __PYX_ERR(0, 338, __pyx_L1_error)
+            if (unlikely(!__Pyx_PyErr_GivenExceptionMatches(exc_type, PyExc_StopIteration))) __PYX_ERR(0, 372, __pyx_L1_error)
             PyErr_Clear();
           }
           break;
@@ -11744,7 +12212,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
       __Pyx_GIVEREF(__pyx_t_1);
       __pyx_t_1 = 0;
 
-      /* "opteryx/operators/aggregate/aggregate_node.pyx":339
+      /* "opteryx/operators/aggregate/aggregate_node.pyx":373
  *             chunk = self._prepare_chunk(chunk)
  *             for collector in self.collectors:
  *                 collector.collect(chunk)             # <<<<<<<<<<<<<<
@@ -11758,12 +12226,12 @@ static PyObject *__pyx_gb_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
         PyObject *__pyx_callargs[2] = {__pyx_t_6, __pyx_cur_scope->__pyx_v_chunk};
         __pyx_t_1 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_collect, __pyx_callargs+__pyx_t_3, (2-__pyx_t_3) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
         __Pyx_XDECREF(__pyx_t_6); __pyx_t_6 = 0;
-        if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 339, __pyx_L1_error)
+        if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 373, __pyx_L1_error)
         __Pyx_GOTREF(__pyx_t_1);
       }
       __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
 
-      /* "opteryx/operators/aggregate/aggregate_node.pyx":338
+      /* "opteryx/operators/aggregate/aggregate_node.pyx":372
  *                 continue
  *             chunk = self._prepare_chunk(chunk)
  *             for collector in self.collectors:             # <<<<<<<<<<<<<<
@@ -11773,7 +12241,7 @@ static PyObject *__pyx_gb_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
     }
     __Pyx_DECREF(__pyx_t_11); __pyx_t_11 = 0;
 
-    /* "opteryx/operators/aggregate/aggregate_node.pyx":334
+    /* "opteryx/operators/aggregate/aggregate_node.pyx":368
  *             return
  * 
  *         for chunk in draken:             # <<<<<<<<<<<<<<
@@ -11784,22 +12252,22 @@ static PyObject *__pyx_gb_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
   }
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":341
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":375
  *                 collector.collect(chunk)
  * 
  *         self.readings["time_aggregate_ingest"] += time.monotonic_ns() - ingest_start             # <<<<<<<<<<<<<<
  *         yield None
 */
-  __pyx_t_2 = __Pyx_PyObject_GetAttrStr(__pyx_cur_scope->__pyx_v_self, __pyx_mstate_global->__pyx_n_u_readings); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 341, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_PyObject_GetAttrStr(__pyx_cur_scope->__pyx_v_self, __pyx_mstate_global->__pyx_n_u_readings); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 375, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
   __Pyx_INCREF(__pyx_mstate_global->__pyx_n_u_time_aggregate_ingest);
   __pyx_t_9 = __pyx_mstate_global->__pyx_n_u_time_aggregate_ingest;
-  __pyx_t_11 = __Pyx_PyObject_Dict_GetItem(__pyx_t_2, __pyx_t_9); if (unlikely(!__pyx_t_11)) __PYX_ERR(0, 341, __pyx_L1_error)
+  __pyx_t_11 = __Pyx_PyObject_Dict_GetItem(__pyx_t_2, __pyx_t_9); if (unlikely(!__pyx_t_11)) __PYX_ERR(0, 375, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_11);
   __pyx_t_6 = NULL;
-  __Pyx_GetModuleGlobalName(__pyx_t_5, __pyx_mstate_global->__pyx_n_u_time); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 341, __pyx_L1_error)
+  __Pyx_GetModuleGlobalName(__pyx_t_5, __pyx_mstate_global->__pyx_n_u_time); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 375, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_5);
-  __pyx_t_10 = __Pyx_PyObject_GetAttrStr(__pyx_t_5, __pyx_mstate_global->__pyx_n_u_monotonic_ns); if (unlikely(!__pyx_t_10)) __PYX_ERR(0, 341, __pyx_L1_error)
+  __pyx_t_10 = __Pyx_PyObject_GetAttrStr(__pyx_t_5, __pyx_mstate_global->__pyx_n_u_monotonic_ns); if (unlikely(!__pyx_t_10)) __PYX_ERR(0, 375, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_10);
   __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
   __pyx_t_3 = 1;
@@ -11819,22 +12287,22 @@ static PyObject *__pyx_gb_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
     __pyx_t_1 = __Pyx_PyObject_FastCall((PyObject*)__pyx_t_10, __pyx_callargs+__pyx_t_3, (1-__pyx_t_3) | (__pyx_t_3*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
     __Pyx_XDECREF(__pyx_t_6); __pyx_t_6 = 0;
     __Pyx_DECREF(__pyx_t_10); __pyx_t_10 = 0;
-    if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 341, __pyx_L1_error)
+    if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 375, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_1);
   }
-  __pyx_t_10 = PyNumber_Subtract(__pyx_t_1, __pyx_cur_scope->__pyx_v_ingest_start); if (unlikely(!__pyx_t_10)) __PYX_ERR(0, 341, __pyx_L1_error)
+  __pyx_t_10 = PyNumber_Subtract(__pyx_t_1, __pyx_cur_scope->__pyx_v_ingest_start); if (unlikely(!__pyx_t_10)) __PYX_ERR(0, 375, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_10);
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
-  __pyx_t_1 = PyNumber_InPlaceAdd(__pyx_t_11, __pyx_t_10); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 341, __pyx_L1_error)
+  __pyx_t_1 = PyNumber_InPlaceAdd(__pyx_t_11, __pyx_t_10); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 375, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
   __Pyx_DECREF(__pyx_t_11); __pyx_t_11 = 0;
   __Pyx_DECREF(__pyx_t_10); __pyx_t_10 = 0;
-  if (unlikely((PyObject_SetItem(__pyx_t_2, __pyx_t_9, __pyx_t_1) < 0))) __PYX_ERR(0, 341, __pyx_L1_error)
+  if (unlikely((PyObject_SetItem(__pyx_t_2, __pyx_t_9, __pyx_t_1) < 0))) __PYX_ERR(0, 375, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
   __Pyx_DECREF(__pyx_t_9); __pyx_t_9 = 0;
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":342
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":376
  * 
  *         self.readings["time_aggregate_ingest"] += time.monotonic_ns() - ingest_start
  *         yield None             # <<<<<<<<<<<<<<
@@ -11848,10 +12316,10 @@ static PyObject *__pyx_gb_7opteryx_9operators_9aggregate_14aggregate_node_17Aggr
   __pyx_generator->resume_label = 3;
   return __pyx_r;
   __pyx_L22_resume_from_yield:;
-  if (unlikely(!__pyx_sent_value)) __PYX_ERR(0, 342, __pyx_L1_error)
+  if (unlikely(!__pyx_sent_value)) __PYX_ERR(0, 376, __pyx_L1_error)
   CYTHON_MAYBE_UNUSED_VAR(__pyx_cur_scope);
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":316
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":350
  *         return Morsel.from_vectors(names, vectors)
  * 
  *     def execute(self, morsel):             # <<<<<<<<<<<<<<
@@ -12641,15 +13109,15 @@ static int __Pyx_modinit_type_init_code(__pyx_mstatetype *__pyx_mstate) {
   }
   #endif
   #if CYTHON_USE_TYPE_SPECS
-  __pyx_mstate->__pyx_ptype_7opteryx_9operators_9aggregate_14aggregate_node___pyx_scope_struct_1_config = (PyTypeObject *) __Pyx_PyType_FromModuleAndSpec(__pyx_m, &__pyx_type_7opteryx_9operators_9aggregate_14aggregate_node___pyx_scope_struct_1_config_spec, NULL); if (unlikely(!__pyx_mstate->__pyx_ptype_7opteryx_9operators_9aggregate_14aggregate_node___pyx_scope_struct_1_config)) __PYX_ERR(0, 285, __pyx_L1_error)
-  if (__Pyx_fix_up_extension_type_from_spec(&__pyx_type_7opteryx_9operators_9aggregate_14aggregate_node___pyx_scope_struct_1_config_spec, __pyx_mstate->__pyx_ptype_7opteryx_9operators_9aggregate_14aggregate_node___pyx_scope_struct_1_config) < (0)) __PYX_ERR(0, 285, __pyx_L1_error)
+  __pyx_mstate->__pyx_ptype_7opteryx_9operators_9aggregate_14aggregate_node___pyx_scope_struct_1_config = (PyTypeObject *) __Pyx_PyType_FromModuleAndSpec(__pyx_m, &__pyx_type_7opteryx_9operators_9aggregate_14aggregate_node___pyx_scope_struct_1_config_spec, NULL); if (unlikely(!__pyx_mstate->__pyx_ptype_7opteryx_9operators_9aggregate_14aggregate_node___pyx_scope_struct_1_config)) __PYX_ERR(0, 319, __pyx_L1_error)
+  if (__Pyx_fix_up_extension_type_from_spec(&__pyx_type_7opteryx_9operators_9aggregate_14aggregate_node___pyx_scope_struct_1_config_spec, __pyx_mstate->__pyx_ptype_7opteryx_9operators_9aggregate_14aggregate_node___pyx_scope_struct_1_config) < (0)) __PYX_ERR(0, 319, __pyx_L1_error)
   #else
   __pyx_mstate->__pyx_ptype_7opteryx_9operators_9aggregate_14aggregate_node___pyx_scope_struct_1_config = &__pyx_type_7opteryx_9operators_9aggregate_14aggregate_node___pyx_scope_struct_1_config;
   #endif
   #if !CYTHON_COMPILING_IN_LIMITED_API
   #endif
   #if !CYTHON_USE_TYPE_SPECS
-  if (__Pyx_PyType_Ready(__pyx_mstate->__pyx_ptype_7opteryx_9operators_9aggregate_14aggregate_node___pyx_scope_struct_1_config) < (0)) __PYX_ERR(0, 285, __pyx_L1_error)
+  if (__Pyx_PyType_Ready(__pyx_mstate->__pyx_ptype_7opteryx_9operators_9aggregate_14aggregate_node___pyx_scope_struct_1_config) < (0)) __PYX_ERR(0, 319, __pyx_L1_error)
   #endif
   #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030E0000
   PyUnstable_Object_EnableDeferredRefcount((PyObject*)__pyx_mstate->__pyx_ptype_7opteryx_9operators_9aggregate_14aggregate_node___pyx_scope_struct_1_config);
@@ -12660,15 +13128,15 @@ static int __Pyx_modinit_type_init_code(__pyx_mstatetype *__pyx_mstate) {
   }
   #endif
   #if CYTHON_USE_TYPE_SPECS
-  __pyx_mstate->__pyx_ptype_7opteryx_9operators_9aggregate_14aggregate_node___pyx_scope_struct_2_genexpr = (PyTypeObject *) __Pyx_PyType_FromModuleAndSpec(__pyx_m, &__pyx_type_7opteryx_9operators_9aggregate_14aggregate_node___pyx_scope_struct_2_genexpr_spec, NULL); if (unlikely(!__pyx_mstate->__pyx_ptype_7opteryx_9operators_9aggregate_14aggregate_node___pyx_scope_struct_2_genexpr)) __PYX_ERR(0, 289, __pyx_L1_error)
-  if (__Pyx_fix_up_extension_type_from_spec(&__pyx_type_7opteryx_9operators_9aggregate_14aggregate_node___pyx_scope_struct_2_genexpr_spec, __pyx_mstate->__pyx_ptype_7opteryx_9operators_9aggregate_14aggregate_node___pyx_scope_struct_2_genexpr) < (0)) __PYX_ERR(0, 289, __pyx_L1_error)
+  __pyx_mstate->__pyx_ptype_7opteryx_9operators_9aggregate_14aggregate_node___pyx_scope_struct_2_genexpr = (PyTypeObject *) __Pyx_PyType_FromModuleAndSpec(__pyx_m, &__pyx_type_7opteryx_9operators_9aggregate_14aggregate_node___pyx_scope_struct_2_genexpr_spec, NULL); if (unlikely(!__pyx_mstate->__pyx_ptype_7opteryx_9operators_9aggregate_14aggregate_node___pyx_scope_struct_2_genexpr)) __PYX_ERR(0, 323, __pyx_L1_error)
+  if (__Pyx_fix_up_extension_type_from_spec(&__pyx_type_7opteryx_9operators_9aggregate_14aggregate_node___pyx_scope_struct_2_genexpr_spec, __pyx_mstate->__pyx_ptype_7opteryx_9operators_9aggregate_14aggregate_node___pyx_scope_struct_2_genexpr) < (0)) __PYX_ERR(0, 323, __pyx_L1_error)
   #else
   __pyx_mstate->__pyx_ptype_7opteryx_9operators_9aggregate_14aggregate_node___pyx_scope_struct_2_genexpr = &__pyx_type_7opteryx_9operators_9aggregate_14aggregate_node___pyx_scope_struct_2_genexpr;
   #endif
   #if !CYTHON_COMPILING_IN_LIMITED_API
   #endif
   #if !CYTHON_USE_TYPE_SPECS
-  if (__Pyx_PyType_Ready(__pyx_mstate->__pyx_ptype_7opteryx_9operators_9aggregate_14aggregate_node___pyx_scope_struct_2_genexpr) < (0)) __PYX_ERR(0, 289, __pyx_L1_error)
+  if (__Pyx_PyType_Ready(__pyx_mstate->__pyx_ptype_7opteryx_9operators_9aggregate_14aggregate_node___pyx_scope_struct_2_genexpr) < (0)) __PYX_ERR(0, 323, __pyx_L1_error)
   #endif
   #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030E0000
   PyUnstable_Object_EnableDeferredRefcount((PyObject*)__pyx_mstate->__pyx_ptype_7opteryx_9operators_9aggregate_14aggregate_node___pyx_scope_struct_2_genexpr);
@@ -12679,15 +13147,15 @@ static int __Pyx_modinit_type_init_code(__pyx_mstatetype *__pyx_mstate) {
   }
   #endif
   #if CYTHON_USE_TYPE_SPECS
-  __pyx_mstate->__pyx_ptype_7opteryx_9operators_9aggregate_14aggregate_node___pyx_scope_struct_3_execute = (PyTypeObject *) __Pyx_PyType_FromModuleAndSpec(__pyx_m, &__pyx_type_7opteryx_9operators_9aggregate_14aggregate_node___pyx_scope_struct_3_execute_spec, NULL); if (unlikely(!__pyx_mstate->__pyx_ptype_7opteryx_9operators_9aggregate_14aggregate_node___pyx_scope_struct_3_execute)) __PYX_ERR(0, 316, __pyx_L1_error)
-  if (__Pyx_fix_up_extension_type_from_spec(&__pyx_type_7opteryx_9operators_9aggregate_14aggregate_node___pyx_scope_struct_3_execute_spec, __pyx_mstate->__pyx_ptype_7opteryx_9operators_9aggregate_14aggregate_node___pyx_scope_struct_3_execute) < (0)) __PYX_ERR(0, 316, __pyx_L1_error)
+  __pyx_mstate->__pyx_ptype_7opteryx_9operators_9aggregate_14aggregate_node___pyx_scope_struct_3_execute = (PyTypeObject *) __Pyx_PyType_FromModuleAndSpec(__pyx_m, &__pyx_type_7opteryx_9operators_9aggregate_14aggregate_node___pyx_scope_struct_3_execute_spec, NULL); if (unlikely(!__pyx_mstate->__pyx_ptype_7opteryx_9operators_9aggregate_14aggregate_node___pyx_scope_struct_3_execute)) __PYX_ERR(0, 350, __pyx_L1_error)
+  if (__Pyx_fix_up_extension_type_from_spec(&__pyx_type_7opteryx_9operators_9aggregate_14aggregate_node___pyx_scope_struct_3_execute_spec, __pyx_mstate->__pyx_ptype_7opteryx_9operators_9aggregate_14aggregate_node___pyx_scope_struct_3_execute) < (0)) __PYX_ERR(0, 350, __pyx_L1_error)
   #else
   __pyx_mstate->__pyx_ptype_7opteryx_9operators_9aggregate_14aggregate_node___pyx_scope_struct_3_execute = &__pyx_type_7opteryx_9operators_9aggregate_14aggregate_node___pyx_scope_struct_3_execute;
   #endif
   #if !CYTHON_COMPILING_IN_LIMITED_API
   #endif
   #if !CYTHON_USE_TYPE_SPECS
-  if (__Pyx_PyType_Ready(__pyx_mstate->__pyx_ptype_7opteryx_9operators_9aggregate_14aggregate_node___pyx_scope_struct_3_execute) < (0)) __PYX_ERR(0, 316, __pyx_L1_error)
+  if (__Pyx_PyType_Ready(__pyx_mstate->__pyx_ptype_7opteryx_9operators_9aggregate_14aggregate_node___pyx_scope_struct_3_execute) < (0)) __PYX_ERR(0, 350, __pyx_L1_error)
   #endif
   #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030E0000
   PyUnstable_Object_EnableDeferredRefcount((PyObject*)__pyx_mstate->__pyx_ptype_7opteryx_9operators_9aggregate_14aggregate_node___pyx_scope_struct_3_execute);
@@ -13376,268 +13844,268 @@ __Pyx_RefNannySetupContext("PyInit_aggregate_node", 0);
   if (PyDict_SetItem(__pyx_mstate_global->__pyx_d, __pyx_mstate_global->__pyx_n_u_vector_sum, __pyx_t_2) < (0)) __PYX_ERR(0, 62, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":80
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":86
  * 
  * 
  * def _vector_min(vector):             # <<<<<<<<<<<<<<
- *     if _is_constant_vector_like(vector):
- *         scalar = _constant_scalar_value(vector)
+ *     valid_count = len(vector) - _vector_null_count(vector)
+ *     if valid_count == 0:
 */
-  __pyx_t_2 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_9operators_9aggregate_14aggregate_node_13_vector_min, 0, __pyx_mstate_global->__pyx_n_u_vector_min, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_operators_aggregate_aggr, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[9])); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 80, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_9operators_9aggregate_14aggregate_node_13_vector_min, 0, __pyx_mstate_global->__pyx_n_u_vector_min, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_operators_aggregate_aggr, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[9])); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 86, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
   #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030E0000
   PyUnstable_Object_EnableDeferredRefcount(__pyx_t_2);
   #endif
-  if (PyDict_SetItem(__pyx_mstate_global->__pyx_d, __pyx_mstate_global->__pyx_n_u_vector_min, __pyx_t_2) < (0)) __PYX_ERR(0, 80, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_mstate_global->__pyx_d, __pyx_mstate_global->__pyx_n_u_vector_min, __pyx_t_2) < (0)) __PYX_ERR(0, 86, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":89
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":109
  * 
  * 
  * def _vector_max(vector):             # <<<<<<<<<<<<<<
- *     if _is_constant_vector_like(vector):
- *         scalar = _constant_scalar_value(vector)
+ *     valid_count = len(vector) - _vector_null_count(vector)
+ *     if valid_count == 0:
 */
-  __pyx_t_2 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_9operators_9aggregate_14aggregate_node_15_vector_max, 0, __pyx_mstate_global->__pyx_n_u_vector_max, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_operators_aggregate_aggr, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[10])); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 89, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_9operators_9aggregate_14aggregate_node_15_vector_max, 0, __pyx_mstate_global->__pyx_n_u_vector_max, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_operators_aggregate_aggr, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[10])); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 109, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
   #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030E0000
   PyUnstable_Object_EnableDeferredRefcount(__pyx_t_2);
   #endif
-  if (PyDict_SetItem(__pyx_mstate_global->__pyx_d, __pyx_mstate_global->__pyx_n_u_vector_max, __pyx_t_2) < (0)) __PYX_ERR(0, 89, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_mstate_global->__pyx_d, __pyx_mstate_global->__pyx_n_u_vector_max, __pyx_t_2) < (0)) __PYX_ERR(0, 109, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":98
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":132
  * 
  * 
  * def _ensure_carchar_set(distinct_hashes):             # <<<<<<<<<<<<<<
  *     return distinct_hashes if distinct_hashes is not None else CarcharSet()
  * 
 */
-  __pyx_t_2 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_9operators_9aggregate_14aggregate_node_17_ensure_carchar_set, 0, __pyx_mstate_global->__pyx_n_u_ensure_carchar_set, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_operators_aggregate_aggr, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[11])); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 98, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_9operators_9aggregate_14aggregate_node_17_ensure_carchar_set, 0, __pyx_mstate_global->__pyx_n_u_ensure_carchar_set, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_operators_aggregate_aggr, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[11])); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 132, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
   #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030E0000
   PyUnstable_Object_EnableDeferredRefcount(__pyx_t_2);
   #endif
-  if (PyDict_SetItem(__pyx_mstate_global->__pyx_d, __pyx_mstate_global->__pyx_n_u_ensure_carchar_set, __pyx_t_2) < (0)) __PYX_ERR(0, 98, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_mstate_global->__pyx_d, __pyx_mstate_global->__pyx_n_u_ensure_carchar_set, __pyx_t_2) < (0)) __PYX_ERR(0, 132, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":102
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":136
  * 
  * 
  * def _insert_vector_hashes(distinct_hashes, vector):             # <<<<<<<<<<<<<<
  *     distinct_hashes = _ensure_carchar_set(distinct_hashes)
  *     distinct_hashes.insert_many(vector.hash())
 */
-  __pyx_t_2 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_9operators_9aggregate_14aggregate_node_19_insert_vector_hashes, 0, __pyx_mstate_global->__pyx_n_u_insert_vector_hashes, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_operators_aggregate_aggr, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[12])); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 102, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_9operators_9aggregate_14aggregate_node_19_insert_vector_hashes, 0, __pyx_mstate_global->__pyx_n_u_insert_vector_hashes, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_operators_aggregate_aggr, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[12])); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 136, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
   #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030E0000
   PyUnstable_Object_EnableDeferredRefcount(__pyx_t_2);
   #endif
-  if (PyDict_SetItem(__pyx_mstate_global->__pyx_d, __pyx_mstate_global->__pyx_n_u_insert_vector_hashes, __pyx_t_2) < (0)) __PYX_ERR(0, 102, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_mstate_global->__pyx_d, __pyx_mstate_global->__pyx_n_u_insert_vector_hashes, __pyx_t_2) < (0)) __PYX_ERR(0, 136, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":108
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":142
  * 
  * 
  * def _insert_literal_hash(distinct_hashes, literal):             # <<<<<<<<<<<<<<
  *     distinct_hashes = _ensure_carchar_set(distinct_hashes)
  *     distinct_hashes.insert_many(vector_from_sequence([literal]).hash())
 */
-  __pyx_t_2 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_9operators_9aggregate_14aggregate_node_21_insert_literal_hash, 0, __pyx_mstate_global->__pyx_n_u_insert_literal_hash, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_operators_aggregate_aggr, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[13])); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 108, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_9operators_9aggregate_14aggregate_node_21_insert_literal_hash, 0, __pyx_mstate_global->__pyx_n_u_insert_literal_hash, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_operators_aggregate_aggr, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[13])); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 142, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
   #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030E0000
   PyUnstable_Object_EnableDeferredRefcount(__pyx_t_2);
   #endif
-  if (PyDict_SetItem(__pyx_mstate_global->__pyx_d, __pyx_mstate_global->__pyx_n_u_insert_literal_hash, __pyx_t_2) < (0)) __PYX_ERR(0, 108, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_mstate_global->__pyx_d, __pyx_mstate_global->__pyx_n_u_insert_literal_hash, __pyx_t_2) < (0)) __PYX_ERR(0, 142, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":114
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":148
  * 
  * 
  * class _DrakenAggregateCollector:             # <<<<<<<<<<<<<<
  *     def __init__(self, aggregate):
  *         self.aggregate = aggregate
 */
-  __pyx_t_2 = __Pyx_Py3MetaclassPrepare((PyObject *) NULL, __pyx_mstate_global->__pyx_empty_tuple, __pyx_mstate_global->__pyx_n_u_DrakenAggregateCollector, __pyx_mstate_global->__pyx_n_u_DrakenAggregateCollector, (PyObject *) NULL, __pyx_mstate_global->__pyx_n_u_opteryx_operators_aggregate_aggr, (PyObject *) NULL); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 114, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_Py3MetaclassPrepare((PyObject *) NULL, __pyx_mstate_global->__pyx_empty_tuple, __pyx_mstate_global->__pyx_n_u_DrakenAggregateCollector, __pyx_mstate_global->__pyx_n_u_DrakenAggregateCollector, (PyObject *) NULL, __pyx_mstate_global->__pyx_n_u_opteryx_operators_aggregate_aggr, (PyObject *) NULL); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 148, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":115
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":149
  * 
  * class _DrakenAggregateCollector:
  *     def __init__(self, aggregate):             # <<<<<<<<<<<<<<
  *         self.aggregate = aggregate
  *         self.aggregate_type = aggregate.value
 */
-  __pyx_t_4 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_9operators_9aggregate_14aggregate_node_25_DrakenAggregateCollector_1__init__, 0, __pyx_mstate_global->__pyx_n_u_DrakenAggregateCollector___init, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_operators_aggregate_aggr, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[14])); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 115, __pyx_L1_error)
+  __pyx_t_4 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_9operators_9aggregate_14aggregate_node_25_DrakenAggregateCollector_1__init__, 0, __pyx_mstate_global->__pyx_n_u_DrakenAggregateCollector___init, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_operators_aggregate_aggr, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[14])); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 149, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_4);
   #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030E0000
   PyUnstable_Object_EnableDeferredRefcount(__pyx_t_4);
   #endif
-  if (__Pyx_SetNameInClass(__pyx_t_2, __pyx_mstate_global->__pyx_n_u_init, __pyx_t_4) < (0)) __PYX_ERR(0, 115, __pyx_L1_error)
+  if (__Pyx_SetNameInClass(__pyx_t_2, __pyx_mstate_global->__pyx_n_u_init, __pyx_t_4) < (0)) __PYX_ERR(0, 149, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":128
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":162
  *         self._distinct_hashes = None
  * 
  *     def _update_min(self, value):             # <<<<<<<<<<<<<<
  *         if value is None:
  *             return
 */
-  __pyx_t_4 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_9operators_9aggregate_14aggregate_node_25_DrakenAggregateCollector_3_update_min, 0, __pyx_mstate_global->__pyx_n_u_DrakenAggregateCollector__updat, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_operators_aggregate_aggr, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[15])); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 128, __pyx_L1_error)
+  __pyx_t_4 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_9operators_9aggregate_14aggregate_node_25_DrakenAggregateCollector_3_update_min, 0, __pyx_mstate_global->__pyx_n_u_DrakenAggregateCollector__updat, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_operators_aggregate_aggr, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[15])); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 162, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_4);
   #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030E0000
   PyUnstable_Object_EnableDeferredRefcount(__pyx_t_4);
   #endif
-  if (__Pyx_SetNameInClass(__pyx_t_2, __pyx_mstate_global->__pyx_n_u_update_min, __pyx_t_4) < (0)) __PYX_ERR(0, 128, __pyx_L1_error)
+  if (__Pyx_SetNameInClass(__pyx_t_2, __pyx_mstate_global->__pyx_n_u_update_min, __pyx_t_4) < (0)) __PYX_ERR(0, 162, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":134
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":168
  *             self._min = value
  * 
  *     def _update_max(self, value):             # <<<<<<<<<<<<<<
  *         if value is None:
  *             return
 */
-  __pyx_t_4 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_9operators_9aggregate_14aggregate_node_25_DrakenAggregateCollector_5_update_max, 0, __pyx_mstate_global->__pyx_n_u_DrakenAggregateCollector__updat_2, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_operators_aggregate_aggr, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[16])); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 134, __pyx_L1_error)
+  __pyx_t_4 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_9operators_9aggregate_14aggregate_node_25_DrakenAggregateCollector_5_update_max, 0, __pyx_mstate_global->__pyx_n_u_DrakenAggregateCollector__updat_2, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_operators_aggregate_aggr, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[16])); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 168, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_4);
   #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030E0000
   PyUnstable_Object_EnableDeferredRefcount(__pyx_t_4);
   #endif
-  if (__Pyx_SetNameInClass(__pyx_t_2, __pyx_mstate_global->__pyx_n_u_update_max, __pyx_t_4) < (0)) __PYX_ERR(0, 134, __pyx_L1_error)
+  if (__Pyx_SetNameInClass(__pyx_t_2, __pyx_mstate_global->__pyx_n_u_update_max, __pyx_t_4) < (0)) __PYX_ERR(0, 168, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":140
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":174
  *             self._max = value
  * 
  *     def _reject_unsupported_approximate(self):             # <<<<<<<<<<<<<<
  *         raise NotImplementedError(
  *             f"Approximate aggregate `{self.aggregate_type}` is no longer supported."
 */
-  __pyx_t_4 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_9operators_9aggregate_14aggregate_node_25_DrakenAggregateCollector_7_reject_unsupported_approximate, 0, __pyx_mstate_global->__pyx_n_u_DrakenAggregateCollector__rejec, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_operators_aggregate_aggr, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[17])); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 140, __pyx_L1_error)
+  __pyx_t_4 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_9operators_9aggregate_14aggregate_node_25_DrakenAggregateCollector_7_reject_unsupported_approximate, 0, __pyx_mstate_global->__pyx_n_u_DrakenAggregateCollector__rejec, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_operators_aggregate_aggr, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[17])); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 174, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_4);
   #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030E0000
   PyUnstable_Object_EnableDeferredRefcount(__pyx_t_4);
   #endif
-  if (__Pyx_SetNameInClass(__pyx_t_2, __pyx_mstate_global->__pyx_n_u_reject_unsupported_approximate, __pyx_t_4) < (0)) __PYX_ERR(0, 140, __pyx_L1_error)
+  if (__Pyx_SetNameInClass(__pyx_t_2, __pyx_mstate_global->__pyx_n_u_reject_unsupported_approximate, __pyx_t_4) < (0)) __PYX_ERR(0, 174, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":145
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":179
  *         )
  * 
  *     def _collect_literal(self, literal, row_count):             # <<<<<<<<<<<<<<
  *         if row_count == 0:
  *             return
 */
-  __pyx_t_4 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_9operators_9aggregate_14aggregate_node_25_DrakenAggregateCollector_9_collect_literal, 0, __pyx_mstate_global->__pyx_n_u_DrakenAggregateCollector__colle, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_operators_aggregate_aggr, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[18])); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 145, __pyx_L1_error)
+  __pyx_t_4 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_9operators_9aggregate_14aggregate_node_25_DrakenAggregateCollector_9_collect_literal, 0, __pyx_mstate_global->__pyx_n_u_DrakenAggregateCollector__colle, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_operators_aggregate_aggr, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[18])); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 179, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_4);
   #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030E0000
   PyUnstable_Object_EnableDeferredRefcount(__pyx_t_4);
   #endif
-  if (__Pyx_SetNameInClass(__pyx_t_2, __pyx_mstate_global->__pyx_n_u_collect_literal, __pyx_t_4) < (0)) __PYX_ERR(0, 145, __pyx_L1_error)
+  if (__Pyx_SetNameInClass(__pyx_t_2, __pyx_mstate_global->__pyx_n_u_collect_literal, __pyx_t_4) < (0)) __PYX_ERR(0, 179, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":184
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":218
  *             self._reject_unsupported_approximate()
  * 
  *     def _collect_vector(self, vector):             # <<<<<<<<<<<<<<
  *         valid_count = len(vector) - _vector_null_count(vector)
  * 
 */
-  __pyx_t_4 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_9operators_9aggregate_14aggregate_node_25_DrakenAggregateCollector_11_collect_vector, 0, __pyx_mstate_global->__pyx_n_u_DrakenAggregateCollector__colle_2, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_operators_aggregate_aggr, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[19])); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 184, __pyx_L1_error)
+  __pyx_t_4 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_9operators_9aggregate_14aggregate_node_25_DrakenAggregateCollector_11_collect_vector, 0, __pyx_mstate_global->__pyx_n_u_DrakenAggregateCollector__colle_2, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_operators_aggregate_aggr, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[19])); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 218, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_4);
   #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030E0000
   PyUnstable_Object_EnableDeferredRefcount(__pyx_t_4);
   #endif
-  if (__Pyx_SetNameInClass(__pyx_t_2, __pyx_mstate_global->__pyx_n_u_collect_vector, __pyx_t_4) < (0)) __PYX_ERR(0, 184, __pyx_L1_error)
+  if (__Pyx_SetNameInClass(__pyx_t_2, __pyx_mstate_global->__pyx_n_u_collect_vector, __pyx_t_4) < (0)) __PYX_ERR(0, 218, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":224
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":258
  *             self._reject_unsupported_approximate()
  * 
  *     def collect(self, morsel: Morsel):             # <<<<<<<<<<<<<<
  *         if self.parameter.node_type == NodeType.WILDCARD:
  *             self._count += morsel.num_rows
 */
-  __pyx_t_4 = __Pyx_PyDict_NewPresized(1); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 224, __pyx_L1_error)
+  __pyx_t_4 = __Pyx_PyDict_NewPresized(1); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 258, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_4);
-  if (PyDict_SetItem(__pyx_t_4, __pyx_mstate_global->__pyx_n_u_morsel, __pyx_mstate_global->__pyx_n_u_Morsel) < (0)) __PYX_ERR(0, 224, __pyx_L1_error)
-  __pyx_t_5 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_9operators_9aggregate_14aggregate_node_25_DrakenAggregateCollector_13collect, 0, __pyx_mstate_global->__pyx_n_u_DrakenAggregateCollector_collec, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_operators_aggregate_aggr, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[20])); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 224, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_4, __pyx_mstate_global->__pyx_n_u_morsel, __pyx_mstate_global->__pyx_n_u_Morsel) < (0)) __PYX_ERR(0, 258, __pyx_L1_error)
+  __pyx_t_5 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_9operators_9aggregate_14aggregate_node_25_DrakenAggregateCollector_13collect, 0, __pyx_mstate_global->__pyx_n_u_DrakenAggregateCollector_collec, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_operators_aggregate_aggr, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[20])); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 258, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_5);
   #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030E0000
   PyUnstable_Object_EnableDeferredRefcount(__pyx_t_5);
   #endif
   __Pyx_CyFunction_SetAnnotationsDict(__pyx_t_5, __pyx_t_4);
   __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
-  if (__Pyx_SetNameInClass(__pyx_t_2, __pyx_mstate_global->__pyx_n_u_collect, __pyx_t_5) < (0)) __PYX_ERR(0, 224, __pyx_L1_error)
+  if (__Pyx_SetNameInClass(__pyx_t_2, __pyx_mstate_global->__pyx_n_u_collect, __pyx_t_5) < (0)) __PYX_ERR(0, 258, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":236
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":270
  *         self._collect_vector(vector)
  * 
  *     def finalize(self):             # <<<<<<<<<<<<<<
  *         if self.aggregate_type == "COUNT":
  *             if self.duplicate_treatment == "Distinct":
 */
-  __pyx_t_5 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_9operators_9aggregate_14aggregate_node_25_DrakenAggregateCollector_15finalize, 0, __pyx_mstate_global->__pyx_n_u_DrakenAggregateCollector_finali, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_operators_aggregate_aggr, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[21])); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 236, __pyx_L1_error)
+  __pyx_t_5 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_9operators_9aggregate_14aggregate_node_25_DrakenAggregateCollector_15finalize, 0, __pyx_mstate_global->__pyx_n_u_DrakenAggregateCollector_finali, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_operators_aggregate_aggr, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[21])); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 270, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_5);
   #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030E0000
   PyUnstable_Object_EnableDeferredRefcount(__pyx_t_5);
   #endif
-  if (__Pyx_SetNameInClass(__pyx_t_2, __pyx_mstate_global->__pyx_n_u_finalize, __pyx_t_5) < (0)) __PYX_ERR(0, 236, __pyx_L1_error)
+  if (__Pyx_SetNameInClass(__pyx_t_2, __pyx_mstate_global->__pyx_n_u_finalize, __pyx_t_5) < (0)) __PYX_ERR(0, 270, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":114
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":148
  * 
  * 
  * class _DrakenAggregateCollector:             # <<<<<<<<<<<<<<
  *     def __init__(self, aggregate):
  *         self.aggregate = aggregate
 */
-  __pyx_t_5 = __Pyx_Py3ClassCreate(((PyObject*)&PyType_Type), __pyx_mstate_global->__pyx_n_u_DrakenAggregateCollector, __pyx_mstate_global->__pyx_empty_tuple, __pyx_t_2, NULL, 0, 0); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 114, __pyx_L1_error)
+  __pyx_t_5 = __Pyx_Py3ClassCreate(((PyObject*)&PyType_Type), __pyx_mstate_global->__pyx_n_u_DrakenAggregateCollector, __pyx_mstate_global->__pyx_empty_tuple, __pyx_t_2, NULL, 0, 0); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 148, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_5);
   #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030E0000
   PyUnstable_Object_EnableDeferredRefcount(__pyx_t_5);
   #endif
-  if (PyDict_SetItem(__pyx_mstate_global->__pyx_d, __pyx_mstate_global->__pyx_n_u_DrakenAggregateCollector, __pyx_t_5) < (0)) __PYX_ERR(0, 114, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_mstate_global->__pyx_d, __pyx_mstate_global->__pyx_n_u_DrakenAggregateCollector, __pyx_t_5) < (0)) __PYX_ERR(0, 148, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":267
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":301
  * 
  * 
  * class AggregateOperator(BasePlanNode):             # <<<<<<<<<<<<<<
  *     def __init__(self, properties: QueryProperties, **parameters):
  *         super().__init__(properties=properties, **parameters)
 */
-  __Pyx_GetModuleGlobalName(__pyx_t_2, __pyx_mstate_global->__pyx_n_u_BasePlanNode); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 267, __pyx_L1_error)
+  __Pyx_GetModuleGlobalName(__pyx_t_2, __pyx_mstate_global->__pyx_n_u_BasePlanNode); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 301, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
-  __pyx_t_5 = PyTuple_Pack(1, __pyx_t_2); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 267, __pyx_L1_error)
+  __pyx_t_5 = PyTuple_Pack(1, __pyx_t_2); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 301, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_5);
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
-  __pyx_t_2 = __Pyx_PEP560_update_bases(__pyx_t_5); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 267, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_PEP560_update_bases(__pyx_t_5); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 301, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
-  __pyx_t_4 = __Pyx_CalculateMetaclass(NULL, __pyx_t_2); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 267, __pyx_L1_error)
+  __pyx_t_4 = __Pyx_CalculateMetaclass(NULL, __pyx_t_2); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 301, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_4);
-  __pyx_t_6 = __Pyx_Py3MetaclassPrepare(__pyx_t_4, __pyx_t_2, __pyx_mstate_global->__pyx_n_u_AggregateOperator, __pyx_mstate_global->__pyx_n_u_AggregateOperator, (PyObject *) NULL, __pyx_mstate_global->__pyx_n_u_opteryx_operators_aggregate_aggr, (PyObject *) NULL); if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 267, __pyx_L1_error)
+  __pyx_t_6 = __Pyx_Py3MetaclassPrepare(__pyx_t_4, __pyx_t_2, __pyx_mstate_global->__pyx_n_u_AggregateOperator, __pyx_mstate_global->__pyx_n_u_AggregateOperator, (PyObject *) NULL, __pyx_mstate_global->__pyx_n_u_opteryx_operators_aggregate_aggr, (PyObject *) NULL); if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 301, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_6);
   if (__pyx_t_2 != __pyx_t_5) {
-    if (unlikely((PyDict_SetItemString(__pyx_t_6, "__orig_bases__", __pyx_t_5) < 0))) __PYX_ERR(0, 267, __pyx_L1_error)
+    if (unlikely((PyDict_SetItemString(__pyx_t_6, "__orig_bases__", __pyx_t_5) < 0))) __PYX_ERR(0, 301, __pyx_L1_error)
   }
   __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
-  __pyx_t_5 = PyList_New(0); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 267, __pyx_L1_error)
+  __pyx_t_5 = PyList_New(0); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 301, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_5);
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":268
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":302
  * 
  * class AggregateOperator(BasePlanNode):
  *     def __init__(self, properties: QueryProperties, **parameters):             # <<<<<<<<<<<<<<
  *         super().__init__(properties=properties, **parameters)
  * 
 */
-  __pyx_t_7 = __Pyx_PyDict_NewPresized(1); if (unlikely(!__pyx_t_7)) __PYX_ERR(0, 268, __pyx_L1_error)
+  __pyx_t_7 = __Pyx_PyDict_NewPresized(1); if (unlikely(!__pyx_t_7)) __PYX_ERR(0, 302, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_7);
-  if (PyDict_SetItem(__pyx_t_7, __pyx_mstate_global->__pyx_n_u_properties, __pyx_mstate_global->__pyx_n_u_QueryProperties) < (0)) __PYX_ERR(0, 268, __pyx_L1_error)
-  __pyx_t_8 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_9operators_9aggregate_14aggregate_node_17AggregateOperator_1__init__, 0, __pyx_mstate_global->__pyx_n_u_AggregateOperator___init, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_operators_aggregate_aggr, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[22])); if (unlikely(!__pyx_t_8)) __PYX_ERR(0, 268, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_7, __pyx_mstate_global->__pyx_n_u_properties, __pyx_mstate_global->__pyx_n_u_QueryProperties) < (0)) __PYX_ERR(0, 302, __pyx_L1_error)
+  __pyx_t_8 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_9operators_9aggregate_14aggregate_node_17AggregateOperator_1__init__, 0, __pyx_mstate_global->__pyx_n_u_AggregateOperator___init, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_operators_aggregate_aggr, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[22])); if (unlikely(!__pyx_t_8)) __PYX_ERR(0, 302, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_8);
   #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030E0000
   PyUnstable_Object_EnableDeferredRefcount(__pyx_t_8);
@@ -13645,10 +14113,10 @@ __Pyx_RefNannySetupContext("PyInit_aggregate_node", 0);
   PyList_Append(__pyx_t_5, __pyx_t_8);
   __Pyx_CyFunction_SetAnnotationsDict(__pyx_t_8, __pyx_t_7);
   __Pyx_DECREF(__pyx_t_7); __pyx_t_7 = 0;
-  if (__Pyx_SetNameInClass(__pyx_t_6, __pyx_mstate_global->__pyx_n_u_init, __pyx_t_8) < (0)) __PYX_ERR(0, 268, __pyx_L1_error)
+  if (__Pyx_SetNameInClass(__pyx_t_6, __pyx_mstate_global->__pyx_n_u_init, __pyx_t_8) < (0)) __PYX_ERR(0, 302, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_8); __pyx_t_8 = 0;
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":285
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":319
  *         self.collectors = [_DrakenAggregateCollector(aggregate) for aggregate in self.aggregates]
  * 
  *     @property             # <<<<<<<<<<<<<<
@@ -13656,7 +14124,7 @@ __Pyx_RefNannySetupContext("PyInit_aggregate_node", 0);
  *         from opteryx.expression import format_expression
 */
   __pyx_t_7 = NULL;
-  __pyx_t_9 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_9operators_9aggregate_14aggregate_node_17AggregateOperator_3config, 0, __pyx_mstate_global->__pyx_n_u_AggregateOperator_config, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_operators_aggregate_aggr, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[23])); if (unlikely(!__pyx_t_9)) __PYX_ERR(0, 285, __pyx_L1_error)
+  __pyx_t_9 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_9operators_9aggregate_14aggregate_node_17AggregateOperator_3config, 0, __pyx_mstate_global->__pyx_n_u_AggregateOperator_config, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_operators_aggregate_aggr, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[23])); if (unlikely(!__pyx_t_9)) __PYX_ERR(0, 319, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_9);
   #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030E0000
   PyUnstable_Object_EnableDeferredRefcount(__pyx_t_9);
@@ -13667,13 +14135,13 @@ __Pyx_RefNannySetupContext("PyInit_aggregate_node", 0);
     __pyx_t_8 = __Pyx_PyObject_FastCall((PyObject*)__pyx_builtin_property, __pyx_callargs+__pyx_t_10, (2-__pyx_t_10) | (__pyx_t_10*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
     __Pyx_XDECREF(__pyx_t_7); __pyx_t_7 = 0;
     __Pyx_DECREF(__pyx_t_9); __pyx_t_9 = 0;
-    if (unlikely(!__pyx_t_8)) __PYX_ERR(0, 285, __pyx_L1_error)
+    if (unlikely(!__pyx_t_8)) __PYX_ERR(0, 319, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_8);
   }
-  if (__Pyx_SetNameInClass(__pyx_t_6, __pyx_mstate_global->__pyx_n_u_config, __pyx_t_8) < (0)) __PYX_ERR(0, 285, __pyx_L1_error)
+  if (__Pyx_SetNameInClass(__pyx_t_6, __pyx_mstate_global->__pyx_n_u_config, __pyx_t_8) < (0)) __PYX_ERR(0, 319, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_8); __pyx_t_8 = 0;
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":291
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":325
  *         return f"AGGREGATE ({', '.join(format_expression(col) for col in self.aggregates)})"
  * 
  *     @property             # <<<<<<<<<<<<<<
@@ -13681,7 +14149,7 @@ __Pyx_RefNannySetupContext("PyInit_aggregate_node", 0);
  *         return "Aggregation Draken"
 */
   __pyx_t_9 = NULL;
-  __pyx_t_7 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_9operators_9aggregate_14aggregate_node_17AggregateOperator_5name, 0, __pyx_mstate_global->__pyx_n_u_AggregateOperator_name, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_operators_aggregate_aggr, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[24])); if (unlikely(!__pyx_t_7)) __PYX_ERR(0, 291, __pyx_L1_error)
+  __pyx_t_7 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_9operators_9aggregate_14aggregate_node_17AggregateOperator_5name, 0, __pyx_mstate_global->__pyx_n_u_AggregateOperator_name, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_operators_aggregate_aggr, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[24])); if (unlikely(!__pyx_t_7)) __PYX_ERR(0, 325, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_7);
   #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030E0000
   PyUnstable_Object_EnableDeferredRefcount(__pyx_t_7);
@@ -13692,78 +14160,78 @@ __Pyx_RefNannySetupContext("PyInit_aggregate_node", 0);
     __pyx_t_8 = __Pyx_PyObject_FastCall((PyObject*)__pyx_builtin_property, __pyx_callargs+__pyx_t_10, (2-__pyx_t_10) | (__pyx_t_10*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
     __Pyx_XDECREF(__pyx_t_9); __pyx_t_9 = 0;
     __Pyx_DECREF(__pyx_t_7); __pyx_t_7 = 0;
-    if (unlikely(!__pyx_t_8)) __PYX_ERR(0, 291, __pyx_L1_error)
+    if (unlikely(!__pyx_t_8)) __PYX_ERR(0, 325, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_8);
   }
-  if (__Pyx_SetNameInClass(__pyx_t_6, __pyx_mstate_global->__pyx_n_u_name_2, __pyx_t_8) < (0)) __PYX_ERR(0, 291, __pyx_L1_error)
+  if (__Pyx_SetNameInClass(__pyx_t_6, __pyx_mstate_global->__pyx_n_u_name_2, __pyx_t_8) < (0)) __PYX_ERR(0, 325, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_8); __pyx_t_8 = 0;
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":295
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":329
  *         return "Aggregation Draken"
  * 
  *     def _prepare_chunk(self, chunk: Morsel) -> Morsel:             # <<<<<<<<<<<<<<
  *         if self.all_identifiers:
  *             chunk = chunk.select(self.all_identifiers)
 */
-  __pyx_t_8 = __Pyx_PyDict_NewPresized(2); if (unlikely(!__pyx_t_8)) __PYX_ERR(0, 295, __pyx_L1_error)
+  __pyx_t_8 = __Pyx_PyDict_NewPresized(2); if (unlikely(!__pyx_t_8)) __PYX_ERR(0, 329, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_8);
-  if (PyDict_SetItem(__pyx_t_8, __pyx_mstate_global->__pyx_n_u_chunk, __pyx_mstate_global->__pyx_n_u_Morsel) < (0)) __PYX_ERR(0, 295, __pyx_L1_error)
-  if (PyDict_SetItem(__pyx_t_8, __pyx_mstate_global->__pyx_n_u_return, __pyx_mstate_global->__pyx_n_u_Morsel) < (0)) __PYX_ERR(0, 295, __pyx_L1_error)
-  __pyx_t_7 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_9operators_9aggregate_14aggregate_node_17AggregateOperator_7_prepare_chunk, 0, __pyx_mstate_global->__pyx_n_u_AggregateOperator__prepare_chunk, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_operators_aggregate_aggr, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[25])); if (unlikely(!__pyx_t_7)) __PYX_ERR(0, 295, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_8, __pyx_mstate_global->__pyx_n_u_chunk, __pyx_mstate_global->__pyx_n_u_Morsel) < (0)) __PYX_ERR(0, 329, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_8, __pyx_mstate_global->__pyx_n_u_return, __pyx_mstate_global->__pyx_n_u_Morsel) < (0)) __PYX_ERR(0, 329, __pyx_L1_error)
+  __pyx_t_7 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_9operators_9aggregate_14aggregate_node_17AggregateOperator_7_prepare_chunk, 0, __pyx_mstate_global->__pyx_n_u_AggregateOperator__prepare_chunk, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_operators_aggregate_aggr, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[25])); if (unlikely(!__pyx_t_7)) __PYX_ERR(0, 329, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_7);
   #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030E0000
   PyUnstable_Object_EnableDeferredRefcount(__pyx_t_7);
   #endif
   __Pyx_CyFunction_SetAnnotationsDict(__pyx_t_7, __pyx_t_8);
   __Pyx_DECREF(__pyx_t_8); __pyx_t_8 = 0;
-  if (__Pyx_SetNameInClass(__pyx_t_6, __pyx_mstate_global->__pyx_n_u_prepare_chunk, __pyx_t_7) < (0)) __PYX_ERR(0, 295, __pyx_L1_error)
+  if (__Pyx_SetNameInClass(__pyx_t_6, __pyx_mstate_global->__pyx_n_u_prepare_chunk, __pyx_t_7) < (0)) __PYX_ERR(0, 329, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_7); __pyx_t_7 = 0;
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":306
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":340
  *         return chunk
  * 
  *     def _finalize_morsel(self):             # <<<<<<<<<<<<<<
  *         names = []
  *         vectors = []
 */
-  __pyx_t_7 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_9operators_9aggregate_14aggregate_node_17AggregateOperator_9_finalize_morsel, 0, __pyx_mstate_global->__pyx_n_u_AggregateOperator__finalize_mors, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_operators_aggregate_aggr, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[26])); if (unlikely(!__pyx_t_7)) __PYX_ERR(0, 306, __pyx_L1_error)
+  __pyx_t_7 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_9operators_9aggregate_14aggregate_node_17AggregateOperator_9_finalize_morsel, 0, __pyx_mstate_global->__pyx_n_u_AggregateOperator__finalize_mors, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_operators_aggregate_aggr, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[26])); if (unlikely(!__pyx_t_7)) __PYX_ERR(0, 340, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_7);
   #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030E0000
   PyUnstable_Object_EnableDeferredRefcount(__pyx_t_7);
   #endif
-  if (__Pyx_SetNameInClass(__pyx_t_6, __pyx_mstate_global->__pyx_n_u_finalize_morsel, __pyx_t_7) < (0)) __PYX_ERR(0, 306, __pyx_L1_error)
+  if (__Pyx_SetNameInClass(__pyx_t_6, __pyx_mstate_global->__pyx_n_u_finalize_morsel, __pyx_t_7) < (0)) __PYX_ERR(0, 340, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_7); __pyx_t_7 = 0;
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":316
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":350
  *         return Morsel.from_vectors(names, vectors)
  * 
  *     def execute(self, morsel):             # <<<<<<<<<<<<<<
  *         draken = self.ensure_draken_morsel(morsel)
  * 
 */
-  __pyx_t_7 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_9operators_9aggregate_14aggregate_node_17AggregateOperator_11execute, 0, __pyx_mstate_global->__pyx_n_u_AggregateOperator_execute, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_operators_aggregate_aggr, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[2])); if (unlikely(!__pyx_t_7)) __PYX_ERR(0, 316, __pyx_L1_error)
+  __pyx_t_7 = __Pyx_CyFunction_New(&__pyx_mdef_7opteryx_9operators_9aggregate_14aggregate_node_17AggregateOperator_11execute, 0, __pyx_mstate_global->__pyx_n_u_AggregateOperator_execute, NULL, __pyx_mstate_global->__pyx_n_u_opteryx_operators_aggregate_aggr, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[2])); if (unlikely(!__pyx_t_7)) __PYX_ERR(0, 350, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_7);
   #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030E0000
   PyUnstable_Object_EnableDeferredRefcount(__pyx_t_7);
   #endif
-  if (__Pyx_SetNameInClass(__pyx_t_6, __pyx_mstate_global->__pyx_n_u_execute, __pyx_t_7) < (0)) __PYX_ERR(0, 316, __pyx_L1_error)
+  if (__Pyx_SetNameInClass(__pyx_t_6, __pyx_mstate_global->__pyx_n_u_execute, __pyx_t_7) < (0)) __PYX_ERR(0, 350, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_7); __pyx_t_7 = 0;
 
-  /* "opteryx/operators/aggregate/aggregate_node.pyx":267
+  /* "opteryx/operators/aggregate/aggregate_node.pyx":301
  * 
  * 
  * class AggregateOperator(BasePlanNode):             # <<<<<<<<<<<<<<
  *     def __init__(self, properties: QueryProperties, **parameters):
  *         super().__init__(properties=properties, **parameters)
 */
-  __pyx_t_7 = __Pyx_Py3ClassCreate(__pyx_t_4, __pyx_mstate_global->__pyx_n_u_AggregateOperator, __pyx_t_2, __pyx_t_6, NULL, 0, 0); if (unlikely(!__pyx_t_7)) __PYX_ERR(0, 267, __pyx_L1_error)
+  __pyx_t_7 = __Pyx_Py3ClassCreate(__pyx_t_4, __pyx_mstate_global->__pyx_n_u_AggregateOperator, __pyx_t_2, __pyx_t_6, NULL, 0, 0); if (unlikely(!__pyx_t_7)) __PYX_ERR(0, 301, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_7);
   #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030E0000
   PyUnstable_Object_EnableDeferredRefcount(__pyx_t_7);
   #endif
-  if (__Pyx_CyFunction_InitClassCell(__pyx_t_5, __pyx_t_7) < (0)) __PYX_ERR(0, 267, __pyx_L1_error)
+  if (__Pyx_CyFunction_InitClassCell(__pyx_t_5, __pyx_t_7) < (0)) __PYX_ERR(0, 301, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
-  if (PyDict_SetItem(__pyx_mstate_global->__pyx_d, __pyx_mstate_global->__pyx_n_u_AggregateOperator, __pyx_t_7) < (0)) __PYX_ERR(0, 267, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_mstate_global->__pyx_d, __pyx_mstate_global->__pyx_n_u_AggregateOperator, __pyx_t_7) < (0)) __PYX_ERR(0, 301, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_7); __pyx_t_7 = 0;
   __Pyx_DECREF(__pyx_t_6); __pyx_t_6 = 0;
   __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
@@ -13821,11 +14289,11 @@ __Pyx_RefNannySetupContext("PyInit_aggregate_node", 0);
 
 static int __Pyx_InitCachedBuiltins(__pyx_mstatetype *__pyx_mstate) {
   CYTHON_UNUSED_VAR(__pyx_mstate);
-  __pyx_builtin_property = __Pyx_GetBuiltinName(__pyx_mstate->__pyx_n_u_property); if (!__pyx_builtin_property) __PYX_ERR(0, 285, __pyx_L1_error)
+  __pyx_builtin_property = __Pyx_GetBuiltinName(__pyx_mstate->__pyx_n_u_property); if (!__pyx_builtin_property) __PYX_ERR(0, 319, __pyx_L1_error)
   __pyx_builtin_sum = __Pyx_GetBuiltinName(__pyx_mstate->__pyx_n_u_sum); if (!__pyx_builtin_sum) __PYX_ERR(0, 55, __pyx_L1_error)
-  __pyx_builtin_min = __Pyx_GetBuiltinName(__pyx_mstate->__pyx_n_u_min); if (!__pyx_builtin_min) __PYX_ERR(0, 86, __pyx_L1_error)
-  __pyx_builtin_max = __Pyx_GetBuiltinName(__pyx_mstate->__pyx_n_u_max); if (!__pyx_builtin_max) __PYX_ERR(0, 95, __pyx_L1_error)
-  __pyx_builtin_super = __Pyx_GetBuiltinName(__pyx_mstate->__pyx_n_u_super); if (!__pyx_builtin_super) __PYX_ERR(0, 269, __pyx_L1_error)
+  __pyx_builtin_min = __Pyx_GetBuiltinName(__pyx_mstate->__pyx_n_u_min); if (!__pyx_builtin_min) __PYX_ERR(0, 106, __pyx_L1_error)
+  __pyx_builtin_max = __Pyx_GetBuiltinName(__pyx_mstate->__pyx_n_u_max); if (!__pyx_builtin_max) __PYX_ERR(0, 129, __pyx_L1_error)
+  __pyx_builtin_super = __Pyx_GetBuiltinName(__pyx_mstate->__pyx_n_u_super); if (!__pyx_builtin_super) __PYX_ERR(0, 303, __pyx_L1_error)
 
   /* Cached unbound methods */
   __pyx_mstate->__pyx_umethod_PyDict_Type_get.type = (PyObject*)&PyDict_Type;
@@ -13854,31 +14322,31 @@ static int __Pyx_InitCachedConstants(__pyx_mstatetype *__pyx_mstate) {
 static int __Pyx_InitConstants(__pyx_mstatetype *__pyx_mstate) {
   CYTHON_UNUSED_VAR(__pyx_mstate);
   {
-    const struct { const unsigned int length: 9; } index[] = {{1},{11},{18},{23},{56},{2},{1},{1},{7},{6},{2},{25},{9},{46},{21},{17},{3},{17},{26},{34},{32},{24},{41},{25},{22},{12},{5},{14},{10},{12},{8},{25},{8},{25},{34},{42},{41},{57},{37},{37},{33},{34},{3},{13},{10},{11},{7},{3},{3},{6},{8},{20},{15},{3},{8},{9},{14},{10},{15},{18},{4},{5},{9},{9},{18},{5},{3},{7},{16},{15},{9},{10},{6},{13},{6},{22},{12},{6},{15},{16},{7},{6},{19},{8},{19},{20},{10},{17},{26},{7},{19},{8},{16},{17},{12},{8},{8},{7},{3},{21},{4},{8},{12},{8},{20},{11},{21},{3},{24},{13},{5},{7},{8},{3},{4},{13},{3},{4},{10},{12},{6},{15},{8},{4},{5},{4},{4},{9},{10},{8},{7},{37},{38},{40},{18},{28},{14},{17},{42},{35},{11},{9},{10},{3},{11},{14},{10},{8},{12},{8},{31},{6},{9},{6},{13},{6},{12},{4},{4},{12},{10},{4},{3},{4},{5},{8},{5},{4},{26},{21},{9},{11},{11},{11},{5},{6},{6},{20},{11},{11},{18},{35},{11},{20},{7},{2},{27},{154},{22},{2},{254},{42},{65},{96},{19},{268},{314},{7},{26},{84},{124},{2},{99},{19},{37},{30},{58},{31},{29},{27}};
-    #if (CYTHON_COMPRESS_STRINGS) == 2 /* compression: bz2 (2261 bytes) */
-const char* const cstring = "BZh91AY&SY\246\312k\030\000\001J\177\377\357\357\377\375\377\377\377\377\277\377\377\372\377\377\377\377@@@@@@@@@@@@@\000@\000`\010|h\332\224U\206*\250!\025\004>\340+\201\242\020\246\232\206M\211\250\375!\2324\304\023D\321\202oS)\264\322h\006\233I\220\320i\220\311\246\233S\324i\211\264i\244\306\220I &\202hh\001\t\211Oz\230T\375F\211\352\031\221=@z\207\250\321\220\304\000\302\037\2514= 12\033P\0202a0\002d\300\000& `\000\000\004\300\230\004`\000\002`\000\000\004\246\204\010D\321F\207\251\262!\243C@\0004\321\240\000\000\000\000\000\000\000\032z\200@\311\204\300\t\223\000\000\230\201\200\000\000\023\002`\021\200\000\t\200\000\000\022\222\220\000h\321\240\032\006\2151\r\014\200h\0002\014L\023&\020\03244\000h\000\002\237\331\352\177<\316c\210\177\344\216\003\230\320\230D\234\025\376\354\236!\324\321\255\376\037\352Ha\t\214\332O\364\271\267\377`\305\013\024iE\360\204\t\000!$\231$\204\231 BBa!$\2036\3156\305\244\336\314p\230\031$\201\242\027\016\212H\243\000\314\314!HLHD\201\205\246\t\323&;P\301/T\340\302\032\030L\221`!\207\201\230sdF\365o\25445\354\271L\"\245D\365\2715\322\226\315\263\002L\341\242\36520A1C\026\251r\304\\\253\\\213\274\231Q\010\335\231huw\327\272o0\020\233\311\355|\013\267\347\370V\025\267\320\237\307\r\206\026\353\304\212:\220N\216\332\3172\303-2\024J\n\tI\000f\002L\240*\021\307\007(\033k\222\341Q#IN\336*O\230\275\307\316\245\335+\271\324G\313,\273!'F\203\341\374\344\331d\200\214#q\264\256b1\035!\244\250\037\2600\245\226\270J\352Q-\013)\373\205,\375\371Gl\333\215\265.M\232\\\371KZ\202\207+m8\253*S\372\005k\324\"\210\242\252\261]\020CGqd\007\331\364\256\201\n\312\236<\227\324i\341BR\360d\361\020 U\341\372\251\265\024\205\316\372\364\353\033\221\217\343\255\265\261\003!+\270@9O\037\007\215L\301\211q\233\020\023-\210\2564\271_\0035!c\t]\242*\006{\264k\353\317\006\320\365'A\005\014R\353\375~\343\311\265\177#\371\240\201\251\217\031\232VR\254|?\267\034\375\334y\332\257\335\276\377Gg/\360\367;\033\277M\027'\273\223\306\301\243\266\313^\275\264\360\230\264\360j1C""E+\367\275\354-_7V\253Q\313;`8m\335\276\232\314\207!\262nY\0160%K\0163|{Q+<\261q=}w\030\247G\245\001\200\272\020\302\022\3241\331q\014\302\031\021 \323\013H\300,V\356\303\020\304\373\373\2729\316j8\202\3248\216\352S1^\233'^%b<X\374y\271\351\326[\273\345\007E\233\337;\214\001=x1\241\301-\353\320\210\250lH\235\"\344\243\2551\023c\343\260\032\210\213\225@\t5\315\022\2156R,%\311)]Zb\317\211^\025z\250\360V\314\234J\032\356\3253\242\305?>\343BI\\\031N2Qo\023:,\337K\022>D\222\032\251\024v\225\033P\362\357\251\342\034P\236\211L\026Q\262MU\311f\207\215\273)+\030\345\305(g\231\327\253\231%\252\346\311jK\332\230\205\277\265\334D\327i[\365\227\312\306\207\314\373C\304\366+;\000a\007\006\241\032\005\326|\221\"\202)H\315'\336V\365\376\024v\2372\261\313\034*;\223C\314Z\354\277k\230Hg8\324\014Z\304\030\201~\031\000{\006\271#y\331<\255\373\272\232\035\260\356\270\225\271\016\310a\376wR\252\354\035VY\341B\006\312\343+0S\217.\247JNf\203\357\244\242\025\n\352Xw(\241\014\365\303\342\007a\203kV\310\224\010E]o\006\260\334\303\306E<\373\"\325Z9J\230Y\234\317B\346[Yjs\220y\030\014\036\350\346\317f&\001[G\347\020@\212\242\373\326\214<e\275f8\0041\336\213\242f\020\223o+p\314\303\r\350\333bIB\333\336Z\203\221\244\352\261\211C^\\q\205r8\2267kx\"\273\"tl^\267\004\014\233}\336Y\3338f$\324b5\247\214\251\025\250\326g\241\336}\264a\2074\362U\033\315\324lI\236\316\352l0\334\356\006\313\025:\350s\334\350\301\357\222\204\300\t\220z\273\027`]H\006I\254\312\222R\354p\252+\032\307\342E\256\016[\251\177;\024\331\276\223a\312;\227\022\202\331\231\2124\302\013\236\247\034=3s\005\255\223-yj\2030\306\211\025N\274\2172\254\320\n\206\nf\337\332\221\315\300\372+\367h\000\313\007T0\315jf\033\316bg\t\307\252A6Bj\323\323\226\332\215\024\326\354\030\220\311\221\233\000\271|_\324\341\351\232*+\273\005\331\304\205\0308\273L\354T\034[\250\204C\261[6\3646\2649,\370\244:@\326\263p\211yB\020[\321\346\360\324\227\304n+\002\311\016\3103\310!&I\252\033U\275\2658X\327\257\r\022\233\223\221qr\353\221\004\302\036\256\345\207""\312\225\343n\306\224\333'\212\343\361\305{#;\255\304\364\273\210\031\025\246V&MK\035S@f\333-\272O1\236\273^m\227\346\216\2676\r\277\032I3b\0301\367\331\016W\203Yd\205aFK\002\3272\324\033\202\266w|\t\005l\255P\244\303c\303\235\306\006\264\301\3219\252$d\226\206\277\245:f\351\216+\303\304v0r(\313\220\232\271\335\000h\215\210\204\303\241!F\243\243\200a\014\244\021\030\023)\r\231\206\276|\311$\342\202\233@\234\264p\251tX\253q7\362\352h\326\325fwq\207\023\2738;\263\240nWIs\210\221'\rt\017B\r\307z\2557 \214\363\206\235na\027\331\2122l=0\304Y\257\267Y\256\2563\221q\r\235L\204\355\020\221y\344 \222\276\027\014\307?\304fm\366E\354\272\034tm\255\261\2712Y\026E\t\341\304\325\304\251\003\326\264\0050\315T35A\3554p\244A\272\314G=\271z;\225\214sI\262.\221Dh\374.vu\262\020&Hd\223\003\014\304\254\233MCE,\205\267\347\251f2\235\3367\247\254\360\362\\&\3609v.Xcs\020M\273\2101\032\004\301\n\230Zvh$s\266\354z\261X\3440\324v\246\021a\253\203J\257O)pB\007\nF\206`\270\212{\220FG%\330\257l/wy\2250\230\211T\352\362!\225\346;\260\201\225\240\363\372\257\036\335\317\374\235}/\220\365\026\366\026\217d@O('\336\010m\344\2757w\323TP\nPg)`\304Y\030@|U\002\323\307\230\035K\305|\354t\232\001(\335A\240Z#\372\017\200\325\275.h\244\376\324\235}\346@\320B\026\244\257\366\352\370\365t\361\271S\270\030\024kz[\313]<\033\036\336\352\220\020\356\243\277tN\351\030\2454\326\324M\n\330\302\331\215\027\313\006w\nI/M\257\337F\017\243\235k\002x\335@ (\231x\351\rL:\203\n\202\023\226N\034\363u3\350[\336xM\000\250\031WHL\321\340\242sl]+<P\006\337Bl\364=\344\023\321\304,\324;\233A\263{;lh[\021\245\203'Og\2108)\273\375xk\323\016\t\234\372\322\312]+.\037;\035\022e\nH\254\331\231\235|\252\242\256\220\177+\244Ji)\322\321\221%\366\2614\0327\365T\201-\254\361\277\2066\360\037/\3123X\021\315\221K\227\327\231\016\245\017-\253\303\177p\313\010w-\302\247\nh\3146q\035\2438d\277\237\245\2228&]\016F\251\214?\003\232\305\r,_|\333\t\027\247\362\235\255\271\305n\247c\350\302=M\246 \207\n\030\005Z:M\003\t'i\213h\261\334\316\242 \226""\235^\252\241Y4\302\320\263\222\265|j\362\227\034eh=\315\026K\346s\020\221z\200\020\014?C\307\241)\323P\327\276Ak\275N7\271\023\207L\254\220\360]F&\363Jc\332\245\254\202\355l\351j\252\260\251VD\034\2450\356\231,T\331\323\343BR\265K\347\t&&\221\000\221d[\004gM\036\321l\266\321\377\213\271\"\234(HSe5\214\000";
-    PyObject *data = __Pyx_DecompressString(cstring, 2261, 2);
+    const struct { const unsigned int length: 9; } index[] = {{1},{11},{18},{23},{56},{2},{1},{1},{7},{6},{2},{25},{9},{46},{21},{17},{3},{17},{26},{34},{32},{24},{41},{25},{22},{12},{5},{14},{10},{12},{8},{25},{8},{25},{34},{42},{41},{57},{37},{37},{33},{34},{3},{10},{7},{3},{3},{6},{8},{20},{15},{3},{8},{9},{14},{10},{15},{18},{4},{5},{9},{18},{5},{3},{7},{16},{15},{9},{10},{6},{13},{6},{22},{12},{6},{15},{16},{7},{6},{19},{8},{19},{20},{10},{17},{26},{7},{19},{8},{16},{17},{12},{8},{8},{7},{3},{21},{4},{8},{12},{8},{20},{11},{21},{3},{24},{13},{5},{7},{8},{3},{4},{13},{3},{4},{10},{12},{6},{15},{8},{4},{5},{4},{4},{9},{10},{8},{7},{37},{38},{40},{18},{28},{14},{17},{42},{35},{11},{9},{10},{3},{11},{14},{10},{8},{12},{8},{31},{6},{9},{6},{13},{6},{12},{4},{4},{12},{10},{4},{3},{4},{5},{8},{5},{4},{26},{21},{9},{11},{11},{11},{5},{6},{6},{20},{11},{11},{18},{35},{11},{20},{7},{2},{27},{154},{22},{2},{254},{42},{65},{96},{19},{268},{314},{7},{26},{84},{137},{129},{2},{99},{19},{37},{30},{31},{29},{27}};
+    #if (CYTHON_COMPRESS_STRINGS) == 2 /* compression: bz2 (2275 bytes) */
+const char* const cstring = "BZh91AY&SY\347\372|\257\000\001[\377\377\357\357\377\375\377\377\377\377\277\377\377\372\377\377\377\377@@@@@@@@@@@@@\000@\000`\010\237\017\035yL\365p\365\3206\214\025*68\003\200\320\220\224\362#L\312\030\324\364\304\330\232j25\014j<F\232jm \323\323$\321\246\206\232h\321\246\217S\324d\033Q\351\220\236H4*z15\032\247\372\224\3752j\237\352j56\241\247\224\00012\001\241\240\000\000\000\000z\236\243@\000\000\r$\332\232\231M4\003\3216\220\323\322z\200\000\000h\000\000\000\000\000\323@\000\r\000\000\224\320\2014\232\020\010\312\017Tzi\250\014@m\032\200\000\000\000\000\000\000\000h2\002\006L&\000L\230\000\004\304\014\000\000\000\230\023\000\214\000\000L\000\000\000\221Bdj4T\374J~\246\231=\252M4\321\355Hh\001\223@\000\006\200\000\014F\231\003&\206\200=54\321`\272\307\303\325\335\335\200\310uH\357\033\244X\231#z}j8F$%b\247\372\035q\244\261)\035r\231\001\346\377\205R\263-,Re\312\254`\330\003\033m6\330\332l\030\330\320\330\333a\240\275^\3267\177bN\267\"(\023m\203\2602\020\261$U\200\333hM\244\246&LD\301\215\323\2124\\]C\004=u\036\001\204\315,!\"\343\020\303\300\3149\306#\262\327\336\033\033\370\334\246\021R\242\271h\257\002\266\313e\230\2230\335\331\322\301\235\010&*iz\230,E\312\265\310\273\311\232!\035\331\226\207\260\367\216=\322\242\000V2\345m\364\030\007\307\335\210b\366\245l>\377\222\342\261E\261\376B\200\236+\360\\\005\350\005\022\204\221\014\t\004&\304\362\235\262\355-\327\245[\307j\024\305m\257\221\213z\303{\236\337\033\275{V\325\005\353\003\327\322\341K.\310I\366\372p\266@B\020\2448\177\004\201\r!\304\230F\230xk\256\302TfK\314\333\305`\327\213:P\303\256\"l\2426\230\001&\245A##\240\\-\010\241\262\014\007\227CF\226%\213[v\264\006\0251\003\266=\346d\234\026\202\n\373\345n8+_u\277\342\206\0141\203~H~\0317\313a3\034rAF\316\324m\326l\322\247H\007ol\252$\033oZb\371\240M\304\020\035qE8\020\203X\226S\200\310\303\001\247\317\340\307h\320\375$\245\214\200\222\022\212\217\033\215!\341\311\371\255}D\001\266\315\220\370\334\326?\037\314\365\341|\346\314\231w4\336\364y.\334\3554\261a""\177\244\300\236\371\2250f\200\261=T\013\212\241\033\243\2433\213\305M.!yu\324\020\035\315^\272@\361\2204\313B\262\"\000\030{|\"\006\327iq\365\216\271Y\217\004u`\223\270\331\357^\006\021\036\"\005D\2000[LW\343>v\347\210\264\370\345\225\262x]\241\203\031\355DCj\005\025!\004U2\320m\271#l\245!\0163\376\320\035{}\005\220\035|\332\230\277\020\206C\017\260\237\027\024\000\230i\030Cv\033\322\204\273\211\"\026k\301\016\002>\234\020\252\237\265C\377D\274\362i\256og\274\257\203_]\037\001o\321\304\241\256\355\231X\237\347\350\352I+\323\304\353\242\213|<\321e\365\261#\350I!\272\221GiQ\276\036]\367<C\212\023\321)\202\3128I\272\272,\241\343\374YIX\303\373\232P\316O9\\\321-\3308KR^\324\304-\274O\024\331W\373K\342\306O\314\373\017\023\354\326l\001\204\033\327\214\306\027\342\336\260\261\005\211L\3218\345+\025\375\2536\216\366\244\027a+N\352\210\215\264\333\272\350f\023\271\320\010\312%\022m\311\300\010A\323V;\376\324;\307\231\345\253`\253\3446\310#\257\2205 M\367\251\254s\202\006iW3B\204$\2127LK\213QJG\030\265H\341\245\254\030\026\024\260\356QB\031\353\243\351\003\263\001\303n1(\020\212\272\354\r\341\330\210\023\030\360\346\212\372\216\325\3076z\016\214\033\223u\246\347w`\365\020\034\260\364\346\347\263\023\000\255\253\364 \201\025E\373-\030x\323\262\314zbf;Y\204&]\363\016$\204/\026tff\234\355\006X;U^\373\306i\352\343\276\223\245O\035\261\325[\301\025\341\023\253b\365\270 d\335\216\362\316\331\206bM\306#d\361\245#F\246\2076\017\014k\204!\325\270\336\233\316\274-\231B\177`\271yz\337\261rQ\251[\215w\302\311F3R\240\001BQW\344\340\213\271@4\236,\351%>\016\245q8\335ZR\025\320\013\302\303t\230\0146\031-Y\204(\252+\244\242\205\243\r5\200\242\300\3040\355\351\006\030\336l\365\317l\233\031\246e\264\256h\231\326\304\202\321\205\333\035\257\022f\346\250\334\262\3604\200g\224-\030\3364\330\374&S\003\205\2630\243BuQP[v\232n\337\303C$\025L\304\200x\177\006\326*\262\301\322\010(\240\330\343i\206E\006)P\201u\"Q\016\305\250\335p\333\220\344\263\342\220\351\003Z\315\314K\312\020\202\337G\227\rI|G""\025`Z!\331\006t\010I\222j\206\372\336\333\234,m\266\032%7\237\241qS\003\221\010z;\225\037\024\257oLf\234'\306q\373\302\3311\314\372\355\014\336\305\2011\243&\313&X\313\335H\227r\275\316\203\314P\335\3577;\371\251\324\353\225y\\\030fKa\007\017\na\333x,\346\243d\302f\3455t\333!\266\025p\344\0010\253X\324\256\240mD7 h7\351\206\272Q\\\221\232}\013\177\224w\333\276y\017\036Y\023>t\023@^\004\325\315\320\006\274\034\204\303\241!\306\363^\241\210ja`\30151\3541\345\246\342I@\270Tr)=8)\353\2415\206\252\361lT\276\212\020\200\210\016\020P\010AA\202\344q-0l\223y=\224 \344w\252\327\222\010\316a\247g0\213\360\305\0316\036\230b,\327\343Y\256\356\034\010\332\305\212eG\005\022*\331ka\"~~\331v\326\t-I\226\360\256\355\026Eo$\311\252,\212\023\327\023W\022\244\017Z\320\024\3035P\314\325\007\264\321\302\221\007q\230\216\256K\321\334\254c\2256\205\322(\215_\237\246vd L\220\230d\010H\256l\254\323\321\214\316\273\371\356\334\307!\354\273a\241\271\347\324\3342\361;y;\232cy(\216\253\240J(\004`)\206\n\334(\021\215a\324\372er\0200mJL\020\304l\351.\323\3031\206\005\226\030$il/&\243\004\026*\035\235\3712\275\031a\307j\355\024\021;a\\\310k.k\364H\3169D\374\316\216\337\003L\276.\207q\032\021S|\277\240f\3174@M\2059B>n)\3129|\325\372\r\003fa\371.$H|b\017\\\330\003\000Y\256G[\tox\335\376]\006\240K\231HCAp\215\201\266[Z\243\227\260\006\036\374a\273\2368\240\201Q\021\205\226e|\335j\331\234\212\340\017\004\372\365#.\210?;\236yk\240F\266\032\371$\213\243\266N\032\373\n\311\257\334\027\214 \326\357\026AH\341Q)\267,LL\215Q\314\275\220\350\372  '\031S\23662\250\211RQSI\263t\343\352\312\275\302\340t\002\224eaAN\215\t\346\355\236\242\332bP6y\325k\235\317\000\311\343\026\264\215\365\260\311\271K|y/\010-\003(\347\275\306\032\024\\\37587(\206\304\216m\266\211\252\026\233>g\234\354\306\032\t]\2233;\023j\213\332\342t\333\2424U+^\254Ly\321{B\244S\235\264\262\006\242\212b\336X\2054\254%\026\0061\342\014\373~j\017\364\244\370n`\234\336\003)C.\363\375\027\362\005\003\304\226\334\367D\311\272u\246\016W0\005\250\272#+A""\275\261\322\277\331\271C\027\325$t\036\244F\263\245\236\240\251\351\005\350\025\r\220\010o\020\226 \0252\322\031\204\267Lc\354\303\021\351O\027\305\345\253\321T-\335\321\013\277\244\245\354gX\214\300\376\225\301\340\377]>\253\274x\035\340\350\206\034C\267o\233RS\246\241\267\214Ak\275[\325\375\311\305\023+$<\027Q\211\274\322\230\373T\265\220]\255\232Z\252\254*U\221\007\211L|\202!2ZX\343\353t\334J\301qj\351&&b\001\"\250\256\010\326\233\236\321l\362*h\365\024\177\361w$S\205\t\016\177\247\312\360";
+    PyObject *data = __Pyx_DecompressString(cstring, 2275, 2);
     if (unlikely(!data)) __PYX_ERR(0, 1, __pyx_L1_error)
     const char* const bytes = __Pyx_PyBytes_AsString(data);
     #if !CYTHON_ASSUME_SAFE_MACROS
     if (likely(bytes)); else { Py_DECREF(data); __PYX_ERR(0, 1, __pyx_L1_error) }
     #endif
-    #elif (CYTHON_COMPRESS_STRINGS) != 0 /* compression: zlib (2144 bytes) */
-const char* const cstring = "x\332\225V\317s\323H\026\306E\006B\305\201\030\262\374\030\246\300&\331\2310?\314z\222\r\014d\231\322\304N\326\003qb\307\001\206\251\251\236\266\334q\004\262d\253[!\316.[9\372\250c\037u\324QG\037}\364\261\217>\346O\330?a_K\262C\342\004\330\252Hj\277~\335\375\336\367\276\357u\322\312\352j)\267\252\224s\3119\245V\263H\r3\3154\222Y\013\277%\206\322hX\346\236V\307\214$q4K\222\177n\031\324n4L\213\221\352\007f\326j\220\344\266iEk\2235\335\254`\375\310\341q\362\373\344\375\237\253\032\305\025\235\020C\276k\352\237I\215&\r3\251\233F\215X\311\341\276i\215\206.U\263\301\210\325\332{`6\210\205\231i\321\007\303\035\217F\3100\253$\335h\355)\033\033\245\365Why}\253PF\331\374f9_X.G\306\215\\i9W(\347\237\347\224\027\253\203d\311z\264\357\210!\215\220fh\014\241Sf\2665\003\353\332>Au\010\210\350\247x4,\322\300\026A\352\216m\274\035\235WMc[\253\235eO/\351\246\212u\3724]#\006\331k\234\022\034\331#\252\315\310\350\204\201\353\344\027L\311\206\216\215\002\240\022@q\034\217el\251;\330\332$\014e\225\262\202V\326KkJy0\213\262%\345Y\256\200r\205\345\365l\276\260\n`\0266\313J\241\234\325(\323\014\025\026\205\344\030\034\275l\352:Q\341\3543'\206P~\304C\r\207H\327\240\336X\377\014\317\335O\035j\2217\322\317>\242+\302G\214\376\310B\273Q\225\016u\315\370\014'\274w\266\323 \3243\035\006D\312\255o\256\350&f\213\013/\202\211|V2u%\237+\345\215\241\361y\276\234+)\317\327\224Wk\371\302Z\300<Y\3412\010\017\241\215\326\036<Y\rN+\220=V\"\333E\033\204\263aI\3410\215\320\315\255\265\227\371\347\331e\245\224\035\352\346H@R\275\303_\024\353:\322\252\304`\332\266F,\212i\313P5\023\322\261L\0338@h\3054\365\200\332\301\013Q\273\216\220\252cJ\345\007\034\240\336\210YX%\025\254\276Uu\223\022\200b\200\306\311R\037/\250:\000g8\2400\262\353\006\212>\225\026D\030\n\005L\006e\330`\210\202^\260\205v\261n\303Q\006\263\264\212-;\031x\330\006\253\016\250\273\203\351\016\241\350\344oT5Ux\005U\252\332\r]S\003L,\202Y\035P \206jV5\243\206\010PI\212:\024\020\242\204E\226pi\324\016\010D\201 ,`\234\214\0073\331\310\202\026E#\003A""\330\010\310\010\307Ek#AC\351\0006\206\"G\310\200\016\233\315\211\256\003\275\026x\214d\177 \224\202\347\266e\326#\020\251\034\277%-Hm\3336 \267\250\221\324\010\203?$\353\033\304\203\314\355\240\364\022\207\260\340\254\005\211\022\312\302\004\206\302\325\014\n4\032\226,\360\017Mul\264\006\323\221$CT5(\213F\217J\024M\352\332[\022\332#2\301\226u:\330\030\266\003\352\004\252\222\017\252\023\206#bI9\326\203I\263j\003\240\3605Lf\032\232\212\014\032B\0026\313\204*A\371eU\021\222\3350|\313\207\002\006L\346-\237 o\303\326\365\220\"\006P\3302\337\321\350\276\211>@\371zC\203k(\035V)\rI\021\220T\032[\340|\226S\030\014\215\276#^\0066\314\212fT\323\003\036\031P\350]2\360;*\350\250%\035\361\002\260\213\346\000\0148j\360kxK\216\030\322Cu\247\217_\233\037\363\334!:X)\324\251a\263\000F\270\324\340\r+\206\003\3320\033hx\337\241\3437_c\330~\242Q\013\241\246\215\365\260.\240/)+\372\211Nm\021f[\006\340\035V*\224:UwH\035G=A\212Ne\341;$\266\324\007\225\352\222\"\215h\000\243*\331\306\266\316(\250H\366,x\340Db!\304$\345\021\333\201S\230\006y\301\203\216p\372@\215'fB\2610\0235Z:4\225\017o\205\243[\004Vk\3250\370\240A\005/\032\352!RE\240]J\2326\364\0322\220\212\334e0\004\342G\303#\316\216ZF\376s\030\270\310l\243a\030\315\2071P's\020\353\217M\2643\355\025g\326\321\370\256\373\332\243\376\214\377\242\363\260\233\022c3n\246?>\331.\265[<\306o\273\005?u8\036o\027\370,\307|\337\233\366\212\236\321Q\372\343q\021O\271\211~|\262\037\237r\306\305\315\357\274\214\227\365c\375\370\2256s\236p\325\275\351%\376{\341\334\245\333<%=.s\0349\376\000;T\375\037:\377\351\275\022[/\016\345Fw9s3n\326\273\344'\374T?8-%n/\370\212\377{w\254\273&\212[\340)\316\315yA\334\017\235\224\363\210/\271\273\336\246\037;P\016 \230\211\366\202\270r\227S7\025\234/\256\315y\347\275L\177\352\206c\363\254H\376\010\331\275\3560\261\\\026\345\337\304o\257\373\361k\316\202\323<\034\256\023\367\346\375y\277*\036\377\332\233\351\025\345\364\337\371\230\370*\355\251\376\227\235\005\361\363\206\330\330\n\202\215\02601\263\004 \304\247\304""\324\337\374\330\341\261\363Ol\035\205\004\021\317\363\212{\336]\010\343\226\2615C\347]^\222\371\177r\227\310t\271\375\206\003\314+]\334e\275L\230\375\242s\315Qd-\344\202\366\256\263\311\277\340\233\356\005\267\342\215yJ\200;\217I\317)'\326\037\277\352\004\025]\343\323\034RM87\240\316\267\302\003\036J\334\037xM?\346\337\352\334\357BLW`\267?\334\224\373\320K\311\r\344\262DP\374;\\s\233\301hFNzO\304\342\032@\007\036\353\374'\311\232\320\371\226\373\035\324\033\313\003\177u\260\264\375\323QF>\"\236t\203\000/\213\313\001\253\376\352\026\335jx\344D\3731\344\003\031O\036\236Y\347i1='\346\240$\235\262P\240\310[\375\251\304!x\3549\357\200wS\323\3163\336\2146x\344\314C\034'7\273\315\037\271?\272\305\210\242s\000\333J\310\231\356b\357j/3\342/\201\234J87\371U\376\0244\361\002\330\363\006\250\272\002\364\001V\277\024/_\035\202\317\004?me\234+\022\370O\333\217\263Lbq\335Qy\202\317\271\367\304\354\242\217\375\346\247\020\371G\247\330\251\212_$w\003DFC:\311|8kV\314\376\324Itf\305\323\242(\226\"\357%\207J!\237\010\372&\237\000\341F\014\233t\313\336u\350$\337v\262\335\013\335J/\366\177\273\177\014\261\337\275\230\227\370\334\271\223\310I\0367\345gRL~\3436\345\317\367\260\256\354\376E|\375\250\023\023c\263\3563\257\031\252\007\2102\355\344\370\r7\346N\273\305\303\201\355\026\310\345\017\017\216\004d\323\036\366\230\230_\3556e\004\227xB|\371\244\263\320y\337[\356Y\000Yx\032\364\252\253\316\214StvxE\266\240\224\237\351\217]<\370w\300?\351q8vQ\\\274\313\233.h2!\022\020\027\364\267q\331\337`\225TcF\272\275s*<\006\256\007\273\355\327\316>\204\204|\245\037\310\262\314\023\207c\220\020\010\006\240\200\3068\337\306\355\177\361\357],3\272\003\304\017b\337\207&\276\354\356y\315\020\337Ew\210\324\261)1%\367\231u\337\370\343\235\013\235P!\t\347\272\024\020\177\357)^\031:\341\323^\250\375\257$S\203KDL\334\021w\322^\r\244\262\337KH\323uq\375\276\227\000\240\306\2569K\274)\222\262\215\027}\255cw\225\340\3269\305\t:\025\001\322\016fO\203\345\n\004{\303\275\350\356\373g%-\316\335\223\226/\244/\205+b""\021\032\325D|\360+\334\370\200\266SQ\007\220\025\220\353\027\235\204\223\n/\304%\3007\341~\353=\357\234\357d:\371\356\313\236\322+\376\017\016d\312\374";
-    PyObject *data = __Pyx_DecompressString(cstring, 2144, 1);
+    #elif (CYTHON_COMPRESS_STRINGS) != 0 /* compression: zlib (2147 bytes) */
+const char* const cstring = "x\332\235V\317S\333H\026\216+$!\205Ip\302\346\307$\225\330\201\335%\363\303Y\017,\311$l\2464\330\260L\300`c\222L\246\246z\332rc\224\310\222\255n\021\314n\2668\372\250c\037u\324QG\037}\364\261\217>\362'\314\237\260\257%\331\004\034Hv\253\220\324~\375\272\373\275\357}\337k\322\312\362r1\267\254\224r\311\031\245Z\265H\0253\3154\222Y\013\277#\206R\257[\346\236V\303\214$q4K\222\277o\031\324\256\327M\213\221\312Gf\326\254\223\344\266iEk\223U\335,c\375\310\341i\362\333\344\303\037+\032\305e\235\020C\276\253\352\357I\215&\r3\251\233F\225X\311\301\276i\215\206.\025\263\316\210\325\334{d\326\211\205\231i\321G\203\035\217F\3100+$]o\356)\033\033\305\365\327hq}+_B\331\225\315\322J~\261\024\0317r\305\305\\\276\264\262\232S^.\367\223%\353\321\276C\2064B\232\2411\204>1\263\255\031X\327\366\t\252A@D\377\204G\335\"ul\021\244\356\330\306\273\341y\3254\266\265\352i\366\364\202n\252X\247\317\323Ub\220\275\372'\202#{D\265\031\031\2360p\215\374\204)\331\320\261\221\007T\002(\216\343\261\210-u\007[\233\204\241\254RR\320\322zqM)\365gQ\266\250\274\310\345Q.\277\270\236]\311/\003\230\371\315\222\222/e5\3124C\205E!9\372G/\232\272NT8\373\324\211\001\224gx\250\341\020\351\032\324\033\353_\340\271\373\271C-\362V\372\331GtE\370\210\321g,\264\353\025\351P\323\214/p\302{\247;\365C=\325\241O\244\334\372\346JV\222si%W\\])\345\212\312\352\232\362zm%\277\0260LV\262\004\002Ch\243\271\007OV\203]\363d\217\025\311v\301\006\201lXR L#tsk\355\325\312jvQ)f\007\3728\022\212T\351\340\027\305\272\216\264\n1\230\266\255\021\213b\3324T\315\204\260-\323\206Z\023Z6M=\240p\360B\324\256\251:\330\241\234\210YX%e\254\276Su\223\022\310\264\237\354\311J\036\257\227\332\317}0\2400\262k\006\212>\345&\004\026\352\000L\006e\330`\210\202\034\260\205v\261n\303Q\006\263\264\262-\033\025x\330\006\253\364\231\271\203\351\016\241\350\344oT1Ux\005E\250\330u]S\003(,\202Y\r\222'\206jV4\243\212\0100Ej6\324\007\242\204E\226pi\244v\002Q \010\013\010%\343\301L\366\251\240\003\321\310@\0206\002\256\301q\321\332H\257P1\200\215\241\310\0212""\240\203^r\242\251@+\005\232\")\177B)xn[f-\002\221\312\361;\322\204\324\266m\003r\213\372D\2250\370C\262\254A<\310\334\016*.q\010\353\314\232\220(\241,L`\240K\315\240\300\236A\311\002\377\320T\303F\263?\035).DU\203\262h\364\250D\321\244\256\275#\241=\342\020lY\243\375\215a;\240N \032\371\240\032aX\3251\205D\244\332j\301\244Y\261\001P\370\032&3\rME\006\r!\001\233eB\225\240\374\262\252\010\311f\027\276\345C\001\003&\363\226O\220\267a\353zH\021\303\256!\313|O\243\353$\372\000\323ku\rn\231tX\2454$E@Iil\201\363iNa04\372\016y\031\3300\313\232QI\367yd@\241wI\337\357\250\240\303\226t\304\013\300.\232\0030\340\250\376\257\301%8dH\017D\235>~+\236\345\271Ct\260R\250S\335f\001\214pg\301\033V\014\006\264n\326\321\340:C\307/\266\372\240\353D\243&B\r\033\353a]@_RV\3643\215\330\"\314\266\014\300;\254T(u\252\356\220\032\216z\202\024\235\312\302wHl\251\017*\325%E\032\321\000F\025\262\215m\235QP\021\264*\331\256\340Db!\304$\345\021\333\201S\230\006y\301\203\216p\372H\215'fB\2610\023\325\233:4\225\217\233\376\321%\001\253\265J\030|\320\240\202\027\r\365\020\251\"\320.%\r\033z\r\351KE\356\322\037\002\361\243\341\021g\207-C\377\030\364]d\266\3210\214\346\343\030\250\2239\210\365F\306Z\231\326\2223\355h|\327}\343Q\177\312\177\331~\334I\211\221)7\323\033\035o\025[M\036\343w\334\274\237:\034\215\267\362|\232c\276\357Mz\005\317h+\275\321\270\210\247\334D/>\336\213O8\243\342\3267^\306\313\372\261^\374j\2139\317\270\352\336\362\022\177\\<w\371\016OI\217+\034G\216\337\301\016\025\377\273\366\177\272\257\305\326\313C\271\321}\316\334\214\233\365.\373\t?\325\013NK\211;s\276\342\377\332\031\351\254\211\302\026x\212s3^\020\367c'\345<\341\013\356\256\267\351\307\016\224\003\010f\2545'\256\336\347\324M\005\347\213\3533\336y/\323\233\270\351\330<+\222\337Cvo\332L,\226D\351\027\361\313\233^\374\2723\3474\016\007\353\304\203Y\177\326\257\210\247?w\247\272\0059\375w>\"\356\246=\325\377\252='~\334\020\033[A\260\321\002&\246\026\000\204\370\204\230\370\233\037;<v\376\211\255\243\220 \342Y^v\317\273sa\3342""\266F\350\274\313\2132\377\317\356\022\231\256\264\336r\200y\251\203;\254\233\t\263\237w\256;\212\254\205\\\320\332u6\371\005\276\351^t\313\336\210\247\004\270\363\230\364\234pb\275\321kNP\3215>\311!\325\204s\023\352|;<\340\261\304\375\221\327\360c\376\355\366\303\016\304t\025v\373\315M\271\217\275\224\334@.K\004\305\277\3075\267\021\214\246\344\244\367L\314\257\001t\340\261\316\177\220\254\t\235o\273\337@\275\261<\360g\007K\333?\035e\350#\342I7\010\360\212\270\022\260\352\317n\301\255\204G\216\265\236B>\220\361\370\341\251u\236\024\2233b\006J\322.\t\005\212\274\325\233H\034\202\307\236\363\036x71\351\274\340\215h\203'\316,\304qr\263;\374\211\373\275[\210(:\003\260-\205\234\351\314w\257u3C\376\022\310\211\204s\213_\343\317A\023/\201=o\201\252K@\037`\365+\361\352\365!\370\214\361O\255\214sE\002\377y\373q\226I,n8*O\360\031\367\201\230\236\367\261\337\370\034\"\377h\027\332\025\361\223\344n\200\310pH'\231\017gM\213\351\037\332\211\366\264x^\020\205b\344\275\340P)\344\023A\337\342c \334\210a\343n\311\273\001\235\344\353v\266s\261S\356\306\376g\367\263\020\373\325\213y\211/\235;\211\234\344qC~\306\305\370_\335\206\374\371\001\326\225\334?\211\277<i\307\304\310\264\373\302k\204\352\001\242L:9~\323\215\271\223n\341\260o\273\rr\371\315\203#\001\331\264\207=&f\227;\r\031\301e\236\020_=k\317\265?t\027\273\026@\026\236\006\275\352\2323\345\024\234\035^\226-(\345gz#\227\016\376\035\360Oz\034\216\\\022\227\356\363\206\013\232L\210\004\304\005\375mT\3667X%\325\230\221n\357\2352\217A#\2750z\360\276\205\201\321\020\346e9;\037\350w\342.W\016\245\257t\271\"\306A=\200\013t\311Yp\376\027\377\326\305\377o W[\373\000\302%w\337O\234}<\314\216O\236\021\200\304\367\036\3100@r\037\256\224Ew\317k\204\325\236w\007u;6%&\344>\323\356[\177\264}\261\035\3525\341\334\220r\346\037<\305+A_~\336\r;\321]\251\233\340J\023c\367\304\275\264W\005\341\356w\023\322tC\334x\350%\240l#\327\235\005\336\020Iy\251\024|\255mw\224\340\016\374\204\023\364M\002\022\222\263\342\334\003\231\314\005\211\006\205kg\036""\232\337X\274\377+X|\351\200\266RQW\221`\312u\363N\302I\205\227\354\202\263\017\211|\355\255\266\317\2673\355\225\316\253\256\322-\374\027/j\333/";
+    PyObject *data = __Pyx_DecompressString(cstring, 2147, 1);
     if (unlikely(!data)) __PYX_ERR(0, 1, __pyx_L1_error)
     const char* const bytes = __Pyx_PyBytes_AsString(data);
     #if !CYTHON_ASSUME_SAFE_MACROS
     if (likely(bytes)); else { Py_DECREF(data); __PYX_ERR(0, 1, __pyx_L1_error) }
     #endif
-    #else /* compression: none (4405 bytes) */
-const char* const bytes = ".AGGREGATE (Aggregation DrakenApproximate aggregate `Unsupported aggregate type for Draken global aggregate: , )?disableenablegc` is no longer supported.isenabledopteryx/operators/aggregate/aggregate_node.pyxAPPROX_COUNT_DISTINCTAPPROX_PERCENTILEAVGAggregateOperatorAggregateOperator.__init__AggregateOperator._finalize_morselAggregateOperator._prepare_chunkAggregateOperator.configAggregateOperator.config.<locals>.genexprAggregateOperator.executeAggregateOperator.nameBasePlanNodeCOUNTCOUNT_DISTINCTCarcharSet_DATA_FORMATDISTINCT_DRAKEN_ENCODING_CONSTANTDistinct_DrakenAggregateCollector_DrakenAggregateCollector.__init___DrakenAggregateCollector._collect_literal_DrakenAggregateCollector._collect_vector_DrakenAggregateCollector._reject_unsupported_approximate_DrakenAggregateCollector._update_min_DrakenAggregateCollector._update_max_DrakenAggregateCollector.collect_DrakenAggregateCollector.finalizeEOSFloat64VectorIDENTIFIERInt64VectorLITERALMAXMINMorselNodeType__Pyx_PyDict_NextRefQueryPropertiesSUMWILDCARDaggregateaggregate_typeaggregatesall_identifiersasyncio.coroutinesboolchunkchunk_sum__class__cline_in_tracebackclosecolcollect_collect_literal_collect_vectorcollectorcollectorscolumn_column_bytesconfig_constant_scalar_valuecontribution_countdistinct_hashes_distinct_hashes__doc__drakenduplicate_treatmentencoding_ensure_carchar_setensure_draken_morseleval_startevaluatable_nodesevaluate_and_append_drakenexecuteextract_evaluationsfinalize_finalize_morselformat_expressionfrom_vectorsfromkeys__func__genexprgetget_all_nodes_of_typehashidentityingest_start__init___insert_literal_hashinsert_many_insert_vector_hashesint_is_constant_vector_like_is_coroutineitemsliteral__main__max_max__metaclass__min_min__module__monotonic_nsmorsel__mro_entries____name__namenamesnextnodenode_typenull_countnum_rowsopteryxopteryx.compiled.draken.interop.arrowopteryx.compiled.draken.morsels.morselopteryx.compiled.nanobind.carchar_nativeopteryx.expressionopteryx.expression.evaluatoropteryx.modelsopteryx.""operatorsopteryx.operators.aggregate.aggregate_nodeopteryx.operators.aggregate.helpersoutput_nameparameterparameterspop__prepare___prepare_chunkpropertiesproperty__qualname__readings_reject_unsupported_approximatereturnrow_countscalarschema_columnselectselect_nodesselfsend__set_name__setdefaultsizesum_sumsuper__test__throwtimetime_aggregate_evaluationstime_aggregate_ingestto_pylist_update_max_update_minvalid_countvaluevaluesvectorvector_from_sequence_vector_max_vector_min_vector_null_count_vector_null_count.<locals>.genexpr_vector_sum_vector_valid_valuesvectors\2201\200\001\330\004\013\2101\210F\220$\220i\230v\240Z\250s\260#\260V\2707\300!\320\004#\2401\330\010\r\210R\210y\230\001\230\033\240N\260!\340\010\014\210N\230$\230a\230z\250\024\250Q\250n\270A\330\010\014\320\014!\240\021\330\014\r\330\014\020\220\010\320\030+\2501\250D\260\001\330\014\017\210t\220;\230c\240\030\250\021\360\006\000\t\033\230!\330\014\020\220\016\230a\330\014\020\220\010\320\030-\250Q\250d\260-\270~\310X\320UV\340\010\014\320\014\037\230t\2401\240D\250\t\260\021\260!\330\010\014\210N\230!\320\0334\260A\260[\300\004\300M\320QU\320UV\320\000(\250\001\330\004\013\2107\220!\2208\230<\240v\250S\260\001\200A\200A\330\010\013\2104\320\017\037\230s\240!\330\014\017\210t\320\023(\250\003\2501\330\020\027\220u\230D\320 2\260#\260Z\270t\320CT\320TY\320YZ\330\014\023\2204\220q\340\010\013\2104\320\017\037\230s\320\"3\2603\260d\320:J\310#\310Q\330\014\023\2205\230\004\320\034.\250c\260\032\2704\320?P\320PU\320UV\340\010\013\2104\320\017\037\230t\320#<\270A\330\014\020\320\0200\260\001\340\010\013\2104\320\017\037\230s\240!\330\014\023\2204\220q\340\010\013\2104\320\017\037\230s\240!\330\014\017\210t\2208\2303\230b\240\003\2404\240v\250S\260\001\330\020\027\220q\330\014\023\2204\220v\230R\230t\2401\340\010\013\2104\320\017\037\230s\240!\330\014\023\2204\220q\340\010\013\2104\320\017\037\230s\240!\330\014\023\2204\220q\340\010\016\210j\230\001\330\014F\300a\300t\3101\200A\330\010\013\2106\220\023\220A\330""\014\r\330\010\013\2104\210v\220S\230\005\230S\240\006\240b\250\004\250A\330\014\020\220\010\230\001\200A\330\010\020\220\001\330\010\022\220!\340\010\014\210M\230\024\230Q\330\014\021\220\027\230\001\230\031\240!\330\014\023\2207\230!\320\033/\250q\260\001\260\031\270)\3001\340\010\017\210v\220]\240!\2407\250!\200A\330\010\014\210M\230\021\330\010\014\320\014\036\230i\240q\330\010\014\320\014#\2407\250!\250;\3206M\310Q\330\010\014\210O\2309\240N\260!\330\010\014\210M\230\031\240+\250Q\250a\340\010\014\210J\220a\330\010\014\210H\220A\330\010\014\210H\220A\330\010\014\210H\220A\330\010\014\320\014 \240\001\200A\330\010\016\320\016!\240\021\330\014%\240Q\240d\250!\200A\330\010\013\210:\220S\230\001\330\014\r\340\010\013\2104\320\017\037\230s\240!\330\014\017\210t\320\023(\250\003\2501\330\020\024\320\024(\320(<\270A\270T\320AT\320TU\330\020\021\340\014\017\210x\220w\230a\330\020\024\220K\230q\330\014\r\340\010\013\2108\2203\220a\330\014\r\340\010\013\2104\320\017\037\230s\240!\330\014\033\2308\2402\240Q\330\014\020\220\010\320\030(\250\004\250F\260#\260Z\270t\3006\310\022\3101\330\014\r\340\010\013\2104\320\017\037\230s\240!\330\014\020\220\001\330\020\021\220\030\230\022\230>\250\024\250V\2603\260j\300\004\300F\310#\310X\320UW\320WX\340\014\020\220\013\2301\330\014\r\340\010\013\2104\320\017\037\230s\240!\330\014\020\220\014\230A\230Q\330\014\r\340\010\013\2104\320\017\037\230s\240!\330\014\020\220\014\230A\230Q\330\014\r\340\010\013\2104\320\017\037\230t\320#<\270A\330\014\020\320\0200\260\001\200A\330\010\026\220c\230\021\230(\240\"\320$6\260a\260q\340\010\013\2104\320\017\037\230s\240!\330\014\017\210t\320\023(\250\003\2501\330\020\024\320\024(\320(=\270Q\270d\320BU\320UV\330\020\021\340\014\020\220\013\2301\330\014\r\340\010\013\2104\320\017\037\230s\320\"3\2603\260d\320:J\310#\310Q\330\014\020\320\020$\320$9\270\021\270$\320>Q\320QR\330\014\r\340\010\013\210<\220s\230!\330\014\r\340\010\013\2104\320\017\037\230s\240!\330\014\030\230\013\2401\240A\330\014\020""\220\010\230\r\240T\250\026\250s\260*\270D\300\006\300b\310\001\330\014\r\340\010\013\2104\320\017\037\230s\240!\330\014\030\230\013\2401\240A\330\014\020\220\010\230\r\240T\250\026\250s\260*\270D\300\006\300b\310\001\330\014\020\220\013\2301\330\014\r\340\010\013\2104\320\017\037\230s\240!\330\014\020\220\014\230A\230[\250\001\250\021\330\014\r\340\010\013\2104\320\017\037\230s\240!\330\014\020\220\014\230A\230[\250\001\250\021\330\014\r\340\010\013\2104\320\017\037\230t\320#<\270A\330\014\020\320\0200\260\001\200A\340\010\017\210q\200A\340\010\r\320\r'\240q\340\010\017\210}\230A\230T\240\025\320&8\270\001\320\004$\240K\250q\330\010\013\2104\210q\330\014\024\220E\230\027\240\001\240\024\240Q\340\010\013\2104\210q\330\014\031\230\024\230]\250!\330\014\024\320\024.\250a\250t\3203G\300q\330\014\020\220\t\230\021\320\032;\2704\270}\310C\310r\320QR\340\010\017\210q\200\001\330\004\022\220#\220Q\220h\230b\320 2\260!\2601\330\004\007\200|\2203\220a\330\010\017\210q\340\004\007\320\007\037\230q\240\001\330\010\021\320\021'\240q\250\001\330\010\013\2107\220#\220Q\330\014\023\2201\330\010\017\210w\220b\230\001\340\004\007\200v\210Z\220z\240\024\240_\260A\330\010\017\210v\220T\230\021\340\004\r\320\r!\240\021\240!\330\004\013\2103\210a\210{\230,\240a\270\001\320\004\036\230a\330\010\013\2104\210z\230\033\240C\240x\250q\330\014\020\220\013\2306\240\021\330\014\r\340\010\013\2104\210z\230\033\240C\240x\250q\330\014\020\320\020!\240\021\240$\240j\260\010\270\006\270a\330\014\r\340\010\021\220\026\220w\230a\230}\250A\250T\260\032\270>\310\021\330\010\014\320\014\034\230A\230Q\200\001\330\004\013\320\013\036\320\036.\250g\260Z\270z\310\021\200\001\330\004\026\320\026)\250\021\250!\330\004\023\220<\230q\320 4\260A\260Q\260i\270u\300A\330\004\013\2101\200\001\330\004\026\320\026)\250\021\250!\330\004\023\220<\230q\240\006\240e\2501\330\004\013\2101\200\001\330\004\007\320\007\037\230q\240\001\330\010\021\320\021'\240q\250\001\330\010\017\210z\230\027\240\007\240z\260\021\340\004""\r\320\r!\240\021\240!\330\004\013\2103\210a\210{\230,\240a\320\000\"\240!\330\004\005\330\010\017\210s\220!\2206\230\021\330\013\014\330\010\017\210s\220!\2201\200\001\330\004\007\200s\210!\2108\2203\220a\330\010\017\210q\330\004\013\2106\220\021\220!\200\001\330\004\013\210<\220z\240\021\240*\250L\270\003\2701\270I\300W\310A\310Q";
+    #else /* compression: none (4456 bytes) */
+const char* const bytes = ".AGGREGATE (Aggregation DrakenApproximate aggregate `Unsupported aggregate type for Draken global aggregate: , )?disableenablegc` is no longer supported.isenabledopteryx/operators/aggregate/aggregate_node.pyxAPPROX_COUNT_DISTINCTAPPROX_PERCENTILEAVGAggregateOperatorAggregateOperator.__init__AggregateOperator._finalize_morselAggregateOperator._prepare_chunkAggregateOperator.configAggregateOperator.config.<locals>.genexprAggregateOperator.executeAggregateOperator.nameBasePlanNodeCOUNTCOUNT_DISTINCTCarcharSet_DATA_FORMATDISTINCT_DRAKEN_ENCODING_CONSTANTDistinct_DrakenAggregateCollector_DrakenAggregateCollector.__init___DrakenAggregateCollector._collect_literal_DrakenAggregateCollector._collect_vector_DrakenAggregateCollector._reject_unsupported_approximate_DrakenAggregateCollector._update_min_DrakenAggregateCollector._update_max_DrakenAggregateCollector.collect_DrakenAggregateCollector.finalizeEOSIDENTIFIERLITERALMAXMINMorselNodeType__Pyx_PyDict_NextRefQueryPropertiesSUMWILDCARDaggregateaggregate_typeaggregatesall_identifiersasyncio.coroutinesboolchunkchunk_sumcline_in_tracebackclosecolcollect_collect_literal_collect_vectorcollectorcollectorscolumn_column_bytesconfig_constant_scalar_valuecontribution_countdistinct_hashes_distinct_hashes__doc__drakenduplicate_treatmentencoding_ensure_carchar_setensure_draken_morseleval_startevaluatable_nodesevaluate_and_append_drakenexecuteextract_evaluationsfinalize_finalize_morselformat_expressionfrom_vectorsfromkeys__func__genexprgetget_all_nodes_of_typehashidentityingest_start__init___insert_literal_hashinsert_many_insert_vector_hashesint_is_constant_vector_like_is_coroutineitemsliteral__main__max_max__metaclass__min_min__module__monotonic_nsmorsel__mro_entries____name__namenamesnextnodenode_typenull_countnum_rowsopteryxopteryx.compiled.draken.interop.arrowopteryx.compiled.draken.morsels.morselopteryx.compiled.nanobind.carchar_nativeopteryx.expressionopteryx.expression.evaluatoropteryx.modelsopteryx.operatorsopteryx.operators.aggreg""ate.aggregate_nodeopteryx.operators.aggregate.helpersoutput_nameparameterparameterspop__prepare___prepare_chunkpropertiesproperty__qualname__readings_reject_unsupported_approximatereturnrow_countscalarschema_columnselectselect_nodesselfsend__set_name__setdefaultsizesum_sumsuper__test__throwtimetime_aggregate_evaluationstime_aggregate_ingestto_pylist_update_max_update_minvalid_countvaluevaluesvectorvector_from_sequence_vector_max_vector_min_vector_null_count_vector_null_count.<locals>.genexpr_vector_sum_vector_valid_valuesvectors\2201\200\001\330\004\013\2101\210F\220$\220i\230v\240Z\250s\260#\260V\2707\300!\320\004#\2401\330\010\r\210R\210y\230\001\230\033\240N\260!\340\010\014\210N\230$\230a\230z\250\024\250Q\250n\270A\330\010\014\320\014!\240\021\330\014\r\330\014\020\220\010\320\030+\2501\250D\260\001\330\014\017\210t\220;\230c\240\030\250\021\360\006\000\t\033\230!\330\014\020\220\016\230a\330\014\020\220\010\320\030-\250Q\250d\260-\270~\310X\320UV\340\010\014\320\014\037\230t\2401\240D\250\t\260\021\260!\330\010\014\210N\230!\320\0334\260A\260[\300\004\300M\320QU\320UV\320\000(\250\001\330\004\013\2107\220!\2208\230<\240v\250S\260\001\200A\200A\330\010\013\2104\320\017\037\230s\240!\330\014\017\210t\320\023(\250\003\2501\330\020\027\220u\230D\320 2\260#\260Z\270t\320CT\320TY\320YZ\330\014\023\2204\220q\340\010\013\2104\320\017\037\230s\320\"3\2603\260d\320:J\310#\310Q\330\014\023\2205\230\004\320\034.\250c\260\032\2704\320?P\320PU\320UV\340\010\013\2104\320\017\037\230t\320#<\270A\330\014\020\320\0200\260\001\340\010\013\2104\320\017\037\230s\240!\330\014\023\2204\220q\340\010\013\2104\320\017\037\230s\240!\330\014\017\210t\2208\2303\230b\240\003\2404\240v\250S\260\001\330\020\027\220q\330\014\023\2204\220v\230R\230t\2401\340\010\013\2104\320\017\037\230s\240!\330\014\023\2204\220q\340\010\013\2104\320\017\037\230s\240!\330\014\023\2204\220q\340\010\016\210j\230\001\330\014F\300a\300t\3101\200A\330\010\013\2106\220\023\220A\330\014\r\330\010\013\2104\210v\220S""\230\005\230S\240\006\240b\250\004\250A\330\014\020\220\010\230\001\200A\330\010\020\220\001\330\010\022\220!\340\010\014\210M\230\024\230Q\330\014\021\220\027\230\001\230\031\240!\330\014\023\2207\230!\320\033/\250q\260\001\260\031\270)\3001\340\010\017\210v\220]\240!\2407\250!\200A\330\010\014\210M\230\021\330\010\014\320\014\036\230i\240q\330\010\014\320\014#\2407\250!\250;\3206M\310Q\330\010\014\210O\2309\240N\260!\330\010\014\210M\230\031\240+\250Q\250a\340\010\014\210J\220a\330\010\014\210H\220A\330\010\014\210H\220A\330\010\014\210H\220A\330\010\014\320\014 \240\001\200A\330\010\016\320\016!\240\021\330\014%\240Q\240d\250!\200A\330\010\013\210:\220S\230\001\330\014\r\340\010\013\2104\320\017\037\230s\240!\330\014\017\210t\320\023(\250\003\2501\330\020\024\320\024(\320(<\270A\270T\320AT\320TU\330\020\021\340\014\017\210x\220w\230a\330\020\024\220K\230q\330\014\r\340\010\013\2108\2203\220a\330\014\r\340\010\013\2104\320\017\037\230s\240!\330\014\033\2308\2402\240Q\330\014\020\220\010\320\030(\250\004\250F\260#\260Z\270t\3006\310\022\3101\330\014\r\340\010\013\2104\320\017\037\230s\240!\330\014\020\220\001\330\020\021\220\030\230\022\230>\250\024\250V\2603\260j\300\004\300F\310#\310X\320UW\320WX\340\014\020\220\013\2301\330\014\r\340\010\013\2104\320\017\037\230s\240!\330\014\020\220\014\230A\230Q\330\014\r\340\010\013\2104\320\017\037\230s\240!\330\014\020\220\014\230A\230Q\330\014\r\340\010\013\2104\320\017\037\230t\320#<\270A\330\014\020\320\0200\260\001\200A\330\010\026\220c\230\021\230(\240\"\320$6\260a\260q\340\010\013\2104\320\017\037\230s\240!\330\014\017\210t\320\023(\250\003\2501\330\020\024\320\024(\320(=\270Q\270d\320BU\320UV\330\020\021\340\014\020\220\013\2301\330\014\r\340\010\013\2104\320\017\037\230s\320\"3\2603\260d\320:J\310#\310Q\330\014\020\320\020$\320$9\270\021\270$\320>Q\320QR\330\014\r\340\010\013\210<\220s\230!\330\014\r\340\010\013\2104\320\017\037\230s\240!\330\014\030\230\013\2401\240A\330\014\020\220\010\230\r\240T\250\026\250s\260*""\270D\300\006\300b\310\001\330\014\r\340\010\013\2104\320\017\037\230s\240!\330\014\030\230\013\2401\240A\330\014\020\220\010\230\r\240T\250\026\250s\260*\270D\300\006\300b\310\001\330\014\020\220\013\2301\330\014\r\340\010\013\2104\320\017\037\230s\240!\330\014\020\220\014\230A\230[\250\001\250\021\330\014\r\340\010\013\2104\320\017\037\230s\240!\330\014\020\220\014\230A\230[\250\001\250\021\330\014\r\340\010\013\2104\320\017\037\230t\320#<\270A\330\014\020\320\0200\260\001\200A\340\010\017\210q\200A\340\010\r\320\r'\240q\340\010\017\210}\230A\230T\240\025\320&8\270\001\320\004$\240K\250q\330\010\013\2104\210q\330\014\024\220E\230\027\240\001\240\024\240Q\340\010\013\2104\210q\330\014\031\230\024\230]\250!\330\014\024\320\024.\250a\250t\3203G\300q\330\014\020\220\t\230\021\320\032;\2704\270}\310C\310r\320QR\340\010\017\210q\200\001\330\004\022\220#\220Q\220h\230b\320 2\260!\2601\330\004\007\200|\2203\220a\330\010\017\210q\340\004\007\320\007\037\230q\240\001\330\010\021\320\021'\240q\250\001\330\010\013\2107\220#\220Q\330\014\023\2201\330\010\017\210w\220b\230\001\360\006\000\005\010\200w\210a\210x\220q\330\010\t\330\014\023\2206\230\024\230Q\330\020\034\230A\340\014\023\2201\360\006\000\005\016\320\r!\240\021\240!\330\004\013\2103\210a\210{\230,\240a\200\001\330\004\022\220#\220Q\220h\230b\320 2\260!\2601\330\004\007\200|\2203\220a\330\010\017\210q\340\004\007\320\007\037\230q\240\001\330\010\021\320\021'\240q\250\001\330\010\017\210z\230\027\240\007\240z\260\021\360\006\000\005\010\200w\210a\210x\220q\330\010\t\330\014\023\2206\230\024\230Q\330\020\034\230A\360\006\000\r\024\2201\360\006\000\005\016\320\r!\240\021\240!\330\004\013\2103\210a\210{\230,\240a\270\001\320\004\036\230a\330\010\013\2104\210z\230\033\240C\240x\250q\330\014\020\220\013\2306\240\021\330\014\r\340\010\013\2104\210z\230\033\240C\240x\250q\330\014\020\320\020!\240\021\240$\240j\260\010\270\006\270a\330\014\r\340\010\021\220\026\220w\230a\230}\250A\250T\260\032\270>\310\021\330\010\014\320""\014\034\230A\230Q\200\001\330\004\013\320\013\036\320\036.\250g\260Z\270z\310\021\200\001\330\004\026\320\026)\250\021\250!\330\004\023\220<\230q\320 4\260A\260Q\260i\270u\300A\330\004\013\2101\200\001\330\004\026\320\026)\250\021\250!\330\004\023\220<\230q\240\006\240e\2501\330\004\013\2101\320\000\"\240!\330\004\005\330\010\017\210s\220!\2206\230\021\330\013\014\330\010\017\210s\220!\2201\200\001\330\004\007\200s\210!\2108\2203\220a\330\010\017\210q\330\004\013\2106\220\021\220!\200\001\330\004\013\210<\220z\240\021\240*\250L\270\003\2701\270I\300W\310A\310Q";
     PyObject *data = NULL;
     CYTHON_UNUSED_VAR(__Pyx_DecompressString);
     #endif
     PyObject **stringtab = __pyx_mstate->__pyx_string_tab;
     Py_ssize_t pos = 0;
-    for (int i = 0; i < 185; i++) {
+    for (int i = 0; i < 182; i++) {
       Py_ssize_t bytes_length = index[i].length;
       PyObject *string = PyUnicode_DecodeUTF8(bytes + pos, bytes_length, NULL);
       if (likely(string) && i >= 14) PyUnicode_InternInPlace(&string);
@@ -13889,7 +14357,7 @@ const char* const bytes = ".AGGREGATE (Aggregation DrakenApproximate aggregate `
       stringtab[i] = string;
       pos += bytes_length;
     }
-    for (int i = 185; i < 210; i++) {
+    for (int i = 182; i < 207; i++) {
       Py_ssize_t bytes_length = index[i].length;
       PyObject *string = PyBytes_FromStringAndSize(bytes + pos, bytes_length);
       stringtab[i] = string;
@@ -13900,14 +14368,14 @@ const char* const bytes = ".AGGREGATE (Aggregation DrakenApproximate aggregate `
       }
     }
     Py_XDECREF(data);
-    for (Py_ssize_t i = 0; i < 210; i++) {
+    for (Py_ssize_t i = 0; i < 207; i++) {
       if (unlikely(PyObject_Hash(stringtab[i]) == -1)) {
         __PYX_ERR(0, 1, __pyx_L1_error)
       }
     }
     #if CYTHON_IMMORTAL_CONSTANTS
     {
-      PyObject **table = stringtab + 185;
+      PyObject **table = stringtab + 182;
       for (Py_ssize_t i=0; i<25; ++i) {
         #if CYTHON_COMPILING_IN_CPYTHON_FREETHREADING
         #if PY_VERSION_HEX < 0x030E0000
@@ -13985,12 +14453,12 @@ static int __Pyx_CreateCodeObjects(__pyx_mstatetype *__pyx_mstate) {
     __pyx_mstate_global->__pyx_codeobj_tab[0] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_opteryx_operators_aggregate_aggr_2, __pyx_mstate->__pyx_n_u_genexpr, __pyx_mstate->__pyx_kp_b_iso88591_1, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[0])) goto bad;
   }
   {
-    const __Pyx_PyCode_New_function_description descr = {0, 0, 0, 1, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS|CO_GENERATOR), 289};
+    const __Pyx_PyCode_New_function_description descr = {0, 0, 0, 1, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS|CO_GENERATOR), 323};
     PyObject* const varnames[] = {__pyx_mstate->__pyx_n_u_col};
     __pyx_mstate_global->__pyx_codeobj_tab[1] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_opteryx_operators_aggregate_aggr_2, __pyx_mstate->__pyx_n_u_genexpr, __pyx_mstate->__pyx_kp_b_iso88591__5, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[1])) goto bad;
   }
   {
-    const __Pyx_PyCode_New_function_description descr = {2, 0, 0, 6, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS|CO_GENERATOR), 316};
+    const __Pyx_PyCode_New_function_description descr = {2, 0, 0, 6, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS|CO_GENERATOR), 350};
     PyObject* const varnames[] = {__pyx_mstate->__pyx_n_u_self, __pyx_mstate->__pyx_n_u_morsel, __pyx_mstate->__pyx_n_u_draken, __pyx_mstate->__pyx_n_u_ingest_start, __pyx_mstate->__pyx_n_u_collector, __pyx_mstate->__pyx_n_u_chunk};
     __pyx_mstate_global->__pyx_codeobj_tab[2] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_opteryx_operators_aggregate_aggr_2, __pyx_mstate->__pyx_n_u_execute, __pyx_mstate->__pyx_kp_b_iso88591_A, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[2])) goto bad;
   }
@@ -14022,95 +14490,95 @@ static int __Pyx_CreateCodeObjects(__pyx_mstatetype *__pyx_mstate) {
   {
     const __Pyx_PyCode_New_function_description descr = {1, 0, 0, 4, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 62};
     PyObject* const varnames[] = {__pyx_mstate->__pyx_n_u_vector, __pyx_mstate->__pyx_n_u_valid_count, __pyx_mstate->__pyx_n_u_scalar, __pyx_mstate->__pyx_n_u_values};
-    __pyx_mstate_global->__pyx_codeobj_tab[8] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_opteryx_operators_aggregate_aggr_2, __pyx_mstate->__pyx_n_u_vector_sum, __pyx_mstate->__pyx_kp_b_iso88591_Qhb_2_1_3a_q_q_q_7_Q_1_wb_vZz, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[8])) goto bad;
+    __pyx_mstate_global->__pyx_codeobj_tab[8] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_opteryx_operators_aggregate_aggr_2, __pyx_mstate->__pyx_n_u_vector_sum, __pyx_mstate->__pyx_kp_b_iso88591_Qhb_2_1_3a_q_q_q_7_Q_1_wb_waxq, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[8])) goto bad;
   }
   {
-    const __Pyx_PyCode_New_function_description descr = {1, 0, 0, 3, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 80};
-    PyObject* const varnames[] = {__pyx_mstate->__pyx_n_u_vector, __pyx_mstate->__pyx_n_u_scalar, __pyx_mstate->__pyx_n_u_values};
-    __pyx_mstate_global->__pyx_codeobj_tab[9] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_opteryx_operators_aggregate_aggr_2, __pyx_mstate->__pyx_n_u_vector_min, __pyx_mstate->__pyx_kp_b_iso88591_q_q_z_z_3a_a, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[9])) goto bad;
+    const __Pyx_PyCode_New_function_description descr = {1, 0, 0, 4, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 86};
+    PyObject* const varnames[] = {__pyx_mstate->__pyx_n_u_vector, __pyx_mstate->__pyx_n_u_valid_count, __pyx_mstate->__pyx_n_u_scalar, __pyx_mstate->__pyx_n_u_values};
+    __pyx_mstate_global->__pyx_codeobj_tab[9] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_opteryx_operators_aggregate_aggr_2, __pyx_mstate->__pyx_n_u_vector_min, __pyx_mstate->__pyx_kp_b_iso88591_Qhb_2_1_3a_q_q_q_z_z_waxq_6_Q_A, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[9])) goto bad;
   }
   {
-    const __Pyx_PyCode_New_function_description descr = {1, 0, 0, 3, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 89};
-    PyObject* const varnames[] = {__pyx_mstate->__pyx_n_u_vector, __pyx_mstate->__pyx_n_u_scalar, __pyx_mstate->__pyx_n_u_values};
-    __pyx_mstate_global->__pyx_codeobj_tab[10] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_opteryx_operators_aggregate_aggr_2, __pyx_mstate->__pyx_n_u_vector_max, __pyx_mstate->__pyx_kp_b_iso88591_q_q_z_z_3a_a, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[10])) goto bad;
+    const __Pyx_PyCode_New_function_description descr = {1, 0, 0, 4, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 109};
+    PyObject* const varnames[] = {__pyx_mstate->__pyx_n_u_vector, __pyx_mstate->__pyx_n_u_valid_count, __pyx_mstate->__pyx_n_u_scalar, __pyx_mstate->__pyx_n_u_values};
+    __pyx_mstate_global->__pyx_codeobj_tab[10] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_opteryx_operators_aggregate_aggr_2, __pyx_mstate->__pyx_n_u_vector_max, __pyx_mstate->__pyx_kp_b_iso88591_Qhb_2_1_3a_q_q_q_z_z_waxq_6_Q_A, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[10])) goto bad;
   }
   {
-    const __Pyx_PyCode_New_function_description descr = {1, 0, 0, 1, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 98};
+    const __Pyx_PyCode_New_function_description descr = {1, 0, 0, 1, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 132};
     PyObject* const varnames[] = {__pyx_mstate->__pyx_n_u_distinct_hashes};
     __pyx_mstate_global->__pyx_codeobj_tab[11] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_opteryx_operators_aggregate_aggr_2, __pyx_mstate->__pyx_n_u_ensure_carchar_set, __pyx_mstate->__pyx_kp_b_iso88591_gZz, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[11])) goto bad;
   }
   {
-    const __Pyx_PyCode_New_function_description descr = {2, 0, 0, 2, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 102};
+    const __Pyx_PyCode_New_function_description descr = {2, 0, 0, 2, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 136};
     PyObject* const varnames[] = {__pyx_mstate->__pyx_n_u_distinct_hashes, __pyx_mstate->__pyx_n_u_vector};
     __pyx_mstate_global->__pyx_codeobj_tab[12] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_opteryx_operators_aggregate_aggr_2, __pyx_mstate->__pyx_n_u_insert_vector_hashes, __pyx_mstate->__pyx_kp_b_iso88591_q_e1_1, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[12])) goto bad;
   }
   {
-    const __Pyx_PyCode_New_function_description descr = {2, 0, 0, 2, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 108};
+    const __Pyx_PyCode_New_function_description descr = {2, 0, 0, 2, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 142};
     PyObject* const varnames[] = {__pyx_mstate->__pyx_n_u_distinct_hashes, __pyx_mstate->__pyx_n_u_literal};
     __pyx_mstate_global->__pyx_codeobj_tab[13] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_opteryx_operators_aggregate_aggr_2, __pyx_mstate->__pyx_n_u_insert_literal_hash, __pyx_mstate->__pyx_kp_b_iso88591_q_4AQiuA_1, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[13])) goto bad;
   }
   {
-    const __Pyx_PyCode_New_function_description descr = {2, 0, 0, 2, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 115};
+    const __Pyx_PyCode_New_function_description descr = {2, 0, 0, 2, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 149};
     PyObject* const varnames[] = {__pyx_mstate->__pyx_n_u_self, __pyx_mstate->__pyx_n_u_aggregate};
     __pyx_mstate_global->__pyx_codeobj_tab[14] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_opteryx_operators_aggregate_aggr_2, __pyx_mstate->__pyx_n_u_init, __pyx_mstate->__pyx_kp_b_iso88591_A_M_iq_7_6MQ_O9N_M_Qa_Ja_HA_HA_H, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[14])) goto bad;
   }
   {
-    const __Pyx_PyCode_New_function_description descr = {2, 0, 0, 2, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 128};
+    const __Pyx_PyCode_New_function_description descr = {2, 0, 0, 2, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 162};
     PyObject* const varnames[] = {__pyx_mstate->__pyx_n_u_self, __pyx_mstate->__pyx_n_u_value};
     __pyx_mstate_global->__pyx_codeobj_tab[15] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_opteryx_operators_aggregate_aggr_2, __pyx_mstate->__pyx_n_u_update_min, __pyx_mstate->__pyx_kp_b_iso88591_A_6_A_4vS_S_b_A, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[15])) goto bad;
   }
   {
-    const __Pyx_PyCode_New_function_description descr = {2, 0, 0, 2, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 134};
+    const __Pyx_PyCode_New_function_description descr = {2, 0, 0, 2, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 168};
     PyObject* const varnames[] = {__pyx_mstate->__pyx_n_u_self, __pyx_mstate->__pyx_n_u_value};
     __pyx_mstate_global->__pyx_codeobj_tab[16] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_opteryx_operators_aggregate_aggr_2, __pyx_mstate->__pyx_n_u_update_max, __pyx_mstate->__pyx_kp_b_iso88591_A_6_A_4vS_S_b_A, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[16])) goto bad;
   }
   {
-    const __Pyx_PyCode_New_function_description descr = {1, 0, 0, 1, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 140};
+    const __Pyx_PyCode_New_function_description descr = {1, 0, 0, 1, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 174};
     PyObject* const varnames[] = {__pyx_mstate->__pyx_n_u_self};
     __pyx_mstate_global->__pyx_codeobj_tab[17] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_opteryx_operators_aggregate_aggr_2, __pyx_mstate->__pyx_n_u_reject_unsupported_approximate, __pyx_mstate->__pyx_kp_b_iso88591_A_Qd, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[17])) goto bad;
   }
   {
-    const __Pyx_PyCode_New_function_description descr = {3, 0, 0, 4, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 145};
+    const __Pyx_PyCode_New_function_description descr = {3, 0, 0, 4, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 179};
     PyObject* const varnames[] = {__pyx_mstate->__pyx_n_u_self, __pyx_mstate->__pyx_n_u_literal, __pyx_mstate->__pyx_n_u_row_count, __pyx_mstate->__pyx_n_u_contribution};
     __pyx_mstate_global->__pyx_codeobj_tab[18] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_opteryx_operators_aggregate_aggr_2, __pyx_mstate->__pyx_n_u_collect_literal, __pyx_mstate->__pyx_kp_b_iso88591_A_S_4_s_t_1_ATATTU_xwa_Kq_83a_4, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[18])) goto bad;
   }
   {
-    const __Pyx_PyCode_New_function_description descr = {2, 0, 0, 4, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 184};
+    const __Pyx_PyCode_New_function_description descr = {2, 0, 0, 4, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 218};
     PyObject* const varnames[] = {__pyx_mstate->__pyx_n_u_self, __pyx_mstate->__pyx_n_u_vector, __pyx_mstate->__pyx_n_u_valid_count, __pyx_mstate->__pyx_n_u_chunk_sum};
     __pyx_mstate_global->__pyx_codeobj_tab[19] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_opteryx_operators_aggregate_aggr_2, __pyx_mstate->__pyx_n_u_collect_vector, __pyx_mstate->__pyx_kp_b_iso88591_A_c_6aq_4_s_t_1_QdBUUV_1_4_s_33d, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[19])) goto bad;
   }
   {
-    const __Pyx_PyCode_New_function_description descr = {2, 0, 0, 3, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 224};
+    const __Pyx_PyCode_New_function_description descr = {2, 0, 0, 3, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 258};
     PyObject* const varnames[] = {__pyx_mstate->__pyx_n_u_self, __pyx_mstate->__pyx_n_u_morsel, __pyx_mstate->__pyx_n_u_vector};
     __pyx_mstate_global->__pyx_codeobj_tab[20] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_opteryx_operators_aggregate_aggr_2, __pyx_mstate->__pyx_n_u_collect, __pyx_mstate->__pyx_kp_b_iso88591_a_4z_Cxq_6_4z_Cxq_j_a_wa_AT_AQ, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[20])) goto bad;
   }
   {
-    const __Pyx_PyCode_New_function_description descr = {1, 0, 0, 1, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 236};
+    const __Pyx_PyCode_New_function_description descr = {1, 0, 0, 1, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 270};
     PyObject* const varnames[] = {__pyx_mstate->__pyx_n_u_self};
     __pyx_mstate_global->__pyx_codeobj_tab[21] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_opteryx_operators_aggregate_aggr_2, __pyx_mstate->__pyx_n_u_finalize, __pyx_mstate->__pyx_kp_b_iso88591_A_4_s_t_1_uD_2_ZtCTTYYZ_4q_4_s_3, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[21])) goto bad;
   }
   {
-    const __Pyx_PyCode_New_function_description descr = {2, 0, 0, 7, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS|CO_VARKEYWORDS), 268};
+    const __Pyx_PyCode_New_function_description descr = {2, 0, 0, 7, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS|CO_VARKEYWORDS), 302};
     PyObject* const varnames[] = {__pyx_mstate->__pyx_n_u_self, __pyx_mstate->__pyx_n_u_properties, __pyx_mstate->__pyx_n_u_parameters, __pyx_mstate->__pyx_n_u_all_identifiers, __pyx_mstate->__pyx_n_u_node, __pyx_mstate->__pyx_n_u_node, __pyx_mstate->__pyx_n_u_aggregate};
     __pyx_mstate_global->__pyx_codeobj_tab[22] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_opteryx_operators_aggregate_aggr_2, __pyx_mstate->__pyx_n_u_init, __pyx_mstate->__pyx_kp_b_iso88591_1_Ry_N_N_az_QnA_1D_t_c_a_Qd_XUV, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[22])) goto bad;
   }
   {
-    const __Pyx_PyCode_New_function_description descr = {1, 0, 0, 4, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 285};
+    const __Pyx_PyCode_New_function_description descr = {1, 0, 0, 4, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 319};
     PyObject* const varnames[] = {__pyx_mstate->__pyx_n_u_self, __pyx_mstate->__pyx_n_u_format_expression, __pyx_mstate->__pyx_n_u_genexpr, __pyx_mstate->__pyx_n_u_genexpr};
     __pyx_mstate_global->__pyx_codeobj_tab[23] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_opteryx_operators_aggregate_aggr_2, __pyx_mstate->__pyx_n_u_config, __pyx_mstate->__pyx_kp_b_iso88591_A_q_AT_8, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[23])) goto bad;
   }
   {
-    const __Pyx_PyCode_New_function_description descr = {1, 0, 0, 1, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 291};
+    const __Pyx_PyCode_New_function_description descr = {1, 0, 0, 1, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 325};
     PyObject* const varnames[] = {__pyx_mstate->__pyx_n_u_self};
     __pyx_mstate_global->__pyx_codeobj_tab[24] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_opteryx_operators_aggregate_aggr_2, __pyx_mstate->__pyx_n_u_name_2, __pyx_mstate->__pyx_kp_b_iso88591_A_q, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[24])) goto bad;
   }
   {
-    const __Pyx_PyCode_New_function_description descr = {2, 0, 0, 3, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 295};
+    const __Pyx_PyCode_New_function_description descr = {2, 0, 0, 3, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 329};
     PyObject* const varnames[] = {__pyx_mstate->__pyx_n_u_self, __pyx_mstate->__pyx_n_u_chunk, __pyx_mstate->__pyx_n_u_eval_start};
     __pyx_mstate_global->__pyx_codeobj_tab[25] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_opteryx_operators_aggregate_aggr_2, __pyx_mstate->__pyx_n_u_prepare_chunk, __pyx_mstate->__pyx_kp_b_iso88591_Kq_4q_E_Q_4q_at3Gq_4_CrQR_q, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[25])) goto bad;
   }
   {
-    const __Pyx_PyCode_New_function_description descr = {1, 0, 0, 4, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 306};
+    const __Pyx_PyCode_New_function_description descr = {1, 0, 0, 4, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 340};
     PyObject* const varnames[] = {__pyx_mstate->__pyx_n_u_self, __pyx_mstate->__pyx_n_u_names, __pyx_mstate->__pyx_n_u_vectors, __pyx_mstate->__pyx_n_u_collector};
     __pyx_mstate_global->__pyx_codeobj_tab[26] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_opteryx_operators_aggregate_aggr_2, __pyx_mstate->__pyx_n_u_finalize_morsel, __pyx_mstate->__pyx_kp_b_iso88591_A_M_Q_7_q_1_v_7, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[26])) goto bad;
   }
@@ -15905,6 +16373,112 @@ static CYTHON_INLINE int __Pyx_PyLong_BoolEqObjC(PyObject *op1, PyObject *op2, l
         PyObject_RichCompare(op1, op2, Py_EQ));
 }
 
+/* HasAttr */
+#if __PYX_LIMITED_VERSION_HEX < 0x030d0000
+static CYTHON_INLINE int __Pyx_HasAttr(PyObject *o, PyObject *n) {
+    PyObject *r;
+    if (unlikely(!PyUnicode_Check(n))) {
+        PyErr_SetString(PyExc_TypeError,
+                        "hasattr(): attribute name must be string");
+        return -1;
+    }
+    r = __Pyx_PyObject_GetAttrStrNoError(o, n);
+    if (!r) {
+        return (unlikely(PyErr_Occurred())) ? -1 : 0;
+    } else {
+        Py_DECREF(r);
+        return 1;
+    }
+}
+#endif
+
+/* FastTypeChecks */
+#if CYTHON_COMPILING_IN_CPYTHON
+static int __Pyx_InBases(PyTypeObject *a, PyTypeObject *b) {
+    while (a) {
+        a = __Pyx_PyType_GetSlot(a, tp_base, PyTypeObject*);
+        if (a == b)
+            return 1;
+    }
+    return b == &PyBaseObject_Type;
+}
+static CYTHON_INLINE int __Pyx_IsSubtype(PyTypeObject *a, PyTypeObject *b) {
+    PyObject *mro;
+    if (a == b) return 1;
+    mro = a->tp_mro;
+    if (likely(mro)) {
+        Py_ssize_t i, n;
+        n = PyTuple_GET_SIZE(mro);
+        for (i = 0; i < n; i++) {
+            if (PyTuple_GET_ITEM(mro, i) == (PyObject *)b)
+                return 1;
+        }
+        return 0;
+    }
+    return __Pyx_InBases(a, b);
+}
+static CYTHON_INLINE int __Pyx_IsAnySubtype2(PyTypeObject *cls, PyTypeObject *a, PyTypeObject *b) {
+    PyObject *mro;
+    if (cls == a || cls == b) return 1;
+    mro = cls->tp_mro;
+    if (likely(mro)) {
+        Py_ssize_t i, n;
+        n = PyTuple_GET_SIZE(mro);
+        for (i = 0; i < n; i++) {
+            PyObject *base = PyTuple_GET_ITEM(mro, i);
+            if (base == (PyObject *)a || base == (PyObject *)b)
+                return 1;
+        }
+        return 0;
+    }
+    return __Pyx_InBases(cls, a) || __Pyx_InBases(cls, b);
+}
+static CYTHON_INLINE int __Pyx_inner_PyErr_GivenExceptionMatches2(PyObject *err, PyObject* exc_type1, PyObject *exc_type2) {
+    if (exc_type1) {
+        return __Pyx_IsAnySubtype2((PyTypeObject*)err, (PyTypeObject*)exc_type1, (PyTypeObject*)exc_type2);
+    } else {
+        return __Pyx_IsSubtype((PyTypeObject*)err, (PyTypeObject*)exc_type2);
+    }
+}
+static int __Pyx_PyErr_GivenExceptionMatchesTuple(PyObject *exc_type, PyObject *tuple) {
+    Py_ssize_t i, n;
+    assert(PyExceptionClass_Check(exc_type));
+    n = PyTuple_GET_SIZE(tuple);
+    for (i=0; i<n; i++) {
+        if (exc_type == PyTuple_GET_ITEM(tuple, i)) return 1;
+    }
+    for (i=0; i<n; i++) {
+        PyObject *t = PyTuple_GET_ITEM(tuple, i);
+        if (likely(PyExceptionClass_Check(t))) {
+            if (__Pyx_inner_PyErr_GivenExceptionMatches2(exc_type, NULL, t)) return 1;
+        } else {
+        }
+    }
+    return 0;
+}
+static CYTHON_INLINE int __Pyx_PyErr_GivenExceptionMatches(PyObject *err, PyObject* exc_type) {
+    if (likely(err == exc_type)) return 1;
+    if (likely(PyExceptionClass_Check(err))) {
+        if (likely(PyExceptionClass_Check(exc_type))) {
+            return __Pyx_inner_PyErr_GivenExceptionMatches2(err, NULL, exc_type);
+        } else if (likely(PyTuple_Check(exc_type))) {
+            return __Pyx_PyErr_GivenExceptionMatchesTuple(err, exc_type);
+        } else {
+        }
+    }
+    return PyErr_GivenExceptionMatches(err, exc_type);
+}
+static CYTHON_INLINE int __Pyx_PyErr_GivenExceptionMatches2(PyObject *err, PyObject *exc_type1, PyObject *exc_type2) {
+    assert(PyExceptionClass_Check(exc_type1));
+    assert(PyExceptionClass_Check(exc_type2));
+    if (likely(err == exc_type1 || err == exc_type2)) return 1;
+    if (likely(PyExceptionClass_Check(err))) {
+        return __Pyx_inner_PyErr_GivenExceptionMatches2(err, exc_type1, exc_type2);
+    }
+    return (PyErr_GivenExceptionMatches(err, exc_type1) || PyErr_GivenExceptionMatches(err, exc_type2));
+}
+#endif
+
 /* PyObjectSetAttrStr */
 #if CYTHON_USE_TYPE_SLOTS
 static CYTHON_INLINE int __Pyx_PyObject_SetAttrStr(PyObject* obj, PyObject* attr_name, PyObject* value) {
@@ -16748,25 +17322,6 @@ CYTHON_UNUSED static int __Pyx_VectorcallBuilder_AddArg_Check(PyObject *key, PyO
 static void __Pyx_RaiseClosureNameError(const char *varname) {
     PyErr_Format(PyExc_NameError, "free variable '%s' referenced before assignment in enclosing scope", varname);
 }
-
-/* HasAttr (used by ImportImpl) */
-#if __PYX_LIMITED_VERSION_HEX < 0x030d0000
-static CYTHON_INLINE int __Pyx_HasAttr(PyObject *o, PyObject *n) {
-    PyObject *r;
-    if (unlikely(!PyUnicode_Check(n))) {
-        PyErr_SetString(PyExc_TypeError,
-                        "hasattr(): attribute name must be string");
-        return -1;
-    }
-    r = __Pyx_PyObject_GetAttrStrNoError(o, n);
-    if (!r) {
-        return (unlikely(PyErr_Occurred())) ? -1 : 0;
-    } else {
-        Py_DECREF(r);
-        return 1;
-    }
-}
-#endif
 
 /* ImportImpl (used by Import) */
 static int __Pyx__Import_GetModule(PyObject *qualname, PyObject **module) {
@@ -19843,93 +20398,6 @@ raise_neg_overflow:
         "can't convert negative value to int");
     return (int) -1;
 }
-
-/* FastTypeChecks */
-#if CYTHON_COMPILING_IN_CPYTHON
-static int __Pyx_InBases(PyTypeObject *a, PyTypeObject *b) {
-    while (a) {
-        a = __Pyx_PyType_GetSlot(a, tp_base, PyTypeObject*);
-        if (a == b)
-            return 1;
-    }
-    return b == &PyBaseObject_Type;
-}
-static CYTHON_INLINE int __Pyx_IsSubtype(PyTypeObject *a, PyTypeObject *b) {
-    PyObject *mro;
-    if (a == b) return 1;
-    mro = a->tp_mro;
-    if (likely(mro)) {
-        Py_ssize_t i, n;
-        n = PyTuple_GET_SIZE(mro);
-        for (i = 0; i < n; i++) {
-            if (PyTuple_GET_ITEM(mro, i) == (PyObject *)b)
-                return 1;
-        }
-        return 0;
-    }
-    return __Pyx_InBases(a, b);
-}
-static CYTHON_INLINE int __Pyx_IsAnySubtype2(PyTypeObject *cls, PyTypeObject *a, PyTypeObject *b) {
-    PyObject *mro;
-    if (cls == a || cls == b) return 1;
-    mro = cls->tp_mro;
-    if (likely(mro)) {
-        Py_ssize_t i, n;
-        n = PyTuple_GET_SIZE(mro);
-        for (i = 0; i < n; i++) {
-            PyObject *base = PyTuple_GET_ITEM(mro, i);
-            if (base == (PyObject *)a || base == (PyObject *)b)
-                return 1;
-        }
-        return 0;
-    }
-    return __Pyx_InBases(cls, a) || __Pyx_InBases(cls, b);
-}
-static CYTHON_INLINE int __Pyx_inner_PyErr_GivenExceptionMatches2(PyObject *err, PyObject* exc_type1, PyObject *exc_type2) {
-    if (exc_type1) {
-        return __Pyx_IsAnySubtype2((PyTypeObject*)err, (PyTypeObject*)exc_type1, (PyTypeObject*)exc_type2);
-    } else {
-        return __Pyx_IsSubtype((PyTypeObject*)err, (PyTypeObject*)exc_type2);
-    }
-}
-static int __Pyx_PyErr_GivenExceptionMatchesTuple(PyObject *exc_type, PyObject *tuple) {
-    Py_ssize_t i, n;
-    assert(PyExceptionClass_Check(exc_type));
-    n = PyTuple_GET_SIZE(tuple);
-    for (i=0; i<n; i++) {
-        if (exc_type == PyTuple_GET_ITEM(tuple, i)) return 1;
-    }
-    for (i=0; i<n; i++) {
-        PyObject *t = PyTuple_GET_ITEM(tuple, i);
-        if (likely(PyExceptionClass_Check(t))) {
-            if (__Pyx_inner_PyErr_GivenExceptionMatches2(exc_type, NULL, t)) return 1;
-        } else {
-        }
-    }
-    return 0;
-}
-static CYTHON_INLINE int __Pyx_PyErr_GivenExceptionMatches(PyObject *err, PyObject* exc_type) {
-    if (likely(err == exc_type)) return 1;
-    if (likely(PyExceptionClass_Check(err))) {
-        if (likely(PyExceptionClass_Check(exc_type))) {
-            return __Pyx_inner_PyErr_GivenExceptionMatches2(err, NULL, exc_type);
-        } else if (likely(PyTuple_Check(exc_type))) {
-            return __Pyx_PyErr_GivenExceptionMatchesTuple(err, exc_type);
-        } else {
-        }
-    }
-    return PyErr_GivenExceptionMatches(err, exc_type);
-}
-static CYTHON_INLINE int __Pyx_PyErr_GivenExceptionMatches2(PyObject *err, PyObject *exc_type1, PyObject *exc_type2) {
-    assert(PyExceptionClass_Check(exc_type1));
-    assert(PyExceptionClass_Check(exc_type2));
-    if (likely(err == exc_type1 || err == exc_type2)) return 1;
-    if (likely(PyExceptionClass_Check(err))) {
-        return __Pyx_inner_PyErr_GivenExceptionMatches2(err, exc_type1, exc_type2);
-    }
-    return (PyErr_GivenExceptionMatches(err, exc_type1) || PyErr_GivenExceptionMatches(err, exc_type2));
-}
-#endif
 
 /* GetRuntimeVersion */
 #if __PYX_LIMITED_VERSION_HEX < 0x030b0000

@@ -413,6 +413,18 @@ cdef class ArrayVector(Vector):
         """
         return 1
 
+    cpdef object min(self):
+        """Min is not defined for array vectors."""
+        raise NotImplementedError("min() is not supported for ArrayVector")
+
+    cpdef object max(self):
+        """Max is not defined for array vectors."""
+        raise NotImplementedError("max() is not supported for ArrayVector")
+
+    cpdef object sum(self):
+        """Sum is not defined for array vectors."""
+        raise NotImplementedError("sum() is not supported for ArrayVector")
+
     def __str__(self):
         if self.ptr == NULL:
             return "<ArrayVector uninitialized>"

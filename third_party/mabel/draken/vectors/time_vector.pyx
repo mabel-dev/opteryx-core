@@ -42,6 +42,13 @@ from opteryx.compiled.draken.vectors.vector cimport MIX_HASH_CONSTANT, Vector, N
 
 DEF TIME32_HASH_CHUNK = 1024
 
+
+cdef inline bint _bitmap_is_valid(uint8_t* bitmap, Py_ssize_t idx, Py_ssize_t bit_offset) noexcept nogil:
+    cdef Py_ssize_t bit_index = idx + bit_offset
+    cdef uint8_t byte = bitmap[bit_index >> 3]
+    return (byte >> (bit_index & 7)) & 1
+
+
 cdef class TimeVector(Vector):
 
     @classmethod
@@ -325,6 +332,143 @@ cdef class TimeVector(Vector):
                         out.append(None)
 
         return out
+
+    cpdef int64_t min(self):
+        cdef DrakenFixedBuffer* ptr = self.ptr
+        cdef Py_ssize_t i, n = ptr.length
+        if n == 0:
+            raise ValueError("Cannot compute min of empty column")
+        if self._has_const:
+            if self._const_is_null:
+                raise ValueError("Cannot compute min of all-null column")
+            return self._const_value
+
+        cdef int64_t m
+        cdef int64_t* data64
+        cdef int32_t* data32
+        cdef bint found = False
+
+        if self.is_time64:
+            data64 = <int64_t*> ptr.data
+            # Find first non-null value
+            for i in range(n):
+                if ptr.null_bitmap != NULL:
+                    if not _bitmap_is_valid(ptr.null_bitmap, i, self.null_bit_offset):  # null
+                        continue
+                m = data64[i]
+                found = True
+                break
+            if not found:
+                raise ValueError("Cannot compute min of all-null column")
+            # Find minimum among remaining values
+            for i in range(i + 1, n):
+                if ptr.null_bitmap != NULL:
+                    if not _bitmap_is_valid(ptr.null_bitmap, i, self.null_bit_offset):  # null
+                        continue
+                if data64[i] < m:
+                    m = data64[i]
+        else:
+            data32 = <int32_t*> ptr.data
+            # Find first non-null value
+            for i in range(n):
+                if ptr.null_bitmap != NULL:
+                    if not _bitmap_is_valid(ptr.null_bitmap, i, self.null_bit_offset):  # null
+                        continue
+                m = <int64_t>data32[i]
+                found = True
+                break
+            if not found:
+                raise ValueError("Cannot compute min of all-null column")
+            # Find minimum among remaining values
+            for i in range(i + 1, n):
+                if ptr.null_bitmap != NULL:
+                    if not _bitmap_is_valid(ptr.null_bitmap, i, self.null_bit_offset):  # null
+                        continue
+                if <int64_t>data32[i] < m:
+                    m = <int64_t>data32[i]
+        return m
+
+    cpdef int64_t max(self):
+        cdef DrakenFixedBuffer* ptr = self.ptr
+        cdef Py_ssize_t i, n = ptr.length
+        if n == 0:
+            raise ValueError("Cannot compute max of empty column")
+        if self._has_const:
+            if self._const_is_null:
+                raise ValueError("Cannot compute max of all-null column")
+            return self._const_value
+
+        cdef int64_t m
+        cdef int64_t* data64
+        cdef int32_t* data32
+        cdef bint found = False
+
+        if self.is_time64:
+            data64 = <int64_t*> ptr.data
+            # Find first non-null value
+            for i in range(n):
+                if ptr.null_bitmap != NULL:
+                    if not _bitmap_is_valid(ptr.null_bitmap, i, self.null_bit_offset):  # null
+                        continue
+                m = data64[i]
+                found = True
+                break
+            if not found:
+                raise ValueError("Cannot compute max of all-null column")
+            # Find maximum among remaining values
+            for i in range(i + 1, n):
+                if ptr.null_bitmap != NULL:
+                    if not _bitmap_is_valid(ptr.null_bitmap, i, self.null_bit_offset):  # null
+                        continue
+                if data64[i] > m:
+                    m = data64[i]
+        else:
+            data32 = <int32_t*> ptr.data
+            # Find first non-null value
+            for i in range(n):
+                if ptr.null_bitmap != NULL:
+                    if not _bitmap_is_valid(ptr.null_bitmap, i, self.null_bit_offset):  # null
+                        continue
+                m = <int64_t>data32[i]
+                found = True
+                break
+            if not found:
+                raise ValueError("Cannot compute max of all-null column")
+            # Find maximum among remaining values
+            for i in range(i + 1, n):
+                if ptr.null_bitmap != NULL:
+                    if not _bitmap_is_valid(ptr.null_bitmap, i, self.null_bit_offset):  # null
+                        continue
+                if <int64_t>data32[i] > m:
+                    m = <int64_t>data32[i]
+        return m
+
+    cpdef int64_t sum(self):
+        if self._has_const:
+            if self._const_is_null:
+                return 0
+            return <int64_t>(self.ptr.length * self._const_value)
+        cdef DrakenFixedBuffer* ptr = self.ptr
+        cdef Py_ssize_t i, n = ptr.length
+        cdef int64_t total = 0
+        cdef int64_t* data64
+        cdef int32_t* data32
+
+        if self.is_time64:
+            data64 = <int64_t*> ptr.data
+            for i in range(n):
+                if ptr.null_bitmap != NULL:
+                    if not _bitmap_is_valid(ptr.null_bitmap, i, self.null_bit_offset):  # null
+                        continue
+                total += data64[i]
+        else:
+            data32 = <int32_t*> ptr.data
+            for i in range(n):
+                if ptr.null_bitmap != NULL:
+                    if not _bitmap_is_valid(ptr.null_bitmap, i, self.null_bit_offset):  # null
+                        continue
+                total += <int64_t>data32[i]
+        return total
 
     cpdef uint64_t[::1] hash(self):
         cdef Py_ssize_t n = self.ptr.length

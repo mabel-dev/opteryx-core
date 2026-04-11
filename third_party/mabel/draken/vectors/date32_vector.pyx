@@ -47,6 +47,13 @@ cdef extern from "simd_hash.h":
 
 DEF DATE32_HASH_CHUNK = 1024
 
+
+cdef inline bint _bitmap_is_valid(uint8_t* bitmap, Py_ssize_t idx, Py_ssize_t bit_offset) noexcept nogil:
+    cdef Py_ssize_t bit_index = idx + bit_offset
+    cdef uint8_t byte = bitmap[bit_index >> 3]
+    return (byte >> (bit_index & 7)) & 1
+
+
 cdef class Date32Vector(Vector):
 
     @classmethod
@@ -312,14 +319,11 @@ cdef class Date32Vector(Vector):
 
         cdef int32_t m
         cdef bint found = False
-        cdef uint8_t byte, bit
 
         # Find first non-null value
         for i in range(n):
             if ptr.null_bitmap != NULL:
-                byte = ptr.null_bitmap[i >> 3]
-                bit = (byte >> (i & 7)) & 1
-                if not bit:  # null
+                if not _bitmap_is_valid(ptr.null_bitmap, i, self.null_bit_offset):  # null
                     continue
             m = data[i]
             found = True
@@ -331,9 +335,7 @@ cdef class Date32Vector(Vector):
         # Find minimum among remaining values
         for i in range(i + 1, n):
             if ptr.null_bitmap != NULL:
-                byte = ptr.null_bitmap[i >> 3]
-                bit = (byte >> (i & 7)) & 1
-                if not bit:  # null
+                if not _bitmap_is_valid(ptr.null_bitmap, i, self.null_bit_offset):  # null
                     continue
             if data[i] < m:
                 m = data[i]
@@ -352,13 +354,10 @@ cdef class Date32Vector(Vector):
 
         cdef int32_t m
         cdef bint found = False
-        cdef uint8_t byte, bit
 
         for i in range(n):
             if ptr.null_bitmap != NULL:
-                byte = ptr.null_bitmap[i >> 3]
-                bit = (byte >> (i & 7)) & 1
-                if not bit:
+                if not _bitmap_is_valid(ptr.null_bitmap, i, self.null_bit_offset):  # null
                     continue
             m = data[i]
             found = True
@@ -369,13 +368,27 @@ cdef class Date32Vector(Vector):
 
         for i in range(i + 1, n):
             if ptr.null_bitmap != NULL:
-                byte = ptr.null_bitmap[i >> 3]
-                bit = (byte >> (i & 7)) & 1
-                if not bit:
+                if not _bitmap_is_valid(ptr.null_bitmap, i, self.null_bit_offset):  # null
                     continue
             if data[i] > m:
                 m = data[i]
         return m
+
+    cpdef int64_t sum(self):
+        if self._has_const:
+            if self._const_is_null:
+                return 0
+            return <int64_t>(self.ptr.length * self._const_value)
+        cdef DrakenFixedBuffer* ptr = self.ptr
+        cdef int32_t* data = <int32_t*> ptr.data
+        cdef Py_ssize_t i, n = ptr.length
+        cdef int64_t total = 0
+        for i in range(n):
+            if ptr.null_bitmap != NULL:
+                if not _bitmap_is_valid(ptr.null_bitmap, i, self.null_bit_offset):  # null
+                    continue
+            total += data[i]
+        return total
 
     cpdef int8_t[::1] is_null(self):
         """

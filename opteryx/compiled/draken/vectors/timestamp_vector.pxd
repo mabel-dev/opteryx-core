@@ -42,6 +42,7 @@ cdef class TimestampVector(Vector):
 
     cpdef int64_t min(self)
     cpdef int64_t max(self)
+    cpdef int64_t sum(self)
 
     cdef void hash_into(self, uint64_t[::1] out_buf, Py_ssize_t offset=*) except *
 

@@ -70,27 +70,61 @@ def _vector_sum(vector):
             return None
         return scalar * valid_count
 
-    if vector.__class__.__name__ in ("Int64Vector", "Float64Vector"):
-        return vector.sum()
+    # Try to use native sum() method if available (fast path for numeric types)
+    if hasattr(vector, 'sum'):
+        try:
+            return vector.sum()
+        except (ValueError, NotImplementedError):
+            # NotImplementedError: aggregate not supported for this type
+            return None
 
+    # Fallback to Python materialization
     values = _vector_valid_values(vector)
     return sum(values) if values else None
 
 
 def _vector_min(vector):
+    valid_count = len(vector) - _vector_null_count(vector)
+    if valid_count == 0:
+        return None
+
     if _is_constant_vector_like(vector):
         scalar = _constant_scalar_value(vector)
         return scalar if scalar is not None else None
 
+    # Try to use native min() method if available
+    if hasattr(vector, 'min'):
+        try:
+            return vector.min()
+        except (ValueError, NotImplementedError):
+            # ValueError: empty or all-null column
+            # NotImplementedError: aggregate not supported for this type
+            return None
+
+    # Fallback to Python materialization
     values = _vector_valid_values(vector)
     return min(values) if values else None
 
 
 def _vector_max(vector):
+    valid_count = len(vector) - _vector_null_count(vector)
+    if valid_count == 0:
+        return None
+
     if _is_constant_vector_like(vector):
         scalar = _constant_scalar_value(vector)
         return scalar if scalar is not None else None
 
+    # Try to use native max() method if available
+    if hasattr(vector, 'max'):
+        try:
+            return vector.max()
+        except (ValueError, NotImplementedError):
+            # ValueError: empty or all-null column
+            # NotImplementedError: aggregate not supported for this type
+            return None
+
+    # Fallback to Python materialization
     values = _vector_valid_values(vector)
     return max(values) if values else None
 

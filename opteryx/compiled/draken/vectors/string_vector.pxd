@@ -50,6 +50,9 @@ cdef class StringVector(Vector):
     cpdef BoolVector contains(self, bytes substr, bint ignore_case=*)
     cdef void hash_into(self, uint64_t[::1] out_buf, Py_ssize_t offset=*) except *
     cpdef StringVector take(self, int32_t[::1] indices)
+    cpdef object min(self)
+    cpdef object max(self)
+    cpdef sum(self)
 
     cpdef list to_pylist(self)
     cpdef Py_ssize_t byte_length(self, Py_ssize_t i)
