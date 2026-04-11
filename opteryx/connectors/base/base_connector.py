@@ -16,6 +16,7 @@ from typing import Iterable
 from typing import Optional
 from typing import Tuple
 
+from opteryx.compiled.draken.interop.arrow import vector_from_sequence
 from opteryx.compiled.draken.morsels.morsel import Morsel
 from opteryx.connectors import TableType
 from opteryx.exceptions import DatasetNotFoundError
@@ -25,6 +26,33 @@ from orso.schema import RelationSchema
 MIN_CHUNK_SIZE: int = 500
 INITIAL_CHUNK_SIZE: int = 500
 DEFAULT_MORSEL_SIZE: int = 16 * 1024 * 1024
+
+
+def _dictset_to_morsel(chunk: list) -> Morsel:
+    """Convert a list of dicts to a Morsel without Arrow intermediate.
+
+    Extracts columns from the dict list and creates vectors directly.
+
+    Args:
+        chunk: List of dictionaries with uniform keys
+
+    Returns:
+        Morsel with columns and data from the dicts
+    """
+    if not chunk:
+        return Morsel()
+
+    # Get all unique column names from the chunk
+    column_names = list(chunk[0].keys()) if chunk else []
+
+    # Extract columns: create a list of lists, one per column
+    columns = []
+    for col_name in column_names:
+        col_data = [record.get(col_name) for record in chunk]
+        vec = vector_from_sequence(col_data)
+        columns.append(vec)
+
+    return Morsel.from_vectors(column_names, columns)
 
 
 class BaseConnector:
@@ -203,20 +231,16 @@ class BaseTable:
             chunk.append(record)
 
             if index == self.chunk_size - 1:
-                arrow_table = pyarrow.Table.from_pylist(chunk)
-                # Estimate the number of records to fill the morsel size
-                if arrow_table.nbytes > 0:
-                    self.chunk_size = int(morsel_size // (arrow_table.nbytes / self.chunk_size))
-                morsel = Morsel.from_arrow(arrow_table)
+                morsel = _dictset_to_morsel(chunk)
                 yield morsel
                 chunk = []
             elif (index > self.chunk_size - 1) and (index - self.chunk_size) % self.chunk_size == 0:
-                morsel = Morsel.from_arrow(pyarrow.Table.from_pylist(chunk))
+                morsel = _dictset_to_morsel(chunk)
                 yield morsel
                 chunk = []
 
         if chunk:
-            morsel = Morsel.from_arrow(pyarrow.Table.from_pylist(chunk))
+            morsel = _dictset_to_morsel(chunk)
             yield morsel
 
 
