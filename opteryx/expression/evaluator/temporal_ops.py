@@ -6,6 +6,7 @@ import numpy
 import pyarrow as _pa
 
 from opteryx.exceptions import ColumnReferencedBeforeEvaluationError
+from opteryx.compiled.vector_ops import vector_in_list
 
 from .function_execution import _is_draken_vector
 from .function_execution import apply_bounded_function
@@ -86,7 +87,7 @@ def _int64_temporal_compare(op: str, vec, right, temporal_type):
     if op == "GtEq":
         return vec.greater_than_or_equals(value)
     if op == "InList":
-        return vec.in_list(value_set)
+        return vector_in_list(vec,value_set)
     raise NotImplementedError(f"Int64Vector temporal: unsupported op {op!r}")
 
 
@@ -137,7 +138,7 @@ def _timestamp_compare(op: str, vec, right):
     if op == "GtEq":
         return vec.greater_than_or_equals(value)
     if op == "InList":
-        return vec.in_list(value_set)
+        return vector_in_list(vec,value_set)
     raise NotImplementedError(f"TimestampVector: unsupported op {op!r}")
 
 
@@ -182,7 +183,7 @@ def _date32_compare(op: str, vec, right):
     if op == "GtEq":
         return vec.greater_than_or_equals(value)
     if op == "InList":
-        return vec.in_list(value_set)
+        return vector_in_list(vec,value_set)
     raise NotImplementedError(f"Date32Vector: unsupported op {op!r}")
 
 

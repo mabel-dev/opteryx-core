@@ -3,6 +3,8 @@
 import datetime
 
 from opteryx.exceptions import ColumnReferencedBeforeEvaluationError
+from opteryx.compiled.vector_ops import vector_like, vector_rlike, vector_contains
+from opteryx.compiled.vector_ops import vector_in_list
 
 from .function_execution import _is_draken_vector
 from .function_execution import apply_bounded_function
@@ -64,17 +66,17 @@ def _string_compare(op: str, vec, right):
     if op == "GtEq":
         return vec.greater_than_or_equals(value_bytes)
     if op == "InList":
-        return vec.in_list(value_set)
+        return vector_in_list(vec, value_set)
     if op == "Like":
-        return vec.like(value_bytes, False)
+        return vector_like(vec, value_bytes, False)
     if op == "ILike":
-        return vec.like(value_bytes, True)
+        return vector_like(vec, value_bytes, True)
     if op == "RLike":
-        return vec.rlike(value_bytes)
+        return vector_rlike(vec, value_bytes)
     if op == "InStr":
-        return vec.contains(value_bytes, False)
+        return vector_contains(vec, value_bytes, False)
     if op == "IInStr":
-        return vec.contains(value_bytes, True)
+        return vector_contains(vec, value_bytes, True)
     raise NotImplementedError(f"StringVector: unsupported op {op!r}")
 
 
@@ -85,7 +87,7 @@ def _string_anyop_like(vec, patterns, ignore_case: bool):
         if p is None:
             continue
         pat_bytes = p if isinstance(p, bytes) else str(p).encode()
-        mask = vec.like(pat_bytes, ignore_case)
+        mask = vector_like(vec, pat_bytes, ignore_case)
         result = mask if result is None else result.or_vector(mask)
     if result is None:
         from opteryx.compiled.draken.vectors.bool_vector import BoolVector
