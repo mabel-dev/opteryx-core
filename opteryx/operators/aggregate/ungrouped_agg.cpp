@@ -1764,7 +1764,20 @@ struct __pyx_opt_args_7opteryx_8compiled_6draken_7vectors_6vector_6Vector_compre
   int __pyx_n;
   Py_ssize_t offset;
 };
+struct __pyx_opt_args_7opteryx_8compiled_6draken_7morsels_6morsel_6Morsel_column;
 struct __pyx_opt_args_7opteryx_8compiled_6draken_7morsels_6morsel_6Morsel_hash;
+
+/* "opteryx/compiled/draken/morsels/morsel.pxd":11
+ *     cdef dict _name_to_index
+ * 
+ *     cpdef Vector column(self, bytes identity, bytes column_name=?)             # <<<<<<<<<<<<<<
+ *     cpdef void append(self, Morsel other)
+ *     cpdef void append_vector(self, object name, Vector vector)
+*/
+struct __pyx_opt_args_7opteryx_8compiled_6draken_7morsels_6morsel_6Morsel_column {
+  int __pyx_n;
+  PyObject *column_name;
+};
 
 /* "opteryx/compiled/draken/morsels/morsel.pxd":14
  *     cpdef void append(self, Morsel other)
@@ -2484,7 +2497,7 @@ static struct __pyx_vtabstruct_7opteryx_8compiled_6draken_7vectors_6vector_Vecto
 */
 
 struct __pyx_vtabstruct_7opteryx_8compiled_6draken_7morsels_6morsel_Morsel {
-  struct __pyx_obj_7opteryx_8compiled_6draken_7vectors_6vector_Vector *(*column)(struct __pyx_obj_7opteryx_8compiled_6draken_7morsels_6morsel_Morsel *, PyObject *, int __pyx_skip_dispatch);
+  struct __pyx_obj_7opteryx_8compiled_6draken_7vectors_6vector_Vector *(*column)(struct __pyx_obj_7opteryx_8compiled_6draken_7morsels_6morsel_Morsel *, PyObject *, int __pyx_skip_dispatch, struct __pyx_opt_args_7opteryx_8compiled_6draken_7morsels_6morsel_6Morsel_column *__pyx_optional_args);
   void (*append)(struct __pyx_obj_7opteryx_8compiled_6draken_7morsels_6morsel_Morsel *, struct __pyx_obj_7opteryx_8compiled_6draken_7morsels_6morsel_Morsel *, int __pyx_skip_dispatch);
   void (*append_vector)(struct __pyx_obj_7opteryx_8compiled_6draken_7morsels_6morsel_Morsel *, PyObject *, struct __pyx_obj_7opteryx_8compiled_6draken_7vectors_6vector_Vector *, int __pyx_skip_dispatch);
   __Pyx_memviewslice (*hash)(struct __pyx_obj_7opteryx_8compiled_6draken_7morsels_6morsel_Morsel *, int __pyx_skip_dispatch, struct __pyx_opt_args_7opteryx_8compiled_6draken_7morsels_6morsel_6Morsel_hash *__pyx_optional_args);
