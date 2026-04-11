@@ -307,6 +307,186 @@ cdef Int64Vector _datepart_i64_dict_calendar(Int64Vector int64_vec, int part_kin
 
 
 # ===========================================================================
+# Dictionary fast-paths for TimestampVector kernels
+# ---------------------------------------------------------------------------
+# These mirror _datepart_i64_dict_subsecond / _datepart_i64_dict_calendar but
+# for TimestampVector.  The key simplification: we know the timestamp unit
+# directly from ts_vec.timestamp_unit, so no heuristic precision detection is
+# needed.  unit_code from _timestamp_unit_code maps to the SIMD convention:
+#   0=s, 1=ms, 2=us, 3=ns
+# ===========================================================================
+
+cdef Int64Vector _datepart_ts_dict_subsecond(TimestampVector ts_vec, int part_kind):
+    cdef DictAccessor* dict_accessor = (<Vector>ts_vec).dict_accessor()
+    cdef Py_ssize_t row_count
+    cdef Py_ssize_t dict_size
+    cdef int64_t* dictionary_ptr
+    cdef int unit_code
+    cdef int64_t divisor
+    cdef Py_ssize_t i
+    cdef array template
+    cdef array output_array
+    cdef int64_t* output_ptr
+    cdef Int64Vector result
+
+    if dict_accessor == NULL:
+        return None
+
+    row_count = <Py_ssize_t>dict_accessor.length
+    dict_size = <Py_ssize_t>dict_accessor.dict_values.length
+    dictionary_ptr = <int64_t*>dict_accessor.dict_values.data
+
+    if row_count == 0:
+        return int64_from_packed_dict(
+            dict_accessor.codes,
+            dict_accessor.code_width,
+            0,
+            dictionary_ptr,
+            dict_size,
+            dict_accessor.row_nulls,
+            False,
+        )
+
+    unit_code = _timestamp_unit_code(ts_vec.timestamp_unit)
+
+    if part_kind == 0:  # minute
+        if unit_code == 0:
+            divisor = SECONDS_PER_MINUTE
+        elif unit_code == 1:
+            divisor = MILLISECONDS_PER_MINUTE
+        elif unit_code == 2:
+            divisor = MICROSECONDS_PER_MINUTE
+        else:
+            divisor = NANOSECONDS_PER_MINUTE
+    elif part_kind == 1:  # hour
+        if unit_code == 0:
+            divisor = SECONDS_PER_HOUR
+        elif unit_code == 1:
+            divisor = MILLISECONDS_PER_HOUR
+        elif unit_code == 2:
+            divisor = MICROSECONDS_PER_HOUR
+        else:
+            divisor = NANOSECONDS_PER_HOUR
+    else:  # second
+        if unit_code == 0:
+            divisor = 1
+        elif unit_code == 1:
+            divisor = MILLISECONDS_PER_SECOND
+        elif unit_code == 2:
+            divisor = MICROSECONDS_PER_SECOND
+        else:
+            divisor = NANOSECONDS_PER_SECOND
+
+    template = array('l')
+    output_array = clone(template, dict_size, False)
+    output_ptr = <int64_t*>output_array.data.as_longs
+
+    if part_kind == 0:
+        for i in range(dict_size):
+            output_ptr[i] = (dictionary_ptr[i] // divisor) % 60
+    elif part_kind == 1:
+        for i in range(dict_size):
+            output_ptr[i] = (dictionary_ptr[i] // divisor) % 24
+    else:  # second
+        if unit_code == 0:  # seconds precision — direct modulo
+            for i in range(dict_size):
+                output_ptr[i] = dictionary_ptr[i] % 60
+        else:
+            for i in range(dict_size):
+                output_ptr[i] = (dictionary_ptr[i] // divisor) % 60
+
+    result = int64_from_packed_dict(
+        dict_accessor.codes,
+        dict_accessor.code_width,
+        row_count,
+        <const int64_t*>output_ptr,
+        dict_size,
+        dict_accessor.row_nulls,
+        False,
+    )
+    result._arrow_data_buf = output_array
+    return result
+
+
+cdef Int64Vector _datepart_ts_dict_calendar(TimestampVector ts_vec, int part_kind):
+    cdef DictAccessor* dict_accessor = (<Vector>ts_vec).dict_accessor()
+    cdef Py_ssize_t row_count
+    cdef Py_ssize_t dict_size
+    cdef int64_t* dictionary_ptr
+    cdef int unit_code
+    cdef int64_t day_divisor
+    cdef Py_ssize_t i
+    cdef int64_t d
+    cdef array template
+    cdef array output_array
+    cdef int64_t* output_ptr
+    cdef Int64Vector result
+
+    if dict_accessor == NULL:
+        return None
+
+    row_count = <Py_ssize_t>dict_accessor.length
+    dict_size = <Py_ssize_t>dict_accessor.dict_values.length
+    dictionary_ptr = <int64_t*>dict_accessor.dict_values.data
+
+    if row_count == 0:
+        return int64_from_packed_dict(
+            dict_accessor.codes,
+            dict_accessor.code_width,
+            0,
+            dictionary_ptr,
+            dict_size,
+            dict_accessor.row_nulls,
+            False,
+        )
+
+    unit_code = _timestamp_unit_code(ts_vec.timestamp_unit)
+
+    template = array('l')
+    output_array = clone(template, dict_size, False)
+    output_ptr = <int64_t*>output_array.data.as_longs
+
+    if part_kind == 3:  # dayofweek — pure integer arithmetic, no SIMD kernel
+        if unit_code == 0:
+            day_divisor = SECONDS_PER_DAY
+        elif unit_code == 1:
+            day_divisor = MILLISECONDS_PER_DAY
+        elif unit_code == 2:
+            day_divisor = MICROSECONDS_PER_DAY
+        else:
+            day_divisor = NANOSECONDS_PER_DAY
+
+        for i in range(dict_size):
+            d = (dictionary_ptr[i] // day_divisor + EPOCH_WEEKDAY) % 7
+            if d < 0:
+                d += 7
+            output_ptr[i] = d
+    else:
+        if part_kind == 0:
+            simd_datepart_year(dictionary_ptr, output_ptr, <size_t>dict_size, unit_code)
+        elif part_kind == 1:
+            simd_datepart_month(dictionary_ptr, output_ptr, <size_t>dict_size, unit_code)
+        elif part_kind == 2:
+            simd_datepart_day(dictionary_ptr, output_ptr, <size_t>dict_size, unit_code)
+        elif part_kind == 4:
+            simd_datepart_dayofyear(dictionary_ptr, output_ptr, <size_t>dict_size, unit_code)
+        else:  # quarter
+            simd_datepart_quarter(dictionary_ptr, output_ptr, <size_t>dict_size, unit_code)
+
+    result = int64_from_packed_dict(
+        dict_accessor.codes,
+        dict_accessor.code_width,
+        row_count,
+        <const int64_t*>output_ptr,
+        dict_size,
+        dict_accessor.row_nulls,
+        False,
+    )
+    result._arrow_data_buf = output_array
+    return result
+
+
+# ===========================================================================
 # MACRO: _mk_result(output_array, length) — build Int64Vector from array
 #   result = int64_from_sequence(<int64_t[:length:1]>output_ptr)
 #   result._arrow_data_buf = output_array   (keep backing store alive)
@@ -324,10 +504,14 @@ cdef Int64Vector _datepart_i64_dict_calendar(Int64Vector int64_vec, int part_kin
 
 cpdef Int64Vector vector_datepart_minute(TimestampVector timestamps, Int64Vector out=None):
     """Extract minute (0–59) from TimestampVector via SIMD dispatch."""
+    cdef Int64Vector dict_result = _datepart_ts_dict_subsecond(timestamps, 0)
     cdef str unit = timestamps.timestamp_unit
     cdef int64_t length = <int64_t>timestamps.ptr.length
     cdef int64_t* data_ptr = <int64_t*>timestamps.ptr.data
     cdef int64_t empty_sentinel = 0
+
+    if dict_result is not None:
+        return dict_result
 
     # unit_code: 0=s, 1=ms, 2=us, 3=ns  (matches simd_datepart.h)
     cdef int unit_code
@@ -368,10 +552,14 @@ cpdef Int64Vector vector_datepart_minute(TimestampVector timestamps, Int64Vector
 
 cpdef Int64Vector vector_datepart_hour(TimestampVector timestamps, Int64Vector out=None):
     """Extract hour (0–23) from TimestampVector via SIMD dispatch."""
+    cdef Int64Vector dict_result = _datepart_ts_dict_subsecond(timestamps, 1)
     cdef str unit = timestamps.timestamp_unit
     cdef int64_t length = <int64_t>timestamps.ptr.length
     cdef int64_t* data_ptr = <int64_t*>timestamps.ptr.data
     cdef int64_t empty_sentinel = 0
+
+    if dict_result is not None:
+        return dict_result
 
     cdef int unit_code
     if unit == 'us':
@@ -411,10 +599,14 @@ cpdef Int64Vector vector_datepart_hour(TimestampVector timestamps, Int64Vector o
 
 cpdef Int64Vector vector_datepart_second(TimestampVector timestamps, Int64Vector out=None):
     """Extract second (0–59) from TimestampVector via SIMD dispatch."""
+    cdef Int64Vector dict_result = _datepart_ts_dict_subsecond(timestamps, 2)
     cdef str unit = timestamps.timestamp_unit
     cdef int64_t length = <int64_t>timestamps.ptr.length
     cdef int64_t* data_ptr = <int64_t*>timestamps.ptr.data
     cdef int64_t empty_sentinel = 0
+
+    if dict_result is not None:
+        return dict_result
 
     cdef int unit_code
     if unit == 'us':
@@ -460,11 +652,15 @@ cpdef Int64Vector vector_datepart_second(TimestampVector timestamps, Int64Vector
 
 cpdef Int64Vector vector_datepart_year(TimestampVector timestamps, Int64Vector out=None):
     """Extract year from TimestampVector."""
+    cdef Int64Vector dict_result = _datepart_ts_dict_calendar(timestamps, 0)
     cdef str unit = timestamps.timestamp_unit
     cdef int64_t length = <int64_t>timestamps.ptr.length
     cdef int64_t* data_ptr = <int64_t*>timestamps.ptr.data
     cdef int64_t empty_sentinel = 0
     cdef int unit_code = _timestamp_unit_code(unit)
+
+    if dict_result is not None:
+        return dict_result
 
     if length == 0:
         return int64_from_sequence(<int64_t[:0:1]>&empty_sentinel)
@@ -493,11 +689,15 @@ cpdef Int64Vector vector_datepart_year(TimestampVector timestamps, Int64Vector o
 
 cpdef Int64Vector vector_datepart_month(TimestampVector timestamps, Int64Vector out=None):
     """Extract month (1–12) from TimestampVector."""
+    cdef Int64Vector dict_result = _datepart_ts_dict_calendar(timestamps, 1)
     cdef str unit = timestamps.timestamp_unit
     cdef int64_t length = <int64_t>timestamps.ptr.length
     cdef int64_t* data_ptr = <int64_t*>timestamps.ptr.data
     cdef int64_t empty_sentinel = 0
     cdef int unit_code = _timestamp_unit_code(unit)
+
+    if dict_result is not None:
+        return dict_result
 
     if length == 0:
         return int64_from_sequence(<int64_t[:0:1]>&empty_sentinel)
@@ -526,11 +726,15 @@ cpdef Int64Vector vector_datepart_month(TimestampVector timestamps, Int64Vector 
 
 cpdef Int64Vector vector_datepart_day(TimestampVector timestamps, Int64Vector out=None):
     """Extract day-of-month (1–31) from TimestampVector."""
+    cdef Int64Vector dict_result = _datepart_ts_dict_calendar(timestamps, 2)
     cdef str unit = timestamps.timestamp_unit
     cdef int64_t length = <int64_t>timestamps.ptr.length
     cdef int64_t* data_ptr = <int64_t*>timestamps.ptr.data
     cdef int64_t empty_sentinel = 0
     cdef int unit_code = _timestamp_unit_code(unit)
+
+    if dict_result is not None:
+        return dict_result
 
     if length == 0:
         return int64_from_sequence(<int64_t[:0:1]>&empty_sentinel)
@@ -563,10 +767,14 @@ cpdef Int64Vector vector_datepart_dayofweek(TimestampVector timestamps, Int64Vec
     Uses pure integer arithmetic: days_since_epoch + EPOCH_WEEKDAY (=4, Thursday)
     then modulo 7.  Negative timestamps (pre-epoch) are handled correctly.
     """
+    cdef Int64Vector dict_result = _datepart_ts_dict_calendar(timestamps, 3)
     cdef str unit = timestamps.timestamp_unit
     cdef int64_t length = <int64_t>timestamps.ptr.length
     cdef int64_t* data_ptr = <int64_t*>timestamps.ptr.data
     cdef int64_t empty_sentinel = 0
+
+    if dict_result is not None:
+        return dict_result
 
     cdef int64_t day_divisor
     if unit == 'us':
@@ -611,11 +819,15 @@ cpdef Int64Vector vector_datepart_dayofweek(TimestampVector timestamps, Int64Vec
 
 cpdef Int64Vector vector_datepart_dayofyear(TimestampVector timestamps, Int64Vector out=None):
     """Extract day-of-year (1–366) from TimestampVector."""
+    cdef Int64Vector dict_result = _datepart_ts_dict_calendar(timestamps, 4)
     cdef str unit = timestamps.timestamp_unit
     cdef int64_t length = <int64_t>timestamps.ptr.length
     cdef int64_t* data_ptr = <int64_t*>timestamps.ptr.data
     cdef int64_t empty_sentinel = 0
     cdef int unit_code = _timestamp_unit_code(unit)
+
+    if dict_result is not None:
+        return dict_result
 
     if length == 0:
         return int64_from_sequence(<int64_t[:0:1]>&empty_sentinel)
@@ -644,11 +856,15 @@ cpdef Int64Vector vector_datepart_dayofyear(TimestampVector timestamps, Int64Vec
 
 cpdef Int64Vector vector_datepart_quarter(TimestampVector timestamps, Int64Vector out=None):
     """Extract quarter (1–4) from TimestampVector."""
+    cdef Int64Vector dict_result = _datepart_ts_dict_calendar(timestamps, 5)
     cdef str unit = timestamps.timestamp_unit
     cdef int64_t length = <int64_t>timestamps.ptr.length
     cdef int64_t* data_ptr = <int64_t*>timestamps.ptr.data
     cdef int64_t empty_sentinel = 0
     cdef int unit_code = _timestamp_unit_code(unit)
+
+    if dict_result is not None:
+        return dict_result
 
     if length == 0:
         return int64_from_sequence(<int64_t[:0:1]>&empty_sentinel)
