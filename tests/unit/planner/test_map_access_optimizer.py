@@ -8,8 +8,8 @@ from opteryx.models import Node, QueryTelemetry
 from opteryx.planner.logical_planner import LogicalPlanNode, LogicalPlanStepType
 from opteryx.planner.optimizer.strategies.constant_folding import fold_constants
 from opteryx.planner.optimizer.strategies.predicate_ordering import order_predicates
-from opteryx.schema import ConstantColumn, FlatColumn
 from opteryx.types import OrsoTypes
+from opteryx.types.schema import ConstantColumn, FlatColumn
 
 
 def _literal(value_type, value, *, element_type=None):

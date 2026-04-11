@@ -18,7 +18,7 @@ import logging
 from typing import Generator
 
 import pyarrow
-from opteryx.schema import convert_orso_schema_to_arrow_schema
+from opteryx.types.schema import convert_orso_schema_to_arrow_schema
 
 from opteryx import EOS
 

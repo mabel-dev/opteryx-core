@@ -1833,12 +1833,12 @@ struct __pyx_opt_args_7opteryx_8compiled_6draken_7vectors_12int64_vector_from_pa
 };
 struct __pyx_opt_args_7opteryx_8compiled_6draken_7vectors_14integer_vector_13IntegerVector_hash_into;
 
-/* "opteryx/compiled/draken/vectors/integer_vector.pxd":25
+/* "opteryx/compiled/draken/vectors/integer_vector.pxd":26
  *     cpdef int64_t max(self)
  *     cpdef int64_t sum(self)
  *     cdef void hash_into(self, uint64_t[::1] out_buf, Py_ssize_t offset=*) except *             # <<<<<<<<<<<<<<
  * 
- * cdef IntegerVector from_arrow(object array)
+ *     cdef bint _compare_int_values(self, int64_t left, int64_t right, int op) nogil
 */
 struct __pyx_opt_args_7opteryx_8compiled_6draken_7vectors_14integer_vector_13IntegerVector_hash_into {
   int __pyx_n;
@@ -2057,8 +2057,8 @@ struct __pyx_obj_7opteryx_8compiled_6draken_7vectors_12int64_vector_Int64Vector 
 };
 
 
-/* "opteryx/compiled/draken/vectors/integer_vector.pxd":6
- * from opteryx.compiled.draken.vectors.vector cimport Vector
+/* "opteryx/compiled/draken/vectors/integer_vector.pxd":7
+ * from opteryx.compiled.draken.vectors.bool_vector cimport BoolVector
  * 
  * cdef class IntegerVector(Vector):             # <<<<<<<<<<<<<<
  *     cdef object _arrow_data_buf
@@ -2605,8 +2605,8 @@ struct __pyx_vtabstruct_7opteryx_8compiled_6draken_7vectors_12int64_vector_Int64
 static struct __pyx_vtabstruct_7opteryx_8compiled_6draken_7vectors_12int64_vector_Int64Vector *__pyx_vtabptr_7opteryx_8compiled_6draken_7vectors_12int64_vector_Int64Vector;
 
 
-/* "opteryx/compiled/draken/vectors/integer_vector.pxd":6
- * from opteryx.compiled.draken.vectors.vector cimport Vector
+/* "opteryx/compiled/draken/vectors/integer_vector.pxd":7
+ * from opteryx.compiled.draken.vectors.bool_vector cimport BoolVector
  * 
  * cdef class IntegerVector(Vector):             # <<<<<<<<<<<<<<
  *     cdef object _arrow_data_buf
@@ -2620,6 +2620,21 @@ struct __pyx_vtabstruct_7opteryx_8compiled_6draken_7vectors_14integer_vector_Int
   int64_t (*min)(struct __pyx_obj_7opteryx_8compiled_6draken_7vectors_14integer_vector_IntegerVector *, int __pyx_skip_dispatch);
   int64_t (*max)(struct __pyx_obj_7opteryx_8compiled_6draken_7vectors_14integer_vector_IntegerVector *, int __pyx_skip_dispatch);
   int64_t (*sum)(struct __pyx_obj_7opteryx_8compiled_6draken_7vectors_14integer_vector_IntegerVector *, int __pyx_skip_dispatch);
+  int (*_compare_int_values)(struct __pyx_obj_7opteryx_8compiled_6draken_7vectors_14integer_vector_IntegerVector *, int64_t, int64_t, int);
+  struct __pyx_obj_7opteryx_8compiled_6draken_7vectors_11bool_vector_BoolVector *(*_compare_scalar)(struct __pyx_obj_7opteryx_8compiled_6draken_7vectors_14integer_vector_IntegerVector *, int64_t, int);
+  struct __pyx_obj_7opteryx_8compiled_6draken_7vectors_11bool_vector_BoolVector *(*_compare_vector)(struct __pyx_obj_7opteryx_8compiled_6draken_7vectors_14integer_vector_IntegerVector *, struct __pyx_obj_7opteryx_8compiled_6draken_7vectors_14integer_vector_IntegerVector *, int);
+  struct __pyx_obj_7opteryx_8compiled_6draken_7vectors_11bool_vector_BoolVector *(*equals)(struct __pyx_obj_7opteryx_8compiled_6draken_7vectors_14integer_vector_IntegerVector *, int64_t, int __pyx_skip_dispatch);
+  struct __pyx_obj_7opteryx_8compiled_6draken_7vectors_11bool_vector_BoolVector *(*equals_vector)(struct __pyx_obj_7opteryx_8compiled_6draken_7vectors_14integer_vector_IntegerVector *, struct __pyx_obj_7opteryx_8compiled_6draken_7vectors_14integer_vector_IntegerVector *, int __pyx_skip_dispatch);
+  struct __pyx_obj_7opteryx_8compiled_6draken_7vectors_11bool_vector_BoolVector *(*not_equals)(struct __pyx_obj_7opteryx_8compiled_6draken_7vectors_14integer_vector_IntegerVector *, int64_t, int __pyx_skip_dispatch);
+  struct __pyx_obj_7opteryx_8compiled_6draken_7vectors_11bool_vector_BoolVector *(*not_equals_vector)(struct __pyx_obj_7opteryx_8compiled_6draken_7vectors_14integer_vector_IntegerVector *, struct __pyx_obj_7opteryx_8compiled_6draken_7vectors_14integer_vector_IntegerVector *, int __pyx_skip_dispatch);
+  struct __pyx_obj_7opteryx_8compiled_6draken_7vectors_11bool_vector_BoolVector *(*greater_than)(struct __pyx_obj_7opteryx_8compiled_6draken_7vectors_14integer_vector_IntegerVector *, int64_t, int __pyx_skip_dispatch);
+  struct __pyx_obj_7opteryx_8compiled_6draken_7vectors_11bool_vector_BoolVector *(*greater_than_vector)(struct __pyx_obj_7opteryx_8compiled_6draken_7vectors_14integer_vector_IntegerVector *, struct __pyx_obj_7opteryx_8compiled_6draken_7vectors_14integer_vector_IntegerVector *, int __pyx_skip_dispatch);
+  struct __pyx_obj_7opteryx_8compiled_6draken_7vectors_11bool_vector_BoolVector *(*greater_than_or_equals)(struct __pyx_obj_7opteryx_8compiled_6draken_7vectors_14integer_vector_IntegerVector *, int64_t, int __pyx_skip_dispatch);
+  struct __pyx_obj_7opteryx_8compiled_6draken_7vectors_11bool_vector_BoolVector *(*greater_than_or_equals_vector)(struct __pyx_obj_7opteryx_8compiled_6draken_7vectors_14integer_vector_IntegerVector *, struct __pyx_obj_7opteryx_8compiled_6draken_7vectors_14integer_vector_IntegerVector *, int __pyx_skip_dispatch);
+  struct __pyx_obj_7opteryx_8compiled_6draken_7vectors_11bool_vector_BoolVector *(*less_than)(struct __pyx_obj_7opteryx_8compiled_6draken_7vectors_14integer_vector_IntegerVector *, int64_t, int __pyx_skip_dispatch);
+  struct __pyx_obj_7opteryx_8compiled_6draken_7vectors_11bool_vector_BoolVector *(*less_than_vector)(struct __pyx_obj_7opteryx_8compiled_6draken_7vectors_14integer_vector_IntegerVector *, struct __pyx_obj_7opteryx_8compiled_6draken_7vectors_14integer_vector_IntegerVector *, int __pyx_skip_dispatch);
+  struct __pyx_obj_7opteryx_8compiled_6draken_7vectors_11bool_vector_BoolVector *(*less_than_or_equals)(struct __pyx_obj_7opteryx_8compiled_6draken_7vectors_14integer_vector_IntegerVector *, int64_t, int __pyx_skip_dispatch);
+  struct __pyx_obj_7opteryx_8compiled_6draken_7vectors_11bool_vector_BoolVector *(*less_than_or_equals_vector)(struct __pyx_obj_7opteryx_8compiled_6draken_7vectors_14integer_vector_IntegerVector *, struct __pyx_obj_7opteryx_8compiled_6draken_7vectors_14integer_vector_IntegerVector *, int __pyx_skip_dispatch);
 };
 static struct __pyx_vtabstruct_7opteryx_8compiled_6draken_7vectors_14integer_vector_IntegerVector *__pyx_vtabptr_7opteryx_8compiled_6draken_7vectors_14integer_vector_IntegerVector;
 
@@ -42174,7 +42189,7 @@ static int __Pyx_modinit_type_import_code(__pyx_mstatetype *__pyx_mstate) {
   __Pyx_ImportType_CheckSize_Warn_3_2_4); if (!__pyx_mstate->__pyx_ptype_7opteryx_8compiled_6draken_7vectors_12int64_vector_Int64Vector) __PYX_ERR(12, 13, __pyx_L1_error)
   __pyx_vtabptr_7opteryx_8compiled_6draken_7vectors_12int64_vector_Int64Vector = (struct __pyx_vtabstruct_7opteryx_8compiled_6draken_7vectors_12int64_vector_Int64Vector*)__Pyx_GetVtable(__pyx_mstate->__pyx_ptype_7opteryx_8compiled_6draken_7vectors_12int64_vector_Int64Vector); if (unlikely(!__pyx_vtabptr_7opteryx_8compiled_6draken_7vectors_12int64_vector_Int64Vector)) __PYX_ERR(12, 13, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
-  __pyx_t_1 = PyImport_ImportModule("opteryx.compiled.draken.vectors.integer_vector"); if (unlikely(!__pyx_t_1)) __PYX_ERR(13, 6, __pyx_L1_error)
+  __pyx_t_1 = PyImport_ImportModule("opteryx.compiled.draken.vectors.integer_vector"); if (unlikely(!__pyx_t_1)) __PYX_ERR(13, 7, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
   __pyx_mstate->__pyx_ptype_7opteryx_8compiled_6draken_7vectors_14integer_vector_IntegerVector = __Pyx_ImportType_3_2_4(__pyx_t_1, "opteryx.compiled.draken.vectors.integer_vector", "IntegerVector",
   #if defined(PYPY_VERSION_NUM) && PYPY_VERSION_NUM < 0x050B0000
@@ -42184,8 +42199,8 @@ static int __Pyx_modinit_type_import_code(__pyx_mstatetype *__pyx_mstate) {
   #else
   sizeof(struct __pyx_obj_7opteryx_8compiled_6draken_7vectors_14integer_vector_IntegerVector), __PYX_GET_STRUCT_ALIGNMENT_3_2_4(struct __pyx_obj_7opteryx_8compiled_6draken_7vectors_14integer_vector_IntegerVector),
   #endif
-  __Pyx_ImportType_CheckSize_Warn_3_2_4); if (!__pyx_mstate->__pyx_ptype_7opteryx_8compiled_6draken_7vectors_14integer_vector_IntegerVector) __PYX_ERR(13, 6, __pyx_L1_error)
-  __pyx_vtabptr_7opteryx_8compiled_6draken_7vectors_14integer_vector_IntegerVector = (struct __pyx_vtabstruct_7opteryx_8compiled_6draken_7vectors_14integer_vector_IntegerVector*)__Pyx_GetVtable(__pyx_mstate->__pyx_ptype_7opteryx_8compiled_6draken_7vectors_14integer_vector_IntegerVector); if (unlikely(!__pyx_vtabptr_7opteryx_8compiled_6draken_7vectors_14integer_vector_IntegerVector)) __PYX_ERR(13, 6, __pyx_L1_error)
+  __Pyx_ImportType_CheckSize_Warn_3_2_4); if (!__pyx_mstate->__pyx_ptype_7opteryx_8compiled_6draken_7vectors_14integer_vector_IntegerVector) __PYX_ERR(13, 7, __pyx_L1_error)
+  __pyx_vtabptr_7opteryx_8compiled_6draken_7vectors_14integer_vector_IntegerVector = (struct __pyx_vtabstruct_7opteryx_8compiled_6draken_7vectors_14integer_vector_IntegerVector*)__Pyx_GetVtable(__pyx_mstate->__pyx_ptype_7opteryx_8compiled_6draken_7vectors_14integer_vector_IntegerVector); if (unlikely(!__pyx_vtabptr_7opteryx_8compiled_6draken_7vectors_14integer_vector_IntegerVector)) __PYX_ERR(13, 7, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
   __pyx_t_1 = PyImport_ImportModule("opteryx.compiled.draken.vectors.float64_vector"); if (unlikely(!__pyx_t_1)) __PYX_ERR(14, 13, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);

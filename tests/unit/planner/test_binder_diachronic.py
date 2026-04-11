@@ -4,8 +4,8 @@ from opteryx.connectors.capabilities import Diachronic
 from opteryx.models import Node
 from opteryx.planner.binder.binding_context import BindingContext
 from opteryx.planner.binder.common import BinderVisitor
-from opteryx.schema import FlatColumn, RelationSchema
 from opteryx.types import OrsoTypes
+from opteryx.types.schema import FlatColumn, RelationSchema
 
 
 class FakeConnector(Diachronic):

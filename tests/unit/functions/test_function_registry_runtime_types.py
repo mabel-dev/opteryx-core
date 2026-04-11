@@ -8,8 +8,8 @@ import numpy
 import pyarrow
 import pytest
 
-from opteryx.schema import FlatColumn
 from opteryx.types import PYTHON_TO_ORSO_MAP, OrsoTypes
+from opteryx.types.schema import FlatColumn
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 

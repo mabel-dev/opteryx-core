@@ -13,8 +13,8 @@ from opteryx.exceptions import (
 from opteryx.expression import NodeType
 from opteryx.models import LogicalColumn, Node
 from opteryx.planner.binder.binding_context import BindingContext
-from opteryx.schema import FlatColumn, RelationSchema
 from opteryx.types import OrsoTypes
+from opteryx.types.schema import FlatColumn, RelationSchema
 from opteryx.utils import random_string
 
 
@@ -119,7 +119,7 @@ def visit_function_dataset(
         node.columns = columns
         node.schema = schema
     elif node.function == "FAKE":
-        from opteryx.schema import ColumnDisposition
+        from opteryx.types.schema import ColumnDisposition
 
         node.relation_name = node.alias
         node.rows = int(node.args[0].value)

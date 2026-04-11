@@ -25,15 +25,16 @@ from libc.stdint cimport (
     uint8_t, uint64_t, intptr_t,
 )
 from libc.stdlib cimport malloc
-from libc.string cimport memset
+from libc.string cimport memset, memcpy
 
 from opteryx.compiled.draken.core.buffers cimport DrakenFixedBuffer, DrakenType
-from opteryx.compiled.draken.core.buffers cimport DRAKEN_INT8, DRAKEN_INT16, DRAKEN_INT32
+from opteryx.compiled.draken.core.buffers cimport DRAKEN_INT8, DRAKEN_INT16, DRAKEN_INT32, DRAKEN_INT64
 from opteryx.compiled.draken.core.buffers cimport ConstAccessor, DRAKEN_ENCODING_CONSTANT
 from opteryx.compiled.draken.core.fixed_vector cimport (
     alloc_fixed_buffer, buf_dtype, buf_itemsize, buf_length, free_fixed_buffer,
 )
 from opteryx.compiled.draken.vectors.vector cimport MIX_HASH_CONSTANT, NULL_HASH, Vector, mix_hash, simd_mix_hash
+from opteryx.compiled.draken.vectors.bool_vector cimport BoolVector
 
 DEF INTEGER_HASH_CHUNK = 1024
 
@@ -509,6 +510,230 @@ cdef class IntegerVector(Vector):
                 out.ptr.null_bitmap = out_null
         return out
 
+    cdef inline bint _compare_int_values(self, int64_t left, int64_t right, int op) nogil:
+        if op == 0:
+            return left == right
+        if op == 1:
+            return left != right
+        if op == 2:
+            return left > right
+        if op == 3:
+            return left >= right
+        if op == 4:
+            return left < right
+        return left <= right
+
+    cdef BoolVector _compare_scalar(self, int64_t value, int op):
+        cdef DrakenFixedBuffer* ptr = self.ptr
+        cdef Py_ssize_t n
+        cdef Py_ssize_t nbytes
+        cdef BoolVector out
+        cdef uint8_t* dst
+        cdef uint8_t* out_null = NULL
+        cdef Py_ssize_t i
+        cdef uint8_t mask
+        cdef bint matched
+        cdef int8_t* d8
+        cdef int16_t* d16
+        cdef int32_t* d32
+        cdef int64_t* d64
+
+        if self._has_const:
+            n = ptr.length
+            nbytes = (n + 7) >> 3
+            out = BoolVector(<size_t>n)
+            dst = <uint8_t*>out.ptr.data
+            if nbytes > 0:
+                memset(dst, 0, nbytes)
+            if self._const_is_null:
+                if nbytes != 0:
+                    out_null = <uint8_t*>malloc(nbytes)
+                    if out_null == NULL:
+                        raise MemoryError()
+                    memset(out_null, 0, nbytes)
+                    out.ptr.null_bitmap = out_null
+                else:
+                    out.ptr.null_bitmap = NULL
+                return out
+
+            matched = self._compare_int_values(self._const_value, value, op)
+            if matched and nbytes > 0:
+                memset(dst, 0xFF, nbytes)
+                if (n & 7) != 0:
+                    mask = <uint8_t>((1 << (n & 7)) - 1)
+                    dst[nbytes - 1] &= mask
+            out.ptr.null_bitmap = NULL
+            return out
+
+        cdef uint8_t* src_null = ptr.null_bitmap
+        n = ptr.length
+        nbytes = (n + 7) >> 3
+        out = BoolVector(<size_t>n)
+        dst = <uint8_t*> out.ptr.data
+
+        memset(dst, 0, nbytes)
+        if src_null != NULL and nbytes != 0:
+            out_null = <uint8_t*> malloc(nbytes)
+            if out_null == NULL:
+                raise MemoryError()
+            memcpy(out_null, src_null, nbytes)
+            if (n & 7) != 0:
+                mask = <uint8_t>((1 << (n & 7)) - 1)
+                out_null[nbytes - 1] &= mask
+            out.ptr.null_bitmap = out_null
+        else:
+            out.ptr.null_bitmap = NULL
+
+        if ptr.itemsize == 1:
+            d8 = <int8_t*>ptr.data
+            for i in range(n):
+                if src_null == NULL or ((src_null[i >> 3] >> (i & 7)) & 1):
+                    if self._compare_int_values(<int64_t>d8[i], value, op):
+                        dst[i >> 3] |= (1 << (i & 7))
+        elif ptr.itemsize == 2:
+            d16 = <int16_t*>ptr.data
+            for i in range(n):
+                if src_null == NULL or ((src_null[i >> 3] >> (i & 7)) & 1):
+                    if self._compare_int_values(<int64_t>d16[i], value, op):
+                        dst[i >> 3] |= (1 << (i & 7))
+        elif ptr.itemsize == 4:
+            d32 = <int32_t*>ptr.data
+            for i in range(n):
+                if src_null == NULL or ((src_null[i >> 3] >> (i & 7)) & 1):
+                    if self._compare_int_values(<int64_t>d32[i], value, op):
+                        dst[i >> 3] |= (1 << (i & 7))
+        elif ptr.itemsize == 8:
+            d64 = <int64_t*>ptr.data
+            for i in range(n):
+                if src_null == NULL or ((src_null[i >> 3] >> (i & 7)) & 1):
+                    if self._compare_int_values(d64[i], value, op):
+                        dst[i >> 3] |= (1 << (i & 7))
+        return out
+
+    cdef BoolVector _compare_vector(self, IntegerVector other, int op):
+        cdef DrakenFixedBuffer* ptr1 = self.ptr
+        cdef DrakenFixedBuffer* ptr2 = other.ptr
+        cdef uint8_t* null1 = ptr1.null_bitmap
+        cdef uint8_t* null2 = ptr2.null_bitmap
+        cdef Py_ssize_t i, n = ptr1.length
+        cdef Py_ssize_t nbytes = (n + 7) >> 3
+        cdef BoolVector out
+        cdef uint8_t* dst
+        cdef uint8_t* out_null = NULL
+        cdef bint valid1, valid2, valid
+        cdef int64_t val1, val2
+        cdef int8_t* d8_1 = NULL
+        cdef int16_t* d16_1 = NULL
+        cdef int32_t* d32_1 = NULL
+        cdef int64_t* d64_1 = NULL
+        cdef int8_t* d8_2 = NULL
+        cdef int16_t* d16_2 = NULL
+        cdef int32_t* d32_2 = NULL
+        cdef int64_t* d64_2 = NULL
+
+        if n != ptr2.length:
+            raise ValueError("Vectors must have the same length")
+
+        out = BoolVector(<size_t>n)
+        dst = <uint8_t*> out.ptr.data
+        memset(dst, 0, nbytes)
+
+        if (null1 != NULL or null2 != NULL) and nbytes != 0:
+            out_null = <uint8_t*> malloc(nbytes)
+            if out_null == NULL:
+                raise MemoryError()
+            memset(out_null, 0, nbytes)
+            out.ptr.null_bitmap = out_null
+        else:
+            out.ptr.null_bitmap = NULL
+
+        # Get data pointers based on itemsize
+        if ptr1.itemsize == 1:
+            d8_1 = <int8_t*>ptr1.data
+        elif ptr1.itemsize == 2:
+            d16_1 = <int16_t*>ptr1.data
+        elif ptr1.itemsize == 4:
+            d32_1 = <int32_t*>ptr1.data
+        else:
+            d64_1 = <int64_t*>ptr1.data
+
+        if ptr2.itemsize == 1:
+            d8_2 = <int8_t*>ptr2.data
+        elif ptr2.itemsize == 2:
+            d16_2 = <int16_t*>ptr2.data
+        elif ptr2.itemsize == 4:
+            d32_2 = <int32_t*>ptr2.data
+        else:
+            d64_2 = <int64_t*>ptr2.data
+
+        for i in range(n):
+            valid1 = True if null1 == NULL else ((null1[i >> 3] >> (i & 7)) & 1) != 0
+            valid2 = True if null2 == NULL else ((null2[i >> 3] >> (i & 7)) & 1) != 0
+            valid = valid1 and valid2
+            if valid:
+                if out_null != NULL:
+                    out_null[i >> 3] |= (1 << (i & 7))
+
+                # Get values from first vector
+                if ptr1.itemsize == 1:
+                    val1 = <int64_t>d8_1[i]
+                elif ptr1.itemsize == 2:
+                    val1 = <int64_t>d16_1[i]
+                elif ptr1.itemsize == 4:
+                    val1 = <int64_t>d32_1[i]
+                else:
+                    val1 = d64_1[i]
+
+                # Get values from second vector
+                if ptr2.itemsize == 1:
+                    val2 = <int64_t>d8_2[i]
+                elif ptr2.itemsize == 2:
+                    val2 = <int64_t>d16_2[i]
+                elif ptr2.itemsize == 4:
+                    val2 = <int64_t>d32_2[i]
+                else:
+                    val2 = d64_2[i]
+
+                if self._compare_int_values(val1, val2, op):
+                    dst[i >> 3] |= (1 << (i & 7))
+        return out
+
+    cpdef BoolVector equals(self, int64_t value):
+        return self._compare_scalar(value, 0)
+
+    cpdef BoolVector equals_vector(self, IntegerVector other):
+        return self._compare_vector(other, 0)
+
+    cpdef BoolVector not_equals(self, int64_t value):
+        return self._compare_scalar(value, 1)
+
+    cpdef BoolVector not_equals_vector(self, IntegerVector other):
+        return self._compare_vector(other, 1)
+
+    cpdef BoolVector greater_than(self, int64_t value):
+        return self._compare_scalar(value, 2)
+
+    cpdef BoolVector greater_than_vector(self, IntegerVector other):
+        return self._compare_vector(other, 2)
+
+    cpdef BoolVector greater_than_or_equals(self, int64_t value):
+        return self._compare_scalar(value, 3)
+
+    cpdef BoolVector greater_than_or_equals_vector(self, IntegerVector other):
+        return self._compare_vector(other, 3)
+
+    cpdef BoolVector less_than(self, int64_t value):
+        return self._compare_scalar(value, 4)
+
+    cpdef BoolVector less_than_vector(self, IntegerVector other):
+        return self._compare_vector(other, 4)
+
+    cpdef BoolVector less_than_or_equals(self, int64_t value):
+        return self._compare_scalar(value, 5)
+
+    cpdef BoolVector less_than_or_equals_vector(self, IntegerVector other):
+        return self._compare_vector(other, 5)
+
     cdef void hash_into(
         self,
         uint64_t[::1] out_buf,
@@ -723,6 +948,12 @@ cdef IntegerVector from_arrow(object array):
     elif pa_type.equals(pa.uint32()):
         dtype = DRAKEN_INT32
         itemsize = 4
+    elif pa_type.equals(pa.int64()):
+        dtype = DRAKEN_INT64
+        itemsize = 8
+    elif pa_type.equals(pa.uint64()):
+        dtype = DRAKEN_INT64
+        itemsize = 8
     else:
         dtype = DRAKEN_INT32
         itemsize = 4

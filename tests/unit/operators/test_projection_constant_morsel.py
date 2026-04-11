@@ -12,8 +12,8 @@ from opteryx.operators.projection_node import ProjectionNode
 
 from opteryx.expression import NodeType, evaluate_and_append
 from opteryx.models import Node, QueryProperties
-from opteryx.schema import ConstantColumn, FlatColumn, FunctionColumn
 from opteryx.types import OrsoTypes
+from opteryx.types.schema import ConstantColumn, FlatColumn, FunctionColumn
 
 
 def _literal_node(identity: str, value, value_type: OrsoTypes) -> Node:

@@ -44,8 +44,8 @@ import numpy
 from opteryx.expression import NodeType
 from opteryx.expression.intervals import normalize_interval_value
 from opteryx.models import Node
-from opteryx.schema import ConstantColumn
 from opteryx.types import OrsoTypes
+from opteryx.types.schema import ConstantColumn
 
 
 def _infer_collection_literal(value: Any) -> tuple[OrsoTypes, Optional[OrsoTypes]]:
@@ -322,7 +322,11 @@ def execute_logical_plan(
 
     # Handle statistics-only (execute_plan may have returned a simple generator)
     if result_type == ResultType.NON_TABULAR:
-        from opteryx.schema import FlatColumn, RelationSchema, convert_orso_schema_to_arrow_schema
+        from opteryx.types.schema import (
+            FlatColumn,
+            RelationSchema,
+            convert_orso_schema_to_arrow_schema,
+        )
 
         # Consume generator to get the first non-empty result (if any)
         data = next(results_generator, None)
@@ -346,7 +350,7 @@ def execute_logical_plan(
         first_table = next(results_generator, None)
         if first_table is None:
             # No rows; return empty table with schema from physical plan Exit node
-            from opteryx.schema import RelationSchema, convert_orso_schema_to_arrow_schema
+            from opteryx.types.schema import RelationSchema, convert_orso_schema_to_arrow_schema
 
             exit_node = physical_plan.get_exit_points()[0]
             exit_instance = physical_plan[exit_node]

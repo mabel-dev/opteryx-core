@@ -17,7 +17,7 @@ from opteryx.connectors import TableType
 from opteryx.connectors.capabilities import Diachronic, Eidetic, PredicatePushable
 from opteryx.exceptions import DatasetNotFoundError, DatasetReadError
 from opteryx.models import FileEntry, Manifest
-from opteryx.schema import RelationSchema
+from opteryx.types.schema import RelationSchema
 
 
 class OpteryxTable(Diachronic, PredicatePushable):

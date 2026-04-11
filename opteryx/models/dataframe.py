@@ -9,8 +9,8 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
 import pyarrow
 
-from opteryx.schema import FlatColumn, RelationSchema
 from opteryx.types import OrsoTypes
+from opteryx.types.schema import FlatColumn, RelationSchema
 
 __all__ = ["DataFrame"]
 

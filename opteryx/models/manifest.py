@@ -19,8 +19,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from opteryx.compiled.structures.relation_statistics import to_int
 from opteryx.models.file_entry import FileEntry
-from opteryx.schema import RelationSchema
 from opteryx.third_party.maki_nage.distogram import Distogram, load
+from opteryx.types.schema import RelationSchema
 
 
 class Manifest:

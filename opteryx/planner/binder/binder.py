@@ -21,8 +21,8 @@ from opteryx.expression.functions.registrar.constant import fixed_value_function
 from opteryx.models import Node
 from opteryx.planner.binder.binding_context import BindingContext
 from opteryx.planner.binder.operator_map import determine_type
-from opteryx.schema import ConstantColumn, FlatColumn, FunctionColumn, RelationSchema
 from opteryx.types import OrsoTypes
+from opteryx.types.schema import ConstantColumn, FlatColumn, FunctionColumn, RelationSchema
 
 
 def merge_schemas(*schemas: Dict[str, RelationSchema]) -> Dict[str, RelationSchema]:

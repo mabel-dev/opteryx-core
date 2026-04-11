@@ -2,8 +2,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from opteryx.expression.intervals import MICROSECONDS_PER_SECOND
-from opteryx.schema import FlatColumn
 from opteryx.types import OrsoTypes
+from opteryx.types.schema import FlatColumn
 from opteryx.utils import random_string
 
 

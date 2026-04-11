@@ -15,8 +15,8 @@ from opteryx.planner.binder.common import (
     extract_join_fields,
     get_mismatched_condition_column_types,
 )
-from opteryx.schema import RelationSchema
 from opteryx.types import OrsoTypes
+from opteryx.types.schema import RelationSchema
 from opteryx.utils import random_string
 
 

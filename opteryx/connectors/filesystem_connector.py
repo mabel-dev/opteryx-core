@@ -15,9 +15,9 @@ from opteryx.connectors import TableType
 from opteryx.connectors.base.base_connector import BaseConnector, BaseTable
 from opteryx.connectors.capabilities import LimitPushable, PredicatePushable
 from opteryx.exceptions import DataError, DatasetNotFoundError, EmptyDatasetError
-from opteryx.schema import RelationSchema
 from opteryx.tracing import record_event
 from opteryx.types import OrsoTypes
+from opteryx.types.schema import RelationSchema
 from opteryx.utils.parquet_decoder import parquet_decoder
 
 OS_SEP = os.sep

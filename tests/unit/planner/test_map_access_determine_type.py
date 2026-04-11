@@ -9,8 +9,8 @@ from opteryx.exceptions import IncorrectTypeError
 from opteryx.expression import NodeType
 from opteryx.models import Node
 from opteryx.planner.binder.operator_map import determine_type
-from opteryx.schema import ConstantColumn, FlatColumn
 from opteryx.types import OrsoTypes
+from opteryx.types.schema import ConstantColumn, FlatColumn
 
 
 def _literal(value_type, value):

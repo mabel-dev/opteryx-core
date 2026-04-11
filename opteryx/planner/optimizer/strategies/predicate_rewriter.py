@@ -48,8 +48,8 @@ from opteryx.models import Node, QueryTelemetry
 from opteryx.planner import build_literal_node
 from opteryx.planner.binder.operator_map import determine_type
 from opteryx.planner.logical_planner import LogicalPlan, LogicalPlanNode, LogicalPlanStepType
-from opteryx.schema import ConstantColumn
 from opteryx.types import OrsoTypes
+from opteryx.types.schema import ConstantColumn
 from opteryx.utils.dates import add_single_unit, parse_iso, truncate_single
 from opteryx.utils.sql import sql_like_to_regex
 

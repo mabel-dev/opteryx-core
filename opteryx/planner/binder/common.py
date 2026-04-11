@@ -39,8 +39,8 @@ from opteryx.planner.binder.view import (
     visit_show_columns,
 )
 from opteryx.planner.logical_planner import LogicalPlan
-from opteryx.schema import ConstantColumn, FlatColumn, RelationSchema
 from opteryx.types import OrsoTypes
+from opteryx.types.schema import ConstantColumn, FlatColumn, RelationSchema
 from opteryx.utils import random_string
 
 CAMEL_TO_SNAKE = re.compile(r"(?<!^)(?=[A-Z])")

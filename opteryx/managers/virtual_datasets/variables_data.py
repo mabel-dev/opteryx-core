@@ -11,8 +11,8 @@ It is the system variables collection.
 
 from opteryx.compiled.draken.interop.arrow import vector_from_sequence
 from opteryx.compiled.draken.morsels.morsel import Morsel
-from opteryx.schema import FlatColumn, RelationSchema
 from opteryx.types import OrsoTypes
+from opteryx.types.schema import FlatColumn, RelationSchema
 
 __all__ = ("read", "schema")
 
