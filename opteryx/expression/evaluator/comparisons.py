@@ -272,13 +272,37 @@ def _constant_compare(op: str, vec, right):
 
 
 def _decimal_compare(op: str, vec, right):
-    """Comparison operations on DecimalVector (scalar only).
+    """Comparison operations on DecimalVector.
 
+    Handles scalar comparisons, vector-vector comparisons, and set membership.
     Scalar coercion (Decimal/int/float -> unscaled int64) is handled internally
     by the Cython _coerce_scalar method, so the raw Python value is passed
     straight through to the comparison methods.
     """
+    from opteryx.compiled.draken.vectors._decimal_vector import DecimalVector
     from opteryx.utils.vector_types import is_scalar
+
+    # Set membership (InList is handled before the scalar/vector branch)
+    if op == "InList":
+        if isinstance(right, (list, tuple, set, frozenset)):
+            return vec.in_list(right)
+        raise NotImplementedError(f"DecimalVector InList: expected a set/list, got {type(right)!r}")
+
+    # Vector-vector comparison
+    if isinstance(right, DecimalVector):
+        if op == "Eq":
+            return vec.equals_vector(right)
+        if op == "NotEq":
+            return vec.not_equals_vector(right)
+        if op == "Lt":
+            return vec.less_than_vector(right)
+        if op == "LtEq":
+            return vec.less_than_or_equals_vector(right)
+        if op == "Gt":
+            return vec.greater_than_vector(right)
+        if op == "GtEq":
+            return vec.greater_than_or_equals_vector(right)
+        raise NotImplementedError(f"DecimalVector vector-vector: unsupported op {op!r}")
 
     # Unwrap constant-encoded right-hand vectors to their scalar value
     if _is_constant_vector_like(right):
