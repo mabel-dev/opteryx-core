@@ -41,11 +41,15 @@ class ColumnDisposition:
     - INTERNAL: system-generated column (e.g., __index__)
     - PRIMARY_KEY: part of primary key
     - INDEXED: column has an index
+    - NAME: column represents a human name
+    - AGE: column represents an age value
     """
 
     INTERNAL = "INTERNAL"
     PRIMARY_KEY = "PRIMARY_KEY"
     INDEXED = "INDEXED"
+    NAME = "NAME"
+    AGE = "AGE"
 
 
 @dataclasses.dataclass
@@ -434,7 +438,7 @@ def _orso_type_to_arrow_type(orso_type: OrsoTypes) -> Any:
         OrsoTypes.BOOLEAN: pyarrow.bool_(),
         OrsoTypes.INTEGER: pyarrow.int32(),
         OrsoTypes.DOUBLE: pyarrow.float64(),
-        OrsoTypes.DECIMAL: pyarrow.decimal128(38, 10),
+        OrsoTypes.DECIMAL: pyarrow.decimal128(18, 10),
         OrsoTypes.VARCHAR: pyarrow.string(),
         OrsoTypes.BLOB: pyarrow.binary(),
         OrsoTypes.DATE: pyarrow.date32(),

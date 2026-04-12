@@ -16,12 +16,10 @@ from opteryx.compiled.draken.interop.arrow import vector_from_sequence
 from opteryx.compiled.draken.morsels.morsel import Morsel
 from opteryx.types import OrsoTypes
 from opteryx.types.schema import FlatColumn, RelationSchema
-from opteryx.utils import single_item_cache
 
 __all__ = ("read", "schema")
 
 
-@single_item_cache
 def read(at_date=None, variables=None) -> Morsel:
     # Create a Morsel containing one column and one row.
     _ = variables

@@ -10,9 +10,7 @@ import threading
 
 import numpy
 from Cython.Build import cythonize
-from setuptools import Extension
-from setuptools import find_packages
-from setuptools import setup
+from setuptools import Extension, find_packages, setup
 from setuptools.command.build_ext import build_ext as build_ext_orig
 from setuptools_rust import RustExtension
 
@@ -622,6 +620,7 @@ extensions = [
         language="c++",
     ),
     make_draken_extension("vectors.date32_vector", "vectors/date32_vector.pyx"),
+    make_draken_extension("vectors._decimal_vector", "vectors/_decimal_vector.pyx"),
     make_draken_extension("vectors.timestamp_vector", "vectors/timestamp_vector.pyx"),
     make_draken_extension("morsels.morsel", "morsels/morsel.pyx"),
     make_draken_extension("storage.morsel_io", "storage/morsel_io.pyx"),

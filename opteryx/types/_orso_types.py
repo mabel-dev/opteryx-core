@@ -152,8 +152,56 @@ class OrsoTypes(Enum):
         Examples:
             OrsoTypes.from_name("INTEGER") -> (OrsoTypes.INTEGER, None, None, None, None)
         """
+        # Normalize to uppercase for simple lookup
+        upper = name.strip().upper()
+
+        # Handle compound types: array<element>, list<element>, struct<...>
+        if "<" in upper:
+            outer, rest = upper.split("<", 1)
+            outer = outer.strip()
+            inner = rest.rstrip(">").strip()
+            try:
+                outer_type = cls[outer] if outer in cls.__members__ else cls["ARRAY"]
+            except KeyError:
+                outer_type = cls.ARRAY
+            # Parse element type - map common aliases
+            _alias = {
+                "INT": "INTEGER",
+                "INT32": "INTEGER",
+                "INT64": "INTEGER",
+                "BIGINT": "INTEGER",
+                "FLOAT": "DOUBLE",
+                "FLOAT32": "DOUBLE",
+                "FLOAT64": "DOUBLE",
+                "STRING": "VARCHAR",
+                "TEXT": "VARCHAR",
+                "BOOL": "BOOLEAN",
+                "BYTES": "BLOB",
+            }
+            inner_key = _alias.get(inner, inner)
+            try:
+                element_type = cls[inner_key]
+            except KeyError:
+                element_type = None
+            return (outer_type, None, None, None, element_type)
+
+        # Map common type name aliases to canonical enum keys
+        _aliases = {
+            "INT": "INTEGER",
+            "INT32": "INTEGER",
+            "INT64": "INTEGER",
+            "BIGINT": "INTEGER",
+            "FLOAT": "DOUBLE",
+            "FLOAT32": "DOUBLE",
+            "FLOAT64": "DOUBLE",
+            "STRING": "VARCHAR",
+            "TEXT": "VARCHAR",
+            "BOOL": "BOOLEAN",
+            "BYTES": "BLOB",
+        }
+        key = _aliases.get(upper, upper)
         try:
-            return (cls[name], None, None, None, None)
+            return (cls[key], None, None, None, None)
         except KeyError:
             raise ValueError(f"Unknown OrsoType: {name}")
 

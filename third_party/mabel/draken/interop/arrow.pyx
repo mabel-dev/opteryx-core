@@ -52,6 +52,7 @@ from opteryx.compiled.draken.vectors.float64_vector cimport from_sequence as flo
 from opteryx.compiled.draken.vectors.bool_vector cimport BoolVector
 from opteryx.compiled.draken.vectors.bool_vector cimport from_sequence as bool_from_sequence
 from opteryx.compiled.draken.vectors.scalar_constructors cimport from_sequence as constant_from_sequence
+from opteryx.compiled.draken.vectors._decimal_vector cimport from_arrow as decimal_from_arrow
 
 cdef object _typed_constant_from_arrow_value(object value_type, object value, Py_ssize_t length, bint is_null):
     import pyarrow as pa
@@ -228,6 +229,8 @@ cpdef object vector_from_arrow(object array):
         if const_vec is not None:
             return const_vec
         return vector_from_arrow(pa.array(array.to_pylist(), type=pa_type.value_type))
+    if pa_type == pa.null():
+        return bool_from_arrow(pa.nulls(len(array), type=pa.bool_()))
     if pa_type.equals(pa.int64()):
         return int64_from_arrow(array)
     if pa_type.equals(pa.uint64()):
@@ -300,6 +303,8 @@ cpdef object vector_from_arrow(object array):
         return array_from_arrow(array)
     if isinstance(pa_type, pa.StructType):
         return string_from_arrow_struct(array)
+    if pa.types.is_decimal(pa_type):
+        return decimal_from_arrow(array)
 
     raise NotImplementedError(
         f"vector_from_arrow: no native Draken handler for Arrow type {pa_type!r}. "
