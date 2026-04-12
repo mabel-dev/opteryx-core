@@ -3,16 +3,16 @@
 import numpy as np
 import pyarrow as pa
 import pytest
-from opteryx.types import OrsoTypes
 
 from opteryx.expression.casts import (
-    cast_to_int,
-    cast_to_double,
-    cast_to_varchar,
-    cast_to_blob,
-    try_cast,
     cast,
+    cast_to_blob,
+    cast_to_double,
+    cast_to_int,
+    cast_to_varchar,
+    try_cast,
 )
+from opteryx.types import OrsoTypes
 
 
 class TestCastToInt:
@@ -66,6 +66,10 @@ class TestCastToDouble:
         """Cast string array to double."""
         arr = np.array(["1.5", "2.7", "3.1", None], dtype=object)
         result = cast_to_double(arr)
+        # cast_to_double now returns PyArrow array for string input
+        # Convert to Python list for comparison
+        if hasattr(result, "to_pylist"):
+            result = result.to_pylist()
         np.testing.assert_almost_equal(result[0], 1.5)
         np.testing.assert_almost_equal(result[1], 2.7)
         np.testing.assert_almost_equal(result[2], 3.1)
@@ -81,9 +85,9 @@ class TestCastToVarchar:
         arr = np.array([1, 2, 3], dtype=np.int64)
         result = cast_to_varchar(arr)
         # cast_to_varchar with int64 optimized path returns PyArrow BinaryScalars
-        assert bytes(result[0]) == b'1'
-        assert bytes(result[1]) == b'2'
-        assert bytes(result[2]) == b'3'
+        assert bytes(result[0]) == b"1"
+        assert bytes(result[1]) == b"2"
+        assert bytes(result[2]) == b"3"
 
     def test_double_to_varchar(self):
         """Cast double array to varchar."""

@@ -321,17 +321,20 @@ def cast_to_double(arr, *args):
         return arr.astype(numpy.float64)
     if numpy.issubdtype(arr.dtype, numpy.object_):
         if isinstance(arr[0], str):
-            # parse_ascii_array_to_double now returns Float64Vector, convert to numpy array
+            # parse_ascii_array_to_double returns Float64Vector
+            # Use to_arrow() to eliminate O(n) list allocation
             result = parse_ascii_array_to_double(arr)
-            return numpy.array(result.to_pylist(), dtype=numpy.float64)
+            return result.to_arrow()
         elif isinstance(arr[0], bytes):
-            # parse_byte_array_to_double now returns Float64Vector, convert to numpy array
+            # parse_byte_array_to_double returns Float64Vector
+            # Use to_arrow() to eliminate O(n) list allocation
             result = parse_byte_array_to_double(arr)
-            return numpy.array(result.to_pylist(), dtype=numpy.float64)
+            return result.to_arrow()
     if numpy.issubdtype(arr.dtype, numpy.str_):
-        # parse_ascii_array_to_double now returns Float64Vector, convert to numpy array
+        # parse_ascii_array_to_double returns Float64Vector
+        # Use to_arrow() to eliminate O(n) list allocation
         result = parse_ascii_array_to_double(arr.astype(object))
-        return numpy.array(result.to_pylist(), dtype=numpy.float64)
+        return result.to_arrow()
 
     caster = OrsoTypes.DOUBLE.parse
     return [caster(i) if i is not None else None for i in arr]
