@@ -73,7 +73,10 @@ def build_literal_node(
         value = value.as_py()
 
     if root is None:
-        root = Node(NodeType.LITERAL, schema_column=ConstantColumn(name=str(value)))
+        root = Node(
+            NodeType.LITERAL,
+            schema_column=ConstantColumn(name=str(value), type=OrsoTypes._MISSING_TYPE),
+        )
 
     if value is None:
         # Matching None has complications

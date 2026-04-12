@@ -43,7 +43,7 @@ def read(at_date=None, variables=None):
         )
         names.append(variable)
         values.append(str(variable_value))
-        types.append(variable_type)
+        types.append(variable_type.value)
         owners.append(variable_owner.name)
         visibilities.append(variable_visibility.name)
 

@@ -30,6 +30,7 @@ class VectorType(Enum):
     INTERVAL = auto()
     ARRAY = auto()
     VECTOR = auto()
+    DECIMAL = auto()  # Decimal column, int64-backed with scale metadata
 
     CONSTANT_ENCODED = auto()  # Special: constant values encoded as typed vector
     DICTIONARY_ENCODED = auto()  # Special: dictionary-encoded categorical vectors
@@ -71,6 +72,7 @@ def get_vector_type(obj) -> VectorType:
         "IntervalVector": VectorType.INTERVAL,
         "ArrayVector": VectorType.ARRAY,
         "VectorVector": VectorType.VECTOR,
+        "DecimalVector": VectorType.DECIMAL,
     }
 
     if cls_name in TYPE_MAP:

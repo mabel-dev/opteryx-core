@@ -271,6 +271,38 @@ def _constant_compare(op: str, vec, right):
     raise NotImplementedError(f"constant-encoded vector: unsupported op {op!r}")
 
 
+def _decimal_compare(op: str, vec, right):
+    """Comparison operations on DecimalVector (scalar only).
+
+    Scalar coercion (Decimal/int/float -> unscaled int64) is handled internally
+    by the Cython _coerce_scalar method, so the raw Python value is passed
+    straight through to the comparison methods.
+    """
+    from opteryx.utils.vector_types import is_scalar
+
+    # Unwrap constant-encoded right-hand vectors to their scalar value
+    if _is_constant_vector_like(right):
+        right = _constant_scalar_value(right)
+
+    if is_scalar(right):
+        if op == "Eq":
+            return vec.equals(right)
+        if op == "NotEq":
+            return vec.not_equals(right)
+        if op == "Lt":
+            return vec.less_than(right)
+        if op == "LtEq":
+            return vec.less_than_or_equals(right)
+        if op == "Gt":
+            return vec.greater_than(right)
+        if op == "GtEq":
+            return vec.greater_than_or_equals(right)
+
+    raise NotImplementedError(
+        f"DecimalVector comparison for op={op!r} with right={type(right)!r} not implemented"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Main dispatch
 # ---------------------------------------------------------------------------
@@ -434,6 +466,8 @@ def draken_compare(op: str, left, right, left_schema_type=None, right_schema_typ
         result = _constant_compare(op, left, right)
     elif vec_type == VectorType.BOOL:
         result = _bool_compare(op, left, right)
+    elif vec_type == VectorType.DECIMAL:
+        result = _decimal_compare(op, left, right)
     else:
         raise NotImplementedError(f"draken_compare: unsupported vector type {vec_type!r}")
 
