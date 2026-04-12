@@ -13,8 +13,11 @@ $planets.
 
 import datetime
 import importlib
+import logging
 import typing
 from typing import Tuple
+
+_logger = logging.getLogger(__name__)
 
 from opteryx.compiled.draken.morsels.morsel import Morsel
 from opteryx.connectors.base.base_connector import BaseConnector, BaseTable
@@ -170,7 +173,9 @@ class VirtualDataTable(BaseTable):
             )
 
         morsel = data_provider.read(at_date=kwargs.get("at_date"), variables=self.variables)
-        yield _project_morsel(morsel, columns)
+        projected = _project_morsel(morsel, columns)
+
+        yield projected
 
 
 class SampleDatasetReader:

@@ -312,6 +312,32 @@ cpdef object vector_from_arrow(object array):
     )
 
 
+cdef object _orso_type_to_arrow(object orso_type):
+    """Convert OrsoTypes enum to PyArrow type."""
+    import pyarrow as pa
+    from opteryx.types import OrsoTypes
+
+    if orso_type is None:
+        return None
+
+    # Map OrsoTypes to PyArrow types
+    type_map = {
+        OrsoTypes.NULL: pa.null(),
+        OrsoTypes.BOOLEAN: pa.bool_(),
+        OrsoTypes.INTEGER: pa.int64(),
+        OrsoTypes.DOUBLE: pa.float64(),
+        OrsoTypes.VARCHAR: pa.string(),
+        OrsoTypes.BLOB: pa.binary(),
+        OrsoTypes.DATE: pa.date32(),
+        OrsoTypes.TIMESTAMP: pa.timestamp('us'),
+        OrsoTypes.INTERVAL: pa.duration('us'),
+        OrsoTypes.DECIMAL: pa.decimal128(18, 10),
+        OrsoTypes.ARRAY: pa.list_(pa.null()),
+    }
+
+    return type_map.get(orso_type, None)
+
+
 cpdef object vector_from_sequence(object data, object dtype=None):
     """
     Create a Draken Vector from a typed memoryview or Python sequence.
@@ -321,7 +347,7 @@ cpdef object vector_from_sequence(object data, object dtype=None):
 
     Args:
         data: int64[::1], double[::1], uint8[::1] (bool), or Python sequence
-        dtype: Optional type hint (for future use)
+        dtype: Optional OrsoTypes hint for type preservation with empty sequences
 
     Returns:
         Vector: Appropriate Draken Vector subclass
@@ -364,7 +390,12 @@ cpdef object vector_from_sequence(object data, object dtype=None):
 
     # Fallback: convert to Arrow then to Vector.
     # This handles varchar, varbinary, and other complex types.
-    arrow_array = pa.array(data)
+    # Use dtype to preserve type information with empty sequences
+    arrow_type = _orso_type_to_arrow(dtype) if dtype is not None else None
+    if arrow_type is not None:
+        arrow_array = pa.array(data, type=arrow_type)
+    else:
+        arrow_array = pa.array(data)
     return vector_from_arrow(arrow_array)
 
 
