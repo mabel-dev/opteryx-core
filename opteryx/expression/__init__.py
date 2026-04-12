@@ -30,6 +30,7 @@ from opteryx.expression.operations import filter_operations
 from opteryx.expression.unary_operations import UNARY_OPERATIONS
 from opteryx.models import LogicalColumn, Node
 from opteryx.types import OrsoTypes
+from opteryx.types._datetime_conversion import date_to_int64_days, timestamp_to_int64_us
 from opteryx.utils import random_string
 
 from .formatter import (
@@ -191,98 +192,205 @@ LOGICAL_OPERATIONS: Dict[NodeType, Callable] = {
 }
 
 
-def evaluate_dnf(expressions: List[Node], table: Table) -> numpy.ndarray:
+def evaluate_dnf(expressions: List[Node], table: Table) -> list:
     num_rows = table.num_rows
-    true_indices = numpy.arange(num_rows)
+    true_indices = list(range(num_rows))
     working_table = table
 
     for i, predicate in enumerate(expressions):
         result = evaluate(predicate, working_table)
 
-        if isinstance(result, pyarrow.Array):
-            result_bool = result.to_numpy(zero_copy_only=False).astype(bool, copy=False)
+        # Convert to Python list
+        if hasattr(result, "to_pylist"):
+            result_bool = result.to_pylist()
+        elif isinstance(result, numpy.ndarray):
+            result_bool = result.tolist()
         else:
-            result_bool = numpy.asarray(result, dtype=bool)
+            result_bool = list(result)
 
-        if not result_bool.any():
-            return numpy.zeros(num_rows, dtype=bool)
+        # Convert to bool list, treating None as False for filtering
+        result_bool = [bool(v) if v is not None else False for v in result_bool]
 
-        true_indices = true_indices[result_bool]
+        if not any(result_bool):
+            return [False] * num_rows
+
+        # Filter indices where result is True
+        true_indices = [idx for idx, res in zip(true_indices, result_bool) if res]
 
         if i < len(expressions) - 1:
             working_table = table.take(true_indices)
 
-    final_result = numpy.zeros(num_rows, dtype=bool)
-    final_result[true_indices] = True
+    # Create final result list
+    final_result = [False] * num_rows
+    for idx in true_indices:
+        final_result[idx] = True
     return final_result
 
 
-def short_cut_and(root, table):
-    # Convert to NumPy arrays
-    true_indices = numpy.arange(table.num_rows)
+def _filter_indices_by_mask(indices, mask):
+    """
+    Filter indices based on a boolean mask.
 
+    Args:
+        indices: list of indices [0, 1, 2, ..., n-1]
+        mask: list of boolean values (True/False/None)
+
+    Returns:
+        list of indices where mask is True
+    """
+    return [i for i, m in zip(indices, mask) if m is True]
+
+
+def _invert_bool_mask(mask):
+    """
+    Invert a boolean mask, preserving None values.
+
+    Args:
+        mask: list of boolean values (True/False/None)
+
+    Returns:
+        list where True→False, False→True, None→None
+    """
+    result = []
+    for m in mask:
+        if m is None:
+            result.append(None)
+        else:
+            result.append(not m)
+    return result
+
+
+def _is_null_mask(values):
+    """
+    Create a null mask from values.
+
+    Args:
+        values: list of values (may contain None)
+
+    Returns:
+        list of boolean values indicating which positions are None
+    """
+    return [v is None for v in values]
+
+
+def _restore_nulls(result, null_mask):
+    """
+    Restore null values in result based on null_mask.
+
+    Args:
+        result: list of boolean values
+        null_mask: list indicating which positions were originally null
+
+    Returns:
+        list where null positions are set to None
+    """
+    if not any(null_mask):
+        return result
+
+    result_obj = [v for v in result]
+    for i, is_null in enumerate(null_mask):
+        if is_null:
+            result_obj[i] = None
+    return result_obj
+
+
+def short_cut_and(root, table):
     # Evaluate left expression
-    left_result = numpy.array(evaluate(root.left, table))
-    null_indices = compute.is_null(left_result, nan_is_null=True).to_numpy(False)
-    left_result = numpy.asarray(left_result, dtype=numpy.bool_)
+    left_result = evaluate(root.left, table)
+
+    # Convert to Python list if needed
+    if hasattr(left_result, "to_pylist"):
+        left_result = left_result.to_pylist()
+    elif isinstance(left_result, numpy.ndarray):
+        left_result = left_result.tolist()
+    else:
+        left_result = list(left_result)
+
+    # Track null positions before coercing to bool
+    null_mask = _is_null_mask(left_result)
+
+    # Convert to boolean, treating None as False for masking purposes
+    bool_result = [bool(v) if v is not None else False for v in left_result]
 
     # If all values in left_result are False, no need to evaluate the right expression
-    if not left_result.any():
-        return left_result
+    if not any(bool_result):
+        return _restore_nulls(bool_result, null_mask)
 
-    # Filter out indices where left_result is FALSE
-    subset_indices = true_indices[left_result]
+    # Find indices where left_result is True (for subset evaluation)
+    true_indices = [i for i, v in enumerate(bool_result) if v]
 
     # Create a subset table for evaluating the right expression
-    subset_table = table.take(subset_indices)
+    subset_table = table.take(true_indices)
 
     # Evaluate right expression on the subset table
-    right_result = numpy.array(evaluate(root.right, subset_table))
+    right_result = evaluate(root.right, subset_table)
 
-    # Combine results
-    left_result[subset_indices] = right_result
+    # Convert to Python list if needed
+    if hasattr(right_result, "to_pylist"):
+        right_result = right_result.to_pylist()
+    elif isinstance(right_result, numpy.ndarray):
+        right_result = right_result.tolist()
+    else:
+        right_result = list(right_result)
 
-    # handle nulls
-    if null_indices.any():
-        left_result = left_result.astype(object)
-        numpy.place(left_result, null_indices, [None])
-        return left_result
+    # Combine results: copy bool_result and update true_indices positions
+    combined = [v for v in bool_result]
+    for i, idx in enumerate(true_indices):
+        combined[idx] = right_result[i]
 
-    return left_result
+    # Restore nulls from left operand
+    return _restore_nulls(combined, null_mask)
 
 
 def short_cut_or(root, table):
-    # Assuming table.num_rows returns the number of rows in the table
-    false_indices = numpy.arange(table.num_rows)
-
     # Evaluate left expression
-    left_result = numpy.array(evaluate(root.left, table))
-    null_indices = compute.is_null(left_result, nan_is_null=True).to_numpy(False)
-    left_result = numpy.asarray(left_result, dtype=numpy.bool_)
+    left_result = evaluate(root.left, table)
 
-    # Filter out indices where left_result is TRUE
-    subset_indices = false_indices[~left_result]
+    # Convert to Python list if needed
+    if hasattr(left_result, "to_pylist"):
+        left_result = left_result.to_pylist()
+    elif isinstance(left_result, numpy.ndarray):
+        left_result = left_result.tolist()
+    else:
+        left_result = list(left_result)
 
-    if subset_indices.size == 0:
-        return left_result
+    # Track null positions before coercing to bool
+    null_mask = _is_null_mask(left_result)
+
+    # Convert to boolean, treating None as False for masking purposes
+    bool_result = [bool(v) if v is not None else False for v in left_result]
+
+    # If all values in left_result are True, short-circuit (no need to evaluate right)
+    if all(bool_result):
+        return _restore_nulls(bool_result, null_mask)
+
+    # Find indices where left_result is False (need to evaluate right)
+    false_indices = [i for i, v in enumerate(bool_result) if not v]
+
+    if not false_indices:
+        return _restore_nulls(bool_result, null_mask)
 
     # Create a subset table for evaluating the right expression
-    subset_table = table.take(subset_indices)
+    subset_table = table.take(false_indices)
 
     # Evaluate right expression on the subset table
-    right_result = numpy.array(evaluate(root.right, subset_table), dtype=numpy.bool_)
+    right_result = evaluate(root.right, subset_table)
 
-    # Combine results
-    # Update left_result with the right_result where left_result was False
-    left_result[subset_indices] = left_result[subset_indices] | right_result
+    # Convert to Python list if needed
+    if hasattr(right_result, "to_pylist"):
+        right_result = right_result.to_pylist()
+    elif isinstance(right_result, numpy.ndarray):
+        right_result = right_result.tolist()
+    else:
+        right_result = list(right_result)
 
-    # handle nulls
-    if null_indices.any():
-        left_result = left_result.astype(object)
-        numpy.place(left_result, null_indices, [None])
-        return left_result
+    # Combine results: copy bool_result and update false_indices positions with OR logic
+    combined = [v for v in bool_result]
+    for i, idx in enumerate(false_indices):
+        combined[idx] = bool_result[idx] or right_result[i]
 
-    return left_result
+    # Restore nulls from left operand
+    return _restore_nulls(combined, null_mask)
 
 
 def prioritize_evaluation(expressions):
@@ -321,49 +429,26 @@ def _inner_evaluate(root: Node, table: Table):
         literal_type = root.type
         if literal_type in (OrsoTypes.ARRAY, OrsoTypes.VECTOR):
             # creating ARRAY/VECTOR columns is expensive, so we don't create one full length
-            array_literal = numpy.empty(1, dtype=object)
-            if isinstance(root.value, (list, tuple)):
-                array_literal[0] = numpy.asarray(root.value, dtype=object)
-            else:
-                array_literal[0] = root.value
-            return array_literal
+            return [root.value]
         if literal_type == OrsoTypes.VARCHAR:
-            return numpy.array([root.value] * table.num_rows, dtype=numpy.str_)
+            return [root.value] * table.num_rows
         if literal_type == OrsoTypes.BLOB:
-            return numpy.array([root.value] * table.num_rows, dtype=numpy.bytes_)
+            return [root.value] * table.num_rows
         if literal_type == OrsoTypes.INTERVAL:
             return pyarrow.array([root.value] * table.num_rows)
         if literal_type == OrsoTypes.DATE and isinstance(root.value, (int, numpy.integer)):
-            value = numpy.datetime64(
-                datetime.date(1970, 1, 1) + datetime.timedelta(days=int(root.value)), "D"
-            )
-            return numpy.full(shape=table.num_rows, fill_value=value, dtype="datetime64[D]")
+            return [int(root.value)] * table.num_rows
         if literal_type == OrsoTypes.DATE and isinstance(root.value, datetime.date):
-            value = numpy.datetime64(root.value, "D")
-            return numpy.full(shape=table.num_rows, fill_value=value, dtype="datetime64[D]")
+            return [date_to_int64_days(root.value)] * table.num_rows
         if literal_type == OrsoTypes.TIMESTAMP and isinstance(root.value, (int, numpy.integer)):
-            ivalue = int(root.value)
-            if abs(ivalue) < 100_000_000_000 and ivalue % 1_000_000 == 0:
-                dt = datetime.datetime(1970, 1, 1) + datetime.timedelta(days=ivalue // 1_000_000)
-                value = numpy.datetime64(dt, "us")
-            else:
-                value = numpy.datetime64(ivalue, "us")
-            return numpy.full(shape=table.num_rows, fill_value=value, dtype="datetime64[us]")
+            return [int(root.value)] * table.num_rows
         if literal_type == OrsoTypes.TIMESTAMP and isinstance(root.value, datetime.datetime):
-            value = numpy.datetime64(root.value, "us")
-            return numpy.full(shape=table.num_rows, fill_value=value, dtype="datetime64[us]")
+            return [timestamp_to_int64_us(root.value)] * table.num_rows
         if literal_type == OrsoTypes.TIMESTAMP and isinstance(root.value, datetime.date):
-            value = numpy.datetime64(
-                datetime.datetime(root.value.year, root.value.month, root.value.day), "us"
-            )
-            return numpy.full(shape=table.num_rows, fill_value=value, dtype="datetime64[us]")
+            return [timestamp_to_int64_us(root.value)] * table.num_rows
         if isinstance(literal_type, OrsoTypes):
-            literal_type = literal_type.numpy_dtype
-        return numpy.full(
-            shape=table.num_rows,
-            fill_value=root.value,
-            dtype=literal_type,
-        )  # type: ignore
+            literal_type = literal_type.native_type
+        return [root.value] * table.num_rows
 
     # BOOLEAN OPERATORS
     if node_type & LOGICAL_TYPE == LOGICAL_TYPE:  # type: ignore
@@ -519,7 +604,7 @@ def _inner_evaluate(root: Node, table: Table):
                     "LtEq": left_value <= right_value,
                     "GtEq": left_value >= right_value,
                 }[root.value]
-                return numpy.full(table.num_rows, _cmp, dtype=numpy.bool_)
+                return [_cmp] * table.num_rows
 
             right = None
             left = None
@@ -569,7 +654,7 @@ def _inner_evaluate(root: Node, table: Table):
             )
             return result
         if node_type == NodeType.WILDCARD:
-            return numpy.full(table.num_rows, "*", dtype=numpy.str_)
+            return ["*"] * table.num_rows
         if node_type == NodeType.SUBQUERY:
             # we should have a query plan here
             sub = root.value.execute()
@@ -845,6 +930,6 @@ def is_mask(new_column, statement, table):
 
 def create_mask(column, num_rows):
     """Create a boolean mask based on the given column."""
-    bool_list = numpy.full(num_rows, False)
+    bool_list = [False] * num_rows
     bool_list[column] = True
     return bool_list

@@ -19,10 +19,7 @@ SQL semantics (SQL-92 E021-11):
 
 from libc.stdint cimport int32_t, int64_t, uint8_t
 from libc.string cimport memchr, memcmp
-
-import numpy
-cimport numpy
-numpy.import_array()
+from libc.stdlib cimport malloc, free
 
 from opteryx.compiled.draken.vectors.string_vector cimport StringVector
 from opteryx.compiled.draken.vectors.int64_vector cimport Int64Vector, from_sequence as int64_from_sequence
@@ -94,6 +91,8 @@ cpdef Int64Vector vector_position(StringVector haystack, object needle):
     cdef bytes needle_scalar = None
     cdef const char* ned_data
     cdef size_t ned_len
+    cdef int64_t* result_ptr
+    cdef int64_t[::1] result_view
 
     if not needle_is_vec:
         if isinstance(needle, bytes):
@@ -101,34 +100,41 @@ cpdef Int64Vector vector_position(StringVector haystack, object needle):
         else:
             needle_scalar = str(needle).encode("utf-8")
 
-    cdef numpy.ndarray[int64_t, ndim=1] result = numpy.zeros(n, dtype=numpy.int64)
-    cdef int64_t[::1] result_view = result
+    # Allocate result buffer with malloc instead of numpy.zeros
+    result_ptr = <int64_t*>malloc(n * sizeof(int64_t))
+    if result_ptr == NULL:
+        raise MemoryError("Failed to allocate memory for result array")
 
-    if needle_is_vec:
-        for i in range(n):
-            hay_row = string_vec_get_at(haystack, i)
-            if hay_row.is_null:
-                result_view[i] = 0
-                continue
-            ned_row = string_vec_get_at(<StringVector>needle, i)
-            if ned_row.is_null:
-                result_view[i] = 0
-                continue
-            result_view[i] = _find_position(
-                hay_row.data, <size_t>hay_row.length,
-                ned_row.data, <size_t>ned_row.length,
-            )
-    else:
-        ned_data = <const char*>needle_scalar
-        ned_len = <size_t>len(needle_scalar)
-        for i in range(n):
-            hay_row = string_vec_get_at(haystack, i)
-            if hay_row.is_null:
-                result_view[i] = 0
-                continue
-            result_view[i] = _find_position(
-                hay_row.data, <size_t>hay_row.length,
-                ned_data, ned_len,
-            )
+    try:
+        result_view = <int64_t[:n]>result_ptr
 
-    return int64_from_sequence(result_view)
+        if needle_is_vec:
+            for i in range(n):
+                hay_row = string_vec_get_at(haystack, i)
+                if hay_row.is_null:
+                    result_view[i] = 0
+                    continue
+                ned_row = string_vec_get_at(<StringVector>needle, i)
+                if ned_row.is_null:
+                    result_view[i] = 0
+                    continue
+                result_view[i] = _find_position(
+                    hay_row.data, <size_t>hay_row.length,
+                    ned_row.data, <size_t>ned_row.length,
+                )
+        else:
+            ned_data = <const char*>needle_scalar
+            ned_len = <size_t>len(needle_scalar)
+            for i in range(n):
+                hay_row = string_vec_get_at(haystack, i)
+                if hay_row.is_null:
+                    result_view[i] = 0
+                    continue
+                result_view[i] = _find_position(
+                    hay_row.data, <size_t>hay_row.length,
+                    ned_data, ned_len,
+                )
+
+        return int64_from_sequence(result_view)
+    finally:
+        free(result_ptr)

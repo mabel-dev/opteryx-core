@@ -741,6 +741,36 @@ cdef class StringVector(Vector):
                 count += 1
         return count
 
+    cpdef int8_t[::1] is_null(self):
+        """
+        Return a memoryview of int8_t, where each element is 1 if the value is null, 0 otherwise.
+        """
+        cdef DrakenVarBuffer* ptr = self.ptr
+        cdef Py_ssize_t i, n = ptr.length
+        cdef int8_t* buf = <int8_t*> PyMem_Malloc(n)
+        cdef uint8_t byte, bit
+
+        if buf == NULL:
+            raise MemoryError()
+
+        if self._has_const:
+            for i in range(n):
+                buf[i] = 1 if self._const_is_null else 0
+            return <int8_t[:n]> buf
+
+        if ptr.null_bitmap == NULL:
+            # No nulls — fill with 0
+            for i in range(n):
+                buf[i] = 0
+        else:
+            # Extract null bits — 1 means valid, so invert for null
+            for i in range(n):
+                byte = ptr.null_bitmap[i >> 3]
+                bit = (byte >> (i & 7)) & 1
+                buf[i] = 0 if bit else 1
+
+        return <int8_t[:n]> buf
+
     # Optimized equality check using SIMD-friendly operations
     cpdef BoolVector equals(self, bytes value):
         """

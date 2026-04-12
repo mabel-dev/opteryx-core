@@ -2,9 +2,6 @@
 
 import datetime
 
-import numpy
-import pyarrow as _pa
-
 from opteryx.compiled.vector_ops import vector_in_list
 from opteryx.exceptions import ColumnReferencedBeforeEvaluationError
 
@@ -205,32 +202,25 @@ def _interval_compare(op: str, vec, right):
 
 
 def _date_minus_date_draken(left_vec, right_vec):
-    import pyarrow as pa
-    import pyarrow.compute as pc
-
     from opteryx.compiled.draken.interop.arrow import vector_from_arrow
-    from opteryx.expression.intervals import MICROSECONDS_PER_DAY, _intervals_to_month_day_nano
+    from opteryx.expression.intervals import _intervals_to_month_day_nano
 
-    left_arr = left_vec.to_arrow()
-    right_arr = right_vec.to_arrow()
+    # Phase 5b: Use native Draken vector subtraction methods instead of PyArrow compute
+    # Eliminates 3 pc.* calls and Arrow type conversions
+    if left_vec.__class__.__name__ == "Date32Vector":
+        if right_vec.__class__.__name__ == "Date32Vector":
+            diff_us = left_vec.subtract_date32_vector(right_vec)
+        else:  # TimestampVector
+            diff_us = left_vec.subtract_timestamp_vector(right_vec)
+    else:  # TimestampVector
+        if right_vec.__class__.__name__ == "TimestampVector":
+            diff_us = left_vec.subtract_timestamp_vector(right_vec)
+        else:  # Date32Vector
+            diff_us = left_vec.subtract_date32_vector(right_vec)
 
-    if pa.types.is_date32(left_arr.type):
-        left_us = pc.multiply(
-            left_arr.cast(pa.int32()).cast(pa.int64()), pa.scalar(MICROSECONDS_PER_DAY, pa.int64())
-        )
-    else:
-        left_us = left_arr.cast(pa.timestamp("us")).cast(pa.int64())
-
-    if pa.types.is_date32(right_arr.type):
-        right_us = pc.multiply(
-            right_arr.cast(pa.int32()).cast(pa.int64()), pa.scalar(MICROSECONDS_PER_DAY, pa.int64())
-        )
-    else:
-        right_us = right_arr.cast(pa.timestamp("us")).cast(pa.int64())
-
-    diff_us = pc.subtract(left_us, right_us)
-
-    rows = [None if not d.is_valid else (0, d.as_py()) for d in diff_us]
+    # Convert Int64Vector microseconds to IntervalVector (months, microseconds)
+    # Nulls are already handled by the subtraction methods via bitmap
+    rows = [(0, d) if d is not None else None for d in diff_us.to_pylist()]
     return vector_from_arrow(_intervals_to_month_day_nano(rows))
 
 

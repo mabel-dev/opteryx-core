@@ -50,6 +50,7 @@ cdef class Float64Vector(Vector):
     cpdef BoolVector in_list(self, object value_set)
 
     cpdef int8_t[::1] is_null(self)
+    cpdef int8_t[::1] is_null_with_nan(self)
 
     cpdef list to_pylist(self)
     #cpdef double __getitem__(self, Py_ssize_t i)

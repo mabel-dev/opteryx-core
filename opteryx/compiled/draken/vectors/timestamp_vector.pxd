@@ -6,6 +6,8 @@ from libc.stdint cimport uint64_t, uint8_t
 from opteryx.compiled.draken.core.buffers cimport ConstAccessor, DictAccessor, DrakenFixedBuffer, DrakenVarBuffer
 from opteryx.compiled.draken.vectors.vector cimport Vector
 from opteryx.compiled.draken.vectors.bool_vector cimport BoolVector
+from opteryx.compiled.draken.vectors.int64_vector cimport Int64Vector
+from opteryx.compiled.draken.vectors.date32_vector cimport Date32Vector
 
 cdef class TimestampVector(Vector):
     cdef object _arrow_data_buf
@@ -55,6 +57,10 @@ cdef class TimestampVector(Vector):
     cpdef int64_t min(self)
     cpdef int64_t max(self)
     cpdef int64_t sum(self)
+
+    # Temporal arithmetic operations (Phase 5b)
+    cpdef Int64Vector subtract_timestamp_vector(self, TimestampVector other)
+    cpdef Int64Vector subtract_date32_vector(self, Date32Vector other)
 
     cdef void hash_into(self, uint64_t[::1] out_buf, Py_ssize_t offset=*) except *
 

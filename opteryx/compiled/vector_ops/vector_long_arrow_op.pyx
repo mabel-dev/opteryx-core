@@ -7,10 +7,8 @@
 # cython: boundscheck=False
 
 import numpy
-cimport numpy
-numpy.import_array()
 
-cpdef numpy.ndarray vector_long_arrow_op(numpy.ndarray arr, object key):
+cpdef object vector_long_arrow_op(object arr, object key):
     """
     Fetch values from a list of dictionaries based on a specified key.
 
@@ -24,19 +22,18 @@ cpdef numpy.ndarray vector_long_arrow_op(numpy.ndarray arr, object key):
         numpy.ndarray: An array containing the values associated with the key in each dictionary
                      or None where the key does not exist.
     """
-    # Determine the number of items in the input list
-    cdef Py_ssize_t n = len(arr)
-    # Prepare an object array to store the results
-    cdef numpy.ndarray result = numpy.empty(n, dtype=object)
+    # Use a Python list for efficient accumulation (avoids numpy.empty allocation)
+    cdef list result = []
 
     cdef Py_ssize_t i
     # Iterate over the list of dictionaries
-    for i in range(n):
+    for i in range(len(arr)):
         # Check if the key exists in the dictionary
         if key in arr[i]:
-            result[i] = str(arr[i][key])
+            result.append(str(arr[i][key]))
         else:
-            # Assign None if the key does not exist
-            result[i] = None
+            # Append None if the key does not exist
+            result.append(None)
 
-    return result
+    # Convert list to numpy array (single allocation at cold path)
+    return numpy.asarray(result, dtype=object)

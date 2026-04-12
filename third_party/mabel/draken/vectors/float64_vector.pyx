@@ -719,6 +719,44 @@ cdef class Float64Vector(Vector):
 
         return <int8_t[:n]> buf
 
+    cpdef int8_t[::1] is_null_with_nan(self):
+        """
+        Return a memoryview of int8_t, where each element is 1 if the value is null OR NaN, 0 otherwise.
+        """
+        cdef DrakenFixedBuffer* ptr = self.ptr
+        cdef Py_ssize_t i, n = ptr.length
+        cdef int8_t* buf = <int8_t*> PyMem_Malloc(n)
+        cdef uint8_t byte, bit
+        cdef double* data
+
+        if buf == NULL:
+            raise MemoryError()
+
+        if self._has_const:
+            for i in range(n):
+                buf[i] = 1 if self._const_is_null else 0
+            return <int8_t[:n]> buf
+
+        data = <double*> ptr.data
+
+        if ptr.null_bitmap == NULL:
+            # No explicit nulls, but check for NaN
+            for i in range(n):
+                buf[i] = 1 if isnan(data[i]) else 0
+        else:
+            # Check both null bitmap and NaN
+            for i in range(n):
+                byte = ptr.null_bitmap[i >> 3]
+                bit = (byte >> (i & 7)) & 1
+                if bit == 0:  # null bitmap says invalid
+                    buf[i] = 1
+                elif isnan(data[i]):  # value is NaN
+                    buf[i] = 1
+                else:
+                    buf[i] = 0
+
+        return <int8_t[:n]> buf
+
     @property
     def null_count(self):
         cdef DrakenFixedBuffer* ptr = self.ptr
