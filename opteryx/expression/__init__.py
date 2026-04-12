@@ -176,6 +176,11 @@ def _typed_constant_vector(value, length: int, schema_column):
             is_time64=is_time64,
         )
 
+    if target_type == OrsoTypes.DECIMAL:
+        from opteryx.compiled.draken.vectors._decimal_vector import DecimalVector
+
+        return DecimalVector.from_constant(None if is_null else value, length, is_null=is_null)
+
     return None
 
 

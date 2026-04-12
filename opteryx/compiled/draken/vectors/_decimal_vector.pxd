@@ -27,8 +27,15 @@ cdef class DecimalVector(Vector):
     cdef int8_t _precision
     cdef int8_t _scale
 
+    # Constant-encoding support: when _has_const is True the buffer is
+    # length-only; all comparison/hash/compress methods use _const_value
+    # or treat every row as null when _const_is_null is True.
+    cdef bint _has_const
+    cdef bint _const_is_null
+    cdef int64_t _const_value   # unscaled int64 at _scale
+
     # ConstAccessor struct kept for the base-class protocol (always returns NULL
-    # since DecimalVector has no constant-encoding path).
+    # since DecimalVector has no constant-encoding path via DictAccessor).
     cdef ConstAccessor _const_accessor
 
     # ------------------------------------------------------------------
@@ -52,9 +59,10 @@ cdef class DecimalVector(Vector):
     cdef int64_t _coerce_scalar(self, object scalar)
     cdef bint _compare_decimal_values(self, int64_t left, int64_t right, int op) nogil
     cdef BoolVector _compare_scalar(self, int op, int64_t rhs)
+    cdef BoolVector _compare_vector(self, DecimalVector other, int op)
 
     # ------------------------------------------------------------------
-    # Public comparison API (scalar only)
+    # Public comparison API — scalar
     # ------------------------------------------------------------------
 
     cpdef BoolVector equals(self, object scalar)
@@ -65,17 +73,49 @@ cdef class DecimalVector(Vector):
     cpdef BoolVector greater_than_or_equals(self, object scalar)
 
     # ------------------------------------------------------------------
+    # Public comparison API — vector-vector
+    # ------------------------------------------------------------------
+
+    cpdef BoolVector equals_vector(self, DecimalVector other)
+    cpdef BoolVector not_equals_vector(self, DecimalVector other)
+    cpdef BoolVector less_than_vector(self, DecimalVector other)
+    cpdef BoolVector less_than_or_equals_vector(self, DecimalVector other)
+    cpdef BoolVector greater_than_vector(self, DecimalVector other)
+    cpdef BoolVector greater_than_or_equals_vector(self, DecimalVector other)
+
+    # ------------------------------------------------------------------
+    # Set membership
+    # ------------------------------------------------------------------
+
+    cpdef BoolVector in_list(self, object value_set)
+
+    # ------------------------------------------------------------------
+    # Null predicate
+    # ------------------------------------------------------------------
+
+    cpdef object is_null(self)
+
+    # ------------------------------------------------------------------
+    # Aggregation
+    # ------------------------------------------------------------------
+
+    cpdef object sum(self)
+    cpdef object min(self)
+    cpdef object max(self)
+
+    # ------------------------------------------------------------------
     # Conversion
     # ------------------------------------------------------------------
 
     cpdef list to_pylist(self)
 
     # ------------------------------------------------------------------
-    # Hashing (overrides Vector base; must be declared to enable cimport
-    # of the concrete implementation from other Cython modules)
+    # Hashing and compression (overrides Vector base; declared to enable
+    # cimport of the concrete implementation from other Cython modules)
     # ------------------------------------------------------------------
 
     cdef void hash_into(self, uint64_t[::1] out_buf, Py_ssize_t offset=*) except *
+    cdef void compress_into(self, int64_t[::1] out_buf, Py_ssize_t offset=*) except *
 
 
 # Module-level factory exposed for cimport by arrow.pyx and other consumers
