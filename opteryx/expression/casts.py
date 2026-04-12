@@ -10,6 +10,7 @@ import inspect
 
 import numpy
 import pyarrow
+
 from opteryx.types import OrsoTypes
 
 
@@ -239,7 +240,9 @@ def _cast_to_binary_representation(
         arr = arr.to_numpy(False)
 
     if arr.dtype == numpy.float64:
-        return format_double_func(arr)
+        # format_double_func now returns StringVector, convert to numpy object array
+        result = format_double_func(arr)
+        return numpy.array(result.to_pylist(), dtype=object)
 
     if arr.dtype == numpy.int64:
         from opteryx.compiled.draken.interop.arrow import vector_from_arrow
@@ -318,11 +321,17 @@ def cast_to_double(arr, *args):
         return arr.astype(numpy.float64)
     if numpy.issubdtype(arr.dtype, numpy.object_):
         if isinstance(arr[0], str):
-            return parse_ascii_array_to_double(arr)
+            # parse_ascii_array_to_double now returns Float64Vector, convert to numpy array
+            result = parse_ascii_array_to_double(arr)
+            return numpy.array(result.to_pylist(), dtype=numpy.float64)
         elif isinstance(arr[0], bytes):
-            return parse_byte_array_to_double(arr)
+            # parse_byte_array_to_double now returns Float64Vector, convert to numpy array
+            result = parse_byte_array_to_double(arr)
+            return numpy.array(result.to_pylist(), dtype=numpy.float64)
     if numpy.issubdtype(arr.dtype, numpy.str_):
-        return parse_ascii_array_to_double(arr.astype(object))
+        # parse_ascii_array_to_double now returns Float64Vector, convert to numpy array
+        result = parse_ascii_array_to_double(arr.astype(object))
+        return numpy.array(result.to_pylist(), dtype=numpy.float64)
 
     caster = OrsoTypes.DOUBLE.parse
     return [caster(i) if i is not None else None for i in arr]

@@ -11,7 +11,7 @@
 from libc.stdint cimport int64_t, uint64_t
 from libc.stdlib cimport malloc, free
 
-from opteryx.compiled.structures.buffers cimport IntBuffer
+from opteryx.compiled.structures.buffers cimport IntBuffer, Int32Buffer
 from opteryx.compiled.table_ops.hash_ops cimport compute_row_hashes
 from opteryx.compiled.table_ops.null_avoidant_ops cimport non_null_row_indices
 
@@ -33,7 +33,7 @@ cpdef tuple nested_loop_join(left_relation, right_relation, list left_columns, l
     cdef IntBuffer right_indexes = IntBuffer()
 
     if nl == 0 or nr == 0:
-        return left_indexes.to_numpy(), right_indexes.to_numpy()
+        return left_indexes.to_int32_buffer(), right_indexes.to_int32_buffer()
 
     cdef uint64_t* left_raw_hashes = <uint64_t*>malloc(left_relation.num_rows * sizeof(uint64_t))
     cdef uint64_t* right_raw_hashes = <uint64_t*>malloc(right_relation.num_rows * sizeof(uint64_t))
@@ -74,4 +74,4 @@ cpdef tuple nested_loop_join(left_relation, right_relation, list left_columns, l
     free(left_raw_hashes)
     free(right_raw_hashes)
 
-    return left_indexes.to_numpy(), right_indexes.to_numpy()
+    return left_indexes.to_int32_buffer(), right_indexes.to_int32_buffer()

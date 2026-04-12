@@ -6,11 +6,11 @@
 # cython: wraparound=False
 # cython: boundscheck=False
 
-import numpy
-cimport numpy
-
 from libc.stdint cimport uint32_t
 from libc.math cimport isnan, isinf, isfinite
+
+from opteryx.compiled.draken.vectors.string_vector cimport StringVector, StringVectorBuilder
+
 
 cdef extern from "ryu.h":
     int d2fixed_buffered_n(double d, uint32_t precision, char* result)
@@ -60,30 +60,55 @@ cdef inline bytes safe_double_to_bytes(double d, uint32_t precision):
     length = trim_trailing_zeros(buf, length)
     return <bytes>buf[:length]
 
-cpdef numpy.ndarray[object] format_double_array_bytes(numpy.ndarray[numpy.float64_t, ndim=1] arr, uint32_t precision=6):
+cpdef StringVector format_double_array_bytes(const double[::1] arr, uint32_t precision=6):
     """
-    Convert a NumPy array of float64s to a NumPy object array of bytes.
-    """
-    cdef:
-        Py_ssize_t i, n = arr.shape[0]
-        numpy.ndarray[object] result = numpy.empty(n, dtype=object)
-        object[:] result_view = result
+    Convert an array of float64s to a StringVector of bytes.
 
-    for i in range(n):
-        result_view[i] = safe_double_to_bytes(arr[i], precision)
+    Args:
+        arr: C-contiguous memoryview of float64 values
+        precision: Decimal precision for formatting
 
-    return result
-
-cpdef numpy.ndarray[object] format_double_array_ascii(numpy.ndarray[numpy.float64_t, ndim=1] arr, uint32_t precision=6):
-    """
-    Convert a NumPy array of float64s to a NumPy object array of Python strings.
+    Returns:
+        StringVector containing formatted byte strings
     """
     cdef:
         Py_ssize_t i, n = arr.shape[0]
-        numpy.ndarray[object] result = numpy.empty(n, dtype=object)
-        object[:] result_view = result
+        StringVectorBuilder builder = StringVectorBuilder(n)
+        bytes formatted
+        char* c_str
+        Py_ssize_t byte_len
 
     for i in range(n):
-        result_view[i] = safe_double_to_bytes(arr[i], precision).decode("ascii")
+        formatted = safe_double_to_bytes(arr[i], precision)
+        c_str = formatted
+        byte_len = len(formatted)
+        builder.append_bytes(c_str, byte_len)
 
-    return result
+    return builder.finish()
+
+cpdef StringVector format_double_array_ascii(const double[::1] arr, uint32_t precision=6):
+    """
+    Convert an array of float64s to a StringVector of Python strings (ASCII encoded as bytes internally).
+
+    Args:
+        arr: C-contiguous memoryview of float64 values
+        precision: Decimal precision for formatting
+
+    Returns:
+        StringVector containing formatted ASCII strings
+    """
+    cdef:
+        Py_ssize_t i, n = arr.shape[0]
+        StringVectorBuilder builder = StringVectorBuilder(n)
+        bytes formatted
+        char* c_str
+        Py_ssize_t byte_len
+
+    for i in range(n):
+        formatted = safe_double_to_bytes(arr[i], precision)
+        # For ASCII, the bytes are already the ASCII representation
+        c_str = formatted
+        byte_len = len(formatted)
+        builder.append_bytes(c_str, byte_len)
+
+    return builder.finish()

@@ -128,6 +128,25 @@ cdef class IntBuffer:
             memcpy(arr.data, self.c_buffer.data(), n * sizeof(int64_t))
         return arr
 
+    cpdef Int32Buffer to_int32_buffer(self):
+        """Convert int64 buffer to int32 buffer with range validation.
+
+        Raises OverflowError if any value is outside the int32 range.
+        """
+        cdef size_t n = self.c_buffer.size()
+        cdef const int64_t* data = self.c_buffer.data()
+        cdef Int32Buffer result = Int32Buffer(n)
+        cdef size_t i
+        cdef int64_t val
+
+        for i in range(n):
+            val = data[i]
+            if val < -2147483648 or val > 2147483647:
+                raise OverflowError(f"Value {val} at index {i} is out of int32 range [-2147483648, 2147483647]")
+            result.append(<int32_t>val)
+
+        return result
+
     cpdef const int64_t[::1] get_buffer(self):
         """Get a read-only memoryview of the buffer."""
         cdef size_t n = self.c_buffer.size()

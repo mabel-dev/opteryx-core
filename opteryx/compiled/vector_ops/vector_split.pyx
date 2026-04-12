@@ -194,12 +194,28 @@ cpdef object vector_split(StringVector vec, char delimiter):
     # Constant encoding: split once, replicate n times
     if vec._has_const:
         if vec._const_is_null or vec._const_value == NULL:
-            return pa.array([None] * n, type=pa.list_(pa.binary()))
+            return pa.nulls(n, type=pa.list_(pa.binary()))
         const_bytes = PyBytes_FromStringAndSize(
             <const char*>vec._const_value.data, vec._const_value.length
         )
         parts = const_bytes.split(bytes([delimiter]))
-        return pa.array([parts] * n, type=pa.list_(pa.binary()))
+
+        # Efficient constant replication using buffer-based approach
+        # Instead of [parts] * n which allocates large Python list,
+        # build child array once and replicate via offsets
+        import numpy as np
+        const_parts_array = pa.array(parts, type=pa.binary())
+        num_parts = len(parts)
+
+        # Create offsets: [0, num_parts, 2*num_parts, ..., n*num_parts]
+        # This efficiently replicates the child array n times without list intermediate
+        list_offsets = np.arange(0, (n + 1) * num_parts, num_parts, dtype=np.int32)
+
+        return pa.Array.from_buffers(
+            pa.list_(pa.binary()), n,
+            [None, pa.py_buffer(list_offsets)],
+            children=[const_parts_array]
+        )
 
     # Dictionary encoding: process per row via to_pylist (rare path)
     if vec._encoding == DRAKEN_ENCODING_DICTIONARY:

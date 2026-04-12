@@ -22,7 +22,7 @@ from opteryx.compiled.joins import build_side_hash_map
 from opteryx.compiled.joins import probe_side_hash_map
 from opteryx.compiled.joins import right_join
 from opteryx.compiled.structures.bloom_filter import create_bloom_filter
-from opteryx.compiled.structures.buffers import IntBuffer
+from opteryx.compiled.structures.buffers import IntBuffer, Int32Buffer
 from opteryx.compiled.structures.hash_table import HashTable
 from opteryx.models import QueryProperties
 from opteryx.utils.arrow import align_tables
@@ -98,8 +98,8 @@ def left_join(
         yield align_tables(
             right_relation,
             left_relation,
-            right_indexes.to_numpy(),
-            left_indexes.to_numpy(),
+            right_indexes.to_int32_buffer(),
+            left_indexes.to_int32_buffer(),
         )
 
     # Emit unmatched left rows using null-filled right columns

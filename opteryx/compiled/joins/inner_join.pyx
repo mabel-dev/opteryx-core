@@ -6,9 +6,7 @@
 # cython: wraparound=False
 # cython: boundscheck=False
 
-import numpy
-cimport numpy
-numpy.import_array()
+
 
 from libc.stdint cimport int64_t, uint64_t
 from libc.stddef cimport size_t
@@ -23,7 +21,7 @@ from opteryx.third_party.abseil.containers cimport (
     IdentityHash,
     flat_hash_map,
 )
-from opteryx.compiled.structures.buffers cimport CIntBuffer, IntBuffer
+from opteryx.compiled.structures.buffers cimport CIntBuffer, IntBuffer, Int32Buffer
 from opteryx.compiled.table_ops.hash_ops cimport compute_row_hashes
 from opteryx.compiled.table_ops.null_avoidant_ops cimport non_null_row_indices
 
@@ -66,7 +64,7 @@ cpdef tuple inner_join(object right_relation, list join_columns, FlatHashMap lef
         last_candidate_rows = candidate_count
         last_result_rows = 0
         last_materialize_time_ns = 0
-        return left_indexes.to_numpy(), right_indexes.to_numpy()
+        return left_indexes.to_int32_buffer(), right_indexes.to_int32_buffer()
 
     cdef uint64_t* raw_hashes = <uint64_t*>malloc(num_rows * sizeof(uint64_t))
     if raw_hashes == NULL:
@@ -99,13 +97,13 @@ cpdef tuple inner_join(object right_relation, list join_columns, FlatHashMap lef
 
     # Return matched row indices from both sides
     cdef long long t_before_numpy = perf_counter_ns()
-    cdef numpy.ndarray[int64_t, ndim=1] left_np = left_indexes.to_numpy()
-    cdef numpy.ndarray[int64_t, ndim=1] right_np = right_indexes.to_numpy()
+    cdef Int32Buffer left_int32 = left_indexes.to_int32_buffer()
+    cdef Int32Buffer right_int32 = right_indexes.to_int32_buffer()
     cdef long long t_after_numpy = perf_counter_ns()
-    last_result_rows = left_np.shape[0]
+    last_result_rows = left_int32.size()
     last_materialize_time_ns = t_after_numpy - t_before_numpy
 
-    return left_np, right_np
+    return left_int32, right_int32
 
 
 cpdef tuple get_last_inner_join_metrics():
@@ -198,7 +196,7 @@ cpdef tuple inner_join_carchar(object right_relation, list join_columns, object 
         last_candidate_rows = candidate_count
         last_result_rows = 0
         last_materialize_time_ns = 0
-        return left_indexes.to_numpy(), right_indexes.to_numpy()
+        return left_indexes.to_int32_buffer(), right_indexes.to_int32_buffer()
 
     cdef uint64_t* raw_hashes = <uint64_t*>malloc(num_rows * sizeof(uint64_t))
     if raw_hashes == NULL:

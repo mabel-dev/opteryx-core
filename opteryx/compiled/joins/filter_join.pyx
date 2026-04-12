@@ -11,7 +11,7 @@ from libc.stdint cimport int64_t, uint64_t
 from libc.stdlib cimport malloc, free
 from opteryx.compiled.table_ops.hash_ops cimport compute_row_hashes
 from opteryx.compiled.structures.carchar_set cimport CarcharSetWrapper
-from opteryx.compiled.structures.buffers cimport IntBuffer
+from opteryx.compiled.structures.buffers cimport IntBuffer, Int32Buffer
 
 
 cpdef CarcharSetWrapper filter_join_set(table, list columns=None, CarcharSetWrapper seen_hashes=None):
@@ -60,7 +60,7 @@ cpdef semi_join(object relation, list join_columns, CarcharSetWrapper seen_hashe
     free(raw_hashes)
 
     if index_buffer.size() > 0:
-        return relation.take(index_buffer.to_numpy())
+        return relation.take(index_buffer.to_int32_buffer())
     else:
         return relation.slice(0, 0)
 
@@ -86,6 +86,6 @@ cpdef anti_join(object relation, list join_columns, CarcharSetWrapper seen_hashe
     free(raw_hashes)
 
     if index_buffer.size() > 0:
-        return relation.take(index_buffer.to_numpy())
+        return relation.take(index_buffer.to_int32_buffer())
     else:
         return relation.slice(0, 0)
