@@ -13,8 +13,10 @@ normalizes the data into the format for internal processing.
 """
 
 import datetime
-
+import logging
 import time
+
+_logger = logging.getLogger(__name__)
 from collections import defaultdict
 from typing import Generator
 
@@ -113,7 +115,7 @@ def normalize_morsel(schema: RelationSchema, morsel: pyarrow.Table) -> pyarrow.T
         if column_name is None:
             droppable_columns.add(i)
         else:
-            target_column_names.append(str(column_name))
+            target_column_names.append(column_name.identity)
 
     # Remove from the end otherwise we'll remove the wrong columns after we've removed one
     if droppable_columns:
@@ -423,8 +425,10 @@ class ReaderNode(BasePlanNode):
 
             morsel = struct_to_jsonb(morsel)
             morsel = normalize_morsel(orso_schema, morsel)
+
             if arrow_schema is None:
                 arrow_schema = merge_schemas(self.schema, morsel.schema)
+
             if arrow_schema.names:
                 morsel = morsel.cast(arrow_schema)
 
@@ -432,7 +436,10 @@ class ReaderNode(BasePlanNode):
             self.telemetry.blobs_read += 1
             self.telemetry.rows_read += morsel.num_rows
             self.telemetry.bytes_processed += morsel.nbytes
-            yield Morsel.from_arrow(morsel)
+
+            result_morsel = Morsel.from_arrow(morsel)
+
+            yield result_morsel
             start_clock = time.monotonic_ns()
 
             if records_to_read <= 0:
