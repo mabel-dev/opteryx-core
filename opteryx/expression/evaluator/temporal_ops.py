@@ -100,21 +100,18 @@ def _timestamp_compare(op: str, vec, right):
     if isinstance(right, (list, tuple, set, frozenset)):
         value_set = _coerce_timestamp_set(right)
     elif right.__class__.__name__ == "TimestampVector":
-        import pyarrow.compute as _pac
-
-        arrow_ops = {
-            "Eq": _pac.equal,
-            "NotEq": _pac.not_equal,
-            "Lt": _pac.less,
-            "Gt": _pac.greater,
-            "LtEq": _pac.less_equal,
-            "GtEq": _pac.greater_equal,
+        vec_ops = {
+            "Eq": vec.equals_vector,
+            "NotEq": vec.not_equals_vector,
+            "Lt": vec.less_than_vector,
+            "Gt": vec.greater_than_vector,
+            "LtEq": vec.less_than_or_equals_vector,
+            "GtEq": vec.greater_than_or_equals_vector,
         }
-        fn = arrow_ops.get(op)
+        fn = vec_ops.get(op)
         if fn is None:
             raise NotImplementedError(f"TimestampVector vector-vector: unsupported op {op!r}")
-        result_arr = fn(vec.to_arrow(), right.to_arrow())
-        return BoolVector.from_arrow(result_arr)
+        return fn(right)
     elif right.__class__.__name__ == "Date32Vector":
         import pyarrow as _pa_local
 

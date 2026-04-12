@@ -40,6 +40,12 @@ cdef class TimestampVector(Vector):
     cpdef BoolVector greater_than_or_equals(self, int64_t value)
     cpdef BoolVector less_than(self, int64_t value)
     cpdef BoolVector less_than_or_equals(self, int64_t value)
+    cpdef BoolVector equals_vector(self, TimestampVector other)
+    cpdef BoolVector not_equals_vector(self, TimestampVector other)
+    cpdef BoolVector greater_than_vector(self, TimestampVector other)
+    cpdef BoolVector greater_than_or_equals_vector(self, TimestampVector other)
+    cpdef BoolVector less_than_vector(self, TimestampVector other)
+    cpdef BoolVector less_than_or_equals_vector(self, TimestampVector other)
     cpdef BoolVector in_list(self, object value_set)
 
     cpdef int8_t[::1] is_null(self)

@@ -28,8 +28,8 @@ from opteryx.compiled.draken.interop.arrow_c_data_interface cimport ArrowArray
 from opteryx.compiled.draken.interop.arrow_c_data_interface cimport ArrowSchema
 from opteryx.compiled.draken.vectors.bool_vector cimport from_arrow as bool_from_arrow
 from opteryx.compiled.draken.vectors.float64_vector cimport from_arrow as float64_from_arrow
-from opteryx.compiled.draken.vectors.integer_vector cimport int64_from_arrow
-from opteryx.compiled.draken.vectors.integer_vector cimport integer_from_arrow
+from opteryx.compiled.draken.vectors.int64_vector cimport from_arrow as int64_from_arrow
+from opteryx.compiled.draken.vectors.integer_vector cimport from_arrow as integer_from_arrow
 from opteryx.compiled.draken.vectors.string_vector cimport from_arrow as string_from_arrow
 from opteryx.compiled.draken.vectors.string_vector cimport from_arrow_struct as string_from_arrow_struct
 from opteryx.compiled.draken.vectors.date32_vector cimport from_arrow as date32_from_arrow
@@ -46,7 +46,7 @@ from opteryx.compiled.draken.vectors.vector_vector cimport from_arrow as vector_
 
 
 from opteryx.compiled.draken.vectors.integer_vector cimport IntegerVector
-from opteryx.compiled.draken.vectors.integer_vector cimport from_sequence as int64_from_sequence
+from opteryx.compiled.draken.vectors.int64_vector cimport from_sequence as int64_from_sequence
 from opteryx.compiled.draken.vectors.float64_vector cimport Float64Vector
 from opteryx.compiled.draken.vectors.float64_vector cimport from_sequence as float64_from_sequence
 from opteryx.compiled.draken.vectors.bool_vector cimport BoolVector
