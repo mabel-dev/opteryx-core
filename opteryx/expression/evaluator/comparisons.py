@@ -116,14 +116,9 @@ def _int64_compare(op: str, vec, right):
     if right_type in (VectorType.INT64, VectorType.INTEGER):
         return _call_vector_vector_op(op, vec, right)
 
-    # Int64 vs Float64 — cast int64 side to float64 and re-dispatch
+    # Int64 vs Float64 — compare directly against the coerced float scalar/vector path
     if get_vector_type(right) == VectorType.FLOAT64:
-        import pyarrow as pa
-
-        from opteryx.compiled.draken.interop.arrow import vector_from_arrow
-
-        float_vec = vector_from_arrow(vec.to_arrow().cast(pa.float64()))
-        return _float64_compare(op, float_vec, right)
+        return _float64_compare(op, vec, right)
 
     value = _coerce_int64(right)
 
@@ -215,13 +210,8 @@ def _dict_compare(op: str, vec, right):
         elif vec_type == VectorType.TIMESTAMP:
             int_val = _coerce_timestamp(right)
         else:
-            # Fallback: peek at the Arrow type to decide
-            import pyarrow as pa
-
-            arr = vec.to_arrow()
-            if pa.types.is_dictionary(arr.type):
-                arr = arr.dictionary_decode()
-            if pa.types.is_date32(arr.type):
+            # Use the vector type directly instead of peeking through Arrow.
+            if get_vector_type(vec) == VectorType.DATE32:
                 int_val = _coerce_date32(right)
             else:
                 int_val = _coerce_timestamp(right)
@@ -245,17 +235,17 @@ def _dict_compare(op: str, vec, right):
     value_list = list(right) if isinstance(right, (list, tuple, set, frozenset)) else right
 
     if op == "Eq":
-        return vec.equals(right)
+        return vec.equals(value_list)
     if op == "NotEq":
-        return vec.not_equals(right)
+        return vec.not_equals(value_list)
     if op == "Lt":
-        return vec.less_than(right)
+        return vec.less_than(value_list)
     if op == "Gt":
-        return vec.greater_than(right)
+        return vec.greater_than(value_list)
     if op == "LtEq":
-        return vec.less_than_or_equals(right)
+        return vec.less_than_or_equals(value_list)
     if op == "GtEq":
-        return vec.greater_than_or_equals(right)
+        return vec.greater_than_or_equals(value_list)
     if op == "InList":
         return vector_in_list(vec, value_list)
     if op in ("Like", "ILike", "RLike", "InStr", "IInStr"):

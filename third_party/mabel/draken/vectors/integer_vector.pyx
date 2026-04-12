@@ -268,7 +268,7 @@ cdef class IntegerVector(Vector):
             d8 = <int8_t*>ptr.data
             for i in range(n):
                 if ptr.null_bitmap != NULL:
-                    if not _bitmap_is_valid(ptr.null_bitmap, i, self.null_bit_offset):
+                    if not _bitmap_is_valid(ptr.null_bitmap, i, 0):
                         continue
                 m = <int64_t>d8[i]
                 found = True
@@ -277,7 +277,7 @@ cdef class IntegerVector(Vector):
                 raise ValueError("Cannot compute min of all-null column")
             for i in range(i + 1, n):
                 if ptr.null_bitmap != NULL:
-                    if not _bitmap_is_valid(ptr.null_bitmap, i, self.null_bit_offset):
+                    if not _bitmap_is_valid(ptr.null_bitmap, i, 0):
                         continue
                 if <int64_t>d8[i] < m:
                     m = <int64_t>d8[i]
@@ -285,7 +285,7 @@ cdef class IntegerVector(Vector):
             d16 = <int16_t*>ptr.data
             for i in range(n):
                 if ptr.null_bitmap != NULL:
-                    if not _bitmap_is_valid(ptr.null_bitmap, i, self.null_bit_offset):
+                    if not _bitmap_is_valid(ptr.null_bitmap, i, 0):
                         continue
                 m = <int64_t>d16[i]
                 found = True
@@ -294,7 +294,7 @@ cdef class IntegerVector(Vector):
                 raise ValueError("Cannot compute min of all-null column")
             for i in range(i + 1, n):
                 if ptr.null_bitmap != NULL:
-                    if not _bitmap_is_valid(ptr.null_bitmap, i, self.null_bit_offset):
+                    if not _bitmap_is_valid(ptr.null_bitmap, i, 0):
                         continue
                 if <int64_t>d16[i] < m:
                     m = <int64_t>d16[i]
@@ -302,7 +302,7 @@ cdef class IntegerVector(Vector):
             d32 = <int32_t*>ptr.data
             for i in range(n):
                 if ptr.null_bitmap != NULL:
-                    if not _bitmap_is_valid(ptr.null_bitmap, i, self.null_bit_offset):
+                    if not _bitmap_is_valid(ptr.null_bitmap, i, 0):
                         continue
                 m = <int64_t>d32[i]
                 found = True
@@ -311,7 +311,7 @@ cdef class IntegerVector(Vector):
                 raise ValueError("Cannot compute min of all-null column")
             for i in range(i + 1, n):
                 if ptr.null_bitmap != NULL:
-                    if not _bitmap_is_valid(ptr.null_bitmap, i, self.null_bit_offset):
+                    if not _bitmap_is_valid(ptr.null_bitmap, i, 0):
                         continue
                 if <int64_t>d32[i] < m:
                     m = <int64_t>d32[i]
@@ -337,7 +337,7 @@ cdef class IntegerVector(Vector):
             d8 = <int8_t*>ptr.data
             for i in range(n):
                 if ptr.null_bitmap != NULL:
-                    if not _bitmap_is_valid(ptr.null_bitmap, i, self.null_bit_offset):
+                    if not _bitmap_is_valid(ptr.null_bitmap, i, 0):
                         continue
                 m = <int64_t>d8[i]
                 found = True
@@ -346,7 +346,7 @@ cdef class IntegerVector(Vector):
                 raise ValueError("Cannot compute max of all-null column")
             for i in range(i + 1, n):
                 if ptr.null_bitmap != NULL:
-                    if not _bitmap_is_valid(ptr.null_bitmap, i, self.null_bit_offset):
+                    if not _bitmap_is_valid(ptr.null_bitmap, i, 0):
                         continue
                 if <int64_t>d8[i] > m:
                     m = <int64_t>d8[i]
@@ -354,7 +354,7 @@ cdef class IntegerVector(Vector):
             d16 = <int16_t*>ptr.data
             for i in range(n):
                 if ptr.null_bitmap != NULL:
-                    if not _bitmap_is_valid(ptr.null_bitmap, i, self.null_bit_offset):
+                    if not _bitmap_is_valid(ptr.null_bitmap, i, 0):
                         continue
                 m = <int64_t>d16[i]
                 found = True
@@ -363,7 +363,7 @@ cdef class IntegerVector(Vector):
                 raise ValueError("Cannot compute max of all-null column")
             for i in range(i + 1, n):
                 if ptr.null_bitmap != NULL:
-                    if not _bitmap_is_valid(ptr.null_bitmap, i, self.null_bit_offset):
+                    if not _bitmap_is_valid(ptr.null_bitmap, i, 0):
                         continue
                 if <int64_t>d16[i] > m:
                     m = <int64_t>d16[i]
@@ -371,7 +371,7 @@ cdef class IntegerVector(Vector):
             d32 = <int32_t*>ptr.data
             for i in range(n):
                 if ptr.null_bitmap != NULL:
-                    if not _bitmap_is_valid(ptr.null_bitmap, i, self.null_bit_offset):
+                    if not _bitmap_is_valid(ptr.null_bitmap, i, 0):
                         continue
                 m = <int64_t>d32[i]
                 found = True
@@ -380,7 +380,7 @@ cdef class IntegerVector(Vector):
                 raise ValueError("Cannot compute max of all-null column")
             for i in range(i + 1, n):
                 if ptr.null_bitmap != NULL:
-                    if not _bitmap_is_valid(ptr.null_bitmap, i, self.null_bit_offset):
+                    if not _bitmap_is_valid(ptr.null_bitmap, i, 0):
                         continue
                 if <int64_t>d32[i] > m:
                     m = <int64_t>d32[i]
@@ -402,21 +402,21 @@ cdef class IntegerVector(Vector):
             d8 = <int8_t*>ptr.data
             for i in range(n):
                 if ptr.null_bitmap != NULL:
-                    if not _bitmap_is_valid(ptr.null_bitmap, i, self.null_bit_offset):
+                    if not _bitmap_is_valid(ptr.null_bitmap, i, 0):
                         continue
                 total += <int64_t>d8[i]
         elif ptr.itemsize == 2:
             d16 = <int16_t*>ptr.data
             for i in range(n):
                 if ptr.null_bitmap != NULL:
-                    if not _bitmap_is_valid(ptr.null_bitmap, i, self.null_bit_offset):
+                    if not _bitmap_is_valid(ptr.null_bitmap, i, 0):
                         continue
                 total += <int64_t>d16[i]
         else:
             d32 = <int32_t*>ptr.data
             for i in range(n):
                 if ptr.null_bitmap != NULL:
-                    if not _bitmap_is_valid(ptr.null_bitmap, i, self.null_bit_offset):
+                    if not _bitmap_is_valid(ptr.null_bitmap, i, 0):
                         continue
                 total += <int64_t>d32[i]
         return total

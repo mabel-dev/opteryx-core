@@ -1,4 +1,8 @@
-"""Function execution helpers for the expression evaluator."""
+"""Function execution helpers for the expression evaluator.
+
+Updated to keep null handling explicit and avoid NumPy-style coercion in the
+compression path while preserving the existing kernel execution contract.
+"""
 
 from typing import Any
 
@@ -98,6 +102,8 @@ def apply_bounded_function(node, *parameters) -> Any:
     null_policy = _normalize_null_policy(kernel.null_policy)
 
     compressed = False
+    valid_positions = ()
+    morsel_size = 0
     if (
         null_policy == "compress"
         and len(parameters) > 0
@@ -108,23 +114,27 @@ def apply_bounded_function(node, *parameters) -> Any:
         null_positions = None
 
         for arr in parameters:
-            if hasattr(arr, "is_null"):
-                arr_nulls = arr.is_null()
-                null_array = arr_nulls.to_numpy() if hasattr(arr_nulls, "to_numpy") else arr_nulls
-            else:
+            if not hasattr(arr, "is_null"):
                 continue
 
-            if null_positions is None:
-                null_positions = null_array
-            else:
-                null_positions = null_positions | null_array
+            arr_nulls = arr.is_null()
+            if not hasattr(arr_nulls, "__len__"):
+                raise FunctionExecutionError(
+                    message=(
+                        "Function compression requires null-aware vector inputs; "
+                        f"received unsupported null result from {type(arr).__name__}."
+                    ),
+                    function=node.value,
+                )
+
+            null_positions = arr_nulls if null_positions is None else null_positions | arr_nulls
 
         if null_positions is not None and null_positions.all():
             return [None] * morsel_size
 
         if null_positions is not None and null_positions.any():
             valid_positions = ~null_positions
-            parameters = [arr.compress(valid_positions) for arr in parameters]
+            parameters = tuple(arr.compress(valid_positions) for arr in parameters)
             compressed = True
 
     if engine == "arrow":
@@ -149,7 +159,7 @@ def apply_bounded_function(node, *parameters) -> Any:
     except FunctionExecutionError as e:
         raise e
     except Exception as e:
-        raise FunctionExecutionError(message=e, function=node.value) from e
+        raise FunctionExecutionError(message=str(e), function=node.value) from e
 
     if compressed:
         out = [None] * morsel_size
