@@ -21,7 +21,6 @@ milliseconds of performance difference between this and a hash join.
 from typing import Generator, Optional
 import time
 
-import numpy
 import pyarrow
 import pyarrow.compute as pc
 from opteryx.compiled.joins import nested_loop_join
@@ -112,8 +111,8 @@ class NestedLoopJoinNode(JoinNode):
                 return
 
             if self.left_relation.num_rows == 0 or morsel.num_rows == 0:
-                left_indexes = numpy.array([], dtype=numpy.int64)
-                right_indexes = numpy.array([], dtype=numpy.int64)
+                left_indexes = ()
+                right_indexes = ()
             else:
                 if self.left_filter is not None:
                     # Filter the morsel using the bloom filter, it's a quick way to

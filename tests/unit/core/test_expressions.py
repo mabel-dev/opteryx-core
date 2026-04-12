@@ -49,7 +49,7 @@ def test_literals(node_type, value_type, value):
     node = Node(node_type, type=value_type, value=value, schema_column=schema_column)
     values = evaluate(node, table=planets)
     if value_type != OrsoTypes.ARRAY:
-        assert values.dtype == value_type.numpy_dtype, values
+        assert values.dtype == numpy.dtype(value_type.native_type), values
     else:
         assert values.shape == (1,), values.shape
         assert type(values[0]) == numpy.ndarray, values[0]

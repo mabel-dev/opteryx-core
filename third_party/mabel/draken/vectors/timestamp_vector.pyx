@@ -44,6 +44,8 @@ from opteryx.compiled.draken.core.fixed_vector cimport buf_length
 from opteryx.compiled.draken.core.fixed_vector cimport free_fixed_buffer
 from opteryx.compiled.draken.vectors.vector cimport MIX_HASH_CONSTANT, Vector, NULL_HASH, mix_hash, simd_mix_hash
 from opteryx.compiled.draken.vectors.bool_vector cimport BoolVector
+from opteryx.compiled.draken.vectors.int64_vector cimport Int64Vector
+from opteryx.compiled.draken.vectors.date32_vector cimport Date32Vector
 
 # Constants for microseconds conversions
 cdef int64_t MICROSECONDS_PER_DAY = 86_400_000_000
@@ -807,6 +809,88 @@ cdef class TimestampVector(Vector):
                     continue
             total += data[i]
         return total
+
+    cpdef Int64Vector subtract_timestamp_vector(self, TimestampVector other):
+        """Subtract two TimestampVector values and return microseconds as Int64Vector."""
+        cdef DrakenFixedBuffer* ptr1 = self.ptr
+        cdef DrakenFixedBuffer* ptr2 = other.ptr
+        cdef int64_t* data1 = <int64_t*> ptr1.data
+        cdef int64_t* data2 = <int64_t*> ptr2.data
+        cdef uint8_t* null1 = ptr1.null_bitmap
+        cdef uint8_t* null2 = ptr2.null_bitmap
+        cdef Py_ssize_t i, n = ptr1.length
+        cdef Py_ssize_t nbytes = (n + 7) >> 3
+        cdef Int64Vector out
+        cdef int64_t* dst
+        cdef uint8_t* out_null = NULL
+        cdef bint valid1, valid2
+
+        if n != ptr2.length:
+            raise ValueError("Vectors must have the same length")
+
+        out = Int64Vector(<size_t>n)
+        dst = <int64_t*> out.ptr.data
+        memset(dst, 0, n * sizeof(int64_t))
+
+        if (null1 != NULL or null2 != NULL) and nbytes != 0:
+            out_null = <uint8_t*> malloc(nbytes)
+            if out_null == NULL:
+                raise MemoryError()
+            memset(out_null, 0, nbytes)
+            out.ptr.null_bitmap = out_null
+        else:
+            out.ptr.null_bitmap = NULL
+
+        for i in range(n):
+            valid1 = True if null1 == NULL else ((null1[i >> 3] >> (i & 7)) & 1) != 0
+            valid2 = True if null2 == NULL else ((null2[i >> 3] >> (i & 7)) & 1) != 0
+            if valid1 and valid2:
+                if out_null != NULL:
+                    out_null[i >> 3] |= (1 << (i & 7))
+                dst[i] = data1[i] - data2[i]
+        return out
+
+    cpdef Int64Vector subtract_date32_vector(self, Date32Vector other):
+        """Subtract Date32Vector from TimestampVector and return microseconds as Int64Vector."""
+        cdef DrakenFixedBuffer* ptr1 = self.ptr
+        cdef DrakenFixedBuffer* ptr2 = other.ptr
+        cdef int64_t* data1 = <int64_t*> ptr1.data
+        cdef int32_t* data2 = <int32_t*> ptr2.data
+        cdef uint8_t* null1 = ptr1.null_bitmap
+        cdef uint8_t* null2 = ptr2.null_bitmap
+        cdef Py_ssize_t i, n = ptr1.length
+        cdef Py_ssize_t nbytes = (n + 7) >> 3
+        cdef Int64Vector out
+        cdef int64_t* dst
+        cdef uint8_t* out_null = NULL
+        cdef bint valid1, valid2
+        cdef int64_t right_us
+
+        if n != ptr2.length:
+            raise ValueError("Vectors must have the same length")
+
+        out = Int64Vector(<size_t>n)
+        dst = <int64_t*> out.ptr.data
+        memset(dst, 0, n * sizeof(int64_t))
+
+        if (null1 != NULL or null2 != NULL) and nbytes != 0:
+            out_null = <uint8_t*> malloc(nbytes)
+            if out_null == NULL:
+                raise MemoryError()
+            memset(out_null, 0, nbytes)
+            out.ptr.null_bitmap = out_null
+        else:
+            out.ptr.null_bitmap = NULL
+
+        for i in range(n):
+            valid1 = True if null1 == NULL else ((null1[i >> 3] >> (i & 7)) & 1) != 0
+            valid2 = True if null2 == NULL else ((null2[i >> 3] >> (i & 7)) & 1) != 0
+            if valid1 and valid2:
+                if out_null != NULL:
+                    out_null[i >> 3] |= (1 << (i & 7))
+                right_us = <int64_t>data2[i] * MICROSECONDS_PER_DAY
+                dst[i] = data1[i] - right_us
+        return out
 
     cpdef int8_t[::1] is_null(self):
         """

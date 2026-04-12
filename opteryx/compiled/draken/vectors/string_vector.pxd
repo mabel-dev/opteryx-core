@@ -58,6 +58,7 @@ cdef class StringVector(Vector):
     cpdef Py_ssize_t byte_length(self, Py_ssize_t i)
     cpdef object buffers(self)
     cpdef object null_bitmap(self)
+    cpdef int8_t[::1] is_null(self)
     cpdef int32_t[::1] lengths(self)
     cpdef object view(self)
 

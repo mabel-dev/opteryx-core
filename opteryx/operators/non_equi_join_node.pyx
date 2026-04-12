@@ -21,7 +21,6 @@ Supported comparisons:
 """
 
 from typing import Generator, Optional
-import numpy
 import pyarrow
 from opteryx.compiled.draken import Morsel
 from opteryx.compiled.draken import align_tables
@@ -104,8 +103,8 @@ class NonEquiJoinNode(JoinNode):
                 return
 
             if morsel is EOS:
-                left_indexes = numpy.array([], dtype=numpy.int32)
-                right_indexes = numpy.array([], dtype=numpy.int32)
+                left_indexes = ()
+                right_indexes = ()
             else:
                 right_morsel = Morsel.from_arrow(morsel)
 
@@ -119,9 +118,6 @@ class NonEquiJoinNode(JoinNode):
                     self.right_column,
                     self.comparison_op,
                 )
-                # Convert to int32 for align_tables
-                left_indexes = numpy.asarray(left_indexes, dtype=numpy.int32)
-                right_indexes = numpy.asarray(right_indexes, dtype=numpy.int32)
 
             result_morsel = align_tables(
                 self.left_morsel, right_morsel, left_indexes, right_indexes

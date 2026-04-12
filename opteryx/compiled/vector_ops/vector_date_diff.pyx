@@ -7,14 +7,14 @@
 # cython: boundscheck=False
 
 from libc.stdint cimport int64_t, uint8_t
+from libc.stdlib cimport malloc, free
+from libc.string cimport memset
 
 from opteryx.compiled.draken.vectors.timestamp_vector cimport TimestampVector
 from opteryx.compiled.draken.vectors.int64_vector cimport Int64Vector, from_sequence as int64_from_sequence
 from opteryx.compiled.draken.core.buffers cimport DrakenFixedBuffer
 
-import numpy
-cimport numpy
-numpy.import_array()
+
 
 
 cdef const int64_t MICROSECONDS = 1
@@ -91,25 +91,31 @@ cpdef Int64Vector vector_date_diff(TimestampVector start, TimestampVector end, s
     cdef uint8_t* s_null = sp.null_bitmap
     cdef uint8_t* e_null = ep.null_bitmap
 
-    cdef numpy.ndarray[int64_t, ndim=1] result = numpy.zeros(n, dtype=numpy.int64)
-    cdef int64_t[::1] result_view = result
+    cdef int64_t* result_data = <int64_t*>malloc(n * sizeof(int64_t))
+    if result_data == NULL:
+        raise MemoryError()
+    memset(result_data, 0, n * sizeof(int64_t))
+    cdef int64_t[::1] result_view = <int64_t[:n]>result_data
 
     cdef Py_ssize_t i
     cdef int64_t sv, ev
 
-    for i in range(n):
-        if s_null != NULL and not ((s_null[i >> 3] >> (i & 7)) & 1):
-            continue
-        if e_null != NULL and not ((e_null[i >> 3] >> (i & 7)) & 1):
-            continue
-        if s_factor == 0:  # nanoseconds: divide to get microseconds
-            sv = s_data[i] // 1000
-        else:
-            sv = s_data[i] * s_factor
-        if e_factor == 0:
-            ev = e_data[i] // 1000
-        else:
-            ev = e_data[i] * e_factor
-        result_view[i] = (ev - sv) // divisor
+    try:
+        for i in range(n):
+            if s_null != NULL and not ((s_null[i >> 3] >> (i & 7)) & 1):
+                continue
+            if e_null != NULL and not ((e_null[i >> 3] >> (i & 7)) & 1):
+                continue
+            if s_factor == 0:  # nanoseconds: divide to get microseconds
+                sv = s_data[i] // 1000
+            else:
+                sv = s_data[i] * s_factor
+            if e_factor == 0:
+                ev = e_data[i] // 1000
+            else:
+                ev = e_data[i] * e_factor
+            result_view[i] = (ev - sv) // divisor
 
-    return int64_from_sequence(result_view)
+        return int64_from_sequence(result_view)
+    finally:
+        free(result_data)

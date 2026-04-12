@@ -12,6 +12,7 @@ numpy.import_array()
 
 from libc.stdint cimport int64_t, uint64_t
 from libc.stddef cimport size_t
+from libc.stdlib cimport malloc, free
 from libcpp.vector cimport vector
 
 from time import perf_counter_ns
@@ -65,9 +66,12 @@ cpdef tuple inner_join(object right_relation, list join_columns, FlatHashMap lef
         last_candidate_rows = candidate_count
         last_result_rows = 0
         last_materialize_time_ns = 0
-        return numpy.empty(0, dtype=numpy.int64), numpy.empty(0, dtype=numpy.int64)
+        return left_indexes.to_numpy(), right_indexes.to_numpy()
 
-    cdef uint64_t[::1] row_hashes = numpy.empty(num_rows, dtype=numpy.uint64)
+    cdef uint64_t* raw_hashes = <uint64_t*>malloc(num_rows * sizeof(uint64_t))
+    if raw_hashes == NULL:
+        raise MemoryError("Failed to allocate memory for hash buffers")
+    cdef uint64_t[::1] row_hashes = <uint64_t[:num_rows]>raw_hashes
     cdef long long t_start = perf_counter_ns()
 
     # Precompute hashes for right relation
@@ -86,6 +90,8 @@ cpdef tuple inner_join(object right_relation, list join_columns, FlatHashMap lef
                 left_indexes.c_buffer,
                 right_indexes.c_buffer,
             )
+
+    free(raw_hashes)
     cdef long long t_after_probe = perf_counter_ns()
     last_probe_time_ns = t_after_probe - t_after_hash
     last_rows_hashed = num_rows
@@ -122,7 +128,10 @@ cpdef FlatHashMap build_side_hash_map(object relation, list join_columns):
     cdef FlatHashMap ht = FlatHashMap()
     cdef int64_t num_rows = relation.num_rows
     cdef int64_t[::1] non_null_indices = non_null_row_indices(relation, join_columns)
-    cdef uint64_t[::1] row_hashes = numpy.empty(num_rows, dtype=numpy.uint64)
+    cdef uint64_t* raw_hashes = <uint64_t*>malloc(num_rows * sizeof(uint64_t))
+    if raw_hashes == NULL:
+        raise MemoryError("Failed to allocate memory for hash buffers")
+    cdef uint64_t[::1] row_hashes = <uint64_t[:num_rows]>raw_hashes
     cdef int64_t i, row_idx
 
     compute_row_hashes(relation, join_columns, row_hashes)
@@ -131,6 +140,7 @@ cpdef FlatHashMap build_side_hash_map(object relation, list join_columns):
         row_idx = non_null_indices[i]
         ht.insert(row_hashes[row_idx], row_idx)
 
+    free(raw_hashes)
     return ht
 
 
@@ -143,9 +153,14 @@ cpdef object build_side_carchar_map(
     cdef object ht
     cdef int64_t num_rows = relation.num_rows
     cdef int64_t[::1] non_null_indices = non_null_row_indices(relation, join_columns)
-    cdef uint64_t[::1] row_hashes = numpy.empty(num_rows, dtype=numpy.uint64)
+    cdef uint64_t* raw_hashes = <uint64_t*>malloc(num_rows * sizeof(uint64_t))
+    if raw_hashes == NULL:
+        raise MemoryError("Failed to allocate memory for hash buffers")
+    cdef uint64_t[::1] row_hashes = <uint64_t[:num_rows]>raw_hashes
 
     compute_row_hashes(relation, join_columns, row_hashes)
+
+    free(raw_hashes)
 
     import opteryx.compiled.nanobind.carchar_native as carchar_native
 
@@ -173,6 +188,8 @@ cpdef tuple inner_join_carchar(object right_relation, list join_columns, object 
     cdef int64_t num_rows = right_relation.num_rows
     cdef int64_t[::1] non_null_indices = non_null_row_indices(right_relation, join_columns)
     cdef Py_ssize_t candidate_count = non_null_indices.shape[0]
+    cdef IntBuffer left_indexes = IntBuffer()
+    cdef IntBuffer right_indexes = IntBuffer()
 
     if candidate_count == 0 or num_rows == 0:
         last_hash_time_ns = 0
@@ -181,9 +198,12 @@ cpdef tuple inner_join_carchar(object right_relation, list join_columns, object 
         last_candidate_rows = candidate_count
         last_result_rows = 0
         last_materialize_time_ns = 0
-        return numpy.empty(0, dtype=numpy.int64), numpy.empty(0, dtype=numpy.int64)
+        return left_indexes.to_numpy(), right_indexes.to_numpy()
 
-    cdef uint64_t[::1] row_hashes = numpy.empty(num_rows, dtype=numpy.uint64)
+    cdef uint64_t* raw_hashes = <uint64_t*>malloc(num_rows * sizeof(uint64_t))
+    if raw_hashes == NULL:
+        raise MemoryError("Failed to allocate memory for hash buffers")
+    cdef uint64_t[::1] row_hashes = <uint64_t[:num_rows]>raw_hashes
     cdef long long t_start = perf_counter_ns()
     compute_row_hashes(right_relation, join_columns, row_hashes)
     cdef long long t_after_hash = perf_counter_ns()
@@ -199,6 +219,8 @@ cpdef tuple inner_join_carchar(object right_relation, list join_columns, object 
     cdef long long t_before_probe = perf_counter_ns()
     left_np, right_np = left_hash_table.probe_join_indices(probe_hashes, probe_rows)
     cdef long long t_after_probe = perf_counter_ns()
+
+    free(raw_hashes)
     last_probe_time_ns = t_after_probe - t_before_probe
     last_rows_hashed = num_rows
     last_candidate_rows = candidate_count

@@ -224,8 +224,6 @@ _FIXED_BUFFER_VECTOR_CLASSES = frozenset(
 
 
 def _is_null_as_boolvector(vec):
-    import pyarrow.compute as _pc
-
     from opteryx.compiled.draken.vectors.bool_vector import BoolVector
     from opteryx.compiled.vector_ops.function_definitions import (
         bool_vector_all_true,
@@ -235,13 +233,6 @@ def _is_null_as_boolvector(vec):
 
     cls_name = vec.__class__.__name__
     n = len(vec)
-
-    def _true_for_nulls(mask):
-        # Arrow compute can preserve nulls in boolean results; for IS NULL we
-        # want those positions to evaluate to True, not remain nullable.
-        if getattr(mask, "null_count", 0):
-            return _pc.fill_null(mask, True)
-        return mask
 
     if _is_typed_constant_encoded_vector(vec):
         if getattr(vec, "null_count", 0) == n:
@@ -254,19 +245,19 @@ def _is_null_as_boolvector(vec):
 
         from opteryx.compiled.draken.interop.arrow import vector_from_arrow as _vfa
 
-        arrow_mask = _true_for_nulls(_pc.is_null(vec.to_arrow()))
-        if _pa.types.is_floating(vec.to_arrow().type):
-            arrow_mask = _true_for_nulls(_pc.or_(arrow_mask, _pc.is_nan(vec.to_arrow())))
-        return _vfa(arrow_mask)
+        # Convert dictionary vector to native Draken vector and use native is_null()
+        native_vec = _vfa(vec.to_arrow())
+        native_cls = native_vec.__class__.__name__
+        if native_cls == "Float64Vector":
+            return bool_vector_from_int8_mask(native_vec.is_null_with_nan(), len(native_vec))
+        elif hasattr(native_vec, "is_null"):
+            return bool_vector_from_int8_mask(native_vec.is_null(), len(native_vec))
+        return BoolVector(n)
 
     if cls_name in _FIXED_BUFFER_VECTOR_CLASSES:
         if cls_name == "Float64Vector":
-            import pyarrow.compute as _pc
-
-            from opteryx.compiled.draken.interop.arrow import vector_from_arrow as _vfa
-
-            arrow_arr = vec.to_arrow()
-            return _vfa(_true_for_nulls(_pc.or_(_pc.is_null(arrow_arr), _pc.is_nan(arrow_arr))))
+            # Use native is_null_with_nan() to detect both nulls and NaN without PyArrow compute
+            return bool_vector_from_int8_mask(vec.is_null_with_nan(), n)
         return bool_vector_from_int8_mask(vec.is_null(), n)
 
     if _is_typed_constant_encoded_vector(vec):
@@ -280,13 +271,16 @@ def _is_null_as_boolvector(vec):
     if getattr(vec, "null_count", 0) == 0:
         return BoolVector(n)
 
+    # StringVector with native is_null() method (no PyArrow compute needed)
+    if cls_name == "StringVector" and hasattr(vec, "is_null"):
+        return bool_vector_from_int8_mask(vec.is_null(), n)
+
+    # Fallback to Arrow conversion for other types
     from opteryx.compiled.draken.interop.arrow import vector_from_arrow as _vfa
 
-    arrow_mask = _true_for_nulls(_pc.is_null(vec.to_arrow()))
-    if cls_name == "StringVector":
-        arrow_arr = vec.to_arrow()
-        if _pa.types.is_string(arrow_arr.type) or _pa.types.is_binary(arrow_arr.type):
-            arrow_mask = _true_for_nulls(_pc.or_(arrow_mask, _pc.is_null(arrow_arr)))
-        else:
-            arrow_mask = _true_for_nulls(_pc.or_(arrow_mask, _pc.is_nan(arrow_arr)))
-    return _vfa(arrow_mask)
+    native_vec = _vfa(vec.to_arrow())
+    if native_vec.__class__.__name__ == "Float64Vector":
+        return bool_vector_from_int8_mask(native_vec.is_null_with_nan(), len(native_vec))
+    elif hasattr(native_vec, "is_null"):
+        return bool_vector_from_int8_mask(native_vec.is_null(), len(native_vec))
+    return BoolVector(n)

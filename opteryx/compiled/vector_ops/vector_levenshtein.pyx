@@ -7,10 +7,8 @@
 # cython: boundscheck=False
 
 from libc.stdint cimport int64_t, int32_t, uint8_t
-
-import numpy
-cimport numpy
-numpy.import_array()
+from libc.stdlib cimport malloc, free
+from libc.string cimport memset
 
 from opteryx.compiled.draken.vectors.string_vector cimport StringVector
 from opteryx.compiled.draken.vectors.int64_vector cimport Int64Vector, from_sequence as int64_from_sequence
@@ -33,28 +31,33 @@ cdef int64_t levenshtein_bytes(
         len1, len2 = len2, len1
 
     cdef int32_t len2_1 = len2 + 1
-    cdef numpy.ndarray[int64_t, ndim=1] dp_arr = numpy.zeros(
-        (len1 + 1) * len2_1, dtype=numpy.int64
-    )
-    cdef int64_t[::1] dp = dp_arr
+    cdef int64_t total_size = (len1 + 1) * len2_1
+    cdef int64_t* dp_data = <int64_t*>malloc(total_size * sizeof(int64_t))
+    if dp_data == NULL:
+        raise MemoryError()
+    memset(dp_data, 0, total_size * sizeof(int64_t))
+    cdef int64_t[::1] dp = <int64_t[:total_size]>dp_data
     cdef int32_t i, j
 
-    for i in range(len1 + 1):
-        for j in range(len2_1):
-            if i == 0:
-                dp[j] = j
-            elif j == 0:
-                dp[i * len2_1] = i
-            elif s1[i - 1] == s2[j - 1]:
-                dp[i * len2_1 + j] = dp[(i - 1) * len2_1 + (j - 1)]
-            else:
-                dp[i * len2_1 + j] = 1 + _min3(
-                    dp[(i - 1) * len2_1 + j],
-                    dp[i * len2_1 + (j - 1)],
-                    dp[(i - 1) * len2_1 + (j - 1)]
-                )
+    try:
+        for i in range(len1 + 1):
+            for j in range(len2_1):
+                if i == 0:
+                    dp[j] = j
+                elif j == 0:
+                    dp[i * len2_1] = i
+                elif s1[i - 1] == s2[j - 1]:
+                    dp[i * len2_1 + j] = dp[(i - 1) * len2_1 + (j - 1)]
+                else:
+                    dp[i * len2_1 + j] = 1 + _min3(
+                        dp[(i - 1) * len2_1 + j],
+                        dp[i * len2_1 + (j - 1)],
+                        dp[(i - 1) * len2_1 + (j - 1)]
+                    )
 
-    return dp[len1 * len2_1 + len2]
+        return dp[len1 * len2_1 + len2]
+    finally:
+        free(dp_data)
 
 
 cpdef Int64Vector vector_levenshtein(StringVector a, StringVector b):
@@ -72,20 +75,26 @@ cpdef Int64Vector vector_levenshtein(StringVector a, StringVector b):
     cdef Py_ssize_t i
     cdef StringRow a_row, b_row
 
-    cdef numpy.ndarray[int64_t, ndim=1] result = numpy.zeros(n, dtype=numpy.int64)
-    cdef int64_t[::1] result_view = result
+    cdef int64_t* result_data = <int64_t*>malloc(n * sizeof(int64_t))
+    if result_data == NULL:
+        raise MemoryError()
+    memset(result_data, 0, n * sizeof(int64_t))
+    cdef int64_t[::1] result_view = <int64_t[:n]>result_data
 
-    for i in range(n):
-        a_row = string_vec_get_at(a, i)
-        b_row = string_vec_get_at(b, i)
+    try:
+        for i in range(n):
+            a_row = string_vec_get_at(a, i)
+            b_row = string_vec_get_at(b, i)
 
-        if a_row.is_null or b_row.is_null:
-            result_view[i] = -1
-            continue
+            if a_row.is_null or b_row.is_null:
+                result_view[i] = -1
+                continue
 
-        result_view[i] = levenshtein_bytes(
-            <const uint8_t*>a_row.data, <int32_t>a_row.length,
-            <const uint8_t*>b_row.data, <int32_t>b_row.length,
-        )
+            result_view[i] = levenshtein_bytes(
+                <const uint8_t*>a_row.data, <int32_t>a_row.length,
+                <const uint8_t*>b_row.data, <int32_t>b_row.length,
+            )
 
-    return int64_from_sequence(result_view)
+        return int64_from_sequence(result_view)
+    finally:
+        free(result_data)

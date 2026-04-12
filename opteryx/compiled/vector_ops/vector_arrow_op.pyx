@@ -7,10 +7,8 @@
 # cython: boundscheck=False
 
 import numpy
-cimport numpy
-numpy.import_array()
 
-cpdef numpy.ndarray vector_arrow_op(numpy.ndarray arr, object key):
+cpdef object vector_arrow_op(object arr, object key):
     """
     Fetch values from a list of dictionaries based on a specified key.
 
@@ -26,8 +24,8 @@ cpdef numpy.ndarray vector_arrow_op(numpy.ndarray arr, object key):
     """
     # Determine the number of items in the input list
     cdef Py_ssize_t n = len(arr)
-    # Prepare an object array to store the results
-    cdef numpy.ndarray result = numpy.empty(n, dtype=object)
+    # Use a Python list for efficient accumulation (avoids numpy.empty allocation)
+    cdef list result = []
     cdef dict document
 
     cdef Py_ssize_t i
@@ -37,9 +35,12 @@ cpdef numpy.ndarray vector_arrow_op(numpy.ndarray arr, object key):
         document = arr[i]
         if document is not None:
             if key in document:
-                result[i] = document[key]
+                result.append(document[key])
             else:
-                # Assign None if the key does not exist
-                result[i] = None
+                # Append None if the key does not exist
+                result.append(None)
+        else:
+            result.append(None)
 
-    return result
+    # Convert list to numpy array (single allocation at cold path)
+    return numpy.asarray(result, dtype=object)
