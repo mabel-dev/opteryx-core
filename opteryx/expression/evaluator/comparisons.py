@@ -8,6 +8,7 @@ NumPy is not imported here.
 import datetime
 
 from opteryx.compiled.vector_ops import vector_contains, vector_in_list, vector_like, vector_rlike
+from opteryx.utils.vector_types import VectorType, get_vector_type, is_draken_vector, is_scalar
 
 from .string_ops import _string_anyop_like, _string_compare
 from .temporal_ops import (
@@ -49,6 +50,51 @@ _NEGATED_OPS = {
 
 
 # ---------------------------------------------------------------------------
+# Unified vector-vector comparison dispatch
+# ---------------------------------------------------------------------------
+
+_VECTOR_VECTOR_OPS = {
+    "Eq": lambda vec, other: vec.equals_vector(other),
+    "Lt": lambda vec, other: vec.less_than_vector(other),
+    "Gt": lambda vec, other: vec.greater_than_vector(other),
+    "LtEq": lambda vec, other: vec.less_than_or_equals_vector(other),
+    "GtEq": lambda vec, other: vec.greater_than_or_equals_vector(other),
+}
+
+
+def _call_vector_vector_op(op: str, left_vec, right_vec):
+    """Call vector-vector comparison operation with consistent error handling.
+
+    This centralized dispatcher eliminates code duplication across multiple
+    _*_compare() functions and ensures consistent operation routing.
+
+    Args:
+        op: Operation name (Eq, Lt, Gt, LtEq, GtEq)
+        left_vec: Left operand (Draken vector)
+        right_vec: Right operand (Draken vector, same type as left)
+
+    Returns:
+        BoolVector with comparison results
+
+    Raises:
+        NotImplementedError: If operation not supported for this vector type
+
+    Examples:
+        >>> from opteryx.compiled.draken.vectors import Int64Vector
+        >>> import pyarrow as pa
+        >>> v1 = Int64Vector.from_arrow(pa.array([1, 2, 3]))
+        >>> v2 = Int64Vector.from_arrow(pa.array([1, 2, 4]))
+        >>> result = _call_vector_vector_op("Eq", v1, v2)
+        >>> result.to_pylist()
+        [True, True, False]
+    """
+    fn = _VECTOR_VECTOR_OPS.get(op)
+    if fn is None:
+        raise NotImplementedError(f"Vector-vector operation {op!r} not supported")
+    return fn(left_vec, right_vec)
+
+
+# ---------------------------------------------------------------------------
 # Scalar-typed compare helpers
 # ---------------------------------------------------------------------------
 
@@ -65,22 +111,13 @@ def _int64_compare(op: str, vec, right):
             return vector_in_list(vec, value_set)
         raise NotImplementedError(f"Int64Vector: set op {op!r} not supported")
 
-    # vector-vector: both sides are Int64Vector (or IntegerVector acting as int64)
-    if right.__class__.__name__ in ("Int64Vector", "IntegerVector"):
-        ops = {
-            "Eq": vec.equals_vector,
-            "Lt": vec.less_than_vector,
-            "Gt": vec.greater_than_vector,
-            "LtEq": vec.less_than_or_equals_vector,
-            "GtEq": vec.greater_than_or_equals_vector,
-        }
-        fn = ops.get(op)
-        if fn is None:
-            raise NotImplementedError(f"Int64Vector vector-vector: unsupported op {op!r}")
-        return fn(right)
+    # vector-vector: both sides are Int64Vector or IntegerVector
+    right_type = get_vector_type(right)
+    if right_type in (VectorType.INT64, VectorType.INTEGER):
+        return _call_vector_vector_op(op, vec, right)
 
     # Int64 vs Float64 — cast int64 side to float64 and re-dispatch
-    if right.__class__.__name__ == "Float64Vector":
+    if get_vector_type(right) == VectorType.FLOAT64:
         import pyarrow as pa
 
         from opteryx.compiled.draken.interop.arrow import vector_from_arrow
@@ -115,18 +152,8 @@ def _float64_compare(op: str, vec, right):
             return vector_in_list(vec, value_set)
         raise NotImplementedError(f"Float64Vector: set op {op!r} not supported")
 
-    if right.__class__.__name__ == "Float64Vector":
-        ops = {
-            "Eq": vec.equals_vector,
-            "Lt": vec.less_than_vector,
-            "Gt": vec.greater_than_vector,
-            "LtEq": vec.less_than_or_equals_vector,
-            "GtEq": vec.greater_than_or_equals_vector,
-        }
-        fn = ops.get(op)
-        if fn is None:
-            raise NotImplementedError(f"Float64Vector vector-vector: unsupported op {op!r}")
-        return fn(right)
+    if get_vector_type(right) == VectorType.FLOAT64:
+        return _call_vector_vector_op(op, vec, right)
 
     value = _coerce_float(right)
 
@@ -182,10 +209,10 @@ def _dict_compare(op: str, vec, right):
 
     # Temporal scalar: coerce to the integer representation the Draken vector uses
     if isinstance(right, (datetime.datetime, datetime.date)):
-        cls = vec.__class__.__name__
-        if cls == "Date32Vector":
+        vec_type = get_vector_type(vec)
+        if vec_type == VectorType.DATE32:
             int_val = _coerce_date32(right)
-        elif cls == "TimestampVector":
+        elif vec_type == VectorType.TIMESTAMP:
             int_val = _coerce_timestamp(right)
         else:
             # Fallback: peek at the Arrow type to decide
@@ -447,10 +474,8 @@ def draken_compare(op: str, left, right, left_schema_type=None, right_schema_typ
         op = _NEGATED_OPS[op]
 
     # Scalar left with vector right: flip operands and invert directional ops
-    if isinstance(
-        left,
-        (str, int, float, bytes, bool, tuple, list, type(None), datetime.date, datetime.datetime),
-    ) and hasattr(right, "null_count"):
+    # Example: 5 > [1, 2, 3] becomes [1, 2, 3] < 5
+    if is_scalar(left) and is_draken_vector(right):
         flip_ops = {"Gt": "Lt", "Lt": "Gt", "GtEq": "LtEq", "LtEq": "GtEq"}
         op = flip_ops.get(op, op)
         left, right = right, left
