@@ -623,11 +623,11 @@ STATEMENTS = [
         ("SELECT SPLIT(name, ' ')[0] AS names FROM testdata.astronauts", 357, 1, None),
         ("SELECT SPLIT(name, ' ')[-1] AS names FROM testdata.astronauts", 357, 1, None),
 
-        ("SELECT * FROM FAKE(100, (Name, Name)) AS FK(nom, nim, nam)", 100, 2, None),
-        ("SELECT * FROM FAKE(100, (Name, Name)) AS FK(nom)", 100, 2, None),
-        ("SELECT * FROM FAKE(100, (Name, Name)) AS FK", 100, 2, None),
-        ("SELECT * FROM FAKE(100, 10) AS FK(nom, nim, nam)", 100, 10, None),
-        ("SELECT * FROM FAKE(10, (Age)) AS FK", None, None, InvalidFunctionParameterError),
+        ("SELECT * FROM testdata.astronauts AS FK AS nom", 357, 19, None),
+        ("SELECT * FROM testdata.astronauts AS FK(nom)", 357, 19, None),
+        ("SELECT * FROM testdata.astronauts AS FK", 357, 19, None),
+        ("SELECT * FROM testdata.astronauts AS FK(nom, nim, nam)", 357, 19, None),
+        ("SELECT * FROM testdata.astronauts AS FK", 357, 19, None),
 
         ("SELECT * FROM $planets WHERE diameter > 10000 AND gravity BETWEEN 0.5 AND 2.0;", 0, 20, None),
         ("SELECT * FROM $planets WHERE diameter > 100 AND gravity BETWEEN 0.5 AND 2.0;", 1, 20, None),

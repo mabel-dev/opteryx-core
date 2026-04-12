@@ -124,17 +124,9 @@ def _values(**parameters):
     return _build_morsel_from_rows(parameters["columns"], rows)
 
 
-def _fake_data(**kwargs):
-    from opteryx.exceptions import UnsupportedSyntaxError
-
-    raise UnsupportedSyntaxError(
-        "FAKE() function requires additional dependencies that are not currently available. "
-        "This function is rarely used and has been marked for future implementation."
-    )
 
 
 DATASET_FUNCTIONS = {
-    "FAKE": _fake_data,
     "GENERATE_SERIES": _generate_series,
     "UNNEST": _unnest,
     "VALUES": _values,
@@ -158,8 +150,6 @@ class FunctionDatasetNode(ReaderNode):
     def config(self):  # pragma: no cover
         from opteryx.expression import format_expression
 
-        if self.function == "FAKE":
-            return f"FAKE ({', '.join(format_expression(arg) for arg in self.args)}{' AS ' + self.alias if self.alias else ''})"
         if self.function == "GENERATE_SERIES":
             return f"GENERATE SERIES ({', '.join(format_expression(arg) for arg in self.args)}){' AS ' + self.alias if self.alias else ''}"
         if self.function == "VALUES":

@@ -155,7 +155,7 @@ def locate_identifier(node: Node, context: Any) -> Tuple[Node, Dict]:
             [
                 column_name
                 for _, schema in candidate_schemas.items()
-                for column_name in schema.all_column_names()
+                for column_name in schema.all_column_names
                 if column_name is not None
             ],
         )

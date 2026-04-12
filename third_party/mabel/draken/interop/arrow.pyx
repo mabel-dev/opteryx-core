@@ -28,8 +28,8 @@ from opteryx.compiled.draken.interop.arrow_c_data_interface cimport ArrowArray
 from opteryx.compiled.draken.interop.arrow_c_data_interface cimport ArrowSchema
 from opteryx.compiled.draken.vectors.bool_vector cimport from_arrow as bool_from_arrow
 from opteryx.compiled.draken.vectors.float64_vector cimport from_arrow as float64_from_arrow
-from opteryx.compiled.draken.vectors.int64_vector cimport from_arrow as int64_from_arrow
-from opteryx.compiled.draken.vectors.integer_vector cimport from_arrow as integer_from_arrow
+from opteryx.compiled.draken.vectors.integer_vector cimport int64_from_arrow
+from opteryx.compiled.draken.vectors.integer_vector cimport integer_from_arrow
 from opteryx.compiled.draken.vectors.string_vector cimport from_arrow as string_from_arrow
 from opteryx.compiled.draken.vectors.string_vector cimport from_arrow_struct as string_from_arrow_struct
 from opteryx.compiled.draken.vectors.date32_vector cimport from_arrow as date32_from_arrow
@@ -45,8 +45,8 @@ from opteryx.compiled.draken.vectors.array_vector cimport from_arrow as array_fr
 from opteryx.compiled.draken.vectors.vector_vector cimport from_arrow as vector_from_arrow_vector
 
 
-from opteryx.compiled.draken.vectors.int64_vector cimport Int64Vector
-from opteryx.compiled.draken.vectors.int64_vector cimport from_sequence as int64_from_sequence
+from opteryx.compiled.draken.vectors.integer_vector cimport IntegerVector
+from opteryx.compiled.draken.vectors.integer_vector cimport from_sequence as int64_from_sequence
 from opteryx.compiled.draken.vectors.float64_vector cimport Float64Vector
 from opteryx.compiled.draken.vectors.float64_vector cimport from_sequence as float64_from_sequence
 from opteryx.compiled.draken.vectors.bool_vector cimport BoolVector
@@ -59,17 +59,16 @@ cdef object _typed_constant_from_arrow_value(object value_type, object value, Py
     from opteryx.compiled.draken.vectors.bool_vector import BoolVector
     from opteryx.compiled.draken.vectors.date32_vector import Date32Vector
     from opteryx.compiled.draken.vectors.float64_vector import Float64Vector
-    from opteryx.compiled.draken.vectors.int64_vector import Int64Vector
     from opteryx.compiled.draken.vectors.integer_vector import IntegerVector
     from opteryx.compiled.draken.vectors.string_vector import StringVector
     from opteryx.compiled.draken.vectors.time_vector import TimeVector
     from opteryx.compiled.draken.vectors.timestamp_vector import TimestampVector
 
     if pa.types.is_int64(value_type):
-        return Int64Vector.from_constant(value, length, is_null=is_null)
+        return IntegerVector.from_constant(value, length, is_null=is_null)
     if pa.types.is_uint64(value_type):
         # Treat uint64 constant as int64 (reinterpret bits as signed)
-        return Int64Vector.from_constant(value, length, is_null=is_null)
+        return IntegerVector.from_constant(value, length, is_null=is_null)
     if pa.types.is_int8(value_type) or pa.types.is_int16(value_type) or pa.types.is_int32(value_type):
         return IntegerVector.from_constant(value, length, is_null=is_null)
     if pa.types.is_float32(value_type) or pa.types.is_float64(value_type):
