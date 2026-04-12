@@ -16,23 +16,24 @@ import sys
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
 import numpy
-import opteryx
 import pyarrow as pa
 import pyarrow.compute as pc
-from opteryx.compiled.vector_ops.function_definitions import vector_datepart_hour_i64
-from opteryx.compiled.vector_ops.function_definitions import vector_datepart_minute_i64
-from opteryx.compiled.vector_ops.function_definitions import vector_datepart_day_i64
-from opteryx.compiled.vector_ops.function_definitions import vector_datepart_dayofweek_i64
-from opteryx.compiled.vector_ops.function_definitions import vector_datepart_dayofyear_i64
-from opteryx.compiled.vector_ops.function_definitions import vector_datepart_month_i64
-from opteryx.compiled.vector_ops.function_definitions import vector_datepart_quarter_i64
-from opteryx.compiled.vector_ops.function_definitions import vector_datepart_second_i64
-from opteryx.compiled.vector_ops.function_definitions import vector_datepart_year_i64
-from opteryx.compiled.draken.vectors.arrow_vector import ArrowVector
 from opteryx.compiled.draken.vectors.int64_vector import Int64Vector
-from opteryx.expression.functions.implementations.temporal import date_part
+from opteryx.compiled.vector_ops.function_definitions import (
+    vector_datepart_day_i64,
+    vector_datepart_dayofweek_i64,
+    vector_datepart_dayofyear_i64,
+    vector_datepart_hour_i64,
+    vector_datepart_minute_i64,
+    vector_datepart_month_i64,
+    vector_datepart_quarter_i64,
+    vector_datepart_second_i64,
+    vector_datepart_year_i64,
+)
 from opteryx.operators.group_state_store import DRAKEN_ENCODING_DICTIONARY
 
+import opteryx
+from opteryx.expression.functions.implementations.temporal import date_part
 
 BASE_DT = datetime.datetime(2024, 1, 15, 14, 30, 45)
 
@@ -121,14 +122,6 @@ def test_datepart_date32_arrow_input():
     """DATE values (date32) should support calendar-oriented extraction units."""
     arr = pa.array([datetime.date(2024, 1, 15)], type=pa.date32())
     for part, expected in (("year", [2024]), ("month", [1]), ("day", [15]), ("quarter", [1])):
-        actual = date_part(part, arr)
-        assert _as_pylist(actual) == expected, f"failed for part={part}"
-
-
-def test_datepart_arrow_vector_date64_input():
-    """ArrowVector date64 values should be normalized for EXTRACT."""
-    arr = ArrowVector(pa.array([datetime.date(1930, 1, 1), datetime.date(1931, 1, 1)], type=pa.date64()))
-    for part, expected in (("year", [1930, 1931]), ("month", [1, 1]), ("day", [1, 1])):
         actual = date_part(part, arr)
         assert _as_pylist(actual) == expected, f"failed for part={part}"
 
@@ -245,7 +238,9 @@ def test_datepart_query_level_phase2_units_from_clickbench():
             elif part == "dayofweek":
                 assert all(v is None or 0 <= v <= 6 for v in norm_values), "dayofweek out of range"
             elif part == "dayofyear":
-                assert all(v is None or 1 <= v <= 366 for v in norm_values), "dayofyear out of range"
+                assert all(v is None or 1 <= v <= 366 for v in norm_values), (
+                    "dayofyear out of range"
+                )
             elif part == "quarter":
                 assert all(v is None or 1 <= v <= 4 for v in norm_values), "quarter out of range"
     finally:

@@ -2,7 +2,6 @@
 
 from typing import Any
 
-import numpy
 import pyarrow as _pa
 
 from opteryx.compiled.draken.vectors.scalar_constructors import from_scalar as _const_scalar
@@ -41,7 +40,7 @@ def _coerce_param_for_draken(p):
         except Exception:
             pass
 
-    # Fast-path plain Python scalars before the numpy isinstance checks.
+    # Fast-path plain Python scalars before sequence coercion.
     if isinstance(p, bool):
         return p
 
@@ -49,11 +48,6 @@ def _coerce_param_for_draken(p):
         vec = _const_scalar(p, 1)
         if vec is not None:
             return vec
-
-    if isinstance(p, numpy.generic):
-        p = p.item()
-    elif isinstance(p, numpy.ndarray):
-        p = p.item() if p.ndim == 0 else p.tolist()
 
     if isinstance(p, (list, tuple)):
         from opteryx.compiled.draken.interop.arrow import vector_from_sequence
@@ -108,41 +102,27 @@ def apply_bounded_function(node, *parameters) -> Any:
         null_policy == "compress"
         and len(parameters) > 0
         and not isinstance(parameters[0], int)
-        and all(isinstance(arr, numpy.ndarray) for arr in parameters)
-        and all(arr.ndim == 1 for arr in parameters)
+        and all(hasattr(arr, "ndim") and arr.ndim == 1 for arr in parameters)
     ):
         morsel_size = len(parameters[0])
-        null_positions = numpy.zeros(morsel_size, dtype=numpy.bool_)
-
-        def _np_is_null(arr, nan_is_null: bool = True):
-            """
-            Lightweight numpy-based null detection to avoid pyarrow.compute in the
-            hot path. For float arrays we treat NaN as null when requested. For
-            object arrays we detect Python None via elementwise equality. For other
-            numeric types there is no representation of null, so we return all-False.
-            """
-            try:
-                kind = arr.dtype.kind
-            except Exception:
-                # If dtype introspection fails, assume no nulls
-                return numpy.zeros(arr.shape, dtype=numpy.bool_)
-
-            if kind == "f" and nan_is_null:
-                # Use numpy.isnan for float NaN detection (vectorized, fast).
-                return numpy.isnan(arr)
-            if arr.dtype == object:
-                # Elementwise check for None for object dtype arrays.
-                return numpy.equal(arr, None)
-            # Other dtypes (ints, bools, etc.) do not carry NaN/None in native numpy arrays.
-            return numpy.zeros(arr.shape, dtype=numpy.bool_)
+        null_positions = None
 
         for arr in parameters:
-            null_positions = numpy.logical_or(null_positions, _np_is_null(arr, nan_is_null=True))
+            if hasattr(arr, "is_null"):
+                arr_nulls = arr.is_null()
+                null_array = arr_nulls.to_numpy() if hasattr(arr_nulls, "to_numpy") else arr_nulls
+            else:
+                continue
 
-        if null_positions.all():
-            return numpy.full(morsel_size, None, dtype=object)
+            if null_positions is None:
+                null_positions = null_array
+            else:
+                null_positions = null_positions | null_array
 
-        if null_positions.any():
+        if null_positions is not None and null_positions.all():
+            return [None] * morsel_size
+
+        if null_positions is not None and null_positions.any():
             valid_positions = ~null_positions
             parameters = [arr.compress(valid_positions) for arr in parameters]
             compressed = True
@@ -171,12 +151,12 @@ def apply_bounded_function(node, *parameters) -> Any:
     except Exception as e:
         raise FunctionExecutionError(message=e, function=node.value) from e
 
-    if isinstance(result, list):
-        result = numpy.array(result)
-
     if compressed:
-        out = numpy.full(morsel_size, None, dtype=object)
-        numpy.place(out, valid_positions, result)
+        out = [None] * morsel_size
+        result_iter = iter(result)
+        for idx, is_valid in enumerate(valid_positions):
+            if is_valid:
+                out[idx] = next(result_iter)
         return out
 
     return result

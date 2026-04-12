@@ -168,11 +168,7 @@ def _coerce_timestamp(value) -> int:
             ).total_seconds()
             * 1_000_000
         )
-    if value.__class__.__name__ == "ArrowVector":
-        scalar = value._arr[0].as_py()
-        if scalar is None:
-            return None
-        return _coerce_timestamp(scalar)
+
     return int(value)
 
 

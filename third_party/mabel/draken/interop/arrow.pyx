@@ -44,7 +44,7 @@ from opteryx.compiled.draken.vectors.interval_vector cimport (
 from opteryx.compiled.draken.vectors.array_vector cimport from_arrow as array_from_arrow
 from opteryx.compiled.draken.vectors.vector_vector cimport from_arrow as vector_from_arrow_vector
 
-from opteryx.compiled.draken.vectors.arrow_vector import from_arrow as arrow_from_arrow
+
 from opteryx.compiled.draken.vectors.int64_vector cimport Int64Vector
 from opteryx.compiled.draken.vectors.int64_vector cimport from_sequence as int64_from_sequence
 from opteryx.compiled.draken.vectors.float64_vector cimport Float64Vector
@@ -261,10 +261,15 @@ cpdef object vector_from_arrow(object array):
         return string_from_arrow(array)
     if pa_type.equals(pa.float64()):
         return float64_from_arrow(array)
+    if pa_type.equals(pa.float32()) or pa_type.equals(pa.float16()):
+        return float64_from_arrow(array.cast(pa.float64()))
     if pa_type.equals(pa.bool_()):
         return bool_from_arrow(array)
     if pa.types.is_date32(pa_type):
         return date32_from_arrow(array)
+    if pa.types.is_date64(pa_type):
+        # date64 stores milliseconds from epoch; cast to timestamp(ms) then to timestamp(us)
+        return timestamp_from_arrow(array.cast(pa.timestamp("ms")).cast(pa.timestamp("us")))
     if pa.types.is_timestamp(pa_type):
         return timestamp_from_arrow(array)
     if pa.types.is_time32(pa_type) or pa.types.is_time64(pa_type):
@@ -272,7 +277,7 @@ cpdef object vector_from_arrow(object array):
     if pa.types.is_fixed_size_list(pa_type):
         if pa.types.is_integer(pa_type.value_type) or pa.types.is_floating(pa_type.value_type):
             return vector_from_arrow_vector(array)
-        return arrow_from_arrow(array)
+        return array_from_arrow(array)
     if pa.types.is_list(pa_type) or pa.types.is_large_list(pa_type):
         if pa.types.is_integer(pa_type.value_type) or pa.types.is_floating(pa_type.value_type):
             raw_lengths = pc.list_value_length(array).to_pylist()
@@ -296,8 +301,10 @@ cpdef object vector_from_arrow(object array):
     if isinstance(pa_type, pa.StructType):
         return string_from_arrow_struct(array)
 
-    # fall back implementation (just wrap pyarrow compute)
-    return arrow_from_arrow(array)
+    raise NotImplementedError(
+        f"vector_from_arrow: no native Draken handler for Arrow type {pa_type!r}. "
+        "Add an explicit handler or cast to a supported type before calling vector_from_arrow."
+    )
 
 
 cpdef object vector_from_sequence(object data, object dtype=None):

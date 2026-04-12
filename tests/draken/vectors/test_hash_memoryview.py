@@ -11,7 +11,6 @@ from opteryx.compiled.draken.vectors._hash_api import hash_into as hash_into_vec
 from opteryx.third_party.cyan4973.xxhash import hash_bytes  # type: ignore[attr-defined]
 
 from opteryx.compiled.draken import Vector
-from opteryx.compiled.draken.vectors.arrow_vector import ArrowVector
 
 NULL_HASH = 0x4C3F95A36AB8ECCA
 MASK = 0xFFFFFFFFFFFFFFFF
@@ -97,13 +96,6 @@ def test_array_vector_hash_uses_xxhash3_for_lists():
     )
 
     assert hash_values == expected
-
-
-def test_arrow_vector_hash_delegates_to_native_vector():
-    arrow_array = pa.array([5, None], type=pa.int64())
-    vector = ArrowVector(arrow_array)
-
-    assert _as_uint64_list(_hash_buffer(vector)) == _expected_single([5, NULL_HASH])
 
 
 if __name__ == "__main__":

@@ -8,18 +8,14 @@ import pytest
 
 sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 
-import opteryx
-from opteryx.types import OrsoTypes
-
 from opteryx.compiled.draken.morsels.morsel import Morsel
-from opteryx.compiled.draken.vectors.arrow_vector import ArrowVector
-from opteryx.expression import NodeType
-from opteryx.expression import evaluate_and_append
+from opteryx.expression.evaluator.draken import _eval_value, _is_null_as_boolvector, evaluate_draken
+
+import opteryx
+from opteryx.expression import NodeType, evaluate_and_append
 from opteryx.expression.evaluator import evaluate_and_append_draken
-from opteryx.expression.evaluator.draken import _eval_value
-from opteryx.expression.evaluator.draken import _is_null_as_boolvector
-from opteryx.expression.evaluator.draken import evaluate_draken
 from opteryx.models import Node
+from opteryx.types import OrsoTypes
 
 
 def _schema(identity: str, value_type):
@@ -175,19 +171,6 @@ def test_grouped_clickbench_style_expressions_stay_native(sql, expected_rows):
         assert agg.get("feature_groupby_draken_eval_native", 0) >= 1
     finally:
         session.close()
-
-
-def test_empty_morsel_preserves_non_native_columns():
-    map_type = pa.map_(pa.string(), pa.int64())
-    morsel = Morsel.from_vectors(
-        ["meta"],
-        [ArrowVector(pa.array([[("alpha", 1)]], type=map_type))],
-    )
-
-    morsel.empty()
-
-    assert morsel.num_rows == 0
-    assert morsel.column(b"meta").to_arrow().type == map_type
 
 
 def test_is_null_mask_returns_true_for_null_float_values():

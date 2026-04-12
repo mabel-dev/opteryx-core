@@ -125,11 +125,9 @@ def _map_parquet_type_to_orso(
             _type, _length, _precision, _scale, _element_type = OrsoTypes.from_name(
                 normalized_logical
             )
-            _type._length = _length
-            _type._precision = _precision
-            _type._scale = _scale
-            _type._element_type = _element_type
-            # print(f"DEBUG: mapped {logical_lower} to {_type} with element_type {_element_type}")
+            # Note: _type is an immutable enum, so we cannot set attributes on it
+            # The metadata (_length, _precision, _scale, _element_type) will be extracted
+            # from the parquet entry itself in the calling code
             return _type
 
     # Fall back to physical type mapping
@@ -228,10 +226,10 @@ def rugo_to_orso_schema(
                 name=name,
                 type=orso_type,
                 nullable=nullable,
-                precision=orso_type._precision,
-                scale=orso_type._scale,
-                length=orso_type._length,
-                element_type=orso_type._element_type,
+                precision=entry.get("precision"),
+                scale=entry.get("scale"),
+                length=entry.get("length"),
+                element_type=entry.get("element_type"),
             )
         )
 
