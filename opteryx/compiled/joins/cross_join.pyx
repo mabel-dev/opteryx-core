@@ -8,7 +8,6 @@
 
 import numpy
 cimport numpy
-numpy.import_array()
 
 from opteryx.compiled.structures.carchar_set cimport CarcharSetWrapper
 from opteryx.third_party.fastfloat.fast_float cimport c_parse_fast_float as parse_fast_float

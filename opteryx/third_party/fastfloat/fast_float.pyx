@@ -7,11 +7,11 @@
 # cython: wraparound=False
 # cython: boundscheck=False
 
-import numpy
-cimport numpy
-
 from cpython.bytes cimport PyBytes_AS_STRING, PyBytes_GET_SIZE
 from cpython.unicode cimport PyUnicode_AsUTF8String
+from cpython.mem cimport PyMem_Malloc, PyMem_Free
+
+from opteryx.compiled.draken.vectors.float64_vector cimport Float64Vector, from_sequence
 
 
 cdef extern from "fast_float.h" namespace "fast_float":
@@ -39,67 +39,99 @@ cdef inline double c_parse_fast_float(bytes bts):
 cpdef double parse_fast_float(bytes bts):
     return c_parse_fast_float(bts)
 
-cpdef numpy.ndarray[double] parse_ascii_array_to_double(numpy.ndarray[object, ndim=1] arr):
+cpdef Float64Vector parse_ascii_array_to_double(object arr):
     """
-    Parse an array of Python strings (str) to NumPy float64 using fast_float.
+    Parse an array of Python strings (str) to Float64Vector using fast_float.
     Assumes ASCII input.
+
+    Args:
+        arr: Sequence of str or None values
+
+    Returns:
+        Float64Vector of parsed double values (NaN for unparseable or None inputs)
     """
-    cdef Py_ssize_t i, n = arr.shape[0]
-    cdef numpy.ndarray[double] out = numpy.empty(n, dtype=numpy.float64)
-    cdef double[:] out_view = out
+    cdef Py_ssize_t i, n = len(arr)
+    cdef double* out = <double*>PyMem_Malloc(n * sizeof(double))
     cdef bytes encoded
     cdef const char* c_str
     cdef Py_ssize_t length
     cdef double val = 0.0
     cdef from_chars_result res
     cdef object item
+    cdef double[::1] view
+    cdef Float64Vector result
 
-    for i in range(n):
-        item = arr[i]
-        if item is None:
-            out_view[i] = numpy.nan
-            continue
+    if out == NULL:
+        raise MemoryError(f"Cannot allocate buffer for {n} doubles")
 
-        # Convert str to bytes (UTF-8 encoded, ideally ASCII)
-        encoded = PyUnicode_AsUTF8String(item)
-        c_str = PyBytes_AS_STRING(encoded)
-        length = PyBytes_GET_SIZE(encoded)
+    try:
+        for i in range(n):
+            item = arr[i]
+            if item is None:
+                out[i] = float('nan')
+                continue
 
-        res = from_chars(c_str, c_str + length, val)
-        if res.ptr != NULL:
-            out_view[i] = val
-        else:
-            out_view[i] = numpy.nan  # or raise?
+            # Convert str to bytes (UTF-8 encoded, ideally ASCII)
+            encoded = PyUnicode_AsUTF8String(item)
+            c_str = PyBytes_AS_STRING(encoded)
+            length = PyBytes_GET_SIZE(encoded)
 
-    return out
+            res = from_chars(c_str, c_str + length, val)
+            if res.ptr != NULL:
+                out[i] = val
+            else:
+                out[i] = float('nan')
+
+        # Create a typed memoryview and wrap it in Float64Vector
+        view = <double[:n]>out
+        result = from_sequence(view)
+        return result
+    finally:
+        PyMem_Free(out)
 
 
-cpdef numpy.ndarray[double] parse_byte_array_to_double(numpy.ndarray[object, ndim=1] arr):
+cpdef Float64Vector parse_byte_array_to_double(object arr):
     """
-    Parse an array of Python bytes (b"123.45") to NumPy float64 using fast_float.
+    Parse an array of Python bytes (b"123.45") to Float64Vector using fast_float.
+
+    Args:
+        arr: Sequence of bytes or None values
+
+    Returns:
+        Float64Vector of parsed double values (NaN for unparseable or None inputs)
     """
-    cdef Py_ssize_t i, n = arr.shape[0]
-    cdef numpy.ndarray[double] out = numpy.empty(n, dtype=numpy.float64)
-    cdef double[:] out_view = out
+    cdef Py_ssize_t i, n = len(arr)
+    cdef double* out = <double*>PyMem_Malloc(n * sizeof(double))
     cdef const char* c_str
     cdef Py_ssize_t length
     cdef double val = 0.0
     cdef from_chars_result res
     cdef object item
+    cdef double[::1] view
+    cdef Float64Vector result
 
-    for i in range(n):
-        item = arr[i]
-        if item is None:
-            out_view[i] = numpy.nan
-            continue
+    if out == NULL:
+        raise MemoryError(f"Cannot allocate buffer for {n} doubles")
 
-        c_str = PyBytes_AS_STRING(item)
-        length = PyBytes_GET_SIZE(item)
+    try:
+        for i in range(n):
+            item = arr[i]
+            if item is None:
+                out[i] = float('nan')
+                continue
 
-        res = from_chars(c_str, c_str + length, val)
-        if res.ptr != NULL:
-            out_view[i] = val
-        else:
-            out_view[i] = numpy.nan
+            c_str = PyBytes_AS_STRING(item)
+            length = PyBytes_GET_SIZE(item)
 
-    return out
+            res = from_chars(c_str, c_str + length, val)
+            if res.ptr != NULL:
+                out[i] = val
+            else:
+                out[i] = float('nan')
+
+        # Create a typed memoryview and wrap it in Float64Vector
+        view = <double[:n]>out
+        result = from_sequence(view)
+        return result
+    finally:
+        PyMem_Free(out)
