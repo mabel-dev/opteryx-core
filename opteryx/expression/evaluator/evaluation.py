@@ -3,10 +3,8 @@
 import datetime
 import decimal
 
-import numpy
-import pyarrow as _pa
-
 from opteryx.exceptions import ColumnReferencedBeforeEvaluationError
+from opteryx.utils.vector_types import VectorType, get_vector_type, is_draken_vector, is_scalar
 
 from .arithmetic import _eval_binary_op_draken
 from .comparisons import draken_compare
@@ -48,26 +46,12 @@ _NEGATED_OPS = {
 
 
 def _is_scalar_value(obj):
-    """Check if object is a raw Python scalar (not a vector or array).
+    """Deprecated: use is_scalar() from opteryx.utils.vector_types instead.
 
-    Used to discriminate between scalars and vectors when both might have
-    null_count attributes (e.g., Draken vectors vs raw Python values).
-
-    Args:
-        obj: Object to test
-
-    Returns:
-        True if obj is a raw Python scalar, False if it's a vector/array
+    This function is kept for backward compatibility but new code should
+    use is_scalar() which is centralized and consistent.
     """
-    # Explicit checks for common scalar types
-    if obj is None or isinstance(obj, (bool, int, float, str, bytes, bytearray)):
-        return True
-    if isinstance(obj, (datetime.date, datetime.time, datetime.datetime, datetime.timedelta)):
-        return True
-    if isinstance(obj, decimal.Decimal):
-        return True
-    # Everything else (Arrow arrays, Draken vectors, etc.) is not a scalar
-    return False
+    return is_scalar(obj)
 
 
 def _eval_value(node, morsel):
@@ -90,10 +74,6 @@ def _eval_value(node, morsel):
 
     if node_type == NodeType.IDENTIFIER:
         vec = morsel.column(node.schema_column.identity.encode(), node.schema_column.name.encode())
-        if vec.__class__.__name__ == "ArrowVector":
-            from opteryx.compiled.draken.interop.arrow import vector_from_arrow
-
-            return vector_from_arrow(vec.to_arrow())
         return vec
 
     if node_type in (NodeType.EVALUATED, NodeType.AGGREGATOR):
@@ -103,10 +83,6 @@ def _eval_value(node, morsel):
             )
         except KeyError:
             raise ColumnReferencedBeforeEvaluationError(column=node.schema_column.name)
-        if vec.__class__.__name__ == "ArrowVector":
-            from opteryx.compiled.draken.interop.arrow import vector_from_arrow
-
-            return vector_from_arrow(vec.to_arrow())
         return vec
 
     if node_type == NodeType.NESTED:
@@ -127,10 +103,11 @@ def _eval_value(node, morsel):
             )
             from opteryx.expression.binary_operators import MapAccessOp
 
+            # Use type discriminator instead of hasattr check
             source = left_vec.to_arrow() if hasattr(left_vec, "to_arrow") else left_vec
             result = MapAccessOp(source, [right_val])
-            if isinstance(result, _pa.Array):
-                return vector_from_arrow(result)
+            if hasattr(result, "to_arrow"):
+                return vector_from_arrow(result.to_arrow())
             return vector_from_sequence(result)
 
         if op in ("Arrow", "LongArrow"):
@@ -160,10 +137,6 @@ def _eval_value(node, morsel):
             except KeyError:
                 vec = None
             if vec is not None:
-                if vec.__class__.__name__ == "ArrowVector":
-                    from opteryx.compiled.draken.interop.arrow import vector_from_arrow
-
-                    return vector_from_arrow(vec.to_arrow())
                 return vec
 
         from opteryx.compiled.draken.interop.arrow import vector_from_arrow, vector_from_sequence
@@ -171,11 +144,11 @@ def _eval_value(node, morsel):
 
         arrow_table = morsel.to_arrow()
         result = _inner_evaluate(node, arrow_table)
-        if isinstance(result, (_pa.Array, _pa.ChunkedArray)):
-            return vector_from_arrow(result)
-        if result is not None and result.__class__.__name__.endswith("Vector"):
+        if result is not None and is_draken_vector(result):
             return result
-        if not hasattr(result, "__iter__") or isinstance(result, (str, bytes, numpy.generic)):
+        if hasattr(result, "to_arrow"):
+            return vector_from_arrow(result.to_arrow())
+        if not hasattr(result, "__iter__") or isinstance(result, str):
             from opteryx.compiled.draken.vectors.scalar_constructors import (
                 from_scalar as _const_scalar,
             )
@@ -183,7 +156,11 @@ def _eval_value(node, morsel):
             vec = _const_scalar(result, morsel.num_rows)
             if vec is not None:
                 return vec
-            return vector_from_arrow(_pa.array([result] * morsel.num_rows))
+            from opteryx.compiled.draken.interop.arrow import (
+                vector_from_sequence as _vector_from_sequence,
+            )
+
+            return _vector_from_sequence([result] * morsel.num_rows)
         return vector_from_sequence(result)
 
     return evaluate_draken(node, morsel)
@@ -197,7 +174,7 @@ def _unary_draken(op: str, centre_node, morsel):
     if op == "IsNotNull":
         return _is_null_as_boolvector(vec).not_vector()
     if op in ("IsTrue", "IsNotFalse", "IsFalse", "IsNotTrue"):
-        bv = vec if vec.__class__.__name__ == "BoolVector" else None
+        bv = vec if get_vector_type(vec) == VectorType.BOOL else None
         if bv is None:
             raise TypeError(
                 f"IS TRUE/IS FALSE requires a boolean expression; got {vec.__class__.__name__!r}"
@@ -223,8 +200,6 @@ def evaluate_draken(node, morsel):
 
     if node_type == NodeType.AND:
         left = evaluate_draken(node.left, morsel)
-        if not left.any():
-            return left
         right = evaluate_draken(node.right, morsel)
         return left.and_vector(right)
 
@@ -250,13 +225,11 @@ def evaluate_draken(node, morsel):
         return result
 
     if node_type == NodeType.LITERAL:
-        import pyarrow as pa
-
         from opteryx.compiled.draken.vectors.bool_vector import BoolVector
 
         val = node.value
         scalar = bool(val) if val is not None else False
-        return BoolVector.from_arrow(pa.array([scalar] * morsel.num_rows, type=pa.bool_()))
+        return BoolVector(morsel.num_rows, scalar)
 
     if node_type == NodeType.COMPARISON_OPERATOR:
         left = _eval_value(node.left, morsel)
@@ -272,23 +245,22 @@ def evaluate_draken(node, morsel):
             if _is_scalar_value(right) and right_schema_type in temporal_types:
                 right = _coerce_temporal_scalar_for_arrow(right, right_schema_type)
 
-        if _is_scalar_value(left) and _is_scalar_value(right):
-            import pyarrow as pa
-
+        if is_scalar(left) and is_scalar(right):
             from opteryx.compiled.draken.vectors.bool_vector import BoolVector
-            from opteryx.expression.operations import filter_operations
 
-            scalar_result = filter_operations(
-                pa.array([left]),
-                left_schema_type,
+            scalar_result = draken_compare(
                 node.value,
-                pa.array([right]),
+                left,
+                right,
+                left_schema_type,
                 right_schema_type,
-            )[0].as_py()
-            scalar_result = False if scalar_result is None else bool(scalar_result)
-            return BoolVector.from_arrow(
-                pa.array([scalar_result] * morsel.num_rows, type=pa.bool_())
             )
+            if get_vector_type(scalar_result) != VectorType.BOOL:
+                raise TypeError(
+                    f"evaluate_draken: scalar comparison '{node.value!r}' returned "
+                    f"{scalar_result.__class__.__name__!r}, expected BoolVector"
+                )
+            return scalar_result
         return draken_compare(node.value, left, right, left_schema_type, right_schema_type)
 
     if node_type == NodeType.UNARY_OPERATOR:
@@ -302,41 +274,19 @@ def evaluate_draken(node, morsel):
             parameters = [morsel.num_rows]
         result = apply_bounded_function(node, *parameters)
         if isinstance(result, list):
-            result = numpy.array(result, dtype=object)
-        if isinstance(result, numpy.ndarray):
-            if result.ndim != 1:
-                raise TypeError(
-                    f"evaluate_draken: FUNCTION node returned ndarray with rank {result.ndim}, expected 1-dimensional boolean results"
-                )
-            if result.dtype.kind in ("b", "O", "f", "i", "u"):
-                import pyarrow as pa
+            from opteryx.compiled.draken.interop.arrow import vector_from_sequence
 
-                from opteryx.compiled.draken.vectors.bool_vector import BoolVector
-
-                try:
-                    result = BoolVector.from_arrow(pa.array(result, type=pa.bool_()))
-                except (pa.ArrowInvalid, pa.ArrowTypeError, ValueError, TypeError):
-                    pass
-        elif isinstance(result, _pa.Array) and _pa.types.is_boolean(result.type):
-            from opteryx.compiled.draken.vectors.bool_vector import BoolVector
-
-            result = BoolVector.from_arrow(result)
-        if result.__class__.__name__ != "BoolVector":
+            result = vector_from_sequence(result)
+        if get_vector_type(result) != VectorType.BOOL:
             raise TypeError(
                 f"evaluate_draken: FUNCTION node returned {result.__class__.__name__!r}, expected BoolVector"
             )
         return result
 
     if node_type == NodeType.BINARY_OPERATOR:
-        from opteryx.compiled.draken.vectors.bool_vector import BoolVector
-
         result = _eval_value(node, morsel)
-        if result.__class__.__name__ == "BoolVector":
+        if get_vector_type(result) == VectorType.BOOL:
             return result
-        if isinstance(result, _pa.Array) and _pa.types.is_boolean(result.type):
-            return BoolVector.from_arrow(result)
-        if isinstance(result, numpy.ndarray) and result.dtype.kind == "b":
-            return BoolVector.from_arrow(_pa.array(result, type=_pa.bool_()))
         raise TypeError(
             f"evaluate_draken: BINARY_OPERATOR '{node.value!r}' returned non-boolean {result.__class__.__name__!r}"
         )

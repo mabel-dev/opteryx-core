@@ -1,15 +1,21 @@
-"""Draken comparison operations."""
+"""Draken comparison operations.
+
+Explicit comparison dispatch for all native Draken vector types.
+ArrowVector has been removed; all paths now use native Draken APIs.
+NumPy is not imported here.
+"""
 
 import datetime
 
-import numpy
-import pyarrow as _pa
-
 from opteryx.compiled.vector_ops import vector_contains, vector_in_list, vector_like, vector_rlike
-from opteryx.exceptions import ColumnReferencedBeforeEvaluationError
 
-from .function_execution import _is_draken_vector, apply_bounded_function
-from .string_ops import _string_compare
+from .string_ops import _string_anyop_like, _string_compare
+from .temporal_ops import (
+    _date32_compare,
+    _int64_temporal_compare,
+    _interval_compare,
+    _timestamp_compare,
+)
 from .type_coercion import (
     _coerce_date32,
     _coerce_date32_set,
@@ -17,19 +23,15 @@ from .type_coercion import (
     _coerce_float_set,
     _coerce_int64,
     _coerce_int64_set,
-    _coerce_interval,
     _coerce_str,
     _coerce_str_set,
     _coerce_temporal_scalar_for_arrow,
     _coerce_timestamp,
     _coerce_timestamp_set,
     _constant_scalar_value,
-    _dictionary_arrow_type,
     _dictionary_compare_vector,
     _is_constant_vector_like,
-    _is_dictionary_encoded_vector,
     _is_null_as_boolvector,
-    _is_typed_constant_encoded_vector,
 )
 
 _EPOCH_DATE = datetime.date(1970, 1, 1)
@@ -46,6 +48,11 @@ _NEGATED_OPS = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Scalar-typed compare helpers
+# ---------------------------------------------------------------------------
+
+
 def _int64_compare(op: str, vec, right):
     from opteryx.compiled.draken.vectors.bool_vector import BoolVector
 
@@ -54,20 +61,34 @@ def _int64_compare(op: str, vec, right):
 
     if isinstance(right, (list, tuple, set, frozenset)):
         value_set = _coerce_int64_set(right)
-    elif right.__class__.__name__ == "Int64Vector":
-        vec_ops = {
+        if op == "InList":
+            return vector_in_list(vec, value_set)
+        raise NotImplementedError(f"Int64Vector: set op {op!r} not supported")
+
+    # vector-vector: both sides are Int64Vector (or IntegerVector acting as int64)
+    if right.__class__.__name__ in ("Int64Vector", "IntegerVector"):
+        ops = {
             "Eq": vec.equals_vector,
             "Lt": vec.less_than_vector,
             "Gt": vec.greater_than_vector,
             "LtEq": vec.less_than_or_equals_vector,
             "GtEq": vec.greater_than_or_equals_vector,
         }
-        fn = vec_ops.get(op)
+        fn = ops.get(op)
         if fn is None:
             raise NotImplementedError(f"Int64Vector vector-vector: unsupported op {op!r}")
         return fn(right)
-    else:
-        value = _coerce_int64(right)
+
+    # Int64 vs Float64 — cast int64 side to float64 and re-dispatch
+    if right.__class__.__name__ == "Float64Vector":
+        import pyarrow as pa
+
+        from opteryx.compiled.draken.interop.arrow import vector_from_arrow
+
+        float_vec = vector_from_arrow(vec.to_arrow().cast(pa.float64()))
+        return _float64_compare(op, float_vec, right)
+
+    value = _coerce_int64(right)
 
     if op == "Eq":
         return vec.equals(value)
@@ -79,18 +100,6 @@ def _int64_compare(op: str, vec, right):
         return vec.less_than_or_equals(value)
     if op == "GtEq":
         return vec.greater_than_or_equals(value)
-    if op == "InList":
-        return vector_in_list(vec, value_set)
-
-    # Fallback for edge cases like Float64Vector comparison (not in hot path for ClickBench)
-    if right.__class__.__name__ == "Float64Vector":
-        import pyarrow as pa
-
-        from opteryx.compiled.draken.interop.arrow import vector_from_arrow
-
-        float_vec = vector_from_arrow(vec.to_arrow().cast(pa.float64()))
-        return _float64_compare(op, float_vec, right)
-
     raise NotImplementedError(f"Int64Vector: unsupported op {op!r}")
 
 
@@ -102,20 +111,24 @@ def _float64_compare(op: str, vec, right):
 
     if isinstance(right, (list, tuple, set, frozenset)):
         value_set = _coerce_float_set(right)
-    elif right.__class__.__name__ == "Float64Vector":
-        vec_ops = {
+        if op == "InList":
+            return vector_in_list(vec, value_set)
+        raise NotImplementedError(f"Float64Vector: set op {op!r} not supported")
+
+    if right.__class__.__name__ == "Float64Vector":
+        ops = {
             "Eq": vec.equals_vector,
             "Lt": vec.less_than_vector,
             "Gt": vec.greater_than_vector,
             "LtEq": vec.less_than_or_equals_vector,
             "GtEq": vec.greater_than_or_equals_vector,
         }
-        fn = vec_ops.get(op)
+        fn = ops.get(op)
         if fn is None:
             raise NotImplementedError(f"Float64Vector vector-vector: unsupported op {op!r}")
         return fn(right)
-    else:
-        value = _coerce_float(right)
+
+    value = _coerce_float(right)
 
     if op == "Eq":
         return vec.equals(value)
@@ -127,15 +140,10 @@ def _float64_compare(op: str, vec, right):
         return vec.less_than_or_equals(value)
     if op == "GtEq":
         return vec.greater_than_or_equals(value)
-    if op == "InList":
-        return vector_in_list(vec, value_set)
     raise NotImplementedError(f"Float64Vector: unsupported op {op!r}")
 
 
 def _dict_compare(op: str, vec, right):
-    import pyarrow as pa
-    import pyarrow.compute as pc
-
     from opteryx.compiled.draken.vectors.bool_vector import BoolVector
 
     vec = _dictionary_compare_vector(vec)
@@ -145,79 +153,74 @@ def _dict_compare(op: str, vec, right):
     if right is None:
         return BoolVector(len(vec))
 
+    # Unwrap constant vectors to their scalar value
     if _is_constant_vector_like(right):
         right = _constant_scalar_value(right)
-    elif right.__class__.__name__ == "ArrowVector":
-        arr = right.to_arrow()
-        right = arr[0].as_py() if len(arr) == 1 else arr
+
+    # Column-to-column: right is also a vector with comparison methods
     elif hasattr(right, "to_arrow") and not _is_constant_vector_like(right):
-        arrow_ops = {
-            "Eq": pc.equal,
-            "NotEq": pc.not_equal,
-            "Lt": pc.less,
-            "Gt": pc.greater,
-            "LtEq": pc.less_equal,
-            "GtEq": pc.greater_equal,
+        right_vec = _dictionary_compare_vector(right)
+        if right_vec is None:
+            raise NotImplementedError(
+                "dictionary-encoded vector column-to-column comparison requires a "
+                "Draken-compatible right-hand vector."
+            )
+        ops = {
+            "Eq": vec.equals_vector,
+            "NotEq": vec.not_equals_vector,
+            "Lt": vec.less_than_vector,
+            "Gt": vec.greater_than_vector,
+            "LtEq": vec.less_than_or_equals_vector,
+            "GtEq": vec.greater_than_or_equals_vector,
         }
-        fn = arrow_ops.get(op)
+        fn = ops.get(op)
         if fn is None:
             raise NotImplementedError(
                 f"dictionary-encoded vector column-to-column: unsupported op {op!r}"
             )
-        left_arr = vec.to_arrow()
-        right_arr = right.to_arrow()
-        if pa.types.is_dictionary(left_arr.type):
-            left_arr = left_arr.dictionary_decode()
-        if pa.types.is_dictionary(right_arr.type):
-            right_arr = right_arr.dictionary_decode()
-        return BoolVector.from_arrow(fn(left_arr, right_arr))
+        return fn(right_vec)
 
-    if isinstance(right, numpy.generic):
-        right = right.item()
+    # Temporal scalar: coerce to the integer representation the Draken vector uses
+    if isinstance(right, (datetime.datetime, datetime.date)):
+        cls = vec.__class__.__name__
+        if cls == "Date32Vector":
+            int_val = _coerce_date32(right)
+        elif cls == "TimestampVector":
+            int_val = _coerce_timestamp(right)
+        else:
+            # Fallback: peek at the Arrow type to decide
+            import pyarrow as pa
+
+            arr = vec.to_arrow()
+            if pa.types.is_dictionary(arr.type):
+                arr = arr.dictionary_decode()
+            if pa.types.is_date32(arr.type):
+                int_val = _coerce_date32(right)
+            else:
+                int_val = _coerce_timestamp(right)
+
+        if op == "Eq":
+            return vec.equals(int_val)
+        if op == "NotEq":
+            return vec.not_equals(int_val)
+        if op == "Lt":
+            return vec.less_than(int_val)
+        if op == "Gt":
+            return vec.greater_than(int_val)
+        if op == "LtEq":
+            return vec.less_than_or_equals(int_val)
+        if op == "GtEq":
+            return vec.greater_than_or_equals(int_val)
+        raise NotImplementedError(
+            f"dictionary-encoded vector temporal compare: unsupported op {op!r}"
+        )
 
     value_list = list(right) if isinstance(right, (list, tuple, set, frozenset)) else right
 
-    if isinstance(right, (datetime.datetime, datetime.date, numpy.datetime64)):
-        arr = vec.to_arrow()
-        if pa.types.is_dictionary(arr.type):
-            arr = arr.dictionary_decode()
-
-        if pa.types.is_date32(arr.type):
-            if isinstance(right, datetime.datetime):
-                arr = arr.cast(pa.timestamp("us"))
-                scalar = pa.scalar(right, type=pa.timestamp("us"))
-            else:
-                day_value = right
-                if isinstance(day_value, numpy.datetime64):
-                    day_value = day_value.astype("datetime64[D]").astype(datetime.date)
-                if isinstance(day_value, datetime.datetime):
-                    day_value = day_value.date()
-                scalar = pa.scalar(day_value, type=pa.date32())
-        else:
-            if isinstance(right, datetime.date) and not isinstance(right, datetime.datetime):
-                right = datetime.datetime(right.year, right.month, right.day)
-            if isinstance(right, numpy.datetime64):
-                right = right.astype("datetime64[us]").astype(datetime.datetime)
-            arr = arr if pa.types.is_timestamp(arr.type) else arr.cast(pa.timestamp("us"))
-            scalar = pa.scalar(right, type=pa.timestamp("us"))
-
-        arrow_ops = {
-            "Eq": pc.equal,
-            "NotEq": pc.not_equal,
-            "Lt": pc.less,
-            "Gt": pc.greater,
-            "LtEq": pc.less_equal,
-            "GtEq": pc.greater_equal,
-        }
-        fn = arrow_ops.get(op)
-        if fn is None:
-            raise NotImplementedError(
-                f"dictionary-encoded vector temporal compare: unsupported op {op!r}"
-            )
-        return BoolVector.from_arrow(fn(arr, scalar))
-
     if op == "Eq":
         return vec.equals(right)
+    if op == "NotEq":
+        return vec.not_equals(right)
     if op == "Lt":
         return vec.less_than(right)
     if op == "Gt":
@@ -268,53 +271,15 @@ def _constant_compare(op: str, vec, right):
     raise NotImplementedError(f"constant-encoded vector: unsupported op {op!r}")
 
 
-_ARROW_COMPARE_OPS = {
-    "Eq": "equal",
-    "NotEq": "not_equal",
-    "Gt": "greater",
-    "GtEq": "greater_equal",
-    "Lt": "less",
-    "LtEq": "less_equal",
-}
-
-
-def _arrow_vector_compare(op: str, vec, right):
-    import pyarrow as pa
-    import pyarrow.compute as pc
-
-    from opteryx.compiled.draken.vectors.bool_vector import BoolVector
-
-    pc_op = _ARROW_COMPARE_OPS.get(op)
-    if pc_op is None:
-        raise NotImplementedError(f"ArrowVector: unsupported op {op!r}")
-    arr = vec.to_arrow() if not isinstance(vec._arr, pa.Array) else vec._arr
-    if hasattr(right, "to_arrow"):
-        right = right.to_arrow()
-        if isinstance(right, pa.ChunkedArray):
-            right = right.combine_chunks() if right.num_chunks > 1 else right.chunk(0)
-    if not isinstance(right, (pa.Array, pa.ChunkedArray)) and (
-        pa.types.is_date32(arr.type)
-        or pa.types.is_date64(arr.type)
-        or pa.types.is_timestamp(arr.type)
-    ):
-        from opteryx.types import OrsoTypes
-
-        target_type = OrsoTypes.TIMESTAMP if pa.types.is_timestamp(arr.type) else OrsoTypes.DATE
-        scalar_value = _coerce_temporal_scalar_for_arrow(right, target_type)
-        if pa.types.is_date32(arr.type) or pa.types.is_date64(arr.type):
-            if isinstance(scalar_value, datetime.datetime):
-                scalar_value = scalar_value.date()
-            scalar = pa.scalar(scalar_value, type=arr.type)
-        else:
-            scalar = pa.scalar(scalar_value, type=arr.type)
-        right = scalar
-    bool_arr = getattr(pc, pc_op)(arr, right)
-    return BoolVector.from_arrow(bool_arr)
+# ---------------------------------------------------------------------------
+# Main dispatch
+# ---------------------------------------------------------------------------
 
 
 def draken_compare(op: str, left, right, left_schema_type=None, right_schema_type=None):
     from opteryx.types import OrsoTypes
 
+    # Array / set operations — dispatch directly, no flip logic needed
     if op == "AnyOpEq":
         from opteryx.compiled.vector_ops import vector_anyop_eq
 
@@ -365,28 +330,28 @@ def draken_compare(op: str, left, right, left_schema_type=None, right_schema_typ
 
         if isinstance(left, StringVector):
             return _string_anyop_like(left, right, ignore_case=False)
-        return vector_anyop_like(right, _ensure_array_vector(left))
+        return vector_anyop_like(right, left)
     if op == "AnyOpNotLike":
         from opteryx.compiled.draken.vectors.string_vector import StringVector
         from opteryx.compiled.vector_ops import vector_anyop_like
 
         if isinstance(left, StringVector):
             return _string_anyop_like(left, right, ignore_case=False).not_vector()
-        return vector_anyop_like(right, _ensure_array_vector(left)).not_vector()
+        return vector_anyop_like(right, left).not_vector()
     if op == "AnyOpILike":
         from opteryx.compiled.draken.vectors.string_vector import StringVector
         from opteryx.compiled.vector_ops import vector_anyop_ilike
 
         if isinstance(left, StringVector):
             return _string_anyop_like(left, right, ignore_case=True)
-        return vector_anyop_ilike(right, _ensure_array_vector(left))
+        return vector_anyop_ilike(right, left)
     if op == "AnyOpNotILike":
         from opteryx.compiled.draken.vectors.string_vector import StringVector
         from opteryx.compiled.vector_ops import vector_anyop_ilike
 
         if isinstance(left, StringVector):
             return _string_anyop_like(left, right, ignore_case=True).not_vector()
-        return vector_anyop_ilike(right, _ensure_array_vector(left)).not_vector()
+        return vector_anyop_ilike(right, left).not_vector()
     if op == "AtQuestion":
         import pyarrow as pa
 
@@ -402,8 +367,7 @@ def draken_compare(op: str, left, right, left_schema_type=None, right_schema_typ
         else:
 
             def _pointer(jsonpath: str) -> str:
-                ptr = jsonpath[1:].replace(".", "/").replace("[", "/").replace("]", "")
-                return ptr
+                return jsonpath[1:].replace(".", "/").replace("[", "/").replace("]", "")
 
             json_pointer = _pointer(path)
 
@@ -420,98 +384,80 @@ def draken_compare(op: str, left, right, left_schema_type=None, right_schema_typ
 
         return vector_from_arrow(pa.array(result, type=pa.bool_()))
 
+    # --- Standard comparison operators ---
+
     negate = op in _NEGATED_OPS
     if negate:
         op = _NEGATED_OPS[op]
 
-    if (
-        isinstance(
-            left,
-            (
-                str,
-                int,
-                float,
-                bytes,
-                bool,
-                tuple,
-                list,
-                type(None),
-                datetime.date,
-                datetime.datetime,
-            ),
-        )
-        and hasattr(right, "null_count")
-        or isinstance(left, (numpy.generic, numpy.datetime64))
-        and hasattr(right, "null_count")
-    ):
+    # Scalar left with vector right: flip operands and invert directional ops
+    if isinstance(
+        left,
+        (str, int, float, bytes, bool, tuple, list, type(None), datetime.date, datetime.datetime),
+    ) and hasattr(right, "null_count"):
         flip_ops = {"Gt": "Lt", "Lt": "Gt", "GtEq": "LtEq", "LtEq": "GtEq"}
         op = flip_ops.get(op, op)
         left, right = right, left
 
+    # Vector left with null right: all False
     if right is None and not isinstance(left, (str, int, float, bytes, bool, type(None))):
         from opteryx.compiled.draken.vectors.bool_vector import BoolVector
 
         return BoolVector(len(left))
 
-    cls = left.__class__.__name__
+    from opteryx.utils.vector_types import VectorType, get_vector_type
 
-    if cls == "StringVector":
+    vec_type = get_vector_type(left)
+
+    if vec_type == VectorType.STRING:
         result = _string_compare(op, left, right)
-    elif cls == "Int64Vector" or cls == "IntegerVector":
+    elif vec_type in (VectorType.INT64, VectorType.INTEGER):
         if left_schema_type in (OrsoTypes.DATE, OrsoTypes.TIMESTAMP):
             result = _int64_temporal_compare(op, left, right, left_schema_type)
         else:
             result = _int64_compare(op, left, right)
-    elif cls == "Float64Vector":
+    elif vec_type == VectorType.FLOAT64:
         result = _float64_compare(op, left, right)
-    elif cls == "TimestampVector":
+    elif vec_type == VectorType.TIMESTAMP:
         result = _timestamp_compare(op, left, right)
-    elif cls == "Date32Vector":
+    elif vec_type == VectorType.DATE32:
         result = _date32_compare(op, left, right)
-    elif cls == "IntervalVector":
+    elif vec_type == VectorType.INTERVAL:
+        from opteryx.compiled.draken.vectors.bool_vector import BoolVector
+
+        from .type_coercion import _coerce_interval
+
         result = _interval_compare(op, left, right)
-    elif _is_dictionary_encoded_vector(left):
+    elif vec_type == VectorType.DICTIONARY_ENCODED:
         result = _dict_compare(op, left, right)
-    elif _is_typed_constant_encoded_vector(left):
+    elif vec_type == VectorType.CONSTANT_ENCODED:
         result = _constant_compare(op, left, right)
-    elif cls == "ArrowVector":
-        result = _arrow_vector_compare(op, left, right)
-    elif cls == "BoolVector":
-        if op == "Eq":
-            result = left.equals(bool(right))
-        elif op == "NotEq":
-            result = left.not_equals(bool(right))
-        elif op == "InList":
-            import pyarrow as _pa_local
-            import pyarrow.compute as _pac
-
-            from opteryx.compiled.draken.vectors.bool_vector import BoolVector as _BoolVec
-
-            bool_set = {bool(v) for v in right if v is not None}
-            result_arr = _pac.is_in(
-                left.to_arrow(), _pa_local.array(list(bool_set), type=_pa_local.bool_())
-            )
-            result = _BoolVec.from_arrow(result_arr)
-        else:
-            import pyarrow.compute as _pac
-
-            from opteryx.compiled.draken.vectors.bool_vector import BoolVector as _BoolVec
-
-            bool_arrow_ops = {
-                "Lt": _pac.less,
-                "Gt": _pac.greater,
-                "LtEq": _pac.less_equal,
-                "GtEq": _pac.greater_equal,
-            }
-            fn = bool_arrow_ops.get(op)
-            if fn is None:
-                raise NotImplementedError(f"BoolVector: unsupported op {op!r}")
-            result_arr = fn(left.to_arrow(), bool(right))
-            result = _BoolVec.from_arrow(result_arr)
+    elif vec_type == VectorType.BOOL:
+        result = _bool_compare(op, left, right)
     else:
-        raise NotImplementedError(f"draken_compare: unsupported vector type {cls!r}")
+        raise NotImplementedError(f"draken_compare: unsupported vector type {vec_type!r}")
 
     return result.not_vector() if negate else result
+
+
+def _bool_compare(op: str, left, right):
+    """Comparison operations on BoolVector."""
+    if op == "Eq":
+        return left.equals(bool(right))
+    if op == "NotEq":
+        return left.not_equals(bool(right))
+    if op == "InList":
+        bool_set = {bool(v) for v in right if v is not None}
+        return vector_in_list(left, bool_set)
+    if op == "Lt":
+        return left.less_than(bool(right))
+    if op == "Gt":
+        return left.greater_than(bool(right))
+    if op == "LtEq":
+        return left.less_than_or_equals(bool(right))
+    if op == "GtEq":
+        return left.greater_than_or_equals(bool(right))
+    raise NotImplementedError(f"BoolVector: unsupported op {op!r}")
 
 
 _DATE_TYPES = frozenset(("Date32Vector", "TimestampVector"))
