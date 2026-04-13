@@ -1151,12 +1151,12 @@ cdef Int64Vector from_packed_dict(
     return vec
 
 
-cdef Int64Vector from_sequence(int64_t[::1] data):
+cdef Int64Vector from_sequence(const int64_t[::1] data):
     """
     Create Int64Vector from a typed int64 memoryview (zero-copy).
 
     Args:
-        data: int64_t[::1] memoryview (C-contiguous)
+        data: const int64_t[::1] memoryview (C-contiguous)
 
     Returns:
         Int64Vector wrapping the memoryview data

@@ -128,6 +128,13 @@ class DataFrame:
             return []
         return self._schema.column_names
 
+    @property
+    def shape(self) -> Tuple[int, int]:
+        """Return shape as (rows, columns)."""
+        num_rows = len(self._rows)
+        num_cols = len(self._schema.columns) if self._schema else 0
+        return (num_rows, num_cols)
+
     def __len__(self) -> int:
         """Return number of rows."""
         return len(self._rows)

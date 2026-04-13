@@ -539,7 +539,9 @@ def _inner_evaluate(root: Node, table: Table):
             # Apply the cast kernel(s, *params)
             result = kernel(source, *params)
 
-            # Ensure result is a numpy array
+            # Phase 5.3.1 PoC: Propagate Draken vectors directly (no conversion to numpy/arrow)
+            # Only convert lists to numpy arrays (fallback cases for heterogeneous types)
+            # This preserves native vector types: Float64Vector, Int64Vector, etc.
             if isinstance(result, list):
                 result = numpy.array(result)
 
@@ -678,6 +680,11 @@ def _inner_evaluate(root: Node, table: Table):
 def evaluate(expression: Node, table: Table):
     result = _inner_evaluate(root=expression, table=table)
     if result.__class__.__name__ == "BoolVector":
+        return result
+    # Phase 5.3.2 PoC: Preserve Draken vectors (no conversion to numpy/arrow)
+    from opteryx.utils.vector_types import is_draken_vector
+
+    if is_draken_vector(result):
         return result
     if not isinstance(result, (pyarrow.Array, numpy.ndarray)):
         result = numpy.array(result)

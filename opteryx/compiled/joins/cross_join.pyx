@@ -9,6 +9,9 @@
 import numpy
 cimport numpy
 
+from opteryx.compiled.draken.vectors.int64_vector cimport Int64Vector
+from opteryx.compiled.draken.vectors.int64_vector cimport from_sequence as int64_from_sequence
+from opteryx.compiled.structures.buffers cimport IntBuffer, ObjectBuffer
 from opteryx.compiled.structures.carchar_set cimport CarcharSetWrapper
 from opteryx.third_party.fastfloat.fast_float cimport c_parse_fast_float as parse_fast_float
 
@@ -26,9 +29,9 @@ cpdef tuple build_rows_indices_and_column(object column):
         Py_ssize_t i
         Py_ssize_t j
         Py_ssize_t index_pos
-        numpy.ndarray indices_np, flat_data_np
-        int64_t[::1] indices
-        object[:] flat_data
+        IntBuffer indices_buf
+        ObjectBuffer flat_data_buf
+        const int64_t[::1] indices
         Py_ssize_t arr_offset = column.offset
         const int32_t* offsets32 = <const int32_t*><uintptr_t>(buffers[1].address)
 
@@ -47,16 +50,14 @@ cpdef tuple build_rows_indices_and_column(object column):
         Py_ssize_t str_end
 
     if row_count == 0:
-        return numpy.empty(0, dtype=numpy.int64), numpy.empty(0, dtype=object)
+        return int64_from_sequence(None), numpy.empty(0, dtype=object)
 
     total_size = offsets32[arr_offset + row_count] - offsets32[arr_offset]
     if total_size == 0:
-        return numpy.empty(0, dtype=numpy.int64), numpy.empty(0, dtype=object)
+        return int64_from_sequence(None), numpy.empty(0, dtype=object)
 
-    indices_np = numpy.empty(total_size, dtype=numpy.int64)
-    flat_data_np = numpy.empty(total_size, dtype=object)
-    indices = indices_np
-    flat_data = flat_data_np
+    indices_buf = IntBuffer(total_size)
+    flat_data_buf = ObjectBuffer(total_size)
 
     index_pos = 0
     for i in range(row_count):
@@ -70,23 +71,27 @@ cpdef tuple build_rows_indices_and_column(object column):
             continue
 
         for j in range(start, end):
-            indices[index_pos] = i
+            indices_buf.append(i)
 
             if child_valid and not (child_valid[(child_offset + j) >> 3] & (1 << ((child_offset + j) & 7))):
-                flat_data[index_pos] = None
+                flat_data_buf.append(None)
             else:
                 str_start = child_offsets32[child_offset + j]
                 str_end = child_offsets32[child_offset + j + 1]
 
                 if str_end > str_start:
-                    flat_data[index_pos] = PyUnicode_DecodeUTF8(
+                    flat_data_buf.append(PyUnicode_DecodeUTF8(
                         child_data + str_start, str_end - str_start, "replace"
                     )
+                )
                 else:
-                    flat_data[index_pos] = ""
+                    flat_data_buf.append("")
             index_pos += 1
 
-    return indices_np, flat_data_np
+    indices = indices_buf.get_buffer()
+    cdef Int64Vector vec = int64_from_sequence(indices)
+    vec._arrow_data_buf = indices_buf
+    return vec, flat_data_buf.to_numpy()
 
 
 cpdef tuple numpy_build_rows_indices_and_column(numpy.ndarray column_data):
@@ -107,24 +112,28 @@ cpdef tuple numpy_build_rows_indices_and_column(numpy.ndarray column_data):
 
     # Early exit if total_size is zero
     if total_size == 0:
-        return (numpy.array([], dtype=numpy.int64), numpy.array([], dtype=object))
+        return (int64_from_sequence(None), numpy.array([], dtype=object))
 
     # Compute offsets for efficient slicing
     offsets[0] = 0
     for i in range(row_count):
         offsets[i + 1] = offsets[i] + lengths[i]
-    cdef numpy.int64_t[::1] indices = numpy.empty(total_size, dtype=numpy.int64)
-    cdef numpy.ndarray flat_data = numpy.empty(total_size, dtype=element_dtype)
+
+    cdef IntBuffer indices_buf = IntBuffer(total_size)
+    cdef ObjectBuffer flat_data_buf = ObjectBuffer(total_size)
 
     # Fill indices and flat_data
     for i in range(row_count):
         start = offsets[i]
         end = offsets[i + 1]
         if end > start:
-            indices[start:end] = i
-            flat_data[start:end] = column_data[i]
+            indices_buf.append_repeated(i, end - start)
+            flat_data_buf.extend(column_data[i])
 
-    return (indices, flat_data)
+    cdef const int64_t[::1] mv = indices_buf.get_buffer()
+    cdef Int64Vector vec = int64_from_sequence(mv)
+    vec._arrow_data_buf = indices_buf
+    return (vec, flat_data_buf.to_numpy())
 
 
 cpdef tuple numpy_build_filtered_rows_indices_and_column(numpy.ndarray column_data, set valid_values):
@@ -146,8 +155,8 @@ cpdef tuple numpy_build_filtered_rows_indices_and_column(numpy.ndarray column_da
     cdef int64_t index = 0
     cdef int64_t i, j, len_i
     cdef object array_i
-    cdef numpy.ndarray flat_data
-    cdef numpy.int64_t[::1] indices
+    cdef ObjectBuffer flat_data_buf
+    cdef IntBuffer indices_buf
     cdef numpy.dtype element_dtype = numpy.dtype(object)
     cdef object value
 
@@ -161,9 +170,9 @@ cpdef tuple numpy_build_filtered_rows_indices_and_column(numpy.ndarray column_da
             element_dtype = array_i.dtype
             break
 
-    # Initialize indices and flat_data arrays
-    indices = numpy.empty(allocated_size, dtype=numpy.int64)
-    flat_data = numpy.empty(allocated_size, dtype=element_dtype)
+    # Initialize indices and flat_data buffers
+    indices_buf = IntBuffer(allocated_size)
+    flat_data_buf = ObjectBuffer(allocated_size)
 
     # Handle set initialization based on element dtype
     if numpy.issubdtype(element_dtype, numpy.integer):
@@ -187,23 +196,18 @@ cpdef tuple numpy_build_filtered_rows_indices_and_column(numpy.ndarray column_da
         for j in range(len_i):
             value = array_i[j]
             if value in valid_values_typed:
-                if index >= allocated_size:
-                    # Reallocate arrays
-                    allocated_size *= 2
-                    indices = numpy.resize(indices, allocated_size)
-                    flat_data = numpy.resize(flat_data, allocated_size)
-                flat_data[index] = value
-                indices[index] = i
+                flat_data_buf.append(value)
+                indices_buf.append(i)
                 index += 1
 
     if index == 0:
-        return (numpy.array([], dtype=numpy.int64), numpy.array([], dtype=element_dtype))
+        return (int64_from_sequence(None), numpy.array([], dtype=element_dtype))
 
-    # Slice arrays to the actual used size
-    indices = indices[:index]
-    flat_data = flat_data[:index]
+    cdef const int64_t[::1] mv = indices_buf.get_buffer()
+    cdef Int64Vector vec = int64_from_sequence(mv)
+    vec._arrow_data_buf = indices_buf
 
-    return (indices, flat_data)
+    return (vec, flat_data_buf.to_numpy())
 
 
 cpdef tuple build_filtered_rows_indices_and_column(object column, set valid_values):
@@ -227,11 +231,6 @@ cpdef tuple build_filtered_rows_indices_and_column(object column, set valid_valu
         Py_ssize_t str_end
         Py_ssize_t allocated_size = row_count * 4 if row_count > 0 else 4
 
-        numpy.ndarray indices = numpy.empty(allocated_size, dtype=numpy.int64)
-        int64_t[::1] indices_mv = indices
-        numpy.ndarray flat_data = numpy.empty(allocated_size, dtype=object)
-        object[::1] flat_mv = flat_data
-
         list child_buffers = child_elements.buffers()
         const int32_t* child_offsets32 = <const int32_t*><uintptr_t>(child_buffers[1].address)
         const char* child_data = <const char*><uintptr_t>(child_buffers[2].address)
@@ -250,6 +249,9 @@ cpdef tuple build_filtered_rows_indices_and_column(object column, set valid_valu
     cdef set valid_bytes = set()
     for v in valid_values:
         valid_bytes.add(v.encode("utf8") if isinstance(v, str) else v)
+
+    cdef IntBuffer indices_buf = IntBuffer(allocated_size)
+    cdef list flat_list = []
 
     for i in range(row_count):
         if parent_bitmap is not NULL and not (parent_bitmap[i >> 3] & (1 << (i & 7))):
@@ -270,23 +272,19 @@ cpdef tuple build_filtered_rows_indices_and_column(object column, set valid_valu
             value_bytes = PyBytes_FromStringAndSize(child_data + str_start, str_len)
 
             if value_bytes in valid_bytes:
-                if k >= allocated_size:
-                    allocated_size *= 2
-                    new_indices = numpy.empty(allocated_size, dtype=numpy.int64)
-                    new_indices[:k] = indices_mv[:k]
-                    indices = new_indices
-                    indices_mv = indices
+                indices_buf.append(i)
+                flat_list.append(value_bytes)
 
-                    new_flat = numpy.empty(allocated_size, dtype=object)
-                    new_flat[:k] = flat_data[:k]
-                    flat_data = new_flat
-                    flat_mv = flat_data
+    k = indices_buf.size()
+    if k == 0:
+        return int64_from_sequence(numpy.empty(0, dtype=numpy.int64)), numpy.empty(0, dtype=object)
 
-                flat_mv[k] = value_bytes
-                indices_mv[k] = i
-                k += 1
-
-    return indices_mv[:k], flat_mv[:k]
+    # Convert IntBuffer to Int64Vector (native path)
+    # We must ensure the IntBuffer stays alive to back the memoryview
+    cdef const int64_t[::1] mv = indices_buf.get_buffer()
+    cdef Int64Vector vec = int64_from_sequence(mv)
+    vec._arrow_data_buf = indices_buf  # Anchor the buffer object
+    return vec, numpy.array(flat_list, dtype=object)
 
 
 cpdef tuple list_distinct(numpy.ndarray values, int64_t[::1] indices, CarcharSetWrapper seen_hashes=None):
@@ -311,4 +309,4 @@ cpdef tuple list_distinct(numpy.ndarray values, int64_t[::1] indices, CarcharSet
             new_indices[j] = indices[i]
             j += 1
 
-    return new_values[:j], new_indices[:j], seen_hashes
+    return new_values[:j], int64_from_sequence(new_indices[:j]), seen_hashes

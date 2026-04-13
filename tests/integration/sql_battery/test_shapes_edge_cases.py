@@ -13,13 +13,14 @@ This file tests: Edge cases, errors, and regressions
 This tests that the shape of the response is as expected: the right number of columns,
 the right number of rows and, if appropriate, the right exception is thrown.
 """
-import pytest
+
 import os
 import sys
 
-#import opteryx
-
+# import opteryx
 from typing import Optional
+
+import pytest
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../../orso"))
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
@@ -279,7 +280,7 @@ STATEMENTS = [
         ("SELECT * FROM testdata.flat.hosts WHERE address | '20.1.0.0/9'", 0, 2, None),
         ("SELECT * FROM testdata.flat.hosts WHERE address | '20.112.0.0/16'", 26, 2, None),
         ("SELECT * FROM testdata.flat.hosts WHERE address | '127.0.0.0/24'", 1, 2, None),
-        # 2019 
+        # 2019
         ("SELECT name, mass, density, rotationPeriod, lengthOfDay, perihelion, aphelion, orbitalVelocity, orbitalEccentricity, obliquityToOrbit, surfacePressure, numberOfMoons FROM testdata.planets WHERE orbitalVelocity <> 2787170570 AND NOT orbitalVelocity BETWEEN 2191745.934 AND 402288.158", 9, 12, None),
         ("SELECT DISTINCT id, gm, density, magnitude FROM testdata.satellites WHERE radius < 1286258.869 AND NOT id > 2730526.873 AND id IS NULL ORDER BY radius DESC", 0, 4, None),
         ("SELECT Company, Price, Mission FROM testdata.missions WHERE Price <= 4279346967 AND NOT Price BETWEEN 137294968 AND 2336093823 ORDER BY Company DESC LIMIT 9 ", 9, 3, None),
@@ -493,7 +494,7 @@ STATEMENTS = [
 
 
 @pytest.mark.parametrize("statement, rows, columns, exception", STATEMENTS)
-def test_sql_battery(statement:str, rows:int, columns:int, exception: Optional[Exception]):
+def test_sql_battery(statement: str, rows: int, columns: int, exception: Optional[Exception]):
     """
     Test a battery of statements
     """
@@ -501,17 +502,17 @@ def test_sql_battery(statement:str, rows:int, columns:int, exception: Optional[E
     try:
         # query to arrow is the fastest way to query
         session = opteryx.session(memberships=["Apollo 11", "opteryx"])
-        result = session.execute_to_arrow(statement)
+        result = session.execute(statement)
         actual_rows, actual_columns = result.shape
-        assert (
-            rows == actual_rows
-        ), f"\n\033[38;5;203mQuery returned {actual_rows} rows but {rows} were expected.\033[0m\n{statement}"
-        assert (
-            columns == actual_columns
-        ), f"\n\033[38;5;203mQuery returned {actual_columns} cols but {columns} were expected.\033[0m\n{statement}"
-        assert (
-            exception is None
-        ), f"Exception {exception} not raised but expected\n{format_sql(statement)}"
+        assert rows == actual_rows, (
+            f"\n\033[38;5;203mQuery returned {actual_rows} rows but {rows} were expected.\033[0m\n{statement}"
+        )
+        assert columns == actual_columns, (
+            f"\n\033[38;5;203mQuery returned {actual_columns} cols but {columns} were expected.\033[0m\n{statement}"
+        )
+        assert exception is None, (
+            f"Exception {exception} not raised but expected\n{format_sql(statement)}"
+        )
     except AssertionError as error:
         raise error
     except Exception as error:
@@ -524,13 +525,14 @@ def test_sql_battery(statement:str, rows:int, columns:int, exception: Optional[E
 if __name__ == "__main__":  # pragma: no cover
     import shutil
     import time
+
     from tests import trunc_printable
 
     start_suite = time.monotonic_ns()
     width = shutil.get_terminal_size((80, 20))[0] - 15
-    passed:int = 0
-    failed:int = 0
-    nl:str = "\n"
+    passed: int = 0
+    failed: int = 0
+    nl: str = "\n"
     failures = []
 
     print(f"RUNNING BATTERY OF {len(STATEMENTS)} EDGE_CASES SHAPE TESTS")
@@ -548,7 +550,7 @@ if __name__ == "__main__":  # pragma: no cover
             start = time.monotonic_ns()
             test_sql_battery(statement, rows, cols, err)
             print(
-                f"\033[38;2;26;185;67m{str(int((time.monotonic_ns() - start)/1e6)).rjust(4)}ms\033[0m ✅",
+                f"\033[38;2;26;185;67m{str(int((time.monotonic_ns() - start) / 1e6)).rjust(4)}ms\033[0m ✅",
                 end="",
             )
             passed += 1
@@ -558,7 +560,9 @@ if __name__ == "__main__":  # pragma: no cover
                 print()
         except Exception as err:
             failed += 1
-            print(f"\033[0;31m{str(int((time.monotonic_ns() - start)/1e6)).rjust(4)}ms ❌ {failed}\033[0m")
+            print(
+                f"\033[0;31m{str(int((time.monotonic_ns() - start) / 1e6)).rjust(4)}ms ❌ {failed}\033[0m"
+            )
             print(">", err)
             failures.append((statement, err))
             if not isinstance(err, AssertionError):

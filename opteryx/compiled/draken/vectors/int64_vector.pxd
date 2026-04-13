@@ -77,4 +77,4 @@ cdef Int64Vector from_packed_dict(
     bint ordered=*,
     const uint8_t* dict_entry_null_bitmap=*,
 )
-cdef Int64Vector from_sequence(int64_t[::1] data)
+cdef Int64Vector from_sequence(const int64_t[::1] data)

@@ -6,7 +6,8 @@
 # cython: wraparound=False
 # cython: boundscheck=False
 
-
+import numpy
+cimport numpy
 
 from libc.stdint cimport int64_t, uint64_t
 from libc.stddef cimport size_t
@@ -21,6 +22,7 @@ from opteryx.third_party.abseil.containers cimport (
     IdentityHash,
     flat_hash_map,
 )
+from opteryx.compiled.draken.vectors.int64_vector cimport Int64Vector
 from opteryx.compiled.structures.buffers cimport CIntBuffer, IntBuffer, Int32Buffer
 from opteryx.compiled.table_ops.hash_ops cimport compute_row_hashes
 from opteryx.compiled.table_ops.null_avoidant_ops cimport non_null_row_indices
@@ -54,8 +56,9 @@ cpdef tuple inner_join(object right_relation, list join_columns, FlatHashMap lef
     cdef IntBuffer left_indexes = IntBuffer()
     cdef IntBuffer right_indexes = IntBuffer()
     cdef int64_t num_rows = right_relation.num_rows
-    cdef int64_t[::1] non_null_indices = non_null_row_indices(right_relation, join_columns)
-    cdef Py_ssize_t candidate_count = non_null_indices.shape[0]
+    cdef Int64Vector non_null_indices_vec = non_null_row_indices(right_relation, join_columns)
+    cdef const int64_t* non_null_ptr = <const int64_t*>non_null_indices_vec.dense_ptr()
+    cdef Py_ssize_t candidate_count = len(non_null_indices_vec)
 
     if candidate_count == 0 or num_rows == 0:
         last_hash_time_ns = 0
@@ -81,7 +84,7 @@ cpdef tuple inner_join(object right_relation, list join_columns, FlatHashMap lef
         with cython.boundscheck(False):
             inner_join_probe(
                 &left_hash_table._map,
-                &non_null_indices[0],
+                non_null_ptr,
                 <size_t>candidate_count,
                 &row_hashes[0],
                 <size_t>num_rows,
@@ -125,7 +128,10 @@ cpdef FlatHashMap build_side_hash_map(object relation, list join_columns):
     """
     cdef FlatHashMap ht = FlatHashMap()
     cdef int64_t num_rows = relation.num_rows
-    cdef int64_t[::1] non_null_indices = non_null_row_indices(relation, join_columns)
+    cdef Int64Vector non_null_indices_vec = non_null_row_indices(relation, join_columns)
+    cdef const int64_t* non_null_ptr = <const int64_t*>non_null_indices_vec.dense_ptr()
+    cdef Py_ssize_t n_non_null = len(non_null_indices_vec)
+
     cdef uint64_t* raw_hashes = <uint64_t*>malloc(num_rows * sizeof(uint64_t))
     if raw_hashes == NULL:
         raise MemoryError("Failed to allocate memory for hash buffers")
@@ -134,8 +140,8 @@ cpdef FlatHashMap build_side_hash_map(object relation, list join_columns):
 
     compute_row_hashes(relation, join_columns, row_hashes)
 
-    for i in range(non_null_indices.shape[0]):
-        row_idx = non_null_indices[i]
+    for i in range(n_non_null):
+        row_idx = non_null_ptr[i]
         ht.insert(row_hashes[row_idx], row_idx)
 
     free(raw_hashes)
@@ -150,7 +156,10 @@ cpdef object build_side_carchar_map(
     cdef object carchar_native
     cdef object ht
     cdef int64_t num_rows = relation.num_rows
-    cdef int64_t[::1] non_null_indices = non_null_row_indices(relation, join_columns)
+    cdef Int64Vector non_null_indices_vec = non_null_row_indices(relation, join_columns)
+    cdef const int64_t* non_null_ptr = <const int64_t*>non_null_indices_vec.dense_ptr()
+    cdef Py_ssize_t n_non_null = len(non_null_indices_vec)
+
     cdef uint64_t* raw_hashes = <uint64_t*>malloc(num_rows * sizeof(uint64_t))
     if raw_hashes == NULL:
         raise MemoryError("Failed to allocate memory for hash buffers")
@@ -163,19 +172,25 @@ cpdef object build_side_carchar_map(
     import opteryx.compiled.nanobind.carchar_native as carchar_native
 
     ht = carchar_native.CarcharJoinEngine(
-        int(non_null_indices.shape[0]),
+        int(n_non_null),
         0,
         0.80,
         probe_load_factor,
     )
-    if non_null_indices.shape[0] == 0:
+    if n_non_null == 0:
         ht.seal()
         return ht
 
-    ht.insert_batch(
-        numpy.asarray(row_hashes)[numpy.asarray(non_null_indices, dtype=numpy.int64)],
-        numpy.asarray(non_null_indices, dtype=numpy.int64),
-    )
+    # Carhar expects numpy arrays for now; we'll convert the indices and relevant hashes
+    cdef numpy.ndarray[numpy.int64_t, ndim=1] indices_np = numpy.empty(n_non_null, dtype=numpy.int64)
+    cdef numpy.ndarray[numpy.uint64_t, ndim=1] hashes_np = numpy.empty(n_non_null, dtype=numpy.uint64)
+
+    for i in range(n_non_null):
+        row_idx = non_null_ptr[i]
+        indices_np[i] = row_idx
+        hashes_np[i] = row_hashes[row_idx]
+
+    ht.insert_batch(hashes_np, indices_np)
     ht.seal()
     return ht
 
@@ -184,8 +199,9 @@ cpdef tuple inner_join_carchar(object right_relation, list join_columns, object 
     global last_hash_time_ns, last_probe_time_ns, last_materialize_time_ns
     global last_rows_hashed, last_candidate_rows, last_result_rows
     cdef int64_t num_rows = right_relation.num_rows
-    cdef int64_t[::1] non_null_indices = non_null_row_indices(right_relation, join_columns)
-    cdef Py_ssize_t candidate_count = non_null_indices.shape[0]
+    cdef Int64Vector non_null_indices_vec = non_null_row_indices(right_relation, join_columns)
+    cdef const int64_t* non_null_ptr = <const int64_t*>non_null_indices_vec.dense_ptr()
+    cdef Py_ssize_t candidate_count = len(non_null_indices_vec)
     cdef IntBuffer left_indexes = IntBuffer()
     cdef IntBuffer right_indexes = IntBuffer()
 
@@ -207,12 +223,14 @@ cpdef tuple inner_join_carchar(object right_relation, list join_columns, object 
     cdef long long t_after_hash = perf_counter_ns()
     last_hash_time_ns = t_after_hash - t_start
 
-    cdef numpy.ndarray[numpy.uint64_t, ndim=1] probe_hashes = numpy.asarray(row_hashes)[
-        numpy.asarray(non_null_indices, dtype=numpy.int64)
-    ]
-    cdef numpy.ndarray[numpy.int64_t, ndim=1] probe_rows = numpy.asarray(
-        non_null_indices, dtype=numpy.int64
-    )
+    # Carchar expects numpy arrays
+    cdef numpy.ndarray[numpy.int64_t, ndim=1] probe_rows = numpy.empty(candidate_count, dtype=numpy.int64)
+    cdef numpy.ndarray[numpy.uint64_t, ndim=1] probe_hashes = numpy.empty(candidate_count, dtype=numpy.uint64)
+
+    for i in range(candidate_count):
+        row_idx = non_null_ptr[i]
+        probe_rows[i] = row_idx
+        probe_hashes[i] = row_hashes[row_idx]
 
     cdef long long t_before_probe = perf_counter_ns()
     left_np, right_np = left_hash_table.probe_join_indices(probe_hashes, probe_rows)

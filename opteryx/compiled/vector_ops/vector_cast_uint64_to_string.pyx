@@ -7,6 +7,7 @@
 # cython: boundscheck=False
 
 from libc.stdint cimport uint64_t, uint8_t
+from libc.stdint cimport uint64_t, uint8_t
 
 from opteryx.compiled.draken.vectors.int64_vector cimport Int64Vector
 from opteryx.compiled.draken.vectors.string_vector cimport StringVector

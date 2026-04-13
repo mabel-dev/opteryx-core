@@ -9,6 +9,7 @@
 from libc.stdint cimport uint64_t, int64_t
 from libc.stdlib cimport malloc, free
 
+from opteryx.compiled.draken.vectors.int64_vector cimport Int64Vector
 from opteryx.compiled.structures.hash_table cimport HashTable
 from opteryx.compiled.table_ops.hash_ops cimport compute_row_hashes
 from opteryx.compiled.table_ops.null_avoidant_ops cimport non_null_row_indices
@@ -20,21 +21,25 @@ cpdef HashTable probe_side_hash_map(object relation, list join_columns):
     """
     cdef HashTable ht = HashTable()
     cdef int64_t num_rows = relation.num_rows
-    cdef int64_t[::1] non_null_indices
+    cdef Int64Vector non_null_indices_vec
+    cdef const int64_t* non_null_ptr
+    cdef Py_ssize_t n_non_null
     cdef uint64_t* raw_hashes = <uint64_t*>malloc(num_rows * sizeof(uint64_t))
     if raw_hashes == NULL:
         raise MemoryError("Failed to allocate memory for hash buffers")
     cdef uint64_t[::1] row_hashes = <uint64_t[:num_rows]>raw_hashes
     cdef Py_ssize_t i
 
-    non_null_indices = non_null_row_indices(relation, join_columns)
+    non_null_indices_vec = non_null_row_indices(relation, join_columns)
+    non_null_ptr = <const int64_t*>non_null_indices_vec.dense_ptr()
+    n_non_null = len(non_null_indices_vec)
 
     # Compute hash of each row on the buffer level
     compute_row_hashes(relation, join_columns, row_hashes)
 
     # Insert into HashTable using row index + buffer-computed hash
-    for i in range(non_null_indices.shape[0]):
-        ht.insert(row_hashes[non_null_indices[i]], non_null_indices[i])
+    for i in range(n_non_null):
+        ht.insert(row_hashes[non_null_ptr[i]], non_null_ptr[i])
 
     free(raw_hashes)
     return ht
@@ -43,8 +48,8 @@ cpdef HashTable probe_side_hash_map(object relation, list join_columns):
 def right_join(
     left_relation,
     right_relation,
-    left_columns: List[str],
-    right_columns: List[str],
+    left_columns: list,
+    right_columns: list,
     left_hash,
     filter_index,
     columns=None

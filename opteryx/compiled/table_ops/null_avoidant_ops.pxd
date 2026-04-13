@@ -7,7 +7,6 @@
 # cython: boundscheck=False
 
 from libc.stdint cimport int32_t, int64_t, uint8_t, uint64_t
-import numpy
-cimport numpy
+from opteryx.compiled.draken.vectors.int64_vector cimport Int64Vector
 
-cdef numpy.ndarray[int64_t, ndim=1] non_null_row_indices(object relation, list column_names)
+cdef Int64Vector non_null_row_indices(object relation, list column_names)

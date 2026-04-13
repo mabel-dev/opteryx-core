@@ -240,21 +240,20 @@ def _cast_to_binary_representation(
         arr = arr.to_numpy(False)
 
     if arr.dtype == numpy.float64:
-        # format_double_func now returns StringVector, convert to numpy object array
-        result = format_double_func(arr)
-        return numpy.array(result.to_pylist(), dtype=object)
+        # Phase 5.3: Return StringVector directly instead of converting to numpy object array
+        return format_double_func(arr)
 
     if arr.dtype == numpy.int64:
         from opteryx.compiled.draken.interop.arrow import vector_from_arrow
 
-        return vector_cast_int64_func(vector_from_arrow(pyarrow.array(arr))).to_arrow()
+        # Phase 5.3: Return StringVector directly instead of converting to Arrow/NumPy
+        return vector_cast_int64_func(vector_from_arrow(pyarrow.array(arr)))
 
     if arr.dtype == numpy.uint64:
         from opteryx.compiled.draken.interop.arrow import vector_from_arrow
 
-        return vector_cast_uint64_func(
-            vector_from_arrow(pyarrow.array(arr.view(numpy.int64)))
-        ).to_arrow()
+        # Phase 5.3: Return StringVector directly instead of converting to Arrow/NumPy
+        return vector_cast_uint64_func(vector_from_arrow(pyarrow.array(arr.view(numpy.int64))))
 
     caster = caster_type.parse
     kwargs = {}
@@ -306,35 +305,42 @@ def cast_to_double(arr, *args):
 
     Casts an array to double precision floating point numbers.
     Uses fast C++ path for string parsing when available,
-    optimized conversion for int64 arrays, and generic fallback.
+    optimized conversion for int64 arrays, and native Draken vectors.
+
+    Returns:
+        - Float64Vector for optimized paths (strings, ints, floats)
+        - list for heterogeneous fallback cases
     """
+    from opteryx.compiled.draken.vectors.float64_vector import Float64Vector, from_sequence
     from opteryx.third_party.fastfloat.fast_float import (
         parse_ascii_array_to_double,
         parse_byte_array_to_double,
     )
 
+    if hasattr(arr, "to_arrow"):
+        from opteryx.utils.vector_types import VectorType, get_vector_type
+
+        v_type = get_vector_type(arr)
+        if v_type == VectorType.FLOAT64:
+            return arr
+        if v_type == VectorType.INT64:
+            return from_sequence(arr.to_numpy(False).astype(numpy.float64))
+        if v_type == VectorType.STRING:
+            return parse_ascii_array_to_double(arr.to_pylist())
+
     if hasattr(arr, "to_numpy"):
         arr = arr.to_numpy(False)
     if arr.dtype == numpy.float64:
-        return arr
+        return from_sequence(arr)
     if arr.dtype == numpy.int64:
-        return arr.astype(numpy.float64)
+        return from_sequence(arr.astype(numpy.float64))
     if numpy.issubdtype(arr.dtype, numpy.object_):
-        if isinstance(arr[0], str):
-            # parse_ascii_array_to_double returns Float64Vector
-            # Use to_arrow() to eliminate O(n) list allocation
-            result = parse_ascii_array_to_double(arr)
-            return result.to_arrow()
-        elif isinstance(arr[0], bytes):
-            # parse_byte_array_to_double returns Float64Vector
-            # Use to_arrow() to eliminate O(n) list allocation
-            result = parse_byte_array_to_double(arr)
-            return result.to_arrow()
+        if len(arr) > 0 and isinstance(arr[0], str):
+            return parse_ascii_array_to_double(arr)
+        elif len(arr) > 0 and isinstance(arr[0], bytes):
+            return parse_byte_array_to_double(arr)
     if numpy.issubdtype(arr.dtype, numpy.str_):
-        # parse_ascii_array_to_double returns Float64Vector
-        # Use to_arrow() to eliminate O(n) list allocation
-        result = parse_ascii_array_to_double(arr.astype(object))
-        return result.to_arrow()
+        return parse_ascii_array_to_double(arr.astype(object))
 
     caster = OrsoTypes.DOUBLE.parse
     return [caster(i) if i is not None else None for i in arr]
@@ -344,34 +350,48 @@ def cast_to_int(arr, *args):
     """Cast array to INTEGER type.
 
     Uses optimized C++ paths for string/byte parsing and date conversion,
-    with generic fallback for other types.
+    returning native Draken Int64Vector for hot paths.
+
+    Returns:
+        - Int64Vector for optimized paths (strings, bytes, ints, dates)
+        - list for heterogeneous fallback cases
     """
+    from opteryx.compiled.draken.interop.arrow import vector_from_arrow
+    from opteryx.compiled.draken.vectors.int64_vector import Int64Vector, from_sequence
     from opteryx.compiled.vector_ops import vector_cast_ascii_to_int, vector_cast_bytes_to_int
+
+    if hasattr(arr, "to_arrow"):
+        from opteryx.utils.vector_types import VectorType, get_vector_type
+
+        v_type = get_vector_type(arr)
+        if v_type == VectorType.INT64:
+            return arr
+        if v_type == VectorType.STRING:
+            return vector_cast_ascii_to_int(arr)
+        if v_type == VectorType.TIMESTAMP or v_type == VectorType.DATE32:
+            return from_sequence(arr.to_numpy(False).astype(numpy.int64))
 
     if hasattr(arr, "to_numpy"):
         arr = arr.to_numpy(False)
     if numpy.issubdtype(arr.dtype, numpy.object_):
-        if isinstance(arr[0], str):
-            from opteryx.compiled.draken.interop.arrow import vector_from_arrow
-
+        if len(arr) > 0 and isinstance(arr[0], str):
             return vector_cast_ascii_to_int(
                 vector_from_arrow(pyarrow.array(arr, type=pyarrow.string()))
-            ).to_arrow()
-        elif isinstance(arr[0], bytes):
-            from opteryx.compiled.draken.interop.arrow import vector_from_arrow
-
+            )
+        elif len(arr) > 0 and isinstance(arr[0], bytes):
             return vector_cast_bytes_to_int(
                 vector_from_arrow(pyarrow.array(arr, type=pyarrow.binary()))
-            ).to_arrow()
+            )
     if numpy.issubdtype(arr.dtype, numpy.str_):
-        from opteryx.compiled.draken.interop.arrow import vector_from_arrow
-
         return vector_cast_ascii_to_int(
             vector_from_arrow(pyarrow.array(arr.astype(object), type=pyarrow.string()))
-        ).to_arrow()
+        )
     if numpy.issubdtype(arr.dtype, numpy.datetime64):
         arr = arr.astype("M8[us]")  # microseconds
-        return arr.astype(numpy.int64)
+        int_arr = arr.astype(numpy.int64)
+        return from_sequence(int_arr)
+    if numpy.issubdtype(arr.dtype, numpy.int64):
+        return from_sequence(arr)
 
     caster = OrsoTypes.INTEGER.parse
     return [caster(i) if i is not None else None for i in arr]
