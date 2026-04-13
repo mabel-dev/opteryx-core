@@ -11,6 +11,7 @@ cimport numpy
 
 from opteryx.compiled.draken.vectors.int64_vector cimport Int64Vector
 from opteryx.compiled.draken.vectors.int64_vector cimport from_sequence as int64_from_sequence
+from opteryx.compiled.draken.interop.arrow cimport vector_from_sequence
 from opteryx.compiled.structures.buffers cimport IntBuffer, ObjectBuffer
 from opteryx.compiled.structures.carchar_set cimport CarcharSetWrapper
 from opteryx.third_party.fastfloat.fast_float cimport c_parse_fast_float as parse_fast_float
@@ -94,97 +95,113 @@ cpdef tuple build_rows_indices_and_column(object column):
     return vec, flat_data_buf.to_numpy()
 
 
-cpdef tuple numpy_build_rows_indices_and_column(numpy.ndarray column_data):
+cpdef tuple numpy_build_rows_indices_and_column(numpy.ndarray column_data, object element_type=None):
+    """Build row indices and typed column data from ARRAY column.
+
+    Parameters:
+        column_data: numpy.ndarray
+            Array of array-like elements to flatten
+        element_type: object
+            Target type for the flattened data (Arrow/Draken type). If None, inferred from input.
+
+    Returns:
+        tuple of (Int64Vector, Draken vector)
+            Row indices and flattened typed data
+    """
     cdef int64_t row_count = column_data.shape[0]
-    cdef numpy.int64_t[::1] lengths = numpy.empty(row_count, dtype=numpy.int64)
-    cdef numpy.int64_t[::1] offsets = numpy.empty(row_count + 1, dtype=numpy.int64)
     cdef int64_t i
     cdef int64_t total_size = 0
-    cdef numpy.dtype element_dtype = column_data[0].dtype
+    cdef numpy.dtype numpy_element_dtype
+    cdef list flat_data_list = []
+    cdef IntBuffer indices_buf
 
     if not isinstance(column_data[0], numpy.ndarray):
         raise TypeError("UNNEST requires an ARRAY column.")
 
-    # Calculate lengths and total_size
+    # Infer element type if not provided
+    if element_type is None:
+        numpy_element_dtype = column_data[0].dtype
+    else:
+        numpy_element_dtype = None  # Will use element_type directly
+
+    # Calculate total_size and collect flattened data
     for i in range(row_count):
-        lengths[i] = column_data[i].shape[0]
-        total_size += lengths[i]
+        array_i = column_data[i]
+        if array_i is not None and array_i.size > 0:
+            total_size += array_i.shape[0]
+            # Extend flat_data list with array elements
+            flat_data_list.extend(array_i)
 
     # Early exit if total_size is zero
     if total_size == 0:
-        return (int64_from_sequence(None), numpy.array([], dtype=object))
+        return (int64_from_sequence(None), vector_from_sequence([], element_type))
 
-    # Compute offsets for efficient slicing
-    offsets[0] = 0
+    # Build indices buffer (which row each flattened element came from)
+    indices_buf = IntBuffer(total_size)
+    cdef int64_t idx = 0
     for i in range(row_count):
-        offsets[i + 1] = offsets[i] + lengths[i]
+        array_i = column_data[i]
+        if array_i is not None:
+            for _ in array_i:
+                indices_buf.append(i)
+                idx += 1
 
-    cdef IntBuffer indices_buf = IntBuffer(total_size)
-    cdef ObjectBuffer flat_data_buf = ObjectBuffer(total_size)
-
-    # Fill indices and flat_data
-    for i in range(row_count):
-        start = offsets[i]
-        end = offsets[i + 1]
-        if end > start:
-            indices_buf.append_repeated(i, end - start)
-            flat_data_buf.extend(column_data[i])
-
+    # Create typed vector from flattened data
     cdef const int64_t[::1] mv = indices_buf.get_buffer()
     cdef Int64Vector vec = int64_from_sequence(mv)
     vec._arrow_data_buf = indices_buf
-    return (vec, flat_data_buf.to_numpy())
+
+    # Create typed vector from collected data
+    data_vector = vector_from_sequence(flat_data_list, element_type)
+    return (vec, data_vector)
 
 
-cpdef tuple numpy_build_filtered_rows_indices_and_column(numpy.ndarray column_data, set valid_values):
-    """
-    Build row indices and flattened column data for matching values from a column of array-like elements.
+cpdef tuple numpy_build_filtered_rows_indices_and_column(numpy.ndarray column_data, set valid_values, object element_type=None):
+    """Build row indices and typed column data for filtered ARRAY column.
 
     Parameters:
-        column_data: ndarray
-            An array of arrays from which to create row indices and flattened data.
+        column_data: numpy.ndarray
+            Array of arrays from which to create row indices and flattened data.
         valid_values: set
-            A set of values to filter the rows by during the cross join.
+            A set of values to filter by during the cross join.
+        element_type: object
+            Target type for the flattened data (Arrow/Draken type). If None, inferred from input.
 
     Returns:
-        tuple of (ndarray, ndarray)
-            Returns a tuple containing an array of indices and an array of flattened data for rows that match the filter.
+        tuple of (Int64Vector, Draken vector)
+            Row indices and flattened typed data for values in valid_values
     """
     cdef int64_t row_count = column_data.shape[0]
-    cdef int64_t allocated_size = row_count * 4  # Initial allocation size
     cdef int64_t index = 0
     cdef int64_t i, j, len_i
     cdef object array_i
-    cdef ObjectBuffer flat_data_buf
     cdef IntBuffer indices_buf
-    cdef numpy.dtype element_dtype = numpy.dtype(object)
+    cdef numpy.dtype numpy_element_dtype = numpy.dtype(object)
     cdef object value
-
-    # Typed sets for different data types
+    cdef list flat_data_list = []
     cdef set valid_values_typed = None
 
     # Determine the dtype of the elements
     for i in range(row_count):
         array_i = column_data[i]
         if array_i is not None and array_i.size > 0:
-            element_dtype = array_i.dtype
+            numpy_element_dtype = array_i.dtype
             break
 
-    # Initialize indices and flat_data buffers
-    indices_buf = IntBuffer(allocated_size)
-    flat_data_buf = ObjectBuffer(allocated_size)
+    # Initialize indices buffer
+    indices_buf = IntBuffer(row_count * 4)  # Estimate initial size
 
-    # Handle set initialization based on element dtype
-    if numpy.issubdtype(element_dtype, numpy.integer):
+    # Handle set initialization based on element dtype for faster lookups
+    if numpy.issubdtype(numpy_element_dtype, numpy.integer):
         valid_values_typed = {int(v) for v in valid_values}
-    elif numpy.issubdtype(element_dtype, numpy.floating):
+    elif numpy.issubdtype(numpy_element_dtype, numpy.floating):
         valid_values_typed = {parse_fast_float(v) for v in valid_values}
-    elif numpy.issubdtype(element_dtype, numpy.str_):
+    elif numpy.issubdtype(numpy_element_dtype, numpy.str_):
         valid_values_typed = {unicode(v) for v in valid_values}
     else:
         valid_values_typed = valid_values  # Fallback to generic Python set
 
-    # Main loop
+    # Main loop: collect filtered data
     for i in range(row_count):
         array_i = column_data[i]
         if array_i is None:
@@ -196,18 +213,20 @@ cpdef tuple numpy_build_filtered_rows_indices_and_column(numpy.ndarray column_da
         for j in range(len_i):
             value = array_i[j]
             if value in valid_values_typed:
-                flat_data_buf.append(value)
+                flat_data_list.append(value)
                 indices_buf.append(i)
                 index += 1
 
     if index == 0:
-        return (int64_from_sequence(None), numpy.array([], dtype=element_dtype))
+        return (int64_from_sequence(None), vector_from_sequence([], element_type))
 
     cdef const int64_t[::1] mv = indices_buf.get_buffer()
     cdef Int64Vector vec = int64_from_sequence(mv)
     vec._arrow_data_buf = indices_buf
 
-    return (vec, flat_data_buf.to_numpy())
+    # Create typed vector from collected data
+    data_vector = vector_from_sequence(flat_data_list, element_type)
+    return (vec, data_vector)
 
 
 cpdef tuple build_filtered_rows_indices_and_column(object column, set valid_values):

@@ -8,18 +8,26 @@
 
 ## ✅ COMPLETED PHASES
 
+### Session 38 (continued): Phase 5.5.B - UNNEST Fallback Draken-Native Refactor
+- Refactored `numpy_build_rows_indices_and_column()` and `numpy_build_filtered_rows_indices_and_column()` in `cross_join.pyx`
+- Eliminated `.to_numpy()` return for flattened data (replaced with `vector_from_sequence()` typed vectors)
+- Modified function signatures to accept `element_type` parameter for type-aware vector creation
+- Updated caller in `unnest_join_node.pyx` to pass element type from `column_data.type.value_type`
+- Removed numpy array allocations in fallback; now collect in Python lists and create typed Draken vectors
+- **Result:** UNNEST fallback now uses Draken-native vectors (Int64Vector for indices, typed vectors for data); NumPy eliminated from return path
+
+### Session 38 (start): Phase 5.4.1 - Fallback Comparison Elimination
+- Refactored 12 functions in `opteryx/expression/operations/comparisons.py` and `string_matching.py`
+- Eliminated `.to_numpy().astype(numpy.bool_)` chains
+- All now use `BoolVector.from_arrow(compute.op(...))`
+- **Result:** 12 NumPy bool conversions removed
+
 ### Session 37: Session API & DataFrame fixes
 - `execute()` returns `self` for method chaining
 - Added `.shape` property to DataFrame
 - Fixed Arrow type mapping (BYTE→INTEGER, SHORT→INTEGER, LONG→INTEGER, FLOAT→DOUBLE)
 - Orphaned code cleanup (removed 86 lines of `execute_to_arrow_batches()` body)
 - **Result:** Tests restored from 7/88 to 87/88
-
-### Session 38: Phase 5.4.1 - Fallback Comparison Elimination
-- Refactored 12 functions in `opteryx/expression/operations/comparisons.py` and `string_matching.py`
-- Eliminated `.to_numpy().astype(numpy.bool_)` chains
-- All now use `BoolVector.from_arrow(compute.op(...))`
-- **Result:** 12 NumPy bool conversions removed; tests still 87/88
 
 ### Prior Sessions: Phases 5.3 & 5.4 (Tier 2 optimization)
 - Phase 5.3.1: Cast operations return native Draken vectors
@@ -35,7 +43,7 @@
 
 ---
 
-## 🔴 BLOCKED / DEFERRED (Architectural decisions needed)
+## 🔴 REMAINING WORK
 
 ### Phase 5.4.2: FastPath Constant Optimization (DEFERRED)
 - Target: Replace `pyarrow.array([constant] * n)` with native BoolVector
@@ -43,41 +51,30 @@
 - **Impact:** ~3-4 allocations
 - **Effort:** 30-45 minutes
 
-### Phase 5.4.3: Dead Code Removal (CANCELLED)
-- **Finding:** All NumPy imports in joins/operators are ACTIVE (not dead)
-- Carchar integration requires NumPy array conversions (lines 185-249 in inner_join.pyx)
-- UNNEST fallback requires NumPy operations (cross_join.pyx numpy_build_* functions)
+### Phase 5.5.A: Carchar Integration (ACTIVE)
+- **Status:** Partially investigated, requires C++ coordination
+- **Scope:** NumPy array conversions in `inner_join.pyx` (lines 185-249) for Carchar interop
+- **Challenge:** C++ layer needs memoryview protocol support for direct buffer passing
+- **Impact:** 6-10 refs
+- **Effort:** 3-5 days with C++ team coordination
 
-### Phase 5.5: Integration Boundary Refactoring (NEEDS ARCHITECT INPUT)
-**Option A: Carchar Integration Redesign**
-- Effort: 3-5 days
-- Impact: 6-10 refs
-- Challenge: C++ layer coordination for memoryview support
-
-**Option B: UNNEST Fallback Refactoring**
-- Effort: 2-3 days
-- Impact: 8-12 refs
-- Scope: Replace numpy arrays in numpy_build_* functions with Draken vectors
-
-**Option C: Audit Other Operators**
-- Effort: 2-3 days audit + TBD for elimination
-- Impact: Potential 15-20 refs outside join/operator ecosystem
-- Discovery needed first
+### Phase 5.5.C: Audit Other Operators (PENDING)
+- **Status:** Not started
+- **Scope:** Search other operators (sort, aggregate, group_by, etc.) for NumPy usage outside join/UNNEST
+- **Potential Impact:** 15-20+ refs
+- **Effort:** 2-3 days audit + TBD for elimination
 
 ---
 
 ## ⏭️ NEXT STEPS
 
 **Immediate (ready to execute):**
-1. Decide Phase 5.5 priority (Carchar vs UNNEST vs audit other operators)
-2. If UNNEST chosen: Refactor `cross_join.pyx` numpy_build_* functions
-3. If Carchar chosen: Coordinate with C++ team on memoryview protocol support
-4. If audit chosen: Search other operators (sort, aggregate, etc.) for NumPy usage
+1. Phase 5.5.C: Audit other operators for NumPy usage (sort, aggregate, group_by, etc.)
+2. Decide priority: Phase 5.5.A (Carchar C++ coordination) vs Phase 5.4.2 (FastPath constants) vs Phase 5.5.C results
 
-**For Decision-Making:**
-- `opteryx/compiled/joins/inner_join.pyx`: Carchar integration (10+ NumPy lines, active)
-- `opteryx/compiled/joins/cross_join.pyx`: UNNEST fallback (numpy_build_* functions)
-- All other operators: Potential 15-20 refs (needs audit)
+**Key Files:**
+- `opteryx/compiled/joins/inner_join.pyx`: Carchar integration (active NumPy usage)
+- All other operators: Under investigation for Phase 5.5.C
 
 ---
 
