@@ -1,7 +1,9 @@
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# See the License at http://www.apache.org/licenses/LICENSE-2.0
-# Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
+# cython: language_level=3
+# cython: nonecheck=False
+# cython: cdivision=True
+# cython: boundscheck=False
+# cython: wraparound=False
+# cython: infer_types=True
 
 """
 Unnest Join Node
@@ -10,198 +12,142 @@ This is a SQL Query Execution Plan Node.
 
 This implements a CROSS JOIN UNNEST, this isn't really a JOIN in that it doesn't join two tables
 together, but it does unnest a column in a table and repeat the rows in the table for each value.
+
+Draken-native implementation (no PyArrow).
 """
 
-from typing import Generator
-from typing import Set
-from typing import Tuple
+from typing import Generator, Set, Tuple
 
-import numpy
-import pyarrow
 from opteryx.compiled.structures.carchar_set import CarcharSetWrapper
+from opteryx.compiled.draken.morsels.morsel cimport Morsel
+from opteryx.compiled.draken.vectors.vector cimport Vector
 from opteryx.expression import NodeType
-from opteryx.models import LogicalColumn
-from opteryx.models import QueryProperties
+from opteryx.models import LogicalColumn, QueryProperties
 from opteryx.types.schema import FlatColumn
 
 from opteryx import EOS
 
 from . import BasePlanNode
 
-_DATA_FORMAT = "arrow"
+_DATA_FORMAT = "draken"
 
-
-INTERNAL_BATCH_SIZE: int = 10000  # config
-MAX_JOIN_SIZE: int = 1000  # config
-MORSEL_SIZE_BYTES: int = 16 * 1024 * 1024
-CROSS_JOIN_UNNEST_BATCH_SIZE = 10000
+INTERNAL_BATCH_SIZE: int = 10000
 
 
 def _cross_join_unnest_column(
     *,
-    morsel: pyarrow.Table = None,
+    morsel: Morsel = None,
     source: LogicalColumn = None,
     target_column: FlatColumn = None,
     conditions: Set = None,
     distinct: bool = False,
     single_column: bool = False,
     hash_set=None,
-) -> pyarrow.Table:
+) -> Generator[Morsel, None, None]:
     """
-    Perform a cross join on an unnested column of pyarrow tables.
+    Perform a cross join on an unnested column of Draken morsels (Draken-native, no PyArrow).
 
     Args:
-        morsels: An iterable of `pyarrow.Table` objects to be cross joined.
+        morsel: A `Morsel` object to be unnested.
         source: The source node indicating the column.
         target_column: The column to be unnested.
+        conditions: Optional set of valid values to filter by.
+        distinct: Whether to deduplicate results.
+        single_column: Whether the output is only the unnested column.
+        hash_set: Optional hash set for deduplication.
 
-    Returns:
-        A generator that yields the resulting `pyarrow.Table` objects.
+    Yields:
+        Morsel objects with unnested rows.
     """
-    from opteryx.compiled.joins import list_distinct
     from opteryx.compiled.joins import build_rows_indices_and_column_draken
     from opteryx.compiled.joins import build_filtered_rows_indices_and_column_draken
+    from opteryx.compiled.joins import list_distinct
 
-    batch_size: int = INTERNAL_BATCH_SIZE
-    at_least_once = False
-    single_column_collector = []
+    if morsel.num_rows == 0:
+        return
 
-    # Break the morsel into batches to avoid memory issues
-    for left_block in morsel.to_batches(max_chunksize=batch_size):
-        new_block = None
-        # Fetch the data of the column to be unnested
-        column_data = left_block[source.schema_column.identity]
+    # Get the column to unnest as a Draken vector
+    column_identity = source.schema_column.identity
+    if not isinstance(column_identity, bytes):
+        column_identity = column_identity.encode('utf-8')
+    column_vector = morsel.column(column_identity)
 
-        # Filter out null values
-        valid_offsets = column_data.is_valid()
-        if valid_offsets.true_count == 0:
-            continue
-        column_data = column_data.filter(valid_offsets)
-        left_block = left_block.filter(valid_offsets)
-
-        # Build indices and new column data using Draken-native vectors
-        # Convert Arrow input to Draken vector
-        from opteryx.compiled.draken.interop.arrow import vector_from_arrow
-        column_vector = vector_from_arrow(column_data)
-
-        if conditions is None:
-            indices, new_column_data = build_rows_indices_and_column_draken(column_vector)
-        else:
-            indices, new_column_data = build_filtered_rows_indices_and_column_draken(
-                column_vector, conditions
-            )
-
-        if single_column and distinct and indices.size > 0:
-            # if the unnest target is the only field in the SELECT and we're DISTINCTING
-            new_column_data, indices, hash_set = list_distinct(new_column_data, indices, hash_set)
-
-        if len(indices) > 0:
-            if single_column:
-                single_column_collector.extend(new_column_data)
-                if len(single_column_collector) > INTERNAL_BATCH_SIZE:
-                    schema = pyarrow.schema(
-                        [
-                            pyarrow.field(
-                                name=target_column.identity, type=target_column.arrow_field.type
-                            )
-                        ]
-                    )
-                    arrow_array = pyarrow.array(single_column_collector)
-                    if arrow_array.type != target_column.arrow_field.type:
-                        arrow_array = arrow_array.cast(target_column.arrow_field.type)
-                    new_block = pyarrow.Table.from_arrays([arrow_array], schema=schema)
-                    single_column_collector.clear()
-                    del arrow_array
-                    yield new_block
-                    at_least_once = True
-            else:
-                # Rebuild the block with the new column data if we have any rows to build for
-
-                total_rows = indices.size  # Both arrays have the same length
-                block_size = MORSEL_SIZE_BYTES / (left_block.nbytes / left_block.num_rows)
-                block_size = int(block_size / 1000) * 1000
-
-                for start_block in range(0, total_rows, block_size):
-                    # Compute the end index for the current chunk
-                    end_block = min(start_block + block_size, total_rows)
-
-                    # Slice the current chunk of indices and new_column_data
-                    indices_chunk = indices[start_block:end_block]
-                    new_column_data_chunk = new_column_data[start_block:end_block]
-
-                    # Create a new block using the chunk of indices
-                    indices_chunk = numpy.array(indices_chunk, dtype=numpy.int64)
-                    new_block = left_block.take(indices_chunk)
-                    new_block = pyarrow.Table.from_batches([new_block], schema=morsel.schema)
-
-                    # Append the corresponding chunk of new_column_data to the block
-                    new_block = new_block.append_column(
-                        target_column.identity, pyarrow.array(new_column_data_chunk)
-                    )
-
-                    yield new_block
-                    at_least_once = True
-
-    if single_column_collector:
-        schema = pyarrow.schema(
-            [pyarrow.field(name=target_column.identity, type=target_column.arrow_field.type)]
+    # Build row indices and flattened column data using Draken-native helpers
+    if conditions is None:
+        indices, flattened_data = build_rows_indices_and_column_draken(column_vector)
+    else:
+        indices, flattened_data = build_filtered_rows_indices_and_column_draken(
+            column_vector, conditions
         )
-        arrow_array = pyarrow.array(single_column_collector)
-        if arrow_array.type != target_column.arrow_field.type:
-            arrow_array = arrow_array.cast(target_column.arrow_field.type)
-        new_block = pyarrow.Table.from_arrays([arrow_array], schema=schema)
-        yield new_block
-        at_least_once = True
 
-    if not at_least_once:
-        # Create an empty table with the new schema
-        schema = morsel.schema
-        new_column = pyarrow.field(target_column.identity, pyarrow.string())
-        new_schema = pyarrow.schema(list(schema) + [new_column])
-        new_block = pyarrow.Table.from_batches([], schema=new_schema)
-        yield new_block
+    # Handle deduplication if requested
+    if single_column and distinct and indices.length > 0:
+        flattened_data, indices, hash_set = list_distinct(flattened_data, indices, hash_set)
+
+    # If no results after filtering/deduplication, yield empty morsel
+    if indices.length == 0:
+        return
+
+    # Convert indices to Python list for take() operation
+    row_indices = indices.to_pylist()
+
+    # Expand the morsel by repeating rows according to indices
+    expanded_morsel = morsel.take(row_indices)
+
+    # Append the unnested column to the expanded morsel
+    expanded_morsel.append_vector(target_column.identity, flattened_data)
+
+    yield expanded_morsel
 
 
 def _cross_join_unnest_literal(
-    morsel: pyarrow.Table, source: Tuple, target_column: FlatColumn
-) -> Generator[pyarrow.Table, None, None]:
-    if morsel.column_names == ["$COUNT(*)"]:
-        count = morsel["$COUNT(*)"][0].as_py()
+    morsel: Morsel, source: Tuple, target_column: FlatColumn
+) -> Generator[Morsel, None, None]:
+    """
+    Perform a cross join with a literal (constant) unnest array (Draken-native, no PyArrow).
 
-        # Create a table from 'source'
-        array_column = pyarrow.array(source)
-        # Ensure type matches target column if possible, or let implicit casting handle it
+    Args:
+        morsel: A `Morsel` object to be cross-joined.
+        source: A tuple of literal values to unnest.
+        target_column: The column to hold the unnested values.
 
-        table = pyarrow.Table.from_arrays([array_column], names=[target_column.identity])
+    Yields:
+        Morsel objects with unnested literal values repeated.
+    """
+    from opteryx.compiled.draken.interop.arrow import vector_from_sequence
 
-        for _ in range(count):
-            yield table
+    if morsel.num_rows == 0:
         return
 
     joined_list_size = len(source)
+    block_size = morsel.num_rows
 
-    # Break the morsel into batches to avoid memory issues
-    for left_block in morsel.to_batches(max_chunksize=INTERNAL_BATCH_SIZE):
-        left_block = pyarrow.Table.from_batches([left_block], schema=morsel.schema)
-        block_size = left_block.num_rows
+    # Build repeated row indices: each row repeated joined_list_size times
+    repeated_indices = []
+    for i in range(block_size):
+        for _ in range(joined_list_size):
+            repeated_indices.append(i)
 
-        # Repeat each row in the table n times
-        repeated_indices = numpy.repeat(numpy.arange(block_size), joined_list_size)
-        appended_table = left_block.take(repeated_indices)
+    # Expand the morsel by repeating rows
+    expanded_morsel = morsel.take(repeated_indices)
 
-        # Tile the array to match the new number of rows
-        tiled_array = numpy.tile(source, block_size)
+    # Create tiled source data: repeat source for each original row
+    tiled_source = []
+    for _ in range(block_size):
+        tiled_source.extend(source)
 
-        # Convert tiled_array to PyArrow array and append it to the table
-        array_column = pyarrow.array(tiled_array)
-        appended_table = appended_table.append_column(target_column.identity, array_column)
+    # Convert to typed Draken vector
+    unnest_vector = vector_from_sequence(tiled_source)
 
-        yield appended_table
+    # Append the unnested column
+    expanded_morsel.append_vector(target_column.identity, unnest_vector)
+
+    yield expanded_morsel
 
 
 class UnnestJoinNode(BasePlanNode):
     """
-    Implements CROSS JOIN UNNEST
+    Implements CROSS JOIN UNNEST (Draken-native, no PyArrow)
     """
 
     def __init__(self, properties: QueryProperties, **parameters):
@@ -246,10 +192,11 @@ class UnnestJoinNode(BasePlanNode):
         return f"CROSS JOIN {filters}"
 
     def execute(self, morsel):
-        morsel = self.ensure_arrow_table(morsel)
+        morsel = self.ensure_draken_morsel(morsel)
 
         if morsel == EOS:
             return
+
         if isinstance(self._unnest_column.value, tuple):
             yield from _cross_join_unnest_literal(
                 morsel=morsel,
@@ -267,4 +214,3 @@ class UnnestJoinNode(BasePlanNode):
             distinct=self._distinct,
             single_column=self._single_column,
         )
-        return

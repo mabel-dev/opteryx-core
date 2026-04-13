@@ -172,13 +172,13 @@ cpdef tuple build_filtered_rows_indices_and_column(object column, set valid_valu
     return vec, vector_from_sequence(flat_list)
 
 
-cpdef tuple list_distinct(object values, object indices, CarcharSetWrapper seen_hashes=None):
+cpdef tuple list_distinct(Vector values, Int64Vector indices, CarcharSetWrapper seen_hashes=None):
     """
     Filter duplicates from values using hash-based deduplication (Draken-native).
 
     Args:
-        values: Iterable of values (Draken vector or Python sequence)
-        indices: Int64Vector or iterable of row indices
+        values: Draken Vector of values
+        indices: Int64Vector of row indices
         seen_hashes: CarcharSetWrapper to track seen hash values
 
     Returns:
@@ -186,12 +186,11 @@ cpdef tuple list_distinct(object values, object indices, CarcharSetWrapper seen_
     """
     cdef:
         Py_ssize_t i = 0
-        Py_ssize_t j = 0
         Py_ssize_t n = len(values)
         uint64_t hash_value
         object v
         list new_values_list = []
-        IntBuffer new_indices_buf = IntBuffer(n)
+        list new_indices_list = []
 
     if seen_hashes is None:
         seen_hashes = CarcharSetWrapper()
@@ -201,11 +200,7 @@ cpdef tuple list_distinct(object values, object indices, CarcharSetWrapper seen_
         hash_value = <uint64_t>(PyObject_Hash(v) & 0xFFFFFFFFFFFFFFFF)
         if seen_hashes.insert(hash_value):
             new_values_list.append(v)
-            new_indices_buf.append(indices[i])
+            new_indices_list.append(indices[i])
 
     # Create Draken vectors from collected data
-    cdef const int64_t[::1] indices_mv = new_indices_buf.get_buffer()
-    cdef Int64Vector indices_vec = int64_from_sequence(indices_mv)
-    indices_vec._arrow_data_buf = new_indices_buf
-
-    return vector_from_sequence(new_values_list), indices_vec, seen_hashes
+    return vector_from_sequence(new_values_list), vector_from_sequence(new_indices_list), seen_hashes

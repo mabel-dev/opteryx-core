@@ -984,6 +984,93 @@ cdef class Morsel:
         finally:
             PyMem_Free(indices_ptr)
 
+    def __str__(self) -> str:
+        """
+        Pretty-print the morsel as a simple ASCII table (top 10 rows).
+        This is intended for interactive display only (repr remains compact).
+        """
+        # Basic safety for uninitialised morsels
+        try:
+            n_rows = self.ptr.num_rows if self.ptr is not NULL else 0
+            n_cols = self.ptr.num_columns if self.ptr is not NULL else 0
+        except Exception:
+            n_rows = 0
+            n_cols = 0
+
+        # Convert encoded names (bytes) to strings where appropriate
+        col_names = []
+        try:
+            for n in self._encoded_names:
+                if isinstance(n, bytes):
+                    try:
+                        col_names.append(n.decode("utf-8"))
+                    except Exception:
+                        col_names.append(repr(n))
+                else:
+                    col_names.append(str(n))
+        except Exception:
+            # Fallback if _encoded_names is not available
+            col_names = [f"col{i}" for i in range(n_cols)]
+
+        if n_cols == 0:
+            return "<Morsel: 0 columns>"
+
+        max_show = 10
+        show_rows = min(max_show, n_rows)
+
+        # Collect rows
+        rows = []
+        for i in range(show_rows):
+            row = []
+            for j in range(n_cols):
+                try:
+                    vec = self._columns[j]
+                    # Prefer direct indexing; fall back to to_pylist() if needed
+                    try:
+                        val = vec[i]
+                    except Exception:
+                        try:
+                            val = vec.to_pylist()[i]
+                        except Exception:
+                            val = None
+                except Exception:
+                    val = None
+
+                if isinstance(val, bytes):
+                    try:
+                        val = val.decode("utf-8")
+                    except Exception:
+                        val = repr(val)
+                row.append("" if val is None else str(val))
+            rows.append(row)
+
+        # Compute column widths
+        widths = [len(name) for name in col_names]
+        for r in rows:
+            for idx, cell in enumerate(r):
+                if idx >= len(widths):
+                    widths.append(len(cell))
+                else:
+                    if len(cell) > widths[idx]:
+                        widths[idx] = len(cell)
+
+        # Build table lines
+        sep = " | "
+        header = sep.join(col_names[i].ljust(widths[i]) for i in range(n_cols))
+        divider = "-+-".join("-" * widths[i] for i in range(n_cols))
+        body_lines = []
+        for r in rows:
+            line = sep.join(r[i].ljust(widths[i]) for i in range(n_cols))
+            body_lines.append(line)
+
+        if show_rows == 0:
+            body = "(no rows)"
+        else:
+            body = "\n".join(body_lines)
+
+        more_info = f"... ({n_rows} rows total)" if n_rows > max_show else f"({n_rows} rows)"
+        return f"{header}\n{divider}\n{body}\n{more_info}"
+
     def __repr__(self) -> str:
         return f"<Morsel: {self.ptr.num_rows} rows x {self.ptr.num_columns} columns>"
 
