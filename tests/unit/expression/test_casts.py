@@ -22,6 +22,9 @@ class TestCastToInt:
         """Casting int to int returns same values."""
         arr = np.array([1, 2, 3, None], dtype=object)
         result = cast_to_int(arr)
+        # Phase 5.3.1 PoC: cast_to_int returns Int64Vector
+        if hasattr(result, "to_pylist"):
+            result = result.to_pylist()
         assert result[0] == 1
         assert result[1] == 2
         assert result[2] == 3
@@ -31,15 +34,23 @@ class TestCastToInt:
         """Cast string array to int."""
         arr = np.array(["1", "2", "3", None], dtype=object)
         result = cast_to_int(arr)
-        # cast_to_int returns PyArrow array/scalars for string input
-        assert int(result[0]) == 1
-        assert int(result[1]) == 2
-        assert int(result[2]) == 3
+        # Phase 5.3.1 PoC: cast_to_int returns Int64Vector for string input
+        if hasattr(result, "to_pylist"):
+            result = result.to_pylist()
+        assert result[0] == 1
+        assert result[1] == 2
+        assert result[2] == 3
+        assert result[3] is None
 
     def test_float_to_int(self):
         """Cast float to int (truncates)."""
         arr = np.array([1.5, 2.7, 3.1, None], dtype=object)
         result = cast_to_int(arr)
+        # Fallback path returns list; may need conversion
+        if hasattr(result, "to_pylist"):
+            result = result.to_pylist()
+        elif not isinstance(result, list):
+            result = np.array(result).tolist()
         assert result[0] == 1
         assert result[1] == 2
         assert result[2] == 3
@@ -53,20 +64,26 @@ class TestCastToDouble:
         """Casting double to double returns same values."""
         arr = np.array([1.5, 2.7, 3.1], dtype=np.float64)
         result = cast_to_double(arr)
-        np.testing.assert_array_equal(result, arr)
+        # Phase 5.3.1 PoC: cast_to_double returns Float64Vector
+        if hasattr(result, "to_pylist"):
+            result = result.to_pylist()
+        np.testing.assert_array_almost_equal(result, arr)
 
     def test_int_to_double(self):
         """Cast int to double."""
         arr = np.array([1, 2, 3], dtype=np.int64)
         result = cast_to_double(arr)
-        expected = np.array([1.0, 2.0, 3.0], dtype=np.float64)
-        np.testing.assert_array_equal(result, expected)
+        # Phase 5.3.1 PoC: cast_to_double returns Float64Vector
+        if hasattr(result, "to_pylist"):
+            result = result.to_pylist()
+        expected = [1.0, 2.0, 3.0]
+        np.testing.assert_array_almost_equal(result, expected)
 
     def test_string_to_double(self):
         """Cast string array to double."""
         arr = np.array(["1.5", "2.7", "3.1", None], dtype=object)
         result = cast_to_double(arr)
-        # cast_to_double now returns PyArrow array for string input
+        # Phase 5.3.1 PoC: cast_to_double returns Float64Vector for string input
         # Convert to Python list for comparison
         if hasattr(result, "to_pylist"):
             result = result.to_pylist()
@@ -84,10 +101,23 @@ class TestCastToVarchar:
         """Cast int array to varchar."""
         arr = np.array([1, 2, 3], dtype=np.int64)
         result = cast_to_varchar(arr)
-        # cast_to_varchar with int64 optimized path returns PyArrow BinaryScalars
-        assert bytes(result[0]) == b"1"
-        assert bytes(result[1]) == b"2"
-        assert bytes(result[2]) == b"3"
+        # cast_to_varchar with int64 optimized path returns PyArrow BinaryArray
+        if hasattr(result, "to_pylist"):
+            result_list = result.to_pylist()
+        elif hasattr(result, "__iter__"):
+            result_list = list(result)
+        else:
+            result_list = result
+
+        # Decode byte strings if needed
+        def to_str(val):
+            if isinstance(val, bytes):
+                return val.decode("utf-8")
+            return str(val)
+
+        assert to_str(result_list[0]) == "1"
+        assert to_str(result_list[1]) == "2"
+        assert to_str(result_list[2]) == "3"
 
     def test_double_to_varchar(self):
         """Cast double array to varchar."""

@@ -80,7 +80,7 @@ result = {
 try:
     session = opteryx.session(memberships=["Apollo 11", "opteryx"])
     start = time.time()
-    arrow_result = session.execute_to_arrow(sql)
+    arrow_result = session.execute(sql)
     row_count = len(arrow_result)
     elapsed_ms = (time.time() - start) * 1000
 

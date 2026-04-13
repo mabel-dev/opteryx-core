@@ -176,7 +176,9 @@ cdef class _BufferCleanup:
 
 from cpython.bytes cimport PyBytes_FromStringAndSize
 from opteryx.compiled.draken.vectors.string_vector cimport StringVector
-from opteryx.compiled.draken.core.buffers cimport DrakenVarBuffer
+from opteryx.compiled.draken.vectors.array_vector cimport array_vector_from_parts
+from opteryx.compiled.draken.core.buffers cimport DrakenVarBuffer, DRAKEN_ENCODING_DICTIONARY, DRAKEN_STRING
+from opteryx.compiled.draken.vectors.string_vector cimport from_arrow as string_vector_from_arrow
 
 cpdef object vector_split(StringVector vec, char delimiter):
     """
@@ -185,6 +187,11 @@ cpdef object vector_split(StringVector vec, char delimiter):
     """
     cdef DrakenVarBuffer* dptr = vec.ptr
     cdef int64_t n = <int64_t>dptr.length
+    cdef StringVector flat_child
+    cdef int32_t num_parts
+    cdef int32_t* list_offsets
+    cdef int32_t* child_offsets = NULL
+    cdef int64_t idx
 
     import pyarrow as pa
 
@@ -195,27 +202,28 @@ cpdef object vector_split(StringVector vec, char delimiter):
     if vec._has_const:
         if vec._const_is_null or vec._const_value == NULL:
             return pa.nulls(n, type=pa.list_(pa.binary()))
+
         const_bytes = PyBytes_FromStringAndSize(
             <const char*>vec._const_value.data, vec._const_value.length
         )
         parts = const_bytes.split(bytes([delimiter]))
 
-        # Efficient constant replication using buffer-based approach
-        # Instead of [parts] * n which allocates large Python list,
-        # build child array once and replicate via offsets
-        import numpy as np
-        const_parts_array = pa.array(parts, type=pa.binary())
-        num_parts = len(parts)
+        # Phase 5.3: Return Draken-native ArrayVector for constant split
+        # This avoids all PyArrow/NumPy overhead for the outer container.
+        flat_child = string_vector_from_arrow(pa.array(parts, type=pa.binary()))
+        num_parts = <int32_t>len(parts)
+        list_offsets = <int32_t*>malloc((n + 1) * sizeof(int32_t))
+        if list_offsets == NULL:
+            raise MemoryError()
 
-        # Create offsets: [0, num_parts, 2*num_parts, ..., n*num_parts]
-        # This efficiently replicates the child array n times without list intermediate
-        list_offsets = np.arange(0, (n + 1) * num_parts, num_parts, dtype=np.int32)
+        for idx in range(n + 1):
+            list_offsets[idx] = <int32_t>(idx * num_parts)
 
-        return pa.Array.from_buffers(
-            pa.list_(pa.binary()), n,
-            [None, pa.py_buffer(list_offsets)],
-            children=[const_parts_array]
-        )
+        # array_vector_from_parts copies the offsets and takes ownership
+        try:
+            return array_vector_from_parts(flat_child, list_offsets, NULL, n)
+        finally:
+            free(list_offsets)
 
     # Dictionary encoding: process per row via to_pylist (rare path)
     if vec._encoding == DRAKEN_ENCODING_DICTIONARY:
@@ -233,13 +241,13 @@ cpdef object vector_split(StringVector vec, char delimiter):
 
     # Dense encoding: SIMD fast path
     cdef const char* raw_data = <const char*>dptr.data
-    cdef const int32_t* offsets = dptr.offsets
+    cdef const int32_t* dense_offsets = dptr.offsets
 
     cdef int64_t i
     cdef int64_t start, end
 
-    cdef int64_t total_bytes = offsets[n] - offsets[0]
-    cdef int64_t base = offsets[0]
+    cdef int64_t total_bytes = dense_offsets[n] - dense_offsets[0]
+    cdef int64_t base = dense_offsets[0]
 
     # Allocate delimiter buffer (no need for alignment here)
     cdef size_t max_delims = total_bytes + 64  # Safety margin
@@ -252,25 +260,25 @@ cpdef object vector_split(StringVector vec, char delimiter):
     with nogil:
         num_delims = simd_find_all_portable(raw_data + base, total_bytes, delimiter, delim_pos)
 
-    cdef object results = []
-
     # Handle trivial case (no delimiters) quickly
     if num_delims == 0:
         free(delim_pos)
 
-        # Build result without any splitting
-        results = []
+        # Build result without any splitting (each string is its own single part)
+        # We can reuse the original StringVector as the child of an ArrayVector
+        # with the same offsets as the original.
+        child_offsets = <int32_t*>malloc((n + 1) * sizeof(int32_t))
+        if child_offsets == NULL:
+            raise MemoryError()
 
-        for i in range(n):
-            start = offsets[i] - base
-            end = offsets[i + 1] - base
-            if end > start:
-                # Create a slice of the original data
-                results.append([raw_data[start:end]])
-            else:
-                results.append([b''])
+        # Copy original offsets to child offsets (0..n+1)
+        for i in range(n + 1):
+            child_offsets[i] = dense_offsets[i] - dense_offsets[0]
 
-        return pa.array(results, type=pa.list_(pa.binary()))
+        try:
+            return array_vector_from_parts(vec, child_offsets, NULL, n)
+        finally:
+            free(child_offsets)
 
     # Count delimiters per string
     cdef size_t* string_delim_counts = <size_t*>calloc(n, sizeof(size_t))
@@ -293,8 +301,8 @@ cpdef object vector_split(StringVector vec, char delimiter):
 
     with nogil:
         for i in range(n):
-            start = offsets[i] - base
-            end = offsets[i + 1] - base
+            start = dense_offsets[i] - base
+            end = dense_offsets[i + 1] - base
 
             # Skip delimiters not in this string
             while delim_idx < num_delims and delim_pos[delim_idx] < start:
@@ -318,7 +326,7 @@ cpdef object vector_split(StringVector vec, char delimiter):
 
     # Allocate output buffers with alignment for SIMD
     cdef char* output_data = <char*>aligned_malloc(total_output_bytes + 64, 64)
-    cdef int32_t* child_offsets = <int32_t*>aligned_malloc((total_segments + 1) * sizeof(int32_t), 64)
+    child_offsets = <int32_t*>aligned_malloc((total_segments + 1) * sizeof(int32_t), 64)
     cdef int32_t* vector_offsets = <int32_t*>malloc((n + 1) * sizeof(int32_t))
 
     if output_data == NULL or child_offsets == NULL or vector_offsets == NULL:
@@ -350,8 +358,8 @@ cpdef object vector_split(StringVector vec, char delimiter):
 
     with nogil:
         for i in range(n):
-            start = offsets[i] - base
-            end = offsets[i + 1] - base
+            start = dense_offsets[i] - base
+            end = dense_offsets[i + 1] - base
 
             # Get delimiters for this string
             string_start_idx = string_delim_starts[i]
@@ -388,9 +396,8 @@ cpdef object vector_split(StringVector vec, char delimiter):
     # Final child offset
     child_offsets[segment_idx] = write_pos
 
-    # Build Arrow arrays with cleanup objects
-
-    # Create cleanup objects
+    # Build Draken vectors
+    # Create the flattened child StringVector first
     cdef _BufferCleanup cleanup_output_data = _BufferCleanup()
     cleanup_output_data.ptr = output_data
     cleanup_output_data.use_aligned_free = True
@@ -399,42 +406,33 @@ cpdef object vector_split(StringVector vec, char delimiter):
     cleanup_child_offsets.ptr = child_offsets
     cleanup_child_offsets.use_aligned_free = True
 
-    cdef _BufferCleanup cleanup_list_offsets = _BufferCleanup()
-    cleanup_list_offsets.ptr = vector_offsets
-    cleanup_list_offsets.use_aligned_free = False
-
-    # Create foreign buffers with the cleanup objects keeping memory alive
-    cdef object child_data_buf = pa.foreign_buffer(
+    cdef object py_child_data_buf = pa.foreign_buffer(
         <uintptr_t>output_data, write_pos,
         base=cleanup_output_data
     )
-
-    cdef object child_offs_buf = pa.foreign_buffer(
+    cdef object py_child_offs_buf = pa.foreign_buffer(
         <uintptr_t>child_offsets, (segment_idx + 1) * sizeof(int32_t),
         base=cleanup_child_offsets
     )
 
-    cdef object vector_offs_buf = pa.foreign_buffer(
-        <uintptr_t>vector_offsets, (n + 1) * sizeof(int32_t),
-        base=cleanup_list_offsets
-    )
-
-    # Create child array
-    cdef object child_array = pa.Array.from_buffers(
+    # Construct the child StringVector from foreign buffers
+    cdef object py_child_array = pa.Array.from_buffers(
         pa.binary(), segment_idx,
-        [None, child_offs_buf, child_data_buf]
+        [None, py_child_offs_buf, py_child_data_buf]
     )
+    cdef StringVector child_vec = string_vector_from_arrow(py_child_array)
 
-    # Create list array
-    cdef object vector_array = pa.Array.from_buffers(
-        pa.list_(pa.binary()), n,
-        [None, vector_offs_buf],
-        children=[child_array]
-    )
+    # Construct the resulting ArrayVector (ListArray equivalent)
+    # array_vector_from_parts copies the vector_offsets and takes ownership
+    cdef object result_vector
+    try:
+        result_vector = array_vector_from_parts(child_vec, vector_offsets, NULL, n)
+    finally:
+        free(vector_offsets)
 
     # Cleanup temporary buffers
     free(delim_pos)
     free(string_delim_counts)
     free(string_delim_starts)
 
-    return vector_array
+    return result_vector

@@ -36,9 +36,10 @@ the build cost is amortised over the ingest phase.
 """
 
 from libc.stdlib cimport calloc, free
-from libc.stdint cimport uint8_t, uint64_t, uint32_t
+from libc.stdint cimport uint8_t, uint64_t, uint32_t, int64_t
 from cpython.array cimport array, clone
 
+from opteryx.compiled.draken.vectors.int64_vector cimport Int64Vector
 from opteryx.compiled.table_ops.hash_ops cimport compute_row_hashes
 from opteryx.compiled.table_ops.null_avoidant_ops cimport non_null_row_indices
 
@@ -133,8 +134,9 @@ cdef class BloomFilter:
         cdef Py_ssize_t num_bytes = (num_rows + 7) >> 3
         cdef array result_arr = clone(_UINT8_TEMPLATE, num_bytes, True)  # zero-initialised
         cdef uint8_t[::1] result = result_arr
-        cdef int64_t[::1] valid_row_ids = non_null_row_indices(relation, columns)
-        cdef Py_ssize_t num_valid_rows = valid_row_ids.shape[0]
+        cdef Int64Vector valid_row_ids_vec = non_null_row_indices(relation, columns)
+        cdef const int64_t* valid_row_ids_ptr = <const int64_t*>valid_row_ids_vec.dense_ptr()
+        cdef Py_ssize_t num_valid_rows = len(valid_row_ids_vec)
         cdef array row_hashes_arr = clone(_UINT64_TEMPLATE, num_rows, False)
         cdef uint64_t[::1] row_hashes = row_hashes_arr
         cdef Py_ssize_t i
@@ -149,7 +151,7 @@ cdef class BloomFilter:
             compute_row_hashes(relation, columns, row_hashes)
 
             for i in range(num_valid_rows):
-                row_id = valid_row_ids[i]
+                row_id = valid_row_ids_ptr[i]
                 hash_val = row_hashes[row_id]
 
                 h1 = hash_val & bit_mask
@@ -204,14 +206,14 @@ cpdef BloomFilter create_bloom_filter(object relation, list columns):
     Optimized Bloom filter creation with better cache behavior.
     """
     cdef array row_hashes_arr = clone(_UINT64_TEMPLATE, relation.num_rows, False)
-    cdef:
-        int64_t[::1] valid_row_ids = non_null_row_indices(relation, columns)
-        Py_ssize_t num_valid_rows = valid_row_ids.shape[0]
-        uint64_t[::1] row_hashes = row_hashes_arr
-        Py_ssize_t i
-        int64_t row_id
-        BloomFilter bf = BloomFilter(num_valid_rows)
-        uint64_t hash_val, h1, h2
+    cdef Int64Vector valid_row_ids_vec = non_null_row_indices(relation, columns)
+    cdef const int64_t* valid_row_ids_ptr = <const int64_t*>valid_row_ids_vec.dense_ptr()
+    cdef Py_ssize_t num_valid_rows = len(valid_row_ids_vec)
+    cdef uint64_t[::1] row_hashes = row_hashes_arr
+    cdef Py_ssize_t i
+    cdef int64_t row_id
+    cdef BloomFilter bf = BloomFilter(<uint32_t>num_valid_rows)
+    cdef uint64_t hash_val, h1, h2
 
     if num_valid_rows == 0:
         return bf
@@ -226,7 +228,7 @@ cpdef BloomFilter create_bloom_filter(object relation, list columns):
 
     # Add to bloom filter
     for i in range(num_valid_rows):
-        row_id = valid_row_ids[i]
+        row_id = valid_row_ids_ptr[i]
         hash_val = row_hashes[row_id]
 
         h1 = hash_val & bit_mask

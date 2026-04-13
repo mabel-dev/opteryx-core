@@ -66,3 +66,14 @@ cdef class Int32Buffer:
     cpdef size_t size(self)
     cpdef void reserve(self, size_t capacity)
     cpdef void extend_numpy(self, numpy.ndarray[int32_t, ndim=1] arr)
+
+cdef class ObjectBuffer:
+
+    cdef list _data
+    cdef Py_ssize_t _size
+
+    cpdef void append(self, object value)
+    cpdef void extend(self, object iterable)
+    cpdef numpy.ndarray to_numpy(self)
+    cpdef size_t size(self)
+    cpdef void reserve(self, size_t capacity)

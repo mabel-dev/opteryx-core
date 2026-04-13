@@ -161,6 +161,49 @@ cdef class IntBuffer:
         self.c_buffer.reserve(capacity)
 
 
+cdef class ObjectBuffer:
+
+    def __cinit__(self, size_t size_hint = 1024):
+        self._data = []
+        if size_hint > 0:
+            # We can't pre-allocate a list with None if we want to use append,
+            # but we can hint to the list object if we were using internal CPython APIs.
+            # For now, we just maintain a size counter and a list.
+            pass
+        self._size = 0
+
+    def __len__(self):
+        return self._size
+
+    def __getitem__(self, Py_ssize_t index):
+        if index < 0:
+            index += self._size
+        if index < 0 or index >= self._size:
+            raise IndexError("ObjectBuffer index out of range")
+        return self._data[index]
+
+    cpdef void append(self, object value):
+        """Append an object to the buffer."""
+        self._data.append(value)
+        self._size += 1
+
+    cpdef void extend(self, object iterable):
+        """Extend the buffer with an iterable of objects."""
+        self._data.extend(iterable)
+        self._size = len(self._data)
+
+    cpdef numpy.ndarray to_numpy(self):
+        """Convert to a numpy object array."""
+        return numpy.array(self._data, dtype=object)
+
+    cpdef size_t size(self):
+        return self._size
+
+    cpdef void reserve(self, size_t capacity):
+        # Python lists don't have a public reserve, but they over-allocate.
+        pass
+
+
 cdef class Int32Buffer:
 
     def __cinit__(self, size_t size_hint = 1024):

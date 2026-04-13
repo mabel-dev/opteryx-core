@@ -197,7 +197,7 @@ def test_sql_battery(statement: str, rows: int, columns: int, exception: Optiona
     try:
         # query to arrow is the fastest way to query
         session = opteryx.session(memberships=["Apollo 11", "opteryx"])
-        result = session.execute_to_arrow(statement)
+        result = session.execute(statement)
         actual_rows, actual_columns = result.shape
         assert rows == actual_rows, (
             f"\n\033[38;5;203mQuery returned {actual_rows} rows but {rows} were expected.\033[0m\n{statement}"
@@ -227,9 +227,7 @@ def test_timetravel_at_syntax_deprecation_warning():
     session = opteryx.session(memberships=["Apollo 11", "opteryx"])
 
     with pytest.warns(DeprecationWarning, match=r"AT\(TIMESTAMP => \.\.\.\) is deprecated"):
-        result = session.execute_to_arrow(
-            "SELECT * FROM $planets AT(TIMESTAMP => '2024-12-15 00:00:00')"
-        )
+        result = session.execute("SELECT * FROM $planets AT(TIMESTAMP => '2024-12-15 00:00:00')")
         assert result.shape == (9, 20)
 
 

@@ -30,15 +30,15 @@ def _arrow_type_to_orso_type(arrow_type: pyarrow.DataType) -> OrsoTypes:
     elif arrow_types.is_boolean(arrow_type):
         return OrsoTypes.BOOLEAN
     elif arrow_types.is_int8(arrow_type):
-        return OrsoTypes.BYTE
+        return OrsoTypes.INTEGER
     elif arrow_types.is_int16(arrow_type):
-        return OrsoTypes.SHORT
+        return OrsoTypes.INTEGER
     elif arrow_types.is_int32(arrow_type):
         return OrsoTypes.INTEGER
     elif arrow_types.is_int64(arrow_type):
-        return OrsoTypes.LONG
+        return OrsoTypes.INTEGER
     elif arrow_types.is_float32(arrow_type):
-        return OrsoTypes.FLOAT
+        return OrsoTypes.DOUBLE
     elif arrow_types.is_float64(arrow_type):
         return OrsoTypes.DOUBLE
     elif arrow_types.is_decimal(arrow_type):

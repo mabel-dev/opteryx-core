@@ -13,6 +13,7 @@ from opteryx.compiled import vector_ops
 from opteryx.expression.intervals import MICROSECONDS_PER_DAY
 from opteryx.third_party.tktech import csimdjson as simdjson
 from opteryx.types import OrsoTypes
+from opteryx.utils.vector_types import is_draken_vector
 
 # Initialize simdjson parser once
 parser = simdjson.Parser()
@@ -225,6 +226,29 @@ def binary_operations(
 
     if operation is None:
         raise NotImplementedError(f"Operator `{operator}` is not implemented!")
+
+    # Phase 5.3.2 PoC: Try Draken vector kernels first for arithmetic operators
+    # This allows native vector arithmetic without conversion to numpy/PyArrow
+    if operator in (
+        "Plus",
+        "Minus",
+        "Multiply",
+        "Divide",
+        "Modulo",
+        "MyIntegerDivide",
+        "BitwiseOr",
+        "BitwiseAnd",
+        "BitwiseXor",
+        "ShiftLeft",
+        "ShiftRight",
+    ):
+        if is_draken_vector(left) or is_draken_vector(right):
+            from opteryx.expression.evaluator.arithmetic_dispatch import call_arithmetic_op
+
+            result = call_arithmetic_op(operator, left, right)
+            if result is not None:
+                return result
+            # If no kernel available, fall through to numpy operations below
 
     if OrsoTypes.INTERVAL in (left_type, right_type):
         from opteryx.expression.intervals import INTERVAL_KERNELS

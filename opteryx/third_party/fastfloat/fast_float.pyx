@@ -64,30 +64,30 @@ cpdef Float64Vector parse_ascii_array_to_double(object arr):
     if out == NULL:
         raise MemoryError(f"Cannot allocate buffer for {n} doubles")
 
-    try:
-        for i in range(n):
-            item = arr[i]
-            if item is None:
-                out[i] = float('nan')
-                continue
+    for i in range(n):
+        item = arr[i]
+        if item is None:
+            out[i] = float('nan')
+            continue
 
-            # Convert str to bytes (UTF-8 encoded, ideally ASCII)
-            encoded = PyUnicode_AsUTF8String(item)
-            c_str = PyBytes_AS_STRING(encoded)
-            length = PyBytes_GET_SIZE(encoded)
+        # Convert str to bytes (UTF-8 encoded, ideally ASCII)
+        encoded = PyUnicode_AsUTF8String(item)
+        c_str = PyBytes_AS_STRING(encoded)
+        length = PyBytes_GET_SIZE(encoded)
 
-            res = from_chars(c_str, c_str + length, val)
-            if res.ptr != NULL:
-                out[i] = val
-            else:
-                out[i] = float('nan')
+        res = from_chars(c_str, c_str + length, val)
+        if res.ptr != NULL:
+            out[i] = val
+        else:
+            out[i] = float('nan')
 
-        # Create a typed memoryview and wrap it in Float64Vector
-        view = <double[:n]>out
-        result = from_sequence(view)
-        return result
-    finally:
-        PyMem_Free(out)
+    # Create a typed memoryview and wrap it in Float64Vector
+    # CRITICAL: from_sequence() stores a reference to the memoryview in result._arrow_data_buf,
+    # which keeps the malloc'd buffer alive for the lifetime of the Float64Vector.
+    # We do NOT free the buffer - it is owned by the Float64Vector via the memoryview reference.
+    view = <double[:n]>out
+    result = from_sequence(view)
+    return result
 
 
 cpdef Float64Vector parse_byte_array_to_double(object arr):
@@ -113,25 +113,25 @@ cpdef Float64Vector parse_byte_array_to_double(object arr):
     if out == NULL:
         raise MemoryError(f"Cannot allocate buffer for {n} doubles")
 
-    try:
-        for i in range(n):
-            item = arr[i]
-            if item is None:
-                out[i] = float('nan')
-                continue
+    for i in range(n):
+        item = arr[i]
+        if item is None:
+            out[i] = float('nan')
+            continue
 
-            c_str = PyBytes_AS_STRING(item)
-            length = PyBytes_GET_SIZE(item)
+        c_str = PyBytes_AS_STRING(item)
+        length = PyBytes_GET_SIZE(item)
 
-            res = from_chars(c_str, c_str + length, val)
-            if res.ptr != NULL:
-                out[i] = val
-            else:
-                out[i] = float('nan')
+        res = from_chars(c_str, c_str + length, val)
+        if res.ptr != NULL:
+            out[i] = val
+        else:
+            out[i] = float('nan')
 
-        # Create a typed memoryview and wrap it in Float64Vector
-        view = <double[:n]>out
-        result = from_sequence(view)
-        return result
-    finally:
-        PyMem_Free(out)
+    # Create a typed memoryview and wrap it in Float64Vector
+    # CRITICAL: from_sequence() stores a reference to the memoryview in result._arrow_data_buf,
+    # which keeps the malloc'd buffer alive for the lifetime of the Float64Vector.
+    # We do NOT free the buffer - it is owned by the Float64Vector via the memoryview reference.
+    view = <double[:n]>out
+    result = from_sequence(view)
+    return result

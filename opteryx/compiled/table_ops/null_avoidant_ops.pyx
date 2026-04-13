@@ -14,64 +14,87 @@ remove them from the results.
 """
 
 import pyarrow
-import numpy
-cimport numpy
-numpy.import_array()
+from opteryx.compiled.draken.vectors.int64_vector cimport Int64Vector
+from opteryx.compiled.draken.vectors.int64_vector cimport from_sequence as int64_from_sequence
+from opteryx.compiled.structures.buffers cimport IntBuffer
 
 from libc.stdint cimport int64_t, uint8_t, uintptr_t
+from libc.stdlib cimport malloc, free
+from libc.string cimport memset
 
-
-cdef inline numpy.ndarray[int64_t, ndim=1] non_null_row_indices(object relation, list column_names):
+cdef inline Int64Vector non_null_row_indices(object relation, list column_names):
     """
     Compute indices of rows where all `column_names` in `relation` are non-null.
-    Returns a new numpy array of row indices (int64).
+    Returns a native Int64Vector of row indices.
     """
     cdef:
         Py_ssize_t num_rows = relation.num_rows
-        numpy.ndarray[uint8_t, ndim=1] combined_nulls_np = numpy.ones(num_rows, dtype=numpy.uint8)
-        uint8_t[::1] combined_nulls = combined_nulls_np
+        uint8_t* combined_nulls = <uint8_t*>malloc(num_rows * sizeof(uint8_t))
         object column, chunk, bitmap_buffer
         const uint8_t* validity
         Py_ssize_t i, j, count = 0
         Py_ssize_t offset, length
         uint8_t bit
-        numpy.ndarray[int64_t, ndim=1] indices = numpy.empty(num_rows, dtype=numpy.int64)
-        int64_t[::1] indices_view = indices
+        Py_ssize_t bit_index, chunk_offset
+        IntBuffer indices_buf
+        const int64_t[::1] mv
+        Int64Vector vec
 
-    for column_name in column_names:
-        column = relation.column(column_name)
-        offset = 0  # reset for each column
+    if not combined_nulls:
+        raise MemoryError()
 
-        for chunk in column.chunks if isinstance(column, pyarrow.ChunkedArray) else [column]:
-            length = len(chunk)
-            bitmap_buffer = chunk.buffers()[0]  # validity buffer
+    # Initialize with 1s (all valid initially)
+    memset(combined_nulls, 1, num_rows)
 
-            if bitmap_buffer is None:
-                # No validity buffer means all values are valid
+    try:
+        for column_name in column_names:
+            column = relation.column(column_name)
+            offset = 0
+
+            # Iterate through chunks in the Column/ChunkedArray
+            for chunk in column.chunks if isinstance(column, pyarrow.ChunkedArray) else [column]:
+                length = len(chunk)
+                bitmap_buffer = chunk.buffers()[0]  # validity buffer
+
+                if bitmap_buffer is None:
+                    # No validity buffer means all values in this chunk are valid
+                    offset += length
+                    continue
+
+                validity = <const uint8_t*><uintptr_t>bitmap_buffer.address
+                if validity == NULL:
+                    raise RuntimeError(f"Null validity buffer for column '{column_name}'")
+
+                chunk_offset = chunk.offset
+                for j in range(length):
+                    bit_index = chunk_offset + j
+                    bit = (validity[bit_index >> 3] >> (bit_index & 7)) & 1
+                    combined_nulls[offset + j] &= bit
+
                 offset += length
-                continue
 
-            validity = <const uint8_t*><uintptr_t>bitmap_buffer.address
+        # Build the resulting index buffer
+        # We use IntBuffer to avoid pre-calculating the final count or using NumPy resize
+        indices_buf = IntBuffer(num_rows // 2 if num_rows > 0 else 0)
 
-            if validity == NULL:
-                raise RuntimeError(f"Null validity buffer for column '{column_name}'")
+        for i in range(num_rows):
+            if combined_nulls[i]:
+                indices_buf.append(i)
 
-            # Account for chunk.offset when checking validity bits
-            chunk_offset = chunk.offset
-            for j in range(length):
-                bit_index = chunk_offset + j
-                bit = (validity[bit_index >> 3] >> (bit_index & 7)) & 1
-                combined_nulls[offset + j] &= bit
+        # Convert to Int64Vector
+        mv = indices_buf.get_buffer()
+        vec = int64_from_sequence(mv)
+        # Anchor the buffer object to ensure memory safety
+        vec._arrow_data_buf = indices_buf
 
-            offset += length
+        return vec
 
-    for i in range(num_rows):
-        if combined_nulls[i]:
-            indices_view[count] = i
-            count += 1
-
-    return numpy.array(indices_view[:count], copy=True)
+    finally:
+        free(combined_nulls)
 
 
-cpdef numpy.ndarray[int64_t, ndim=1] non_null_indices(object relation, list column_names):
+cpdef Int64Vector non_null_indices(object relation, list column_names):
+    """
+    Public interface for non_null_row_indices, returning a native Draken Int64Vector.
+    """
     return non_null_row_indices(relation, column_names)
