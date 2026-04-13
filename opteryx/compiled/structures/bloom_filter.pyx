@@ -40,6 +40,7 @@ from libc.stdint cimport uint8_t, uint64_t, uint32_t, int64_t
 from cpython.array cimport array, clone
 
 from opteryx.compiled.draken.vectors.int64_vector cimport Int64Vector
+from opteryx.compiled.draken.morsels.morsel cimport Morsel
 from opteryx.compiled.table_ops.hash_ops cimport compute_row_hashes
 from opteryx.compiled.table_ops.null_avoidant_ops cimport non_null_row_indices
 
@@ -274,3 +275,51 @@ cpdef BloomFilter create_bloom_filter_from_hashes(uint64_t[::1] hashes):
         bit_array[h2 >> 6] |= (<uint64_t>1) << (h2 & 0x3F)
 
     return bf
+
+
+# Draken-native bloom filter API (no Arrow conversion)
+
+cpdef BloomFilter create_bloom_filter_morsel(Morsel morsel, list columns):
+    """
+    Create a Bloom filter from a Draken Morsel using native hashing.
+
+    Uses Morsel.hash(columns) to compute hashes natively, avoiding any Arrow conversion.
+    This is the fast path for join build phases.
+
+    Args:
+        morsel: Draken Morsel containing data
+        columns: List of column identities to hash
+
+    Returns:
+        BloomFilter instance or None if morsel is empty
+    """
+    if morsel is None or morsel.num_rows == 0:
+        return None
+
+    cdef uint64_t[::1] hashes = morsel.hash(columns)
+    return create_bloom_filter_from_hashes(hashes)
+
+
+cpdef uint8_t[::1] bloom_filter_check_morsel(BloomFilter bloom_filter, Morsel morsel, list columns):
+    """
+    Check Morsel rows against bloom filter using native hashing.
+
+    Returns a bit-packed uint8_t array (LSB-first, PyArrow bool_ layout).
+    Rows where result bit is set were "possibly in set" according to bloom filter.
+
+    Uses Morsel.hash(columns) for native hashing, no Arrow conversion in hot path.
+
+    Args:
+        bloom_filter: BloomFilter instance (from create_bloom_filter_morsel)
+        morsel: Draken Morsel to check
+        columns: List of column identities to hash
+
+    Returns:
+        Bit-packed uint8_t array with length (morsel.num_rows + 7) >> 3 bytes
+        or None if inputs are empty
+    """
+    if bloom_filter is None or morsel is None or morsel.num_rows == 0:
+        return None
+
+    cdef uint64_t[::1] hashes = morsel.hash(columns)
+    return bloom_filter.possibly_contains_many_direct(hashes)

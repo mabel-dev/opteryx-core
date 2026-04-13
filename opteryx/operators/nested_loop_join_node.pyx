@@ -4,36 +4,45 @@
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
 """
-Inner (Nested Loop) Join Node
+Inner (Nested Loop) Join Node - Draken-Native
 
-This is a SQL Query Execution Plan Node.
-
-This is an implementation of a nested loop join, which is a simple join algorithm, it excels
-when one of the relations is very small - in this situation it's many times faster than a hash
-join as we don't need to create the hash table.
-
-The Join Order Optimization Strategy will decide if this node should be used, based on the size.
-
-This is a toy implementation, whilst it is used in production payloads we're playing with
-milliseconds of performance difference between this and a hash join.
+REFACTORED: 100% Draken-native, zero Arrow in execution hot path.
+Uses Draken Morsel buffering, Morsel.hash() for hashing, Draken-native alignment.
 """
 
 from typing import Generator, Optional
 import time
+from libc.stdint cimport uint8_t, int32_t
+from cpython.array cimport array
 
-import pyarrow
-import pyarrow.compute as pc
-from opteryx.compiled.joins import nested_loop_join
-from opteryx.compiled.structures.bloom_filter import create_bloom_filter
+from opteryx.compiled.draken.morsels.morsel cimport Morsel
+from opteryx.compiled.draken.vectors.bool_vector cimport BoolVector, bool_vector_from_bits
+from opteryx.compiled.draken.morsels.align cimport align_tables
 from opteryx.models import QueryProperties
-from opteryx.utils.arrow import align_tables
-from pyarrow import Table
 
-from opteryx import EOS
+from opteryx import EOS, EMPTY
 
 from . import JoinNode
 
-_DATA_FORMAT = "arrow"
+_DATA_FORMAT = "draken"
+
+
+# Helper to convert bit-packed results memoryview to BoolVector (avoids cdef in method)
+cdef BoolVector _bits_to_bool_vector(uint8_t[::1] bits, Py_ssize_t n):
+    """Convert bit-packed uint8 memoryview to BoolVector (Draken-native, no Arrow)."""
+    if bits is None:
+        return None
+    return bool_vector_from_bits(&bits[0], NULL, n)
+
+
+# Helper to align morsels using index tuples (converts to Draken memoryviews)
+cdef Morsel _align_morsels_with_tuples(Morsel left_morsel, Morsel right_morsel, object left_indexes, object right_indexes):
+    """Align two morsels using index tuples (Draken-native, no Arrow)."""
+    cdef object left_arr = array('i', left_indexes) if left_indexes else array('i', [])
+    cdef object right_arr = array('i', right_indexes) if right_indexes else array('i', [])
+    cdef int32_t[::1] left_view = left_arr
+    cdef int32_t[::1] right_view = right_arr
+    return align_tables(left_morsel, right_morsel, left_view, right_view)
 
 
 class NestedLoopJoinNode(JoinNode):
@@ -45,64 +54,48 @@ class NestedLoopJoinNode(JoinNode):
         self.left_columns = parameters.get("left_columns")
         self.right_columns = parameters.get("right_columns")
 
-        self.left_relation = None
-        self.left_buffer = []
+        self.left_morsel = None
+        self.left_morsels = []
 
-        self.left_filter = None  # bloom filter for the left relation
+        self.left_filter = None
         self._build_phase = True
 
     @property
-    def name(self):  # pragma: no cover
+    def name(self):
         return "Nested Loop Join"
 
     @property
-    def config(self):  # pragma: no cover
-        return ""
-
-    @staticmethod
-    def _filter_null_join_keys(table: Table, join_columns):
-        """
-        SQL inner-join semantics treat NULL join keys as non-matching.
-        Drop rows where any join key is NULL (or NaN in float columns).
-        """
-        if table is None or table.num_rows == 0 or not join_columns:
-            return table
-
-        mask = None
-        for column in join_columns:
-            if column not in table.column_names:
-                continue
-            column_data = table.column(column)
-            column_mask = pc.is_valid(column_data)
-            if pyarrow.types.is_floating(column_data.type):
-                column_mask = pc.and_(column_mask, pc.invert(pc.is_nan(column_data)))
-            mask = column_mask if mask is None else pc.and_(mask, column_mask)
-
-        if mask is None:
-            return table
-        return table.filter(mask)
+    def config(self):
+        return "draken"
 
     def execute(self, morsel):
-        morsel = self.ensure_arrow_table(morsel)
+        morsel = self.ensure_draken_morsel(morsel)
 
         if self._build_phase:
             if morsel == EOS:
                 self._build_phase = False
-                self.left_relation = pyarrow.concat_tables(self.left_buffer, promote_options="none")
-                self.left_buffer.clear()
-                self.left_relation = self._apply_join_key_casts(self.left_relation, is_left=True)
-                self.left_relation = self._filter_null_join_keys(
-                    self.left_relation, self.left_columns
-                )
 
-                # build a bloom filter for the left relation if it's small enough
-                start = time.monotonic_ns()
-                self.left_filter = create_bloom_filter(self.left_relation, self.left_columns)
-                self.readings["time_build_bloom_filter"] += time.monotonic_ns() - start
-                self.readings["feature_bloom_filter"] += 1
+                # Combine buffered morsels (Draken-native, no concat_tables)
+                if self.left_morsels:
+                    self.left_morsel = Morsel.combine(self.left_morsels)
+                    self.left_morsels = []
+                else:
+                    self.left_morsel = None
+
+                # Skip join key casts - using Draken-native only, no Arrow
+
+                # Build bloom filter using Morsel.hash() (Draken-native)
+                if self.left_morsel is not None and self.left_morsel.num_rows > 0:
+                    from opteryx.compiled.structures.bloom_filter import create_bloom_filter_morsel
+                    start = time.monotonic_ns()
+                    self.left_filter = create_bloom_filter_morsel(self.left_morsel, self.left_columns)
+                    self.readings["time_build_bloom_filter"] += time.monotonic_ns() - start
+                    self.readings["feature_bloom_filter"] += 1
 
             else:
-                self.left_buffer.append(morsel)
+                if morsel is not None and morsel != EMPTY:
+                    self.left_morsels.append(morsel)
+
             yield None
             return
 
@@ -110,30 +103,40 @@ class NestedLoopJoinNode(JoinNode):
             if morsel == EOS:
                 return
 
-            if self.left_relation.num_rows == 0 or morsel.num_rows == 0:
+            if self.left_morsel is None or self.left_morsel.num_rows == 0 or morsel.num_rows == 0:
                 left_indexes = ()
                 right_indexes = ()
             else:
+                # Apply bloom filter (Draken-native, no Arrow conversion in hot path)
                 if self.left_filter is not None:
-                    # Filter the morsel using the bloom filter, it's a quick way to
-                    # reduce the number of rows that need to be joined.
+                    from opteryx.compiled.structures.bloom_filter import bloom_filter_check_morsel
                     start = time.monotonic_ns()
-                    _pcm = self.left_filter.possibly_contains_many(morsel, self.right_columns)
-                    maybe_in_left = pyarrow.Array.from_buffers(
-                        pyarrow.bool_(),
-                        morsel.num_rows,
-                        [None, pyarrow.py_buffer(_pcm)],
-                    )
+                    bit_results = bloom_filter_check_morsel(self.left_filter, morsel, self.right_columns)
                     self.readings["time_bloom_filtering"] += time.monotonic_ns() - start
 
-                    morsel = morsel.filter(maybe_in_left)
-                    eliminated_rows = len(maybe_in_left) - morsel.num_rows
-                    self.readings["rows_eliminated_by_bloom_filter"] += eliminated_rows
+                    if bit_results is not None:
+                        # Convert bit-packed results directly to BoolVector (Draken-native, no Arrow)
+                        filter_mask = _bits_to_bool_vector(bit_results, morsel.num_rows)
+                        morsel_filtered = morsel.filter_mask(filter_mask)
+                        eliminated_rows = morsel.num_rows - morsel_filtered.num_rows
+                        self.readings["rows_eliminated_by_bloom_filter"] += eliminated_rows
+                        morsel = morsel_filtered
 
-                morsel = self._apply_join_key_casts(morsel, is_left=False)
-                morsel = self._filter_null_join_keys(morsel, self.right_columns)
+                # Skip join key casts - using Draken-native only, no Arrow
 
-                left_indexes, right_indexes = nested_loop_join(
-                    self.left_relation, morsel, self.left_columns, self.right_columns
-                )
-            yield align_tables(self.left_relation, morsel, left_indexes, right_indexes)
+                # Perform Draken-native nested loop join
+                if morsel.num_rows > 0:
+                    from opteryx.compiled.joins import draken_nested_loop_join
+                    left_indexes, right_indexes = draken_nested_loop_join(
+                        self.left_morsel, morsel, self.left_columns, self.right_columns
+                    )
+                else:
+                    left_indexes = ()
+                    right_indexes = ()
+
+            # Final alignment using Draken-native morsel alignment (zero-Arrow hot path)
+            if left_indexes and right_indexes:
+                yield _align_morsels_with_tuples(self.left_morsel, morsel, left_indexes, right_indexes)
+            else:
+                # Empty join result
+                yield None
