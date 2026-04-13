@@ -8,17 +8,14 @@
 This module provides the execution engine for processing physical plans in a serial manner.
 """
 
-from typing import Any
-from typing import Generator
-from typing import Tuple
+from typing import Any, Generator, Tuple
 
 import pyarrow
-from opteryx.constants import ResultType
-from opteryx.exceptions import InvalidInternalStateError
-from opteryx.models import PhysicalPlan
-from opteryx.models import QueryTelemetry
 
 from opteryx import EOS
+from opteryx.constants import ResultType
+from opteryx.exceptions import InvalidInternalStateError
+from opteryx.models import PhysicalPlan, QueryTelemetry
 
 
 def execute(
@@ -148,7 +145,7 @@ def process_node(plan: PhysicalPlan, nid: str, morsel: pyarrow.Table) -> Generat
         if results is None:
             yield None
             # If input was EOS, propagate it downstream even if node produced nothing
-            if morsel is EOS:
+            if morsel is EOS and not node.is_join:
                 for _, child, _ in plan.outgoing_edges(nid):
                     yield from process_node(plan, child, EOS)
             return
@@ -161,6 +158,7 @@ def process_node(plan: PhysicalPlan, nid: str, morsel: pyarrow.Table) -> Generat
                 yield from process_node(plan, child, result)
 
         # After all results processed, if input was EOS, propagate EOS downstream
-        if morsel is EOS:
+        # Join nodes suppress this: they yield EOS explicitly when the probe side exhausts.
+        if morsel is EOS and not node.is_join:
             for _, child, _ in plan.outgoing_edges(nid):
                 yield from process_node(plan, child, EOS)

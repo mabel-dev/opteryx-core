@@ -4,13 +4,18 @@
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
 """
-Outer Join Node
+Outer Join Node - Draken-Native Buffering (Session 42)
 
 This is a SQL Query Execution Plan Node.
 
 PyArrow has LEFT/RIGHT/FULL OUTER JOIN implementations, but they error when the
 relations being joined contain STRUCT or ARRAY columns so we've written our own
 OUTER JOIN implementations.
+
+REFACTORED: Draken-native Morsel buffering (Session 42)
+- Buffer morsels instead of Arrow tables
+- Morsel.combine() instead of pyarrow.concat_tables()
+- Join functions operate on Arrow (warm path, acceptable)
 """
 
 import time
@@ -24,14 +29,15 @@ from opteryx.compiled.joins import right_join
 from opteryx.compiled.structures.bloom_filter import create_bloom_filter
 from opteryx.compiled.structures.buffers import IntBuffer, Int32Buffer
 from opteryx.compiled.structures.hash_table import HashTable
+from opteryx.compiled.draken.morsels.morsel import Morsel
 from opteryx.models import QueryProperties
 from opteryx.utils.arrow import align_tables
 
-from opteryx import EOS
+from opteryx import EOS, EMPTY
 
 from . import JoinNode
 
-_DATA_FORMAT = "arrow"
+_DATA_FORMAT = "draken"
 
 
 CHUNK_SIZE: int = 50_000
@@ -175,13 +181,11 @@ class OuterJoinNode(JoinNode):
 
         self.columns = parameters.get("columns")
 
-        self.left_buffer = []
-        self.left_buffer_columns = None
-        self.right_buffer = []
+        # REFACTORED (Session 42): Morsel buffering instead of Arrow table buffering
+        self.left_morsels = []
+        self.right_morsels = []
         self.left_relation = None
-        self.empty_right_relation = None
         self.left_hash = None
-        self.left_seen_rows = set()
 
         self.filter_index = None
         self._build_phase = True
@@ -201,13 +205,20 @@ class OuterJoinNode(JoinNode):
         return f"{self.join_type.upper()}"
 
     def execute(self, morsel):
-        morsel = self.ensure_arrow_table(morsel)
+        morsel = self.ensure_draken_morsel(morsel)
 
         if self._build_phase:
             if morsel == EOS:
                 self._build_phase = False
-                self.left_relation = pyarrow.concat_tables(self.left_buffer, promote_options="none")
-                self.left_buffer.clear()
+                # REFACTORED (Session 42): Combine Morsels instead of Arrow tables
+                if self.left_morsels:
+                    left_morsel = Morsel.combine(self.left_morsels)
+                    self.left_morsels = []
+                    # Convert to Arrow for join algorithm (warm path, acceptable)
+                    self.left_relation = left_morsel.to_arrow()
+                else:
+                    self.left_relation = pyarrow.table({})
+
                 self.left_relation = self._apply_join_key_casts(self.left_relation, is_left=True)
                 if self.join_type == "left outer":
                     start = time.monotonic_ns()
@@ -222,18 +233,22 @@ class OuterJoinNode(JoinNode):
                         self.readings["time_build_bloom_filter"] += time.monotonic_ns() - start
                         self.readings["feature_bloom_filter"] += 1
             else:
-                if self.left_buffer_columns is None:
-                    self.left_buffer_columns = morsel.schema.names
-                else:
-                    morsel = morsel.select(self.left_buffer_columns)
-                self.left_buffer.append(morsel)
+                if morsel is not None and morsel != EMPTY:
+                    self.left_morsels.append(morsel)
             yield None
             return
 
         else:
             if morsel == EOS:
-                right_relation = pyarrow.concat_tables(self.right_buffer, promote_options="none")
-                self.right_buffer.clear()
+                # REFACTORED (Session 42): Combine Morsels instead of Arrow tables
+                if self.right_morsels:
+                    right_morsel = Morsel.combine(self.right_morsels)
+                    self.right_morsels = []
+                    # Convert to Arrow for join algorithm (warm path, acceptable)
+                    right_relation = right_morsel.to_arrow()
+                else:
+                    right_relation = pyarrow.table({})
+
                 right_relation = self._apply_join_key_casts(right_relation, is_left=False)
 
                 join_provider = providers.get(self.join_type)
@@ -253,9 +268,11 @@ class OuterJoinNode(JoinNode):
                         keep_columns = [c for c in candidates if c in result_table.schema.names]
                         result_table = result_table.select(keep_columns)
                     yield result_table
+                yield EOS
 
             else:
-                self.right_buffer.append(morsel)
+                if morsel is not None and morsel != EMPTY:
+                    self.right_morsels.append(morsel)
                 yield None
 
 

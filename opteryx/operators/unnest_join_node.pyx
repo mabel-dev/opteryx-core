@@ -195,6 +195,7 @@ class UnnestJoinNode(BasePlanNode):
         morsel = self.ensure_draken_morsel(morsel)
 
         if morsel == EOS:
+            yield EOS
             return
 
         if isinstance(self._unnest_column.value, tuple):
