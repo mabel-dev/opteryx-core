@@ -59,8 +59,8 @@ def _cross_join_unnest_column(
         A generator that yields the resulting `pyarrow.Table` objects.
     """
     from opteryx.compiled.joins import list_distinct
-    from opteryx.compiled.joins.cross_join_draken import build_rows_indices_and_column_draken
-    from opteryx.compiled.joins.cross_join_draken import build_filtered_rows_indices_and_column_draken
+    from opteryx.compiled.joins import build_rows_indices_and_column_draken
+    from opteryx.compiled.joins import build_filtered_rows_indices_and_column_draken
 
     batch_size: int = INTERNAL_BATCH_SIZE
     at_least_once = False
