@@ -222,6 +222,11 @@ class UnnestJoinNode(BasePlanNode):
     def __init__(self, properties: QueryProperties, **parameters):
         BasePlanNode.__init__(self, properties=properties, **parameters)
 
+        # Initialize join interface (UnnestJoinNode is registered as a join node in catalog)
+        self.left_readers = parameters.get("left_readers")
+        self.right_readers = parameters.get("right_readers")
+        self.join_type = "cross"
+
         # do we have unnest details?
         self._unnest_column = parameters.get("unnest_column")
         self._unnest_target = parameters.get("unnest_target").schema_column
