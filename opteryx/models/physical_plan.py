@@ -64,6 +64,10 @@ class PhysicalPlan(Graph):
         # add the left/right labels to the edges coming into the joins
         joins = ((nid, node) for nid, node in self.nodes(True) if node.is_join)
         for nid, join in joins:
+            # Skip UnnestJoinNode (doesn't have traditional left/right readers)
+            if join.left_readers is None:
+                continue
+
             for provider, provider_target, provider_relation in self.ingoing_edges(nid):
                 reader_edges = {
                     (source, target, relation)
