@@ -82,29 +82,27 @@ def _cross_join_unnest_column(
         left_block = left_block.filter(valid_offsets)
 
         # Build indices and new column data
+        # Extract element type for typed vector creation
+        element_type = column_data.type.value_type if hasattr(column_data.type, "value_type") else None
+
         if conditions is None:
-            if hasattr(column_data.type, "value_type") and (
-                column_data.type.value_type == pyarrow.string()
-                or column_data.type.value_type == pyarrow.binary()
-            ):
+            if element_type == pyarrow.string() or element_type == pyarrow.binary():
                 # optimized version for string and binary columns
                 indices, new_column_data = build_rows_indices_and_column(column_data)
             else:
-                # fallback to numpy version
+                # fallback to numpy version with typed vector creation
                 indices, new_column_data = numpy_build_rows_indices_and_column(
-                    column_data.to_numpy(False)
+                    column_data.to_numpy(False), element_type
                 )
         else:
-            if hasattr(column_data.type, "value_type") and (
-                column_data.type.value_type == pyarrow.string()
-                or column_data.type.value_type == pyarrow.binary()
-            ):
+            if element_type == pyarrow.string() or element_type == pyarrow.binary():
                 indices, new_column_data = build_filtered_rows_indices_and_column(
                     column_data, conditions
                 )
             else:
+                # fallback to numpy version with typed vector creation
                 indices, new_column_data = numpy_build_filtered_rows_indices_and_column(
-                    column_data.to_numpy(False), conditions
+                    column_data.to_numpy(False), conditions, element_type
                 )
 
         if single_column and distinct and indices.size > 0:
