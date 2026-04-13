@@ -58,11 +58,9 @@ def _cross_join_unnest_column(
     Returns:
         A generator that yields the resulting `pyarrow.Table` objects.
     """
-    from opteryx.compiled.joins import build_filtered_rows_indices_and_column
-    from opteryx.compiled.joins import build_rows_indices_and_column
     from opteryx.compiled.joins import list_distinct
-    from opteryx.compiled.joins import numpy_build_filtered_rows_indices_and_column
-    from opteryx.compiled.joins import numpy_build_rows_indices_and_column
+    from opteryx.compiled.joins.cross_join_draken import build_rows_indices_and_column_draken
+    from opteryx.compiled.joins.cross_join_draken import build_filtered_rows_indices_and_column_draken
 
     batch_size: int = INTERNAL_BATCH_SIZE
     at_least_once = False
@@ -81,33 +79,20 @@ def _cross_join_unnest_column(
         column_data = column_data.filter(valid_offsets)
         left_block = left_block.filter(valid_offsets)
 
-        # Build indices and new column data
-        # Extract element type for typed vector creation
-        element_type = column_data.type.value_type if hasattr(column_data.type, "value_type") else None
+        # Build indices and new column data using Draken-native vectors
+        # Convert Arrow input to Draken vector
+        from opteryx.compiled.draken.interop.arrow import vector_from_arrow
+        column_vector = vector_from_arrow(column_data)
 
         if conditions is None:
-            if element_type == pyarrow.string() or element_type == pyarrow.binary():
-                # optimized version for string and binary columns
-                indices, new_column_data = build_rows_indices_and_column(column_data)
-            else:
-                # fallback to numpy version with typed vector creation
-                indices, new_column_data = numpy_build_rows_indices_and_column(
-                    column_data.to_numpy(False), element_type
-                )
+            indices, new_column_data = build_rows_indices_and_column_draken(column_vector)
         else:
-            if element_type == pyarrow.string() or element_type == pyarrow.binary():
-                indices, new_column_data = build_filtered_rows_indices_and_column(
-                    column_data, conditions
-                )
-            else:
-                # fallback to numpy version with typed vector creation
-                indices, new_column_data = numpy_build_filtered_rows_indices_and_column(
-                    column_data.to_numpy(False), conditions, element_type
-                )
+            indices, new_column_data = build_filtered_rows_indices_and_column_draken(
+                column_vector, conditions
+            )
 
         if single_column and distinct and indices.size > 0:
             # if the unnest target is the only field in the SELECT and we're DISTINCTING
-            indices = numpy.array(indices, dtype=numpy.int64)
             new_column_data, indices, hash_set = list_distinct(new_column_data, indices, hash_set)
 
         if len(indices) > 0:

@@ -1,6 +1,6 @@
 # NumPy & PyArrow Eradication - Status
 
-**Last Updated:** SESSION 38  
+**Last Updated:** SESSION 39  
 **Status:** 87/88 tests passing (99%)  
 **Baseline Failure:** 1 pre-existing (GROUP BY column resolution in planner)
 
@@ -8,13 +8,19 @@
 
 ## ✅ COMPLETED PHASES
 
-### Session 38 (continued): Phase 5.5.B - UNNEST Fallback Draken-Native Refactor
-- Refactored `numpy_build_rows_indices_and_column()` and `numpy_build_filtered_rows_indices_and_column()` in `cross_join.pyx`
-- Eliminated `.to_numpy()` return for flattened data (replaced with `vector_from_sequence()` typed vectors)
-- Modified function signatures to accept `element_type` parameter for type-aware vector creation
-- Updated caller in `unnest_join_node.pyx` to pass element type from `column_data.type.value_type`
-- Removed numpy array allocations in fallback; now collect in Python lists and create typed Draken vectors
-- **Result:** UNNEST fallback now uses Draken-native vectors (Int64Vector for indices, typed vectors for data); NumPy eliminated from return path
+### Session 39: Phase 5.5.B - Draken-Native UNNEST Refactor (COMPLETE)
+- Created new file `opteryx/compiled/joins/cross_join_draken.pyx` with pure Draken-native UNNEST processing
+- Implemented `build_rows_indices_and_column_draken()` and `build_filtered_rows_indices_and_column_draken()` functions
+  - Take Draken vectors (ArrayVector) as input via `vector_from_arrow()` conversion
+  - Iterate natively, flatten ARRAY elements, track row indices via IntBuffer
+  - Return (Int64Vector, Draken vector) with no numpy/arrow in pipeline
+- Refactored `list_distinct()` in `cross_join.pyx` to work with Draken vectors instead of numpy arrays
+  - Accepts arbitrary iterables (works with both Draken vectors and Python sequences)
+  - Returns typed Draken vectors via `vector_from_sequence()`
+  - Removed numpy.array() conversion in caller (unnest_join_node.pyx line 96)
+- Deleted dead code: removed `vector_build_rows_indices_and_column()` and `vector_build_filtered_rows_indices_and_column()` from cross_join.pyx
+- Updated `build_filtered_rows_indices_and_column()` (Arrow-native path) to return Draken vectors instead of numpy
+- **Result:** Complete Draken-native UNNEST pipeline. No numpy/arrow in flattening logic. Baseline: 87/88 tests passing ✅
 
 ### Session 38 (start): Phase 5.4.1 - Fallback Comparison Elimination
 - Refactored 12 functions in `opteryx/expression/operations/comparisons.py` and `string_matching.py`
