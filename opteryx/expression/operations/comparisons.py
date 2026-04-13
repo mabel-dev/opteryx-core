@@ -1,7 +1,7 @@
 """Comparison operations (Eq, NotEq, Lt, Gt, LtEq, GtEq)."""
 
-import numpy
 import pyarrow
+from opteryx.compiled.draken.vectors.bool_vector import BoolVector
 from opteryx.expression.operations.fastpath_dictionary import dictionary_fastpath
 from opteryx.expression.operations.fastpath_dictionary import has_dictionary_candidate
 from opteryx.expression.operations.fastpath_telemetry import record_dict_fastpath_hit
@@ -16,7 +16,7 @@ def equal(arr, value, dict_candidate=False):
             record_dict_fastpath_hit()
             return fast
         raise RuntimeError("Dictionary fastpath failed for `Eq`.")
-    return compute.equal(arr, value).to_numpy(False).astype(dtype=numpy.bool_)
+    return BoolVector.from_arrow(compute.equal(arr, value))
 
 
 def not_equal(arr, value, dict_candidate=False):
@@ -27,7 +27,7 @@ def not_equal(arr, value, dict_candidate=False):
             record_dict_fastpath_hit()
             return fast
         raise RuntimeError("Dictionary fastpath failed for `NotEq`.")
-    return compute.not_equal(arr, value).to_numpy(False).astype(dtype=numpy.bool_)
+    return BoolVector.from_arrow(compute.not_equal(arr, value))
 
 
 def less_than(arr, value, numeric_dict_candidate=False):
@@ -38,7 +38,7 @@ def less_than(arr, value, numeric_dict_candidate=False):
             record_dict_fastpath_hit()
             return fast
         raise RuntimeError("Dictionary fastpath failed for `Lt`.")
-    return compute.less(arr, value).to_numpy(False).astype(dtype=numpy.bool_)
+    return BoolVector.from_arrow(compute.less(arr, value))
 
 
 def greater_than(arr, value, numeric_dict_candidate=False):
@@ -49,7 +49,7 @@ def greater_than(arr, value, numeric_dict_candidate=False):
             record_dict_fastpath_hit()
             return fast
         raise RuntimeError("Dictionary fastpath failed for `Gt`.")
-    return compute.greater(arr, value).to_numpy(False).astype(dtype=numpy.bool_)
+    return BoolVector.from_arrow(compute.greater(arr, value))
 
 
 def less_than_or_equal(arr, value, numeric_dict_candidate=False):
@@ -60,7 +60,7 @@ def less_than_or_equal(arr, value, numeric_dict_candidate=False):
             record_dict_fastpath_hit()
             return fast
         raise RuntimeError("Dictionary fastpath failed for `LtEq`.")
-    return compute.less_equal(arr, value).to_numpy(False).astype(dtype=numpy.bool_)
+    return BoolVector.from_arrow(compute.less_equal(arr, value))
 
 
 def greater_than_or_equal(arr, value, numeric_dict_candidate=False):
@@ -71,4 +71,4 @@ def greater_than_or_equal(arr, value, numeric_dict_candidate=False):
             record_dict_fastpath_hit()
             return fast
         raise RuntimeError("Dictionary fastpath failed for `GtEq`.")
-    return compute.greater_equal(arr, value).to_numpy(False).astype(dtype=numpy.bool_)
+    return BoolVector.from_arrow(compute.greater_equal(arr, value))
