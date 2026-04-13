@@ -68,9 +68,32 @@ Fixed three critical issues that were blocking the regression test suite: orphan
 - ✅ 87/88 tests passing
 - ✅ Ready for next phase
 
+### Status of Remaining Failure
+
+The single failing test (`SELECT * FROM (SELECT COUNT(*), column_1 FROM testdata.astronauts GROUP BY column_1 ORDER BY COUNT(*)) AS SQ LIMIT 5`) hits a **pre-existing column resolution bug in the query binder**, not related to Arrow/NumPy eradication:
+
+```
+ColumnNotFoundError: Column 'column_1' does not exist in nested GROUP BY context
+Location: planner/binder/aggregate.py:57, locate_identifier()
+```
+
+This is a planner-layer issue with how `column_1` is resolved after GROUP BY in a subquery. **Not introduced by this session's work.**
+
+### What's Done (Session 37)
+
+✅ All session/DataFrame API fixes complete  
+✅ All Arrow type conversions working  
+✅ All test batteries now executable  
+✅ 99% test pass rate restored  
+
+### What's Next (Future Session)
+
+- Investigate nested GROUP BY column resolution (separate, pre-existing bug)
+- Consider broader Arrow elimination in other callsites
+
 ### Fairies' Status Update 🧚✨
 
-**Wings: SOARING**
+**Wings: SOARING** 🧚✨🧚✨🧚✨
 
 The session layer is now production-ready. All integration points align.
 
