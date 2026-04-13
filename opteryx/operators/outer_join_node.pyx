@@ -22,6 +22,10 @@ import time
 from array import array
 from typing import List
 
+# Draken BoolVector helpers for converting bit-packed bloom results
+from libc.stdint cimport uint8_t
+from opteryx.compiled.draken.vectors.bool_vector cimport BoolVector, bool_vector_from_bits
+
 import pyarrow
 from opteryx.compiled.joins import build_side_hash_map
 from opteryx.compiled.joins import probe_side_hash_map
@@ -206,6 +210,13 @@ class OuterJoinNode(JoinNode):
 
     def execute(self, morsel):
         morsel = self.ensure_draken_morsel(morsel)
+        # Cython-typed locals used for Draken-native bloom-filter checks.
+        # Declared here at the top of the function so cdef is valid (not inside a nested block).
+        cdef Py_ssize_t orig_rows
+        cdef uint8_t[::1] bit_results
+        cdef object pass_filter_index
+        cdef object right_morsel_local
+        cdef object left_morsel_local
 
         if self._build_phase:
             if morsel == EOS:
@@ -214,22 +225,31 @@ class OuterJoinNode(JoinNode):
                 if self.left_morsels:
                     left_morsel = Morsel.combine(self.left_morsels)
                     self.left_morsels = []
+                    # Keep the combined Morsel around for fast-path bloom creation and later use.
+                    self._left_morsel = left_morsel
                     # Convert to Arrow for join algorithm (warm path, acceptable)
                     self.left_relation = left_morsel.to_arrow()
                 else:
+                    self._left_morsel = None
                     self.left_relation = pyarrow.table({})
 
                 self.left_relation = self._apply_join_key_casts(self.left_relation, is_left=True)
                 if self.join_type == "left outer":
                     start = time.monotonic_ns()
                     self.left_hash = build_side_hash_map(self.left_relation, self.left_columns)
-                    self.readings["time_build_hash_map"] += time.monotonic_ns() - start
 
                     if self.left_relation.num_rows < 16_000_001:
+                        # Prefer a Morsel-based fast path when the combined left morsel is available.
+                        # This avoids creating Arrow buffers in the hot path and keeps bloom checks
+                        # fully Draken-native.
                         start = time.monotonic_ns()
-                        self.filter_index = create_bloom_filter(
-                            self.left_relation, self.left_columns
-                        )
+                        if getattr(self, "_left_morsel", None) is not None:
+                            # Fast Draken-native builder
+                            from opteryx.compiled.structures.bloom_filter import create_bloom_filter_morsel
+                            self.filter_index = create_bloom_filter_morsel(self._left_morsel, self.left_columns)
+                        else:
+                            # Fallback to Arrow-based builder
+                            self.filter_index = create_bloom_filter(self.left_relation, self.left_columns)
                         self.readings["time_build_bloom_filter"] += time.monotonic_ns() - start
                         self.readings["feature_bloom_filter"] += 1
             else:
@@ -244,7 +264,33 @@ class OuterJoinNode(JoinNode):
                 if self.right_morsels:
                     right_morsel = Morsel.combine(self.right_morsels)
                     self.right_morsels = []
-                    # Convert to Arrow for join algorithm (warm path, acceptable)
+
+                    # Prefer to apply the bloom-filter at the Morsel level (native fast path).
+                    # If we successfully apply the Draken bloom check we will convert the
+                    # filtered morsel to Arrow and avoid constructing an Arrow mask via
+                    # Array.from_buffers().
+                    pass_filter_index = self.filter_index
+                    if self.filter_index is not None:
+                        try:
+                            from opteryx.compiled.structures.bloom_filter import bloom_filter_check_morsel
+                            # Use the C-typed locals declared at the top of this function.
+                            orig_rows = right_morsel.num_rows
+                            # bloom_filter_check_morsel returns a typed uint8_t[::1] memoryview or None.
+                            bit_results = bloom_filter_check_morsel(self.filter_index, right_morsel, self.right_columns)
+                            if bit_results is not None:
+                                # Convert bit-packed results directly to BoolVector (Draken-native)
+                                mask = bool_vector_from_bits(&bit_results[0], NULL, orig_rows)
+                                right_morsel = right_morsel.filter_mask(mask)
+                                eliminated_rows = orig_rows - right_morsel.num_rows
+                                self.readings["rows_eliminated_by_bloom_filter"] += eliminated_rows
+                                # We've applied bloom filtering at Morsel level, no need for provider to
+                                # re-run the bloom check via Arrow buffers - suppress it.
+                                pass_filter_index = None
+                        except Exception:
+                            # On any failure, fall back to Arrow-based path below.
+                            pass
+
+                    # Convert (possibly filtered) morsel to Arrow for the join warm-path.
                     right_relation = right_morsel.to_arrow()
                 else:
                     right_relation = pyarrow.table({})
@@ -259,7 +305,7 @@ class OuterJoinNode(JoinNode):
                     left_columns=self.left_columns,
                     right_columns=self.right_columns,
                     left_hash=self.left_hash,
-                    filter_index=self.filter_index,
+                    filter_index=pass_filter_index,
                     columns=self.columns,
                 ):
                     # Project down to only the needed columns if specified
