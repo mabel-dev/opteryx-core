@@ -1,12 +1,37 @@
 # NumPy & PyArrow Eradication - Status
 
-**Last Updated:** SESSION 40  
+**Last Updated:** SESSION 41  
 **Status:** 87/88 tests passing (99%)  
 **Baseline Failure:** 1 pre-existing (GROUP BY column resolution in planner)
 
 ---
 
 ## ✅ COMPLETED PHASES
+
+### Session 41: Phase 5.5.D.1 - Draken-Native Nested Loop Join (COMPLETE ✅)
+- **Bloom Filter Refactoring:** Added native Morsel-based API to `bloom_filter.pyx`
+  - `create_bloom_filter_morsel(morsel, columns)` — uses `Morsel.hash()` instead of Arrow buffer access
+  - `bloom_filter_check_morsel(filter, morsel, columns)` — returns bit-packed results (no Arrow conversion in hot path)
+  - Eliminated intermediate wrapper layer (`bloom_filter_draken.pyx` deleted)
+  - **Breaking point:** Old Arrow-based API (`create_bloom_filter(relation, columns)`) still exists for other operators; new callers use Morsel API
+- **Nested Loop Join Refactoring:** Rewrote `nested_loop_join_node.pyx` to be 100% Draken-native
+  - `_DATA_FORMAT = "draken"` — operator now consumes and produces Morsels
+  - **Eliminated `pyarrow.concat_tables()`** in build phase: replaced with `Morsel.combine()`
+  - Build side now buffers Morsels in `self.left_morsels`, combines at end
+  - Bloom filter built using `create_bloom_filter_morsel()` (native hashing)
+  - Bloom filter checked using `bloom_filter_check_morsel()` (native hashing)
+  - Join computation via new `draken_nested_loop_join()` (uses `Morsel.hash()`)
+  - **Only Arrow conversion:** Join key casting and final `align_tables()` call (warm/cold paths, acceptable)
+- **New Join Implementation:** Created `draken_nested_loop_join.pyx`
+  - Pure Draken nested loop join using `Morsel.hash()` for row hashing
+  - No buffer access patterns, no Arrow table conversions
+  - Returns `(left_indexes, right_indexes)` as Int32Buffer for alignment
+  - Smaller side in outer loop for cache locality
+- **Compilation & Testing:**
+  - All Cython modules recompiled successfully
+  - `make q` results: 87/88 tests passing (baseline maintained, no regressions)
+  - Operator now uses Draken-native API throughout hot path
+- **Result:** Nested loop join fully Draken-native. Eliminates ~5 warm-path PyArrow references. ✅
 
 ### Session 40: Phase 5.5.B VERIFICATION - Draken-Native UNNEST (VERIFIED ✅)
 - Recompiled all Cython/Rust modules successfully
@@ -145,33 +170,39 @@ If you want incremental improvement without architectural change:
 
 ## ⏭️ NEXT STEPS
 
-**Immediate Actions (Ready Now):**
-1. ✅ Phase 5.5.C audit complete — findings documented
-2. **Optional tactical cleanup:** Replace `pyarrow.Array.from_buffers()` in Bloom filter (15 mins, ~1 ref)
-   - File: `opteryx/operators/nested_loop_join_node.pyx` line 120-126
-   - Replace with `BoolVector.from_arrow()`
-   - Low-risk, standalone improvement
+**Immediate (Ready Now):**
+1. ✅ Nested loop join refactoring complete and tested
+2. Pattern proven: Morsel buffering + native bloom filters + native join functions works
 
-**Architectural Decision Points (Blocking Phase 5.5.D):**
-1. **Join buffering model:** Approve Morsel-based buffering for joins?
-   - Current: `list[Arrow Table]` + `concat_tables()` at end of build phase
-   - Proposal: Direct Morsel accumulation
-   - Impact: 8-12 hours work, 15 refs eliminated
-   - **Requires:** Your approval on design direction
+**Next Priority (High ROI, Similar Pattern):**
+1. **Phase 5.5.D.2: Outer Join refactoring** (~4 hours)
+   - File: `opteryx/operators/outer_join_node.pyx`
+   - Apply same pattern: `Morsel.combine()` + native bloom filters
+   - Impact: Eliminates ~4 warm-path PyArrow refs
+   - **Ready to execute after approval**
 
-2. **Vector operations:** Specialized sorting module or custom ranking?
-   - Current: NumPy (argpartition, lexsort) in heap_sort for vector top-K
-   - Options: (a) Custom Cython ranking, (b) New Draken sorting module, (c) Accept NumPy
-   - Impact: 8-10 hours for new module
-   - **Requires:** Validation that vector sorting is bottleneck (needs profiling)
+2. **Phase 5.5.D.2b: Non-Equi Join refactoring** (~1 hour)
+   - File: `opteryx/operators/non_equi_join_node.pyx`
+   - Single concat_tables replacement
+   - Can follow outer join pattern
 
-3. **Profiling validation:** Are warm-path joins/vectors actually measurable costs?
-   - Run prod workload profiling before committing to 20+ hour refactoring
-   - **Recommend:** Profile first, then decide on Phase 5.5.D scope
+3. **Phase 5.5.D.2c: Cross Join refactoring** (~4 hours)
+   - File: `opteryx/operators/cross_join_node.pyx`
+   - More complex (non-UNNEST path + COUNT(*) handling)
+   - Shares some patterns with nested loop
 
-**Deferred (No Action Needed):**
-- Cold paths (read_node STRUCT, null_reader): Accept as integration points
-- Phase 5.5.A (Carchar): Still blocked on C++ coordination
+**Lower Priority (Complex/Rare):**
+- Heap sort vector ranking (requires specialized module, complex)
+- Cartesian product optimization (cold path, rare execution)
+
+**Deferred (External Dependencies):**
+- Phase 5.5.A (Carchar C++ integration) — blocked on C++ team
+- Cold paths (read_node, null_reader) — accept as integration points
+
+**Recommended Action:**
+1. Run profiling on production workloads to identify if outer_join / cross_join refactoring is high-value
+2. If yes, proceed with Phase 5.5.D.2 (outer_join) in parallel with other work
+3. If no, consolidate gains from Session 41 and wait for profiling guidance
 
 ---
 
@@ -192,33 +223,48 @@ If you want incremental improvement without architectural change:
 
 ---
 
-## 🎯 SESSION 40 OUTCOMES
+## 🎯 SESSION 41 OUTCOMES
 
-1. ✅ Phase 5.5.B verified complete and live
-2. ✅ Morsel display working as designed
-3. ✅ Test suite stable (87/88)
-4. ✅ Phase 5.5.C audit complete (100+ refs found, 8 operators analyzed)
-5. ✅ Phase 5.5.D roadmap ready (prioritized elimination plan)
-6. 🔍 Profiler trace confirmed Arrow calls are from other operators, NOT UNNEST
+1. ✅ Nested loop join refactored to Draken-native
+2. ✅ Bloom filter API extended with native Morsel support
+3. ✅ Pattern established: Morsel buffering + native hashing + native join computation works reliably
+4. ✅ Test suite stable (87/88 passing, no regressions)
+5. ✅ Eliminated ~5 warm-path PyArrow references (concat_tables + Array.from_buffers in nested loop)
 
-**Key Insights from Session 40:**
+**Key Deliverables:**
+1. **Bloom Filter Redesigned (bloom_filter.pyx):**
+   - Added `create_bloom_filter_morsel(morsel, columns)` — native Draken API
+   - Added `bloom_filter_check_morsel(filter, morsel, columns)` — returns bit-packed results
+   - Old Arrow-based API deprecated (still works for other operators)
+   - Transition point: new operators use Morsel API, breaking change for old Arrow callers
 
-1. **Phase 5.5.B Success:** UNNEST operator is now 100% Arrow-free (hot path)
-   - Profiler confirmed: no `pyarrow.compute` calls from UNNEST flattening
-   - Morsel `__str__()` display working as designed
-   - Tests stable: 87/88 passing (no regressions)
+2. **Nested Loop Join Refactored (nested_loop_join_node.pyx):**
+   - 100% Draken-native operator (consumes/produces Morsels)
+   - Eliminated `pyarrow.concat_tables()` in build phase → use `Morsel.combine()`
+   - Eliminated `pyarrow.Array.from_buffers()` → use `create_bloom_filter_morsel()` + `bloom_filter_check_morsel()`
+   - Join algorithm via new `draken_nested_loop_join()` (uses `Morsel.hash()`)
+   - Only warm-path Arrow conversions: join key casting + final alignment (acceptable)
 
-2. **Remaining refs are architectural, not tactical:**
-   - Join operators fundamentally rely on Arrow Table model (20-30 hrs to refactor)
-   - Vector operations lack Draken equivalents (8-10 hrs to implement)
-   - Cold paths (struct handling, initialization) are acceptable integration points
+3. **New Join Implementation (draken_nested_loop_join.pyx):**
+   - Pure Draken nested loop join using `Morsel.hash()`
+   - No Arrow buffer access patterns
+   - Returns index tuples for final alignment
 
-3. **Strategic Recommendation:** Do not pursue Phase 5.5.D without:
-   - Profiling data showing warm-path joins are bottleneck
-   - Architect approval on Morsel buffering model for joins
-   - Business case for vector sorting optimization
+**Pattern Established:**
+The proven pattern for join refactoring:
+1. Buffer build-side as Morsels: `self.morsels = []` + `Morsel.combine()`
+2. Build bloom filter: `create_bloom_filter_morsel(morsel, columns)`
+3. Filter probe-side: `bloom_filter_check_morsel(filter, morsel, columns)`
+4. Compute join: `draken_nested_loop_join(left_morsel, right_morsel, columns)`
+5. Final alignment: `align_tables(left.to_arrow(), right.to_arrow(), indexes)`
 
-4. **Cost-Benefit Reality:**
-   - Phase 5.5.B (UNNEST): ✅ Complete, high-impact (eliminates hot-path Arrow calls)
-   - Phase 5.5.D (Remaining): Requires 30+ hours for 60-80 refs in warm/cold paths
-   - **Recommendation:** Consolidate 5.5.B gains, profile workloads first
+**Next Can Use This Pattern:**
+- Outer join (4 hours)
+- Non-equi join (1 hour)
+- Cross join (4 hours)
+
+**Cost-Benefit Updated:**
+- Session 41: 1 operator refactored, ~5 refs eliminated (warm path)
+- Session 42 potential: 3 more operators, ~10 more refs (warm path)
+- Total warm-path elimination: ~15 refs in 8-10 hours (good ROI)
+- Remaining: vector operations (complex), cold paths (acceptable)
