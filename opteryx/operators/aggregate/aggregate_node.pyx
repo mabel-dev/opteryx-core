@@ -256,9 +256,20 @@ class _DrakenAggregateCollector:
             self._reject_unsupported_approximate()
 
     def collect(self, morsel: Morsel):
-        if self.parameter.node_type == NodeType.WILDCARD:
-            self._count += morsel.num_rows
-            return
+        if self.aggregate_type == "COUNT":
+            if self.parameter.node_type == NodeType.WILDCARD:
+                self._count += morsel.num_rows
+                return
+
+            if self.parameter.node_type == NodeType.LITERAL and self.parameter.value == "*":
+                self._count += morsel.num_rows
+                return
+
+            schema_column = getattr(self.parameter, "schema_column", None)
+            identity = getattr(schema_column, "identity", None) if schema_column is not None else None
+            if identity in (None, "", b""):
+                self._count += morsel.num_rows
+                return
 
         if self.parameter.node_type == NodeType.LITERAL:
             self._collect_literal(self.parameter.value, morsel.num_rows)
@@ -315,6 +326,7 @@ class AggregateOperator(BasePlanNode):
         ]
         self.all_identifiers = list(dict.fromkeys(all_identifiers))
         self.collectors = [_DrakenAggregateCollector(aggregate) for aggregate in self.aggregates]
+        self._finalized = False
 
     @property
     def config(self):  # pragma: no cover
@@ -351,6 +363,9 @@ class AggregateOperator(BasePlanNode):
         draken = self.ensure_draken_morsel(morsel)
 
         if draken == EOS:
+            if self._finalized:
+                return
+            self._finalized = True
             yield self._finalize_morsel()
             return
 

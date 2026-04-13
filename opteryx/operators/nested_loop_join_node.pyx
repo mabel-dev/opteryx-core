@@ -12,7 +12,7 @@ Uses Draken Morsel buffering, Morsel.hash() for hashing, Draken-native alignment
 
 from typing import Generator, Optional
 import time
-from libc.stdint cimport uint8_t, int32_t
+from libc.stdint cimport uint8_t, int32_t, uint64_t
 from cpython.array cimport array
 
 from opteryx.compiled.draken.morsels.morsel cimport Morsel
@@ -43,6 +43,64 @@ cdef Morsel _align_morsels_with_tuples(Morsel left_morsel, Morsel right_morsel, 
     cdef int32_t[::1] left_view = left_arr
     cdef int32_t[::1] right_view = right_arr
     return align_tables(left_morsel, right_morsel, left_view, right_view)
+
+
+# Nested loop join kernel - pure Draken implementation
+cdef tuple _nested_loop_join_morsel(Morsel left_morsel, Morsel right_morsel, list left_columns, list right_columns):
+    """
+    Perform a nested loop join on Draken Morsels.
+
+    Uses native Morsel.hash() to compute row hashes, enabling pure Draken flow.
+    No Arrow table conversion, no buffer access patterns - direct hash-based join.
+
+    Inputs:
+        left_morsel: Left Morsel (build side)
+        right_morsel: Right Morsel (probe side)
+        left_columns: Column identities for left join keys
+        right_columns: Column identities for right join keys
+
+    Returns:
+        (left_indexes, right_indexes) tuples (as Int32Buffer for alignment)
+    """
+    cdef Morsel lm = left_morsel
+    cdef Morsel rm = right_morsel
+
+    if lm is None or rm is None:
+        return (), ()
+
+    cdef Py_ssize_t nl = lm.num_rows
+    cdef Py_ssize_t nr = rm.num_rows
+
+    if nl == 0 or nr == 0:
+        return (), ()
+
+    # Get hash values for both sides (Draken-native)
+    cdef uint64_t[::1] left_hashes = lm.hash(left_columns)
+    cdef uint64_t[::1] right_hashes = rm.hash(right_columns)
+
+    cdef list left_indexes = []
+    cdef list right_indexes = []
+
+    cdef Py_ssize_t i, j
+    cdef uint64_t left_hash, right_hash
+
+    # Nested loop join: smaller side outer for better cache locality
+    if nl <= nr:
+        for i in range(nl):
+            left_hash = left_hashes[i]
+            for j in range(nr):
+                if left_hash == right_hashes[j]:
+                    left_indexes.append(i)
+                    right_indexes.append(j)
+    else:
+        for j in range(nr):
+            right_hash = right_hashes[j]
+            for i in range(nl):
+                if right_hash == left_hashes[i]:
+                    left_indexes.append(i)
+                    right_indexes.append(j)
+
+    return tuple(left_indexes), tuple(right_indexes)
 
 
 class NestedLoopJoinNode(JoinNode):
@@ -101,6 +159,7 @@ class NestedLoopJoinNode(JoinNode):
 
         else:
             if morsel == EOS:
+                yield EOS
                 return
 
             if self.left_morsel is None or self.left_morsel.num_rows == 0 or morsel.num_rows == 0:
@@ -124,10 +183,9 @@ class NestedLoopJoinNode(JoinNode):
 
                 # Skip join key casts - using Draken-native only, no Arrow
 
-                # Perform Draken-native nested loop join
+                # Perform nested loop join
                 if morsel.num_rows > 0:
-                    from opteryx.compiled.joins import draken_nested_loop_join
-                    left_indexes, right_indexes = draken_nested_loop_join(
+                    left_indexes, right_indexes = _nested_loop_join_morsel(
                         self.left_morsel, morsel, self.left_columns, self.right_columns
                     )
                 else:

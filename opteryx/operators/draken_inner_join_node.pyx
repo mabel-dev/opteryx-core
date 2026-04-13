@@ -266,6 +266,7 @@ class DrakenInnerJoinNode(JoinNode):
 
             else:
                 if morsel == EOS:
+                    yield EOS
                     return
 
                 if self.left_is_empty:

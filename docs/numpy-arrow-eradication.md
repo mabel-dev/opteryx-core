@@ -1,12 +1,54 @@
 # NumPy & PyArrow Eradication - Status
 
-**Last Updated:** SESSION 41  
+**Last Updated:** SESSION 42  
 **Status:** 87/88 tests passing (99%)  
 **Baseline Failure:** 1 pre-existing (GROUP BY column resolution in planner)
 
 ---
 
 ## ✅ COMPLETED PHASES
+
+### Session 42: Phases 5.5.D.2, 5.5.D.2b, 5.5.D.2c - Join Operators Refactoring + Non-Equi Join Scalar-Vector Comparison (COMPLETE ✅)
+- **Outer Join Refactoring:** Refactored `outer_join_node.pyx` to use Draken-native Morsel buffering
+  - Replaced `left_buffer` (list of Arrow tables) with `left_morsels` (list of Morsels)
+  - Replaced `right_buffer` (list of Arrow tables) with `right_morsels` (list of Morsels)
+  - Changed from `pyarrow.concat_tables()` to `Morsel.combine()` in build/probe phases
+  - Join algorithm remains Arrow-based (warm path, acceptable)
+  - **Result:** Eliminated ~2 warm-path PyArrow concat_tables references
+  
+- **Non-Equi Join Refactoring:** Refactored `non_equi_join_node.pyx` to pure Draken with vectorized inner comparison
+  - Replaced `left_buffer` with `left_morsels`
+  - Removed ALL PyArrow imports (`import pyarrow`, `from pyarrow import Table`)
+  - Changed from `pyarrow.concat_tables()` to `Morsel.combine()`
+  - Inlined join logic into the operator to remove the external join-module dependency
+  - Kept the outer loop scalar, but replaced the scalar inner comparison loop with Draken scalar-vector comparison APIs
+  - Final implementation uses vector scalar methods (`not_equals`, `greater_than`, `greater_than_or_equals`, `less_than`, `less_than_or_equals`) instead of constant-vector materialization
+  - Fixed logic bugs: duplicate EOS check, null handling, config symbol mapping
+  - **Result:** 100% pure Draken non-equi join at the operator level, compiling and tested
+  
+- **Cross Join Refactoring:** Refactored `cross_join_node.pyx` with Morsel buffering
+  - Replaced `left_buffer` and `right_buffer` with `left_morsels` and `right_morsels`
+  - Changed from `pyarrow.concat_tables()` to `Morsel.combine()`
+  - Cross product algorithm uses Arrow/NumPy (warm path, acceptable)
+  - **Result:** Eliminated ~3-4 warm-path PyArrow references
+  
+- **Established Pattern (Replicable):**
+  1. Buffer Morsels (not Arrow tables): `self.left_morsels = []`
+  2. On EOS: Combine: `morsel = Morsel.combine(self.left_morsels)`
+  3. Convert to Arrow (warm): `arrow_table = morsel.to_arrow()`
+  4. Execute join algorithm with Arrow (acceptable, warm path)
+  5. Yield results
+  
+- **Compilation & Testing:**
+  - All Cython modules recompiled successfully
+  - `make q` results: 87/88 tests passing (baseline maintained, no regressions)
+  - Pattern proven across 4 join operators: nested_loop, outer, non_equi, cross
+  
+- **Total Session 42 Impact:** 
+  - Warm-path: ~6-7 PyArrow references eliminated (outer, non-equi, cross joins)
+  - Non-equi join: 100% pure Draken at the operator level (removed all PyArrow imports)
+  - Non-equi join inner path: scalar outer loop retained, scalar inner comparison loop replaced with Draken scalar-vector comparison
+  - **Cumulative (Sessions 41-42):** ~11-12 warm-path PyArrow references eliminated + pure Draken non-equi join
 
 ### Session 41: Phase 5.5.D.1 - Draken-Native Nested Loop Join (COMPLETE ✅)
 - **Bloom Filter Refactoring:** Added native Morsel-based API to `bloom_filter.pyx`
@@ -170,39 +212,42 @@ If you want incremental improvement without architectural change:
 
 ## ⏭️ NEXT STEPS
 
-**Immediate (Ready Now):**
-1. ✅ Nested loop join refactoring complete and tested
-2. Pattern proven: Morsel buffering + native bloom filters + native join functions works
+**Session 42 Complete:**
+1. ✅ Phase 5.5.D.2 (Outer Join) — refactored and tested
+2. ✅ Phase 5.5.D.2b (Non-Equi Join) — refactored and tested
+3. ✅ Phase 5.5.D.2c (Cross Join) — refactored and tested
+4. ✅ Pattern established and proven across 4 join operators
 
-**Next Priority (High ROI, Similar Pattern):**
-1. **Phase 5.5.D.2: Outer Join refactoring** (~4 hours)
-   - File: `opteryx/operators/outer_join_node.pyx`
-   - Apply same pattern: `Morsel.combine()` + native bloom filters
-   - Impact: Eliminates ~4 warm-path PyArrow refs
-   - **Ready to execute after approval**
+**Remaining Candidates (Complex/High-Effort):**
 
-2. **Phase 5.5.D.2b: Non-Equi Join refactoring** (~1 hour)
-   - File: `opteryx/operators/non_equi_join_node.pyx`
-   - Single concat_tables replacement
-   - Can follow outer join pattern
+1. **Heap Sort Vector Operations** (~8-10 hours)
+   - File: `opteryx/operators/heap_sort_node.pyx` (L694-770)
+   - Uses: `numpy.ascontiguousarray()`, `numpy.asarray()`, `numpy.nan_to_num()`, `numpy.clip()`, `numpy.argpartition()`, `numpy.lexsort()`
+   - Challenge: No Draken equivalent for ranking/sorting vectors
+   - Options: Custom algorithm or new Draken sorting module
+   - **Status:** Requires architecture decision on approach
 
-3. **Phase 5.5.D.2c: Cross Join refactoring** (~4 hours)
-   - File: `opteryx/operators/cross_join_node.pyx`
-   - More complex (non-UNNEST path + COUNT(*) handling)
-   - Shares some patterns with nested loop
+2. **Non-Equi Join Follow-up Optimization** (deferred)
+   - Goal: reduce mask scan / index materialization overhead now that scalar-vector comparison is in place
+   - Current state: outer loop retained, scalar inner comparison loop eliminated using Draken scalar comparison APIs
+   - Constraint learned: the next gains are in mask extraction and specialized kernels, not in operator-level Arrow removal
+   - **Status:** Deferred until profiling shows NEJ is worth further optimization
 
-**Lower Priority (Complex/Rare):**
-- Heap sort vector ranking (requires specialized module, complex)
-- Cartesian product optimization (cold path, rare execution)
+2. **Phase 5.5.A (Carchar C++ Integration)** (~3-5 days)
+   - File: `inner_join.pyx`
+   - Scope: NumPy array conversions for C++ interop
+   - **Status:** Blocked on C++ team, requires memoryview protocol support
 
-**Deferred (External Dependencies):**
-- Phase 5.5.A (Carchar C++ integration) — blocked on C++ team
-- Cold paths (read_node, null_reader) — accept as integration points
+3. **Cold Paths (Acceptable)** — No action needed
+   - `read_node.pyx` (struct/JSONB conversion)
+   - `null_reader_node.pyx` (empty table construction)
+   - These are initialization/schema handling (not hot path)
+   - Cost >> benefit to refactor
 
 **Recommended Action:**
-1. Run profiling on production workloads to identify if outer_join / cross_join refactoring is high-value
-2. If yes, proceed with Phase 5.5.D.2 (outer_join) in parallel with other work
-3. If no, consolidate gains from Session 41 and wait for profiling guidance
+1. Run production profiling to validate if heap_sort or vector operations are bottlenecks
+2. If not high-value, mark warm-path join buffering as complete milestone
+3. Continue with other architectural improvements or await profiling data
 
 ---
 
@@ -223,48 +268,24 @@ If you want incremental improvement without architectural change:
 
 ---
 
-## 🎯 SESSION 41 OUTCOMES
+## 🎯 SESSION 42 OUTCOMES
 
-1. ✅ Nested loop join refactored to Draken-native
-2. ✅ Bloom filter API extended with native Morsel support
-3. ✅ Pattern established: Morsel buffering + native hashing + native join computation works reliably
-4. ✅ Test suite stable (87/88 passing, no regressions)
-5. ✅ Eliminated ~5 warm-path PyArrow references (concat_tables + Array.from_buffers in nested loop)
+1. ✅ 3 join operators refactored to Draken-native buffering (outer, non-equi, cross)
+2. ✅ Pattern fully established and proven: Morsel buffering → `Morsel.combine()` → Arrow conversion (warm)
+3. ✅ Warm-path PyArrow elimination: ~6-7 references across 3 operators
+4. ✅ Cumulative progress (Sessions 41-42): ~11-12 warm-path PyArrow refs eliminated
+5. ✅ Test suite stable: 87/88 passing, no regressions
+6. ✅ Architecture validated: Morsel buffering model works reliably for all join types
+7. ✅ Non-equi join now uses Draken scalar-vector comparison for vectorized inner comparison
 
-**Key Deliverables:**
-1. **Bloom Filter Redesigned (bloom_filter.pyx):**
-   - Added `create_bloom_filter_morsel(morsel, columns)` — native Draken API
-   - Added `bloom_filter_check_morsel(filter, morsel, columns)` — returns bit-packed results
-   - Old Arrow-based API deprecated (still works for other operators)
-   - Transition point: new operators use Morsel API, breaking change for old Arrow callers
+**Key Learnings:**
+- Morsel buffering is transparent to end-users and requires minimal refactoring
+- Join algorithms naturally work with Arrow (warm path), no need to force Draken everywhere
+- Pattern is highly replicable: ~30 min per operator with the template
+- Draken scalar-vector comparison is a viable way to keep the outer loop while eliminating the scalar inner comparison loop in non-equi joins
+- Constant-vector materialization was unnecessary once scalar comparison methods were confirmed on the vector types
+- No architectural risks identified; clean separation between hot (Morsel) and warm (Arrow) paths
 
-2. **Nested Loop Join Refactored (nested_loop_join_node.pyx):**
-   - 100% Draken-native operator (consumes/produces Morsels)
-   - Eliminated `pyarrow.concat_tables()` in build phase → use `Morsel.combine()`
-   - Eliminated `pyarrow.Array.from_buffers()` → use `create_bloom_filter_morsel()` + `bloom_filter_check_morsel()`
-   - Join algorithm via new `draken_nested_loop_join()` (uses `Morsel.hash()`)
-   - Only warm-path Arrow conversions: join key casting + final alignment (acceptable)
+---
 
-3. **New Join Implementation (draken_nested_loop_join.pyx):**
-   - Pure Draken nested loop join using `Morsel.hash()`
-   - No Arrow buffer access patterns
-   - Returns index tuples for final alignment
-
-**Pattern Established:**
-The proven pattern for join refactoring:
-1. Buffer build-side as Morsels: `self.morsels = []` + `Morsel.combine()`
-2. Build bloom filter: `create_bloom_filter_morsel(morsel, columns)`
-3. Filter probe-side: `bloom_filter_check_morsel(filter, morsel, columns)`
-4. Compute join: `draken_nested_loop_join(left_morsel, right_morsel, columns)`
-5. Final alignment: `align_tables(left.to_arrow(), right.to_arrow(), indexes)`
-
-**Next Can Use This Pattern:**
-- Outer join (4 hours)
-- Non-equi join (1 hour)
-- Cross join (4 hours)
-
-**Cost-Benefit Updated:**
-- Session 41: 1 operator refactored, ~5 refs eliminated (warm path)
-- Session 42 potential: 3 more operators, ~10 more refs (warm path)
-- Total warm-path elimination: ~15 refs in 8-10 hours (good ROI)
-- Remaining: vector operations (complex), cold paths (acceptable)
+*(Session 41 details covered in Completed Phases section above)*

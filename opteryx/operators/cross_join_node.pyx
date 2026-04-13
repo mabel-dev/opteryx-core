@@ -4,12 +4,16 @@
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
 """
-Cross Join Node
+Cross Join Node - Draken-Native Buffering (Session 42)
 
 This is a SQL Query Execution Plan Node.
 
 This performs a CROSS JOIN - CROSS JOIN is not natively supported by PyArrow so this is written
 here rather than calling the join() functions
+
+REFACTORED (Session 42): Draken-native Morsel buffering
+- Buffer morsels instead of Arrow tables
+- Morsel.combine() instead of pyarrow.concat_tables()
 
 Note: CROSS JOIN UNNEST is implemented by the UnnestJoinNode
 """
@@ -18,13 +22,14 @@ from typing import Generator, Optional
 import numpy
 import pyarrow
 from opteryx.compiled.structures.carchar_set import CarcharSetWrapper
+from opteryx.compiled.draken.morsels.morsel import Morsel
 from opteryx.models import QueryProperties
 
-from opteryx import EOS
+from opteryx import EOS, EMPTY
 
 from . import JoinNode
 
-_DATA_FORMAT = "arrow"
+_DATA_FORMAT = "draken"
 
 
 INTERNAL_BATCH_SIZE: int = 10000  # config
@@ -42,10 +47,12 @@ def _cartesian_product(*arrays):
     return numpy.hsplit(arr.reshape(-1, array_count), array_count)
 
 
-def _cross_join(left_morsel, right):
+def _cross_join(left_table, right_table):
     """
     A cross join is the cartesian product of two tables - this usually isn't very
     useful, but it does allow you to the theta joins (non-equi joins)
+
+    Arrow-based join algorithm (warm path, acceptable).
     """
 
     def _chunker(seq_1, seq_2, size: int = INTERNAL_BATCH_SIZE):
@@ -55,36 +62,36 @@ def _cross_join(left_morsel, right):
     from opteryx.utils.arrow import align_tables
 
     # Optimization for COUNT(*) queries
-    if left_morsel.column_names == ["$COUNT(*)"] and right.column_names == ["$COUNT(*)"]:
-        left_count = left_morsel["$COUNT(*)"][0].as_py()
-        right_count = right["$COUNT(*)"][0].as_py()
+    if left_table.column_names == ["$COUNT(*)"] and right_table.column_names == ["$COUNT(*)"]:
+        left_count = left_table["$COUNT(*)"][0].as_py()
+        right_count = right_table["$COUNT(*)"][0].as_py()
         yield pyarrow.Table.from_pydict({"$COUNT(*)": [left_count * right_count]})
         return
 
-    if left_morsel.column_names == ["$COUNT(*)"]:
-        left_count = left_morsel["$COUNT(*)"][0].as_py()
+    if left_table.column_names == ["$COUNT(*)"]:
+        left_count = left_table["$COUNT(*)"][0].as_py()
         for _ in range(left_count):
-            yield right
+            yield right_table
         return
 
-    if right.column_names == ["$COUNT(*)"]:
-        right_count = right["$COUNT(*)"][0].as_py()
+    if right_table.column_names == ["$COUNT(*)"]:
+        right_count = right_table["$COUNT(*)"][0].as_py()
         for _ in range(right_count):
-            yield left_morsel
+            yield left_table
         return
 
     at_least_once = False
-    left_schema = left_morsel.schema
-    right_schema = right.schema
+    left_schema = left_table.schema
+    right_schema = right_table.schema
 
     # Iterate through left table in chunks of size INTERNAL_BATCH_SIZE
-    for left_block in left_morsel.to_batches(max_chunksize=INTERNAL_BATCH_SIZE):
+    for left_block in left_table.to_batches(max_chunksize=INTERNAL_BATCH_SIZE):
         # Convert the chunk to a table to retain column names
-        left_block = pyarrow.Table.from_batches([left_block], schema=left_morsel.schema)
+        left_block = pyarrow.Table.from_batches([left_block], schema=left_table.schema)
 
         # Create an array of row indices for each table
         left_array = numpy.arange(left_block.num_rows, dtype=numpy.int64)
-        right_array = numpy.arange(right.num_rows, dtype=numpy.int64)
+        right_array = numpy.arange(right_table.num_rows, dtype=numpy.int64)
 
         # Calculate the cartesian product of the two arrays of row indices
         left_align, right_align = _cartesian_product(left_array, right_array)
@@ -94,7 +101,7 @@ def _cross_join(left_morsel, right):
             left_align.flatten(), right_align.flatten(), MAX_JOIN_SIZE
         ):
             # Align the tables using the specified chunks of row indices
-            table = align_tables(left_block, right, left_chunk, right_chunk)
+            table = align_tables(left_block, right_table, left_chunk, right_chunk)
 
             # Yield the resulting table to the caller
             yield table
@@ -125,10 +132,11 @@ class CrossJoinNode(JoinNode):
         self._left_relation = parameters.get("left_relation_names")
         self._right_relation = parameters.get("right_relation_names")
 
-        self.left_buffer = []
-        self.right_buffer = []
-        self.left_relation = None
-        self.right_relation = None
+        # REFACTORED (Session 42): Buffer Morsels instead of Arrow tables
+        self.left_morsels = []
+        self.right_morsels = []
+        self.left_table = None
+        self.right_table = None
         self.hash_set = CarcharSetWrapper()
 
         self.continue_executing = True
@@ -143,7 +151,7 @@ class CrossJoinNode(JoinNode):
         return f"CROSS JOIN"
 
     def execute(self, morsel):
-        morsel = self.ensure_arrow_table(morsel)
+        morsel = self.ensure_draken_morsel(morsel)
 
         if not self.continue_executing:
             yield None
@@ -152,18 +160,34 @@ class CrossJoinNode(JoinNode):
         if self._build_phase:
             if morsel == EOS:
                 self._build_phase = False
-                self.left_relation = pyarrow.concat_tables(self.left_buffer, promote_options="none")
-                self.left_buffer.clear()
+                # REFACTORED (Session 42): Combine Morsels instead of Arrow tables
+                if self.left_morsels:
+                    left_morsel = Morsel.combine(self.left_morsels)
+                    self.left_morsels = []
+                    # Convert to Arrow for join algorithm (warm path, acceptable)
+                    self.left_table = left_morsel.to_arrow()
+                else:
+                    self.left_table = pyarrow.table({})
             else:
-                self.left_buffer.append(morsel)
+                if morsel is not None and morsel != EMPTY:
+                    self.left_morsels.append(morsel)
             yield None
             return
 
         else:
             if morsel == EOS:
-                right_table = pyarrow.concat_tables(self.right_buffer, promote_options="none")  # type: ignore
-                self.right_buffer = None
-                yield from _cross_join(self.left_relation, right_table)
+                # REFACTORED (Session 42): Combine Morsels instead of Arrow tables
+                if self.right_morsels:
+                    right_morsel = Morsel.combine(self.right_morsels)
+                    self.right_morsels = []
+                    # Convert to Arrow for join algorithm (warm path, acceptable)
+                    right_table = right_morsel.to_arrow()
+                else:
+                    right_table = pyarrow.table({})
+
+                yield from _cross_join(self.left_table, right_table)
+                yield EOS
             else:
-                self.right_buffer.append(morsel)
+                if morsel is not None and morsel != EMPTY:
+                    self.right_morsels.append(morsel)
                 yield None
