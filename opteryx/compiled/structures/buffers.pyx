@@ -7,14 +7,12 @@
 # cython: wraparound=False
 # cython: boundscheck=False
 
-import numpy
-cimport numpy
-numpy.import_array()
-
 from libc.stddef cimport size_t
 from libc.stdint cimport int64_t, int32_t
 from libcpp.vector cimport vector
 from libc.string cimport memcpy
+
+from opteryx.compiled.draken.vectors.int64_vector cimport Int64Vector, from_sequence as int64_from_sequence
 
 cdef extern from "intbuffer.h":
     cdef cppclass CIntBuffer:
@@ -97,12 +95,6 @@ cdef class IntBuffer:
 
     cpdef void extend(self, object iterable):
         """Extend the buffer with an iterable of integers."""
-        # Fast path for numpy arrays
-        if isinstance(iterable, numpy.ndarray):
-            arr = numpy.ascontiguousarray(iterable, dtype=numpy.int64)
-            self.extend_numpy(arr)
-            return
-
         # Fast path for lists/tuples - pre-allocate and copy
         cdef size_t estimated_size
         estimated_size = len(iterable)
@@ -118,19 +110,11 @@ cdef class IntBuffer:
             for item in iterable:
                 self.c_buffer.append(item)
 
-    cpdef void extend_numpy(self, numpy.ndarray[int64_t, ndim=1] arr):
-        """Extend with numpy array - fastest method."""
-        cdef size_t n = arr.shape[0]
-        if n > 0:
-            self.c_buffer.extend(<int64_t*>arr.data, n)
-
-    cpdef numpy.ndarray[int64_t, ndim=1] to_numpy(self):
-        """Convert to numpy array (copy)."""
+    cpdef Int64Vector to_int64_vector(self):
+        """Convert to Int64Vector (Draken vector)."""
         cdef size_t n = self.c_buffer.size()
-        cdef numpy.ndarray[int64_t, ndim=1] arr = numpy.empty(n, dtype=numpy.int64)
-        if n > 0:
-            memcpy(arr.data, self.c_buffer.data(), n * sizeof(int64_t))
-        return arr
+        cdef const int64_t[::1] data_view = <int64_t[:n]>self.c_buffer.data()
+        return int64_from_sequence(data_view)
 
     cpdef Int32Buffer to_int32_buffer(self):
         """Convert int64 buffer to int32 buffer with range validation.
@@ -196,9 +180,9 @@ cdef class ObjectBuffer:
         self._data.extend(iterable)
         self._size = len(self._data)
 
-    cpdef numpy.ndarray to_numpy(self):
-        """Convert to a numpy object array."""
-        return numpy.array(self._data, dtype=object)
+    cpdef list to_list(self):
+        """Convert to a Python list."""
+        return list(self._data)
 
     cpdef size_t size(self):
         return self._size
@@ -255,13 +239,6 @@ cdef class Int32Buffer:
 
     cpdef void extend(self, object iterable):
         """Extend the buffer with an iterable of integers."""
-        # Fast path for numpy arrays
-        if isinstance(iterable, numpy.ndarray):
-            if iterable.dtype == numpy.int32:
-                self.extend_numpy(iterable)
-                return
-            # else fall through to generic loop
-
         # Fast path for lists/tuples - pre-allocate and copy
         cdef size_t estimated_size
         estimated_size = len(iterable)
@@ -277,19 +254,6 @@ cdef class Int32Buffer:
             for item in iterable:
                 self.c_buffer.append(item)
 
-    cpdef void extend_numpy(self, numpy.ndarray[int32_t, ndim=1] arr):
-        """Extend with numpy array - fastest method."""
-        cdef size_t n = arr.shape[0]
-        if n > 0:
-            self.c_buffer.extend(<int32_t*>arr.data, n)
-
-    cpdef numpy.ndarray[int32_t, ndim=1] to_numpy(self):
-        """Convert to numpy array (copy)."""
-        cdef size_t n = self.c_buffer.size()
-        cdef numpy.ndarray[int32_t, ndim=1] arr = numpy.empty(n, dtype=numpy.int32)
-        if n > 0:
-            memcpy(arr.data, self.c_buffer.data(), n * sizeof(int32_t))
-        return arr
 
     cpdef size_t size(self):
         return self.c_buffer.size()

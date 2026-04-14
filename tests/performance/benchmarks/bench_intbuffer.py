@@ -5,7 +5,6 @@ import time
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
 from opteryx.compiled.structures.buffers import IntBuffer
-import numpy as np
 
 
 def bench_append(N, iterations=10):
@@ -42,7 +41,7 @@ def bench_extend(N, chunk=10000, iterations=10):
     return min(times), sum(times) / len(times)
 
 
-def bench_to_numpy(N, iterations=10):
+def bench_to_int64_vector(N, iterations=10):
     b = IntBuffer(size_hint=N)
     for i in range(N):
         b.append(i)
@@ -50,7 +49,7 @@ def bench_to_numpy(N, iterations=10):
     times = []
     for _ in range(iterations):
         t0 = time.perf_counter()
-        _ = b.to_numpy()
+        _ = b.to_int64_vector()
         t1 = time.perf_counter()
         times.append(t1 - t0)
 
@@ -58,9 +57,8 @@ def bench_to_numpy(N, iterations=10):
 
 
 def bench_python_list(N, iterations=5):
-    # baseline: python list append then numpy conversion
+    # baseline: python list append
     times_append = []
-    times_to_numpy = []
     for _ in range(iterations):
         lst = []
         t0 = time.perf_counter()
@@ -69,12 +67,7 @@ def bench_python_list(N, iterations=5):
         t1 = time.perf_counter()
         times_append.append(t1 - t0)
 
-        t0 = time.perf_counter()
-        arr = np.array(lst, dtype=np.int64)
-        t1 = time.perf_counter()
-        times_to_numpy.append(t1 - t0)
-
-    return (min(times_append), sum(times_append) / len(times_append)), (min(times_to_numpy), sum(times_to_numpy) / len(times_to_numpy))
+    return (min(times_append), sum(times_append) / len(times_append))
 
 
 if __name__ == '__main__':
@@ -97,11 +90,10 @@ if __name__ == '__main__':
     best, mean = bench_extend(N, chunk=50000, iterations=iters)
     print(f'extend: best={best:.4f}s mean={mean:.4f}s')
 
-    print('\nBenchmarking to_numpy...')
-    best, mean = bench_to_numpy(N, iterations=iters)
-    print(f'to_numpy: best={best:.4f}s mean={mean:.4f}s')
+    print('\nBenchmarking to_int64_vector...')
+    best, mean = bench_to_int64_vector(N, iterations=iters)
+    print(f'to_int64_vector: best={best:.4f}s mean={mean:.4f}s')
 
-    print('\nPython list baseline (append + to_numpy)...')
-    (a_best, a_mean), (n_best, n_mean) = bench_python_list(N, iterations=iters)
+    print('\nPython list baseline (append)...')
+    a_best, a_mean = bench_python_list(N, iterations=iters)
     print(f'py_append: best={a_best:.4f}s mean={a_mean:.4f}s')
-    print(f'py_to_numpy: best={n_best:.4f}s mean={n_mean:.4f}s')
