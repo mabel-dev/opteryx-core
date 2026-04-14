@@ -329,8 +329,14 @@ cpdef object vector_date_trunc(str truncate_to, TimestampVector timestamp_array)
     else:
         raise ValueError(f"Invalid unit: {truncate_to}")
 
-    # Create TimestampVector from int64 array using Draken interop
-    # PyArrow is imported locally to avoid module-level dependency
-    import pyarrow as pa
-    pa_array = pa.array(output_array, type=pa.timestamp(unit))
-    return ts_from_arrow(pa_array)
+    # Create TimestampVector directly from processed int64 data (no PyArrow needed)
+    cdef TimestampVector result = TimestampVector(length)
+    result.timestamp_unit = unit
+
+    # Copy processed data directly into the result vector
+    cdef int64_t* result_ptr = <int64_t*>result.ptr.data
+    cdef Py_ssize_t j
+    for j in range(length):
+        result_ptr[j] = output_ptr[j]
+
+    return result

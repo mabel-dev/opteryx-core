@@ -7,41 +7,33 @@
 # cython: boundscheck=False
 
 from libc.stdint cimport uint64_t, int64_t
-from libc.stdlib cimport malloc, free
 
 from opteryx.compiled.draken.vectors.int64_vector cimport Int64Vector
 from opteryx.compiled.structures.hash_table cimport HashTable
-from opteryx.compiled.table_ops.hash_ops cimport compute_row_hashes
-from opteryx.compiled.table_ops.null_avoidant_ops cimport non_null_row_indices
+from opteryx.compiled.draken.morsels.morsel cimport Morsel
+from opteryx.compiled.morsel_ops.null_filter cimport non_null_row_indices
 from opteryx.utils.arrow import align_tables as _align_tables_arrow
 
 cpdef HashTable probe_side_hash_map(object relation, list join_columns):
     """
-    Build a hash table for the join operations (probe-side) using buffer-level hashing.
+    Build a hash table for the join operations (probe-side) using Morsel hashing.
     """
     cdef HashTable ht = HashTable()
-    cdef int64_t num_rows = relation.num_rows
     cdef Int64Vector non_null_indices_vec
     cdef const int64_t* non_null_ptr
     cdef Py_ssize_t n_non_null
-    cdef uint64_t* raw_hashes = <uint64_t*>malloc(num_rows * sizeof(uint64_t))
-    if raw_hashes == NULL:
-        raise MemoryError("Failed to allocate memory for hash buffers")
-    cdef uint64_t[::1] row_hashes = <uint64_t[:num_rows]>raw_hashes
     cdef Py_ssize_t i
+    cdef Morsel morsel = Morsel.from_arrow(relation)
+    cdef uint64_t[::1] row_hashes = morsel.hash(join_columns)
 
     non_null_indices_vec = non_null_row_indices(relation, join_columns)
     non_null_ptr = <const int64_t*>non_null_indices_vec.dense_ptr()
     n_non_null = len(non_null_indices_vec)
 
-    # Compute hash of each row on the buffer level
-    compute_row_hashes(relation, join_columns, row_hashes)
-
-    # Insert into HashTable using row index + buffer-computed hash
+    # Insert into HashTable using row index + Draken-computed hash
     for i in range(n_non_null):
         ht.insert(row_hashes[non_null_ptr[i]], non_null_ptr[i])
 
-    free(raw_hashes)
     return ht
 
 
@@ -75,33 +67,22 @@ def right_join(
     cdef HashTable left_hash_table = HashTable()
     cdef Py_ssize_t num_left_rows = left_relation.num_rows
     cdef Py_ssize_t i
-
-    cdef uint64_t* raw_hashes = <uint64_t*> malloc(num_left_rows * sizeof(uint64_t))
-    if raw_hashes == NULL:
-        raise MemoryError("Failed to allocate memory for hash table")
-    cdef uint64_t[::1] left_hashes = <uint64_t[:num_left_rows]> raw_hashes
-
-    compute_row_hashes(left_relation, left_columns, left_hashes)
+    cdef Morsel left_morsel = Morsel.from_arrow(left_relation)
+    cdef uint64_t[::1] left_hashes = left_morsel.hash(left_columns)
 
     for i in range(num_left_rows):
         left_hash_table.insert(left_hashes[i], i)
 
-    free(raw_hashes)
-
-    cdef uint64_t* chunk_hashes
     cdef uint64_t[::1] right_hashes
+    cdef Morsel right_morsel
 
     # Iterate over the right_relation in chunks
     for right_chunk in right_relation.to_batches(50_000):
         chunk_size = right_chunk.num_rows
 
-        # Compute hashes for this right chunk
-        chunk_hashes = <uint64_t*> malloc(chunk_size * sizeof(uint64_t))
-        if chunk_hashes == NULL:
-            raise MemoryError("Failed to allocate memory for chunk hashes")
-        right_hashes = <uint64_t[:chunk_size]> chunk_hashes
-
-        compute_row_hashes(right_chunk, right_columns, right_hashes)
+        # Compute hashes for this right chunk using Draken
+        right_morsel = Morsel.from_arrow(right_chunk)
+        right_hashes = right_morsel.hash(right_columns)
 
         # Collect matches
         left_indexes = []
@@ -115,7 +96,5 @@ def right_join(
             else:
                 left_indexes.append(None)
                 right_indexes.append(i)
-
-        free(chunk_hashes)
 
         yield _align_tables_arrow(left_relation, right_chunk, left_indexes, right_indexes)

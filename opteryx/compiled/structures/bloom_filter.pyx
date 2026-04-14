@@ -41,7 +41,7 @@ from cpython.array cimport array, clone
 
 from opteryx.compiled.draken.vectors.int64_vector cimport Int64Vector
 from opteryx.compiled.draken.morsels.morsel cimport Morsel
-from opteryx.compiled.table_ops.null_avoidant_ops cimport non_null_row_indices
+from opteryx.compiled.morsel_ops.null_filter cimport non_null_row_indices
 
 # Reusable template arrays for zero-copy clone allocations
 cdef array _UINT64_TEMPLATE = array('Q', [])
@@ -145,10 +145,10 @@ cdef class BloomFilter:
         cdef uint64_t bit_mask = self.bit_mask
         cdef uint64_t golden_ratio = GOLDEN_RATIO
         cdef uint64_t* bit_array = self.bit_array
+        cdef Morsel _m
 
         if num_valid_rows > 0:
             # Compute hashes only for non-null rows — prefer Draken Morsel.hash()
-            cdef Morsel _m
             if isinstance(relation, Morsel):
                 row_hashes = relation.hash(columns)
             else:

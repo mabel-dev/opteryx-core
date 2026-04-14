@@ -3,7 +3,7 @@ import pyarrow as pa
 from opteryx.compiled.joins.join_definitions import (
     build_side_hash_map,
 )
-from opteryx.compiled.table_ops.null_avoidant_ops import non_null_indices
+from opteryx.compiled.morsel_ops.null_filter import non_null_indices
 
 import opteryx.compiled.draken as draken
 

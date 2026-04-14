@@ -6,7 +6,7 @@ import pyarrow
 
 sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 
-from opteryx.compiled.table_ops.null_avoidant_ops import non_null_indices
+from opteryx.compiled.morsel_ops.null_filter import non_null_indices
 
 def test_all_valid():
     table = pyarrow.table({

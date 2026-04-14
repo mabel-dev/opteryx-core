@@ -8,7 +8,7 @@ import pyarrow as pa
 
 def test_non_null_indices_with_chunk_offsets():
     try:
-        from opteryx.compiled.table_ops.null_avoidant_ops import non_null_indices
+        from opteryx.compiled.morsel_ops.null_filter import non_null_indices
     except ImportError:
         import pytest
         pytest.skip("Cython null_avoidant_ops not available")

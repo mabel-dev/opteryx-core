@@ -6,11 +6,12 @@
 # cython: wraparound=False
 # cython: boundscheck=False
 
-"""
-Helper functions for handling PyArrow tables, particularly for hashing values or rows.
+"""opteryx.compiled.morsel_ops.null_filter
 
-This is the "null avoidant" set of these functions, these functions will remove hash values and
-remove them from the results.
+Null filtering operations for relations.
+
+This module provides functions to identify rows where all specified columns are
+non-null, using Draken vector capabilities.
 """
 
 import pyarrow
@@ -22,10 +23,13 @@ from libc.stdint cimport int64_t, uint8_t, uintptr_t
 from libc.stdlib cimport malloc, free
 from libc.string cimport memset
 
+
 cdef inline Int64Vector non_null_row_indices(object relation, list column_names):
     """
     Compute indices of rows where all `column_names` in `relation` are non-null.
     Returns a native Int64Vector of row indices.
+
+    Uses Draken vector types to wrap results.
     """
     cdef:
         Py_ssize_t num_rows = relation.num_rows
@@ -95,6 +99,18 @@ cdef inline Int64Vector non_null_row_indices(object relation, list column_names)
 
 cpdef Int64Vector non_null_indices(object relation, list column_names):
     """
-    Public interface for non_null_row_indices, returning a native Draken Int64Vector.
+    Public interface for finding non-null rows, returning a native Draken Int64Vector.
+
+    Parameters
+    ----------
+    relation : pyarrow.Table
+        PyArrow table to filter
+    column_names : list of str
+        Column names to check for nullness
+
+    Returns
+    -------
+    Int64Vector
+        Draken Int64Vector containing indices of rows where all specified columns are non-null
     """
     return non_null_row_indices(relation, column_names)
