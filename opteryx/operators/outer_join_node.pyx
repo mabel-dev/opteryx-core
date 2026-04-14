@@ -26,6 +26,10 @@ from typing import List
 from libc.stdint cimport uint8_t
 from opteryx.compiled.draken.vectors.bool_vector cimport BoolVector, bool_vector_from_bits
 
+# Telemetry: number of times the outer-join bloom-filter Draken fast-path was applied.
+# Incremented when a probe morsel is filtered via the Draken bit-packed result path.
+BLOOM_FASTPATH_COUNTER = 0
+
 import pyarrow
 from opteryx.compiled.joins import build_side_hash_map
 from opteryx.compiled.joins import probe_side_hash_map
@@ -283,6 +287,9 @@ class OuterJoinNode(JoinNode):
                                 right_morsel = right_morsel.filter_mask(mask)
                                 eliminated_rows = orig_rows - right_morsel.num_rows
                                 self.readings["rows_eliminated_by_bloom_filter"] += eliminated_rows
+                                # Fast-path used — increment module-level counter for telemetry/tests
+                                global BLOOM_FASTPATH_COUNTER
+                                BLOOM_FASTPATH_COUNTER += 1
                                 # We've applied bloom filtering at Morsel level, no need for provider to
                                 # re-run the bloom check via Arrow buffers - suppress it.
                                 pass_filter_index = None

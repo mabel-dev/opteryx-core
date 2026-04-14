@@ -6,8 +6,7 @@
 # cython: wraparound=False
 # cython: boundscheck=False
 
-import numpy
-cimport numpy
+from array import array
 
 from libc.stdint cimport int64_t, uint64_t
 from libc.stddef cimport size_t
@@ -181,16 +180,33 @@ cpdef object build_side_carchar_map(
         ht.seal()
         return ht
 
-    # Carhar expects numpy arrays for now; we'll convert the indices and relevant hashes
-    cdef numpy.ndarray[numpy.int64_t, ndim=1] indices_np = numpy.empty(n_non_null, dtype=numpy.int64)
-    cdef numpy.ndarray[numpy.uint64_t, ndim=1] hashes_np = numpy.empty(n_non_null, dtype=numpy.uint64)
+    # Draken-native: allocate memoryviews instead of NumPy arrays
+    # Carchar accepts buffer protocol via nanobind
+    cdef int64_t* indices_buf = <int64_t*>malloc(n_non_null * sizeof(int64_t))
+    cdef uint64_t* hashes_buf = <uint64_t*>malloc(n_non_null * sizeof(uint64_t))
+
+    if indices_buf == NULL or hashes_buf == NULL:
+        if indices_buf != NULL:
+            free(indices_buf)
+        if hashes_buf != NULL:
+            free(hashes_buf)
+        raise MemoryError("Failed to allocate memory for index/hash buffers")
+
+    cdef int64_t[::1] indices_view = <int64_t[:n_non_null]>indices_buf
+    cdef uint64_t[::1] hashes_view = <uint64_t[:n_non_null]>hashes_buf
+    cdef Py_ssize_t i
 
     for i in range(n_non_null):
         row_idx = non_null_ptr[i]
-        indices_np[i] = row_idx
-        hashes_np[i] = row_hashes[row_idx]
+        indices_view[i] = row_idx
+        hashes_view[i] = row_hashes[row_idx]
 
-    ht.insert_batch(hashes_np, indices_np)
+    try:
+        ht.insert_batch(hashes_view, indices_view)
+    finally:
+        free(indices_buf)
+        free(hashes_buf)
+
     ht.seal()
     return ht
 
@@ -223,29 +239,40 @@ cpdef tuple inner_join_carchar(object right_relation, list join_columns, object 
     cdef long long t_after_hash = perf_counter_ns()
     last_hash_time_ns = t_after_hash - t_start
 
-    # Carchar expects numpy arrays
-    cdef numpy.ndarray[numpy.int64_t, ndim=1] probe_rows = numpy.empty(candidate_count, dtype=numpy.int64)
-    cdef numpy.ndarray[numpy.uint64_t, ndim=1] probe_hashes = numpy.empty(candidate_count, dtype=numpy.uint64)
+    # Draken-native: allocate memoryviews instead of NumPy arrays
+    # Carchar accepts buffer protocol via nanobind
+    cdef int64_t* probe_rows_buf = <int64_t*>malloc(candidate_count * sizeof(int64_t))
+    cdef uint64_t* probe_hashes_buf = <uint64_t*>malloc(candidate_count * sizeof(uint64_t))
+
+    if probe_rows_buf == NULL or probe_hashes_buf == NULL:
+        if probe_rows_buf != NULL:
+            free(probe_rows_buf)
+        if probe_hashes_buf != NULL:
+            free(probe_hashes_buf)
+        free(raw_hashes)
+        raise MemoryError("Failed to allocate memory for probe buffers")
+
+    cdef int64_t[::1] probe_rows_view = <int64_t[:candidate_count]>probe_rows_buf
+    cdef uint64_t[::1] probe_hashes_view = <uint64_t[:candidate_count]>probe_hashes_buf
+    cdef Py_ssize_t i
 
     for i in range(candidate_count):
         row_idx = non_null_ptr[i]
-        probe_rows[i] = row_idx
-        probe_hashes[i] = row_hashes[row_idx]
+        probe_rows_view[i] = row_idx
+        probe_hashes_view[i] = row_hashes[row_idx]
 
     cdef long long t_before_probe = perf_counter_ns()
-    left_np, right_np = left_hash_table.probe_join_indices(probe_hashes, probe_rows)
+    result_left, result_right = left_hash_table.probe_join_indices(probe_hashes_view, probe_rows_view)
     cdef long long t_after_probe = perf_counter_ns()
 
     free(raw_hashes)
+    free(probe_rows_buf)
+    free(probe_hashes_buf)
+
     last_probe_time_ns = t_after_probe - t_before_probe
     last_rows_hashed = num_rows
     last_candidate_rows = candidate_count
+    last_result_rows = len(result_left) if result_left is not None else 0
+    last_materialize_time_ns = 0
 
-    cdef long long t_before_numpy = perf_counter_ns()
-    left_np = numpy.asarray(left_np, dtype=numpy.int64)
-    right_np = numpy.asarray(right_np, dtype=numpy.int64)
-    cdef long long t_after_numpy = perf_counter_ns()
-    last_result_rows = left_np.shape[0]
-    last_materialize_time_ns = t_after_numpy - t_before_numpy
-
-    return left_np, right_np
+    return result_left, result_right
