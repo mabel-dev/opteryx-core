@@ -100,7 +100,7 @@ cpdef Int64Vector vector_position(StringVector haystack, object needle):
         else:
             needle_scalar = str(needle).encode("utf-8")
 
-    # Allocate result buffer with malloc instead of numpy.zeros
+    # Allocate result buffer with malloc
     result_ptr = <int64_t*>malloc(n * sizeof(int64_t))
     if result_ptr == NULL:
         raise MemoryError("Failed to allocate memory for result array")
