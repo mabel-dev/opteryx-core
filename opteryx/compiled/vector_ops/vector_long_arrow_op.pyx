@@ -6,7 +6,7 @@
 # cython: wraparound=False
 # cython: boundscheck=False
 
-import numpy
+from opteryx.compiled.draken.vectors.string_vector cimport StringVectorBuilder
 
 cpdef object vector_long_arrow_op(object arr, object key):
     """
@@ -19,21 +19,34 @@ cpdef object vector_long_arrow_op(object arr, object key):
             The key whose corresponding value is to be fetched from each dictionary.
 
     Returns:
-        numpy.ndarray: An array containing the values associated with the key in each dictionary
-                     or None where the key does not exist.
+        StringVector: A Draken string vector containing the values associated with the key
+                     in each dictionary, converted to strings, or None where the key does not exist.
     """
-    # Use a Python list for efficient accumulation (avoids numpy.empty allocation)
-    cdef list result = []
+    cdef Py_ssize_t n = len(arr)
+    cdef object value
+    cdef bytes value_bytes
+
+    # Use StringVectorBuilder for efficient construction
+    cdef StringVectorBuilder builder = StringVectorBuilder.with_estimate(n, 64)
 
     cdef Py_ssize_t i
     # Iterate over the list of dictionaries
-    for i in range(len(arr)):
+    for i in range(n):
         # Check if the key exists in the dictionary
         if key in arr[i]:
-            result.append(str(arr[i][key]))
+            value = arr[i][key]
+            if value is None:
+                builder.append_null()
+            else:
+                # Convert value to string
+                if isinstance(value, bytes):
+                    builder.append(value)
+                else:
+                    value_bytes = str(value).encode('utf-8')
+                    builder.append(value_bytes)
         else:
             # Append None if the key does not exist
-            result.append(None)
+            builder.append_null()
 
-    # Convert list to numpy array (single allocation at cold path)
-    return numpy.asarray(result, dtype=object)
+    # Return the constructed Draken string vector
+    return builder.finish()

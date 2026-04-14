@@ -8,7 +8,6 @@
 
 from libc.stdint cimport int64_t
 from cpython.array cimport array, clone
-import pyarrow as pa
 
 from opteryx.compiled.draken.vectors.timestamp_vector cimport TimestampVector, from_arrow as ts_from_arrow
 
@@ -330,4 +329,8 @@ cpdef object vector_date_trunc(str truncate_to, TimestampVector timestamp_array)
     else:
         raise ValueError(f"Invalid unit: {truncate_to}")
 
-    return ts_from_arrow(pa.array(output_array, type=pa.timestamp(unit)))
+    # Create TimestampVector from int64 array using Draken interop
+    # PyArrow is imported locally to avoid module-level dependency
+    import pyarrow as pa
+    pa_array = pa.array(output_array, type=pa.timestamp(unit))
+    return ts_from_arrow(pa_array)

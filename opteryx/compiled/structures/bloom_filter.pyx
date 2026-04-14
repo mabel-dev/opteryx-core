@@ -41,7 +41,6 @@ from cpython.array cimport array, clone
 
 from opteryx.compiled.draken.vectors.int64_vector cimport Int64Vector
 from opteryx.compiled.draken.morsels.morsel cimport Morsel
-from opteryx.compiled.table_ops.hash_ops cimport compute_row_hashes
 from opteryx.compiled.table_ops.null_avoidant_ops cimport non_null_row_indices
 
 # Reusable template arrays for zero-copy clone allocations
@@ -148,8 +147,13 @@ cdef class BloomFilter:
         cdef uint64_t* bit_array = self.bit_array
 
         if num_valid_rows > 0:
-            # Compute hashes only for non-null rows
-            compute_row_hashes(relation, columns, row_hashes)
+            # Compute hashes only for non-null rows — prefer Draken Morsel.hash()
+            cdef Morsel _m
+            if isinstance(relation, Morsel):
+                row_hashes = relation.hash(columns)
+            else:
+                _m = Morsel.from_arrow(relation)
+                row_hashes = _m.hash(columns)
 
             for i in range(num_valid_rows):
                 row_id = valid_row_ids_ptr[i]
@@ -219,8 +223,13 @@ cpdef BloomFilter create_bloom_filter(object relation, list columns):
     if num_valid_rows == 0:
         return bf
 
-    # Populate row hashes using the selected columns
-    compute_row_hashes(relation, columns, row_hashes)
+    # Populate row hashes using the selected columns (prefer Morsel.hash())
+    cdef Morsel _m
+    if isinstance(relation, Morsel):
+        row_hashes = relation.hash(columns)
+    else:
+        _m = Morsel.from_arrow(relation)
+        row_hashes = _m.hash(columns)
 
     # Precompute constants for faster access
     cdef uint64_t bit_mask = bf.bit_mask

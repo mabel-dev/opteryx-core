@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from typing import Optional
 
-import numpy
 from opteryx.types import OrsoTypes
 
 NUMERIC_VECTOR_ELEMENT_TYPES = frozenset(
@@ -66,13 +65,30 @@ def node_is_literal_numeric_vector(node) -> bool:
     if getattr(node, "type", None) == OrsoTypes.VECTOR:
         return True
     value = getattr(node, "value", None)
-    if not isinstance(value, (list, tuple, numpy.ndarray)):
+
+    # Check if value is a sequence type (list, tuple, or array-like)
+    # Handle numpy arrays without importing numpy by checking class name
+    if value is None:
         return False
+
+    value_type_name = type(value).__name__
+
+    # Accept lists, tuples, and numpy arrays (detected by class name)
+    if not isinstance(value, (list, tuple)) and value_type_name != "ndarray":
+        return False
+
+    # Check if it's a non-empty sequence of numeric values
     try:
-        vector = numpy.asarray(value, dtype=numpy.float32)
+        if len(value) == 0:
+            return False
+
+        # Try to convert all elements to float to verify they're numeric
+        # This is a lightweight check without numpy dependency
+        for elem in value:
+            float(elem)  # Will raise if not numeric
+        return True
     except (TypeError, ValueError):
         return False
-    return vector.ndim == 1 and vector.size > 0
 
 
 def node_is_constant_embed_call(node) -> bool:

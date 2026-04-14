@@ -6,9 +6,9 @@ from collections import OrderedDict
 from collections.abc import Sequence
 from pathlib import Path
 
-import numpy
 from opteryx.exceptions import InvalidConfigurationError
 from opteryx.third_party.cyan4973.xxhash import hash_bytes
+from opteryx.vectors import _embedding_math as numpy
 
 _embedding_provider = None
 _default_embedding_provider = None

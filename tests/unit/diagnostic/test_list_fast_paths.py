@@ -4,7 +4,8 @@ import sys
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
 import pyarrow as pa
-from opteryx.compiled.table_ops.hash_ops import compute_hashes
+
+import opteryx.compiled.draken as draken
 
 
 def test_list_of_ints_matches_per_element_hashing():
@@ -12,20 +13,21 @@ def test_list_of_ints_matches_per_element_hashing():
     data = [[i % 7 for _ in range(3)] for i in range(N)]
     t = pa.table({"l": pa.array(data)})
 
-    # Compute hashes using our function
-    h1 = compute_hashes(t, ["l"])
+    # Compute hashes using Draken Morsel.hash()
+    m = draken.Morsel.from_arrow(t)
+    h1 = m.hash(["l"])
     # Compute a Python-level reference by hashing tuples per-row (exact parity)
     # Compute a reference using the same mixing logic as the Cython implementation
-    SEED = 0x9e3779b97f4a7c15 & 0xFFFFFFFFFFFFFFFF
-    c1 = 0xbf58476d1ce4e5b9 & 0xFFFFFFFFFFFFFFFF
-    c2 = 0x94d049bb133111eb & 0xFFFFFFFFFFFFFFFF
-    FINAL_MUL = 0x9e3779b97f4a7c15 & 0xFFFFFFFFFFFFFFFF
+    SEED = 0x9E3779B97F4A7C15 & 0xFFFFFFFFFFFFFFFF
+    c1 = 0xBF58476D1CE4E5B9 & 0xFFFFFFFFFFFFFFFF
+    c2 = 0x94D049BB133111EB & 0xFFFFFFFFFFFFFFFF
+    FINAL_MUL = 0x9E3779B97F4A7C15 & 0xFFFFFFFFFFFFFFFF
 
     ref = []
     for row in data:
         # per-list hash
         if len(row) == 0:
-            list_hash = 0xab52d8afc1448992 & 0xFFFFFFFFFFFFFFFF  # EMPTY_HASH
+            list_hash = 0xAB52D8AFC1448992 & 0xFFFFFFFFFFFFFFFF  # EMPTY_HASH
         else:
             list_hash = SEED
             for elem in row:
@@ -39,7 +41,7 @@ def test_list_of_ints_matches_per_element_hashing():
         # final row mix (update_row_hash behavior)
         h = 0
         h = (h ^ list_hash) * FINAL_MUL & 0xFFFFFFFFFFFFFFFF
-        h ^= (h >> 32)
+        h ^= h >> 32
         ref.append(h)
 
     assert len(h1) == len(ref)
@@ -49,7 +51,7 @@ def test_list_of_ints_matches_per_element_hashing():
 
 def test_list_of_strings_and_chunked_slices():
     # Create long list and then create a chunked / sliced version
-    data = [[f'str{i % 10}' for _ in range(2)] for i in range(2000)]
+    data = [[f"str{i % 10}" for _ in range(2)] for i in range(2000)]
     arr = pa.array(data)
     # make chunked by slicing into two
     a1 = arr.slice(0, 1200)
@@ -59,8 +61,10 @@ def test_list_of_strings_and_chunked_slices():
 
     t_flat = pa.table({"l": arr})
 
-    h_flat = compute_hashes(t_flat, ["l"])
-    h_chunked = compute_hashes(t_chunked, ["l"])
+    m_flat = draken.Morsel.from_arrow(t_flat)
+    m_chunked = draken.Morsel.from_arrow(t_chunked)
+    h_flat = m_flat.hash(["l"])
+    h_chunked = m_chunked.hash(["l"])
 
     assert len(h_flat) == len(h_chunked)
     for i in range(len(h_flat)):
@@ -76,11 +80,14 @@ def test_nested_and_boolean_lists():
     data_bool = [[(i + j) % 2 == 0 for j in range(4)] for i in range(500)]
     t_bool = pa.table({"bl": pa.array(data_bool)})
 
-    hn = compute_hashes(t_nested, ["nl"])
-    hb = compute_hashes(t_bool, ["bl"])
+    m_nested = draken.Morsel.from_arrow(t_nested)
+    m_bool = draken.Morsel.from_arrow(t_bool)
+    hn = m_nested.hash(["nl"])
+    hb = m_bool.hash(["bl"])
 
     assert len(hn) == 500
     assert len(hb) == 500
+
 
 if __name__ == "__main__":
     from tests import run_tests
