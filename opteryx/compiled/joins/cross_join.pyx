@@ -51,11 +51,11 @@ cpdef tuple build_rows_indices_and_column(object column):
         Py_ssize_t str_end
 
     if row_count == 0:
-        return int64_from_sequence(None), numpy.empty(0, dtype=object)
+        return int64_from_sequence(None), []
 
     total_size = offsets32[arr_offset + row_count] - offsets32[arr_offset]
     if total_size == 0:
-        return int64_from_sequence(None), numpy.empty(0, dtype=object)
+        return int64_from_sequence(None), []
 
     indices_buf = IntBuffer(total_size)
     flat_data_buf = ObjectBuffer(total_size)
