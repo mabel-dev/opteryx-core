@@ -51,7 +51,7 @@ def _get_http_head_pool():
 class _FileBuffer:
     """Lightweight file-like wrapper around a bytes object.
 
-    Holds the raw bytes and exposes a zero-copy memoryview for Arrow/rugo.
+    Holds the raw bytes and exposes a zero-copy memoryview for consumers.
     Avoids the unnecessary copy that io.BytesIO(data) would introduce —
     BytesIO copies bytes into its own internal buffer, but callers only
     ever access `.memoryview` here.

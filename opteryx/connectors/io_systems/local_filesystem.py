@@ -1,8 +1,7 @@
 """
 Local filesystem implementation using Opteryx's optimized I/O.
 
-This implements pyarrow.fs.FileSystem interface but uses memory-mapped files
-and stream wrappers for high-performance local file access.
+Uses memory-mapped files and stream wrappers for high-performance local file access.
 """
 
 import os
@@ -33,8 +32,8 @@ class MemoryMappedFile:
     """
     Wrapper providing file-like interface over memory-mapped files.
 
-    This allows Arrow to treat our optimized memory-mapped files as
-    standard file objects while maintaining zero-copy semantics.
+    Provides standard file object semantics while maintaining zero-copy
+    semantics through direct memoryview access.
     """
 
     def __init__(self, path: str):

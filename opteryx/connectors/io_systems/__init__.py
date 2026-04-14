@@ -1,8 +1,8 @@
 """
-Custom Arrow FileSystem implementations using Opteryx's optimized I/O.
+Custom filesystem implementations for Opteryx I/O operations.
 
-These filesystems implement the pyarrow.fs.FileSystem interface but use
-Opteryx's memory-view-based readers and stream wrappers for optimal performance.
+Provides memory-view-based readers and stream wrappers for optimal performance
+across local, GCS, and HTTP storage backends.
 """
 
 __all__ = [
