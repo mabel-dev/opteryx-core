@@ -6,7 +6,7 @@ Direct SIMD/NEON string splitting with runtime CPU detection.
 This code is fast AND works - no compiler errors.
 """
 
-from libc.stdint cimport int32_t, int64_t, uintptr_t
+from libc.stdint cimport int32_t, int64_t, uintptr_t, uint8_t
 from libc.stdlib cimport malloc, free, calloc
 from libc.stddef cimport size_t
 
@@ -180,7 +180,7 @@ from opteryx.compiled.draken.vectors.array_vector cimport array_vector_from_part
 from opteryx.compiled.draken.core.buffers cimport DrakenVarBuffer, DRAKEN_ENCODING_DICTIONARY, DRAKEN_STRING
 from opteryx.compiled.draken.vectors.string_vector cimport from_arrow as string_vector_from_arrow
 
-cpdef object vector_split(StringVector vec, char delimiter):
+def vector_split(StringVector vec, char delimiter):
     """
     FAST string splitting that actually compiles.
     Works on x86 and ARM, no compiler errors.
@@ -188,20 +188,38 @@ cpdef object vector_split(StringVector vec, char delimiter):
     cdef DrakenVarBuffer* dptr = vec.ptr
     cdef int64_t n = <int64_t>dptr.length
     cdef StringVector flat_child
+    cdef StringVector empty_child
+    cdef StringVector null_child
     cdef int32_t num_parts
     cdef int32_t* list_offsets
+    cdef int32_t* list_offs
+    cdef int32_t* empty_offsets
+    cdef int32_t* null_offsets
     cdef int32_t* child_offsets = NULL
+    cdef int32_t seg_count
     cdef int64_t idx
+    cdef int64_t i
 
-    import pyarrow as pa
-
+    # Handle empty input: return empty ArrayVector
     if n <= 0:
-        return pa.array([], type=pa.list_(pa.binary()))
+        empty_child = StringVector(0)  # Empty StringVector
+        empty_offsets = <int32_t*>malloc(1 * sizeof(int32_t))
+        if empty_offsets == NULL:
+            raise MemoryError()
+        empty_offsets[0] = 0
+        return array_vector_from_parts(empty_child, empty_offsets, NULL, 0)
 
     # Constant encoding: split once, replicate n times
     if vec._has_const:
         if vec._const_is_null or vec._const_value == NULL:
-            return pa.nulls(n, type=pa.list_(pa.binary()))
+            # Return ArrayVector with all nulls
+            null_child = StringVector(0)  # Empty child for null values
+            null_offsets = <int32_t*>malloc((n + 1) * sizeof(int32_t))
+            if null_offsets == NULL:
+                raise MemoryError()
+            for idx in range(n + 1):
+                null_offsets[idx] = 0
+            return array_vector_from_parts(null_child, null_offsets, NULL, n)
 
         const_bytes = PyBytes_FromStringAndSize(
             <const char*>vec._const_value.data, vec._const_value.length
@@ -209,8 +227,15 @@ cpdef object vector_split(StringVector vec, char delimiter):
         parts = const_bytes.split(bytes([delimiter]))
 
         # Phase 5.3: Return Draken-native ArrayVector for constant split
-        # This avoids all PyArrow/NumPy overhead for the outer container.
-        flat_child = string_vector_from_arrow(pa.array(parts, type=pa.binary()))
+        # Build StringVector directly from split parts without PyArrow
+        from opteryx.compiled.draken.vectors.string_vector import StringVectorBuilder
+        builder = StringVectorBuilder.with_estimate(len(parts), 8)
+        for part in parts:
+            if part is None:
+                builder.append_null()
+            else:
+                builder.append_bytes(part, len(part))
+        flat_child = builder.finish()
         num_parts = <int32_t>len(parts)
         list_offsets = <int32_t*>malloc((n + 1) * sizeof(int32_t))
         if list_offsets == NULL:
@@ -237,13 +262,35 @@ cpdef object vector_split(StringVector vec, char delimiter):
                 result.append(val.encode("utf-8").split(delim_bytes))
             else:
                 result.append(val.split(delim_bytes))
-        return pa.array(result, type=pa.list_(pa.binary()))
+
+        # Build ArrayVector from the split results without PyArrow
+        from opteryx.compiled.draken.vectors.string_vector import StringVectorBuilder
+        flat_builder = StringVectorBuilder.with_estimate(sum(len(r) if r else 1 for r in result), 8)
+
+        list_offs = <int32_t*>malloc((n + 1) * sizeof(int32_t))
+        if list_offs == NULL:
+            raise MemoryError()
+
+        seg_count = 0
+        list_offs[0] = 0
+
+        for i, row_parts in enumerate(result):
+            if row_parts is None:
+                # For null values, skip (single null entry per row)
+                list_offs[i + 1] = seg_count
+            else:
+                for part in row_parts:
+                    flat_builder.append_bytes(part, len(part))
+                    seg_count += 1
+                list_offs[i + 1] = seg_count
+
+        flat_child = flat_builder.finish()
+        return array_vector_from_parts(flat_child, list_offs, NULL, n)
 
     # Dense encoding: SIMD fast path
     cdef const char* raw_data = <const char*>dptr.data
     cdef const int32_t* dense_offsets = dptr.offsets
 
-    cdef int64_t i
     cdef int64_t start, end
 
     cdef int64_t total_bytes = dense_offsets[n] - dense_offsets[0]
@@ -397,30 +444,20 @@ cpdef object vector_split(StringVector vec, char delimiter):
     child_offsets[segment_idx] = write_pos
 
     # Build Draken vectors
-    # Create the flattened child StringVector first
-    cdef _BufferCleanup cleanup_output_data = _BufferCleanup()
-    cleanup_output_data.ptr = output_data
-    cleanup_output_data.use_aligned_free = True
+    # Create the flattened child StringVector directly from allocated buffers (no PyArrow needed)
+    # The StringVector will take ownership of the allocated buffers
+    cdef StringVector child_vec = StringVector(segment_idx, 0, wrap=True)
+    child_vec.ptr = <DrakenVarBuffer*>malloc(sizeof(DrakenVarBuffer))
+    if child_vec.ptr == NULL:
+        raise MemoryError()
 
-    cdef _BufferCleanup cleanup_child_offsets = _BufferCleanup()
-    cleanup_child_offsets.ptr = child_offsets
-    cleanup_child_offsets.use_aligned_free = True
-
-    cdef object py_child_data_buf = pa.foreign_buffer(
-        <uintptr_t>output_data, write_pos,
-        base=cleanup_output_data
-    )
-    cdef object py_child_offs_buf = pa.foreign_buffer(
-        <uintptr_t>child_offsets, (segment_idx + 1) * sizeof(int32_t),
-        base=cleanup_child_offsets
-    )
-
-    # Construct the child StringVector from foreign buffers
-    cdef object py_child_array = pa.Array.from_buffers(
-        pa.binary(), segment_idx,
-        [None, py_child_offs_buf, py_child_data_buf]
-    )
-    cdef StringVector child_vec = string_vector_from_arrow(py_child_array)
+    # Initialize the DrakenVarBuffer structure
+    child_vec.ptr.length = segment_idx
+    child_vec.ptr.data = <uint8_t*>output_data
+    child_vec.ptr.offsets = child_offsets
+    child_vec.ptr.null_bitmap = NULL
+    child_vec.ptr.type = DRAKEN_STRING
+    child_vec.owns_data = True
 
     # Construct the resulting ArrayVector (ListArray equivalent)
     # array_vector_from_parts copies the vector_offsets and takes ownership

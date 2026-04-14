@@ -7,12 +7,11 @@
 # cython: boundscheck=False
 
 from libc.stdint cimport int64_t, uint64_t
-from libc.stdlib cimport malloc, free
 
 from opteryx.compiled.draken.vectors.int64_vector cimport Int64Vector
 from opteryx.compiled.structures.buffers cimport IntBuffer, Int32Buffer
-from opteryx.compiled.table_ops.hash_ops cimport compute_row_hashes
-from opteryx.compiled.table_ops.null_avoidant_ops cimport non_null_row_indices
+from opteryx.compiled.draken.morsels.morsel cimport Morsel
+from opteryx.compiled.morsel_ops.null_filter cimport non_null_row_indices
 
 cpdef tuple nested_loop_join(left_relation, right_relation, list left_columns, list right_columns):
     """
@@ -36,22 +35,13 @@ cpdef tuple nested_loop_join(left_relation, right_relation, list left_columns, l
     if nl == 0 or nr == 0:
         return left_indexes.to_int32_buffer(), right_indexes.to_int32_buffer()
 
-    cdef uint64_t* left_raw_hashes = <uint64_t*>malloc(left_relation.num_rows * sizeof(uint64_t))
-    cdef uint64_t* right_raw_hashes = <uint64_t*>malloc(right_relation.num_rows * sizeof(uint64_t))
-    if left_raw_hashes == NULL or right_raw_hashes == NULL:
-        if left_raw_hashes != NULL:
-            free(left_raw_hashes)
-        if right_raw_hashes != NULL:
-            free(right_raw_hashes)
-        raise MemoryError("Failed to allocate memory for hash buffers")
+    cdef Morsel left_morsel = Morsel.from_arrow(left_relation)
+    cdef Morsel right_morsel = Morsel.from_arrow(right_relation)
 
-    cdef uint64_t[::1] left_hashes = <uint64_t[:left_relation.num_rows]>left_raw_hashes
-    cdef uint64_t[::1] right_hashes = <uint64_t[:right_relation.num_rows]>right_raw_hashes
+    cdef uint64_t[::1] left_hashes = left_morsel.hash(left_columns)
+    cdef uint64_t[::1] right_hashes = right_morsel.hash(right_columns)
     cdef int64_t i, j, left_row, right_row
     cdef uint64_t left_hash, right_hash
-
-    compute_row_hashes(left_relation, left_columns, left_hashes)
-    compute_row_hashes(right_relation, right_columns, right_hashes)
 
     if nl <= nr:
         for i in range(nl):
@@ -71,8 +61,5 @@ cpdef tuple nested_loop_join(left_relation, right_relation, list left_columns, l
                 if right_hash == left_hashes[left_row]:
                     left_indexes.append(left_row)
                     right_indexes.append(right_row)
-
-    free(left_raw_hashes)
-    free(right_raw_hashes)
 
     return left_indexes.to_int32_buffer(), right_indexes.to_int32_buffer()

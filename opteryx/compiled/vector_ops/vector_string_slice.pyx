@@ -6,7 +6,8 @@
 # cython: wraparound=False
 # cython: boundscheck=False
 
-from libc.stdint cimport int32_t, uint8_t
+from libc.stdint cimport int32_t, int64_t, uint8_t
+from cpython.array cimport array, clone
 
 from opteryx.compiled.draken.vectors.string_vector cimport StringVector
 from opteryx.compiled.draken.vectors.int64_vector cimport Int64Vector, from_sequence as int64_from_sequence
@@ -22,17 +23,24 @@ cpdef Int64Vector vector_string_length(StringVector vec):
     cdef DrakenVarBuffer* ptr = vec.ptr
     cdef Py_ssize_t n = ptr.length
     cdef uint8_t* null_bm
-    cdef numpy.ndarray[int64_t, ndim=1] result = numpy.zeros(n, dtype=numpy.int64)
-    cdef int64_t[::1] rview = result
+    cdef int64_t[::1] rview
     cdef Py_ssize_t i
     cdef DrakenConstantStringPayload* const_val
+
+    # Use array module to allocate data (Cython will manage it)
+    cdef array template = array('q')  # 'q' = signed long long (int64)
+    cdef array result_array = clone(template, n, False)
+    rview = result_array
 
     if vec._has_const:
         if not vec._const_is_null and vec._const_value != NULL:
             const_val = vec._const_value
             for i in range(n):
                 rview[i] = const_val.length
-        # else: all-null → zeros (already initialised)
+        else:
+            # all-null → zeros
+            for i in range(n):
+                rview[i] = 0
         return int64_from_sequence(rview)
 
     null_bm = ptr.null_bitmap

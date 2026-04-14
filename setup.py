@@ -842,15 +842,8 @@ extensions = [
         extra_compile_args=CPP_FLAGS,
     ),
     Extension(
-        name="opteryx.compiled.table_ops.hash_ops",
-        sources=["opteryx/compiled/table_ops/hash_ops.pyx"],
-        include_dirs=include_dirs + ["third_party/abseil"],
-        language="c++",
-        extra_compile_args=CPP_FLAGS,
-    ),
-    Extension(
-        name="opteryx.compiled.table_ops.null_avoidant_ops",
-        sources=["opteryx/compiled/table_ops/null_avoidant_ops.pyx"],
+        "opteryx.compiled.morsel_ops.null_filter",
+        sources=["opteryx/compiled/morsel_ops/null_filter.pyx"],
         include_dirs=include_dirs,
         language="c++",
         extra_compile_args=CPP_FLAGS,

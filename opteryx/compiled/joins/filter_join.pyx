@@ -1,4 +1,3 @@
-opteryx-core/opteryx/compiled/joins/filter_join.pyx
 # cython: language_level=3
 # cython: nonecheck=False
 # cython: cdivision=True
