@@ -100,8 +100,8 @@ def left_join(
 
     right_hash = probe_side_hash_map(right_morsel, right_columns)
 
-    for h, right_rows in right_hash.hash_table.items():
-        left_rows = left_hash.get(h)
+    for h, right_rows in right_hash.items_py():
+        left_rows = left_hash.rows_for(h)
         if not left_rows:
             continue
         for l in left_rows:
@@ -180,7 +180,7 @@ def right_join(
 
     right_hashes = right_morsel.hash(right_columns)
     for i in range(len(right_morsel)):
-        left_rows = left_hash_table.get(right_hashes[i])
+        left_rows = left_hash_table.rows_for(right_hashes[i])
         if left_rows:
             seen_flags[i] = 1
             for left_idx in left_rows:
@@ -237,7 +237,7 @@ def full_join(
 
     left_hashes = left_morsel.hash(left_columns)
     for i in range(len(left_morsel)):
-        right_rows = right_hash_table.get(left_hashes[i])
+        right_rows = right_hash_table.rows_for(left_hashes[i])
         if right_rows:
             for right_idx in right_rows:
                 left_indexes.append(i)
