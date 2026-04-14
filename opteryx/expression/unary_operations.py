@@ -1,124 +1,40 @@
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# See the License at http://www.apache.org/licenses/LICENSE-2.0
-# Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
-
 """
-Implement conditions which are essentially unary statements, usually IS statements.
+Unary operations (IS NULL, IS TRUE, IS FALSE) - Draken-native only.
 
-This are executed as functions on arrays rather than functions on elements in arrays.
+This module implements unary logical operations assuming inputs are Draken vectors.
+No Arrow/numpy fallbacks. No defensive hasattr checks.
+If you get an AttributeError, your input isn't Draken - that's the point.
 """
 
-import numpy
-import pyarrow
+
+def _is_null(values):
+    """Check for null values. Input must be Draken vector."""
+    return values.is_null()
 
 
-def _is_null(values: numpy.ndarray) -> numpy.ndarray:
-    """
-    Returns a boolean mask where True indicates that the corresponding element in values is null (NaN, NaT, etc.).
-
-    Parameters:
-        values: numpy.ndarray
-            1D array of various types.
-
-    Returns:
-        numpy.ndarray: 1D array of booleans serving as a mask.
-    """
-    if isinstance(values, pyarrow.Array):
-        from pyarrow import compute
-
-        mask = compute.is_null(values)
-        if pyarrow.types.is_floating(values.type):
-            mask = compute.or_(mask, compute.is_nan(values))
-        return mask
-    if values.dtype.kind in ("f", "b", "i"):  # float, bool, int
-        return numpy.isnan(values)
-    elif values.dtype.kind == "M":  # datetime64
-        return numpy.isnat(values)
-    elif values.dtype.kind in ("S", "O", "U"):  # string or object
-        return numpy.vectorize(lambda x: x is None)(values)
-    else:
-        raise TypeError(
-            f"Unsupported type for null comparison: {values.dtype} ({values.dtype.kind})"
-        )
+def _is_not_null(values):
+    """Check for non-null values. Input must be Draken vector."""
+    return values.is_null().not_vector()
 
 
-def _is_not_null(values: numpy.ndarray) -> numpy.ndarray:
-    """
-    Returns a boolean mask where True indicates that the corresponding element in values is not null (NaN).
-
-    Parameters:
-        values: numpy.ndarray
-            1D array of boolean and/or null values.
-
-    Returns:
-        numpy.ndarray: 1D array of booleans serving as a mask.
-    """
-    return numpy.logical_not(_is_null(values))
+def _is_true(values):
+    """Check for TRUE values in boolean vector. Input must be Draken BoolVector."""
+    return values.equals(True)
 
 
-def _is_true(values: numpy.ndarray) -> numpy.ndarray:
-    """
-    Returns a boolean mask where True indicates that the corresponding element in values is True.
-
-    Parameters:
-        values: np.ndarray
-            1D array of boolean and/or null values.
-
-    Returns:
-        np.ndarray: 1D array of booleans serving as a mask.
-    """
-    if isinstance(values, pyarrow.Array):
-        values = values.to_numpy(False)
-    return values == True
+def _is_false(values):
+    """Check for FALSE values in boolean vector. Input must be Draken BoolVector."""
+    return values.equals(False)
 
 
-def _is_false(values: numpy.ndarray) -> numpy.ndarray:
-    """
-    Returns a boolean mask where True indicates that the corresponding element in values is False.
-
-    Parameters:
-        values: np.ndarray
-            1D array of boolean and/or null values.
-
-    Returns:
-        np.ndarray: 1D array of booleans serving as a mask.
-    """
-    if isinstance(values, pyarrow.Array):
-        values = values.to_numpy(False)
-    return values == False
+def _is_not_true(values):
+    """Check for NOT TRUE values. Input must be Draken BoolVector."""
+    return values.equals(True).not_vector()
 
 
-def _is_not_true(values: numpy.ndarray) -> numpy.ndarray:
-    """
-    Returns a boolean mask where True indicates that the corresponding element in values is not True.
-
-    Parameters:
-        values: np.ndarray
-            1D array of boolean and/or null values.
-
-    Returns:
-        np.ndarray: 1D array of booleans serving as a mask.
-    """
-    if isinstance(values, pyarrow.Array):
-        values = values.to_numpy(False)
-    return values != True
-
-
-def _is_not_false(values: numpy.ndarray) -> numpy.ndarray:
-    """
-    Returns a boolean mask where True indicates that the corresponding element in values is not False.
-
-    Parameters:
-        values: np.ndarray
-            1D array of boolean and/or null values.
-
-    Returns:
-        np.ndarray: 1D array of booleans serving as a mask.
-    """
-    if isinstance(values, pyarrow.Array):
-        values = values.to_numpy(False)
-    return values != False
+def _is_not_false(values):
+    """Check for NOT FALSE values. Input must be Draken BoolVector."""
+    return values.equals(False).not_vector()
 
 
 UNARY_OPERATIONS = {
