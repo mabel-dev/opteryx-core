@@ -67,28 +67,30 @@ numpy and pyarrow imports **ONLY** allowed in interop methods:
 
 **All hot-path NumPy/PyArrow eliminated** ✅
 
-### WARM PATH: ACCEPTABLE (Session 42+)
-- `outer_join_node.pyx`, `non_equi_join_node.pyx`: Buffer Morsels, concat_tables at end (warm phase)
-- Assessment: Arrow use is isolated to build-phase buffering, not hot computation
+### WARM PATH: PARTIALLY MIGRATED
+- `outer_join_node.pyx`: Join providers now operate on Morsels; Arrow remains only at execution boundaries for key-cast compatibility
+- `non_equi_join_node.pyx`: still warm-path buffered
+- Assessment: hot join work is Draken-native; remaining Arrow use is boundary-only
 
 ## 🟢 SESSION 49: Table Ops Draken Migration (COMPLETE ✅)
 
 **Status:** ✅ COMPLETE - All remaining table_ops.hash_ops references migrated and files deleted
 - ✅ Migrated `nested_loop_join_equals.pyx` to `Morsel.hash()`
-- ✅ Migrated `outer_join.pyx` (both `probe_side_hash_map` and `right_join`) to `Morsel.hash()`
+- ✅ Migrated outer-join helper hashing to Morsel-based join helpers
 - ✅ Removed `hash_ops` extension from setup.py
 - ✅ Deleted `hash_ops.pyx` and `hash_ops.pxd` stub files
+- ✅ Outer join provider logic moved into `outer_join_node.pyx` and now runs on Morsels
 - ✅ Fixed pre-existing numpy import in vector_string_slice.pyx
 - ✅ Compilation: Successful (`make c`) - Full clean build
 - ✅ Tests: 86/88 passing (97%) — Same 2 pre-existing planner failures, NO NEW REGRESSIONS
 
 **Files Modified:**
 1. `opteryx/compiled/joins/nested_loop_join_equals.pyx` - Removed malloc/compute_row_hashes, uses Morsel.from_arrow().hash()
-2. `opteryx/compiled/joins/outer_join.pyx` - Removed 3 malloc calls (probe, left, right), all use Morsel hashing
-3. `opteryx/compiled/structures/bloom_filter.pyx` - Moved Morsel cdef outside if block (Cython syntax fix)
-4. `opteryx/compiled/joins/filter_join.pyx` - Removed stray path line at top of file (Cython syntax error)
-5. `opteryx/compiled/vector_ops/vector_string_slice.pyx` - Added `import numpy` for runtime function calls
-6. `setup.py` - Removed hash_ops Extension entry (no longer built)
+2. `opteryx/compiled/structures/bloom_filter.pyx` - Moved Morsel cdef outside if block (Cython syntax fix)
+3. `opteryx/compiled/joins/filter_join.pyx` - Removed stray path line at top of file (Cython syntax error)
+4. `opteryx/compiled/vector_ops/vector_string_slice.pyx` - Added `import numpy` for runtime function calls
+5. `setup.py` - Removed hash_ops Extension entry (no longer built)
+6. `opteryx/operators/outer_join_node.pyx` - Outer join providers now consume Morsels and return Morsel chunks
 
 **Files Deleted:**
 - `opteryx/compiled/table_ops/hash_ops.pyx` - Deleted (was fail-fast stub, now replaced by Morsel API)
@@ -102,14 +104,15 @@ numpy and pyarrow imports **ONLY** allowed in interop methods:
 **Key Changes:**
 - **Eliminated malloc/free patterns:** Replaced manual buffer allocation with `Morsel.from_arrow()` + `Morsel.hash()`
 - **Fail-fast contract:** Removed ImportError stub since no code imports it anymore
-- **No performance regression:** Tests maintain 97% pass rate (86/88), with same 2 unrelated failures
-- **Draken-native only:** All hash computation now goes through `Morsel.hash()` (fast, nogil where possible)
+- **No performance regression:** Tests still show the same 2 pre-existing failures; no new failures were introduced by the outer-join changes
+- **Draken-native only in join work:** Outer-join matching now uses Morsel operations; Arrow remains only at boundaries where key-cast plumbing still expects it
 
 **Architecture Achievement:**
 - `table_ops.hash_ops` fully eradicated
-- All join hashing operations now use Draken `Morsel.hash()` API
+- Join hashing work is Draken-native
+- Outer-join provider logic now uses Morsel-based join assembly
 - Manual buffer management eliminated in join hot paths
-- Aligns with performance-first architecture (Draken-native operations preferred)
+- Aligns with performance-first architecture
 
 **Migration Path Reference:**
 Old API (REMOVED):
@@ -118,7 +121,7 @@ from opteryx.compiled.table_ops.hash_ops cimport compute_row_hashes
 compute_row_hashes(relation, columns, hashes_memoryview)
 ```
 
-New API (CURRENT):
+Current API pattern:
 ```cython
 from opteryx.compiled.draken.morsels.morsel cimport Morsel
 morsel = Morsel.from_arrow(relation)
@@ -564,7 +567,7 @@ Database engines can afford lower guards than general-purpose code because they 
 
 ## 🔴 REMAINING WORK
 
-### Phase 5.5.C: Audit Other Operators (COMPLETE ✅)
+### Phase 5.5.C: Audit Other Operators (PARTIALLY COMPLETE)
 - **Status:** Grep audit finished. 100+ references found across 8 operators.
 - **Findings:**
 
@@ -595,7 +598,7 @@ Database engines can afford lower guards than general-purpose code because they 
 
 ---
 
-### Phase 5.5.D: Architectural Assessment (DEFERRED - Warm Paths Acceptable)
+### Phase 5.5.D: Architectural Assessment (IN PROGRESS)
 
 **Analysis Summary:**
 After code review, remaining NumPy/PyArrow refs require architectural decisions, not quick fixes:
@@ -631,15 +634,16 @@ After code review, remaining NumPy/PyArrow refs require architectural decisions,
 - ✅ Join hashing (Morsel.hash)
 - ✅ Expression operators (Draken-native)
 - ✅ Distinct (Draken-native)
+- ✅ Outer-join matching logic (Morsel-native)
 
 **Acceptable Warm/Cold Paths:**
-- Warm: Join buffering (Morsel-based, Arrow concat at end)
+- Warm: Join buffering and join-key cast boundaries
 - Cold: Schema transformation, initialization
 
 **Architectural Achievement:**
-- Hot paths: **100% NumPy/PyArrow-free**
-- Warm/Cold: Strategic use only (acceptable per design)
-- Performance: No regressions (86/88 tests, baseline stable)
+- Hot paths: **100% NumPy-free** and join computation is Draken-native
+- Warm/Cold: Arrow is now constrained to boundary-only cast plumbing
+- Performance: no new regressions; the same 2 unrelated test failures remain
 
 ---
 
