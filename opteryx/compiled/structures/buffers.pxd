@@ -45,6 +45,7 @@ cdef class IntBuffer:
     cdef Py_ssize_t _strides[1]
 
     cpdef void append(self, int64_t value)
+    cpdef void append_repeated(self, int64_t value, size_t count)
     cpdef void extend(self, iterable)
     cpdef numpy.ndarray[int64_t, ndim=1] to_numpy(self)
     cpdef Int32Buffer to_int32_buffer(self)

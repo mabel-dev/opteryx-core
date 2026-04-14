@@ -26,7 +26,8 @@ from opteryx import EOS
 from . import BasePlanNode
 
 from cpython.mem cimport PyMem_Malloc, PyMem_Free
-from libc.stdint cimport int32_t, int64_t
+from libc.stdint cimport int32_t, int64_t, uint64_t
+from libc.stdlib cimport malloc, free
 
 # you may not use this file except in compliance with the License.
 # See the License at http://www.apache.org/licenses/LICENSE-2.0
@@ -635,7 +636,7 @@ class HeapSortNode(BasePlanNode):
         return self._materialize_rows(morsel, selected)
 
     def _vector_top_n(self, morsel):
-        cdef Py_ssize_t take_count, row_index
+        cdef Py_ssize_t take_count, row_index, i, j, dims
         cdef bint nearest_neighbor_order, descending
 
         if self.limit is None or self.limit <= 0 or len(self.order_by) != 1:
@@ -662,6 +663,10 @@ class HeapSortNode(BasePlanNode):
         if query_vector is None or query_vector.size == 0:
             return None
 
+        # Convert query vector to float32 memoryview
+        cdef float[::1] query_view = numpy.ascontiguousarray(query_vector, dtype=numpy.float32)
+        dims = query_view.shape[0]
+
         source_keys = [
             getattr(source_identifier.schema_column, "identity", None),
             getattr(source_identifier, "source_column", None),
@@ -679,83 +684,122 @@ class HeapSortNode(BasePlanNode):
         if source_values is None:
             return None
 
-        dense_rows = []
-        source_indices = []
+        # Pass 1: Filter and count valid rows
+        source_indices_list = []
+        valid_rows_list = []
         for row_index in range(<Py_ssize_t>len(source_values)):
             row_vector = self._coerce_numeric_vector(source_values[row_index])
             if row_vector is None:
                 continue
-            if row_vector.shape[0] != query_vector.shape[0]:
+            if row_vector.shape[0] != dims:
                 continue
-            dense_rows.append(row_vector)
-            source_indices.append(row_index)
+            valid_rows_list.append(row_vector)
+            source_indices_list.append(row_index)
 
-        if not dense_rows:
+        cdef Py_ssize_t n_valid = len(valid_rows_list)
+        if n_valid == 0:
             return None
 
-        dense_vectors = numpy.vstack(dense_rows).astype(numpy.float32, copy=False)
-        self.readings["vector_topk_candidate_rows"] += dense_vectors.shape[0]
-        take_count = min(<Py_ssize_t>self.limit, <Py_ssize_t>dense_vectors.shape[0])
+        # Pass 2: Materialize into contiguous buffers
+        cdef float* dense_buf = <float*>malloc(n_valid * dims * sizeof(float))
+        cdef int64_t* row_ids_buf = <int64_t*>malloc(n_valid * sizeof(int64_t))
+        if dense_buf == NULL or row_ids_buf == NULL:
+            if dense_buf != NULL: free(dense_buf)
+            if row_ids_buf != NULL: free(row_ids_buf)
+            raise MemoryError("Failed to allocate vector buffers")
+
+        cdef float[:, ::1] dense_view = <float[:n_valid, :dims]>dense_buf
+        cdef int64_t[::1] row_ids_view = <int64_t[:n_valid]>row_ids_buf
+
+        for i in range(n_valid):
+            row_ids_view[i] = source_indices_list[i]
+            row_vector = valid_rows_list[i]
+            # Copy row vector into dense matrix
+            row_mv = numpy.ascontiguousarray(row_vector, dtype=numpy.float32)
+            for j in range(dims):
+                dense_view[i, j] = row_mv[j]
+
+        self.readings["vector_topk_candidate_rows"] += n_valid
+        take_count = min(<Py_ssize_t>self.limit, n_valid)
         if take_count == 0:
+            free(dense_buf)
+            free(row_ids_buf)
             return morsel.empty()
 
-        query_vector = numpy.ascontiguousarray(query_vector, dtype=numpy.float32)
-        dense_vectors = numpy.ascontiguousarray(dense_vectors, dtype=numpy.float32)
-        row_ids = numpy.asarray(source_indices, dtype=numpy.int64)
         nearest_neighbor_order = _is_nearest_neighbor_order(order_expression.value, direction)
 
+        # Usearch optimization
         if (
             self._USEARCH_ENABLED
             and self.vector_topk_candidate
-            and dense_vectors.shape[0] >= self._USEARCH_MIN_ROWS
+            and n_valid >= self._USEARCH_MIN_ROWS
             and nearest_neighbor_order
         ):
             try:
                 from opteryx.compiled.nanobind import usearch_native
 
                 index = usearch_native.UsearchIndex(
-                    dimensions=query_vector.shape[0],
-                    capacity=dense_vectors.shape[0],
+                    dimensions=dims,
+                    capacity=n_valid,
                     metric="cos",
                     expansion_add=16,
                     expansion_search=16,
                 )
                 self.readings["feature_vector_topk_usearch"] += 1
-                self.readings["vector_topk_usearch_rows_indexed"] += dense_vectors.shape[0]
-                index.add_batch(row_ids, dense_vectors)
-                found_ids, _ = index.search(query_vector, take_count)
+                self.readings["vector_topk_usearch_rows_indexed"] += n_valid
+                index.add_batch(row_ids_view, dense_view)
+                found_ids, _ = index.search(query_view, take_count)
                 if found_ids:
+                    free(dense_buf)
+                    free(row_ids_buf)
                     return self._materialize_rows(morsel, [int(row_id) for row_id in found_ids])
             except Exception:
                 self.readings["feature_vector_topk_usearch_fallbacks"] += 1
+            finally:
+                pass  # Buffers are freed later if not returned here
 
+        # Exact search
         try:
             from opteryx.compiled.nanobind import vector_search
 
             if nearest_neighbor_order:
                 found_ids, _ = vector_search.exact_search_cosine(
-                    query_vector,
-                    row_ids,
-                    dense_vectors,
+                    query_view,
+                    row_ids_view,
+                    dense_view,
                     take_count,
                 )
                 self.readings["feature_vector_topk_exact"] += 1
                 if found_ids:
-                    return self._materialize_rows(morsel, [int(row_id) for row_id in found_ids])
-                return morsel.empty()
+                    result = self._materialize_rows(morsel, [int(row_id) for row_id in found_ids])
+                else:
+                    result = morsel.empty()
+                free(dense_buf)
+                free(row_ids_buf)
+                return result
 
-            scores = numpy.asarray(
-                vector_search.score_cosine(query_vector, dense_vectors), dtype=numpy.float32
-            )
+            # Score and rank manually (Non-nearest neighbor case or complex sort)
+            scores_mv = vector_search.score_cosine(query_view, dense_view)
+            self.readings["feature_vector_topk_exact"] += 1
         except Exception:
+            free(dense_buf)
+            free(row_ids_buf)
             return None
 
-        self.readings["feature_vector_topk_exact"] += 1
+        # Clean up buffers before final ranking (scores_mv is independent)
+        # scores_mv is a list or numpy array depending on vector_search implementation
+        # we convert it to numpy for ranking logic
+        scores = numpy.asarray(scores_mv, dtype=numpy.float32)
+        free(dense_buf)
+        free(row_ids_buf)
+
         scores = numpy.nan_to_num(scores, nan=0.0, posinf=0.0, neginf=0.0)
         if order_expression.value == "COSINE_DISTANCE":
             scores = 1.0 - numpy.clip(scores, -1.0, 1.0)
 
         descending = _is_descending(direction)
+        row_ids = numpy.array(source_indices_list, dtype=numpy.int64)
+
         if take_count < scores.shape[0]:
             if descending:
                 candidate_indices = numpy.argpartition(-scores, take_count - 1)[:take_count]
@@ -771,7 +815,7 @@ class HeapSortNode(BasePlanNode):
         ranked_dense_indices = candidate_indices[order]
 
         top_indices = [
-            int(source_indices[int(index)]) for index in ranked_dense_indices[:take_count]
+            int(source_indices_list[int(index)]) for index in ranked_dense_indices[:take_count]
         ]
         return self._materialize_rows(morsel, top_indices)
 
