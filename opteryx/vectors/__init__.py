@@ -20,13 +20,11 @@ from __future__ import annotations
 
 import importlib
 from types import ModuleType
-from typing import Any
-from typing import List
-from typing import Set
+from typing import Any, List, Set
 
 # Submodules that compose the vectors package. Add future vector-specific modules
 # here to have them automatically imported and re-exported.
-_SUBMODULE_NAMES = ("embeddings", "vector_types")
+_SUBMODULE_NAMES = ("embeddings", "vector_types", "vector_ranking")
 
 # Import submodules and bind them into this package namespace.
 for _name in _SUBMODULE_NAMES:
