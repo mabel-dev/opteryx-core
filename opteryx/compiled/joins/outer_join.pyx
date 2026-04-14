@@ -17,18 +17,18 @@ signature collisions with the existing build-side helper exported from
 from libc.stdint cimport uint64_t, int64_t
 
 from opteryx.compiled.draken.vectors.int64_vector cimport Int64Vector
-from opteryx.compiled.structures.hash_table cimport HashTable
+from opteryx.compiled.structures.carchar_index cimport CarcharJoinIndexWrapper
 from opteryx.compiled.draken.morsels.morsel cimport Morsel
 from opteryx.compiled.morsel_ops.null_filter cimport non_null_row_indices
 
 
-cpdef HashTable probe_side_hash_map(object relation, list join_columns):
+cpdef CarcharJoinIndexWrapper probe_side_hash_map(object relation, list join_columns):
     """
     Build a hash table for the join operations (probe-side) using Morsel hashing.
 
-    Accepts either Arrow table or Morsel and returns a HashTable.
+    Accepts either Arrow table or Morsel and returns a CarcharJoinIndexWrapper.
     """
-    cdef HashTable ht = HashTable()
+    cdef CarcharJoinIndexWrapper ht = CarcharJoinIndexWrapper()
     cdef Int64Vector non_null_indices_vec
     cdef const int64_t* non_null_ptr
     cdef Py_ssize_t n_non_null
@@ -48,6 +48,6 @@ cpdef HashTable probe_side_hash_map(object relation, list join_columns):
     n_non_null = len(non_null_indices_vec)
 
     for i in range(n_non_null):
-        ht.insert(row_hashes[non_null_ptr[i]], non_null_ptr[i])
+        ht.insert_row(row_hashes[non_null_ptr[i]], non_null_ptr[i])
 
     return ht

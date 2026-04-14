@@ -705,13 +705,6 @@ extensions = [
         extra_link_args=LD_EXTRA,
     ),
     Extension(
-        "opteryx.compiled.structures.hash_table",
-        sources=["opteryx/compiled/structures/hash_table.pyx"],
-        include_dirs=include_dirs,
-        language="c++",
-        extra_compile_args=CPP_FLAGS,
-    ),
-    Extension(
         "opteryx.compiled.structures.carchar_set",
         sources=[
             "opteryx/compiled/structures/carchar_set.pyx",
@@ -722,6 +715,22 @@ extensions = [
         extra_compile_args=CPP_FLAGS,
         depends=[
             "third_party/mabel/carchar/carchar_set.hpp",
+            "third_party/mabel/carchar/carchar_common.hpp",
+            "third_party/mabel/carchar/carchar_simd.hpp",
+        ],
+    ),
+    Extension(
+        "opteryx.compiled.structures.carchar_index",
+        sources=[
+            "opteryx/compiled/structures/carchar_index.pyx",
+            "src/cpp/cpu_features.cpp",
+        ],
+        include_dirs=include_dirs,
+        language="c++",
+        extra_compile_args=CPP_FLAGS,
+        depends=[
+            "third_party/mabel/carchar/carchar_join_index.hpp",
+            "third_party/mabel/carchar/carchar_index.hpp",
             "third_party/mabel/carchar/carchar_common.hpp",
             "third_party/mabel/carchar/carchar_simd.hpp",
         ],
