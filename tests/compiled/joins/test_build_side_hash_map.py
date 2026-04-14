@@ -1,11 +1,11 @@
 import numpy
 import pyarrow as pa
-
 from opteryx.compiled.joins.join_definitions import (
     build_side_hash_map,
 )
-from opteryx.compiled.table_ops.hash_ops import compute_hashes
 from opteryx.compiled.table_ops.null_avoidant_ops import non_null_indices
+
+import opteryx.compiled.draken as draken
 
 
 def test_build_side_hash_map_basic_values():
@@ -20,7 +20,8 @@ def test_build_side_hash_map_basic_values():
 
     # Compute the row hashes and non-null indices via the compiled helper
     num_rows = table.num_rows
-    row_hashes = compute_hashes(table, ["x"])  # returns array.array('Q')
+    morsel = draken.Morsel.from_arrow(table)
+    row_hashes = morsel.hash(["x"])  # uint64_t[::1]-like memoryview of per-row hashes
     non_nulls = non_null_indices(table, ["x"])  # typed memoryview
 
     # For every non-null row, ensure the hash map returns a non-empty list
@@ -28,6 +29,7 @@ def test_build_side_hash_map_basic_values():
         row_idx = int(non_nulls[i])
         key = int(row_hashes[row_idx])
         found = ht.get(key)
-        assert found is not None and len(found) >= 1, f"Missing mapping for hash {key} (row {row_idx})"
+        assert found is not None and len(found) >= 1, (
+            f"Missing mapping for hash {key} (row {row_idx})"
+        )
         assert row_idx in found, f"Row idx {row_idx} not present in mapping for hash {key}: {found}"
-

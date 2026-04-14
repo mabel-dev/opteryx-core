@@ -5,7 +5,6 @@
 
 from typing import Any, Dict, List, Optional, Union
 
-import numpy
 import pyarrow
 from pyarrow import compute
 
@@ -126,7 +125,7 @@ def MapAccessOp(array, key):
             type=pyarrow.binary(),
         )
 
-    if isinstance(first_element, (list, pyarrow.ListScalar, numpy.ndarray)):
+    if isinstance(first_element, (list, pyarrow.ListScalar)):
         from opteryx.compiled.draken.interop.arrow import vector_from_arrow
         from opteryx.compiled.vector_ops import vector_get_element
 
@@ -203,67 +202,59 @@ def _ip_containment(left: List[Optional[str]], right: List[str]) -> List[Optiona
 
 def _dispatch_arithmetic_operation(
     op: str, left, right, left_type: OrsoTypes, right_type: OrsoTypes
-) -> Union[None, numpy.ndarray, pyarrow.Array]:
+) -> Union[None, pyarrow.Array]:
     """
-    Dispatch arithmetic operations with Draken kernels as primary path.
+    Dispatch arithmetic operations with Draken kernels.
 
-    Implements fail-fast semantics per architectural contract ("Always prefer
-    failure over silent degradation"):
-
-    - If EITHER operand is a Draken vector: use Draken kernels EXCLUSIVELY.
-      If the kernel returns None (unsupported type combo), return None immediately
-      WITHOUT falling back to NumPy. Caller will raise NotImplementedError.
-
-    - If NEITHER operand is a Draken vector: delegate to NumPy functions as
-      a secondary fallback for unsupported type combinations.
-
-    This ensures that Draken operands never silently degrade to NumPy.
+    Per architectural contract (FAIL-FAST):
+    - Expression layer ONLY accepts Draken vectors
+    - Draken kernels handle all vector operations
+    - If kernel returns None (unsupported), raise error immediately
+    - NO silent fallback to Python operators
 
     Parameters:
         op: str - Operator name (e.g., "Plus", "Minus")
-        left: Operand (Draken vector, PyArrow array, or scalar)
-        right: Operand (Draken vector, PyArrow array, or scalar)
+        left: Operand (Draken vector required)
+        right: Operand (Draken vector required)
         left_type: OrsoTypes - Type of left operand
         right_type: OrsoTypes - Type of right operand
 
     Returns:
-        Result of the operation, or None if the operation cannot be performed
-    """
-    # Phase 5.3.2: Try Draken vector kernels first for arithmetic operators
-    # If a Draken vector is involved, use Draken kernels exclusively (fail-fast)
-    if is_draken_vector(left) or is_draken_vector(right):
-        from opteryx.expression.evaluator.arithmetic_dispatch import call_arithmetic_op
+        Result of the operation
 
-        result = call_arithmetic_op(op, left, right)
-        # Return whatever Draken gives us (result or None)
-        # Do not silently fall back to NumPy per fail-fast principle
+    Raises:
+        NotImplementedError: If operation not supported for input types
+    """
+    from opteryx.expression.evaluator.arithmetic_dispatch import call_arithmetic_op
+
+    # Use Draken kernels exclusively
+    result = call_arithmetic_op(op, left, right)
+
+    if result is not None:
         return result
 
-    # No Draken operands: use NumPy functions as fallback
-    operation = OPERATOR_FUNCTION_MAP.get(op)
-    if operation is not None:
-        return operation(left, right)
-
-    # Operation not supported
-    return None
+    # Kernel not available: architectural violation
+    raise NotImplementedError(
+        f"Operator `{op}` is not implemented for types {left_type} and {right_type}. "
+        f"Left: {type(left).__name__}, Right: {type(right).__name__}"
+    )
 
 
 def binary_operations(
     left, left_type: OrsoTypes, operator: str, right, right_type: OrsoTypes
-) -> Union[numpy.ndarray, pyarrow.Array]:
+) -> pyarrow.Array:
     """
     Execute inline operators (e.g. the add in 3 + 4).
 
+    Per architectural contract: only Draken vectors or Python scalars accepted.
+    PyArrow/NumPy inputs are architectural violations (fail-fast).
+
     Parameters:
-        left: Union[numpy.ndarray, pyarrow.Array]
-            The left operand
-        operator: str
-            The operator to be applied
-        right: Union[numpy.ndarray, pyarrow.Array]
-            The right operand
+        left: Operand (Draken vector or scalar)
+        operator: str - Operator to apply
+        right: Operand (Draken vector or scalar)
     Returns:
-        Union[numpy.ndarray, pyarrow.Array]
-            The result of the binary operation
+        Result of the binary operation
     """
     # Phase 5.3.2: Try Draken arithmetic dispatch first for arithmetic operators
     # This prioritizes native Draken kernels over NumPy operations (fail-fast)
@@ -307,45 +298,50 @@ def binary_operations(
         and right_type in (OrsoTypes.DATE, OrsoTypes.TIMESTAMP)
     ):
         # date - date = INTERVAL (months=0, microseconds=days_diff * MICROS_PER_DAY)
-        # Normalise both sides to a pyarrow date32 or timestamp array — avoids the
-        # numpy object-array-of-datetime.date path that breaks astype(int64).
+        # Work directly with Draken vectors; no PyArrow intermediate
         from opteryx.expression.intervals import _intervals_to_month_day_nano
 
-        def _to_pyarrow_date(arr):
-            if hasattr(arr, "to_arrow"):
-                return arr.to_arrow()
-            if isinstance(arr, pyarrow.ChunkedArray):
-                return arr.combine_chunks() if arr.num_chunks > 1 else arr.chunk(0)
-            if isinstance(arr, pyarrow.Array):
-                return arr
-            if isinstance(arr, (numpy.datetime64,)):
-                return pyarrow.array([arr])
-            if hasattr(arr, "isoformat") or hasattr(arr, "year"):
-                return pyarrow.array([arr])
-            # numpy object array (datetime.date values from _inner_evaluate)
-            return pyarrow.array(arr)
+        # Convert left to int64 array
+        if hasattr(left, "to_numpy"):
+            # Draken vector
+            left_values = left.to_numpy(False).astype(numpy.int64)
+        elif isinstance(left, (list, tuple)):
+            # Python sequence
+            left_values = numpy.array(
+                [int(x) if x is not None else 0 for x in left], dtype=numpy.int64
+            )
+        elif isinstance(left, int):
+            # Python scalar
+            left_values = numpy.array([left], dtype=numpy.int64)
+        else:
+            raise TypeError(f"Unsupported type for date subtraction (left): {type(left).__name__}")
 
-        left_arr = _to_pyarrow_date(left)
-        right_arr = _to_pyarrow_date(right)
+        # Convert right to int64 array
+        if hasattr(right, "to_numpy"):
+            # Draken vector
+            right_values = right.to_numpy(False).astype(numpy.int64)
+        elif isinstance(right, (list, tuple)):
+            # Python sequence
+            right_values = numpy.array(
+                [int(x) if x is not None else 0 for x in right], dtype=numpy.int64
+            )
+        elif isinstance(right, int):
+            # Python scalar
+            right_values = numpy.array([right], dtype=numpy.int64)
+        else:
+            raise TypeError(
+                f"Unsupported type for date subtraction (right): {type(right).__name__}"
+            )
 
-        # Cast to int32 days-since-epoch (date32 → int32 is zero-copy in Arrow)
-        left_days = left_arr.cast(pyarrow.int32())
-        right_days = right_arr.cast(pyarrow.int32())
-        day_diff = compute.subtract(left_days, right_days)
-
-        rows = [None if not d.is_valid else (0, d.as_py() * MICROSECONDS_PER_DAY) for d in day_diff]
+        # Compute difference and convert to intervals
+        day_diff = left_values - right_values
+        rows = [(0, int(d) * MICROSECONDS_PER_DAY) for d in day_diff]
         return _intervals_to_month_day_nano(rows)
 
     elif operator == "BitwiseOr" and OrsoTypes.VARCHAR in (left_type, right_type):
         return _ip_containment(left, right)
 
     elif operator == "StringConcat":
-        # Support numpy-filled columns from expression evaluation
-        if isinstance(left, numpy.ndarray):
-            left = pyarrow.array(left)
-        if isinstance(right, numpy.ndarray):
-            right = pyarrow.array(right)
-
         if hasattr(left, "type") and pyarrow.types.is_binary(left.type):
             left = left.cast(pyarrow.large_utf8())
         if hasattr(right, "type") and pyarrow.types.is_binary(right.type):
@@ -361,7 +357,6 @@ def binary_operations(
         if isinstance(right, pyarrow.Scalar) and pyarrow.types.is_binary(right.type):
             right = right.cast(pyarrow.large_utf8())
 
-        # Fallback to align to large_string for pyarrow-based operands
         if hasattr(left, "type") and not pyarrow.types.is_large_string(left.type):
             try:
                 left = left.cast(pyarrow.large_utf8())
@@ -379,23 +374,36 @@ def binary_operations(
     return operation(left, right)
 
 
+def _unsupported_bitwise_op(op_name):
+    """Factory for bitwise operations that are not supported in expression layer."""
+
+    def _op(left, right):
+        raise TypeError(
+            f"Bitwise operation '{op_name}' requires Draken vectors at expression layer. "
+            f"Left type: {type(left).__name__}, Right type: {type(right).__name__}"
+        )
+
+    return _op
+
+
 # fmt:off
 OPERATOR_FUNCTION_MAP: Dict[str, Any] = {
-    # Arithmetic operators: Draken kernels are primary; NumPy is fallback
-    "Plus": numpy.add,
-    "Minus": numpy.subtract,
-    "Multiply": numpy.multiply,
-    "Divide": numpy.divide,
-    "Modulo": numpy.mod,
-    "MyIntegerDivide": lambda left, right: numpy.trunc(numpy.divide(left, right)).astype(numpy.int64),
+    # Arithmetic operators: dispatch via _dispatch_arithmetic_operation() first
+    # If this table is reached, it's an error
+    "Plus": lambda l, r: _unsupported_bitwise_op("Plus")(l, r),
+    "Minus": lambda l, r: _unsupported_bitwise_op("Minus")(l, r),
+    "Multiply": lambda l, r: _unsupported_bitwise_op("Multiply")(l, r),
+    "Divide": lambda l, r: _unsupported_bitwise_op("Divide")(l, r),
+    "Modulo": lambda l, r: _unsupported_bitwise_op("Modulo")(l, r),
+    "MyIntegerDivide": lambda l, r: _unsupported_bitwise_op("MyIntegerDivide")(l, r),
     # String operations
     "StringConcat": compute.binary_join_element_wise,
-    # Bitwise operations
-    "BitwiseOr": numpy.bitwise_or,
-    "BitwiseAnd": numpy.bitwise_and,
-    "BitwiseXor": numpy.bitwise_xor,
-    "ShiftLeft": numpy.left_shift,
-    "ShiftRight": numpy.right_shift,
+    # Bitwise operations: route to native vector ops
+    "BitwiseOr": lambda left, right: vector_ops.vector_bitwise_or(left, right),
+    "BitwiseAnd": lambda left, right: vector_ops.vector_bitwise_and(left, right),
+    "BitwiseXor": lambda left, right: vector_ops.vector_bitwise_xor(left, right),
+    "ShiftLeft": lambda left, right: vector_ops.vector_left_shift(left, right),
+    "ShiftRight": lambda left, right: vector_ops.vector_right_shift(left, right),
     # Special extraction operators
     "Arrow": ArrowOp,
     "LongArrow": LongArrowOp,

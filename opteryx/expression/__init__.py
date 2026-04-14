@@ -185,11 +185,7 @@ def _typed_constant_vector(value, length: int, schema_column):
     return None
 
 
-LOGICAL_OPERATIONS: Dict[NodeType, Callable] = {
-    NodeType.AND: pyarrow.compute.and_,
-    NodeType.OR: pyarrow.compute.or_,
-    NodeType.XOR: pyarrow.compute.xor,
-}
+LOGICAL_OPERATIONS: Dict[NodeType, Callable] = {}
 
 
 def evaluate_dnf(expressions: List[Node], table: Table) -> list:
@@ -419,36 +415,77 @@ def _inner_evaluate(root: Node, table: Table):
 
     identity = root.schema_column.identity if root.schema_column else random_string()
 
-    # if we have this column already, just return it
+    # if we have this column already, convert to Draken at interop boundary
     if identity in table.column_names:
-        return table[identity].to_numpy(False)
+        from opteryx.compiled.draken.interop.arrow import vector_from_arrow
 
-    # LITERAL TYPES
+        col = table[identity]
+        if hasattr(col, "to_arrow"):
+            # Already a Draken vector
+            return col
+        # PyArrow column: convert to Draken
+        arrow_col = col if isinstance(col, pyarrow.Array) else col.combine_chunks()
+        return vector_from_arrow(arrow_col)
+
+    # LITERAL TYPES - return Draken constant vectors
     if node_type == NodeType.LITERAL:
-        # if it's a literal value, return it once for every value in the table
+        from opteryx.compiled.draken.vectors.bool_vector import BoolVector
+        from opteryx.compiled.draken.vectors.float64_vector import Float64Vector
+        from opteryx.compiled.draken.vectors.int64_vector import Int64Vector
+        from opteryx.compiled.draken.vectors.string_vector import StringVector
+
         literal_type = root.type
-        if literal_type in (OrsoTypes.ARRAY, OrsoTypes.VECTOR):
-            # creating ARRAY/VECTOR columns is expensive, so we don't create one full length
-            return [root.value]
+        value = root.value
+        length = table.num_rows
+
+        # Normalize NumPy scalar values before constructing constant vectors
+        if hasattr(value, "item") and not isinstance(value, (bytes, bytearray, str)):
+            try:
+                value = value.item()
+            except Exception:
+                pass
+
+        if literal_type == OrsoTypes.DATE:
+            if isinstance(value, datetime.date):
+                value = date_to_int64_days(value)
+            elif isinstance(value, int):
+                pass
+            else:
+                value = int(value)
+            return Int64Vector.from_constant(value, length)
+
+        if literal_type == OrsoTypes.TIMESTAMP:
+            if isinstance(value, datetime.datetime):
+                value = timestamp_to_int64_us(value)
+            elif isinstance(value, datetime.date):
+                value = timestamp_to_int64_us(value)
+            elif not isinstance(value, int):
+                value = int(value)
+            return Int64Vector.from_constant(value, length)
+
+        if literal_type == OrsoTypes.INTEGER:
+            return Int64Vector.from_constant(int(value), length)
+
+        if literal_type == OrsoTypes.FLOAT:
+            return Float64Vector.from_constant(float(value), length)
+
+        if literal_type == OrsoTypes.BOOLEAN:
+            return BoolVector.from_constant(bool(value), length)
+
         if literal_type == OrsoTypes.VARCHAR:
-            return [root.value] * table.num_rows
+            return StringVector.from_constant(value, length)
+
         if literal_type == OrsoTypes.BLOB:
-            return [root.value] * table.num_rows
+            return StringVector.from_constant(value, length)
+
+        if literal_type in (OrsoTypes.ARRAY, OrsoTypes.VECTOR):
+            # Complex types remain non-constant to avoid speculative conversion
+            return [value]
+
         if literal_type == OrsoTypes.INTERVAL:
-            return pyarrow.array([root.value] * table.num_rows)
-        if literal_type == OrsoTypes.DATE and isinstance(root.value, (int, numpy.integer)):
-            return [int(root.value)] * table.num_rows
-        if literal_type == OrsoTypes.DATE and isinstance(root.value, datetime.date):
-            return [date_to_int64_days(root.value)] * table.num_rows
-        if literal_type == OrsoTypes.TIMESTAMP and isinstance(root.value, (int, numpy.integer)):
-            return [int(root.value)] * table.num_rows
-        if literal_type == OrsoTypes.TIMESTAMP and isinstance(root.value, datetime.datetime):
-            return [timestamp_to_int64_us(root.value)] * table.num_rows
-        if literal_type == OrsoTypes.TIMESTAMP and isinstance(root.value, datetime.date):
-            return [timestamp_to_int64_us(root.value)] * table.num_rows
-        if isinstance(literal_type, OrsoTypes):
-            literal_type = literal_type.native_type
-        return [root.value] * table.num_rows
+            return pyarrow.array([value] * length)
+
+        return [value]
 
     # BOOLEAN OPERATORS
     if node_type & LOGICAL_TYPE == LOGICAL_TYPE:  # type: ignore
@@ -458,29 +495,25 @@ def _inner_evaluate(root: Node, table: Table):
             return short_cut_and(root, table)
 
         if node_type in LOGICAL_OPERATIONS:
-            left = (
-                _inner_evaluate(root.left, table)
-                if root.left
-                else pyarrow.nulls(1, type=pyarrow.bool_())
-            )
-            right = (
-                _inner_evaluate(root.right, table)
-                if root.right
-                else pyarrow.nulls(1, type=pyarrow.bool_())
-            )
+            left = _inner_evaluate(root.left, table) if root.left else None
+            right = _inner_evaluate(root.right, table) if root.right else None
 
-            if not isinstance(left, pyarrow.Array):
-                if left.__class__.__name__ == "BoolVector":
-                    left = left.to_arrow()
-                else:
-                    left = pyarrow.array(left, type=pyarrow.bool_())
-            if not isinstance(right, pyarrow.Array):
-                if right.__class__.__name__ == "BoolVector":
-                    right = right.to_arrow()
-                else:
-                    right = pyarrow.array(right, type=pyarrow.bool_())
+            if left.__class__.__name__ != "BoolVector":
+                raise TypeError(
+                    f"Boolean operator `{node_type}` requires BoolVector inputs; got {type(left).__name__}"
+                )
+            if right.__class__.__name__ != "BoolVector":
+                raise TypeError(
+                    f"Boolean operator `{node_type}` requires BoolVector inputs; got {type(right).__name__}"
+                )
 
-            return LOGICAL_OPERATIONS[node_type](left, right)  # type: ignore
+            if node_type == NodeType.AND:
+                return left.and_vector(right)
+            if node_type == NodeType.OR:
+                return left.or_vector(right)
+            if node_type == NodeType.XOR:
+                return left.xor_vector(right)
+            raise NotImplementedError(f"Boolean operator `{node_type}` is not implemented")
 
         if node_type == NodeType.NOT:
             centre = (
@@ -488,18 +521,9 @@ def _inner_evaluate(root: Node, table: Table):
                 if root.centre
                 else pyarrow.nulls(1, type=pyarrow.bool_())
             )
-            # Convert to numpy array if it's not already a PyArrow array
-            # This handles memoryviews, Cython memoryviewslices, and other array-like objects
-            if not isinstance(centre, pyarrow.Array):
-                if centre.__class__.__name__ == "BoolVector":
-                    centre = centre.to_arrow()
-                else:
-                    centre = numpy.asarray(centre)
-                    # Convert numeric types (e.g., uint8 from list_contains_any) to boolean
-                    if numpy.issubdtype(centre.dtype, numpy.integer):
-                        centre = centre.astype(numpy.bool_)
-                    centre = pyarrow.array(centre, type=pyarrow.bool_())
-            return pyarrow.compute.invert(centre)
+            if centre.__class__.__name__ == "BoolVector":
+                return centre.xor_vector(centre.not_vector())
+            raise TypeError(f"Boolean NOT requires BoolVector input; got {type(centre).__name__}")
 
     # INTERAL IDENTIFIERS
     if node_type & INTERNAL_TYPE == INTERNAL_TYPE:  # type: ignore
@@ -539,12 +563,7 @@ def _inner_evaluate(root: Node, table: Table):
             # Apply the cast kernel(s, *params)
             result = kernel(source, *params)
 
-            # Phase 5.3.1 PoC: Propagate Draken vectors directly (no conversion to numpy/arrow)
-            # Only convert lists to numpy arrays (fallback cases for heterogeneous types)
-            # This preserves native vector types: Float64Vector, Int64Vector, etc.
-            if isinstance(result, list):
-                result = numpy.array(result)
-
+            # Propagate Draken vectors directly; keep fallback values native.
             return result
         if node_type == NodeType.AGGREGATOR:
             # detected as an aggregator, but here it's an identifier because it
@@ -555,7 +574,16 @@ def _inner_evaluate(root: Node, table: Table):
         if node_type == NodeType.EVALUATED:
             if root.schema_column.identity not in table.column_names:
                 raise ColumnReferencedBeforeEvaluationError(column=root.schema_column.name)
-            return table[root.schema_column.identity].to_numpy(zero_copy_only=False)
+            # Convert to Draken vector at interop boundary
+            from opteryx.compiled.draken.interop.arrow import vector_from_arrow
+
+            col = table[root.schema_column.identity]
+            if hasattr(col, "to_arrow"):
+                # Already a Draken vector
+                return col
+            # PyArrow column: convert to Draken
+            arrow_col = col if isinstance(col, pyarrow.Array) else col.combine_chunks()
+            return vector_from_arrow(arrow_col)
         if node_type == NodeType.COMPARISON_OPERATOR:
             if (
                 root.left.node_type == NodeType.LITERAL
@@ -616,12 +644,26 @@ def _inner_evaluate(root: Node, table: Table):
 
             if right is None:
                 if root.right.node_type == NodeType.IDENTIFIER:
-                    right = table[root.right.schema_column.identity]
+                    from opteryx.compiled.draken.interop.arrow import vector_from_arrow
+
+                    col = table[root.right.schema_column.identity]
+                    if hasattr(col, "to_arrow"):
+                        right = col
+                    else:
+                        arrow_col = col if isinstance(col, pyarrow.Array) else col.combine_chunks()
+                        right = vector_from_arrow(arrow_col)
                 else:
                     right = _inner_evaluate(root.right, table)
             if left is None:
                 if root.left.node_type == NodeType.IDENTIFIER:
-                    left = table[root.left.schema_column.identity]
+                    from opteryx.compiled.draken.interop.arrow import vector_from_arrow
+
+                    col = table[root.left.schema_column.identity]
+                    if hasattr(col, "to_arrow"):
+                        left = col
+                    else:
+                        arrow_col = col if isinstance(col, pyarrow.Array) else col.combine_chunks()
+                        left = vector_from_arrow(arrow_col)
                 else:
                     left = _inner_evaluate(root.left, table)
 

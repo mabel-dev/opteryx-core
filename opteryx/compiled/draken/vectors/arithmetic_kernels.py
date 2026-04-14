@@ -60,22 +60,21 @@ def _compute_result_with_null_propagation(left, right, operator_func):
 
 def _make_vector_from_result(result, vector_type):
     """Convert result list to Draken vector."""
-    import pyarrow as pa
+    from opteryx.compiled.draken.interop.arrow import vector_from_sequence
+    from opteryx.types import OrsoTypes
 
-    from opteryx.compiled.draken.interop.arrow import vector_from_arrow
-
-    # Map VectorType to PyArrow type
-    arrow_types = {
-        VectorType.INT64: pa.int64(),
-        VectorType.FLOAT64: pa.float64(),
-        VectorType.BOOL: pa.bool_(),
+    # Map VectorType to OrsoTypes for Draken vector construction
+    type_map = {
+        VectorType.INT64: OrsoTypes.INTEGER,
+        VectorType.FLOAT64: OrsoTypes.DOUBLE,
+        VectorType.BOOL: OrsoTypes.BOOLEAN,
     }
 
-    if vector_type not in arrow_types:
+    if vector_type not in type_map:
         raise ValueError(f"Unsupported result type: {vector_type}")
 
-    arrow_array = pa.array(result, type=arrow_types[vector_type])
-    return vector_from_arrow(arrow_array)
+    # Use Draken's vector_from_sequence to create typed vector without PyArrow
+    return vector_from_sequence(result, type_map[vector_type])
 
 
 # ============================================================================

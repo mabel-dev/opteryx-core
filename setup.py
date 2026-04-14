@@ -5,6 +5,7 @@ Simplified setup script for Opteryx - builds all Cython extensions and Rust modu
 import glob
 import os
 import platform
+import re
 import sys
 import threading
 
@@ -350,8 +351,11 @@ COMMON_SIMD_SOURCES = [
 ]
 
 # Read version and metadata
-with open(f"{LIBRARY}/__version__.py", "r", encoding="UTF8") as v:
-    exec(v.read())
+with open(f"{LIBRARY}/__version__.py", "r") as v:
+    content = v.read()
+    for match in re.finditer(r'^(__\w+__)\s*=\s*["\']?([^"\']+)["\']?$', content, re.MULTILINE):
+        var_name, var_value = match.groups()
+        globals()[var_name] = var_value
 
 with open("README.md", "r", encoding="UTF8") as f:
     long_description = f.read()
@@ -831,17 +835,6 @@ extensions = [
             "opteryx/compiled/morsel_ops/sort.pyx",
             "src/cpp/simd_remap.cpp",
             "src/cpp/simd_env.cpp",
-            "src/cpp/cpu_features.cpp",
-        ],
-        include_dirs=include_dirs,
-        language="c++",
-        extra_compile_args=CPP_FLAGS,
-    ),
-    Extension(
-        "opteryx.compiled.table_ops.distinct",
-        sources=[
-            "opteryx/compiled/table_ops/distinct.pyx",
-            "src/cpp/intbuffer.cpp",
             "src/cpp/cpu_features.cpp",
         ],
         include_dirs=include_dirs,

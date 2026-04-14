@@ -464,51 +464,31 @@ If you want incremental improvement without architectural change:
 
 ---
 
-## ⏭️ NEXT STEPS - PHASE 3 & BEYOND
+3. **Draken-native literal and identifier evaluation** (Implemented)
+   - Primitive literals now emit typed Draken constant vectors
+   - Identifier lookup converts Arrow columns to Draken at the boundary
+   - CAST now preserves Draken vectors directly
+   - Remaining cleanup is focused on keeping boolean paths Draken-native where possible
 
-**Phase 2 Status: ✅ COMPLETE**
-- Strict fail-fast casting implemented
-- Expression layer now enforces Draken-native contract
-- Tests stable at 86/88 (97%)
+4. **Boolean NOT path cleanup** (Implemented)
+   - Removed `numpy.asarray(...)` from the NOT path
+   - Non-Arrow boolean inputs now stay in Arrow-compatible form without NumPy materialization
+   - Goal: keep expression outputs vector-native end-to-end
 
-**Phase 3: Remaining Expression Layer (Next Priority)**
-
-**High-Value Opportunities:**
-1. **Simplify LOGICAL_OPERATIONS in `__init__.py`** (Medium Effort)
-   - Currently uses `pyarrow.compute.and_`, `or_`, `xor` (lines 188-192)
-   - Problem: BoolVector doesn't have and_/or_/xor methods yet
-   - Options:
-     - A) Implement these methods in BoolVector (Draken-native)
-     - B) Use Draken vector comparison methods to build boolean results
-     - C) Keep PyArrow compute for logical ops (acceptable - warm path only)
-   - Decision: TBD - requires BoolVector extension or architecture review
-
-2. **Remove Type Coercion NumPy Usage** (Low-Medium Effort)
-   - Files: `type_coercion.py` (numpy.generic, numpy.datetime64, numpy.issubdtype)
-   - Status: Currently acceptable (warm path, type detection only)
-   - Effort: 2-4 hours to replace with VectorType dispatch
-
-3. **Audit Remaining NumPy/PyArrow in Expression** (Low Effort - Just counting)
+5. **Audit remaining expression semantics** (Low Effort - Just counting)
    - Run full grep to measure remaining imports
    - Prioritize by hot-path impact
-   - Target: ~70% reduction in expression layer
+   - Target: continue reducing expression-layer dependency on NumPy/PyArrow
+
+5. **Audit remaining expression semantics** (Low Effort - Just counting)
+   - Run full grep to measure remaining imports
+   - Prioritize by hot-path impact
+   - Target: continue reducing expression-layer dependency on NumPy/PyArrow
 
 **Phase 1 Status: ✅ COMPLETE (Already Done)**
-- ✅ Arithmetic dispatch is Draken-first (Phase 5.3.2 PoC was committed)
-- ✅ Binary operators use Draken kernels before NumPy fallback
-- ✅ Fail-fast semantics for arithmetic (no silent degradation)
-
-**Session 44 Active Work (Archived):**
-- ✅ Phase 5.5.A.1 (Carchar Draken Rewrite) — COMPLETE
-  - Replaced NumPy arrays with malloc'd memoryviews throughout Carchar integration
-  - Results: ~8-10 NumPy refs eliminated from hot-path join build/probe
-  - Tests: 87/88 passing, no regressions
-
-**Remaining High-Value Candidates (Earlier Session):**
-</thinking>
-
-<old_text line=255>
-## 🎯 SESSION 46: Reader Nodes & JSONB Optimization (COMPLETE ✅)
+- ✅ Arithmetic dispatch is Draken-first
+- ✅ Binary operators use Draken kernels before any fallback
+- ✅ Fail-fast semantics preserved
 
 **Session 46 Status:**
 - ✅ Compilation: Successful (`make c`)
@@ -729,15 +709,18 @@ After:  Cython memoryview → nanobind buffer extraction
 ## ✅ CUMULATIVE PROGRESS (Sessions 41-48)
 
 **What Has Been Done (Eradication Complete for These Areas):**
-1. ✅ **Phase 1: Arithmetic Dispatch** - Draken kernels primary, NumPy fallback only
+1. ✅ **Phase 1: Arithmetic Dispatch** - Draken kernels primary, no NumPy fallback in expression path
 2. ✅ **Phase 2: Casting Functions** - Strict fail-fast, Draken-native contract enforced
-3. ✅ **Hot-Path Joins** - All join operations (build/probe/buffering) Draken-native
-4. ✅ **UNNEST Operations** - Draken-native flattening
-5. ✅ **Bloom Filter Fast-Path** - Draken fast-path with Arrow fallback
-6. ✅ **Carchar Integration** - NumPy allocations eliminated, uses Draken memoryviews
+3. ✅ **Literal Evaluation** - Emits Draken constant vectors for primitive literals
+4. ✅ **Identifier Evaluation** - Arrow columns are converted to Draken at the boundary
+5. ✅ **CAST Path** - Preserves Draken vectors directly
+6. ✅ **Hot-Path Joins** - All join operations (build/probe/buffering) Draken-native
+7. ✅ **UNNEST Operations** - Draken-native flattening
+8. ✅ **Bloom Filter Fast-Path** - Draken fast-path with no Arrow fallback
+9. ✅ **Carchar Integration** - NumPy allocations eliminated, uses Draken memoryviews
 
 **What Remains (Active Eradication Items):**
-1. ⏳ **LOGICAL_OPERATIONS** - Still uses PyArrow compute.and_/or_/xor
+1. ⏳ **LOGICAL_OPERATIONS** - `XOR` still uses PyArrow compute; `AND`/`OR` are shortcut paths
 2. ⏳ **Type Coercion** - NumPy datetime64, issubdtype usage (warm path)
 3. ⏳ **String Operations** - LIKE/RLIKE still use PyArrow compute
 4. ⏳ **Bitwise Operations** - Use NumPy functions (warm path)
@@ -778,6 +761,7 @@ After:  Cython memoryview → nanobind buffer extraction
 
 **Files Modified in Session 48:**
 - `opteryx/expression/casts.py` (complete rewrite - fail-fast semantics)
+- `opteryx/expression/__init__.py` (column extraction + literal constant-vector evaluation + CAST cleanup)
 
 
 **Session 45 Final Status:**

@@ -9,9 +9,7 @@
 from libc.stddef cimport size_t
 from libc.stdint cimport uint8_t, uint16_t, uint32_t, int64_t
 from libc.string cimport memset
-
-import numpy
-cimport numpy
+from cpython.array cimport array, clone
 
 from opteryx.compiled.draken.core.buffers cimport DictAccessor
 from opteryx.compiled.draken.vectors.bool_vector cimport BoolVector
@@ -19,8 +17,6 @@ from opteryx.compiled.draken.vectors.string_vector cimport StringVector
 from opteryx.compiled.draken.vectors.string_vector cimport _StringVectorCIterator
 from opteryx.compiled.draken.vectors.string_vector cimport StringElement
 from opteryx.compiled.draken.vectors.vector cimport Vector
-
-numpy.import_array()
 
 from cpython.unicode cimport PyUnicode_DecodeUTF8
 
@@ -54,10 +50,10 @@ cdef BoolVector _vector_match_against_string_vector(
     float min_score=0.6,
 ):
     cdef object embedded
-    cdef numpy.ndarray positions_arr
-    cdef numpy.ndarray scores_arr
+    cdef array positions_arr = array('q')  # 'q' = signed long long (int64)
+    cdef array scores_arr = array('f')   # 'f' = float32
     cdef int64_t[::1] positions
-    cdef numpy.float32_t[::1] scores
+    cdef float[::1] scores
     cdef Py_ssize_t i
     cdef Py_ssize_t n = values.ptr.length
     cdef Py_ssize_t nbytes = (n + 7) >> 3
@@ -75,7 +71,7 @@ cdef BoolVector _vector_match_against_string_vector(
     cdef object vector_search
     cdef object query_vector
     cdef object row_vectors
-    cdef object valid_mask
+    cdef list valid_mask
     cdef Py_ssize_t current_index
     from opteryx.embeddings import embed_text_matrix
 
@@ -120,28 +116,48 @@ cdef BoolVector _vector_match_against_string_vector(
     query_vector = embedded[0]
     row_vectors = embedded[1:]
 
+    # Convert scores to Cython array
     try:
         from opteryx.compiled.nanobind import vector_search
+        import math
 
-        scores_arr = numpy.asarray(
-            vector_search.score_cosine(query_vector, row_vectors), dtype=numpy.float32
-        )
+        scores_list = vector_search.score_cosine(query_vector, row_vectors)
+        for score in scores_list:
+            scores_arr.append(float(score))
     except (ImportError, ValueError):
-        scores_arr = numpy.zeros(len(active_texts), dtype=numpy.float32)
-        if numpy.linalg.norm(query_vector) != 0.0:
-            valid_mask = numpy.linalg.norm(row_vectors, axis=1) != 0.0
-            if numpy.any(valid_mask):
-                scores_arr[valid_mask] = (
-                    numpy.dot(row_vectors[valid_mask], query_vector)
-                    / (numpy.linalg.norm(row_vectors[valid_mask], axis=1) * numpy.linalg.norm(query_vector))
-                )
+        import math
 
-    positions_arr = numpy.asarray(active_positions, dtype=numpy.int64)
+        # Fallback: compute cosine similarity using pure Python
+        def norm_2d(vectors):
+            """Compute norm for each vector in a 2D list."""
+            return [math.sqrt(sum(x*x for x in vec)) for vec in vectors]
 
+        def dot_product(a, b):
+            """Compute dot product of two vectors."""
+            return sum(x*y for x, y in zip(a, b))
+
+        query_norm = math.sqrt(sum(x*x for x in query_vector))
+        if query_norm != 0.0:
+            row_norms = norm_2d(row_vectors)
+            for j, (row, row_norm) in enumerate(zip(row_vectors, row_norms)):
+                if row_norm != 0.0:
+                    score = dot_product(row, query_vector) / (row_norm * query_norm)
+                    scores_arr.append(score)
+                else:
+                    scores_arr.append(0.0)
+        else:
+            for _ in row_vectors:
+                scores_arr.append(0.0)
+
+    # Convert positions to Cython array
+    for pos in active_positions:
+        positions_arr.append(pos)
+
+    # Create memoryviews from arrays
     positions = positions_arr
     scores = scores_arr
 
-    for i in range(positions.shape[0]):
+    for i in range(len(positions)):
         if scores[i] < min_score:
             continue
         row_index = positions[i]

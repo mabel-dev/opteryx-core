@@ -6,7 +6,7 @@
 # cython: wraparound=False
 # cython: boundscheck=False
 
-import numpy
+from opteryx.compiled.draken.vectors.string_vector cimport StringVectorBuilder
 
 cpdef object vector_arrow_op(object arr, object key):
     """
@@ -19,28 +19,36 @@ cpdef object vector_arrow_op(object arr, object key):
             The key whose corresponding value is to be fetched from each dictionary.
 
     Returns:
-        numpy.ndarray: An array containing the values associated with the key in each dictionary
-                     or None where the key does not exist.
+        StringVector: A Draken string vector containing the values associated with the key
+                     in each dictionary, or None where the key does not exist.
     """
     # Determine the number of items in the input list
     cdef Py_ssize_t n = len(arr)
-    # Use a Python list for efficient accumulation (avoids numpy.empty allocation)
-    cdef list result = []
     cdef dict document
+    cdef object value
+    cdef bytes value_bytes
+
+    # Use StringVectorBuilder for efficient construction
+    cdef StringVectorBuilder builder = StringVectorBuilder.with_estimate(n, 64)
 
     cdef Py_ssize_t i
     # Iterate over the list of dictionaries
     for i in range(n):
         # Check if the key exists in the dictionary
         document = arr[i]
-        if document is not None:
-            if key in document:
-                result.append(document[key])
+        if document is not None and key in document:
+            value = document[key]
+            if value is None:
+                builder.append_null()
             else:
-                # Append None if the key does not exist
-                result.append(None)
+                # Convert value to string
+                if isinstance(value, bytes):
+                    builder.append(value)
+                else:
+                    value_bytes = str(value).encode('utf-8')
+                    builder.append(value_bytes)
         else:
-            result.append(None)
+            builder.append_null()
 
-    # Convert list to numpy array (single allocation at cold path)
-    return numpy.asarray(result, dtype=object)
+    # Return the constructed Draken string vector
+    return builder.finish()

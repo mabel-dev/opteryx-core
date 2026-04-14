@@ -9,10 +9,11 @@ import pyarrow as pa
 
 def test_list_chunk_offsets_hash_consistency():
     try:
-        from opteryx.compiled.table_ops.hash_ops import compute_hashes
+        import opteryx.compiled.draken as draken
     except ImportError:
         import pytest
-        pytest.skip("Cython hash_ops not available")
+
+        pytest.skip("Draken Morsel not available")
 
     full = [[1, 2], [3], [], None, [4, 5]]
     list_type = pa.list_(pa.int64())
@@ -28,10 +29,13 @@ def test_list_chunk_offsets_hash_consistency():
     chunked = pa.chunked_array([chunk0, chunk1])
     t_chunked = pa.Table.from_arrays([chunked], names=["l"])
 
-    h_flat = compute_hashes(t_flat, ["l"])
-    h_chunked = compute_hashes(t_chunked, ["l"])
+    m_flat = draken.Morsel.from_arrow(t_flat)
+    m_chunked = draken.Morsel.from_arrow(t_chunked)
+    h_flat = m_flat.hash(["l"])
+    h_chunked = m_chunked.hash(["l"])
 
     assert list(h_flat) == list(h_chunked)
+
 
 if __name__ == "__main__":
     from tests import run_tests
