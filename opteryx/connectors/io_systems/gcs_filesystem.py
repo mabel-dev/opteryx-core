@@ -1,8 +1,7 @@
 """
 Google Cloud Storage filesystem implementation using Opteryx's optimized I/O.
 
-This implements pyarrow.fs.FileSystem interface but uses Opteryx's
-stream wrappers for high-performance GCS access.
+Uses Opteryx's stream wrappers for high-performance GCS access.
 """
 
 import os
@@ -97,8 +96,7 @@ class OpteryxGcsFileSystem:
     Custom GCS filesystem using direct HTTP API for optimal performance.
 
     Uses direct GCS JSON API calls for 10% better performance than SDK,
-    with libcurl connection pooling for efficiency. Provides Arrow-compatible
-    filesystem interface via duck typing.
+    with libcurl connection pooling for efficiency.
     """
 
     def __init__(self, bucket=None, **kwargs):

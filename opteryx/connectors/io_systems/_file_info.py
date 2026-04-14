@@ -1,4 +1,4 @@
-"""Lightweight replacement for pyarrow.fs.FileInfo."""
+"""File metadata container for filesystem operations."""
 
 from __future__ import annotations
 
