@@ -8,8 +8,8 @@
 import heapq
 from collections.abc import Iterable
 
-import numpy
 from opteryx.compiled.draken.morsels.morsel import Morsel
+from opteryx.vectors.vector_ranking import vector_exact_search_top_k
 from opteryx.exceptions import ColumnNotFoundError
 from opteryx.expression import NodeType
 from opteryx.expression import evaluate_and_append
@@ -663,9 +663,19 @@ class HeapSortNode(BasePlanNode):
         if query_vector is None or query_vector.size == 0:
             return None
 
-        # Convert query vector to float32 memoryview
-        cdef float[::1] query_view = numpy.ascontiguousarray(query_vector, dtype=numpy.float32)
-        dims = query_view.shape[0]
+        # Convert query vector to float32 buffer (fail-fast if invalid)
+        query_floats = self._validate_numeric_sequence(query_vector)
+        if query_floats is None:
+            return None
+
+        dims = len(query_floats)
+        cdef float* query_buf = <float*>malloc(dims * sizeof(float))
+        if query_buf == NULL:
+            raise MemoryError("Failed to allocate query vector buffer")
+
+        cdef float[::1] query_view = <float[:dims]>query_buf
+        for i in range(dims):
+            query_view[i] = query_floats[i]
 
         source_keys = [
             getattr(source_identifier.schema_column, "identity", None),
@@ -691,7 +701,7 @@ class HeapSortNode(BasePlanNode):
             row_vector = self._coerce_numeric_vector(source_values[row_index])
             if row_vector is None:
                 continue
-            if row_vector.shape[0] != dims:
+            if len(row_vector) != dims:
                 continue
             valid_rows_list.append(row_vector)
             source_indices_list.append(row_index)
@@ -713,11 +723,10 @@ class HeapSortNode(BasePlanNode):
 
         for i in range(n_valid):
             row_ids_view[i] = source_indices_list[i]
-            row_vector = valid_rows_list[i]
-            # Copy row vector into dense matrix
-            row_mv = numpy.ascontiguousarray(row_vector, dtype=numpy.float32)
+            row_floats = valid_rows_list[i]
+            # Copy row vector into dense matrix (already validated)
             for j in range(dims):
-                dense_view[i, j] = row_mv[j]
+                dense_view[i, j] = row_floats[j]
 
         self.readings["vector_topk_candidate_rows"] += n_valid
         take_count = min(<Py_ssize_t>self.limit, n_valid)
@@ -787,47 +796,77 @@ class HeapSortNode(BasePlanNode):
             return None
 
         # Clean up buffers before final ranking (scores_mv is independent)
-        # scores_mv is a list or numpy array depending on vector_search implementation
-        # we convert it to numpy for ranking logic
-        scores = numpy.asarray(scores_mv, dtype=numpy.float32)
         free(dense_buf)
         free(row_ids_buf)
+        free(query_buf)
 
-        scores = numpy.nan_to_num(scores, nan=0.0, posinf=0.0, neginf=0.0)
-        if order_expression.value == "COSINE_DISTANCE":
-            scores = 1.0 - numpy.clip(scores, -1.0, 1.0)
-
-        descending = _is_descending(direction)
-        row_ids = numpy.array(source_indices_list, dtype=numpy.int64)
-
-        if take_count < scores.shape[0]:
-            if descending:
-                candidate_indices = numpy.argpartition(-scores, take_count - 1)[:take_count]
-            else:
-                candidate_indices = numpy.argpartition(scores, take_count - 1)[:take_count]
+        # Convert scores to list if numpy array
+        if hasattr(scores_mv, 'tolist'):
+            scores = scores_mv.tolist()
         else:
-            candidate_indices = numpy.arange(scores.shape[0], dtype=numpy.int64)
+            scores = list(scores_mv)
 
-        if descending:
-            order = numpy.lexsort((row_ids[candidate_indices], -scores[candidate_indices]))
-        else:
-            order = numpy.lexsort((row_ids[candidate_indices], scores[candidate_indices]))
-        ranked_dense_indices = candidate_indices[order]
+        # Use vector_ranking module for NumPy-free top-k selection and ranking
+        metric = order_expression.value  # "COSINE_SIMILARITY" or "COSINE_DISTANCE"
+        top_indices = vector_exact_search_top_k(
+            similarity_scores=scores,
+            source_row_indices=source_indices_list,
+            k=take_count,
+            metric=metric,
+        )
 
-        top_indices = [
-            int(source_indices_list[int(index)]) for index in ranked_dense_indices[:take_count]
-        ]
         return self._materialize_rows(morsel, top_indices)
 
     @staticmethod
-    def _coerce_numeric_vector(value):
+    def _validate_numeric_sequence(value):
+        """
+        Validate and convert sequence to list of floats without NumPy.
+
+        Returns list of floats or None if invalid.
+        Fails fast on: non-sequences, non-numeric elements, NaN, infinity.
+        """
         try:
-            vector = numpy.asarray(value, dtype=numpy.float32)
-        except (TypeError, ValueError):
+            # Check it's sized/iterable
+            n = len(value)
+        except TypeError:
             return None
-        if vector.ndim != 1:
+
+        if n == 0:
             return None
-        return vector
+
+        result = []
+        for item in value:
+            # Type coercion: bool, int, float → float
+            if item is None:
+                return None
+            elif isinstance(item, bool):
+                f = float(1.0 if item else 0.0)
+            elif isinstance(item, (int, float)):
+                f = float(item)
+            else:
+                # Try generic conversion
+                try:
+                    f = float(item)
+                except (TypeError, ValueError):
+                    return None
+
+            # Reject NaN and infinity
+            if f != f or f == float('inf') or f == float('-inf'):
+                return None
+
+            result.append(f)
+
+        return result
+
+    @staticmethod
+    def _coerce_numeric_vector(value):
+        """
+        Validate a numeric vector sequence.
+
+        Returns tuple of floats or None if invalid.
+        Used for checking row vector validity before materialization.
+        """
+        return HeapSortNode._validate_numeric_sequence(value)
 
     def _resolve_query_vector(self, query_node):
         if query_node.node_type == NodeType.LITERAL:
