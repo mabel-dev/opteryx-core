@@ -4,7 +4,7 @@
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
 """
-Outer Join Node - Draken-Native Buffering (Session 42)
+Outer Join Node - Draken-Native Morsel-Based Operations
 
 This is a SQL Query Execution Plan Node.
 
@@ -12,10 +12,10 @@ PyArrow has LEFT/RIGHT/FULL OUTER JOIN implementations, but they error when the
 relations being joined contain STRUCT or ARRAY columns so we've written our own
 OUTER JOIN implementations.
 
-REFACTORED: Draken-native Morsel buffering (Session 42)
-- Buffer morsels instead of Arrow tables
-- Morsel.combine() instead of pyarrow.concat_tables()
-- Join functions operate on Arrow (warm path, acceptable)
+REFACTORED (Session 51): Draken-native Morsel-based join functions
+- Join functions accept Morsels instead of Arrow tables
+- Morsel.combine() and align_tables_pyarray() for result alignment
+- No Arrow conversions within join logic; Arrow only remains at execution boundaries
 """
 
 import time
@@ -33,13 +33,12 @@ BLOOM_FASTPATH_COUNTER = 0
 import pyarrow
 from opteryx.compiled.joins import build_side_hash_map
 from opteryx.compiled.joins import probe_side_hash_map
-from opteryx.compiled.joins import right_join
 from opteryx.compiled.structures.bloom_filter import create_bloom_filter
-from opteryx.compiled.structures.buffers import IntBuffer, Int32Buffer
-from opteryx.compiled.structures.hash_table import HashTable
+from opteryx.compiled.structures.bloom_filter import bloom_filter_check_morsel
+from opteryx.compiled.structures.buffers import IntBuffer
 from opteryx.compiled.draken.morsels.morsel import Morsel
+from opteryx.compiled.draken.morsels.align import align_tables_pyarray
 from opteryx.models import QueryProperties
-from opteryx.utils.arrow import align_tables
 
 from opteryx import EOS, EMPTY
 
@@ -51,9 +50,16 @@ _DATA_FORMAT = "draken"
 CHUNK_SIZE: int = 50_000
 
 
+cdef BoolVector _bits_to_bool_vector(uint8_t[::1] bits, Py_ssize_t n):
+    """Convert bit-packed uint8 memoryview to BoolVector (Draken-native, no Arrow)."""
+    if bits is None:
+        return None
+    return bool_vector_from_bits(&bits[0], NULL, n)
+
+
 def left_join(
-    left_relation,
-    right_relation,
+    left_morsel,
+    right_morsel,
     left_columns: List[str],
     right_columns: List[str],
     filter_index,
@@ -61,42 +67,38 @@ def left_join(
     columns=None,
 ):
     """
-    Perform a LEFT OUTER JOIN using a prebuilt hash map and optional filter.
+    Perform a LEFT OUTER JOIN using prebuilt hash map and optional filter.
+
+    Accepts Morsels, returns Morsels.
 
     Yields:
-        pyarrow.Table chunks of the joined result.
+        Morsel chunks of the joined result.
     """
 
-    left_indexes = IntBuffer()
-    right_indexes = IntBuffer()
-    seen_flags = array("b", [0]) * left_relation.num_rows
+    left_indexes = []
+    right_indexes = []
+    seen_flags = array("b", [0]) * len(left_morsel)
 
-    if filter_index:
-        # We can just dispose of rows from the right relation that don't match
-        # our bloom filter
-        _pcm = filter_index.possibly_contains_many(right_relation, right_columns)
-        possibly_matching_rows = pyarrow.Array.from_buffers(
-            pyarrow.bool_(),
-            right_relation.num_rows,
-            [None, pyarrow.py_buffer(_pcm)],
-        )
-        right_relation = right_relation.filter(possibly_matching_rows)
+    if filter_index is not None:
+        bit_results = bloom_filter_check_morsel(filter_index, right_morsel, right_columns)
+        if bit_results is not None:
+            mask = _bits_to_bool_vector(bit_results, len(right_morsel))
+            right_morsel = right_morsel.filter_mask(mask)
 
-        # If there's no matching rows in the right relation, we can exit early
-        if right_relation.num_rows == 0:
-            # Short circuit: no matching right rows at all
-            for i in range(0, left_relation.num_rows, CHUNK_SIZE):
-                chunk = list(range(i, min(i + CHUNK_SIZE, left_relation.num_rows)))
-                yield align_tables(
-                    source_table=left_relation,
-                    append_table=right_relation.slice(0, 0),
-                    source_indices=chunk,
-                    append_indices=[None] * len(chunk),
+        if len(right_morsel) == 0:
+            for i in range(0, len(left_morsel), CHUNK_SIZE):
+                chunk_end = min(i + CHUNK_SIZE, len(left_morsel))
+                chunk_indices = list(range(i, chunk_end))
+                null_indices = [-1] * len(chunk_indices)
+                yield align_tables_pyarray(
+                    left_morsel,
+                    right_morsel,
+                    chunk_indices,
+                    null_indices,
                 )
             return
 
-    # Build the hash table of the right relation
-    right_hash = probe_side_hash_map(right_relation, right_columns)
+    right_hash = probe_side_hash_map(right_morsel, right_columns)
 
     for h, right_rows in right_hash.hash_table.items():
         left_rows = left_hash.get(h)
@@ -107,70 +109,165 @@ def left_join(
             left_indexes.extend([l] * len(right_rows))
             right_indexes.extend(right_rows)
 
-    # Yield matching rows
-    if left_indexes.size() > 0:
-        yield align_tables(
-            right_relation,
-            left_relation,
-            right_indexes.to_int32_buffer(),
-            left_indexes.to_int32_buffer(),
+    if left_indexes:
+        yield align_tables_pyarray(
+            left_morsel,
+            right_morsel,
+            left_indexes,
+            right_indexes,
         )
 
-    # Emit unmatched left rows using null-filled right columns
     unmatched = [i for i, seen in enumerate(seen_flags) if not seen]
 
     if unmatched:
-        unmatched_left = left_relation.take(pyarrow.array(unmatched))
-        # Create a right-side table with zero rows, we do this because
-        # we want arrow to do the heavy lifting of adding new columns to
-        # the left relation, we do not want to add rows to the left
-        # relation - arrow is faster at adding null columns that we can be.
-        null_right = pyarrow.table(
-            [pyarrow.nulls(0, type=field.type) for field in right_relation.schema],
-            schema=right_relation.schema,
+        for i in range(0, len(unmatched), CHUNK_SIZE):
+            chunk_end = min(i + CHUNK_SIZE, len(unmatched))
+            chunk_indices = unmatched[i:chunk_end]
+            null_indices = [-1] * len(chunk_indices)
+
+            yield align_tables_pyarray(
+                left_morsel,
+                right_morsel,
+                chunk_indices,
+                null_indices,
+            )
+
+    return
+
+
+def right_join(
+    left_morsel,
+    right_morsel,
+    left_columns: List[str],
+    right_columns: List[str],
+    filter_index,
+    left_hash,
+    columns=None,
+):
+    """
+    Perform a RIGHT OUTER JOIN using prebuilt hash map and optional filter.
+
+    Accepts Morsels, returns Morsels.
+
+    Yields:
+        Morsel chunks of the joined result.
+    """
+
+    left_hash_table = probe_side_hash_map(left_morsel, left_columns)
+
+    left_indexes = []
+    right_indexes = []
+    seen_flags = array("b", [0]) * len(right_morsel)
+
+    if filter_index is not None:
+        bit_results = bloom_filter_check_morsel(filter_index, left_morsel, left_columns)
+        if bit_results is not None:
+            mask = _bits_to_bool_vector(bit_results, len(left_morsel))
+            left_morsel = left_morsel.filter_mask(mask)
+
+        if len(left_morsel) == 0:
+            for i in range(0, len(right_morsel), CHUNK_SIZE):
+                chunk_end = min(i + CHUNK_SIZE, len(right_morsel))
+                chunk_indices = list(range(i, chunk_end))
+                null_indices = [-1] * len(chunk_indices)
+                yield align_tables_pyarray(
+                    left_morsel,
+                    right_morsel,
+                    null_indices,
+                    chunk_indices,
+                )
+            return
+
+    right_hashes = right_morsel.hash(right_columns)
+    for i in range(len(right_morsel)):
+        left_rows = left_hash_table.get(right_hashes[i])
+        if left_rows:
+            seen_flags[i] = 1
+            for left_idx in left_rows:
+                left_indexes.append(left_idx)
+                right_indexes.append(i)
+
+    if left_indexes:
+        yield align_tables_pyarray(
+            left_morsel,
+            right_morsel,
+            left_indexes,
+            right_indexes,
         )
-        yield pyarrow.concat_tables([unmatched_left, null_right], promote_options="permissive")
+
+    unmatched = [i for i, seen in enumerate(seen_flags) if not seen]
+
+    if unmatched:
+        for i in range(0, len(unmatched), CHUNK_SIZE):
+            chunk_end = min(i + CHUNK_SIZE, len(unmatched))
+            chunk_indices = unmatched[i:chunk_end]
+            null_indices = [-1] * len(chunk_indices)
+
+            yield align_tables_pyarray(
+                left_morsel,
+                right_morsel,
+                null_indices,
+                chunk_indices,
+            )
 
     return
 
 
 def full_join(
-    left_relation,
-    right_relation,
+    left_morsel,
+    right_morsel,
     left_columns: List[str],
     right_columns: List[str],
     columns=None,
     **kwargs,
 ):
-    hash_table = HashTable()
-    non_null_right_values = right_relation.select(right_columns).itercolumns()
-    for i, value_tuple in enumerate(zip(*non_null_right_values)):
-        hash_table.insert(abs(hash(value_tuple)), i)
+    """
+    Perform a FULL OUTER JOIN.
+
+    Accepts Morsels, returns Morsels.
+
+    Yields:
+        Morsel chunks of the joined result.
+    """
+    right_hash_table = probe_side_hash_map(right_morsel, right_columns)
 
     left_indexes = []
     right_indexes = []
+    matched_right = set()
 
-    left_values = left_relation.select(left_columns).itercolumns()
-    for i, value_tuple in enumerate(zip(*left_values)):
-        rows = hash_table.get(abs(hash(value_tuple)))
-        if rows:
-            right_indexes.extend(rows)
-            left_indexes.extend([i] * len(rows))
+    left_hashes = left_morsel.hash(left_columns)
+    for i in range(len(left_morsel)):
+        right_rows = right_hash_table.get(left_hashes[i])
+        if right_rows:
+            for right_idx in right_rows:
+                left_indexes.append(i)
+                right_indexes.append(right_idx)
+                matched_right.add(right_idx)
         else:
-            right_indexes.append(None)
             left_indexes.append(i)
+            right_indexes.append(-1)
 
-    for i in range(right_relation.num_rows):
-        if i not in right_indexes:
+    for i in range(len(right_morsel)):
+        if i not in matched_right:
+            left_indexes.append(-1)
             right_indexes.append(i)
-            left_indexes.append(None)
 
-    for i in range(0, len(left_indexes), CHUNK_SIZE):
-        chunk_left_indexes = left_indexes[i : i + CHUNK_SIZE]
-        chunk_right_indexes = right_indexes[i : i + CHUNK_SIZE]
+    total_rows = len(left_indexes)
+    chunk_start = 0
 
-        # Align this chunk and add the resulting table to our list
-        yield align_tables(right_relation, left_relation, chunk_right_indexes, chunk_left_indexes)
+    while chunk_start < total_rows:
+        chunk_end = min(chunk_start + CHUNK_SIZE, total_rows)
+        chunk_left = left_indexes[chunk_start : chunk_end]
+        chunk_right = right_indexes[chunk_start : chunk_end]
+
+        yield align_tables_pyarray(
+            left_morsel,
+            right_morsel,
+            chunk_left,
+            chunk_right,
+        )
+
+        chunk_start = chunk_end
 
 
 class OuterJoinNode(JoinNode):
@@ -182,10 +279,13 @@ class OuterJoinNode(JoinNode):
         self.using = parameters.get("using")
 
         self.left_columns = parameters.get("left_columns")
-        self.left_readers = parameters.get("left_readers")
+        self.left_readers = parameters.get("left_readers") or []
 
         self.right_columns = parameters.get("right_columns")
-        self.right_readers = parameters.get("right_readers")
+        self.right_readers = parameters.get("right_readers") or []
+
+        self.left_relation_names = parameters.get("left_relation_names") or []
+        self.right_relation_names = parameters.get("right_relation_names") or []
 
         self.columns = parameters.get("columns")
 
@@ -218,42 +318,28 @@ class OuterJoinNode(JoinNode):
         # Declared here at the top of the function so cdef is valid (not inside a nested block).
         cdef Py_ssize_t orig_rows
         cdef uint8_t[::1] bit_results
-        cdef object pass_filter_index
-        cdef object right_morsel_local
-        cdef object left_morsel_local
+        cdef object pass_filter_index = self.filter_index
 
         if self._build_phase:
             if morsel == EOS:
                 self._build_phase = False
-                # REFACTORED (Session 42): Combine Morsels instead of Arrow tables
                 if self.left_morsels:
                     left_morsel = Morsel.combine(self.left_morsels)
                     self.left_morsels = []
-                    # Keep the combined Morsel around for fast-path bloom creation and later use.
                     self._left_morsel = left_morsel
-                    # Convert to Arrow for join algorithm (warm path, acceptable)
-                    self.left_relation = left_morsel.to_arrow()
                 else:
-                    self._left_morsel = None
-                    self.left_relation = pyarrow.table({})
+                    self._left_morsel = Morsel.from_vectors({})
 
-                self.left_relation = self._apply_join_key_casts(self.left_relation, is_left=True)
+                self.left_relation = self._apply_join_key_casts(self._left_morsel.to_arrow(), is_left=True)
+                self._left_morsel = Morsel.from_arrow(self.left_relation)
+
                 if self.join_type == "left outer":
                     start = time.monotonic_ns()
-                    self.left_hash = build_side_hash_map(self.left_relation, self.left_columns)
+                    self.left_hash = build_side_hash_map(self._left_morsel, self.left_columns)
 
-                    if self.left_relation.num_rows < 16_000_001:
-                        # Prefer a Morsel-based fast path when the combined left morsel is available.
-                        # This avoids creating Arrow buffers in the hot path and keeps bloom checks
-                        # fully Draken-native.
+                    if len(self._left_morsel) < 16_000_001:
                         start = time.monotonic_ns()
-                        if getattr(self, "_left_morsel", None) is not None:
-                            # Fast Draken-native builder
-                            from opteryx.compiled.structures.bloom_filter import create_bloom_filter_morsel
-                            self.filter_index = create_bloom_filter_morsel(self._left_morsel, self.left_columns)
-                        else:
-                            # Fallback to Arrow-based builder
-                            self.filter_index = create_bloom_filter(self.left_relation, self.left_columns)
+                        self.filter_index = create_bloom_filter(self.left_relation, self.left_columns)
                         self.readings["time_build_bloom_filter"] += time.monotonic_ns() - start
                         self.readings["feature_bloom_filter"] += 1
             else:
@@ -262,71 +348,50 @@ class OuterJoinNode(JoinNode):
             yield None
             return
 
-        else:
-            if morsel == EOS:
-                # REFACTORED (Session 42): Combine Morsels instead of Arrow tables
-                if self.right_morsels:
-                    right_morsel = Morsel.combine(self.right_morsels)
-                    self.right_morsels = []
+        if morsel == EOS:
+            if self.right_morsels:
+                right_morsel = Morsel.combine(self.right_morsels)
+                self.right_morsels = []
 
-                    # Prefer to apply the bloom-filter at the Morsel level (native fast path).
-                    # If we successfully apply the Draken bloom check we will convert the
-                    # filtered morsel to Arrow and avoid constructing an Arrow mask via
-                    # Array.from_buffers().
-                    pass_filter_index = self.filter_index
-                    if self.filter_index is not None:
-                        try:
-                            from opteryx.compiled.structures.bloom_filter import bloom_filter_check_morsel
-                            # Use the C-typed locals declared at the top of this function.
-                            orig_rows = right_morsel.num_rows
-                            # bloom_filter_check_morsel returns a typed uint8_t[::1] memoryview or None.
-                            bit_results = bloom_filter_check_morsel(self.filter_index, right_morsel, self.right_columns)
-                            if bit_results is not None:
-                                # Convert bit-packed results directly to BoolVector (Draken-native)
-                                mask = bool_vector_from_bits(&bit_results[0], NULL, orig_rows)
-                                right_morsel = right_morsel.filter_mask(mask)
-                                eliminated_rows = orig_rows - right_morsel.num_rows
-                                self.readings["rows_eliminated_by_bloom_filter"] += eliminated_rows
-                                # Fast-path used — increment module-level counter for telemetry/tests
-                                global BLOOM_FASTPATH_COUNTER
-                                BLOOM_FASTPATH_COUNTER += 1
-                                # We've applied bloom filtering at Morsel level, no need for provider to
-                                # re-run the bloom check via Arrow buffers - suppress it.
-                                pass_filter_index = None
-                        except Exception:
-                            # On any failure, fall back to Arrow-based path below.
-                            pass
-
-                    # Convert (possibly filtered) morsel to Arrow for the join warm-path.
-                    right_relation = right_morsel.to_arrow()
-                else:
-                    right_relation = pyarrow.table({})
-
-                right_relation = self._apply_join_key_casts(right_relation, is_left=False)
-
-                join_provider = providers.get(self.join_type)
-
-                for result_table in join_provider(
-                    left_relation=self.left_relation,
-                    right_relation=right_relation,
-                    left_columns=self.left_columns,
-                    right_columns=self.right_columns,
-                    left_hash=self.left_hash,
-                    filter_index=pass_filter_index,
-                    columns=self.columns,
-                ):
-                    # Project down to only the needed columns if specified
-                    if self.columns is not None:
-                        candidates = [c.schema_column.identity for c in self.columns]
-                        keep_columns = [c for c in candidates if c in result_table.schema.names]
-                        result_table = result_table.select(keep_columns)
-                    yield result_table
-                yield EOS
-
+                if pass_filter_index is not None:
+                    orig_rows = len(right_morsel)
+                    bit_results = bloom_filter_check_morsel(self.filter_index, right_morsel, self.right_columns)
+                    if bit_results is not None:
+                        mask = _bits_to_bool_vector(bit_results, orig_rows)
+                        right_morsel = right_morsel.filter_mask(mask)
+                        eliminated_rows = orig_rows - len(right_morsel)
+                        self.readings["rows_eliminated_by_bloom_filter"] += eliminated_rows
+                        global BLOOM_FASTPATH_COUNTER
+                        BLOOM_FASTPATH_COUNTER += 1
+                        pass_filter_index = None
             else:
-                if morsel is not None and morsel != EMPTY:
-                    self.right_morsels.append(morsel)
-                yield None
+                right_morsel = Morsel.from_vectors({})
+
+            right_relation = self._apply_join_key_casts(right_morsel.to_arrow(), is_left=False)
+            right_morsel = Morsel.from_arrow(right_relation)
+            left_morsel_for_join = self._left_morsel
+
+            join_provider = providers.get(self.join_type)
+
+            for result_morsel in join_provider(
+                left_morsel=left_morsel_for_join,
+                right_morsel=right_morsel,
+                left_columns=self.left_columns,
+                right_columns=self.right_columns,
+                left_hash=self.left_hash,
+                filter_index=pass_filter_index,
+                columns=self.columns,
+            ):
+                if self.columns is not None:
+                    candidates = [c.schema_column.identity for c in self.columns]
+                    keep_columns = [c for c in candidates if c in result_morsel.column_names]
+                    result_morsel = result_morsel.select(keep_columns)
+                yield result_morsel.to_arrow()
+            yield EOS
+        else:
+            if morsel is not None and morsel != EMPTY:
+                self.right_morsels.append(morsel)
+            yield None
 
 
 providers = {"left outer": left_join, "full outer": full_join, "right outer": right_join}
