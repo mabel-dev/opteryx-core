@@ -43,7 +43,7 @@ cpdef Int64Vector vector_cast_bytes_to_int(StringVector vec):
     cdef int64_t[::1] result_view
     cdef Int64Vector result_vector
 
-    # Allocate result buffer with malloc instead of numpy.zeros
+    # Allocate result buffer with malloc
     result_ptr = <int64_t*>malloc(n * sizeof(int64_t))
     if result_ptr == NULL:
         raise MemoryError("Failed to allocate memory for result array")

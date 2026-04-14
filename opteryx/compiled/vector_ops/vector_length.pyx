@@ -31,7 +31,7 @@ cpdef Int64Vector vector_length(ArrayVector vec):
     cdef int64_t* result_ptr
     cdef int64_t[::1] result_view
 
-    # Allocate result buffer with malloc instead of numpy.zeros
+    # Allocate result buffer with malloc
     result_ptr = <int64_t*>malloc(n * sizeof(int64_t))
     if result_ptr == NULL:
         raise MemoryError("Failed to allocate memory for result array")

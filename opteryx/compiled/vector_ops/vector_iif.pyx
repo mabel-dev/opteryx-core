@@ -105,24 +105,12 @@ cdef inline bint _constant_is_null(object value, Py_ssize_t row) except *:
     return False
 
 
-def _is_numpy_array_like(value):
-    module_name = value.__class__.__module__
-    return module_name == "numpy" or module_name.startswith("numpy.")
-
-
-def _is_arrow_value(value):
-    module_name = value.__class__.__module__
-    return module_name == "pyarrow.lib" or module_name.startswith("pyarrow.")
-
-
 def _sequence_length(value):
     if isinstance(value, Vector):
         return len(value)
-    if _is_numpy_array_like(value):
-        return None if value.shape == () else len(value)
     if isinstance(value, (list, tuple)):
         return len(value)
-    if _is_arrow_value(value) and hasattr(value, "__len__"):
+    if hasattr(value, "to_pylist") and hasattr(value, "__len__"):
         try:
             return len(value)
         except TypeError:
@@ -139,46 +127,21 @@ def _normalize_value(value):
     if isinstance(value, Vector):
         return value
 
-    if _is_arrow_value(value):
-        if hasattr(value, "combine_chunks"):
-            try:
-                value = value.combine_chunks()
-            except Exception:
-                pass
-
-        # Prefer Draken-native conversion if possible (works for strings, ints, etc.)
+    if hasattr(value, "combine_chunks"):
         try:
-            from opteryx.compiled.draken.interop.arrow import vector_from_arrow
-
-            return vector_from_arrow(value)
+            value = value.combine_chunks()
         except Exception:
             pass
 
-        if hasattr(value, "to_pylist"):
-            try:
-                return value.to_pylist()
-            except Exception:
-                pass
-
-        if hasattr(value, "as_py"):
-            try:
-                return value.as_py()
-            except Exception:
-                pass
+    if hasattr(value, "to_pylist"):
+        from opteryx.compiled.draken.interop.arrow import vector_from_arrow
+        return vector_from_arrow(value)
 
     if hasattr(value, "as_py"):
         try:
-            return value.as_py()
+            value = value.as_py()
         except Exception:
             pass
-
-    if _is_numpy_array_like(value):
-        # Treat scalar arrays as scalars to make constant-folding compatible
-        # with functions (e.g. IIF) that expect fixed-width vectors.
-        if value.shape == () or value.shape == (1,):
-            value = value.item()
-        else:
-            return value.tolist()
 
     # Scalars are normalized through the shared helper so typed scalar branches
     # participate in the constant-encoding migration.
@@ -214,8 +177,6 @@ def _validate_length(value, length):
 def _python_values(value, length):
     if isinstance(value, Vector):
         values = value.to_pylist()
-    elif _is_numpy_array_like(value):
-        values = [value.item()] if value.shape == () else value.tolist()
     elif isinstance(value, (list, tuple)):
         values = list(value)
     elif hasattr(value, "to_pylist"):
