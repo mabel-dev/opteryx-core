@@ -92,7 +92,7 @@ cpdef tuple build_rows_indices_and_column(object column):
     indices = indices_buf.get_buffer()
     cdef Int64Vector vec = int64_from_sequence(indices)
     vec._arrow_data_buf = indices_buf
-    return vec, flat_data_buf.to_numpy()
+    return vec, flat_data_buf.to_list()
 
 
 cpdef tuple build_filtered_rows_indices_and_column(object column, set valid_values):

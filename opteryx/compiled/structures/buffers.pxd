@@ -6,12 +6,11 @@
 # cython: wraparound=False
 # cython: boundscheck=False
 
-import numpy
-cimport numpy
-
 from libc.stdint cimport int64_t, int32_t
 from libc.stddef cimport size_t
 from libcpp.vector cimport vector
+
+from opteryx.compiled.draken.vectors.int64_vector cimport Int64Vector
 
 cdef extern from "intbuffer.h" namespace "" nogil:
     cdef cppclass CIntBuffer:
@@ -47,11 +46,10 @@ cdef class IntBuffer:
     cpdef void append(self, int64_t value)
     cpdef void append_repeated(self, int64_t value, size_t count)
     cpdef void extend(self, iterable)
-    cpdef numpy.ndarray[int64_t, ndim=1] to_numpy(self)
+    cpdef Int64Vector to_int64_vector(self)
     cpdef Int32Buffer to_int32_buffer(self)
     cpdef const int64_t[::1] get_buffer(self)
     cpdef size_t size(self)
-    cpdef void extend_numpy(self, numpy.ndarray[int64_t, ndim=1] arr)
     cpdef void reserve(self, size_t capacity)
     cpdef void append_batch(self, int64_t[::1] values)
 
@@ -63,10 +61,8 @@ cdef class Int32Buffer:
 
     cpdef void append(self, int32_t value)
     cpdef void extend(self, iterable)
-    cpdef numpy.ndarray[int32_t, ndim=1] to_numpy(self)
     cpdef size_t size(self)
     cpdef void reserve(self, size_t capacity)
-    cpdef void extend_numpy(self, numpy.ndarray[int32_t, ndim=1] arr)
 
 cdef class ObjectBuffer:
 
@@ -75,6 +71,6 @@ cdef class ObjectBuffer:
 
     cpdef void append(self, object value)
     cpdef void extend(self, object iterable)
-    cpdef numpy.ndarray to_numpy(self)
+    cpdef list to_list(self)
     cpdef size_t size(self)
     cpdef void reserve(self, size_t capacity)
