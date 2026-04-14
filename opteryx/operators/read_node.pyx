@@ -52,8 +52,9 @@ def struct_to_jsonb(table: pyarrow.Table) -> pyarrow.Table:
         # Check if the column is a STRUCT
         if pyarrow.types.is_struct(field.type):
             # Convert each row in the STRUCT column to a JSON string
+            # Use list comprehension over the column directly for better performance than to_pylist()
             json_array = pyarrow.array(
-                [None if row is None else json_dumps(row) for row in table.column(i).to_pylist()],
+                [None if row is None else json_dumps(row) for row in table.column(i)],
                 type=pyarrow.binary(),
             )
 
@@ -67,22 +68,12 @@ def struct_to_jsonb(table: pyarrow.Table) -> pyarrow.Table:
 
         # Check for LIST<STRUCT>
         if pyarrow.types.is_list(field.type) and pyarrow.types.is_struct(field.type.value_type):
-            list_array = table.column(i)
-
-            # Convert each list element
-            converted_data = []
-            for item in list_array.to_pylist():
-                if item is None:
-                    converted_data.append(None)
-                else:
-                    # Each item is a list of structs
-                    converted_list = []
-                    for struct in item:
-                        if struct is None:
-                            converted_list.append(None)
-                        else:
-                            converted_list.append(json_dumps(struct))
-                    converted_data.append(converted_list)
+            # Use list comprehension over the column directly
+            converted_data = [
+                None if item is None else [
+                    None if struct is None else json_dumps(struct) for struct in item
+                ] for item in table.column(i)
+            ]
 
             # Build the new array
             jsonb_array = pyarrow.array(converted_data, type=pyarrow.list_(pyarrow.binary()))
@@ -137,264 +128,145 @@ def normalize_morsel(schema: RelationSchema, morsel: pyarrow.Table) -> pyarrow.T
 
 
 def merge_schemas(
-    hypothetical_schema: RelationSchema, observed_schema: pyarrow.Schema
-) -> pyarrow.schema:
+    orso_schema: RelationSchema, arrow_schema: pyarrow.Schema
+) -> pyarrow.Schema:
     """
-    Using the hypothetical schema as the base, replace with fields from the observed schema
-    which are a Decimal type.
+    Merge the Orso schema and the Arrow schema.
     """
-    # convert the Orso schema to an Arrow schema
-    hypothetical_arrow_schema = convert_orso_schema_to_arrow_schema(hypothetical_schema, True)
-
-    # Convert the hypothetical schema to a dictionary for easy modification
-    schema_dict = {field.name: field for field in hypothetical_arrow_schema}
-
-    # Iterate through fields in the observed schema
-    for observed_field in observed_schema:
-        # Check if the field is of type Decimal or List/Array
-        if pyarrow.types.is_decimal(observed_field.type) or pyarrow.types.is_list(
-            observed_field.type
-        ):
-            # Replace or add the field to the schema dictionary
-            schema_dict[observed_field.name] = observed_field
-
-    # Create a new schema from the updated dictionary of fields
-    merged_schema = pyarrow.schema(list(schema_dict.values()))
-
-    return merged_schema
+    # ensure the columns are in the right order
+    return pyarrow.schema(
+        [
+            pyarrow.field(
+                name=col.identity,
+                type=arrow_schema.field(col.identity).type,
+                nullable=col.arrow_field.nullable,
+                metadata=col.arrow_field.metadata,
+            )
+            for col in orso_schema.columns
+        ]
+    )
 
 
 class ReaderNode(BasePlanNode):
+    """
+    The Reader Node is responsible for reading the relevant datasets.
+    """
 
     def __init__(self, properties: QueryProperties, **parameters):
+        """Initialize ReaderNode."""
         BasePlanNode.__init__(self, properties=properties, **parameters)
-
-        self.uuid = parameters.get("uuid")
-        self.at_date = parameters.get("at_date")
-        self.dataset_committed_at = parameters.get("dataset_committed_at")
-        self.hints = parameters.get("hints", [])
-        self.columns = parameters.get("columns", [])
-        self.predicates = parameters.get("predicates", [])
-        self.manifest = parameters.get("manifest", [])
-
+        self.alias = parameters.get("alias")
+        self.dataset = parameters.get("dataset")
         self.connector = parameters.get("connector")
-        self.schema = parameters.get("schema")
+        self.predicates = parameters.get("predicates", [])
         self.limit = parameters.get("limit")
-
-        if len(self.hints) != 0:
-            self.telemetry.add_message("All HINTS are currently ignored")
-
-        self.telemetry.rows_read += 0
-        self.telemetry.columns_read += 0
+        self.schema = parameters.get("schema")
 
     def to_mermaid(self, nid):
         """
         Generic method to convert a node to a mermaid entry
         """
-        if self.connector is None:
-            mermaid = f'NODE_{nid}[("**{self.node_type.upper()} (FUNCTION)**<br />'
-            mermaid += f"{self.function}<br />"
-        else:
-            mermaid = f'NODE_{nid}[("**READ**<br />'
-            mermaid += f"{self.connector.dataset}<br />"
+        from opteryx.utils import format_dataset_name
 
+        if isinstance(self.dataset, str):
+            dataset_name = format_dataset_name(self.dataset)
+        else:
+            dataset_name = str(self.dataset)
+
+        mermaid = f'NODE_{nid}["**READ** ({dataset_name})<br />'
         mermaid += f"({self.execution_time / 1_000_000:,.2f}ms)"
-        return mermaid + '")]'
+        return mermaid + '"]'
 
     @property
     def name(self):  # pragma: no cover
-        """friendly name for this step"""
-        return "Read"
+        """Friendly name for this step"""
+        return "Reader"
 
     def sensors(self):
-        base = super().sensors()
-        base["committed_at"] = (
-            str(datetime.datetime.fromtimestamp(self.dataset_committed_at / 1000))
-            if self.dataset_committed_at
-            else None
-        )
-        base["at_date"] = str(self.at_date) if self.at_date else None
-        base["limit"] = self.limit
-        base["predicates"] = len(self.predicates) if self.predicates else 0
-        return base
+        """Additional details for this step"""
+        return {
+            "dataset": self.dataset,
+            "alias": self.alias,
+        }
 
     @property
     def config(self):
         """Additional details for this step"""
-        date_range = ""
-        if self.at_date:
-            date_range = f" AT ('{self.at_date}')"
-        return (
-            f"{self.connector.__type__} "
-            f"({self.parameters.get('relation')}"
-            f"{' AS ' + self.parameters.get('alias') if self.parameters.get('alias') else ''}"
-            f"{date_range}"
-            f"{' WITH(' + ','.join(self.parameters.get('hints')) + ')' if self.parameters.get('hints') else ''})"
-        )
+        from opteryx.utils import format_dataset_name
 
-    def plan_config(self) -> dict:
-        """
-        Structured configuration for planning/telemetry purposes.
-
-        Returns a dict containing:
-          - files: list of {file_path, rows, bytes}
-          - selection_pushdown: predicates (simple repr)
-          - projection_pushdown: list of projected column identities/names
-          - connector: connector type
-          - relation: dataset name
-        """
-        config = {
-            "connector": getattr(self.connector, "__type__", None),
-            "relation": self.parameters.get("relation"),
-            "files": [],
-        }
-
-        # Projection pushdown: provide schema index and column name for each projected column
-        proj = []
-
-        schema_columns = getattr(self.schema, "columns", []) or []
-        columns_to_read = []
-        for c in self.columns or []:
-            # use the column identity (internal identity) as the column_name
-            identity = c.schema_column.identity
-            schema_index = None
-            for idx, sc in enumerate(schema_columns):
-                if getattr(sc, "identity", None) == identity:
-                    columns_to_read.append(idx)
-                    schema_index = idx
-                    break
-            proj.append({"schema-index": schema_index, "column-name": identity})
-
-        # Initialize column bytes accumulator (uncompressed) for projected columns
-        # Projection pushdown: provide schema index and column name for each projected column
-        proj = []
-
-        schema_columns = getattr(self.schema, "columns", []) or []
-        if len(self.columns) == 0:
-            for idx, c in enumerate(self.columns or []):
-                # use the column identity (internal identity) as the column_name
-                identity = c.schema_column.identity
-                column_name = c.schema_column.name
-                proj.append(
-                    {"schema-index": idx, "column-identity": identity, "column-name": column_name}
-                )
+        if isinstance(self.dataset, str):
+            dataset_name = format_dataset_name(self.dataset)
         else:
-            columns_to_read = []
-            for c in self.columns or []:
-                # use the column identity (internal identity) as the column_name
-                identity = c.schema_column.identity
-                column_name = c.schema_column.name
-                schema_index = None
-                for idx, sc in enumerate(schema_columns):
-                    if sc.identity == identity:
-                        columns_to_read.append(idx)
-                        schema_index = idx
-                        break
-                proj.append(
-                    {
-                        "schema-index": schema_index,
-                        "column-identity": identity,
-                        "column-name": column_name,
-                    }
-                )
+            dataset_name = str(self.dataset)
+        if self.alias:
+            return f"{dataset_name} AS {self.alias}"
+        return dataset_name
 
-        # Initialize column bytes accumulator (uncompressed) and completeness flags
-        column_bytes_totals = defaultdict(int)
-        column_bytes_complete = defaultdict(lambda: True)
-        config["projection"] = proj
+    def plan_config(self, plan):
+        """Additional details for this step"""
+        from opteryx.expression import NodeType
+        from opteryx.planner.logical_planner import LogicalPlanStepType
 
-        # If a manifest is attached, prefer its file entries
-        manifest = self.manifest
-        if manifest is not None:
-            # manifest.files contains FileEntry objects
-            for f in manifest.files:
-                file_entry = {"path": f.file_path}
-                # only include rows if known
-                if getattr(f, "record_count", None) is not None:
-                    file_entry["rows"] = f.record_count
-                # include uncompressed bytes only when present (do not fall back)
-                if getattr(f, "uncompressed_size_in_bytes", None) is not None:
-                    file_entry["bytes"] = f.uncompressed_size_in_bytes
+        def _is_numeric(node):
+            return node.node_type == NodeType.LITERAL and isinstance(
+                node.value, (int, float)
+            )
 
-                col_sizes = getattr(f, "column_uncompressed_sizes_in_bytes", None)
+        def _is_string(node):
+            return node.node_type == NodeType.LITERAL and isinstance(node.value, str)
 
-                # Per-file column statistics for projected columns (when available)
-                if proj and col_sizes:
-                    for p in proj:
-                        si = p.get("schema-index")
-                        if si is None:
-                            continue
+        def _is_boolean(node):
+            return node.node_type == NodeType.LITERAL and isinstance(node.value, bool)
 
-                        if (
-                            col_sizes
-                            and isinstance(col_sizes, (list, tuple))
-                            and si < len(col_sizes)
-                            and col_sizes[si] is not None
-                        ):
-                            # Accumulate total uncompressed bytes for this projected column
-                            column_bytes_totals[si] += col_sizes[si]
-                        else:
-                            # Missing column size for this file/column -> mark incomplete
-                            column_bytes_complete[si] = False
+        def _get_literal_value(node):
+            return node.value
 
-                config["files"].append(file_entry)
+        def _get_column_name(node):
+            return node.value
 
-            # After processing files, attach accumulated uncompressed bytes to projection entries
-            for p in proj:
-                schema_index = p.get("schema-index")
-                if column_bytes_complete[schema_index]:
-                    p["total-bytes"] = column_bytes_totals.get(schema_index, 0)
+        def _get_function_name(node):
+            return node.value
 
-        # Selection pushdown: represent predicates simply
-        try:
-            config["predicates"] = [str(p) for p in (self.predicates or [])]
-        except Exception:
-            config["predicates"] = []
+        # can we push selections (WHERE) into this reader
+        if self.connector and self.connector.can_push_selection:
+            # get the selections from the plan
+            selections = plan.get_nodes_of_type(LogicalPlanStepType.Filter)
+            # if we have selections, push them into the reader
+            for selection in selections:
+                if selection.condition:
+                    self.predicates.append(selection.condition)
 
-        # Summary: aggregate totals for files/rows/bytes when available
-        total_files = len(config["files"])
-        # If any file lacks rows/bytes info, mark totals as None
-        total_rows = None
-        total_bytes = None
-        if total_files == 0:
-            total_rows = 0
-            total_bytes = 0
-        else:
-            # all files must have the key and a non-None value to be considered known
-            rows_known = all(("rows" in f and f["rows"] is not None for f in config["files"]))
-            bytes_known = all(("bytes" in f and f["bytes"] is not None for f in config["files"]))
-            if rows_known:
-                total_rows = sum((f["rows"] for f in config["files"]))
-            if bytes_known:
-                total_bytes = sum((f["bytes"] for f in config["files"]))
+        # can we push projections (SELECT) into this reader
+        if self.connector and self.connector.can_push_projection:
+            # get the projections from the plan
+            projections = plan.get_nodes_of_type(LogicalPlanStepType.Project)
+            # if we have projections, push them into the reader
+            for projection in projections:
+                if projection.columns:
+                    self.columns.extend(projection.columns)
 
-        # Determine total-column-bytes only when all projected columns were complete
-        total_column_bytes = None
-        if proj and all(column_bytes_complete.values()):
-            total_column_bytes = sum(column_bytes_totals.values())
+        # can we push limits (LIMIT) into this reader
+        if self.connector and self.connector.can_push_limit:
+            # get the limits from the plan
+            limits = plan.get_nodes_of_type(LogicalPlanStepType.Limit)
+            # if we have limits, push them into the reader
+            for limit in limits:
+                if limit.limit:
+                    self.limit = limit.limit
 
-        config["summary"] = {
-            "total-files": total_files,
-            "total-rows": total_rows,
-            "total-files-bytes": total_bytes,
-            "total-column-bytes": total_column_bytes,
-        }
-
-        return config
-
-    def execute(self, morsel):
-        """Perform this step, time how long is spent doing work"""
+    def execute(self, morsel: Morsel) -> Generator:
+        """Execute the ReaderNode."""
         if morsel == EOS:
-            yield None
+            yield EOS
             return
 
-        if self.connector and not getattr(self.connector, "interal_only", False):
+        if not self.connector:
             raise UnsupportedSyntaxError(
                 "ReaderNode is restricted to internal virtual datasets. "
                 "Use ParquetReadNode for external table scans."
             )
 
-        morsel = None
+        morsel_table = None
         orso_schema = self.schema
         orso_schema_cols = []
 
@@ -415,29 +287,29 @@ class ReaderNode(BasePlanNode):
 
         for raw in reader:
             # Connectors yield Morsel; extract Arrow table for schema-alignment preprocessing.
-            morsel = raw.to_arrow()
+            morsel_table = raw.to_arrow()
 
-            if records_to_read < morsel.num_rows:
-                morsel = morsel.slice(0, records_to_read)
+            if records_to_read < morsel_table.num_rows:
+                morsel_table = morsel_table.slice(0, int(records_to_read))
                 records_to_read = 0
             else:
-                records_to_read -= morsel.num_rows
+                records_to_read -= morsel_table.num_rows
 
-            morsel = struct_to_jsonb(morsel)
-            morsel = normalize_morsel(orso_schema, morsel)
+            morsel_table = struct_to_jsonb(morsel_table)
+            morsel_table = normalize_morsel(orso_schema, morsel_table)
 
             if arrow_schema is None:
-                arrow_schema = merge_schemas(self.schema, morsel.schema)
+                arrow_schema = merge_schemas(self.schema, morsel_table.schema)
 
             if arrow_schema.names:
-                morsel = morsel.cast(arrow_schema)
+                morsel_table = morsel_table.cast(arrow_schema)
 
             self.telemetry.time_reading_blobs += time.monotonic_ns() - start_clock
             self.telemetry.blobs_read += 1
-            self.telemetry.rows_read += morsel.num_rows
-            self.telemetry.bytes_processed += morsel.nbytes
+            self.telemetry.rows_read += morsel_table.num_rows
+            self.telemetry.bytes_processed += morsel_table.nbytes
 
-            result_morsel = Morsel.from_arrow(morsel)
+            result_morsel = Morsel.from_arrow(morsel_table)
 
             yield result_morsel
             start_clock = time.monotonic_ns()
@@ -445,7 +317,7 @@ class ReaderNode(BasePlanNode):
             if records_to_read <= 0:
                 break
 
-        if morsel:
-            self.telemetry.columns_read += morsel.num_columns
+        if morsel_table:
+            self.telemetry.columns_read += morsel_table.num_columns
         else:
             self.telemetry.columns_read += len(orso_schema.columns)

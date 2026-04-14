@@ -131,3 +131,44 @@ cpdef tuple build_filtered_rows_indices_and_column_draken(object column_vector, 
     # Create typed vector from flattened data
     data_vector = vector_from_sequence(flat_data_list)
     return (vec, data_vector)
+
+
+cpdef tuple build_cartesian_indices(int64_t left_rows, int64_t right_rows):
+    """
+    Build row indices for a Cartesian product (CROSS JOIN) (Draken-native).
+
+    Parameters:
+        left_rows: Number of rows in the left table
+        right_rows: Number of rows in the right table
+
+    Returns:
+        tuple of (Int64Vector, Int64Vector)
+            Left and right row indices
+    """
+    cdef int64_t total_rows = left_rows * right_rows
+    cdef IntBuffer left_indices_buf = IntBuffer(total_rows)
+    cdef IntBuffer right_indices_buf = IntBuffer(total_rows)
+    cdef int64_t i
+
+    if total_rows == 0:
+        return (int64_from_sequence(None), int64_from_sequence(None))
+
+    for i in range(left_rows):
+        # Repeat each left index right_rows times
+        left_indices_buf.append_repeated(i, right_rows)
+        # For each left row, we need all right rows
+        # We could optimize this by building the right_rows sequence once and extending
+        # but for now we'll just loop or use a small helper if available
+        for j in range(right_rows):
+            right_indices_buf.append(j)
+
+    # Create Int64Vectors for indices
+    cdef const int64_t[::1] left_mv = left_indices_buf.get_buffer()
+    cdef Int64Vector left_vec = int64_from_sequence(left_mv)
+    left_vec._arrow_data_buf = left_indices_buf
+
+    cdef const int64_t[::1] right_mv = right_indices_buf.get_buffer()
+    cdef Int64Vector right_vec = int64_from_sequence(right_mv)
+    right_vec._arrow_data_buf = right_indices_buf
+
+    return (left_vec, right_vec)

@@ -85,6 +85,10 @@ cdef class IntBuffer:
         """Append an integer to the buffer."""
         self.c_buffer.append(value)
 
+    cpdef void append_repeated(self, int64_t value, size_t count):
+        """Append an integer to the buffer multiple times."""
+        self.c_buffer.append_repeated(value, count)
+
     cpdef void append_batch(self, int64_t[::1] values):
         """Append a batch of values efficiently."""
         cdef size_t n = values.shape[0]

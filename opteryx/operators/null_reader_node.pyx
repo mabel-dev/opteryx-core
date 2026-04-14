@@ -18,13 +18,15 @@ import logging
 from typing import Generator
 
 import pyarrow
+from opteryx.compiled.draken.morsels.morsel import Morsel
+from opteryx.compiled.draken.vectors.scalar_constructors import from_scalar
 from opteryx.types.schema import convert_orso_schema_to_arrow_schema
 
 from opteryx import EOS
 
 from . import BasePlanNode
 
-_DATA_FORMAT = "arrow"
+_DATA_FORMAT = "arrow,draken"
 
 
 logger = logging.getLogger(__name__)
@@ -50,49 +52,38 @@ class NullReaderNode(BasePlanNode):  # pragma: no cover
             yield None
             return
 
-        # Try to build empty table with correct schema
+        # Try to build empty Morsel with correct schema
         # First try: use schema property if available
         if self.schema:
             try:
-                arrow_schema = convert_orso_schema_to_arrow_schema(self.schema)
-                empty_table = pyarrow.table(
-                    {
-                        name: pyarrow.array([], type=arrow_schema.field(name).type)
-                        for name in arrow_schema.names
-                    }
-                )
-                yield empty_table
+                empty_morsel = Morsel()
+                for column in self.schema.columns:
+                    # Create empty vector with correct type
+                    vector = from_scalar(None, 0, dtype=column.arrow_field.type)
+                    empty_morsel.append_vector(column.identity.encode(), vector)
+                yield empty_morsel
                 return
-            except (
-                ValueError,
-                TypeError,
-                pyarrow.lib.ArrowInvalid,
-            ) as err:  # pragma: no cover - defensive fallback
-                logger.debug(f"Unable to build schema-aware empty table: {err}")
+            except Exception as err:  # pragma: no cover - defensive fallback
+                logger.debug(f"Unable to build schema-aware empty morsel: {err}")
 
         # Second try: use columns property if available
         if self.columns:
-            # Create empty table with column names but no types
-            # Extract column names (handle both string and LogicalColumn objects)
-            col_names = []
+            empty_morsel = Morsel()
             for col in self.columns:
-                if isinstance(col, str):
-                    col_names.append(col)
+                col_name = col
+                if hasattr(col, "identity"):
+                    col_name = col.identity
                 elif hasattr(col, "name"):
-                    col_names.append(col.name)
-                else:
-                    col_names.append(str(col))
+                    col_name = col.name
 
-            # Create empty table with column structure
-            empty_table = pyarrow.table(
-                {col_name: pyarrow.array([], type=pyarrow.null()) for col_name in col_names}
-            )
-            yield empty_table
+                # Default to null type for unknown columns
+                vector = from_scalar(None, 0)
+                empty_morsel.append_vector(str(col_name).encode(), vector)
+            yield empty_morsel
             return
 
-        # Fallback: return completely empty table
-        empty_table = pyarrow.table({})
-        yield empty_table
+        # Fallback: return completely empty morsel
+        yield Morsel()
 
     @property
     def name(self):  # pragma: no cover
