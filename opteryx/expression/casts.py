@@ -1,8 +1,19 @@
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# See the License at http://www.apache.org/licenses/LICENSE-2.0
+# Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
+
 """Cast operation kernels.
 
 This module contains the core implementations for type casting operations (CAST, TRY_CAST).
 These kernels are the source of truth for cast behavior and are used by both the legacy
 function system and the new cast evaluation path.
+
+Architectural note (Phase 5.3.2):
+- Expression layer functions are Draken-native: they receive Draken vectors or Python scalars
+- PyArrow/NumPy in this module are used ONLY for interop and type construction
+- If expression functions receive PyArrow/NumPy arrays, they raise AttributeError (fail-fast)
+- Conversion from reader data (PyArrow) → Draken vectors happens at interop boundaries
 """
 
 import datetime
@@ -14,77 +25,33 @@ import pyarrow
 from opteryx.types import OrsoTypes
 
 
-def safe(func, value, **kwargs):
-    """Safely cast a value, returning None on error (for TRY_CAST/SAFE_CAST)."""
-    try:
-        return func(value, **kwargs)
-    except (ValueError, TypeError, ArithmeticError, OverflowError):
-        return None
+def _is_nullish(value) -> bool:
+    """Check if a value is None or represents null."""
+    return value is None or (isinstance(value, float) and numpy.isnan(value))
 
 
 def _unwrap_vector_value(value):
+    """Unwrap PyArrow scalar wrappers to Python native types."""
     if hasattr(value, "as_py"):
-        value = value.as_py()
-    if isinstance(value, numpy.ndarray):
-        value = value.tolist()
+        return value.as_py()
     return value
-
-
-def _normalize_scalar(value):
-    if hasattr(value, "as_py"):
-        value = value.as_py()
-    if isinstance(value, numpy.ndarray):
-        value = value.item() if value.ndim == 0 else value.tolist()
-    if isinstance(value, numpy.generic):
-        value = value.item()
-    return value
-
-
-def _is_nullish(value):
-    if value is None:
-        return True
-    return isinstance(value, (float, numpy.floating)) and numpy.isnan(value)
 
 
 def parse_timestamp_value(value):
-    """
-    Cast a single scalar-like value to a Python datetime.
-
-    This extends the Orso TIMESTAMP parser with support for:
-    - raw epoch integers/floats in s/ms/us/ns
-    - numpy datetime64
-    - Python date values
-    - UTF-8 bytes
-    """
-    value = _normalize_scalar(value)
-
-    if value is None:
+    """Parse a timestamp value into a Python datetime object."""
+    if _is_nullish(value):
         return None
 
     if isinstance(value, datetime.datetime):
         return value
 
     if isinstance(value, datetime.date):
-        return datetime.datetime(value.year, value.month, value.day)
-
-    if isinstance(value, numpy.datetime64):
-        micros = int(value.astype("datetime64[us]").astype(numpy.int64))
-        return datetime.datetime.fromtimestamp(
-            micros / 1_000_000, tz=datetime.timezone.utc
-        ).replace(tzinfo=None)
-
-    if isinstance(value, (bytes, bytearray, memoryview)):
-        value = bytes(value).decode("utf-8")
-
-    if isinstance(value, str):
-        return OrsoTypes.TIMESTAMP.parse(value)
+        return datetime.datetime.combine(value, datetime.time()).replace(tzinfo=None)
 
     if isinstance(value, (int, float, numpy.integer, numpy.floating)):
         numeric = float(value)
         magnitude = abs(numeric)
 
-        # Small integers are interpreted as epoch seconds. Larger magnitudes
-        # are inferred as ms/us/ns epoch values.
         if magnitude >= 1e18:
             seconds = numeric / 1_000_000_000
         elif magnitude >= 1e15:
@@ -102,6 +69,7 @@ def parse_timestamp_value(value):
 
 
 def _parse_array_value(value, element_type, safe_cast=False):
+    """Parse array values with element type coercion."""
     value = _unwrap_vector_value(value)
 
     if _is_nullish(value):
@@ -129,69 +97,226 @@ def _parse_array_value(value, element_type, safe_cast=False):
     else:
         value = [value]
 
-    parser = OrsoTypes[element_type].parse
-    result = []
-    for element in value:
-        element = _unwrap_vector_value(element)
-        if _is_nullish(element):
-            continue
-        if safe_cast:
-            converted = safe(parser, element)
-            if converted is None:
-                return None
-        else:
-            converted = parser(element)
-        result.append(converted)
-    return result
+    caster = OrsoTypes[element_type.name].parse
+    return [caster(item) if item is not None else None for item in value]
 
 
-def try_cast(_type):
-    """Cast a column to a specified type, returning None for failed conversions.
+def cast_to_double(arr, *args):
+    """Cast array to DOUBLE (floating point) type.
 
-    This is used for TRY_CAST and SAFE_CAST operations.
+    Per architectural contract (Phase 5.3.2 - fail-fast):
+    - Primary: Draken vectors only
+    - Fallback: Python scalars/lists
+    - Fail: PyArrow/NumPy arrays (architectural invariant violation)
+
+    Returns:
+        Float64Vector or Python float/list
+    """
+    from opteryx.compiled.draken.vectors.float64_vector import from_sequence
+    from opteryx.third_party.fastfloat.fast_float import (
+        parse_ascii_array_to_double,
+        parse_byte_array_to_double,
+    )
+    from opteryx.utils.vector_types import VectorType, get_vector_type
+
+    # Primary path: Draken vectors
+    if hasattr(arr, "to_arrow"):
+        v_type = get_vector_type(arr)
+        if v_type == VectorType.FLOAT64:
+            return arr
+        if v_type == VectorType.INT64:
+            return from_sequence(arr.to_numpy(False).astype(numpy.float64))
+        if v_type == VectorType.STRING:
+            return parse_ascii_array_to_double(arr.to_pylist())
+        # Other Draken types: fall through to fallback
+
+    # Fallback: Python scalar or list
+    if isinstance(arr, (list, tuple)):
+        caster = OrsoTypes.DOUBLE.parse
+        return [caster(i) if i is not None else None for i in arr]
+
+    if isinstance(arr, (int, float)):
+        return OrsoTypes.DOUBLE.parse(arr)
+
+    # Fail-fast: PyArrow/NumPy arrays violate architectural contract
+    if isinstance(arr, (pyarrow.Array, pyarrow.ChunkedArray)):
+        raise AttributeError(
+            f"Expression layer received PyArrow array; expected Draken vector or Python scalar. "
+            f"Use interop boundary to convert. Got: {type(arr).__name__}"
+        )
+    if isinstance(arr, numpy.ndarray):
+        raise AttributeError(
+            f"Expression layer received NumPy array; expected Draken vector or Python scalar. "
+            f"Use interop boundary to convert. Got: {type(arr).__name__}"
+        )
+
+    raise TypeError(f"Unsupported type for cast_to_double: {type(arr).__name__}")
+
+
+def cast_to_int(arr, *args):
+    """Cast array to INTEGER type.
+
+    Per architectural contract (Phase 5.3.2 - fail-fast):
+    - Primary: Draken vectors only
+    - Fallback: Python scalars/lists
+    - Fail: PyArrow/NumPy arrays (architectural invariant violation)
+
+    Returns:
+        Int64Vector or Python int/list
+    """
+    from opteryx.compiled.draken.vectors.int64_vector import from_sequence
+    from opteryx.compiled.vector_ops import vector_cast_ascii_to_int
+    from opteryx.utils.vector_types import VectorType, get_vector_type
+
+    # Primary path: Draken vectors
+    if hasattr(arr, "to_arrow"):
+        v_type = get_vector_type(arr)
+        if v_type == VectorType.INT64:
+            return arr
+        if v_type == VectorType.STRING:
+            return vector_cast_ascii_to_int(arr)
+        if v_type == VectorType.TIMESTAMP or v_type == VectorType.DATE32:
+            return from_sequence(arr.to_numpy(False).astype(numpy.int64))
+        # Other Draken types: fall through to fallback
+
+    # Fallback: Python scalar or list
+    if isinstance(arr, (list, tuple)):
+        caster = OrsoTypes.INTEGER.parse
+        return [caster(i) if i is not None else None for i in arr]
+
+    if isinstance(arr, int):
+        return arr
+
+    # Fail-fast: PyArrow/NumPy arrays violate architectural contract
+    if isinstance(arr, (pyarrow.Array, pyarrow.ChunkedArray)):
+        raise AttributeError(
+            f"Expression layer received PyArrow array; expected Draken vector or Python scalar. "
+            f"Use interop boundary to convert. Got: {type(arr).__name__}"
+        )
+    if isinstance(arr, numpy.ndarray):
+        raise AttributeError(
+            f"Expression layer received NumPy array; expected Draken vector or Python scalar. "
+            f"Use interop boundary to convert. Got: {type(arr).__name__}"
+        )
+
+    raise TypeError(f"Unsupported type for cast_to_int: {type(arr).__name__}")
+
+
+def cast_to_varchar(arr, *args):
+    """Cast array to VARCHAR type."""
+    from opteryx.compiled.draken.vectors.string_vector import StringVector
+    from opteryx.utils.vector_types import VectorType, get_vector_type
+
+    if hasattr(arr, "to_arrow"):
+        v_type = get_vector_type(arr)
+        if v_type == VectorType.STRING:
+            return arr
+        # Other types: convert via to_pylist() and reconstruct
+        return StringVector.from_list([str(v) if v is not None else None for v in arr.to_pylist()])
+
+    if isinstance(arr, (list, tuple)):
+        return StringVector.from_list([str(v) if v is not None else None for v in arr])
+
+    if isinstance(arr, str):
+        return arr
+
+    # Fail-fast for PyArrow/NumPy
+    if isinstance(arr, (pyarrow.Array, pyarrow.ChunkedArray)):
+        raise AttributeError(
+            f"Expression layer received PyArrow array; expected Draken vector. Got: {type(arr).__name__}"
+        )
+    if isinstance(arr, numpy.ndarray):
+        raise AttributeError(
+            f"Expression layer received NumPy array; expected Draken vector. Got: {type(arr).__name__}"
+        )
+
+    raise TypeError(f"Unsupported type for cast_to_varchar: {type(arr).__name__}")
+
+
+def cast_to_boolean(arr, *args):
+    """Cast array to BOOLEAN type."""
+    from opteryx.compiled.draken.vectors.bool_vector import BoolVector
+    from opteryx.utils.vector_types import VectorType, get_vector_type
+
+    if hasattr(arr, "to_arrow"):
+        v_type = get_vector_type(arr)
+        if v_type == VectorType.BOOL:
+            return arr
+        # Other types: convert via to_pylist()
+        return BoolVector.from_list([bool(v) if v is not None else None for v in arr.to_pylist()])
+
+    if isinstance(arr, (list, tuple)):
+        return BoolVector.from_list([bool(v) if v is not None else None for v in arr])
+
+    if isinstance(arr, bool):
+        return arr
+
+    # Fail-fast for PyArrow/NumPy
+    if isinstance(arr, (pyarrow.Array, pyarrow.ChunkedArray)):
+        raise AttributeError(
+            f"Expression layer received PyArrow array; expected Draken vector. Got: {type(arr).__name__}"
+        )
+    if isinstance(arr, numpy.ndarray):
+        raise AttributeError(
+            f"Expression layer received NumPy array; expected Draken vector. Got: {type(arr).__name__}"
+        )
+
+    raise TypeError(f"Unsupported type for cast_to_boolean: {type(arr).__name__}")
+
+
+def cast_to_date(arr, *args):
+    """Cast array to DATE type."""
+    from opteryx.utils.vector_types import VectorType, get_vector_type
+
+    if hasattr(arr, "to_arrow"):
+        v_type = get_vector_type(arr)
+        if v_type == VectorType.DATE32:
+            return arr
+        # Convert to date list and reconstruct
+        caster = OrsoTypes.DATE.parse
+        return [caster(v) if v is not None else None for v in arr.to_pylist()]
+
+    if isinstance(arr, (list, tuple)):
+        caster = OrsoTypes.DATE.parse
+        return [caster(v) if v is not None else None for v in arr]
+
+    if isinstance(arr, datetime.date):
+        return arr
+
+    # Fail-fast for PyArrow/NumPy
+    if isinstance(arr, (pyarrow.Array, pyarrow.ChunkedArray)):
+        raise AttributeError(
+            f"Expression layer received PyArrow array; expected Draken vector. Got: {type(arr).__name__}"
+        )
+    if isinstance(arr, numpy.ndarray):
+        raise AttributeError(
+            f"Expression layer received NumPy array; expected Draken vector. Got: {type(arr).__name__}"
+        )
+
+    raise TypeError(f"Unsupported type for cast_to_date: {type(arr).__name__}")
+
+
+def safe(func, value, **kwargs):
+    """Safely call a function with kwargs, returning None on exception."""
+    try:
+        return func(value, **kwargs)
+    except Exception:
+        return None
+
+
+def cast(arr: any, _type: str, args: tuple = ()) -> any:
+    """
+    Create a casting function for the given type.
+
+    This is a factory function that returns a callable that can be used to cast values.
     """
 
-    def _inner(arr, *args):
-        args = [a[0] for a in args]
-        kwargs = {}
-
-        caster = OrsoTypes[_type].parse
-
-        sig = inspect.signature(caster)
-        params = list(sig.parameters.values())[1:]  # skip the first param (`value`)
-
-        kwargs = {param.name: arg for param, arg in zip(params, args)}
-
-        if _type == "TIMESTAMP":
-            return [safe(parse_timestamp_value, i) for i in arr]
-        if _type == "ARRAY":
-            return [_parse_array_value(i, args[0], safe_cast=True) for i in arr]
-        if _type == "VECTOR":
-            return [safe(caster, _unwrap_vector_value(i), **kwargs) for i in arr]
-        return [safe(caster, i, **kwargs) for i in arr]
-
-    return _inner
-
-
-def cast(_type):
-    """Cast a column to a specified type.
-
-    This handles standard CAST operations with type-specific logic for DECIMAL,
-    VARCHAR, BLOB, and ARRAY types.
-    """
-
-    def _inner(arr, *args):
-        args = [a[0] for a in args]
-        kwargs = {}
-
-        def _cast_value(value):
-            value = _normalize_scalar(value)
-            if _is_nullish(value):
-                return None
-            return caster(value, **kwargs)
+    def _inner(arr):
+        def _cast_value(i):
+            return caster(i, **kwargs)
 
         # VARBINARY is not a canonical OrsoType — map to BLOB
-        _resolved_type = "BLOB" if _type == "VARBINARY" else _type
+        _resolved_type = "VARBINARY" if _type == "VARBINARY" else _type
         caster = OrsoTypes[_resolved_type].parse
 
         if _type == "DECIMAL":
@@ -218,180 +343,3 @@ def cast(_type):
         return [_cast_value(i) for i in arr]
 
     return _inner
-
-
-def _cast_to_binary_representation(
-    arr, format_double_func, vector_cast_int64_func, vector_cast_uint64_func, caster_type, *args
-):
-    """Internal helper for casting to binary representations (VARCHAR and BLOB).
-
-    Both VARCHAR and BLOB store identical binary data; only the format functions differ.
-    This consolidates the identical logic paths.
-
-    Args:
-        arr: Input array
-        format_double_func: Function to format float64 arrays (format_double_array_ascii or format_double_array_bytes)
-        vector_cast_int64_func: Function to cast int64 arrays
-        vector_cast_uint64_func: Function to cast uint64 arrays
-        caster_type: Type constant for OrsoTypes lookup (e.g., OrsoTypes.VARCHAR)
-        *args: Optional length argument
-    """
-    if hasattr(arr, "to_numpy"):
-        arr = arr.to_numpy(False)
-
-    if arr.dtype == numpy.float64:
-        # Phase 5.3: Return StringVector directly instead of converting to numpy object array
-        return format_double_func(arr)
-
-    if arr.dtype == numpy.int64:
-        from opteryx.compiled.draken.interop.arrow import vector_from_arrow
-
-        # Phase 5.3: Return StringVector directly instead of converting to Arrow/NumPy
-        return vector_cast_int64_func(vector_from_arrow(pyarrow.array(arr)))
-
-    if arr.dtype == numpy.uint64:
-        from opteryx.compiled.draken.interop.arrow import vector_from_arrow
-
-        # Phase 5.3: Return StringVector directly instead of converting to Arrow/NumPy
-        return vector_cast_uint64_func(vector_from_arrow(pyarrow.array(arr.view(numpy.int64))))
-
-    caster = caster_type.parse
-    kwargs = {}
-    if len(args) == 1:
-        kwargs["length"] = int(args[0])
-    return [caster(i, **kwargs) if i is not None else None for i in arr]
-
-
-def cast_to_varchar(arr, *args):
-    """Cast array to VARCHAR (text) type.
-
-    Uses optimized paths for float64 and int64 arrays when possible,
-    falling back to generic conversion for other types.
-    """
-    from opteryx.compiled.vector_ops import vector_cast_int64_to_ascii, vector_cast_uint64_to_ascii
-    from opteryx.third_party.ulfjack.ryu import format_double_array_ascii
-
-    return _cast_to_binary_representation(
-        arr,
-        format_double_array_ascii,
-        vector_cast_int64_to_ascii,
-        vector_cast_uint64_to_ascii,
-        OrsoTypes.VARCHAR,
-        *args,
-    )
-
-
-def cast_to_blob(arr, *args):
-    """Cast array to BLOB (binary) type.
-
-    Uses optimized paths for float64 and int64 arrays when possible,
-    falling back to generic conversion for other types.
-    """
-    from opteryx.compiled.vector_ops import vector_cast_int64_to_bytes, vector_cast_uint64_to_bytes
-    from opteryx.third_party.ulfjack.ryu import format_double_array_bytes
-
-    return _cast_to_binary_representation(
-        arr,
-        format_double_array_bytes,
-        vector_cast_int64_to_bytes,
-        vector_cast_uint64_to_bytes,
-        OrsoTypes.BLOB,
-        *args,
-    )
-
-
-def cast_to_double(arr, *args):
-    """Cast array to DOUBLE (floating point) type.
-
-    Casts an array to double precision floating point numbers.
-    Uses fast C++ path for string parsing when available,
-    optimized conversion for int64 arrays, and native Draken vectors.
-
-    Returns:
-        - Float64Vector for optimized paths (strings, ints, floats)
-        - list for heterogeneous fallback cases
-    """
-    from opteryx.compiled.draken.vectors.float64_vector import Float64Vector, from_sequence
-    from opteryx.third_party.fastfloat.fast_float import (
-        parse_ascii_array_to_double,
-        parse_byte_array_to_double,
-    )
-
-    if hasattr(arr, "to_arrow"):
-        from opteryx.utils.vector_types import VectorType, get_vector_type
-
-        v_type = get_vector_type(arr)
-        if v_type == VectorType.FLOAT64:
-            return arr
-        if v_type == VectorType.INT64:
-            return from_sequence(arr.to_numpy(False).astype(numpy.float64))
-        if v_type == VectorType.STRING:
-            return parse_ascii_array_to_double(arr.to_pylist())
-
-    if hasattr(arr, "to_numpy"):
-        arr = arr.to_numpy(False)
-    if arr.dtype == numpy.float64:
-        return from_sequence(arr)
-    if arr.dtype == numpy.int64:
-        return from_sequence(arr.astype(numpy.float64))
-    if numpy.issubdtype(arr.dtype, numpy.object_):
-        if len(arr) > 0 and isinstance(arr[0], str):
-            return parse_ascii_array_to_double(arr)
-        elif len(arr) > 0 and isinstance(arr[0], bytes):
-            return parse_byte_array_to_double(arr)
-    if numpy.issubdtype(arr.dtype, numpy.str_):
-        return parse_ascii_array_to_double(arr.astype(object))
-
-    caster = OrsoTypes.DOUBLE.parse
-    return [caster(i) if i is not None else None for i in arr]
-
-
-def cast_to_int(arr, *args):
-    """Cast array to INTEGER type.
-
-    Uses optimized C++ paths for string/byte parsing and date conversion,
-    returning native Draken Int64Vector for hot paths.
-
-    Returns:
-        - Int64Vector for optimized paths (strings, bytes, ints, dates)
-        - list for heterogeneous fallback cases
-    """
-    from opteryx.compiled.draken.interop.arrow import vector_from_arrow
-    from opteryx.compiled.draken.vectors.int64_vector import Int64Vector, from_sequence
-    from opteryx.compiled.vector_ops import vector_cast_ascii_to_int, vector_cast_bytes_to_int
-
-    if hasattr(arr, "to_arrow"):
-        from opteryx.utils.vector_types import VectorType, get_vector_type
-
-        v_type = get_vector_type(arr)
-        if v_type == VectorType.INT64:
-            return arr
-        if v_type == VectorType.STRING:
-            return vector_cast_ascii_to_int(arr)
-        if v_type == VectorType.TIMESTAMP or v_type == VectorType.DATE32:
-            return from_sequence(arr.to_numpy(False).astype(numpy.int64))
-
-    if hasattr(arr, "to_numpy"):
-        arr = arr.to_numpy(False)
-    if numpy.issubdtype(arr.dtype, numpy.object_):
-        if len(arr) > 0 and isinstance(arr[0], str):
-            return vector_cast_ascii_to_int(
-                vector_from_arrow(pyarrow.array(arr, type=pyarrow.string()))
-            )
-        elif len(arr) > 0 and isinstance(arr[0], bytes):
-            return vector_cast_bytes_to_int(
-                vector_from_arrow(pyarrow.array(arr, type=pyarrow.binary()))
-            )
-    if numpy.issubdtype(arr.dtype, numpy.str_):
-        return vector_cast_ascii_to_int(
-            vector_from_arrow(pyarrow.array(arr.astype(object), type=pyarrow.string()))
-        )
-    if numpy.issubdtype(arr.dtype, numpy.datetime64):
-        arr = arr.astype("M8[us]")  # microseconds
-        int_arr = arr.astype(numpy.int64)
-        return from_sequence(int_arr)
-    if numpy.issubdtype(arr.dtype, numpy.int64):
-        return from_sequence(arr)
-
-    caster = OrsoTypes.INTEGER.parse
-    return [caster(i) if i is not None else None for i in arr]

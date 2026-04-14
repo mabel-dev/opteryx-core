@@ -87,16 +87,12 @@ def MapAccessOp(array, key):
     # Determine the type of the first non-null element.
     first_element = next((item for item in array if item is not None), None)
     if first_element is None:
-        return numpy.full(len(array), None)
+        return [None] * len(array)
 
     raw_key = key[0]
     if hasattr(raw_key, "as_py"):
         raw_key = raw_key.as_py()
-    if (
-        raw_key is None
-        or isinstance(raw_key, (bool, numpy.bool_))
-        or not isinstance(raw_key, (int, numpy.integer))
-    ):
+    if raw_key is None or isinstance(raw_key, bool) or not isinstance(raw_key, int):
         raise IncorrectTypeError("Map/iterable values must be subscripted with INTEGER values")
     index = int(raw_key)
 
@@ -205,6 +201,53 @@ def _ip_containment(left: List[Optional[str]], right: List[str]) -> List[Optiona
         ) from err
 
 
+def _dispatch_arithmetic_operation(
+    op: str, left, right, left_type: OrsoTypes, right_type: OrsoTypes
+) -> Union[None, numpy.ndarray, pyarrow.Array]:
+    """
+    Dispatch arithmetic operations with Draken kernels as primary path.
+
+    Implements fail-fast semantics per architectural contract ("Always prefer
+    failure over silent degradation"):
+
+    - If EITHER operand is a Draken vector: use Draken kernels EXCLUSIVELY.
+      If the kernel returns None (unsupported type combo), return None immediately
+      WITHOUT falling back to NumPy. Caller will raise NotImplementedError.
+
+    - If NEITHER operand is a Draken vector: delegate to NumPy functions as
+      a secondary fallback for unsupported type combinations.
+
+    This ensures that Draken operands never silently degrade to NumPy.
+
+    Parameters:
+        op: str - Operator name (e.g., "Plus", "Minus")
+        left: Operand (Draken vector, PyArrow array, or scalar)
+        right: Operand (Draken vector, PyArrow array, or scalar)
+        left_type: OrsoTypes - Type of left operand
+        right_type: OrsoTypes - Type of right operand
+
+    Returns:
+        Result of the operation, or None if the operation cannot be performed
+    """
+    # Phase 5.3.2: Try Draken vector kernels first for arithmetic operators
+    # If a Draken vector is involved, use Draken kernels exclusively (fail-fast)
+    if is_draken_vector(left) or is_draken_vector(right):
+        from opteryx.expression.evaluator.arithmetic_dispatch import call_arithmetic_op
+
+        result = call_arithmetic_op(op, left, right)
+        # Return whatever Draken gives us (result or None)
+        # Do not silently fall back to NumPy per fail-fast principle
+        return result
+
+    # No Draken operands: use NumPy functions as fallback
+    operation = OPERATOR_FUNCTION_MAP.get(op)
+    if operation is not None:
+        return operation(left, right)
+
+    # Operation not supported
+    return None
+
+
 def binary_operations(
     left, left_type: OrsoTypes, operator: str, right, right_type: OrsoTypes
 ) -> Union[numpy.ndarray, pyarrow.Array]:
@@ -222,13 +265,8 @@ def binary_operations(
         Union[numpy.ndarray, pyarrow.Array]
             The result of the binary operation
     """
-    operation = OPERATOR_FUNCTION_MAP.get(operator)
-
-    if operation is None:
-        raise NotImplementedError(f"Operator `{operator}` is not implemented!")
-
-    # Phase 5.3.2 PoC: Try Draken vector kernels first for arithmetic operators
-    # This allows native vector arithmetic without conversion to numpy/PyArrow
+    # Phase 5.3.2: Try Draken arithmetic dispatch first for arithmetic operators
+    # This prioritizes native Draken kernels over NumPy operations (fail-fast)
     if operator in (
         "Plus",
         "Minus",
@@ -236,19 +274,19 @@ def binary_operations(
         "Divide",
         "Modulo",
         "MyIntegerDivide",
-        "BitwiseOr",
-        "BitwiseAnd",
-        "BitwiseXor",
-        "ShiftLeft",
-        "ShiftRight",
     ):
-        if is_draken_vector(left) or is_draken_vector(right):
-            from opteryx.expression.evaluator.arithmetic_dispatch import call_arithmetic_op
+        result = _dispatch_arithmetic_operation(operator, left, right, left_type, right_type)
+        if result is not None:
+            return result
+        # Dispatcher returned None: operation not supported
+        raise NotImplementedError(
+            f"Operator `{operator}` is not implemented for types {left_type} and {right_type}!"
+        )
 
-            result = call_arithmetic_op(operator, left, right)
-            if result is not None:
-                return result
-            # If no kernel available, fall through to numpy operations below
+    operation = OPERATOR_FUNCTION_MAP.get(operator)
+
+    if operation is None:
+        raise NotImplementedError(f"Operator `{operator}` is not implemented!")
 
     if OrsoTypes.INTERVAL in (left_type, right_type):
         from opteryx.expression.intervals import INTERVAL_KERNELS
@@ -343,18 +381,22 @@ def binary_operations(
 
 # fmt:off
 OPERATOR_FUNCTION_MAP: Dict[str, Any] = {
-    "Divide": numpy.divide,
-    "Minus": numpy.subtract,
-    "Modulo": numpy.mod,
-    "Multiply": numpy.multiply,
+    # Arithmetic operators: Draken kernels are primary; NumPy is fallback
     "Plus": numpy.add,
-    "StringConcat": compute.binary_join_element_wise,
+    "Minus": numpy.subtract,
+    "Multiply": numpy.multiply,
+    "Divide": numpy.divide,
+    "Modulo": numpy.mod,
     "MyIntegerDivide": lambda left, right: numpy.trunc(numpy.divide(left, right)).astype(numpy.int64),
+    # String operations
+    "StringConcat": compute.binary_join_element_wise,
+    # Bitwise operations
     "BitwiseOr": numpy.bitwise_or,
     "BitwiseAnd": numpy.bitwise_and,
     "BitwiseXor": numpy.bitwise_xor,
     "ShiftLeft": numpy.left_shift,
     "ShiftRight": numpy.right_shift,
+    # Special extraction operators
     "Arrow": ArrowOp,
     "LongArrow": LongArrowOp,
     "MapAccess": MapAccessOp,
