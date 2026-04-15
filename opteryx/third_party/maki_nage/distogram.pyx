@@ -14,10 +14,8 @@ __version__ = "3.0.0"
 """
 The following changes have been made for Opteryx:
 - The ability to weight the differences has been removed
-- Dump and Load functionality
-- Bulk load functionality added
-- Removed numpy dependency
-- Fixed count_at bug (was undefined)
+- Removed numpy dependency (no longer needed)
+- Fixed count_at undefined bug
 """
 
 
@@ -53,37 +51,24 @@ class Distogram:  # pragma: no cover
         self._bin_count = bin_count
 
     def bulkload(self, values):
-        """Load many values efficiently using histogram approximation.
-
-        To speed up bulk loads we use a histogram at higher resolution
-        and add this to the distogram. This ends up being an approximation
-        of an approximation but ~1000x faster than sequential updates.
-        The accuracy is poor on very small datasets, but the consequence
-        of a bad decision is minimal on small tables.
-        """
+        """Load many values efficiently using histogram approximation."""
         if len(values) == 0:
             return
-
         # Extract unique values and counts (replaces numpy.unique)
         value_counts = {}
         for v in values:
             fv = float(v)
             value_counts[fv] = value_counts.get(fv, 0) + 1
-
         bin_values = sorted(value_counts.keys())
         counts = [value_counts[v] for v in bin_values]
-
         # If high cardinality, use histogram approximation
         if len(bin_values) > (self._bin_count * 5):
             counts_hist, bin_edges = self._histogram_native(values, self._bin_count * 5)
             bin_values = [(bin_edges[i] + bin_edges[i + 1]) / 2.0 for i in range(len(bin_edges) - 1)]
             counts = counts_hist
-
-        # Add each bin to the distogram
         for index, count in enumerate(counts):
             if count > 0:
                 update(self, bin_values[index], count)
-
         # Update min/max with actual data bounds
         min_val = min(values)
         max_val = max(values)
@@ -102,10 +87,8 @@ class Distogram:  # pragma: no cover
         min_val = min(values)
         max_val = max(values)
         bin_width = (max_val - min_val) / num_bins if num_bins > 0 else 1.0
-
         bin_counts = [0] * num_bins
         bin_edges = _linspace(min_val, max_val, num_bins)
-
         for v in values:
             fv = float(v)
             if fv == max_val:
@@ -116,7 +99,6 @@ class Distogram:  # pragma: no cover
                     bin_counts[bin_idx] += 1
             elif fv == min_val:
                 bin_counts[0] += 1
-
         return bin_counts, bin_edges
 
     def count(self):
