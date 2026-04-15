@@ -9,9 +9,9 @@ from cpython.mem cimport PyMem_Malloc, PyMem_Free
 from libc.stdlib cimport malloc, free
 
 """
-Vector conversion operations without NumPy.
+Vector conversion operations.
 
-Provides NumPy-free conversion of Python sequences to float32 C arrays
+Provides conversion of Python sequences to float32 C arrays
 for use in vector similarity operations.
 
 Key design:
@@ -60,7 +60,7 @@ cdef class FloatBuffer:
 
 def sequence_to_float32_vector(object sequence):
     """
-    Convert Python sequence to FloatBuffer without NumPy.
+    Convert Python sequence to FloatBuffer.
 
     Validates:
     - Sequence is iterable and sized
