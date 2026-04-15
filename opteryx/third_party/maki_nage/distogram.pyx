@@ -2,6 +2,7 @@
 # type: ignore
 import math
 from bisect import bisect_left
+from heapq import heappush, heappop
 from itertools import accumulate
 from operator import itemgetter
 from typing import List
@@ -195,9 +196,22 @@ def _update_diffs(h: Distogram, i: int) -> None:  # pragma: no cover
 
 def _trim(h: Distogram) -> Distogram:  # pragma: no cover
     while len(h.bins) > h._bin_count:
-        if h.diffs is not None:
-            i = h.diffs.index(h.min_diff)
+        # Find the index of the smallest gap
+        # Optimization: if diffs is available, scan it instead of recomputing gaps
+        if h.diffs is not None and len(h.diffs) > 0:
+            # diffs list already tracks gaps - find minimum in O(n) instead of recomputing
+            min_idx = 0
+            min_gap = h.diffs[0]
+            for i in range(1, len(h.diffs)):
+                if h.diffs[i] < min_gap:
+                    min_gap = h.diffs[i]
+                    min_idx = i
+            i = min_idx
+        elif h.diffs is not None:
+            # diffs exists but is empty (only 1 bin left)
+            break
         else:
+            # diffs not initialized - compute gaps (original algorithm)
             diffs = [(i - 1, b[0] - h.bins[i - 1][0]) for i, b in enumerate(h.bins[1:], start=1)]
             i, _ = min(diffs, key=itemgetter(1))
 
@@ -208,7 +222,8 @@ def _trim(h: Distogram) -> Distogram:  # pragma: no cover
         if h.diffs is not None:
             h.diffs.pop(i)
             _update_diffs(h, i)
-            h.min_diff = min(h.diffs)
+            if h.diffs:  # Only compute min if diffs is non-empty
+                h.min_diff = min(h.diffs)
 
     return h
 
