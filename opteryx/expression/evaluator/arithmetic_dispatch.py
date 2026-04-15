@@ -1,11 +1,8 @@
 """Arithmetic operation dispatch for Draken vectors.
 
-Phase 4.5 implementation: Uses native Python arithmetic kernels for Draken vectors.
-
 Architecture:
 - VectorType-based routing to kernel registry
 - Only processes Draken vectors (at least one operand must be Draken)
-- Falls back to PyArrow/numpy for unsupported combinations via binary_operations()
 - Kernels handle null propagation and type coercion at Python level
 
 Kernels:
@@ -21,9 +18,9 @@ def call_arithmetic_op(op, left, right):
     """
     Execute arithmetic operation with VectorType-based dispatch.
 
-    Phase 4.5: Routes to native Draken kernels when both operands are
-    Draken vectors (or scalar with Draken vector). Falls back to None
-    for PyArrow arrays, which triggers binary_operations() path.
+    Routes to native Draken kernels when both operands are Draken vectors
+    (or scalar with Draken vector). Returns None if no kernel is found,
+    which triggers the `binary_operations()` fallback.
 
     Parameters:
         op: str - Operator ('Plus', 'Minus', 'Multiply', 'Divide', etc.)

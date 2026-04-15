@@ -1,12 +1,8 @@
 """Binary arithmetic operations.
 
-Refactored in Phase 4.4 to use VectorType-based dispatch, eliminating
-__class__.__name__ anti-patterns and improving maintainability.
-
 Architecture:
 - Uses arithmetic_dispatch module for centralized routing
 - Delegates to VectorType discriminator (from utils/vector_types.py)
-- Maintains backward compatibility while preparing for Phase 4.5 (native Draken)
 
 Operations:
 - Binary arithmetic: Plus, Minus, Multiply, Divide, Modulo, MyIntegerDivide
@@ -63,9 +59,6 @@ _NEGATED_OPS = {
 def _eval_binary_op_draken(node, morsel):
     """
     Evaluate binary operations in Draken evaluator.
-
-    Refactored in Phase 4.4 to use centralized arithmetic dispatch and
-    VectorType-based type discrimination.
 
     Parameters:
         node: Expression AST node with value (operator), left, right
@@ -155,7 +148,7 @@ def _eval_binary_op_draken(node, morsel):
         return vector_string_concat_binary(_to_bytes_or_vec(left), _to_bytes_or_vec(right))
 
     # ===================================================================
-    # GENERAL ARITHMETIC OPERATIONS (uses arithmetic_dispatch)
+    # GENERAL ARITHMETIC OPERATIONS
     # ===================================================================
     from opteryx.compiled.draken.interop.arrow import vector_from_arrow
     from opteryx.compiled.draken.interop.vector_sequence import vector_from_sequence
@@ -187,7 +180,7 @@ def _eval_binary_op_draken(node, morsel):
         )
 
     # ===================================================================
-    # RESULT CONVERSION (centralized via arithmetic_dispatch)
+    # RESULT CONVERSION
     # ===================================================================
     # Convert Arrow-like results back to Draken vectors
     if hasattr(result, "to_pylist") and not hasattr(result, "to_arrow"):

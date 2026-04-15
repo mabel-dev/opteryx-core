@@ -83,29 +83,16 @@ class NodeType(int, Enum):
     EXTRACTION_OPERATOR = 46  # 0010 1110 - value extraction: ->, ->>, []
 
 
-def _arrow_type_for_schema_column(schema_column):
-    if schema_column is None:
-        return None
-    if getattr(schema_column, "type", None) == OrsoTypes.VECTOR:
-        import pyarrow as _pa
-
-        return _pa.list_(_pa.float64())
-    arrow_field = getattr(schema_column, "arrow_field", None)
-    return getattr(arrow_field, "type", None)
-
-
 def _typed_constant_vector(value, length: int, schema_column):
     """
     Create a typed constant-encoded Draken vector when the output type is known.
 
-    Returns `None` when the type is not yet supported by typed constant encoding,
-    allowing callers to fall back to Arrow materialization if the type is still unknown.
+    Returns `None` when the type is not yet supported by typed constant encoding.
     """
     if schema_column is None or length < 0:
         return None
 
     target_type = getattr(schema_column, "type", None)
-    arrow_type = _arrow_type_for_schema_column(schema_column)
     is_null = value is None
 
     if target_type == OrsoTypes.BOOLEAN:
@@ -148,8 +135,8 @@ def _typed_constant_vector(value, length: int, schema_column):
     if target_type == OrsoTypes.TIMESTAMP:
         from opteryx.compiled.draken.vectors.timestamp_vector import TimestampVector
 
-        # Extract timestamp unit from arrow_type without importing pyarrow at module level
-        timestamp_unit = getattr(arrow_type, "unit", "us") if arrow_type is not None else "us"
+        # Default to microsecond precision for constant-encoded timestamps
+        timestamp_unit = "us"
         if not is_null:
             value = timestamp_to_int64_us(value)
         return TimestampVector.from_constant(
@@ -162,8 +149,8 @@ def _typed_constant_vector(value, length: int, schema_column):
     if target_type == OrsoTypes.TIME:
         from opteryx.compiled.draken.vectors.time_vector import TimeVector
 
-        # time64 uses 'us' or 'ns' units; time32 uses 's' or 'ms'
-        is_time64 = bool(arrow_type and str(arrow_type).startswith("time64"))
+        # Default to time64 (microsecond precision) for constant-encoded times
+        is_time64 = True
         if not is_null:
             if isinstance(value, datetime.time):
                 if is_time64:
@@ -412,17 +399,17 @@ def _inner_evaluate(root: Node, table):
 
     identity = root.schema_column.identity if root.schema_column else random_string()
 
-    # if we have this column already, convert to Draken at interop boundary
-    if identity in table.column_names:
-        from opteryx.compiled.draken.interop.arrow import vector_from_arrow
+    # if we have this column already, return it from the Morsel
+    # Morsels use bytes for column names
+    col_names = table.column_names
+    col_identity = identity
 
-        col = table[identity]
-        if hasattr(col, "to_arrow"):
-            # Already a Draken vector
-            return col
-        # PyArrow column: convert to Draken
-        arrow_col = col if not hasattr(col, "combine_chunks") else col.combine_chunks()
-        return vector_from_arrow(arrow_col)
+    if isinstance(identity, str):
+        col_identity = identity.encode("utf-8")
+
+    if col_identity in col_names:
+        col = table.column(col_identity)
+        return col
 
     # LITERAL TYPES - return Draken constant vectors
     if node_type == NodeType.LITERAL:
@@ -534,23 +521,25 @@ def _inner_evaluate(root: Node, table):
             # zero parameter functions get the number of rows as the parameter
             if len(parameters) == 0:
                 parameters = [table.num_rows]
-            return apply_bounded_function(root, *parameters)
+            result = apply_bounded_function(root, *parameters)
+            # Convert PyArrow arrays to Draken vectors if needed
+            if hasattr(result, "__class__") and "pyarrow" in result.__class__.__module__:
+                from opteryx.compiled.draken.interop.arrow import vector_from_arrow
+
+                if hasattr(result, "combine_chunks"):
+                    result = vector_from_arrow(result.combine_chunks())
+                else:
+                    result = vector_from_arrow(result)
+            return result
         if node_type == NodeType.CAST:
             # Handle CAST operations (CAST(expr AS type), TRY_CAST, SAFE_CAST)
-            from opteryx.expression.casts import cast, try_cast
+            from opteryx.expression.casts import cast
 
             # Evaluate source expression
             source = _inner_evaluate(root.left, table)
 
-            # Determine if this is a safe cast (TRY_CAST/SAFE_CAST) or regular cast
-            # TRY_ prefix in node.value indicates safe cast
-            is_safe_cast = root.value.startswith("TRY_")
-
-            # Get the target type name (remove TRY_ prefix if present)
-            target_type = root.value[4:] if is_safe_cast else root.value
-
-            # Get the appropriate cast kernel
-            kernel = try_cast(target_type) if is_safe_cast else cast(target_type)
+            # Get the target type name (remove TRY_ prefix if present for TRY_CAST/SAFE_CAST)
+            target_type = root.value[4:] if root.value.startswith("TRY_") else root.value
 
             # Handle optional precision/scale/length parameters from node.parameters
             params = []
@@ -558,8 +547,20 @@ def _inner_evaluate(root: Node, table):
                 # Parameters were already bound by binder if needed
                 params = [_inner_evaluate(param, table) for param in root.parameters]
 
-            # Apply the cast kernel(s, *params)
-            result = kernel(source, *params)
+            # Get the cast kernel - cast() is a factory that returns a callable
+            kernel = cast(None, target_type, tuple(params))
+
+            # Apply the cast kernel to the source
+            result = kernel(source)
+
+            # Convert PyArrow arrays to Draken vectors if needed
+            if hasattr(result, "__class__") and "pyarrow" in result.__class__.__module__:
+                from opteryx.compiled.draken.interop.arrow import vector_from_arrow
+
+                if hasattr(result, "combine_chunks"):
+                    result = vector_from_arrow(result.combine_chunks())
+                else:
+                    result = vector_from_arrow(result)
 
             # Propagate Draken vectors directly; keep fallback values native.
             return result
@@ -570,18 +571,18 @@ def _inner_evaluate(root: Node, table):
             root.value = format_expression(root)
             root.node_type = NodeType.EVALUATED
         if node_type == NodeType.EVALUATED:
-            if root.schema_column.identity not in table.column_names:
-                raise ColumnReferencedBeforeEvaluationError(column=root.schema_column.name)
-            # Convert to Draken vector at interop boundary
-            from opteryx.compiled.draken.interop.arrow import vector_from_arrow
+            # Get the column from the Morsel
+            col_names = table.column_names
+            col_identity = root.schema_column.identity
 
-            col = table[root.schema_column.identity]
-            if hasattr(col, "to_arrow"):
-                # Already a Draken vector
-                return col
-            # PyArrow column: convert to Draken
-            arrow_col = col if not hasattr(col, "combine_chunks") else col.combine_chunks()
-            return vector_from_arrow(arrow_col)
+            if isinstance(col_identity, str):
+                col_identity = col_identity.encode("utf-8")
+
+            if col_identity not in col_names:
+                raise ColumnReferencedBeforeEvaluationError(column=root.schema_column.name)
+
+            col = table.column(col_identity)
+            return col
         if node_type == NodeType.COMPARISON_OPERATOR:
             if (
                 root.left.node_type == NodeType.LITERAL
@@ -637,30 +638,24 @@ def _inner_evaluate(root: Node, table):
 
             if right is None:
                 if root.right.node_type == NodeType.IDENTIFIER:
-                    from opteryx.compiled.draken.interop.arrow import vector_from_arrow
+                    # Get the column from the Morsel
+                    col_identity = root.right.schema_column.identity
 
-                    col = table[root.right.schema_column.identity]
-                    if hasattr(col, "to_arrow"):
-                        right = col
-                    else:
-                        arrow_col = (
-                            col if not hasattr(col, "combine_chunks") else col.combine_chunks()
-                        )
-                        right = vector_from_arrow(arrow_col)
+                    if isinstance(col_identity, str):
+                        col_identity = col_identity.encode("utf-8")
+                    col = table.column(col_identity)
+                    right = col
                 else:
                     right = _inner_evaluate(root.right, table)
             if left is None:
                 if root.left.node_type == NodeType.IDENTIFIER:
-                    from opteryx.compiled.draken.interop.arrow import vector_from_arrow
+                    # Get the column from the Morsel
+                    col_identity = root.left.schema_column.identity
 
-                    col = table[root.left.schema_column.identity]
-                    if hasattr(col, "to_arrow"):
-                        left = col
-                    else:
-                        arrow_col = (
-                            col if not hasattr(col, "combine_chunks") else col.combine_chunks()
-                        )
-                        left = vector_from_arrow(arrow_col)
+                    if isinstance(col_identity, str):
+                        col_identity = col_identity.encode("utf-8")
+                    col = table.column(col_identity)
+                    left = col
                 else:
                     left = _inner_evaluate(root.left, table)
 
@@ -697,11 +692,9 @@ def _inner_evaluate(root: Node, table):
         if node_type == NodeType.WILDCARD:
             return ["*"] * table.num_rows
         if node_type == NodeType.SUBQUERY:
-            import pyarrow as _pa_subq
-
-            # we should have a query plan here
-            sub = root.value.execute()
-            return _pa_subq.concat_tables(sub, promote_options="none")
+            raise UnsupportedSyntaxError(
+                "Subqueries must be planned away before reaching expression evaluation."
+            )
         if node_type == NodeType.NESTED:
             return _inner_evaluate(root.centre, table)
         if node_type == NodeType.UNARY_OPERATOR:
@@ -773,119 +766,25 @@ def get_all_nodes_of_type(root, select_nodes: tuple) -> list:
     return identifiers
 
 
-def _evaluate_and_append_arrow(expressions, table):
-    """
-    Evaluate an expression and add it to the table.
-
-    This needs to be able to deal with and avoid cascading problems where field names
-    are duplicated, this is most common when performing many joins on the same table.
-    """
-    import pyarrow
-
-    prioritized_expressions = prioritize_evaluation(expressions)
-    existing_cols = set(table.column_names)
-
-    for statement in prioritized_expressions:
-        identity = statement.schema_column.identity
-        if identity in existing_cols:
-            continue
-
-        if not should_evaluate(statement):
-            continue
-
-        new_column = None
-        if statement.node_type == NodeType.LITERAL and statement.type not in (
-            OrsoTypes.DATE,
-            OrsoTypes.TIMESTAMP,
-        ):
-            from opteryx.compiled.draken.vectors.scalar_constructors import (
-                from_scalar as constant_from_scalar,
-            )
-
-            target_type = _arrow_type_for_schema_column(statement.schema_column)
-            literal_vec = constant_from_scalar(statement.value, table.num_rows, dtype=target_type)
-            if literal_vec is not None:
-                new_column = literal_vec.to_arrow()
-
-        if new_column is None:
-            if table.num_rows > 0:
-                new_column = evaluate_statement(statement, table)
-            else:
-                # we make all unknown fields to object type
-                new_column = pyarrow.array(
-                    [], type=_arrow_type_for_schema_column(statement.schema_column)
-                )
-
-        # if we know the intended type of the result column, cast it
-        field = statement.schema_column.identity
-        if statement.schema_column.type not in (
-            0,
-            OrsoTypes._MISSING_TYPE,
-            OrsoTypes.NULL,
-            OrsoTypes.INTERVAL,
-        ):
-            field = pyarrow.field(
-                name=identity,
-                type=_arrow_type_for_schema_column(statement.schema_column),
-            )
-            try:
-                if isinstance(new_column, (pyarrow.Array, pyarrow.ChunkedArray)):
-                    new_column = new_column.cast(field.type)
-                else:
-                    temporal_python = isinstance(new_column, (list, tuple)) and any(
-                        isinstance(value, (datetime.date, datetime.datetime))
-                        for value in new_column
-                        if value is not None
-                    )
-                    if temporal_python:
-                        new_column = pyarrow.array(new_column)
-                    else:
-                        from opteryx.compiled.draken.interop.vector_sequence import (
-                            vector_from_sequence,
-                        )
-
-                        vec = vector_from_sequence(new_column)
-                        new_column = vec.to_arrow()
-                    # Cast to the expected type if needed
-                    if new_column.type != field.type:
-                        try:
-                            new_column = new_column.cast(field.type)
-                        except pyarrow.lib.ArrowInvalid:
-                            # If safe casting fails, try unsafe cast
-                            new_column = new_column.cast(field.type, safe=False)
-            except pyarrow.lib.ArrowInvalid as e:
-                raise IncorrectTypeError(
-                    f"Unable to cast '{statement.schema_column.name}' to {field.type}"
-                ) from e
-        elif not isinstance(new_column, (pyarrow.Array, pyarrow.ChunkedArray)):
-            new_column = pyarrow.array(new_column)
-
-        table = table.append_column(field, new_column)
-        existing_cols.add(identity)
-
-    return table
-
-
 def _evaluate_and_append_morsel(expressions, morsel):
     """
     Evaluate expressions against a Draken Morsel.
 
-    Typed literal expressions are appended natively as typed constant-encoded
-    vectors where possible. If a non-literal expression is encountered we fall
-    back to Arrow evaluation for the remaining expressions, then convert back
-    to a Morsel.
+    Typed literal expressions are appended natively as typed constant-encoded vectors.
+    Non-literal expressions are evaluated directly against the Draken morsel.
     """
-    from opteryx.compiled.draken.interop.arrow import vector_from_arrow
     from opteryx.compiled.draken.morsels.morsel import Morsel
     from opteryx.compiled.draken.vectors.scalar_constructors import (
         from_scalar as constant_from_scalar,
     )
 
     prioritized_expressions = prioritize_evaluation(expressions)
+
+    # Keep column names as bytes (Morsel format) and retrieve vectors
     names = list(morsel.column_names)
-    vectors = [
-        morsel.column(name if isinstance(name, bytes) else name.encode("utf-8")) for name in names
-    ]
+    vectors = [morsel.column(name) for name in morsel.column_names]
+
+    # Track existing columns as strings for identity checking
     existing_cols = {name.decode("utf-8") if isinstance(name, bytes) else name for name in names}
 
     for statement in prioritized_expressions:
@@ -901,30 +800,20 @@ def _evaluate_and_append_morsel(expressions, morsel):
                 statement.value, morsel.num_rows, statement.schema_column
             )
             if literal_vec is None:
-                target_type = _arrow_type_for_schema_column(statement.schema_column)
-                literal_vec = constant_from_scalar(
-                    statement.value, morsel.num_rows, dtype=target_type
-                )
+                literal_vec = constant_from_scalar(statement.value, morsel.num_rows)
             if literal_vec is not None:
-                names.append(identity)
+                # Convert identity to bytes for consistency with morsel column names
+                names.append(identity.encode("utf-8") if isinstance(identity, str) else identity)
                 vectors.append(literal_vec)
                 existing_cols.add(identity)
                 continue
 
-        # Non-literal expressions still evaluate through Arrow today.
-        # Evaluate only the current expression and append its result vector so
-        # previously appended constant vectors remain native.
+        # Non-literal expressions evaluate directly using Draken vectors
         working_morsel = Morsel.from_vectors(names, vectors)
-        working_table = working_morsel.to_arrow()
-        evaluated = _evaluate_and_append_arrow([statement], working_table)
-        new_column = evaluated.column(identity)
-        if hasattr(new_column, "num_chunks"):
-            if new_column.num_chunks == 1:
-                new_column = new_column.chunk(0)
-            else:
-                new_column = new_column.combine_chunks()
-        names.append(identity)
-        vectors.append(vector_from_arrow(new_column))
+        result = evaluate_statement(statement, working_morsel)
+        # Convert identity to bytes for consistency with morsel column names
+        names.append(identity.encode("utf-8") if isinstance(identity, str) else identity)
+        vectors.append(result)
         existing_cols.add(identity)
         continue
 
@@ -932,9 +821,12 @@ def _evaluate_and_append_morsel(expressions, morsel):
 
 
 def evaluate_and_append(expressions, table):
-    if table.__class__.__name__ == "Morsel":
-        return _evaluate_and_append_morsel(expressions, table)
-    return _evaluate_and_append_arrow(expressions, table)
+    """
+    Evaluate expressions and append result columns to a Draken Morsel.
+
+    The table must be a Draken Morsel; PyArrow tables must be converted first.
+    """
+    return _evaluate_and_append_morsel(expressions, table)
 
 
 def should_evaluate(statement):

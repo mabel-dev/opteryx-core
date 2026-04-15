@@ -1,24 +1,21 @@
 """Native type registry - no external dependencies.
 
-Provides type information for OrsoTypes without depending on numpy.
-Maps OrsoTypes to native Python type identifiers that are compatible
-with numpy.full(), pyarrow, and other type systems.
+Provides type information for OrsoTypes using native Python identifiers.
+Maps OrsoTypes to portable type strings that work with the rest of the system.
 
-This module replaces the numpy dtype mappings that were previously
+This module replaces the legacy type mappings that were previously
 in _orso_types.py. It provides an abstraction layer that allows
 future migrations without API churn.
 
 Key features:
-- Zero numpy dependency
-- Compatible with numpy dtype strings (for backward compatibility during transition)
+- Compatible with native dtype strings
 - Clean, testable interface for type information
 - Type identifiers are strings (portable across systems)
 
 Design rationale:
-- Using string identifiers instead of numpy objects allows this module
-  to be numpy-free while remaining compatible with code that uses numpy
-- The strings are identical to numpy dtype names, so existing type
-  systems (numpy.full, pyarrow, etc.) work unchanged
+- Using string identifiers keeps this module lightweight while remaining compatible with code that uses dtype strings
+- The strings are identical to dtype names, so existing type
+  systems (e.g. array construction and schema handling) work unchanged
 - This is an internal API; external code uses OrsoTypes.native_type property
 """
 

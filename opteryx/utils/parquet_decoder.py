@@ -53,7 +53,11 @@ def filter_records(filters: Optional[list], table: pyarrow.Table) -> pyarrow.Tab
 
     function_evaluations = get_all_nodes_of_type(root, select_nodes=(NodeType.FUNCTION,))
     if function_evaluations:
-        table = evaluate_and_append(function_evaluations, table)
+        from opteryx.compiled.draken.morsels.morsel import Morsel
+
+        morsel = Morsel.from_arrow(table)
+        morsel = evaluate_and_append(function_evaluations, morsel)
+        table = morsel.to_arrow()
 
     mask = evaluate(root, table)
     return table.filter(mask)

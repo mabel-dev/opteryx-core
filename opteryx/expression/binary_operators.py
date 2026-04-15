@@ -20,13 +20,6 @@ def ArrowOp(documents, elements):
 
     element = elements[0]
 
-    # Fast path: if the documents are dicts, delegate to the cython optimized op
-    if len(documents) > 0 and isinstance(documents[0], dict):
-        return vector_ops.cython_arrow_op(documents, element)
-
-    if hasattr(documents, "to_numpy"):
-        documents = documents.to_numpy(zero_copy_only=False)
-
     def extract(doc: bytes, elem: Union[bytes, str]) -> Any:
         value = parser.parse(doc).get(elem)  # type: ignore
         if hasattr(value, "as_list"):
@@ -51,12 +44,6 @@ def LongArrowOp(documents, elements):
 
     element = elements[0]
 
-    if len(documents) > 0 and isinstance(documents[0], dict):
-        return vector_ops.cython_long_arrow_op(documents, element)
-
-    if hasattr(documents, "to_numpy"):
-        documents = documents.to_numpy(zero_copy_only=False)
-
     def extract(doc: bytes, elem: Union[bytes, str]) -> bytes:
         value = parser.parse(doc).get(elem)  # type: ignore
         if hasattr(value, "mini"):
@@ -77,17 +64,12 @@ def MapAccessOp(array, key):
     """Map/iterable subscript accessor."""
     from opteryx.exceptions import IncorrectTypeError
 
-    if hasattr(array, "to_numpy"):
-        array = array.to_numpy(False)
-
     # Determine the type of the first non-null element.
     first_element = next((item for item in array if item is not None), None)
     if first_element is None:
         return [None] * len(array)
 
     raw_key = key[0]
-    if hasattr(raw_key, "as_py"):
-        raw_key = raw_key.as_py()
     if raw_key is None or isinstance(raw_key, bool) or not isinstance(raw_key, int):
         raise IncorrectTypeError("Map/iterable values must be subscripted with INTEGER values")
     index = int(raw_key)
@@ -125,22 +107,12 @@ def MapAccessOp(array, key):
         pa_arr = _pyarrow.array(list(array))
         return vector_get_element(vector_from_arrow(pa_arr), index)
 
-    # PyArrow ListScalar — convert to Python lists first
-    if hasattr(first_element, "as_py"):
-        import pyarrow as _pyarrow
-
-        from opteryx.compiled.draken.interop.arrow import vector_from_arrow
-        from opteryx.compiled.vector_ops import vector_get_element
-
-        pa_arr = _pyarrow.array([r.as_py() if hasattr(r, "as_py") else r for r in array])
-        return vector_get_element(vector_from_arrow(pa_arr), index)
-
     raise IncorrectTypeError(
         f"Map access is not supported for {type(first_element).__name__} values"
     )
 
 
-def _ip_containment(left, right) -> List[Optional[bool]]:
+def _ip_containment(left, right) -> list:
     """
     Check if each IP address in 'left' is contained within the network in 'right'.
 
@@ -151,58 +123,7 @@ def _ip_containment(left, right) -> List[Optional[bool]]:
     cidr_str = right if isinstance(right, str) else str(right[0])
 
     # Fast path: already a Draken StringVector — pass directly to the kernel
-    if left.__class__.__name__ == "StringVector":
-        return vector_ip_in_cidr(left, cidr_str)
-
-    # Slower path: normalise arbitrary input to a Draken StringVector
-    def _normalize_ip(v):
-        if v is None:
-            return None
-        if hasattr(v, "as_py"):
-            v = v.as_py()
-            if v is None:
-                return None
-        if isinstance(v, memoryview):
-            try:
-                v = v.tobytes()
-            except Exception:
-                v = bytes(v)
-        if isinstance(v, (bytes, bytearray)):
-            try:
-                return v.decode("utf-8")
-            except Exception:
-                return str(v)
-        if not isinstance(v, str):
-            return str(v)
-        return v
-
-    try:
-        if hasattr(left, "to_numpy"):
-            left_iter = left.to_numpy(zero_copy_only=False)
-        else:
-            left_iter = left
-
-        normalized = [_normalize_ip(v) for v in left_iter]
-
-        from opteryx.compiled.draken.vectors import string_vector as _sv_module
-
-        n = len(normalized)
-        builder = _sv_module.StringVectorBuilder.with_estimate(n, 20)
-        for v in normalized:
-            if v is None:
-                builder.append_null()
-            else:
-                builder.append(v.encode("utf-8"))
-        left_vec = builder.finish()
-
-        return vector_ip_in_cidr(left_vec, cidr_str)
-
-    except (IndexError, AttributeError, ValueError, TypeError) as err:
-        from opteryx.exceptions import IncorrectTypeError
-
-        raise IncorrectTypeError(
-            "The `|` operator can be used as bitwise OR or IP address containment only."
-        ) from err
+    return vector_ip_in_cidr(left, cidr_str)
 
 
 def _dispatch_arithmetic_operation(
@@ -233,9 +154,6 @@ def _dispatch_arithmetic_operation(
 def binary_operations(left, left_type: OrsoTypes, operator: str, right, right_type: OrsoTypes):
     """
     Execute inline operators (e.g. the add in 3 + 4).
-
-    Per architectural contract: only Draken vectors or Python scalars accepted.
-    PyArrow/NumPy inputs are architectural violations (fail-fast).
     """
     if operator in (
         "Plus",
