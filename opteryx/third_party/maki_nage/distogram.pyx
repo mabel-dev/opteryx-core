@@ -1,3 +1,4 @@
+# cython: language_level=3, boundscheck=False, cdivision=True
 # type: ignore
 import math
 from bisect import bisect_left
@@ -16,6 +17,7 @@ The following changes have been made for Opteryx:
 - The ability to weight the differences has been removed
 - Removed numpy dependency (no longer needed)
 - Fixed count_at undefined bug
+- Added Cython type optimizations
 """
 
 
@@ -225,10 +227,22 @@ def _trim_in_place(
     return distogram
 
 
-def _compute_diffs(h: Distogram) -> List[float]:  # pragma: no cover
-    diffs = [v2 - v1 for (v1, _), (v2, _) in zip(h.bins[:-1], h.bins[1:])]
-    h.min_diff = min(diffs)
+def _compute_diffs(h: Distogram):  # pragma: no cover
+    cdef int i
+    cdef int bins_len = len(h.bins)
+    cdef list diffs = []
+    cdef double v1, v2, d
+    cdef double min_d = float('inf')
 
+    for i in range(bins_len - 1):
+        v1 = h.bins[i][0]
+        v2 = h.bins[i + 1][0]
+        d = v2 - v1
+        diffs.append(d)
+        if d < min_d:
+            min_d = d
+
+    h.min_diff = min_d
     return diffs
 
 
@@ -247,7 +261,7 @@ def _search_in_place_index(h: Distogram, new_value: float, index: int) -> int:  
     return -1
 
 
-def update(h: Distogram, value: float, count: int = 1) -> Distogram:  # pragma: no cover
+def update(h: Distogram, value: float, count: int = 1):  # pragma: no cover
     """Adds a new element to the distribution.
 
     Args:
@@ -261,11 +275,16 @@ def update(h: Distogram, value: float, count: int = 1) -> Distogram:  # pragma: 
     Raises:
         ValueError if count is not strictly positive.
     """
+    cdef int index = 0
+    cdef int in_place_index
+    cdef double vi, fi, diff
+    cdef int bins_len
+
     if count <= 0:
         raise ValueError("count must be strictly positive")
 
-    index = 0
-    if len(h.bins) > 0:
+    bins_len = len(h.bins)
+    if bins_len > 0:
         if value <= h.bins[0][0]:
             index = 0
         elif value >= h.bins[-1][0]:
@@ -278,7 +297,7 @@ def update(h: Distogram, value: float, count: int = 1) -> Distogram:  # pragma: 
             h.bins[index] = (_caster(vi), fi + count)
             return h
 
-    if index > 0 and len(h.bins) >= h._bin_count:
+    if index > 0 and bins_len >= h._bin_count:
         in_place_index = _search_in_place_index(h, value, index)
         if in_place_index > 0:
             h = _trim_in_place(h, value, count, in_place_index)
@@ -342,7 +361,13 @@ def count_up_to(h: Distogram, value: float):  # pragma: no cover
         object contains no element or value is outside of the distribution
         bounds.
     """
-    if len(h.bins) == 0:
+    cdef int bins_len = len(h.bins)
+    cdef int i, j
+    cdef double v0, f0, vl, fl
+    cdef double vi, fi, vj, fj
+    cdef double ratio, result, mb, sum_val, v, f
+
+    if bins_len == 0:
         return None
 
     if value < h.min or value > h.max:
@@ -356,13 +381,19 @@ def count_up_to(h: Distogram, value: float):  # pragma: no cover
 
     v0, f0 = h.bins[0]
     vl, fl = h.bins[-1]
+
     if value <= v0:  # left
         ratio = (value - h.min) / (v0 - h.min)
         result = ratio * v0 / 2
     elif value >= vl:  # right
         ratio = (value - vl) / (h.max - vl)
         result = (1 + ratio) * fl / 2
-        result += sum((f for _, f in h.bins[:-1]))
+        # Optimized sum of all but last
+        sum_val = 0.0
+        for i in range(bins_len - 1):
+            _, f = h.bins[i]
+            sum_val += f
+        result += sum_val
     else:
         i = sum(((value > v) for v, _ in h.bins)) - 1
         vi, fi = h.bins[i]
@@ -370,14 +401,18 @@ def count_up_to(h: Distogram, value: float):  # pragma: no cover
 
         mb = fi + (fj - fi) / (vj - vi) * (value - vi)
         result = (fi + mb) / 2 * (value - vi) / (vj - vi)
-        result += sum((f for _, f in h.bins[:i]))
-
+        # Optimized sum of all before i
+        sum_val = 0.0
+        for j in range(i):
+            _, f = h.bins[j]
+            sum_val += f
+        result += sum_val
         result = result + fi / 2
 
     return result
 
 
-def count(h: Distogram) -> float:  # pragma: no cover
+def count(h: Distogram):  # pragma: no cover
     """Counts the number of elements in the distribution.
 
     Args:
@@ -386,7 +421,16 @@ def count(h: Distogram) -> float:  # pragma: no cover
     Returns:
         The number of elements in the distribution.
     """
-    return sum(f for _, f in h.bins)
+    cdef double total = 0.0
+    cdef int i
+    cdef int bins_len = len(h.bins)
+    cdef double f
+
+    for i in range(bins_len):
+        _, f = h.bins[i]
+        total += f
+
+    return total
 
 
 def bin_size(h: Distogram, value) -> int:  # pragma: no cover
