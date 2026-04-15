@@ -138,6 +138,10 @@ class OrsoTypes(Enum):
         """Check if this is a large object type (BLOB, JSONB, ARRAY, STRUCT, VECTOR)."""
         return self in _LARGE_OBJECT_TYPES
 
+    def is_string(self) -> bool:
+        """Check if this is a string type (VARCHAR, BLOB)."""
+        return self in _STRING_TYPES
+
     @classmethod
     def from_name(cls, name: str) -> Tuple["OrsoTypes", None, None, None, None]:
         """Get OrsoType from string name.
@@ -254,18 +258,14 @@ PYTHON_TO_ORSO_MAP: Dict[Type, OrsoTypes] = {
 # Reverse mapping: OrsoType -> Python type (for completeness)
 ORSO_TO_PYTHON_MAP: Dict[OrsoTypes, Type] = _TYPE_TO_PYTHON.copy()
 
-
+# fmt: off
 # Type classification sets (for fast membership checks)
 _NUMERIC_TYPES = {OrsoTypes.INTEGER, OrsoTypes.DOUBLE, OrsoTypes.DECIMAL}
 _TEMPORAL_TYPES = {OrsoTypes.DATE, OrsoTypes.TIME, OrsoTypes.TIMESTAMP, OrsoTypes.INTERVAL}
 _COMPLEX_TYPES = {OrsoTypes.ARRAY, OrsoTypes.STRUCT, OrsoTypes.JSONB, OrsoTypes.VECTOR}
-_LARGE_OBJECT_TYPES = {
-    OrsoTypes.BLOB,
-    OrsoTypes.JSONB,
-    OrsoTypes.ARRAY,
-    OrsoTypes.STRUCT,
-    OrsoTypes.VECTOR,
-}
+_STRING_TYPES = {OrsoTypes.VARCHAR, OrsoTypes.BLOB}
+_LARGE_OBJECT_TYPES = {OrsoTypes.BLOB, OrsoTypes.JSONB, OrsoTypes.ARRAY, OrsoTypes.STRUCT, OrsoTypes.VECTOR}
+# fmt: on
 
 
 # Parser functions: OrsoType -> callable that converts string to native type

@@ -14,11 +14,15 @@ from opteryx.compiled.draken.morsels.morsel import Morsel
 from opteryx.connectors import TableType
 from opteryx.connectors.base.base_connector import BaseConnector, BaseTable
 from opteryx.connectors.capabilities import LimitPushable, PredicatePushable
-from opteryx.exceptions import DataError, DatasetNotFoundError, EmptyDatasetError
+from opteryx.exceptions import (
+    DataError,
+    DatasetNotFoundError,
+    EmptyDatasetError,
+    UnsupportedSyntaxError,
+)
 from opteryx.tracing import record_event
 from opteryx.types import OrsoTypes
 from opteryx.types.schema import RelationSchema
-from opteryx.utils.parquet_decoder import parquet_decoder
 
 OS_SEP = os.sep
 PARQUET_SUFFIX = ".parquet"
@@ -122,60 +126,63 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
         """
         return self.filesystem.list_files(prefix, recursive=True)
 
-    def read_blob(
-        self, *, blob_name: str, decoder, just_schema=False, projection=None, selection=None
-    ):
+    def read_blob(self, *, blob_name: str, just_schema=False, projection=None, selection=None):
         """
         Read a single blob using the filesystem.
 
+        FileSystemConnector is a legacy path that is no longer used by the query executor.
+        All parquet scans are routed to ParquetReadNode via the physical planner.
+
+        For schema-only reads, this uses rugo to extract Parquet metadata without
+        loading data.
+
         Args:
             blob_name: Path to the blob
-            decoder: Decoder function for the file format
             just_schema: If True, only return schema
             projection: Columns to project
             selection: Predicates to push down
 
         Returns:
-            Decoded data or schema
+            RelationSchema if just_schema=True
+
+        Raises:
+            UnsupportedSyntaxError: For data reads
         """
-        from opteryx import config as _config
-
-        _tracing = _config.OPTERYX_TRACE
-        if _tracing:
-            record_event("download_start", file_id=blob_name, connector=self.__type__)
-        # Open file through the filesystem, passing through projection/selection for remote filtering.
-        # Ensure the stream is deterministically closed so memory-mapped handles don't accumulate.
-        data = self.filesystem.open_input_file(blob_name, columns=projection, filters=selection)
-        try:
-            if _tracing:
-                record_event(
-                    "download_complete",
-                    file_id=blob_name,
-                    bytes_received=data.memoryview.nbytes,
-                    connector=self.__type__,
-                )
-            self.telemetry.bytes_read += data.memoryview.nbytes
-
-            # If the underlying filesystem already applied the selection (e.g., S3 Select),
-            # don't pass the selection to the decoder again to avoid duplicate filtering.
-            selection_to_pass = None if getattr(data, "filters_applied", False) else selection
-
-            if _tracing:
-                record_event("decode_start", file_id=blob_name, connector=self.__type__)
-            result = decoder(
-                data.memoryview,
-                projection=projection,
-                selection=selection_to_pass,
-                just_schema=just_schema,
+        if not just_schema:
+            raise UnsupportedSyntaxError(
+                "All Parquet scans use ParquetReadNode. FileSystemConnector data reads are not supported."
             )
-            if _tracing:
-                record_event("decode_complete", file_id=blob_name, connector=self.__type__)
 
-            return result
-        finally:
-            close = getattr(data, "close", None)
-            if callable(close):
-                close()
+        # Schema-only read using rugo metadata extraction
+        try:
+            from opteryx.compiled.rugo.converters.orso import (
+                rugo_to_orso_schema,  # type: ignore[import]
+            )
+            from opteryx.compiled.rugo.parquet import (
+                read_metadata_from_memoryview,  # type: ignore[import]
+            )
+        except ImportError as e:
+            raise RuntimeError(
+                "rugo is required for schema-only reads but not available. "
+                "Ensure rugo is compiled and in the Python path."
+            ) from e
+
+        try:
+            # Open the file and extract metadata from memoryview
+            stream = self.filesystem.open_input_stream(blob_name)
+            try:
+                mv = stream.memoryview
+                rugo_metadata = read_metadata_from_memoryview(mv, schema_only=True)
+                schema = rugo_to_orso_schema(rugo_metadata, schema_name=blob_name)
+                return schema
+            finally:
+                stream.close()
+        except Exception as e:
+            if isinstance(e, UnsupportedSyntaxError):
+                raise
+            raise DataError(
+                f"Unable to read Parquet metadata from {blob_name}: {type(e).__name__}: {e}"
+            ) from e
 
     def read_dataset(
         self,
@@ -221,7 +228,6 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
                 try:
                     schema = self.read_blob(
                         blob_name=blob_name,
-                        decoder=parquet_decoder,
                         just_schema=True,
                     )
                     blob_count = len(blob_names)
@@ -324,7 +330,6 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
         """Helper for reading a blob in a thread pool."""
         return self.read_blob(
             blob_name=blob_name,
-            decoder=parquet_decoder,
             just_schema=False,
             projection=columns,
             selection=predicates,

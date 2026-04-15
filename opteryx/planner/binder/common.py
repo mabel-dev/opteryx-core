@@ -110,6 +110,7 @@ def get_mismatched_condition_column_types(
                 or (left_type.is_numeric() and right_type.is_temporal())
                 or (left_type.is_temporal() and right_type.is_numeric())
                 or (left_type.is_large_object() and right_type.is_large_object())
+                or (left_type.is_string() and right_type.is_string())
                 or (left_type == 0 or right_type == 0)
             ):
                 return None
