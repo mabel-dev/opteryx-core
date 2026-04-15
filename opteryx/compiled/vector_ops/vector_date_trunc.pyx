@@ -329,7 +329,7 @@ cpdef object vector_date_trunc(str truncate_to, TimestampVector timestamp_array)
     else:
         raise ValueError(f"Invalid unit: {truncate_to}")
 
-    # Create TimestampVector directly from processed int64 data (no PyArrow needed)
+    # Create TimestampVector directly from processed int64 data
     cdef TimestampVector result = TimestampVector(length)
     result.timestamp_unit = unit
 

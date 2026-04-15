@@ -22,8 +22,8 @@ cpdef list vector_log(object values, object bases):
     """
     Compute logarithms element-wise as log(values) / log(bases) using libc.
 
-    Parameters may be numpy arrays, Arrow arrays, Python sequences, or scalars.
-    The return value is a Python list to avoid a NumPy dependency in this kernel.
+    Parameters may be Python sequences or scalars.
+    The return value is a Python list.
     """
     cdef list value_list = _as_list(values)
     cdef list base_list = _as_list(bases)
