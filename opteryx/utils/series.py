@@ -3,11 +3,10 @@
 # See the License at http://www.apache.org/licenses/LICENSE-2.0
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
-import numpy
-from opteryx.exceptions import InvalidFunctionParameterError
-from opteryx.exceptions import SqlError
-from opteryx.utils import dates
+
+from opteryx.exceptions import InvalidFunctionParameterError, SqlError
 from opteryx.types import OrsoTypes
+from opteryx.utils import dates
 
 
 def generate_series(*args):
@@ -34,28 +33,38 @@ def generate_series(*args):
     )
 
 
-def numeric_range(*args) -> numpy.ndarray:
+def _is_integer_like(v) -> bool:
+    """Return True if v is an integer-like value (not bool, not float)."""
+    if isinstance(v, bool):
+        return False
+    if isinstance(v, int):
+        return True
+    if isinstance(v, float):
+        return False
+    # Catch integer-like types (e.g. numpy.int64 during transition) via __index__
+    return hasattr(v, "__index__")
+
+
+def numeric_range(*args) -> list:
     """
-    Generate a numeric range of vales
+    Generate a numeric range of values.
 
     Args:
-        [start, ]stop, [step, ]: Arguments as in numpy.arange.
+        [start, ]stop[, step]: start defaults to 1, step defaults to 1.
 
     Returns:
-        numpy.ndarray: Array of evenly spaced values.
+        list: List of evenly spaced numeric values.
 
     Raises:
         ValueError: If the number of arguments is not 1, 2, or 3.
 
     Examples:
-        generate_range(5)
-        generate_range(1, 5)
-        generate_range(1, 5, 0.5)
+        numeric_range(5)
+        numeric_range(1, 5)
+        numeric_range(1, 5, 0.5)
     """
-    # Define defaults
-    start, step, dtype = numpy.int64(1), numpy.int64(1), numpy.float64
+    start, step = 1, 1
 
-    # Process arguments
     if len(args) == 1:
         stop = args[0]
     elif len(args) == 2:
@@ -65,15 +74,23 @@ def numeric_range(*args) -> numpy.ndarray:
     else:  # pragma: no cover
         raise ValueError("Invalid number of arguments. Expected 1, 2, or 3: start, stop [, step].")
 
-    # Determine dtype
-    if all(numpy.issubdtype(arg, numpy.integer) for arg in [start, stop, step]):
-        dtype = numpy.int64  # type: ignore
+    # Use integer arithmetic when all values are integer-like
+    if _is_integer_like(start) and _is_integer_like(stop) and _is_integer_like(step):
+        start, stop, step = int(start), int(stop), int(step)
+        result = list(range(start, stop + step, step))
+        if result and result[-1] > stop:
+            result.pop()
+        return result
 
-    # Compute range
-    num_range = numpy.arange(start, stop + step, step, dtype=dtype)
-
-    # Check last value, remove if it doesn't fall on a step boundary or is over the stop value
-    if not numpy.isclose(num_range[-1], stop, atol=step / 2) or num_range[-1] > stop:  # type: ignore
-        num_range = num_range[:-1]
-
-    return num_range
+    # Float range: iterative addition with tolerance-based boundary check
+    start, stop, step = float(start), float(stop), float(step)
+    tolerance = step / 2
+    result = []
+    val = start
+    while val <= stop + tolerance:
+        result.append(val)
+        val += step
+    # Remove last value if it doesn't fall on a step boundary or exceeds stop
+    if result and (abs(result[-1] - stop) > tolerance or result[-1] > stop):
+        result.pop()
+    return result

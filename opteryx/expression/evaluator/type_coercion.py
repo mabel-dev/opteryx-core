@@ -3,17 +3,16 @@
 import datetime
 import decimal
 
-import numpy
-import pyarrow as _pa
-
 _EPOCH_DATE = datetime.date(1970, 1, 1)
 _EPOCH_DATETIME = datetime.datetime(1970, 1, 1)
 _DRAKEN_ENCODING_CONSTANT = 3
 
 
 def _dictionary_arrow_type(vec):
-    if isinstance(vec, (_pa.Array, _pa.ChunkedArray)):
-        return vec.type if _pa.types.is_dictionary(vec.type) else None
+    # Arrow arrays have .type but NOT .to_arrow(); Draken vectors have .to_arrow()
+    arr_type = getattr(vec, "type", None)
+    if arr_type is not None and not hasattr(vec, "to_arrow"):
+        return arr_type if str(arr_type).startswith("dictionary") else None
 
     to_arrow = getattr(vec, "to_arrow", None)
     if to_arrow is None:
@@ -24,10 +23,9 @@ def _dictionary_arrow_type(vec):
     except Exception:
         return None
 
-    if isinstance(arrow_arr, (_pa.Array, _pa.ChunkedArray)) and _pa.types.is_dictionary(
-        arrow_arr.type
-    ):
-        return arrow_arr.type
+    arr_type = getattr(arrow_arr, "type", None)
+    if arr_type is not None and str(arr_type).startswith("dictionary"):
+        return arr_type
 
     return None
 
@@ -60,7 +58,7 @@ def _dictionary_compare_vector(vec):
     from opteryx.compiled.draken.interop.arrow import vector_from_arrow
 
     arrow_arr = vec.to_arrow() if hasattr(vec, "to_arrow") else vec
-    if isinstance(arrow_arr, _pa.ChunkedArray):
+    if hasattr(arrow_arr, "num_chunks"):  # ChunkedArray
         if arrow_arr.num_chunks != 1:
             raise NotImplementedError(
                 "Dictionary compare path does not support multi-chunk dictionary arrays."
@@ -113,14 +111,10 @@ def _coerce_int64(value) -> int:
     value = _constant_scalar_value(value)
     if hasattr(value, "as_py"):
         value = value.as_py()
-    if isinstance(value, numpy.generic):
-        value = value.item()
     if isinstance(value, datetime.datetime):
         return int(value.timestamp() * 1_000)
     if isinstance(value, datetime.date):
         return (value - _EPOCH_DATE).days
-    if isinstance(value, numpy.datetime64):
-        return int(value.astype("datetime64[D]").astype(numpy.int64))
     return int(value)
 
 
@@ -132,8 +126,6 @@ def _coerce_date32(value) -> int:
     value = _constant_scalar_value(value)
     if hasattr(value, "as_py"):
         value = value.as_py()
-    if isinstance(value, numpy.generic):
-        value = value.item()
     if isinstance(value, datetime.datetime):
         return (value.date() - _EPOCH_DATE).days
     if isinstance(value, datetime.date):
@@ -149,14 +141,10 @@ def _coerce_timestamp(value) -> int:
     value = _constant_scalar_value(value)
     if hasattr(value, "as_py"):
         value = value.as_py()
-    if isinstance(value, numpy.generic):
-        value = value.item()
     if isinstance(value, (bytes, bytearray, memoryview, str)):
         from opteryx.expression.casts import parse_timestamp_value
 
         value = parse_timestamp_value(value)
-    if isinstance(value, numpy.datetime64):
-        return int(value.astype("datetime64[us]").astype(numpy.int64))
     if isinstance(value, datetime.datetime):
         if value.tzinfo is not None:
             value = value.astimezone(datetime.timezone.utc).replace(tzinfo=None)
@@ -188,21 +176,19 @@ def _coerce_temporal_scalar_for_arrow(value, target_type):
 
     if hasattr(value, "as_py"):
         value = value.as_py()
-    if isinstance(value, numpy.generic):
-        value = value.item()
 
     if target_type == OrsoTypes.DATE:
         if isinstance(value, datetime.datetime):
             return value.date()
         if isinstance(value, datetime.date):
             return value
-        if isinstance(value, (int, numpy.integer)):
-            return _EPOCH_DATE + datetime.timedelta(days=int(value))
+        if isinstance(value, int):
+            return _EPOCH_DATE + datetime.timedelta(days=value)
         return parse_timestamp_value(value).date()
 
     if target_type == OrsoTypes.TIMESTAMP:
-        if isinstance(value, (int, numpy.integer)):
-            ivalue = int(value)
+        if isinstance(value, int):
+            ivalue = value
             if abs(ivalue) < 100_000_000_000 and ivalue % 1_000_000 == 0:
                 return datetime.datetime(1970, 1, 1) + datetime.timedelta(days=ivalue // 1_000_000)
         return parse_timestamp_value(value)

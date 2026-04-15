@@ -14,7 +14,7 @@ This module provides functions to identify rows where all specified columns are
 non-null, using Draken vector capabilities.
 """
 
-import pyarrow
+
 from opteryx.compiled.draken.vectors.int64_vector cimport Int64Vector
 from opteryx.compiled.draken.vectors.int64_vector cimport from_sequence as int64_from_sequence
 from opteryx.compiled.structures.buffers cimport IntBuffer
@@ -56,7 +56,9 @@ cdef inline Int64Vector non_null_row_indices(object relation, list column_names)
             offset = 0
 
             # Iterate through chunks in the Column/ChunkedArray
-            for chunk in column.chunks if isinstance(column, pyarrow.ChunkedArray) else [column]:
+            if hasattr(column, "to_arrow"):
+                column = column.to_arrow()
+            for chunk in column.chunks if hasattr(column, "chunks") else [column]:
                 length = len(chunk)
                 bitmap_buffer = chunk.buffers()[0]  # validity buffer
 

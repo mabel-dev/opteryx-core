@@ -14,8 +14,6 @@ Kernels:
 - mixed-type kernels for int64/float64 combinations
 """
 
-import pyarrow as _pa
-
 from opteryx.utils.vector_types import VectorType, get_vector_type, is_draken_vector, is_scalar
 
 
@@ -47,20 +45,14 @@ def call_arithmetic_op(op, left, right):
         # Both are Draken vectors - use kernels
         left_type = get_vector_type(left)
         right_type = get_vector_type(right)
-    elif left_is_draken and (is_scalar(right) or isinstance(right, (_pa.Array, _pa.ChunkedArray))):
-        # Left is Draken, right is scalar or PyArrow - try kernels with coercion
+    elif left_is_draken and not right_is_draken:
+        # Left is Draken, right is scalar or non-Draken (Arrow during transition)
         left_type = get_vector_type(left)
-        right_type = (
-            get_vector_type(right)
-            if isinstance(right, (_pa.Array, _pa.ChunkedArray))
-            else left_type
-        )
-    elif right_is_draken and (is_scalar(left) or isinstance(left, (_pa.Array, _pa.ChunkedArray))):
-        # Right is Draken, left is scalar or PyArrow - try kernels with coercion
+        right_type = get_vector_type(right) if not is_scalar(right) else left_type
+    elif right_is_draken and not left_is_draken:
+        # Right is Draken, left is scalar or non-Draken (Arrow during transition)
         right_type = get_vector_type(right)
-        left_type = (
-            get_vector_type(left) if isinstance(left, (_pa.Array, _pa.ChunkedArray)) else right_type
-        )
+        left_type = get_vector_type(left) if not is_scalar(left) else right_type
     else:
         # Mixed PyArrow/scalar, no Draken - delegate
         return None

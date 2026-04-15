@@ -16,7 +16,7 @@ presence or absence of matching rows in the right table.
 from typing import Generator, Optional
 import time
 
-import pyarrow
+
 from opteryx.compiled.joins import anti_join
 from opteryx.compiled.joins import filter_join_set
 from opteryx.compiled.joins import semi_join

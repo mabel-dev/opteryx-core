@@ -1,6 +1,5 @@
 """Array operations (AnyOp*, AllOp*, @>>, array contains)."""
 
-import numpy
 from opteryx.compiled import vector_ops
 
 
@@ -82,13 +81,15 @@ def allop_not_eq(literal, column):
 
 def array_contains_any(arr, value):
     """Check if array contains any of the values (@>)."""
+    from opteryx.compiled.draken.vectors.bool_vector import BoolVector
+
     if len(arr) == 0:
-        return numpy.array([], dtype=numpy.bool_)
+        return BoolVector(0)
 
     if len(arr) == 1:
         elem = arr[0]
         if elem is None:
-            return numpy.array([False], dtype=numpy.bool_)
+            return BoolVector.from_constant(False, 1)
 
         value_set = set(value) if value is not None else set()
         try:
@@ -97,11 +98,7 @@ def array_contains_any(arr, value):
             elem_set = {elem}
 
         result = bool(elem_set.intersection(value_set))
-        return numpy.array([result], dtype=numpy.bool_)
-
-    to_numpy = getattr(arr, "to_numpy", None)
-    if to_numpy is not None:
-        arr = to_numpy(zero_copy_only=False)
+        return BoolVector.from_constant(result, 1)
 
     to_pylist = getattr(value, "to_pylist", None)
     if to_pylist is not None:
@@ -115,10 +112,6 @@ def array_contains_all(arr, value):
     to_pylist = getattr(value, "to_pylist", None)
     if to_pylist is not None:
         value = to_pylist()
-
-    to_numpy = getattr(arr, "to_numpy", None)
-    if to_numpy is not None:
-        arr = to_numpy(zero_copy_only=False)
 
     if len(arr) == 1 and len(value) != 0:
         raise ValueError("Unable to execute @>>, check form matches `column @>> (values)`.")

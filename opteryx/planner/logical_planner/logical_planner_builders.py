@@ -12,8 +12,6 @@ a function and a reference to it in the dictionary.
 import datetime
 from typing import List, Optional
 
-import numpy
-
 from opteryx.exceptions import ArrayWithMixedTypesError, SqlError, UnsupportedSyntaxError
 from opteryx.expression import NodeType, format_expression
 from opteryx.expression.binary_operators import binary_operations
@@ -52,46 +50,51 @@ def _evaluate_fixed_temporal_function(function_name: str):
 
 
 def _extract_single_scalar(value):
-    if hasattr(value, "to_numpy"):
-        value = value.to_numpy(zero_copy_only=False)
-    if isinstance(value, numpy.ndarray):
+    # Arrow array / chunked array → to_pylist is the common denominator
+    if hasattr(value, "to_pylist"):
+        lst = value.to_pylist()
+        if len(lst) != 1:
+            raise UnsupportedSyntaxError(
+                "Time-travel expressions must evaluate to a single scalar value."
+            )
+        return lst[0]
+    # numpy-like objects that expose .item() (transition compatibility)
+    if hasattr(value, "item") and hasattr(value, "shape"):
         if value.size != 1:
             raise UnsupportedSyntaxError(
                 "Time-travel expressions must evaluate to a single scalar value."
             )
-        value = value.reshape(-1)[0]
-    elif isinstance(value, (list, tuple)):
+        return value.item()
+    # Plain Python sequences
+    if isinstance(value, (list, tuple)):
         if len(value) != 1:
             raise UnsupportedSyntaxError(
                 "Time-travel expressions must evaluate to a single scalar value."
             )
-        value = value[0]
-
+        return value[0]
+    # Arrow scalar
     if hasattr(value, "as_py"):
-        value = value.as_py()
-    if isinstance(value, numpy.generic):
-        value = value.item()
+        return value.as_py()
+    # Already a Python scalar
     return value
 
 
 def _as_binary_operand_array(value, value_type):
     if value_type == OrsoTypes.INTERVAL:
-        arr = numpy.empty(1, dtype=object)
-        arr[0] = value
-        return arr
+        return [value]
     if value_type == OrsoTypes.TIMESTAMP:
         timestamp = dates.parse_iso(value)
         if timestamp is None:
             raise UnsupportedSyntaxError(
                 "Unable to parse timestamp value in time-travel expression."
             )
-        return numpy.array([int((timestamp - _EPOCH_DT).total_seconds() * 1_000_000)])
+        return [int((timestamp - _EPOCH_DT).total_seconds() * 1_000_000)]
     if value_type == OrsoTypes.DATE:
         dt = dates.parse_iso(value)
         if dt is None:
             raise UnsupportedSyntaxError("Unable to parse date value in time-travel expression.")
-        return numpy.array([(dt.date() - _EPOCH_DATE).days])
-    return numpy.array([value])
+        return [(dt.date() - _EPOCH_DATE).days]
+    return [value]
 
 
 def _as_function_parameter_array(value, value_type):
@@ -99,13 +102,13 @@ def _as_function_parameter_array(value, value_type):
         dt = dates.parse_iso(value)
         if dt is None:
             raise UnsupportedSyntaxError("Unable to parse temporal function argument.")
-        return numpy.array([int((dt - _EPOCH_DT).total_seconds() * 1_000_000)])
+        return [int((dt - _EPOCH_DT).total_seconds() * 1_000_000)]
     if value_type == OrsoTypes.DATE:
         dt = dates.parse_iso(value)
         if dt is None:
             raise UnsupportedSyntaxError("Unable to parse temporal function argument.")
-        return numpy.array([(dt.date() - _EPOCH_DATE).days])
-    return numpy.array([value])
+        return [(dt.date() - _EPOCH_DATE).days]
+    return [value]
 
 
 def _type_from_value(value):
@@ -113,23 +116,21 @@ def _type_from_value(value):
         return OrsoTypes.NULL
     if isinstance(value, bool):
         return OrsoTypes.BOOLEAN
-    if isinstance(value, (numpy.datetime64, datetime.datetime)):
+    if isinstance(value, datetime.datetime):
         return OrsoTypes.TIMESTAMP
     if isinstance(value, datetime.time):
         return OrsoTypes.TIME
     if isinstance(value, datetime.date):
         return OrsoTypes.DATE
-    if isinstance(value, (int, numpy.integer)):
+    if isinstance(value, int):
         return OrsoTypes.INTEGER
-    if isinstance(value, (float, numpy.floating)):
+    if isinstance(value, float):
         return OrsoTypes.DOUBLE
     if isinstance(value, (bytes, bytearray)):
         return OrsoTypes.BLOB
     if isinstance(value, str):
         return OrsoTypes.VARCHAR
     if isinstance(value, tuple) and len(value) == 2:
-        return OrsoTypes.INTERVAL
-    if isinstance(value, numpy.ndarray) and value.shape == (2,):
         return OrsoTypes.INTERVAL
     return OrsoTypes._MISSING_TYPE
 
@@ -1010,7 +1011,7 @@ def literal_number(branch, alias: Optional[List[str]] = None, key=None):
         return Node(
             NodeType.LITERAL,
             type=OrsoTypes.INTEGER,
-            value=numpy.int64(branch[0]),  # value
+            value=value,
             alias=alias,
         )
     except ValueError:
@@ -1019,7 +1020,7 @@ def literal_number(branch, alias: Optional[List[str]] = None, key=None):
         return Node(
             NodeType.LITERAL,
             type=OrsoTypes.DOUBLE,
-            value=numpy.float64(branch[0]),  # value
+            value=value,
             alias=alias,
         )
 

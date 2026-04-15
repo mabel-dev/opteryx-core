@@ -114,7 +114,10 @@ def _int64_compare(op: str, vec, right):
     # vector-vector: both sides are Int64Vector or IntegerVector
     right_type = get_vector_type(right)
     if right_type in (VectorType.INT64, VectorType.INTEGER):
-        return _call_vector_vector_op(op, vec, right)
+        if _is_constant_vector_like(right):
+            right = _constant_scalar_value(right)
+        else:
+            return _call_vector_vector_op(op, vec, right)
 
     # Int64 vs Float64 — compare directly against the coerced float scalar/vector path
     if get_vector_type(right) == VectorType.FLOAT64:
@@ -148,7 +151,10 @@ def _float64_compare(op: str, vec, right):
         raise NotImplementedError(f"Float64Vector: set op {op!r} not supported")
 
     if get_vector_type(right) == VectorType.FLOAT64:
-        return _call_vector_vector_op(op, vec, right)
+        if _is_constant_vector_like(right):
+            right = _constant_scalar_value(right)
+        else:
+            return _call_vector_vector_op(op, vec, right)
 
     value = _coerce_float(right)
 

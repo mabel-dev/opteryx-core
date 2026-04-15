@@ -15,10 +15,6 @@ import datetime
 from enum import Enum
 from typing import Callable, Dict, List
 
-import numpy
-import pyarrow
-from pyarrow import Table, compute
-
 from opteryx.exceptions import (
     ColumnReferencedBeforeEvaluationError,
     IncorrectTypeError,
@@ -73,7 +69,7 @@ class NodeType(int, Enum):
     # 0010 nnnn
     WILDCARD = 33  # 0010 0001
     COMPARISON_OPERATOR = 34  # 0010 0010
-    BINARY_OPERATOR = 35  # 0010 0011
+    BINARY_OPERATOR = 35  # 0010 0011
     UNARY_OPERATOR = 36  # 0010 0100
     FUNCTION = 37  # 0010 0101
     IDENTIFIER = 38  # 0010 0110
@@ -91,7 +87,9 @@ def _arrow_type_for_schema_column(schema_column):
     if schema_column is None:
         return None
     if getattr(schema_column, "type", None) == OrsoTypes.VECTOR:
-        return pyarrow.list_(pyarrow.float64())
+        import pyarrow as _pa
+
+        return _pa.list_(_pa.float64())
     arrow_field = getattr(schema_column, "arrow_field", None)
     return getattr(arrow_field, "type", None)
 
@@ -136,25 +134,24 @@ def _typed_constant_vector(value, length: int, schema_column):
         if not is_null:
             if isinstance(value, datetime.datetime):
                 value = value.date()
-            if isinstance(value, numpy.datetime64):
-                value = value.astype("datetime64[D]").astype(numpy.int64)
             if isinstance(value, datetime.date):
                 value = (value - datetime.date(1970, 1, 1)).days
-            else:
-                value = (
-                    pyarrow.array([value], type=pyarrow.date32()).cast(pyarrow.int32())[0].as_py()
-                )
+            elif not isinstance(value, int):
+                try:
+                    value = (
+                        datetime.date.fromisoformat(str(value)) - datetime.date(1970, 1, 1)
+                    ).days
+                except (ValueError, TypeError):
+                    value = int(value)
         return Date32Vector.from_constant(0 if is_null else value, length, is_null=is_null)
 
     if target_type == OrsoTypes.TIMESTAMP:
         from opteryx.compiled.draken.vectors.timestamp_vector import TimestampVector
 
-        timestamp_type = (
-            arrow_type if pyarrow.types.is_timestamp(arrow_type) else pyarrow.timestamp("us")
-        )
-        timestamp_unit = timestamp_type.unit
+        # Extract timestamp unit from arrow_type without importing pyarrow at module level
+        timestamp_unit = getattr(arrow_type, "unit", "us") if arrow_type is not None else "us"
         if not is_null:
-            value = pyarrow.array([value], type=timestamp_type).cast(pyarrow.int64())[0].as_py()
+            value = timestamp_to_int64_us(value)
         return TimestampVector.from_constant(
             0 if is_null else value,
             length,
@@ -165,11 +162,21 @@ def _typed_constant_vector(value, length: int, schema_column):
     if target_type == OrsoTypes.TIME:
         from opteryx.compiled.draken.vectors.time_vector import TimeVector
 
-        is_time64 = bool(arrow_type and pyarrow.types.is_time64(arrow_type))
-        time_type = arrow_type or pyarrow.time64("us")
+        # time64 uses 'us' or 'ns' units; time32 uses 's' or 'ms'
+        is_time64 = bool(arrow_type and str(arrow_type).startswith("time64"))
         if not is_null:
-            cast_type = pyarrow.int64() if pyarrow.types.is_time64(time_type) else pyarrow.int32()
-            value = pyarrow.array([value], type=time_type).cast(cast_type)[0].as_py()
+            if isinstance(value, datetime.time):
+                if is_time64:
+                    value = (
+                        value.hour * 3_600_000_000
+                        + value.minute * 60_000_000
+                        + value.second * 1_000_000
+                        + value.microsecond
+                    )
+                else:
+                    value = value.hour * 3600 + value.minute * 60 + value.second
+            else:
+                value = int(value)
         return TimeVector.from_constant(
             0 if is_null else value,
             length,
@@ -188,7 +195,7 @@ def _typed_constant_vector(value, length: int, schema_column):
 LOGICAL_OPERATIONS: Dict[NodeType, Callable] = {}
 
 
-def evaluate_dnf(expressions: List[Node], table: Table) -> list:
+def evaluate_dnf(expressions: List[Node], table) -> list:
     num_rows = table.num_rows
     true_indices = list(range(num_rows))
     working_table = table
@@ -199,8 +206,6 @@ def evaluate_dnf(expressions: List[Node], table: Table) -> list:
         # Convert to Python list
         if hasattr(result, "to_pylist"):
             result_bool = result.to_pylist()
-        elif isinstance(result, numpy.ndarray):
-            result_bool = result.tolist()
         else:
             result_bool = list(result)
 
@@ -297,8 +302,6 @@ def short_cut_and(root, table):
     # Convert to Python list if needed
     if hasattr(left_result, "to_pylist"):
         left_result = left_result.to_pylist()
-    elif isinstance(left_result, numpy.ndarray):
-        left_result = left_result.tolist()
     else:
         left_result = list(left_result)
 
@@ -324,8 +327,6 @@ def short_cut_and(root, table):
     # Convert to Python list if needed
     if hasattr(right_result, "to_pylist"):
         right_result = right_result.to_pylist()
-    elif isinstance(right_result, numpy.ndarray):
-        right_result = right_result.tolist()
     else:
         right_result = list(right_result)
 
@@ -345,8 +346,6 @@ def short_cut_or(root, table):
     # Convert to Python list if needed
     if hasattr(left_result, "to_pylist"):
         left_result = left_result.to_pylist()
-    elif isinstance(left_result, numpy.ndarray):
-        left_result = left_result.tolist()
     else:
         left_result = list(left_result)
 
@@ -375,8 +374,6 @@ def short_cut_or(root, table):
     # Convert to Python list if needed
     if hasattr(right_result, "to_pylist"):
         right_result = right_result.to_pylist()
-    elif isinstance(right_result, numpy.ndarray):
-        right_result = right_result.tolist()
     else:
         right_result = list(right_result)
 
@@ -404,7 +401,7 @@ def prioritize_evaluation(expressions):
     return non_dependent_expressions + dependent_expressions
 
 
-def _inner_evaluate(root: Node, table: Table):
+def _inner_evaluate(root: Node, table):
     node_type = root.node_type  # type: ignore
 
     if node_type == NodeType.DNF:
@@ -424,7 +421,7 @@ def _inner_evaluate(root: Node, table: Table):
             # Already a Draken vector
             return col
         # PyArrow column: convert to Draken
-        arrow_col = col if isinstance(col, pyarrow.Array) else col.combine_chunks()
+        arrow_col = col if not hasattr(col, "combine_chunks") else col.combine_chunks()
         return vector_from_arrow(arrow_col)
 
     # LITERAL TYPES - return Draken constant vectors
@@ -483,7 +480,7 @@ def _inner_evaluate(root: Node, table: Table):
             return [value]
 
         if literal_type == OrsoTypes.INTERVAL:
-            return pyarrow.array([value] * length)
+            return [value] * length
 
         return [value]
 
@@ -516,11 +513,12 @@ def _inner_evaluate(root: Node, table: Table):
             raise NotImplementedError(f"Boolean operator `{node_type}` is not implemented")
 
         if node_type == NodeType.NOT:
-            centre = (
-                _inner_evaluate(root.centre, table)
-                if root.centre
-                else pyarrow.nulls(1, type=pyarrow.bool_())
-            )
+            if root.centre:
+                centre = _inner_evaluate(root.centre, table)
+            else:
+                from opteryx.compiled.draken.vectors.bool_vector import BoolVector
+
+                centre = BoolVector.from_constant(None, 1, is_null=True)
             if centre.__class__.__name__ == "BoolVector":
                 return centre.xor_vector(centre.not_vector())
             raise TypeError(f"Boolean NOT requires BoolVector input; got {type(centre).__name__}")
@@ -582,7 +580,7 @@ def _inner_evaluate(root: Node, table: Table):
                 # Already a Draken vector
                 return col
             # PyArrow column: convert to Draken
-            arrow_col = col if isinstance(col, pyarrow.Array) else col.combine_chunks()
+            arrow_col = col if not hasattr(col, "combine_chunks") else col.combine_chunks()
             return vector_from_arrow(arrow_col)
         if node_type == NodeType.COMPARISON_OPERATOR:
             if (
@@ -595,7 +593,7 @@ def _inner_evaluate(root: Node, table: Table):
                 def _literal_temporal_value(node):
                     value = node.value
                     if node.type == OrsoTypes.DATE:
-                        if isinstance(value, (int, numpy.integer)):
+                        if isinstance(value, int):
                             return datetime.datetime(1970, 1, 1) + datetime.timedelta(
                                 days=int(value)
                             )
@@ -604,7 +602,7 @@ def _inner_evaluate(root: Node, table: Table):
                         if isinstance(value, datetime.date):
                             return datetime.datetime(value.year, value.month, value.day)
                     if node.type == OrsoTypes.TIMESTAMP:
-                        if isinstance(value, (int, numpy.integer)):
+                        if isinstance(value, int):
                             ivalue = int(value)
                             if abs(ivalue) < 100_000_000_000 and ivalue % 1_000_000 == 0:
                                 return datetime.datetime(1970, 1, 1) + datetime.timedelta(
@@ -612,11 +610,6 @@ def _inner_evaluate(root: Node, table: Table):
                                 )
                             return datetime.datetime(1970, 1, 1) + datetime.timedelta(
                                 microseconds=ivalue
-                            )
-                        if isinstance(value, numpy.datetime64):
-                            micros = int(value.astype("datetime64[us]").astype(numpy.int64))
-                            return datetime.datetime(1970, 1, 1) + datetime.timedelta(
-                                microseconds=micros
                             )
                         if isinstance(value, datetime.date) and not isinstance(
                             value, datetime.datetime
@@ -650,7 +643,9 @@ def _inner_evaluate(root: Node, table: Table):
                     if hasattr(col, "to_arrow"):
                         right = col
                     else:
-                        arrow_col = col if isinstance(col, pyarrow.Array) else col.combine_chunks()
+                        arrow_col = (
+                            col if not hasattr(col, "combine_chunks") else col.combine_chunks()
+                        )
                         right = vector_from_arrow(arrow_col)
                 else:
                     right = _inner_evaluate(root.right, table)
@@ -662,7 +657,9 @@ def _inner_evaluate(root: Node, table: Table):
                     if hasattr(col, "to_arrow"):
                         left = col
                     else:
-                        arrow_col = col if isinstance(col, pyarrow.Array) else col.combine_chunks()
+                        arrow_col = (
+                            col if not hasattr(col, "combine_chunks") else col.combine_chunks()
+                        )
                         left = vector_from_arrow(arrow_col)
                 else:
                     left = _inner_evaluate(root.left, table)
@@ -700,9 +697,11 @@ def _inner_evaluate(root: Node, table: Table):
         if node_type == NodeType.WILDCARD:
             return ["*"] * table.num_rows
         if node_type == NodeType.SUBQUERY:
+            import pyarrow as _pa_subq
+
             # we should have a query plan here
             sub = root.value.execute()
-            return pyarrow.concat_tables(sub, promote_options="none")
+            return _pa_subq.concat_tables(sub, promote_options="none")
         if node_type == NodeType.NESTED:
             return _inner_evaluate(root.centre, table)
         if node_type == NodeType.UNARY_OPERATOR:
@@ -719,17 +718,14 @@ def _inner_evaluate(root: Node, table: Table):
         )
 
 
-def evaluate(expression: Node, table: Table):
+def evaluate(expression: Node, table):
     result = _inner_evaluate(root=expression, table=table)
     if result.__class__.__name__ == "BoolVector":
         return result
-    # Phase 5.3.2 PoC: Preserve Draken vectors (no conversion to numpy/arrow)
     from opteryx.utils.vector_types import is_draken_vector
 
     if is_draken_vector(result):
         return result
-    if not isinstance(result, (pyarrow.Array, numpy.ndarray)):
-        result = numpy.array(result)
     return result
 
 
@@ -777,13 +773,15 @@ def get_all_nodes_of_type(root, select_nodes: tuple) -> list:
     return identifiers
 
 
-def _evaluate_and_append_arrow(expressions, table: Table):
+def _evaluate_and_append_arrow(expressions, table):
     """
     Evaluate an expression and add it to the table.
 
     This needs to be able to deal with and avoid cascading problems where field names
     are duplicated, this is most common when performing many joins on the same table.
     """
+    import pyarrow
+
     prioritized_expressions = prioritize_evaluation(expressions)
     existing_cols = set(table.column_names)
 
@@ -834,25 +832,17 @@ def _evaluate_and_append_arrow(expressions, table: Table):
                 if isinstance(new_column, (pyarrow.Array, pyarrow.ChunkedArray)):
                     new_column = new_column.cast(field.type)
                 else:
-                    temporal_numpy = isinstance(new_column, numpy.ndarray) and numpy.issubdtype(
-                        new_column.dtype, numpy.datetime64
-                    )
                     temporal_python = isinstance(new_column, (list, tuple)) and any(
                         isinstance(value, (datetime.date, datetime.datetime))
                         for value in new_column
                         if value is not None
                     )
-                    if temporal_numpy or temporal_python:
+                    if temporal_python:
                         new_column = pyarrow.array(new_column)
                     else:
-                        # Use Draken's generic sequence interop for efficient array construction
                         from opteryx.compiled.draken.interop.vector_sequence import (
                             vector_from_sequence,
                         )
-
-                        # Convert numpy arrays to lists to avoid dimension issues
-                        if hasattr(new_column, "tolist"):
-                            new_column = new_column.tolist()
 
                         vec = vector_from_sequence(new_column)
                         new_column = vec.to_arrow()
@@ -928,7 +918,7 @@ def _evaluate_and_append_morsel(expressions, morsel):
         working_table = working_morsel.to_arrow()
         evaluated = _evaluate_and_append_arrow([statement], working_table)
         new_column = evaluated.column(identity)
-        if isinstance(new_column, pyarrow.ChunkedArray):
+        if hasattr(new_column, "num_chunks"):
             if new_column.num_chunks == 1:
                 new_column = new_column.chunk(0)
             else:
@@ -941,7 +931,7 @@ def _evaluate_and_append_morsel(expressions, morsel):
     return Morsel.from_vectors(names, vectors)
 
 
-def evaluate_and_append(expressions, table: Table):
+def evaluate_and_append(expressions, table):
     if table.__class__.__name__ == "Morsel":
         return _evaluate_and_append_morsel(expressions, table)
     return _evaluate_and_append_arrow(expressions, table)

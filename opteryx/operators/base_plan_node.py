@@ -8,10 +8,6 @@ import time
 from collections import defaultdict
 from typing import Optional, Union
 
-import pyarrow
-import pyarrow.compute as pc
-from pyarrow import Table
-
 from opteryx import EMPTY, EOS
 from opteryx.compiled.draken import Morsel
 from opteryx.expression import NodeType, get_all_nodes_of_type
@@ -92,10 +88,10 @@ class BasePlanNode:
     def __str__(self) -> str:
         return f"{self.name} {self.sensors()}"
 
-    def execute(self, morsel: pyarrow.Table) -> Optional[pyarrow.Table]:  # pragma: no cover
+    def execute(self, morsel) -> None:  # pragma: no cover
         raise NotImplementedError()
 
-    def ensure_arrow_table(self, morsel: Union[Table, Morsel]) -> Table:
+    def ensure_arrow_table(self, morsel):
         """Ensure the provided morsel is a PyArrow table when needed."""
         if morsel is EOS:
             return EOS
@@ -104,21 +100,20 @@ class BasePlanNode:
             return morsel.to_arrow()
         return morsel
 
-    def ensure_draken_morsel(self, table: Union[Table, Morsel]):
+    def ensure_draken_morsel(self, table):
         """Ensure the provided morsel is a Draken morsel when needed.
 
         Returns either a single Morsel or a generator of Morsels.
         """
         if table is EOS:
             return EOS
-        if isinstance(table, Table):
+        if not hasattr(table, "to_arrow"):
+            # PyArrow Table (no to_arrow method) — convert to Morsel stream
             self.readings["table_to_morsel_conversion"] += 1
-            # Use iter_from_arrow to avoid expensive combine_chunks
-            # Yields morsels aligned with Arrow chunk boundaries
             return Morsel.iter_from_arrow(table)
         return table
 
-    def __call__(self, morsel: pyarrow.Table) -> Optional[pyarrow.Table]:
+    def __call__(self, morsel):
         # Cache frequently accessed attributes
         telemetry = self.telemetry
         time_stat_key = self._time_stat_key
@@ -294,19 +289,19 @@ class JoinNode(BasePlanNode):
         self._join_key_cast_plan = None
 
     @staticmethod
-    def _join_numeric_target_arrow_type(left_type, right_type):
+    def _join_numeric_target_type(left_type, right_type):
         """
-        Return a target Arrow type for implicit numeric join-key coercion.
+        Return the promoted OrsoType for implicit numeric join-key coercion.
+        INTEGER + DOUBLE → DOUBLE (SQL92: 1 == 1.0 is TRUE)
         """
+        from opteryx.types import find_compatible_type
+
         numeric_types = (OrsoTypes.INTEGER, OrsoTypes.DOUBLE, OrsoTypes.DECIMAL)
         if left_type not in numeric_types or right_type not in numeric_types:
             return None
-        if left_type in (OrsoTypes.DOUBLE, OrsoTypes.DECIMAL) or right_type in (
-            OrsoTypes.DOUBLE,
-            OrsoTypes.DECIMAL,
-        ):
-            return pyarrow.float64()
-        return pyarrow.int64()
+        if left_type == right_type:
+            return None
+        return find_compatible_type([left_type, right_type])
 
     def _build_join_key_cast_plan(self):
         if self._join_key_cast_plan is not None:
@@ -347,11 +342,11 @@ class JoinNode(BasePlanNode):
             else:
                 continue
 
-            target_arrow_type = self._join_numeric_target_arrow_type(left_type, right_type)
-            if target_arrow_type is None:
+            target_type = self._join_numeric_target_type(left_type, right_type)
+            if target_type is None:
                 continue
 
-            signature = (left_column, right_column, str(target_arrow_type))
+            signature = (left_column, right_column, target_type)
             if signature in seen:
                 continue
             seen.add(signature)
@@ -359,37 +354,56 @@ class JoinNode(BasePlanNode):
                 {
                     "left_column": left_column,
                     "right_column": right_column,
-                    "target_type": target_arrow_type,
+                    "target_type": target_type,
                 }
             )
 
-    def _apply_join_key_casts(self, table: Table, *, is_left: bool) -> Table:
+    def _apply_join_key_casts(self, morsel, *, is_left: bool):
         """
         Apply implicit join-key type coercions for numeric equality joins.
+        Operates on Draken Morsels; returns a (possibly new) Morsel.
+        SQL92: 1 == 1.0 is TRUE — INTEGER and DOUBLE keys are promoted to DOUBLE.
         """
-        if table is None or table is EOS or table.num_rows == 0:
-            return table
+        if morsel is None or morsel is EOS:
+            return morsel
 
         self._build_join_key_cast_plan()
         if not self._join_key_cast_plan:
-            return table
+            return morsel
 
+        from opteryx.compiled.draken.morsels.morsel import Morsel as _Morsel
+        from opteryx.expression.casts import cast_to_double, cast_to_int
+
+        if not isinstance(morsel, _Morsel):
+            morsel = _Morsel.from_arrow(morsel)
+
+        names = list(morsel.column_names)
+        names_str = [n.decode() if isinstance(n, bytes) else n for n in names]
+        vectors = [morsel.column(n if isinstance(n, bytes) else n.encode()) for n in names]
+
+        changed = False
         for cast_rule in self._join_key_cast_plan:
             column_name = cast_rule["left_column"] if is_left else cast_rule["right_column"]
-            if column_name not in table.column_names:
+            if column_name not in names_str:
                 continue
 
-            current = table.column(column_name)
+            idx = names_str.index(column_name)
             target_type = cast_rule["target_type"]
-            if current.type == target_type:
-                continue
 
-            casted = pc.cast(current, target_type, safe=False)
-            field_index = table.schema.get_field_index(column_name)
-            table = table.set_column(field_index, pyarrow.field(column_name, target_type), casted)
-            self.readings["feature_implicit_join_key_cast"] += 1
+            if target_type == OrsoTypes.DOUBLE:
+                vectors[idx] = cast_to_double(vectors[idx])
+                changed = True
+            elif target_type == OrsoTypes.INTEGER:
+                vectors[idx] = cast_to_int(vectors[idx])
+                changed = True
 
-        return table
+            if changed:
+                self.readings["feature_implicit_join_key_cast"] += 1
+
+        if not changed:
+            return morsel
+
+        return _Morsel.from_vectors(names_str, vectors)
 
     def to_mermaid(self, nid):
         """

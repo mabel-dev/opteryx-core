@@ -1,12 +1,10 @@
 import gc
-from typing import Generator
+from typing import Any, Generator
 
-import pyarrow
+from opteryx import config
 from opteryx.config import features
 from opteryx.exceptions import InvalidInternalStateError
 from opteryx.utils.free_threading import is_free_threading_available
-
-from opteryx import config
 
 from .serial_engine import ResultType
 from .serial_engine import execute as serial_execute
@@ -15,8 +13,8 @@ ENABLE_FREE_THREADING = features.enable_free_threading
 
 
 def _with_optional_gc_disabled(
-    results: Generator[pyarrow.Table, None, None],
-) -> Generator[pyarrow.Table, None, None]:
+    results: Generator[Any, None, None],
+) -> Generator[Any, None, None]:
     """Wrap result iteration with optional GC disable/restore for diagnostics."""
     if not config.OPTERYX_DISABLE_GC_DURING_QUERY:
         yield from results
