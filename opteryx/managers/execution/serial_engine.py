@@ -10,17 +10,18 @@ This module provides the execution engine for processing physical plans in a ser
 
 from typing import Any, Generator, Tuple
 
-import pyarrow
-
 from opteryx import EOS
+from opteryx.compiled.draken import Morsel
+from opteryx.compiled.draken.interop.vector_sequence import vector_from_sequence
 from opteryx.constants import ResultType
 from opteryx.exceptions import InvalidInternalStateError
 from opteryx.models import PhysicalPlan, QueryTelemetry
+from opteryx.types import OrsoTypes
 
 
 def execute(
     plan: PhysicalPlan, head_node: str = None, telemetry: QueryTelemetry = None
-) -> Tuple[Generator[pyarrow.Table, Any, Any], ResultType]:
+) -> Tuple[Generator[Morsel, Any, Any], ResultType]:
     from opteryx.operators.explain_node import ExplainNode
     from opteryx.operators.set_variable_node import SetVariableNode
     from opteryx.operators.show_create_node import ShowCreateNode
@@ -68,9 +69,7 @@ def execute(
     return inner_execute(plan), ResultType.TABULAR
 
 
-def explain(
-    plan: PhysicalPlan, analyze: bool, _format: str
-) -> Generator[pyarrow.Table, None, None]:
+def explain(plan: PhysicalPlan, analyze: bool, _format: str) -> Generator[Morsel, None, None]:
     from opteryx.operators.base_plan_node import BasePlanNode
     from opteryx.operators.exit_node import ExitNode
     from opteryx.operators.explain_node import ExplainNode
@@ -119,20 +118,33 @@ def explain(
     explained = list(_inner_explain(head[0], 1))
 
     if _format == "TEXT":
-        table = pyarrow.Table.from_pylist(explained).select(
-            col for col in explained[0] if col not in ["identity", "bytes_in", "bytes_out"]
+        table = Morsel.from_vectors(
+            ["identity", "bytes_in", "bytes_out"],
+            [
+                vector_from_sequence(
+                    [row["identity"] for row in explained], dtype=OrsoTypes.VARCHAR
+                ),
+                vector_from_sequence(
+                    [row["bytes_in"] for row in explained], dtype=OrsoTypes.INTEGER
+                ),
+                vector_from_sequence(
+                    [row["bytes_out"] for row in explained], dtype=OrsoTypes.INTEGER
+                ),
+            ],
         )
     else:
         from opteryx.utils import mermaid
 
         mermaid_plan = mermaid.plan_to_mermaid(plan, explained)
         # DEBUG: print(mermaid_plan)
-        table = pyarrow.Table.from_pylist([{"plan": mermaid_plan}])
+        table = Morsel.from_vectors(
+            ["plan"], [vector_from_sequence([mermaid_plan], dtype=OrsoTypes.VARCHAR)]
+        )
 
     yield table
 
 
-def process_node(plan: PhysicalPlan, nid: str, morsel: pyarrow.Table) -> Generator:
+def process_node(plan: PhysicalPlan, nid: str, morsel: Morsel) -> Generator:
     node = plan[nid]
 
     if node.is_scan:

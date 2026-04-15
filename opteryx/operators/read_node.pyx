@@ -166,12 +166,7 @@ class ReaderNode(BasePlanNode):
         """
         Generic method to convert a node to a mermaid entry
         """
-        from opteryx.utils import format_dataset_name
-
-        if isinstance(self.dataset, str):
-            dataset_name = format_dataset_name(self.dataset)
-        else:
-            dataset_name = str(self.dataset)
+        dataset_name = str(self.dataset)
 
         mermaid = f'NODE_{nid}["**READ** ({dataset_name})<br />'
         mermaid += f"({self.execution_time / 1_000_000:,.2f}ms)"
@@ -192,12 +187,7 @@ class ReaderNode(BasePlanNode):
     @property
     def config(self):
         """Additional details for this step"""
-        from opteryx.utils import format_dataset_name
-
-        if isinstance(self.dataset, str):
-            dataset_name = format_dataset_name(self.dataset)
-        else:
-            dataset_name = str(self.dataset)
+        dataset_name = str(self.dataset)
         if self.alias:
             return f"{dataset_name} AS {self.alias}"
         return dataset_name

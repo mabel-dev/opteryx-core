@@ -35,38 +35,26 @@ def anyop_less_than_or_equal(literal, column):
 
 def anyop_like(arr, value, flags=0):
     """Check if any element in column matches LIKE pattern (AnyOpLike)."""
-    import re
-
-    from opteryx.utils.sql import regex_match_any
-
-    return regex_match_any(arr, value, flags=flags)
+    return vector_ops.regex_match_any(arr, value, flags=flags)
 
 
 def anyop_ilike(arr, value):
     """Check if any element in column matches case-insensitive LIKE pattern (AnyOpILike)."""
     import re
 
-    from opteryx.utils.sql import regex_match_any
-
-    return regex_match_any(arr, value, flags=re.IGNORECASE)
+    return vector_ops.regex_match_any(arr, value, flags=re.IGNORECASE)
 
 
 def anyop_not_like(arr, value, flags=0):
     """Check if no element in column matches LIKE pattern (AnyOpNotLike)."""
-    import re
-
-    from opteryx.utils.sql import regex_match_any
-
-    return regex_match_any(arr, value, flags=flags, invert=True)
+    return vector_ops.regex_match_any(arr, value, flags=flags, invert=True)
 
 
 def anyop_not_ilike(arr, value):
     """Check if no element in column matches case-insensitive LIKE pattern (AnyOpNotILike)."""
     import re
 
-    from opteryx.utils.sql import regex_match_any
-
-    return regex_match_any(arr, value, flags=re.IGNORECASE, invert=True)
+    return vector_ops.regex_match_any(arr, value, flags=re.IGNORECASE, invert=True)
 
 
 def allop_eq(literal, column):
