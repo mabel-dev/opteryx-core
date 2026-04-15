@@ -58,7 +58,7 @@ def _extract_single_scalar(value):
                 "Time-travel expressions must evaluate to a single scalar value."
             )
         return lst[0]
-    # numpy-like objects that expose .item() (transition compatibility)
+    # Scalar wrapper objects that expose .item()
     if hasattr(value, "item") and hasattr(value, "shape"):
         if value.size != 1:
             raise UnsupportedSyntaxError(

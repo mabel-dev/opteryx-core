@@ -1,9 +1,8 @@
 """Dictionary vector encoding optimization for filter operations."""
 
 import pyarrow
-from opteryx.compiled.vector_ops import vector_in_list
-from opteryx.compiled.vector_ops import vector_like
-from opteryx.compiled.vector_ops import vector_rlike
+
+from opteryx.compiled.vector_ops import vector_in_list, vector_like, vector_rlike
 from opteryx.expression.operations.fastpath_constant import _coerce_in_list_values
 from opteryx.expression.operations.fastpath_telemetry import record_dict_fastpath_hit
 
@@ -108,7 +107,7 @@ def _dictionary_supports_numeric_fastpath(arr):
 
 def _normalize_dict_compare_value(value):
     """Normalize comparison value for dictionary vector operations (e.g., str → bytes)."""
-    # Handle hasattr(value, 'item') for numpy/arrow scalars
+    # Handle .item() method on scalar wrapper types
     if hasattr(value, "item"):
         try:
             value = value.item()

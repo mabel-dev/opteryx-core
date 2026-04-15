@@ -242,7 +242,7 @@ def _is_null_as_boolvector(vec):
 
     if cls_name in _FIXED_BUFFER_VECTOR_CLASSES:
         if cls_name == "Float64Vector":
-            # Use native is_null_with_nan() to detect both nulls and NaN without PyArrow compute
+            # Detect both nulls and NaN via is_null_with_nan()
             return bool_vector_from_int8_mask(vec.is_null_with_nan(), n)
         return bool_vector_from_int8_mask(vec.is_null(), n)
 
@@ -257,7 +257,7 @@ def _is_null_as_boolvector(vec):
     if getattr(vec, "null_count", 0) == 0:
         return BoolVector(n)
 
-    # StringVector with native is_null() method (no PyArrow compute needed)
+    # StringVector: use native is_null()
     if cls_name == "StringVector" and hasattr(vec, "is_null"):
         return bool_vector_from_int8_mask(vec.is_null(), n)
 

@@ -122,7 +122,7 @@ def _eval_binary_op_draken(node, morsel):
     # ===================================================================
     # DATE-SPECIFIC OPERATIONS (refactored to use VectorType discriminator)
     # ===================================================================
-    # Phase 4.4: Replace __class__.__name__ checks with VectorType enum
+    # Use VectorType enum for type discrimination
     left_type = get_vector_type(left)
     right_type = get_vector_type(right)
 
@@ -142,8 +142,7 @@ def _eval_binary_op_draken(node, morsel):
             return _date_interval_op_draken(right, left, op)
 
     # ===================================================================
-    # STRING CONCAT: handle before Arrow conversion so inputs stay as
-    # Draken StringVectors (constant-encoded scalars included).
+    # StringConcat: handle before Arrow conversion
     # ===================================================================
     if op == "StringConcat":
         from opteryx.compiled.vector_ops import vector_string_concat_binary
@@ -156,7 +155,7 @@ def _eval_binary_op_draken(node, morsel):
         return vector_string_concat_binary(_to_bytes_or_vec(left), _to_bytes_or_vec(right))
 
     # ===================================================================
-    # GENERAL ARITHMETIC OPERATIONS (Phase 4.4: uses arithmetic_dispatch)
+    # GENERAL ARITHMETIC OPERATIONS (uses arithmetic_dispatch)
     # ===================================================================
     from opteryx.compiled.draken.interop.arrow import vector_from_arrow
     from opteryx.compiled.draken.interop.vector_sequence import vector_from_sequence
@@ -165,14 +164,12 @@ def _eval_binary_op_draken(node, morsel):
     if op not in BINARY_OPERATORS:
         return None
 
-    # Phase 4.4: Attempt centralized arithmetic dispatch
-    # This will use Draken kernels when available (Phase 4.5)
-    # For now, falls back to Arrow/numpy via binary_operations()
+    # Attempt centralized arithmetic dispatch
+    # Falls back to binary_operations() for operators without native kernels
     result = call_arithmetic_op(op, left, right)
 
     # If call_arithmetic_op returns None, it means no Draken kernel exists
-    # (This occurs during Phase 4.4 transition; Phase 4.5 will populate kernels)
-    # Fall back to Arrow/numpy conversion path
+    # Fallback: convert to Arrow and dispatch through binary_operations()
     if result is None:
         # Convert to Arrow if needed
         if hasattr(left, "to_arrow"):
@@ -190,9 +187,9 @@ def _eval_binary_op_draken(node, morsel):
         )
 
     # ===================================================================
-    # RESULT CONVERSION (Phase 4.4: centralized via arithmetic_dispatch)
+    # RESULT CONVERSION (centralized via arithmetic_dispatch)
     # ===================================================================
-    # Convert Arrow-like results back to Draken vectors (duck-typed: no pyarrow import needed)
+    # Convert Arrow-like results back to Draken vectors
     if hasattr(result, "to_pylist") and not hasattr(result, "to_arrow"):
         arr = result.combine_chunks() if hasattr(result, "combine_chunks") else result
         return vector_from_arrow(arr)

@@ -140,7 +140,7 @@ class NestedLoopJoinNode(JoinNode):
                 else:
                     self.left_morsel = None
 
-                # Skip join key casts - using Draken-native only, no Arrow
+                # Skip join key casts — Draken-native path
 
                 # Build bloom filter using Morsel.hash() (Draken-native)
                 if self.left_morsel is not None and self.left_morsel.num_rows > 0:
@@ -166,7 +166,7 @@ class NestedLoopJoinNode(JoinNode):
                 left_indexes = ()
                 right_indexes = ()
             else:
-                # Apply bloom filter (Draken-native, no Arrow conversion in hot path)
+                # Apply bloom filter
                 if self.left_filter is not None:
                     from opteryx.compiled.structures.bloom_filter import bloom_filter_check_morsel
                     start = time.monotonic_ns()
@@ -174,14 +174,14 @@ class NestedLoopJoinNode(JoinNode):
                     self.readings["time_bloom_filtering"] += time.monotonic_ns() - start
 
                     if bit_results is not None:
-                        # Convert bit-packed results directly to BoolVector (Draken-native, no Arrow)
+                        # Convert bit-packed results directly to BoolVector
                         filter_mask = _bits_to_bool_vector(bit_results, morsel.num_rows)
                         morsel_filtered = morsel.filter_mask(filter_mask)
                         eliminated_rows = morsel.num_rows - morsel_filtered.num_rows
                         self.readings["rows_eliminated_by_bloom_filter"] += eliminated_rows
                         morsel = morsel_filtered
 
-                # Skip join key casts - using Draken-native only, no Arrow
+                # Skip join key casts — Draken-native path
 
                 # Perform nested loop join
                 if morsel.num_rows > 0:
@@ -192,7 +192,7 @@ class NestedLoopJoinNode(JoinNode):
                     left_indexes = ()
                     right_indexes = ()
 
-            # Final alignment using Draken-native morsel alignment (zero-Arrow hot path)
+            # Draken-native morsel alignment
             if left_indexes and right_indexes:
                 yield _align_morsels_with_tuples(self.left_morsel, morsel, left_indexes, right_indexes)
             else:

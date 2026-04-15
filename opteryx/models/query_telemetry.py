@@ -42,9 +42,8 @@ class _QueryTelemetry:
         """
         Return telemetry as a dictionary
         """
-        from opteryx.utils.firestore_utils import sanitize_for_firestore
-
         import opteryx
+        from opteryx.utils.firestore_utils import sanitize_for_firestore
 
         readings_dict = dict(self._reading)
 
@@ -71,7 +70,7 @@ class _QueryTelemetry:
         )
         # sort the keys in the dictionary
         readings_dict = {key: readings_dict[key] for key in sorted(readings_dict)}
-        # convert numpy and similar types to native python types for downstream writers
+        # Convert scalar wrapper types to native Python types for downstream writers
         readings_dict = sanitize_for_firestore(readings_dict)
         # put messages and plan at the end
         readings_dict["version"] = opteryx.__version__

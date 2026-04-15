@@ -800,13 +800,13 @@ class HeapSortNode(BasePlanNode):
         free(row_ids_buf)
         free(query_buf)
 
-        # Convert scores to list if numpy array
+        # Normalise scores to Python list
         if hasattr(scores_mv, 'tolist'):
             scores = scores_mv.tolist()
         else:
             scores = list(scores_mv)
 
-        # Use vector_ranking module for NumPy-free top-k selection and ranking
+        # Use vector_ranking module for top-k selection and ranking
         metric = order_expression.value  # "COSINE_SIMILARITY" or "COSINE_DISTANCE"
         top_indices = vector_exact_search_top_k(
             similarity_scores=scores,
