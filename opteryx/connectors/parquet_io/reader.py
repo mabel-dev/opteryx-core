@@ -51,6 +51,59 @@ class ListColumnError(ValueError):
     """Raised when a column's decoded length doesn't match the row group row count."""
 
 
+def _logical_timestamp_unit(logical_type: str) -> str:
+    """
+    Extract timestamp unit from footer logical type text.
+
+    Examples:
+      'timestamp[ms,UTC]' -> 'ms'
+      'timestamp[us]'     -> 'us'
+      'timestamp'         -> 'us' (safe default)
+    """
+    logical_lower = logical_type.lower()
+    if not logical_lower.startswith("timestamp"):
+        return "us"
+
+    lb = logical_lower.find("[")
+    rb = logical_lower.find("]", lb + 1) if lb >= 0 else -1
+    if lb >= 0 and rb > lb + 1:
+        token = logical_lower[lb + 1 : rb].split(",", 1)[0].strip()
+        if token in ("s", "ms", "us", "ns"):
+            return token
+    return "us"
+
+
+def _coerce_temporal_vector(decoded: Any, col_stats: dict) -> Any:
+    """
+    Ensure parquet logical temporal columns materialize as temporal vectors.
+
+    The rugo decoder currently emits Int64Vector for date32/timestamp columns.
+    This helper normalizes those to Date32Vector/TimestampVector at the parquet
+    -> vector boundary.
+    """
+    logical_type = str(col_stats.get("logical_type", "") or "").lower()
+    if not logical_type:
+        return decoded
+
+    cls_name = decoded.__class__.__name__
+    if cls_name != "Int64Vector":
+        return decoded
+
+    if not (logical_type.startswith("date32") or logical_type.startswith("timestamp")):
+        return decoded
+
+    from opteryx.compiled.draken.vectors.date32_vector import from_int64_vector as int64_to_date32
+    from opteryx.compiled.draken.vectors.timestamp_vector import (
+        from_int64_vector as int64_to_timestamp,
+    )
+
+    if logical_type.startswith("date32"):
+        return int64_to_date32(decoded)
+
+    unit = _logical_timestamp_unit(logical_type)
+    return int64_to_timestamp(decoded, unit)
+
+
 def _trace_enabled() -> bool:
     return bool(_cfg.OPTERYX_TRACE)
 
@@ -398,6 +451,7 @@ def fetch_columns(
                     f"(codec={_col_stats.get('compression_codec')}, "
                     f"encodings={_col_stats.get('encodings')})"
                 )
+            decoded = _coerce_temporal_vector(decoded, _col_stats)
 
             if _trace_enabled():
                 _trace_decode_completed(

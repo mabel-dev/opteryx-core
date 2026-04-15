@@ -1018,21 +1018,26 @@ cdef class Morsel:
         max_show = 10
         show_rows = min(max_show, n_rows)
 
-        # Collect rows
+        # Materialize displayed values column-wise using to_pylist()
         rows = []
+        cdef list displayed_columns = []
+        cdef list py_values
+        cdef object val
+        cdef Vector vec
+        for j in range(n_cols):
+            try:
+                vec = <Vector>self._columns[j]
+                py_values = vec.to_pylist()
+            except Exception:
+                py_values = [None] * show_rows
+            displayed_columns.append(py_values)
+
         for i in range(show_rows):
             row = []
             for j in range(n_cols):
                 try:
-                    vec = self._columns[j]
-                    # Prefer direct indexing; fall back to to_pylist() if needed
-                    try:
-                        val = vec[i]
-                    except Exception:
-                        try:
-                            val = vec.to_pylist()[i]
-                        except Exception:
-                            val = None
+                    py_values = <list>displayed_columns[j]
+                    val = py_values[i] if i < len(py_values) else None
                 except Exception:
                     val = None
 

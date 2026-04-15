@@ -135,16 +135,18 @@ def date_part(part, arr):
     )
 
 
-def trunc_temporal(arr, part):
-    """
-    Truncate a temporal value to the start of the specified unit.
+def trunc_date(arr, part):
+    """TRUNC(Date32Vector, unit) -> TimestampVector."""
+    from opteryx.compiled.vector_ops import vector_date_trunc
 
-    SQL surface form is TRUNC(value, unit), but the underlying utility uses
-    the opposite argument order.
-    """
-    from opteryx.utils.dates import date_trunc
+    return vector_date_trunc(part, arr)
 
-    return date_trunc(part, arr)
+
+def trunc_timestamp(arr, part):
+    """TRUNC(TimestampVector, unit) -> TimestampVector."""
+    from opteryx.compiled.vector_ops import vector_timestamp_trunc
+
+    return vector_timestamp_trunc(part, arr)
 
 
 def date_diff(part, start, end):

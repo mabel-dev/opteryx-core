@@ -6,10 +6,12 @@
 # cython: wraparound=False
 # cython: boundscheck=False
 
-from libc.stdint cimport int64_t
+from libc.stdint cimport int32_t, int64_t, uint8_t
 from cpython.array cimport array, clone
 
-from opteryx.compiled.draken.vectors.timestamp_vector cimport TimestampVector, from_arrow as ts_from_arrow
+from opteryx.compiled.draken.vectors.date32_vector cimport Date32Vector
+from opteryx.compiled.draken.vectors.string_vector cimport StringVector
+from opteryx.compiled.draken.vectors.timestamp_vector cimport TimestampVector
 
 # Constants
 cdef const int64_t SECONDS_PER_MINUTE = 60
@@ -202,43 +204,87 @@ cdef inline int64_t truncate_month_fast(int64_t seconds) nogil:
         # Fall back to general algorithm
         return truncate_month_inline(seconds)
 
-# Main fast processing function - delegates to optimized vector_date_trunc
-cpdef object date_trunc_fast(str truncate_to, TimestampVector timestamp_array):
+
+cdef inline str _extract_truncate_op(StringVector truncate_to) except *:
+    """
+    Extract a single truncation unit from a StringVector.
+
+    DATE_TRUNC expects a constant unit; non-constant vectors are rejected.
+    """
+    cdef const uint8_t* data_ptr
+    cdef int32_t* offsets
+    cdef int32_t length
+    cdef bytes raw
+
+    if truncate_to._has_const:
+        if truncate_to._const_is_null:
+            raise ValueError("DATE_TRUNC unit cannot be NULL")
+        raw = (<const char*>truncate_to._const_value.data)[:truncate_to._const_value.length]
+        return raw.decode("utf-8").lower()
+
+    if truncate_to.ptr.length != 1:
+        raise ValueError("DATE_TRUNC unit must be a constant or single-value StringVector")
+
+    if truncate_to.ptr.null_bitmap != NULL and ((truncate_to.ptr.null_bitmap[0] & 1) == 0):
+        raise ValueError("DATE_TRUNC unit cannot be NULL")
+
+    data_ptr = <const uint8_t*>truncate_to.ptr.data
+    offsets = truncate_to.ptr.offsets
+    length = offsets[1] - offsets[0]
+    raw = (<const char*>(data_ptr + offsets[0]))[:length]
+    return raw.decode("utf-8").lower()
+
+# Main fast processing function - delegates to timestamp kernel
+cpdef TimestampVector date_trunc_fast(StringVector truncate_to, TimestampVector timestamp_array):
     """
     Fast date truncation using pure integer arithmetic.
 
     Args:
-        truncate_to: "year", "quarter", "month", "week", "day", "hour", "minute", "second"
-        timestamp_array: TimestampVector of timestamps.
+        truncate_to: StringVector containing one of
+            "year", "quarter", "month", "week", "day", "hour", "minute", "second"
+        timestamp_array: TimestampVector.
 
     Returns:
         TimestampVector of truncated timestamps.
     """
-    return vector_date_trunc(truncate_to, timestamp_array)
+    return vector_timestamp_trunc(truncate_to, timestamp_array)
 
-# Ultra-fast version with SIMD-like loop unrolling
-cpdef object vector_date_trunc(str truncate_to, TimestampVector timestamp_array):
+cdef TimestampVector _vector_trunc_core(StringVector truncate_to, object temporal_array):
     """
     Ultra-fast date truncation with loop unrolling for maximum speed.
     Works directly in native timestamp units to avoid conversion overhead.
     Optimized for Draken TimestampVector with zero-copy buffer access.
     """
-    cdef str op = truncate_to.lower()
+    cdef str op = _extract_truncate_op(truncate_to)
     cdef str unit
     cdef int64_t length
     cdef int64_t i
     cdef int64_t* data_ptr
+    cdef int32_t* date_ptr
     cdef int64_t* output_ptr
     cdef int64_t days_since_epoch, days_to_monday, temp_seconds
     cdef int64_t factor
     cdef int64_t divisor_day, divisor_hour, divisor_minute
     cdef array output_array
     cdef array template = array('q')  # 'q' = signed long long (int64)
+    cdef bint is_date_input = False
+    cdef TimestampVector timestamp_array
 
-    # Access Draken TimestampVector buffers directly
-    unit = timestamp_array.timestamp_unit
-    length = <int64_t>timestamp_array.ptr.length
-    data_ptr = <int64_t*>timestamp_array.ptr.data
+    if isinstance(temporal_array, TimestampVector):
+        timestamp_array = <TimestampVector>temporal_array
+        unit = timestamp_array.timestamp_unit
+        length = <int64_t>timestamp_array.ptr.length
+        data_ptr = <int64_t*>timestamp_array.ptr.data
+    elif isinstance(temporal_array, Date32Vector):
+        is_date_input = True
+        # Keep Date32 truncation outputs in microseconds to match the engine's
+        # timestamp storage/interop expectations.
+        unit = "us"
+        length = <int64_t>(<Date32Vector>temporal_array).ptr.length
+        date_ptr = <int32_t*>(<Date32Vector>temporal_array).ptr.data
+        data_ptr = NULL
+    else:
+        raise TypeError("Internal error: _vector_trunc_core expects Date32Vector or TimestampVector")
 
     # Map unit to factor
     if unit == 'ms':
@@ -264,62 +310,110 @@ cpdef object vector_date_trunc(str truncate_to, TimestampVector timestamp_array)
     if op == "day":
         # Most common - process in chunks of 4 for better pipelining
         i = 0
-        while i + 3 < length:
-            output_ptr[i] = (data_ptr[i] // divisor_day) * divisor_day
-            output_ptr[i + 1] = (data_ptr[i + 1] // divisor_day) * divisor_day
-            output_ptr[i + 2] = (data_ptr[i + 2] // divisor_day) * divisor_day
-            output_ptr[i + 3] = (data_ptr[i + 3] // divisor_day) * divisor_day
-            i += 4
+        if is_date_input:
+            while i + 3 < length:
+                output_ptr[i] = <int64_t>date_ptr[i] * divisor_day
+                output_ptr[i + 1] = <int64_t>date_ptr[i + 1] * divisor_day
+                output_ptr[i + 2] = <int64_t>date_ptr[i + 2] * divisor_day
+                output_ptr[i + 3] = <int64_t>date_ptr[i + 3] * divisor_day
+                i += 4
+        else:
+            while i + 3 < length:
+                output_ptr[i] = (data_ptr[i] // divisor_day) * divisor_day
+                output_ptr[i + 1] = (data_ptr[i + 1] // divisor_day) * divisor_day
+                output_ptr[i + 2] = (data_ptr[i + 2] // divisor_day) * divisor_day
+                output_ptr[i + 3] = (data_ptr[i + 3] // divisor_day) * divisor_day
+                i += 4
         # Handle remainder
         while i < length:
-            output_ptr[i] = (data_ptr[i] // divisor_day) * divisor_day
+            if is_date_input:
+                output_ptr[i] = <int64_t>date_ptr[i] * divisor_day
+            else:
+                output_ptr[i] = (data_ptr[i] // divisor_day) * divisor_day
             i += 1
     elif op == "hour":
         # Second most common
         i = 0
-        while i + 3 < length:
-            output_ptr[i] = (data_ptr[i] // divisor_hour) * divisor_hour
-            output_ptr[i + 1] = (data_ptr[i + 1] // divisor_hour) * divisor_hour
-            output_ptr[i + 2] = (data_ptr[i + 2] // divisor_hour) * divisor_hour
-            output_ptr[i + 3] = (data_ptr[i + 3] // divisor_hour) * divisor_hour
-            i += 4
+        if is_date_input:
+            while i + 3 < length:
+                output_ptr[i] = <int64_t>date_ptr[i] * divisor_day
+                output_ptr[i + 1] = <int64_t>date_ptr[i + 1] * divisor_day
+                output_ptr[i + 2] = <int64_t>date_ptr[i + 2] * divisor_day
+                output_ptr[i + 3] = <int64_t>date_ptr[i + 3] * divisor_day
+                i += 4
+        else:
+            while i + 3 < length:
+                output_ptr[i] = (data_ptr[i] // divisor_hour) * divisor_hour
+                output_ptr[i + 1] = (data_ptr[i + 1] // divisor_hour) * divisor_hour
+                output_ptr[i + 2] = (data_ptr[i + 2] // divisor_hour) * divisor_hour
+                output_ptr[i + 3] = (data_ptr[i + 3] // divisor_hour) * divisor_hour
+                i += 4
         while i < length:
-            output_ptr[i] = (data_ptr[i] // divisor_hour) * divisor_hour
+            if is_date_input:
+                output_ptr[i] = <int64_t>date_ptr[i] * divisor_day
+            else:
+                output_ptr[i] = (data_ptr[i] // divisor_hour) * divisor_hour
             i += 1
     elif op == "minute":
         i = 0
-        while i + 3 < length:
-            output_ptr[i] = (data_ptr[i] // divisor_minute) * divisor_minute
-            output_ptr[i + 1] = (data_ptr[i + 1] // divisor_minute) * divisor_minute
-            output_ptr[i + 2] = (data_ptr[i + 2] // divisor_minute) * divisor_minute
-            output_ptr[i + 3] = (data_ptr[i + 3] // divisor_minute) * divisor_minute
-            i += 4
+        if is_date_input:
+            while i + 3 < length:
+                output_ptr[i] = <int64_t>date_ptr[i] * divisor_day
+                output_ptr[i + 1] = <int64_t>date_ptr[i + 1] * divisor_day
+                output_ptr[i + 2] = <int64_t>date_ptr[i + 2] * divisor_day
+                output_ptr[i + 3] = <int64_t>date_ptr[i + 3] * divisor_day
+                i += 4
+        else:
+            while i + 3 < length:
+                output_ptr[i] = (data_ptr[i] // divisor_minute) * divisor_minute
+                output_ptr[i + 1] = (data_ptr[i + 1] // divisor_minute) * divisor_minute
+                output_ptr[i + 2] = (data_ptr[i + 2] // divisor_minute) * divisor_minute
+                output_ptr[i + 3] = (data_ptr[i + 3] // divisor_minute) * divisor_minute
+                i += 4
         while i < length:
-            output_ptr[i] = (data_ptr[i] // divisor_minute) * divisor_minute
+            if is_date_input:
+                output_ptr[i] = <int64_t>date_ptr[i] * divisor_day
+            else:
+                output_ptr[i] = (data_ptr[i] // divisor_minute) * divisor_minute
             i += 1
     elif op == "month":
         # Complex ops: convert to seconds, truncate, scale back
         for i in range(length):
-            temp_seconds = data_ptr[i] // factor
+            if is_date_input:
+                temp_seconds = <int64_t>date_ptr[i] * SECONDS_PER_DAY
+            else:
+                temp_seconds = data_ptr[i] // factor
             output_ptr[i] = truncate_month_fast(temp_seconds) * factor
     elif op == "week":
         for i in range(length):
-            days_since_epoch = data_ptr[i] // divisor_day
+            if is_date_input:
+                days_since_epoch = <int64_t>date_ptr[i]
+            else:
+                days_since_epoch = data_ptr[i] // divisor_day
             days_to_monday = (days_since_epoch - EPOCH_WEEKDAY) % DAYS_PER_WEEK
             if days_to_monday < 0:
                 days_to_monday += DAYS_PER_WEEK
             output_ptr[i] = (days_since_epoch - days_to_monday) * divisor_day
     elif op == "quarter":
         for i in range(length):
-            temp_seconds = data_ptr[i] // factor
+            if is_date_input:
+                temp_seconds = <int64_t>date_ptr[i] * SECONDS_PER_DAY
+            else:
+                temp_seconds = data_ptr[i] // factor
             output_ptr[i] = truncate_quarter_inline(temp_seconds) * factor
     elif op == "year":
         for i in range(length):
-            temp_seconds = data_ptr[i] // factor
+            if is_date_input:
+                temp_seconds = <int64_t>date_ptr[i] * SECONDS_PER_DAY
+            else:
+                temp_seconds = data_ptr[i] // factor
             output_ptr[i] = truncate_year_inline(temp_seconds) * factor
     elif op == "second":
         # Truncate sub-second precision or no-op for second precision
-        if factor > 1:
+        if is_date_input:
+            for i in range(length):
+                output_ptr[i] = <int64_t>date_ptr[i] * divisor_day
+        elif factor > 1:
             for i in range(length):
                 output_ptr[i] = (data_ptr[i] // factor) * factor
         else:
@@ -327,7 +421,7 @@ cpdef object vector_date_trunc(str truncate_to, TimestampVector timestamp_array)
             for i in range(length):
                 output_ptr[i] = data_ptr[i]
     else:
-        raise ValueError(f"Invalid unit: {truncate_to}")
+        raise ValueError(f"Invalid unit: {op}")
 
     # Create TimestampVector directly from processed int64 data
     cdef TimestampVector result = TimestampVector(length)
@@ -340,3 +434,13 @@ cpdef object vector_date_trunc(str truncate_to, TimestampVector timestamp_array)
         result_ptr[j] = output_ptr[j]
 
     return result
+
+
+cpdef TimestampVector vector_timestamp_trunc(StringVector truncate_to, TimestampVector timestamp_array):
+    """Truncate a TimestampVector to a unit from StringVector."""
+    return _vector_trunc_core(truncate_to, timestamp_array)
+
+
+cpdef TimestampVector vector_date_trunc(StringVector truncate_to, Date32Vector date_array):
+    """Truncate a Date32Vector to a unit from StringVector (returns TimestampVector)."""
+    return _vector_trunc_core(truncate_to, date_array)

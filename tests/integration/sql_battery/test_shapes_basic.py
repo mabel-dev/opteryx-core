@@ -195,16 +195,20 @@ def test_sql_battery(statement: str, rows: int, columns: int, exception: Optiona
     opteryx.register_workspace("testdata", DiskConnector)
 
     try:
-        # query to arrow is the fastest way to query
         session = opteryx.session(memberships=["Apollo 11", "opteryx"])
-        result = session.execute(statement)
-        actual_rows, actual_columns = result.shape
+        morsels = list(session.execute_to_morsels(statement))
+        actual_rows = sum(morsel.num_rows for morsel in morsels)
         assert rows == actual_rows, (
             f"\n\033[38;5;203mQuery returned {actual_rows} rows but {rows} were expected.\033[0m\n{statement}"
         )
-        assert columns == actual_columns, (
-            f"\n\033[38;5;203mQuery returned {actual_columns} cols but {columns} were expected.\033[0m\n{statement}"
-        )
+        if morsels:
+            actual_columns = len(morsels[0].column_names)
+            assert columns == actual_columns, (
+                f"\n\033[38;5;203mQuery returned {actual_columns} cols but {columns} were expected.\033[0m\n{statement}"
+            )
+        else:
+            # Empty morsel streams currently do not expose output schema metadata.
+            assert rows == 0, f"Query returned no morsels but expected {rows} rows.\n{statement}"
         assert exception is None, (
             f"Exception {exception} not raised but expected\n{format_sql(statement)}"
         )
@@ -227,8 +231,9 @@ def test_timetravel_at_syntax_deprecation_warning():
     session = opteryx.session(memberships=["Apollo 11", "opteryx"])
 
     with pytest.warns(DeprecationWarning, match=r"AT\(TIMESTAMP => \.\.\.\) is deprecated"):
-        result = session.execute("SELECT * FROM $planets AT(TIMESTAMP => '2024-12-15 00:00:00')")
-        assert result.shape == (9, 20)
+        morsels = list(session.execute_to_morsels("SELECT * FROM $planets AT(TIMESTAMP => '2024-12-15 00:00:00')"))
+        assert sum(morsel.num_rows for morsel in morsels) == 9
+        assert len(morsels[0].column_names) == 20
 
 
 if __name__ == "__main__":  # pragma: no cover

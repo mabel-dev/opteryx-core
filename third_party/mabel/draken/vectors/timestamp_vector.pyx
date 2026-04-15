@@ -18,6 +18,8 @@ This module provides:
 Used for high-performance temporal analytics and columnar data processing in Draken.
 """
 
+import datetime as _dt
+
 from cpython.bytes cimport PyBytes_FromStringAndSize, PyBytes_AS_STRING
 from cpython.mem cimport PyMem_Malloc
 from libc.stdint cimport int32_t
@@ -59,6 +61,7 @@ DEF UNIT_NS = 0
 DEF UNIT_US = 1
 DEF UNIT_MS = 2
 DEF UNIT_S  = 3
+_TIMESTAMP_EPOCH = _dt.datetime(1970, 1, 1)
 
 
 cdef inline uint8_t _dict_code_width_for_size(Py_ssize_t dict_size) noexcept:
@@ -941,22 +944,79 @@ cdef class TimestampVector(Vector):
         cdef Py_ssize_t i, n = ptr.length
         cdef list out = []
         cdef uint8_t byte, bit
+        cdef object timedelta = _dt.timedelta
+        cdef int64_t value
+        cdef int64_t seconds
+        cdef int64_t remainder
+        cdef int64_t micros
+        cdef object ts
         if self._has_const:
             if self._const_is_null:
                 for i in range(n):
                     out.append(None)
             else:
                 for i in range(n):
-                    out.append(self._const_value)
+                    value = self._const_value
+                    if self.timestamp_unit == "s":
+                        seconds = value
+                        micros = 0
+                    elif self.timestamp_unit == "ms":
+                        seconds, remainder = divmod(value, 1000)
+                        micros = remainder * 1000
+                    elif self.timestamp_unit == "ns":
+                        seconds, remainder = divmod(value, 1000000000)
+                        micros = remainder // 1000
+                    else:
+                        seconds, remainder = divmod(value, 1000000)
+                        micros = remainder
+                    try:
+                        ts = _TIMESTAMP_EPOCH + timedelta(seconds=seconds, microseconds=micros)
+                    except (OverflowError, ValueError):
+                        ts = value
+                    out.append(ts)
             return out
 
         if ptr.null_bitmap == NULL:
             for i in range(n):
-                out.append(data[i])
+                value = data[i]
+                if self.timestamp_unit == "s":
+                    seconds = value
+                    micros = 0
+                elif self.timestamp_unit == "ms":
+                    seconds, remainder = divmod(value, 1000)
+                    micros = remainder * 1000
+                elif self.timestamp_unit == "ns":
+                    seconds, remainder = divmod(value, 1000000000)
+                    micros = remainder // 1000
+                else:
+                    seconds, remainder = divmod(value, 1000000)
+                    micros = remainder
+                try:
+                    ts = _TIMESTAMP_EPOCH + timedelta(seconds=seconds, microseconds=micros)
+                except (OverflowError, ValueError):
+                    ts = value
+                out.append(ts)
         else:
             for i in range(n):
                 if _bitmap_is_valid(ptr.null_bitmap, i, self.null_bit_offset):
-                    out.append(data[i])
+                    value = data[i]
+                    if self.timestamp_unit == "s":
+                        seconds = value
+                        micros = 0
+                    elif self.timestamp_unit == "ms":
+                        seconds, remainder = divmod(value, 1000)
+                        micros = remainder * 1000
+                    elif self.timestamp_unit == "ns":
+                        seconds, remainder = divmod(value, 1000000000)
+                        micros = remainder // 1000
+                    else:
+                        seconds, remainder = divmod(value, 1000000)
+                        micros = remainder
+                    try:
+                        ts = _TIMESTAMP_EPOCH + timedelta(seconds=seconds, microseconds=micros)
+                    except (OverflowError, ValueError):
+                        ts = value
+                    out.append(ts)
                 else:
                     out.append(None)
 
@@ -1265,3 +1325,49 @@ cdef TimestampVector from_dict_nullable(
     _attach_dictionary_storage(vec, codes, dictionary, False)
 
     return vec
+
+
+cpdef TimestampVector from_int64_vector(Int64Vector source, str timestamp_unit="us"):
+    """
+    Convert an Int64Vector containing epoch timestamp values to TimestampVector.
+
+    This is a native Draken conversion path (no Arrow interop).
+    """
+    cdef Py_ssize_t n = <Py_ssize_t>source.ptr.length
+    cdef TimestampVector out
+    cdef int64_t* src_data
+    cdef int64_t* dst_data
+    cdef uint8_t* src_null
+    cdef size_t nb_bytes
+    cdef uint8_t* out_null
+
+    if source._has_const:
+        if source._const_is_null:
+            return TimestampVector.from_constant(None, n, is_null=True, timestamp_unit=timestamp_unit)
+        return TimestampVector.from_constant(
+            source._const_value, n, timestamp_unit=timestamp_unit
+        )
+
+    out = TimestampVector(<size_t>n)
+    out.timestamp_unit = timestamp_unit
+    out._unit_code = _unit_code_from_str(timestamp_unit)
+
+    src_data = <int64_t*>source.ptr.data
+    dst_data = <int64_t*>out.ptr.data
+    if n > 0:
+        memcpy(dst_data, src_data, <size_t>n * sizeof(int64_t))
+
+    src_null = <uint8_t*>source.ptr.null_bitmap
+    if src_null != NULL:
+        nb_bytes = (<size_t>n + 7) >> 3
+        out_null = <uint8_t*>malloc(nb_bytes)
+        if out_null == NULL:
+            raise MemoryError()
+        memcpy(out_null, src_null, nb_bytes)
+        out.ptr.null_bitmap = out_null
+        out.null_bit_offset = 0
+    else:
+        out.ptr.null_bitmap = NULL
+        out.null_bit_offset = 0
+
+    return out
