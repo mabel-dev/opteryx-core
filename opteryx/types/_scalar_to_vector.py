@@ -26,7 +26,8 @@ import decimal
 import json
 from typing import Any, Optional
 
-from opteryx.compiled.draken.interop.arrow import vector_from_arrow, vector_from_sequence
+from opteryx.compiled.draken.interop.arrow import vector_from_arrow
+from opteryx.compiled.draken.interop.vector_sequence import vector_from_sequence
 from opteryx.types._orso_types import OrsoTypes
 from opteryx.types._scalar_types import (
     ScalarType,
