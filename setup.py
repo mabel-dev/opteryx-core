@@ -598,6 +598,7 @@ extensions = [
     ),
     # Draken core components
     make_draken_extension("interop.arrow", "interop/arrow.pyx"),
+    make_draken_extension("interop.vector_sequence", "interop/vector_sequence.pyx"),
     make_draken_extension("vectors.vector", "vectors/vector.pyx"),
     make_draken_extension("vectors.bool_vector", "vectors/bool_vector.pyx"),
     make_draken_extension("vectors.float64_vector", "vectors/float64_vector.pyx"),
