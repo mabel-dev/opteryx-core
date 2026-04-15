@@ -549,6 +549,11 @@ extensions = [
         sources=["opteryx/third_party/fuzzy/soundex.pyx"],
         extra_compile_args=C_FLAGS,
     ),
+    Extension(
+        name="opteryx.third_party.mbleven",
+        sources=["opteryx/third_party/mbleven.pyx"],
+        extra_compile_args=C_FLAGS,
+    ),
     # File format readers
     Extension(
         "opteryx.compiled.rugo.parquet",

@@ -2,10 +2,11 @@
 
 **Objective:** Uninstall numpy and pyarrow entirely from Opteryx.
 
-**Session 47 Final Status:** 86/88 tests passing (97%), **2% performance improvement**  
+**Current Status (post-Session 50 + follow-on commits):** 86/88 tests passing (97%)  
 **Remaining Test Failures:** 2 pre-existing planner issues (unrelated to eradication)  
-**Files Eradicated:** 4 (comparisons.py, list_ops.py, unary_operations.py, filter_operations/__init__.py)  
-**Files Remaining:** 59 of 63 total (6% of eradication complete)
+**Import lines remaining:** ~101 across ~55 files (verified by grep, see Remaining Work below)  
+**Hot-path compiled operators:** ✅ 100% clean  
+**Warm/cold paths:** ❌ Substantial work remaining — expression layer is the largest body
 
 ---
 
@@ -56,21 +57,72 @@ numpy and pyarrow imports **ONLY** allowed in interop methods:
 
 ---
 
-## 🔴 REMAINING WORK
+## 🟢 POST-SESSION 50: Follow-on Commits (COMPLETE ✅)
 
-### HOT PATH STATUS: ALL COMPLETE ✅
-- ✅ Vector search (`heap_sort_node.pyx`) - Session 50
-- ✅ CROSS JOIN indices (`build_cartesian_indices`) - Session 46
-- ✅ Join hashing (`Morsel.hash`) - Session 49
-- ✅ Expressions (comparisons, unary, list ops) - Session 47-48
-- ✅ Distinct (`morsel_ops/distinct.pyx`) - Session 47
+Work completed after Session 50 that is not recorded in session entries below:
 
-**All hot-path NumPy/PyArrow eliminated** ✅
+- ✅ **`vector_sequence` interop module** — `vector_from_sequence` lifted out of `arrow.pyx` into a new `draken/interop/vector_sequence.pyx`. Removes Arrow as a mandatory intermediary for all sequence-to-vector construction. Adds native Python-list builders for `Int64Vector`, `Float64Vector`, `StringVector`, and `DecimalVector`.
+- ✅ **FlatHashSet (Abseil) fully removed** — Replaced entirely by `CarcharSet`. Abseil dependency can now be dropped.
+- ✅ **`hash_table.pyx` replaced** — Rewritten as Carchar-based join index; no Arrow dependency.
+- ✅ **Outer join migrated to Morsel-based operations** — `outer_join_node.pyx` build/probe phases operate on Morsels; residual `import pyarrow` remains for key-cast boundary only.
+- ✅ **`_arrow_data_buf` usage dropped** — Removed zero-copy Arrow buffer anchoring from vectors that now own their data.
+- ✅ **Vector IIF / vector ops NumPy cleaned** — `vector_iif.pyx` and related vector ops no longer use numpy/pyarrow fallbacks.
+- ✅ **Arrow/NumPy comments purged from `vector_ops/`** — All explanatory "no PyArrow needed" / "no NumPy" comments removed; the absence of those dependencies is now the baseline, not a noteworthy exception.
 
-### WARM PATH: PARTIALLY MIGRATED
-- `outer_join_node.pyx`: Join providers now operate on Morsels; Arrow remains only at execution boundaries for key-cast compatibility
-- `non_equi_join_node.pyx`: still warm-path buffered
-- Assessment: hot join work is Draken-native; remaining Arrow use is boundary-only
+**Note on Session 48 (`casts.py`) overclaim:** Session 48 below describes `casts.py` as "complete rewrite / PyArrow eliminated." This is inaccurate. The file was refactored to enforce fail-fast semantics but **still contains top-level `import numpy` and `import pyarrow`**. Similarly, `null_reader_node.pyx` (Session 46) still has `import pyarrow`. These files remain on the remaining-work list.
+
+---
+
+## 🔴 REMAINING WORK (current)
+
+### HOT-PATH COMPILED OPERATORS: ✅ ALL CLEAN
+- ✅ `heap_sort_node.pyx` — Session 50
+- ✅ `cross_join.pyx` / `cross_join_draken.pyx` — Session 46 / 44
+- ✅ `morsel_ops/distinct.pyx` — Session 47
+- ✅ `morsel_ops/null_filter.pyx` — pending (still has `import pyarrow`)
+
+**Exception:** `compiled/morsel_ops/null_filter.pyx` still imports pyarrow — not yet addressed.
+
+### WARM-PATH OPERATORS: PARTIALLY MIGRATED
+- ⚠️ `operators/outer_join_node.pyx` — Morsel-native internally; `import pyarrow` remains for key-cast boundary
+- ❌ `operators/filter_join_node.pyx` — `import pyarrow` at top level
+- ❌ `operators/base_plan_node.py` — `import pyarrow`, `from pyarrow import Table`
+- ❌ `operators/distinct_node.pyx` — conditional `import pyarrow` (fallback path)
+- ❌ `operators/null_reader_node.pyx` — `import pyarrow` (claimed done in Session 46; not actually clean)
+- ❌ `operators/read_node.pyx` — `import pyarrow` (cold path; schema handling)
+
+### EXPRESSION LAYER: ❌ LARGEST REMAINING BODY (~30 files)
+Top-level or function-scoped pyarrow/numpy imports remain in:
+- `expression/__init__.py` — numpy + pyarrow (3 import lines)
+- `expression/binary_operators.py`, `expression/casts.py`, `expression/intervals.py`, `expression/ops.py`
+- `expression/evaluator/arithmetic.py`, `arithmetic_dispatch.py`, `comparisons.py`, `evaluation.py`, `function_execution.py`, `temporal_ops.py`, `type_coercion.py`
+- `expression/functions/implementations/` — arithmetic, logical, temporal, text, utility
+- `expression/functions/registrar/` — arithmetic, arithmetic_extended, constant, logical, utility, `__init__`
+- `expression/operations/` — array_ops, fastpath_constant, fastpath_dictionary, special_ops, string_matching, type_coercion
+
+### TYPES & UTILS: ❌ PARTIALLY REMAINING
+- ❌ `types/_null_handling.py` — numpy + pyarrow (~8 import occurrences)
+- ❌ `types/_scalar_to_vector.py` — pyarrow (~3 occurrences)
+- ❌ `types/schema.py` — pyarrow
+- ❌ `utils/dates.py`, `utils/series.py`, `utils/sql.py` — numpy + pyarrow
+- ❌ `utils/firestore_utils.py` — lazy `import numpy`
+- ✅ `utils/arrow.py`, `utils/arrow_interop.py`, `utils/parquet_decoder.py` — **legitimate interop; keep**
+
+### OTHER
+- ❌ `managers/execution/__init__.py`, `serial_engine.py`
+- ❌ `models/dataframe.py`, `models/execution_context.py`
+- ❌ `planner/__init__.py`, `planner/ast_rewriter.py`, `planner/logical_planner/logical_planner_builders.py`, `planner/optimizer/strategies/statistics_only_response.py`
+- ❌ `query_session.py`
+- ❌ `connectors/catalogs/local_catalog.py`
+- ❌ `__main__.py`
+
+### RECOMMENDED PRIORITY ORDER
+1. `expression/__init__.py` — central dispatcher; eliminating this unblocks many downstream files
+2. `expression/evaluator/` files — high-frequency hot path despite "expression layer" label
+3. `types/_null_handling.py` — used everywhere; high leverage
+4. `operators/base_plan_node.py` and remaining operator files
+5. `expression/operations/` and `expression/functions/` — lower leverage, more mechanical
+
 
 ## 🟢 SESSION 49: Table Ops Draken Migration (COMPLETE ✅)
 
