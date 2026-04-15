@@ -142,6 +142,20 @@ def _eval_binary_op_draken(node, morsel):
             return _date_interval_op_draken(right, left, op)
 
     # ===================================================================
+    # STRING CONCAT: handle before Arrow conversion so inputs stay as
+    # Draken StringVectors (constant-encoded scalars included).
+    # ===================================================================
+    if op == "StringConcat":
+        from opteryx.compiled.vector_ops import vector_string_concat_binary
+
+        def _to_bytes_or_vec(v):
+            if isinstance(v, str):
+                return v.encode("utf-8")
+            return v  # bytes, None, or StringVector
+
+        return vector_string_concat_binary(_to_bytes_or_vec(left), _to_bytes_or_vec(right))
+
+    # ===================================================================
     # GENERAL ARITHMETIC OPERATIONS (Phase 4.4: uses arithmetic_dispatch)
     # ===================================================================
     from opteryx.compiled.draken.interop.arrow import vector_from_arrow

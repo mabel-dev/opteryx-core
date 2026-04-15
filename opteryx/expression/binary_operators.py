@@ -5,11 +5,7 @@
 
 from typing import Any, Dict, List, Optional, Union
 
-import pyarrow
-from pyarrow import compute
-
 from opteryx.compiled import vector_ops
-from opteryx.expression.intervals import MICROSECONDS_PER_DAY
 from opteryx.third_party.tktech import csimdjson as simdjson
 from opteryx.types import OrsoTypes
 from opteryx.utils.vector_types import is_draken_vector
@@ -18,8 +14,10 @@ from opteryx.utils.vector_types import is_draken_vector
 parser = simdjson.Parser()
 
 
-def ArrowOp(documents, elements) -> pyarrow.Array:
+def ArrowOp(documents, elements):
     """JSON Selector"""
+    import pyarrow as _pyarrow
+
     element = elements[0]
 
     # Fast path: if the documents are dicts, delegate to the cython optimized op
@@ -29,7 +27,6 @@ def ArrowOp(documents, elements) -> pyarrow.Array:
     if hasattr(documents, "to_numpy"):
         documents = documents.to_numpy(zero_copy_only=False)
 
-    # Function to extract value from a document
     def extract(doc: bytes, elem: Union[bytes, str]) -> Any:
         value = parser.parse(doc).get(elem)  # type: ignore
         if hasattr(value, "as_list"):
@@ -45,12 +42,13 @@ def ArrowOp(documents, elements) -> pyarrow.Array:
 
         raise IncorrectTypeError("The `->` operator can only be used on JSON documents.") from err
 
-    # Return the result as a PyArrow array
-    return pyarrow.array(extracted_values)
+    return _pyarrow.array(extracted_values)
 
 
-def LongArrowOp(documents, elements) -> pyarrow.Array:
+def LongArrowOp(documents, elements):
     """JSON Selector (as byte string)"""
+    import pyarrow as _pyarrow
+
     element = elements[0]
 
     if len(documents) > 0 and isinstance(documents[0], dict):
@@ -72,8 +70,7 @@ def LongArrowOp(documents, elements) -> pyarrow.Array:
 
         raise IncorrectTypeError("The `->>` operator can only be used on JSON documents.") from err
 
-    # Return the result as a PyArrow array
-    return pyarrow.array(extracted_values, type=pyarrow.binary())
+    return _pyarrow.array(extracted_values, type=_pyarrow.binary())
 
 
 def MapAccessOp(array, key):
@@ -96,42 +93,46 @@ def MapAccessOp(array, key):
     index = int(raw_key)
 
     if isinstance(first_element, str):
-        return pyarrow.array(
-            [
-                (
-                    None
-                    if value is None
-                    else (value[index] if -len(value) <= index < len(value) else None)
-                )
-                for value in array
-            ],
-            type=pyarrow.string(),
-        )
+        return [
+            (
+                None
+                if value is None
+                else (value[index] if -len(value) <= index < len(value) else None)
+            )
+            for value in array
+        ]
 
     if isinstance(first_element, (bytes, bytearray, memoryview)):
-        return pyarrow.array(
-            [
-                (
-                    None
-                    if value is None
-                    else (
-                        bytes(value)[index : index + 1]
-                        if -len(bytes(value)) <= index < len(bytes(value))
-                        else None
-                    )
+        return [
+            (
+                None
+                if value is None
+                else (
+                    bytes(value)[index : index + 1]
+                    if -len(bytes(value)) <= index < len(bytes(value))
+                    else None
                 )
-                for value in array
-            ],
-            type=pyarrow.binary(),
-        )
+            )
+            for value in array
+        ]
 
-    if isinstance(first_element, (list, pyarrow.ListScalar)):
+    if isinstance(first_element, list):
+        import pyarrow as _pyarrow
+
         from opteryx.compiled.draken.interop.arrow import vector_from_arrow
         from opteryx.compiled.vector_ops import vector_get_element
 
-        pa_arr = pyarrow.array(
-            [r if not isinstance(r, pyarrow.ListScalar) else r.as_py() for r in array]
-        )
+        pa_arr = _pyarrow.array(list(array))
+        return vector_get_element(vector_from_arrow(pa_arr), index)
+
+    # PyArrow ListScalar — convert to Python lists first
+    if hasattr(first_element, "as_py"):
+        import pyarrow as _pyarrow
+
+        from opteryx.compiled.draken.interop.arrow import vector_from_arrow
+        from opteryx.compiled.vector_ops import vector_get_element
+
+        pa_arr = _pyarrow.array([r.as_py() if hasattr(r, "as_py") else r for r in array])
         return vector_get_element(vector_from_arrow(pa_arr), index)
 
     raise IncorrectTypeError(
@@ -139,36 +140,28 @@ def MapAccessOp(array, key):
     )
 
 
-def _ip_containment(left: List[Optional[str]], right: List[str]) -> List[Optional[bool]]:
+def _ip_containment(left, right) -> List[Optional[bool]]:
     """
-    Check if each IP address in 'left' is contained within the network specified in 'right'.
+    Check if each IP address in 'left' is contained within the network in 'right'.
 
-    Parameters:
-        left: List[Optional[str]]
-            List of IP addresses as strings.
-        right: List[str]
-            List containing the network as a string.
-
-    Returns:
-        List[Optional[bool]]:
-            A list of boolean values indicating if each corresponding IP in 'left' is in 'right'.
+    Accepts Draken StringVector, PyArrow arrays, or plain Python iterables as 'left'.
     """
-
     from opteryx.compiled.vector_ops import vector_ip_in_cidr
 
-    # Normalize the left values to Python str (or None). The compiled
-    # Cython routine expects Python str objects; some readers return bytes
-    # which cause a TypeError inside the extension. Convert bytes/bytearray
-    # and memoryview to str by decoding as utf-8, leave None as-is.
+    cidr_str = right if isinstance(right, str) else str(right[0])
+
+    # Fast path: already a Draken StringVector — pass directly to the kernel
+    if left.__class__.__name__ == "StringVector":
+        return vector_ip_in_cidr(left, cidr_str)
+
+    # Slower path: normalise arbitrary input to a Draken StringVector
     def _normalize_ip(v):
         if v is None:
             return None
-        # PyArrow scalar wrappers (BinaryScalar, StringScalar, etc.) — unwrap first
         if hasattr(v, "as_py"):
             v = v.as_py()
             if v is None:
                 return None
-        # memoryview -> bytes
         if isinstance(v, memoryview):
             try:
                 v = v.tobytes()
@@ -184,14 +177,26 @@ def _ip_containment(left: List[Optional[str]], right: List[str]) -> List[Optiona
         return v
 
     try:
-        normalized_left = [_normalize_ip(v) for v in left]
-        import pyarrow as _pyarrow
+        if hasattr(left, "to_numpy"):
+            left_iter = left.to_numpy(zero_copy_only=False)
+        else:
+            left_iter = left
 
-        from opteryx.compiled.draken.interop.arrow import vector_from_arrow as _vector_from_arrow
+        normalized = [_normalize_ip(v) for v in left_iter]
 
-        arr = _pyarrow.array(normalized_left, type=_pyarrow.string())
-        cidr_str = right if isinstance(right, str) else str(right[0])
-        return vector_ip_in_cidr(_vector_from_arrow(arr), cidr_str)
+        from opteryx.compiled.draken.vectors import string_vector as _sv_module
+
+        n = len(normalized)
+        builder = _sv_module.StringVectorBuilder.with_estimate(n, 20)
+        for v in normalized:
+            if v is None:
+                builder.append_null()
+            else:
+                builder.append(v.encode("utf-8"))
+        left_vec = builder.finish()
+
+        return vector_ip_in_cidr(left_vec, cidr_str)
+
     except (IndexError, AttributeError, ValueError, TypeError) as err:
         from opteryx.exceptions import IncorrectTypeError
 
@@ -202,7 +207,7 @@ def _ip_containment(left: List[Optional[str]], right: List[str]) -> List[Optiona
 
 def _dispatch_arithmetic_operation(
     op: str, left, right, left_type: OrsoTypes, right_type: OrsoTypes
-) -> Union[None, pyarrow.Array]:
+):
     """
     Dispatch arithmetic operations with Draken kernels.
 
@@ -211,53 +216,27 @@ def _dispatch_arithmetic_operation(
     - Draken kernels handle all vector operations
     - If kernel returns None (unsupported), raise error immediately
     - NO silent fallback to Python operators
-
-    Parameters:
-        op: str - Operator name (e.g., "Plus", "Minus")
-        left: Operand (Draken vector required)
-        right: Operand (Draken vector required)
-        left_type: OrsoTypes - Type of left operand
-        right_type: OrsoTypes - Type of right operand
-
-    Returns:
-        Result of the operation
-
-    Raises:
-        NotImplementedError: If operation not supported for input types
     """
     from opteryx.expression.evaluator.arithmetic_dispatch import call_arithmetic_op
 
-    # Use Draken kernels exclusively
     result = call_arithmetic_op(op, left, right)
 
     if result is not None:
         return result
 
-    # Kernel not available: architectural violation
     raise NotImplementedError(
         f"Operator `{op}` is not implemented for types {left_type} and {right_type}. "
         f"Left: {type(left).__name__}, Right: {type(right).__name__}"
     )
 
 
-def binary_operations(
-    left, left_type: OrsoTypes, operator: str, right, right_type: OrsoTypes
-) -> pyarrow.Array:
+def binary_operations(left, left_type: OrsoTypes, operator: str, right, right_type: OrsoTypes):
     """
     Execute inline operators (e.g. the add in 3 + 4).
 
     Per architectural contract: only Draken vectors or Python scalars accepted.
     PyArrow/NumPy inputs are architectural violations (fail-fast).
-
-    Parameters:
-        left: Operand (Draken vector or scalar)
-        operator: str - Operator to apply
-        right: Operand (Draken vector or scalar)
-    Returns:
-        Result of the binary operation
     """
-    # Phase 5.3.2: Try Draken arithmetic dispatch first for arithmetic operators
-    # This prioritizes native Draken kernels over NumPy operations (fail-fast)
     if operator in (
         "Plus",
         "Minus",
@@ -269,7 +248,6 @@ def binary_operations(
         result = _dispatch_arithmetic_operation(operator, left, right, left_type, right_type)
         if result is not None:
             return result
-        # Dispatcher returned None: operation not supported
         raise NotImplementedError(
             f"Operator `{operator}` is not implemented for types {left_type} and {right_type}!"
         )
@@ -292,84 +270,19 @@ def binary_operations(
 
         return function(left, left_type, right, right_type, operator)
 
-    if (
-        operator == "Minus"
-        and left_type in (OrsoTypes.DATE, OrsoTypes.TIMESTAMP)
-        and right_type in (OrsoTypes.DATE, OrsoTypes.TIMESTAMP)
-    ):
-        # date - date = INTERVAL (months=0, microseconds=days_diff * MICROS_PER_DAY)
-        # Work directly with Draken vectors; no PyArrow intermediate
-        from opteryx.expression.intervals import _intervals_to_month_day_nano
-
-        # Convert left to int64 array
-        if hasattr(left, "to_numpy"):
-            # Draken vector
-            left_values = left.to_numpy(False).astype(numpy.int64)
-        elif isinstance(left, (list, tuple)):
-            # Python sequence
-            left_values = numpy.array(
-                [int(x) if x is not None else 0 for x in left], dtype=numpy.int64
-            )
-        elif isinstance(left, int):
-            # Python scalar
-            left_values = numpy.array([left], dtype=numpy.int64)
-        else:
-            raise TypeError(f"Unsupported type for date subtraction (left): {type(left).__name__}")
-
-        # Convert right to int64 array
-        if hasattr(right, "to_numpy"):
-            # Draken vector
-            right_values = right.to_numpy(False).astype(numpy.int64)
-        elif isinstance(right, (list, tuple)):
-            # Python sequence
-            right_values = numpy.array(
-                [int(x) if x is not None else 0 for x in right], dtype=numpy.int64
-            )
-        elif isinstance(right, int):
-            # Python scalar
-            right_values = numpy.array([right], dtype=numpy.int64)
-        else:
-            raise TypeError(
-                f"Unsupported type for date subtraction (right): {type(right).__name__}"
-            )
-
-        # Compute difference and convert to intervals
-        day_diff = left_values - right_values
-        rows = [(0, int(d) * MICROSECONDS_PER_DAY) for d in day_diff]
-        return _intervals_to_month_day_nano(rows)
-
-    elif operator == "BitwiseOr" and OrsoTypes.VARCHAR in (left_type, right_type):
+    if operator == "BitwiseOr" and OrsoTypes.VARCHAR in (left_type, right_type):
         return _ip_containment(left, right)
 
-    elif operator == "StringConcat":
-        if hasattr(left, "type") and pyarrow.types.is_binary(left.type):
-            left = left.cast(pyarrow.large_utf8())
-        if hasattr(right, "type") and pyarrow.types.is_binary(right.type):
-            right = right.cast(pyarrow.large_utf8())
+    if operator == "StringConcat":
+        from opteryx.compiled.vector_ops import vector_string_concat_binary
 
-        if isinstance(left, str):
-            left = pyarrow.scalar(left, type=pyarrow.large_utf8())
-        if isinstance(right, str):
-            right = pyarrow.scalar(right, type=pyarrow.large_utf8())
+        # Normalise Python str to bytes so the Cython kernel receives bytes or StringVector
+        def _to_bytes_or_vec(v):
+            if isinstance(v, str):
+                return v.encode("utf-8")
+            return v  # already bytes, None, or StringVector
 
-        if isinstance(left, pyarrow.Scalar) and pyarrow.types.is_binary(left.type):
-            left = left.cast(pyarrow.large_utf8())
-        if isinstance(right, pyarrow.Scalar) and pyarrow.types.is_binary(right.type):
-            right = right.cast(pyarrow.large_utf8())
-
-        if hasattr(left, "type") and not pyarrow.types.is_large_string(left.type):
-            try:
-                left = left.cast(pyarrow.large_utf8())
-            except Exception:
-                pass
-        if hasattr(right, "type") and not pyarrow.types.is_large_string(right.type):
-            try:
-                right = right.cast(pyarrow.large_utf8())
-            except Exception:
-                pass
-
-        delim = pyarrow.scalar("", type=pyarrow.large_utf8())
-        return compute.binary_join_element_wise(left, right, delim)
+        return vector_string_concat_binary(_to_bytes_or_vec(left), _to_bytes_or_vec(right))
 
     return operation(left, right)
 
@@ -397,7 +310,7 @@ OPERATOR_FUNCTION_MAP: Dict[str, Any] = {
     "Modulo": lambda l, r: _unsupported_bitwise_op("Modulo")(l, r),
     "MyIntegerDivide": lambda l, r: _unsupported_bitwise_op("MyIntegerDivide")(l, r),
     # String operations
-    "StringConcat": compute.binary_join_element_wise,
+    "StringConcat": lambda l, r: _unsupported_bitwise_op("StringConcat")(l, r),
     # Bitwise operations: route to native vector ops
     "BitwiseOr": lambda left, right: vector_ops.vector_bitwise_or(left, right),
     "BitwiseAnd": lambda left, right: vector_ops.vector_bitwise_and(left, right),
