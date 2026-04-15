@@ -48,7 +48,6 @@ cdef class Distogram:
     cdef int64_t bins_capacity
 
     # Python-visible state for API compatibility
-    cdef public list bins  # Mirrored as Python list for external access
     cdef public double min
     cdef public double max
     cdef public object diffs
@@ -71,7 +70,6 @@ cdef class Distogram:
         self.bins_data = <Bin*>malloc(bin_count * sizeof(Bin))
         self.bins_length = 0
 
-        self.bins = []  # Keep Python list in sync for API
         self.min = float('inf')
         self.max = float('-inf')
         self.diffs = None
@@ -113,11 +111,6 @@ cdef class Distogram:
                 right = mid
 
         return max(0, left - 1) if left > 0 else -1
-
-    def _sync_to_python_list(self):
-        """Sync C bins array to Python list for API compatibility."""
-        self.bins = [(self.bins_data[i].value, self.bins_data[i].count)
-                     for i in range(self.bins_length)]
 
     cdef inline void _append_bin(self, double value, int64_t count) nogil:
         """Append a bin to the C array."""
@@ -236,7 +229,7 @@ cdef class Distogram:
         cdef int bin_idx
 
         for v in values:
-            fv = float(v)
+            fv = <double>v
             if fv == max_val:
                 bin_counts[num_bins - 1] += 1
             elif fv > min_val:
@@ -273,13 +266,10 @@ def load(bins: list, minimum, maximum):
 
     # Populate C array from bins
     for v, c in bins:
-        dgram._append_bin(float(v), int(c))
+        dgram._append_bin(<double>(v), <int64_t>(c))
 
-    # Sync to Python list for API
-    dgram._sync_to_python_list()
-
-    dgram.min = float(minimum)
-    dgram.max = float(maximum)
+    dgram.min = <double>(minimum)
+    dgram.max = <double>(maximum)
     dgram.diffs = []
 
     for i in range(dgram.bins_length - 1):
@@ -417,11 +407,10 @@ cpdef Distogram _trim(Distogram h):
             if h.diffs:
                 h.min_diff = min(h.diffs)
 
-    h._sync_to_python_list()
     return h
 
 
-cpdef Distogram _trim_in_place(Distogram distogram, double new_value, int64_t new_count, int64_t bin_index):
+cdef inline Distogram _trim_in_place(Distogram distogram, double new_value, int64_t new_count, int64_t bin_index):
     """Trim by merging in place at specific index."""
     cdef double current_value = distogram.bins_data[bin_index].value
     cdef int64_t current_frequency = distogram.bins_data[bin_index].count
@@ -435,7 +424,7 @@ cpdef Distogram _trim_in_place(Distogram distogram, double new_value, int64_t ne
     return distogram
 
 
-def _compute_diffs(Distogram h):
+cdef inline list _compute_diffs(Distogram h):
     """Compute all bin differences."""
     cdef int i, bins_len
     cdef list diffs
@@ -458,7 +447,7 @@ def _compute_diffs(Distogram h):
     return diffs
 
 
-def _search_in_place_index(Distogram h, double new_value, int index) -> int:
+cdef inline int _search_in_place_index(Distogram h, double new_value, int index):
     """Search for best in-place merge location."""
     if h.diffs is None:
         h.diffs = _compute_diffs(h)
@@ -527,9 +516,7 @@ cpdef update(Distogram h, double value, int64_t count=1):
     if math.isinf(h.max) or value > h.max:
         h.max = value
 
-    # Trim first, then single sync at end
     h = _trim(h)
-    h._sync_to_python_list()
 
     return h
 
