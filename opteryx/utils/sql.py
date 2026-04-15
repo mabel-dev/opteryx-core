@@ -2,9 +2,6 @@ import re
 from functools import lru_cache
 from typing import List
 
-import numpy
-import pyarrow
-
 ESCAPE_SPECIAL_CHARS = re.compile(r"([.^$*+?{}[\]|()\\])")
 
 
@@ -137,102 +134,6 @@ def split_sql_statements(sql: str) -> List[str]:
         statements.append("".join(buffer).strip())
 
     return [s for s in statements if s != ""]
-
-
-def regex_match_any(
-    arr: pyarrow.Array,
-    patterns: List[str],
-    flags: int = 0,
-    invert: bool = False,
-) -> numpy.ndarray:
-    """
-    Evaluates whether each row in `arr` matches ANY of the given LIKE patterns.
-    Compatible with Arrow Arrays (flat or List<String>).
-
-    Parameters:
-        arr: pyarrow.Array or ChunkedArray
-        patterns: list of SQL LIKE patterns (converted to regex)
-        flags: regex flags (e.g. re.IGNORECASE)
-        invert: True to negate the result (i.e., NOT LIKE ANY)
-
-    Returns:
-        numpy.ndarray of object dtype (bool or None per row)
-    """
-
-    def _decode_text(value):
-        if isinstance(value, bytes):
-            return value.decode("utf-8", errors="replace")
-        return value
-
-    # We often receive a single container-wrapped value from expression eval:
-    # - [ ["%a%","%b%"] ]
-    # - [ "%a%" ]
-    # - Arrow array wrappers
-    if hasattr(patterns, "to_pylist"):
-        patterns = patterns.to_pylist()
-    if isinstance(patterns, numpy.ndarray):
-        patterns = patterns.tolist()
-
-    if isinstance(patterns, (list, tuple)) and len(patterns) == 1:
-        first = patterns[0]
-        if hasattr(first, "to_pylist"):
-            first = first.to_pylist()
-        if isinstance(first, numpy.ndarray):
-            first = first.tolist()
-        patterns = first
-
-    if not isinstance(patterns, (list, tuple)):
-        patterns = [patterns]
-
-    patterns = [_decode_text(p) if p is not None else None for p in patterns]
-    if any(not isinstance(p, str) for p in patterns if p is not None):
-        from opteryx.exceptions import IncorrectTypeError
-
-        raise IncorrectTypeError("Patterns for LIKE ANY comparisons must be strings.")
-
-    # Compile a single combined regex
-    pattern_str = r"|".join(sql_like_to_regex(p) for p in patterns if p) or r"(?!x)"
-    combined_regex = re.compile(pattern_str, flags=flags)
-
-    # Normalize to a flat list of Arrow chunks
-    chunks = arr.chunks if isinstance(arr, pyarrow.ChunkedArray) else [arr]
-    total_len = sum(len(chunk) for chunk in chunks)
-    out = numpy.empty(total_len, dtype=object)
-
-    offset = 0
-    for chunk in chunks:
-        if pyarrow.types.is_list(chunk.type):
-            values = chunk.values.to_pylist()
-            offsets = chunk.offsets.to_numpy()
-            validity = chunk.is_valid().to_numpy(False)
-            for i in range(len(chunk)):
-                if not validity[i]:
-                    out[offset + i] = None
-                else:
-                    sublist = values[offsets[i] : offsets[i + 1]]
-                    decoded_sublist = []
-                    for value in sublist:
-                        if value is None:
-                            continue
-                        decoded_sublist.append(_decode_text(value))
-                    out[offset + i] = (
-                        (not any(combined_regex.search(x) for x in decoded_sublist))
-                        if invert
-                        else (any(combined_regex.search(x) for x in decoded_sublist))
-                    )
-        else:
-            validity = chunk.is_valid().to_numpy(False)
-            strings = chunk.to_pylist()
-            for i in range(len(chunk)):
-                if not validity[i]:
-                    out[offset + i] = None
-                else:
-                    text_value = _decode_text(strings[i])
-                    is_match = combined_regex.search(text_value) is not None
-                    out[offset + i] = not is_match if invert else is_match
-        offset += len(chunk)
-
-    return out
 
 
 def convert_camel_to_sql_case(s: str) -> str:

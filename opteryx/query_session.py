@@ -27,8 +27,6 @@ import time
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple, Union
 from uuid import uuid4
 
-import pyarrow
-
 from opteryx import EOS, config, utils
 from opteryx.constants import QueryStatus, ResultType
 from opteryx.exceptions import (
@@ -45,7 +43,6 @@ from opteryx.models.dataframe import DataFrame
 from opteryx.tracing import record_event
 from opteryx.types import OrsoTypes
 from opteryx.types.schema import FlatColumn, RelationSchema
-from opteryx.utils import arrow_interop as converters
 from opteryx.utils import sql
 
 _CAMEL_SPLIT_RE = re.compile(r"[A-Z][a-z]*|[0-9]+")
@@ -235,59 +232,6 @@ class Session(DataFrame):
         # we only return the last result set
         return results
 
-    def execute(
-        self,
-        operation: str,
-        params: Optional[Iterable] = None,
-        visibility_filters: Optional[Dict[str, Any]] = None,
-    ):
-        self._ensure_open()
-        if self._tracing_enabled:
-            try:
-                record_event("trace_session_start", session_id=self._query_id, query=operation)
-            except Exception:
-                pass
-        start = time.time_ns()
-        results = self._execute_statements(operation, params, visibility_filters)
-        if results is not None:
-            result_data, self._result_type = results
-            if self._result_type == ResultType.NON_TABULAR:
-                meta_dataframe = DataFrame(
-                    rows=[(result_data.record_count,)],  # type: ignore
-                    schema=RelationSchema(
-                        name="table",
-                        columns=[FlatColumn(name="rows_affected", type=OrsoTypes.INTEGER)],
-                    ),
-                )  # type: ignore
-                self._rows = meta_dataframe._rows
-                self._schema = meta_dataframe._schema
-
-                self._rowcount = result_data.record_count  # type: ignore
-                self._query_status = result_data.status  # type: ignore
-            elif self._result_type == ResultType.TABULAR:
-                # Ensure each item in result_data is an Arrow Table before passing to
-                # converters.from_arrow, which expects pyarrow.Table items.
-                def _to_arrow_gen(items):
-                    for item in items:
-                        if hasattr(item, "to_arrow"):
-                            yield item.to_arrow()
-                        else:
-                            yield item
-
-                self._rows, self._schema = converters.from_arrow(_to_arrow_gen(result_data))
-                self._cursor = iter(self._rows)
-                self._query_status = QueryStatus.SQL_SUCCESS
-            else:  # pragma: no cover
-                self._query_status = QueryStatus.SQL_FAILURE
-            self._description = self._schema_to_description(self._schema)
-        else:
-            self._description = None
-        # time_executing includes planning time, so subtract it to get just execution time
-        elapsed = time.time_ns() - start
-        self._telemetry.time_executing += elapsed - self._telemetry.time_planning
-        self._executed = True
-        return self
-
     def execute_logical_plan(self, logical_plan, **kwargs):
         """
         Execute a logical plan by delegating to the planner module. qid, telemetry
@@ -347,8 +291,6 @@ class Session(DataFrame):
     def description(self) -> Optional[Tuple[Tuple[Any, ...], ...]]:
         """DBAPI-compatible column description metadata."""
         return self._description
-
-
 
     def _get_plan_dict(self) -> Optional[dict]:
         """
@@ -579,12 +521,6 @@ class Session(DataFrame):
 
             if isinstance(item, Morsel):
                 morsels = [item]
-            elif isinstance(item, pyarrow.Table):
-                # Fallback for non-Draken sources: convert to morsels
-                morsels = list(Morsel.from_arrow(item).slice(0, item.num_rows) for _ in [None])
-            else:
-                # Assume Arrow batch-like
-                morsels = [Morsel.from_arrow(item.to_table())]
 
             for morsel in morsels:
                 for chunk in _split_morsel(morsel):
