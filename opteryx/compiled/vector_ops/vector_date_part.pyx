@@ -15,7 +15,6 @@ Relies on helpers defined there:
   SECONDS_PER_MINUTE, SECONDS_PER_HOUR, SECONDS_PER_DAY, EPOCH_WEEKDAY.
 
 Phase 3 Implementation:
-- No NumPy in the Draken-vector hot path
 - Pure integer arithmetic for all extraction logic (sub-second and calendar)
 - Loop unrolling for minute/hour/second (simple modulo ops)
 - from_sequence() cimport for zero-copy Int64Vector construction

@@ -226,8 +226,7 @@ def vector_split(StringVector vec, char delimiter):
         )
         parts = const_bytes.split(bytes([delimiter]))
 
-        # Phase 5.3: Return Draken-native ArrayVector for constant split
-        # Build StringVector directly from split parts without PyArrow
+        # Build StringVector from constant split parts
         from opteryx.compiled.draken.vectors.string_vector import StringVectorBuilder
         builder = StringVectorBuilder.with_estimate(len(parts), 8)
         for part in parts:
@@ -263,7 +262,7 @@ def vector_split(StringVector vec, char delimiter):
             else:
                 result.append(val.split(delim_bytes))
 
-        # Build ArrayVector from the split results without PyArrow
+        # Build ArrayVector from split results
         from opteryx.compiled.draken.vectors.string_vector import StringVectorBuilder
         flat_builder = StringVectorBuilder.with_estimate(sum(len(r) if r else 1 for r in result), 8)
 
@@ -443,9 +442,7 @@ def vector_split(StringVector vec, char delimiter):
     # Final child offset
     child_offsets[segment_idx] = write_pos
 
-    # Build Draken vectors
-    # Create the flattened child StringVector directly from allocated buffers (no PyArrow needed)
-    # The StringVector will take ownership of the allocated buffers
+    # Build Draken vectors: wrap allocated buffers into a StringVector
     cdef StringVector child_vec = StringVector(segment_idx, 0, wrap=True)
     child_vec.ptr = <DrakenVarBuffer*>malloc(sizeof(DrakenVarBuffer))
     if child_vec.ptr == NULL:
