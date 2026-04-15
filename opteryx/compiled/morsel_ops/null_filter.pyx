@@ -80,7 +80,7 @@ cdef inline Int64Vector non_null_row_indices(object relation, list column_names)
                 offset += length
 
         # Build the resulting index buffer
-        # We use IntBuffer to avoid pre-calculating the final count or using NumPy resize
+        # We use IntBuffer to avoid pre-calculating the final count
         indices_buf = IntBuffer(num_rows // 2 if num_rows > 0 else 0)
 
         for i in range(num_rows):

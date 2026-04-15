@@ -43,7 +43,7 @@ def read(at_date=None, variables=None) -> Morsel:
         "orbital_inclination", "orbital_eccentricity", "obliquity_to_orbit", "mean_temperature", "surface_pressure",
         "number_of_moons",
     ]
-    # Prepare the data as a list of Draken Vectors (no Arrow intermediary).
+    # Prepare the data as a list of Draken Vectors.
     vectors = [
         vector_from_sequence([1, 2, 3, 4, 5, 6, 7, 8, 9], dtype=OrsoTypes.INTEGER),
         vector_from_sequence(["Mercury", "Venus", "Earth", "Mars", "Jupiter", "Saturn", "Uranus", "Neptune", "Pluto"], dtype=OrsoTypes.VARCHAR),

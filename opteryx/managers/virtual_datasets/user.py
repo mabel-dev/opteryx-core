@@ -34,7 +34,7 @@ def read(at_date=None, variables=None):
     if hasattr(memberships, "to_pylist"):
         memberships = memberships.to_pylist()
 
-    # Build Draken vectors directly (no Arrow intermediary)
+    # Build Draken vectors directly
     memberships_list = list(memberships)
     vectors = [
         vector_from_sequence(["membership"] * len(memberships_list), dtype=OrsoTypes.VARCHAR),

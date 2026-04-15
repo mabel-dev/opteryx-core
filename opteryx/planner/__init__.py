@@ -70,8 +70,7 @@ def build_literal_node(
     if hasattr(value, "as_py"):
         value = value.as_py()
 
-    # Convert numpy-like scalars to Python native types (transition compatibility).
-    # Covers numpy.int64, numpy.float64, numpy.bool_, numpy.datetime64, etc.
+    # Normalise scalar wrappers to native Python types.
     _PYTHON_NATIVE = (
         bool,
         int,

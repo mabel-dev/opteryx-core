@@ -35,8 +35,7 @@ __all__ = [
     "get_native_type",
 ]
 
-# Native type identifiers (strings, no numpy dependency)
-# These strings are compatible with numpy dtype names but don't require numpy to be loaded
+# Native type identifiers (plain strings)
 TYPE_OBJECT = "object"
 TYPE_BOOL = "bool"
 TYPE_INT32 = "int32"

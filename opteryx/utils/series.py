@@ -41,7 +41,7 @@ def _is_integer_like(v) -> bool:
         return True
     if isinstance(v, float):
         return False
-    # Catch integer-like types (e.g. numpy.int64 during transition) via __index__
+    # Catch integer-like types (e.g. objects with __index__) via duck typing
     return hasattr(v, "__index__")
 
 

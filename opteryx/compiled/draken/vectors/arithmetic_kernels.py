@@ -73,7 +73,7 @@ def _make_vector_from_result(result, vector_type):
     if vector_type not in type_map:
         raise ValueError(f"Unsupported result type: {vector_type}")
 
-    # Use Draken's vector_from_sequence to create typed vector without PyArrow
+    # Use Draken's vector_from_sequence to create a typed vector
     return vector_from_sequence(result, type_map[vector_type])
 
 

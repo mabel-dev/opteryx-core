@@ -38,7 +38,7 @@ def call_arithmetic_op(op, left, right):
     right_is_draken = is_draken_vector(right)
 
     if not (left_is_draken or right_is_draken):
-        # Both are scalars or PyArrow - delegate to binary_operations
+        # Both are scalars — delegate to binary_operations
         return None
 
     if left_is_draken and is_draken_vector(right):
@@ -46,15 +46,15 @@ def call_arithmetic_op(op, left, right):
         left_type = get_vector_type(left)
         right_type = get_vector_type(right)
     elif left_is_draken and not right_is_draken:
-        # Left is Draken, right is scalar or non-Draken (Arrow during transition)
+        # Left is Draken, right is scalar or non-Draken
         left_type = get_vector_type(left)
         right_type = get_vector_type(right) if not is_scalar(right) else left_type
     elif right_is_draken and not left_is_draken:
-        # Right is Draken, left is scalar or non-Draken (Arrow during transition)
+        # Right is Draken, left is scalar or non-Draken
         right_type = get_vector_type(right)
         left_type = get_vector_type(left) if not is_scalar(left) else right_type
     else:
-        # Mixed PyArrow/scalar, no Draken - delegate
+        # Mixed scalars/non-Draken — delegate
         return None
 
     # Try to find a kernel for this combination
