@@ -2,6 +2,7 @@
 # type: ignore
 
 from libc.stdlib cimport malloc, free, realloc
+from libc.string cimport memmove
 from libc.math cimport fabs
 from libc.stdint cimport int64_t, uint64_t
 cimport cython
@@ -129,29 +130,39 @@ cdef class Distogram:
 
     cdef inline void _insert_bin(self, int64_t index, double value, int64_t count) nogil:
         """Insert a bin at the given index (uses memmove for speed)."""
-        cdef int64_t i
+        cdef int64_t shift_count
+        cdef Bin* src_ptr
+        cdef Bin* dst_ptr
 
         if self.bins_length >= self.bins_capacity:
             return
 
-        # Shift bins to the right using memmove for speed
-        for i in range(self.bins_length, index, -1):
-            self.bins_data[i] = self.bins_data[i-1]
+        # Shift bins to the right using memmove for O(1) operation
+        shift_count = self.bins_length - index
+        if shift_count > 0:
+            src_ptr = &self.bins_data[index]
+            dst_ptr = &self.bins_data[index + 1]
+            memmove(dst_ptr, src_ptr, shift_count * sizeof(Bin))
 
         self.bins_data[index].value = value
         self.bins_data[index].count = count
         self.bins_length += 1
 
     cdef inline void _remove_bin(self, int64_t index) nogil:
-        """Remove a bin at the given index."""
-        cdef int64_t i
+        """Remove a bin at the given index (uses memmove for speed)."""
+        cdef int64_t shift_count
+        cdef Bin* src_ptr
+        cdef Bin* dst_ptr
 
         if index < 0 or index >= self.bins_length:
             return
 
-        # Shift bins to the left
-        for i in range(index, self.bins_length - 1):
-            self.bins_data[i] = self.bins_data[i+1]
+        # Shift bins to the left using memmove
+        shift_count = self.bins_length - index - 1
+        if shift_count > 0:
+            src_ptr = &self.bins_data[index + 1]
+            dst_ptr = &self.bins_data[index]
+            memmove(dst_ptr, src_ptr, shift_count * sizeof(Bin))
 
         self.bins_length -= 1
 
