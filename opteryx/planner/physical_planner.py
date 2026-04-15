@@ -161,6 +161,8 @@ def create_physical_plan(logical_plan, query_properties) -> PhysicalPlan:
 
         # Copy optimizer/binder attached metadata from logical node to physical node
         node.manifest = logical_node.manifest
+        if hasattr(logical_node, "uuid"):
+            node.uuid = logical_node.uuid
 
         plan.add_node(nid, node)
 
