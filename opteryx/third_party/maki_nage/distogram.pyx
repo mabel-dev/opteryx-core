@@ -1,6 +1,7 @@
 # cython: language_level=3, boundscheck=False, cdivision=True
 # type: ignore
 import math
+import numpy
 from bisect import bisect_left
 from heapq import heappush, heappop
 from itertools import accumulate
@@ -33,7 +34,7 @@ _caster = float
 class Distogram:  # pragma: no cover
     """Compressed representation of a distribution."""
 
-    __slots__ = "bins", "min", "max", "diffs", "min_diff", "_bin_count"
+    __slots__ = "bins", "min", "max", "diffs", "min_diff", "_bin_count", "_values_mv", "_counts_mv", "_mv_valid"
 
     def __init__(self, bin_count: int = BIN_COUNT):
         """Creates a new Distogram object
@@ -52,6 +53,24 @@ class Distogram:  # pragma: no cover
         self.min_diff: Optional[float] = None
 
         self._bin_count = bin_count
+        self._values_mv = None  # Memoryview cache for bin values
+        self._counts_mv = None  # Memoryview cache for bin counts
+        self._mv_valid = False  # Whether memoryviews are current
+
+    def _ensure_memoryviews(self):
+        """Lazy rebuild memoryviews if bins changed."""
+        cdef int n = len(self.bins)
+        if not self._mv_valid or (self._values_mv is not None and len(self._values_mv) != n):
+            if n == 0:
+                self._values_mv = None
+                self._counts_mv = None
+            else:
+                # Extract values and counts as typed arrays for memoryview access
+                values = numpy.array([v for v, _ in self.bins], dtype=numpy.float64)
+                counts = numpy.array([c for _, c in self.bins], dtype=numpy.float64)
+                self._values_mv = values
+                self._counts_mv = counts
+            self._mv_valid = True
 
     def bulkload(self, values):
         """Load many values efficiently using histogram approximation."""
@@ -72,6 +91,8 @@ class Distogram:  # pragma: no cover
         for index, count in enumerate(counts):
             if count > 0:
                 update(self, bin_values[index], count)
+        # Mark memoryviews dirty after updates
+        self._mv_valid = False
         # Update min/max with actual data bounds
         min_val = min(values)
         max_val = max(values)
@@ -133,6 +154,18 @@ def load(bins: list, minimum, maximum):  # pragma: no cover
         dgram.min_diff = float("inf")
 
     return dgram
+
+
+cdef int _binary_search_values(double[:] values, double target):
+    """Binary search to find insertion point in values array."""
+    cdef int left = 0, right = len(values), mid
+    while left < right:
+        mid = (left + right) >> 1
+        if values[mid] < target:
+            left = mid + 1
+        else:
+            right = mid
+    return max(0, left - 1)
 
 
 def _linspace(start: float, stop: float, num: int) -> List[float]:  # pragma: no cover
@@ -239,6 +272,8 @@ def _trim_in_place(
         current_frequency + new_count,
     )
     _update_diffs(distogram, bin_index)
+    # Invalidate memoryviews - bins have changed
+    distogram._mv_valid = False
     return distogram
 
 
@@ -336,6 +371,8 @@ def update(h: Distogram, value: float, count: int = 1):  # pragma: no cover
         h.max = value
 
     h = _trim(h)
+    # Invalidate memoryviews - bins have changed
+    h._mv_valid = False
     return h
 
 
@@ -380,7 +417,9 @@ def count_up_to(h: Distogram, value: float):  # pragma: no cover
     cdef int i, j
     cdef double v0, f0, vl, fl
     cdef double vi, fi, vj, fj
-    cdef double ratio, result, mb, sum_val, v, f
+    cdef double ratio, result, mb, sum_val, f
+    cdef double[:] values
+    cdef double[:] counts
 
     if bins_len == 0:
         return None
@@ -394,8 +433,18 @@ def count_up_to(h: Distogram, value: float):  # pragma: no cover
     if value == h.max:
         return count(h)
 
-    v0, f0 = h.bins[0]
-    vl, fl = h.bins[-1]
+    # Lazy rebuild memoryviews for fast access
+    h._ensure_memoryviews()
+    if h._values_mv is None or h._counts_mv is None:
+        return None
+
+    values = h._values_mv
+    counts = h._counts_mv
+
+    v0 = values[0]
+    f0 = counts[0]
+    vl = values[bins_len - 1]
+    fl = counts[bins_len - 1]
 
     if value <= v0:  # left
         ratio = (value - h.min) / (v0 - h.min)
@@ -403,24 +452,25 @@ def count_up_to(h: Distogram, value: float):  # pragma: no cover
     elif value >= vl:  # right
         ratio = (value - vl) / (h.max - vl)
         result = (1 + ratio) * fl / 2
-        # Optimized sum of all but last
+        # Fast sum using memoryview access
         sum_val = 0.0
         for i in range(bins_len - 1):
-            _, f = h.bins[i]
-            sum_val += f
+            sum_val += counts[i]
         result += sum_val
     else:
-        i = sum(((value > v) for v, _ in h.bins)) - 1
-        vi, fi = h.bins[i]
-        vj, fj = h.bins[i + 1]
+        # Binary search on memoryview for O(log n) vs O(n) sum()
+        i = _binary_search_values(values, value)
+        vi = values[i]
+        fi = counts[i]
+        vj = values[i + 1]
+        fj = counts[i + 1]
 
         mb = fi + (fj - fi) / (vj - vi) * (value - vi)
         result = (fi + mb) / 2 * (value - vi) / (vj - vi)
-        # Optimized sum of all before i
+        # Fast sum using memoryview access
         sum_val = 0.0
         for j in range(i):
-            _, f = h.bins[j]
-            sum_val += f
+            sum_val += counts[j]
         result += sum_val
         result = result + fi / 2
 
