@@ -5,18 +5,19 @@ Run this before refactoring to establish performance targets.
 Usage:
   python tests/performance/distogram_baseline.py
 """
-import time
-import sys
+
 import os
+import sys
+import time
 
 # Add repo root to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../.."))
 
 from opteryx.third_party.maki_nage.distogram import (
     Distogram,
-    update,
-    merge,
     count_up_to,
+    merge,
+    update,
 )
 
 
