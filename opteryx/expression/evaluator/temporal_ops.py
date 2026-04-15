@@ -205,7 +205,7 @@ def _date_minus_date_draken(left_vec, right_vec):
     from opteryx.compiled.draken.interop.arrow import vector_from_arrow
     from opteryx.expression.intervals import _intervals_to_month_day_nano
 
-    # Draken-native vector subtraction
+    # Native vector subtraction
     if left_vec.__class__.__name__ == "Date32Vector":
         if right_vec.__class__.__name__ == "Date32Vector":
             diff_us = left_vec.subtract_date32_vector(right_vec)

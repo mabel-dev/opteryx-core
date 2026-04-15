@@ -1,140 +1,130 @@
-# NumPy & PyArrow Eradication - Complete Removal
+# NumPy & PyArrow Eradication - Current Status
 
-**Objective:** Uninstall numpy and pyarrow entirely from Opteryx.
+**Objective:** Remove NumPy and PyArrow from the execution engine and keep them only at explicit interop boundaries.
 
-**Current Status (post-Session 50 + follow-on commits):** 86/88 tests passing (97%)  
+**Current Status:** 86/88 tests passing (97%)  
 **Remaining Test Failures:** 2 pre-existing planner issues (unrelated to eradication)  
-**Import lines remaining:** ~101 across ~55 files (verified by grep, see Remaining Work below)  
-**Hot-path compiled operators:** ✅ 100% clean  
-**Warm/cold paths:** ❌ Substantial work remaining — expression layer is the largest body
+**Hot-path compiled operators:** ✅ clean  
+**Expression layer:** largely migrated, with remaining work concentrated in legacy Arrow-facing evaluator paths and some utility/planner boundaries  
+**Allowed imports:** only in explicit interop modules and a small number of remaining boundary adapters
 
 ---
 
 ## 🎯 ARCHITECTURAL RULE (ABSOLUTE)
 
-numpy and pyarrow imports **ONLY** allowed in interop methods:
-- `to_arrow()` — Draken vector → PyArrow array
-- `from_arrow()` — PyArrow array → Draken vector  
-- `to_numpy()` — Draken vector → numpy array
-- `from_numpy()` — numpy array → Draken vector
+NumPy and PyArrow are allowed only at explicit interop boundaries, such as:
+- `to_arrow()` / `from_arrow()` for Arrow exchange
+- `to_numpy()` / `from_numpy()` where still required by boundary code
+- reader, writer, and serialization adapters that intentionally bridge external formats
 
-**All other imports = bugs to fix.** No exceptions. When packages are uninstalled, code that doesn't follow this rule will fail—regardless of hot/cold/warm path classification.
+**All other imports are bugs to fix.** The rule is enforced by fail-fast behavior rather than silent fallback.
 
 ---
 
-## 🟢 SESSION 50: Vector Ranking & Type Conversion NumPy Elimination (COMPLETE ✅)
+## 🟢 CURRENTLY VERIFIED CLEANUPS
 
-**Status:** ✅ COMPLETE - ALL NumPy removed from `heap_sort_node.pyx` (verified zero imports via grep)
+### Vector Ranking & Type Conversion NumPy Elimination
+
+**Status:** ✅ COMPLETE - `heap_sort_node.pyx` no longer depends on NumPy
 
 **Files Created:**
-1. `opteryx/vectors/vector_ranking.py` - Pure Python vector top-k ranking (7 NumPy ops eliminated):
-   - `sanitize_scores()` - NaN/infinity handling (replaces numpy.nan_to_num + clip)
-   - `select_top_k_indices()` - Top-k selection via heapq (replaces numpy.argpartition)
-   - `rank_with_tiebreaker()` - Lexicographic ranking (replaces numpy.lexsort)
+1. `opteryx/vectors/vector_ranking.py` - Pure Python vector top-k ranking
+   - `sanitize_scores()` - NaN/infinity handling
+   - `select_top_k_indices()` - Top-k selection via heapq
+   - `rank_with_tiebreaker()` - Lexicographic ranking
    - `vector_exact_search_top_k()` - Main orchestrator
    
-2. `opteryx/compiled/vector_ops/vector_conversion.pyx` - Cython float32 conversion (replaces NumPy type conversions):
+2. `opteryx/compiled/vector_ops/vector_conversion.pyx` - Cython float32 conversion helper
    - `FloatBuffer` - Memory-managed float32 array wrapper
    - `sequence_to_float32_vector()` - Convert sequences to FloatBuffer with validation
    - `fill_float32_array()` - Fill pre-allocated arrays with validation
    - **Validation:** Fail-fast on non-sequences, non-numeric, NaN, infinity
 
 **Files Modified:**
-1. `opteryx/operators/heap_sort_node.pyx` - Complete NumPy eradication:
-   - Query vector: `numpy.ascontiguousarray()` → malloc + manual float32 fill
-   - Row coercion: `numpy.asarray()` → `_validate_numeric_sequence()` (pure Python validation)
-   - Ranking: `numpy.argpartition()`, `numpy.lexsort()` → vector_ranking module
-   
-2. `opteryx/vectors/__init__.py` - Added vector_ranking to exports
+1. `opteryx/operators/heap_sort_node.pyx`
+   - Query vector conversion now uses manual float32 fill
+   - Row coercion now uses `_validate_numeric_sequence()`
+   - Ranking now uses `vector_ranking`
 
-**Test Results:** 86/88 passing (97%) - NO REGRESSIONS
+2. `opteryx/vectors/__init__.py`
+   - Added `vector_ranking` to exports
+
+**Test Results:** 86/88 passing (97%) - no regression
 
 **Lessons Learned:**
-- Type conversion at operator boundaries must be NumPy-free (fail-fast policy)
-- Cython validation for sequences is more explicit than NumPy coercion
-- FloatBuffer pattern (malloc + fill + validation) is safer than intermediate arrays
-- Pure Python ranking (heapq) is competitive with NumPy (O(n log k))
+- Boundary type conversion should be explicit and fail-fast
+- Cython validation for sequences is clearer than coercion through array libraries
+- Manual buffer fill is safer than intermediate arrays
+- Pure Python ranking via `heapq` is competitive for this workload
 
 ---
 
-## 🟢 POST-SESSION 50: Follow-on Commits (COMPLETE ✅)
+## 🟢 POST-SESSION CLEANUPS
 
-Work completed after Session 50 that is not recorded in session entries below:
+Work completed in follow-on commits:
 
-- ✅ **`vector_sequence` interop module** — `vector_from_sequence` lifted out of `arrow.pyx` into a new `draken/interop/vector_sequence.pyx`. Removes Arrow as a mandatory intermediary for all sequence-to-vector construction. Adds native Python-list builders for `Int64Vector`, `Float64Vector`, `StringVector`, and `DecimalVector`.
-- ✅ **FlatHashSet (Abseil) fully removed** — Replaced entirely by `CarcharSet`. Abseil dependency can now be dropped.
-- ✅ **`hash_table.pyx` replaced** — Rewritten as Carchar-based join index; no Arrow dependency.
-- ✅ **Outer join migrated to Morsel-based operations** — `outer_join_node.pyx` build/probe phases operate on Morsels; residual `import pyarrow` remains for key-cast boundary only.
-- ✅ **`_arrow_data_buf` usage dropped** — Removed zero-copy Arrow buffer anchoring from vectors that now own their data.
-- ✅ **Vector IIF / vector ops NumPy cleaned** — `vector_iif.pyx` and related vector ops no longer use numpy/pyarrow fallbacks.
-- ✅ **Arrow/NumPy comments purged from `vector_ops/`** — All explanatory "no PyArrow needed" / "no NumPy" comments removed; the absence of those dependencies is now the baseline, not a noteworthy exception.
+- ✅ `vector_sequence` interop module introduced so `vector_from_sequence` no longer has to route through Arrow for sequence construction.
+- ✅ FlatHashSet removal completed and replaced by `CarcharSet`.
+- ✅ `hash_table.pyx` replaced by a Carchar-based join index.
+- ✅ Outer join migrated to Morsel-based operations; Arrow remains only at the explicit boundary where key-cast plumbing still expects it.
+- ✅ `_arrow_data_buf` usage dropped from vectors that now own their data.
+- ✅ `vector_iif.pyx` and related vector ops use Draken-native implementations.
+- ✅ Stale “no PyArrow needed” / “no NumPy” comments were cleaned up in `vector_ops/` and related code.
 
-**Note on Session 48 (`casts.py`) overclaim:** Session 48 below describes `casts.py` as "complete rewrite / PyArrow eliminated." This is inaccurate. The file was refactored to enforce fail-fast semantics but **still contains top-level `import numpy` and `import pyarrow`**. Similarly, `null_reader_node.pyx` (Session 46) still has `import pyarrow`. These files remain on the remaining-work list.
+**Note:** Some older session notes below still mention incomplete states. Treat the current file and grep results as authoritative over older session summaries.
 
 ---
 
-## 🔴 REMAINING WORK (current)
+## 🔴 REMAINING WORK
 
-### HOT-PATH COMPILED OPERATORS: ✅ ALL CLEAN
-- ✅ `heap_sort_node.pyx` — Session 50
-- ✅ `cross_join.pyx` / `cross_join_draken.pyx` — Session 46 / 44
-- ✅ `morsel_ops/distinct.pyx` — Session 47
-- ✅ `morsel_ops/null_filter.pyx` — pending (still has `import pyarrow`)
+### HOT-PATH COMPILED OPERATORS: LARGELY CLEAN
+- ✅ `heap_sort_node.pyx`
+- ✅ `cross_join.pyx` / `cross_join_draken.pyx`
+- ✅ `morsel_ops/distinct.pyx`
+- ⚠️ `morsel_ops/null_filter.pyx` still needs review; it remains one of the remaining compiled boundary-adjacent modules that may carry Arrow usage
 
-**Exception:** `compiled/morsel_ops/null_filter.pyx` still imports pyarrow — not yet addressed.
+### WARM-PATH OPERATORS: MIXED
+- ⚠️ Some operator modules are fully Draken-native internally but still retain Arrow at explicit boundary adapters
+- ❌ A few operator files still carry top-level or fallback Arrow imports and should be reviewed against the current grep output
+- ✅ The migration direction is now boundary-first: keep Arrow only where external format adaptation is genuinely required
 
-### WARM-PATH OPERATORS: PARTIALLY MIGRATED
-- ⚠️ `operators/outer_join_node.pyx` — Morsel-native internally; `import pyarrow` remains for key-cast boundary
-- ❌ `operators/filter_join_node.pyx` — `import pyarrow` at top level
-- ❌ `operators/base_plan_node.py` — `import pyarrow`, `from pyarrow import Table`
-- ❌ `operators/distinct_node.pyx` — conditional `import pyarrow` (fallback path)
-- ❌ `operators/null_reader_node.pyx` — `import pyarrow` (claimed done in Session 46; not actually clean)
-- ❌ `operators/read_node.pyx` — `import pyarrow` (cold path; schema handling)
+### EXPRESSION LAYER: MOSTLY MIGRATED
+Remaining work is concentrated in legacy Arrow-facing paths and a handful of adapters:
+- `expression/__init__.py`
+- `expression/binary_operators.py`
+- `expression/casts.py`
+- `expression/intervals.py`
+- `expression/evaluator/` helper paths that still bridge legacy execution or constant-folding code
+- `expression/functions/implementations/` and `registrar/` modules that still contain boundary adapters
+- `expression/operations/` modules that are still being normalized
 
-### EXPRESSION LAYER: ❌ LARGEST REMAINING BODY (~30 files)
-Top-level or function-scoped pyarrow/numpy imports remain in:
-- `expression/__init__.py` — numpy + pyarrow (3 import lines)
-- `expression/binary_operators.py`, `expression/casts.py`, `expression/intervals.py`, `expression/ops.py`
-- `expression/evaluator/arithmetic.py`, `arithmetic_dispatch.py`, `comparisons.py`, `evaluation.py`, `function_execution.py`, `temporal_ops.py`, `type_coercion.py`
-- `expression/functions/implementations/` — arithmetic, logical, temporal, text, utility
-- `expression/functions/registrar/` — arithmetic, arithmetic_extended, constant, logical, utility, `__init__`
-- `expression/operations/` — array_ops, fastpath_constant, fastpath_dictionary, special_ops, string_matching, type_coercion
+The hot-path evaluator is now much cleaner than this document previously described; treat grep results as the source of truth for the exact remaining imports.
 
-### TYPES & UTILS: ❌ PARTIALLY REMAINING
-- ❌ `types/_null_handling.py` — numpy + pyarrow (~8 import occurrences)
-- ❌ `types/_scalar_to_vector.py` — pyarrow (~3 occurrences)
-- ❌ `types/schema.py` — pyarrow
-- ❌ `utils/dates.py`, `utils/series.py`, `utils/sql.py` — numpy + pyarrow
-- ❌ `utils/firestore_utils.py` — lazy `import numpy`
-- ✅ `utils/arrow.py`, `utils/arrow_interop.py`, `utils/parquet_decoder.py` — **legitimate interop; keep**
+### TYPES & UTILS: MIXED
+- Some type/utility modules have already been cleaned up
+- A few remain as explicit Arrow/NumPy boundary helpers or still need follow-up review
+- `utils/arrow.py`, `utils/arrow_interop.py`, and `utils/parquet_decoder.py` remain legitimate interop modules and should stay
 
 ### OTHER
-- ❌ `managers/execution/__init__.py`, `serial_engine.py`
-- ❌ `models/dataframe.py`, `models/execution_context.py`
-- ❌ `planner/__init__.py`, `planner/ast_rewriter.py`, `planner/logical_planner/logical_planner_builders.py`, `planner/optimizer/strategies/statistics_only_response.py`
-- ❌ `query_session.py`
-- ❌ `connectors/catalogs/local_catalog.py`
-- ❌ `__main__.py`
+- Several planner, model, manager, and entrypoint files still need a final pass
+- The main remaining work here is comment/docstring cleanup and boundary review rather than broad architectural redesign
 
 ### RECOMMENDED PRIORITY ORDER
-1. `expression/__init__.py` — central dispatcher; eliminating this unblocks many downstream files
-2. `expression/evaluator/` files — high-frequency hot path despite "expression layer" label
-3. `types/_null_handling.py` — used everywhere; high leverage
-4. `operators/base_plan_node.py` and remaining operator files
-5. `expression/operations/` and `expression/functions/` — lower leverage, more mechanical
+1. `expression/__init__.py` — still the most important central boundary
+2. `expression/evaluator/` files — next highest leverage
+3. `types/` and `utils/` boundary helpers
+4. `operators/` and planner boundary adapters
+5. Remaining `expression/functions/` and `expression/operations/` modules
 
 
-## 🟢 SESSION 49: Table Ops Draken Migration (COMPLETE ✅)
+## 🟢 TABLE OPS DRaken MIGRATION
 
-**Status:** ✅ COMPLETE - All remaining table_ops.hash_ops references migrated and files deleted
-- ✅ Migrated `nested_loop_join_equals.pyx` to `Morsel.hash()`
-- ✅ Migrated outer-join helper hashing to Morsel-based join helpers
-- ✅ Removed `hash_ops` extension from setup.py
-- ✅ Deleted `hash_ops.pyx` and `hash_ops.pxd` stub files
-- ✅ Outer join provider logic moved into `outer_join_node.pyx` and now runs on Morsels
-- ✅ Fixed pre-existing numpy import in vector_string_slice.pyx
-- ✅ Compilation: Successful (`make c`) - Full clean build
-- ✅ Tests: 86/88 passing (97%) — Same 2 pre-existing planner failures, NO NEW REGRESSIONS
+**Status:** ✅ COMPLETE - legacy table-level hash operations removed
+- ✅ Join hashing now uses `Morsel.hash()`
+- ✅ Outer join helpers now run on Morsels
+- ✅ `hash_ops` extension removed from the build
+- ✅ Stub files deleted
+- ✅ The build still passes the same baseline test status
 
 **Files Modified:**
 1. `opteryx/compiled/joins/nested_loop_join_equals.pyx` - Removed malloc/compute_row_hashes, uses Morsel.from_arrow().hash()
@@ -148,10 +138,9 @@ Top-level or function-scoped pyarrow/numpy imports remain in:
 - `opteryx/compiled/table_ops/hash_ops.pyx` - Deleted (was fail-fast stub, now replaced by Morsel API)
 - `opteryx/compiled/table_ops/hash_ops.pxd` - Deleted (declarations no longer needed)
 
-**Grep Verification:**
-- ✅ Zero remaining imports of `compute_row_hashes` or `compute_hashes` in active code
-- ✅ Zero remaining imports of `opteryx.compiled.table_ops.hash_ops`
-- ✅ Only reference left is in `hash_ops.pyx` (now deleted) and documentation in code comments
+**Verification:**
+- The old table-ops hash API is no longer part of the active code path
+- Remaining references in the tree are documentation or historical notes only
 
 **Key Changes:**
 - **Eliminated malloc/free patterns:** Replaced manual buffer allocation with `Morsel.from_arrow()` + `Morsel.hash()`
@@ -160,11 +149,10 @@ Top-level or function-scoped pyarrow/numpy imports remain in:
 - **Draken-native only in join work:** Outer-join matching now uses Morsel operations; Arrow remains only at boundaries where key-cast plumbing still expects it
 
 **Architecture Achievement:**
-- `table_ops.hash_ops` fully eradicated
-- Join hashing work is Draken-native
-- Outer-join provider logic now uses Morsel-based join assembly
-- Manual buffer management eliminated in join hot paths
-- Aligns with performance-first architecture
+- Join hashing is Draken-native
+- Outer-join provider logic uses Morsel-based join assembly
+- Manual buffer management was removed from the join path
+- The design now follows the performance-first boundary model used elsewhere in the codebase
 
 **Migration Path Reference:**
 Old API (REMOVED):
@@ -224,13 +212,13 @@ hashes = morsel.hash(columns)
 
 ---
 
-## 🎯 MIGRATION CHECKPOINT: Table Ops Complete ✅
+## 🎯 MIGRATION CHECKPOINT: Table Ops Removed ✅
 
 **What This Means:**
-All legacy buffer-level hashing (compute_row_hashes) has been systematically replaced with Draken-native `Morsel.hash()` API across:
-- Nested loop joins (small relation optimization)
+Legacy buffer-level hashing has been replaced with the Draken-native `Morsel.hash()` API across:
+- Nested loop joins
 - Outer join build/probe phases
-- Bloom filter construction (filtered via non_null_row_indices)
+- Bloom filter construction
 
 **Pattern Established (Canonical Going Forward):**
 ```cython

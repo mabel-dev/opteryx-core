@@ -9,7 +9,7 @@ _DRAKEN_ENCODING_CONSTANT = 3
 
 
 def _dictionary_arrow_type(vec):
-    # Arrow arrays have .type but NOT .to_arrow(); Draken vectors have .to_arrow()
+    # Arrow arrays have .type but not .to_arrow(); Draken vectors have .to_arrow()
     arr_type = getattr(vec, "type", None)
     if arr_type is not None and not hasattr(vec, "to_arrow"):
         return arr_type if str(arr_type).startswith("dictionary") else None

@@ -1,7 +1,7 @@
 """
-Arithmetic kernels for Draken vectors (Phase 4.5).
+Arithmetic kernels for Draken vectors.
 
-Pure-Python arithmetic functions for Draken vector operations without recompilation.
+Pure-Python arithmetic functions for Draken vector operations.
 Handles vector-vector, vector-scalar, and scalar-vector combinations with proper
 null propagation.
 
@@ -9,7 +9,6 @@ Design:
 - Kernels operate on values from vectors via iteration and indexing
 - Null propagation: if either operand is None, result is None
 - Results are converted to Draken vectors using vector_from_arrow()
-- No NumPy dependency; PyArrow used only for type conversion
 """
 
 from opteryx.utils.vector_types import VectorType, is_scalar
