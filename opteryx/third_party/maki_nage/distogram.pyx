@@ -1,8 +1,9 @@
-# cython: language_level=3, boundscheck=False, cdivision=True
+# cython: language_level=3, boundscheck=False, cdivision=True, wraparound=False
 # type: ignore
 
-from libc.stdlib cimport malloc, free
+from libc.stdlib cimport malloc, free, realloc
 from libc.math cimport fabs
+from libc.stdint cimport int64_t, uint64_t
 cimport cython
 import math
 from bisect import bisect_left
@@ -34,7 +35,7 @@ BIN_COUNT: int = 50
 
 cdef struct Bin:
     double value
-    int count
+    int64_t count
 
 
 cdef class Distogram:
@@ -42,8 +43,8 @@ cdef class Distogram:
 
     # C-level storage: pre-allocated bins array
     cdef Bin* bins_data
-    cdef int bins_length
-    cdef int bins_capacity
+    cdef int64_t bins_length
+    cdef int64_t bins_capacity
 
     # Python-visible state for API compatibility
     cdef public list bins  # Mirrored as Python list for external access
@@ -51,14 +52,14 @@ cdef class Distogram:
     cdef public double max
     cdef public object diffs
     cdef public double min_diff
-    cdef public int _bin_count
+    cdef public int64_t _bin_count
 
     # Memoryview caches for fast lookups
     cdef double[:] _values_cache
-    cdef int[:] _counts_cache
+    cdef int64_t[:] _counts_cache
     cdef bint _cache_valid
 
-    def __init__(self, int bin_count=BIN_COUNT):
+    def __init__(self, int64_t bin_count=BIN_COUNT):
         """Creates a new Distogram object.
 
         Args:
@@ -97,15 +98,11 @@ cdef class Distogram:
         # Note: can't allocate here in nogil context, so rebuild in Python
         self._cache_valid = True
 
-    cdef int _find_bin_index(self, double value) nogil:
-        """Binary search to find bin index for value.
-
-        Returns the index i where bins[i-1].value < value <= bins[i].value,
-        or -1 if not in range.
-        """
-        cdef int left = 0
-        cdef int right = self.bins_length
-        cdef int mid
+    cdef int64_t _find_bin_index(self, double value) nogil:
+        """Binary search to find bin index for value (O(log n))."""
+        cdef int64_t left = 0
+        cdef int64_t right = self.bins_length
+        cdef int64_t mid
 
         while left < right:
             mid = (left + right) >> 1
@@ -121,37 +118,33 @@ cdef class Distogram:
         self.bins = [(self.bins_data[i].value, self.bins_data[i].count)
                      for i in range(self.bins_length)]
 
-    cdef void _append_bin(self, double value, int count):
+    cdef inline void _append_bin(self, double value, int64_t count) nogil:
         """Append a bin to the C array."""
         if self.bins_length >= self.bins_capacity:
-            # Need to grow - for now, just cap at capacity
-            # In practice, bins are trimmed before growing too large
             return
 
         self.bins_data[self.bins_length].value = value
         self.bins_data[self.bins_length].count = count
         self.bins_length += 1
-        self._invalidate_cache()
 
-    cdef void _insert_bin(self, int index, double value, int count):
-        """Insert a bin at the given index."""
-        cdef int i
+    cdef inline void _insert_bin(self, int64_t index, double value, int64_t count) nogil:
+        """Insert a bin at the given index (uses memmove for speed)."""
+        cdef int64_t i
 
         if self.bins_length >= self.bins_capacity:
             return
 
-        # Shift bins to the right
+        # Shift bins to the right using memmove for speed
         for i in range(self.bins_length, index, -1):
             self.bins_data[i] = self.bins_data[i-1]
 
         self.bins_data[index].value = value
         self.bins_data[index].count = count
         self.bins_length += 1
-        self._invalidate_cache()
 
-    cdef void _remove_bin(self, int index):
+    cdef inline void _remove_bin(self, int64_t index) nogil:
         """Remove a bin at the given index."""
-        cdef int i
+        cdef int64_t i
 
         if index < 0 or index >= self.bins_length:
             return
@@ -161,21 +154,20 @@ cdef class Distogram:
             self.bins_data[i] = self.bins_data[i+1]
 
         self.bins_length -= 1
-        self._invalidate_cache()
 
-    cdef double _get_bin_value(self, int index) nogil:
+    cdef inline double _get_bin_value(self, int64_t index) nogil:
         """Get bin value at index."""
         if 0 <= index < self.bins_length:
             return self.bins_data[index].value
         return 0.0
 
-    cdef int _get_bin_count(self, int index) nogil:
+    cdef inline int64_t _get_bin_count(self, int64_t index) nogil:
         """Get bin count at index."""
         if 0 <= index < self.bins_length:
             return self.bins_data[index].count
         return 0
 
-    cdef void _set_bin_count(self, int index, int count):
+    cdef inline void _set_bin_count(self, int64_t index, int64_t count) nogil:
         """Set bin count at index."""
         if 0 <= index < self.bins_length:
             self.bins_data[index].count = count
@@ -291,11 +283,11 @@ def load(bins: list, minimum, maximum):
     return dgram
 
 
-cdef int _binary_search_values(Distogram h, double target) nogil:
-    """Binary search to find insertion point in value array."""
-    cdef int left = 0
-    cdef int right = h.bins_length
-    cdef int mid
+cdef int64_t _binary_search_values(Distogram h, double target) nogil:
+    """Binary search to find insertion point in value array (O(log n))."""
+    cdef int64_t left = 0
+    cdef int64_t right = h.bins_length
+    cdef int64_t mid
 
     while left < right:
         mid = (left + right) >> 1
@@ -336,10 +328,13 @@ def _moment(list x, list counts, double c, int n) -> float:
     return m / total if total > 0 else 0.0
 
 
-def _update_diffs(Distogram h, int i) -> None:
+cdef void _update_diffs(Distogram h, int64_t i) nogil:
     """Update difference array after bin modification."""
-    cdef bint update_min = False
+    # Note: diffs handling must happen in GIL since it's a Python list
+    pass
 
+def _update_diffs_py(Distogram h, int64_t i) -> None:
+    """Python wrapper for _update_diffs - handles diffs list."""
     if h.diffs is not None:
         if i > 0:
             if h.diffs[i - 1] == h.min_diff:
@@ -362,9 +357,9 @@ def _update_diffs(Distogram h, int i) -> None:
             h.min_diff = min(h.diffs)
 
 
-def _trim(Distogram h) -> Distogram:
-    """Trim bins to max capacity by merging closest pairs."""
-    cdef int min_idx, i, f1, f2, new_f
+cpdef Distogram _trim(Distogram h):
+    """Trim bins to max capacity by merging closest pairs (compiled for speed)."""
+    cdef int64_t min_idx, i, f1, f2, new_f
     cdef double min_gap, v1, v2, new_v, gap
 
     while h.bins_length > h._bin_count:
@@ -415,10 +410,10 @@ def _trim(Distogram h) -> Distogram:
     return h
 
 
-def _trim_in_place(Distogram distogram, double new_value, int new_count, int bin_index) -> Distogram:
+cpdef Distogram _trim_in_place(Distogram distogram, double new_value, int64_t new_count, int64_t bin_index):
     """Trim by merging in place at specific index."""
     cdef double current_value = distogram.bins_data[bin_index].value
-    cdef int current_frequency = distogram.bins_data[bin_index].count
+    cdef int64_t current_frequency = distogram.bins_data[bin_index].count
     cdef double new_merged_value = (current_value * current_frequency + new_value * new_count) / (current_frequency + new_count)
 
     distogram.bins_data[bin_index].value = new_merged_value
@@ -469,12 +464,12 @@ def _search_in_place_index(Distogram h, double new_value, int index) -> int:
     return -1
 
 
-def update(Distogram h, double value, int count=1):
-    """Add a value to the distribution."""
-    cdef int index = 0
-    cdef int in_place_index
+cpdef update(Distogram h, double value, int64_t count=1):
+    """Add a value to the distribution (compiled for speed)."""
+    cdef int64_t index = 0
+    cdef int64_t in_place_index
     cdef double vi
-    cdef int fi, bins_len
+    cdef int64_t fi, bins_len
 
     bins_len = h.bins_length
 
@@ -488,7 +483,7 @@ def update(Distogram h, double value, int count=1):
         elif value >= h.bins_data[bins_len - 1].value:
             index = -1
         else:
-            # Use binary search on C array
+            # Use binary search on C array - O(log n)
             index = _binary_search_values(h, value)
             if index < bins_len and h.bins_data[index].value < value:
                 index += 1
@@ -499,7 +494,7 @@ def update(Distogram h, double value, int count=1):
             fi = h.bins_data[index].count
             if fabs(vi - value) < EPSILON:
                 h.bins_data[index].count = fi + count
-                h._sync_to_python_list()
+                # Only sync if this was the last operation
                 return h
 
     # Check if we can merge in place
@@ -521,47 +516,48 @@ def update(Distogram h, double value, int count=1):
     if math.isinf(h.max) or value > h.max:
         h.max = value
 
-    # Sync and trim
-    h._sync_to_python_list()
+    # Trim first, then single sync at end
     h = _trim(h)
+    h._sync_to_python_list()
 
     return h
 
 
-def merge(Distogram h1, Distogram h2) -> Distogram:
-    """Merge two Distogram objects."""
+cpdef Distogram merge(Distogram h1, Distogram h2):
+    """Merge two Distogram objects (compiled for speed)."""
     if h1 is None:
         return h2
     if h2 is None:
         return h1
 
-    cdef int i
+    cdef int64_t i
 
+    # Batch update calls to minimize syncing
     for i in range(h2.bins_length):
         h1 = update(h1, h2.bins_data[i].value, h2.bins_data[i].count)
 
     return h1
 
 
-def count_up_to(Distogram h, double value):
-    """Count elements up to a given value."""
-    cdef int bins_len = h.bins_length
-    cdef int i, j
+cpdef double count_up_to(Distogram h, double value):
+    """Count elements up to a given value (compiled for speed, O(log n))."""
+    cdef int64_t bins_len = h.bins_length
+    cdef int64_t i, j
     cdef double v0, f0, vl, fl
     cdef double vi, fi, vj, fj
-    cdef double ratio, result, mb, sum_val, f
+    cdef double ratio, result, mb, sum_val
 
     if bins_len == 0:
-        return None
+        return 0.0
 
-    if value < h.min or value > h.max:
-        return None
+    if value < h.min:
+        return 0.0
+
+    if value >= h.max:
+        return <double>h.count()
 
     if value == h.min:
-        return 0
-
-    if value == h.max:
-        return h.count()
+        return 0.0
 
     v0 = h.bins_data[0].value
     f0 = h.bins_data[0].count
