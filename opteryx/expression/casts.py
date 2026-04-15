@@ -18,16 +18,14 @@ Architectural note (Phase 5.3.2):
 
 import datetime
 import inspect
-
-import numpy
-import pyarrow
+import math
 
 from opteryx.types import OrsoTypes
 
 
 def _is_nullish(value) -> bool:
     """Check if a value is None or represents null."""
-    return value is None or (isinstance(value, float) and numpy.isnan(value))
+    return value is None or (isinstance(value, float) and math.isnan(value))
 
 
 def _unwrap_vector_value(value):
@@ -48,7 +46,7 @@ def parse_timestamp_value(value):
     if isinstance(value, datetime.date):
         return datetime.datetime.combine(value, datetime.time()).replace(tzinfo=None)
 
-    if isinstance(value, (int, float, numpy.integer, numpy.floating)):
+    if isinstance(value, (int, float)):
         numeric = float(value)
         magnitude = abs(numeric)
 
@@ -75,12 +73,9 @@ def _parse_array_value(value, element_type, safe_cast=False):
     if _is_nullish(value):
         return None
 
-    if isinstance(value, pyarrow.Array):
+    # Duck-typed: handle any array-like with to_pylist() (Arrow arrays, Draken vectors)
+    if hasattr(value, "to_pylist") and not isinstance(value, (bytes, str)):
         value = value.to_pylist()
-    if isinstance(value, numpy.ndarray):
-        value = value.item() if value.ndim == 0 else value.tolist()
-    if isinstance(value, numpy.generic):
-        value = value.item()
 
     if isinstance(value, (bytes, bytearray, memoryview)):
         value = bytes(value).decode("utf-8", errors="ignore")
@@ -125,7 +120,7 @@ def cast_to_double(arr, *args):
         if v_type == VectorType.FLOAT64:
             return arr
         if v_type == VectorType.INT64:
-            return from_sequence(arr.to_numpy(False).astype(numpy.float64))
+            return from_sequence([float(v) if v is not None else None for v in arr.to_pylist()])
         if v_type == VectorType.STRING:
             return parse_ascii_array_to_double(arr.to_pylist())
         # Other Draken types: fall through to fallback
@@ -137,18 +132,6 @@ def cast_to_double(arr, *args):
 
     if isinstance(arr, (int, float)):
         return OrsoTypes.DOUBLE.parse(arr)
-
-    # Fail-fast: PyArrow/NumPy arrays violate architectural contract
-    if isinstance(arr, (pyarrow.Array, pyarrow.ChunkedArray)):
-        raise AttributeError(
-            f"Expression layer received PyArrow array; expected Draken vector or Python scalar. "
-            f"Use interop boundary to convert. Got: {type(arr).__name__}"
-        )
-    if isinstance(arr, numpy.ndarray):
-        raise AttributeError(
-            f"Expression layer received NumPy array; expected Draken vector or Python scalar. "
-            f"Use interop boundary to convert. Got: {type(arr).__name__}"
-        )
 
     raise TypeError(f"Unsupported type for cast_to_double: {type(arr).__name__}")
 
@@ -176,7 +159,10 @@ def cast_to_int(arr, *args):
         if v_type == VectorType.STRING:
             return vector_cast_ascii_to_int(arr)
         if v_type == VectorType.TIMESTAMP or v_type == VectorType.DATE32:
-            return from_sequence(arr.to_numpy(False).astype(numpy.int64))
+            from opteryx.expression.evaluator.type_coercion import _coerce_date32, _coerce_timestamp
+
+            coerce = _coerce_timestamp if v_type == VectorType.TIMESTAMP else _coerce_date32
+            return from_sequence([coerce(v) if v is not None else None for v in arr.to_pylist()])
         # Other Draken types: fall through to fallback
 
     # Fallback: Python scalar or list
@@ -186,18 +172,6 @@ def cast_to_int(arr, *args):
 
     if isinstance(arr, int):
         return arr
-
-    # Fail-fast: PyArrow/NumPy arrays violate architectural contract
-    if isinstance(arr, (pyarrow.Array, pyarrow.ChunkedArray)):
-        raise AttributeError(
-            f"Expression layer received PyArrow array; expected Draken vector or Python scalar. "
-            f"Use interop boundary to convert. Got: {type(arr).__name__}"
-        )
-    if isinstance(arr, numpy.ndarray):
-        raise AttributeError(
-            f"Expression layer received NumPy array; expected Draken vector or Python scalar. "
-            f"Use interop boundary to convert. Got: {type(arr).__name__}"
-        )
 
     raise TypeError(f"Unsupported type for cast_to_int: {type(arr).__name__}")
 
@@ -220,16 +194,6 @@ def cast_to_varchar(arr, *args):
     if isinstance(arr, str):
         return arr
 
-    # Fail-fast for PyArrow/NumPy
-    if isinstance(arr, (pyarrow.Array, pyarrow.ChunkedArray)):
-        raise AttributeError(
-            f"Expression layer received PyArrow array; expected Draken vector. Got: {type(arr).__name__}"
-        )
-    if isinstance(arr, numpy.ndarray):
-        raise AttributeError(
-            f"Expression layer received NumPy array; expected Draken vector. Got: {type(arr).__name__}"
-        )
-
     raise TypeError(f"Unsupported type for cast_to_varchar: {type(arr).__name__}")
 
 
@@ -250,16 +214,6 @@ def cast_to_boolean(arr, *args):
 
     if isinstance(arr, bool):
         return arr
-
-    # Fail-fast for PyArrow/NumPy
-    if isinstance(arr, (pyarrow.Array, pyarrow.ChunkedArray)):
-        raise AttributeError(
-            f"Expression layer received PyArrow array; expected Draken vector. Got: {type(arr).__name__}"
-        )
-    if isinstance(arr, numpy.ndarray):
-        raise AttributeError(
-            f"Expression layer received NumPy array; expected Draken vector. Got: {type(arr).__name__}"
-        )
 
     raise TypeError(f"Unsupported type for cast_to_boolean: {type(arr).__name__}")
 
@@ -282,16 +236,6 @@ def cast_to_date(arr, *args):
 
     if isinstance(arr, datetime.date):
         return arr
-
-    # Fail-fast for PyArrow/NumPy
-    if isinstance(arr, (pyarrow.Array, pyarrow.ChunkedArray)):
-        raise AttributeError(
-            f"Expression layer received PyArrow array; expected Draken vector. Got: {type(arr).__name__}"
-        )
-    if isinstance(arr, numpy.ndarray):
-        raise AttributeError(
-            f"Expression layer received NumPy array; expected Draken vector. Got: {type(arr).__name__}"
-        )
 
     raise TypeError(f"Unsupported type for cast_to_date: {type(arr).__name__}")
 

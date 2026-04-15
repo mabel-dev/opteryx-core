@@ -17,8 +17,6 @@ Operations:
 
 import datetime
 
-import pyarrow as _pa
-
 from opteryx.exceptions import ColumnReferencedBeforeEvaluationError
 from opteryx.utils.vector_types import VectorType, get_vector_type
 
@@ -99,25 +97,27 @@ def _eval_binary_op_draken(node, morsel):
         OrsoTypes.DATE,
         OrsoTypes.TIMESTAMP,
     ):
-        from opteryx.compiled.draken.interop.arrow import vector_from_arrow
+        if node.left.schema_column.type == OrsoTypes.DATE:
+            from opteryx.compiled.draken.vectors.date32_vector import Date32Vector
 
-        arrow_type = (
-            _pa.date32() if node.left.schema_column.type == OrsoTypes.DATE else _pa.timestamp("us")
-        )
-        scalar = _coerce_temporal_scalar_for_arrow(left, node.left.schema_column.type)
-        left = vector_from_arrow(_pa.array([scalar] * morsel.num_rows, type=arrow_type))
+            left = Date32Vector.from_constant(_coerce_date32(left), morsel.num_rows)
+        else:
+            from opteryx.compiled.draken.vectors.timestamp_vector import TimestampVector
+
+            left = TimestampVector.from_constant(_coerce_timestamp(left), morsel.num_rows)
 
     if not hasattr(right, "null_count") and node.right.schema_column.type in (
         OrsoTypes.DATE,
         OrsoTypes.TIMESTAMP,
     ):
-        from opteryx.compiled.draken.interop.arrow import vector_from_arrow
+        if node.right.schema_column.type == OrsoTypes.DATE:
+            from opteryx.compiled.draken.vectors.date32_vector import Date32Vector
 
-        arrow_type = (
-            _pa.date32() if node.right.schema_column.type == OrsoTypes.DATE else _pa.timestamp("us")
-        )
-        scalar = _coerce_temporal_scalar_for_arrow(right, node.right.schema_column.type)
-        right = vector_from_arrow(_pa.array([scalar] * morsel.num_rows, type=arrow_type))
+            right = Date32Vector.from_constant(_coerce_date32(right), morsel.num_rows)
+        else:
+            from opteryx.compiled.draken.vectors.timestamp_vector import TimestampVector
+
+            right = TimestampVector.from_constant(_coerce_timestamp(right), morsel.num_rows)
 
     # ===================================================================
     # DATE-SPECIFIC OPERATIONS (refactored to use VectorType discriminator)
@@ -178,12 +178,13 @@ def _eval_binary_op_draken(node, morsel):
     # ===================================================================
     # RESULT CONVERSION (Phase 4.4: centralized via arithmetic_dispatch)
     # ===================================================================
-    # Convert PyArrow results back to Draken vectors
-    if isinstance(result, (_pa.Array, _pa.ChunkedArray)):
-        return vector_from_arrow(result)
+    # Convert Arrow-like results back to Draken vectors (duck-typed: no pyarrow import needed)
+    if hasattr(result, "to_pylist") and not hasattr(result, "to_arrow"):
+        arr = result.combine_chunks() if hasattr(result, "combine_chunks") else result
+        return vector_from_arrow(arr)
 
-    # PyArrow scalars → extract Python value
-    if isinstance(result, _pa.Scalar):
+    # Arrow scalars → extract Python value
+    if hasattr(result, "as_py") and not hasattr(result, "to_arrow"):
         return result.as_py()
 
     # Result is already a Draken vector or Python scalar

@@ -6,8 +6,6 @@ compression path while preserving the existing kernel execution contract.
 
 from typing import Any
 
-import pyarrow as _pa
-
 from opteryx.compiled.draken.vectors.scalar_constructors import from_scalar as _const_scalar
 from opteryx.exceptions import FunctionExecutionError
 
@@ -33,10 +31,11 @@ def _coerce_param_for_draken(p):
     if _is_draken_vector(p):
         return p
 
-    if isinstance(p, (_pa.Array, _pa.ChunkedArray)):
+    if not _is_draken_vector(p) and hasattr(p, "to_pylist") and not isinstance(p, (list, tuple)):
         from opteryx.compiled.draken.interop.arrow import vector_from_arrow
 
-        return vector_from_arrow(p)
+        arr = p.combine_chunks() if hasattr(p, "combine_chunks") else p
+        return vector_from_arrow(arr)
 
     if hasattr(p, "as_py") and not isinstance(p, (bytes, str)):
         try:

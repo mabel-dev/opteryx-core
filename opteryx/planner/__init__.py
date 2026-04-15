@@ -39,8 +39,6 @@ import decimal
 import time
 from typing import Any, Dict, Generator, Iterable, Optional, Union
 
-import numpy
-
 from opteryx.expression import NodeType
 from opteryx.expression.intervals import normalize_interval_value
 from opteryx.models import Node
@@ -72,6 +70,24 @@ def build_literal_node(
     if hasattr(value, "as_py"):
         value = value.as_py()
 
+    # Convert numpy-like scalars to Python native types (transition compatibility).
+    # Covers numpy.int64, numpy.float64, numpy.bool_, numpy.datetime64, etc.
+    _PYTHON_NATIVE = (
+        bool,
+        int,
+        float,
+        str,
+        bytes,
+        datetime.datetime,
+        datetime.date,
+        datetime.time,
+        decimal.Decimal,
+        list,
+        tuple,
+    )
+    if not isinstance(value, _PYTHON_NATIVE) and value is not None and hasattr(value, "item"):
+        value = value.item()
+
     if root is None:
         root = Node(
             NodeType.LITERAL,
@@ -95,16 +111,10 @@ def build_literal_node(
     # Define a mapping of types to OrsoTypes
     type_mapping = {
         bool: OrsoTypes.BOOLEAN,
-        numpy.bool_: OrsoTypes.BOOLEAN,
         str: OrsoTypes.VARCHAR,
-        numpy.str_: OrsoTypes.VARCHAR,
         bytes: OrsoTypes.BLOB,
-        numpy.bytes_: OrsoTypes.BLOB,
         int: OrsoTypes.INTEGER,
-        numpy.int64: OrsoTypes.INTEGER,
         float: OrsoTypes.DOUBLE,
-        numpy.float64: OrsoTypes.DOUBLE,
-        numpy.datetime64: OrsoTypes.TIMESTAMP,
         datetime.datetime: OrsoTypes.TIMESTAMP,
         datetime.time: OrsoTypes.TIME,
         datetime.date: OrsoTypes.DATE,

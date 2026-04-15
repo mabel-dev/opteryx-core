@@ -23,8 +23,6 @@ Note: MIN/MAX only work for INTEGER and TIMESTAMP types. FLOAT, STRING,
 and complex types lose precision in BRIN bounds and cannot be answered.
 """
 
-import pyarrow
-
 from opteryx.expression import NodeType
 from opteryx.planner import build_literal_node
 from opteryx.planner.logical_planner.logical_planner import LogicalPlanStepType

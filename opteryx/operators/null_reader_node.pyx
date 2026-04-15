@@ -17,7 +17,7 @@ This is more efficient than reading all rows and filtering them out.
 import logging
 from typing import Generator
 
-import pyarrow
+
 from opteryx.compiled.draken.morsels.morsel import Morsel
 from opteryx.compiled.draken.vectors.scalar_constructors import from_scalar
 from opteryx.types.schema import convert_orso_schema_to_arrow_schema

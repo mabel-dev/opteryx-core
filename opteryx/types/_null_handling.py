@@ -81,26 +81,6 @@ def is_null(value: Any) -> bool:
     if isinstance(value, float):
         return math.isnan(value)
 
-    # Check for numpy NaN scalar
-    try:
-        import numpy as np
-
-        if isinstance(value, np.floating):
-            return np.isnan(value)
-        if value is np.nan:
-            return True
-    except ImportError:
-        pass
-
-    # Check for pyarrow null scalar
-    try:
-        import pyarrow as pa
-
-        if isinstance(value, pa.Scalar):
-            return not value.is_valid
-    except ImportError:
-        pass
-
     # Not NULL (or unknown type; assume not NULL)
     return False
 
@@ -139,29 +119,6 @@ def is_nan(value: Any) -> bool:
     if isinstance(value, float):
         return math.isnan(value)
 
-    # Check numpy floats
-    try:
-        import numpy as np
-
-        if isinstance(value, np.floating):
-            return bool(np.isnan(value))
-        if value is np.nan:
-            return True
-    except ImportError:
-        pass
-
-    # Check pyarrow float scalars
-    try:
-        import pyarrow as pa
-
-        if isinstance(value, pa.Scalar):
-            if value.is_valid and hasattr(value, "as_py"):
-                py_value = value.as_py()
-                if isinstance(py_value, float):
-                    return math.isnan(py_value)
-    except ImportError:
-        pass
-
     # Not NaN (or not numeric)
     return False
 
@@ -199,27 +156,6 @@ def is_inf(value: Any) -> bool:
     # Fast path: native Python float
     if isinstance(value, float):
         return math.isinf(value)
-
-    # Check numpy floats
-    try:
-        import numpy as np
-
-        if isinstance(value, np.floating):
-            return bool(np.isinf(value))
-    except ImportError:
-        pass
-
-    # Check pyarrow float scalars
-    try:
-        import pyarrow as pa
-
-        if isinstance(value, pa.Scalar):
-            if value.is_valid and hasattr(value, "as_py"):
-                py_value = value.as_py()
-                if isinstance(py_value, float):
-                    return math.isinf(py_value)
-    except ImportError:
-        pass
 
     # Not infinity (or not numeric)
     return False
@@ -275,22 +211,9 @@ def is_null_vector(vector: Any) -> bool:
         >>> is_null_vector(v)
         True
     """
-    # Check for Draken vector
-    try:
-        null_count = getattr(vector, "null_count", None)
-        if null_count is not None:
-            return null_count > 0
-    except Exception:
-        pass
-
-    # Check for Arrow array/chunked array
-    try:
-        import pyarrow as pa
-
-        if isinstance(vector, (pa.Array, pa.ChunkedArray)):
-            return vector.null_count > 0
-    except ImportError:
-        pass
+    null_count = getattr(vector, "null_count", None)
+    if null_count is not None:
+        return null_count > 0
 
     # Unknown type; assume no nulls
     return False
@@ -317,20 +240,9 @@ def null_count_vector(vector: Any) -> int:
         >>> null_count_vector(v)
         2
     """
-    try:
-        null_count = getattr(vector, "null_count", None)
-        if null_count is not None:
-            return int(null_count)
-    except Exception:
-        pass
-
-    try:
-        import pyarrow as pa
-
-        if isinstance(vector, (pa.Array, pa.ChunkedArray)):
-            return int(vector.null_count)
-    except ImportError:
-        pass
+    null_count = getattr(vector, "null_count", None)
+    if null_count is not None:
+        return int(null_count)
 
     return 0
 

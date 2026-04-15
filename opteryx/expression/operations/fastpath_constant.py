@@ -1,9 +1,10 @@
 """Constant vector encoding optimization for filter operations."""
 
-import pyarrow
 from opteryx.compiled.vector_ops import vector_in_list
-from opteryx.expression.operations.fastpath_telemetry import record_constant_fastpath_fallback
-from opteryx.expression.operations.fastpath_telemetry import record_constant_fastpath_hit
+from opteryx.expression.operations.fastpath_telemetry import (
+    record_constant_fastpath_fallback,
+    record_constant_fastpath_hit,
+)
 
 _DRAKEN_ENCODING_CONSTANT = 3
 
@@ -57,14 +58,10 @@ def _typed_constant_fastpath(arr, operator, value):
     if scalar is None:
         if operator == "InList":
             result = None in _coerce_in_list_values(value)
-            return BoolVector.from_arrow(
-                pyarrow.array([bool(result)] * len(arr), type=pyarrow.bool_())
-            )
+            return BoolVector.from_constant(bool(result), len(arr))
         if operator == "NotInList":
             result = None not in _coerce_in_list_values(value)
-            return BoolVector.from_arrow(
-                pyarrow.array([bool(result)] * len(arr), type=pyarrow.bool_())
-            )
+            return BoolVector.from_constant(bool(result), len(arr))
         return BoolVector(len(arr))
 
     if hasattr(value, "item"):
@@ -95,7 +92,7 @@ def _typed_constant_fastpath(arr, operator, value):
     except Exception:
         return None
 
-    return BoolVector.from_arrow(pyarrow.array([bool(result)] * len(arr), type=pyarrow.bool_()))
+    return BoolVector.from_constant(bool(result), len(arr))
 
 
 def constant_fastpath(arr, operator, value):

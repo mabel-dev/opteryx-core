@@ -30,10 +30,9 @@ from opteryx.compiled.draken.vectors.bool_vector cimport BoolVector, bool_vector
 # Incremented when a probe morsel is filtered via the Draken bit-packed result path.
 BLOOM_FASTPATH_COUNTER = 0
 
-import pyarrow
 from opteryx.compiled.joins import build_side_hash_map
 from opteryx.compiled.joins import probe_side_hash_map
-from opteryx.compiled.structures.bloom_filter import create_bloom_filter
+from opteryx.compiled.structures.bloom_filter import create_bloom_filter_morsel
 from opteryx.compiled.structures.bloom_filter import bloom_filter_check_morsel
 from opteryx.compiled.structures.buffers import IntBuffer
 from opteryx.compiled.draken.morsels.morsel import Morsel
@@ -330,8 +329,7 @@ class OuterJoinNode(JoinNode):
                 else:
                     self._left_morsel = Morsel.from_vectors({})
 
-                self.left_relation = self._apply_join_key_casts(self._left_morsel.to_arrow(), is_left=True)
-                self._left_morsel = Morsel.from_arrow(self.left_relation)
+                self._left_morsel = self._apply_join_key_casts(self._left_morsel, is_left=True)
 
                 if self.join_type == "left outer":
                     start = time.monotonic_ns()
@@ -339,7 +337,7 @@ class OuterJoinNode(JoinNode):
 
                     if len(self._left_morsel) < 16_000_001:
                         start = time.monotonic_ns()
-                        self.filter_index = create_bloom_filter(self.left_relation, self.left_columns)
+                        self.filter_index = create_bloom_filter_morsel(self._left_morsel, self.left_columns)
                         self.readings["time_build_bloom_filter"] += time.monotonic_ns() - start
                         self.readings["feature_bloom_filter"] += 1
             else:
@@ -367,8 +365,7 @@ class OuterJoinNode(JoinNode):
             else:
                 right_morsel = Morsel.from_vectors({})
 
-            right_relation = self._apply_join_key_casts(right_morsel.to_arrow(), is_left=False)
-            right_morsel = Morsel.from_arrow(right_relation)
+            right_morsel = self._apply_join_key_casts(right_morsel, is_left=False)
             left_morsel_for_join = self._left_morsel
 
             join_provider = providers.get(self.join_type)
