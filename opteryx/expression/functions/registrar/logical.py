@@ -1,8 +1,7 @@
 from __future__ import annotations
 
+import math as _math
 from typing import List
-
-import numpy
 
 # Local implementation imports (kept as late imports inside function if heavy)
 from opteryx.compiled.vector_ops import vector_iif as _vector_iif
@@ -34,96 +33,92 @@ from opteryx.types import OrsoTypes
 
 def _coalesce(*arrays):
     """
-    Element-wise coalesce function for multiple numpy arrays.
-    Selects the first non-None item in each row across the input arrays.
-
-    Parameters:
-        arrays: tuple of numpy arrays
-
-    Returns:
-        numpy array with coalesced values
+    Element-wise coalesce: return the first non-null value across arrays.
+    Treats Python None and float NaN as null.
     """
-    # Start with an array full of None values
-    result = numpy.array(arrays[0], dtype=object)
 
-    mask = result == None
+    def _is_null_val(v):
+        if v is None:
+            return True
+        if isinstance(v, float) and _math.isnan(v):
+            return True
+        return False
 
-    for arr in arrays[1:]:
-        mask = numpy.array([None if value != value else value for value in result]) == None
-        numpy.copyto(result, arr, where=mask)
+    def to_pylist(a):
+        if hasattr(a, "to_pylist"):
+            return a.to_pylist()
+        if isinstance(a, list):
+            return a
+        return list(a)
+
+    lists = [to_pylist(a) for a in arrays]
+    n = max(len(lst) for lst in lists)
+    result = [None] * n
+
+    for lst in lists:
+        broadcast = len(lst) == 1
+        for i in range(n):
+            if _is_null_val(result[i]):
+                val = lst[0] if broadcast else lst[i]
+                if not _is_null_val(val):
+                    result[i] = val
 
     return result
 
 
 def select_values(boolean_arrays, value_arrays):
     """
-    Build a result array based on boolean conditions and corresponding value arrays.
+    Build a result array based on CASE conditions and corresponding value arrays.
+    Conditions are evaluated in reverse priority order (last wins → applied first).
 
     Parameters:
-    - boolean_arrays: List[np.ndarray], list of boolean arrays representing conditions.
-    - value_arrays: List[np.ndarray], list of arrays with values corresponding to each condition.
+    - boolean_arrays: list of boolean arrays/vectors representing conditions.
+    - value_arrays:   list of value arrays/vectors corresponding to each condition.
 
     Returns:
-    - np.ndarray: Result array with selected values or False where no condition is met.
+    - list: result values, None where no condition matched.
     """
-
-    def _to_numpy_condition(values, target_length):
-        if hasattr(values, "to_numpy"):
-            arr = values.to_numpy(zero_copy_only=False)
-        elif hasattr(values, "to_pylist"):
-            arr = numpy.asarray(values.to_pylist(), dtype=object)
-        elif isinstance(values, (list, tuple, numpy.ndarray)):
-            arr = numpy.asarray(values)
-        else:
-            arr = numpy.full(target_length, bool(values), dtype=bool)
-
-        if arr.shape == ():
-            arr = numpy.full(target_length, bool(arr.item()), dtype=bool)
-        elif len(arr) == 1 and target_length != 1:
-            arr = numpy.full(target_length, bool(arr[0]), dtype=bool)
-        return arr.astype(bool, copy=False)
-
-    def _to_numpy_values(values, target_length):
-        if hasattr(values, "to_numpy"):
-            arr = values.to_numpy(zero_copy_only=False)
-        elif hasattr(values, "to_pylist"):
-            arr = numpy.asarray(values.to_pylist(), dtype=object)
-        elif isinstance(values, numpy.ndarray):
-            arr = values
-        elif isinstance(values, (list, tuple)):
-            arr = numpy.asarray(values, dtype=object)
-        else:
-            arr = numpy.full(target_length, values, dtype=object)
-
-        if arr.shape == ():
-            arr = numpy.full(target_length, arr.item(), dtype=object)
-        elif len(arr) == 1 and target_length != 1:
-            arr = numpy.full(target_length, arr[0], dtype=object)
-        return arr
-
-    # Ensure the input lists are not empty and have the same length
     if not boolean_arrays or not value_arrays or len(boolean_arrays) != len(value_arrays):
         raise ValueError("Input lists must be non-empty and of the same length.")
 
+    def _to_bool_list(v, n):
+        if hasattr(v, "to_pylist"):
+            lst = v.to_pylist()
+        elif isinstance(v, list):
+            lst = v
+        else:
+            lst = [bool(v)] * n
+        if len(lst) == 1 and n != 1:
+            lst = lst * n
+        return [bool(b) if b is not None else False for b in lst]
+
+    def _to_val_list(v, n):
+        if hasattr(v, "to_pylist"):
+            lst = v.to_pylist()
+        elif isinstance(v, list):
+            lst = v
+        else:
+            lst = [v] * n
+        if len(lst) == 1 and n != 1:
+            lst = lst * n
+        return lst
+
     first_condition = boolean_arrays[0]
-    if hasattr(first_condition, "__len__"):
-        target_length = len(first_condition)
+    if hasattr(first_condition, "__len__") and not isinstance(first_condition, (str, bytes)):
+        n = len(first_condition)
     elif hasattr(first_condition, "to_pylist"):
-        target_length = len(first_condition.to_pylist())
+        n = len(first_condition.to_pylist())
     else:
-        target_length = 1
+        n = 1
 
-    # Initialize the result array with False, assuming no condition will be met
-    result = numpy.full(target_length, None, dtype=object)
+    result = [None] * n
 
-    # Iterate over pairs of boolean and value arrays
     for condition, values in zip(reversed(boolean_arrays), reversed(value_arrays)):
-        # Update the result array where the condition is True
-        numpy.putmask(
-            result,
-            _to_numpy_condition(condition, target_length),
-            _to_numpy_values(values, target_length),
-        )
+        cond = _to_bool_list(condition, n)
+        vals = _to_val_list(values, n)
+        for i in range(n):
+            if cond[i]:
+                result[i] = vals[i]
 
     return result
 

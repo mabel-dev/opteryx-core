@@ -18,9 +18,6 @@ binary_operators.
 
 from typing import List
 
-import numpy
-from pyarrow import compute
-
 _DRAKEN_ENCODING_CONSTANT = 3
 
 
@@ -38,8 +35,7 @@ def _constant_scalar(value):
 
 def round1(values):
     """ROUND(values)"""
-    from opteryx.compiled.vector_ops import vector_round
-    from opteryx.compiled.vector_ops import vector_round_constant
+    from opteryx.compiled.vector_ops import vector_round, vector_round_constant
 
     if _is_constant_like(values):
         return vector_round_constant(values, 0)
@@ -48,8 +44,7 @@ def round1(values):
 
 def round2(values, digits):
     """ROUND(values, digits)"""
-    from opteryx.compiled.vector_ops import vector_round_constant
-    from opteryx.compiled.vector_ops import vector_round_digits
+    from opteryx.compiled.vector_ops import vector_round_constant, vector_round_digits
 
     if _is_constant_like(digits):
         scalar = _constant_scalar(digits)
@@ -64,14 +59,15 @@ def round2(values, digits):
 
 
 def random_number(size):
-    return numpy.random.uniform(size=size)
+    from opteryx.compiled.vector_ops import vector_random
+
+    return vector_random(size)
 
 
 def random_normal(size):
-    from numpy.random import default_rng
+    from opteryx.compiled.vector_ops import vector_random_normal
 
-    rng = default_rng(831835)  # 8 days, 3 hours, 18 minutes, 35 seconds
-    return rng.standard_normal(size)
+    return vector_random_normal(size)
 
 
 def random_strings(items):
@@ -91,21 +87,27 @@ def random_strings(items):
 
 def safe_power(base_array, exponent_array):
     """
-    Wrapper around pyarrow's compute.power function.
-    If both base and exponent arrays are of int type, the result will be int.
-    Otherwise, it'll return a float.
+    Element-wise POWER using the Draken vector_power kernel.
+    The exponent must be a constant (all identical values); the scalar
+    exponent is extracted and passed directly to the C kernel.
     """
-    if len(numpy.unique(exponent_array)) != 1:
-        raise ValueError("The exponent_array should have all identical values.")
+    from opteryx.compiled.vector_ops import vector_power
 
-    single_exponent = exponent_array[0]
-
-    if base_array.dtype.kind == "i" and exponent_array.dtype.kind == "i" and single_exponent >= 0:
-        result = compute.power(base_array, exponent_array)
+    # Validate: all exponents must be the same scalar value.
+    # exponent_array may be a Draken vector or a Python list/scalar.
+    if hasattr(exponent_array, "to_pylist"):
+        exp_values = exponent_array.to_pylist()
+    elif hasattr(exponent_array, "__iter__") and not isinstance(exponent_array, (int, float)):
+        exp_values = list(exponent_array)
     else:
-        result = compute.power(base_array.astype(numpy.float64), exponent_array)
+        exp_values = [exponent_array]
 
-    return result
+    unique_exps = set(v for v in exp_values if v is not None)
+    if len(unique_exps) != 1:
+        raise ValueError("safe_power: exponent_array must contain identical values.")
+
+    exponent = float(unique_exps.pop())
+    return vector_power(base_array, exponent)
 
 
 def log(values, bases):
@@ -116,56 +118,35 @@ def log(values, bases):
 
 def ceiling(values, scales=None) -> List:
     """Performs a 'ceiling' with a scale factor."""
-    if scales is None:
-        scale = 0
-    elif len(scales) == 0:
-        return []
-    else:
-        scale = scales[0]
-    if scale == 0:
-        return numpy.ceil(values)
+    from opteryx.compiled.vector_ops import vector_ceil
 
-    if scale > 0:
-        scale_factor = 10**scale
-        return numpy.ceil(values * scale_factor) / scale_factor
+    if scales is None or len(scales) == 0:
+        scale = 0
     else:
-        scale_factor = 10 ** (-scale)
-        return numpy.ceil(values / scale_factor) * scale_factor
+        scale = int(scales[0]) if scales[0] is not None else 0
+
+    return vector_ceil(values, scale)
 
 
 def floor(values, scales=None) -> List:
     """Performs a 'floor' with a scale factor."""
-    if scales is None:
-        scale = 0
-    elif len(scales) == 0:
-        return []
-    else:
-        scale = scales[0]
-    if scale == 0:
-        return numpy.floor(values)
+    from opteryx.compiled.vector_ops import vector_floor
 
-    if scale > 0:
-        scale_factor = 10**scale
-        return numpy.floor(values * scale_factor) / scale_factor
+    if scales is None or len(scales) == 0:
+        scale = 0
     else:
-        scale_factor = 10 ** (-scale)
-        return numpy.floor(values / scale_factor) * scale_factor
+        scale = int(scales[0]) if scales[0] is not None else 0
+
+    return vector_floor(values, scale)
 
 
 def trunc(values, scales=None) -> List:
     """Performs a 'trunc' (truncate towards zero) with a scale factor."""
-    if scales is None:
-        scale = 0
-    elif len(scales) == 0:
-        return []
-    else:
-        scale = scales[0]
-    if scale == 0:
-        return numpy.trunc(values)
+    from opteryx.compiled.vector_ops import vector_trunc
 
-    if scale > 0:
-        scale_factor = 10**scale
-        return numpy.trunc(values * scale_factor) / scale_factor
+    if scales is None or len(scales) == 0:
+        scale = 0
     else:
-        scale_factor = 10 ** (-scale)
-        return numpy.trunc(values / scale_factor) * scale_factor
+        scale = int(scales[0]) if scales[0] is not None else 0
+
+    return vector_trunc(values, scale)

@@ -463,7 +463,7 @@ def _inner_evaluate(root: Node, table):
         if literal_type == OrsoTypes.INTEGER:
             return Int64Vector.from_constant(int(value), length)
 
-        if literal_type == OrsoTypes.FLOAT:
+        if literal_type == OrsoTypes.DOUBLE:
             return Float64Vector.from_constant(float(value), length)
 
         if literal_type == OrsoTypes.BOOLEAN:
