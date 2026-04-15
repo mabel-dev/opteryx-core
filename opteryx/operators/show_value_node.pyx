@@ -11,7 +11,7 @@ This is a SQL Query Execution Plan Node.
 
 from typing import Generator
 
-from opteryx.compiled.draken.interop.arrow import vector_from_sequence
+from opteryx.compiled.draken.interop.vector_sequence import vector_from_sequence
 from opteryx.compiled.draken.morsels.morsel import Morsel
 from opteryx.exceptions import SqlError
 from opteryx.models import QueryProperties

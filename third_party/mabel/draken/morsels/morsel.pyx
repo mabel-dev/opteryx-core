@@ -63,7 +63,7 @@ from opteryx.compiled.draken.vectors.string_vector cimport StringVector
 from opteryx.compiled.draken.vectors.time_vector cimport TimeVector
 from opteryx.compiled.draken.vectors.timestamp_vector cimport TimestampVector
 from opteryx.compiled.draken.interop.arrow cimport vector_from_arrow
-from opteryx.compiled.draken.interop.arrow cimport vector_from_sequence
+from opteryx.compiled.draken.interop.vector_sequence cimport vector_from_sequence
 
 # Python helper: int subclass for DrakenType enum debugging
 cdef class DrakenTypeInt(int):

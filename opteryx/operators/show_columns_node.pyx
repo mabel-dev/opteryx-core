@@ -12,7 +12,7 @@ Gives information about a dataset's columns
 """
 
 from typing import Generator, Optional
-from opteryx.compiled.draken.interop.arrow import vector_from_sequence
+from opteryx.compiled.draken.interop.vector_sequence import vector_from_sequence
 from opteryx.compiled.draken.morsels.morsel import Morsel
 from opteryx.models import QueryProperties
 from opteryx.types import OrsoTypes

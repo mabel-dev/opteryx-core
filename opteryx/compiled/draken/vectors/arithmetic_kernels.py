@@ -60,7 +60,7 @@ def _compute_result_with_null_propagation(left, right, operator_func):
 
 def _make_vector_from_result(result, vector_type):
     """Convert result list to Draken vector."""
-    from opteryx.compiled.draken.interop.arrow import vector_from_sequence
+    from opteryx.compiled.draken.interop.vector_sequence import vector_from_sequence
     from opteryx.types import OrsoTypes
 
     # Map VectorType to OrsoTypes for Draken vector construction

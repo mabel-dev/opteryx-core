@@ -36,7 +36,8 @@ from opteryx.compiled.draken.core.buffers cimport (
     DRAKEN_STRING,
 )
 from opteryx.compiled.draken.vectors.string_vector cimport StringVector
-from opteryx.compiled.draken.interop.arrow cimport arrow_type_to_draken, vector_from_arrow, vector_from_sequence
+from opteryx.compiled.draken.interop.arrow cimport arrow_type_to_draken, vector_from_arrow
+from opteryx.compiled.draken.interop.vector_sequence cimport vector_from_sequence
 from opteryx.compiled.draken.vectors.vector cimport (
     MIX_HASH_CONSTANT,
     NULL_HASH,

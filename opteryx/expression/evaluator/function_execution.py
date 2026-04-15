@@ -54,7 +54,7 @@ def _coerce_param_for_draken(p):
             return vec
 
     if isinstance(p, (list, tuple)):
-        from opteryx.compiled.draken.interop.arrow import vector_from_sequence
+        from opteryx.compiled.draken.interop.vector_sequence import vector_from_sequence
 
         try:
             return vector_from_sequence(p)

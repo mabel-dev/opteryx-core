@@ -152,7 +152,7 @@ def _normalize_value(value):
 
     # Normalize Python sequences into Draken vectors so the Draken IIF kernel
     # can operate on them directly.
-    from opteryx.compiled.draken.interop.arrow import vector_from_sequence
+    from opteryx.compiled.draken.interop.vector_sequence import vector_from_sequence
 
     if isinstance(value, (tuple, list)):
         if len(value) == 1:

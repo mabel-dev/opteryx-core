@@ -87,7 +87,7 @@ class ExitNode(BasePlanNode):
         if morsel == EOS:
             if not self.at_least_one:
                 # Return empty Draken morsel with correct schema
-                from opteryx.compiled.draken.interop.arrow import vector_from_sequence
+                from opteryx.compiled.draken.interop.vector_sequence import vector_from_sequence
 
                 # Create empty vectors with correct types
                 vectors = []

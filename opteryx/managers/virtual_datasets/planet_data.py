@@ -25,7 +25,7 @@ can instantiate a PlanetData() class and use it like a Relation.
 import datetime
 import decimal
 
-from opteryx.compiled.draken.interop.arrow import vector_from_sequence
+from opteryx.compiled.draken.interop.vector_sequence import vector_from_sequence
 from opteryx.compiled.draken.morsels.morsel import Morsel
 from opteryx.types import OrsoTypes
 from opteryx.types.schema import FlatColumn, RelationSchema

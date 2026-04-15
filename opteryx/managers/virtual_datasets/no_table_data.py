@@ -12,7 +12,7 @@ This is used to prepresent no table.
 It actually is a table, with one row and one column.
 """
 
-from opteryx.compiled.draken.interop.arrow import vector_from_sequence
+from opteryx.compiled.draken.interop.vector_sequence import vector_from_sequence
 from opteryx.compiled.draken.morsels.morsel import Morsel
 from opteryx.types import OrsoTypes
 from opteryx.types.schema import FlatColumn, RelationSchema

@@ -84,6 +84,7 @@ def is_null(value: Any) -> bool:
     # Check for numpy NaN scalar
     try:
         import numpy as np
+
         if isinstance(value, np.floating):
             return np.isnan(value)
         if value is np.nan:
@@ -94,6 +95,7 @@ def is_null(value: Any) -> bool:
     # Check for pyarrow null scalar
     try:
         import pyarrow as pa
+
         if isinstance(value, pa.Scalar):
             return not value.is_valid
     except ImportError:
@@ -124,7 +126,7 @@ def is_nan(value: Any) -> bool:
         - Fast path for Python floats
 
     Examples:
-        >>> is_nan(float('nan'))
+        >>> is_nan(float("nan"))
         True
         >>> is_nan(42.0)
         False
@@ -140,6 +142,7 @@ def is_nan(value: Any) -> bool:
     # Check numpy floats
     try:
         import numpy as np
+
         if isinstance(value, np.floating):
             return bool(np.isnan(value))
         if value is np.nan:
@@ -150,6 +153,7 @@ def is_nan(value: Any) -> bool:
     # Check pyarrow float scalars
     try:
         import pyarrow as pa
+
         if isinstance(value, pa.Scalar):
             if value.is_valid and hasattr(value, "as_py"):
                 py_value = value.as_py()
@@ -183,13 +187,13 @@ def is_inf(value: Any) -> bool:
         - Fast path for Python floats
 
     Examples:
-        >>> is_inf(float('inf'))
+        >>> is_inf(float("inf"))
         True
-        >>> is_inf(float('-inf'))
+        >>> is_inf(float("-inf"))
         True
         >>> is_inf(42.0)
         False
-        >>> is_inf(float('nan'))
+        >>> is_inf(float("nan"))
         False
     """
     # Fast path: native Python float
@@ -199,6 +203,7 @@ def is_inf(value: Any) -> bool:
     # Check numpy floats
     try:
         import numpy as np
+
         if isinstance(value, np.floating):
             return bool(np.isinf(value))
     except ImportError:
@@ -207,6 +212,7 @@ def is_inf(value: Any) -> bool:
     # Check pyarrow float scalars
     try:
         import pyarrow as pa
+
         if isinstance(value, pa.Scalar):
             if value.is_valid and hasattr(value, "as_py"):
                 py_value = value.as_py()
@@ -263,7 +269,7 @@ def is_null_vector(vector: Any) -> bool:
         - O(1) operation (uses cached null count)
 
     Examples:
-        >>> from opteryx.compiled.draken.interop.arrow import vector_from_sequence
+        >>> from opteryx.compiled.draken.interop.vector_sequence import vector_from_sequence
         >>> from opteryx.types import OrsoTypes
         >>> v = vector_from_sequence([1, None, 3], dtype=OrsoTypes.INTEGER)
         >>> is_null_vector(v)
@@ -280,6 +286,7 @@ def is_null_vector(vector: Any) -> bool:
     # Check for Arrow array/chunked array
     try:
         import pyarrow as pa
+
         if isinstance(vector, (pa.Array, pa.ChunkedArray)):
             return vector.null_count > 0
     except ImportError:
@@ -304,7 +311,7 @@ def null_count_vector(vector: Any) -> int:
         - O(1) operation (uses cached null count)
 
     Examples:
-        >>> from opteryx.compiled.draken.interop.arrow import vector_from_sequence
+        >>> from opteryx.compiled.draken.interop.vector_sequence import vector_from_sequence
         >>> from opteryx.types import OrsoTypes
         >>> v = vector_from_sequence([1, None, 3, None], dtype=OrsoTypes.INTEGER)
         >>> null_count_vector(v)
@@ -319,6 +326,7 @@ def null_count_vector(vector: Any) -> int:
 
     try:
         import pyarrow as pa
+
         if isinstance(vector, (pa.Array, pa.ChunkedArray)):
             return int(vector.null_count)
     except ImportError:

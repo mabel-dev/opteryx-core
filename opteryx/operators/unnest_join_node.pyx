@@ -114,7 +114,7 @@ def _cross_join_unnest_literal(
     Yields:
         Morsel objects with unnested literal values repeated.
     """
-    from opteryx.compiled.draken.interop.arrow import vector_from_sequence
+    from opteryx.compiled.draken.interop.vector_sequence import vector_from_sequence
 
     if morsel.num_rows == 0:
         return
