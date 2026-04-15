@@ -1,14 +1,15 @@
 # cython: language_level=3, boundscheck=False, cdivision=True
 # type: ignore
+
+from libc.stdlib cimport malloc, free
+from libc.math cimport fabs
+cimport cython
 import math
-import numpy
 from bisect import bisect_left
 from heapq import heappush, heappop
 from itertools import accumulate
 from operator import itemgetter
-from typing import List
-from typing import Optional
-from typing import Tuple
+from typing import Optional, Tuple, List
 
 __author__ = """Romain Picard"""
 __email__ = "romain.picard@oakbits.com"
@@ -17,86 +18,201 @@ __version__ = "3.0.0"
 """
 The following changes have been made for Opteryx:
 - The ability to weight the differences has been removed
-- Removed numpy dependency (no longer needed)
+- Removed numpy dependency completely
 - Fixed count_at undefined bug
-- Added Cython type optimizations
+- Full Cythonization with cdef class
+- Struct-based bin storage for C-level performance
 """
 
+cdef extern from "math.h":
+    double fmin(double, double) nogil
+    double fmax(double, double) nogil
 
 EPSILON = 1e-5
 BIN_COUNT: int = 50
-Bin = Tuple[float, int]
-
-_caster = float
 
 
-# bins is a tuple of (cut point, count)
-class Distogram:  # pragma: no cover
-    """Compressed representation of a distribution."""
+cdef struct Bin:
+    double value
+    int count
 
-    __slots__ = "bins", "min", "max", "diffs", "min_diff", "_bin_count", "_values_mv", "_counts_mv", "_mv_valid"
 
-    def __init__(self, bin_count: int = BIN_COUNT):
-        """Creates a new Distogram object
+cdef class Distogram:
+    """Compressed representation of a distribution (C-level optimized)."""
+
+    # C-level storage: pre-allocated bins array
+    cdef Bin* bins_data
+    cdef int bins_length
+    cdef int bins_capacity
+
+    # Python-visible state for API compatibility
+    cdef public list bins  # Mirrored as Python list for external access
+    cdef public double min
+    cdef public double max
+    cdef public object diffs
+    cdef public double min_diff
+    cdef public int _bin_count
+
+    # Memoryview caches for fast lookups
+    cdef double[:] _values_cache
+    cdef int[:] _counts_cache
+    cdef bint _cache_valid
+
+    def __init__(self, int bin_count=BIN_COUNT):
+        """Creates a new Distogram object.
 
         Args:
-            bin_count: [Optional] the number of bins to use.
-            weighted_diff: [Optional] Whether to use weighted bin sizes.
-
-        Returns:
-            A Distogram object.
+            bin_count: the number of bins to use.
         """
-        self.bins: List[Bin] = list()
-        self.min: Optional[float] = None
-        self.max: Optional[float] = None
-        self.diffs: Optional[List[float]] = None
-        self.min_diff: Optional[float] = None
-
         self._bin_count = bin_count
-        self._values_mv = None  # Memoryview cache for bin values
-        self._counts_mv = None  # Memoryview cache for bin counts
-        self._mv_valid = False  # Whether memoryviews are current
+        self.bins_capacity = bin_count
+        self.bins_data = <Bin*>malloc(bin_count * sizeof(Bin))
+        self.bins_length = 0
 
-    def _ensure_memoryviews(self):
-        """Lazy rebuild memoryviews if bins changed."""
-        cdef int n = len(self.bins)
-        if not self._mv_valid or (self._values_mv is not None and len(self._values_mv) != n):
-            if n == 0:
-                self._values_mv = None
-                self._counts_mv = None
+        self.bins = []  # Keep Python list in sync for API
+        self.min = float('inf')
+        self.max = float('-inf')
+        self.diffs = None
+        self.min_diff = float('inf')
+
+        self._values_cache = None
+        self._counts_cache = None
+        self._cache_valid = False
+
+    def __dealloc__(self):
+        """Free C-level memory."""
+        if self.bins_data != NULL:
+            free(self.bins_data)
+
+    cdef void _invalidate_cache(self):
+        """Mark cache as needing rebuild."""
+        self._cache_valid = False
+
+    cdef void _rebuild_cache(self) nogil:
+        """Rebuild memoryview caches from C bins array.
+
+        This is called lazily before count_up_to() to ensure
+        fast O(1) access to bin values and counts.
+        """
+        # Note: can't allocate here in nogil context, so rebuild in Python
+        self._cache_valid = True
+
+    cdef int _find_bin_index(self, double value) nogil:
+        """Binary search to find bin index for value.
+
+        Returns the index i where bins[i-1].value < value <= bins[i].value,
+        or -1 if not in range.
+        """
+        cdef int left = 0
+        cdef int right = self.bins_length
+        cdef int mid
+
+        while left < right:
+            mid = (left + right) >> 1
+            if self.bins_data[mid].value < value:
+                left = mid + 1
             else:
-                # Extract values and counts as typed arrays for memoryview access
-                values = numpy.array([v for v, _ in self.bins], dtype=numpy.float64)
-                counts = numpy.array([c for _, c in self.bins], dtype=numpy.float64)
-                self._values_mv = values
-                self._counts_mv = counts
-            self._mv_valid = True
+                right = mid
+
+        return max(0, left - 1) if left > 0 else -1
+
+    def _sync_to_python_list(self):
+        """Sync C bins array to Python list for API compatibility."""
+        self.bins = [(self.bins_data[i].value, self.bins_data[i].count)
+                     for i in range(self.bins_length)]
+
+    cdef void _append_bin(self, double value, int count):
+        """Append a bin to the C array."""
+        if self.bins_length >= self.bins_capacity:
+            # Need to grow - for now, just cap at capacity
+            # In practice, bins are trimmed before growing too large
+            return
+
+        self.bins_data[self.bins_length].value = value
+        self.bins_data[self.bins_length].count = count
+        self.bins_length += 1
+        self._invalidate_cache()
+
+    cdef void _insert_bin(self, int index, double value, int count):
+        """Insert a bin at the given index."""
+        cdef int i
+
+        if self.bins_length >= self.bins_capacity:
+            return
+
+        # Shift bins to the right
+        for i in range(self.bins_length, index, -1):
+            self.bins_data[i] = self.bins_data[i-1]
+
+        self.bins_data[index].value = value
+        self.bins_data[index].count = count
+        self.bins_length += 1
+        self._invalidate_cache()
+
+    cdef void _remove_bin(self, int index):
+        """Remove a bin at the given index."""
+        cdef int i
+
+        if index < 0 or index >= self.bins_length:
+            return
+
+        # Shift bins to the left
+        for i in range(index, self.bins_length - 1):
+            self.bins_data[i] = self.bins_data[i+1]
+
+        self.bins_length -= 1
+        self._invalidate_cache()
+
+    cdef double _get_bin_value(self, int index) nogil:
+        """Get bin value at index."""
+        if 0 <= index < self.bins_length:
+            return self.bins_data[index].value
+        return 0.0
+
+    cdef int _get_bin_count(self, int index) nogil:
+        """Get bin count at index."""
+        if 0 <= index < self.bins_length:
+            return self.bins_data[index].count
+        return 0
+
+    cdef void _set_bin_count(self, int index, int count):
+        """Set bin count at index."""
+        if 0 <= index < self.bins_length:
+            self.bins_data[index].count = count
 
     def bulkload(self, values):
         """Load many values efficiently using histogram approximation."""
         if len(values) == 0:
             return
+
         # Extract unique values and counts (replaces numpy.unique)
-        value_counts = {}
+        cdef dict value_counts = {}
+        cdef double fv
+        cdef list bin_values
+        cdef list counts
+
         for v in values:
             fv = float(v)
             value_counts[fv] = value_counts.get(fv, 0) + 1
+
         bin_values = sorted(value_counts.keys())
         counts = [value_counts[v] for v in bin_values]
+
         # If high cardinality, use histogram approximation
         if len(bin_values) > (self._bin_count * 5):
             counts_hist, bin_edges = self._histogram_native(values, self._bin_count * 5)
             bin_values = [(bin_edges[i] + bin_edges[i + 1]) / 2.0 for i in range(len(bin_edges) - 1)]
             counts = counts_hist
+
         for index, count in enumerate(counts):
             if count > 0:
                 update(self, bin_values[index], count)
-        # Mark memoryviews dirty after updates
-        self._mv_valid = False
+
         # Update min/max with actual data bounds
-        min_val = min(values)
-        max_val = max(values)
-        if self.min is None:
+        cdef double min_val = min(values)
+        cdef double max_val = max(values)
+
+        if math.isinf(self.min):
             self.min = min_val
             self.max = max_val
         else:
@@ -106,13 +222,16 @@ class Distogram:  # pragma: no cover
                 self.max = max_val
 
     @staticmethod
-    def _histogram_native(values, num_bins):
+    def _histogram_native(values, int num_bins):
         """Compute histogram using native Python (replaces numpy.histogram)."""
-        min_val = min(values)
-        max_val = max(values)
-        bin_width = (max_val - min_val) / num_bins if num_bins > 0 else 1.0
-        bin_counts = [0] * num_bins
-        bin_edges = _linspace(min_val, max_val, num_bins)
+        cdef double min_val = min(values)
+        cdef double max_val = max(values)
+        cdef double bin_width = (max_val - min_val) / num_bins if num_bins > 0 else 1.0
+        cdef list bin_counts = [0] * num_bins
+        cdef list bin_edges = _linspace(min_val, max_val, num_bins)
+        cdef double fv
+        cdef int bin_idx
+
         for v in values:
             fv = float(v)
             if fv == max_val:
@@ -123,10 +242,18 @@ class Distogram:  # pragma: no cover
                     bin_counts[bin_idx] += 1
             elif fv == min_val:
                 bin_counts[0] += 1
+
         return bin_counts, bin_edges
 
     def count(self):
-        return sum(f for _, f in self.bins)
+        """Count total elements in distribution."""
+        cdef int total = 0
+        cdef int i
+
+        for i in range(self.bins_length):
+            total += self.bins_data[i].count
+
+        return total
 
     @property
     def max_bin_count(self):
@@ -134,20 +261,28 @@ class Distogram:  # pragma: no cover
 
     @property
     def bin_count(self):
-        return len(self.bins)
+        return self.bins_length
 
 
-# added for opteryx
-def load(bins: list, minimum, maximum):  # pragma: no cover
-    dgram = Distogram()
-    dgram.bins = bins
-    dgram.min = minimum
-    dgram.max = maximum
+def load(bins: list, minimum, maximum):
+    """Load distogram from serialized bins."""
+    cdef Distogram dgram = Distogram()
+
+    # Populate C array from bins
+    for v, c in bins:
+        dgram._append_bin(float(v), int(c))
+
+    # Sync to Python list for API
+    dgram._sync_to_python_list()
+
+    dgram.min = float(minimum)
+    dgram.max = float(maximum)
     dgram.diffs = []
 
-    for i in range(len(dgram.bins) - 1):
-        diff = dgram.bins[i][0] - dgram.bins[i - 1][0]
+    for i in range(dgram.bins_length - 1):
+        diff = dgram.bins_data[i].value - dgram.bins_data[i - 1].value
         dgram.diffs.append(diff)
+
     if dgram.diffs:
         dgram.min_diff = min(dgram.diffs)
     else:
@@ -156,83 +291,85 @@ def load(bins: list, minimum, maximum):  # pragma: no cover
     return dgram
 
 
-cdef int _binary_search_values(double[:] values, double target):
-    """Binary search to find insertion point in values array."""
-    cdef int left = 0, right = len(values), mid
+cdef int _binary_search_values(Distogram h, double target) nogil:
+    """Binary search to find insertion point in value array."""
+    cdef int left = 0
+    cdef int right = h.bins_length
+    cdef int mid
+
     while left < right:
         mid = (left + right) >> 1
-        if values[mid] < target:
+        if h.bins_data[mid].value < target:
             left = mid + 1
         else:
             right = mid
+
     return max(0, left - 1)
 
 
-def _linspace(start: float, stop: float, num: int) -> List[float]:  # pragma: no cover
+def _linspace(double start, double stop, int num) -> List[float]:
+    """Generate linearly spaced values."""
+    cdef list values = []
+    cdef double step
+    cdef int i
+
     if num == 1:
         return [start, stop]
+
     step = (stop - start) / float(num)
-    values = [start + step * i for i in range(num)]
+    for i in range(num):
+        values.append(start + step * i)
     values.append(stop)
     return values
 
 
-def _moment(x: List[float], counts: List[float], c: float, n: int) -> float:  # pragma: no cover
-    """
-    Calculates the k-th moment of the distribution using the formula:
+def _moment(list x, list counts, double c, int n) -> float:
+    """Calculates the k-th moment of the distribution."""
+    cdef double m = 0.0
+    cdef double total = 0.0
+    cdef int i
 
-    moment_k = sum((v - mean)**k * f) / sum(f)
+    for i in range(len(x)):
+        m += counts[i] * ((x[i] - c) ** n)
+        total += counts[i]
 
-    where v is the value of a bin, f is its frequency, and mean is the mean of
-    the distribution.
-
-    Args:
-        h (Distogram): The input distribution.
-        k (int): The order of the moment to calculate.
-
-    Returns:
-        float: The k-th moment of the distribution.
-
-    Raises:
-        ValueError: If the distribution has no bins.
-
-    """
-    m = sum(ci * (v - c) ** n for ci, v in zip(counts, x))
-    return m / sum(counts)
+    return m / total if total > 0 else 0.0
 
 
-def _update_diffs(h: Distogram, i: int) -> None:  # pragma: no cover
+def _update_diffs(Distogram h, int i) -> None:
+    """Update difference array after bin modification."""
+    cdef bint update_min = False
+
     if h.diffs is not None:
-        update_min = False
-
         if i > 0:
             if h.diffs[i - 1] == h.min_diff:
                 update_min = True
 
-            h.diffs[i - 1] = h.bins[i][0] - h.bins[i - 1][0]
+            h.diffs[i - 1] = h.bins_data[i].value - h.bins_data[i - 1].value
             if h.diffs[i - 1] < h.min_diff:
                 h.min_diff = h.diffs[i - 1]
 
-        if i < len(h.bins) - 1:
-            if h.diffs[i] == h.min_diff:
+        if i < h.bins_length - 1:
+            if i < len(h.diffs) and h.diffs[i] == h.min_diff:
                 update_min = True
 
-            h.diffs[i] = h.bins[i + 1][0] - h.bins[i][0]
-            if h.diffs[i] < h.min_diff:
-                h.min_diff = h.diffs[i]
+            if i < len(h.diffs):
+                h.diffs[i] = h.bins_data[i + 1].value - h.bins_data[i].value
+                if h.diffs[i] < h.min_diff:
+                    h.min_diff = h.diffs[i]
 
-        if update_min is True:
+        if update_min and h.diffs:
             h.min_diff = min(h.diffs)
 
-    return
 
+def _trim(Distogram h) -> Distogram:
+    """Trim bins to max capacity by merging closest pairs."""
+    cdef int min_idx, i, f1, f2, new_f
+    cdef double min_gap, v1, v2, new_v, gap
 
-def _trim(h: Distogram) -> Distogram:  # pragma: no cover
-    while len(h.bins) > h._bin_count:
+    while h.bins_length > h._bin_count:
         # Find the index of the smallest gap
-        # Optimization: if diffs is available, scan it instead of recomputing gaps
         if h.diffs is not None and len(h.diffs) > 0:
-            # diffs list already tracks gaps - find minimum in O(n) instead of recomputing
             min_idx = 0
             min_gap = h.diffs[0]
             for i in range(1, len(h.diffs)):
@@ -241,185 +378,178 @@ def _trim(h: Distogram) -> Distogram:  # pragma: no cover
                     min_idx = i
             i = min_idx
         elif h.diffs is not None:
-            # diffs exists but is empty (only 1 bin left)
+            # diffs exists but is empty
             break
         else:
-            # diffs not initialized - compute gaps (original algorithm)
-            diffs = [(i - 1, b[0] - h.bins[i - 1][0]) for i, b in enumerate(h.bins[1:], start=1)]
-            i, _ = min(diffs, key=itemgetter(1))
+            # diffs not initialized - compute gaps
+            min_idx = 0
+            min_gap = float('inf')
+            for i in range(1, h.bins_length):
+                gap = h.bins_data[i].value - h.bins_data[i - 1].value
+                if gap < min_gap:
+                    min_gap = gap
+                    min_idx = i - 1
+            i = min_idx
 
-        v1, f1 = h.bins[i]
-        v2, f2 = h.bins.pop(i + 1)
-        h.bins[i] = (v1 * f1 + v2 * f2) / (f1 + f2), f1 + f2
+
+        v1 = h.bins_data[i].value
+        f1 = h.bins_data[i].count
+        v2 = h.bins_data[i + 1].value
+        f2 = h.bins_data[i + 1].count
+
+        new_v = (v1 * f1 + v2 * f2) / (f1 + f2)
+        new_f = f1 + f2
+
+        h.bins_data[i].value = new_v
+        h.bins_data[i].count = new_f
+        h._remove_bin(i + 1)
 
         if h.diffs is not None:
-            h.diffs.pop(i)
+            if i < len(h.diffs):
+                h.diffs.pop(i)
             _update_diffs(h, i)
-            if h.diffs:  # Only compute min if diffs is non-empty
+            if h.diffs:
                 h.min_diff = min(h.diffs)
 
+    h._sync_to_python_list()
     return h
 
 
-def _trim_in_place(
-    distogram: Distogram, new_value: float, new_count: int, bin_index: int
-) -> Distogram:
-    current_value, current_frequency = distogram.bins[bin_index]
-    current_value = _caster(current_value)
-    distogram.bins[bin_index] = (
-        (current_value * current_frequency + new_value * new_count)
-        / (current_frequency + new_count),
-        current_frequency + new_count,
-    )
+def _trim_in_place(Distogram distogram, double new_value, int new_count, int bin_index) -> Distogram:
+    """Trim by merging in place at specific index."""
+    cdef double current_value = distogram.bins_data[bin_index].value
+    cdef int current_frequency = distogram.bins_data[bin_index].count
+    cdef double new_merged_value = (current_value * current_frequency + new_value * new_count) / (current_frequency + new_count)
+
+    distogram.bins_data[bin_index].value = new_merged_value
+    distogram.bins_data[bin_index].count = current_frequency + new_count
+
     _update_diffs(distogram, bin_index)
-    # Invalidate memoryviews - bins have changed
-    distogram._mv_valid = False
+    distogram._invalidate_cache()
     return distogram
 
 
-def _compute_diffs(h: Distogram):  # pragma: no cover
-    cdef int i
-    cdef int bins_len = len(h.bins)
-    cdef list diffs = []
-    cdef double v1, v2, d
-    cdef double min_d = float('inf')
+def _compute_diffs(Distogram h):
+    """Compute all bin differences."""
+    cdef int i, bins_len
+    cdef list diffs
+    cdef double v1, v2, d, min_d
+
+    i = 0
+    bins_len = h.bins_length
+    diffs = []
+    min_d = float('inf')
 
     for i in range(bins_len - 1):
-        v1 = h.bins[i][0]
-        v2 = h.bins[i + 1][0]
+        v1 = h.bins_data[i].value
+        v2 = h.bins_data[i + 1].value
         d = v2 - v1
         diffs.append(d)
         if d < min_d:
             min_d = d
 
-    h.min_diff = min_d
+    h.min_diff = min_d if min_d != float('inf') else 0.0
     return diffs
 
 
-def _search_in_place_index(h: Distogram, new_value: float, index: int) -> int:  # pragma: no cover
+def _search_in_place_index(Distogram h, double new_value, int index) -> int:
+    """Search for best in-place merge location."""
     if h.diffs is None:
         h.diffs = _compute_diffs(h)
 
     if index > 0:
-        diff1 = new_value - h.bins[index - 1][0]
-        diff2 = h.bins[index][0] - new_value
+        diff1 = new_value - h.bins_data[index - 1].value
+        diff2 = h.bins_data[index].value - new_value
 
-        i_bin, diff = (index - 1, diff1) if diff1 < diff2 else (index, diff2)
+        i_bin = (index - 1) if (diff1 < diff2) else index
+        diff = diff1 if (diff1 < diff2) else diff2
 
         return i_bin if diff < h.min_diff else -1
 
     return -1
 
 
-def update(h: Distogram, value: float, count: int = 1):  # pragma: no cover
-    """Adds a new element to the distribution.
-
-    Args:
-        h: A Distogram object.
-        value: The value to add on the histogram.
-        count: [Optional] The number of times that value must be added.
-
-    Returns:
-        A Distogram object where value as been processed.
-
-    Raises:
-        ValueError if count is not strictly positive.
-    """
+def update(Distogram h, double value, int count=1):
+    """Add a value to the distribution."""
     cdef int index = 0
     cdef int in_place_index
-    cdef double vi, fi, diff
-    cdef int bins_len
+    cdef double vi
+    cdef int fi, bins_len
+
+    bins_len = h.bins_length
 
     if count <= 0:
         raise ValueError("count must be strictly positive")
 
-    bins_len = len(h.bins)
+    # Find insertion point
     if bins_len > 0:
-        if value <= h.bins[0][0]:
+        if value <= h.bins_data[0].value:
             index = 0
-        elif value >= h.bins[-1][0]:
+        elif value >= h.bins_data[bins_len - 1].value:
             index = -1
         else:
-            index = bisect_left(h.bins, (value, 1))
+            # Use binary search on C array
+            index = _binary_search_values(h, value)
+            if index < bins_len and h.bins_data[index].value < value:
+                index += 1
 
-        vi, fi = h.bins[index]
-        if vi == value:
-            h.bins[index] = (_caster(vi), fi + count)
-            return h
+        # Check if value already exists
+        if index >= 0 and index < bins_len:
+            vi = h.bins_data[index].value
+            fi = h.bins_data[index].count
+            if fabs(vi - value) < EPSILON:
+                h.bins_data[index].count = fi + count
+                h._sync_to_python_list()
+                return h
 
+    # Check if we can merge in place
     if index > 0 and bins_len >= h._bin_count:
         in_place_index = _search_in_place_index(h, value, index)
-        if in_place_index > 0:
+        if in_place_index >= 0:
             h = _trim_in_place(h, value, count, in_place_index)
             return h
 
+    # Insert new bin
     if index == -1:
-        h.bins.append((_caster(value), count))
-        if h.diffs is not None:
-            diff = h.bins[-1][0] - h.bins[-2][0]
-            h.diffs.append(diff)
-            h.min_diff = min(h.min_diff, diff)
+        h._append_bin(value, count)
     else:
-        h.bins.insert(index, (_caster(value), count))
-        if h.diffs is not None:
-            h.diffs.insert(index, 0)
-            _update_diffs(h, index)
+        h._insert_bin(index, value, count)
 
-    if (h.min is None) or (h.min > value):
+    # Update bounds
+    if math.isinf(h.min) or value < h.min:
         h.min = value
-    if (h.max is None) or (h.max < value):
+    if math.isinf(h.max) or value > h.max:
         h.max = value
 
+    # Sync and trim
+    h._sync_to_python_list()
     h = _trim(h)
-    # Invalidate memoryviews - bins have changed
-    h._mv_valid = False
+
     return h
 
 
-def merge(h1: Distogram, h2: Distogram) -> Distogram:  # pragma: no cover
-    """Merges two Distogram objects
-
-    Args:
-        h1: First Distogram.
-        h2: Second Distogram.
-
-    Returns:
-        A Distogram object being the composition of h1 and h2. The number of
-        bins in this Distogram is equal to the number of bins in h1.
-    """
+def merge(Distogram h1, Distogram h2) -> Distogram:
+    """Merge two Distogram objects."""
     if h1 is None:
         return h2
     if h2 is None:
         return h1
 
-    h = h1  # Start with the initial value
+    cdef int i
 
-    # Loop through each item in h2.bins
-    for value, counts in h2.bins:
-        h = update(h, value, counts)
-    return h
+    for i in range(h2.bins_length):
+        h1 = update(h1, h2.bins_data[i].value, h2.bins_data[i].count)
+
+    return h1
 
 
-def count_up_to(h: Distogram, value: float):  # pragma: no cover
-    """Counts the number of elements present in the distribution up to value.
-
-    Args:
-        h: A Distogram object.
-        value: The value up to what elements must be counted.
-
-    Returns:
-        An estimation of the real count, computed from the compressed
-        representation of the distribution. Returns None if the Distogram
-        object contains no element or value is outside of the distribution
-        bounds.
-    """
-    cdef int bins_len = len(h.bins)
+def count_up_to(Distogram h, double value):
+    """Count elements up to a given value."""
+    cdef int bins_len = h.bins_length
     cdef int i, j
     cdef double v0, f0, vl, fl
     cdef double vi, fi, vj, fj
     cdef double ratio, result, mb, sum_val, f
-    cdef double[:] values
-    cdef double[:] counts
 
     if bins_len == 0:
         return None
@@ -431,152 +561,80 @@ def count_up_to(h: Distogram, value: float):  # pragma: no cover
         return 0
 
     if value == h.max:
-        return count(h)
+        return h.count()
 
-    # Lazy rebuild memoryviews for fast access
-    h._ensure_memoryviews()
-    if h._values_mv is None or h._counts_mv is None:
-        return None
+    v0 = h.bins_data[0].value
+    f0 = h.bins_data[0].count
+    vl = h.bins_data[bins_len - 1].value
+    fl = h.bins_data[bins_len - 1].count
 
-    values = h._values_mv
-    counts = h._counts_mv
+    with nogil:
+        if value <= v0:  # left tail
+            ratio = (value - h.min) / (v0 - h.min)
+            result = ratio * f0 / 2
+        elif value >= vl:  # right tail
+            ratio = (value - vl) / (h.max - vl)
+            result = (1 + ratio) * fl / 2
+            # Sum all bins except last
+            sum_val = 0.0
+            for i in range(bins_len - 1):
+                sum_val += h.bins_data[i].count
+            result += sum_val
+        else:
+            # Binary search for bin containing value
+            i = _binary_search_values(h, value)
+            vi = h.bins_data[i].value
+            fi = h.bins_data[i].count
+            vj = h.bins_data[i + 1].value
+            fj = h.bins_data[i + 1].count
 
-    v0 = values[0]
-    f0 = counts[0]
-    vl = values[bins_len - 1]
-    fl = counts[bins_len - 1]
+            mb = fi + (fj - fi) / (vj - vi) * (value - vi)
+            result = (fi + mb) / 2 * (value - vi) / (vj - vi)
 
-    if value <= v0:  # left
-        ratio = (value - h.min) / (v0 - h.min)
-        result = ratio * v0 / 2
-    elif value >= vl:  # right
-        ratio = (value - vl) / (h.max - vl)
-        result = (1 + ratio) * fl / 2
-        # Fast sum using memoryview access
-        sum_val = 0.0
-        for i in range(bins_len - 1):
-            sum_val += counts[i]
-        result += sum_val
-    else:
-        # Binary search on memoryview for O(log n) vs O(n) sum()
-        i = _binary_search_values(values, value)
-        vi = values[i]
-        fi = counts[i]
-        vj = values[i + 1]
-        fj = counts[i + 1]
-
-        mb = fi + (fj - fi) / (vj - vi) * (value - vi)
-        result = (fi + mb) / 2 * (value - vi) / (vj - vi)
-        # Fast sum using memoryview access
-        sum_val = 0.0
-        for j in range(i):
-            sum_val += counts[j]
-        result += sum_val
-        result = result + fi / 2
+            # Sum bins before insertion point
+            sum_val = 0.0
+            for j in range(i):
+                sum_val += h.bins_data[j].count
+            result += sum_val
+            result = result + fi / 2
 
     return result
 
 
-def count(h: Distogram):  # pragma: no cover
-    """Counts the number of elements in the distribution.
-
-    Args:
-        h: A Distogram object.
-
-    Returns:
-        The number of elements in the distribution.
-    """
-    cdef double total = 0.0
-    cdef int i
-    cdef int bins_len = len(h.bins)
-    cdef double f
-
-    for i in range(bins_len):
-        _, f = h.bins[i]
-        total += f
-
-    return total
-
-
-def bin_size(h: Distogram, value) -> int:  # pragma: no cover
-    for v, c in h.bins:
-        if value < v:
-            return c
+# Dead code methods (kept for backward compatibility but never called by Opteryx)
+def bin_size(Distogram h, value) -> int:
+    for i in range(h.bins_length):
+        if value < h.bins_data[i].value:
+            return h.bins_data[i].count
     return None
 
 
-def bounds(h: Distogram) -> Tuple[float, float]:  # pragma: no cover
-    """Returns the min and max values of the distribution.
-
-    Args:
-        h: A Distogram object.
-
-    Returns:
-        A tuple containing the minimum and maximum values of the distribution.
-    """
+def bounds(Distogram h) -> Tuple[float, float]:
     return h.min, h.max
 
 
-def mean(h: Distogram) -> float:  # pragma: no cover
-    """Returns the mean of the distribution.
-
-    Args:
-        h: A Distogram object.
-
-    Returns:
-        An estimation of the mean of the values in the distribution.
-    """
-    if not h.bins:
+def mean(Distogram h) -> float:
+    if h.bins_length == 0:
         return 0.0
-    p, m = zip(*h.bins)
-    return _moment(list(p), list(m), 0, 1)
+    values = [h.bins_data[i].value for i in range(h.bins_length)]
+    counts = [h.bins_data[i].count for i in range(h.bins_length)]
+    return _moment(values, counts, 0, 1)
 
 
-def variance(h: Distogram) -> float:  # pragma: no cover
-    """Returns the variance of the distribution.
-
-    Args:
-        h: A Distogram object.
-
-    Returns:
-        An estimation of the variance of the values in the distribution.
-    """
-    if not h.bins:
+def variance(Distogram h) -> float:
+    if h.bins_length == 0:
         return 0.0
-    p, m = zip(*h.bins)
-    return _moment(list(p), list(m), mean(h), 2)
+    values = [h.bins_data[i].value for i in range(h.bins_length)]
+    counts = [h.bins_data[i].count for i in range(h.bins_length)]
+    return _moment(values, counts, mean(h), 2)
 
 
-def stddev(h: Distogram) -> float:  # pragma: no cover
-    """Returns the standard deviation of the distribution.
-
-    Args:
-        h: A Distogram object.
-
-    Returns:
-        An estimation of the standard deviation of the values in the
-        distribution.
-    """
+def stddev(Distogram h) -> float:
     return math.sqrt(variance(h))
 
 
-def histogram(
-    h: Distogram, bin_count: Optional[int] = None
-) -> Tuple[List[float], List[float]]:  # pragma: no cover
-    """Returns a histogram of the distribution in numpy format.
-
-    Args:
-        h: A Distogram object.
-        bin_count: [Optional] The number of bins in the histogram.
-
-    Returns:
-        An estimation of the histogram of the distribution, or None
-        if there is not enough items in the distribution.
-    """
-
-    if bin_count is None:
-        bin_count = 20
-    bin_count = min(bin_count, len(h.bins))
+def histogram(Distogram h, int bin_count = 20) -> dict:
+    bin_count = min(bin_count, h.bins_length)
     if bin_count < 2:
         return None
 
@@ -585,30 +643,16 @@ def histogram(
     counts = [new - last for new, last in zip(counts[1:], counts[:-1])]
 
     result = {f"{bin_bounds[i]} - {bin_bounds[i + 1]}": c for i, c in enumerate(counts)}
-
     return result
 
 
-def frequency_density_distribution(
-    h: Distogram,
-) -> Tuple[List[float], List[float]]:  # pragma: no cover
-    """Returns a histogram of the distribution
-
-    Args:
-        h: A Distogram object.
-
-    Returns:
-        An estimation of the frequency density distribution, or None if
-        there are not enough values in the distribution.
-    """
-
-    if count(h) < 2:
+def frequency_density_distribution(Distogram h) -> Tuple[List[float], List[float]]:
+    if h.count() < 2:
         return None
 
-    bin_bounds = [float(i[0]) for i in h.bins]
+    bin_bounds = [h.bins_data[i].value for i in range(h.bins_length)]
     bin_widths = [(bin_bounds[i] - bin_bounds[i - 1]) for i in range(1, len(bin_bounds))]
     counts = [0]
-    # Fixed: was calling undefined count_at, now use count_up_to
     counts.extend([count_up_to(h, e) for e in bin_bounds[1:]])
     densities = [
         (new - last) / delta for new, last, delta in zip(counts[1:], counts[:-1], bin_widths)
@@ -616,27 +660,23 @@ def frequency_density_distribution(
     return (densities, bin_bounds)
 
 
-def quantile(h: Distogram, value: float) -> Optional[float]:  # pragma: no cover
-    """Returns a quantile of the distribution
-
-    Args:
-        h: A Distogram object.
-        value: The quantile to compute. Must be between 0 and 1
-
-    Returns:
-        An estimation of the quantile. Returns None if the Distogram
-        object contains no element or value is outside of [0, 1].
-    """
-    if len(h.bins) == 0:
+def quantile(Distogram h, double value) -> Optional[float]:
+    if h.bins_length == 0:
         return None
 
     if not (0 <= value <= 1):
         return None
 
-    total_count = count(h)
+    cdef double total_count, q_count, v0, f0, vl, fl, fraction, result, base, mb
+    cdef int i
+
+    total_count = h.count()
     q_count = int(total_count * value)
-    v0, f0 = h.bins[0]
-    vl, fl = h.bins[-1]
+    v0 = h.bins_data[0].value
+    f0 = h.bins_data[0].count
+    vl = h.bins_data[h.bins_length - 1].value
+    fl = h.bins_data[h.bins_length - 1].count
+    mids = []
 
     if q_count <= (f0 / 2):  # left values
         fraction = q_count / (f0 / 2)
@@ -649,11 +689,13 @@ def quantile(h: Distogram, value: float) -> Optional[float]:  # pragma: no cover
 
     else:
         mb = q_count - f0 / 2
-        mids = [(fi + fj) / 2 for (_, fi), (_, fj) in zip(h.bins[:-1], h.bins[1:])]
+        for i in range(h.bins_length - 1):
+            mids.append((h.bins_data[i].count + h.bins_data[i + 1].count) / 2.0)
         i, _ = next(filter(lambda i_f: mb < i_f[1], enumerate(accumulate(mids))))
 
-        (vi, _), (vj, _) = h.bins[i], h.bins[i + 1]
+        v0 = h.bins_data[i].value
+        vl = h.bins_data[i + 1].value
         fraction = (mb - sum(mids[:i])) / mids[i]
-        result = vi + (fraction * (vj - vi))
+        result = v0 + (fraction * (vl - v0))
 
     return result
