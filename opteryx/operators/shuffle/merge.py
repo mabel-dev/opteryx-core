@@ -7,13 +7,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import cmp_to_key
-from heapq import heappop
-from heapq import heappush
-from typing import Iterable
-from typing import Iterator
-from typing import Sequence
+from heapq import heappop, heappush
+from typing import Iterable, Iterator, Sequence
 
-from opteryx.compiled.draken.interop.arrow import vector_from_sequence
+from opteryx.compiled.draken.interop.vector_sequence import vector_from_sequence
 from opteryx.compiled.draken.morsels.morsel import Morsel
 
 

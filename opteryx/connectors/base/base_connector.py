@@ -12,7 +12,7 @@ BaseTable: Table reader interface for transient readers (OpteryxTable, FileSyste
 
 from typing import Any, Dict, Iterable, Optional, Tuple
 
-from opteryx.compiled.draken.interop.arrow import vector_from_sequence
+from opteryx.compiled.draken.interop.vector_sequence import vector_from_sequence
 from opteryx.compiled.draken.morsels.morsel import Morsel
 from opteryx.connectors import TableType
 from opteryx.exceptions import DatasetNotFoundError

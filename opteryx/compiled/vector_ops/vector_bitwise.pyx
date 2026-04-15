@@ -29,7 +29,7 @@ from libc.string cimport memset
 
 from opteryx.compiled.draken.vectors.int64_vector cimport Int64Vector
 from opteryx.compiled.draken.core.buffers cimport DrakenFixedBuffer
-from opteryx.compiled.draken.interop.arrow cimport vector_from_sequence
+from opteryx.compiled.draken.interop.vector_sequence cimport vector_from_sequence
 
 
 cdef inline bint _is_null(uint8_t* null_bitmap, Py_ssize_t idx) noexcept:

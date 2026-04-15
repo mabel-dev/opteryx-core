@@ -53,6 +53,7 @@ from opteryx.compiled.draken.vectors.bool_vector cimport BoolVector
 from opteryx.compiled.draken.vectors.bool_vector cimport from_sequence as bool_from_sequence
 from opteryx.compiled.draken.vectors.scalar_constructors cimport from_sequence as constant_from_sequence
 from opteryx.compiled.draken.vectors._decimal_vector cimport from_arrow as decimal_from_arrow
+from opteryx.compiled.draken.interop.vector_sequence cimport vector_from_sequence as generic_vector_from_sequence
 
 cdef object _typed_constant_from_arrow_value(object value_type, object value, Py_ssize_t length, bint is_null):
     import pyarrow as pa
@@ -338,64 +339,7 @@ cdef object _orso_type_to_arrow(object orso_type):
 
 
 cpdef object vector_from_sequence(object data, object dtype=None):
-    """
-    Create a Draken Vector from a typed memoryview or Python sequence.
-
-    For fixed-width numeric/boolean types, accepts typed memoryviews for zero-copy wrapping.
-    Falls back to Arrow conversion for other types (including varchar/varbinary).
-
-    Args:
-        data: int64[::1], double[::1], uint8[::1] (bool), or Python sequence
-        dtype: Optional OrsoTypes hint for type preservation with empty sequences
-
-    Returns:
-        Vector: Appropriate Draken Vector subclass
-
-    Note:
-        For varchar/varbinary types, use pa.array() + vector_from_arrow() instead.
-        This function is optimized for fixed-width numeric types only.
-    """
-    cdef int64_t[::1] int64_view
-    cdef double[::1] float64_view
-    cdef uint8_t[::1] bool_view
-    import pyarrow as pa
-
-    # Check if it's a typed memoryview by attempting casts
-    try:
-        # Try int64 memoryview
-        int64_view = data
-        return int64_from_sequence(int64_view)
-    except (TypeError, ValueError, BufferError):
-        pass
-
-    try:
-        # Try float64 memoryview
-        float64_view = data
-        return float64_from_sequence(float64_view)
-    except (TypeError, ValueError, BufferError):
-        pass
-
-    try:
-        # Try bool/uint8 memoryview
-        bool_view = data
-        return bool_from_sequence(bool_view)
-    except (TypeError, ValueError, BufferError):
-        pass
-
-    # Constant path for Python sequences (avoid materializing full repeated payloads).
-    const_vec = constant_from_sequence(data, dtype)
-    if const_vec is not None:
-        return const_vec
-
-    # Fallback: convert to Arrow then to Vector.
-    # This handles varchar, varbinary, and other complex types.
-    # Use dtype to preserve type information with empty sequences
-    arrow_type = _orso_type_to_arrow(dtype) if dtype is not None else None
-    if arrow_type is not None:
-        arrow_array = pa.array(data, type=arrow_type)
-    else:
-        arrow_array = pa.array(data)
-    return vector_from_arrow(arrow_array)
+    return generic_vector_from_sequence(data, dtype)
 
 
 cpdef DrakenType arrow_type_to_draken(object dtype):

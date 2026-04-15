@@ -20,7 +20,7 @@ from opteryx.compiled.draken.core.buffers cimport (
     ConstAccessor, DictAccessor, DrakenFixedBuffer, DrakenVarBuffer,
     DrakenConstantStringPayload,
 )
-from opteryx.compiled.draken.interop.arrow cimport vector_from_sequence
+from opteryx.compiled.draken.interop.vector_sequence cimport vector_from_sequence
 from opteryx.compiled.structures.carchar_set cimport CarcharSetWrapper
 
 cdef extern from "_agg_kernels.hpp" namespace "opteryx::ungrouped":

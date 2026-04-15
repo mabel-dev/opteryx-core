@@ -9,7 +9,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 
 import pyarrow as pa
 import pytest
-from opteryx.compiled.draken.interop.arrow import vector_from_sequence
+from opteryx.compiled.draken.interop.vector_sequence import vector_from_sequence
 from opteryx.compiled.draken.vectors.bool_vector import BoolVector
 from opteryx.compiled.draken.vectors.float64_vector import Float64Vector
 from opteryx.compiled.draken.vectors.int64_vector import Int64Vector

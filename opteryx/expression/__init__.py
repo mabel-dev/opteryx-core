@@ -845,8 +845,10 @@ def _evaluate_and_append_arrow(expressions, table: Table):
                     if temporal_numpy or temporal_python:
                         new_column = pyarrow.array(new_column)
                     else:
-                        # Use Draken's vector_from_sequence for efficient array construction
-                        from opteryx.compiled.draken.interop.arrow import vector_from_sequence
+                        # Use Draken's generic sequence interop for efficient array construction
+                        from opteryx.compiled.draken.interop.vector_sequence import (
+                            vector_from_sequence,
+                        )
 
                         # Convert numpy arrays to lists to avoid dimension issues
                         if hasattr(new_column, "tolist"):

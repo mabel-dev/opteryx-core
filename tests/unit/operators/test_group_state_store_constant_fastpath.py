@@ -6,7 +6,7 @@ import pytest
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
-from opteryx.compiled.draken.interop.arrow import vector_from_sequence
+from opteryx.compiled.draken.interop.vector_sequence import vector_from_sequence
 from opteryx.compiled.draken.morsels.morsel import Morsel
 from opteryx.compiled.draken.vectors.scalar_constructors import from_scalar as constant_from_scalar
 from opteryx.compiled.draken.vectors.string_vector import StringVector

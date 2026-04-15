@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import time
 
-from opteryx.compiled.draken.interop.arrow import vector_from_sequence
+from opteryx.compiled.draken.interop.vector_sequence import vector_from_sequence
 from opteryx.compiled.draken.morsels.morsel import Morsel
 from opteryx.compiled.nanobind.carchar_native import CarcharSet
 from opteryx.expression import NodeType

@@ -274,7 +274,7 @@ def evaluate_draken(node, morsel):
             parameters = [morsel.num_rows]
         result = apply_bounded_function(node, *parameters)
         if isinstance(result, list):
-            from opteryx.compiled.draken.interop.arrow import vector_from_sequence
+            from opteryx.compiled.draken.interop.vector_sequence import vector_from_sequence
 
             result = vector_from_sequence(result)
         if get_vector_type(result) != VectorType.BOOL:
@@ -297,7 +297,7 @@ def evaluate_draken(node, morsel):
 
 
 def evaluate_and_append_draken(nodes, morsel):
-    from opteryx.compiled.draken.interop.arrow import vector_from_sequence
+    from opteryx.compiled.draken.interop.vector_sequence import vector_from_sequence
     from opteryx.compiled.draken.morsels.morsel import Morsel
     from opteryx.expression import NodeType
 

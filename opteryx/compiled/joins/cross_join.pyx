@@ -9,7 +9,7 @@
 from opteryx.compiled.draken.vectors.int64_vector cimport Int64Vector
 from opteryx.compiled.draken.vectors.int64_vector cimport from_sequence as int64_from_sequence
 from opteryx.compiled.draken.vectors.vector cimport Vector
-from opteryx.compiled.draken.interop.arrow cimport vector_from_sequence
+from opteryx.compiled.draken.interop.vector_sequence cimport vector_from_sequence
 from opteryx.compiled.structures.buffers cimport IntBuffer
 from opteryx.compiled.structures.buffers cimport ObjectBuffer
 from opteryx.compiled.structures.carchar_set cimport CarcharSetWrapper
