@@ -139,7 +139,8 @@ def _eval_value(node, morsel):
             if vec is not None:
                 return vec
 
-        from opteryx.compiled.draken.interop.arrow import vector_from_arrow, vector_from_sequence
+        from opteryx.compiled.draken.interop.arrow import vector_from_arrow
+        from opteryx.compiled.draken.interop.vector_sequence import vector_from_sequence
         from opteryx.expression import _inner_evaluate
 
         arrow_table = morsel.to_arrow()

@@ -1741,7 +1741,7 @@ struct __pyx_t_7opteryx_8compiled_6draken_4core_7buffers_ConstAccessor {
 struct __pyx_opt_args_7opteryx_8compiled_6draken_7vectors_6vector_6Vector_hash_into;
 struct __pyx_opt_args_7opteryx_8compiled_6draken_7vectors_6vector_6Vector_compress_into;
 
-/* "opteryx/compiled/draken/vectors/vector.pxd":35
+/* "opteryx/compiled/draken/vectors/vector.pxd":36
  *     cdef void* dense_ptr(self) noexcept
  *     cdef uint8_t* null_bitmap_ptr(self) noexcept
  *     cdef void hash_into(self, uint64_t[::1] out_buf, Py_ssize_t offset=*) except *             # <<<<<<<<<<<<<<
@@ -1753,7 +1753,7 @@ struct __pyx_opt_args_7opteryx_8compiled_6draken_7vectors_6vector_6Vector_hash_i
   Py_ssize_t offset;
 };
 
-/* "opteryx/compiled/draken/vectors/vector.pxd":42
+/* "opteryx/compiled/draken/vectors/vector.pxd":43
  *     # same semantics as `to_int` in relation_statistics. Implementations
  *     # should write into an int64 buffer provided by the caller.
  *     cdef void compress_into(self, int64_t[::1] out_buf, Py_ssize_t offset=*) except *             # <<<<<<<<<<<<<<
@@ -1965,7 +1965,7 @@ struct __pyx_opt_args_7opteryx_8compiled_6draken_7interop_15vector_sequence_vect
   PyObject *dtype;
 };
 
-/* "opteryx/compiled/draken/vectors/vector.pxd":27
+/* "opteryx/compiled/draken/vectors/vector.pxd":28
  *     return mixed ^ (mixed >> 32)
  * 
  * cdef class Vector:             # <<<<<<<<<<<<<<
@@ -2464,7 +2464,7 @@ struct __pyx_memoryviewslice_obj {
 
 
 
-/* "opteryx/compiled/draken/vectors/vector.pxd":27
+/* "opteryx/compiled/draken/vectors/vector.pxd":28
  *     return mixed ^ (mixed >> 32)
  * 
  * cdef class Vector:             # <<<<<<<<<<<<<<
@@ -18287,7 +18287,7 @@ static PyObject *__pyx_unpickle_Enum__set_state(struct __pyx_MemviewEnum_obj *__
   return __pyx_r;
 }
 
-/* "opteryx/compiled/draken/vectors/vector.pxd":22
+/* "opteryx/compiled/draken/vectors/vector.pxd":23
  *     void simd_mix_hash(uint64_t* dest, const uint64_t* values, size_t count) nogil
  * 
  * cdef inline uint64_t mix_hash(uint64_t current, uint64_t value) nogil:             # <<<<<<<<<<<<<<
@@ -18299,7 +18299,7 @@ static CYTHON_INLINE uint64_t __pyx_f_7opteryx_8compiled_6draken_7vectors_6vecto
   uint64_t __pyx_v_mixed;
   uint64_t __pyx_r;
 
-  /* "opteryx/compiled/draken/vectors/vector.pxd":23
+  /* "opteryx/compiled/draken/vectors/vector.pxd":24
  * 
  * cdef inline uint64_t mix_hash(uint64_t current, uint64_t value) nogil:
  *     cdef uint64_t mixed = current ^ value             # <<<<<<<<<<<<<<
@@ -18308,7 +18308,7 @@ static CYTHON_INLINE uint64_t __pyx_f_7opteryx_8compiled_6draken_7vectors_6vecto
 */
   __pyx_v_mixed = (__pyx_v_current ^ __pyx_v_value);
 
-  /* "opteryx/compiled/draken/vectors/vector.pxd":24
+  /* "opteryx/compiled/draken/vectors/vector.pxd":25
  * cdef inline uint64_t mix_hash(uint64_t current, uint64_t value) nogil:
  *     cdef uint64_t mixed = current ^ value
  *     mixed = mixed * MIX_HASH_CONSTANT + 1             # <<<<<<<<<<<<<<
@@ -18317,7 +18317,7 @@ static CYTHON_INLINE uint64_t __pyx_f_7opteryx_8compiled_6draken_7vectors_6vecto
 */
   __pyx_v_mixed = ((__pyx_v_mixed * __pyx_v_7opteryx_8compiled_6draken_7vectors_6vector_MIX_HASH_CONSTANT) + 1);
 
-  /* "opteryx/compiled/draken/vectors/vector.pxd":25
+  /* "opteryx/compiled/draken/vectors/vector.pxd":26
  *     cdef uint64_t mixed = current ^ value
  *     mixed = mixed * MIX_HASH_CONSTANT + 1
  *     return mixed ^ (mixed >> 32)             # <<<<<<<<<<<<<<
@@ -18327,7 +18327,7 @@ static CYTHON_INLINE uint64_t __pyx_f_7opteryx_8compiled_6draken_7vectors_6vecto
   __pyx_r = (__pyx_v_mixed ^ (__pyx_v_mixed >> 32));
   goto __pyx_L0;
 
-  /* "opteryx/compiled/draken/vectors/vector.pxd":22
+  /* "opteryx/compiled/draken/vectors/vector.pxd":23
  *     void simd_mix_hash(uint64_t* dest, const uint64_t* values, size_t count) nogil
  * 
  * cdef inline uint64_t mix_hash(uint64_t current, uint64_t value) nogil:             # <<<<<<<<<<<<<<
@@ -42125,7 +42125,7 @@ static int __Pyx_modinit_type_import_code(__pyx_mstatetype *__pyx_mstate) {
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("__Pyx_modinit_type_import_code", 0);
   /*--- Type import code ---*/
-  __pyx_t_1 = PyImport_ImportModule("opteryx.compiled.draken.vectors.vector"); if (unlikely(!__pyx_t_1)) __PYX_ERR(8, 27, __pyx_L1_error)
+  __pyx_t_1 = PyImport_ImportModule("opteryx.compiled.draken.vectors.vector"); if (unlikely(!__pyx_t_1)) __PYX_ERR(8, 28, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
   __pyx_mstate->__pyx_ptype_7opteryx_8compiled_6draken_7vectors_6vector_Vector = __Pyx_ImportType_3_2_4(__pyx_t_1, "opteryx.compiled.draken.vectors.vector", "Vector",
   #if defined(PYPY_VERSION_NUM) && PYPY_VERSION_NUM < 0x050B0000
@@ -42135,8 +42135,8 @@ static int __Pyx_modinit_type_import_code(__pyx_mstatetype *__pyx_mstate) {
   #else
   sizeof(struct __pyx_obj_7opteryx_8compiled_6draken_7vectors_6vector_Vector), __PYX_GET_STRUCT_ALIGNMENT_3_2_4(struct __pyx_obj_7opteryx_8compiled_6draken_7vectors_6vector_Vector),
   #endif
-  __Pyx_ImportType_CheckSize_Warn_3_2_4); if (!__pyx_mstate->__pyx_ptype_7opteryx_8compiled_6draken_7vectors_6vector_Vector) __PYX_ERR(8, 27, __pyx_L1_error)
-  __pyx_vtabptr_7opteryx_8compiled_6draken_7vectors_6vector_Vector = (struct __pyx_vtabstruct_7opteryx_8compiled_6draken_7vectors_6vector_Vector*)__Pyx_GetVtable(__pyx_mstate->__pyx_ptype_7opteryx_8compiled_6draken_7vectors_6vector_Vector); if (unlikely(!__pyx_vtabptr_7opteryx_8compiled_6draken_7vectors_6vector_Vector)) __PYX_ERR(8, 27, __pyx_L1_error)
+  __Pyx_ImportType_CheckSize_Warn_3_2_4); if (!__pyx_mstate->__pyx_ptype_7opteryx_8compiled_6draken_7vectors_6vector_Vector) __PYX_ERR(8, 28, __pyx_L1_error)
+  __pyx_vtabptr_7opteryx_8compiled_6draken_7vectors_6vector_Vector = (struct __pyx_vtabstruct_7opteryx_8compiled_6draken_7vectors_6vector_Vector*)__Pyx_GetVtable(__pyx_mstate->__pyx_ptype_7opteryx_8compiled_6draken_7vectors_6vector_Vector); if (unlikely(!__pyx_vtabptr_7opteryx_8compiled_6draken_7vectors_6vector_Vector)) __PYX_ERR(8, 28, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
   __pyx_t_1 = PyImport_ImportModule("opteryx.compiled.draken.morsels.morsel"); if (unlikely(!__pyx_t_1)) __PYX_ERR(9, 5, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);

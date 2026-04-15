@@ -12,6 +12,7 @@ from libc.stdint cimport uint64_t, int64_t, uint8_t
 from opteryx.compiled.draken.core.buffers cimport ConstAccessor, DictAccessor, DrakenEncoding
 
 from opteryx.compiled.draken.interop.arrow import vector_from_arrow
+from opteryx.compiled.draken.interop.vector_sequence import vector_from_sequence
 
 cdef const uint64_t MIX_HASH_CONSTANT
 cdef const uint64_t NULL_HASH
