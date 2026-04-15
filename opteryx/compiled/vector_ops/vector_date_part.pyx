@@ -15,12 +15,12 @@ Relies on helpers defined there:
   SECONDS_PER_MINUTE, SECONDS_PER_HOUR, SECONDS_PER_DAY, EPOCH_WEEKDAY.
 
 Phase 3 Implementation:
-- No NumPy or PyArrow in the Draken-vector hot path
+- No NumPy in the Draken-vector hot path
 - Pure integer arithmetic for all extraction logic (sub-second and calendar)
 - Loop unrolling for minute/hour/second (simple modulo ops)
 - from_sequence() cimport for zero-copy Int64Vector construction
 - Full calendar-unit coverage: year/month/day/dayofweek/dayofyear/quarter
-- GC safety: _arrow_data_buf is overridden to the cpython.array backing store
+- GC safety: result buffers are backed by the cpython.array store
 
 Phase 4 (Future):
 - AVX2/NEON SIMD intrinsics for 2-4x additional speedup
@@ -222,7 +222,7 @@ cdef Int64Vector _datepart_i64_dict_subsecond(Int64Vector int64_vec, int part_ki
         dict_accessor.row_nulls,
         int64_vec.ordered,
     )
-    result._arrow_data_buf = output_array
+    pass
     return result
 
 
@@ -302,7 +302,7 @@ cdef Int64Vector _datepart_i64_dict_calendar(Int64Vector int64_vec, int part_kin
         dict_accessor.row_nulls,
         int64_vec.ordered,
     )
-    result._arrow_data_buf = output_array
+    pass
     return result
 
 
@@ -404,7 +404,7 @@ cdef Int64Vector _datepart_ts_dict_subsecond(TimestampVector ts_vec, int part_ki
         dict_accessor.row_nulls,
         False,
     )
-    result._arrow_data_buf = output_array
+    pass
     return result
 
 
@@ -482,14 +482,13 @@ cdef Int64Vector _datepart_ts_dict_calendar(TimestampVector ts_vec, int part_kin
         dict_accessor.row_nulls,
         False,
     )
-    result._arrow_data_buf = output_array
+    pass
     return result
 
 
 # ===========================================================================
 # MACRO: _mk_result(output_array, length) — build Int64Vector from array
 #   result = int64_from_sequence(<int64_t[:length:1]>output_ptr)
-#   result._arrow_data_buf = output_array   (keep backing store alive)
 # Used inline in every kernel below.
 # ===========================================================================
 
@@ -546,7 +545,7 @@ cpdef Int64Vector vector_datepart_minute(TimestampVector timestamps, Int64Vector
     if reuse_out:
         return out
     cdef Int64Vector result = int64_from_sequence(<int64_t[:length:1]>output_ptr)
-    result._arrow_data_buf = output_array
+    pass
     return result
 
 
@@ -593,7 +592,7 @@ cpdef Int64Vector vector_datepart_hour(TimestampVector timestamps, Int64Vector o
     if reuse_out:
         return out
     cdef Int64Vector result = int64_from_sequence(<int64_t[:length:1]>output_ptr)
-    result._arrow_data_buf = output_array
+    pass
     return result
 
 
@@ -640,7 +639,7 @@ cpdef Int64Vector vector_datepart_second(TimestampVector timestamps, Int64Vector
     if reuse_out:
         return out
     cdef Int64Vector result = int64_from_sequence(<int64_t[:length:1]>output_ptr)
-    result._arrow_data_buf = output_array
+    pass
     return result
 
 
@@ -683,7 +682,7 @@ cpdef Int64Vector vector_datepart_year(TimestampVector timestamps, Int64Vector o
     if reuse_out:
         return out
     cdef Int64Vector result = int64_from_sequence(<int64_t[:length:1]>output_ptr)
-    result._arrow_data_buf = output_array
+    pass
     return result
 
 
@@ -720,7 +719,7 @@ cpdef Int64Vector vector_datepart_month(TimestampVector timestamps, Int64Vector 
     if reuse_out:
         return out
     cdef Int64Vector result = int64_from_sequence(<int64_t[:length:1]>output_ptr)
-    result._arrow_data_buf = output_array
+    pass
     return result
 
 
@@ -757,7 +756,7 @@ cpdef Int64Vector vector_datepart_day(TimestampVector timestamps, Int64Vector ou
     if reuse_out:
         return out
     cdef Int64Vector result = int64_from_sequence(<int64_t[:length:1]>output_ptr)
-    result._arrow_data_buf = output_array
+    pass
     return result
 
 
@@ -813,7 +812,7 @@ cpdef Int64Vector vector_datepart_dayofweek(TimestampVector timestamps, Int64Vec
     if reuse_out:
         return out
     cdef Int64Vector result = int64_from_sequence(<int64_t[:length:1]>output_ptr)
-    result._arrow_data_buf = output_array
+    pass
     return result
 
 

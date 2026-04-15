@@ -42,9 +42,9 @@ cpdef BoolVector bool_vector_from_int8_mask(object mask_obj, Py_ssize_t n):
 
 
 cpdef BoolVector bool_vector_from_inverted_null_bitmap(object bitmap_mv, Py_ssize_t n):
-    """Build a BoolVector from an Arrow-style null bitmap (inverted for IS NULL).
+    """Build a BoolVector from an inverted null bitmap.
 
-    Arrow/Draken null bitmaps use bit=1 for VALID, bit=0 for NULL.
+    Bitmaps use bit=1 for VALID, bit=0 for NULL.
     IS NULL requires bit=1 where null_bitmap=0, so we invert.
 
     Used for StringVector and ArrayVector which expose null information via
@@ -53,9 +53,6 @@ cpdef BoolVector bool_vector_from_inverted_null_bitmap(object bitmap_mv, Py_ssiz
     Args:
         bitmap_mv: A memoryview of the null bitmap bytes (bit=1 valid, bit=0 null).
         n:         Number of rows.
-
-    Returns:
-        BoolVector where bit[i] = 1 when row i is SQL NULL.
     """
     cdef const uint8_t[::1] bitmap = bitmap_mv
     cdef Py_ssize_t nbytes = (n + 7) >> 3
