@@ -18,6 +18,8 @@ This module provides:
 Used for high-performance temporal analytics and columnar data processing in Draken.
 """
 
+import datetime as _dt
+
 from cpython.bytes cimport PyBytes_FromStringAndSize, PyBytes_AS_STRING
 from cpython.mem cimport PyMem_Malloc, PyMem_Free
 from libc.string cimport memset, memcpy
@@ -51,6 +53,7 @@ cdef extern from "simd_hash.h":
 cdef int64_t MICROSECONDS_PER_DAY = 86_400_000_000
 
 DEF DATE32_HASH_CHUNK = 1024
+_DATE_EPOCH_ORDINAL = _dt.date(1970, 1, 1).toordinal()
 
 
 cdef inline bint _bitmap_is_valid(uint8_t* bitmap, Py_ssize_t idx, Py_ssize_t bit_offset) noexcept nogil:
@@ -779,6 +782,8 @@ cdef class Date32Vector(Vector):
         cdef Py_ssize_t i, n = ptr.length
         cdef list out = []
         cdef uint8_t byte, bit
+        cdef object date_fromordinal = _dt.date.fromordinal
+        cdef int ordinal
 
         if self._has_const:
             if self._const_is_null:
@@ -786,17 +791,29 @@ cdef class Date32Vector(Vector):
                     out.append(None)
             else:
                 for i in range(n):
-                    out.append(self._const_value)
+                    ordinal = _DATE_EPOCH_ORDINAL + self._const_value
+                    try:
+                        out.append(date_fromordinal(ordinal))
+                    except (OverflowError, ValueError):
+                        out.append(self._const_value)
             return out
         if ptr.null_bitmap == NULL:
             for i in range(n):
-                out.append(data[i])
+                ordinal = _DATE_EPOCH_ORDINAL + data[i]
+                try:
+                    out.append(date_fromordinal(ordinal))
+                except (OverflowError, ValueError):
+                    out.append(data[i])
         else:
             for i in range(n):
                 byte = ptr.null_bitmap[i >> 3]
                 bit = (byte >> (i & 7)) & 1
                 if bit:
-                    out.append(data[i])
+                    ordinal = _DATE_EPOCH_ORDINAL + data[i]
+                    try:
+                        out.append(date_fromordinal(ordinal))
+                    except (OverflowError, ValueError):
+                        out.append(data[i])
                 else:
                     out.append(None)
 
@@ -973,6 +990,7 @@ cdef Date32Vector from_arrow(object array):
 
     cdef intptr_t addr = base_ptr + offset * itemsize
     vec.ptr.data = <void*> addr
+    vec._arrow_data_buf = bufs[1]  # Keep Arrow data buffer alive
 
     # Variables for null bitmap handling
     cdef Py_ssize_t n_bytes
@@ -990,6 +1008,7 @@ cdef Date32Vector from_arrow(object array):
         nb_addr = bufs[0].address
         if offset % 8 == 0:
             vec.ptr.null_bitmap = <uint8_t*> (nb_addr + (offset >> 3))
+            vec._arrow_null_buf = bufs[0]  # Keep Arrow null bitmap alive
         else:
             # Unaligned offset: copy and shift
             n_bytes = (vec.ptr.length + 7) // 8
@@ -1079,3 +1098,59 @@ cdef Date32Vector from_dict_nullable(
             dst[i] = 0
 
     return vec
+
+
+cpdef Date32Vector from_int64_vector(Int64Vector source):
+    """
+    Convert an Int64Vector containing epoch-day values to Date32Vector.
+
+    This is a native Draken conversion path (no Arrow interop).
+    """
+    cdef Py_ssize_t i
+    cdef Py_ssize_t n = <Py_ssize_t>source.ptr.length
+    cdef Date32Vector out
+    cdef int64_t* src_data
+    cdef int32_t* dst_data
+    cdef uint8_t* src_null
+    cdef size_t nb_bytes
+    cdef uint8_t* out_null
+    cdef bint is_valid
+    cdef int64_t value64
+    cdef int64_t int32_min = -2147483648
+    cdef int64_t int32_max = 2147483647
+
+    if source._has_const:
+        if source._const_is_null:
+            return Date32Vector.from_constant(None, n, is_null=True)
+        if source._const_value < int32_min or source._const_value > int32_max:
+            raise OverflowError(f"date32 value out of range: {source._const_value}")
+        return Date32Vector.from_constant(<int32_t>source._const_value, n)
+
+    out = Date32Vector(<size_t>n)
+    src_data = <int64_t*>source.ptr.data
+    dst_data = <int32_t*>out.ptr.data
+    src_null = <uint8_t*>source.ptr.null_bitmap
+
+    if src_null != NULL:
+        nb_bytes = (<size_t>n + 7) >> 3
+        out_null = <uint8_t*>malloc(nb_bytes)
+        if out_null == NULL:
+            raise MemoryError()
+        memcpy(out_null, src_null, nb_bytes)
+        out.ptr.null_bitmap = out_null
+    else:
+        out.ptr.null_bitmap = NULL
+
+    for i in range(n):
+        if src_null != NULL:
+            is_valid = ((src_null[i >> 3] >> (i & 7)) & 1) != 0
+            if not is_valid:
+                dst_data[i] = 0
+                continue
+
+        value64 = src_data[i]
+        if value64 < int32_min or value64 > int32_max:
+            raise OverflowError(f"date32 value out of range at row {i}: {value64}")
+        dst_data[i] = <int32_t>value64
+
+    return out

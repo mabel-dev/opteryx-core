@@ -20,7 +20,8 @@ def get_builtin_arithmetic_extended_functions() -> list[FunctionDefinition]:
     """Numeric functions not in the core arithmetic group."""
     # Parameter shortcuts
     _num = ParameterSpec(name="num", type_family="numeric")
-    _temporal_value = ParameterSpec(name="value", type_family="any")
+    _date_value = ParameterSpec(name="value", type_family="date")
+    _timestamp_value = ParameterSpec(name="value", type_family="timestamp")
     _temporal_unit = ParameterSpec(name="unit", type_family="string", constant_only=True)
 
     return [
@@ -59,16 +60,30 @@ def get_builtin_arithmetic_extended_functions() -> list[FunctionDefinition]:
                     ),
                 ),
                 FunctionOverload(
-                    id="TRUNC_temporal",
+                    id="TRUNC_date",
                     parameters=(
-                        _temporal_value,
+                        _date_value,
                         _temporal_unit,
                     ),
                     return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.TIMESTAMP),
                     kernel=KernelSpec(
-                        engine="arrow",
-                        id="temporal",
-                        callable_ref=date_functions.trunc_temporal,
+                        engine="draken",
+                        id="date",
+                        callable_ref=date_functions.trunc_date,
+                        cost_us_per_million=0.92,
+                    ),
+                ),
+                FunctionOverload(
+                    id="TRUNC_timestamp",
+                    parameters=(
+                        _timestamp_value,
+                        _temporal_unit,
+                    ),
+                    return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.TIMESTAMP),
+                    kernel=KernelSpec(
+                        engine="draken",
+                        id="timestamp",
+                        callable_ref=date_functions.trunc_timestamp,
                         cost_us_per_million=0.96,
                     ),
                 ),

@@ -191,9 +191,23 @@ def _evaluate_timetravel_expression(node, apply_interval_literal_to_now: bool = 
             return fixed_value, fixed_type
 
         parameter_values = []
+        resolved_parameters = []
+        scalar_parameters = []
         for parameter in node.parameters:
             value, value_type = _evaluate_timetravel_expression(parameter)
+            scalar_parameters.append((value, value_type))
             parameter_values.append(_as_function_parameter_array(value, value_type))
+            resolved_parameters.append(Node(NodeType.LITERAL, type=value_type, value=value))
+
+        if node.value == "TRUNC" and len(scalar_parameters) == 2:
+            trunc_value, trunc_value_type = scalar_parameters[0]
+            unit_value, unit_type = scalar_parameters[1]
+            if trunc_value_type in (OrsoTypes.DATE, OrsoTypes.TIMESTAMP) and unit_type == OrsoTypes.VARCHAR:
+                if isinstance(trunc_value, datetime.date) and not isinstance(
+                    trunc_value, datetime.datetime
+                ):
+                    trunc_value = datetime.datetime.combine(trunc_value, datetime.time.min)
+                return dates.truncate_single(trunc_value, unit_value.lower()), OrsoTypes.TIMESTAMP
 
         try:
             from opteryx.expression.functions import FunctionResolutionContext
@@ -204,7 +218,7 @@ def _evaluate_timetravel_expression(node, apply_interval_literal_to_now: bool = 
             if _func_def is None or not _func_def.overloads:
                 raise UnsupportedSyntaxError(f"Unknown function '{node.value}'.")
             resolved = _catalog.resolve(
-                node.value, node.parameters, FunctionResolutionContext(schema={}, bound_args={})
+                node.value, resolved_parameters, FunctionResolutionContext(schema={}, bound_args={})
             )
             if resolved is None:
                 raise UnsupportedSyntaxError(f"Unknown function '{node.value}'.")

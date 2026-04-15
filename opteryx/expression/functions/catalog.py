@@ -284,6 +284,10 @@ class FunctionCatalog:
                 return 1.0 if node_type == OrsoTypes.BLOB else _INF
             if type_family == "temporal":
                 return 0.0 if isinstance(node_type, OrsoTypes) and node_type.is_temporal() else _INF
+            if type_family == "date":
+                return 0.0 if node_type == OrsoTypes.DATE else _INF
+            if type_family == "timestamp":
+                return 0.0 if node_type == OrsoTypes.TIMESTAMP else _INF
             if type_family == "numeric_vector":
                 return 0.0 if is_numeric_vector_type(node_type, element_type) else _INF
 
@@ -318,6 +322,8 @@ class FunctionCatalog:
                 "integer": "INTEGER",
                 "boolean": "BOOLEAN",
                 "temporal": "TIMESTAMP",
+                "date": "DATE",
+                "timestamp": "TIMESTAMP",
             }
             selected_for_error = scored[0]
             mismatches = []
