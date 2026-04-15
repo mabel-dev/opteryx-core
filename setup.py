@@ -554,6 +554,12 @@ extensions = [
         sources=["opteryx/third_party/mbleven.pyx"],
         extra_compile_args=C_FLAGS,
     ),
+    # High-performance distogram for cost-based optimization
+    Extension(
+        name="opteryx.third_party.maki_nage.distogram",
+        sources=["opteryx/third_party/maki_nage/distogram.pyx"],
+        extra_compile_args=C_FLAGS,
+    ),
     # File format readers
     Extension(
         "opteryx.compiled.rugo.parquet",
