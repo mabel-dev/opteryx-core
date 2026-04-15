@@ -89,7 +89,7 @@ STATEMENTS = [
         ("THIS IS NOT VALID SQL", None, None, SqlError),
 
         # PAGING OF DATASETS AFTER A GROUP BY [#179]
-        ("SELECT * FROM (SELECT COUNT(*), column_1 FROM testdata.astronauts GROUP BY column_1 ORDER BY COUNT(*)) AS SQ LIMIT 5", 5, 2, None),
+        ("SELECT * FROM (SELECT COUNT(*), name FROM testdata.astronauts GROUP BY name ORDER BY COUNT(*)) AS SQ LIMIT 5", 5, 2, None),
         # FILTER CREATION FOR 3 OR MORE ANDED PREDICATES FAILS [#182]
         ("SELECT * FROM testdata.astronauts WHERE name LIKE '%o%' AND `year` > 1900 AND gender ILIKE '%ale%' AND group IN (1,2,3,4,5,6)", 41, 19, None),
 
