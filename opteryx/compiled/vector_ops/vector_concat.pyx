@@ -13,7 +13,7 @@ from opteryx.compiled.draken.vectors.array_vector cimport ArrayVector
 from opteryx.compiled.draken.vectors.string_vector cimport StringVector
 from opteryx.compiled.draken.vectors import string_vector as string_vector_module
 
-# NOTE: DrakenArrayBuffer.values is NEVER set for arrow-backed ArrayVectors.
+# NOTE: DrakenArrayBuffer.values is NEVER set for ArrayVectors.
 # The child is stored in the Python-level `_child` attribute as a StringVector.
 # Always access arr._child, cast to StringVector, then use .ptr.
 
@@ -33,7 +33,7 @@ cpdef StringVector vector_concat_array(ArrayVector arr):
     Returns a StringVector of length == arr.length.
     """
     cdef DrakenArrayBuffer* arr_ptr = arr.ptr
-    # ptr.values is NOT set for arrow-backed ArrayVectors — child lives in _child.
+    # ptr.values is NOT set for ArrayVectors — child lives in _child.
     cdef StringVector child_sv = <StringVector>arr._child
     cdef DrakenVarBuffer* child_ptr = child_sv.ptr
     cdef Py_ssize_t n = arr_ptr.length
@@ -74,7 +74,7 @@ cpdef StringVector vector_concat_ws_array(bytes sep, ArrayVector arr):
     Returns a StringVector of length == arr.length.
     """
     cdef DrakenArrayBuffer* arr_ptr = arr.ptr
-    # ptr.values is NOT set for arrow-backed ArrayVectors — child lives in _child.
+    # ptr.values is NOT set for ArrayVectors — child lives in _child.
     cdef StringVector child_sv = <StringVector>arr._child
     cdef DrakenVarBuffer* child_ptr = child_sv.ptr
     cdef Py_ssize_t n = arr_ptr.length
