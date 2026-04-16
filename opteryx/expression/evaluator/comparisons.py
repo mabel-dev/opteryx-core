@@ -2,7 +2,6 @@
 
 Explicit comparison dispatch for all native Draken vector types.
 ArrowVector has been removed; all paths now use native Draken APIs.
-NumPy is not imported here.
 """
 
 import datetime
@@ -19,24 +18,16 @@ from .temporal_ops import (
 )
 from .type_coercion import (
     _coerce_date32,
-    _coerce_date32_set,
     _coerce_float,
     _coerce_float_set,
     _coerce_int64,
     _coerce_int64_set,
     _coerce_str,
-    _coerce_str_set,
-    _coerce_temporal_scalar_for_arrow,
     _coerce_timestamp,
-    _coerce_timestamp_set,
     _constant_scalar_value,
     _dictionary_compare_vector,
     _is_constant_vector_like,
-    _is_null_as_boolvector,
 )
-
-_EPOCH_DATE = datetime.date(1970, 1, 1)
-_EPOCH_DATETIME = datetime.datetime(1970, 1, 1)
 
 _NEGATED_OPS = {
     "NotEq": "Eq",
@@ -47,6 +38,12 @@ _NEGATED_OPS = {
     "NotInStr": "InStr",
     "NotIInStr": "IInStr",
 }
+
+
+def _get_boolvector():
+    """Lazy import to avoid circular dependencies."""
+    from opteryx.compiled.draken.vectors.bool_vector import BoolVector
+    return BoolVector
 
 
 # ---------------------------------------------------------------------------
@@ -81,9 +78,9 @@ def _call_vector_vector_op(op: str, left_vec, right_vec):
 
     Examples:
         >>> from opteryx.compiled.draken.vectors import Int64Vector
-        >>> import pyarrow as pa
-        >>> v1 = Int64Vector.from_arrow(pa.array([1, 2, 3]))
-        >>> v2 = Int64Vector.from_arrow(pa.array([1, 2, 4]))
+        >>> from opteryx.compiled.draken.interop.arrow import vector_from_sequence
+        >>> v1 = vector_from_sequence([1, 2, 3])
+        >>> v2 = vector_from_sequence([1, 2, 4])
         >>> result = _call_vector_vector_op("Eq", v1, v2)
         >>> result.to_pylist()
         [True, True, False]
@@ -100,7 +97,7 @@ def _call_vector_vector_op(op: str, left_vec, right_vec):
 
 
 def _int64_compare(op: str, vec, right):
-    from opteryx.compiled.draken.vectors.bool_vector import BoolVector
+    BoolVector = _get_boolvector()
 
     if right is None:
         return BoolVector(len(vec))
@@ -139,7 +136,7 @@ def _int64_compare(op: str, vec, right):
 
 
 def _float64_compare(op: str, vec, right):
-    from opteryx.compiled.draken.vectors.bool_vector import BoolVector
+    BoolVector = _get_boolvector()
 
     if right is None:
         return BoolVector(len(vec))
@@ -172,7 +169,7 @@ def _float64_compare(op: str, vec, right):
 
 
 def _dict_compare(op: str, vec, right):
-    from opteryx.compiled.draken.vectors.bool_vector import BoolVector
+    BoolVector = _get_boolvector()
 
     vec = _dictionary_compare_vector(vec)
     if vec is None:
@@ -186,7 +183,7 @@ def _dict_compare(op: str, vec, right):
         right = _constant_scalar_value(right)
 
     # Column-to-column: right is also a vector with comparison methods
-    elif hasattr(right, "to_arrow") and not _is_constant_vector_like(right):
+    elif is_draken_vector(right):
         right_vec = _dictionary_compare_vector(right)
         if right_vec is None:
             raise NotImplementedError(
@@ -213,14 +210,8 @@ def _dict_compare(op: str, vec, right):
         vec_type = get_vector_type(vec)
         if vec_type == VectorType.DATE32:
             int_val = _coerce_date32(right)
-        elif vec_type == VectorType.TIMESTAMP:
-            int_val = _coerce_timestamp(right)
         else:
-            # Use the vector type directly instead of peeking through Arrow.
-            if get_vector_type(vec) == VectorType.DATE32:
-                int_val = _coerce_date32(right)
-            else:
-                int_val = _coerce_timestamp(right)
+            int_val = _coerce_timestamp(right)
 
         if op == "Eq":
             return vec.equals(int_val)
@@ -270,7 +261,7 @@ def _dict_compare(op: str, vec, right):
 
 
 def _constant_compare(op: str, vec, right):
-    from opteryx.compiled.draken.vectors.bool_vector import BoolVector
+    BoolVector = _get_boolvector()
     from opteryx.expression.operations.fastpath_constant import _coerce_in_list_values
 
     if right is None:
@@ -303,7 +294,6 @@ def _decimal_compare(op: str, vec, right):
     straight through to the comparison methods.
     """
     from opteryx.compiled.draken.vectors._decimal_vector import DecimalVector
-    from opteryx.utils.vector_types import is_scalar
 
     # Set membership (InList is handled before the scalar/vector branch)
     if op == "InList":
@@ -432,9 +422,7 @@ def draken_compare(op: str, left, right, left_schema_type=None, right_schema_typ
             return _string_anyop_like(left, right, ignore_case=True).not_vector()
         return vector_anyop_ilike(right, left).not_vector()
     if op == "AtQuestion":
-        import pyarrow as pa
-
-        from opteryx.compiled.draken.interop.arrow import vector_from_arrow
+        from opteryx.compiled.draken.interop.arrow import vector_from_sequence
         from opteryx.third_party.tktech import csimdjson as simdjson
 
         docs = left.to_pylist()
@@ -461,7 +449,7 @@ def draken_compare(op: str, left, right, left_schema_type=None, right_schema_typ
 
             result = [_check(doc) for doc in docs]
 
-        return vector_from_arrow(pa.array(result, type=pa.bool_()))
+        return vector_from_sequence(result)
 
     # --- Standard comparison operators ---
 
@@ -478,11 +466,8 @@ def draken_compare(op: str, left, right, left_schema_type=None, right_schema_typ
 
     # Vector left with null right: all False
     if right is None and not isinstance(left, (str, int, float, bytes, bool, type(None))):
-        from opteryx.compiled.draken.vectors.bool_vector import BoolVector
-
+        BoolVector = _get_boolvector()
         return BoolVector(len(left))
-
-    from opteryx.utils.vector_types import VectorType, get_vector_type
 
     vec_type = get_vector_type(left)
 
@@ -500,10 +485,6 @@ def draken_compare(op: str, left, right, left_schema_type=None, right_schema_typ
     elif vec_type == VectorType.DATE32:
         result = _date32_compare(op, left, right)
     elif vec_type == VectorType.INTERVAL:
-        from opteryx.compiled.draken.vectors.bool_vector import BoolVector
-
-        from .type_coercion import _coerce_interval
-
         result = _interval_compare(op, left, right)
     elif vec_type == VectorType.DICTIONARY_ENCODED:
         result = _dict_compare(op, left, right)
@@ -539,5 +520,7 @@ def _bool_compare(op: str, left, right):
     raise NotImplementedError(f"BoolVector: unsupported op {op!r}")
 
 
+# These are re-exported for use in other modules; they should arguably be defined
+# in temporal_ops.py but remain here for backward compatibility
 _DATE_TYPES = frozenset(("Date32Vector", "TimestampVector"))
 _INTERVAL_TYPES = frozenset(("IntervalVector",))
