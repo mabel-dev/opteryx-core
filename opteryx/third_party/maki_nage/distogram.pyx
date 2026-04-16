@@ -20,8 +20,6 @@ __version__ = "3.0.0"
 """
 The following changes have been made for Opteryx:
 - The ability to weight the differences has been removed
-- Removed numpy dependency completely
-- Fixed count_at undefined bug
 - Full Cythonization with cdef class
 - Struct-based bin storage for C-level performance
 """
@@ -181,7 +179,7 @@ cdef class Distogram:
         if len(values) == 0:
             return
 
-        # Extract unique values and counts (replaces numpy.unique)
+        # Extract unique values and counts
         cdef dict value_counts = {}
         cdef double fv
         cdef list bin_values
@@ -219,7 +217,7 @@ cdef class Distogram:
 
     @staticmethod
     def _histogram_native(values, int num_bins):
-        """Compute histogram using native Python (replaces numpy.histogram)."""
+        """Compute histogram using native Python."""
         cdef double min_val = min(values)
         cdef double max_val = max(values)
         cdef double bin_width = (max_val - min_val) / num_bins if num_bins > 0 else 1.0

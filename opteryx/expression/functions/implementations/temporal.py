@@ -15,10 +15,6 @@ Includes:
 
 import datetime
 
-import numpy
-import pyarrow
-from pyarrow import compute
-
 from opteryx.exceptions import InvalidFunctionParameterError
 
 
@@ -48,6 +44,7 @@ def date_part(part, arr):
 
     # Date32Vector: cast to TimestampVector so the timestamp kernels can be reused.
     if vector_type == "Date32Vector":
+        import pyarrow
         from opteryx.compiled.draken.interop.arrow import vector_from_arrow
 
         arr = vector_from_arrow(arr.to_arrow().cast(pyarrow.timestamp("us")))
@@ -155,6 +152,9 @@ def date_diff(part, start, end):
     All inputs are normalised to pyarrow timestamp[us] arrays first so that
     no numpy datetime64 intermediates are needed.
     """
+    import pyarrow
+    from pyarrow import compute
+
     from opteryx.compiled.draken.interop.arrow import vector_from_arrow as _vfa
     from opteryx.compiled.vector_ops import vector_date_diff
 
@@ -207,73 +207,99 @@ def time_diff(time1, time2):
 
 
 def date_format(dates, pattern):  # [#325]
+    """Format dates using strftime pattern.
+
+    Inputs: dates is a Draken TimestampVector or Date32Vector, pattern is a bytes scalar.
+    """
     pattern = pattern[0]
     return [None if d is None else d.strftime(pattern) for d in dates.tolist()]
 
 
 def date_floor(dates, magnitude, units):  # [#325]
+    """Floor dates to the nearest unit.
+
+    Inputs: dates (Draken vector), magnitude (scalar), units (str scalar).
+    """
+    from pyarrow import compute
+
+    # Extract scalars from constant vectors if needed
     if hasattr(magnitude, "as_py"):
         magnitude = magnitude.as_py()
-    elif isinstance(magnitude, numpy.ndarray):
+    else:
         magnitude = magnitude[0]
+
     if hasattr(units, "as_py"):
         units = units.as_py()
-    elif isinstance(units, numpy.ndarray):
+    else:
         units = units[0]
+
     return compute.floor_temporal(dates, int(magnitude), units)
 
 
 def from_unixtimestamp(values):
-    return numpy.array(
-        [datetime.datetime.fromtimestamp(i, tz=datetime.timezone.utc) for i in values],
-        dtype="datetime64[s]",
-    )
+    """Convert Unix timestamps to datetime objects.
+
+    Args:
+        values: Array-like of Unix timestamps (seconds since epoch).
+
+    Returns:
+        List of datetime.datetime objects in UTC.
+    """
+    return [datetime.datetime.fromtimestamp(i, tz=datetime.timezone.utc) for i in values]
+
+
+def convert_int64_array_to_pyarrow_datetime(array):
+    """Convert a PyArrow int64 array (Unix timestamps in microseconds) to timestamp[us].
+
+    Used by type_coercion.to_temporal_array() during query planning.
+    """
+    import pyarrow
+
+    if isinstance(array, pyarrow.Array) and pyarrow.types.is_integer(array.type):
+        return array.cast(pyarrow.timestamp("us"))
+    return array
 
 
 def unixtime(array):
     """
-    Convert a NumPy or Arrow array of timestamps or ISO8601 strings to Unix time
-    (seconds since epoch). NaNs or nulls are converted to numpy.nan.
+    Convert a Draken vector or Arrow array of timestamps or ISO8601 strings to Unix time
+    (seconds since epoch).
+
+    Inputs:
+      - TimestampVector, Date32Vector → Int64Vector of seconds since epoch
+      - Arrow timestamp/date arrays → converted via Arrow compute
+      - Draken or Arrow → handled by their respective paths
     """
+    import pyarrow
+    from pyarrow import compute
+
+    # Draken vectors → convert to Arrow
     if hasattr(array, "to_arrow"):
         array = array.to_arrow()
 
+    # Arrow ChunkedArray → combine and recurse
     if isinstance(array, pyarrow.ChunkedArray):
         if array.num_chunks == 0:
-            return numpy.array([], dtype=numpy.int64)
+            return []
         chunks = [unixtime(chunk) for chunk in array.chunks]
-        return numpy.concatenate(chunks)
+        return sum(chunks, [])  # Flatten list of lists
 
+    # Arrow Array → convert to int64 Unix timestamp
     if isinstance(array, pyarrow.Array):
         if (
             pyarrow.types.is_date32(array.type)
             or pyarrow.types.is_date64(array.type)
             or pyarrow.types.is_timestamp(array.type)
         ):
-            return (
+            result = (
                 array.cast(pyarrow.timestamp("s"))
                 .cast(pyarrow.int64())
-                .to_numpy(zero_copy_only=False)
+                .to_pylist()
             )
-        array = array.to_numpy(zero_copy_only=False)
+            return result
+        # String arrays → try parsing as ISO8601
+        if pyarrow.types.is_string(array.type) or pyarrow.types.is_large_string(array.type):
+            parsed = compute.strptime(array, "%Y-%m-%dT%H:%M:%S", "us")
+            return unixtime(parsed)
 
-    if not isinstance(array, numpy.ndarray):
-        array = numpy.asarray(array)
-
-    if numpy.issubdtype(array.dtype, numpy.datetime64):
-        return array.astype("datetime64[s]").astype(numpy.int64)
-
-    if array.dtype.kind in {"U", "S", "O"}:
-
-        def to_epoch(s):
-            if s is None or s != s:
-                return numpy.nan
-            try:
-                dt = numpy.datetime64(s, "s")
-                return float(dt.astype(numpy.int64))
-            except Exception:
-                return numpy.nan
-
-        return numpy.vectorize(to_epoch, otypes=[numpy.float64])(array)
-
-    raise TypeError(f"Unsupported array type: {array.dtype}")
+    raise TypeError(f"Unsupported array type: {type(array).__name__}")
