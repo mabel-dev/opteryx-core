@@ -1,7 +1,6 @@
 """Main expression evaluation engine."""
 
 import datetime
-import decimal
 
 from opteryx.exceptions import ColumnReferencedBeforeEvaluationError
 from opteryx.utils.vector_types import VectorType, get_vector_type, is_draken_vector, is_scalar

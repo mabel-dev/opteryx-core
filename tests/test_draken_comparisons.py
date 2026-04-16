@@ -11,7 +11,6 @@ Tests cover:
 - Type conversions and coercions
 """
 
-import datetime
 
 import pyarrow as pa
 import pytest

@@ -16,7 +16,7 @@ handle timezone conversion.
 """
 
 import datetime
-from typing import Any, Union
+from typing import Any
 
 
 def timestamp_to_int64_us(value: Any) -> int:

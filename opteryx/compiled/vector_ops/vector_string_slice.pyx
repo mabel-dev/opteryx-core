@@ -58,7 +58,7 @@ cpdef StringVector vector_string_slice_left(StringVector vec, object length):
 
     Parameters:
         vec: StringVector of strings.
-        length: int scalar or iterable of ints — number of bytes to keep.
+        length: StringVector or int — number of bytes to keep.
 
     Returns:
         StringVector: sliced strings.
@@ -72,9 +72,15 @@ cpdef StringVector vector_string_slice_left(StringVector vec, object length):
     cdef DrakenConstantStringPayload* const_val
     cdef int32_t const_len
 
-    # Normalize length to a list
+    # Convert StringVector to list of integers
     cdef list length_list
-    if hasattr(length, "__iter__") and not isinstance(length, (str, bytes)):
+    if isinstance(length, StringVector):
+        # Convert StringVector elements to integers
+        try:
+            length_list = [int(str(s)) if s is not None else 0 for s in length]
+        except (ValueError, TypeError):
+            length_list = [0] * n
+    elif hasattr(length, "__iter__") and not isinstance(length, (str, bytes)):
         try:
             length_list = list(length)
         except TypeError:
@@ -124,7 +130,7 @@ cpdef StringVector vector_string_slice_right(StringVector vec, object length):
 
     Parameters:
         vec: StringVector of strings.
-        length: int scalar or iterable of ints — number of bytes to keep from the right.
+        length: StringVector or int — number of bytes to keep from the right.
 
     Returns:
         StringVector: sliced strings.
@@ -139,7 +145,13 @@ cpdef StringVector vector_string_slice_right(StringVector vec, object length):
     cdef int32_t const_len
 
     cdef list length_list
-    if hasattr(length, "__iter__") and not isinstance(length, (str, bytes)):
+    if isinstance(length, StringVector):
+        # Convert StringVector elements to integers
+        try:
+            length_list = [int(str(s)) if s is not None else 0 for s in length]
+        except (ValueError, TypeError):
+            length_list = [0] * n
+    elif hasattr(length, "__iter__") and not isinstance(length, (str, bytes)):
         try:
             length_list = list(length)
         except TypeError:

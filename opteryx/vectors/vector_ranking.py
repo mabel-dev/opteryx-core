@@ -10,7 +10,7 @@ Key operations:
 """
 
 import heapq
-from typing import List, Tuple
+from typing import List
 
 
 def sanitize_scores(scores: List[float], metric: str = "COSINE_SIMILARITY") -> List[float]:
@@ -30,10 +30,7 @@ def sanitize_scores(scores: List[float], metric: str = "COSINE_SIMILARITY") -> L
     result = []
     for score in scores:
         # NaN check: NaN != NaN is True in Python
-        if score != score:
-            result.append(0.0)
-        # Infinity handling
-        elif score == float("inf") or score == float("-inf"):
+        if score != score or score == float("inf") or score == float("-inf"):
             result.append(0.0)
         else:
             # Clamp cosine similarity to valid range

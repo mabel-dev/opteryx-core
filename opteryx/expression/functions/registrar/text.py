@@ -15,7 +15,26 @@ from __future__ import annotations
 from typing import List
 
 from opteryx.compiled import vector_ops as compiled_vector_ops
-from opteryx.compiled.vector_ops import vector_ends_with, vector_starts_with
+from opteryx.compiled.draken.vectors.string_vector import lowercase as vector_lowercase
+from opteryx.compiled.draken.vectors.string_vector import uppercase as vector_uppercase
+from opteryx.compiled.vector_ops import (
+    vector_ends_with,
+    vector_initcap,
+    vector_length,
+    vector_levenshtein,
+    vector_md5,
+    vector_position,
+    vector_replace,
+    vector_reverse,
+    vector_sha1,
+    vector_sha256,
+    vector_sha512,
+    vector_soundex,
+    vector_starts_with,
+    vector_string_slice_left,
+    vector_string_slice_right,
+    vector_string_length,
+)
 from opteryx.expression.functions import (
     FunctionDefinition,
     FunctionOverload,
@@ -43,7 +62,7 @@ def get_builtin_text_functions() -> List[FunctionDefinition]:
     return [
         _make(
             "UPPER",
-            string_functions.to_upper,
+            vector_uppercase,
             OrsoTypes.VARCHAR,
             (_str,),
             aliases=("UCASE",),
@@ -54,7 +73,7 @@ def get_builtin_text_functions() -> List[FunctionDefinition]:
         ),
         _make(
             "LOWER",
-            string_functions.to_lower,
+            vector_lowercase,
             OrsoTypes.VARCHAR,
             (_str,),
             aliases=("LCASE",),
@@ -65,18 +84,18 @@ def get_builtin_text_functions() -> List[FunctionDefinition]:
         ),
         _make(
             "LENGTH",
-            string_functions.vector_lengther,
+            vector_string_length,
             OrsoTypes.INTEGER,
             (_string,),
             aliases=("CHAR_LENGTH", "CHARACTER_LENGTH"),
             category="text",
-            engine="arrow",
+            engine="draken",
             summary="Return length of string.",
             cost=221.0,
         ),
         _make(
             "INITCAP",
-            string_functions._initcap,
+            vector_initcap,
             OrsoTypes.VARCHAR,
             (_string,),
             aliases=("TITLE",),
@@ -87,7 +106,7 @@ def get_builtin_text_functions() -> List[FunctionDefinition]:
         ),
         _make(
             "REVERSE",
-            string_functions._reverse,
+            vector_reverse,
             OrsoTypes.VARCHAR,
             (_string,),
             category="text",
@@ -97,7 +116,7 @@ def get_builtin_text_functions() -> List[FunctionDefinition]:
         ),
         _make(
             "SOUNDEX",
-            string_functions._soundex,
+            vector_soundex,
             OrsoTypes.VARCHAR,
             (_string,),
             category="text",
@@ -124,7 +143,7 @@ def get_builtin_text_functions() -> List[FunctionDefinition]:
                     ),
                     return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.VARCHAR),
                     kernel=KernelSpec(
-                        engine="arrow",
+                        engine="draken",
                         id="default",
                         callable_ref=lambda *args: "".join(str(a) for a in args if a is not None),
                         null_policy="passthru",
@@ -151,7 +170,7 @@ def get_builtin_text_functions() -> List[FunctionDefinition]:
                     ),
                     return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.VARCHAR),
                     kernel=KernelSpec(
-                        engine="arrow",
+                        engine="draken",
                         id="default",
                         callable_ref=string_functions.substring,
                         cost_us_per_million=378.0,
@@ -166,7 +185,7 @@ def get_builtin_text_functions() -> List[FunctionDefinition]:
                     ),
                     return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.VARCHAR),
                     kernel=KernelSpec(
-                        engine="arrow",
+                        engine="draken",
                         id="default",
                         callable_ref=string_functions.substring,
                         cost_us_per_million=429.0,
@@ -176,7 +195,7 @@ def get_builtin_text_functions() -> List[FunctionDefinition]:
         ),
         _make(
             "LEFT",
-            string_functions._string_slice_left,
+            vector_string_slice_left,
             OrsoTypes.VARCHAR,
             (
                 _string,
@@ -188,7 +207,7 @@ def get_builtin_text_functions() -> List[FunctionDefinition]:
         ),
         _make(
             "RIGHT",
-            string_functions._string_slice_right,
+            vector_string_slice_right,
             OrsoTypes.VARCHAR,
             (
                 _string,
@@ -293,7 +312,7 @@ def get_builtin_text_extended_functions() -> List[FunctionDefinition]:
                     ),
                     return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.VARCHAR),
                     kernel=KernelSpec(
-                        engine="arrow",
+                        engine="draken",
                         id="default",
                         callable_ref=_concat_ws_kernel,
                         null_policy="passthru",
@@ -320,7 +339,7 @@ def get_builtin_text_extended_functions() -> List[FunctionDefinition]:
                     ),
                     return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.ARRAY),
                     kernel=KernelSpec(
-                        engine="arrow",
+                        engine="draken",
                         id="default",
                         callable_ref=string_functions.split,
                         cost_us_per_million=531.0,
@@ -335,7 +354,7 @@ def get_builtin_text_extended_functions() -> List[FunctionDefinition]:
                     ),
                     return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.ARRAY),
                     kernel=KernelSpec(
-                        engine="arrow",
+                        engine="draken",
                         id="default",
                         callable_ref=string_functions.split,
                         cost_us_per_million=589.0,
@@ -361,9 +380,9 @@ def get_builtin_text_extended_functions() -> List[FunctionDefinition]:
                     ),
                     return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.INTEGER),
                     kernel=KernelSpec(
-                        engine="arrow",
+                        engine="draken",
                         id="default",
-                        callable_ref=string_functions.position,
+                        callable_ref=lambda sub, string: vector_position(string, sub),
                         cost_us_per_million=291.0,
                     ),
                 ),
@@ -371,7 +390,7 @@ def get_builtin_text_extended_functions() -> List[FunctionDefinition]:
         ),
         _make(
             "REPLACE",
-            string_functions._replace,
+            vector_replace,
             OrsoTypes.VARCHAR,
             (
                 _string,
@@ -401,7 +420,7 @@ def get_builtin_text_extended_functions() -> List[FunctionDefinition]:
                     ),
                     return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.VARCHAR),
                     kernel=KernelSpec(
-                        engine="arrow",
+                        engine="draken",
                         id="default",
                         callable_ref=string_functions.regex_replace,
                         null_policy="passthru",
@@ -508,7 +527,7 @@ def get_builtin_text_extended_functions() -> List[FunctionDefinition]:
         ),
         _make(
             "LEVENSHTEIN",
-            string_functions.levenshtein,
+            vector_levenshtein,
             OrsoTypes.INTEGER,
             (
                 _string,
@@ -538,7 +557,7 @@ def get_builtin_text_extended_functions() -> List[FunctionDefinition]:
                     ),
                     return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.VARCHAR),
                     kernel=KernelSpec(
-                        engine="arrow",
+                        engine="draken",
                         id="default",
                         callable_ref=string_functions.left_pad,
                         cost_us_per_million=318.0,
@@ -565,7 +584,7 @@ def get_builtin_text_extended_functions() -> List[FunctionDefinition]:
                     ),
                     return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.VARCHAR),
                     kernel=KernelSpec(
-                        engine="arrow",
+                        engine="draken",
                         id="default",
                         callable_ref=string_functions.right_pad,
                         cost_us_per_million=321.0,
@@ -588,7 +607,7 @@ def get_builtin_text_extended_functions() -> List[FunctionDefinition]:
                     parameters=(ParameterSpec(name="num", type_family="integer"),),
                     return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.VARCHAR),
                     kernel=KernelSpec(
-                        engine="arrow",
+                        engine="draken",
                         id="default",
                         callable_ref=string_functions.to_char,
                         cost_us_per_million=8.2,
@@ -611,7 +630,7 @@ def get_builtin_text_extended_functions() -> List[FunctionDefinition]:
                     parameters=(_string,),
                     return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.INTEGER),
                     kernel=KernelSpec(
-                        engine="arrow",
+                        engine="draken",
                         id="default",
                         callable_ref=string_functions.to_ascii,
                         cost_us_per_million=6.8,
@@ -637,7 +656,7 @@ def get_builtin_text_extended_functions() -> List[FunctionDefinition]:
                     ),
                     return_spec=ReturnSpec(mode="fixed", fixed_type=OrsoTypes.BOOLEAN),
                     kernel=KernelSpec(
-                        engine="arrow",
+                        engine="draken",
                         id="default",
                         callable_ref=string_functions.match_against,
                         null_policy="compress",

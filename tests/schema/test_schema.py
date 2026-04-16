@@ -1,6 +1,5 @@
 """Unit tests for inlined schema definitions."""
 
-import json
 
 import pytest
 
