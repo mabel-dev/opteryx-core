@@ -219,7 +219,6 @@ def get_builtin_functions() -> list[FunctionDefinition]:
     # appropriate getter as noted above.
     from . import aggregate as _agg
     from . import arithmetic as _arith
-    from . import arithmetic_extended as _arith_ext
     from . import array_misc as _array
     from . import constant as _const
     from . import hash_encoding as _hash
@@ -236,7 +235,7 @@ def get_builtin_functions() -> list[FunctionDefinition]:
     functions.extend(_text.get_builtin_text_functions())
     functions.extend(_text_ext.get_builtin_text_extended_functions())
     functions.extend(_arith.get_builtin_arithmetic_functions())
-    functions.extend(_arith_ext.get_builtin_arithmetic_extended_functions())
+    functions.extend(_arith.get_builtin_arithmetic_extended_functions())
     functions.extend(_type_conv.get_builtin_type_conversion_functions())
     functions.extend(_logical.get_builtin_logical_functions())
     functions.extend(_agg.get_builtin_aggregate_functions())

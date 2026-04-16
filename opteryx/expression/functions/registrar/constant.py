@@ -3,8 +3,6 @@ from __future__ import annotations
 import datetime
 from typing import List
 
-import numpy
-
 # `_make` is the registrar package-level helper which constructs a
 # FunctionDefinition with a single overload. Use the shorthand form where
 # the second argument is the return type for zero-argument constants.
@@ -51,19 +49,17 @@ def fixed_value_function(function, context):
 
         return OrsoTypes.VARCHAR, opteryx.__version__
     if function in ("NOW", "UTC_TIMESTAMP"):
-        return OrsoTypes.TIMESTAMP, numpy.datetime64(context.execution_context.connected_at, "us")
+        return OrsoTypes.TIMESTAMP, context.execution_context.connected_at
     if function in ("CURRENT_TIME",):
         # CURRENT_TIME is an alias for NOW, so we return the same value
         return OrsoTypes.TIME, context.execution_context.connected_at.time()
     if function in ("CURRENT_TIMESTAMP",):
         # CURRENT_TIMESTAMP is an alias for NOW, so we return the same value
-        return OrsoTypes.TIMESTAMP, numpy.datetime64(context.execution_context.connected_at, "us")
+        return OrsoTypes.TIMESTAMP, context.execution_context.connected_at
     if function in ("CURRENT_DATE", "TODAY"):
-        return OrsoTypes.DATE, numpy.datetime64(context.execution_context.connected_at.date(), "D")
+        return OrsoTypes.DATE, context.execution_context.connected_at.date()
     if function in ("YESTERDAY",):
-        return OrsoTypes.DATE, numpy.datetime64(
-            context.execution_context.connected_at.date() - datetime.timedelta(days=1), "D"
-        )
+        return OrsoTypes.DATE, context.execution_context.connected_at.date() - datetime.timedelta(days=1)
     if function == "CONNECTION_ID":
         return OrsoTypes.INTEGER, context.execution_context.query_id
     if function == "DATABASE":
@@ -78,9 +74,6 @@ def fixed_value_function(function, context):
     if function == "E":
         # eulers number
         return OrsoTypes.DOUBLE, 2.71828182845904523536028747135266249775724709369995
-    if function == "UTC_TIMESTAMP":
-        # UTC timestamp
-        return OrsoTypes.TIMESTAMP, numpy.datetime64(datetime.datetime.now(datetime.UTC), "us")
     if function == "UNIXTIME":
         # We should only ever get here if the function is called without parameters
         return OrsoTypes.INTEGER, context.execution_context.connected_at.timestamp()

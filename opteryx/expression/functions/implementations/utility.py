@@ -17,30 +17,81 @@ Includes:
 - Vector operations: COSINE_SIMILARITY, COSINE_DISTANCE
 """
 
-import numpy
-import pyarrow
+import math
 
 from opteryx.third_party.tktech import csimdjson as simdjson
 from opteryx.vectors.embeddings import embed_text_matrix, embed_text_values, get_embedding_provider
 
 
+# ============================================================================
+# Math utility functions for vector operations (replaces NumPy)
+# ============================================================================
+
+
+def _vec_norm(vec: list) -> float:
+    """Compute L2 norm of a vector."""
+    sum_sq = sum(x * x for x in vec)
+    return math.sqrt(sum_sq) if sum_sq > 0 else 0.0
+
+
+def _dot_product(a: list, b: list) -> float:
+    """Compute dot product of two vectors."""
+    return sum(x * y for x, y in zip(a, b))
+
+
+def _is_finite(x: float) -> bool:
+    """Check if a float value is finite (not NaN or inf)."""
+    return x == x and abs(x) != float('inf')  # x==x is False for NaN
+
+
+def _bool_list_to_vector(bool_list: list):
+    """Convert a Python list of bools to a Draken BoolVector.
+
+    Fallback: Uses PyArrow bridge since pure Python bit-packing of Draken vectors
+    requires direct memory manipulation that's not safely possible from Python.
+    """
+    import pyarrow
+    from opteryx.compiled.draken.interop.arrow import vector_from_arrow
+
+    # Create PyArrow boolean array and convert to Draken BoolVector
+    arrow_array = pyarrow.array(bool_list, type=pyarrow.bool_())
+    return vector_from_arrow(arrow_array)
+
+
 def _sequence_rows(values):
     if isinstance(values, (str, bytes, bytearray)):
         return [values]
-    if isinstance(values, pyarrow.Array):
-        return values.to_pylist()
-    if isinstance(values, numpy.ndarray):
-        return values.tolist()
     if isinstance(values, (list, tuple)):
         return list(values)
-    return list(values)
+    # Try to convert Arrow arrays or other sequence types
+    try:
+        return values.to_pylist()
+    except AttributeError:
+        pass
+    # Try tolist method (works for numpy arrays and similar)
+    try:
+        return values.tolist()
+    except (AttributeError, TypeError):
+        pass
+    # Last resort: convert to list
+    try:
+        return list(values)
+    except TypeError:
+        return [values]
 
 
 def _as_python_value(value):
-    if hasattr(value, "as_py"):
-        value = value.as_py()
-    if isinstance(value, pyarrow.Array):
+    # Try PyArrow scalar .as_py() method
+    try:
+        return value.as_py()
+    except AttributeError:
+        pass
+    # Try PyArrow Array .to_pylist() method
+    try:
         return value.to_pylist()
+    except AttributeError:
+        pass
+    # Return as-is if no conversion available
     return value
 
 
@@ -48,12 +99,17 @@ def _normalize_array_row(value):
     value = _as_python_value(value)
     if value is None:
         return None
-    if isinstance(value, numpy.ndarray):
-        if value.ndim == 0:
-            return [value.item()]
-        return value.tolist()
     if isinstance(value, (list, tuple, set, frozenset)):
         return list(value)
+    # Try to convert ndim==0 arrays (scalar arrays)
+    try:
+        ndim = value.ndim
+        if ndim == 0:
+            return [value.item()]
+        return value.tolist()
+    except AttributeError:
+        pass
+    # Default: wrap in list
     return [value]
 
 
@@ -61,15 +117,19 @@ def _normalize_membership_values(value):
     value = _as_python_value(value)
     if value is None:
         return []
-    if isinstance(value, numpy.ndarray):
-        if value.ndim == 0:
+    # Try to convert NumPy arrays
+    try:
+        ndim = value.ndim
+        if ndim == 0:
             return [value.item()]
         value = value.tolist()
+    except AttributeError:
+        pass
     if isinstance(value, (list, tuple, set, frozenset)):
-        if len(value) == 1 and isinstance(
-            next(iter(value)), (list, tuple, set, frozenset, numpy.ndarray)
-        ):
-            return _normalize_array_row(next(iter(value))) or []
+        if len(value) == 1:
+            first_elem = next(iter(value))
+            if isinstance(first_elem, (list, tuple, set, frozenset)):
+                return _normalize_array_row(first_elem) or []
         return list(value)
     return [value]
 
@@ -78,20 +138,30 @@ def _coerce_numeric_vector(value):
     value = _as_python_value(value)
     if value is None:
         return None
-    if isinstance(value, numpy.ndarray):
-        if value.ndim != 1:
+    # Handle array-like objects (numpy arrays, etc)
+    try:
+        ndim = value.ndim
+        if ndim != 1:
             return None
-        if value.dtype.kind not in {"b", "i", "u", "f"}:
-            try:
-                value = value.astype(numpy.float32)
-            except (TypeError, ValueError):
-                return None
-        return numpy.asarray(value, dtype=numpy.float32)
-    if isinstance(value, (list, tuple)):
+        # Try to get dtype.kind to check if numeric
         try:
-            return numpy.asarray(value, dtype=numpy.float32)
+            dtype_kind = value.dtype.kind
+            if dtype_kind not in {"b", "i", "u", "f"}:
+                value = value.astype('float32')
+        except (AttributeError, TypeError):
+            pass
+        # Convert to Python list of floats
+        try:
+            return [float(x) for x in value]
         except (TypeError, ValueError):
             return None
+    except AttributeError:
+        # Not an array-like object, try list/tuple
+        if isinstance(value, (list, tuple)):
+            try:
+                return [float(x) for x in value]
+            except (TypeError, ValueError):
+                return None
     return None
 
 
@@ -106,18 +176,21 @@ def _coerce_text_scalar(value):
 
 def _as_text_vector(values):
     from opteryx.compiled.draken.interop.arrow import vector_from_arrow
+    from opteryx.compiled.draken.interop.vector_sequence import vector_from_sequence
     from opteryx.compiled.draken.vectors.string_vector import StringVector
 
     if isinstance(values, StringVector):
         return values
-    if hasattr(values, "to_arrow"):
-        values = values.to_arrow()
-    elif isinstance(values, (numpy.ndarray, list, tuple)):
-        values = pyarrow.array(values)
-    elif not isinstance(values, pyarrow.Array):
-        return None
 
-    vector = vector_from_arrow(values)
+    # Convert to StringVector
+    if isinstance(values, (list, tuple)):
+        # Use vector_from_sequence which handles lists natively
+        vector = vector_from_sequence(values)
+        return vector if isinstance(vector, StringVector) else None
+
+    # Assume it's a Draken vector or similar with to_arrow method
+    arrow_array = values.to_arrow()
+    vector = vector_from_arrow(arrow_array)
     return vector if isinstance(vector, StringVector) else None
 
 
@@ -127,11 +200,11 @@ def _coerce_numeric_matrix(rows, width=None):
 
     for index, row in enumerate(rows):
         vector = _coerce_numeric_vector(row)
-        if vector is None or vector.size == 0:
+        if vector is None or len(vector) == 0:
             continue
         if width is None:
-            width = vector.size
-        if vector.size != width:
+            width = len(vector)
+        if len(vector) != width:
             continue
         dense_rows.append(vector)
         valid_positions.append(index)
@@ -139,13 +212,8 @@ def _coerce_numeric_matrix(rows, width=None):
     if width is None:
         width = 0
 
-    if not dense_rows:
-        return numpy.empty((0, width), dtype=numpy.float32), numpy.empty(0, dtype=numpy.int64)
-
-    return (
-        numpy.vstack(dense_rows).astype(numpy.float32, copy=False),
-        numpy.asarray(valid_positions, dtype=numpy.int64),
-    )
+    # Return Python lists instead of NumPy arrays
+    return (dense_rows, valid_positions)
 
 
 def _coerce_aligned_numeric_matrices(left_rows, right_rows):
@@ -159,11 +227,11 @@ def _coerce_aligned_numeric_matrices(left_rows, right_rows):
         right_vector = _coerce_numeric_vector(right_row)
         if left_vector is None or right_vector is None:
             continue
-        if left_vector.size == 0 or right_vector.size == 0 or left_vector.size != right_vector.size:
+        if len(left_vector) == 0 or len(right_vector) == 0 or len(left_vector) != len(right_vector):
             continue
         if width is None:
-            width = left_vector.size
-        if left_vector.size != width or right_vector.size != width:
+            width = len(left_vector)
+        if len(left_vector) != width or len(right_vector) != width:
             continue
         left_dense_rows.append(left_vector)
         right_dense_rows.append(right_vector)
@@ -172,15 +240,8 @@ def _coerce_aligned_numeric_matrices(left_rows, right_rows):
     if width is None:
         width = 0
 
-    if not valid_positions:
-        empty = numpy.empty((0, width), dtype=numpy.float32)
-        return empty, empty.copy(), numpy.empty(0, dtype=numpy.int64)
-
-    return (
-        numpy.vstack(left_dense_rows).astype(numpy.float32, copy=False),
-        numpy.vstack(right_dense_rows).astype(numpy.float32, copy=False),
-        numpy.asarray(valid_positions, dtype=numpy.int64),
-    )
+    # Return Python lists instead of NumPy arrays
+    return (left_dense_rows, right_dense_rows, valid_positions)
 
 
 def _score_numeric_vectors(left_rows, right_rows):
@@ -188,34 +249,36 @@ def _score_numeric_vectors(left_rows, right_rows):
         return []
 
     query_vector = _coerce_numeric_vector(right_rows[0])
-    if len(right_rows) == 1 and query_vector is not None and query_vector.size > 0:
-        dense_vectors, valid_positions = _coerce_numeric_matrix(left_rows, query_vector.size)
-        scores = numpy.zeros(len(left_rows), dtype=numpy.float32)
-        if dense_vectors.shape[0] == 0:
-            return scores.tolist()
+    if len(right_rows) == 1 and query_vector is not None and len(query_vector) > 0:
+        dense_vectors, valid_positions = _coerce_numeric_matrix(left_rows, len(query_vector))
+        scores = [0.0] * len(left_rows)
+        if len(dense_vectors) == 0:
+            return scores
 
         try:
             from opteryx.compiled.nanobind import vector_search
 
-            valid_scores = numpy.asarray(
-                vector_search.score_cosine(query_vector, dense_vectors), dtype=numpy.float32
-            )
-        except (ImportError, ValueError):
-            query_norm = numpy.linalg.norm(query_vector)
+            valid_scores = vector_search.score_cosine(query_vector, dense_vectors)
+            valid_scores = [float(s) for s in valid_scores]
+        except (ImportError, ValueError, TypeError):
+            # Fallback: compute cosine similarity in Python
+            query_norm = _vec_norm(query_vector)
             if query_norm == 0.0:
-                return scores.tolist()
+                return scores
 
-            valid_scores = numpy.zeros(dense_vectors.shape[0], dtype=numpy.float32)
-            row_norms = numpy.linalg.norm(dense_vectors, axis=1)
-            valid_mask = row_norms != 0.0
-            if numpy.any(valid_mask):
-                valid_scores[valid_mask] = (dense_vectors[valid_mask] @ query_vector) / (
-                    row_norms[valid_mask] * query_norm
-                )
+            valid_scores = []
+            for row_vec in dense_vectors:
+                row_norm = _vec_norm(row_vec)
+                if row_norm == 0.0:
+                    valid_scores.append(0.0)
+                else:
+                    dot = _dot_product(row_vec, query_vector)
+                    similarity = dot / (row_norm * query_norm)
+                    valid_scores.append(similarity if _is_finite(similarity) else 0.0)
 
-        valid_scores = numpy.where(numpy.isfinite(valid_scores), valid_scores, 0.0)
-        scores[valid_positions] = valid_scores
-        return scores.tolist()
+        for pos, score in zip(valid_positions, valid_scores):
+            scores[pos] = score
+        return scores
 
     if len(right_rows) != len(left_rows):
         return [0.0] * len(left_rows)
@@ -223,19 +286,22 @@ def _score_numeric_vectors(left_rows, right_rows):
     left_vectors, right_vectors, valid_positions = _coerce_aligned_numeric_matrices(
         left_rows, right_rows
     )
-    scores = numpy.zeros(len(left_rows), dtype=numpy.float32)
-    if valid_positions.size == 0:
-        return scores.tolist()
+    scores = [0.0] * len(left_rows)
+    if len(valid_positions) == 0:
+        return scores
 
-    left_norms = numpy.linalg.norm(left_vectors, axis=1)
-    right_norms = numpy.linalg.norm(right_vectors, axis=1)
-    valid_mask = (left_norms != 0.0) & (right_norms != 0.0)
-    if numpy.any(valid_mask):
-        numerators = numpy.einsum("ij,ij->i", left_vectors[valid_mask], right_vectors[valid_mask])
-        scores[valid_positions[valid_mask]] = numerators / (
-            left_norms[valid_mask] * right_norms[valid_mask]
-        )
-    return scores.tolist()
+    # Compute pairwise cosine similarities
+    for i, (left_vec, right_vec) in enumerate(zip(left_vectors, right_vectors)):
+        left_norm = _vec_norm(left_vec)
+        right_norm = _vec_norm(right_vec)
+        if left_norm == 0.0 or right_norm == 0.0:
+            score = 0.0
+        else:
+            dot = _dot_product(left_vec, right_vec)
+            score = dot / (left_norm * right_norm)
+            score = score if _is_finite(score) else 0.0
+        scores[valid_positions[i]] = score
+    return scores
 
 
 def _cosine_similarity_text(arr, val):
@@ -255,15 +321,11 @@ def _cosine_similarity_text(arr, val):
         scorer = getattr(provider, "score_string_vector", None)
         if text_vector is not None and scorer is not None:
             positions, scores = scorer(query_text, text_vector)
-            positions = numpy.asarray(positions, dtype=numpy.int64)
-            scores = numpy.asarray(scores, dtype=numpy.float32)
-            result = numpy.zeros(len(arr), dtype=numpy.float32)
-            if positions.ndim == 1 and scores.ndim == 1 and positions.shape[0] == scores.shape[0]:
-                valid = (positions >= 0) & (positions < len(arr))
-                result[positions[valid]] = numpy.where(
-                    numpy.isfinite(scores[valid]), scores[valid], 0.0
-                )
-            return result.tolist()
+            result = [0.0] * len(arr)
+            for pos, score in zip(positions, scores):
+                if 0 <= pos < len(arr) and _is_finite(float(score)):
+                    result[pos] = float(score)
+            return result
 
     result = [0.0] * len(arr)
     active_positions = []
@@ -288,23 +350,25 @@ def _cosine_similarity_text(arr, val):
     try:
         from opteryx.compiled.nanobind import vector_search
 
-        scores = numpy.asarray(
-            vector_search.score_cosine(query_vector, row_vectors), dtype=numpy.float32
-        )
-    except (ImportError, ValueError):
-        scores = numpy.zeros(len(active_texts), dtype=numpy.float32)
-        query_norm = numpy.linalg.norm(query_vector)
-        if query_norm != 0.0:
-            row_norms = numpy.linalg.norm(row_vectors, axis=1)
-            valid_mask = row_norms != 0.0
-            if numpy.any(valid_mask):
-                scores[valid_mask] = numpy.dot(row_vectors[valid_mask], query_vector) / (
-                    row_norms[valid_mask] * query_norm
-                )
+        scores = vector_search.score_cosine(query_vector, row_vectors)
+    except (ImportError, ValueError, TypeError):
+        # Fallback: compute in Python
+        scores = []
+        query_norm = _vec_norm(query_vector)
+        if query_norm == 0.0:
+            scores = [0.0] * len(row_vectors)
+        else:
+            for row_vec in row_vectors:
+                row_norm = _vec_norm(row_vec)
+                if row_norm == 0.0:
+                    scores.append(0.0)
+                else:
+                    dot = _dot_product(row_vec, query_vector)
+                    similarity = dot / (row_norm * query_norm)
+                    scores.append(similarity if _is_finite(similarity) else 0.0)
 
-    scores = numpy.where(numpy.isfinite(scores), scores, 0.0)
-    for index, score in zip(active_positions, scores.tolist(), strict=True):
-        result[index] = score
+    for index, score in zip(active_positions, scores, strict=True):
+        result[index] = float(score)
     return result
 
 
@@ -329,10 +393,11 @@ def cosine_similarity(arr, val):
 
 def cosine_distance(arr, val):
     """Cosine distance for numeric vectors, returned as 1 - cosine_similarity."""
-    scores = numpy.asarray(cosine_similarity(arr, val), dtype=numpy.float32)
-    if scores.size == 0:
+    scores = cosine_similarity(arr, val)
+    if not scores:
         return []
-    return (1.0 - numpy.clip(scores, -1.0, 1.0)).tolist()
+    # Clip each score to [-1, 1] and compute 1 - similarity
+    return [1.0 - max(-1.0, min(float(s), 1.0)) for s in scores]
 
 
 def embed(arr):
@@ -360,25 +425,29 @@ def embed(arr):
     return results
 
 
-def jsonb_object_keys(arr: numpy.ndarray):
+def jsonb_object_keys(arr):
     """
-    Extract the keys from a NumPy array of JSON objects or JSON strings/bytes.
+    Extract the keys from an array of JSON objects or JSON strings/bytes.
     """
     if len(arr) == 0:
-        return numpy.array([])
+        return []
 
-    if isinstance(arr, pyarrow.Array):
-        arr = arr.to_numpy(zero_copy_only=False)
+    # Assume arr is already a list/tuple or has to_pylist()
+    if not isinstance(arr, (list, tuple)):
+        arr = arr.to_pylist()
 
-    result = numpy.empty(arr.shape, dtype=list)
+    result = []
+    if len(arr) == 0:
+        return result
 
-    if isinstance(arr[0], dict):
-        for i, row in enumerate(arr):
-            result[i] = [str(key) for key in row.keys()]  # noqa: SIM118
-    elif isinstance(arr[0], (str, bytes)):
+    first_elem = arr[0]
+    if isinstance(first_elem, dict):
+        for row in arr:
+            result.append([str(key) for key in row.keys()])
+    elif isinstance(first_elem, (str, bytes)):
         parser = simdjson.Parser()
-        for i, row in enumerate(arr):
-            result[i] = [str(key) for key in parser.parse(row).keys()]  # noqa: SIM118
+        for row in arr:
+            result.append([str(key) for key in parser.parse(row).keys()])
     else:
         raise ValueError("Unsupported dtype for array elements. Expected dict, str, or bytes.")
 
@@ -402,10 +471,12 @@ def humanize(arr):
                 return f"{format_number(rounded)} {label}"
         return format_number(value)
 
-    if hasattr(arr, "to_numpy"):
-        arr = arr.to_numpy(zero_copy_only=False)
-    if hasattr(arr, "tolist"):
-        arr = arr.tolist()
+    # Convert to Python list if needed
+    if not isinstance(arr, (list, tuple)):
+        if hasattr(arr, 'tolist'):
+            arr = arr.tolist()
+        else:
+            arr = list(arr)
 
     return [humanize_number(value) for value in arr]
 
@@ -413,47 +484,66 @@ def humanize(arr):
 def array_contains(arr, val):
     needle = _as_python_value(val)
     rows = _sequence_rows(arr)
-    return pyarrow.array(
-        [False if row is None else needle in set(_normalize_array_row(row) or []) for row in rows],
-        type=pyarrow.bool_(),
-    )
+    bool_list = []
+    for row in rows:
+        if row is None:
+            bool_list.append(False)
+        else:
+            normalized = _normalize_array_row(row) or []
+            # Try to check membership with set (fast path for hashable types)
+            try:
+                bool_list.append(needle in set(normalized))
+            except TypeError:
+                # Fallback for unhashable types (lists, etc)
+                bool_list.append(needle in normalized)
+    return _bool_list_to_vector(bool_list)
 
 
 def array_contains_any(arr, val):
     needles = frozenset(_normalize_membership_values(val))
     rows = _sequence_rows(arr)
-    return pyarrow.array(
-        [
-            (
-                False
-                if row is None
-                else bool(set(_normalize_array_row(row) or []).intersection(needles))
-            )
-            for row in rows
-        ],
-        type=pyarrow.bool_(),
-    )
+    bool_list = []
+    for row in rows:
+        if row is None:
+            bool_list.append(False)
+        else:
+            normalized = _normalize_array_row(row) or []
+            # Try set intersection (fast path)
+            try:
+                bool_list.append(bool(set(normalized).intersection(needles)))
+            except TypeError:
+                # Fallback for unhashable types
+                bool_list.append(any(n in normalized for n in needles))
+    return _bool_list_to_vector(bool_list)
 
 
 def array_contains_all(arr, val):
     needles = frozenset(_normalize_membership_values(val))
     rows = _sequence_rows(arr)
-    return pyarrow.array(
-        [
-            False if row is None else needles.issubset(set(_normalize_array_row(row) or []))
-            for row in rows
-        ],
-        type=pyarrow.bool_(),
-    )
+    bool_list = []
+    for row in rows:
+        if row is None:
+            bool_list.append(False)
+        else:
+            normalized = _normalize_array_row(row) or []
+            # Try set subset check (fast path)
+            try:
+                bool_list.append(needles.issubset(set(normalized)))
+            except TypeError:
+                # Fallback for unhashable types
+                bool_list.append(all(n in normalized for n in needles))
+    return _bool_list_to_vector(bool_list)
 
 
 def array_cast(array, element_type):
     from opteryx.types import OrsoTypes
 
-    result = numpy.empty(len(array), dtype=list)
+    # Convert to list if needed
+    if hasattr(array, 'tolist'):
+        array = array.tolist()
+
+    result = [None] * len(array)
     parser = OrsoTypes[element_type[0]].parse
-    if hasattr(array, "to_numpy"):
-        array = array.to_numpy(zero_copy_only=False)
     for i, row in enumerate(array):
         row_res = []
         if row is not None:
@@ -470,7 +560,7 @@ def array_cast_safe(array, element_type):
 
     from opteryx.types import OrsoTypes
 
-    result = numpy.empty(len(array), dtype=list)
+    result = [None] * len(array)
     parser = OrsoTypes[element_type[0]].parse
     for i, row in enumerate(array):
         row_res = []

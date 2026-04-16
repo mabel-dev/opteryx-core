@@ -150,3 +150,21 @@ def trunc(values, scales=None) -> List:
         scale = int(scales[0]) if scales[0] is not None else 0
 
     return vector_trunc(values, scale)
+
+
+def abs_value(values):
+    """ABS(values): element-wise absolute value."""
+    from opteryx.compiled.vector_ops import vector_abs
+    return vector_abs(values)
+
+
+def sqrt_value(values):
+    """SQRT(values): element-wise square root."""
+    from opteryx.compiled.vector_ops import vector_sqrt
+    return vector_sqrt(values)
+
+
+def sign_value(values):
+    """SIGN(values): sign of value (-1, 0, 1)."""
+    from opteryx.compiled.vector_ops import vector_sign
+    return vector_sign(values)

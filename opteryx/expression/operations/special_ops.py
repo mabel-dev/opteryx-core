@@ -1,24 +1,26 @@
 """Special filter operations (JSON path, etc.)."""
 
-import pyarrow
-
 
 def json_path_exists(arr, value):
-    """Check if JSON path exists in document (AtQuestion operator @?)."""
+    """Check if JSON path exists in document (AtQuestion operator @?).
+
+    Returns BoolVector to match registrar expectations.
+    """
+    from opteryx.compiled.draken.interop.vector_sequence import vector_from_sequence
     from opteryx.third_party.tktech import csimdjson as simdjson
 
-    to_numpy = getattr(arr, "to_numpy", None)
-    if to_numpy is not None:
-        arr = to_numpy(zero_copy_only=False)
+    # Convert to list of strings for processing
+    if hasattr(arr, "tolist"):
+        arr = arr.tolist()
+    elif not isinstance(arr, (list, tuple)):
+        arr = list(arr)
 
     parser = simdjson.Parser()
 
     if not value.startswith("$."):
         # Not a JSONPath, treat as a simple key existence check
-        return pyarrow.array(
-            [value in parser.parse(doc) for doc in arr],
-            type=pyarrow.bool_(),
-        )
+        result = [value in parser.parse(doc) for doc in arr]
+        return vector_from_sequence(result)
 
     # Convert "$.key1.list[0]" to JSON Pointer "/key1/list/0"
     def jsonpath_to_pointer(jsonpath: str) -> str:
@@ -39,7 +41,5 @@ def json_path_exists(arr, value):
         except Exception:
             return False
 
-    return pyarrow.array(
-        [check_json_pointer(doc, json_pointer) for doc in arr],
-        type=pyarrow.bool_(),
-    )
+    result = [check_json_pointer(doc, json_pointer) for doc in arr]
+    return vector_from_sequence(result)
