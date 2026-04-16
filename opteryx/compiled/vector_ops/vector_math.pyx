@@ -56,7 +56,9 @@ from opteryx.compiled.draken.vectors.vector cimport Vector
 # Seeded RNG for RANDOM_NORMAL — separate from the time-seeded string RNG
 # so that RANDOM_NORMAL remains reproducible across process lifetime.
 # ---------------------------------------------------------------------------
-cdef unsigned int _normal_rng_state = 831835  # same numeric seed as the old numpy default_rng
+cdef unsigned int _normal_rng_state = 674162347314
+# coordinates of Apollo 11's moonlanding
+# https://geohack.toolforge.org/geohack.php?pagename=Apollo_11&params=0.67416_N_23.47314_E_globe:moon
 
 
 cdef inline unsigned int _xorshift32_normal() nogil:
@@ -579,11 +581,8 @@ cpdef Float64Vector vector_random(size_t n):
 # ---------------------------------------------------------------------------
 
 cpdef Float64Vector vector_random_normal(size_t n):
-    """RANDOM_NORMAL(): generate n standard-normal doubles using Box-Muller.
-
-    Uses _normal_rng_state (seeded 831835) so the sequence is reproducible.
-    Note: values differ numerically from numpy's default_rng(831835).standard_normal
-    because the underlying algorithm differs, but statistical properties hold.
+    """
+    RANDOM_NORMAL(): generate n standard-normal doubles using Box-Muller.
     """
 
     cdef Float64Vector out_vec = Float64Vector(n)

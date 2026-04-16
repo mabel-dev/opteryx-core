@@ -2,10 +2,18 @@
 
 Explicit comparison dispatch for all native Draken vector types.
 ArrowVector has been removed; all paths now use native Draken APIs.
+
+TODO: AtQuestion operator (JSON path queries) is misplaced here. It should be
+moved to vector_ops or a dedicated json_ops module since it's not a comparison.
+
+TODO: Dispatch logic mixes VectorType (underlying type) with encoding schemes
+(DICTIONARY_ENCODED, CONSTANT_ENCODED). Ideally we'd dispatch on encoding first
+(unwrap constants, handle dictionaries), then on underlying type.
 """
 
 import datetime
 
+from opteryx.compiled.draken.vectors.bool_vector import BoolVector
 from opteryx.compiled.vector_ops import vector_contains, vector_in_list, vector_like, vector_rlike
 from opteryx.utils.vector_types import VectorType, get_vector_type, is_draken_vector, is_scalar
 
@@ -38,12 +46,6 @@ _NEGATED_OPS = {
     "NotInStr": "InStr",
     "NotIInStr": "IInStr",
 }
-
-
-def _get_boolvector():
-    """Lazy import to avoid circular dependencies."""
-    from opteryx.compiled.draken.vectors.bool_vector import BoolVector
-    return BoolVector
 
 
 # ---------------------------------------------------------------------------
@@ -97,7 +99,6 @@ def _call_vector_vector_op(op: str, left_vec, right_vec):
 
 
 def _int64_compare(op: str, vec, right):
-    BoolVector = _get_boolvector()
 
     if right is None:
         return BoolVector(len(vec))
@@ -136,7 +137,6 @@ def _int64_compare(op: str, vec, right):
 
 
 def _float64_compare(op: str, vec, right):
-    BoolVector = _get_boolvector()
 
     if right is None:
         return BoolVector(len(vec))
@@ -169,7 +169,6 @@ def _float64_compare(op: str, vec, right):
 
 
 def _dict_compare(op: str, vec, right):
-    BoolVector = _get_boolvector()
 
     vec = _dictionary_compare_vector(vec)
     if vec is None:
@@ -261,7 +260,6 @@ def _dict_compare(op: str, vec, right):
 
 
 def _constant_compare(op: str, vec, right):
-    BoolVector = _get_boolvector()
     from opteryx.expression.operations.fastpath_constant import _coerce_in_list_values
 
     if right is None:
@@ -466,8 +464,7 @@ def draken_compare(op: str, left, right, left_schema_type=None, right_schema_typ
 
     # Vector left with null right: all False
     if right is None and not isinstance(left, (str, int, float, bytes, bool, type(None))):
-        BoolVector = _get_boolvector()
-        return BoolVector(len(left))
+            return BoolVector(len(left))
 
     vec_type = get_vector_type(left)
 
@@ -518,9 +515,3 @@ def _bool_compare(op: str, left, right):
     if op == "GtEq":
         return left.greater_than_or_equals(bool(right))
     raise NotImplementedError(f"BoolVector: unsupported op {op!r}")
-
-
-# These are re-exported for use in other modules; they should arguably be defined
-# in temporal_ops.py but remain here for backward compatibility
-_DATE_TYPES = frozenset(("Date32Vector", "TimestampVector"))
-_INTERVAL_TYPES = frozenset(("IntervalVector",))
