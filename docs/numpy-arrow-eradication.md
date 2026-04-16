@@ -37,8 +37,6 @@ Boundary / explicit interop (acceptable if kept isolated)
   Classification: Boundary (planner returns PyArrow tables for tabular results). Action: verify isolation and document boundary responsibilities.
 - `opteryx/types/schema.py` — `import pyarrow` (schema ↔ Arrow mapping)  
   Classification: Boundary (schema conversions). Action: keep as isolated conversion boundary or prepare alternative API if schema conversion is redesigned.
-- `opteryx/types/_scalar_to_vector.py` — local `import pyarrow` for scalar normalization  
-  Classification: Boundary helper (scalar normalization). Action: ensure conversion is minimal and documented.
 - `opteryx/expression/evaluator/evaluation.py` — local `pyarrow` import when converting Arrow arrays to Draken vectors  
   Classification: Boundary (conversion path). Action: keep conversion localized; consider moving to a small interop module.
 
@@ -93,7 +91,6 @@ Classification summary (recommended triage)
   - `opteryx/models/dataframe.py`
   - `opteryx/planner/__init__.py`
   - `opteryx/types/schema.py`
-  - `opteryx/types/_scalar_to_vector.py`
   - `opteryx/expression/evaluator/evaluation.py`
 - Priority 3 (Low / Tests / Docs): Leave for now unless you want to remove dev/test dependencies
   - `opteryx/third_party/maki_nage/tests/*`, `dev/*` scripts, and doc/example mentions
@@ -117,27 +114,32 @@ Appendix — discovered files (explicit import or mention in `opteryx/` sources)
 - `opteryx/expression/evaluator/evaluation.py` (local pyarrow import for conversion)
 - `opteryx/expression/evaluator/function_execution.py` (local pyarrow import for Arrow engine)
 - `opteryx/expression/evaluator/temporal_ops.py` (local pyarrow imports)
-- `opteryx/expression/intervals.py` (top-level pyarrow)
-- `opteryx/expression/functions/implementations/utility.py` (numpy + pyarrow)
-- `opteryx/expression/functions/implementations/temporal.py` (numpy + pyarrow)
-- `opteryx/expression/operations/fastpath_dictionary.py` (top-level pyarrow)
-- `opteryx/expression/operations/type_coercion.py` (top-level numpy + pyarrow)
+- `opteryx/expression/intervals.py` (top-level `pyarrow`)
+- `opteryx/expression/functions/implementations/utility.py` (`numpy` + `pyarrow`)
+- `opteryx/expression/functions/implementations/temporal.py` (`numpy` + `pyarrow`)
+- `opteryx/expression/operations/fastpath_dictionary.py` (top-level `pyarrow`)
+- `opteryx/expression/operations/type_coercion.py` (top-level `numpy` + `pyarrow`)
 - `opteryx/operators/distinct_node.pyx` (pyarrow mention / generated code)
-- `opteryx/operators/read_node.pyx` (import pyarrow)
-- `opteryx/planner/__init__.py` (import pyarrow when composing tables)
+- `opteryx/operators/read_node.pyx` (import `pyarrow`)
+- `opteryx/planner/__init__.py` (import `pyarrow` when composing tables)
 - `opteryx/third_party/maki_nage/tests/*` (numpy in tests)
-- `opteryx/types/_scalar_to_vector.py` (pyarrow in scalar normalization)
 - `opteryx/types/schema.py` (pyarrow top-level)
-- `opteryx/utils/firestore_utils.py` (local numpy import)
+- `opteryx/utils/firestore_utils.py` (local `numpy` import)
 - `opteryx/utils/vector_types.py` (pyarrow in examples / docstrings)
 
 # KEEP
 - `opteryx/models/dataframe.py` (pyarrow in `arrow()` method)  # keep
 - `opteryx/__main__.py` (pyarrow imports for CLI output)  # keep
 
-Closing notes
-- This updated document records the "truth" of NumPy/PyArrow presence across the `opteryx/` package (Python/Cython) so you can plan eradication work with full visibility.
-- If you want, I will:
-  - produce the precise import-line audit (file + line numbers + import text) next; or
-  - generate a prioritized per-symbol usage map for the Priority 1 files so we can start writing minimal, targeted patches.
-- Tell me which of the two outputs you want next and I will prepare it (import-line audit or per-symbol usage map).
+Notes about the KEEP section
+- Per your recent edits, the two files listed above are the only confirmed, intentional PyArrow imports that should be retained as explicit interop boundaries in the `opteryx/` package.
+- You noted you haven't checked every file yet. This document therefore:
+  - Marks `opteryx/models/dataframe.py` and `opteryx/__main__.py` as the canonical, intentionally-allowed Arrow boundaries for now.
+  - Leaves the rest of the discovered files (listed above) as candidates for review/remediation — some are hot-paths that need action, others are acceptable boundaries, and some are tests/docs.
+
+Suggested immediate next steps
+- If you'd like, I will now:
+  1) Run an import-line audit for all `.py` and `.pyx` files under `opteryx/` and produce a precise list of `import` / `from` lines (file + line number + import text). This will confirm whether any other files truly import Arrow at runtime versus only mentioning it.
+  2) Produce a short remediation plan for the Priority-1 hot-path files (e.g., `type_coercion.py`, `fastpath_dictionary.py`, `functions/implementations/*`) showing minimal, safe refactors to isolate or remove NumPy/PyArrow from hot execution paths.
+
+Which of the two outputs do you want next? If you want the import-line audit, I will produce it and then update this document with exact import lines and an updated KEEP/TO-REVIEW list.
