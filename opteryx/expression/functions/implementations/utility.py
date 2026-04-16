@@ -59,110 +59,62 @@ def _bool_list_to_vector(bool_list: list):
 
 
 def _sequence_rows(values):
+    """Convert input to list of rows. Assumes Draken vectors or Python sequences."""
     if isinstance(values, (str, bytes, bytearray)):
         return [values]
     if isinstance(values, (list, tuple)):
         return list(values)
-    # Try to convert Arrow arrays or other sequence types
-    try:
-        return values.to_pylist()
-    except AttributeError:
-        pass
-    # Try tolist method (works for numpy arrays and similar)
-    try:
-        return values.tolist()
-    except (AttributeError, TypeError):
-        pass
-    # Last resort: convert to list
-    try:
-        return list(values)
-    except TypeError:
-        return [values]
+    # Assume Draken vector with to_pylist() method
+    return values.to_pylist()
 
 
 def _as_python_value(value):
-    # Try PyArrow scalar .as_py() method
-    try:
+    """Extract scalar value from PyArrow/Draken scalar, or return as-is."""
+    # Try PyArrow scalar .as_py() method only - don't convert arrays
+    if hasattr(value, "as_py"):
         return value.as_py()
-    except AttributeError:
-        pass
-    # Try PyArrow Array .to_pylist() method
-    try:
-        return value.to_pylist()
-    except AttributeError:
-        pass
-    # Return as-is if no conversion available
+    # Return Draken vectors unchanged
     return value
 
 
 def _normalize_array_row(value):
+    """Normalize a single array row. Keep Draken vectors as-is."""
     value = _as_python_value(value)
     if value is None:
         return None
     if isinstance(value, (list, tuple, set, frozenset)):
         return list(value)
-    # Try to convert ndim==0 arrays (scalar arrays)
-    try:
-        ndim = value.ndim
-        if ndim == 0:
-            return [value.item()]
-        return value.tolist()
-    except AttributeError:
-        pass
-    # Default: wrap in list
-    return [value]
+    # For Draken vectors, return as-is; don't convert to Python
+    return value
 
 
 def _normalize_membership_values(value):
+    """Normalize membership test values. Keep Draken vectors as-is."""
     value = _as_python_value(value)
     if value is None:
         return []
-    # Try to convert NumPy arrays
-    try:
-        ndim = value.ndim
-        if ndim == 0:
-            return [value.item()]
-        value = value.tolist()
-    except AttributeError:
-        pass
     if isinstance(value, (list, tuple, set, frozenset)):
         if len(value) == 1:
             first_elem = next(iter(value))
             if isinstance(first_elem, (list, tuple, set, frozenset)):
                 return _normalize_array_row(first_elem) or []
         return list(value)
-    return [value]
+    # For Draken vectors, return as-is
+    return value
 
 
 def _coerce_numeric_vector(value):
+    """Convert value to numeric vector. Assumes Draken vectors or Python lists."""
     value = _as_python_value(value)
     if value is None:
         return None
-    # Handle array-like objects (numpy arrays, etc)
-    try:
-        ndim = value.ndim
-        if ndim != 1:
-            return None
-        # Try to get dtype.kind to check if numeric
-        try:
-            dtype_kind = value.dtype.kind
-            if dtype_kind not in {"b", "i", "u", "f"}:
-                value = value.astype('float32')
-        except (AttributeError, TypeError):
-            pass
-        # Convert to Python list of floats
+    if isinstance(value, (list, tuple)):
         try:
             return [float(x) for x in value]
         except (TypeError, ValueError):
             return None
-    except AttributeError:
-        # Not an array-like object, try list/tuple
-        if isinstance(value, (list, tuple)):
-            try:
-                return [float(x) for x in value]
-            except (TypeError, ValueError):
-                return None
-    return None
+    # For Draken vectors, return as-is (don't try to convert)
+    return value
 
 
 def _coerce_text_scalar(value):
