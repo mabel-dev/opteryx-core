@@ -23,7 +23,7 @@ from opteryx.third_party.tktech import csimdjson as simdjson
 from opteryx.vectors.embeddings import embed_text_matrix, embed_text_values, get_embedding_provider
 
 # ============================================================================
-# Math utility functions for vector operations (replaces NumPy)
+# Math utility functions for vector operations
 # ============================================================================
 
 
@@ -43,10 +43,6 @@ def _is_finite(x: float) -> bool:
     return x == x and abs(x) != float("inf")  # x==x is False for NaN
 
 
-
-
-
-
 def _normalize_membership_values(value):
     """Normalize membership test values. Keep Draken vectors as-is."""
     if value is None:
@@ -61,17 +57,6 @@ def _normalize_membership_values(value):
     return value
 
 
-def _coerce_numeric_vector(value):
-    """Convert value to numeric vector. Assumes Draken vectors or Python lists."""
-    if value is None:
-        return None
-    if isinstance(value, (list, tuple)):
-        try:
-            return [float(x) for x in value]
-        except (TypeError, ValueError):
-            return None
-    # For Draken vectors, return as-is (don't try to convert)
-    return value
 
 
 def _coerce_text_scalar(value):
@@ -103,7 +88,7 @@ def _coerce_numeric_matrix(rows, width=None):
     valid_positions = []
 
     for index, row in enumerate(rows):
-        vector = _coerce_numeric_vector(row)
+        vector = row
         if vector is None or len(vector) == 0:
             continue
         if width is None:
@@ -127,8 +112,8 @@ def _coerce_aligned_numeric_matrices(left_rows, right_rows):
     width = None
 
     for index, (left_row, right_row) in enumerate(zip(left_rows, right_rows, strict=True)):
-        left_vector = _coerce_numeric_vector(left_row)
-        right_vector = _coerce_numeric_vector(right_row)
+        left_vector = left_row
+        right_vector = right_row
         if left_vector is None or right_vector is None:
             continue
         if len(left_vector) == 0 or len(right_vector) == 0 or len(left_vector) != len(right_vector):
@@ -152,7 +137,7 @@ def _score_numeric_vectors(left_rows, right_rows):
     if len(right_rows) == 0:
         return []
 
-    query_vector = _coerce_numeric_vector(right_rows[0])
+    query_vector = right_rows[0]
     if len(right_rows) == 1 and query_vector is not None and len(query_vector) > 0:
         dense_vectors, valid_positions = _coerce_numeric_matrix(left_rows, len(query_vector))
         scores = [0.0] * len(left_rows)
@@ -283,10 +268,7 @@ def cosine_similarity(arr, val):
 
     sample_left = next((row for row in arr if row is not None), None)
     sample_right = next((row for row in val if row is not None), None)
-    if (
-        _coerce_numeric_vector(sample_left) is not None
-        and _coerce_numeric_vector(sample_right) is not None
-    ):
+    if sample_left is not None and sample_right is not None:
         return _score_numeric_vectors(arr, val)
 
     return _cosine_similarity_text(arr, val)
