@@ -81,7 +81,7 @@ def _call_vector_vector_op(op: str, left_vec, right_vec):
 
     Examples:
         >>> from opteryx.compiled.draken.vectors import Int64Vector
-        >>> from opteryx.compiled.draken.interop.arrow import vector_from_sequence
+        >>> from opteryx.compiled.draken.interop.vector_sequence import vector_from_sequence
         >>> v1 = vector_from_sequence([1, 2, 3])
         >>> v2 = vector_from_sequence([1, 2, 4])
         >>> result = _call_vector_vector_op("Eq", v1, v2)
