@@ -34,20 +34,15 @@ def date_part(part, arr):
                            millisecond, microsecond, nanosecond (require implementation)
     """
     # part arrives as a Draken constant vector; extract the scalar bytes value.
-    if not isinstance(part, (str, bytes, bytearray)):
-        part = part[0]
-    if isinstance(part, str):
-        part = part.encode("utf-8")
-    part = part.lower()  # [#325]
+    part = part[0].lower()
 
     vector_type = arr.__class__.__name__
 
-    # Date32Vector: cast to TimestampVector so the timestamp kernels can be reused.
+    # Date32Vector: convert to TimestampVector so the timestamp kernels can be reused.
     if vector_type == "Date32Vector":
-        import pyarrow
-        from opteryx.compiled.draken.interop.arrow import vector_from_arrow
+        from opteryx.compiled.vector_ops.function_definitions import vector_date32_to_timestamp
 
-        arr = vector_from_arrow(arr.to_arrow().cast(pyarrow.timestamp("us")))
+        arr = vector_date32_to_timestamp(arr)
         vector_type = "TimestampVector"
 
     if vector_type == "TimestampVector":
@@ -149,69 +144,49 @@ def trunc_timestamp(arr, part):
 def date_diff(part, start, end):
     """Calculate the difference between two timestamps.
 
-    All inputs are normalised to pyarrow timestamp[us] arrays first so that
-    no numpy datetime64 intermediates are needed.
+    All inputs are converted to TimestampVector and processed with Draken.
+    Returns a Draken Int64Vector.
     """
-    import pyarrow
-    from pyarrow import compute
-
-    from opteryx.compiled.draken.interop.arrow import vector_from_arrow as _vfa
     from opteryx.compiled.vector_ops import vector_date_diff
-
-    arrow_extractors = {
-        "months": compute.month_interval_between,
-        "quarters": compute.quarters_between,
-        "weeks": compute.weeks_between,
-        "years": compute.years_between,
-    }
 
     part = str(part[0]).lower()
     if not part.endswith("s"):
         part += "s"
 
-    def _to_timestamp_us(arr):
-        """Return a flat pyarrow timestamp[us] Array from any input type."""
-        arr = arr.to_arrow()
-        if isinstance(arr, pyarrow.ChunkedArray):
-            arr = arr.combine_chunks() if arr.num_chunks > 1 else arr.chunk(0)
-        if isinstance(arr, pyarrow.Array):
-            if pyarrow.types.is_timestamp(arr.type):
-                return (
-                    arr
-                    if arr.type == pyarrow.timestamp("us")
-                    else arr.cast(pyarrow.timestamp("us"))
-                )
-            if pyarrow.types.is_date32(arr.type):
-                return arr.cast(pyarrow.timestamp("us"))
-            return arr.cast(pyarrow.timestamp("us"))
-        # Python scalars / sequences / numpy arrays
-        return pyarrow.array(arr).cast(pyarrow.timestamp("us"))
+    # Convert inputs to TimestampVector if needed
+    def _to_timestamp_vector(arr):
+        """Ensure input is a Draken TimestampVector."""
+        type_name = arr.__class__.__name__
+        if type_name == "TimestampVector":
+            return arr
+        if type_name == "Date32Vector":
+            from opteryx.compiled.vector_ops.function_definitions import vector_date32_to_timestamp
 
-    start_arr = _to_timestamp_us(start)
-    end_arr = _to_timestamp_us(end)
+            return vector_date32_to_timestamp(arr)
+        return arr
 
-    if part in arrow_extractors:
-        diff = arrow_extractors[part](start_arr, end_arr)
-        if not hasattr(diff, "__iter__"):
-            diff = [diff]
-        return [i.as_py() for i in diff]
+    start_vec = _to_timestamp_vector(start)
+    end_vec = _to_timestamp_vector(end)
 
-    start_vec = _vfa(start_arr)
-    end_vec = _vfa(end_arr)
-    return vector_date_diff(start_vec, end_vec, part).to_arrow()
+    # Use Draken vector_date_diff directly - returns Int64Vector
+    return vector_date_diff(start_vec, end_vec, part)
 
 
 def time_diff(time1, time2):
-    return date_diff(["hours"], time1, time2)
+    return date_diff([b"hours"], time1, time2)
 
 
 def date_format(dates, pattern):  # [#325]
     """Format dates using strftime pattern.
 
     Inputs: dates is a Draken TimestampVector or Date32Vector, pattern is a bytes scalar.
+    Returns: List of formatted strings.
     """
+    from opteryx.compiled.vector_ops.function_definitions import vector_date_format
+
     pattern = pattern[0]
-    return [None if d is None else d.strftime(pattern) for d in dates.tolist()]
+
+    return vector_date_format(dates, pattern)
 
 
 def date_floor(dates, magnitude, units):  # [#325]
@@ -219,20 +194,22 @@ def date_floor(dates, magnitude, units):  # [#325]
 
     Inputs: dates (Draken vector), magnitude (scalar), units (str scalar).
     """
-    from pyarrow import compute
+    from opteryx.compiled.vector_ops.function_definitions import vector_floor_temporal
 
     # Extract scalars from constant vectors if needed
-    if hasattr(magnitude, "as_py"):
-        magnitude = magnitude.as_py()
-    else:
+    mag_type = magnitude.__class__.__name__
+    if mag_type in ("ConstantVector", "Int64Vector", "Int32Vector"):
         magnitude = magnitude[0]
+    magnitude = int(magnitude)
 
-    if hasattr(units, "as_py"):
-        units = units.as_py()
-    else:
+    units_type = units.__class__.__name__
+    if units_type in ("ConstantVector", "StringVector"):
         units = units[0]
+    if isinstance(units, bytes):
+        units = units.decode("utf-8")
+    units = str(units)
 
-    return compute.floor_temporal(dates, int(magnitude), units)
+    return vector_floor_temporal(dates, magnitude, units)
 
 
 def from_unixtimestamp(values):
@@ -247,57 +224,24 @@ def from_unixtimestamp(values):
     return [datetime.datetime.fromtimestamp(i, tz=datetime.timezone.utc) for i in values]
 
 
-def convert_int64_array_to_pyarrow_datetime(array):
-    """Convert a PyArrow int64 array (Unix timestamps in microseconds) to timestamp[us].
-
-    Used by type_coercion.to_temporal_array() during query planning.
-    """
-    import pyarrow
-
-    if isinstance(array, pyarrow.Array) and pyarrow.types.is_integer(array.type):
-        return array.cast(pyarrow.timestamp("us"))
-    return array
-
-
 def unixtime(array):
     """
-    Convert a Draken vector or Arrow array of timestamps or ISO8601 strings to Unix time
-    (seconds since epoch).
+    Convert a Draken vector of timestamps or dates to Unix time (seconds since epoch).
+
+    Returns an Int64Vector of Unix timestamps.
 
     Inputs:
-      - TimestampVector, Date32Vector → Int64Vector of seconds since epoch
-      - Arrow timestamp/date arrays → converted via Arrow compute
-      - Draken or Arrow → handled by their respective paths
+      - TimestampVector → Int64Vector of seconds since epoch
+      - Date32Vector → Int64Vector of seconds since epoch
     """
-    import pyarrow
-    from pyarrow import compute
+    from opteryx.compiled.vector_ops.function_definitions import vector_unixtime
 
-    # Draken vectors → convert to Arrow
-    array = array.to_arrow()
+    vector_type = array.__class__.__name__
 
-    # Arrow ChunkedArray → combine and recurse
-    if isinstance(array, pyarrow.ChunkedArray):
-        if array.num_chunks == 0:
-            return []
-        chunks = [unixtime(chunk) for chunk in array.chunks]
-        return sum(chunks, [])  # Flatten list of lists
+    if vector_type in ("TimestampVector", "Date32Vector"):
+        # Use Draken vector_unixtime - returns Int64Vector
+        return vector_unixtime(array)
 
-    # Arrow Array → convert to int64 Unix timestamp
-    if isinstance(array, pyarrow.Array):
-        if (
-            pyarrow.types.is_date32(array.type)
-            or pyarrow.types.is_date64(array.type)
-            or pyarrow.types.is_timestamp(array.type)
-        ):
-            result = (
-                array.cast(pyarrow.timestamp("s"))
-                .cast(pyarrow.int64())
-                .to_pylist()
-            )
-            return result
-        # String arrays → try parsing as ISO8601
-        if pyarrow.types.is_string(array.type) or pyarrow.types.is_large_string(array.type):
-            parsed = compute.strptime(array, "%Y-%m-%dT%H:%M:%S", "us")
-            return unixtime(parsed)
-
-    raise TypeError(f"Unsupported array type: {type(array).__name__}")
+    raise TypeError(
+        f"Unsupported vector type: {vector_type}. Expected TimestampVector or Date32Vector."
+    )
