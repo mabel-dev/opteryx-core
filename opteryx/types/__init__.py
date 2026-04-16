@@ -4,8 +4,7 @@ Opteryx types module.
 This module provides:
 - Internal scalar type system (replacing numpy/pyarrow type checks)
 - Inlined OrsoTypes type system (replacing orso.types dependency)
-- Scalar-to-vector conversion (Step 2 of NumPy-Arrow eradication)
-- Null handling primitives (Step 3 of NumPy-Arrow eradication)
+- Null handling primitives
 - Type conversion utilities
 - Type coercion helpers
 - Bidirectional type mapping (Python ↔ Orso)
@@ -29,7 +28,6 @@ from opteryx.types._orso_types import (
     OrsoTypes,
     find_compatible_type,
 )
-from opteryx.types._scalar_to_vector import scalar_to_draken_vector
 from opteryx.types._scalar_types import (
     ScalarType,
     classify_scalar,
@@ -56,8 +54,6 @@ __all__ = [
     "PYTHON_TO_ORSO_MAP",
     "ORSO_TO_PYTHON_MAP",
     "find_compatible_type",
-    # Scalar-to-vector conversion (Step 2)
-    "scalar_to_draken_vector",
     # Null handling primitives (Step 3)
     "is_null",
     "is_nan",
