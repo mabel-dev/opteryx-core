@@ -69,4 +69,3 @@ cdef class FlatHashMapByteVector:
 
     cpdef clear(self):
         self._map.clear()
-

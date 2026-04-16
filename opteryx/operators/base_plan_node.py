@@ -6,7 +6,6 @@
 
 import time
 from collections import defaultdict
-from typing import Optional, Union
 
 from opteryx import EMPTY, EOS
 from opteryx.compiled.draken import Morsel

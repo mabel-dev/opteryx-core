@@ -3,7 +3,7 @@
 # See the License at http://www.apache.org/licenses/LICENSE-2.0
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, Union
 
 from opteryx.compiled import vector_ops
 from opteryx.third_party.tktech import csimdjson as simdjson

@@ -226,11 +226,7 @@ class BaseTable:
 
             chunk.append(record)
 
-            if index == self.chunk_size - 1:
-                morsel = _dictset_to_morsel(chunk)
-                yield morsel
-                chunk = []
-            elif (index > self.chunk_size - 1) and (index - self.chunk_size) % self.chunk_size == 0:
+            if index == self.chunk_size - 1 or (index > self.chunk_size - 1) and (index - self.chunk_size) % self.chunk_size == 0:
                 morsel = _dictset_to_morsel(chunk)
                 yield morsel
                 chunk = []

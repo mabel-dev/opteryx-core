@@ -9,7 +9,6 @@ This script:
 """
 
 import os
-import sys
 import gzip
 import json
 import contextlib

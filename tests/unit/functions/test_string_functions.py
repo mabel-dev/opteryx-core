@@ -7,6 +7,7 @@ import pyarrow
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
 from opteryx.compiled.draken.interop.arrow import vector_from_arrow
+from opteryx.compiled.draken.vectors.string_vector import StringVector
 
 from opteryx.compiled import vector_ops as compiled_vector_ops
 from opteryx.compiled.draken import Vector
@@ -78,13 +79,19 @@ def test_random_string():
 
 def test_compiled_replace():
     data = _to_sv(["hello world", "banana", None])
-    result = _sv_to_list(vector_replace(data, b"l", b"L"))
+    # Create constant-encoded vectors (repeated for all rows)
+    search = _to_sv(["l", "l", "l"])
+    replace = _to_sv(["L", "L", "L"])
+    result = _sv_to_list(vector_replace(data, search, replace))
     assert result == ["heLLo worLd", "banana", None]
 
 
 def test_compiled_replace_bytes():
     data = vector_from_arrow(pyarrow.array([b"abcabc", b"", None], type=pyarrow.binary()))
-    result = _sv_to_list(vector_replace(data, b"abc", b"x"))
+    # Create constant-encoded vectors (repeated for all rows)
+    search = _to_sv(["abc", "abc", "abc"])
+    replace = _to_sv(["x", "x", "x"])
+    result = _sv_to_list(vector_replace(data, search, replace))
     assert result == ["xx", "", None]
 
 
@@ -150,14 +157,14 @@ def test_re2_list_regex_replace_bytes():
 
 
 def test_regex_replace_python_wrapper_returns_arrow():
-    """Test that the Python wrapper returns PyArrow arrays with bytes"""
-    data = pyarrow.array(["Earth", "Europa"])
+    """Test that the Python wrapper returns Draken StringVector with bytes"""
+    data = _to_sv(["Earth", "Europa"])
     pattern = numpy.array(["^E"], dtype=object)
     replacement = numpy.array(["G"], dtype=object)
 
     result = string_functions.regex_replace(data, pattern, replacement)
 
-    assert isinstance(result, pyarrow.Array)
+    assert isinstance(result, StringVector)
     # Result is binary (bytes) because Draken works with bytes
     # But the scalar wrapper may return unicode; accept both formats.
     assert [x if isinstance(x, bytes) else x.encode("utf-8") for x in result.to_pylist()] == [
@@ -167,23 +174,24 @@ def test_regex_replace_python_wrapper_returns_arrow():
 
 
 def test_regex_replace_python_wrapper_dictionary_input():
-    data = pyarrow.DictionaryArray.from_arrays(
+    pa_dict_array = pyarrow.DictionaryArray.from_arrays(
         pyarrow.array([0, 1, 0, None], type=pyarrow.int8()),
         pyarrow.array(["http://a.example", "https://b.example"], type=pyarrow.string()),
     )
+    data = vector_from_arrow(pa_dict_array)
     pattern = numpy.array([r"^https?".encode("utf8")], dtype=object)
     replacement = numpy.array([b""], dtype=object)
 
     result = string_functions.regex_replace(data, pattern, replacement)
 
-    assert isinstance(result, pyarrow.Array)
+    assert isinstance(result, StringVector)
     assert result.to_pylist() == [b"://a.example", b"://b.example", b"://a.example", None]
 
 
 def test_regex_replace_invalid_pattern_raises():
     from opteryx.exceptions import InvalidFunctionParameterError
 
-    data = pyarrow.array(["test"])
+    data = _to_sv(["test"])
     pattern = numpy.array(["("], dtype=object)
     replacement = numpy.array([""], dtype=object)
 
@@ -247,7 +255,7 @@ def test_normalise_replacement_mixed():
 
 def test_regex_replace_double_backslash_form_matches_single():
     """SQL r'\\\\1' (3-byte replacement) must produce the same output as r'\\1' (2-byte)."""
-    data = pyarrow.array(
+    data = _to_sv(
         [
             "https://www.example.com/path",
             "http://foo.bar/x",
@@ -272,7 +280,7 @@ def test_regex_replace_double_backslash_form_matches_single():
 
 def test_regex_replace_double_backslash_extracts_domains():
     """SQL r'\\\\1' (3-byte form) must extract domain names, not return '\\\\1' literally."""
-    data = pyarrow.array(
+    data = _to_sv(
         [
             "https://www.example.com/path",
             "http://foo.bar/x",

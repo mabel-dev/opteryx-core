@@ -23,7 +23,7 @@ Design:
 """
 
 import math
-from typing import Any, Generator, Optional
+from typing import Any, Generator
 
 __all__ = [
     "is_null",

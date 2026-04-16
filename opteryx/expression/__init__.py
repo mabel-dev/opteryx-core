@@ -439,9 +439,7 @@ def _inner_evaluate(root: Node, table):
             return Int64Vector.from_constant(value, length)
 
         if literal_type == OrsoTypes.TIMESTAMP:
-            if isinstance(value, datetime.datetime):
-                value = timestamp_to_int64_us(value)
-            elif isinstance(value, datetime.date):
+            if isinstance(value, datetime.datetime) or isinstance(value, datetime.date):
                 value = timestamp_to_int64_us(value)
             elif not isinstance(value, int):
                 value = int(value)

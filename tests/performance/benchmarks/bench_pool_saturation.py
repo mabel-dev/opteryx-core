@@ -8,8 +8,7 @@ that maximizes throughput without contention overhead.
 import os
 import sys
 import time
-import tempfile
-from typing import List, Tuple
+from typing import Tuple
 from concurrent.futures import ThreadPoolExecutor
 
 # Setup path

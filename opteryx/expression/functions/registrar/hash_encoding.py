@@ -14,9 +14,16 @@ def get_builtin_hash_encoding_functions() -> list[FunctionDefinition]:
     """Hash, encoding, and random-generation functions."""
 
     # Local imports to avoid top-level import cycles and to keep costs lazy.
+    from opteryx.compiled.vector_ops import (
+        vector_base64_decode,
+        vector_base64_encode,
+        vector_md5,
+        vector_sha1,
+        vector_sha256,
+        vector_sha512,
+    )
     from opteryx.expression.functions.implementations import arithmetic as number_functions
     from opteryx.expression.functions.implementations import text as string_functions
-    from opteryx.expression.functions.implementations.text import _md5, _sha1, _sha256, _sha512
     from opteryx.expression.functions.registrar import _iterate_single_parameter as _isingle
     from opteryx.third_party.cyan4973.xxhash import hash_bytes
 
@@ -39,11 +46,11 @@ def get_builtin_hash_encoding_functions() -> list[FunctionDefinition]:
             "HASH", _hash_kernel, OrsoTypes.BLOB, (_any,), cost=437424.69, summary="Generic hash."
         ),
         _make(
-            "MD5", _md5, OrsoTypes.BLOB, (_any,), engine="draken", cost=8.44, summary="MD5 hash."
+            "MD5", vector_md5, OrsoTypes.BLOB, (_any,), engine="draken", cost=8.44, summary="MD5 hash."
         ),
         _make(
             "SHA1",
-            _sha1,
+            vector_sha1,
             OrsoTypes.BLOB,
             (_any,),
             engine="draken",
@@ -60,7 +67,7 @@ def get_builtin_hash_encoding_functions() -> list[FunctionDefinition]:
         ),
         _make(
             "SHA256",
-            _sha256,
+            vector_sha256,
             OrsoTypes.BLOB,
             (_any,),
             engine="draken",
@@ -77,7 +84,7 @@ def get_builtin_hash_encoding_functions() -> list[FunctionDefinition]:
         ),
         _make(
             "SHA512",
-            _sha512,
+            vector_sha512,
             OrsoTypes.BLOB,
             (_any,),
             engine="draken",
@@ -169,17 +176,19 @@ def get_builtin_hash_encoding_functions() -> list[FunctionDefinition]:
         ),
         _make(
             "BASE64_ENCODE",
-            string_functions.base64_encode,
+            vector_base64_encode,
             OrsoTypes.BLOB,
             (_b,),
+            engine="draken",
             summary="Base64 encode.",
             cost=3.40,
         ),
         _make(
             "BASE64_DECODE",
-            string_functions.base64_decode,
+            vector_base64_decode,
             OrsoTypes.BLOB,
             (_b,),
+            engine="draken",
             summary="Base64 decode.",
             cost=2.60,
         ),

@@ -17,7 +17,6 @@ Architectural note (Phase 5.3.2):
 """
 
 import datetime
-import inspect
 import math
 
 from opteryx.types import OrsoTypes

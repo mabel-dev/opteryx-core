@@ -91,7 +91,7 @@ A usage is classified as one of:
 
 ### 8) `opteryx/expression/functions/registrar/arithmetic.py`
 - **Imports:** `pyarrow.compute`
-- **Refs:** `pyarrow[1]`
+- **Refs:** `pyarrow[2]`
 - **Status:** boundary / registry metadata
 - **Why it matters:** registers arithmetic kernels, some still Arrow-backed
 - **Audit note:** likely not hot path itself, but indicates residual Arrow-backed function definitions
@@ -99,7 +99,7 @@ A usage is classified as one of:
 
 ### 9) `opteryx/expression/functions/registrar/arithmetic_extended.py`
 - **Imports:** `pyarrow.compute`
-- **Refs:** `pyarrow[1]`
+- **Refs:** `pyarrow[2]`
 - **Status:** boundary / registry metadata
 - **Why it matters:** same pattern as above
 - **Decision:** same as arithmetic registrar
@@ -152,12 +152,10 @@ A usage is classified as one of:
 - **Decision:** remove from the active audit list
 
 ### 16) `opteryx/utils/arrow.py`
-- **Imports:** `pyarrow`
-- **Refs:** `pyarrow[4]`
-- **Status:** boundary
-- **Why it matters:** Arrow helper functions by design
-- **Audit note:** this is an acceptable interop module if the engine core stays Arrow-free
-- **Decision:** keep
+- **Status:** removed
+- **Why it matters:** this file does not exist in the current tree
+- **Audit note:** stale path removed from the audit
+- **Decision:** do not track
 
 ### 17) `opteryx/utils/sql.py`
 - **Status:** clean
@@ -203,9 +201,11 @@ These were previously part of the audit but are not currently treated as primary
 - `opteryx/expression/functions/implementations/text.py` — `numpy[41]`, `pyarrow[32]`
 - `opteryx/expression/intervals.py` — `numpy[0]`, `pyarrow[8]`
 - `opteryx/types/schema.py` — `numpy[0]`, `pyarrow[1]`
-- `opteryx/models/dataframe.py` — `numpy[0]`, `pyarrow[3]`
-- `opteryx/models/execution_context.py` — `numpy[0]`, `pyarrow[1]`
-- `opteryx/expression/functions/registrar/__init__.py` — `numpy[0]`, `pyarrow[1]`
+- `opteryx/expression/functions/registrar/arithmetic.py` — `numpy[0]`, `pyarrow[2]`
+- `opteryx/expression/functions/registrar/arithmetic_extended.py` — `numpy[0]`, `pyarrow[2]`
+- `opteryx/expression/functions/registrar/constant.py` — `numpy[5]`, `pyarrow[0]`
+- `opteryx/expression/operations/fastpath_dictionary.py` — `numpy[0]`, `pyarrow[11]`
+- `opteryx/expression/operations/special_ops.py` — `numpy[0]`, `pyarrow[3]`
 
 ### Priority 2: boundary helpers that may still be too broad
 5. `opteryx/expression/intervals.py`

@@ -136,4 +136,3 @@ cdef class CarcharJoinIndexWrapper:
             row_ids = self._ptr.rows_from_payload(payload_ref)
             result.append((key, list(row_ids)))
         return result
-
