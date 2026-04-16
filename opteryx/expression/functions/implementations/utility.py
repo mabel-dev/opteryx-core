@@ -291,16 +291,11 @@ def embed(arr):
 
 
 def jsonb_object_keys(arr):
-    """
-    Extract the keys from an array of JSON objects or JSON strings/bytes.
-    """
+    """Extract the keys from an array of JSON objects or JSON strings/bytes."""
     if len(arr) == 0:
         return []
 
-    # Assume arr is already a list/tuple or has to_pylist()
-    if not isinstance(arr, (list, tuple)):
-        arr = arr.to_pylist()
-
+    arr = arr.to_pylist()
     result = []
     if len(arr) == 0:
         return result
@@ -335,13 +330,6 @@ def humanize(arr):
             if rounded >= 0.9:
                 return f"{format_number(rounded)} {label}"
         return format_number(value)
-
-    # Convert to Python list if needed
-    if not isinstance(arr, (list, tuple)):
-        if hasattr(arr, "tolist"):
-            arr = arr.tolist()
-        else:
-            arr = list(arr)
 
     return [humanize_number(value) for value in arr]
 
