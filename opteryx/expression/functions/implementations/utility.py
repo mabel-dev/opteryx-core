@@ -43,11 +43,6 @@ def _is_finite(x: float) -> bool:
     return x == x and abs(x) != float("inf")  # x==x is False for NaN
 
 
-def _bool_list_to_vector(bool_list: list):
-    """Convert a Python list of bools to a Draken BoolVector."""
-    from opteryx.compiled.draken.interop.vector_sequence import vector_from_sequence
-
-    return vector_from_sequence(bool_list)
 
 
 
@@ -388,6 +383,8 @@ def humanize(arr):
 
 def array_contains(arr, val):
     """Check if array contains value. Assumes Draken vectors."""
+    from opteryx.compiled.draken.interop.vector_sequence import vector_from_sequence
+
     needle = val[0] if hasattr(val, "__getitem__") else val
     bool_list = []
     for row in arr:
@@ -398,10 +395,12 @@ def array_contains(arr, val):
                 bool_list.append(needle in set(row))
             except TypeError:
                 bool_list.append(needle in row)
-    return _bool_list_to_vector(bool_list)
+    return vector_from_sequence(bool_list)
 
 
 def array_contains_any(arr, val):
+    from opteryx.compiled.draken.interop.vector_sequence import vector_from_sequence
+
     needles = frozenset(_normalize_membership_values(val))
     bool_list = []
     for row in arr:
@@ -412,10 +411,12 @@ def array_contains_any(arr, val):
                 bool_list.append(bool(set(row).intersection(needles)))
             except TypeError:
                 bool_list.append(any(n in row for n in needles))
-    return _bool_list_to_vector(bool_list)
+    return vector_from_sequence(bool_list)
 
 
 def array_contains_all(arr, val):
+    from opteryx.compiled.draken.interop.vector_sequence import vector_from_sequence
+
     needles = frozenset(_normalize_membership_values(val))
     bool_list = []
     for row in arr:
@@ -426,7 +427,7 @@ def array_contains_all(arr, val):
                 bool_list.append(needles.issubset(set(row)))
             except TypeError:
                 bool_list.append(all(n in row for n in needles))
-    return _bool_list_to_vector(bool_list)
+    return vector_from_sequence(bool_list)
 
 
 def array_cast(array, element_type):
