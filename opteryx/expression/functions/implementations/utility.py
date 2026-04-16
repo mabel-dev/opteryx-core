@@ -386,10 +386,7 @@ def array_contains_all(arr, val):
 def array_cast(array, element_type):
     from opteryx.types import OrsoTypes
 
-    # Convert to list if needed
-    if hasattr(array, "tolist"):
-        array = array.tolist()
-
+    array = array.tolist()
     result = [None] * len(array)
     parser = OrsoTypes[element_type[0]].parse
     for i, row in enumerate(array):
