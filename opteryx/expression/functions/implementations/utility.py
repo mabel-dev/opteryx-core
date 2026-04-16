@@ -127,23 +127,20 @@ def _coerce_text_scalar(value):
 
 
 def _as_text_vector(values):
-    from opteryx.compiled.draken.interop.arrow import vector_from_arrow
     from opteryx.compiled.draken.interop.vector_sequence import vector_from_sequence
     from opteryx.compiled.draken.vectors.string_vector import StringVector
 
     if isinstance(values, StringVector):
         return values
 
-    # Convert to StringVector
+    # Convert to StringVector from Python list
     if isinstance(values, (list, tuple)):
-        # Use vector_from_sequence which handles lists natively
         vector = vector_from_sequence(values)
         return vector if isinstance(vector, StringVector) else None
 
-    # Assume it's a Draken vector or similar with to_arrow method
-    arrow_array = values.to_arrow()
-    vector = vector_from_arrow(arrow_array)
-    return vector if isinstance(vector, StringVector) else None
+    # Assume Draken vector - fail fast if can't cast
+    # For other Draken types, return None (type mismatch)
+    return None
 
 
 def _coerce_numeric_matrix(rows, width=None):

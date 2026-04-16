@@ -135,8 +135,6 @@ def null_if(col1, col2):
     def _to_pylist(v):
         if hasattr(v, "to_pylist"):
             return v.to_pylist()
-        if hasattr(v, "to_arrow"):
-            return v.to_arrow().to_pylist()
         if isinstance(v, list):
             return v
         return list(v) if hasattr(v, "__iter__") and not isinstance(v, (str, bytes)) else [v]
