@@ -22,7 +22,6 @@ import math
 from opteryx.third_party.tktech import csimdjson as simdjson
 from opteryx.vectors.embeddings import embed_text_matrix, embed_text_values, get_embedding_provider
 
-
 # ============================================================================
 # Math utility functions for vector operations (replaces NumPy)
 # ============================================================================
@@ -41,7 +40,7 @@ def _dot_product(a: list, b: list) -> float:
 
 def _is_finite(x: float) -> bool:
     """Check if a float value is finite (not NaN or inf)."""
-    return x == x and abs(x) != float('inf')  # x==x is False for NaN
+    return x == x and abs(x) != float("inf")  # x==x is False for NaN
 
 
 def _bool_list_to_vector(bool_list: list):
@@ -51,6 +50,7 @@ def _bool_list_to_vector(bool_list: list):
     requires direct memory manipulation that's not safely possible from Python.
     """
     import pyarrow
+
     from opteryx.compiled.draken.interop.arrow import vector_from_arrow
 
     # Create PyArrow boolean array and convert to Draken BoolVector
@@ -68,18 +68,8 @@ def _sequence_rows(values):
     return values.to_pylist()
 
 
-def _as_python_value(value):
-    """Extract scalar value from PyArrow/Draken scalar, or return as-is."""
-    # Try PyArrow scalar .as_py() method only - don't convert arrays
-    if hasattr(value, "as_py"):
-        return value.as_py()
-    # Return Draken vectors unchanged
-    return value
-
-
 def _normalize_array_row(value):
     """Normalize a single array row. Keep Draken vectors as-is."""
-    value = _as_python_value(value)
     if value is None:
         return None
     if isinstance(value, (list, tuple, set, frozenset)):
@@ -90,7 +80,6 @@ def _normalize_array_row(value):
 
 def _normalize_membership_values(value):
     """Normalize membership test values. Keep Draken vectors as-is."""
-    value = _as_python_value(value)
     if value is None:
         return []
     if isinstance(value, (list, tuple, set, frozenset)):
@@ -105,7 +94,6 @@ def _normalize_membership_values(value):
 
 def _coerce_numeric_vector(value):
     """Convert value to numeric vector. Assumes Draken vectors or Python lists."""
-    value = _as_python_value(value)
     if value is None:
         return None
     if isinstance(value, (list, tuple)):
@@ -118,7 +106,7 @@ def _coerce_numeric_vector(value):
 
 
 def _coerce_text_scalar(value):
-    value = _as_python_value(value)
+    """Coerce value to text scalar. Assumes Python values or Draken scalars."""
     if value is None:
         return None
     if isinstance(value, bytes):
@@ -138,8 +126,6 @@ def _as_text_vector(values):
         vector = vector_from_sequence(values)
         return vector if isinstance(vector, StringVector) else None
 
-    # Assume Draken vector - fail fast if can't cast
-    # For other Draken types, return None (type mismatch)
     return None
 
 
@@ -422,7 +408,7 @@ def humanize(arr):
 
     # Convert to Python list if needed
     if not isinstance(arr, (list, tuple)):
-        if hasattr(arr, 'tolist'):
+        if hasattr(arr, "tolist"):
             arr = arr.tolist()
         else:
             arr = list(arr)
@@ -431,7 +417,9 @@ def humanize(arr):
 
 
 def array_contains(arr, val):
-    needle = _as_python_value(val)
+    """Check if array contains value. Assumes Draken vectors."""
+    # Extract scalar: val is a constant vector, get first element
+    needle = val[0] if hasattr(val, "__getitem__") else val
     rows = _sequence_rows(arr)
     bool_list = []
     for row in rows:
@@ -488,7 +476,7 @@ def array_cast(array, element_type):
     from opteryx.types import OrsoTypes
 
     # Convert to list if needed
-    if hasattr(array, 'tolist'):
+    if hasattr(array, "tolist"):
         array = array.tolist()
 
     result = [None] * len(array)
