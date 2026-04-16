@@ -21,15 +21,38 @@ def get_builtin_utility_functions() -> List[FunctionDefinition]:
 
     This module merges the previous array_misc group into utility as requested.
     """
-    # Local imports to avoid heavy imports at module import time
-    import numpy
-
     from opteryx.expression.functions.registrar import _iterate_single_parameter as _isingle
     from opteryx.expression.functions.registrar import _sort as _sort_factory
 
-    _greatest_kernel = _isingle(numpy.nanmax)
-    _least_kernel = _isingle(numpy.nanmin)
-    _sort_kernel = _sort_factory(numpy.sort)
+    def _nanmax(arr):
+        """Find maximum value ignoring NaNs, handling None values."""
+        if not arr:
+            return None
+        valid = [x for x in arr if x is not None and x == x]  # x == x filters out NaN
+        return max(valid) if valid else None
+
+    def _nanmin(arr):
+        """Find minimum value ignoring NaNs, handling None values."""
+        if not arr:
+            return None
+        valid = [x for x in arr if x is not None and x == x]  # x == x filters out NaN
+        return min(valid) if valid else None
+
+    def _sort(arr):
+        """Sort array, preserving None values at the end."""
+        if not arr:
+            return arr
+        nones = [x for x in arr if x is None]
+        valid = [x for x in arr if x is not None]
+        try:
+            return sorted(valid) + nones
+        except TypeError:
+            # Fallback for mixed types - return as-is
+            return arr
+
+    _greatest_kernel = _isingle(_nanmax)
+    _least_kernel = _isingle(_nanmin)
+    _sort_kernel = _sort_factory(_sort)
 
     def _element_type_return(arg_nodes) -> OrsoTypes:
         """Return the element type of the first arg (for GREATEST/LEAST/SORT)."""
