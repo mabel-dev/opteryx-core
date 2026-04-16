@@ -79,12 +79,6 @@ STATEMENTS = [
         ("SELECT * FROM $planets TIMESTAMP AS OF CURRENT_DATE - INTERVAL '7' DAY", 9, 20, None),
         ("SELECT * FROM $planets TIMESTAMP AS OF TRUNC(CURRENT_DATE, 'month')", 9, 20, None),
 
-        # Time-travel syntax (unsupported)
-        ("SELECT * FROM $planets AT(TIMESTAMP => '2024-12-15 00:00:00')", 9, 20, UnsupportedSyntaxError),
-        ("SELECT * FROM $planets AT('2024-12-15 00:00:00')", None, None, UnsupportedSyntaxError),
-        ("SELECT * FROM $planets BEFORE(TIMESTAMP => '2024-12-15 00:00:00')", None, None, UnsupportedSyntaxError),
-        ("SELECT * FROM $planets FOR SYSTEM_TIME AS OF '2024-12-15 00:00:00'", None, None, UnsupportedSyntaxError),
-
         # Does the error tester work
         ("THIS IS NOT VALID SQL", None, None, SqlError),
 
@@ -112,6 +106,7 @@ STATEMENTS = [
 
         # DISTINCT variations
         ("SELECT DISTINCT id FROM $planets", 9, 1, None),
+        ("SELECT DISTINCT ON (id) * FROM $planets", 9, 20, None),
         ("SELECT DISTINCT name FROM $planets", 9, 1, None),
         ("SELECT DISTINCT id, name FROM $planets", 9, 2, None),
 
@@ -131,6 +126,7 @@ STATEMENTS = [
 
         # WHERE clause variations
         ("SELECT * FROM $planets WHERE id = 1", 1, 20, None),
+        ("SELECT * FROM $planets WHERE ~id = -2", 1, 20, None),
         ("SELECT * FROM $planets WHERE id != 1", 8, 20, None),
         ("SELECT * FROM $planets WHERE id > 5", 4, 20, None),
         ("SELECT * FROM $planets WHERE id >= 5", 5, 20, None),
@@ -231,7 +227,11 @@ def test_timetravel_at_syntax_deprecation_warning():
     session = opteryx.session(memberships=["Apollo 11", "opteryx"])
 
     with pytest.warns(DeprecationWarning, match=r"AT\(TIMESTAMP => \.\.\.\) is deprecated"):
-        morsels = list(session.execute_to_morsels("SELECT * FROM $planets AT(TIMESTAMP => '2024-12-15 00:00:00')"))
+        morsels = list(
+            session.execute_to_morsels(
+                "SELECT * FROM $planets AT(TIMESTAMP => '2024-12-15 00:00:00')"
+            )
+        )
         assert sum(morsel.num_rows for morsel in morsels) == 9
         assert len(morsels[0].column_names) == 20
 
