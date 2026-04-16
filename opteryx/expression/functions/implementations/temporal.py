@@ -171,8 +171,7 @@ def date_diff(part, start, end):
 
     def _to_timestamp_us(arr):
         """Return a flat pyarrow timestamp[us] Array from any input type."""
-        if hasattr(arr, "to_arrow"):
-            arr = arr.to_arrow()
+        arr = arr.to_arrow()
         if isinstance(arr, pyarrow.ChunkedArray):
             arr = arr.combine_chunks() if arr.num_chunks > 1 else arr.chunk(0)
         if isinstance(arr, pyarrow.Array):
@@ -274,8 +273,7 @@ def unixtime(array):
     from pyarrow import compute
 
     # Draken vectors → convert to Arrow
-    if hasattr(array, "to_arrow"):
-        array = array.to_arrow()
+    array = array.to_arrow()
 
     # Arrow ChunkedArray → combine and recurse
     if isinstance(array, pyarrow.ChunkedArray):

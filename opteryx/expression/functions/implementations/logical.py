@@ -129,16 +129,9 @@ def null_if(col1, col2):
     Returns null if col1 equals col2, otherwise returns col1.
     """
 
-    # Normalise both operands to Python lists for comparison
-    def _to_pylist(v):
-        if hasattr(v, "to_pylist"):
-            return v.to_pylist()
-        if isinstance(v, list):
-            return v
-        return list(v) if hasattr(v, "__iter__") and not isinstance(v, (str, bytes)) else [v]
-
-    col1_list = _to_pylist(col1)
-    col2_list = _to_pylist(col2)
+    # Convert Draken vectors to Python lists
+    col1_list = col1.to_pylist()
+    col2_list = col2.to_pylist()
     n = len(col1_list)
 
     # Validate type compatibility on first non-null pair

@@ -94,14 +94,7 @@ def safe_power(base_array, exponent_array):
     from opteryx.compiled.vector_ops import vector_power
 
     # Validate: all exponents must be the same scalar value.
-    # exponent_array may be a Draken vector or a Python list/scalar.
-    if hasattr(exponent_array, "to_pylist"):
-        exp_values = exponent_array.to_pylist()
-    elif hasattr(exponent_array, "__iter__") and not isinstance(exponent_array, (int, float)):
-        exp_values = list(exponent_array)
-    else:
-        exp_values = [exponent_array]
-
+    exp_values = exponent_array.to_pylist()
     unique_exps = set(v for v in exp_values if v is not None)
     if len(unique_exps) != 1:
         raise ValueError("safe_power: exponent_array must contain identical values.")
