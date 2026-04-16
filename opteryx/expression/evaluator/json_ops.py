@@ -3,7 +3,7 @@
 Operations on vectors of JSON-encoded objects and arrays.
 """
 
-from opteryx.compiled.draken.interop.arrow import vector_from_sequence
+from opteryx.compiled.draken.interop.vector_sequence import vector_from_sequence
 
 
 def _json_at_question(left, right):
