@@ -3,12 +3,13 @@
 Explicit comparison dispatch for all native Draken vector types.
 ArrowVector has been removed; all paths now use native Draken APIs.
 
-TODO: AtQuestion operator (JSON path queries) is misplaced here. It should be
-moved to vector_ops or a dedicated json_ops module since it's not a comparison.
+Dispatch strategy:
+  1. Check encoding schemes first (CONSTANT_ENCODED, DICTIONARY_ENCODED)
+  2. Then dispatch by underlying data type (STRING, INT64, FLOAT64, TIMESTAMP, etc.)
 
-TODO: Dispatch logic mixes VectorType (underlying type) with encoding schemes
-(DICTIONARY_ENCODED, CONSTANT_ENCODED). Ideally we'd dispatch on encoding first
-(unwrap constants, handle dictionaries), then on underlying type.
+This separation is important because encoding schemes like CONSTANT_ENCODED and
+DICTIONARY_ENCODED can wrap any underlying type, so they must be checked before
+type-specific comparison logic.
 """
 
 import datetime
@@ -420,34 +421,8 @@ def draken_compare(op: str, left, right, left_schema_type=None, right_schema_typ
             return _string_anyop_like(left, right, ignore_case=True).not_vector()
         return vector_anyop_ilike(right, left).not_vector()
     if op == "AtQuestion":
-        from opteryx.compiled.draken.interop.arrow import vector_from_sequence
-        from opteryx.third_party.tktech import csimdjson as simdjson
-
-        docs = left.to_pylist()
-        path = right
-        parser = simdjson.Parser()
-
-        if path.startswith("$."):
-            result = [None if doc is None else path in parser.parse(doc) for doc in docs]
-        else:
-
-            def _pointer(jsonpath: str) -> str:
-                return jsonpath[1:].replace(".", "/").replace("[", "/").replace("]", "")
-
-            json_pointer = _pointer(path)
-
-            def _check(doc):
-                if doc is None:
-                    return None
-                try:
-                    parser.parse(doc).at_pointer(json_pointer)
-                    return True
-                except Exception:
-                    return False
-
-            result = [_check(doc) for doc in docs]
-
-        return vector_from_sequence(result)
+        from .json_ops import _json_at_question
+        return _json_at_question(left, right)
 
     # --- Standard comparison operators ---
 
@@ -468,7 +443,14 @@ def draken_compare(op: str, left, right, left_schema_type=None, right_schema_typ
 
     vec_type = get_vector_type(left)
 
-    if vec_type == VectorType.STRING:
+    # --- Dispatch by encoding scheme first ---
+    # CONSTANT_ENCODED and DICTIONARY_ENCODED are overlaid on top of underlying types
+    if vec_type == VectorType.CONSTANT_ENCODED:
+        result = _constant_compare(op, left, right)
+    elif vec_type == VectorType.DICTIONARY_ENCODED:
+        result = _dict_compare(op, left, right)
+    # --- Then dispatch by underlying data type ---
+    elif vec_type == VectorType.STRING:
         result = _string_compare(op, left, right)
     elif vec_type in (VectorType.INT64, VectorType.INTEGER):
         if left_schema_type in (OrsoTypes.DATE, OrsoTypes.TIMESTAMP):
@@ -483,10 +465,6 @@ def draken_compare(op: str, left, right, left_schema_type=None, right_schema_typ
         result = _date32_compare(op, left, right)
     elif vec_type == VectorType.INTERVAL:
         result = _interval_compare(op, left, right)
-    elif vec_type == VectorType.DICTIONARY_ENCODED:
-        result = _dict_compare(op, left, right)
-    elif vec_type == VectorType.CONSTANT_ENCODED:
-        result = _constant_compare(op, left, right)
     elif vec_type == VectorType.BOOL:
         result = _bool_compare(op, left, right)
     elif vec_type == VectorType.DECIMAL:
