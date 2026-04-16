@@ -123,8 +123,6 @@ def if_not_null(values, replacements):
     not_null_boolvec = bool_vector_from_int8_mask(inv_mask, n)
     return vector_iif(not_null_boolvec, replacements, values)
 
-    return [r if v is not None else None for v, r in zip(vals, repls)]
-
 
 def null_if(col1, col2):
     """

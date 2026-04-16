@@ -44,38 +44,12 @@ def _is_finite(x: float) -> bool:
 
 
 def _bool_list_to_vector(bool_list: list):
-    """Convert a Python list of bools to a Draken BoolVector.
+    """Convert a Python list of bools to a Draken BoolVector."""
+    from opteryx.compiled.draken.interop.vector_sequence import vector_from_sequence
 
-    Fallback: Uses PyArrow bridge since pure Python bit-packing of Draken vectors
-    requires direct memory manipulation that's not safely possible from Python.
-    """
-    import pyarrow
-
-    from opteryx.compiled.draken.interop.arrow import vector_from_arrow
-
-    # Create PyArrow boolean array and convert to Draken BoolVector
-    arrow_array = pyarrow.array(bool_list, type=pyarrow.bool_())
-    return vector_from_arrow(arrow_array)
+    return vector_from_sequence(bool_list)
 
 
-def _sequence_rows(values):
-    """Convert input to list of rows. Assumes Draken vectors or Python sequences."""
-    if isinstance(values, (str, bytes, bytearray)):
-        return [values]
-    if isinstance(values, (list, tuple)):
-        return list(values)
-    # Assume Draken vector with to_pylist() method
-    return values.to_pylist()
-
-
-def _normalize_array_row(value):
-    """Normalize a single array row. Keep Draken vectors as-is."""
-    if value is None:
-        return None
-    if isinstance(value, (list, tuple, set, frozenset)):
-        return list(value)
-    # For Draken vectors, return as-is; don't convert to Python
-    return value
 
 
 def _normalize_membership_values(value):
@@ -309,19 +283,16 @@ def _cosine_similarity_text(arr, val):
 
 def cosine_similarity(arr, val):
     """Cosine similarity over numeric vectors or semantic text embeddings."""
-    left_rows = _sequence_rows(arr)
-    right_rows = _sequence_rows(val)
-
-    if len(left_rows) == 0:
+    if len(arr) == 0:
         return []
 
-    sample_left = next((row for row in left_rows if row is not None), None)
-    sample_right = next((row for row in right_rows if row is not None), None)
+    sample_left = next((row for row in arr if row is not None), None)
+    sample_right = next((row for row in val if row is not None), None)
     if (
         _coerce_numeric_vector(sample_left) is not None
         and _coerce_numeric_vector(sample_right) is not None
     ):
-        return _score_numeric_vectors(left_rows, right_rows)
+        return _score_numeric_vectors(arr, val)
 
     return _cosine_similarity_text(arr, val)
 
@@ -337,14 +308,13 @@ def cosine_distance(arr, val):
 
 def embed(arr):
     """Convert text values into numeric vectors using the configured embedding provider."""
-    rows = _sequence_rows(arr)
-    if len(rows) == 0:
+    if len(arr) == 0:
         return []
 
     texts = []
     row_positions = []
-    results = [None] * len(rows)
-    for index, value in enumerate(rows):
+    results = [None] * len(arr)
+    for index, value in enumerate(arr):
         text_value = _coerce_text_scalar(value)
         if text_value is None:
             continue
@@ -418,57 +388,44 @@ def humanize(arr):
 
 def array_contains(arr, val):
     """Check if array contains value. Assumes Draken vectors."""
-    # Extract scalar: val is a constant vector, get first element
     needle = val[0] if hasattr(val, "__getitem__") else val
-    rows = _sequence_rows(arr)
     bool_list = []
-    for row in rows:
+    for row in arr:
         if row is None:
             bool_list.append(False)
         else:
-            normalized = _normalize_array_row(row) or []
-            # Try to check membership with set (fast path for hashable types)
             try:
-                bool_list.append(needle in set(normalized))
+                bool_list.append(needle in set(row))
             except TypeError:
-                # Fallback for unhashable types (lists, etc)
-                bool_list.append(needle in normalized)
+                bool_list.append(needle in row)
     return _bool_list_to_vector(bool_list)
 
 
 def array_contains_any(arr, val):
     needles = frozenset(_normalize_membership_values(val))
-    rows = _sequence_rows(arr)
     bool_list = []
-    for row in rows:
+    for row in arr:
         if row is None:
             bool_list.append(False)
         else:
-            normalized = _normalize_array_row(row) or []
-            # Try set intersection (fast path)
             try:
-                bool_list.append(bool(set(normalized).intersection(needles)))
+                bool_list.append(bool(set(row).intersection(needles)))
             except TypeError:
-                # Fallback for unhashable types
-                bool_list.append(any(n in normalized for n in needles))
+                bool_list.append(any(n in row for n in needles))
     return _bool_list_to_vector(bool_list)
 
 
 def array_contains_all(arr, val):
     needles = frozenset(_normalize_membership_values(val))
-    rows = _sequence_rows(arr)
     bool_list = []
-    for row in rows:
+    for row in arr:
         if row is None:
             bool_list.append(False)
         else:
-            normalized = _normalize_array_row(row) or []
-            # Try set subset check (fast path)
             try:
-                bool_list.append(needles.issubset(set(normalized)))
+                bool_list.append(needles.issubset(set(row)))
             except TypeError:
-                # Fallback for unhashable types
-                bool_list.append(all(n in normalized for n in needles))
+                bool_list.append(all(n in row for n in needles))
     return _bool_list_to_vector(bool_list)
 
 
