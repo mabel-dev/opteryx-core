@@ -6,15 +6,19 @@ import pyarrow
 from opteryx.types import OrsoTypes
 
 
+def _convert_int64_array_to_pyarrow_datetime(array):
+    """Convert a PyArrow int64 array (Unix timestamps in microseconds) to timestamp[us]."""
+    if isinstance(array, pyarrow.Array) and pyarrow.types.is_integer(array.type):
+        return array.cast(pyarrow.timestamp("us"))
+    return array
+
+
 def to_temporal_array(values, source_type, target_type):
     """
     Coerce values to temporal type (TIMESTAMP or DATE).
     Handles conversion from various input types including integers and strings.
     """
     from opteryx.expression.casts import parse_timestamp_value
-    from opteryx.expression.functions.implementations.temporal import (
-        convert_int64_array_to_pyarrow_datetime,
-    )
 
     if isinstance(values, pyarrow.ChunkedArray):
         arr = values.combine_chunks() if values.num_chunks > 1 else values.chunk(0)
@@ -57,7 +61,7 @@ def to_temporal_array(values, source_type, target_type):
                         ],
                         type=pyarrow.timestamp("us"),
                     )
-            return convert_int64_array_to_pyarrow_datetime(arr)
+            return _convert_int64_array_to_pyarrow_datetime(arr)
         return pyarrow.array(
             [parse_timestamp_value(v.as_py() if hasattr(v, "as_py") else v) for v in arr],
             type=pyarrow.timestamp("us"),

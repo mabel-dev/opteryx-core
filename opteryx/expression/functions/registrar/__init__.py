@@ -226,17 +226,13 @@ def get_builtin_functions() -> list[FunctionDefinition]:
     from . import temporal as _temp
     from . import temporal_extra as _temp_ext
     from . import text as _text
-    from . import text_extended as _text_ext
-    from . import type_conversion as _type_conv
     from . import utility as _util
 
     # Collect from each domain getter. Domain modules should implement these
     # functions (or alias them) to return lists of FunctionDefinition objects.
     functions.extend(_text.get_builtin_text_functions())
-    functions.extend(_text_ext.get_builtin_text_extended_functions())
     functions.extend(_arith.get_builtin_arithmetic_functions())
     functions.extend(_arith.get_builtin_arithmetic_extended_functions())
-    functions.extend(_type_conv.get_builtin_type_conversion_functions())
     functions.extend(_logical.get_builtin_logical_functions())
     functions.extend(_agg.get_builtin_aggregate_functions())
     functions.extend(_const.get_builtin_constant_functions())
