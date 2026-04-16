@@ -6,6 +6,9 @@ from opteryx.compiled.vector_ops import vector_in_list
 from opteryx.exceptions import ColumnReferencedBeforeEvaluationError
 
 from .function_execution import _is_draken_vector, apply_bounded_function
+
+# Encoding type identifiers for interval detection
+_INTERVAL_TYPES = frozenset(("IntervalVector",))
 from .type_coercion import (
     _coerce_date32,
     _coerce_date32_set,
