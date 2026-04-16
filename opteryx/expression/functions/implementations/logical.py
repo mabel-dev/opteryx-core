@@ -72,33 +72,12 @@ def if_null(values, replacements):
             else replacements
         )
 
-    # Fast path: native Draken vector — is_null() returns int8_t[::1] memoryview
-    if type(values).__name__ in _DRAKEN_VECTOR_CLASSES:
-        n = len(values)
-        null_mask = values.is_null()  # int8_t[::1]: 1 = null, 0 = not null
-        null_boolvec = bool_vector_from_int8_mask(null_mask, n)
-        return vector_iif(null_boolvec, replacements, values)
-
-    # Fallback: Python iterable (should rarely be reached in production)
-    vals = (
-        list(values)
-        if hasattr(values, "__iter__") and not isinstance(values, (str, bytes))
-        else [values]
-    )
-    n = len(vals)
-
-    if hasattr(replacements, "to_pylist"):
-        repls = replacements.to_pylist()
-    elif hasattr(replacements, "__iter__") and not isinstance(replacements, (str, bytes)):
-        repls = list(replacements)
-    else:
-        repls = [replacements]
-
-    if len(repls) == 1:
-        r = repls[0]
-        return [r if v is None else v for v in vals]
-
-    return [r if v is None else v for v, r in zip(vals, repls)]
+    # Draken vector — is_null() returns int8_t[::1] memoryview
+    # Assume values is now a Draken vector after conversion above
+    n = len(values)
+    null_mask = values.is_null()  # int8_t[::1]: 1 = null, 0 = not null
+    null_boolvec = bool_vector_from_int8_mask(null_mask, n)
+    return vector_iif(null_boolvec, replacements, values)
 
 
 def if_not_null(values, replacements):
@@ -135,33 +114,14 @@ def if_not_null(values, replacements):
             else replacements
         )
 
-    # Fast path: native Draken vector — is_null() returns int8_t[::1] memoryview
-    if type(values).__name__ in _DRAKEN_VECTOR_CLASSES:
-        n = len(values)
-        null_mask = values.is_null()  # int8_t[::1]: 1 = null, 0 = not null
-        # Invert: 1 = not null (true → use replacement), 0 = null (false → keep null)
-        inv_mask = _array("b", [0 if b else 1 for b in null_mask])
-        not_null_boolvec = bool_vector_from_int8_mask(inv_mask, n)
-        return vector_iif(not_null_boolvec, replacements, values)
-
-    # Fallback: Python iterable
-    vals = (
-        list(values)
-        if hasattr(values, "__iter__") and not isinstance(values, (str, bytes))
-        else [values]
-    )
-    n = len(vals)
-
-    if hasattr(replacements, "to_pylist"):
-        repls = replacements.to_pylist()
-    elif hasattr(replacements, "__iter__") and not isinstance(replacements, (str, bytes)):
-        repls = list(replacements)
-    else:
-        repls = [replacements]
-
-    if len(repls) == 1:
-        r = repls[0]
-        return [r if v is not None else None for v in vals]
+    # Draken vector — is_null() returns int8_t[::1] memoryview
+    # Assume values is now a Draken vector after conversion above
+    n = len(values)
+    null_mask = values.is_null()  # int8_t[::1]: 1 = null, 0 = not null
+    # Invert: 1 = not null (true → use replacement), 0 = null (false → keep null)
+    inv_mask = _array("b", [0 if b else 1 for b in null_mask])
+    not_null_boolvec = bool_vector_from_int8_mask(inv_mask, n)
+    return vector_iif(not_null_boolvec, replacements, values)
 
     return [r if v is not None else None for v, r in zip(vals, repls)]
 
