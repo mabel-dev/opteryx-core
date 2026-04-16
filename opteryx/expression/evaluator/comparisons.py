@@ -381,17 +381,11 @@ def draken_compare(op: str, left, right, left_schema_type=None, right_schema_typ
 
         return vector_allop_neq(left, right)
     if op == "AtArrow":
-        from opteryx.compiled.vector_ops import vector_contains_any
-
-        items = set(right) if right is not None else set()
-        items = {v.encode() if isinstance(v, str) else v for v in items}
-        return vector_contains_any(left, items)
+        from .json_ops import _json_at_arrow
+        return _json_at_arrow(left, right)
     if op == "ArrayContainsAll":
-        from opteryx.compiled.vector_ops import vector_contains_all
-
-        items = set(right) if right is not None else set()
-        items = {v.encode() if isinstance(v, str) else v for v in items}
-        return vector_contains_all(left, items)
+        from .json_ops import _json_array_contains_all
+        return _json_array_contains_all(left, right)
     if op == "AnyOpLike":
         from opteryx.compiled.draken.vectors.string_vector import StringVector
         from opteryx.compiled.vector_ops import vector_anyop_like
@@ -422,6 +416,7 @@ def draken_compare(op: str, left, right, left_schema_type=None, right_schema_typ
         return vector_anyop_ilike(right, left).not_vector()
     if op == "AtQuestion":
         from .json_ops import _json_at_question
+
         return _json_at_question(left, right)
 
     # --- Standard comparison operators ---
@@ -439,7 +434,7 @@ def draken_compare(op: str, left, right, left_schema_type=None, right_schema_typ
 
     # Vector left with null right: all False
     if right is None and not isinstance(left, (str, int, float, bytes, bool, type(None))):
-            return BoolVector(len(left))
+        return BoolVector(len(left))
 
     vec_type = get_vector_type(left)
 
@@ -449,6 +444,7 @@ def draken_compare(op: str, left, right, left_schema_type=None, right_schema_typ
         result = _constant_compare(op, left, right)
     elif vec_type == VectorType.DICTIONARY_ENCODED:
         result = _dict_compare(op, left, right)
+
     # --- Then dispatch by underlying data type ---
     elif vec_type == VectorType.STRING:
         result = _string_compare(op, left, right)
