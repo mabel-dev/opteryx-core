@@ -7,8 +7,6 @@ import datetime
 from dataclasses import dataclass, field
 from typing import Iterable, List
 
-import pyarrow
-
 from opteryx.types import OrsoTypes
 from opteryx.variables import SystemVariables, SystemVariablesContainer, VariableOwner, Visibility
 
@@ -56,7 +54,7 @@ class ExecutionContext:
         object.__setattr__(self, "variables", SystemVariables.snapshot(VariableOwner.USER))
         self.variables._variables["user_memberships"] = (
             OrsoTypes.ARRAY,
-            pyarrow.array(self.memberships),
+            list(self.memberships or []),
             VariableOwner.SERVER,
             Visibility.UNRESTRICTED,
         )

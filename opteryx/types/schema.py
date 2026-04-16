@@ -20,8 +20,6 @@ from __future__ import annotations
 import dataclasses
 from typing import Any, Dict, List, Optional
 
-import pyarrow
-
 from opteryx.types import OrsoTypes
 
 __all__ = [
@@ -148,6 +146,8 @@ class FlatColumn:
         Returns a PyArrow Field that describes this column's type and nullability.
         Used by the execution engine for morsel normalization.
         """
+        import pyarrow
+
         arrow_type = _orso_type_to_arrow_type(self.type)
         return pyarrow.field(self.name, arrow_type, nullable=self.nullable)
 
@@ -433,6 +433,8 @@ class RelationSchema:
 
 def _orso_type_to_arrow_type(orso_type: OrsoTypes) -> Any:
     """Convert OrsoTypes enum to PyArrow type."""
+    import pyarrow
+
     type_mapping = {
         OrsoTypes.NULL: pyarrow.null(),
         OrsoTypes.BOOLEAN: pyarrow.bool_(),
@@ -455,7 +457,7 @@ def _orso_type_to_arrow_type(orso_type: OrsoTypes) -> Any:
 
 def convert_orso_schema_to_arrow_schema(
     schema: RelationSchema, use_identities: bool = False
-) -> pyarrow.Schema:
+) -> Any:
     """Convert RelationSchema to PyArrow schema.
 
     Args:
@@ -465,6 +467,8 @@ def convert_orso_schema_to_arrow_schema(
     Returns:
         PyArrow schema corresponding to the RelationSchema
     """
+    import pyarrow
+
     fields = []
     for col in schema.columns:
         # Use identity if requested, otherwise use name

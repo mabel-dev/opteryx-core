@@ -19,8 +19,6 @@ from __future__ import annotations
 
 from typing import Any
 
-import pyarrow
-
 from opteryx.expression.functions import (
     FunctionDefinition,
     FunctionOverload,
@@ -37,7 +35,7 @@ def _iterate_single_parameter(func):
     """Decorator for functions that iterate over a single array parameter."""
 
     def _inner(array):
-        return pyarrow.array(list(map(func, array)))
+        return list(map(func, array))
 
     return _inner
 
@@ -46,7 +44,7 @@ def _sort(func):
     """Decorator for sort/ordering functions that process arrays."""
 
     def _inner(array):
-        return pyarrow.array([func(item) for item in array])
+        return [func(item) for item in array]
 
     return _inner
 
@@ -57,7 +55,7 @@ def _iterate_double_parameter(func):
     def _inner(array, literal):
         if isinstance(array, str):
             array = [array]
-        return pyarrow.array(func(item, literal[index]) for index, item in enumerate(array))
+        return [func(item, literal[index]) for index, item in enumerate(array)]
 
     return _inner
 
@@ -68,7 +66,7 @@ def _iterate_double_parameter_swapped(func):
     def _inner(array, literal):
         if isinstance(array, str):
             array = [array]
-        return pyarrow.array(func(literal[index], item) for index, item in enumerate(array))
+        return [func(literal[index], item) for index, item in enumerate(array)]
 
     return _inner
 
