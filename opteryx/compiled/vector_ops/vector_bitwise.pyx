@@ -13,6 +13,7 @@ This module implements vectorized bitwise operations on Int64Vector:
 - Bitwise AND
 - Bitwise OR
 - Bitwise XOR
+- Bitwise NOT
 - Left shift
 - Right shift
 
@@ -109,6 +110,40 @@ cpdef object vector_bitwise_or(Int64Vector left, Int64Vector right):
             result.append(None)
         else:
             result.append(l_data[i] | r_data[i])
+
+    return vector_from_sequence(result)
+
+
+cpdef object vector_bitwise_not(Int64Vector operand):
+    """Bitwise NOT (complement) an Int64Vector element-wise.
+
+    Parameters:
+        operand: Int64Vector operand.
+
+    Returns:
+        Int64Vector with bitwise NOT result. NULL propagates from the input.
+    """
+    cdef DrakenFixedBuffer* op = operand.ptr
+    cdef Py_ssize_t n = op.length
+
+    # Constant-encoded vector: data buffer is not materialised; use the
+    # stored scalar and return another constant vector.
+    if operand._has_const:
+        if operand._const_is_null:
+            return Int64Vector.from_constant(None, n, is_null=True)
+        return Int64Vector.from_constant(~operand._const_value, n)
+
+    cdef int64_t* op_data = <int64_t*>op.data
+    cdef uint8_t* op_null = op.null_bitmap
+
+    cdef list result = []
+    cdef Py_ssize_t i
+
+    for i in range(n):
+        if _is_null(op_null, i):
+            result.append(None)
+        else:
+            result.append(~op_data[i])
 
     return vector_from_sequence(result)
 

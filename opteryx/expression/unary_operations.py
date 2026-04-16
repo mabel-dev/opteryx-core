@@ -1,9 +1,5 @@
 """
-Unary operations (IS NULL, IS TRUE, IS FALSE) - Draken-native only.
-
-This module implements unary logical operations assuming inputs are Draken vectors.
-No Arrow/numpy fallbacks. No defensive hasattr checks.
-If you get an AttributeError, your input isn't Draken - that's the point.
+Unary operations (IS NULL, IS TRUE, IS FALSE)
 """
 
 
@@ -37,6 +33,13 @@ def _is_not_false(values):
     return values.equals(False).not_vector()
 
 
+def _bitwise_not(values):
+    """Bitwise complement of integer values. Input must be Draken Int64Vector."""
+    from opteryx.compiled.vector_ops import vector_bitwise_not
+
+    return vector_bitwise_not(values)
+
+
 UNARY_OPERATIONS = {
     "IsNull": _is_null,
     "IsNotFalse": _is_not_false,
@@ -44,4 +47,5 @@ UNARY_OPERATIONS = {
     "IsNotTrue": _is_not_true,
     "IsTrue": _is_true,
     "IsFalse": _is_false,
+    "BitwiseNot": _bitwise_not,
 }
