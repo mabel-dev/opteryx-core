@@ -113,7 +113,11 @@ def format_expression(root, qualify: bool = False):
         token = (get_operator_token(root.value) or root.value).upper()
         return f"{format_expression(root.left, qualify)} {token} {format_expression(root.right, qualify)}"
     if node_type == NodeType.UNARY_OPERATOR:
-        _map = {"IsNull": "%s IS NULL", "IsNotNull": "%s IS NOT NULL"}
+        _map = {
+            "IsNull": "%s IS NULL",
+            "IsNotNull": "%s IS NOT NULL",
+            "BitwiseNot": "~%s",
+        }
         return _map.get(root.value, root.value + "(%s)").replace(
             "%s", format_expression(root.centre, qualify)
         )

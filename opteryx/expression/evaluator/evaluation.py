@@ -173,6 +173,10 @@ def _unary_draken(op: str, centre_node, morsel):
         return _is_null_as_boolvector(vec)
     if op == "IsNotNull":
         return _is_null_as_boolvector(vec).not_vector()
+    if op == "BitwiseNot":
+        from opteryx.compiled.vector_ops import vector_bitwise_not
+
+        return vector_bitwise_not(vec)
     if op in ("IsTrue", "IsNotFalse", "IsFalse", "IsNotTrue"):
         bv = vec if get_vector_type(vec) == VectorType.BOOL else None
         if bv is None:

@@ -322,6 +322,13 @@ def determine_type(node) -> OrsoTypes:
             raise IncorrectTypeError(
                 f"Expected a BOOLEAN value for {convert_camel_to_sql_case(node.value)}, but received {node.centre.schema_column.type}."
             )
+        if node.value == "BitwiseNot":
+            operand_type = node.centre.schema_column.type
+            if operand_type not in (OrsoTypes.INTEGER, OrsoTypes._MISSING_TYPE, 0):
+                raise IncorrectTypeError(
+                    f"Expected an INTEGER value for bitwise NOT (~), but received {operand_type}."
+                )
+            return OrsoTypes.INTEGER
         return OrsoTypes.BOOLEAN
     if node.node_type == NodeType.NESTED:
         return determine_type(node.centre)

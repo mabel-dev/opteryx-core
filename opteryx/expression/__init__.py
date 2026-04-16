@@ -856,7 +856,12 @@ def evaluate_statement(statement, table):
 
 def is_mask(new_column, statement, table):
     """Determine if the given column represents a mask."""
-    return len(new_column) < table.num_rows or statement.node_type == NodeType.UNARY_OPERATOR
+    if len(new_column) < table.num_rows:
+        return True
+    if statement.node_type == NodeType.UNARY_OPERATOR:
+        # BitwiseNot returns an integer vector, not a boolean mask
+        return statement.value != "BitwiseNot"
+    return False
 
 
 def create_mask(column, num_rows):

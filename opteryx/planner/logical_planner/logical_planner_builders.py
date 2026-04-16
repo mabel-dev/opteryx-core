@@ -1218,6 +1218,9 @@ def unary_op(branch, alias: Optional[List[str]] = None, key=None):
         return node
     if branch["op"] == "Plus":
         return literal_number(branch["expr"]["Value"]["value"]["Number"], alias=alias)
+    if branch["op"] == "BitwiseNot":
+        centre = build(branch["expr"])
+        return Node(node_type=NodeType.UNARY_OPERATOR, value="BitwiseNot", centre=centre)
 
 
 def wildcard_filter(branch, alias: Optional[List[str]] = None, key=None):
