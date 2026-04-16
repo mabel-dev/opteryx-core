@@ -7,8 +7,6 @@ Only implements the methods actually used by Opteryx (not a full DataFrame repla
 
 from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
-import pyarrow
-
 from opteryx.types import OrsoTypes
 from opteryx.types.schema import FlatColumn, RelationSchema
 
@@ -58,12 +56,14 @@ class DataFrame:
         else:
             self._schema = schema
 
-    def arrow(self) -> pyarrow.Table:
+    def arrow(self) -> Any:
         """Convert DataFrame to PyArrow Table.
 
         Returns:
             PyArrow Table with the data from this DataFrame
         """
+        import pyarrow
+
         if not self._schema or not self._schema.columns:
             # Empty schema - return empty table
             return pyarrow.table({})
