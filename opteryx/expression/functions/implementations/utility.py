@@ -44,27 +44,18 @@ def _is_finite(x: float) -> bool:
 
 
 def _normalize_membership_values(value):
-    """Normalize membership test values. Keep Draken vectors as-is."""
+    """Extract membership test values as frozenset."""
     if value is None:
-        return []
-    if isinstance(value, (list, tuple, set, frozenset)):
-        if len(value) == 1:
-            first_elem = next(iter(value))
-            if isinstance(first_elem, (list, tuple, set, frozenset)):
-                return _normalize_array_row(first_elem) or []
-        return list(value)
-    # For Draken vectors, return as-is
-    return value
+        return frozenset()
+    return frozenset(value)
 
 
 
 
 def _coerce_text_scalar(value):
-    """Coerce value to text scalar. Assumes Python values or Draken scalars."""
+    """Convert value to string."""
     if value is None:
         return None
-    if isinstance(value, bytes):
-        return value.decode("utf8", errors="ignore")
     return str(value)
 
 
