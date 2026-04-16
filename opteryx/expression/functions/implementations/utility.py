@@ -61,17 +61,9 @@ def _coerce_text_scalar(value):
 
 def _as_text_vector(values):
     from opteryx.compiled.draken.interop.vector_sequence import vector_from_sequence
-    from opteryx.compiled.draken.vectors.string_vector import StringVector
 
-    if isinstance(values, StringVector):
-        return values
-
-    # Convert to StringVector from Python list
-    if isinstance(values, (list, tuple)):
-        vector = vector_from_sequence(values)
-        return vector if isinstance(vector, StringVector) else None
-
-    return None
+    # Assume values is iterable; vector_from_sequence handles conversion
+    return vector_from_sequence(values)
 
 
 def _coerce_numeric_matrix(rows, width=None):
