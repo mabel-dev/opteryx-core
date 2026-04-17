@@ -28,7 +28,6 @@ __all__ = [
     "FunctionColumn",
     "RelationSchema",
     "ColumnDisposition",
-    "convert_orso_schema_to_arrow_schema",
 ]
 
 
@@ -138,18 +137,6 @@ class FlatColumn:
         if self.aliases:
             names.extend(self.aliases)
         return names
-
-    @property
-    def arrow_field(self) -> Any:
-        """Get PyArrow field representation of this column.
-
-        Returns a PyArrow Field that describes this column's type and nullability.
-        Used by the execution engine for morsel normalization.
-        """
-        import pyarrow
-
-        arrow_type = _orso_type_to_arrow_type(self.type)
-        return pyarrow.field(self.name, arrow_type, nullable=self.nullable)
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert column to dictionary for serialization."""
@@ -429,52 +416,3 @@ class RelationSchema:
 
         self.columns.extend(other.columns)
         return self
-
-
-def _orso_type_to_arrow_type(orso_type: OrsoTypes) -> Any:
-    """Convert OrsoTypes enum to PyArrow type."""
-    import pyarrow
-
-    type_mapping = {
-        OrsoTypes.NULL: pyarrow.null(),
-        OrsoTypes.BOOLEAN: pyarrow.bool_(),
-        OrsoTypes.INTEGER: pyarrow.int32(),
-        OrsoTypes.DOUBLE: pyarrow.float64(),
-        OrsoTypes.DECIMAL: pyarrow.decimal128(18, 10),
-        OrsoTypes.VARCHAR: pyarrow.string(),
-        OrsoTypes.BLOB: pyarrow.binary(),
-        OrsoTypes.DATE: pyarrow.date32(),
-        OrsoTypes.TIMESTAMP: pyarrow.timestamp("us"),
-        OrsoTypes.TIME: pyarrow.time64("us"),
-        OrsoTypes.INTERVAL: pyarrow.duration("us"),
-        OrsoTypes.ARRAY: pyarrow.list_(pyarrow.string()),
-        OrsoTypes.STRUCT: pyarrow.struct([]),
-        OrsoTypes.VECTOR: pyarrow.list_(pyarrow.float64()),
-        OrsoTypes.JSONB: pyarrow.string(),
-    }
-    return type_mapping.get(orso_type, pyarrow.string())
-
-
-def convert_orso_schema_to_arrow_schema(
-    schema: RelationSchema, use_identities: bool = False
-) -> Any:
-    """Convert RelationSchema to PyArrow schema.
-
-    Args:
-        schema: RelationSchema to convert
-        use_identities: If True, use column identities as field names; otherwise use column names
-
-    Returns:
-        PyArrow schema corresponding to the RelationSchema
-    """
-    import pyarrow
-
-    fields = []
-    for col in schema.columns:
-        # Use identity if requested, otherwise use name
-        field_name = col.identity if use_identities else col.name
-        arrow_type = _orso_type_to_arrow_type(col.type)
-        field = pyarrow.field(field_name, arrow_type, nullable=col.nullable)
-        fields.append(field)
-
-    return pyarrow.schema(fields)

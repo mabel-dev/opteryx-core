@@ -109,23 +109,20 @@ Recommended immediate actions (practical checklist)
    - Decide if you want tests/dev scripts to keep NumPy/PyArrow. My recommendation: keep them unless you want to reduce dev dependencies; they do not affect runtime hot-path performance.
 
 Appendix — discovered files (explicit import or mention in `opteryx/` sources)
-- `opteryx/expression/binary_operators.py` (local pyarrow imports for JSON/Arrow helpers)
-- `opteryx/expression/evaluator/comparisons.py` (local pyarrow imports for specific ops)
-- `opteryx/expression/evaluator/evaluation.py` (local pyarrow import for conversion)
-- `opteryx/expression/evaluator/function_execution.py` (local pyarrow import for Arrow engine)
-- `opteryx/expression/evaluator/temporal_ops.py` (local pyarrow imports)
+- `opteryx/expression/__init__.py` (local `pyarrow` import path detected in evaluation logic)
+- `opteryx/expression/binary_operators.py` (local `pyarrow` imports for JSON/Arrow helpers)
+- `opteryx/expression/evaluator/evaluation.py` (local `pyarrow` import for conversion)
+- `opteryx/expression/evaluator/function_execution.py` (local `pyarrow` import for Arrow engine)
+- `opteryx/expression/evaluator/temporal_ops.py` (local `pyarrow` imports)
 - `opteryx/expression/intervals.py` (top-level `pyarrow`)
 - `opteryx/expression/functions/implementations/utility.py` (`numpy` + `pyarrow`)
 - `opteryx/expression/functions/implementations/temporal.py` (`numpy` + `pyarrow`)
 - `opteryx/expression/operations/fastpath_dictionary.py` (top-level `pyarrow`)
 - `opteryx/expression/operations/type_coercion.py` (top-level `numpy` + `pyarrow`)
-- `opteryx/operators/distinct_node.pyx` (pyarrow mention / generated code)
 - `opteryx/operators/read_node.pyx` (import `pyarrow`)
 - `opteryx/planner/__init__.py` (import `pyarrow` when composing tables)
 - `opteryx/third_party/maki_nage/tests/*` (numpy in tests)
 - `opteryx/types/schema.py` (pyarrow top-level)
-- `opteryx/utils/firestore_utils.py` (local `numpy` import)
-- `opteryx/utils/vector_types.py` (pyarrow in examples / docstrings)
 
 # KEEP
 - `opteryx/models/dataframe.py` (pyarrow in `arrow()` method)  # keep

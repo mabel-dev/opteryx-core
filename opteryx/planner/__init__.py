@@ -66,10 +66,6 @@ def build_literal_node(
     """
     Build a literal node with the appropriate type based on the value.
     """
-    # Convert value if it has `as_py` method (e.g., from PyArrow)
-    if hasattr(value, "as_py"):
-        value = value.as_py()
-
     # Normalise scalar wrappers to native Python types.
     _PYTHON_NATIVE = (
         bool,
@@ -262,8 +258,6 @@ def execute_logical_plan(
     """
     import uuid
 
-    import pyarrow
-
     from opteryx.constants import ResultType
     from opteryx.exceptions import SqlError
     from opteryx.managers.execution import execute as execute_plan
@@ -329,92 +323,7 @@ def execute_logical_plan(
     physical_plan = create_physical_plan(optimized_plan, query_properties)
     telemetry.time_planning_physical_planner += time.monotonic_ns() - start
 
-    # Execute the physical plan and return a single pyarrow.Table
+    # Execute the physical plan and return the executor's generator and ResultType.
     results_generator, result_type = execute_plan(physical_plan, telemetry=telemetry)
 
-    # Handle statistics-only (execute_plan may have returned a simple generator)
-    if result_type == ResultType.NON_TABULAR:
-        from opteryx.types.schema import (
-            FlatColumn,
-            RelationSchema,
-            convert_orso_schema_to_arrow_schema,
-        )
-
-        # Consume generator to get the first non-empty result (if any)
-        data = next(results_generator, None)
-        if data is None:
-            # return an empty meta table
-            schema_obj = RelationSchema(
-                name="table",
-                columns=[FlatColumn(name="rows_affected", type=OrsoTypes.INTEGER)],
-            )
-            arrow_schema = convert_orso_schema_to_arrow_schema(schema_obj)
-            arrays = [pyarrow.array([0], type=pyarrow.int64())]
-            return pyarrow.Table.from_arrays(arrays, schema=arrow_schema)
-        # If data is already an Arrow table, return it
-        if isinstance(data, pyarrow.Table):
-            return data
-        # else assume it's orso-like and convert
-        return data.arrow()
-
-    # For tabular results, the generator yields pyarrow tables (or EOS)
-    try:
-        first_table = next(results_generator, None)
-        if first_table is None:
-            # No rows; return empty table with schema from physical plan Exit node
-            from opteryx.types.schema import RelationSchema, convert_orso_schema_to_arrow_schema
-
-            exit_node = physical_plan.get_exit_points()[0]
-            exit_instance = physical_plan[exit_node]
-            orso_schema = RelationSchema(
-                name="Relation", columns=[c.schema_column for c in exit_instance.columns]
-            )
-            arrow_schema = convert_orso_schema_to_arrow_schema(orso_schema, use_identities=True)
-            return pyarrow.Table.from_arrays(
-                [pyarrow.array([]) for _ in exit_instance.columns], schema=arrow_schema
-            )
-
-        # If result is a single table, return it directly
-        if (
-            isinstance(first_table, pyarrow.Table)
-            and getattr(first_table, "num_rows", None) is not None
-            and len(first_table.column_names) == len(set(first_table.column_names))
-        ):
-            # attempt to concatenate remaining tables if generator returns more
-            from itertools import chain
-
-            rest = results_generator
-            if rest is not None:
-                try:
-                    combined = pyarrow.concat_tables(
-                        chain([first_table], rest), promote_options="permissive"
-                    )
-                    return combined
-                except (pyarrow.ArrowInvalid, pyarrow.ArrowTypeError):
-                    return first_table
-            return first_table
-
-        # Otherwise, concatenate streaming tables handling duplicate names similarly to Cursor.execute_to_arrow
-        from itertools import chain
-
-        if first_table is not None:
-            column_names = first_table.column_names
-            if len(column_names) != len(set(column_names)):
-                temporary_names = [f"col_{i}" for i in range(len(column_names))]
-                first_table = first_table.rename_columns(temporary_names)
-                return_table = pyarrow.concat_tables(
-                    chain(
-                        [first_table],
-                        (t.rename_columns(temporary_names) for t in results_generator),
-                    ),
-                    promote_options="permissive",
-                )
-                return return_table.rename_columns(column_names)
-
-        table = pyarrow.concat_tables(
-            chain([first_table], results_generator), promote_options="permissive"
-        )
-        return table
-    except StopIteration:
-        # no results
-        return pyarrow.Table.from_batches([])
+    return results_generator, result_type

@@ -20,7 +20,7 @@ from typing import Generator
 
 from opteryx.compiled.draken.morsels.morsel import Morsel
 from opteryx.compiled.draken.vectors.scalar_constructors import from_scalar
-from opteryx.types.schema import convert_orso_schema_to_arrow_schema
+from opteryx.types.schema import RelationSchema
 
 from opteryx import EOS
 
