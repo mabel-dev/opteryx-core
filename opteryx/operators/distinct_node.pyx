@@ -19,7 +19,7 @@ from opteryx import EOS
 
 from . import BasePlanNode
 
-_DATA_FORMAT = "arrow,draken"
+_DATA_FORMAT = "draken"
 
 
 class DistinctNode(BasePlanNode):
@@ -50,20 +50,6 @@ class DistinctNode(BasePlanNode):
             self._hash_set = CarcharSetWrapper()
 
         if morsel == EOS:
-            return
-
-        if not isinstance(morsel, Morsel):
-            # e.g. Arrow Table produced by UnionNode — convert to Morsel
-            converted = self.ensure_draken_morsel(morsel)
-            if converted is EOS:
-                return
-            # iter_from_arrow returns a generator; process each chunk
-            import pyarrow
-
-            if isinstance(converted, pyarrow.Table):
-                converted = Morsel.iter_from_arrow(converted)
-            for sub_morsel in converted if hasattr(converted, "__iter__") else [converted]:
-                yield from self.execute(sub_morsel)
             return
 
         for chunk in [morsel]:

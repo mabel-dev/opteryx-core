@@ -54,7 +54,7 @@ def get_vector_type(obj) -> VectorType:
     Examples:
         >>> from opteryx.utils.vector_types import get_vector_type, VectorType
         >>> from opteryx.compiled.draken.vectors import StringVector
-        >>> vec = StringVector.from_pylist(["a", "b", "c"])
+        >>> vec = StringVector.from_constant("a", 3)
         >>> get_vector_type(vec) == VectorType.STRING
         True
     """
@@ -131,8 +131,7 @@ def is_scalar(obj) -> bool:
         True
         >>> # For vectors, False:
         >>> from opteryx.compiled.draken.vectors import Int64Vector
-        >>> import pyarrow as pa
-        >>> vec = Int64Vector.from_arrow(pa.array([1, 2, 3], type=pa.int64()))
+        >>> vec = Int64Vector.from_constant(1, 3)
         >>> is_scalar(vec)
         False
     """
