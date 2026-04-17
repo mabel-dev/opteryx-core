@@ -20,131 +20,88 @@ _logger = logging.getLogger(__name__)
 from collections import defaultdict
 from typing import Generator
 
-import pyarrow
 from opteryx.compiled.draken.morsels.morsel import Morsel
+from opteryx.compiled.draken.vectors.int64_vector import Int64Vector
+from opteryx.compiled.draken.vectors.float64_vector import Float64Vector
+from opteryx.compiled.draken.vectors.string_vector import StringVector
+from opteryx.compiled.draken.vectors.bool_vector import BoolVector
+from opteryx.compiled.draken.vectors.date32_vector import Date32Vector
+from opteryx.compiled.draken.vectors.timestamp_vector import TimestampVector
+from opteryx.compiled.draken.vectors.time_vector import TimeVector
+from opteryx.compiled.draken.vectors.interval_vector import IntervalVector
 from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.models import QueryProperties
-from opteryx.utils.json_compat import dumps as json_dumps
 from opteryx.types.schema import RelationSchema
-from opteryx.types.schema import convert_orso_schema_to_arrow_schema
+from opteryx.types import OrsoTypes
 
 from opteryx import EOS
 
 from . import BasePlanNode
 
-_DATA_FORMAT = "arrow,draken"
+_DATA_FORMAT = "draken"
 
 
-def struct_to_jsonb(table: pyarrow.Table) -> pyarrow.Table:
+def _create_null_vector(column, num_rows):
+    """Create a null vector of the correct type for a schema column."""
+    col_type = column.type
+
+    if col_type == OrsoTypes.INT8 or col_type == OrsoTypes.INT16 or col_type == OrsoTypes.INT32:
+        return Int64Vector.from_constant(None, num_rows)
+    elif col_type == OrsoTypes.INT64:
+        return Int64Vector.from_constant(None, num_rows)
+    elif col_type == OrsoTypes.FLOAT32 or col_type == OrsoTypes.FLOAT64:
+        return Float64Vector.from_constant(None, num_rows)
+    elif col_type == OrsoTypes.VARCHAR or col_type == OrsoTypes.TEXT or col_type == OrsoTypes.BLOB:
+        return StringVector.from_constant(None, num_rows)
+    elif col_type == OrsoTypes.BOOLEAN:
+        return BoolVector.from_constant(None, num_rows)
+    elif col_type == OrsoTypes.DATE:
+        return Date32Vector.from_constant(None, num_rows)
+    elif col_type == OrsoTypes.TIMESTAMP:
+        return TimestampVector.from_constant(None, num_rows)
+    elif col_type == OrsoTypes.TIME:
+        return TimeVector.from_constant(None, num_rows)
+    elif col_type == OrsoTypes.INTERVAL:
+        return IntervalVector.from_constant(None, num_rows)
+    else:
+        return StringVector.from_constant(None, num_rows)
+
+
+def normalize_morsel(schema: RelationSchema, morsel: Morsel) -> Morsel:
+    """Normalize a Morsel to match the expected schema.
+
+    Handles:
+    - Selecting columns that match the schema
+    - Adding missing columns as nulls
+    - Reordering columns to match schema order
     """
-    Converts any STRUCT columns in a PyArrow Table to JSON strings and replaces them
-    in the same column position.
-
-    Parameters:
-        table (pa.Table): The PyArrow Table to process.
-
-    Returns:
-        pa.Table: A new PyArrow Table with STRUCT columns converted to JSON strings.
-    """
-    for i in range(table.num_columns):
-        field = table.schema.field(i)
-
-        # Check if the column is a STRUCT
-        if pyarrow.types.is_struct(field.type):
-            # Convert each row in the STRUCT column to a JSON string
-            # Use list comprehension over the column directly for better performance than to_pylist()
-            json_array = pyarrow.array(
-                [None if row is None else json_dumps(row) for row in table.column(i)],
-                type=pyarrow.binary(),
-            )
-
-            # Drop the original STRUCT column
-            table = table.drop_columns(field.name)
-
-            # Insert the new JSON column at the same position
-            table = table.add_column(
-                i, pyarrow.field(name=field.name, type=pyarrow.binary()), json_array
-            )
-
-        # Check for LIST<STRUCT>
-        if pyarrow.types.is_list(field.type) and pyarrow.types.is_struct(field.type.value_type):
-            # Use list comprehension over the column directly
-            converted_data = [
-                None if item is None else [
-                    None if struct is None else json_dumps(struct) for struct in item
-                ] for item in table.column(i)
-            ]
-
-            # Build the new array
-            jsonb_array = pyarrow.array(converted_data, type=pyarrow.list_(pyarrow.binary()))
-
-            # Drop original column and insert new one at same position
-            table = table.drop_columns(field.name)
-            table = table.add_column(
-                i, pyarrow.field(name=field.name, type=jsonb_array.type), jsonb_array
-            )
-
-    return table
-
-
-def normalize_morsel(schema: RelationSchema, morsel: pyarrow.Table) -> pyarrow.Table:
-    if morsel.column_names == ["$COUNT(*)"]:
+    if morsel.column_names == [b"$COUNT(*)"]:
         return morsel
-    if len(schema.columns) == 0 and morsel.column_names != ["*"]:
-        one_column = pyarrow.array([True] * morsel.num_rows, type=pyarrow.bool_())
-        morsel = morsel.append_column("*", one_column)
-        return morsel.select(["*"])
 
-    # rename columns for internal use
-    target_column_names = []
-    # columns in the data but not in the schema, droppable
-    droppable_columns = set()
+    if len(schema.columns) == 0:
+        if morsel.column_names != [b"*"]:
+            all_true = BoolVector.from_constant(True, morsel.num_rows)
+            morsel.append_vector(b"*", all_true)
+        return morsel.select([b"*"])
 
-    # Find which columns to drop and which columns we already have
-    for i, column in enumerate(morsel.column_names):
-        column_name = schema.find_column(column)
-        if column_name is None:
-            droppable_columns.add(i)
-        else:
-            target_column_names.append(column_name.identity)
+    # Build lists of vectors and names in schema order
+    names = []
+    vectors = []
 
-    # Remove from the end otherwise we'll remove the wrong columns after we've removed one
-    if droppable_columns:
-        keep_indices = [i for i in range(len(morsel.columns)) if i not in droppable_columns]
-        morsel = morsel.select(keep_indices)
-
-    # remane columns to the internal names (identities)
-    morsel = morsel.rename_columns(target_column_names)
-
-    # add columns we don't have, populate with nulls but try to get the correct type
     for column in schema.columns:
-        if column.identity not in target_column_names:
-            null_column = pyarrow.nulls(morsel.num_rows, type=column.arrow_field.type)
-            field = pyarrow.field(name=column.identity, type=column.arrow_field.type)
-            morsel = morsel.append_column(field, null_column)
+        col_identity = column.identity.encode() if isinstance(column.identity, str) else column.identity
+        col_name_bytes = column.name.encode() if isinstance(column.name, str) else column.name
 
-    # ensure the columns are in the right order
-    return morsel.select([col.identity for col in schema.columns])
+        try:
+            vector = morsel.column(col_identity, col_name_bytes)
+            names.append(col_identity)
+            vectors.append(vector)
+        except (KeyError, ValueError):
+            null_vector = _create_null_vector(column, morsel.num_rows)
+            names.append(col_identity)
+            vectors.append(null_vector)
 
-
-def merge_schemas(
-    orso_schema: RelationSchema, arrow_schema: pyarrow.Schema
-) -> pyarrow.Schema:
-    """
-    Merge the Orso schema and the Arrow schema.
-    """
-    # ensure the columns are in the right order
-    return pyarrow.schema(
-        [
-            pyarrow.field(
-                name=col.identity,
-                type=arrow_schema.field(col.identity).type,
-                nullable=col.arrow_field.nullable,
-                metadata=col.arrow_field.metadata,
-            )
-            for col in orso_schema.columns
-        ]
-    )
+    return Morsel.from_vectors(names, vectors)
 
 
 class ReaderNode(BasePlanNode):
@@ -256,17 +213,15 @@ class ReaderNode(BasePlanNode):
                 "Use ParquetReadNode for external table scans."
             )
 
-        morsel_table = None
         orso_schema = self.schema
         orso_schema_cols = []
 
-        # Filter columns
+        # Filter columns based on projection
         for col in orso_schema.columns:
             if col.identity in [c.schema_column.identity for c in self.columns]:
                 orso_schema_cols.append(col)
 
         orso_schema.columns = orso_schema_cols
-        arrow_schema = None
         start_clock = time.monotonic_ns()
         reader = self.connector.read_dataset(
             columns=self.columns,
@@ -274,32 +229,21 @@ class ReaderNode(BasePlanNode):
         )
 
         records_to_read = self.limit if self.limit is not None else float("inf")
+        result_morsel = None
 
         for raw in reader:
-            # Connectors yield Morsel; extract Arrow table for schema-alignment preprocessing.
-            morsel_table = raw.to_arrow()
-
-            if records_to_read < morsel_table.num_rows:
-                morsel_table = morsel_table.slice(0, int(records_to_read))
+            if records_to_read < raw.num_rows:
+                raw = raw.slice(0, int(records_to_read))
                 records_to_read = 0
             else:
-                records_to_read -= morsel_table.num_rows
+                records_to_read -= raw.num_rows
 
-            morsel_table = struct_to_jsonb(morsel_table)
-            morsel_table = normalize_morsel(orso_schema, morsel_table)
-
-            if arrow_schema is None:
-                arrow_schema = merge_schemas(self.schema, morsel_table.schema)
-
-            if arrow_schema.names:
-                morsel_table = morsel_table.cast(arrow_schema)
+            result_morsel = normalize_morsel(orso_schema, raw)
 
             self.telemetry.time_reading_blobs += time.monotonic_ns() - start_clock
             self.telemetry.blobs_read += 1
-            self.telemetry.rows_read += morsel_table.num_rows
-            self.telemetry.bytes_processed += morsel_table.nbytes
-
-            result_morsel = Morsel.from_arrow(morsel_table)
+            self.telemetry.rows_read += result_morsel.num_rows
+            self.telemetry.bytes_processed += result_morsel.nbytes
 
             yield result_morsel
             start_clock = time.monotonic_ns()
@@ -307,7 +251,7 @@ class ReaderNode(BasePlanNode):
             if records_to_read <= 0:
                 break
 
-        if morsel_table:
-            self.telemetry.columns_read += morsel_table.num_columns
+        if result_morsel:
+            self.telemetry.columns_read += result_morsel.num_columns
         else:
             self.telemetry.columns_read += len(orso_schema.columns)
