@@ -28,7 +28,7 @@ from opteryx.compiled.structures.carchar_set cimport CarcharSet, CarcharSetWrapp
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
-def distinct(Morsel morsel, CarcharSetWrapper seen_hashes, list columns=None):
+def distinct(Morsel morsel, object seen_hashes, list columns=None):
     """
     Filter a Draken Morsel to distinct rows, in place.
 
@@ -36,13 +36,15 @@ def distinct(Morsel morsel, CarcharSetWrapper seen_hashes, list columns=None):
     ----------
     morsel : Morsel
         Modified in place; duplicate rows are removed.
-    seen_hashes : CarcharSetWrapper
+    seen_hashes : CarcharSetWrapper or ParviSetWrapper
         Accumulates row hashes across calls for streaming DISTINCT.
+        Supports both carchar (dynamic) and parvi (fixed 16-slot) implementations.
     columns : list of bytes, optional
         Column names to hash; all columns used when None.
     """
+    from opteryx.compiled.structures.parvi_set import ParviSetWrapper
+
     cdef Py_ssize_t n = morsel.ptr.num_rows
-    cdef CarcharSet* cs = seen_hashes._ptr
     cdef uint64_t* hashes_ptr = NULL
     cdef int32_t* idx_buf = NULL
     cdef int32_t* col_indices = NULL
@@ -50,9 +52,18 @@ def distinct(Morsel morsel, CarcharSetWrapper seen_hashes, list columns=None):
     cdef size_t count
     cdef bint hash_requires_gil
     cdef uint64_t[::1] py_hashes
+    cdef bint is_parvi
+    cdef CarcharSetWrapper carchar_set
+    cdef CarcharSet* cs
+    cdef uint64_t[::1] hashes_memview
+    cdef int32_t[::1] idx_memview
 
     if n == 0:
         return
+
+    # ── Check set variant (WITH GIL) ──────────────────────────────────────────
+    from opteryx.compiled.structures.parvi_set import ParviSetWrapper
+    is_parvi = isinstance(seen_hashes, ParviSetWrapper)
 
     # ── Resolve column names → C int array (WITH GIL, once) ──────────────────
     col_indices = morsel._resolve_columns_to_indices(columns, &n_cols)
@@ -90,8 +101,18 @@ def distinct(Morsel morsel, CarcharSetWrapper seen_hashes, list columns=None):
                 py_hashes = morsel.hash(columns=columns)
             memcpy(hashes_ptr, &py_hashes[0], <size_t>n * sizeof(uint64_t))
 
-        with nogil:
-            count = cs.mark_new_indices_32(hashes_ptr, idx_buf, <size_t>n)
+        # Call mark_new_indices on the appropriate set type
+        if is_parvi:
+            # ParviSet path: create memoryviews from pointers and call cpdef wrapper
+            hashes_memview = <uint64_t[:n]>hashes_ptr
+            idx_memview = <int32_t[:n]>idx_buf
+            count, _ = seen_hashes.mark_new_indices_32_public(hashes_memview, idx_memview, <size_t>n)
+        else:
+            # CarcharSet path
+            carchar_set = <CarcharSetWrapper>seen_hashes
+            cs = carchar_set._ptr
+            with nogil:
+                count = cs.mark_new_indices_32(hashes_ptr, idx_buf, <size_t>n)
 
         if count == 0:
             morsel._empty_inplace()

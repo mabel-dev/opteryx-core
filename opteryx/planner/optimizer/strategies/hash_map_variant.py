@@ -4,28 +4,35 @@
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
 """
-Optimization Rule — Hash Map Variant Selection for GROUP BY
+Optimization Rule — Hash Map Variant Selection for GROUP BY and DISTINCT
 
 Type: Cost-based
-Goal: Pick the smallest viable hash map for each AggregateAndGroup node.
+Goal: Pick the smallest viable hash map for AggregateAndGroup and Distinct nodes.
 
-When the estimated distinct group count is small enough (<= kParviCapacity),
-we tag the node with `group_map_variant = "parvi"` so the operator uses the
-fixed-capacity 16-slot inline map instead of heap-allocating a 256-slot
-CarcharIndex. The operator migrates back to carchar automatically if the
-estimate turns out wrong (see GroupHashEngine._promote_parvi_to_carchar).
+GROUP BY (AggregateAndGroup):
+  When the estimated distinct group count is small enough (<= kParviCapacity),
+  we tag the node with `group_map_variant = "parvi"` so the operator uses the
+  fixed-capacity 16-slot inline map instead of heap-allocating a 256-slot
+  CarcharIndex. The operator migrates back to carchar automatically if the
+  estimate turns out wrong (see GroupHashEngine._promote_parvi_to_carchar).
+
+DISTINCT:
+  When the estimated distinct-on cardinality is small enough (<= kParviCapacity),
+  we tag the node with `set_variant = "parvi"` so the operator uses the
+  fixed-capacity 16-slot inline set instead of CarcharSetWrapper. The operator
+  migrates to carchar on overflow.
 
 Fail-safe default: carchar. Parvi is only chosen with positive evidence.
 Missing or stale stats → carchar.
 
 Two signals are used, in priority order:
 
-1. **NDV-product bound** — for each GROUP BY column, resolve to a source
+1. **NDV-product bound** — for each GROUP BY/DISTINCT column, resolve to a source
    column in the upstream Scan manifest and read the KMV-based distinct-count
    estimate. If every column resolves and the product is <= 16, pick parvi.
 
 2. **Input-rows bound** — if the total record count across all upstream
-   Scan manifests is <= 16, the group-by output cannot exceed that regardless
+   Scan manifests is <= 16, the output cardinality cannot exceed that regardless
    of NDV, so pick parvi.
 
 If neither signal fires, carchar.
@@ -52,18 +59,25 @@ class HashMapVariantStrategy(OptimizationStrategy):
         if not context.optimized_plan:
             context.optimized_plan = context.pre_optimized_tree.copy()  # type: ignore[arg-type]
 
-        if node.node_type != LogicalPlanStepType.AggregateAndGroup:
+        # Handle both GROUP BY and DISTINCT nodes.
+        if node.node_type == LogicalPlanStepType.AggregateAndGroup:
+            # GROUP BY — use group_map_variant hint
+            if getattr(node, "group_map_variant", None) is not None:
+                return context
+            variant = self._pick_variant(node, context)
+            node.group_map_variant = variant
+            context.optimized_plan[context.node_id] = node
             return context
 
-        # Already tagged (e.g. by a later traversal) — leave alone.
-        if getattr(node, "group_map_variant", None) is not None:
+        elif node.node_type == LogicalPlanStepType.Distinct:
+            # DISTINCT — use set_variant hint
+            if getattr(node, "set_variant", None) is not None:
+                return context
+            variant = self._pick_variant(node, context)
+            node.set_variant = variant
+            context.optimized_plan[context.node_id] = node
             return context
 
-        variant = self._pick_variant(node, context)
-        # Always stamp, so the physical planner sees an explicit choice and
-        # we never silently depend on the operator default.
-        node.group_map_variant = variant
-        context.optimized_plan[context.node_id] = node
         return context
 
     def complete(self, plan: LogicalPlan, context: OptimizerContext) -> LogicalPlan:
@@ -71,7 +85,9 @@ class HashMapVariantStrategy(OptimizationStrategy):
 
     def should_i_run(self, plan: LogicalPlan) -> bool:
         return bool(
-            get_nodes_of_type_from_logical_plan(plan, (LogicalPlanStepType.AggregateAndGroup,))
+            get_nodes_of_type_from_logical_plan(
+                plan, (LogicalPlanStepType.AggregateAndGroup, LogicalPlanStepType.Distinct)
+            )
         )
 
     # ------------------------------------------------------------------
@@ -134,18 +150,19 @@ class HashMapVariantStrategy(OptimizationStrategy):
             total += int(count)
         return total
 
-    def _ndv_product(self, agg_node: LogicalPlanNode, scan_nodes: list) -> Optional[int]:
-        groups = getattr(agg_node, "groups", None)
-        if not groups:
-            # GROUP BY () collapses to a single row — trivially parvi-eligible.
+    def _ndv_product(self, node: LogicalPlanNode, scan_nodes: list) -> Optional[int]:
+        # Handle both GROUP BY (groups) and DISTINCT (on) columns.
+        columns = getattr(node, "groups", None) or getattr(node, "on", None)
+        if not columns:
+            # GROUP BY () or DISTINCT with no specific columns — trivially parvi-eligible.
             return 1
 
-        # Try to resolve each group column to a manifest cardinality estimate.
-        # Any expression group (e.g. GROUP BY UPPER(x)) defeats this signal and
+        # Try to resolve each column to a manifest cardinality estimate.
+        # Any expression column (e.g. GROUP BY UPPER(x)) defeats this signal and
         # we bail out to carchar — we'd need per-expression NDV propagation.
         product = 1
-        for group_expr in groups:
-            col_name = self._source_column_name(group_expr)
+        for col_expr in columns:
+            col_name = self._source_column_name(col_expr)
             if col_name is None:
                 return None
             ndv = self._column_ndv(col_name, scan_nodes)

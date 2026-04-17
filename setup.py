@@ -749,6 +749,38 @@ extensions = [
         ],
     ),
     Extension(
+        "opteryx.compiled.structures.parvi_index",
+        sources=[
+            "opteryx/compiled/structures/parvi_index.pyx",
+            "src/cpp/cpu_features.cpp",
+        ],
+        include_dirs=include_dirs,
+        language="c++",
+        extra_compile_args=CPP_FLAGS,
+        depends=[
+            "third_party/mabel/parvi/parvi.hpp",
+            "third_party/mabel/carchar/carchar_index.hpp",
+            "third_party/mabel/carchar/carchar_common.hpp",
+            "third_party/mabel/carchar/carchar_simd.hpp",
+        ],
+    ),
+    Extension(
+        "opteryx.compiled.structures.parvi_set",
+        sources=[
+            "opteryx/compiled/structures/parvi_set.pyx",
+            "src/cpp/cpu_features.cpp",
+        ],
+        include_dirs=include_dirs,
+        language="c++",
+        extra_compile_args=CPP_FLAGS,
+        depends=[
+            "third_party/mabel/parvi/parvi.hpp",
+            "third_party/mabel/carchar/carchar_index.hpp",
+            "third_party/mabel/carchar/carchar_common.hpp",
+            "third_party/mabel/carchar/carchar_simd.hpp",
+        ],
+    ),
+    Extension(
         "opteryx.compiled.structures.node",
         sources=["opteryx/compiled/structures/node.pyx"],
         include_dirs=include_dirs,
