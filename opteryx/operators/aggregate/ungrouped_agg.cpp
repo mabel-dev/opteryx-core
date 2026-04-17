@@ -24,6 +24,7 @@
             "src/c",
             "third_party/mabel/draken",
             "third_party/mabel/carchar",
+            "third_party/mabel/parvi",
             "third_party/abseil",
             "third_party/fastfloat",
             "third_party/fastfloat/fast_float",

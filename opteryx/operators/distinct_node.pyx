@@ -31,8 +31,10 @@ class DistinctNode(BasePlanNode):
             self._distinct_on = [
                 col.schema_column.identity.encode("utf-8") for col in self._distinct_on
             ]
+        self._set_variant = parameters.get("set_variant", "carchar")
         self._hash_set = None
         self.at_least_one_yielded = False
+        self._promoted = False  # Track if we've promoted from parvi to carchar
 
     @property
     def config(self):  # pragma: no cover
@@ -45,15 +47,27 @@ class DistinctNode(BasePlanNode):
     def execute(self, morsel):
         from opteryx.compiled.morsel_ops.distinct import distinct
         from opteryx.compiled.structures.carchar_set import CarcharSetWrapper
+        from opteryx.compiled.structures.parvi_set import ParviSetWrapper
 
         if self._hash_set is None:
-            self._hash_set = CarcharSetWrapper()
+            if self._set_variant == "parvi" and not self._promoted:
+                self._hash_set = ParviSetWrapper()
+            else:
+                self._hash_set = CarcharSetWrapper()
 
         if morsel == EOS:
             return
 
         for chunk in [morsel]:
             distinct(chunk, self._hash_set, columns=self._distinct_on)
+
+            # If parvi is now full and we haven't promoted yet, prepare to promote
+            # on the next morsel
+            if isinstance(self._hash_set, ParviSetWrapper) and self._hash_set.full() and not self._promoted:
+                # Promote to carchar for next morsel
+                carchar_set = CarcharSetWrapper()
+                self._hash_set = carchar_set
+                self._promoted = True
 
             if len(chunk) > 0 or not self.at_least_one_yielded:
                 yield chunk
