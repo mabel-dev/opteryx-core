@@ -183,7 +183,7 @@ Current payload record format in the shared key arena:
 
 This is intentional:
 
-- fixed-width primitives are stored directly; they do not need `zpp_bits`-style packing
+- fixed-width primitives are stored directly; they do not need extra serialization packing
 - variable-length values use compact varint lengths instead of the earlier fixed 4-byte prefix
 - Carchar remains unchanged and still stores only `hash -> state_index`
 - `state_index` points into this payload arena plus the aggregate state arrays
@@ -238,7 +238,7 @@ The engine also needs a way to emit the original group key columns during finali
 
 Primary design:
 
-1. group key columns are `zpp_bits` encoded into a compact key store
+1. group key columns are encoded into a compact key store
 2. Carchar maps canonical `uint64` hash -> `state_index`
 3. `state_index` resolves both:
    - aggregate state
@@ -469,7 +469,7 @@ Validated state:
 
 Still missing from the original Phase-1 vision:
 
-- unified `zpp_bits` key store for all supported key kinds
+- unified encoded key store for all supported key kinds
 - broader exact distinct state strategies if the current hashed-value distinct mode becomes insufficient for some types
 - full replacement of the remaining fixed-width key side stores with the planned unified encoded key store
 - broader typed finalize paths for object-heavy outputs without `vector_from_sequence(...)`
@@ -838,7 +838,7 @@ Status:
 
 Work:
 
-1. add a `zpp_bits`-encoded key store owned by the engine
+1. add an encoded key store owned by the engine
 2. on first insert of a new group:
    - encode group key columns
    - append into key store
@@ -945,7 +945,7 @@ Work:
 1. allocate output vectors for one chunk
 2. walk `state_index` space directly
 3. finalize aggregate state into typed output buffers
-4. decode `zpp_bits` key payload into output key vectors
+4. decode encoded key payload into output key vectors
 5. emit `Morsel.from_vectors(...)`
 
 Important:

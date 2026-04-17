@@ -18,7 +18,7 @@ opteryx/compiled/aggregations/
     30_avg_int64_float64.pyx           ← dead code
     90_factory.pyx                     ← dead code
   kernels/
-    key_serialization_zpp.pyx          ← live: key packing/unpacking via zpp_bits
+    key_codec.pyx                      ← live: key packing/unpacking
     dictionary_keys.pyx                ← live: vector type readers and dict helpers
     constant_keys.pyx                  ← live: constant-key ingest path
     groupby_finalize_kernels.pyx       ← live: output vector reconstruction
@@ -77,7 +77,7 @@ DrakenAggregateAndGroupNode   (Python coordinator)
   ↓ ingest() / finalize_morsels()
 CarcharGroupStateEngine        (Cython engine, 4961 lines)
   cimports from kernels/:
-    key_serialization_zpp      → key packing / unpacking
+    key_codec                  → key packing / unpacking
     dictionary_keys            → reads any vector type regardless of encoding
     constant_keys              → handles constant-key ingest (327 lines, 1 caller)
     groupby_finalize_kernels   → rebuilds output vectors from engine state
@@ -160,8 +160,7 @@ opteryx/compiled/aggregations/
   count_distinct.pyx
 
   # Infrastructure — no aggregate logic, no state
-  key_codec.pyx             # key packing/unpacking via zpp_bits C++ bridge
-                            #   (renamed from key_serialization_zpp.pyx)
+  key_codec.pyx             # key packing/unpacking bridge
   vector_readers.pyx        # reads any vector type: plain, dict-encoded, constant
                             #   (renamed from dictionary_keys.pyx)
   group_by_finalize.pyx     # rebuilds output vectors from engine state
@@ -272,7 +271,7 @@ Done when the build passes and no test imports any deleted module.
 
 Mechanical rename only, no logic changes:
 
-- `kernels/key_serialization_zpp.pyx` → `key_codec.pyx` (move up to aggregations/)
+- `kernels/key_codec.pyx` → `key_codec.pyx` (move up to aggregations/)
 - `kernels/dictionary_keys.pyx` → `vector_readers.pyx` (move up)
 - `kernels/groupby_finalize_kernels.pyx` → `group_by_finalize.pyx` (move up)
 - `carchar_group_state_engine.pyx` → `group_by_engine.pyx`

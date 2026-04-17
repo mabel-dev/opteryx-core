@@ -7,7 +7,7 @@ from opteryx.compiled.aggregations.key_codec import deserialize_key_components
 from opteryx.compiled.aggregations.key_codec import serialize_key_components
 
 
-def test_key_serialization_zpp_roundtrip():
+def test_key_codec_roundtrip():
     payload = [None, True, False, 42, -7, 1.5, "north", b"south"]
 
     encoded = serialize_key_components(payload)
