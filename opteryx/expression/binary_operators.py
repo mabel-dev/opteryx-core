@@ -3,127 +3,79 @@
 # See the License at http://www.apache.org/licenses/LICENSE-2.0
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
-from typing import Any, Dict, Union
+from typing import Any, Dict
 
 from opteryx.compiled import vector_ops
-from opteryx.third_party.tktech import csimdjson as simdjson
 from opteryx.types import OrsoTypes
-from opteryx.utils.vector_types import is_draken_vector
-
-# Initialize simdjson parser once
-parser = simdjson.Parser()
 
 
 def ArrowOp(documents, elements):
-    """JSON Selector"""
-    import pyarrow as _pyarrow
+    """JSON selector returning a Draken vector."""
+    from opteryx.compiled.draken.interop.vector_sequence import vector_from_sequence
+    from opteryx.compiled.vector_ops import vector_json_extract_variant
+    from opteryx.exceptions import IncorrectTypeError
 
-    element = elements[0]
-
-    def extract(doc: bytes, elem: Union[bytes, str]) -> Any:
-        value = parser.parse(doc).get(elem)  # type: ignore
-        if hasattr(value, "as_list"):
-            return value.as_list()
-        if hasattr(value, "as_dict"):
-            return value.mini
-        return value
+    element = _json_key_constant(elements)
+    extracted_values = vector_json_extract_variant(documents, element)
 
     try:
-        extracted_values = [None if d is None else extract(d, element) for d in documents]
-    except ValueError as err:
-        from opteryx.exceptions import IncorrectTypeError
+        result = vector_from_sequence(extracted_values)
+    except Exception as err:
+        raise IncorrectTypeError("The `->` operator produced complex/mixed values.") from err
 
-        raise IncorrectTypeError("The `->` operator can only be used on JSON documents.") from err
-
-    return _pyarrow.array(extracted_values)
+    if isinstance(result, list):
+        raise IncorrectTypeError("The `->` operator produced complex/mixed values.")
+    return result
 
 
 def LongArrowOp(documents, elements):
-    """JSON Selector (as byte string)"""
-    import pyarrow as _pyarrow
+    """JSON selector returning text as a StringVector of bytes."""
+    from opteryx.compiled.vector_ops import vector_json_extract_text
 
-    element = elements[0]
+    element = _json_key_constant(elements)
+    return vector_json_extract_text(documents, element)
 
-    def extract(doc: bytes, elem: Union[bytes, str]) -> bytes:
-        value = parser.parse(doc).get(elem)  # type: ignore
-        if hasattr(value, "mini"):
-            return value.mini  # type: ignore
-        return None if value is None else str(value).encode()
 
-    try:
-        extracted_values = [None if d is None else extract(d, element) for d in documents]
-    except ValueError as err:
-        from opteryx.exceptions import IncorrectTypeError
+def _json_key_constant(key) -> bytes:
+    from opteryx.compiled.draken import encoding as draken_encoding
+    from opteryx.compiled.draken.vectors.string_vector import StringVector
+    from opteryx.exceptions import IncorrectTypeError
 
-        raise IncorrectTypeError("The `->>` operator can only be used on JSON documents.") from err
+    if not isinstance(key, StringVector):
+        raise IncorrectTypeError("JSON extraction key must be a StringVector")
+    if key.encoding != draken_encoding.DRAKEN_ENCODING_CONSTANT:
+        raise IncorrectTypeError("JSON extraction key must be constant encoded")
 
-    return _pyarrow.array(extracted_values, type=_pyarrow.binary())
+    raw_key = key[0]
+    if raw_key is None:
+        raise IncorrectTypeError("JSON extraction key cannot be NULL")
+    return raw_key
 
 
 def MapAccessOp(array, key):
-    """Map/iterable subscript accessor."""
+    """Map/iterable subscript accessor over Draken vectors."""
+
+    from opteryx.compiled.draken import encoding as draken_encoding
+    from opteryx.compiled.draken.interop.vector_sequence import vector_from_sequence
+    from opteryx.compiled.draken.vectors.array_vector import ArrayVector
+    from opteryx.compiled.draken.vectors.int64_vector import Int64Vector
+    from opteryx.compiled.draken.vectors.string_vector import StringVector
+    from opteryx.compiled.vector_ops import vector_map_access_array, vector_map_access_string
     from opteryx.exceptions import IncorrectTypeError
 
-    # Determine the type of the first non-null element.
-    first_element = next((item for item in array if item is not None), None)
-    if first_element is None:
-        return [None] * len(array)
+    if not isinstance(key, Int64Vector):
+        raise IncorrectTypeError("Map/iterable subscript key must be an Int64Vector")
 
-    raw_key = key[0]
-    if raw_key is None or isinstance(raw_key, bool) or not isinstance(raw_key, int):
-        raise IncorrectTypeError("Map/iterable values must be subscripted with INTEGER values")
-    index = int(raw_key)
+    if getattr(key, "encoding", None) != draken_encoding.DRAKEN_ENCODING_CONSTANT:
+        raise IncorrectTypeError("Map/iterable subscript key must be constant encoded")
 
-    if isinstance(first_element, str):
-        return [
-            (
-                None
-                if value is None
-                else (value[index] if -len(value) <= index < len(value) else None)
-            )
-            for value in array
-        ]
-
-    if isinstance(first_element, (bytes, bytearray, memoryview)):
-        return [
-            (
-                None
-                if value is None
-                else (
-                    bytes(value)[index : index + 1]
-                    if -len(bytes(value)) <= index < len(bytes(value))
-                    else None
-                )
-            )
-            for value in array
-        ]
-
-    if isinstance(first_element, list):
-        import pyarrow as _pyarrow
-
-        from opteryx.compiled.draken.interop.arrow import vector_from_arrow
-        from opteryx.compiled.vector_ops import vector_get_element
-
-        pa_arr = _pyarrow.array(list(array))
-        return vector_get_element(vector_from_arrow(pa_arr), index)
-
+    if isinstance(array, StringVector):
+        return vector_map_access_string(array, key)
+    if isinstance(array, ArrayVector):
+        return vector_from_sequence(vector_map_access_array(array, key))
     raise IncorrectTypeError(
-        f"Map access is not supported for {type(first_element).__name__} values"
+        f"Map access is only supported for ArrayVector/StringVector, not {type(array).__name__}"
     )
-
-
-def _ip_containment(left, right) -> list:
-    """
-    Check if each IP address in 'left' is contained within the network in 'right'.
-
-    Accepts Draken StringVector, PyArrow arrays, or plain Python iterables as 'left'.
-    """
-    from opteryx.compiled.vector_ops import vector_ip_in_cidr
-
-    cidr_str = right if isinstance(right, str) else str(right[0])
-
-    # Fast path: already a Draken StringVector — pass directly to the kernel
-    return vector_ip_in_cidr(left, cidr_str)
 
 
 def _dispatch_arithmetic_operation(
@@ -189,7 +141,9 @@ def binary_operations(left, left_type: OrsoTypes, operator: str, right, right_ty
         return function(left, left_type, right, right_type, operator)
 
     if operator == "BitwiseOr" and OrsoTypes.VARCHAR in (left_type, right_type):
-        return _ip_containment(left, right)
+        from opteryx.compiled.vector_ops import vector_ip_in_cidr
+
+        return vector_ip_in_cidr(left, right)
 
     if operator == "StringConcat":
         from opteryx.compiled.vector_ops import vector_string_concat_binary

@@ -91,7 +91,9 @@ class GroupedAggregateHashedNode(BasePlanNode):
             self._aggregation_specs, normalized_group_cols
         )
 
-        self._engine = GroupHashEngine(normalized_group_cols, collectors, True)
+        variant = parameters.get("group_map_variant", "carchar")
+        use_parvi = variant == "parvi"
+        self._engine = GroupHashEngine(normalized_group_cols, collectors, True, use_parvi)
 
         # Required columns for morsel.select() before ingestion
         self._required_columns = self._build_required_columns()

@@ -3,6 +3,7 @@ from .cast_simplification import CastSimplificationStrategy
 from .constant_folding import ConstantFoldingStrategy
 from .correlated_filters import CorrelatedFiltersStrategy
 from .distinct_pushdown import DistinctPushdownStrategy
+from .hash_map_variant import HashMapVariantStrategy
 from .join_ordering import JoinOrderingStrategy
 from .join_rewriter import JoinRewriteStrategy
 from .limit_files_pruning import LimitFilesPruningStrategy
@@ -24,6 +25,7 @@ __all__ = [
     "ConstantFoldingStrategy",
     "CorrelatedFiltersStrategy",
     "DistinctPushdownStrategy",
+    "HashMapVariantStrategy",
     "JoinOrderingStrategy",
     "JoinRewriteStrategy",
     "LimitFilesPruningStrategy",

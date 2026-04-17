@@ -246,3 +246,4 @@ third_party/mabel/draken/vectors/scalar_constructors.cpp
 opteryx/operators/*.c*
 opteryx/third_party/mbleven.c
 opteryx/third_party/maki_nage/distogram.c
+testdata/github/**.parquet

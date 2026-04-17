@@ -41,7 +41,7 @@ def create_physical_plan(logical_plan, query_properties) -> PhysicalPlan:
             node = registry.create(
                 "Aggregate and Group",
                 query_properties,
-                **{k: v for k, v in node_config.items() if k in ("aggregates", "groups", "projection", "all_relations", "having_condition")},
+                **{k: v for k, v in node_config.items() if k in ("aggregates", "groups", "projection", "all_relations", "having_condition", "group_map_variant")},
             )
         elif node_type == LogicalPlanStepType.Distinct:
             node = registry.create("Distinct", query_properties, **node_config)
